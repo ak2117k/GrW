@@ -4,7 +4,9 @@ import { WatchStatus } from '@prisma/client';
 import { SellFuturesWatchRepository } from '../repositories/sell-futures-watch.repository';
 import { SellFuturesTradeRepository } from '../repositories/sell-futures-trade.repository';
 import { SellFuturesPaperAccountService } from '../services/sell-futures-paper-account.service';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @ApiTags('SELL-Futures Track (paper)')
 @Controller('api/sell-futures')
 export class SellFuturesController {

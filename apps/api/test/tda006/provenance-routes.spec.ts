@@ -49,6 +49,29 @@ import { AnandDualTrackRepository } from '../../src/modules/anand-dual-track/rep
 import { AngelOneAdapterService } from '../../src/modules/market-data/services/angel-one-adapter.service';
 import { ChartinkRepository } from '../../src/modules/chartink/repositories/chartink.repository';
 
+// --- Task 3: ADMIN-gate the raw provenance / scanner / strategy / track REST
+// controllers. The decorator metadata is asserted directly off each controller
+// class (no module boot), plus one real HTTP guard-stack check for /api/signals.
+import { getQueueToken } from '@nestjs/bull';
+import { Reflector } from '@nestjs/core';
+import { RolesGuard } from '../../src/modules/auth/guards/roles.guard';
+import { ROLES_KEY } from '../../src/common/decorators';
+import { SignalGeneratorController } from '../../src/modules/signal-generator/controllers/signal-generator.controller';
+import { StrategyBuilderController } from '../../src/modules/signal-generator/controllers/strategy-builder.controller';
+import { ChartinkController } from '../../src/modules/chartink/controllers/chartink.controller';
+import { ChartinkWebhookController } from '../../src/modules/chartink/controllers/chartink-webhook.controller';
+import { BacktestController } from '../../src/modules/backtest/controllers/backtest.controller';
+import { StrategyReviewController } from '../../src/modules/strategy-review/controllers/strategy-review.controller';
+import { AdaptiveStopController } from '../../src/modules/adaptive-stop-track/controllers/adaptive-stop.controller';
+import { BreakoutSwingController } from '../../src/modules/breakout-swing-track/controllers/breakout-swing.controller';
+import { UngatedTrackController } from '../../src/modules/ungated-track/controllers/ungated-track.controller';
+import { SellFuturesController } from '../../src/modules/sell-futures-track/controllers/sell-futures.controller';
+import { SignalGeneratorService } from '../../src/modules/signal-generator/services/signal-generator.service';
+import { StrategyRegistryService } from '../../src/modules/signal-generator/services/strategy-registry.service';
+import { SignalRepository } from '../../src/modules/signal-generator/repositories/signal.repository';
+import { UniverseScannerWorker } from '../../src/modules/signal-generator/workers/universe-scanner.worker';
+import { SetupTrackerService } from '../../src/modules/signal-generator/services/setup-tracker.service';
+
 const PROVENANCE_KEYS = [
   'scannerName',
   'scoreBreakdown',
@@ -234,5 +257,95 @@ describe('TDA-006 Task 2 — anand provenance routes (USER sanitized, ADMIN raw)
       expect(body[0]).toHaveProperty('scannerName');
       expect(body[0]).toHaveProperty('leadCount');
     });
+  });
+});
+
+/**
+ * TDA-006 Task 3 — the raw provenance / scanner / strategy / experiment-track
+ * REST controllers must be ADMIN-only. We assert the class-level @AdminOnly()
+ * metadata directly off each controller class (RolesGuard reads exactly this
+ * via Reflector.get(ROLES_KEY, class)), so no heavy module boot is needed.
+ *
+ * The Chartink inbound webhook (@Public, M2M) and the user-facing anand feed
+ * controller MUST NOT carry the ADMIN gate — asserted as a regression guard so
+ * the webhook can never be silently locked out.
+ */
+describe('TDA-006 Task 3 — ADMIN gate metadata on raw provenance controllers', () => {
+  const reflector = new Reflector();
+  const rolesOf = (cls: unknown) => reflector.get<string[]>(ROLES_KEY, cls as never);
+
+  const GATED: Array<[string, unknown]> = [
+    ['SignalGeneratorController (api/signals)', SignalGeneratorController],
+    ['StrategyBuilderController (api/strategies)', StrategyBuilderController],
+    ['ChartinkController (api/chartink)', ChartinkController],
+    ['BacktestController (api/backtest)', BacktestController],
+    ['StrategyReviewController (api/strategy-review)', StrategyReviewController],
+    ['AdaptiveStopController (api/adaptive-stop)', AdaptiveStopController],
+    ['BreakoutSwingController (api/breakout-swing)', BreakoutSwingController],
+    ['UngatedTrackController (api/ungated)', UngatedTrackController],
+    ['SellFuturesController (api/sell-futures)', SellFuturesController],
+  ];
+
+  it.each(GATED)('%s carries class-level roles ["ADMIN"]', (_name, cls) => {
+    expect(rolesOf(cls)).toEqual(['ADMIN']);
+  });
+
+  it('ChartinkWebhookController (webhooks/chartink) is NOT ADMIN-gated', () => {
+    expect(rolesOf(ChartinkWebhookController)).not.toEqual(['ADMIN']);
+  });
+
+  it('AnandDualTrackController (api/anand, user-facing) is NOT ADMIN-gated', () => {
+    expect(rolesOf(AnandDualTrackController)).not.toEqual(['ADMIN']);
+  });
+});
+
+/**
+ * TDA-006 Task 3 — one real HTTP pair proving the gate end-to-end for
+ * /api/signals: mount the REAL SignalGeneratorController under the REAL
+ * JwtAuthGuard → RolesGuard stack (service deps stubbed, à la Task 2), then a
+ * USER token must be 403 and an ADMIN token must NOT be 403.
+ */
+const signalServiceStub = {
+  getSignalHistory: async () => ({ data: [] }),
+  getActiveSignals: async () => [],
+};
+
+@Module({
+  imports: [PassportModule],
+  controllers: [SignalGeneratorController],
+  providers: [
+    JwtStrategy,
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: SignalGeneratorService, useValue: signalServiceStub },
+    { provide: StrategyRegistryService, useValue: {} },
+    { provide: SignalRepository, useValue: {} },
+    { provide: UniverseScannerWorker, useValue: {} },
+    { provide: SetupTrackerService, useValue: {} },
+    { provide: getQueueToken('signal-scan'), useValue: {} },
+  ],
+})
+class SignalGateTestModule {}
+
+describe('TDA-006 Task 3 — /api/signals enforced over real guard stack', () => {
+  let app: INestApplication;
+  let get: ReturnType<typeof getJson>;
+
+  beforeAll(async () => {
+    const booted = await boot(SignalGateTestModule);
+    app = booted.app;
+    get = getJson(booted.baseUrl);
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it('USER token is forbidden (403) on GET /api/signals', async () => {
+    expect((await get('/api/signals', tokenFor('USER'))).status).toBe(403);
+  });
+
+  it('ADMIN token is NOT forbidden on GET /api/signals', async () => {
+    expect((await get('/api/signals', tokenFor('ADMIN'))).status).not.toBe(403);
   });
 });

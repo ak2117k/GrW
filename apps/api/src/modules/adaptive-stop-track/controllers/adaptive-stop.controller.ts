@@ -7,7 +7,9 @@ import { AdaptiveStopAccountService } from '../services/adaptive-stop-account.se
 import { AdaptiveStopComparisonService } from '../services/adaptive-stop-comparison.service';
 import { AdaptiveStopTickPoller } from '../services/adaptive-stop-tick-poller.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @ApiTags('Adaptive-Stop Track (A/B experiment)')
 @Controller('api/adaptive-stop')
 export class AdaptiveStopController {

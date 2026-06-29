@@ -1,0 +1,1548 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// Market Data
+// ============================================
+
+model Instrument {
+  id        String   @id @default(cuid())
+  symbol    String
+  token     String
+  name      String
+  exchange  String
+  segment   String
+  lotSize   Int      @default(1)
+  tickSize  Float    @default(0.05)
+  expiry    DateTime?
+  strike    Float?
+  optionType String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  candles   Candle[]
+  oiData    OISnapshot[]
+  signals   Signal[]
+  trades    Trade[]
+  alerts    Alert[]
+
+  @@unique([symbol, exchange, token])
+  @@index([exchange, segment])
+  @@index([symbol])
+  @@map("instruments")
+}
+
+model Candle {
+  id           String   @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id])
+  timeframe    String   // 1m, 5m, 15m, 1h, 1d
+  timestamp    DateTime
+  open         Float
+  high         Float
+  low          Float
+  close        Float
+  volume       BigInt
+
+  @@unique([instrumentId, timeframe, timestamp])
+  @@index([instrumentId, timeframe, timestamp])
+  @@map("candles")
+}
+
+/// Broad stock → NSE sector-index mapping. Populated daily by
+/// NseSectorIndexService from the NIFTY 500 constituent CSV (which carries
+/// an Industry column). Each row maps a bare trading symbol to its NSE
+/// `Industry` string and the resolved NIFTY sectoral-index token.
+/// `sectorIndexToken` is nullable: some industries (e.g. "Diversified")
+/// have no clean sector index, and we still persist the row so the lookup
+/// has a definitive answer instead of falling through to slow tiers.
+model StockSector {
+  symbol           String   @id
+  industry         String
+  sectorIndexToken String?
+  updatedAt        DateTime @updatedAt
+
+  @@index([sectorIndexToken])
+  @@map("stock_sectors")
+}
+
+model OISnapshot {
+  id           String   @id @default(cuid())
+  instrumentId String
+  instrument   Instrument @relation(fields: [instrumentId], references: [id])
+  oi           BigInt
+  oiChange     BigInt   @default(0)
+  volume       BigInt   @default(0)
+  timestamp    DateTime
+
+  @@index([instrumentId, timestamp])
+  @@map("oi_snapshots")
+}
+
+model OptionChainSnapshot {
+  id          String   @id @default(cuid())
+  underlying  String   // NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
+  expiryDate  DateTime @db.Date
+  spotPrice   Decimal  @db.Decimal(12, 2)
+  source      String   // ANGEL_ONE | NSE | ANGEL_ONE_WS | DB_INSTRUMENTS
+  strikeCount Int
+  chainJson   Json     // full OptionsChainEntry[] serialized
+  capturedAt  DateTime @default(now())
+
+  @@index([underlying, expiryDate, capturedAt(sort: Desc)])
+  @@map("option_chain_snapshots")
+}
+
+// ============================================
+// Signals & Trades
+// ============================================
+
+model Signal {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  instrument      Instrument @relation(fields: [instrumentId], references: [id])
+  side            String   // BUY, SELL
+  entryPrice      Float
+  targetPrice     Float
+  stoplossPrice   Float
+  expectedProfit  Float
+  expectedLoss    Float
+  riskRewardRatio Float
+  confidence      String   // LOW, MEDIUM, HIGH, VERY_HIGH
+  confidenceScore Int      // 0-100
+  strategy        String
+  timeframe       String
+  reason          String
+  marketStatus    String   @default("LIVE")
+  isActive        Boolean  @default(true)
+  setupContext    Json?    // levels-context strategy payload (level type, setup type, grade, level book snapshot, etc.) — see SetupContext type
+  createdAt       DateTime @default(now())
+  expiresAt       DateTime?
+
+  trades Trade[]
+
+  @@index([isActive, confidenceScore])
+  @@index([strategy])
+  @@index([createdAt])
+  @@map("signals")
+}
+
+model Trade {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  instrumentId    String
+  instrument      Instrument @relation(fields: [instrumentId], references: [id])
+  signalId        String?
+  signal          Signal?  @relation(fields: [signalId], references: [id])
+  orderId         String?  // Broker order ID
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  entryPrice      Float?
+  exitPrice       Float?
+  // Resting-order prices for LIMIT / STOPLOSS orders that sit PENDING until the
+  // market reaches them. Persisted so a pending order survives an API restart
+  // (the paper engine rebuilds its pending map from these on boot) and so the
+  // UI can show what price the order is waiting for. Null for MARKET orders.
+  limitPrice      Float?
+  triggerPrice    Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  // Origin track of the trade: MANUAL (user order) | WATCH (gated-watch /
+  // Chartink) | AUTO (signal auto-trade) | SCANNER (universe scanner). Lets
+  // the manual-trade page scope to MANUAL-only without mixing in auto rows.
+  source          String   @default("MANUAL")
+
+  // ---- M5: Entry context capture ----
+  entryReason       String?
+  entryTags         String[]  @default([])
+  spotAtEntry       Float?
+  vixAtEntry        Float?
+  vixRegimeAtEntry  String?
+  pcrAtEntry        Float?
+  maxPainAtEntry    Float?
+  adRatioAtEntry    Float?
+  contextSnapshot   Json?
+
+  // ---- M5: Exit reason capture ----
+  exitReasonTag     String?
+  exitNotes         String?
+
+  // Lifecycle event log (CREATED → FILLED → … → CLOSED). Mirrors WatchEvent so
+  // the manual-trade terminal can show a per-trade audit trail.
+  events            TradeEvent[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([strategy])
+  @@index([isPaperTrade])
+  @@index([vixRegimeAtEntry])
+  @@index([exitReasonTag])
+  @@index([source])
+  @@index([userId])
+  // Journal/history list: WHERE status filtered, ORDER BY createdAt
+  // (portfolio.repository.ts getTradeJournal/getRecentTrades + every
+  // CLOSED/FILLED aggregate). Composite lets the DB satisfy filter+sort.
+  @@index([userId, status, createdAt])
+  // Manual-trade page scoping: getOpenTrades(source) filters source + status
+  // together (trade.repository.ts getOpenTrades source filter).
+  @@index([userId, source, status])
+  @@map("trades")
+}
+
+// ============================================
+// Locked Setups — persistence for in-memory tracker
+// ============================================
+//
+// Mirrors the LockedSetup contract maintained in-memory by
+// SetupTrackerService. The in-memory map remains the source of truth for
+// hot-path lookups; this table is the durable forensics log so MFE / MAE
+// / invalidation kind / close reason / barsToOutcome survive an API
+// restart. Without it we cannot do failure-mode analysis — every restart
+// wipes the data.
+model Setup {
+  id                    String    @id @default(cuid())
+  token                 Int
+  symbol                String
+  exchange              String
+  side                  String    // BUY | SELL
+  setupType             String    // BREAKOUT | REVERSAL
+  levelType             String    // PDH | PDL | ORH | ORL | VWAP | ROUND | VOL_STRIKE
+  levelValue            Float
+  entry                 Float
+  stoploss              Float
+  target                Float
+  partialTakeAt         Float?
+  grade                 String    // A | B | C
+  atr14                 Float?
+  regime                String?   // trending | choppy | normal
+  intradayRangeRatio    Float?
+  higherTimeframeTrend  Json?
+  recommendedStrike     Json?
+  reason                String
+  status                String    // PENDING | ACTIVE | PARTIAL_BOOKED | CLOSED | INVALIDATED
+  lockedAt              DateTime  @default(now())
+  triggeredAt           DateTime?
+  triggerBarTimestamp   DateTime?
+  closedAt              DateTime?
+  // SL_HIT | TARGET_HIT | TRAIL_STOP | INVALIDATED_STRUCTURAL |
+  // INVALIDATED_COUNTER | INVALIDATED_TIME_MFE | EOD | MANUAL
+  closeReason           String?
+  // structural | counter-setup | time-mfe | manual
+  invalidationKind      String?
+  invalidationReason    String?
+  // Running max favorable excursion in R units (0 at entry).
+  mfeR                  Float?
+  // Running max adverse excursion in R units (0 at entry, NEW).
+  maeR                  Float?
+  barsSinceEntry        Int?
+  lastUpdatedAt         DateTime  @updatedAt
+
+  @@index([token, status])
+  @@index([symbol, lockedAt])
+  @@index([closeReason])
+  @@map("setups")
+}
+
+// ============================================
+// Strong Zones — supply/demand zone detector cache
+// ============================================
+//
+// Persists the most recent StrongZoneDetector output per token so the
+// chart overlay (and any consumer that doesn't run the detector itself)
+// can read zones without recomputing them on every poll. Refreshed by
+// upsertMany() — which deletes existing rows for the token in a
+// transaction before inserting the new set — so a token always has at
+// most ~10 zones (5 above + 5 below LTP). Stale rows past
+// `expiresAt` are skipped by findActiveByToken().
+model Zone {
+  id                  String   @id @default(cuid())
+  token               String
+  symbol              String
+  exchange            String
+  type                String   // 'support' | 'resistance'
+  upper               Float
+  lower               Float
+  isLine              Boolean
+  strength            Int
+  classification      String   // 'STRONG' | 'MEDIUM' | 'WEAK'
+  touchCount          Int
+  lastTouchTimestamp  DateTime
+  scoreBreakdown      Json
+  computedAt          DateTime @default(now())
+  expiresAt           DateTime
+
+  @@index([token, classification])
+  @@index([expiresAt])
+  @@map("zones")
+}
+
+// ============================================
+// Portfolio & Performance
+// ============================================
+
+model DailyPerformance {
+  id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  date                DateTime @unique
+  totalPnl            Float    @default(0)
+  realizedPnl         Float    @default(0)
+  unrealizedPnl       Float    @default(0)
+  totalTrades         Int      @default(0)
+  winningTrades       Int      @default(0)
+  losingTrades        Int      @default(0)
+  maxDrawdown         Float    @default(0)
+  capitalDeployed     Float    @default(0)
+
+  @@index([date])
+  @@index([userId])
+  @@map("daily_performance")
+}
+
+// ============================================
+// News
+// ============================================
+
+model NewsArticle {
+  id              String   @id @default(cuid())
+  title           String
+  summary         String?
+  source          String
+  url             String   @unique
+  category        String   // indian, global, sector, company
+  sentiment       String?  // bullish, bearish, neutral
+  sentimentScore  Float?   // -1.0 to 1.0
+  relatedSymbols  String[] @default([])
+  publishedAt     DateTime
+  fetchedAt       DateTime @default(now())
+
+  @@index([category, publishedAt])
+  @@index([sentiment])
+  @@map("news_articles")
+}
+
+// ============================================
+// AI & Learning
+// ============================================
+
+model AITradeAnalysis {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tradeId       String
+  analysis      String   // JSON: what went right/wrong
+  suggestions   String   // JSON: improvement recommendations
+  patterns      String   // JSON: detected patterns
+  score         Float    // AI performance score for this trade
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([userId])
+  @@map("ai_trade_analyses")
+}
+
+model AIWeeklyReport {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  weekStart       DateTime
+  weekEnd         DateTime
+  summary         String
+  strengths       String   // JSON array
+  weaknesses      String   // JSON array
+  recommendations String   // JSON array
+  overallScore    Float
+  createdAt       DateTime @default(now())
+
+  @@index([weekStart])
+  @@index([userId])
+  @@map("ai_weekly_reports")
+}
+
+// ============================================
+// Settings & Configuration
+// ============================================
+
+model UserSettings {
+  id                     String   @id @default(cuid())
+  userId                 String   @unique
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  autoTradeMode          String   @default("OFF")
+  paperTrading           Boolean  @default(true)
+  maxDailyLoss           Float    @default(5000)
+  maxCapitalPerTrade     Float    @default(50000)
+  maxConcurrentPositions Int      @default(5)
+  defaultRiskReward      Float    @default(2.0)
+  activeStrategies       String[] @default(["gamma-blast"])
+  preferredSegments      String[] @default(["OPTIONS", "EQUITY"])
+  tradingHoursOnly       Boolean  @default(true)
+  notificationsEnabled   Boolean  @default(true)
+  mlConfig               Json?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@map("user_settings")
+}
+
+// ============================================
+// Alerts
+// ============================================
+
+model Alert {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  instrumentId String?
+  instrument   Instrument? @relation(fields: [instrumentId], references: [id])
+  type         String   // price, oi_spike, news, pnl
+  condition    String   // above, below, spike, threshold
+  value        Float?
+  message      String?
+  isActive     Boolean  @default(true)
+  triggeredAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  @@index([userId, isActive, type])
+  @@map("alerts")
+}
+
+// ============================================
+// Backtest
+// ============================================
+
+model BacktestRun {
+  id             String   @id @default(cuid())
+  strategy       String
+  parameters     String   // JSON
+  startDate      DateTime
+  endDate        DateTime
+  totalTrades    Int
+  winRate        Float
+  totalReturn    Float
+  maxDrawdown    Float
+  sharpeRatio    Float
+  results        String   // JSON: detailed results
+  createdAt      DateTime @default(now())
+
+  @@index([strategy, createdAt])
+  @@map("backtest_runs")
+}
+
+// ============================================
+// AI Insights — Section-level Claude analysis
+// ============================================
+
+model AIInsight {
+  id            String    @id @default(cuid())
+  sectionKey    String    // "market-breadth" | "options-chain"
+  contextKey    String    // "default" | "NIFTY:2026-04-24"
+  status        String    // "pending" | "in_progress" | "completed" | "failed"
+  contextData   Json      // Snapshot of inputs at request time
+  insight       String?   // Claude's analysis as markdown
+  confidence    Int?      // 1-100
+  errorMessage  String?
+  requestedAt   DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@index([sectionKey, contextKey, status])
+  @@index([status, requestedAt])
+  @@map("ai_insights")
+}
+
+// ============================================
+// Broker credentials (existed pre-Prisma)
+// ============================================
+
+model BrokerCredential {
+  id            String    @id @default(cuid())
+  userId        String    @unique
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broker        String    @default("angel_one")
+  encApiKey     String
+  encApiSecret  String
+  encClientId   String
+  encPassword   String
+  encTotpSecret String
+  encDataKey    String
+  keyVersion    Int       @default(1)
+  isActive      Boolean   @default(true)
+  lastConnected DateTime?
+  lastValidated DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@map("broker_credentials")
+}
+
+// ============================================
+// Chartink — webhook-driven scanner alerts
+// ============================================
+//
+// Each scanner the user configures on chartink.com gets one
+// ChartinkScanner row (keyed by scan_url slug). Every time it fires,
+// we get a ChartinkAlert. Each alert produces N ChartinkAlertSetup
+// rows — one per symbol in the alert payload, each annotated with
+// whether our pipeline accepted (kind='setup') or rejected (kind=
+// 'no-setup' / 'unresolved' / 'error').
+//
+// See docs/superpowers/specs/2026-05-06-chartink-webhook-integration-design.md.
+
+model ChartinkScanner {
+  id           String           @id @default(cuid())
+  scanUrl      String           @unique
+  scanName     String
+  alertName    String?
+  firstSeenAt  DateTime         @default(now())
+  lastFiredAt  DateTime?
+  fireCount    Int              @default(0)
+  category     String           @default("OTHER")
+  alerts       ChartinkAlert[]
+
+  @@map("chartink_scanners")
+}
+
+model ChartinkAlert {
+  id           String                 @id @default(cuid())
+  scannerId    String
+  scanner      ChartinkScanner        @relation(fields: [scannerId], references: [id])
+  triggeredAt  DateTime
+  receivedAt   DateTime               @default(now())
+  rawPayload   Json
+  setups       ChartinkAlertSetup[]
+
+  @@index([scannerId, triggeredAt])
+  @@map("chartink_alerts")
+}
+
+model ChartinkAlertSetup {
+  id            String         @id @default(cuid())
+  alertId       String
+  alert         ChartinkAlert  @relation(fields: [alertId], references: [id])
+  symbol        String
+  token         String?
+  hitPrice      Float
+  // 'setup' | 'no-setup' | 'unresolved' | 'error'
+  kind          String
+  // Loose ref to the existing Setup model when kind='setup'. Intentionally
+  // NOT a Prisma @relation so the existing setup lifecycle (close /
+  // invalidate / cascade) doesn't reach into Chartink history.
+  setupId       String?
+  rejectReason  String?
+  processedAt   DateTime       @default(now())
+
+  score          Int?
+  lotCount       Int?
+  scoreBreakdown Json?
+
+  @@index([alertId])
+  @@index([token])
+  @@map("chartink_alert_setups")
+}
+
+// ============================================
+// Watch Monitor (Chartink Stage 2)
+// ============================================
+
+enum WatchStatus {
+  WATCHING
+  TRADED
+  TARGET_HIT
+  STOPPED
+  EXITED
+  DISMISSED
+  // Alert that reached its target/stop level but was never executed as a trade
+  // (e.g. the upside gate refused to chase a price that already ran away).
+  // Distinct from TARGET_HIT so an untraded alert is never booked as a win and
+  // stays out of realized P&L.
+  MISSED
+}
+
+enum WatchEventType {
+  INITIAL
+  PRICE_CHANGE
+  SCORE_CHANGE
+  TARGET_HIT
+  SL_HIT_SCORE
+  SL_HIT_PRICE
+  TRADE_OPENED
+  TRADE_CLOSED
+  DISMISSED
+  PARTIAL_EXIT
+  TRAILING_STOP_HIT
+  // Alert was scored but NOT executed (gate-rejected) — records the reason
+  // (e.g. "already moved +2.16% from alert price"), shown in the event log.
+  NOT_TRADED
+}
+
+model WatchEntry {
+  id                    String   @id @default(cuid())
+  recoveryReEntry       Boolean  @default(false) // admitted as a half-size loss-recovery re-entry
+  alertId               String?
+  setupId               String?  @unique
+  symbol                String
+  token                 String
+  exchange              String
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  currentBreakdown      Json?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  optionsToken          String?
+  optionsType           String?
+  optionsExpiry         DateTime?
+  optionsStrike         Float?
+  optionsLotSize        Int?
+  optionsSelectionScore Float?
+  paperTradeId          String?
+  liveTradeId           String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  quantity              Int?       // actual filled quantity — the real position size,
+                                   // so P&L never reconstructs floor(MAX_INVESTMENT/price)
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  // Partial-exit + trailing-stop (post-execution profit management).
+  // When a TRADED entry's price moves +10% in our favor, half the position
+  // is sold and a trailing stop is placed on the remaining half.
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?       // shares we sold at partial exit (typically half)
+  remainingQty          Int?       // shares still open and trailing
+  trailingHighWater     Float?     // most favorable price seen since partial exit
+  trailingStopPrice     Float?     // current stop level (updates as high-water moves)
+  // Two-strike stop-hunt guard: counts consecutive WS ticks where LTP
+  // breaches the hard SL threshold. Exit fires only on the 2nd consecutive
+  // breach. Resets to 0 when price recovers above the SL level between ticks.
+  // Run `npx prisma db push` from the project root after this schema change.
+  slBreachCount         Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                WatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  // Closed-list / last-closed lookups order by closedAt DESC filtered by
+  // token + terminal status (watch.repository.ts getLastClosedPnlForToken
+  // / getLastClosedTradeForToken, orderBy closedAt:'desc').
+  @@index([token, closedAt])
+  // Strategy-review filters WatchEntry by initialAt range
+  // (strategy-review.service.ts watchWhere.initialAt gte/lte).
+  @@index([status, initialAt])
+  @@map("watch_entries")
+}
+
+model WatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    WatchEntry     @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("watch_events")
+}
+
+// Per-trade lifecycle audit log for the main Trade table (manual/auto/watch
+// trades). Mirrors WatchEvent. Shown in the manual-trade terminal so a trader
+// can see exactly what happened to an order: when it was created, filled,
+// partially booked, stop/target hit, and closed.
+model TradeEvent {
+  id        String         @id @default(cuid())
+  tradeId   String
+  trade     Trade          @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  eventType TradeEventType
+  price     Float?
+  quantity  Int?
+  pnl       Float?
+  notes     String?
+  createdAt DateTime       @default(now())
+
+  @@index([tradeId, createdAt])
+  @@index([eventType])
+  @@map("trade_events")
+}
+
+enum TradeEventType {
+  CREATED       // order accepted/persisted (PENDING or OPEN)
+  FILLED        // entry fill (MARKET fill, or resting LIMIT/STOP reached)
+  SL_SET        // stop-loss attached/updated
+  TARGET_SET    // target attached/updated
+  PARTIAL_EXIT  // partial quantity booked
+  SL_HIT        // stop-loss triggered
+  TARGET_HIT    // target reached
+  MODIFIED      // qty/price/SL/target modified
+  CANCELLED     // pending order cancelled before fill
+  CLOSED        // final exit (full square-off)
+}
+
+// ============================================================================
+// Ungated Shadow-Track A/B Experiment
+// See docs/superpowers/specs/2026-05-20-ungated-shadow-track-design.md
+// ============================================================================
+
+model UngatedWatchEntry {
+  id                    String   @id @default(cuid())
+  alertId               String?
+  setupId               String?
+  symbol                String
+  token                 String
+  exchange              String
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  currentBreakdown      Json?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  paperTradeId          String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  quantity              Int?
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?
+  remainingQty          Int?
+  trailingHighWater     Float?
+  trailingStopPrice     Float?
+  // Two-strike stop-hunt guard: counts consecutive 30s polls where LTP
+  // breaches the hard SL threshold. Exit fires only on the 2nd consecutive
+  // breach (slBreachCount reaches 1 after first poll, exits on second poll).
+  // Resets to 0 when price recovers above the SL level between polls.
+  // Run `npx prisma db push` from the project root after this schema change.
+  slBreachCount         Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                UngatedWatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  @@map("ungated_watch_entries")
+}
+
+model UngatedWatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    UngatedWatchEntry @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("ungated_watch_events")
+}
+
+model UngatedTrade {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  signalId        String?
+  orderId         String?
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  // Cumulative shares closed across all (partial + final) exit legs. Lets
+  // pnlPercent blend every leg's cost basis into a position-level return,
+  // instead of being overwritten with only the final leg's percent.
+  closedQuantity  Int      @default(0)
+  entryPrice      Float?
+  exitPrice       Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  entryReason     String?
+  exitReasonTag   String?
+  exitNotes       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("ungated_trades")
+}
+
+model UngatedPaperAccount {
+  id               String   @id @default(cuid())
+  startingBalance  Float
+  cash             Float
+  realizedPnl      Float    @default(0)
+  fees             Float    @default(0)
+  deployedCapital  Float    @default(0)
+  killSwitchAt     DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("ungated_paper_account")
+}
+
+model UngatedRejection {
+  id          String   @id @default(cuid())
+  alertId     String?
+  symbol      String
+  reason      String
+  score       Int?
+  hitPrice    Float?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([reason])
+  @@map("ungated_rejections")
+}
+
+// ============================================================================
+// SELL-Futures Shadow-Track
+// See docs/superpowers/specs/2026-06-27-sell-futures-track-design.md
+// Cloned from the ungated-track models; shorts the stock FUTURE (NFO) on
+// bearish (SELL) Chartink signals. The entry stores BOTH the equity symbol
+// and the resolved futures token/tradingsymbol/expiry/lotSize — quotes and
+// exits run on the futures NFO token (`token`).
+// Tables: sell_futures_watch_entries, sell_futures_watch_events,
+//         sell_futures_trades, sell_futures_paper_account, sell_futures_rejections.
+// ============================================================================
+
+model SellFuturesWatchEntry {
+  id                    String   @id @default(cuid())
+  alertId               String?
+  setupId               String?
+  // Equity symbol that triggered the signal (e.g. "RELIANCE").
+  symbol                String
+  // Resolved FUTURES NFO token — dedup, quotes and exits all key off this.
+  token                 String
+  exchange              String
+  // Equity token (NSE) the alert resolved to, kept for provenance.
+  eqToken               String?
+  // Resolved futures contract details.
+  futTradingsymbol      String?
+  futExpiry             DateTime?
+  lotSize               Int?
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  currentBreakdown      Json?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  paperTradeId          String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  quantity              Int?
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?
+  remainingQty          Int?
+  trailingHighWater     Float?
+  trailingStopPrice     Float?
+  slBreachCount         Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                SellFuturesWatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  @@map("sell_futures_watch_entries")
+}
+
+model SellFuturesWatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    SellFuturesWatchEntry @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("sell_futures_watch_events")
+}
+
+model SellFuturesTrade {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  signalId        String?
+  orderId         String?
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  closedQuantity  Int      @default(0)
+  entryPrice      Float?
+  exitPrice       Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  entryReason     String?
+  exitReasonTag   String?
+  exitNotes       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("sell_futures_trades")
+}
+
+model SellFuturesPaperAccount {
+  id               String   @id @default(cuid())
+  startingBalance  Float
+  cash             Float
+  realizedPnl      Float    @default(0)
+  fees             Float    @default(0)
+  deployedCapital  Float    @default(0)
+  killSwitchAt     DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("sell_futures_paper_account")
+}
+
+model SellFuturesRejection {
+  id          String   @id @default(cuid())
+  alertId     String?
+  symbol      String
+  reason      String
+  score       Int?
+  hitPrice    Float?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([reason])
+  @@map("sell_futures_rejections")
+}
+
+// ============================================================================
+// Adaptive-Stop Shadow-Track
+// Cloned from the ungated-track models; adds ATR-based stop sizing fields.
+// Tables: adaptive_stop_watch_entries, adaptive_stop_trades,
+//         adaptive_stop_watch_events.
+// ============================================================================
+
+model AdaptiveStopWatchEntry {
+  id                    String   @id @default(cuid())
+  alertId               String?
+  setupId               String?
+  symbol                String
+  token                 String
+  exchange              String
+  side                  String
+  initialPrice          Float
+  initialScore          Int
+  initialBreakdown      Json
+  initialAt             DateTime @default(now())
+  profitTarget          Float
+  profitTargetSource    String
+  stopLossScore         Int      @default(60)
+  status                WatchStatus @default(WATCHING)
+  currentPrice          Float?
+  currentScore          Int?
+  currentBreakdown      Json?
+  maxFavorable          Float?
+  maxAdverse            Float?
+  lastTickAt            DateTime?
+  lastRescoreAt         DateTime?
+  lastEventPrice        Float?
+  paperTradeId          String?
+  executedAt            DateTime?
+  executedPrice         Float?
+  quantity              Int?
+  // Adaptive-stop sizing fields (new — not present in ungated track)
+  riskAmount            Float?   // ₹ risked on this entry
+  atrAtEntry            Float?   // 5m ATR(14) used to size the stop
+  stopPct               Float?   // resolved stop distance as % of entry
+  stopPrice             Float?   // absolute stop level
+  stopBasis             String?  // 'atr' | 'floor' | 'cap'
+  // Decision Gate (CORE2) outcome recorded at entry, for observability: how
+  // often does the gate fail OPEN (skip on a 15m data gap) vs actually pass?
+  gateSkipped           Boolean? // true = gate couldn't evaluate → failed open
+  gateReason            String?  // human-readable gate decision
+  gateDetail            Json?    // { nearestSupport, distSupportPct, rsi, vwapExtPct, macdHist }
+  closedAt              DateTime?
+  closedReason          String?
+  notes                 String?
+  dismissedAt           DateTime?
+  partialExitedAt       DateTime?
+  partialExitPrice      Float?
+  partialQty            Int?
+  remainingQty          Int?
+  trailingHighWater     Float?
+  trailingStopPrice     Float?
+  // Two-strike stop-hunt guard: counts consecutive 30s polls where LTP
+  // breaches the hard SL threshold. Exit fires only on the 2nd consecutive
+  // breach (slBreachCount reaches 1 after first poll, exits on second poll).
+  // Resets to 0 when price recovers above the SL level between polls.
+  slBreachCount         Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  events                AdaptiveStopWatchEvent[]
+
+  @@index([status])
+  @@index([token])
+  @@index([symbol])
+  @@index([createdAt])
+  @@map("adaptive_stop_watch_entries")
+}
+
+model AdaptiveStopWatchEvent {
+  id            String         @id @default(cuid())
+  watchEntryId  String
+  watchEntry    AdaptiveStopWatchEntry @relation(fields: [watchEntryId], references: [id], onDelete: Cascade)
+  eventType     WatchEventType
+  price         Float?
+  score         Int?
+  breakdown     Json?
+  priceDelta    Float?
+  scoreDelta    Int?
+  notes         String?
+  createdAt     DateTime       @default(now())
+
+  @@index([watchEntryId, createdAt])
+  @@index([eventType])
+  @@map("adaptive_stop_watch_events")
+}
+
+model AdaptiveStopTrade {
+  id              String   @id @default(cuid())
+  instrumentId    String
+  signalId        String?
+  orderId         String?
+  side            String
+  orderType       String
+  positionType    String
+  quantity        Int
+  // Cumulative shares closed across all (partial + final) exit legs. Lets
+  // pnlPercent blend every leg's cost basis into a position-level return,
+  // instead of being overwritten with only the final leg's percent.
+  closedQuantity  Int      @default(0)
+  entryPrice      Float?
+  exitPrice       Float?
+  stoploss        Float?
+  target          Float?
+  pnl             Float?
+  pnlPercent      Float?
+  fees            Float    @default(0)
+  status          String   @default("PENDING")
+  strategy        String?
+  isPaperTrade    Boolean  @default(true)
+  entryTime       DateTime?
+  exitTime        DateTime?
+  notes           String?
+  entryReason     String?
+  exitReasonTag   String?
+  exitNotes       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("adaptive_stop_trades")
+}
+
+model AdaptiveStopPaperAccount {
+  id               String   @id @default(cuid())
+  startingBalance  Float
+  cash             Float
+  realizedPnl      Float    @default(0)
+  fees             Float    @default(0)
+  deployedCapital  Float    @default(0)
+  killSwitchAt     DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("adaptive_stop_paper_account")
+}
+
+// ============================================
+// Anand Dual-Track Analysis Logs
+// ============================================
+
+model IntradayEntry {
+  id             String    @id @default(cuid())
+  symbol         String
+  token          String?
+  entryPrice     Float
+  enteredAt      DateTime  @default(now())
+  targetPct      Float     @default(5.0)
+  stopPct        Float     @default(5.0)
+  status         String    @default("TRADED")
+  exitPrice      Float?
+  exitedAt       DateTime?
+  alertId        String
+  scoreBreakdown Json?
+  trailing       Boolean   @default(false)
+  partialBookedAt  DateTime?
+  partialExitPrice Float?
+  partialFraction  Float?
+  stopMovedToBE    Boolean   @default(false)
+  peakPrice      Float?
+  exitReason     String?
+
+  @@index([status, enteredAt])
+  @@index([alertId])
+  // Per-alert de-dup checks query symbol + status together
+  // (anand-dual-track.repository.ts findActiveTradedBySymbol /
+  // hasTargetHitTodayBySymbol: where { symbol, status }).
+  @@index([symbol, status])
+  @@map("intraday_entries")
+}
+
+model SwingEntry {
+  id             String    @id @default(cuid())
+  symbol         String
+  token          String?
+  entryPrice     Float
+  enteredAt      DateTime  @default(now())
+  targetPct      Float     @default(10.0)
+  stopPct        Float     @default(10.0)
+  status         String    @default("TRADED")
+  exitPrice      Float?
+  exitedAt       DateTime?
+  alertId        String
+  scoreBreakdown Json?
+
+  dailyOhlc      SwingDailyOhlc[]
+
+  @@index([status, enteredAt])
+  @@index([alertId])
+  // Per-alert de-dup checks query symbol + status together
+  // (anand-dual-track.repository.ts findActiveTradedBySymbol /
+  // hasTargetHitTodayBySymbol: where { symbol, status }).
+  @@index([symbol, status])
+  @@map("swing_entries")
+}
+
+// Breakout Swing track — a breakout variant of the Anand swing (clone of
+// SwingEntry + the resting-limit/queue + management fields). Lifecycle:
+// QUEUED (resting limit-buy armed) -> TRADED (breakout filled) ->
+// {TARGET_HIT | STOPPED | BIG_MOVER_EOD | EXPIRED | DISMISSED}.
+// See docs spec 2026-06-16-breakout-swing-track.
+model BreakoutSwingEntry {
+  id             String    @id @default(cuid())
+  symbol         String
+  token          String?
+  alertId        String
+  scoreBreakdown Json?
+
+  // --- breakout entry setup (resting limit-buy) ---
+  signalPrice    Float                          // price at the alert
+  resistance     Float?                         // nearest detected resistance
+  limitPrice     Float                          // resting limit = signalPrice × (1 + LIMIT_PCT)
+  prevDayClose   Float?                         // gate: current price > prev day close
+  status         String    @default("QUEUED")
+  queuedAt       DateTime  @default(now())
+
+  // --- fill (null while QUEUED) ---
+  entryPrice     Float?
+  enteredAt      DateTime?
+  quantity       Int?
+  targetPct      Float     @default(10.0)
+  stopPct        Float     @default(10.0)
+
+  // --- management ---
+  trailing          Boolean  @default(false)
+  trailingHighWater Float?
+  stopPrice         Float?                       // current effective stop (trailed after +7%)
+  currentPrice      Float?
+  lastTickAt        DateTime?
+
+  // --- exit ---
+  exitPrice      Float?
+  exitedAt       DateTime?
+  exitReason     String?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([status])
+  @@index([token])
+  @@index([alertId])
+  // Per-alert de-dup queries symbol + status together
+  // (breakout-swing.repository.ts: where { symbol, status: { in [...] } }).
+  @@index([symbol, status])
+  @@map("breakout_swing_entries")
+}
+
+/// Day-wise OHLC of a swing trade's underlying, recorded for the holding period
+/// PLUS up to 60 post-exit trading days. One row per (trade, trading day).
+model SwingDailyOhlc {
+  id           String     @id @default(cuid())
+  swingEntryId String
+  date         DateTime
+  open         Float
+  high         Float
+  low          Float
+  close        Float
+  phase        String     @default("HOLD") // HOLD = on/before exit; POST_EXIT = after exit
+  createdAt    DateTime   @default(now())
+
+  swingEntry   SwingEntry @relation(fields: [swingEntryId], references: [id], onDelete: Cascade)
+
+  @@unique([swingEntryId, date])
+  @@index([swingEntryId])
+  @@map("swing_daily_ohlc")
+}
+
+model SymbolLeadStat {
+  id        String   @id @default(cuid())
+  symbol    String
+  track     String   @default("swing")
+  count     Int      @default(0)
+  dates     Json     @default("[]")
+  lastLedAt DateTime @default(now())
+
+  @@unique([symbol, track])
+  @@map("symbol_lead_stats")
+}
+
+model ReinvestmentLot {
+  id                 String    @id @default(cuid())
+  symbol             String
+  sourceSwingEntryId String    @unique
+  capital            Float
+  entryPrice         Float
+  enteredAt          DateTime  @default(now())
+  targetPct          Float     @default(10.0)
+  stopPct            Float     @default(10.0)
+  status             String    @default("OPEN")
+  exitPrice          Float?
+  exitedAt           DateTime?
+  exitReason         String?
+
+  @@index([status, enteredAt])
+  @@index([symbol])
+  @@map("reinvestment_lots")
+}
+
+model ReinvestmentPool {
+  id             String @id @default("singleton")
+  harvestedTotal Float  @default(0)
+  deployedActive Float  @default(0)
+  idleBalance    Float  @default(0)
+  realizedPnl    Float  @default(0)
+
+  @@map("reinvestment_pool")
+}
+
+/// Stocks under exchange surveillance / delivery-only (cautionary listings).
+/// Populated two ways: (1) learned — when a live order is rejected by the broker
+/// for surveillance, the symbol is upserted here so the ticket warns pre-trade
+/// next time; (2) NSE lists — a daily cron upserts the official ASM/GSM/ESM sets.
+/// The /market-data/cautionary endpoint ORs this against the -BE/-BZ series check.
+model CautionarySymbol {
+  id           String   @id @default(cuid())
+  symbol       String   // base symbol, uppercase, no series suffix (e.g. "SUZLON")
+  exchange     String   @default("NSE")
+  token        String?
+  reason       String   // 'T2T' | 'ASM' | 'GSM' | 'ESM' | 'REJECTED'
+  source       String   // 'rejection' | 'nse-asm' | 'nse-gsm' | 'nse-esm'
+  deliveryOnly Boolean  @default(true)
+  notes        String?
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([symbol, exchange])
+  @@index([token])
+  @@map("cautionary_symbols")
+}
+
+// ============================================
+// Multi-Tenant Foundation (TDA-001)
+// ============================================
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum Segment {
+  INTRADAY
+  SWING
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+model User {
+  id              String      @id @default(cuid())
+  email           String      @unique
+  passwordHash    String
+  role            UserRole    @default(USER)
+  status          UserStatus  @default(PENDING_VERIFICATION)
+  emailVerifiedAt DateTime?
+  displayName     String?
+  mfaEnabled      Boolean     @default(false)
+  mfaSecretEnc    String?     // encrypted TOTP secret (interim AES-GCM; KMS in TDA-005)
+  lastLoginAt     DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  subscriptions     Subscription[]
+  brokerCredential  BrokerCredential?
+  autoTradeConsents AutoTradeConsent[]
+  consentRecords    ConsentRecord[]
+  trades            Trade[]
+  settings          UserSettings?
+  alerts            Alert[]
+  dailyPerformance  DailyPerformance[]
+  tradeAnalyses     AITradeAnalysis[]
+  weeklyReports     AIWeeklyReport[]
+  auditLogs         AuditLog[]
+  refreshTokens      RefreshToken[]
+  verificationTokens VerificationToken[]
+  @@index([status])
+  @@map("users")
+}
+
+model RefreshToken {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash    String    @unique          // sha256 of the opaque refresh token
+  familyId     String                      // rotation lineage; reuse → revoke whole family
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedById String?                      // the token that rotated this one
+  userAgent    String?
+  ip           String?
+  createdAt    DateTime  @default(now())
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model VerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      VerificationTokenType
+  tokenHash String   @unique               // sha256 of the opaque token sent by email
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, type])
+  @@map("verification_tokens")
+}
+
+enum VerificationTokenType {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+model Subscription {
+  id        String             @id @default(cuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  segment   Segment
+  status    SubscriptionStatus @default(ACTIVE)
+  startedAt DateTime           @default(now())
+  expiresAt DateTime?
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  @@unique([userId, segment])
+  @@index([status, expiresAt])
+  @@map("subscriptions")
+}
+
+model AutoTradeConsent {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  segment      Segment
+  enabled      Boolean  @default(false)
+  killSwitch   Boolean  @default(false)
+  riskPerTrade Float?
+  maxCapital   Float?
+  enabledAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  @@unique([userId, segment])
+  @@map("auto_trade_consents")
+}
+
+model ConsentDocument {
+  id          String   @id @default(cuid())
+  version     String   @unique
+  kind        String
+  body        String
+  contentHash String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  records     ConsentRecord[]
+  @@map("consent_documents")
+}
+
+model ConsentRecord {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  documentId String
+  document   ConsentDocument @relation(fields: [documentId], references: [id])
+  version    String
+  acceptedAt DateTime @default(now())
+  ipAddress  String?
+  userAgent  String?
+  @@index([userId, version])
+  @@map("consent_records")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  target    String?
+  meta      Json?
+  prevHash  String?
+  hash      String
+  createdAt DateTime @default(now())
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================
+// S/R Level Reaction Tracking (calibration)
+// ============================================
+// Persisted snapshots of evidence-weighted S/R levels (SrEvidenceService
+// output) so we can later classify whether price actually respected each
+// level. Snapshots are recorded at poll time; the reaction fields are
+// filled in by a deferred evaluation pass that replays subsequent candles.
+// Feeds scripts/sr-hold-rate.mjs which calibrates evidence weights against
+// observed hold rates per evidence kind.
+model SrLevelObservation {
+  id             String    @id @default(cuid())
+  token          String
+  exchange       String
+  interval       String
+  price          Float
+  side           String // 'resistance' | 'support'
+  kinds          String[] // EvidenceKind[] that produced this level
+  score          Int // 0-100 evidence score at snapshot
+  ltpAtSnapshot  Float
+  atr14          Float?
+  snapshotAt     DateTime  @default(now())
+  // ─── reaction (filled in by the deferred evaluation pass) ───
+  evaluatedAt    DateTime?
+  touched        Boolean?
+  reaction       String? // 'REJECTED' | 'BROKE' | 'UNTOUCHED'
+  reactionDetail Json?
+
+  @@index([token, snapshotAt])
+  @@index([reaction])
+  @@index([reaction, snapshotAt])
+  @@map("sr_level_observations")
+}

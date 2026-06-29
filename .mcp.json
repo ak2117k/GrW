@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "td-trading": {
+      "command": "node",
+      "args": ["mcp-server/dist/index.js"],
+      "env": {
+        "TD_API_URL": "http://localhost:4001"
+      }
+    }
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "name": "@td/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "nest start --watch",
+    "build": "nest build",
+    "start": "node dist/main",
+    "start:prod": "node dist/main",
+    "lint": "eslint \"{src,test}/**/*.ts\"",
+    "lint:fix": "eslint \"{src,test}/**/*.ts\" --fix",
+    "test": "jest",
+    "test:cov": "jest --coverage",
+    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "clean": "rm -rf dist node_modules"
+  },
+  "dependencies": {
+    "@nestjs/axios": "^4.0.1",
+    "@nestjs/bull": "^11.0.0",
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/config": "^4.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/jwt": "^11.0.2",
+    "@nestjs/mapped-types": "^2.1.0",
+    "@nestjs/passport": "^11.0.5",
+    "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/platform-socket.io": "^11.0.0",
+    "@nestjs/schedule": "^5.0.0",
+    "@nestjs/swagger": "^8.1.0",
+    "@nestjs/throttler": "^6.5.0",
+    "@nestjs/websockets": "^11.0.0",
+    "@prisma/client": "^6.2.0",
+    "@td/shared": "workspace:*",
+    "argon2": "^0.44.0",
+    "bcrypt": "^5.1.0",
+    "bull": "^4.16.0",
+    "class-transformer": "^0.5.0",
+    "class-validator": "^0.14.0",
+    "helmet": "^8.0.0",
+    "ioredis": "^5.4.0",
+    "nestjs-cls": "^6.2.1",
+    "otplib": "^13.4.0",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "reflect-metadata": "^0.2.0",
+    "rxjs": "^7.8.0",
+    "smartapi-javascript": "^1.0.0",
+    "socket.io": "^4.8.0"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.0",
+    "@nestjs/schematics": "^11.0.0",
+    "@nestjs/testing": "^11.0.0",
+    "@swc/cli": "^0.8.0",
+    "@swc/core": "^1.15.21",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^29.5.0",
+    "@types/node": "^22.10.0",
+    "@types/passport-jwt": "^4.0.1",
+    "eslint": "^9.17.0",
+    "jest": "^29.7.0",
+    "prisma": "^6.2.0",
+    "source-map-support": "^0.5.0",
+    "ts-jest": "^29.2.0",
+    "ts-loader": "^9.5.0",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.7.0"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.(t|j)s$": [
+        "ts-jest",
+        {
+          "isolatedModules": true
+        }
+      ]
+    },
+    "moduleNameMapper": {
+      "^@td/shared/types$": "<rootDir>/../../../packages/shared/src/types/index.ts",
+      "^@td/shared/constants$": "<rootDir>/../../../packages/shared/src/constants/index.ts",
+      "^@td/shared/utils$": "<rootDir>/../../../packages/shared/src/utils/index.ts",
+      "^@td/shared$": "<rootDir>/../../../packages/shared/src/index.ts"
+    },
+    "testEnvironment": "node"
+  }
+}

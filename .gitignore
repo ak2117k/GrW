@@ -1,0 +1,89 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.next/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Turbo
+.turbo/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+.eggs/
+
+# Database
+*.db
+*.sqlite
+
+# Redis
+dump.rdb
+
+# Prisma
+prisma/*.db
+
+# Credentials - NEVER commit these
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Claude Code / MCP session state
+.claude/
+.playwright-mcp/
+
+# Local data dumps (runtime artifacts, not source)
+ai-engine/data/
+apps/api/data/
+
+# Local test screenshots (debugging artifacts, not source)
+/chartink-activated.png
+/drawing-test-*.png
+
+# git worktrees (isolated workspaces)
+.worktrees/
+
+# Claude session memory + scratch (not application code)
+/.claude/
+/.playwright-mcp/
+/saas-*.png

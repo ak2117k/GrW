@@ -1,5 +1,7 @@
 import { Body, Controller, Get, NotFoundException, Optional, Param, Patch, Query } from '@nestjs/common';
 import { IsNotEmpty, IsString } from 'class-validator';
+import { CurrentUser, AuthenticatedUser } from '../../../common/decorators';
+import { toPublicEntry, AnandEntryLike } from '../dto/public-entry.dto';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
@@ -35,6 +37,7 @@ export class AnandDualTrackController {
 
   @Get('intraday/entries')
   async listIntraday(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('status') status?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
@@ -45,11 +48,20 @@ export class AnandDualTrackController {
       to: to ? new Date(to) : undefined,
     });
     const enriched = await this.enrichWithLivePrice(entries);
-    return this.enrichWithScannerName(enriched);
+    const rows = await this.enrichWithScannerName(enriched);
+    // Strip provenance/IP last: a non-ADMIN gets the allowlisted public shape;
+    // an ADMIN keeps the raw enriched rows. Absent role fails closed (sanitized).
+    // The enriched row carries `enteredAt` (a DB column) at runtime, but the
+    // enrichment helpers surface it only through an index signature, so it must
+    // be widened to AnandEntryLike for the serializer.
+    return user?.role === 'ADMIN'
+      ? rows
+      : rows.map((r) => toPublicEntry(r as unknown as AnandEntryLike, 'INTRADAY'));
   }
 
   @Get('swing/entries')
   async listSwing(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('status') status?: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
@@ -61,11 +73,15 @@ export class AnandDualTrackController {
     });
     const enriched = await this.enrichWithLivePrice(entries);
     const withScanner = await this.enrichWithScannerName(enriched);
-    return this.enrichWithLeadStat(withScanner);
+    const rows = await this.enrichWithLeadStat(withScanner);
+    return user?.role === 'ADMIN'
+      ? rows
+      : rows.map((r) => toPublicEntry(r as unknown as AnandEntryLike, 'SWING'));
   }
 
   @Get('swing/exits')
   async listSwingExits(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('from') from?: string,
     @Query('to') to?: string,
     @Query('status') status?: string,
@@ -80,7 +96,10 @@ export class AnandDualTrackController {
     // from the exit price, keeping the row shape identical to swing/entries.
     const enriched = await this.enrichWithLivePrice(entries);
     const withScanner = await this.enrichWithScannerName(enriched);
-    return this.enrichWithLeadStat(withScanner);
+    const rows = await this.enrichWithLeadStat(withScanner);
+    return user?.role === 'ADMIN'
+      ? rows
+      : rows.map((r) => toPublicEntry(r as unknown as AnandEntryLike, 'SWING'));
   }
 
   @Get('intraday/pnl-summary')

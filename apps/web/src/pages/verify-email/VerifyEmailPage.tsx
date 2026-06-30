@@ -22,18 +22,13 @@ export default function VerifyEmailPage() {
     if (posted.current) return;
     posted.current = true;
 
-    let active = true;
+    // The `posted` ref already guarantees a single POST across StrictMode's
+    // double-invoke/remount, so update status unconditionally. A per-run
+    // cleanup flag would drop the update when run 1's cleanup fires before
+    // the POST resolves; React no-ops a stray set on a truly-unmounted tree.
     verifyEmail(token)
-      .then(() => {
-        if (active) setStatus('success');
-      })
-      .catch(() => {
-        if (active) setStatus('failure');
-      });
-
-    return () => {
-      active = false;
-    };
+      .then(() => setStatus('success'))
+      .catch(() => setStatus('failure'));
   }, [token]);
 
   return (

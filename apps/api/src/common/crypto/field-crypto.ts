@@ -1,4 +1,5 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { createCipheriv, createDecipheriv, randomBytes } from 'crypto';
+import { getEncryptionKey } from './encryption-key';
 
 /**
  * Interim AES-256-GCM field encryption for sensitive column values
@@ -17,11 +18,7 @@ const ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12; // GCM standard nonce length
 
 function getKey(): Buffer {
-  const secret = process.env.ENCRYPTION_KEY;
-  if (!secret) {
-    throw new Error('ENCRYPTION_KEY environment variable is not set');
-  }
-  return createHash('sha256').update(secret, 'utf8').digest();
+  return getEncryptionKey();
 }
 
 export function encryptField(plain: string): string {

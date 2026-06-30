@@ -3,15 +3,11 @@ import * as crypto from 'crypto';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { SaveBrokerCredentialsDto } from '../dto/broker.dto';
+import { getEncryptionKey } from '../../../common/crypto/encryption-key';
 
 @Injectable()
 export class BrokerService implements OnModuleInit {
   private readonly logger = new Logger(BrokerService.name);
-
-  private static readonly ENCRYPTION_KEY = crypto
-    .createHash('sha256')
-    .update(process.env.ENCRYPTION_KEY || 'td-automation-default-key-change-me')
-    .digest();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -38,11 +34,11 @@ export class BrokerService implements OnModuleInit {
   async saveCredentials(dto: SaveBrokerCredentialsDto) {
     const encryptedPassword = BrokerService.encrypt(
       dto.password,
-      BrokerService.ENCRYPTION_KEY,
+      getEncryptionKey(),
     );
     const encryptedTotp = BrokerService.encrypt(
       dto.totpSecret,
-      BrokerService.ENCRYPTION_KEY,
+      getEncryptionKey(),
     );
 
     const saved = await this.prisma.brokerCredential.upsert({
@@ -91,11 +87,11 @@ export class BrokerService implements OnModuleInit {
     try {
       const password = BrokerService.decrypt(
         creds.password,
-        BrokerService.ENCRYPTION_KEY,
+        getEncryptionKey(),
       );
       const totpSecret = BrokerService.decrypt(
         creds.totpSecret,
-        BrokerService.ENCRYPTION_KEY,
+        getEncryptionKey(),
       );
 
       this.authService.updateCredentials(

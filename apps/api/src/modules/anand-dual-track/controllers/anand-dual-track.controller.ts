@@ -208,6 +208,10 @@ export class AnandDualTrackController {
     };
   }
 
+  // Tagging a scanner's category mutates scanner IP — an ADMIN cockpit write,
+  // not part of the USER product surface. Handler-level gate (no class-level
+  // guard) keeps the USER product endpoints on this controller reachable.
+  @AdminOnly()
   @Patch('scanners/:id/category')
   async tagScanner(
     @Param('id') id: string,

@@ -6,6 +6,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
 import { createHash, randomBytes } from 'crypto';
+import { AuditService, type AuditAction } from '../../../common/audit';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LoginDto, SignupDto } from '../dto';
 import { EmailService } from './email/email.service';
@@ -102,8 +103,9 @@ interface ForgotPasswordResult {
  * Orchestrates the auth core flows: signup + email verification, password login,
  * refresh-token rotation, logout, and the `/me` profile. Token mechanics live in
  * {@link TokenService}; password hashing in {@link PasswordService}; delivery in
- * {@link EmailService}. Every flow writes an `AuditLog` row (hash chaining is
- * deferred to TDA-008, so `hash`/`prevHash` are written as empty strings).
+ * {@link EmailService}. Every flow writes an `AuditLog` row via
+ * {@link AuditService.append} (TDA-008), which hash-chains each row; the write
+ * is best-effort (swallowed) so an audit hiccup never breaks the auth flow.
  */
 @Injectable()
 export class AuthService {
@@ -116,6 +118,7 @@ export class AuthService {
     private readonly email: EmailService,
     private readonly mfa: MfaService,
     private readonly jwt: JwtService,
+    private readonly audits: AuditService,
   ) {}
 
   private sha256(value: string): string {
@@ -129,15 +132,11 @@ export class AuthService {
     meta?: Prisma.InputJsonValue,
   ): Promise<void> {
     try {
-      await this.prisma.auditLog.create({
-        data: {
-          action,
-          userId: userId ?? undefined,
-          target: target ?? undefined,
-          meta: meta ?? undefined,
-          hash: '',
-          prevHash: '',
-        },
+      await this.audits.append({
+        action: action as AuditAction,
+        userId: userId ?? null,
+        target: target ?? null,
+        meta: meta as Record<string, unknown> | undefined,
       });
     } catch (err) {
       // Auditing must never break the user-facing flow.

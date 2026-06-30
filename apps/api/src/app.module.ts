@@ -11,6 +11,7 @@ import { SecretsModule } from './common/secrets/secrets.module';
 import { KmsModule } from './common/crypto/kms/kms.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { TenantContextInterceptor } from './common/tenant/tenant-context.interceptor';
+import { AuditModule } from './common/audit/audit.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { MarketDataModule } from './modules/market-data/market-data.module';
 import { SettingsModule } from './modules/settings/settings.module';
@@ -100,6 +101,9 @@ import { SubscriptionModule } from './modules/subscription/subscription.module';
     // explicitly selected, so the dev/test build never needs @aws-sdk/*.
     SecretsModule,
     KmsModule,
+    // Tamper-evident audit log (TDA-008) — @Global; exposes the ADMIN-only
+    // read/verify/export surface at /api/admin/audit.
+    AuditModule,
 
     // Authentication — signup/verify/login/refresh/logout + global JwtAuthGuard
     AuthModule,

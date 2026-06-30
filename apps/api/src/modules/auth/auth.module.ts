@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { AuditModule } from '../../common/audit/audit.module';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AccountRateLimitGuard } from '../../common/ratelimit/account-rate-limit.guard';
@@ -38,6 +39,11 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 @Module({
   imports: [
     PrismaModule,
+    // AuditModule is @Global, but a @Global module's exports only propagate once
+    // it has been imported into the graph. AppModule imports it for the running
+    // app; importing it here too lets AuthService/MfaService inject AuditService
+    // when AuthModule is booted in isolation (tests). Idempotent (@Global).
+    AuditModule,
     PassportModule,
     JwtModule.register({ secret: process.env.JWT_SECRET }),
     // Brute-force defence for the sensitive auth routes (spec §7) is now served

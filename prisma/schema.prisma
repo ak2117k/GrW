@@ -1503,12 +1503,16 @@ model AuditLog {
   id        String   @id @default(cuid())
   userId    String?
   user      User?    @relation(fields: [userId], references: [id])
+  chainKey  String   @default("global")
+  seq       BigInt
   action    String
   target    String?
   meta      Json?
-  prevHash  String?
+  prevHash  String
   hash      String
   createdAt DateTime @default(now())
+  @@unique([chainKey, seq])
+  @@index([chainKey, seq])
   @@index([userId, createdAt])
   @@index([action, createdAt])
   @@map("audit_logs")

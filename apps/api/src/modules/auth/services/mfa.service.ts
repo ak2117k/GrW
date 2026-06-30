@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { generateSecret, generateURI, verify } from 'otplib';
+import { AuditService, type AuditAction } from '../../../common/audit';
 import {
   decryptField,
   encryptField,
@@ -55,6 +56,7 @@ export class MfaService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly passwords: PasswordService,
+    private readonly audits: AuditService,
   ) {}
 
   private async audit(
@@ -63,14 +65,10 @@ export class MfaService {
     meta?: Prisma.InputJsonValue,
   ): Promise<void> {
     try {
-      await this.prisma.auditLog.create({
-        data: {
-          action,
-          userId: userId ?? undefined,
-          meta: meta ?? undefined,
-          hash: '',
-          prevHash: '',
-        },
+      await this.audits.append({
+        action: action as AuditAction,
+        userId: userId ?? null,
+        meta: meta as Record<string, unknown> | undefined,
       });
     } catch (err) {
       this.logger.error(`Failed to write audit row ${action}`, err as Error);

@@ -27,4 +27,7 @@ export default () => ({
     url: process.env.AI_ENGINE_URL || 'http://localhost:5000',
     port: parseInt(process.env.AI_ENGINE_PORT || '5000', 10),
   },
+  secrets: {
+    provider: process.env.SECRETS_PROVIDER || 'local',
+  },
 });

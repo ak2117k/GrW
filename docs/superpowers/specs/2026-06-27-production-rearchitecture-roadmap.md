@@ -105,7 +105,7 @@ Mobile-ready, stateless.
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-004** | AWS baseline: KMS CMK, Secrets Manager, TLS, kill default key, headers/CORS/rate-limit | — (parallel w/ S1) | Not started |
+| **TDA-004** | AWS baseline: KMS CMK, Secrets Manager, TLS, kill default key, headers/CORS/rate-limit | — (parallel w/ S1) | Planned (spec+plan 2026-07-01-tda-004) |
 | **TDA-005** | Per-tenant credential vault + envelope encryption; "Connect Angel One" flow | TDA-001, TDA-004 | Not started |
 
 **TDA-004 scope:** Provision KMS customer master key; move all secrets to AWS Secrets Manager; remove the
@@ -121,7 +121,7 @@ inside the isolated execution module (sole KMS grant); plaintext used in-memory 
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-006** | IP/provenance boundary: outbound DTO allowlist + log redaction | TDA-001 | Planned (spec + plan `2026-06-29-tda-006-provenance-boundary.md`) — ready to execute |
+| **TDA-006** | IP/provenance boundary: outbound DTO allowlist + log redaction | TDA-001 | ✅ Done (merged 7568d03; 55/55 tests; whole-branch review caught+fixed 3 extra leaks) |
 | **TDA-007** | Sanitized Intraday/Swing API + frontend collapse to 2 sections | TDA-006, TDA-003 | Planned (spec + plan `2026-06-29-tda-007-user-surface.md`) — execute AFTER TDA-006 merges |
 
 **TDA-006 scope:** A single `toPublicSignalDto()` is the only serializer that emits a signal outward (REST +
@@ -136,7 +136,7 @@ internals removed from the user-facing app and mobile API. Plan-gated visibility
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-008** | Tamper-evident, hash-chained audit log | TDA-001 | Not started |
+| **TDA-008** | Tamper-evident, hash-chained audit log | TDA-001 | Planned (spec+plan 2026-07-01-tda-008) |
 | **TDA-009** | Versioned consent & disclaimer gate | TDA-002, TDA-008 | Not started |
 
 **TDA-008 scope:** Append-only `AuditLog` where each row stores `hash = H(prevHash + payload)` (tamper-evident).
@@ -172,7 +172,7 @@ backstops; add per-user `killSwitch` and global `LIVE_TRADING_ENABLED`.
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-014** | Public landing page + signup funnel | TDA-002 | Not started |
+| **TDA-014** | Public landing page + signup funnel | TDA-002 | Planned (spec+plan 2026-07-01-tda-014) |
 | **TDA-015** | Billing/subscriptions/payments + plan-gating enforcement | TDA-001, TDA-014 | Not started |
 
 ### Sprint S8 — Mobile  *(Later)*

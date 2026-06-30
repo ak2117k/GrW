@@ -29,6 +29,9 @@ import SwingPage from '@/pages/swing/SwingPage';
 import BreakoutSwingPage from '@/pages/breakout-swing/BreakoutSwingPage';
 import { SellFuturesPage } from '@/pages/sell-futures/SellFuturesPage';
 import ReinvestPage from '@/pages/reinvest/ReinvestPage';
+import LandingPage from '@/pages/landing/LandingPage';
+import SignupPage from '@/pages/signup/SignupPage';
+import VerifyEmailPage from '@/pages/verify-email/VerifyEmailPage';
 
 // Gate the authenticated app. While the stored session is being verified we
 // show a minimal loader; once resolved we either render children or bounce to
@@ -46,7 +49,7 @@ function RequireAuth({ children }: { children: ReactNode }) {
   }
 
   if (status === 'anon') {
-    return <Navigate to="/login" replace state={{ from: location }} />;
+    return <Navigate to="/welcome" replace state={{ from: location }} />;
   }
 
   return <>{children}</>;
@@ -58,6 +61,14 @@ function LoginRoute() {
   const status = useAuthStore((s) => s.status);
   if (status === 'authed') return <Navigate to="/" replace />;
   return <LoginPage />;
+}
+
+// Mirror of LoginRoute for the public marketing/auth routes: authenticated
+// users hitting /welcome or /signup get sent home; everyone else sees them.
+function RedirectIfAuthed({ children }: { children: ReactNode }) {
+  const status = useAuthStore((s) => s.status);
+  if (status === 'authed') return <Navigate to="/" replace />;
+  return <>{children}</>;
 }
 
 export default function App() {
@@ -82,6 +93,24 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginRoute />} />
+      {/* TDA-014: public routes */}
+      <Route
+        path="/welcome"
+        element={
+          <RedirectIfAuthed>
+            <LandingPage />
+          </RedirectIfAuthed>
+        }
+      />
+      <Route
+        path="/signup"
+        element={
+          <RedirectIfAuthed>
+            <SignupPage />
+          </RedirectIfAuthed>
+        }
+      />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
       <Route
         element={
           <RequireAuth>

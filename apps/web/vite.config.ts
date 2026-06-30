@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
@@ -7,6 +7,9 @@ import path from 'path';
 // 4101) so it never collides with the original TD_Automation app (4000/4001).
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  test: {
+    exclude: [...configDefaults.exclude, 'tests/e2e/**'],
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

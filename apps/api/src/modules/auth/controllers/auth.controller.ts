@@ -9,7 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+import { Throttle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { CurrentUser, Public } from '../../../common/decorators';
 import type { AuthenticatedUser } from '../../../common/decorators';
@@ -80,7 +80,7 @@ export class AuthController {
   @Public()
   @Throttle({ default: AUTH_THROTTLE })
   @AccountRateLimit(ACCOUNT_THROTTLE)
-  @UseGuards(ThrottlerGuard, AccountRateLimitGuard)
+  @UseGuards(AccountRateLimitGuard)
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Authenticate and receive an access + refresh pair' })
@@ -90,7 +90,6 @@ export class AuthController {
 
   @Public()
   @Throttle({ default: AUTH_THROTTLE })
-  @UseGuards(ThrottlerGuard)
   @Post('login/mfa')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Complete the login MFA challenge and receive tokens' })
@@ -101,7 +100,7 @@ export class AuthController {
   @Public()
   @Throttle({ default: AUTH_THROTTLE })
   @AccountRateLimit(ACCOUNT_THROTTLE)
-  @UseGuards(ThrottlerGuard, AccountRateLimitGuard)
+  @UseGuards(AccountRateLimitGuard)
   @Post('password/forgot')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Request a password-reset link (always 200; no enumeration)' })

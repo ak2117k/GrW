@@ -87,3 +87,4 @@ apps/api/data/
 /.claude/
 /.playwright-mcp/
 /saas-*.png
+/.superpowers/

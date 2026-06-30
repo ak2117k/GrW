@@ -13,10 +13,17 @@ import {
   Layers,
   CheckCircle,
   AlertTriangle,
+  CreditCard,
+  Plug,
+  FileText,
+  Mail,
+  LogOut,
 } from 'lucide-react';
 import { Toggle, Modal, Badge, LoadingSkeleton } from '@/components/common';
 import { cn } from '@/utils/cn';
 import { useSettingsStore } from '@/stores/settings-store';
+import { useAuthStore } from '@/stores/auth-store';
+import { useSubscriptions } from '@/hooks/useSubscriptions';
 import { AutoTradeMode, Segment } from '@/types';
 import type { TradingSettings } from '@/types';
 import api from '@/services/api';
@@ -141,9 +148,175 @@ const autoTradeModes: {
   },
 ];
 
+// ---- USER account hub ----
+
+/**
+ * Account hub shown to a non-ADMIN USER. Real where possible
+ * (subscription status from `useSubscriptions`, email + working logout from
+ * the auth store); honest placeholders elsewhere. Each placeholder states the
+ * capability it will deliver and the sprint that lands it, so nothing looks
+ * fake-functional.
+ */
+function UserAccountHub() {
+  const { intraday, swing, loading } = useSubscriptions();
+  const email = useAuthStore((s) => s.user?.email);
+  const logout = useAuthStore((s) => s.logout);
+
+  return (
+    <div className="space-y-6 max-w-4xl">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <Settings size={24} className="text-[var(--color-text-secondary)]" />
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Account</h1>
+      </div>
+
+      {/* Section 1: Subscriptions */}
+      <SectionCard
+        icon={<CreditCard size={18} />}
+        title="Subscriptions"
+        description="Your access to each signals segment"
+      >
+        {loading ? (
+          <LoadingSkeleton variant="card" count={2} className="h-12" />
+        ) : (
+          <div className="space-y-2">
+            {([
+              { label: 'Intraday', active: intraday },
+              { label: 'Swing', active: swing },
+            ] as const).map((seg) => (
+              <div
+                key={seg.label}
+                className="flex items-center justify-between rounded-lg border border-gray-700/60 bg-gray-800/30 p-3"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-200">{seg.label}</span>
+                  {seg.active ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-400">
+                      <CheckCircle size={11} />
+                      Active
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-gray-700/40 px-2 py-0.5 text-[10px] font-medium text-gray-400">
+                      Not subscribed
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => toast('Checkout coming soon')}
+                  className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
+                >
+                  {seg.active ? 'Manage' : 'Subscribe'}
+                </button>
+              </div>
+            ))}
+            <p className="text-[10px] text-gray-600 pt-1">
+              Billing and checkout arrive in TDA-015.
+            </p>
+          </div>
+        )}
+      </SectionCard>
+
+      {/* Section 2: Connect Angel One */}
+      <SectionCard
+        icon={<Plug size={18} />}
+        title="Connect Angel One"
+        description="Connect your broker account to enable auto-execution"
+      >
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-gray-500">
+            Coming soon &mdash; broker connection lands in TDA-005.
+          </p>
+          <button
+            onClick={() => toast('Broker connection coming soon')}
+            className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 transition-colors"
+          >
+            Connect
+          </button>
+        </div>
+      </SectionCard>
+
+      {/* Section 3: Consent & disclaimer */}
+      <SectionCard
+        icon={<FileText size={18} />}
+        title="Consent & Disclaimer"
+        description="Review and accept the risk disclosure"
+      >
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-gray-500">
+            Coming soon &mdash; the consent gate lands in TDA-009.
+          </p>
+          <button
+            onClick={() => toast('Risk disclosure coming soon')}
+            className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 transition-colors"
+          >
+            Review
+          </button>
+        </div>
+      </SectionCard>
+
+      {/* Section 4: Auto-execution */}
+      <SectionCard
+        icon={<Zap size={18} />}
+        title="Auto-Execution"
+        description="Let approved signals execute automatically"
+      >
+        <FieldRow
+          label="Enable auto-execution"
+          description="Available after you connect a broker and accept the disclosure (TDA-011)"
+        >
+          <Toggle checked={false} onChange={() => {}} disabled />
+        </FieldRow>
+      </SectionCard>
+
+      {/* Section 5: Account */}
+      <SectionCard
+        icon={<Mail size={18} />}
+        title="Account"
+        description="Your sign-in details"
+      >
+        <FieldRow label="Email">
+          <span className="text-sm text-gray-300">{email ?? '—'}</span>
+        </FieldRow>
+        <FieldRow
+          label="Password"
+          description="Change password becomes available in a later sprint"
+        >
+          <button
+            onClick={() => toast('Change password coming soon')}
+            className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 transition-colors"
+          >
+            Change
+          </button>
+        </FieldRow>
+        <div className="flex items-center justify-between pt-3">
+          <span className="text-xs text-gray-500">Sign out of this device</span>
+          <button
+            onClick={() => logout()}
+            className="flex items-center gap-1.5 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition-colors"
+          >
+            <LogOut size={12} />
+            Logout
+          </button>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
 // ---- Main Component ----
 
+/**
+ * Settings entry point. ADMINs keep the full trading-configuration page;
+ * non-ADMIN USERs get the account hub. Branching here (before either
+ * component's hooks run) keeps the hooks rule intact — each child calls its
+ * own hooks unconditionally.
+ */
 export default function SettingsPage() {
+  const isAdmin = useAuthStore((s) => s.user?.role) === 'ADMIN';
+  return isAdmin ? <AdminSettings /> : <UserAccountHub />;
+}
+
+function AdminSettings() {
   const settings = useSettingsStore((s) => s.settings);
   const isLoading = useSettingsStore((s) => s.isLoading);
   const updateSettings = useSettingsStore((s) => s.updateSettings);

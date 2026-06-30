@@ -7,6 +7,8 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ClsModule } from 'nestjs-cls';
 import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
+import { SecretsModule } from './common/secrets/secrets.module';
+import { KmsModule } from './common/crypto/kms/kms.module';
 import { TenantModule } from './common/tenant/tenant.module';
 import { TenantContextInterceptor } from './common/tenant/tenant-context.interceptor';
 import { AuthModule } from './modules/auth/auth.module';
@@ -90,6 +92,13 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
 
     // Database
     PrismaModule,
+
+    // Secrets + KMS provider abstractions (TDA-004 Tasks 1 & 3). Both @Global,
+    // selected by config (SECRETS_PROVIDER / KMS_PROVIDER, 'local' default).
+    // The 'aws' adapters are dynamic-import skeletons, never constructed unless
+    // explicitly selected, so the dev/test build never needs @aws-sdk/*.
+    SecretsModule,
+    KmsModule,
 
     // Authentication — signup/verify/login/refresh/logout + global JwtAuthGuard
     AuthModule,

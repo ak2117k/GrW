@@ -1,6 +1,6 @@
 import { Body, Controller, Get, NotFoundException, Optional, Param, Patch, Query } from '@nestjs/common';
 import { IsNotEmpty, IsString } from 'class-validator';
-import { CurrentUser, AuthenticatedUser } from '../../../common/decorators';
+import { CurrentUser, AuthenticatedUser, AdminOnly } from '../../../common/decorators';
 import { toPublicEntry, AnandEntryLike } from '../dto/public-entry.dto';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
@@ -117,6 +117,10 @@ export class AnandDualTrackController {
     return this.repo.getSwingCapital();
   }
 
+  // Reinvest is an ADMIN cockpit feature, not part of the USER product surface.
+  // reinvestLots spreads raw ReinvestmentLot (incl. exitReason, a forbidden
+  // provenance key), so both reinvest endpoints are ADMIN-only.
+  @AdminOnly()
   @Get('reinvest/pool')
   async reinvestPool() {
     const pool = await this.repo.getPool();
@@ -131,6 +135,7 @@ export class AnandDualTrackController {
     return { ...pool, unrealizedPnl };
   }
 
+  @AdminOnly()
   @Get('reinvest/lots')
   async reinvestLots(@Query('status') status?: string) {
     const lots = await this.repo.listReinvestmentLots(status || undefined);

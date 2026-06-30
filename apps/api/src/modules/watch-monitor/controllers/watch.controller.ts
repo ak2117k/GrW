@@ -17,7 +17,13 @@ import { WatchService } from '../services/watch.service';
 import { RiskGuardService } from '../services/risk-guard.service';
 import { ExecuteWatchDto } from '../dto/execute-watch.dto';
 import { CloseWatchDto } from '../dto/close-watch.dto';
+import { AdminOnly } from '../../../common/decorators';
 
+// Watch is an ADMIN cockpit feature, not part of the USER product surface
+// (Intraday/Swing/Positions/Settings → /api/anand/*). Its rows are enriched with
+// scannerName and the WatchEntry model carries initial/currentBreakdown + trailing
+// fields (raw IP/provenance), so the whole controller is ADMIN-only.
+@AdminOnly()
 @Controller('api/watch')
 export class WatchController {
   private readonly logger = new Logger(WatchController.name);

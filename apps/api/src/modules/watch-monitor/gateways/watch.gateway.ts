@@ -1,13 +1,14 @@
 import {
-  WebSocketGateway, WebSocketServer, OnGatewayInit,
+  WebSocketGateway, WebSocketServer, OnGatewayInit, OnGatewayConnection,
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
+import { isAdminSocket } from '../../../common/ws/authenticate-admin-socket';
 
 const CORS_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4000';
 
 @WebSocketGateway({ cors: { origin: CORS_ORIGIN, credentials: true }, namespace: '/watch' })
-export class WatchGateway implements OnGatewayInit {
+export class WatchGateway implements OnGatewayInit, OnGatewayConnection {
   private readonly logger = new Logger(WatchGateway.name);
 
   @WebSocketServer()
@@ -15,6 +16,14 @@ export class WatchGateway implements OnGatewayInit {
 
   afterInit() {
     this.logger.log(`WatchGateway initialized (namespace=/watch origin=${CORS_ORIGIN})`);
+  }
+
+  // watch:* events carry raw provenance (scannerName, initial/currentBreakdown,
+  // trailing fields). Reject any socket without a valid ADMIN access token.
+  handleConnection(client: Socket) {
+    if (!isAdminSocket(client)) {
+      client.disconnect(true);
+    }
   }
 
   emitTick(entryId: string, payload: { price: number; currentScore: number | null }) {

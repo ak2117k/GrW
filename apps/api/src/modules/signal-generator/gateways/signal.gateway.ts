@@ -7,9 +7,8 @@ import {
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
-import * as jwt from 'jsonwebtoken';
 import { WS_NAMESPACE } from '@td/shared/constants';
-import { ACCESS_TOKEN_AUDIENCE } from '../../auth/services/token.service';
+import { isAdminSocket } from '../../../common/ws/authenticate-admin-socket';
 
 @WebSocketGateway({
   namespace: WS_NAMESPACE,
@@ -28,22 +27,11 @@ export class SignalGateway
   }
 
   handleConnection(client: Socket): void {
-    const raw =
-      (client.handshake.auth?.token as string | undefined) ??
-      client.handshake.headers.authorization?.replace(/^Bearer\s+/i, '');
-    try {
-      const payload = jwt.verify(raw ?? '', process.env.JWT_SECRET as string, {
-        algorithms: ['HS256'],
-        audience: ACCESS_TOKEN_AUDIENCE,
-      }) as { role?: string; sub?: string };
-      if (payload.role !== 'ADMIN') {
-        client.disconnect(true);
-        return;
-      }
-      this.logger.debug(`Signal ADMIN socket connected: ${client.id}`);
-    } catch {
+    if (!isAdminSocket(client)) {
       client.disconnect(true);
+      return;
     }
+    this.logger.debug(`Signal ADMIN socket connected: ${client.id}`);
   }
 
   handleDisconnect(client: Socket): void {

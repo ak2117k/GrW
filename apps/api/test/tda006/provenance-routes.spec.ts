@@ -345,7 +345,7 @@ describe('TDA-006 Task 3 — /api/signals enforced over real guard stack', () =>
     expect((await get('/api/signals', tokenFor('USER'))).status).toBe(403);
   });
 
-  it('ADMIN token is NOT forbidden on GET /api/signals', async () => {
-    expect((await get('/api/signals', tokenFor('ADMIN'))).status).not.toBe(403);
+  it('ADMIN token is accepted (200) on GET /api/signals', async () => {
+    expect((await get('/api/signals', tokenFor('ADMIN'))).status).toBe(200);
   });
 });

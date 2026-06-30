@@ -1,7 +1,7 @@
 const path = require('path');
 
 /**
- * Standalone Jest config for the TDA-003 tenant-isolation / RBAC tests.
+ * Standalone Jest config for the TDA-006 IP/provenance-boundary tests.
  *
  * Mirrors test/tda002/jest.config.js: the default apps/api Jest config roots at
  * src/, so it never discovers specs under test/. This roots discovery at
@@ -9,7 +9,7 @@ const path = require('path');
  * apps/api/tsconfig.json.
  *
  * Run from apps/api:
- *   npx jest --config test/tda006/jest.config.js -v
+ *   npx jest --config test/tda006/jest.config.js --verbose
  */
 module.exports = {
   rootDir: path.resolve(__dirname, '../..'),
@@ -21,7 +21,7 @@ module.exports = {
   // @scure/base, which this transform does not process. Redirect otplib to an
   // inert CJS stub (MFA is never exercised by the guard tests).
   moduleNameMapper: {
-    '^otplib$': '<rootDir>/test/tda003/otplib.stub.js',
+    '^otplib$': '<rootDir>/test/tda006/otplib.stub.js',
   },
   transform: {
     '^.+\\.(t|j)s$': [

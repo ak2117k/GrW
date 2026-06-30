@@ -30,4 +30,8 @@ export default () => ({
   secrets: {
     provider: process.env.SECRETS_PROVIDER || 'local',
   },
+  kms: {
+    provider: process.env.KMS_PROVIDER || 'local',
+    cmkId: process.env.KMS_CMK_ID || '',
+  },
 });

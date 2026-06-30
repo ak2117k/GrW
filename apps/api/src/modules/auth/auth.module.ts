@@ -4,6 +4,14 @@ import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { AccountRateLimitGuard } from '../../common/ratelimit/account-rate-limit.guard';
+import { MemoryRateLimitStore } from '../../common/ratelimit/memory-rate-limit.store';
+import {
+  RATE_LIMIT_STORE,
+  RateLimitStore,
+} from '../../common/ratelimit/rate-limit-store.interface';
+import { RedisRateLimitStore } from '../../common/ratelimit/redis-rate-limit.store';
+import { redisThrottlerEnabled } from '../../common/ratelimit/redis.provider';
 import { AuthController } from './controllers/auth.controller';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from './guards/roles.guard';
@@ -54,6 +62,31 @@ import { JwtStrategy } from './strategies/jwt.strategy';
         new TokenService(prisma, jwt),
       inject: [PrismaService, JwtService],
     },
+    // TDA-004 Task 7 — per-account rate limiting on login / password-forgot.
+    // This is the seam Task 6 left open (its store providers were "registered
+    // nowhere"): bind RATE_LIMIT_STORE HERE so the AccountRateLimitGuard
+    // (referenced per-handler via @UseGuards) can inject it. The factory selects
+    // Task 6's stores — RedisRateLimitStore (cross-replica counters) when
+    // REDIS_THROTTLER==='true', else the in-process MemoryRateLimitStore for
+    // dev/test/CI. It reads the redis.* connection straight from process.env
+    // (same vars/defaults as configuration.ts) so AuthModule needs no extra
+    // ConfigService/global-infra dependency in focused test harnesses.
+    {
+      provide: RATE_LIMIT_STORE,
+      useFactory: (): RateLimitStore => {
+        if (!redisThrottlerEnabled()) return new MemoryRateLimitStore();
+        // Lazy require keeps ioredis out of the dev/test path entirely.
+        const Redis = require('ioredis');
+        return new RedisRateLimitStore(
+          new Redis({
+            host: process.env.REDIS_HOST || 'localhost',
+            port: parseInt(process.env.REDIS_PORT || '6379', 10),
+            password: process.env.REDIS_PASSWORD || undefined,
+          }),
+        );
+      },
+    },
+    AccountRateLimitGuard,
     // Global guards, co-located here so APP_GUARD array order is authoritative:
     // JwtAuthGuard authenticates FIRST (→ req.user / 401), then RolesGuard
     // authorises by role (@Roles/@AdminOnly → 403). They MUST live in the same

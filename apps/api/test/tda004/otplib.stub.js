@@ -1,5 +1,5 @@
 /**
- * Test stub for `otplib` (TDA-003 rbac.spec).
+ * Test stub for `otplib` (carried over from TDA-003 harness).
  *
  * The real `otplib` v13 pulls in the ESM-only `@scure/base` package, which this
  * suite's ts-jest transform does not process (node_modules is ignored). The

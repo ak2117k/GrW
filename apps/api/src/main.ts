@@ -2,14 +2,47 @@
 // into process.env before any other module is evaluated. See load-env.ts.
 import './load-env';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { ValidationPipe, Logger, INestApplication } from '@nestjs/common';
 import { IoAdapter } from '@nestjs/platform-socket.io';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
+import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters';
 import { LoggingInterceptor } from './common/interceptors';
 import { isBenignWsHeartbeatError } from './common/utils/ws-heartbeat-error';
+import { EnforceHttpsMiddleware } from './common/http/enforce-https.middleware';
+import { validateBootConfig } from './common/config/validate-boot-config';
+
+/**
+ * Transport-layer hardening (TDA-004), exported so tests exercise the real code.
+ *
+ * - helmet: HSTS, X-Content-Type-Options nosniff, frameguard (X-Frame-Options),
+ *   and hides X-Powered-By. CSP is disabled because the only HTML this API
+ *   serves is Swagger UI at /api/docs, whose inline scripts/styles helmet's
+ *   default CSP blocks; every other route is JSON, for which CSP adds nothing.
+ * - trust proxy: behind the ALB so req.protocol / x-forwarded-proto are honored.
+ * - CORS: FAIL-CLOSED in production — only the configured WEB_ORIGIN allowlist
+ *   (and no-origin requests: curl / same-origin / mobile) pass; unknown origins
+ *   get no Access-Control-Allow-Origin. In dev, fall back to localhost origins.
+ * - EnforceHttpsMiddleware: prod-only 426 for plaintext requests.
+ */
+export function applyHttpHardening(app: INestApplication, env: NodeJS.ProcessEnv = process.env): void {
+  app.use(helmet({ contentSecurityPolicy: false })); // HSTS, nosniff, frameguard, hide x-powered-by
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+  const isProd = env.NODE_ENV === 'production';
+  const allowlist = (env.WEB_ORIGIN?.split(',').map((s) => s.trim()).filter(Boolean))
+    ?? (isProd ? [] : ['http://localhost:4000', 'http://127.0.0.1:4000']);
+  app.enableCors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // same-origin / curl / mobile
+      if (allowlist.includes(origin)) return cb(null, true);
+      return cb(new Error(`Origin not allowed: ${origin}`), false);
+    },
+    credentials: true,
+  });
+  app.use(new EnforceHttpsMiddleware().use);
+}
 
 /**
  * Safety net for the smartapi-javascript WebSocket heartbeat bug: its internal
@@ -43,22 +76,17 @@ process.on('unhandledRejection', (reason: unknown) => {
 });
 
 async function bootstrap(): Promise<void> {
+  // Fail closed BEFORE creating the app: refuse to start on invalid config.
+  validateBootConfig();
+
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 
   const configService = app.get(ConfigService);
   const port = configService.get<number>('app.port', 3001);
 
-  // CORS
-  // Web app runs on :4000 (not :3000 — that's the stale port from CLAUDE.md).
-  // Accept both 127.0.0.1 and localhost forms since browsers treat them as
-  // distinct origins. Honor WEB_ORIGIN env override for non-dev environments.
-  app.enableCors({
-    origin: process.env.WEB_ORIGIN
-      ? process.env.WEB_ORIGIN.split(',').map((s) => s.trim())
-      : ['http://localhost:4000', 'http://127.0.0.1:4000'],
-    credentials: true,
-  });
+  // Transport hardening: helmet + fail-closed CORS + trust proxy + HTTPS enforcement.
+  applyHttpHardening(app);
 
   // WebSocket adapter (Socket.IO)
   app.useWebSocketAdapter(new IoAdapter(app));
@@ -92,4 +120,8 @@ async function bootstrap(): Promise<void> {
   logger.log(`Swagger docs available at http://localhost:${port}/api/docs`);
 }
 
-bootstrap();
+// Only boot when run as the entry point. Importing this module (e.g. tests
+// exercising the exported applyHttpHardening) must NOT spin up the real server.
+if (require.main === module) {
+  bootstrap();
+}

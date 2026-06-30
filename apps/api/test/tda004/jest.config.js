@@ -1,7 +1,7 @@
 const path = require('path');
 
 /**
- * Standalone Jest config for the TDA-004 secrets-provider tests.
+ * Standalone Jest config for the TDA-004 security-hardening tests.
  *
  * Mirrors test/tda003/jest.config.js: the default apps/api Jest config roots at
  * src/, so it never discovers specs under test/. This roots discovery at
@@ -9,7 +9,7 @@ const path = require('path');
  * apps/api/tsconfig.json.
  *
  * Run from apps/api:
- *   npx jest --config test/tda004/jest.config.js env-secrets --verbose
+ *   npx jest --config test/tda004/jest.config.js --verbose
  */
 module.exports = {
   rootDir: path.resolve(__dirname, '../..'),

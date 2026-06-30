@@ -13,6 +13,8 @@ import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { Request } from 'express';
 import { CurrentUser, Public } from '../../../common/decorators';
 import type { AuthenticatedUser } from '../../../common/decorators';
+import { AccountRateLimit } from '../../../common/ratelimit/account-rate-limit.decorator';
+import { AccountRateLimitGuard } from '../../../common/ratelimit/account-rate-limit.guard';
 import {
   ForgotPasswordDto,
   LoginDto,
@@ -35,6 +37,15 @@ import { TokenContext } from '../services/token.service';
  * the protected routes unchanged. Exceeding the window yields HTTP 429.
  */
 const AUTH_THROTTLE = { limit: 10, ttl: 60_000 };
+
+/**
+ * Per-ACCOUNT brute-force ceiling (TDA-004 Task 7): 5 attempts per 15-minute
+ * window, keyed on the normalised request email by the {@link AccountRateLimitGuard}
+ * — independent of source IP, so credential stuffing one account from many IPs
+ * is still blocked. Returns an identical 429 whether or not the account exists
+ * (no enumeration). Runs ALONGSIDE the per-IP `ThrottlerGuard`.
+ */
+const ACCOUNT_THROTTLE = { limit: 5, ttl: 15 * 60_000 };
 
 @ApiTags('Auth')
 @Controller('auth')
@@ -68,7 +79,8 @@ export class AuthController {
 
   @Public()
   @Throttle({ default: AUTH_THROTTLE })
-  @UseGuards(ThrottlerGuard)
+  @AccountRateLimit(ACCOUNT_THROTTLE)
+  @UseGuards(ThrottlerGuard, AccountRateLimitGuard)
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Authenticate and receive an access + refresh pair' })
@@ -88,7 +100,8 @@ export class AuthController {
 
   @Public()
   @Throttle({ default: AUTH_THROTTLE })
-  @UseGuards(ThrottlerGuard)
+  @AccountRateLimit(ACCOUNT_THROTTLE)
+  @UseGuards(ThrottlerGuard, AccountRateLimitGuard)
   @Post('password/forgot')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Request a password-reset link (always 200; no enumeration)' })

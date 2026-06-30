@@ -16,10 +16,9 @@ module.exports = {
   roots: ['<rootDir>/test/tda004'],
   moduleFileExtensions: ['js', 'json', 'ts'],
   testRegex: '.*\\.spec\\.ts$',
-  // rbac.spec imports the REAL AuthModule to exercise its global guard wiring.
-  // AuthModule -> MfaService -> otplib (v13) transitively loads the ESM-only
-  // @scure/base, which this transform does not process. Redirect otplib to an
-  // inert CJS stub (MFA is never exercised by the guard tests).
+  // Specs that import the REAL AuthModule transitively load MfaService -> otplib
+  // (v13) -> ESM-only @scure/base, which this transform does not process.
+  // Redirect otplib to an inert CJS stub (MFA is never exercised here).
   moduleNameMapper: {
     '^otplib$': '<rootDir>/test/tda004/otplib.stub.js',
   },

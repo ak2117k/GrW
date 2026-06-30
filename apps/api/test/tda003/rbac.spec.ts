@@ -53,6 +53,7 @@ import {
 import { APP_GUARD } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { Test } from '@nestjs/testing';
 import { AddressInfo } from 'net';
 import { ClsModule } from 'nestjs-cls';
@@ -290,6 +291,13 @@ describe('TDA-003 Task 3 — cross-module guard ordering (mechanics)', () => {
     // TenantContextService, then the production AuthModule that owns the global
     // guards.
     ClsModule.forRoot({ global: true, middleware: { mount: true } }),
+    // TDA-004 Task 6 centralised the throttler into AppModule (global). The
+    // real AuthModule's @UseGuards(ThrottlerGuard) now resolves its options from
+    // that global module instead of a local one, so mirror it here (high limit
+    // so it never interferes with the RBAC assertions below).
+    ThrottlerModule.forRoot({
+      throttlers: [{ name: 'default', ttl: 60_000, limit: 100_000 }],
+    }),
     TenantModule,
     AuthModule,
   ],

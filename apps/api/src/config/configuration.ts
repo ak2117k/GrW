@@ -11,6 +11,10 @@ export default () => ({
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD || undefined,
   },
+  rateLimit: {
+    ttl: +(process.env.GLOBAL_RATE_TTL || 60000),
+    limit: +(process.env.GLOBAL_RATE_LIMIT || 120),
+  },
   angelOne: {
     apiKey: process.env.ANGEL_ONE_API_KEY || '',
     clientId: process.env.ANGEL_ONE_CLIENT_ID || '',

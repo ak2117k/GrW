@@ -3,6 +3,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ClsModule } from 'nestjs-cls';
 import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
@@ -54,6 +55,26 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
 
     // Cron / interval scheduling
     ScheduleModule.forRoot(),
+
+    // Central global rate limiter (TDA-004 Task 6). ONE app-wide throttler
+    // ('default'), config-driven from rateLimit.* (GLOBAL_RATE_TTL/LIMIT). The
+    // local ThrottlerModule that AuthModule used to register was removed; the
+    // auth controller's @Throttle({ default: ... }) decorators now bind to this
+    // central throttler. Storage is left DEFAULT (in-memory): the gated
+    // Redis-backed ThrottlerStorage is deferred to prod wiring (see
+    // common/ratelimit/redis.provider.ts).
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        throttlers: [
+          {
+            name: 'default',
+            ttl: config.get<number>('rateLimit.ttl', 60_000),
+            limit: config.get<number>('rateLimit.limit', 120),
+          },
+        ],
+      }),
+    }),
 
     // Request-scoped CLS store (TDA-003). Mounted as middleware so the store
     // exists BEFORE guards run, letting the TenantContextInterceptor populate it
@@ -141,6 +162,12 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,
     // so req.user is available; copies { userId, role } into the CLS store.
     { provide: APP_INTERCEPTOR, useClass: TenantContextInterceptor },
+
+    // Central global rate limiter (TDA-004 Task 6). Declared in the root module
+    // so — by NestJS module-scan order — it runs BEFORE JwtAuthGuard (declared
+    // in the imported AuthModule): unauthenticated floods are rejected (429)
+    // before hitting auth. Replaces AuthModule's old per-handler throttler.
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
 
     // NOTE: the global RBAC guard (RolesGuard) is intentionally NOT registered
     // here. NestJS executes global enhancers in MODULE-SCAN order, and the root

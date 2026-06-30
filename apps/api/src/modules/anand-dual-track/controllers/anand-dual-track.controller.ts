@@ -1,6 +1,7 @@
-import { Body, Controller, Get, NotFoundException, Optional, Param, Patch, Query } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, NotFoundException, Optional, Param, Patch, Query } from '@nestjs/common';
 import { IsNotEmpty, IsString } from 'class-validator';
 import { CurrentUser, AuthenticatedUser, AdminOnly } from '../../../common/decorators';
+import { SubscriptionService, Seg } from '../../subscription/subscription.service';
 import { toPublicEntry, AnandEntryLike } from '../dto/public-entry.dto';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
@@ -32,8 +33,24 @@ export class AnandDualTrackController {
     private readonly repo: AnandDualTrackRepository,
     private readonly chartinkRepo: ChartinkRepository,
     private readonly adapter: AngelOneAdapterService,
+    private readonly subs: SubscriptionService,
     @Optional() private readonly levelBook?: LevelBookService,
   ) {}
+
+  /**
+   * Plan-gate (TDA-007): a non-ADMIN USER may only reach a segment they hold an
+   * ACTIVE subscription for. ADMIN bypasses entirely. Throws 403
+   * {code:'NOT_SUBSCRIBED', segment} otherwise.
+   */
+  private async assertSubscribed(
+    user: AuthenticatedUser,
+    segment: Seg,
+  ): Promise<void> {
+    if (user?.role === 'ADMIN') return;
+    if (!(await this.subs.hasActive(user.userId, segment))) {
+      throw new ForbiddenException({ code: 'NOT_SUBSCRIBED', segment });
+    }
+  }
 
   @Get('intraday/entries')
   async listIntraday(
@@ -42,6 +59,7 @@ export class AnandDualTrackController {
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
+    await this.assertSubscribed(user, 'INTRADAY');
     const entries = await this.repo.listIntradayEntries({
       status: status || undefined,
       from: from ? new Date(from) : undefined,
@@ -66,6 +84,7 @@ export class AnandDualTrackController {
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
+    await this.assertSubscribed(user, 'SWING');
     const entries = await this.repo.listSwingEntries({
       status: status || undefined,
       from: from ? new Date(from) : undefined,
@@ -86,6 +105,7 @@ export class AnandDualTrackController {
     @Query('to') to?: string,
     @Query('status') status?: string,
   ) {
+    await this.assertSubscribed(user, 'SWING');
     const entries = await this.repo.listSwingExits({
       from: from ? new Date(from) : undefined,
       to: to ? new Date(to) : undefined,
@@ -103,12 +123,14 @@ export class AnandDualTrackController {
   }
 
   @Get('intraday/pnl-summary')
-  async intradayPnl() {
+  async intradayPnl(@CurrentUser() user: AuthenticatedUser) {
+    await this.assertSubscribed(user, 'INTRADAY');
     return this.repo.getPnlSummary('intraday');
   }
 
   @Get('swing/pnl-summary')
-  async swingPnl() {
+  async swingPnl(@CurrentUser() user: AuthenticatedUser) {
+    await this.assertSubscribed(user, 'SWING');
     return this.repo.getPnlSummary('swing');
   }
 
@@ -186,6 +208,10 @@ export class AnandDualTrackController {
     };
   }
 
+  // Tagging a scanner's category mutates scanner IP — an ADMIN cockpit write,
+  // not part of the USER product surface. Handler-level gate (no class-level
+  // guard) keeps the USER product endpoints on this controller reachable.
+  @AdminOnly()
   @Patch('scanners/:id/category')
   async tagScanner(
     @Param('id') id: string,

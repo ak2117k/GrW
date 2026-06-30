@@ -15,8 +15,10 @@ export interface AnandEntry {
   pnlPct: number | null;        // null when price is unavailable (see priceStale)
   targetLeftPct: number | null;
   priceStale?: boolean;         // true when neither live LTP nor level-book seed had a price
-  scannerName: string | null;   // resolved from alertId on the backend
-  scoreBreakdown: Array<{ name: string; points: number; pointsPossible: number; passed: boolean }> | null;
+  segment?: 'INTRADAY' | 'SWING';
+  // provenance — present only for ADMIN responses; stripped from USER payloads (TDA-006):
+  scannerName?: string | null;  // resolved from alertId on the backend
+  scoreBreakdown?: Array<{ name: string; points: number; pointsPossible: number; passed: boolean }> | null;
   leadCount?: number;           // Feature 1: how many times this symbol led (swing)
   leadDates?: string[];         // lossless ISO-timestamp lead log
   trailing?: boolean;           // Feature 3: intraday trailing-stop armed

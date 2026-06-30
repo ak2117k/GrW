@@ -9,6 +9,9 @@ import { summarizeOpenBook } from '../../utils/swingOpenBook';
 import { CapitalStrip } from '../../components/anand/CapitalStrip';
 import { SymbolChartLink } from '../../components/common';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
+import { useAuthStore } from '../../stores/auth-store';
+import { useSubscriptions, shouldShowSubscribeCard } from '../../hooks/useSubscriptions';
+import { SubscribeCard } from '../../components/product/SubscribeCard';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
 const ENTRY_FILTERS = [
@@ -189,7 +192,7 @@ function SwingOhlcDetail({ entry }: { entry: AnandEntry }) {
   );
 }
 
-function EntryRow({ entry }: { entry: AnandEntry }) {
+function EntryRow({ entry, isAdmin }: { entry: AnandEntry; isAdmin: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const ongoing = entry.exitPrice == null;
   const stale = entry.priceStale === true; // only set for open rows with no price
@@ -224,23 +227,27 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
             </span>
           )}
         </td>
-        {/* 2. Scanner */}
-        <td className="px-3 py-2 text-[var(--color-text-secondary)]">
-          {entry.scannerName ?? <span className="text-[var(--color-text-muted)]">—</span>}
-        </td>
-        {/* Leads */}
-        <td className="px-3 py-2 tabular-nums">
-          {entry.leadCount && entry.leadCount > 0 ? (
-            <span
-              title={distinctDays(entry.leadDates ?? []).join('\n')}
-              className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-xs font-semibold text-[var(--color-text-secondary)]"
-            >
-              ×{entry.leadCount}
-            </span>
-          ) : (
-            <span className="text-[var(--color-text-muted)]">—</span>
-          )}
-        </td>
+        {/* Provenance: Scanner — ADMIN only */}
+        {isAdmin && (
+          <td className="px-3 py-2 text-[var(--color-text-secondary)]">
+            {entry.scannerName ?? <span className="text-[var(--color-text-muted)]">—</span>}
+          </td>
+        )}
+        {/* Provenance: Leads — ADMIN only */}
+        {isAdmin && (
+          <td className="px-3 py-2 tabular-nums">
+            {entry.leadCount && entry.leadCount > 0 ? (
+              <span
+                title={distinctDays(entry.leadDates ?? []).join('\n')}
+                className="rounded bg-[var(--color-bg-tertiary)] px-1.5 py-0.5 text-xs font-semibold text-[var(--color-text-secondary)]"
+              >
+                ×{entry.leadCount}
+              </span>
+            ) : (
+              <span className="text-[var(--color-text-muted)]">—</span>
+            )}
+          </td>
+        )}
         {/* 3. Entry Price */}
         <td className="px-3 py-2 tabular-nums">₹{entry.entryPrice.toFixed(2)}</td>
         {/* 4. Price / Δ% */}
@@ -293,7 +300,8 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
           {daysElapsed(entry.enteredAt, entry.exitedAt)}d
         </td>
       </tr>
-      {expanded && entry.scoreBreakdown && (
+      {/* Provenance: click-to-expand score breakdown — ADMIN only */}
+      {isAdmin && expanded && entry.scoreBreakdown && (
         <tr className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/40">
           <td colSpan={13} className="px-3 py-2">
             <ChartinkScoreTable
@@ -306,7 +314,7 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
       )}
       {expanded && (
         <tr className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/40">
-          <td colSpan={13} className="px-3 py-2">
+          <td colSpan={isAdmin ? 13 : 11} className="px-3 py-2">
             <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
               Daily OHLC
             </div>
@@ -324,11 +332,13 @@ function EntriesTable({
   loading,
   error,
   emptyMessage,
+  isAdmin,
 }: {
   entries: AnandEntry[];
   loading: boolean;
   error: string | null;
   emptyMessage: string;
+  isAdmin: boolean;
 }) {
   if (loading) return <div className="text-[var(--color-text-muted)]">Loading…</div>;
   if (error) return <div className="text-red-400">Error: {error}</div>;
@@ -338,8 +348,9 @@ function EntriesTable({
         <thead className="bg-[var(--color-bg-secondary)] text-left text-xs uppercase tracking-wider text-[var(--color-text-muted)]">
           <tr>
             <th className="px-3 py-2">Symbol</th>
-            <th className="px-3 py-2">Scanner</th>
-            <th className="px-3 py-2">Leads</th>
+            {/* Provenance: Scanner + Leads — ADMIN only */}
+            {isAdmin && <th className="px-3 py-2">Scanner</th>}
+            {isAdmin && <th className="px-3 py-2">Leads</th>}
             <th className="px-3 py-2">Entry ₹</th>
             <th className="px-3 py-2">Price / Δ%</th>
             <th className="px-3 py-2">P&L ₹</th>
@@ -355,12 +366,12 @@ function EntriesTable({
         <tbody>
           {entries.length === 0 && (
             <tr>
-              <td colSpan={13} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
+              <td colSpan={isAdmin ? 13 : 11} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
                 {emptyMessage}
               </td>
             </tr>
           )}
-          {entries.map((e) => <EntryRow key={e.id} entry={e} />)}
+          {entries.map((e) => <EntryRow key={e.id} entry={e} isAdmin={isAdmin} />)}
         </tbody>
       </table>
     </div>
@@ -368,6 +379,8 @@ function EntriesTable({
 }
 
 export default function SwingPage() {
+  // NOTE: all hooks are called unconditionally before any early return, so the
+  // hook order is stable regardless of role/subscription branching below.
   const [filter, setFilter] = useState<string | undefined>(undefined);
   const [from, setFrom] = useState(todayIST());
   // Default exit window is a wide 90-day lookback so a recently-closed trade is
@@ -399,6 +412,23 @@ export default function SwingPage() {
   // visible and counted, even when the From date excludes their entry day.
   const { openEntries, loading: openLoading, error: openError } = useSwingOpenBook();
   const { openCount, invested, currentValue, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'ADMIN';
+  const subs = useSubscriptions();
+
+  // Gate: an unsubscribed USER (non-admin) sees the Subscribe placeholder
+  // instead of the signals tables. Branch happens AFTER all hooks above.
+  if (shouldShowSubscribeCard(isAdmin, subs.loading, subs.swing)) {
+    return (
+      <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
+        <div>
+          <h1 className="text-2xl font-semibold">Swing Track</h1>
+          <p className="text-sm text-[var(--color-text-muted)]">10% target · 10% stop · holds overnight</p>
+        </div>
+        <SubscribeCard segment="Swing" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
@@ -447,6 +477,7 @@ export default function SwingPage() {
           loading={openLoading}
           error={openError}
           emptyMessage="No open positions."
+          isAdmin={isAdmin}
         />
       </section>
 
@@ -487,6 +518,7 @@ export default function SwingPage() {
           loading={loading}
           error={error}
           emptyMessage="No swing entries yet. Waiting for Anand Swing scanner alerts."
+          isAdmin={isAdmin}
         />
       </section>
 
@@ -540,6 +572,7 @@ export default function SwingPage() {
           loading={exitsLoading}
           error={exitsError}
           emptyMessage="No swing exits in this range."
+          isAdmin={isAdmin}
         />
       </section>
     </div>

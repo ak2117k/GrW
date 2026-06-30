@@ -34,6 +34,7 @@ import { AdaptiveStopTrackModule } from './modules/adaptive-stop-track/adaptive-
 import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-track.module';
 import { BreakoutSwingTrackModule } from './modules/breakout-swing-track/breakout-swing-track.module';
 import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.module';
+import { SubscriptionModule } from './modules/subscription/subscription.module';
 
 @Module({
   imports: [
@@ -166,6 +167,9 @@ import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.mod
 
     // SELL-Futures Track — shorts the stock future on bearish signals (paper)
     SellFuturesModule,
+
+    // Subscription — TDA-007 plan-gating (Intraday/Swing) + me/admin endpoints
+    SubscriptionModule,
   ],
   providers: [
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,

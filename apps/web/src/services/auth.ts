@@ -76,4 +76,18 @@ export async function logout(accessToken: string): Promise<void> {
   );
 }
 
+export async function signup(
+  email: string,
+  password: string,
+  displayName?: string,
+): Promise<{ message: string; verificationToken?: string }> {
+  const res = await authApi.post('/signup', { email, password, displayName });
+  return res.data;
+}
+
+export async function verifyEmail(token: string): Promise<{ message: string }> {
+  const res = await authApi.post('/verify-email', { token });
+  return res.data;
+}
+
 export default authApi;

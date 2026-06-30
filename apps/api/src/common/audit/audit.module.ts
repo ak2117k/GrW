@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { AuditController } from './audit.controller';
 import { AuditService } from './audit.service';
 
 /**
@@ -9,11 +10,13 @@ import { AuditService } from './audit.service';
  * `PrismaService` directly (PrismaModule is itself `@Global`), so this module
  * does NOT import PrismaModule.
  *
- * NOTE: the `AuditController` (read-only verify/query surface) is added in
- * Task 4; it does not exist yet, so no `controllers` array is declared here.
+ * The `AuditController` exposes the read-only ADMIN-only verify/list/export
+ * surface (Task 4). It is a pure reader; {@link AuditService.append} remains the
+ * sole writer.
  */
 @Global()
 @Module({
+  controllers: [AuditController],
   providers: [AuditService],
   exports: [AuditService],
 })

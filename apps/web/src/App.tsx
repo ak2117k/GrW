@@ -52,6 +52,22 @@ function RequireAuth({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+// Role gate for individual routes. A user whose role does not match (including
+// a null/unknown role) is bounced to /intraday — fail-closed: only the literal
+// expected role passes. Sits inside RequireAuth, so the user is already authed.
+function RequireRole({ role, children }: { role: string; children: ReactNode }) {
+  const userRole = useAuthStore((s) => s.user?.role);
+  if (userRole !== role) return <Navigate to="/intraday" replace />;
+  return <>{children}</>;
+}
+
+// Role-aware element switch (used for the index route): renders `admin` for an
+// ADMIN, otherwise `user`. Anything that is not the literal 'ADMIN' gets `user`.
+function RequireRoleSwitch({ admin, user }: { admin: ReactNode; user: ReactNode }) {
+  const role = useAuthStore((s) => s.user?.role);
+  return <>{role === 'ADMIN' ? admin : user}</>;
+}
+
 // Authenticated users hitting /login get sent home. While loading, render
 // nothing decisive (the login form is harmless to show briefly).
 function LoginRoute() {
@@ -89,30 +105,35 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<DashboardPage />} />
-        <Route path="charts" element={<ChartsPage />} />
-        <Route path="market" element={<MarketPage />} />
-        <Route path="options" element={<OptionsPage />} />
-        <Route path="signals" element={<SignalsPage />} />
-        <Route path="rejections" element={<RejectionsPage />} />
-        <Route path="chartink" element={<ChartinkPage />} />
-        <Route path="watch" element={<WatchPage />} />
-        <Route path="ungated-watch" element={<UngatedWatchPage />} />
-        <Route path="adaptive-stop" element={<AdaptiveStopPage />} />
+        <Route
+          index
+          element={
+            <RequireRoleSwitch admin={<DashboardPage />} user={<Navigate to="/intraday" replace />} />
+          }
+        />
+        <Route path="charts" element={<RequireRole role="ADMIN"><ChartsPage /></RequireRole>} />
+        <Route path="market" element={<RequireRole role="ADMIN"><MarketPage /></RequireRole>} />
+        <Route path="options" element={<RequireRole role="ADMIN"><OptionsPage /></RequireRole>} />
+        <Route path="signals" element={<RequireRole role="ADMIN"><SignalsPage /></RequireRole>} />
+        <Route path="rejections" element={<RequireRole role="ADMIN"><RejectionsPage /></RequireRole>} />
+        <Route path="chartink" element={<RequireRole role="ADMIN"><ChartinkPage /></RequireRole>} />
+        <Route path="watch" element={<RequireRole role="ADMIN"><WatchPage /></RequireRole>} />
+        <Route path="ungated-watch" element={<RequireRole role="ADMIN"><UngatedWatchPage /></RequireRole>} />
+        <Route path="adaptive-stop" element={<RequireRole role="ADMIN"><AdaptiveStopPage /></RequireRole>} />
         <Route path="intraday" element={<IntradayPage />} />
         <Route path="swing" element={<SwingPage />} />
-        <Route path="breakout-swing" element={<BreakoutSwingPage />} />
-        <Route path="sell-futures" element={<SellFuturesPage />} />
-        <Route path="reinvest" element={<ReinvestPage />} />
-        <Route path="auto-trade" element={<AutoTradePage />} />
-        <Route path="manual-trade" element={<ManualTradePage />} />
+        <Route path="breakout-swing" element={<RequireRole role="ADMIN"><BreakoutSwingPage /></RequireRole>} />
+        <Route path="sell-futures" element={<RequireRole role="ADMIN"><SellFuturesPage /></RequireRole>} />
+        <Route path="reinvest" element={<RequireRole role="ADMIN"><ReinvestPage /></RequireRole>} />
+        <Route path="auto-trade" element={<RequireRole role="ADMIN"><AutoTradePage /></RequireRole>} />
+        <Route path="manual-trade" element={<RequireRole role="ADMIN"><ManualTradePage /></RequireRole>} />
         <Route path="positions" element={<PositionsPage />} />
-        <Route path="news" element={<NewsPage />} />
-        <Route path="journal" element={<JournalPage />} />
-        <Route path="advisor" element={<AdvisorPage />} />
-        <Route path="backtest" element={<BacktestPage />} />
-        <Route path="strategy-builder" element={<StrategyBuilderPage />} />
-        <Route path="strategy-review" element={<StrategyReviewPage />} />
+        <Route path="news" element={<RequireRole role="ADMIN"><NewsPage /></RequireRole>} />
+        <Route path="journal" element={<RequireRole role="ADMIN"><JournalPage /></RequireRole>} />
+        <Route path="advisor" element={<RequireRole role="ADMIN"><AdvisorPage /></RequireRole>} />
+        <Route path="backtest" element={<RequireRole role="ADMIN"><BacktestPage /></RequireRole>} />
+        <Route path="strategy-builder" element={<RequireRole role="ADMIN"><StrategyBuilderPage /></RequireRole>} />
+        <Route path="strategy-review" element={<RequireRole role="ADMIN"><StrategyReviewPage /></RequireRole>} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>

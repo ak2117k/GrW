@@ -6,7 +6,9 @@ import { UngatedTradeRepository } from '../repositories/ungated-trade.repository
 import { UngatedPaperAccountService } from '../services/ungated-paper-account.service';
 import { UngatedComparisonService } from '../services/ungated-comparison.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @ApiTags('Ungated Track (A/B experiment)')
 @Controller('api/ungated')
 export class UngatedTrackController {

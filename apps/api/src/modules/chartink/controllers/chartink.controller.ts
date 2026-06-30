@@ -2,7 +2,9 @@ import { Body, Controller, Get, HttpCode, HttpStatus, NotFoundException, Param, 
 import { ChartinkRepository } from '../repositories/chartink.repository';
 import { ChartinkScoringService, type SetupSide } from '../services/chartink-scoring.service';
 import { ChartinkRejectionsService } from '../services/chartink-rejections.service';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @Controller('api/chartink')
 export class ChartinkController {
   constructor(

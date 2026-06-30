@@ -4,6 +4,7 @@ import {
   StrategyReviewService,
   type StrategyReview,
 } from '../services/strategy-review.service';
+import { AdminOnly } from '../../../common/decorators';
 
 /**
  * Read-only analytics endpoint. Aggregates stored Chartink alerts + watch
@@ -13,6 +14,7 @@ import {
  *
  * Both query params are optional; omitting them reviews all stored history.
  */
+@AdminOnly()
 @Controller('api/strategy-review')
 export class StrategyReviewController {
   private readonly logger = new Logger(StrategyReviewController.name);

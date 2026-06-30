@@ -23,7 +23,9 @@ import {
   CandleData,
   BacktestResult,
 } from '../../../common/interfaces/trading-strategy.interface';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @Controller('api/strategies')
 export class StrategyBuilderController {
   private readonly logger = new Logger(StrategyBuilderController.name);

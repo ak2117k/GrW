@@ -29,7 +29,9 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { SrEvidenceService } from '../services/sr-evidence.service';
 import { isIntradayInterval, lookbackDaysFor } from '../services/timeframe-lookback';
 import { computeAtrFromCandles } from '../services/per-tf-atr';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @Controller('api/signals')
 export class SignalGeneratorController {
   private readonly logger = new Logger(SignalGeneratorController.name);

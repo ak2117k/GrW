@@ -1,8 +1,9 @@
 import {
-  WebSocketGateway, WebSocketServer, OnGatewayInit,
+  WebSocketGateway, WebSocketServer, OnGatewayInit, OnGatewayConnection,
 } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
-import { Server } from 'socket.io';
+import { Server, Socket } from 'socket.io';
+import { isAdminSocket } from '../../../common/ws/authenticate-admin-socket';
 
 const CORS_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4000';
 
@@ -15,7 +16,7 @@ const CORS_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4000';
   cors: { origin: CORS_ORIGIN, credentials: true },
   namespace: '/ungated-watch',
 })
-export class UngatedWatchGateway implements OnGatewayInit {
+export class UngatedWatchGateway implements OnGatewayInit, OnGatewayConnection {
   private readonly logger = new Logger(UngatedWatchGateway.name);
 
   @WebSocketServer()
@@ -25,6 +26,13 @@ export class UngatedWatchGateway implements OnGatewayInit {
     this.logger.log(
       `UngatedWatchGateway initialized (namespace=/ungated-watch origin=${CORS_ORIGIN})`,
     );
+  }
+
+  // ungated:entry carries raw provenance. Reject non-ADMIN sockets.
+  handleConnection(client: Socket) {
+    if (!isAdminSocket(client)) {
+      client.disconnect(true);
+    }
   }
 
   /** Full updated row — frontend merges in place, no refetch. */

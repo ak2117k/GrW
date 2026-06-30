@@ -9,7 +9,9 @@ import {
 } from '@nestjs/common';
 import { BacktestService } from '../services/backtest.service';
 import { RunBacktestDto, CompareStrategiesDto } from '../dto/backtest.dto';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @Controller('api/backtest')
 export class BacktestController {
   constructor(private readonly backtestService: BacktestService) {}

@@ -8,6 +8,7 @@ import {
 import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { WS_NAMESPACE } from '@td/shared/constants';
+import { isAdminSocket } from '../../../common/ws/authenticate-admin-socket';
 
 @WebSocketGateway({
   namespace: WS_NAMESPACE,
@@ -26,7 +27,11 @@ export class SignalGateway
   }
 
   handleConnection(client: Socket): void {
-    this.logger.debug(`Signal client connected: ${client.id}`);
+    if (!isAdminSocket(client)) {
+      client.disconnect(true);
+      return;
+    }
+    this.logger.debug(`Signal ADMIN socket connected: ${client.id}`);
   }
 
   handleDisconnect(client: Socket): void {

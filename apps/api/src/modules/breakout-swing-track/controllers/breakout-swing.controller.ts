@@ -1,6 +1,8 @@
 import { Controller, Get, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { BreakoutSwingRepository } from '../repositories/breakout-swing.repository';
+import { AdminOnly } from '../../../common/decorators';
 
+@AdminOnly()
 @Controller('api/breakout-swing')
 export class BreakoutSwingController {
   constructor(private readonly repo: BreakoutSwingRepository) {}

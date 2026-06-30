@@ -5,6 +5,9 @@ import { summarizeOpenBook } from '../../utils/swingOpenBook';
 import { CapitalStrip } from '../../components/anand/CapitalStrip';
 import { SymbolChartLink } from '../../components/common';
 import ChartinkScoreTable from '../../components/chartink/ChartinkScoreTable';
+import { useAuthStore } from '../../stores/auth-store';
+import { useSubscriptions, shouldShowSubscribeCard } from '../../hooks/useSubscriptions';
+import { SubscribeCard } from '../../components/product/SubscribeCard';
 import type { AnandEntry, PnlPeriod, PnlSummary } from '../../services/anand';
 
 const FILTERS = [
@@ -80,7 +83,7 @@ function PnlBar({ pnl }: { pnl: PnlSummary }) {
   );
 }
 
-function EntryRow({ entry }: { entry: AnandEntry }) {
+function EntryRow({ entry, isAdmin }: { entry: AnandEntry; isAdmin: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const isActive = entry.exitPrice == null;
   const stale = entry.priceStale === true; // only set for open rows with no price
@@ -104,9 +107,12 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
         <td className="px-3 py-2 font-mono font-medium">
           <SymbolChartLink symbol={entry.symbol} token={entry.token} />
         </td>
-        <td className="px-3 py-2 text-[var(--color-text-muted)]">
-          {entry.scannerName ?? <span className="text-gray-500">—</span>}
-        </td>
+        {/* Provenance: Scanner — ADMIN only */}
+        {isAdmin && (
+          <td className="px-3 py-2 text-[var(--color-text-muted)]">
+            {entry.scannerName ?? <span className="text-gray-500">—</span>}
+          </td>
+        )}
         <td className="px-3 py-2 tabular-nums">₹{entry.entryPrice.toFixed(2)}</td>
         <td className={clsx('px-3 py-2 tabular-nums', pnlColor)}>
           {stale ? (
@@ -135,10 +141,11 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
         <td className="px-3 py-2 tabular-nums text-[var(--color-text-muted)]">{entry.targetPct}%</td>
         <td className={clsx('px-3 py-2 text-xs font-semibold uppercase tracking-wider', statusColor[entry.status] ?? 'text-gray-400')}>
           {entry.status.replace('_', ' ')}
-          {isActive && entry.trailing && (
+          {/* Provenance: trailing/exitReason badges — ADMIN only */}
+          {isAdmin && isActive && entry.trailing && (
             <span className="ml-1 rounded bg-amber-500/20 px-1 py-0.5 text-[9px] text-amber-300">trailing</span>
           )}
-          {!isActive && entry.exitReason && (
+          {isAdmin && !isActive && entry.exitReason && (
             <span className="ml-1 text-[9px] lowercase text-[var(--color-text-muted)]">
               {entry.exitReason === 'TRAIL_ST' ? 'trail·st' : entry.exitReason === 'TRAIL_GB' ? 'trail·gb' : entry.exitReason.toLowerCase()}
             </span>
@@ -148,7 +155,8 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
           {fmtTimeIST(entry.enteredAt)}
         </td>
       </tr>
-      {expanded && entry.scoreBreakdown && (
+      {/* Provenance: click-to-expand score breakdown — ADMIN only */}
+      {isAdmin && expanded && entry.scoreBreakdown && (
         <tr className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/40">
           <td colSpan={9} className="px-3 py-2">
             <ChartinkScoreTable
@@ -164,14 +172,33 @@ function EntryRow({ entry }: { entry: AnandEntry }) {
 }
 
 export default function IntradayPage() {
+  // NOTE: all hooks are called unconditionally before any early return, so the
+  // hook order is stable regardless of role/subscription branching below.
   const [filter, setFilter] = useState<string | undefined>(undefined);
   const [date, setDate] = useState(todayIST());
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'ADMIN';
+  const subs = useSubscriptions();
   const { entries, pnl, loading, error } = useIntradayEntries(filter, date);
   // Open (unrealized) book: floating mark-to-market P&L of positions not yet
   // closed (exitPrice null). Kept separate from the realized period cards so
   // booked vs floating P&L are never conflated.
   const openEntries = entries.filter((e) => e.exitPrice == null);
   const { openCount, invested, currentValue, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
+
+  // Gate: an unsubscribed USER (non-admin) sees the Subscribe placeholder
+  // instead of the signals table. Branch happens AFTER all hooks above.
+  if (shouldShowSubscribeCard(isAdmin, subs.loading, subs.intraday)) {
+    return (
+      <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
+        <div>
+          <h1 className="text-2xl font-semibold">Intraday Track</h1>
+          <p className="text-sm text-[var(--color-text-muted)]">5% → trailing (Supertrend 15m) · 5% stop · expires 15:15</p>
+        </div>
+        <SubscribeCard segment="Intraday" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
@@ -238,7 +265,7 @@ export default function IntradayPage() {
             <thead className="bg-[var(--color-bg-secondary)] text-left text-xs uppercase tracking-wider text-[var(--color-text-muted)]">
               <tr>
                 <th className="px-3 py-2">Symbol</th>
-                <th className="px-3 py-2">Scanner</th>
+                {isAdmin && <th className="px-3 py-2">Scanner</th>}
                 <th className="px-3 py-2">Entry Price</th>
                 <th className="px-3 py-2">Price / Δ%</th>
                 <th className="px-3 py-2">P&L ₹</th>
@@ -251,12 +278,12 @@ export default function IntradayPage() {
             <tbody>
               {entries.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
+                  <td colSpan={isAdmin ? 9 : 8} className="px-3 py-8 text-center text-[var(--color-text-muted)]">
                     No entries yet. Tag an Anand Swing scanner as ANAND_SWING to start auto-logging.
                   </td>
                 </tr>
               )}
-              {entries.map((e) => <EntryRow key={e.id} entry={e} />)}
+              {entries.map((e) => <EntryRow key={e.id} entry={e} isAdmin={isAdmin} />)}
             </tbody>
           </table>
         </div>

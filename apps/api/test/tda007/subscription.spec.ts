@@ -16,7 +16,10 @@ import { PrismaClient } from '@prisma/client';
 import { AsyncLocalStorage } from 'async_hooks';
 import { ClsService } from 'nestjs-cls';
 import { PrismaService } from '../../src/common/prisma/prisma.service';
-import { TenantContextService } from '../../src/common/tenant/tenant-context.service';
+import {
+  TenantContext,
+  TenantContextService,
+} from '../../src/common/tenant/tenant-context.service';
 import { SubscriptionService } from '../../src/modules/subscription/subscription.service';
 
 const url = process.env.DATABASE_URL_TEST;
@@ -93,6 +96,22 @@ describe('TDA-007 Task 1 — SubscriptionService', () => {
       INTRADAY: true,
       SWING: false,
     }));
+
+  // Regression (Critical): listForUser ran two concurrent runWithoutTenant
+  // scopes whose capture/restore raced on the shared CLS store, and could leave
+  // an active request's tenant context WIPED — making later tenant-scoped
+  // queries run unscoped (cross-tenant leak). The single-scope fix must
+  // preserve the caller's context across the parallel segment checks.
+  it('listForUser preserves the caller active tenant context (no wipe)', async () => {
+    const ctx: TenantContext = { userId: uId, role: 'USER' };
+    await cls.run(async () => {
+      tenant.set(ctx);
+      const result = await svc.listForUser(uId);
+      expect(result).toEqual({ INTRADAY: true, SWING: false });
+      // The request's tenant context must survive the parallel bypass scopes.
+      expect(tenant.get()).toEqual(ctx);
+    });
+  });
 
   it('grant upserts ACTIVE; revoke cancels', async () => {
     await run(() => svc.grant(uId, 'SWING', null));

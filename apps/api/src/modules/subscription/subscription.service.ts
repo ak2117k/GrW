@@ -22,29 +22,44 @@ export class SubscriptionService {
     private readonly tenant: TenantContextService,
   ) {}
 
-  hasActive(userId: string, segment: Seg): Promise<boolean> {
-    return this.tenant.runWithoutTenant(async () => {
-      const row = await this.prisma.subscription.findFirst({
-        where: {
-          userId,
-          segment,
-          status: 'ACTIVE',
-          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
-        },
-        select: { id: true },
-      });
-      return !!row;
+  /**
+   * The unwrapped "is this segment active?" query body. Does NOT manage the
+   * tenant bypass itself — callers MUST run it inside a `runWithoutTenant`
+   * scope. Keeping the bypass out of here lets {@link listForUser} run BOTH
+   * segment checks under a SINGLE bypass scope: two concurrent
+   * `runWithoutTenant` calls on the same shared CLS store race their
+   * capture/restore and can leave the request's real tenant context wiped
+   * (cross-tenant leak).
+   */
+  private async queryActive(userId: string, segment: Seg): Promise<boolean> {
+    const row = await this.prisma.subscription.findFirst({
+      where: {
+        userId,
+        segment,
+        status: 'ACTIVE',
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      },
+      select: { id: true },
     });
+    return !!row;
   }
 
-  async listForUser(
+  hasActive(userId: string, segment: Seg): Promise<boolean> {
+    return this.tenant.runWithoutTenant(() =>
+      this.queryActive(userId, segment),
+    );
+  }
+
+  listForUser(
     userId: string,
   ): Promise<{ INTRADAY: boolean; SWING: boolean }> {
-    const [intraday, swing] = await Promise.all([
-      this.hasActive(userId, 'INTRADAY'),
-      this.hasActive(userId, 'SWING'),
-    ]);
-    return { INTRADAY: intraday, SWING: swing };
+    return this.tenant.runWithoutTenant(async () => {
+      const [intraday, swing] = await Promise.all([
+        this.queryActive(userId, 'INTRADAY'),
+        this.queryActive(userId, 'SWING'),
+      ]);
+      return { INTRADAY: intraday, SWING: swing };
+    });
   }
 
   grant(

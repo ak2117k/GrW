@@ -48,6 +48,7 @@ import { AnandDualTrackController } from '../../src/modules/anand-dual-track/con
 import { AnandDualTrackRepository } from '../../src/modules/anand-dual-track/repositories/anand-dual-track.repository';
 import { AngelOneAdapterService } from '../../src/modules/market-data/services/angel-one-adapter.service';
 import { ChartinkRepository } from '../../src/modules/chartink/repositories/chartink.repository';
+import { SubscriptionService } from '../../src/modules/subscription/subscription.service';
 
 // --- Task 3: ADMIN-gate the raw provenance / scanner / strategy / track REST
 // controllers. The decorator metadata is asserted directly off each controller
@@ -109,6 +110,10 @@ const adapterStub = { getLtpsBatch: async () => new Map<string, number>() };
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: AngelOneAdapterService, useValue: adapterStub },
     { provide: ChartinkRepository, useValue: {} },
+    // TDA-007 added a subscription gate to the segment handlers. This spec is
+    // about provenance-stripping, not the gate (its tokens are synthetic, not
+    // seeded users) — stub hasActive→true so every request clears the gate.
+    { provide: SubscriptionService, useValue: { hasActive: async () => true } },
   ],
 })
 class AnandProvenanceTestModule {}

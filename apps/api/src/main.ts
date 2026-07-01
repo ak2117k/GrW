@@ -107,7 +107,7 @@ async function bootstrap(): Promise<void> {
 
   // Swagger API docs
   const swaggerConfig = new DocumentBuilder()
-    .setTitle('TD Automation API')
+    .setTitle('GrW API')
     .setDescription('Trading automation platform API')
     .setVersion('0.1.0')
     .addBearerAuth()
@@ -116,7 +116,7 @@ async function bootstrap(): Promise<void> {
   SwaggerModule.setup('api/docs', app, document);
 
   await app.listen(port);
-  logger.log(`TD Automation API running on http://localhost:${port}`);
+  logger.log(`GrW API running on http://localhost:${port}`);
   logger.log(`Swagger docs available at http://localhost:${port}/api/docs`);
 }
 

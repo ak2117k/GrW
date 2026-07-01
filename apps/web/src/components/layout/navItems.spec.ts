@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { navItems, visibleNavItems } from './navItems';
 
-const USER_PATHS = ['/intraday', '/swing', '/positions', '/settings'];
+const USER_PATHS = ['/intraday', '/swing', '/positions', '/settings', '/market', '/charts'];
 
 describe('visibleNavItems', () => {
-  it('USER sees exactly the four product items', () => {
+  it('USER sees exactly the product items (Intraday/Swing/Positions/Settings + Market/Charts)', () => {
     expect(visibleNavItems('USER').map((i) => i.path).sort()).toEqual([...USER_PATHS].sort());
   });
 

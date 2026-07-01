@@ -88,7 +88,7 @@ export default function LoginPage() {
         {/* Brand */}
         <div className="mb-8 text-center">
           <span className="text-3xl font-bold tracking-tight text-[var(--color-text-primary)]">
-            TD<span className="text-[var(--color-accent-blue)]">Auto</span>
+            Gr<span className="text-[var(--color-accent-blue)]">W</span>
           </span>
           <p className="mt-2 text-sm text-[var(--color-text-muted)]">
             {mfaToken ? 'Two-factor authentication' : 'Sign in to your account'}

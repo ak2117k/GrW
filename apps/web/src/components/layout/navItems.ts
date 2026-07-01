@@ -59,7 +59,7 @@ export const navItems: NavItem[] = [
 // the single source of truth for what a non-ADMIN sees; everything else is
 // ADMIN-only. Treat null/unknown roles as USER (fail closed) so a missing or
 // malformed role never leaks the full nav.
-const USER_VISIBLE = new Set(['/intraday', '/swing', '/positions', '/settings']);
+const USER_VISIBLE = new Set(['/intraday', '/swing', '/positions', '/settings', '/market', '/charts']);
 
 export function visibleNavItems(role: string | null | undefined): NavItem[] {
   if (role === 'ADMIN') return navItems;

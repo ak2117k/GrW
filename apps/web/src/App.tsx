@@ -140,8 +140,8 @@ export default function App() {
             <RequireRoleSwitch admin={<DashboardPage />} user={<Navigate to="/intraday" replace />} />
           }
         />
-        <Route path="charts" element={<RequireRole role="ADMIN"><ChartsPage /></RequireRole>} />
-        <Route path="market" element={<RequireRole role="ADMIN"><MarketPage /></RequireRole>} />
+        <Route path="charts" element={<ChartsPage />} />
+        <Route path="market" element={<MarketPage />} />
         <Route path="options" element={<RequireRole role="ADMIN"><OptionsPage /></RequireRole>} />
         <Route path="signals" element={<RequireRole role="ADMIN"><SignalsPage /></RequireRole>} />
         <Route path="rejections" element={<RequireRole role="ADMIN"><RejectionsPage /></RequireRole>} />

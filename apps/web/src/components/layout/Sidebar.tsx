@@ -27,7 +27,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       <div className="flex h-14 items-center border-b border-[var(--color-border-subtle)] px-4">
         {!collapsed && (
           <span className="text-lg font-bold tracking-tight text-[var(--color-text-primary)]">
-            TD<span className="text-[var(--color-accent-blue)]">Auto</span>
+            Gr<span className="text-[var(--color-accent-blue)]">W</span>
           </span>
         )}
         {collapsed && (

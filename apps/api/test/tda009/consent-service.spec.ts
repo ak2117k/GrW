@@ -58,7 +58,12 @@ beforeAll(async () => {
 afterAll(async () => {
   await raw.consentRecord.deleteMany({ where: { userId: uId } });
   await raw.consentDocument.deleteMany({ where: { version: { in: [v1, v2] } } });
-  await raw.user.deleteMany({ where: { email: E } });
+  // NB: we deliberately do NOT delete the test user. The AuditLog.user relation
+  // is `onDelete: SetNull`, so deleting a user would null the `userId` on its
+  // historical audit rows — but those rows' `hash` was computed over the
+  // original userId, so nulling it would break the append-only global chain and
+  // fail `verifyChain('global')` on the next run. A unique email per run keeps
+  // users from colliding; leaving them preserves chain immutability.
   await raw.$disconnect();
   await prisma.$disconnect();
 });

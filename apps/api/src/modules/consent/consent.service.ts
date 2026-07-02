@@ -235,25 +235,42 @@ export class ConsentService {
    * Publish a new disclosure version (ADMIN). In one transaction, deactivate the
    * current active doc of `kind` and create the new active one (unique `version`
    * guards accidental re-publish); the new id makes every prior acceptance stop
-   * matching, forcing global re-consent. The FATAL `CONSENT_VERSION_PUBLISHED`
-   * audit append is added in Task 4.
+   * matching, forcing global re-consent. Then a FATAL
+   * `CONSENT_VERSION_PUBLISHED` audit append (let it throw).
    */
   async publish(
     kind: string,
     version: string,
     body: string,
-    _actorUserId: string | null,
+    actorUserId: string | null,
   ): Promise<CurrentConsent> {
     const contentHash = this.computeContentHash(kind, version, body);
 
-    const doc = await this.prisma.$transaction(async (tx) => {
-      await tx.consentDocument.updateMany({
-        where: { kind, active: true },
-        data: { active: false },
-      });
-      return tx.consentDocument.create({
-        data: { kind, version, body, contentHash, active: true },
-      });
+    const { doc, previousVersion } = await this.prisma.$transaction(
+      async (tx) => {
+        const prev = await tx.consentDocument.findFirst({
+          where: { kind, active: true },
+          orderBy: { createdAt: 'desc' },
+          select: { version: true },
+        });
+        await tx.consentDocument.updateMany({
+          where: { kind, active: true },
+          data: { active: false },
+        });
+        const created = await tx.consentDocument.create({
+          data: { kind, version, body, contentHash, active: true },
+        });
+        return { doc: created, previousVersion: prev?.version ?? null };
+      },
+    );
+
+    // FATAL audit (spec §4.1 / §6): publishing is the only path that mints a
+    // new current version and forces global re-consent — record it.
+    await this.audits.append({
+      action: 'CONSENT_VERSION_PUBLISHED',
+      userId: actorUserId,
+      target: version,
+      meta: { kind, contentHash, previousVersion },
     });
 
     return {

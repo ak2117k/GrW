@@ -24,6 +24,7 @@ import { cn } from '@/utils/cn';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { useSubscriptions } from '@/hooks/useSubscriptions';
+import { useConsent } from '@/hooks/useConsent';
 import { AutoTradeMode, Segment } from '@/types';
 import type { TradingSettings } from '@/types';
 import api from '@/services/api';
@@ -148,6 +149,90 @@ const autoTradeModes: {
   },
 ];
 
+/**
+ * TDA-009 versioned consent card (USER view). Fetches status; when acceptance
+ * is due, renders the current disclosure body + a checkbox-gated Accept button
+ * that POSTs the shown { version, contentHash }. When already accepted, shows
+ * the accepted version. The auto-execution toggle (TDA-011) reads this status.
+ */
+function ConsentCard() {
+  const { status, current, loading, submitting, accept, needsConsent } = useConsent();
+  const [agreed, setAgreed] = useState(false);
+
+  const onAccept = async () => {
+    try {
+      await accept();
+      setAgreed(false);
+      toast.success('Risk disclosure accepted');
+    } catch {
+      toast.error('Could not record acceptance. Please try again.');
+    }
+  };
+
+  if (loading) {
+    return <LoadingSkeleton variant="card" count={1} className="h-20" />;
+  }
+
+  if (!needsConsent && status) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+        <CheckCircle size={16} className="text-emerald-400" />
+        <p className="text-xs text-gray-300">
+          You accepted version{' '}
+          <span className="font-medium text-gray-100">{status.acceptedVersion}</span>.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {status?.requiresReconsent && (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5">
+          <AlertTriangle size={14} className="text-amber-400 shrink-0" />
+          <p className="text-[11px] text-amber-300">
+            The risk disclosure was updated. Please review and re-accept to keep
+            auto-execution available.
+          </p>
+        </div>
+      )}
+
+      {current ? (
+        <>
+          <div className="max-h-56 overflow-y-auto rounded-lg border border-gray-700/60 bg-gray-900/40 p-3">
+            <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gray-300">
+              {current.body}
+            </p>
+          </div>
+          <p className="text-[10px] text-gray-600">
+            Version {current.version}
+          </p>
+          <label className="flex items-center gap-2 text-xs text-gray-300">
+            <input
+              type="checkbox"
+              checked={agreed}
+              onChange={(e) => setAgreed(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-600 bg-gray-800"
+            />
+            I have read and accept the risk disclosure
+          </label>
+          <button
+            onClick={onAccept}
+            disabled={!agreed || submitting}
+            className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {submitting ? 'Recording…' : 'Accept'}
+          </button>
+        </>
+      ) : (
+        <p className="text-xs text-gray-500">
+          No risk disclosure is currently published.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ---- USER account hub ----
 
 /**
@@ -241,17 +326,7 @@ function UserAccountHub() {
         title="Consent & Disclaimer"
         description="Review and accept the risk disclosure"
       >
-        <div className="flex items-center justify-between">
-          <p className="text-xs text-gray-500">
-            Coming soon &mdash; the consent gate lands in TDA-009.
-          </p>
-          <button
-            onClick={() => toast('Risk disclosure coming soon')}
-            className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 transition-colors"
-          >
-            Review
-          </button>
-        </div>
+        <ConsentCard />
       </SectionCard>
 
       {/* Section 4: Auto-execution */}

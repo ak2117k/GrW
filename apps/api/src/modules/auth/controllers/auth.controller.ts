@@ -22,6 +22,7 @@ import {
   MfaCodeDto,
   MfaDisableDto,
   RefreshDto,
+  ResendVerificationDto,
   ResetPasswordDto,
   SignupDto,
   VerifyEmailDto,
@@ -75,6 +76,19 @@ export class AuthController {
   @ApiOperation({ summary: 'Verify an email address and activate the account' })
   verifyEmail(@Body() dto: VerifyEmailDto) {
     return this.auth.verifyEmail(dto.token);
+  }
+
+  @Public()
+  @Throttle({ default: AUTH_THROTTLE })
+  @AccountRateLimit(ACCOUNT_THROTTLE)
+  @UseGuards(AccountRateLimitGuard)
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Re-send the verification email (always 200; no enumeration)',
+  })
+  resendVerification(@Body() dto: ResendVerificationDto) {
+    return this.auth.resendVerification(dto.email);
   }
 
   @Public()

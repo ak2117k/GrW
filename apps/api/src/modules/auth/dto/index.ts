@@ -1,5 +1,6 @@
 export {
   SignupDto,
+  ResendVerificationDto,
   VerifyEmailDto,
   LoginDto,
   RefreshDto,

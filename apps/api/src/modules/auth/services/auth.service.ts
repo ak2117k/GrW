@@ -91,6 +91,14 @@ const DUMMY_PASSWORD_HASH =
 const SIGNUP_MESSAGE =
   'If that email address is available, a verification link has been sent.';
 
+/**
+ * Generic, non-enumerating resend-verification response. Returned unchanged
+ * whether the email is unknown, already verified, or a pending account that was
+ * actually re-sent a link.
+ */
+const RESEND_VERIFICATION_MESSAGE =
+  'If that email address needs verifying, a new verification link has been sent.';
+
 interface SignupResult {
   message: string;
   /** Test-only seam (NODE_ENV=test): the raw email-verification token. */
@@ -203,6 +211,44 @@ export class AuthService {
     await this.audit('AUTH_SIGNUP', user.id, email);
 
     const result: SignupResult = { message: SIGNUP_MESSAGE };
+    if (process.env.NODE_ENV === 'test') {
+      result.verificationToken = rawToken;
+    }
+    return result;
+  }
+
+  /**
+   * Re-send the email-verification link. ALWAYS returns the same generic message
+   * regardless of whether the email is registered or already verified (no user
+   * enumeration). A fresh EMAIL_VERIFY token is minted + emailed ONLY for a real,
+   * still-PENDING_VERIFICATION user; every other case is a silent no-op. Previous
+   * unused tokens are left intact (each remains valid until it expires), so a race
+   * between a stale and a fresh link cannot lock the user out.
+   */
+  async resendVerification(rawEmail: string): Promise<SignupResult> {
+    const email = rawEmail.toLowerCase().trim();
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    const result: SignupResult = { message: RESEND_VERIFICATION_MESSAGE };
+
+    // Only a genuinely-unverified account gets a new link. An ACTIVE/verified or
+    // absent account yields the identical response with nothing sent.
+    if (!user || user.status !== 'PENDING_VERIFICATION' || user.emailVerifiedAt) {
+      return result;
+    }
+
+    const rawToken = randomBytes(32).toString('base64url');
+    await this.prisma.verificationToken.create({
+      data: {
+        userId: user.id,
+        type: 'EMAIL_VERIFY',
+        tokenHash: this.sha256(rawToken),
+        expiresAt: new Date(Date.now() + EMAIL_VERIFY_TTL_MS),
+      },
+    });
+
+    await this.email.sendVerification(email, this.verifyUrl(rawToken));
+    await this.audit('AUTH_EMAIL_VERIFY_RESENT', user.id, email);
+
     if (process.env.NODE_ENV === 'test') {
       result.verificationToken = rawToken;
     }

@@ -5,8 +5,9 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
-import { createHash, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import { AuditService, type AuditAction } from '../../../common/audit';
+import { sha256Hex } from '../../../common/crypto/token-hash';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LoginDto, SignupDto } from '../dto';
 import { EmailService } from './email/email.service';
@@ -136,10 +137,6 @@ export class AuthService {
     private readonly audits: AuditService,
   ) {}
 
-  private sha256(value: string): string {
-    return createHash('sha256').update(value).digest('hex');
-  }
-
   private async audit(
     action: string,
     userId: string | null,
@@ -202,7 +199,7 @@ export class AuthService {
       data: {
         userId: user.id,
         type: 'EMAIL_VERIFY',
-        tokenHash: this.sha256(rawToken),
+        tokenHash: sha256Hex(rawToken),
         expiresAt: new Date(Date.now() + EMAIL_VERIFY_TTL_MS),
       },
     });
@@ -241,7 +238,7 @@ export class AuthService {
       data: {
         userId: user.id,
         type: 'EMAIL_VERIFY',
-        tokenHash: this.sha256(rawToken),
+        tokenHash: sha256Hex(rawToken),
         expiresAt: new Date(Date.now() + EMAIL_VERIFY_TTL_MS),
       },
     });
@@ -261,7 +258,7 @@ export class AuthService {
    */
   async verifyEmail(token: string): Promise<{ message: string }> {
     const record = await this.prisma.verificationToken.findUnique({
-      where: { tokenHash: this.sha256(token) },
+      where: { tokenHash: sha256Hex(token) },
     });
     if (
       !record ||
@@ -306,7 +303,7 @@ export class AuthService {
       data: {
         userId: user.id,
         type: 'PASSWORD_RESET',
-        tokenHash: this.sha256(rawToken),
+        tokenHash: sha256Hex(rawToken),
         expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
       },
     });
@@ -330,7 +327,7 @@ export class AuthService {
     newPassword: string,
   ): Promise<{ message: string }> {
     const record = await this.prisma.verificationToken.findUnique({
-      where: { tokenHash: this.sha256(token) },
+      where: { tokenHash: sha256Hex(token) },
     });
     if (
       !record ||
@@ -488,7 +485,7 @@ export class AuthService {
         // The presented (now-revoked) token row still exists; recover its owner
         // so the theft event is attributable.
         const row = await this.prisma.refreshToken.findUnique({
-          where: { tokenHash: this.sha256(refreshToken) },
+          where: { tokenHash: sha256Hex(refreshToken) },
           select: { userId: true },
         });
         await this.audit('AUTH_REFRESH_REUSE', row?.userId ?? null, null);

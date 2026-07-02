@@ -17,7 +17,12 @@ describe('getEncryptionKey', () => {
   });
 
   it('the public default-key sentinel no longer exists in source (regression guard)', () => {
+    // The sentinel originally lived in broker.service.ts. TDA-005 retired that
+    // stale module entirely (its plaintext-column code + the sentinel are gone),
+    // so an absent file trivially satisfies the guard. If the file exists, it
+    // must still not contain the sentinel.
     const src = path.resolve(__dirname, '../../src/modules/broker/services/broker.service.ts');
+    if (!fs.existsSync(src)) return;
     expect(fs.readFileSync(src, 'utf8')).not.toContain('td-automation-default-key-change-me');
   });
 });

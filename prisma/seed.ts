@@ -1,6 +1,52 @@
 import { PrismaClient } from '@prisma/client';
+import { canonicalize, sha256 } from '../apps/api/src/common/audit/canonicalize';
 
 const prisma = new PrismaClient();
+
+/**
+ * MVP risk-disclosure (TDA-009). Structurally-correct, hash-pinned consent body;
+ * final legal copy is a Harden-phase task. Its contentHash is computed with the
+ * SAME algorithm as ConsentService.computeContentHash
+ * ('sha256:' + sha256(canonicalize({ kind, version, body }))) so a freshly
+ * seeded DB has a valid, hash-consistent active document — never a placeholder.
+ */
+const RISK_DISCLOSURE_KIND = 'risk-disclosure';
+const RISK_DISCLOSURE_VERSION = '2026-07-02.1';
+const RISK_DISCLOSURE_BODY = [
+  'RISK DISCLOSURE & AUTO-EXECUTION CONSENT',
+  '',
+  'Trading in equities, derivatives, options, and commodities carries a high',
+  'level of risk and may not be suitable for every investor. You may lose some',
+  'or all of your invested capital; do not trade with money you cannot afford',
+  'to lose. Past performance of any strategy, signal, or algorithm is not',
+  'indicative of future results.',
+  '',
+  'By accepting this disclosure you acknowledge that:',
+  '1. Signals and analysis provided by this platform are informational and do',
+  '   not constitute investment advice or a recommendation to buy or sell.',
+  '2. If you enable auto-execution, orders may be placed on your connected',
+  '   broker account automatically, without a manual review of each order.',
+  '3. You are solely responsible for the orders placed on your account, for',
+  '   configuring your risk limits, and for monitoring open positions.',
+  '4. Automated systems can fail, disconnect, or behave unexpectedly due to',
+  '   market, network, or third-party outages; the platform does not guarantee',
+  '   uninterrupted or error-free execution.',
+  '5. You may withdraw this consent at any time, after which auto-execution is',
+  '   disabled for your account.',
+  '',
+  'You confirm that you have read, understood, and accept these risks.',
+].join('\n');
+
+/** Local content hash — MUST equal ConsentService.computeContentHash. */
+const RISK_DISCLOSURE_HASH =
+  'sha256:' +
+  sha256(
+    canonicalize({
+      kind: RISK_DISCLOSURE_KIND,
+      version: RISK_DISCLOSURE_VERSION,
+      body: RISK_DISCLOSURE_BODY,
+    }),
+  );
 
 /**
  * Seed instruments that the frontend expects to exist.
@@ -51,16 +97,23 @@ async function main() {
 
   await prisma.consentDocument.upsert({
     where: { id: 'cdoc_seed_0001' },
-    update: {},
+    update: {
+      version: RISK_DISCLOSURE_VERSION,
+      kind: RISK_DISCLOSURE_KIND,
+      body: RISK_DISCLOSURE_BODY,
+      contentHash: RISK_DISCLOSURE_HASH,
+      active: true,
+    },
     create: {
       id: 'cdoc_seed_0001',
-      version: '2026-06-27.0-placeholder',
-      kind: 'risk-disclosure',
-      body: 'PLACEHOLDER - replaced in TDA-009',
-      contentHash: 'sha256:placeholder',
+      version: RISK_DISCLOSURE_VERSION,
+      kind: RISK_DISCLOSURE_KIND,
+      body: RISK_DISCLOSURE_BODY,
+      contentHash: RISK_DISCLOSURE_HASH,
+      active: true,
     },
   });
-  console.log('  ✓ Consent document cdoc_seed_0001');
+  console.log(`  ✓ Consent document cdoc_seed_0001 (${RISK_DISCLOSURE_HASH})`);
 
   console.log('Seeding instruments...');
 

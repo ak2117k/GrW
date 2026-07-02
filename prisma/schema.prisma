@@ -1482,6 +1482,7 @@ model ConsentDocument {
   active      Boolean  @default(true)
   createdAt   DateTime @default(now())
   records     ConsentRecord[]
+  @@index([kind, active])          // TDA-009 — fast "current active doc for kind" lookup
   @@map("consent_documents")
 }
 
@@ -1495,6 +1496,7 @@ model ConsentRecord {
   acceptedAt DateTime @default(now())
   ipAddress  String?
   userAgent  String?
+  @@unique([userId, documentId])   // TDA-009 — one acceptance row per (user, document); makes POST /accept an idempotent upsert
   @@index([userId, version])
   @@map("consent_records")
 }

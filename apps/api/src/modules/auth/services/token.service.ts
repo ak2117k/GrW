@@ -1,7 +1,8 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma, PrismaClient, RefreshToken } from '@prisma/client';
-import { createHash, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
+import { sha256Hex } from '../../../common/crypto/token-hash';
 
 /** Access token TTL (short-lived, carried in memory by clients). */
 const ACCESS_TTL = '15m';
@@ -87,10 +88,6 @@ export class TokenService {
     private readonly jwt: JwtService,
   ) {}
 
-  private sha256(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
-  }
-
   private signAccess(user: AuthUser): string {
     const payload: AccessTokenPayload = {
       sub: user.id,
@@ -130,7 +127,7 @@ export class TokenService {
     const row = await client.refreshToken.create({
       data: {
         userId,
-        tokenHash: this.sha256(opaque),
+        tokenHash: sha256Hex(opaque),
         familyId,
         expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
         userAgent: ctx.userAgent ?? null,
@@ -174,7 +171,7 @@ export class TokenService {
    * Committed) would leave open.
    */
   async rotate(refreshToken: string, ctx: TokenContext = {}): Promise<TokenPair> {
-    const tokenHash = this.sha256(refreshToken);
+    const tokenHash = sha256Hex(refreshToken);
     const existing = await this.prisma.refreshToken.findUnique({
       where: { tokenHash },
     });

@@ -5,8 +5,9 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Prisma } from '@prisma/client';
-import { createHash, randomBytes } from 'crypto';
+import { randomBytes } from 'crypto';
 import { AuditService, type AuditAction } from '../../../common/audit';
+import { sha256Hex } from '../../../common/crypto/token-hash';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LoginDto, SignupDto } from '../dto';
 import { EmailService } from './email/email.service';
@@ -37,6 +38,13 @@ const MFA_TOKEN_TTL = '5m';
 
 /** Purpose claim that scopes the MFA-challenge JWT to `/auth/login/mfa` only. */
 const MFA_TOKEN_PURPOSE = 'mfa';
+
+/**
+ * The one signing algorithm the MFA-challenge token is minted with and the only
+ * one accepted when verifying it. Pinned on BOTH sign and verify so the token
+ * can never be re-interpreted under a different algorithm (substitution attack).
+ */
+const JWT_ALGORITHM = 'HS256';
 
 /**
  * Audience claim isolating the MFA-challenge token from session access tokens
@@ -84,6 +92,14 @@ const DUMMY_PASSWORD_HASH =
 const SIGNUP_MESSAGE =
   'If that email address is available, a verification link has been sent.';
 
+/**
+ * Generic, non-enumerating resend-verification response. Returned unchanged
+ * whether the email is unknown, already verified, or a pending account that was
+ * actually re-sent a link.
+ */
+const RESEND_VERIFICATION_MESSAGE =
+  'If that email address needs verifying, a new verification link has been sent.';
+
 interface SignupResult {
   message: string;
   /** Test-only seam (NODE_ENV=test): the raw email-verification token. */
@@ -121,10 +137,6 @@ export class AuthService {
     private readonly audits: AuditService,
   ) {}
 
-  private sha256(value: string): string {
-    return createHash('sha256').update(value).digest('hex');
-  }
-
   private async audit(
     action: string,
     userId: string | null,
@@ -161,6 +173,10 @@ export class AuthService {
    * registered, no second account/email is created.
    */
   async signup(dto: SignupDto): Promise<SignupResult> {
+    // Reject weak passwords BEFORE any user lookup so the outcome never depends
+    // on whether the email exists (no enumeration).
+    this.passwords.assertStrength(dto.password);
+
     const email = dto.email.toLowerCase().trim();
     const existing = await this.prisma.user.findUnique({ where: { email } });
     if (existing) {
@@ -183,7 +199,7 @@ export class AuthService {
       data: {
         userId: user.id,
         type: 'EMAIL_VERIFY',
-        tokenHash: this.sha256(rawToken),
+        tokenHash: sha256Hex(rawToken),
         expiresAt: new Date(Date.now() + EMAIL_VERIFY_TTL_MS),
       },
     });
@@ -199,12 +215,50 @@ export class AuthService {
   }
 
   /**
+   * Re-send the email-verification link. ALWAYS returns the same generic message
+   * regardless of whether the email is registered or already verified (no user
+   * enumeration). A fresh EMAIL_VERIFY token is minted + emailed ONLY for a real,
+   * still-PENDING_VERIFICATION user; every other case is a silent no-op. Previous
+   * unused tokens are left intact (each remains valid until it expires), so a race
+   * between a stale and a fresh link cannot lock the user out.
+   */
+  async resendVerification(rawEmail: string): Promise<SignupResult> {
+    const email = rawEmail.toLowerCase().trim();
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    const result: SignupResult = { message: RESEND_VERIFICATION_MESSAGE };
+
+    // Only a genuinely-unverified account gets a new link. An ACTIVE/verified or
+    // absent account yields the identical response with nothing sent.
+    if (!user || user.status !== 'PENDING_VERIFICATION' || user.emailVerifiedAt) {
+      return result;
+    }
+
+    const rawToken = randomBytes(32).toString('base64url');
+    await this.prisma.verificationToken.create({
+      data: {
+        userId: user.id,
+        type: 'EMAIL_VERIFY',
+        tokenHash: sha256Hex(rawToken),
+        expiresAt: new Date(Date.now() + EMAIL_VERIFY_TTL_MS),
+      },
+    });
+
+    await this.email.sendVerification(email, this.verifyUrl(rawToken));
+    await this.audit('AUTH_EMAIL_VERIFY_RESENT', user.id, email);
+
+    if (process.env.NODE_ENV === 'test') {
+      result.verificationToken = rawToken;
+    }
+    return result;
+  }
+
+  /**
    * Validate an unexpired, unused EMAIL_VERIFY token: mark `emailVerifiedAt`,
    * flip status to ACTIVE, and consume the token.
    */
   async verifyEmail(token: string): Promise<{ message: string }> {
     const record = await this.prisma.verificationToken.findUnique({
-      where: { tokenHash: this.sha256(token) },
+      where: { tokenHash: sha256Hex(token) },
     });
     if (
       !record ||
@@ -249,7 +303,7 @@ export class AuthService {
       data: {
         userId: user.id,
         type: 'PASSWORD_RESET',
-        tokenHash: this.sha256(rawToken),
+        tokenHash: sha256Hex(rawToken),
         expiresAt: new Date(Date.now() + PASSWORD_RESET_TTL_MS),
       },
     });
@@ -273,7 +327,7 @@ export class AuthService {
     newPassword: string,
   ): Promise<{ message: string }> {
     const record = await this.prisma.verificationToken.findUnique({
-      where: { tokenHash: this.sha256(token) },
+      where: { tokenHash: sha256Hex(token) },
     });
     if (
       !record ||
@@ -284,6 +338,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid or expired reset token');
     }
 
+    this.passwords.assertStrength(newPassword);
     const passwordHash = await this.passwords.hash(newPassword);
     await this.prisma.$transaction([
       this.prisma.user.update({
@@ -344,6 +399,7 @@ export class AuthService {
       const mfaToken = this.jwt.sign(claims, {
         secret: process.env.JWT_SECRET,
         expiresIn: MFA_TOKEN_TTL,
+        algorithm: JWT_ALGORITHM,
         audience: MFA_TOKEN_AUDIENCE,
       });
       await this.audit('AUTH_MFA_CHALLENGE', user.id, email);
@@ -366,6 +422,11 @@ export class AuthService {
     try {
       claims = this.jwt.verify<MfaTokenClaims>(mfaToken, {
         secret: process.env.JWT_SECRET,
+        // Pin the accepted signing algorithm: the MFA-challenge token is
+        // HS256-signed with JWT_SECRET, so accepting only HS256 closes the
+        // algorithm-substitution surface (e.g. a forged `alg:none`/asymmetric
+        // token). Mirrors TokenService.verifyAccess and the WS admin verifier.
+        algorithms: [JWT_ALGORITHM],
         audience: MFA_TOKEN_AUDIENCE,
       });
     } catch {
@@ -424,7 +485,7 @@ export class AuthService {
         // The presented (now-revoked) token row still exists; recover its owner
         // so the theft event is attributable.
         const row = await this.prisma.refreshToken.findUnique({
-          where: { tokenHash: this.sha256(refreshToken) },
+          where: { tokenHash: sha256Hex(refreshToken) },
           select: { userId: true },
         });
         await this.audit('AUTH_REFRESH_REUSE', row?.userId ?? null, null);

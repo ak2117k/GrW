@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import { PasswordService } from './password.service';
 
@@ -39,5 +40,30 @@ describe('PasswordService', () => {
     expect(hash).toMatch(/p=1/);
     // sanity: library agrees the hash verifies
     await expect(argon2.verify(hash, 'param-check')).resolves.toBe(true);
+  });
+
+  describe('assertStrength', () => {
+    it('accepts a strong password (>=8 chars, 3+ character classes)', () => {
+      expect(() => svc.assertStrength('Sup3r-Str0ng-Pass!')).not.toThrow();
+      // exactly three classes (upper + lower + digit) is enough
+      expect(() => svc.assertStrength('Password1')).not.toThrow();
+    });
+
+    it('rejects a password shorter than the minimum length', () => {
+      expect(() => svc.assertStrength('Ab1!x')).toThrow(BadRequestException);
+    });
+
+    it('rejects a password using too few character classes', () => {
+      // all-lowercase (1 class)
+      expect(() => svc.assertStrength('abcdefghij')).toThrow(BadRequestException);
+      // lowercase + digits only (2 classes)
+      expect(() => svc.assertStrength('abcdefgh12')).toThrow(BadRequestException);
+    });
+
+    it('rejects a password exceeding the maximum length', () => {
+      expect(() => svc.assertStrength('Aa1' + 'x'.repeat(200))).toThrow(
+        BadRequestException,
+      );
+    });
   });
 });

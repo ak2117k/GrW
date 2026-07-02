@@ -27,6 +27,13 @@ export class SignupDto {
   displayName?: string;
 }
 
+/** Request a fresh email-verification link for an address (non-enumerating). */
+export class ResendVerificationDto {
+  @ApiProperty({ example: 'trader@example.com' })
+  @IsEmail()
+  email!: string;
+}
+
 export class VerifyEmailDto {
   @ApiProperty()
   @IsString()

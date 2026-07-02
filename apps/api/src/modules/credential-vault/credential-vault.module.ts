@@ -4,6 +4,7 @@ import { MarketDataModule } from '../market-data/market-data.module';
 import { CredentialVaultService } from './services/credential-vault.service';
 import { CredentialDecryptorModule } from './execution/credential-decryptor.module';
 import { CredentialRewrapJob } from './jobs/credential-rewrap.job';
+import { BrokerController } from './controllers/broker.controller';
 
 /**
  * Per-tenant credential vault (TDA-005). Owns the WRITE side
@@ -17,6 +18,7 @@ import { CredentialRewrapJob } from './jobs/credential-rewrap.job';
  */
 @Module({
   imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule],
+  controllers: [BrokerController],
   providers: [CredentialVaultService, CredentialRewrapJob],
   // Re-export the isolated decryptor module so TDA-010/011 depend on the vault
   // module alone for the CREDENTIAL_DECRYPTOR seam.

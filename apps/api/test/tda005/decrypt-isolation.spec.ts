@@ -43,4 +43,15 @@ describe('decrypt-grant isolation', () => {
   it('the CredentialDecryptor is (at least) one of the unwrap callers', () => {
     expect(rel.some((r) => r.endsWith(ALLOWED[0]))).toBe(true);
   });
+
+  it('the stale broker module (removed plaintext-column code) is retired', () => {
+    // The old broker.service read/wrote apiKey/clientId/password/totpSecret —
+    // columns that no longer exist on BrokerCredential. The whole module is
+    // deleted, so those removed-column references are gone with it, and nothing
+    // in src still imports it.
+    expect(fs.existsSync(path.join(SRC, 'modules', 'broker'))).toBe(false);
+    const importsStaleBroker = /from ['"][^'"]*modules\/broker\//;
+    const offenders = files.filter((f) => importsStaleBroker.test(fs.readFileSync(f, 'utf8')));
+    expect(offenders.map((f) => path.relative(SRC, f))).toEqual([]);
+  });
 });

@@ -26,7 +26,7 @@ import { OptionsChainModule } from './modules/options-chain/options-chain.module
 import { AIAdvisorModule } from './modules/ai-advisor/ai-advisor.module';
 import { AutoTradeModule } from './modules/auto-trade/auto-trade.module';
 import { InsightsModule } from './modules/insights/insights.module';
-import { BrokerModule } from './modules/broker/broker.module';
+import { CredentialVaultModule } from './modules/credential-vault/credential-vault.module';
 import { ChartinkModule } from './modules/chartink/chartink.module';
 import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
 import { WatchMonitorModule } from './modules/watch-monitor/watch-monitor.module';
@@ -148,8 +148,9 @@ import { SubscriptionModule } from './modules/subscription/subscription.module';
     // Auto-trade — signal-to-trade automation with approval workflow
     AutoTradeModule,
 
-    // Broker management — credential storage and connection lifecycle
-    BrokerModule,
+    // Per-tenant credential vault (TDA-005) — envelope-encrypted broker creds,
+    // validated Connect Angel One flow, isolated decrypt-for-execution seam.
+    CredentialVaultModule,
 
     // Chartink — webhook-driven scanner alerts feeding the setup pipeline
     ChartinkModule,

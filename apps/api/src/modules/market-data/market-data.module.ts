@@ -11,6 +11,7 @@ import { StockSectorRepository } from './repositories/stock-sector.repository';
 import { OITrackerProcessor } from './workers/oi-tracker.processor';
 import { DailyBackfillWorker } from './workers/daily-backfill.worker';
 import { AngelOneAuthService } from './services/angel-one-auth.service';
+import { AngelOneValidator } from './services/angel-one-validator.service';
 import { AngelOneWebSocketService } from './services/angel-one-websocket.service';
 import { AngelOneAdapterService } from './services/angel-one-adapter.service';
 import { YahooFinanceService } from './services/yahoo-finance.service';
@@ -49,6 +50,9 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
 
     // Angel One broker services
     AngelOneAuthService,
+    // Per-user ephemeral credential validator (TDA-005) — never mutates the
+    // singleton session above.
+    AngelOneValidator,
     PremarketSessionCron,
     AngelOneWebSocketService,
     AngelOneAdapterService,
@@ -101,6 +105,7 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
     MarketDataRepository,
     MarketDataGateway,
     AngelOneAuthService,
+    AngelOneValidator,
     AngelOneAdapterService,
     YahooFinanceService,
     MarketContextService,

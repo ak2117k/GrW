@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { CredentialVaultService } from './services/credential-vault.service';
+import { CredentialDecryptorModule } from './execution/credential-decryptor.module';
 
 /**
  * Per-tenant credential vault (TDA-005). Owns the WRITE side
@@ -14,8 +15,10 @@ import { CredentialVaultService } from './services/credential-vault.service';
  * the broker.controller + re-wrap job are wired in Tasks 7-8.
  */
 @Module({
-  imports: [PrismaModule, MarketDataModule],
+  imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule],
   providers: [CredentialVaultService],
-  exports: [CredentialVaultService],
+  // Re-export the isolated decryptor module so TDA-010/011 depend on the vault
+  // module alone for the CREDENTIAL_DECRYPTOR seam.
+  exports: [CredentialVaultService, CredentialDecryptorModule],
 })
 export class CredentialVaultModule {}

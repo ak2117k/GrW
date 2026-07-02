@@ -1,6 +1,9 @@
 import { Global, Module } from '@nestjs/common';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { TenantModule } from '../../common/tenant/tenant.module';
+import { AdminConsentController } from './admin-consent.controller';
+import { ConsentController } from './consent.controller';
+import { ConsentGuard } from './consent.guard';
 import { ConsentService } from './consent.service';
 
 /**
@@ -11,12 +14,14 @@ import { ConsentService } from './consent.service';
  * `AuditModule` is itself `@Global`, so `AuditService` injects without an
  * import here; `PrismaModule`/`TenantModule` are imported for their providers.
  *
- * Controllers + `ConsentGuard` are added in Task 5.
+ * Exports `ConsentService` + `ConsentGuard` so TDA-011 can adopt the guard via
+ * `@RequiresConsent()` with zero design work.
  */
 @Global()
 @Module({
   imports: [PrismaModule, TenantModule],
-  providers: [ConsentService],
-  exports: [ConsentService],
+  controllers: [ConsentController, AdminConsentController],
+  providers: [ConsentService, ConsentGuard],
+  exports: [ConsentService, ConsentGuard],
 })
 export class ConsentModule {}

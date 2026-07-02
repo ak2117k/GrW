@@ -39,6 +39,13 @@ const MFA_TOKEN_TTL = '5m';
 const MFA_TOKEN_PURPOSE = 'mfa';
 
 /**
+ * The one signing algorithm the MFA-challenge token is minted with and the only
+ * one accepted when verifying it. Pinned on BOTH sign and verify so the token
+ * can never be re-interpreted under a different algorithm (substitution attack).
+ */
+const JWT_ALGORITHM = 'HS256';
+
+/**
  * Audience claim isolating the MFA-challenge token from session access tokens
  * (which use `td-access`). The global guard's JWT strategy requires `td-access`,
  * so this token can never be replayed as a Bearer access token — and `loginMfa`
@@ -344,6 +351,7 @@ export class AuthService {
       const mfaToken = this.jwt.sign(claims, {
         secret: process.env.JWT_SECRET,
         expiresIn: MFA_TOKEN_TTL,
+        algorithm: JWT_ALGORITHM,
         audience: MFA_TOKEN_AUDIENCE,
       });
       await this.audit('AUTH_MFA_CHALLENGE', user.id, email);
@@ -366,6 +374,11 @@ export class AuthService {
     try {
       claims = this.jwt.verify<MfaTokenClaims>(mfaToken, {
         secret: process.env.JWT_SECRET,
+        // Pin the accepted signing algorithm: the MFA-challenge token is
+        // HS256-signed with JWT_SECRET, so accepting only HS256 closes the
+        // algorithm-substitution surface (e.g. a forged `alg:none`/asymmetric
+        // token). Mirrors TokenService.verifyAccess and the WS admin verifier.
+        algorithms: [JWT_ALGORITHM],
         audience: MFA_TOKEN_AUDIENCE,
       });
     } catch {

@@ -487,10 +487,12 @@ model BrokerCredential {
   encPassword   String
   encTotpSecret String
   encDataKey    String
-  keyVersion    Int       @default(1)
+  keyVersion    String    @default("local-v1") // holds KmsProvider.keyVersion() (TDA-005 §3.3)
+  clientIdMasked String?                        // non-secret display value set at connect (TDA-005 §4.1)
   isActive      Boolean   @default(true)
   lastConnected DateTime?
   lastValidated DateTime?
+  lastRotatedAt DateTime?                        // last successful KEK re-wrap (TDA-005 §7)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 

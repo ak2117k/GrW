@@ -106,7 +106,7 @@ Mobile-ready, stateless.
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
 | **TDA-004** | AWS baseline: KMS CMK, Secrets Manager, TLS, kill default key, headers/CORS/rate-limit | — (parallel w/ S1) | Planned (spec+plan 2026-07-01-tda-004) |
-| **TDA-005** | Per-tenant credential vault + envelope encryption; "Connect Angel One" flow | TDA-001, TDA-004 | Not started |
+| **TDA-005** | Per-tenant credential vault + envelope encryption; "Connect Angel One" flow | TDA-001, TDA-004 | Planned (spec+plan 2026-07-02-tda-005) |
 
 **TDA-004 scope:** Provision KMS customer master key; move all secrets to AWS Secrets Manager; remove the
 hardcoded `ENCRYPTION_KEY` fallback (`td-automation-default-key-change-me`); enforce TLS on API, AI-engine,
@@ -124,7 +124,9 @@ inside the isolated execution module (sole KMS grant); plaintext used in-memory 
 | **TDA-006** | IP/provenance boundary: outbound DTO allowlist + log redaction | TDA-001 | ✅ Done (merged 7568d03; 55/55 tests; whole-branch review caught+fixed 3 extra leaks) |
 | **TDA-007** | Sanitized Intraday/Swing API + frontend collapse to 2 sections | TDA-006, TDA-003 | Planned (spec + plan `2026-06-29-tda-007-user-surface.md`) — execute AFTER TDA-006 merges |
 
-**TDA-006 scope:** A single `toPublicSignalDto()` is the only serializer that emits a signal outward (REST +
+**TDA-006 scope:** A single sanitizer (shipped as `toPublicEntry()` on the anand Intraday/Swing entries — the
+data-flow diagram above says `toPublicSignalDto()`, but the real symbol is `toPublicEntry()`) is the only
+serializer that emits a signal outward (REST +
 WebSocket); it physically cannot include `scanner`, `strategy`, `source`, `gate`, `rejectionReason`. CI test
 fails if a forbidden field appears in any public payload. Log redactor for provenance. Provenance accessible
 only via an `ADMIN`-only internal endpoint.
@@ -137,7 +139,7 @@ internals removed from the user-facing app and mobile API. Plan-gated visibility
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
 | **TDA-008** | Tamper-evident, hash-chained audit log | TDA-001 | Planned (spec+plan 2026-07-01-tda-008) |
-| **TDA-009** | Versioned consent & disclaimer gate | TDA-002, TDA-008 | Not started |
+| **TDA-009** | Versioned consent & disclaimer gate | TDA-002, TDA-008 | Planned (spec+plan 2026-07-02-tda-009) |
 
 **TDA-008 scope:** Append-only `AuditLog` where each row stores `hash = H(prevHash + payload)` (tamper-evident).
 Covers auth events, credential access/decrypt, consent changes, every order. `ADMIN`-readable, exportable.
@@ -150,8 +152,8 @@ timestamp + IP. First-line legal defense for a public auto-trading product.
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-010** | Central signal sanitization + fan-out engine | TDA-005, TDA-006 | Not started |
-| **TDA-011** | Opt-in auto-execution: consent-gated, per-user risk, idempotency, kill switch | TDA-009, TDA-010 | Not started |
+| **TDA-010** | Central signal sanitization + fan-out engine | TDA-005, TDA-006 | Planned (spec+plan 2026-07-02-tda-010) |
+| **TDA-011** | Opt-in auto-execution: consent-gated, per-user risk, idempotency, kill switch | TDA-009, TDA-010 | Planned (spec+plan 2026-07-02-tda-011) |
 
 **TDA-010 scope:** Central signal → one `signal.fanout` job → one `execute.user` job per eligible user.
 Per-user Angel One key = independent 10-req/sec bucket. Failure isolation (one user's failure cannot block

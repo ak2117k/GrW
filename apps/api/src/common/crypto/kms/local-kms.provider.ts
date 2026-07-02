@@ -7,14 +7,22 @@ import { DataKey, KmsProvider } from './kms-provider.interface';
 export class LocalKmsProvider implements KmsProvider {
   keyVersion(): string { return 'local-v1'; }
 
-  async generateDataKey(): Promise<DataKey> {
-    const plaintext = randomBytes(32);
+  /** AES-256-GCM wrap of `plaintext` under the master key. Format: v1:iv:tag:ct (base64). */
+  private wrap(plaintext: Buffer): string {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', getEncryptionKey(), iv);
     const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
     const tag = cipher.getAuthTag();
-    const wrapped = ['v1', iv.toString('base64'), tag.toString('base64'), ct.toString('base64')].join(':');
-    return { plaintext, wrapped, keyVersion: this.keyVersion() };
+    return ['v1', iv.toString('base64'), tag.toString('base64'), ct.toString('base64')].join(':');
+  }
+
+  async generateDataKey(): Promise<DataKey> {
+    const plaintext = randomBytes(32);
+    return { plaintext, wrapped: this.wrap(plaintext), keyVersion: this.keyVersion() };
+  }
+
+  async wrapKey(plaintext: Buffer): Promise<{ wrapped: string; keyVersion: string }> {
+    return { wrapped: this.wrap(plaintext), keyVersion: this.keyVersion() };
   }
 
   async unwrapKey(wrapped: string): Promise<Buffer> {

@@ -19,6 +19,16 @@ export class AwsKmsProvider implements KmsProvider {
       keyVersion: this.keyVersion(),
     };
   }
+  async wrapKey(plaintext: Buffer): Promise<{ wrapped: string; keyVersion: string }> {
+    // A 32-byte DEK is well under KMS Encrypt's 4 KB limit (TDA-005 §7.1).
+    const { KMSClient, EncryptCommand } = await import('@aws-sdk/client-kms');
+    const client = new KMSClient({});
+    const out = await client.send(new EncryptCommand({ KeyId: this.cmkId, Plaintext: plaintext }));
+    return {
+      wrapped: Buffer.from(out.CiphertextBlob as Uint8Array).toString('base64'),
+      keyVersion: this.keyVersion(),
+    };
+  }
   async unwrapKey(wrapped: string): Promise<Buffer> {
     const { KMSClient, DecryptCommand } = await import('@aws-sdk/client-kms');
     const client = new KMSClient({});

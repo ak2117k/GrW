@@ -168,6 +168,10 @@ export class AuthService {
    * registered, no second account/email is created.
    */
   async signup(dto: SignupDto): Promise<SignupResult> {
+    // Reject weak passwords BEFORE any user lookup so the outcome never depends
+    // on whether the email exists (no enumeration).
+    this.passwords.assertStrength(dto.password);
+
     const email = dto.email.toLowerCase().trim();
     const existing = await this.prisma.user.findUnique({ where: { email } });
     if (existing) {
@@ -291,6 +295,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid or expired reset token');
     }
 
+    this.passwords.assertStrength(newPassword);
     const passwordHash = await this.passwords.hash(newPassword);
     await this.prisma.$transaction([
       this.prisma.user.update({

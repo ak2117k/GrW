@@ -4,6 +4,10 @@ import { BrowserRouter } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import App from './App';
 import './app.css';
+import { initTheme } from './stores/theme-store';
+
+// Apply the persisted theme to <html> before first paint (no theme flash).
+initTheme();
 
 const root = document.getElementById('root');
 

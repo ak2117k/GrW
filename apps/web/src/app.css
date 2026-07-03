@@ -1,19 +1,75 @@
 @import "tailwindcss";
 
+/*
+ * Midnight Glass — the design system.
+ * Deep-indigo base, cyan/violet ambient glow, frosted-glass surfaces, with the
+ * market's own bull-green / bear-red as the data duality. The @theme block is
+ * the DARK theme (default) and generates Tailwind's color utilities; the light
+ * variant overrides the same token values under [data-theme="light"], so every
+ * component that reads var(--color-*) re-themes with a single attribute flip.
+ */
 @theme {
-  --color-bg-primary: #0a0a1a;
-  --color-bg-secondary: #111827;
-  --color-bg-tertiary: #1a1a2e;
-  --color-bg-card: #16213e;
-  --color-border-subtle: #1e293b;
-  --color-border-default: #334155;
-  --color-accent-green: #00cf84;
-  --color-accent-red: #ef4444;
-  --color-accent-blue: #3b82f6;
-  --color-accent-yellow: #f59e0b;
-  --color-text-primary: #f1f5f9;
-  --color-text-secondary: #94a3b8;
-  --color-text-muted: #64748b;
+  /* surfaces — deep indigo, subtly stepped */
+  --color-bg-primary: #0a0e1f;
+  --color-bg-secondary: #10162b;
+  --color-bg-tertiary: #161d38;
+  --color-bg-card: #131a30;
+
+  /* borders — hairline, cool */
+  --color-border-subtle: #202944;
+  --color-border-default: #2d3860;
+
+  /* accents — cyan/violet brand + bull/bear market duality */
+  --color-accent-blue: #22d3ee;   /* cyan — primary brand / CTA */
+  --color-accent-purple: #8b5cf6; /* violet — secondary */
+  --color-accent-green: #12d9a0;  /* bull / up */
+  --color-accent-red: #ff4d6a;    /* bear / down */
+  --color-accent-yellow: #f5b544;
+
+  /* text — near-white on ink */
+  --color-text-primary: #eef2ff;
+  --color-text-secondary: #a6b1d4;
+  --color-text-muted: #6a7699;
+}
+
+/* Non-utility design vars (dark defaults) — frosted glass + ambient glow. */
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.045);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-highlight: rgba(255, 255, 255, 0.06);
+  --glow-cyan: rgba(34, 211, 238, 0.20);
+  --glow-violet: rgba(139, 92, 246, 0.18);
+  --grid-line: rgba(148, 163, 208, 0.06);
+  color-scheme: dark;
+}
+
+/* Light variant — same tokens, inverted for a bright premium surface. */
+[data-theme="light"] {
+  --color-bg-primary: #eef1f8;
+  --color-bg-secondary: #ffffff;
+  --color-bg-tertiary: #e7ebf5;
+  --color-bg-card: #ffffff;
+
+  --color-border-subtle: #e3e8f2;
+  --color-border-default: #cbd4e6;
+
+  --color-accent-blue: #0e9ab6;
+  --color-accent-purple: #7c3aed;
+  --color-accent-green: #059b73;
+  --color-accent-red: #e11d48;
+  --color-accent-yellow: #cf8a1a;
+
+  --color-text-primary: #101733;
+  --color-text-secondary: #47527a;
+  --color-text-muted: #7b86a6;
+
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(16, 23, 51, 0.08);
+  --glass-highlight: rgba(16, 23, 51, 0.04);
+  --glow-cyan: rgba(14, 155, 184, 0.14);
+  --glow-violet: rgba(124, 58, 237, 0.12);
+  --grid-line: rgba(16, 23, 51, 0.05);
+  color-scheme: light;
 }
 
 * {
@@ -29,17 +85,58 @@ body {
   font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* smooth, brief cross-fade when the theme flips */
+  transition: background-color 0.4s ease, color 0.4s ease;
 }
 
 #root {
   min-height: 100vh;
 }
 
+/* Monospace for market data — the type signature of a trading terminal. */
+.font-mono-data {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* Frosted-glass surface. */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border: 1px solid var(--glass-border);
+  box-shadow: inset 0 1px 0 0 var(--glass-highlight);
+}
+
+/* Ambient glow blob — placed absolutely behind content. */
+.glow {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  pointer-events: none;
+  z-index: 0;
+}
+.glow-cyan { background: var(--glow-cyan); }
+.glow-violet { background: var(--glow-violet); }
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+.animate-pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
 
-.animate-pulse-dot {
-  animation: pulse-dot 1.5s ease-in-out infinite;
+/* Slow ambient drift for the hero glow, so the backdrop feels alive. */
+@keyframes drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(3%, -4%, 0) scale(1.08); }
+}
+.animate-drift { animation: drift 16s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }

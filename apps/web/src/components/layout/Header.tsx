@@ -3,6 +3,7 @@ import { OctagonX, Wifi, WifiOff, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useMarketStore } from '@/stores/market-store';
 import { useAuthStore } from '@/stores/auth-store';
+import { ThemeToggle } from '@/components/common';
 
 function useIST() {
   const [time, setTime] = useState('');
@@ -81,8 +82,9 @@ export default function Header() {
         </div>
       </div>
 
-      {/* Right side: Clock + Kill Switch */}
+      {/* Right side: Theme + Clock + Kill Switch */}
       <div className="flex items-center gap-5">
+        <ThemeToggle />
         <div className="flex flex-col items-end">
           <span className="font-mono text-sm font-semibold tracking-wider text-[var(--color-text-primary)]">
             {time}

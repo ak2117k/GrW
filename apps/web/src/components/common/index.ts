@@ -13,3 +13,4 @@ export { ConnectionStatus } from './ConnectionStatus';
 export { MiniChart } from './MiniChart';
 export { PageLoadingOverlay } from './PageLoadingOverlay';
 export { SymbolChartLink } from './SymbolChartLink';
+export { ThemeToggle } from './ThemeToggle';

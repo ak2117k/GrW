@@ -1523,6 +1523,39 @@ model AuditLog {
 }
 
 // ============================================
+// Auto-Execution — local idempotency store (TDA-011)
+// ============================================
+//
+// At-most-once backstop for the per-user auto-execution pipeline. The pipeline
+// inserts a CLAIMED row keyed by `idempotencyKey` = sha256(entryId:userId)
+// BEFORE any side effect (credential decrypt / broker order), so a crash between
+// claim and place errs toward a MISSED order, never a duplicate real order. The
+// `@unique(idempotencyKey)` constraint is the concurrency guarantee: two
+// concurrent jobs with the same key → exactly one wins the insert; the loser
+// sees the conflict (P2002) and is silently skipped by the caller.
+//
+// NOT a tenant-scoped model (deliberately absent from TENANT_MODELS): it is
+// written by the queue worker with no request context, cross-user. `userId` is
+// stored for forensics and the (userId, entryId) index, not for tenant scoping.
+//
+// TDA-012 hardens this into a durable/transactional store with order-status
+// reconciliation of CLAIMED-but-unsettled rows.
+model ExecutionClaim {
+  id             String    @id @default(cuid())
+  idempotencyKey String    @unique                // sha256(entryId:userId) — the race backstop
+  userId         String
+  entryId        String
+  status         String    @default("CLAIMED")    // CLAIMED | PLACED | FAILED
+  brokerOrderId  String?                           // set on markPlaced
+  error          String?                           // set on markFailed
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([userId, entryId])
+  @@map("execution_claims")
+}
+
+// ============================================
 // S/R Level Reaction Tracking (calibration)
 // ============================================
 // Persisted snapshots of evidence-weighted S/R levels (SrEvidenceService

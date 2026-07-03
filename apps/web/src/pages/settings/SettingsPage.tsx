@@ -22,7 +22,11 @@ import { Toggle, Modal, Badge, LoadingSkeleton } from '@/components/common';
 import { cn } from '@/utils/cn';
 import { useSettingsStore } from '@/stores/settings-store';
 import { useAuthStore } from '@/stores/auth-store';
-import { useSubscriptions } from '@/hooks/useSubscriptions';
+import {
+  useBilling,
+  describeSegmentBilling,
+  type BillingSegment,
+} from '@/hooks/useBilling';
 import { useConsent } from '@/hooks/useConsent';
 import { AutoTradeMode, Segment } from '@/types';
 import type { TradingSettings } from '@/types';
@@ -403,17 +407,171 @@ function ConnectAngelOne() {
   );
 }
 
+// ---- Billing management (TDA-015) ----
+
+const BILLING_ROWS: { label: string; key: BillingSegment }[] = [
+  { label: 'Intraday', key: 'INTRADAY' },
+  { label: 'Swing', key: 'SWING' },
+];
+
+const TONE_BADGE: Record<string, string> = {
+  success: 'bg-emerald-500/10 text-emerald-400',
+  warning: 'bg-amber-500/10 text-amber-400',
+  danger: 'bg-red-500/10 text-red-400',
+  neutral: 'bg-gray-700/40 text-gray-400',
+};
+
+/** Short renewal/expiry date (en-IN), or empty when unset/unparseable. */
+function fmtBillingDate(iso: string | null): string {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  return new Date(iso).toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+/**
+ * Real billing management (TDA-015 §9) — replaces the TDA-007 "Checkout coming
+ * soon" placeholder. Shows each segment's current plan + status (ACTIVE /
+ * awaiting-payment / grace-dunning / expired), the renewal date, a
+ * payment-failed grace banner, and honest Subscribe / Cancel actions. Access
+ * itself still comes from the webhook-driven gate — cancellation is at cycle
+ * end, so access persists until the period ends.
+ */
+function BillingSection() {
+  const { states, loading, busy, startCheckout, cancel } = useBilling();
+  const email = useAuthStore((s) => s.user?.email);
+  const [confirmCancel, setConfirmCancel] = useState<BillingSegment | null>(null);
+
+  const handleSubscribe = async (key: BillingSegment) => {
+    try {
+      await startCheckout(key, email ?? undefined);
+      toast('Activating your subscription — this can take a moment after payment.');
+    } catch {
+      toast.error('Could not start checkout. Please try again.');
+    }
+  };
+
+  const handleCancel = async (key: BillingSegment) => {
+    try {
+      await cancel(key);
+      setConfirmCancel(null);
+      toast.success('Subscription will end at the current cycle.');
+    } catch {
+      toast.error('Could not cancel. Please try again.');
+    }
+  };
+
+  if (loading) {
+    return <LoadingSkeleton variant="card" count={2} className="h-16" />;
+  }
+
+  return (
+    <div className="space-y-2">
+      {BILLING_ROWS.map(({ label, key }) => {
+        const view = describeSegmentBilling(states[key]);
+        const isBusy = busy === key;
+        const renewal = fmtBillingDate(view.renewalAt);
+        return (
+          <div
+            key={key}
+            className="rounded-lg border border-gray-700/60 bg-gray-800/30 p-3"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-gray-200">{label}</span>
+                <span
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium',
+                    TONE_BADGE[view.tone] ?? TONE_BADGE.neutral,
+                  )}
+                >
+                  {view.tone === 'success' && <CheckCircle size={11} />}
+                  {(view.tone === 'warning' || view.tone === 'danger') && (
+                    <AlertTriangle size={11} />
+                  )}
+                  {view.label}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {view.canCancel &&
+                  (confirmCancel === key ? (
+                    <>
+                      <button
+                        onClick={() => handleCancel(key)}
+                        disabled={isBusy}
+                        className="rounded-md border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+                      >
+                        {isBusy ? 'Cancelling…' : 'Confirm cancel'}
+                      </button>
+                      <button
+                        onClick={() => setConfirmCancel(null)}
+                        disabled={isBusy}
+                        className="rounded-md border border-gray-700 bg-gray-800 px-2.5 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-50"
+                      >
+                        Keep
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmCancel(key)}
+                      className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-gray-700 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  ))}
+                {view.canSubscribe && (
+                  <button
+                    onClick={() => handleSubscribe(key)}
+                    disabled={isBusy}
+                    className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isBusy ? 'Opening checkout…' : 'Subscribe'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {renewal && (
+              <p className="mt-1.5 text-[11px] text-gray-500">
+                {view.tone === 'danger' ? 'Ended' : 'Renews'} {renewal}
+              </p>
+            )}
+
+            {view.showGraceBanner && (
+              <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-2">
+                <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-400" />
+                <p className="text-[11px] text-amber-300">
+                  A payment failed. Update your payment mandate to keep {label}{' '}
+                  access — it stays on until {renewal || 'the paid-through date'}{' '}
+                  while we retry.
+                </p>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <p className="text-[10px] text-gray-600 pt-1">
+        Payments are processed securely by Razorpay. Cancellation takes effect at
+        the end of the current billing cycle.
+      </p>
+    </div>
+  );
+}
+
 // ---- USER account hub ----
 
 /**
- * Account hub shown to a non-ADMIN USER. Real where possible
- * (subscription status from `useSubscriptions`, email + working logout from
- * the auth store); honest placeholders elsewhere. Each placeholder states the
- * capability it will deliver and the sprint that lands it, so nothing looks
- * fake-functional.
+ * Account hub shown to a non-ADMIN USER. Real where possible (billing status +
+ * checkout from `useBilling`, email + working logout from the auth store);
+ * honest placeholders elsewhere. Each placeholder states the capability it will
+ * deliver and the sprint that lands it, so nothing looks fake-functional.
  */
 function UserAccountHub() {
-  const { intraday, swing, loading } = useSubscriptions();
   const email = useAuthStore((s) => s.user?.email);
   const logout = useAuthStore((s) => s.logout);
 
@@ -425,50 +583,13 @@ function UserAccountHub() {
         <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Account</h1>
       </div>
 
-      {/* Section 1: Subscriptions */}
+      {/* Section 1: Subscriptions & Billing */}
       <SectionCard
         icon={<CreditCard size={18} />}
-        title="Subscriptions"
-        description="Your access to each signals segment"
+        title="Subscriptions & Billing"
+        description="Manage your access to each signals segment"
       >
-        {loading ? (
-          <LoadingSkeleton variant="card" count={2} className="h-12" />
-        ) : (
-          <div className="space-y-2">
-            {([
-              { label: 'Intraday', active: intraday },
-              { label: 'Swing', active: swing },
-            ] as const).map((seg) => (
-              <div
-                key={seg.label}
-                className="flex items-center justify-between rounded-lg border border-gray-700/60 bg-gray-800/30 p-3"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-gray-200">{seg.label}</span>
-                  {seg.active ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-400">
-                      <CheckCircle size={11} />
-                      Active
-                    </span>
-                  ) : (
-                    <span className="rounded-full bg-gray-700/40 px-2 py-0.5 text-[10px] font-medium text-gray-400">
-                      Not subscribed
-                    </span>
-                  )}
-                </div>
-                <button
-                  onClick={() => toast('Checkout coming soon')}
-                  className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
-                >
-                  {seg.active ? 'Manage' : 'Subscribe'}
-                </button>
-              </div>
-            ))}
-            <p className="text-[10px] text-gray-600 pt-1">
-              Billing and checkout arrive in TDA-015.
-            </p>
-          </div>
-        )}
+        <BillingSection />
       </SectionCard>
 
       {/* Section 2: Connect Angel One */}

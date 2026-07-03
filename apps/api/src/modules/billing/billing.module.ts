@@ -10,6 +10,7 @@ import {
 import { SubscriptionModule } from '../subscription/subscription.module';
 import { BillingService } from './billing.service';
 import { BillingWebhookService } from './billing-webhook.service';
+import { BillingSweepService } from './billing-sweep.service';
 import { MeBillingController } from './me-billing.controller';
 import { RazorpayWebhookController } from './razorpay-webhook.controller';
 import {
@@ -56,6 +57,7 @@ export async function paymentProviderFactory(
     },
     BillingService,
     BillingWebhookService,
+    BillingSweepService,
   ],
   exports: [BillingService, BillingWebhookService, PAYMENT_PROVIDER],
 })

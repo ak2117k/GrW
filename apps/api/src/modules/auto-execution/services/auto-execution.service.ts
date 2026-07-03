@@ -278,6 +278,10 @@ function toExecuteDto(order: OrderRequest, signal: PublicSignal): ExecuteTradeDt
     side: order.side,
     orderType: order.orderType,
     quantity: order.quantity,
+    // Pass the signal entry price so the shared RiskManager's per-trade capital
+    // ceiling (orderValue = price * qty) can actually veto an oversized auto
+    // order. Without a price it reads 0 and the ceiling is silently inert.
+    price: signal.entryPrice,
     positionType: order.positionType,
     isPaper: false,
     source: 'AUTO',

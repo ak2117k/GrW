@@ -2,7 +2,12 @@ import { InjectQueue, OnQueueFailed, Process, Processor } from '@nestjs/bull';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Job, Queue } from 'bull';
 import { AuditService } from '../../../common/audit/audit.service';
-import { EXECUTE_USER_DEAD_QUEUE, EXECUTE_USER_JOB, EXECUTE_USER_QUEUE } from '../constants';
+import {
+  EXECUTE_USER_CONCURRENCY,
+  EXECUTE_USER_DEAD_QUEUE,
+  EXECUTE_USER_JOB,
+  EXECUTE_USER_QUEUE,
+} from '../constants';
 import { PerUserRateLimiter } from '../services/per-user-rate-limiter';
 import type { ExecuteUserJob } from '../dto/public-signal.dto';
 
@@ -45,7 +50,10 @@ export class ExecuteUserWorker {
     @Optional() private readonly audit?: AuditService,
   ) {}
 
-  @Process(EXECUTE_USER_JOB)
+  // Concurrency is load-bearing for failure isolation: at Bull's default of 1,
+  // a single user's slow/hung/rate-limited job would block the whole fleet's
+  // execution. EXECUTE_USER_CONCURRENCY lets N users progress in parallel.
+  @Process({ name: EXECUTE_USER_JOB, concurrency: EXECUTE_USER_CONCURRENCY })
   async handle(job: Job<ExecuteUserJob>): Promise<void> {
     const { userId } = job.data;
 

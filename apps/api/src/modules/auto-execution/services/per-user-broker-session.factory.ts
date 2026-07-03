@@ -83,6 +83,24 @@ function maskClientId(clientId: string): string {
 }
 
 /**
+ * Wall-clock cap on a single broker network call. Without it a hung
+ * generateSession/placeOrder/logout would await unbounded and — even with
+ * per-user worker concurrency — pin a worker slot indefinitely, stalling other
+ * users' orders. On timeout the call rejects so the pipeline treats it as a
+ * transient fault (retry → DLQ) rather than freezing the fleet.
+ */
+const BROKER_CALL_TIMEOUT_MS = 15_000;
+
+/** Reject if `p` does not settle within `ms`; always clears the timer. */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/**
  * Concrete disposable session backed by a per-user SmartAPI client. Not exported
  * — callers only ever see the `UserBrokerSession` interface, and only within the
  * `withSession` callback.
@@ -130,7 +148,11 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
           `qty=${order.quantity} (client ${maskClientId(this.clientId)})`,
       );
 
-      const response = await this.client.placeOrder(params);
+      const response = await withTimeout(
+        this.client.placeOrder(params),
+        BROKER_CALL_TIMEOUT_MS,
+        'Angel One placeOrder',
+      );
 
       if (!response?.data?.orderid) {
         return {
@@ -214,7 +236,11 @@ export class PerUserBrokerSessionFactory {
     // authenticated for the subsequent placeOrder call.
     try {
       const totp = generateTOTP(creds.totpSecret);
-      const session = await client.generateSession(creds.clientId, creds.password, totp);
+      const session = await withTimeout(
+        client.generateSession(creds.clientId, creds.password, totp),
+        BROKER_CALL_TIMEOUT_MS,
+        'Angel One generateSession',
+      );
       if (!session?.data?.jwtToken) {
         this.logger.warn(
           `Per-user Angel One login for client ${maskClientId(creds.clientId)} returned no session`,
@@ -227,9 +253,12 @@ export class PerUserBrokerSessionFactory {
       if (error instanceof Error && error.message === 'Angel One rejected the credentials for order placement') {
         throw error;
       }
+      // Log only the error TYPE, never `error.message`: the raw broker/SDK
+      // message on a failed generateSession is the one place that could echo the
+      // submitted password/TOTP back into the log stream.
       this.logger.warn(
         `Per-user Angel One login failed for client ${maskClientId(creds.clientId)}: ` +
-          `${error instanceof Error ? error.message : 'unknown error'}`,
+          `${error instanceof Error ? error.name : 'unknown error'}`,
       );
       throw new Error('Angel One rejected the credentials for order placement');
     }
@@ -248,7 +277,7 @@ export class PerUserBrokerSessionFactory {
   /** Best-effort broker logout; a failure is logged (masked) and swallowed. */
   private async safeLogout(client: UserSmartApiLike, clientId: string): Promise<void> {
     try {
-      await client.logout(clientId);
+      await withTimeout(client.logout(clientId), BROKER_CALL_TIMEOUT_MS, 'Angel One logout');
     } catch (error) {
       this.logger.warn(
         `Per-user Angel One logout failed for client ${maskClientId(clientId)}: ` +

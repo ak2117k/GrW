@@ -175,7 +175,7 @@ backstops; add per-user `killSwitch` and global `LIVE_TRADING_ENABLED`.
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
 | **TDA-014** | Public landing page + signup funnel | TDA-002 | Planned (spec+plan 2026-07-01-tda-014) |
-| **TDA-015** | Billing/subscriptions/payments + plan-gating enforcement | TDA-001, TDA-014 | Not started |
+| **TDA-015** | Billing/subscriptions/payments + plan-gating enforcement | TDA-001, TDA-014 | Planned (spec+plan 2026-07-03-tda-015, Razorpay) |
 
 ### Sprint S8 — Mobile  *(Later)*
 

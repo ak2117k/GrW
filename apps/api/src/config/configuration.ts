@@ -38,4 +38,14 @@ export default () => ({
     provider: process.env.KMS_PROVIDER || 'local',
     cmkId: process.env.KMS_CMK_ID || '',
   },
+  billing: {
+    // 'razorpay' (prod default) | 'fake' (test/offline). Tests run 'fake'.
+    provider: process.env.BILLING_PROVIDER || 'razorpay',
+    // Grace/dunning window (days) added to expiresAt after a paid cycle and
+    // retained on a failed renewal until Razorpay's retries are exhausted.
+    graceDays: +(process.env.BILLING_GRACE_DAYS || 3),
+    // Public-launch kill switch: billing is built/tested behind this flag until
+    // the SEBI/legal review lands (spec §11). Does not gate the test path.
+    liveEnabled: process.env.LIVE_BILLING_ENABLED === 'true',
+  },
 });

@@ -80,7 +80,10 @@ async function bootstrap(): Promise<void> {
   validateBootConfig();
 
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+  // rawBody:true (Nest built-in) buffers the exact request bytes onto
+  // req.rawBody so the Razorpay webhook (TDA-015) can HMAC-verify the raw
+  // payload. Additive: normal parsed-body routes are unaffected.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   const configService = app.get(ConfigService);
   const port = configService.get<number>('app.port', 3001);

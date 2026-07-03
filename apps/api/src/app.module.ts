@@ -37,6 +37,7 @@ import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-trac
 import { BreakoutSwingTrackModule } from './modules/breakout-swing-track/breakout-swing-track.module';
 import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.module';
 import { SubscriptionModule } from './modules/subscription/subscription.module';
+import { BillingModule } from './modules/billing/billing.module';
 import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module';
 import { AutoExecutionModule } from './modules/auto-execution/auto-execution.module';
 
@@ -183,6 +184,10 @@ import { AutoExecutionModule } from './modules/auto-execution/auto-execution.mod
 
     // Subscription — TDA-007 plan-gating (Intraday/Swing) + me/admin endpoints
     SubscriptionModule,
+
+    // Billing / payments — TDA-015 Razorpay checkout + idempotent webhook that
+    // drives SubscriptionService grant/revoke (payment state = access).
+    BillingModule,
 
     // Signal fan-out engine (TDA-010) — one central signal → one sanitized
     // fan-out job → one independent execute-user job per eligible user, with

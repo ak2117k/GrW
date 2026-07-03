@@ -2,7 +2,7 @@ const path = require('path');
 
 /**
  * Standalone Jest config for the TDA-011 auto-execution tests (Phase 1:
- * ExecutionClaim idempotency store).
+ * ExecutionClaim idempotency store + per-user risk sizing service).
  *
  * Mirrors test/tda010/jest.config.js: the default apps/api Jest config roots at
  * src/, so it never discovers specs under test/. This roots discovery at
@@ -10,7 +10,8 @@ const path = require('path');
  * apps/api/tsconfig.json.
  *
  * The DB-backed idempotency spec runs concurrent claims against ONE scratch DB;
- * run with --runInBand so parallel Jest workers never share/flake that DB.
+ * run with --runInBand so parallel Jest workers never share/flake that DB. The
+ * sizing spec is pure (no DB), so it needs no DATABASE_URL.
  *
  * Run from apps/api:
  *   DATABASE_URL_TEST=postgresql://postgres:postgres@127.0.0.1:5432/td_saas_tda011a \

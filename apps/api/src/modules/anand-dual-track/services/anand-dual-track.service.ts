@@ -1,5 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { AnandDualTrackRepository, CreatedEntryRow } from '../repositories/anand-dual-track.repository';
+import { SignalFanoutService } from '../../signal-fanout/services/signal-fanout.service';
+import { toPublicSignal, Segment } from '../../signal-fanout/dto/public-signal.dto';
 
 export interface CreateEntriesInput {
   alertId: string;
@@ -13,7 +15,12 @@ export interface CreateEntriesInput {
 export class AnandDualTrackService {
   private readonly logger = new Logger(AnandDualTrackService.name);
 
-  constructor(private readonly repo: AnandDualTrackRepository) {}
+  constructor(
+    private readonly repo: AnandDualTrackRepository,
+    // @Optional so existing focused-boot tests (and any consumer that predates
+    // the fan-out engine) can construct this service without wiring the queue.
+    @Optional() private readonly fanout?: SignalFanoutService,
+  ) {}
 
   async createEntries(input: CreateEntriesInput): Promise<void> {
     const shared = {
@@ -53,7 +60,8 @@ export class AnandDualTrackService {
       this.logger.log(`[anand] intraday: ${input.symbol} already made a loss today — SKIP_LOSS_TODAY`);
     } else {
       try {
-        await this.repo.createIntradayEntry(shared);
+        const row = await this.repo.createIntradayEntry(shared);
+        await this.emitFanout(row, 'INTRADAY');
       } catch (err) {
         this.logger.warn(`[anand-dual-track] intraday insert failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`);
       }
@@ -67,10 +75,28 @@ export class AnandDualTrackService {
       this.logger.log(`[anand] swing: ${input.symbol} already made a loss today — SKIP_LOSS_TODAY`);
     } else {
       try {
-        await this.repo.createSwingEntry(shared);
+        const row = await this.repo.createSwingEntry(shared);
+        await this.emitFanout(row, 'SWING');
       } catch (err) {
         this.logger.warn(`[anand-dual-track] swing insert failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`);
       }
+    }
+  }
+
+  /**
+   * Best-effort fan-out emission (TDA-010 §7). Builds a provenance-safe
+   * PublicSignal from the freshly-inserted row (via toPublicSignal → toPublicEntry
+   * allowlist) and enqueues one signal-fanout job. Swallows every error so a
+   * fan-out hiccup can NEVER fail or roll back the entry insert that triggered
+   * it — a dropped enqueue is a missed auto-trade for one signal, not a corrupt
+   * product feed. No-ops when the fan-out engine is not wired.
+   */
+  private async emitFanout(row: CreatedEntryRow, segment: Segment): Promise<void> {
+    if (!this.fanout) return;
+    try {
+      await this.fanout.enqueueFanout(toPublicSignal(row, segment));
+    } catch (err) {
+      this.logger.warn(`[anand-dual-track] fan-out emit failed for ${row?.symbol}: ${err instanceof Error ? err.message : err}`);
     }
   }
 }

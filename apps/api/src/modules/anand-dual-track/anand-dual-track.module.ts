@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { SubscriptionModule } from '../subscription/subscription.module';
+import { SignalFanoutModule } from '../signal-fanout/signal-fanout.module';
 import { AnandDualTrackRepository } from './repositories/anand-dual-track.repository';
 import { AnandDualTrackService } from './services/anand-dual-track.service';
 import { AnandPriceMonitorService } from './services/anand-price-monitor.service';
@@ -12,7 +13,7 @@ import { AnandDualTrackController } from './controllers/anand-dual-track.control
 // ChartinkModule is @Global(), so ChartinkRepository is available without importing it here.
 // ChartinkModule imports AnandDualTrackModule — importing ChartinkModule here would be circular.
 @Module({
-  imports: [PrismaModule, MarketDataModule, SubscriptionModule],
+  imports: [PrismaModule, MarketDataModule, SubscriptionModule, SignalFanoutModule],
   controllers: [AnandDualTrackController],
   providers: [AnandDualTrackRepository, AnandDualTrackService, AnandPriceMonitorService, ReinvestmentService, SwingOhlcService],
   exports: [AnandDualTrackService],

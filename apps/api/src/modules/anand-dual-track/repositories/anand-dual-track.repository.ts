@@ -15,6 +15,18 @@ export interface CreateEntryInput {
   scoreBreakdown: unknown;
 }
 
+/** The subset of a created entry row returned for provenance-safe fan-out (TDA-010). */
+export interface CreatedEntryRow {
+  id: string;
+  symbol: string;
+  token: string | null;
+  entryPrice: number;
+  enteredAt: Date;
+  targetPct: number;
+  stopPct: number;
+  status: string;
+}
+
 export interface UpdateStatusInput {
   status: string;
   exitPrice?: number;
@@ -46,7 +58,7 @@ export interface PnlSummary {
 export class AnandDualTrackRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  async createIntradayEntry(input: CreateEntryInput): Promise<{ id: string }> {
+  async createIntradayEntry(input: CreateEntryInput): Promise<CreatedEntryRow> {
     return this.prisma.intradayEntry.create({
       data: {
         symbol: input.symbol,
@@ -60,11 +72,15 @@ export class AnandDualTrackRepository {
             ? Prisma.JsonNull
             : (input.scoreBreakdown as Prisma.InputJsonValue),
       },
-      select: { id: true },
+      // Fields needed to build a provenance-safe PublicSignal for fan-out (TDA-010).
+      select: {
+        id: true, symbol: true, token: true, entryPrice: true,
+        enteredAt: true, targetPct: true, stopPct: true, status: true,
+      },
     });
   }
 
-  async createSwingEntry(input: CreateEntryInput): Promise<{ id: string }> {
+  async createSwingEntry(input: CreateEntryInput): Promise<CreatedEntryRow> {
     return this.prisma.swingEntry.create({
       data: {
         symbol: input.symbol,
@@ -78,7 +94,11 @@ export class AnandDualTrackRepository {
             ? Prisma.JsonNull
             : (input.scoreBreakdown as Prisma.InputJsonValue),
       },
-      select: { id: true },
+      // Fields needed to build a provenance-safe PublicSignal for fan-out (TDA-010).
+      select: {
+        id: true, symbol: true, token: true, entryPrice: true,
+        enteredAt: true, targetPct: true, stopPct: true, status: true,
+      },
     });
   }
 

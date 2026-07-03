@@ -18,6 +18,7 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'AIWeeklyReport',
   'BrokerCredential',
   'Subscription',
+  'BillingProfile',
   'AutoTradeConsent',
   'ConsentRecord',
   'RefreshToken',

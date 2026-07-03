@@ -1405,6 +1405,7 @@ model User {
   auditLogs         AuditLog[]
   refreshTokens      RefreshToken[]
   verificationTokens VerificationToken[]
+  billingProfile     BillingProfile?
   @@index([status])
   @@map("users")
 }
@@ -1454,9 +1455,51 @@ model Subscription {
   expiresAt DateTime?
   createdAt DateTime           @default(now())
   updatedAt DateTime           @updatedAt
+  // TDA-015 — billing linkage (additive, nullable). The webhook maps a Razorpay
+  // subscription back to this gate row via providerSubId, so no join table.
+  providerSubId  String?   @unique   // razorpay subscription id
+  providerPlanId String?             // razorpay plan id (segment tier)
+  graceUntil     DateTime?           // dunning window end (failed-renewal grace)
   @@unique([userId, segment])
   @@index([status, expiresAt])
   @@map("subscriptions")
+}
+
+// ============================================
+// Billing / Payments (TDA-015)
+// ============================================
+
+// One per user — the Razorpay customer + GST identity. A TENANT_MODEL
+// (user-owned); the billing webhook worker (no request context) reaches it via
+// runWithoutTenant, like SubscriptionService.
+model BillingProfile {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerCustomerId String   @unique          // razorpay customer id
+  gstin              String?                    // for GST invoicing (B2B input credit)
+  billingName        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  @@map("billing_profiles")
+}
+
+// The webhook idempotency / dedupe ledger. NOT a tenant model — written by the
+// unauthenticated webhook worker, cross-user. Mirrors ExecutionClaim's
+// insert-first at-most-once rationale (TDA-011): a RECEIVED row is inserted
+// BEFORE any side effect; the @@unique([provider, eventId]) is the dedupe key.
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String    @default("razorpay")
+  eventId     String                              // provider event id (idempotency key)
+  eventType   String                              // razorpay event name
+  status      String    @default("RECEIVED")      // RECEIVED | PROCESSED | FAILED
+  payloadHash String                              // sha256 of raw body (forensics, no PII)
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  @@unique([provider, eventId])                   // the dedupe key
+  @@index([status, receivedAt])
+  @@map("webhook_events")
 }
 
 model AutoTradeConsent {

@@ -37,6 +37,7 @@ import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-trac
 import { BreakoutSwingTrackModule } from './modules/breakout-swing-track/breakout-swing-track.module';
 import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.module';
 import { SubscriptionModule } from './modules/subscription/subscription.module';
+import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module';
 
 @Module({
   imports: [
@@ -181,6 +182,12 @@ import { SubscriptionModule } from './modules/subscription/subscription.module';
 
     // Subscription — TDA-007 plan-gating (Intraday/Swing) + me/admin endpoints
     SubscriptionModule,
+
+    // Signal fan-out engine (TDA-010) — one central signal → one sanitized
+    // fan-out job → one independent execute-user job per eligible user, with
+    // per-user rate isolation, retry/backoff, and a DLQ. TDA-011 fills the
+    // per-user execution pipeline behind the AUTO_EXECUTION_PORT seam.
+    SignalFanoutModule,
   ],
   providers: [
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,

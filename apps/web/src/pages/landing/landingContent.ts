@@ -82,7 +82,7 @@ export const landingContent: LandingContent = {
   pricingTiers: [
     {
       name: 'Intraday',
-      priceLabel: 'Launch pricing — coming soon',
+      priceLabel: '₹999 / month',
       bullets: [
         'Automated same-day execution on your broker account',
         'Per-user risk sizing and daily loss cap',
@@ -91,7 +91,7 @@ export const landingContent: LandingContent = {
     },
     {
       name: 'Swing',
-      priceLabel: 'Launch pricing — coming soon',
+      priceLabel: '₹799 / month',
       bullets: [
         'Automated multi-day execution on your broker account',
         'Per-user risk sizing for longer holds',
@@ -100,7 +100,7 @@ export const landingContent: LandingContent = {
     },
     {
       name: 'Both',
-      priceLabel: 'Launch pricing — coming soon',
+      priceLabel: '₹1,499 / month',
       bullets: [
         'Everything in Intraday and Swing, combined',
         'One unified view of all your automated positions',

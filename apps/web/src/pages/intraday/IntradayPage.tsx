@@ -179,12 +179,29 @@ export default function IntradayPage() {
   const role = useAuthStore((s) => s.user?.role);
   const isAdmin = role === 'ADMIN';
   const subs = useSubscriptions();
-  const { entries, pnl, loading, error } = useIntradayEntries(filter, date);
+  // Only fetch the plan-gated data once access is known — otherwise an
+  // unsubscribed USER fires a 403 that would flash before the gate resolves.
+  const canView = isAdmin || subs.intraday;
+  const { entries, pnl, loading, error } = useIntradayEntries(filter, date, canView);
   // Open (unrealized) book: floating mark-to-market P&L of positions not yet
   // closed (exitPrice null). Kept separate from the realized period cards so
   // booked vs floating P&L are never conflated.
   const openEntries = entries.filter((e) => e.exitPrice == null);
   const { openCount, invested, currentValue, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
+
+  // While the subscription status is still resolving, show a quiet loading
+  // state — NOT the table (which would surface the gated data call's 403).
+  if (!isAdmin && subs.loading) {
+    return (
+      <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
+        <div>
+          <h1 className="text-2xl font-semibold">Intraday Track</h1>
+          <p className="text-sm text-[var(--color-text-muted)]">5% → trailing (Supertrend 15m) · 5% stop · expires 15:15</p>
+        </div>
+        <div className="text-[var(--color-text-muted)]">Loading…</div>
+      </div>
+    );
+  }
 
   // Gate: an unsubscribed USER (non-admin) sees the Subscribe placeholder
   // instead of the signals table. Branch happens AFTER all hooks above.

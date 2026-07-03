@@ -389,7 +389,13 @@ export default function SwingPage() {
   // floor is dropped entirely (all-time for that status) so it's always findable.
   const [exitFrom, setExitFrom] = useState(daysAgoIST(90));
   const [exitStatus, setExitStatus] = useState<string | undefined>(undefined);
-  const { entries, pnl, loading, error } = useSwingEntries(filter, from);
+  const role = useAuthStore((s) => s.user?.role);
+  const isAdmin = role === 'ADMIN';
+  const subs = useSubscriptions();
+  // Only fetch the plan-gated data once access is known — otherwise an
+  // unsubscribed USER fires 403s that would flash before the gate resolves.
+  const canView = isAdmin || subs.swing;
+  const { entries, pnl, loading, error } = useSwingEntries(filter, from, canView);
   // Recent Exits: closed/exited swing positions filtered by EXIT date and
   // status. The Entries log above filters by ENTRY date, so a multi-day swing
   // entered earlier but cut recently shows nowhere — this section surfaces it.
@@ -397,9 +403,10 @@ export default function SwingPage() {
   const { exits, loading: exitsLoading, error: exitsError } = useSwingExits(
     exitStatus ? undefined : exitFrom,
     exitStatus,
+    canView,
   );
   // Capital summary: engaged vs available, recycles as positions exit.
-  const { capital } = useSwingCapital();
+  const { capital } = useSwingCapital(canView);
   // Total realized P&L of the listed exits, using the same per-row notional
   // basis EntryRow uses for its P&L ₹ column ((pnlPct / 100) * NOTIONAL).
   const exitsRealizedRs = exits.reduce(
@@ -410,11 +417,22 @@ export default function SwingPage() {
   // filter — the live-exposure source of truth. Kept separate from the
   // date-filtered `entries` above so overnight/multi-day positions are always
   // visible and counted, even when the From date excludes their entry day.
-  const { openEntries, loading: openLoading, error: openError } = useSwingOpenBook();
+  const { openEntries, loading: openLoading, error: openError } = useSwingOpenBook(canView);
   const { openCount, invested, currentValue, unrealizedRs } = summarizeOpenBook(openEntries, NOTIONAL);
-  const role = useAuthStore((s) => s.user?.role);
-  const isAdmin = role === 'ADMIN';
-  const subs = useSubscriptions();
+
+  // While the subscription status is still resolving, show a quiet loading
+  // state — NOT the tables (which would surface the gated data calls' 403s).
+  if (!isAdmin && subs.loading) {
+    return (
+      <div className="flex flex-col gap-4 p-6 text-[var(--color-text-primary)]">
+        <div>
+          <h1 className="text-2xl font-semibold">Swing Track</h1>
+          <p className="text-sm text-[var(--color-text-muted)]">10% target · 10% stop · holds overnight</p>
+        </div>
+        <div className="text-[var(--color-text-muted)]">Loading…</div>
+      </div>
+    );
+  }
 
   // Gate: an unsubscribed USER (non-admin) sees the Subscribe placeholder
   // instead of the signals tables. Branch happens AFTER all hooks above.

@@ -3,13 +3,15 @@ import { listSwingEntries, getSwingPnl, type AnandEntry, type PnlSummary } from 
 
 const REFRESH_MS = 30_000;
 
-export function useSwingEntries(status?: string, from?: string) {
+export function useSwingEntries(status?: string, from?: string, enabled = true) {
   const [entries, setEntries] = useState<AnandEntry[]>([]);
   const [pnl, setPnl] = useState<PnlSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    // Skip the plan-gated fetch until access is confirmed (avoids a 403 flash).
+    if (!enabled) return;
     try {
       const [rows, summary] = await Promise.all([
         listSwingEntries({
@@ -26,13 +28,17 @@ export function useSwingEntries(status?: string, from?: string) {
     } finally {
       setLoading(false);
     }
-  }, [status, from]);
+  }, [status, from, enabled]);
 
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
     refresh();
     const t = window.setInterval(refresh, REFRESH_MS);
     return () => window.clearInterval(t);
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   return { entries, pnl, loading, error, refresh };
 }

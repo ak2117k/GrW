@@ -3,13 +3,16 @@ import { listIntradayEntries, getIntradayPnl, type AnandEntry, type PnlSummary }
 
 const REFRESH_MS = 30_000;
 
-export function useIntradayEntries(status?: string, date?: string) {
+export function useIntradayEntries(status?: string, date?: string, enabled = true) {
   const [entries, setEntries] = useState<AnandEntry[]>([]);
   const [pnl, setPnl] = useState<PnlSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    // Don't fetch the plan-gated data until the caller confirms access — an
+    // unsubscribed USER would otherwise trigger a 403 that flashes as an error.
+    if (!enabled) return;
     try {
       const [rows, summary] = await Promise.all([
         listIntradayEntries({
@@ -27,13 +30,17 @@ export function useIntradayEntries(status?: string, date?: string) {
     } finally {
       setLoading(false);
     }
-  }, [status, date]);
+  }, [status, date, enabled]);
 
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
     refresh();
     const t = window.setInterval(refresh, REFRESH_MS);
     return () => window.clearInterval(t);
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   return { entries, pnl, loading, error, refresh };
 }

@@ -10,12 +10,14 @@ const REFRESH_MS = 30_000;
  * open-positions counter must come from here so it never gets zeroed by the
  * page's `from` date when positions are held overnight.
  */
-export function useSwingOpenBook() {
+export function useSwingOpenBook(enabled = true) {
   const [openEntries, setOpenEntries] = useState<AnandEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
+    // Skip the plan-gated fetch until access is confirmed (avoids a 403 flash).
+    if (!enabled) return;
     try {
       const rows = await listSwingEntries({ status: 'TRADED' });
       setOpenEntries(rows);
@@ -25,13 +27,17 @@ export function useSwingOpenBook() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
     refresh();
     const t = window.setInterval(refresh, REFRESH_MS);
     return () => window.clearInterval(t);
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   return { openEntries, loading, error, refresh };
 }

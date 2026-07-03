@@ -30,4 +30,8 @@ module.exports = {
     ],
   },
   testEnvironment: 'node',
+  // The dlq-integration spec drives REAL Bull queues on Redis; Bull keeps its
+  // ioredis clients open past teardown (a known Bull/Jest interaction), so force
+  // Jest to exit after the suite completes rather than hang on those handles.
+  forceExit: true,
 };

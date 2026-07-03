@@ -36,13 +36,11 @@ interface Bucket {
 @Injectable()
 export class PerUserRateLimiter {
   private readonly buckets = new Map<string, Bucket>();
-  private readonly ratePerSec: number;
-  private readonly burst: number;
-
-  constructor(ratePerSec: number = ANGEL_REFILL_PER_SEC) {
-    this.ratePerSec = ratePerSec;
-    this.burst = ratePerSec;
-  }
+  // Fixed at the Angel One refill target. Kept as fields (not constructor
+  // params) so Nest can instantiate this provider — a primitive constructor
+  // param is unresolvable by the DI container. Burst equals the rate.
+  private readonly ratePerSec = ANGEL_REFILL_PER_SEC;
+  private readonly burst = ANGEL_REFILL_PER_SEC;
 
   /**
    * Resolve when a token is available for `userId`; otherwise wait (bounded by

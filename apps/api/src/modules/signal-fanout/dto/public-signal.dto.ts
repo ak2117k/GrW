@@ -35,6 +35,28 @@ export interface FanoutJob {
   signal: PublicSignal;
 }
 
+/**
+ * The minimal source-row shape `toPublicSignal` reads. A clean named type (no
+ * index signature) so a precise repo return type (`CreatedEntryRow`) is
+ * assignable. Provenance columns, if present at runtime, are simply never read.
+ */
+export interface SignalSourceRow {
+  id: string;
+  symbol: string;
+  entryPrice: number;
+  enteredAt: string | Date;
+  targetPct: number;
+  stopPct: number;
+  status: string;
+  token?: string | null;
+  exitPrice?: number | null;
+  exitedAt?: string | Date | null;
+  currentPrice?: number | null;
+  pnlPct?: number | null;
+  targetLeftPct?: number | null;
+  priceStale?: boolean;
+}
+
 /** One execute-user job = one (signal × eligible user). The contract with TDA-011. */
 export interface ExecuteUserJob {
   userId: string;
@@ -54,11 +76,14 @@ export interface ExecuteUserJob {
  * is an instrument token needed for execution, not provenance).
  */
 export function toPublicSignal(
-  entryRow: AnandEntryLike & { token?: string | null },
+  entryRow: SignalSourceRow,
   segment: Segment,
   side: 'BUY' = 'BUY',
 ): PublicSignal {
-  const pub = toPublicEntry(entryRow, segment);
+  // toPublicEntry takes the loose AnandEntryLike (which carries an index
+  // signature for ignored provenance columns); SignalSourceRow overlaps it on
+  // every read field, so the cast is sound and the allowlist still governs output.
+  const pub = toPublicEntry(entryRow as AnandEntryLike, segment);
   return {
     entryId: pub.id,
     symbol: pub.symbol,

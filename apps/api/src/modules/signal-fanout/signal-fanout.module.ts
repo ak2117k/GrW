@@ -11,6 +11,7 @@ import { FanoutEligibilityService } from './services/fanout-eligibility.service'
 import { PerUserRateLimiter } from './services/per-user-rate-limiter';
 import { SignalFanoutService } from './services/signal-fanout.service';
 import { SignalFanoutWorker } from './workers/signal-fanout.worker';
+import { ExecuteUserWorker } from './workers/execute-user.worker';
 
 /**
  * TDA-010 signal fan-out engine.
@@ -39,7 +40,10 @@ import { SignalFanoutWorker } from './workers/signal-fanout.worker';
     PerUserRateLimiter,
     SignalFanoutService,
     SignalFanoutWorker,
+    ExecuteUserWorker,
+    // AUTO_EXECUTION_PORT is intentionally NOT provided here — TDA-011 binds it.
+    // ExecuteUserWorker injects it @Optional(), so this lane boots without it.
   ],
-  exports: [SignalFanoutService],
+  exports: [SignalFanoutService, PerUserRateLimiter],
 })
 export class SignalFanoutModule {}

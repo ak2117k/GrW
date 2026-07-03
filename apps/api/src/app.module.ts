@@ -38,6 +38,7 @@ import { BreakoutSwingTrackModule } from './modules/breakout-swing-track/breakou
 import { SellFuturesModule } from './modules/sell-futures-track/sell-futures.module';
 import { SubscriptionModule } from './modules/subscription/subscription.module';
 import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module';
+import { AutoExecutionModule } from './modules/auto-execution/auto-execution.module';
 
 @Module({
   imports: [
@@ -188,6 +189,7 @@ import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module
     // per-user rate isolation, retry/backoff, and a DLQ. TDA-011 fills the
     // per-user execution pipeline behind the AUTO_EXECUTION_PORT seam.
     SignalFanoutModule,
+    AutoExecutionModule,
   ],
   providers: [
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,

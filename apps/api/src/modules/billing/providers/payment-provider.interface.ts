@@ -38,6 +38,10 @@ export interface BillingEvent {
   providerSubId?: string;
   /** Paid-through instant (drives `expiresAt`). */
   currentPeriodEnd?: Date;
+  /** Provider payment id for the charge/failure (Payment idempotency key). */
+  providerPaymentId?: string;
+  /** Charged amount in minor units (paise). */
+  amount?: number;
   /** Opaque provider payload — for audit forensics only, ALWAYS redacted. */
   raw: unknown;
 }
@@ -95,7 +99,7 @@ export function normalizeRazorpayEnvelope(rawBody: Buffer): BillingEvent {
     created_at?: number;
     payload?: {
       subscription?: { entity?: { id?: string; current_end?: number } };
-      payment?: { entity?: { id?: string } };
+      payment?: { entity?: { id?: string; amount?: number } };
     };
   };
 
@@ -107,7 +111,8 @@ export function normalizeRazorpayEnvelope(rawBody: Buffer): BillingEvent {
       ? new Date(subEntity.current_end * 1000)
       : undefined;
 
-  const paymentId = parsed.payload?.payment?.entity?.id;
+  const paymentEntity = parsed.payload?.payment?.entity;
+  const paymentId = paymentEntity?.id;
   const eventId = paymentId
     ? `${event}:${paymentId}`
     : `${event}:${providerSubId ?? '-'}:${parsed.created_at ?? '-'}`;
@@ -117,6 +122,8 @@ export function normalizeRazorpayEnvelope(rawBody: Buffer): BillingEvent {
     eventId,
     providerSubId,
     currentPeriodEnd,
+    providerPaymentId: paymentId,
+    amount: typeof paymentEntity?.amount === 'number' ? paymentEntity.amount : undefined,
     raw: parsed,
   };
 }

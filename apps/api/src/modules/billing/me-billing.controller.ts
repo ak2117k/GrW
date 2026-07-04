@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators';
 import { BillingService, SegmentBillingStatus } from './billing.service';
+import { PaymentService, PaymentView } from './payment.service';
 import { CheckoutDto } from './dto/checkout.dto';
 
 /**
@@ -10,7 +11,10 @@ import { CheckoutDto } from './dto/checkout.dto';
  */
 @Controller('api/me/billing')
 export class MeBillingController {
-  constructor(private readonly billing: BillingService) {}
+  constructor(
+    private readonly billing: BillingService,
+    private readonly paymentSvc: PaymentService,
+  ) {}
 
   /** Create a Razorpay subscription + return the non-secret checkout payload. */
   @Post('checkout')
@@ -31,5 +35,11 @@ export class MeBillingController {
   @Get()
   status(@CurrentUser() user: AuthenticatedUser): Promise<SegmentBillingStatus[]> {
     return this.billing.getStatus(user.userId);
+  }
+
+  /** The authenticated user's payment history, newest first (TDA-017). */
+  @Get('payments')
+  payments(@CurrentUser() user: AuthenticatedUser): Promise<PaymentView[]> {
+    return this.paymentSvc.listForUser(user.userId);
   }
 }

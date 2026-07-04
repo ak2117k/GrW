@@ -40,7 +40,10 @@ const audit = new AuditService(prisma);
 const provider = new FakePaymentProvider();
 const config = { get: (k: string) => (k === 'billing.graceDays' ? 3 : undefined) };
 const billing = new BillingService(prisma, tenant, provider as never, audit, config as never);
-const webhook = new BillingWebhookService(provider as never, subs, billing, audit, prisma);
+// TDA-017 added a PaymentService dependency; stub it (this suite asserts
+// redaction, not the payment ledger), mirroring the `provider as never` stub.
+const payments = { record: async () => {} };
+const webhook = new BillingWebhookService(provider as never, subs, billing, audit, prisma, payments as never);
 
 const run = <T>(fn: () => Promise<T>): Promise<T> => cls.run(() => fn());
 

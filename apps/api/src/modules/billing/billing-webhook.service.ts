@@ -11,6 +11,7 @@ import { AuditService } from '../../common/audit/audit.service';
 import { AUDIT_ACTIONS } from '../../common/audit/audit-actions';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { BillingService, Seg } from './billing.service';
+import { PaymentService } from './payment.service';
 import {
   BillingEvent,
   PAYMENT_PROVIDER,
@@ -45,6 +46,7 @@ export class BillingWebhookService {
     private readonly billing: BillingService,
     private readonly audit: AuditService,
     private readonly prisma: PrismaService,
+    private readonly payments: PaymentService,
   ) {}
 
   async handle(rawBody: Buffer, signature: string): Promise<WebhookHandleResult> {
@@ -132,6 +134,16 @@ export class BillingWebhookService {
       case 'SUBSCRIPTION_ACTIVATED':
       case 'PAYMENT_CHARGED':
         await this.grantAccess(userId, segment, ev);
+        if (ev.kind === 'PAYMENT_CHARGED' && ev.providerPaymentId) {
+          await this.payments.record({
+            userId,
+            segment,
+            amount: ev.amount ?? 0,
+            status: 'CAPTURED',
+            providerPaymentId: ev.providerPaymentId,
+            description: `${segment} subscription`,
+          });
+        }
         await this.auditBilling(
           ev.kind === 'PAYMENT_CHARGED'
             ? AUDIT_ACTIONS.billing.BILLING_PAYMENT_CHARGED
@@ -150,6 +162,16 @@ export class BillingWebhookService {
           segment,
           new Date(Date.now() + this.billing.graceMs()),
         );
+        if (ev.kind === 'PAYMENT_FAILED' && ev.providerPaymentId) {
+          await this.payments.record({
+            userId,
+            segment,
+            amount: ev.amount ?? 0,
+            status: 'FAILED',
+            providerPaymentId: ev.providerPaymentId,
+            description: `${segment} renewal failed`,
+          });
+        }
         await this.auditBilling(
           AUDIT_ACTIONS.billing.BILLING_PAYMENT_FAILED,
           userId,

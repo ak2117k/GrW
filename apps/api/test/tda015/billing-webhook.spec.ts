@@ -46,12 +46,17 @@ const audit = new AuditService(prisma);
 const provider = new FakePaymentProvider();
 const config = { get: (k: string) => (k === 'billing.graceDays' ? GRACE_DAYS : undefined) };
 const billing = new BillingService(prisma, tenant, provider as never, audit, config as never);
+// TDA-017 added a PaymentService dependency (records captured/failed payments).
+// tda015 asserts entitlement/grace/redaction, not the ledger — stub it (mirrors
+// the `provider as never` stubbing above).
+const payments = { record: async () => {} };
 const webhook = new BillingWebhookService(
   provider as never,
   subs,
   billing,
   audit,
   prisma,
+  payments as never,
 );
 
 const run = <T>(fn: () => Promise<T>): Promise<T> => cls.run(() => fn());

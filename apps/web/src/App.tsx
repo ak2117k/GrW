@@ -5,6 +5,8 @@ import { wsService } from '@/services/websocket';
 import { useAuthStore } from '@/stores/auth-store';
 import LoginPage from '@/pages/login/LoginPage';
 import DashboardPage from '@/pages/dashboard/DashboardPage';
+import UserDashboardPage from '@/pages/dashboard/UserDashboardPage';
+import PaymentsPage from '@/pages/payments/PaymentsPage';
 import ChartsPage from '@/pages/charts/ChartsPage';
 import MarketPage from '@/pages/market/MarketPage';
 import OptionsPage from '@/pages/options/OptionsPage';
@@ -137,7 +139,7 @@ export default function App() {
         <Route
           index
           element={
-            <RequireRoleSwitch admin={<DashboardPage />} user={<Navigate to="/intraday" replace />} />
+            <RequireRoleSwitch admin={<DashboardPage />} user={<UserDashboardPage />} />
           }
         />
         <Route path="charts" element={<ChartsPage />} />
@@ -157,6 +159,7 @@ export default function App() {
         <Route path="auto-trade" element={<RequireRole role="ADMIN"><AutoTradePage /></RequireRole>} />
         <Route path="manual-trade" element={<RequireRole role="ADMIN"><ManualTradePage /></RequireRole>} />
         <Route path="positions" element={<PositionsPage />} />
+        <Route path="payments" element={<PaymentsPage />} />
         <Route path="news" element={<RequireRole role="ADMIN"><NewsPage /></RequireRole>} />
         <Route path="journal" element={<RequireRole role="ADMIN"><JournalPage /></RequireRole>} />
         <Route path="advisor" element={<RequireRole role="ADMIN"><AdvisorPage /></RequireRole>} />

@@ -1,8 +1,8 @@
 # Production Re-Architecture — Master Roadmap & Spec Registry
 
 **Doc ID:** TDA-ROADMAP
-**Date:** 2026-06-27
-**Status:** Active — planning
+**Date:** 2026-06-27 (status synced to `main` 2026-07-04)
+**Status:** Active — **MVP (S1–S5) complete + landing & billing (S7) merged**; reliability hardening (S6), AWS provisioning, and mobile (S8) remain.
 **Owner:** development@panamoure.com
 
 > This is the **index** for the production re-architecture of TD Automation
@@ -80,13 +80,15 @@ Market data ─► CENTRAL SIGNAL ENGINE (IP, provenance lives ONLY here)
 
 Status legend: `Not started` · `In design` · `In progress` · `In review` · `Done`
 
-### Sprint S1 — Identity & Tenancy  *(MVP)*
+> **Program snapshot (2026-07-04):** 13 of 16 specs merged to `main` — **all of S1–S5 (MVP) + S7 (landing & billing)**. The MVP Definition of Done (§6) is functionally met, running in **paper mode** (`LIVE_TRADING_ENABLED=false`). The prior fresh-DB **migration-ordering deploy blocker is fixed** (`e7fbd31` — tda001 renumbered before tda002). Remaining: **TDA-012** (reliability hardening), **TDA-013** (HA infra), TDA-004's **actual AWS provisioning**, **TDA-016** (mobile).
+
+### Sprint S1 — Identity & Tenancy  *(MVP)* ✅ Done
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
 | **TDA-001** | Multi-tenant data model & migration | — | ✅ Done (merged c6defef; fresh-start on new DB `td_saas`) |
-| **TDA-002** | Auth: signup/login, JWT access+refresh, email verify, reset, optional MFA | TDA-001 | Not started |
-| **TDA-003** | Tenant isolation: `TenantGuard` + Prisma auto-scoping, RBAC | TDA-001, TDA-002 | Not started |
+| **TDA-002** | Auth: signup/login, JWT access+refresh, email verify, reset, optional MFA | TDA-001 | ✅ Done (merged; debt-lane + resend-verification/hardening ba733a8) |
+| **TDA-003** | Tenant isolation: `TenantGuard` + Prisma auto-scoping, RBAC | TDA-001, TDA-002 | ✅ Done (merged to `main`; +TDA-003b build/run remediation — app builds via SWC & boots on `td_saas`) |
 
 **TDA-001 scope:** Add `User` (= tenant), `Subscription { userId, segment INTRADAY|SWING, status, expiresAt }`,
 `AutoTradeConsent`, `AuditLog`, vault shape on `BrokerCredential` (no plaintext fields). Add `userId` to every
@@ -101,12 +103,12 @@ Mobile-ready, stateless.
 `where: { userId }` on tenant-owned models so unscoped queries are structurally impossible; RBAC roles
 `USER`, `ADMIN` (ADMIN runs the engine / sees provenance).
 
-### Sprint S2 — Secrets, Transport & Credential Vault  *(MVP)*
+### Sprint S2 — Secrets, Transport & Credential Vault  *(MVP)* ✅ Done (app layer; AWS provisioning pending)
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-004** | AWS baseline: KMS CMK, Secrets Manager, TLS, kill default key, headers/CORS/rate-limit | — (parallel w/ S1) | Planned (spec+plan 2026-07-01-tda-004) |
-| **TDA-005** | Per-tenant credential vault + envelope encryption; "Connect Angel One" flow | TDA-001, TDA-004 | Planned (spec+plan 2026-07-02-tda-005) |
+| **TDA-004** | AWS baseline: KMS CMK, Secrets Manager, TLS, kill default key, headers/CORS/rate-limit | — (parallel w/ S1) | ✅ Done — app layer (merged 8e4d1ef): helmet/CORS/HTTPS enforce, `SecretsProvider`/`KmsProvider` abstractions (local default, **AWS adapters gated OFF**), per-account Redis rate-limit, boot-config validation. ⚠️ **Actual AWS provisioning still pending** (see §8). |
+| **TDA-005** | Per-tenant credential vault + envelope encryption; "Connect Angel One" flow | TDA-001, TDA-004 | ✅ Done (merged c183d01): DEK-keyed AES-256-GCM field cipher, isolated `CredentialDecryptor` lease, "Connect Angel One" validated-connect UI, KEK re-wrap job |
 
 **TDA-004 scope:** Provision KMS customer master key; move all secrets to AWS Secrets Manager; remove the
 hardcoded `ENCRYPTION_KEY` fallback (`td-automation-default-key-change-me`); enforce TLS on API, AI-engine,
@@ -117,12 +119,12 @@ AES-256-GCM encrypted with that data key; `encDataKey` stored wrapped, `keyVersi
 inside the isolated execution module (sole KMS grant); plaintext used in-memory then zeroized, never logged.
 "Connect Angel One" UX: validate creds via a test login before saving. Key-rotation re-wrap job.
 
-### Sprint S3 — IP Boundary & Product Surface  *(MVP)*
+### Sprint S3 — IP Boundary & Product Surface  *(MVP)* ✅ Done
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
 | **TDA-006** | IP/provenance boundary: outbound DTO allowlist + log redaction | TDA-001 | ✅ Done (merged 7568d03; 55/55 tests; whole-branch review caught+fixed 3 extra leaks) |
-| **TDA-007** | Sanitized Intraday/Swing API + frontend collapse to 2 sections | TDA-006, TDA-003 | Planned (spec + plan `2026-06-29-tda-007-user-surface.md`) — execute AFTER TDA-006 merges |
+| **TDA-007** | Sanitized Intraday/Swing API + frontend collapse to 2 sections | TDA-006, TDA-003 | ✅ Done (merged af98c37): SubscriptionService + me/admin sub endpoints, plan-gated Intraday/Swing surface, no-403-flash on unsubscribed (cbd45f8) |
 
 **TDA-006 scope:** A single sanitizer (shipped as `toPublicEntry()` on the anand Intraday/Swing entries — the
 data-flow diagram above says `toPublicSignalDto()`, but the real symbol is `toPublicEntry()`) is the only
@@ -134,12 +136,12 @@ only via an `ADMIN`-only internal endpoint.
 **TDA-007 scope:** Frontend reduced to **Intraday** and **Swing** sections; all 14-strategy / scanner / rejection
 internals removed from the user-facing app and mobile API. Plan-gated visibility.
 
-### Sprint S4 — Audit & Consent  *(MVP)*
+### Sprint S4 — Audit & Consent  *(MVP)* ✅ Done
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-008** | Tamper-evident, hash-chained audit log | TDA-001 | Planned (spec+plan 2026-07-01-tda-008) |
-| **TDA-009** | Versioned consent & disclaimer gate | TDA-002, TDA-008 | Planned (spec+plan 2026-07-02-tda-009) |
+| **TDA-008** | Tamper-evident, hash-chained audit log | TDA-001 | ✅ Done (merged 3f765ad): `AuditLog` `seq`/`chainKey` schema + forward migration, `AuditService.append`/`verifyChain`, ADMIN audit list/verify/export; `verifyChain('global')` green on live `td_saas` |
+| **TDA-009** | Versioned consent & disclaimer gate | TDA-002, TDA-008 | ✅ Done (merged e134396): content-hash-pinned versioned disclosure, `ConsentGuard`/`@RequiresConsent` seam, Settings consent card |
 
 **TDA-008 scope:** Append-only `AuditLog` where each row stores `hash = H(prevHash + payload)` (tamper-evident).
 Covers auth events, credential access/decrypt, consent changes, every order. `ADMIN`-readable, exportable.
@@ -148,12 +150,12 @@ Covers auth events, credential access/decrypt, consent changes, every order. `AD
 the current version is accepted; version bump forces re-consent. Each acceptance recorded in `AuditLog` with
 timestamp + IP. First-line legal defense for a public auto-trading product.
 
-### Sprint S5 — Signals & Auto-Execution  *(MVP)*
+### Sprint S5 — Signals & Auto-Execution  *(MVP)* ✅ Done
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-010** | Central signal sanitization + fan-out engine | TDA-005, TDA-006 | Planned (spec+plan 2026-07-02-tda-010) |
-| **TDA-011** | Opt-in auto-execution: consent-gated, per-user risk, idempotency, kill switch | TDA-009, TDA-010 | Planned (spec+plan 2026-07-02-tda-011) |
+| **TDA-010** | Central signal sanitization + fan-out engine | TDA-005, TDA-006 | ✅ Done (merged d7d04d3): `PublicSignal` builder + provenance guard, eligibility fan-out (subscribed+connected+auto-on), per-user rate bucket, execute-user worker + retry/DLQ, emitted on anand entry creation |
+| **TDA-011** | Opt-in auto-execution: consent-gated, per-user risk, idempotency, kill switch | TDA-009, TDA-010 | ✅ Done (Phase-1a/b/c merges + Phase-2 pipeline 5db2bd3; **Phase-3 adversarial review fixed 2 confirmed + 1 plausible money-path defects, 459f9c1**). Deferred to TDA-012: per-user cumulative daily-loss gate + kill-switch TOCTOU |
 
 **TDA-010 scope:** Central signal → one `signal.fanout` job → one `execute.user` job per eligible user.
 Per-user Angel One key = independent 10-req/sec bucket. Failure isolation (one user's failure cannot block
@@ -170,12 +172,12 @@ backstops; add per-user `killSwitch` and global `LIVE_TRADING_ENABLED`.
 | **TDA-012** | DB transactions on multi-step trades, idempotency store, exit race fixes | TDA-011 | Not started |
 | **TDA-013** | HA infra: RDS Multi-AZ, ElastiCache, horizontal API scaling | TDA-004 | Not started |
 
-### Sprint S7 — Landing & Billing  *(Harden)*
+### Sprint S7 — Landing & Billing  *(Harden)* ✅ Done
 
 | Spec | Title | Depends on | Status |
 |---|---|---|---|
-| **TDA-014** | Public landing page + signup funnel | TDA-002 | Planned (spec+plan 2026-07-01-tda-014) |
-| **TDA-015** | Billing/subscriptions/payments + plan-gating enforcement | TDA-001, TDA-014 | Planned (spec+plan 2026-07-03-tda-015, Razorpay) |
+| **TDA-014** | Public landing page + signup funnel | TDA-002 | ✅ Done (merged 606e1d6): `/welcome` landing + signup/verify funnel; +Midnight Glass theme/light-dark toggle (301f2af) |
+| **TDA-015** | Billing/subscriptions/payments + plan-gating enforcement | TDA-001, TDA-014 | ✅ Done (Razorpay; frontend merge 9010ea7 + backend merge 505b343): `PaymentProvider` seam + `RazorpayProvider`, checkout + billing-management UI, signature-verified idempotent webhook → `SubscriptionService.grant/revoke`, daily lapse sweep (`expiresAt` authoritative) |
 
 ### Sprint S8 — Mobile  *(Later)*
 
@@ -201,7 +203,7 @@ Critical path to a sellable MVP: **TDA-001 → 005 → 010 → 011** (with 002/0
 
 ---
 
-## 6. Definition of Done — MVP (S1–S5)
+## 6. Definition of Done — MVP (S1–S5) ✅ MET (2026-07-04, paper mode)
 
 A new user can: sign up publicly → verify email → subscribe to Intraday and/or Swing →
 connect their Angel One account (encrypted per-tenant) → accept the consent/disclaimer →
@@ -222,6 +224,14 @@ anywhere; TLS everywhere; tenant data isolation enforced structurally.
 ---
 
 ## 8. Carried-forward follow-ups (from completed sprints)
+
+**Fresh-DB migration deploy blocker — ✅ RESOLVED (`e7fbd31`):** tda001 (creates `users`) was numbered *after* tda002 (FKs to `users`), so `migrate deploy`/`reset` failed on any fresh DB with `relation "users" does not exist`. Foundation renumbered to `20260627105020` (one second before auth); SQL/checksum unchanged; `td_saas` + `td_saas_test` history rows renamed to match. Fresh-DB migrate now clean.
+
+**Remaining before production (post-MVP):**
+- **TDA-012** (reliability) — per-user cumulative daily-loss gate (global RiskManager is not tenant-scoped), kill-switch TOCTOU, DB transactions on multi-step trades, idempotency store.
+- **TDA-004 AWS provisioning** — the app ships local `SecretsProvider`/`KmsProvider` adapters with AWS implementations gated OFF; provision the real KMS CMK / Secrets Manager / RDS / ElastiCache and flip the adapters.
+- **TDA-013** (HA infra) + **TDA-016** (mobile) — not started.
+
 
 **From TDA-002 (auth) — final whole-branch review, non-blocking:**
 - `POST /auth/resend-verification` — specced (§5/§7) but not implemented; an unverified user who loses the email is currently stuck. Small follow-up — implement a throttled public endpoint that re-mints an EMAIL_VERIFY token for a PENDING user (generic response).

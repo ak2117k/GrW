@@ -1406,6 +1406,7 @@ model User {
   refreshTokens      RefreshToken[]
   verificationTokens VerificationToken[]
   billingProfile     BillingProfile?
+  payments          Payment[]
   @@index([status])
   @@map("users")
 }
@@ -1500,6 +1501,33 @@ model WebhookEvent {
   @@unique([provider, eventId])                   // the dedupe key
   @@index([status, receivedAt])
   @@map("webhook_events")
+}
+
+// TDA-017 — per-transaction payment ledger. Tenant-owned (userId). Written by
+// the billing webhook worker (runWithoutTenant, cross-user); read by the user
+// via the tenant-scoped /api/me/billing/payments endpoint. Idempotent on
+// providerPaymentId (a redelivered payment.captured is a no-op upsert).
+model Payment {
+  id                String        @id @default(cuid())
+  userId            String
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  segment           Segment?      // null for account-level charges
+  amount            Int           // minor units (paise)
+  currency          String        @default("INR")
+  status            PaymentStatus
+  providerPaymentId String        @unique  // razorpay payment id — idempotency key
+  providerInvoiceId String?
+  invoiceUrl        String?
+  description       String?
+  createdAt         DateTime      @default(now())
+  @@index([userId, createdAt])
+  @@map("payments")
+}
+
+enum PaymentStatus {
+  CAPTURED
+  FAILED
+  REFUNDED
 }
 
 model AutoTradeConsent {

@@ -35,6 +35,11 @@ export interface UserSmartApiLike {
   generateSession(clientId: string, password: string, totp: string): Promise<any>;
   placeOrder(params: Record<string, string>): Promise<any>;
   logout(clientId: string): Promise<any>;
+  // Read-only account surface (TDA-017 overview). Names match the installed
+  // smartapi-javascript@1.0.27 client exactly (get_rms / get_profile / get_position).
+  getRMS(): Promise<any>;
+  getProfile(): Promise<any>;
+  getPosition(): Promise<any>;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -58,6 +63,17 @@ export interface UserBrokerSession {
    * broker-side idempotency dedupe (spec §5).
    */
   placeOrder(order: OrderRequest, orderTag?: string): Promise<OrderResponse>;
+
+  /**
+   * Read-only account reads on this user's own Angel One account, used by the
+   * TDA-017 sanitized overview. Each returns the RAW broker `data` payload (the
+   * service layer is responsible for sanitizing it into safe fields). Like every
+   * other call on this session they are guarded against use after disposal and
+   * bounded by {@link BROKER_CALL_TIMEOUT_MS}.
+   */
+  getFunds(): Promise<any>;
+  getProfile(): Promise<any>;
+  getPositions(): Promise<any>;
 }
 
 /** Map our generic order types to Angel One SmartAPI order-type strings. */
@@ -174,6 +190,38 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
       this.logger.error(`Failed to place per-user order: ${msg}`);
       return { orderId: '', status: 'FAILED', message: msg };
     }
+  }
+
+  /**
+   * Fetch this user's RMS funds/margin. Returns the RAW broker `data` (or null);
+   * the service sanitizes. Same disposed-guard + timeout as `placeOrder`.
+   */
+  async getFunds(): Promise<any> {
+    return this.read(() => this.client.getRMS(), 'Angel One getRMS');
+  }
+
+  /** Fetch this user's profile. Returns the RAW broker `data` (or null). */
+  async getProfile(): Promise<any> {
+    return this.read(() => this.client.getProfile(), 'Angel One getProfile');
+  }
+
+  /** Fetch this user's open positions. Returns the RAW broker `data` (or null). */
+  async getPositions(): Promise<any> {
+    return this.read(() => this.client.getPosition(), 'Angel One getPosition');
+  }
+
+  /**
+   * Shared read helper: reject if the session was disposed, run the broker call
+   * under the wall-clock cap, and return only its `data` envelope up to the
+   * caller. Read faults propagate (unlike `placeOrder`, which maps to a response)
+   * — the overview service turns them into an HTTP error, never a partial leak.
+   */
+  private async read(call: () => Promise<any>, label: string): Promise<any> {
+    if (this.disposed) {
+      throw new Error('UserBrokerSession has been disposed and can no longer be read');
+    }
+    const response = await withTimeout(call(), BROKER_CALL_TIMEOUT_MS, label);
+    return response?.data ?? null;
   }
 
   /** Mark the session unusable. Called by the factory in `finally`. */

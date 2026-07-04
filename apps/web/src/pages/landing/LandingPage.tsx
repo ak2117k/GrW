@@ -11,6 +11,7 @@ import {
 import { landingContent } from './landingContent';
 import { MarketCanvas } from '@/components/landing/MarketCanvas';
 import { ThemeToggle } from '@/components/common';
+import { ParallaxHero, TiltCard } from '@/components/depth';
 
 const SEGMENT_ICON = {
   Intraday: Zap,
@@ -54,8 +55,10 @@ export default function LandingPage() {
 
       {/* Hero — the living market */}
       <section className="relative overflow-hidden">
-        <div className="glow glow-cyan animate-drift -left-32 -top-24 h-80 w-80" />
-        <div className="glow glow-violet animate-drift -right-24 top-40 h-96 w-96" />
+        <ParallaxHero>
+          {/* Background decorative glows — deepest layer */}
+          <div data-depth="0.3" className="glow glow-cyan animate-drift -left-32 -top-24 h-80 w-80" />
+          <div data-depth="0.3" className="glow glow-violet animate-drift -right-24 top-40 h-96 w-96" />
 
         <div className="relative z-10 mx-auto grid max-w-6xl items-center gap-12 px-4 py-16 lg:grid-cols-[1.05fr_1fr] lg:py-24">
           <div>
@@ -91,8 +94,8 @@ export default function LandingPage() {
             </div>
           </div>
 
-          {/* Live market panel */}
-          <div className="glass rounded-2xl p-3 shadow-2xl">
+          {/* Live market panel — mid parallax layer */}
+          <div data-depth="0.15" className="glass rounded-2xl p-3 shadow-2xl">
             <div className="flex items-center justify-between px-2 pb-2">
               <span className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
                 <span className="h-2 w-2 animate-pulse-dot rounded-full bg-[var(--color-accent-green)]" />
@@ -121,6 +124,7 @@ export default function LandingPage() {
             </div>
           </div>
         </div>
+        </ParallaxHero>
       </section>
 
       {/* Value props */}
@@ -129,7 +133,8 @@ export default function LandingPage() {
           {valueProps.map((prop) => {
             const Icon = SEGMENT_ICON[prop.segment];
             return (
-              <div key={prop.segment} className="glass rounded-2xl p-6">
+              <TiltCard key={prop.segment} maxTiltDeg={6}>
+                <div className="glass depth-card depth-rise rounded-2xl p-6">
                 <div className="flex items-center gap-3">
                   <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--color-accent-blue)]/12 text-[var(--color-accent-blue)]">
                     <Icon size={20} />
@@ -147,7 +152,8 @@ export default function LandingPage() {
                     </li>
                   ))}
                 </ul>
-              </div>
+                </div>
+              </TiltCard>
             );
           })}
         </div>

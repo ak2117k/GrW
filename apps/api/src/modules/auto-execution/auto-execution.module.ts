@@ -4,9 +4,11 @@ import { CredentialVaultModule } from '../credential-vault/credential-vault.modu
 import { TradeEngineModule } from '../trade-engine/trade-engine.module';
 import { AUTO_EXECUTION_PORT } from '../signal-fanout';
 import { AutoExecutionService } from './services/auto-execution.service';
+import { AutoExecSettingsService } from './services/auto-exec-settings.service';
 import { AutoTradeRiskSizingService } from './services/auto-trade-risk-sizing.service';
 import { ExecutionClaimService } from './services/execution-claim.service';
 import { PerUserBrokerSessionFactory } from './services/per-user-broker-session.factory';
+import { MeAutoExecController } from './controllers/me-auto-exec.controller';
 
 /**
  * TDA-011 auto-execution pipeline (Phase 2).
@@ -28,13 +30,15 @@ import { PerUserBrokerSessionFactory } from './services/per-user-broker-session.
 @Global()
 @Module({
   imports: [SubscriptionModule, CredentialVaultModule, TradeEngineModule],
+  controllers: [MeAutoExecController],
   providers: [
     AutoExecutionService,
+    AutoExecSettingsService,
     AutoTradeRiskSizingService,
     ExecutionClaimService,
     PerUserBrokerSessionFactory,
     { provide: AUTO_EXECUTION_PORT, useExisting: AutoExecutionService },
   ],
-  exports: [AUTO_EXECUTION_PORT],
+  exports: [AUTO_EXECUTION_PORT, AutoExecSettingsService],
 })
 export class AutoExecutionModule {}

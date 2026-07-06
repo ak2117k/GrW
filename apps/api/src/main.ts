@@ -5,7 +5,6 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger, INestApplication } from '@nestjs/common';
 import { IoAdapter } from '@nestjs/platform-socket.io';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters';
@@ -85,8 +84,10 @@ async function bootstrap(): Promise<void> {
   // payload. Additive: normal parsed-body routes are unaffected.
   const app = await NestFactory.create(AppModule, { rawBody: true });
 
-  const configService = app.get(ConfigService);
-  const port = configService.get<number>('app.port', 3001);
+  // Host-agnostic port binding: PaaS hosts (Render/Railway/Fly) inject PORT and
+  // require binding all interfaces (0.0.0.0). Fall back to API_PORT (local dev),
+  // then 4101. See docs/deploy/FREE-DEPLOY-RUNBOOK.md.
+  const port = Number(process.env.PORT ?? process.env.API_PORT ?? 4101);
 
   // Transport hardening: helmet + fail-closed CORS + trust proxy + HTTPS enforcement.
   applyHttpHardening(app);
@@ -118,8 +119,8 @@ async function bootstrap(): Promise<void> {
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, document);
 
-  await app.listen(port);
-  logger.log(`GrW API running on http://localhost:${port}`);
+  await app.listen(port, '0.0.0.0');
+  logger.log(`GrW API running on http://0.0.0.0:${port}`);
   logger.log(`Swagger docs available at http://localhost:${port}/api/docs`);
 }
 

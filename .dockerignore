@@ -1,0 +1,42 @@
+# Keep the build context small and deterministic. node_modules and dist are
+# rebuilt inside the image; secrets and local tooling must never ship.
+
+# Dependencies + build outputs (regenerated in-image)
+**/node_modules
+**/dist
+**/.turbo
+.pnpm-store
+
+# Git + VCS
+.git
+.gitignore
+
+# Secrets / local env — NEVER copy into the image (config comes from host env)
+.env
+.env.*
+!.env.production.example
+**/.env
+**/.env.*
+
+# Claude / superpowers / agent tooling
+.claude
+.superpowers
+.husky
+
+# Tests / e2e / coverage artifacts
+**/coverage
+**/playwright-report
+**/test-results
+**/.playwright
+tests/e2e
+
+# Logs + editor + OS cruft
+*.log
+**/*.log
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Docs (not needed at runtime)
+docs

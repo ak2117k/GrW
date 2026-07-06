@@ -712,8 +712,10 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       const redisHost = this.configService.get<string>('redis.host', 'localhost');
       const redisPort = this.configService.get<number>('redis.port', 6379);
       const redisPassword = this.configService.get<string>('redis.password') || undefined;
+      // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
+      const redisTls = this.configService.get<Record<string, never> | undefined>('redis.tls');
 
-      const redisOptions = { host: redisHost, port: redisPort, password: redisPassword };
+      const redisOptions = { host: redisHost, port: redisPort, password: redisPassword, tls: redisTls };
 
       this.redisPub = new Redis(redisOptions);
       this.redisSub = new Redis(redisOptions);

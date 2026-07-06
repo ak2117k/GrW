@@ -57,6 +57,8 @@ import { AutoExecutionModule } from './modules/auto-execution/auto-execution.mod
           host: config.get<string>('redis.host'),
           port: config.get<number>('redis.port'),
           password: config.get<string>('redis.password') || undefined,
+          // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
+          tls: config.get<Record<string, never> | undefined>('redis.tls'),
         },
       }),
     }),

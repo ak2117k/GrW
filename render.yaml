@@ -1,0 +1,75 @@
+# Render Blueprint — free-tier GrW API (paper mode).
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy: Render Dashboard -> New -> Blueprint -> connect github.com/ak2117k/GrW
+# (branch main). Render reads this file, builds apps/api/Dockerfile from the repo
+# root, and prompts for every `sync: false` secret. See
+# docs/deploy/FREE-DEPLOY-RUNBOOK.md for the full walkthrough.
+services:
+  - type: web
+    name: grw-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./apps/api/Dockerfile
+    dockerContext: .
+    branch: main
+    # GET /api/docs serves Swagger UI (HTTP 200). The app has no dedicated
+    # /health route, and Swagger is always mounted, so it is a valid liveness
+    # probe. Render also needs the app to bind 0.0.0.0:$PORT (handled in main.ts).
+    healthCheckPath: /api/docs
+    autoDeploy: true
+    envVars:
+      # --- Runtime mode ---
+      - key: NODE_ENV
+        value: production
+      - key: PAPER_TRADING
+        value: "true"
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+      - key: BILLING_PROVIDER
+        value: fake
+      - key: LIVE_BILLING_ENABLED
+        value: "false"
+
+      # --- Secrets (entered in the Render dashboard; never committed) ---
+      # 32+ char random string. node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
+      - key: JWT_SECRET
+        sync: false
+      # MUST be >= 32 chars in production (validate-boot-config asserts it) and
+      # must NOT be the public default sentinel. Same generator as above.
+      - key: ENCRYPTION_KEY
+        sync: false
+      # Neon POOLED connection string. MUST contain sslmode=require (prod boot
+      # check rejects it otherwise). e.g.
+      # postgresql://user:pass@ep-xxx-pooler.<region>.aws.neon.tech/neondb?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+
+      # --- CORS (fail-closed): the Cloudflare Pages origin, no trailing slash ---
+      # Login and every browser call 500 / are blocked if this is wrong.
+      # e.g. https://grw.pages.dev  (comma-separate to allow more than one)
+      - key: WEB_ORIGIN
+        sync: false
+
+      # --- Redis (Upstash) ---
+      # Prod boot requires REDIS_TLS=true and REDIS_THROTTLER=true.
+      # NOTE: the app reads REDIS_HOST/REDIS_PORT/REDIS_PASSWORD (NOT REDIS_URL).
+      # With REDIS_TLS=true all ioredis clients attach a TLS socket (Upstash is
+      # TLS-only), via the shared redis.tls config.
+      - key: REDIS_TLS
+        value: "true"
+      - key: REDIS_THROTTLER
+        value: "true"
+      - key: REDIS_HOST
+        sync: false
+      - key: REDIS_PORT
+        value: "6379"
+      - key: REDIS_PASSWORD
+        sync: false
+
+      # --- AI engine ---
+      # Prod boot requires an https URL even though the free stack ships no AI
+      # sidecar (paper mode never calls it). A placeholder https URL satisfies
+      # the check; calls will simply fail closed if anything ever hits it.
+      - key: AI_ENGINE_URL
+        value: https://ai-engine.invalid

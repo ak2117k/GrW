@@ -8,7 +8,7 @@
   // Deploy: the connected Cloudflare project runs `npx wrangler deploy` from the
   // repo root after the build command produces apps/web/dist. See
   // docs/deploy/FREE-DEPLOY-RUNBOOK.md.
-  "name": "grw-web",
+  "name": "grw",
   "compatibility_date": "2025-06-01",
   "main": "worker/index.js",
   "assets": {

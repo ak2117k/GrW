@@ -108,7 +108,7 @@ in `worker/index.js` (`API_ORIGIN`) — update it there if the API URL changes.
    - **Deploy command**: `npx wrangler deploy` (the default; it reads `wrangler.jsonc`)
    - **Root directory**: `/` (repo root — the build needs the workspace + `@td/shared`, and `wrangler.jsonc` is at the root)
 3. Set env var `NODE_VERSION=22` so the build uses a Node matching the lockfile.
-4. Deploy. Copy the Worker URL, e.g. `https://grw-web.<subdomain>.workers.dev`.
+4. Deploy. Copy the Worker URL, e.g. `https://grw.<subdomain>.workers.dev`.
 
 > Why a Worker and not Pages `_redirects`? The React client (`apps/web/src/services/api.ts`) uses a **relative** axios `baseURL: '/api'` and a bare `'/auth/refresh'` — no env-driven base URL to override without a code change. Pages `_redirects` 200-rewrites are **same-site only** (they cannot proxy to Render). A Worker CAN proxy externally, so `worker/index.js` forwards `/api` + `/auth` to Render while `run_worker_first` scopes the Worker to just those paths; all other paths serve the static SPA directly, with `not_found_handling: single-page-application` giving the client-route fallback.
 
@@ -116,7 +116,7 @@ in `worker/index.js` (`API_ORIGIN`) — update it there if the API URL changes.
 
 ## Step 5 — Point CORS at the Worker URL, redeploy API
 
-1. Render → `grw-api` → **Environment** → set `WEB_ORIGIN` to the exact Worker URL from Step 4 (e.g. `https://grw-web.<subdomain>.workers.dev`), **no trailing slash**.
+1. Render → `grw-api` → **Environment** → set `WEB_ORIGIN` to the exact Worker URL from Step 4 (e.g. `https://grw.<subdomain>.workers.dev`), **no trailing slash**.
 2. Save → Render redeploys automatically.
 
 > `WEB_ORIGIN` is a **fail-closed** CORS allowlist. The browser talks to the Worker (same-origin), but the Worker forwards the browser's `Origin` header to Render on `/api`+`/auth` calls, so it must exactly match the Worker URL or authenticated calls are rejected.

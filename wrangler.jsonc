@@ -1,0 +1,24 @@
+{
+  // Cloudflare Worker that serves the GrW SPA (static assets) AND proxies API
+  // calls to the Render backend server-side, so the browser makes only
+  // same-origin requests (no CORS). Cloudflare Pages _redirects CANNOT proxy to
+  // an external origin (200 rewrites are same-site only), which is why this is a
+  // Worker-with-assets, not a plain Pages static site.
+  //
+  // Deploy: the connected Cloudflare project runs `npx wrangler deploy` from the
+  // repo root after the build command produces apps/web/dist. See
+  // docs/deploy/FREE-DEPLOY-RUNBOOK.md.
+  "name": "grw-web",
+  "compatibility_date": "2025-06-01",
+  "main": "worker/index.js",
+  "assets": {
+    "directory": "apps/web/dist",
+    "binding": "ASSETS",
+    // Serve index.html for unknown paths so react-router client routes
+    // (/login, /dashboard, ...) resolve on hard refresh.
+    "not_found_handling": "single-page-application",
+    // Run the Worker (proxy) ONLY for these paths; everything else is served
+    // directly from the static assets with no Worker invocation.
+    "run_worker_first": ["/api/*", "/auth/*"]
+  }
+}

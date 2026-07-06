@@ -92,28 +92,34 @@ New → **Web Service** → the repo → Runtime **Docker**, Dockerfile path `./
 
 ---
 
-## Step 4 — Cloudflare Pages (Web)
+## Step 4 — Cloudflare Worker + static assets (Web)
 
-1. Before connecting, edit `apps/web/public/_redirects` and replace the placeholder host `https://grw-api.onrender.com` with **your** Render API origin from Step 3 (both `/api/*` and `/auth/*` lines). Commit + push.
-2. Cloudflare Dashboard → **Workers & Pages** → **Create** → **Pages** → **Connect to Git** → select the repo → branch `main`.
-3. Build settings:
-   - **Framework preset**: Vite (or None)
+The frontend deploys as a **Cloudflare Worker with static assets** (NOT plain Pages):
+the Worker serves the SPA and **proxies `/api` + `/auth` to Render server-side**.
+This is required because Cloudflare Pages `_redirects` **cannot proxy (200) to an
+external origin** — so a static-only Pages site can't forward API calls to Render.
+The proxy keeps every browser call same-origin (no CORS). Config lives in
+`wrangler.jsonc` + `worker/index.js` (committed); the Render origin is hard-coded
+in `worker/index.js` (`API_ORIGIN`) — update it there if the API URL changes.
+
+1. Cloudflare Dashboard → **Workers & Pages** → **Create** → **Workers** → **Connect to Git** (a.k.a. "Import a repository") → select the repo → branch `main`.
+2. Build settings:
    - **Build command**: `corepack enable && pnpm install --frozen-lockfile && pnpm --filter @td/shared build && pnpm --filter @td/web build`
-   - **Build output directory**: `apps/web/dist`
-   - **Root directory**: `/` (repo root — the build needs the workspace + `@td/shared`)
-4. (Optional) Set env var `NODE_VERSION=22` under the Pages project settings if the build picks an older Node.
-5. Deploy. Copy the Pages URL, e.g. `https://grw.pages.dev`.
+   - **Deploy command**: `npx wrangler deploy` (the default; it reads `wrangler.jsonc`)
+   - **Root directory**: `/` (repo root — the build needs the workspace + `@td/shared`, and `wrangler.jsonc` is at the root)
+3. Set env var `NODE_VERSION=22` so the build uses a Node matching the lockfile.
+4. Deploy. Copy the Worker URL, e.g. `https://grw-web.<subdomain>.workers.dev`.
 
-> Why `_redirects` and not `VITE_API_URL`? The API client (`apps/web/src/services/api.ts`) uses a **relative** axios `baseURL: '/api'` and a bare `'/auth/refresh'` — there is no env-driven base URL to override without a code change. `_redirects` proxies those same-origin paths to Render at the edge, so the SPA needs zero code changes and browsers make no cross-origin (CORS-preflighted) calls.
+> Why a Worker and not Pages `_redirects`? The React client (`apps/web/src/services/api.ts`) uses a **relative** axios `baseURL: '/api'` and a bare `'/auth/refresh'` — no env-driven base URL to override without a code change. Pages `_redirects` 200-rewrites are **same-site only** (they cannot proxy to Render). A Worker CAN proxy externally, so `worker/index.js` forwards `/api` + `/auth` to Render while `run_worker_first` scopes the Worker to just those paths; all other paths serve the static SPA directly, with `not_found_handling: single-page-application` giving the client-route fallback.
 
 ---
 
-## Step 5 — Point CORS at Pages, redeploy API
+## Step 5 — Point CORS at the Worker URL, redeploy API
 
-1. Render → `grw-api` → **Environment** → set `WEB_ORIGIN` to the exact Pages URL from Step 4 (e.g. `https://grw.pages.dev`), **no trailing slash**.
+1. Render → `grw-api` → **Environment** → set `WEB_ORIGIN` to the exact Worker URL from Step 4 (e.g. `https://grw-web.<subdomain>.workers.dev`), **no trailing slash**.
 2. Save → Render redeploys automatically.
 
-> `WEB_ORIGIN` is a **fail-closed** CORS allowlist. If it does not exactly match the browser origin, authenticated calls (including login) are rejected.
+> `WEB_ORIGIN` is a **fail-closed** CORS allowlist. The browser talks to the Worker (same-origin), but the Worker forwards the browser's `Origin` header to Render on `/api`+`/auth` calls, so it must exactly match the Worker URL or authenticated calls are rejected.
 
 ---
 

@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, Logger } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule, JwtService } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -83,15 +83,22 @@ import { JwtStrategy } from './strategies/jwt.strategy';
         if (!redisThrottlerEnabled()) return new MemoryRateLimitStore();
         // Lazy require keeps ioredis out of the dev/test path entirely.
         const Redis = require('ioredis');
-        return new RedisRateLimitStore(
-          new Redis({
-            host: process.env.REDIS_HOST || 'localhost',
-            port: parseInt(process.env.REDIS_PORT || '6379', 10),
-            password: process.env.REDIS_PASSWORD || undefined,
-            // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
-            tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
-          }),
+        const client = new Redis({
+          host: process.env.REDIS_HOST || 'localhost',
+          port: parseInt(process.env.REDIS_PORT || '6379', 10),
+          password: process.env.REDIS_PASSWORD || undefined,
+          // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
+          tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
+          // Force IPv4 to avoid AAAA-lookup ENOTFOUND on container networks.
+          family: 4,
+        });
+        // Attach an error handler so a transient connection error is logged and
+        // retried by ioredis, not surfaced as "[ioredis] Unhandled error event"
+        // (and never allowed to crash the process on an unhandled 'error').
+        client.on('error', (err: Error) =>
+          new Logger('RateLimitRedis').warn(`Redis error: ${err.message}`),
         );
+        return new RedisRateLimitStore(client);
       },
     },
     AccountRateLimitGuard,

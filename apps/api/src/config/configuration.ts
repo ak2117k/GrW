@@ -17,6 +17,11 @@ export default () => ({
     // (servername) from host. Shared by Bull, market-feed pub/sub, and the
     // rate-limit store so every Redis consumer connects the same way.
     tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
+    // Force IPv4. Managed Redis (Upstash) publishes only A records; on some
+    // container networks ioredis's default dual-stack lookup stalls on the AAAA
+    // (IPv6) query and surfaces as `getaddrinfo ENOTFOUND` at boot. family: 4
+    // skips IPv6 resolution entirely.
+    family: 4,
   },
   rateLimit: {
     ttl: +(process.env.GLOBAL_RATE_TTL || 60000),

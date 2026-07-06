@@ -17,18 +17,30 @@ export class WatchRescoreWorker implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    const repeatables = await this.queue.getRepeatableJobs();
-    for (const r of repeatables) {
-      if (r.name === RESCORE_JOB_NAME) {
-        await this.queue.removeRepeatableByKey(r.key);
+    // Redis may be briefly unreachable at boot (e.g. a cold DNS resolver on a
+    // fresh container). These queue ops await Redis; if they reject and escape
+    // onModuleInit, NestJS aborts the ENTIRE app bootstrap → crash loop. Guard
+    // them so a transient Redis hiccup only skips repeatable-job registration
+    // (the app still starts and serves); the job re-registers on the next boot.
+    try {
+      const repeatables = await this.queue.getRepeatableJobs();
+      for (const r of repeatables) {
+        if (r.name === RESCORE_JOB_NAME) {
+          await this.queue.removeRepeatableByKey(r.key);
+        }
       }
+      await this.queue.add(
+        RESCORE_JOB_NAME,
+        {},
+        { repeat: { every: RESCORE_EVERY_MS }, removeOnComplete: true, removeOnFail: true },
+      );
+      this.logger.log(`Registered watch-rescore repeating job (every ${RESCORE_EVERY_MS}ms)`);
+    } catch (err) {
+      this.logger.error(
+        `Could not register watch-rescore repeating job (Redis unavailable at boot?): ` +
+        `${err instanceof Error ? err.message : err}. App will start without it.`,
+      );
     }
-    await this.queue.add(
-      RESCORE_JOB_NAME,
-      {},
-      { repeat: { every: RESCORE_EVERY_MS }, removeOnComplete: true, removeOnFail: true },
-    );
-    this.logger.log(`Registered watch-rescore repeating job (every ${RESCORE_EVERY_MS}ms)`);
   }
 
   @OnQueueActive()

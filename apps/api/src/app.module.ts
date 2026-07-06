@@ -59,6 +59,8 @@ import { AutoExecutionModule } from './modules/auto-execution/auto-execution.mod
           password: config.get<string>('redis.password') || undefined,
           // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
           tls: config.get<Record<string, never> | undefined>('redis.tls'),
+          // Force IPv4 to avoid AAAA-lookup ENOTFOUND on container networks.
+          family: config.get<number>('redis.family'),
         },
       }),
     }),

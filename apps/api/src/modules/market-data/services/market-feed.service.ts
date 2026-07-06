@@ -714,8 +714,10 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       const redisPassword = this.configService.get<string>('redis.password') || undefined;
       // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
       const redisTls = this.configService.get<Record<string, never> | undefined>('redis.tls');
+      // Force IPv4 to avoid AAAA-lookup ENOTFOUND on container networks.
+      const redisFamily = this.configService.get<number>('redis.family');
 
-      const redisOptions = { host: redisHost, port: redisPort, password: redisPassword, tls: redisTls };
+      const redisOptions = { host: redisHost, port: redisPort, password: redisPassword, tls: redisTls, family: redisFamily };
 
       this.redisPub = new Redis(redisOptions);
       this.redisSub = new Redis(redisOptions);

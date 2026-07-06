@@ -89,8 +89,8 @@ import { JwtStrategy } from './strategies/jwt.strategy';
           password: process.env.REDIS_PASSWORD || undefined,
           // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
           tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
-          // Force IPv4 to avoid AAAA-lookup ENOTFOUND on container networks.
-          family: 4,
+          // Optional IP family override (default dual-stack). See configuration.ts.
+          family: process.env.REDIS_FAMILY ? parseInt(process.env.REDIS_FAMILY, 10) : undefined,
           // Fail FAST when Redis is down so the guard's fail-open is instant
           // rather than blocking the request ~20-40s on ioredis retries:
           // reject commands immediately instead of queueing them offline, and

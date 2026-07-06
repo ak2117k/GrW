@@ -28,7 +28,12 @@ export function validateBootConfig(env: NodeJS.ProcessEnv = process.env): void {
     if (env.DATABASE_URL && !/sslmode=(require|verify-full|verify-ca)/.test(env.DATABASE_URL))
       fail.push('DATABASE_URL must enforce TLS (sslmode=require) in production');
     if (!/^https:\/\//.test(env.AI_ENGINE_URL ?? '')) fail.push('AI_ENGINE_URL must be https in production');
-    if (env.REDIS_TLS !== 'true') fail.push('REDIS_TLS must be "true" in production (ElastiCache in-transit encryption)');
+    // Require in-transit encryption for external managed Redis (Upstash/
+    // ElastiCache). Explicit opt-out for a trusted PRIVATE-network Redis whose
+    // traffic never leaves the provider's network (e.g. Render Key Value's
+    // internal endpoint), where TLS is unnecessary and often unsupported.
+    if (env.REDIS_TLS !== 'true' && env.REDIS_ALLOW_PLAINTEXT !== 'true')
+      fail.push('REDIS_TLS must be "true" in production (in-transit encryption), or set REDIS_ALLOW_PLAINTEXT=true for a trusted private-network Redis (e.g. Render Key Value internal endpoint)');
     if (env.REDIS_THROTTLER !== 'true') fail.push('REDIS_THROTTLER must be "true" in production (durable cross-replica limits)');
   }
   if (fail.length) throw new BootConfigError(fail);

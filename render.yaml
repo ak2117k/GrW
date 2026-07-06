@@ -59,12 +59,18 @@ services:
       - key: WEB_ORIGIN
         sync: false
 
-      # --- Redis (Upstash) ---
-      # Prod boot requires REDIS_TLS=true and REDIS_THROTTLER=true.
-      # NOTE: the app reads REDIS_HOST/REDIS_PORT/REDIS_PASSWORD (NOT REDIS_URL).
-      # With REDIS_TLS=true all ioredis clients attach a TLS socket (Upstash is
-      # TLS-only), via the shared redis.tls config.
+      # --- Redis (Render Key Value, INTERNAL endpoint) ---
+      # The app reads REDIS_HOST/REDIS_PORT/REDIS_PASSWORD (NOT REDIS_URL).
+      # Use Render Key Value's INTERNAL connection: it lives on Render's private
+      # network so it always resolves (external Upstash did NOT resolve from
+      # Render — getaddrinfo ENOTFOUND). Internal traffic is plaintext, so
+      # REDIS_TLS=false + REDIS_ALLOW_PLAINTEXT=true (acknowledges the private-net
+      # tradeoff; boot otherwise requires TLS). Leave REDIS_FAMILY unset — the
+      # private network may be IPv6, so do NOT force IPv4.
+      # (For an external TLS Redis instead: REDIS_TLS=true, drop ALLOW_PLAINTEXT.)
       - key: REDIS_TLS
+        value: "false"
+      - key: REDIS_ALLOW_PLAINTEXT
         value: "true"
       - key: REDIS_THROTTLER
         value: "true"

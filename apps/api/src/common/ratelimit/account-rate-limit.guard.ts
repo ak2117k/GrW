@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import {
@@ -28,6 +29,8 @@ import { RATE_LIMIT_STORE, RateLimitStore } from './rate-limit-store.interface';
  */
 @Injectable()
 export class AccountRateLimitGuard implements CanActivate {
+  private readonly logger = new Logger(AccountRateLimitGuard.name);
+
   constructor(
     private readonly reflector: Reflector,
     @Inject(RATE_LIMIT_STORE) private readonly store: RateLimitStore,
@@ -47,7 +50,24 @@ export class AccountRateLimitGuard implements CanActivate {
     if (!email) return true; // body validation will 400; nothing to key on
 
     const route = req.route?.path ?? req.url;
-    const { count } = await this.store.hit(`acct:${route}:${email}`, opts.ttl);
+
+    // FAIL OPEN: a rate-limiter is a protective control, so if the store itself
+    // is unavailable (e.g. Redis unreachable) we must NOT take auth down with it.
+    // The Redis-backed store's ioredis calls reject when Redis is down; swallow
+    // that and allow the request (brute-force protection is degraded until the
+    // store recovers). MemoryRateLimitStore never throws, so this only trips for
+    // the Redis path.
+    let count: number;
+    try {
+      ({ count } = await this.store.hit(`acct:${route}:${email}`, opts.ttl));
+    } catch (err) {
+      this.logger.warn(
+        `Rate-limit store unavailable — failing open for ${route}: ` +
+        `${err instanceof Error ? err.message : err}`,
+      );
+      return true;
+    }
+
     if (count > opts.limit) {
       throw new HttpException(
         'Too many attempts for this account. Try again later.',

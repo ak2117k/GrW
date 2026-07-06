@@ -91,6 +91,14 @@ import { JwtStrategy } from './strategies/jwt.strategy';
           tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
           // Force IPv4 to avoid AAAA-lookup ENOTFOUND on container networks.
           family: 4,
+          // Fail FAST when Redis is down so the guard's fail-open is instant
+          // rather than blocking the request ~20-40s on ioredis retries:
+          // reject commands immediately instead of queueing them offline, and
+          // cap retries. Rate limiting degrades gracefully (fail-open); it must
+          // never add tens of seconds of latency to every login.
+          maxRetriesPerRequest: 1,
+          enableOfflineQueue: false,
+          connectTimeout: 3000,
         });
         // Attach an error handler so a transient connection error is logged and
         // retried by ioredis, not surfaced as "[ioredis] Unhandled error event"

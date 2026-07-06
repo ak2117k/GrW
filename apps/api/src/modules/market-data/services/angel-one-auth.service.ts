@@ -31,10 +31,14 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   private static readonly TOKEN_REFRESH_BUFFER_MS = 60 * 60 * 1000;
 
   constructor(private readonly configService: ConfigService) {
-    this.apiKey = this.configService.getOrThrow<string>('ANGEL_ONE_API_KEY');
-    this.clientId = this.configService.getOrThrow<string>('ANGEL_ONE_CLIENT_ID');
-    this.password = this.configService.getOrThrow<string>('ANGEL_ONE_PASSWORD');
-    this.totpSecret = this.configService.getOrThrow<string>('ANGEL_ONE_TOTP_SECRET');
+    // Angel One env creds are OPTIONAL (paper mode / SaaS uses per-user encrypted
+    // creds entered in-app, not a global boot secret). Default to the same
+    // placeholders onModuleInit checks for, so a deploy without these vars skips
+    // auto-login gracefully instead of crashing the whole app at construction.
+    this.apiKey = this.configService.get<string>('ANGEL_ONE_API_KEY', 'your_api_key_here');
+    this.clientId = this.configService.get<string>('ANGEL_ONE_CLIENT_ID', 'your_client_id_here');
+    this.password = this.configService.get<string>('ANGEL_ONE_PASSWORD', '');
+    this.totpSecret = this.configService.get<string>('ANGEL_ONE_TOTP_SECRET', '');
 
     this.smartApi = new SmartAPI({ api_key: this.apiKey });
   }

@@ -10,6 +10,13 @@ export default () => ({
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379', 10),
     password: process.env.REDIS_PASSWORD || undefined,
+    // TLS-only managed Redis (Upstash / ElastiCache in-transit) needs an actual
+    // tls socket on the ioredis client. Presence of a tls object enables it;
+    // undefined leaves plain TCP for local/dev. validate-boot-config asserts
+    // REDIS_TLS==='true' in production. `{}` is enough — ioredis derives SNI
+    // (servername) from host. Shared by Bull, market-feed pub/sub, and the
+    // rate-limit store so every Redis consumer connects the same way.
+    tls: process.env.REDIS_TLS === 'true' ? {} : undefined,
   },
   rateLimit: {
     ttl: +(process.env.GLOBAL_RATE_TTL || 60000),

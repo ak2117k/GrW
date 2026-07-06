@@ -44,6 +44,12 @@ services:
       # postgresql://user:pass@ep-xxx-pooler.<region>.aws.neon.tech/neondb?sslmode=require
       - key: DATABASE_URL
         sync: false
+      # Neon DIRECT (unpooled) string — same value as DATABASE_URL but with the
+      # host WITHOUT `-pooler`. Prisma Migrate uses this; migrate deploy HANGS on
+      # the pooled PgBouncer endpoint (advisory lock). Keep sslmode=require.
+      # postgresql://user:pass@ep-xxx.<region>.aws.neon.tech/neondb?sslmode=require
+      - key: DIRECT_URL
+        sync: false
 
       # --- CORS (fail-closed): the Cloudflare Pages origin, no trailing slash ---
       # Login and every browser call 500 / are blocked if this is wrong.

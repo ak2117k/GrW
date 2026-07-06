@@ -4,7 +4,14 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  // Runtime queries use the POOLED Neon endpoint (many short-lived connections).
   url      = env("DATABASE_URL")
+  // Migrations MUST use a DIRECT (unpooled) connection. Neon's -pooler endpoint
+  // is PgBouncer in transaction mode, where Prisma Migrate's session-level
+  // advisory lock hangs forever. `prisma migrate deploy` uses directUrl; Prisma
+  // Client keeps using url. Set DIRECT_URL to the same Neon string WITHOUT
+  // `-pooler` in the host. See docs/deploy/FREE-DEPLOY-RUNBOOK.md.
+  directUrl = env("DIRECT_URL")
 }
 
 // ============================================

@@ -35,8 +35,13 @@ Everything runs in **paper mode** (`LIVE_TRADING_ENABLED=false`, `PAPER_TRADING=
    postgresql://<user>:<pass>@ep-xxxx-pooler.<region>.aws.neon.tech/neondb?sslmode=require
    ```
 3. Confirm it ends with `?sslmode=require` — the API **refuses to boot in production** without TLS on the DB URL. Save this as your `DATABASE_URL`.
+4. Also grab the **direct (unpooled)** string for migrations: it is the same URL with the host **minus `-pooler`** (toggle Pooled connection **OFF** to see it, or just delete `-pooler` from the host). Save this as your `DIRECT_URL`:
+   ```
+   postgresql://<user>:<pass>@ep-xxxx.<region>.aws.neon.tech/neondb?sslmode=require
+   ```
+   Prisma Migrate uses `DIRECT_URL`; the running app uses the pooled `DATABASE_URL`. Strip `channel_binding=require` from both if Neon appended it — Prisma's engine can choke on it.
 
-> You do **not** run migrations manually. The API container runs `prisma migrate deploy` on every boot (idempotent), so the schema is created the first time Render starts the service.
+> You do **not** run migrations manually. The API container runs `prisma migrate deploy` on every boot (idempotent), so the schema is created the first time Render starts the service. It runs over `DIRECT_URL` because `migrate deploy` **hangs on the pooled `-pooler` endpoint** (PgBouncer transaction mode + Prisma's session advisory lock).
 
 ---
 
@@ -63,7 +68,8 @@ Option A — Blueprint (uses the committed `render.yaml`, recommended):
    | ---------------- | -------------------------------------------------------- |
    | `JWT_SECRET`     | the first generated secret                               |
    | `ENCRYPTION_KEY` | the second generated secret (**≥ 32 chars**)             |
-   | `DATABASE_URL`   | Neon pooled URL from Step 1 (must have `sslmode=require`) |
+   | `DATABASE_URL`   | Neon **pooled** URL from Step 1 (host has `-pooler`, `sslmode=require`) |
+   | `DIRECT_URL`     | Neon **direct** URL from Step 1 (host **without** `-pooler`, `sslmode=require`) — used by Prisma Migrate |
    | `REDIS_HOST`     | Upstash endpoint from Step 2                             |
    | `REDIS_PASSWORD` | Upstash password from Step 2                             |
    | `WEB_ORIGIN`     | **leave as a placeholder for now** (e.g. `https://example.pages.dev`) — you set the real Pages URL in Step 5 |
@@ -127,6 +133,7 @@ Open the Pages URL and walk the paper-mode flow:
 
 - **Login / any API call returns 500 or is CORS-blocked** → `WEB_ORIGIN` on Render doesn't match the Pages origin. It must be the exact scheme+host, no trailing slash, comma-separated if multiple. Fix it and redeploy (Step 5).
 - **API 404 / calls not reaching Render from the browser** → the `_redirects` host still points at the placeholder. Update both `/api/*` and `/auth/*` lines to your Render origin, commit, and let Pages rebuild (Step 4.1).
+- **Deploy hangs after "N migrations found" then Render says "no open ports detected"** → `prisma migrate deploy` is stuck on the **pooled** endpoint. Set `DIRECT_URL` to the Neon **direct** string (host without `-pooler`) so migrations use a real session connection. The datasource's `directUrl` picks it up; the app keeps the pooled `DATABASE_URL`.
 - **App refuses to boot with "Refusing to start — invalid configuration"** → a required prod var is missing/invalid. Common ones: `ENCRYPTION_KEY` shorter than 32 chars, `DATABASE_URL` missing `sslmode=require`, `AI_ENGINE_URL` not `https`, or `REDIS_TLS`/`REDIS_THROTTLER` not exactly `"true"`. The log lists every failure.
 - **Docker build fails on `pnpm install --frozen-lockfile`** → the committed `pnpm-lock.yaml` is out of sync with `package.json`. Regenerate the lockfile locally (`pnpm install`) and commit it, or temporarily switch the Dockerfile install line to `--no-frozen-lockfile`.
 - **Prisma "engine" / "libssl" error at runtime** → OpenSSL missing from the image. The Dockerfile installs `openssl ca-certificates`; confirm that layer built. The Prisma client is generated inside the linux image (no custom `binaryTargets`), which yields the correct engine.

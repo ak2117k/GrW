@@ -40,8 +40,10 @@ services:
       - key: ENCRYPTION_KEY
         sync: false
       # Neon POOLED connection string. MUST contain sslmode=require (prod boot
-      # check rejects it otherwise). e.g.
-      # postgresql://user:pass@ep-xxx-pooler.<region>.aws.neon.tech/neondb?sslmode=require
+      # check rejects it otherwise). APPEND &connect_timeout=30 — Neon free-tier
+      # compute autosuspends, and the first query after idle needs >5s (Prisma's
+      # default) to wake it or it fails P1001. e.g.
+      # postgresql://user:pass@ep-xxx-pooler.<region>.aws.neon.tech/neondb?sslmode=require&connect_timeout=30
       - key: DATABASE_URL
         sync: false
       # Neon DIRECT (unpooled) string — same value as DATABASE_URL but with the

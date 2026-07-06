@@ -40,6 +40,10 @@ RUN pnpm install --frozen-lockfile \
 
 ENV NODE_ENV=production
 
-# On boot: apply any pending migrations against DATABASE_URL, then start the API.
-# `migrate deploy` is idempotent — safe to run on every container start.
-CMD ["sh", "-c", "npx prisma migrate deploy --schema prisma/schema.prisma && node apps/api/dist/main.js"]
+# Boot just starts the API. Migrations are applied OUT-OF-BAND (see the runbook),
+# NOT on container boot: Render's network reaches Neon's POOLED endpoint (which
+# the app uses at runtime via DATABASE_URL) but cannot complete a connection to
+# Neon's DIRECT compute endpoint that Prisma Migrate requires — and migrate
+# deploy hangs on the pooled PgBouncer endpoint (session advisory lock). So we
+# run `prisma migrate deploy` from a machine that can reach the direct endpoint.
+CMD ["node", "apps/api/dist/main.js"]

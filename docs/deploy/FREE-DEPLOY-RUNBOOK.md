@@ -41,7 +41,16 @@ Everything runs in **paper mode** (`LIVE_TRADING_ENABLED=false`, `PAPER_TRADING=
    ```
    Prisma Migrate uses `DIRECT_URL`; the running app uses the pooled `DATABASE_URL`. Strip `channel_binding=require` from both if Neon appended it — Prisma's engine can choke on it.
 
-> You do **not** run migrations manually. The API container runs `prisma migrate deploy` on every boot (idempotent), so the schema is created the first time Render starts the service. It runs over `DIRECT_URL` because `migrate deploy` **hangs on the pooled `-pooler` endpoint** (PgBouncer transaction mode + Prisma's session advisory lock).
+> **Migrations run OUT-OF-BAND, from your machine — not on container boot.** Render's network reaches Neon's *pooled* endpoint (the app uses it at runtime) but cannot complete a connection to Neon's *direct* compute endpoint that Prisma Migrate needs, and `migrate deploy` hangs on the pooled PgBouncer endpoint. So you apply migrations once from a machine that reaches the direct endpoint (your laptop), then the container just starts the API. Re-run this whenever the schema changes:
+>
+> ```powershell
+> # from the repo root, using the Neon DIRECT (unpooled) URL:
+> $env:DIRECT_URL   = "postgresql://<user>:<pass>@ep-xxxx.<region>.aws.neon.tech/neondb?sslmode=require"
+> $env:DATABASE_URL = $env:DIRECT_URL
+> npx prisma migrate deploy --schema prisma/schema.prisma
+> ```
+>
+> Expect `All migrations have been successfully applied.` The container's `DATABASE_URL` stays the **pooled** URL for runtime.
 
 ---
 
@@ -133,7 +142,8 @@ Open the Pages URL and walk the paper-mode flow:
 
 - **Login / any API call returns 500 or is CORS-blocked** → `WEB_ORIGIN` on Render doesn't match the Pages origin. It must be the exact scheme+host, no trailing slash, comma-separated if multiple. Fix it and redeploy (Step 5).
 - **API 404 / calls not reaching Render from the browser** → the `_redirects` host still points at the placeholder. Update both `/api/*` and `/auth/*` lines to your Render origin, commit, and let Pages rebuild (Step 4.1).
-- **Deploy hangs after "N migrations found" then Render says "no open ports detected"** → `prisma migrate deploy` is stuck on the **pooled** endpoint. Set `DIRECT_URL` to the Neon **direct** string (host without `-pooler`) so migrations use a real session connection. The datasource's `directUrl` picks it up; the app keeps the pooled `DATABASE_URL`.
+- **Deploy hangs after "N migrations found" then "no open ports detected"** → boot-time migration over the **pooled** endpoint hangs (PgBouncer advisory lock). Fixed: the container no longer migrates on boot; run migrations out-of-band (see Step 1).
+- **Boot-time migration fails `P1001: Can't reach database server` at the direct host** → Render can reach Neon's pooled endpoint but not the direct compute endpoint. This is why migrations run out-of-band from your machine (Step 1) and the container `CMD` only starts the API. Your laptop reaching the host (`Test-NetConnection <direct-host> -Port 5432` → `TcpTestSucceeded : True`) while Render cannot is the signature of this.
 - **App refuses to boot with "Refusing to start — invalid configuration"** → a required prod var is missing/invalid. Common ones: `ENCRYPTION_KEY` shorter than 32 chars, `DATABASE_URL` missing `sslmode=require`, `AI_ENGINE_URL` not `https`, or `REDIS_TLS`/`REDIS_THROTTLER` not exactly `"true"`. The log lists every failure.
 - **Docker build fails on `pnpm install --frozen-lockfile`** → the committed `pnpm-lock.yaml` is out of sync with `package.json`. Regenerate the lockfile locally (`pnpm install`) and commit it, or temporarily switch the Dockerfile install line to `--no-frozen-lockfile`.
 - **Prisma "engine" / "libssl" error at runtime** → OpenSSL missing from the image. The Dockerfile installs `openssl ca-certificates`; confirm that layer built. The Prisma client is generated inside the linux image (no custom `binaryTargets`), which yields the correct engine.

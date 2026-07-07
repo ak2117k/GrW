@@ -1,9 +1,14 @@
 import { useState, useEffect } from 'react';
-import { OctagonX, Wifi, WifiOff, LogOut } from 'lucide-react';
+import { OctagonX, Wifi, WifiOff, LogOut, Menu } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useMarketStore } from '@/stores/market-store';
 import { useAuthStore } from '@/stores/auth-store';
 import { ThemeToggle } from '@/components/common';
+
+interface HeaderProps {
+  /** Opens the mobile nav drawer (hamburger); only rendered below `md`. */
+  onMenuClick: () => void;
+}
 
 function useIST() {
   const [time, setTime] = useState('');
@@ -29,7 +34,7 @@ function useIST() {
   return time;
 }
 
-export default function Header() {
+export default function Header({ onMenuClick }: HeaderProps) {
   const time = useIST();
   const isConnected = useMarketStore((s) => s.isConnected);
   const marketStatus = useMarketStore((s) => s.marketStatus);
@@ -64,17 +69,26 @@ export default function Header() {
   };
 
   return (
-    <header className="flex h-14 items-center justify-between border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] px-6">
-      {/* Left side: Market status */}
-      <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2">
-          <span className={clsx('h-2.5 w-2.5 rounded-full animate-pulse-dot', statusColor)} />
-          <span className="text-sm font-medium text-[var(--color-text-secondary)]">
+    <header className="flex h-14 items-center justify-between gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] px-3 md:px-6">
+      {/* Left side: hamburger (mobile) + Market status */}
+      <div className="flex min-w-0 items-center gap-3 md:gap-6">
+        <button
+          onClick={onMenuClick}
+          aria-label="Open menu"
+          className="text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] md:hidden"
+        >
+          <Menu size={22} />
+        </button>
+
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={clsx('h-2.5 w-2.5 shrink-0 rounded-full animate-pulse-dot', statusColor)} />
+          <span className="truncate text-sm font-medium text-[var(--color-text-secondary)]">
             {statusLabel}
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5 text-[var(--color-text-muted)]">
+        {/* Live/Disconnected indicator — hidden on the smallest screens. */}
+        <div className="hidden items-center gap-1.5 text-[var(--color-text-muted)] sm:flex">
           {isConnected ? <Wifi size={14} /> : <WifiOff size={14} />}
           <span className="text-xs">
             {isConnected ? 'Live' : 'Disconnected'}
@@ -82,10 +96,11 @@ export default function Header() {
         </div>
       </div>
 
-      {/* Right side: Theme + Clock + Kill Switch */}
-      <div className="flex items-center gap-5">
+      {/* Right side: Theme + Clock + Kill Switch + Logout */}
+      <div className="flex shrink-0 items-center gap-2 md:gap-5">
         <ThemeToggle />
-        <div className="flex flex-col items-end">
+        {/* Clock — hidden on the smallest screens to save width. */}
+        <div className="hidden flex-col items-end sm:flex">
           <span className="font-mono text-sm font-semibold tracking-wider text-[var(--color-text-primary)]">
             {time}
           </span>
@@ -96,15 +111,16 @@ export default function Header() {
 
         <button
           onClick={handleKillSwitch}
-          className="flex items-center gap-2 rounded-lg bg-[var(--color-accent-red)] px-4 py-2 text-xs font-bold uppercase tracking-wider text-white shadow-lg shadow-red-500/20 transition-all hover:bg-red-600 hover:shadow-red-500/40 active:scale-95"
+          className="flex items-center gap-2 rounded-lg bg-[var(--color-accent-red)] px-3 py-2 text-xs font-bold uppercase tracking-wider text-white shadow-lg shadow-red-500/20 transition-all hover:bg-red-600 hover:shadow-red-500/40 active:scale-95 md:px-4"
         >
           <OctagonX size={14} />
-          Kill Switch
+          {/* Text label hidden on mobile; the icon still conveys the action. */}
+          <span className="hidden sm:inline">Kill Switch</span>
         </button>
 
-        <div className="flex items-center gap-2 border-l border-[var(--color-border-subtle)] pl-4">
+        <div className="flex items-center gap-2 border-l border-[var(--color-border-subtle)] pl-2 md:pl-4">
           {user?.email && (
-            <span className="hidden text-xs text-[var(--color-text-muted)] sm:inline">
+            <span className="hidden text-xs text-[var(--color-text-muted)] lg:inline">
               {user.email}
             </span>
           )}
@@ -114,7 +130,7 @@ export default function Header() {
             className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border-subtle)] px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-white/5 hover:text-[var(--color-text-primary)]"
           >
             <LogOut size={14} />
-            Logout
+            <span className="hidden sm:inline">Logout</span>
           </button>
         </div>
       </div>

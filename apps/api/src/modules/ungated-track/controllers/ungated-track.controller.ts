@@ -1,10 +1,20 @@
-import { Controller, Get, NotFoundException, Param, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  NotFoundException,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { WatchStatus } from '@prisma/client';
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
 import { UngatedTradeRepository } from '../repositories/ungated-trade.repository';
 import { UngatedPaperAccountService } from '../services/ungated-paper-account.service';
 import { UngatedComparisonService } from '../services/ungated-comparison.service';
+import { UngatedTickPoller } from '../services/ungated-tick-poller.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { AdminOnly } from '../../../common/decorators';
 
@@ -18,7 +28,27 @@ export class UngatedTrackController {
     private readonly _account: UngatedPaperAccountService,
     private readonly _comparison: UngatedComparisonService,
     private readonly adapter: AngelOneAdapterService,
+    private readonly poller: UngatedTickPoller,
   ) {}
+
+  /**
+   * Manual square-off — flatten every TRADED ungated position on demand,
+   * running the same logic as the 15:25 IST cron. Useful when the timer was
+   * missed (e.g. the API was down at 15:25) or the feed recovered late.
+   * Mirrors the adaptive-stop track's manual square-off route.
+   */
+  @Post('square-off')
+  @HttpCode(HttpStatus.OK)
+  async squareOff() {
+    const before = (await this.watchRepo.findAllActive()).filter(
+      (e) => e.status === WatchStatus.TRADED,
+    ).length;
+    await this.poller.eodSquareOff();
+    const after = (await this.watchRepo.findAllActive()).filter(
+      (e) => e.status === WatchStatus.TRADED,
+    ).length;
+    return { before, after, closed: before - after };
+  }
 
   @Get('watch/:id')
   async get(@Param('id') id: string) {

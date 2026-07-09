@@ -4,11 +4,12 @@ import { UngatedWatchRepository } from '../repositories/ungated-watch.repository
 import { UngatedTradeRepository } from '../repositories/ungated-trade.repository';
 import { UngatedPaperAccountService, STARTING_BALANCE } from '../services/ungated-paper-account.service';
 import { UngatedComparisonService } from '../services/ungated-comparison.service';
+import { UngatedTickPoller } from '../services/ungated-tick-poller.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 
 describe('UngatedTrackController', () => {
   let ctrl: UngatedTrackController;
-  let watchRepo: any, tradeRepo: any, account: any, comparison: any;
+  let watchRepo: any, tradeRepo: any, account: any, comparison: any, poller: any;
 
   beforeEach(async () => {
     watchRepo = {
@@ -31,6 +32,7 @@ describe('UngatedTrackController', () => {
       }),
     };
     comparison = { daily: jest.fn().mockResolvedValue({ date: '2026-05-20' }) };
+    poller = { eodSquareOff: jest.fn().mockResolvedValue(undefined) };
 
     const mod = await Test.createTestingModule({
       controllers: [UngatedTrackController],
@@ -43,6 +45,7 @@ describe('UngatedTrackController', () => {
           provide: AngelOneAdapterService,
           useValue: { getLtpsBatch: jest.fn().mockResolvedValue(new Map()) },
         },
+        { provide: UngatedTickPoller, useValue: poller },
       ],
     }).compile();
     ctrl = mod.get(UngatedTrackController);

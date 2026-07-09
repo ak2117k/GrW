@@ -15,6 +15,17 @@ describe('SrEvidenceService', () => {
     ...Array.from({ length: 8 }, () => ({ high: 150, low: 150, close: 150, volume: 300 })),
   ];
 
+  // Yahoo's candle shape carries an `open` and a `timestamp` too; the heavy
+  // shelf above spot mirrors the Angel fixture so positional TFs score a
+  // resistance the same way the intraday fixtures do.
+  const yahooCandles = [
+    ...Array.from({ length: 16 }, (_, i) => {
+      const p = 130 + (i % 3);
+      return { timestamp: new Date(), open: p, high: p, low: p, close: p, volume: 10 };
+    }),
+    ...Array.from({ length: 8 }, () => ({ timestamp: new Date(), open: 150, high: 150, low: 150, close: 150, volume: 300 })),
+  ];
+
   function build(overrides: Partial<any> = {}) {
     const deps = {
       levelBookService: { lazyLoad: jest.fn().mockResolvedValue(book) },
@@ -25,6 +36,8 @@ describe('SrEvidenceService', () => {
       },
       zoneRepository: { findActiveByToken: jest.fn().mockResolvedValue([]) },
       oiWallService: { wallsExtended: jest.fn().mockResolvedValue([]) },
+      tracking: undefined,
+      yahooFinanceService: { getCandles: jest.fn().mockResolvedValue(yahooCandles) },
       ...overrides,
     };
     return new SrEvidenceService(
@@ -33,6 +46,8 @@ describe('SrEvidenceService', () => {
       deps.marketDataRepository as never,
       deps.zoneRepository as never,
       deps.oiWallService as never,
+      deps.tracking as never,
+      deps.yahooFinanceService as never,
     );
   }
 
@@ -116,5 +131,111 @@ describe('SrEvidenceService', () => {
     adapter.getHistoricalData.mockClear();
     await s.levelsFor('18520', 'NSE', 'CUPID', '5m');
     expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+  });
+
+  // ── Positional path (1d / 1w / 1mo) ─────────────────────────────
+
+  it("interval='1d' ⇒ fetches 1d candles via Angel and does NOT call OI walls", async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const oi = { wallsExtended: jest.fn().mockResolvedValue([]) };
+    const zoneRepo = { findActiveByToken: jest.fn().mockResolvedValue([]) };
+    const s = build({ angelOneAdapter: adapter, oiWallService: oi, zoneRepository: zoneRepo });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '1d');
+    // Daily candles come from Angel (it maps ONE_DAY).
+    expect(adapter.getHistoricalData).toHaveBeenCalledWith('18520', 'NSE', '1d', expect.any(Date), expect.any(Date));
+    // OI walls are intraday-only — skipped positionally.
+    expect(oi.wallsExtended).not.toHaveBeenCalled();
+    // Native path — never touches the shared zone DB.
+    expect(zoneRepo.findActiveByToken).not.toHaveBeenCalled();
+  });
+
+  it("interval='1w' ⇒ fetches weekly candles via Yahoo, skips OI, and skips Angel", async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const oi = { wallsExtended: jest.fn().mockResolvedValue([]) };
+    const yahoo = { getCandles: jest.fn().mockResolvedValue(yahooCandles) };
+    const s = build({ angelOneAdapter: adapter, oiWallService: oi, yahooFinanceService: yahoo });
+    const levels = await s.levelsFor('18520', 'NSE', 'CUPID', '1w');
+    // Weekly comes from Yahoo with the `1w` code (Angel has no weekly interval).
+    expect(yahoo.getCandles).toHaveBeenCalledWith('CUPID', 'NSE', '18520', '1w', expect.any(Date), expect.any(Date));
+    expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+    expect(oi.wallsExtended).not.toHaveBeenCalled();
+    // The volume shelf above spot still scores a resistance.
+    expect(levels.some((l) => l.side === 'resistance' && !l.soft && l.kinds.includes('VOLUME'))).toBe(true);
+  });
+
+  it("interval='1mo' ⇒ maps to Yahoo's 1M code", async () => {
+    const yahoo = { getCandles: jest.fn().mockResolvedValue(yahooCandles) };
+    const s = build({ yahooFinanceService: yahoo });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '1mo');
+    expect(yahoo.getCandles).toHaveBeenCalledWith('CUPID', 'NSE', '18520', '1M', expect.any(Date), expect.any(Date));
+  });
+
+  it('positional Yahoo fetch returning null degrades gracefully (no throw; volume evidence gone)', async () => {
+    // With no weekly candles, the volume/pivot/profile evidence all vanish, so
+    // no VOLUME resistance can survive — the branch must not throw, and the only
+    // things that can appear are the soft round-number fallbacks (score 0).
+    const yahoo = { getCandles: jest.fn().mockResolvedValue(null) };
+    const s = build({ yahooFinanceService: yahoo });
+    const levels = await s.levelsFor('18520', 'NSE', 'CUPID', '1w');
+    expect(Array.isArray(levels)).toBe(true);
+    // No candle-derived (non-soft) level can exist once Yahoo returns nothing.
+    expect(levels.some((l) => l.kinds.includes('VOLUME'))).toBe(false);
+    expect(levels.every((l) => l.soft)).toBe(true);
+  });
+
+  // Over-producing fixture: five heavy, non-round volume shelves per side plus
+  // strong swing-pivot rejections landing on the adaptive round-number grid.
+  // This yields ≥8 surviving evidence clusters PER SIDE before the cap (verified
+  // empirically), so the per-timeframe cap genuinely truncates and the exact
+  // 1d/1w=5 vs 1mo=6 distinction is observable rather than trivially satisfied.
+  const capBook = { spot: 1000, atr14: 15, pdh: 1010, pdl: 990 };
+  type Bar = { open: number; high: number; low: number; close: number; volume: number };
+  function overProducingCandles(): Bar[] {
+    const fill = (p: number): Bar => ({ open: p, high: p + 1, low: p - 1, close: p, volume: 10 });
+    const shelf = (p: number): Bar => ({ open: p, high: p, low: p, close: p, volume: 700 });
+    const pivHi = (p: number, v: number): Bar => ({ open: p - 15, high: p, low: p - 15, close: p - 15, volume: v });
+    const pivLo = (p: number, v: number): Bar => ({ open: p + 15, high: p + 15, low: p, close: p + 15, volume: v });
+    // Shelves sit OFF the round grid (925/950/975/1025/1050/1075); pivots sit ON it.
+    const resShelves = [1038, 1063, 1088, 1113, 1138];
+    const supShelves = [962, 937, 912, 887, 862];
+    const resGrid = [1025, 1050, 1075];
+    const supGrid = [975, 950, 925];
+    const bars: Bar[] = [];
+    for (let pass = 0; pass < 3; pass++) {
+      for (const r of resGrid) { for (let i = 0; i < 4; i++) bars.push(fill(1000)); bars.push(pivHi(r, 900)); }
+      for (const r of resShelves) { for (let i = 0; i < 4; i++) bars.push(fill(1000)); bars.push(pivHi(r, 400)); for (let i = 0; i < 4; i++) bars.push(shelf(r)); }
+      for (const s of supGrid) { for (let i = 0; i < 4; i++) bars.push(fill(1000)); bars.push(pivLo(s, 900)); }
+      for (const s of supShelves) { for (let i = 0; i < 4; i++) bars.push(fill(1000)); bars.push(pivLo(s, 400)); for (let i = 0; i < 4; i++) bars.push(shelf(s)); }
+    }
+    for (let i = 0; i < 4; i++) bars.push(fill(1000));
+    return bars;
+  }
+
+  it('positional cap truncates to EXACTLY 5 per side on 1d/1w and 6 on 1mo', async () => {
+    const bars = overProducingCandles();
+    // Feed identical data to Angel (1d) and Yahoo (1w/1mo) so the ONLY thing
+    // that can move the surviving count between timeframes is the cap itself.
+    const yahooBars = bars.map((b) => ({ timestamp: new Date(), ...b }));
+    const s = build({
+      levelBookService: { lazyLoad: jest.fn().mockResolvedValue(capBook) },
+      angelOneAdapter: { getHistoricalData: jest.fn().mockResolvedValue(bars) },
+      yahooFinanceService: { getCandles: jest.fn().mockResolvedValue(yahooBars) },
+    });
+    const counts: Record<string, { res: number; sup: number }> = {};
+    for (const tf of ['1d', '1w', '1mo'] as const) {
+      const levels = await s.levelsFor('18520', 'NSE', 'CUPID', tf);
+      counts[tf] = {
+        res: levels.filter((l) => l.side === 'resistance' && !l.soft).length,
+        sup: levels.filter((l) => l.side === 'support' && !l.soft).length,
+      };
+    }
+    // Daily & weekly are capped at 5/side; monthly gets the wider 6/side budget.
+    expect(counts['1d']).toEqual({ res: 5, sup: 5 });
+    expect(counts['1w']).toEqual({ res: 5, sup: 5 });
+    expect(counts['1mo']).toEqual({ res: 6, sup: 6 });
+    // The monthly count is strictly larger than daily/weekly — proves the cap
+    // VALUE (not just its presence) differs by timeframe.
+    expect(counts['1mo'].res).toBeGreaterThan(counts['1d'].res);
+    expect(counts['1mo'].sup).toBeGreaterThan(counts['1w'].sup);
   });
 });

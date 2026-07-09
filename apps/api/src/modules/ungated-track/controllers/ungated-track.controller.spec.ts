@@ -1,14 +1,16 @@
 import { Test } from '@nestjs/testing';
+import { WatchStatus } from '@prisma/client';
 import { UngatedTrackController } from './ungated-track.controller';
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
 import { UngatedTradeRepository } from '../repositories/ungated-trade.repository';
 import { UngatedPaperAccountService, STARTING_BALANCE } from '../services/ungated-paper-account.service';
 import { UngatedComparisonService } from '../services/ungated-comparison.service';
+import { UngatedTickPoller } from '../services/ungated-tick-poller.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 
 describe('UngatedTrackController', () => {
   let ctrl: UngatedTrackController;
-  let watchRepo: any, tradeRepo: any, account: any, comparison: any;
+  let watchRepo: any, tradeRepo: any, account: any, comparison: any, poller: any;
 
   beforeEach(async () => {
     watchRepo = {
@@ -31,6 +33,7 @@ describe('UngatedTrackController', () => {
       }),
     };
     comparison = { daily: jest.fn().mockResolvedValue({ date: '2026-05-20' }) };
+    poller = { eodSquareOff: jest.fn().mockResolvedValue(undefined) };
 
     const mod = await Test.createTestingModule({
       controllers: [UngatedTrackController],
@@ -43,6 +46,7 @@ describe('UngatedTrackController', () => {
           provide: AngelOneAdapterService,
           useValue: { getLtpsBatch: jest.fn().mockResolvedValue(new Map()) },
         },
+        { provide: UngatedTickPoller, useValue: poller },
       ],
     }).compile();
     ctrl = mod.get(UngatedTrackController);
@@ -76,5 +80,41 @@ describe('UngatedTrackController', () => {
     const out = await ctrl.comparison('2026-05-20');
     expect(comparison.daily).toHaveBeenCalledWith('2026-05-20');
     expect(out.date).toBe('2026-05-20');
+  });
+
+  it('POST /api/ungated/square-off runs eodSquareOff and reports before/after/closed TRADED counts', async () => {
+    // findAllActive is read twice by the handler: once BEFORE the square-off to
+    // count open TRADED positions, once AFTER to see how many were flattened.
+    // Only TRADED entries count — WATCHING/other statuses are ignored both times.
+    const beforeSet = [
+      { id: 'uw1', status: WatchStatus.TRADED },
+      { id: 'uw2', status: WatchStatus.TRADED },
+      { id: 'uw3', status: WatchStatus.TRADED },
+      { id: 'uw4', status: WatchStatus.WATCHING }, // not TRADED → excluded
+    ];
+    const afterSet = [
+      { id: 'uw1', status: WatchStatus.TRADED }, // one position survived
+      { id: 'uw2', status: WatchStatus.EXITED }, // flattened by square-off
+      { id: 'uw3', status: WatchStatus.STOPPED }, // flattened by square-off
+      { id: 'uw4', status: WatchStatus.WATCHING },
+    ];
+    watchRepo.findAllActive = jest
+      .fn()
+      .mockResolvedValueOnce(beforeSet)
+      .mockResolvedValueOnce(afterSet);
+
+    const out = await ctrl.squareOff();
+
+    // The square-off ran exactly once, between the two count reads.
+    expect(poller.eodSquareOff).toHaveBeenCalledTimes(1);
+    expect(watchRepo.findAllActive).toHaveBeenCalledTimes(2);
+    const eodOrder = poller.eodSquareOff.mock.invocationCallOrder[0];
+    const firstRead = watchRepo.findAllActive.mock.invocationCallOrder[0];
+    const secondRead = watchRepo.findAllActive.mock.invocationCallOrder[1];
+    expect(firstRead).toBeLessThan(eodOrder);
+    expect(eodOrder).toBeLessThan(secondRead);
+
+    // 3 TRADED before, 1 TRADED after ⇒ closed = 3 − 1 = 2.
+    expect(out).toEqual({ before: 3, after: 1, closed: 2 });
   });
 });

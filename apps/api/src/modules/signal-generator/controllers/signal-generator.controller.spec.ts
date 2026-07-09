@@ -142,5 +142,20 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       await ctrl.getSrEvidence('18520', 'NSE', 'CUPID', 'bogus');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '15m');
     });
+
+    it.each(['1d', '1w', '1mo'])(
+      "positional interval='%s' is accepted as its own timeframe (not collapsed to 15m)",
+      async (tf) => {
+        const { ctrl, deps } = build();
+        await ctrl.getSrEvidence('18520', 'NSE', 'CUPID', tf);
+        expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', tf);
+      },
+    );
+
+    it("normalizes Yahoo-style '1M' to '1mo'", async () => {
+      const { ctrl, deps } = build();
+      await ctrl.getSrEvidence('18520', 'NSE', 'CUPID', '1M');
+      expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '1mo');
+    });
   });
 });

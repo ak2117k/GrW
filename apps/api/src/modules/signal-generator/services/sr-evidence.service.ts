@@ -4,10 +4,11 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { ZoneRepository } from '../repositories/zone.repository';
 import { OiWallService } from './oi-wall.service';
+import { YahooFinanceService } from '../../market-data/services/yahoo-finance.service';
 import { computeVolumeNodes, computeProfileLevels, type ProfileCandle } from './volume-profile';
 import { adaptiveRoundNumbers, adaptiveRoundStep, roundScore } from './adaptive-round-numbers';
 import { scoreAndCluster, capLevelsPerSide } from './sr-evidence-scoring';
-import { lookbackDaysFor } from './timeframe-lookback';
+import { lookbackDaysFor, isIntradayInterval, isPositionalInterval } from './timeframe-lookback';
 import { computeAtrFromCandles } from './per-tf-atr';
 import { detectWeightedPivots } from './swing-pivots';
 import { maLevels, anchoredVwap } from './dynamic-sr';
@@ -28,6 +29,19 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
 const EVIDENCE_MAX_PER_SIDE_INTRADAY = 3;
 
 /**
+ * Per-side evidence cap by timeframe. Intraday floods with swing-pivot HISTORY
+ * so it stays tight (3). Positional TFs carry fewer, more meaningful structural
+ * levels (weekly/monthly MAs, fib, gaps) and a wider price range, so they get
+ * more room: 5 for daily/weekly, 6 for monthly. The frozen 15m path is never
+ * capped (handled by the caller, not this helper).
+ */
+function maxPerSideFor(interval: string): number {
+  if (interval === '1mo') return 6;
+  if (interval === '1d' || interval === '1w') return 5;
+  return EVIDENCE_MAX_PER_SIDE_INTRADAY;
+}
+
+/**
  * Orchestrates evidence-weighted S/R: volume nodes + adaptive round numbers +
  * OI walls + pivot history -> scored, sided EvidenceLevel[]. Cached 15 min.
  * All deps optional so test/unwired containers construct cleanly; returns []
@@ -45,6 +59,10 @@ export class SrEvidenceService {
     @Optional() private readonly zoneRepository?: ZoneRepository,
     @Optional() private readonly oiWallService?: OiWallService,
     @Optional() private readonly tracking?: SrLevelTrackingService,
+    // Weekly/monthly candles — Angel's adapter only maps up to ONE_DAY, so
+    // 1w/1mo levels must come from Yahoo. Optional so test/unwired containers
+    // construct cleanly; positional weekly/monthly returns [] when absent.
+    @Optional() private readonly yahooFinanceService?: YahooFinanceService,
   ) {}
 
   /**
@@ -81,9 +99,12 @@ export class SrEvidenceService {
       // Candle source + ATR unit differ by branch. 15m keeps the proven
       // 5m-candles + daily-ATR basis; non-15m uses native per-TF candles
       // and a per-TF ATR (falling back to the daily ATR only if zero).
+      // Candle source by timeframe: 15m keeps its 5m basis; intraday + daily
+      // come from Angel (it maps up to ONE_DAY); weekly/monthly can only come
+      // from Yahoo (Angel has no weekly/monthly interval).
       const candles = isFifteen
         ? await this.fetchCandles(token, exchange, '5m', 10)
-        : await this.fetchCandles(token, exchange, interval, lookbackDaysFor(interval));
+        : await this.fetchNativeCandles(token, exchange, symbol, interval);
       const atr14 = isFifteen
         ? book.atr14
         : computeAtrFromCandles(candles, 14) || book.atr14;
@@ -91,8 +112,12 @@ export class SrEvidenceService {
       const volNodes = computeVolumeNodes(candles, atr14, ltp);
       const step = adaptiveRoundStep(ltp);
       const roundGrid = adaptiveRoundNumbers(ltp);
-      // OI walls + max-pain + OI-change build-up (wallsExtended adds the latter two).
-      const oiWalls = this.oiWallService ? await this.oiWallService.wallsExtended(symbol, ltp) : [];
+      // OI walls + max-pain + OI-change build-up (wallsExtended adds the latter
+      // two). Intraday-only: a near-expiry options concept is meaningless on a
+      // positional (1d/1w/1mo) horizon, so we skip the OI candidates entirely.
+      const oiWalls = (this.oiWallService && isIntradayInterval(interval))
+        ? await this.oiWallService.wallsExtended(symbol, ltp)
+        : [];
 
       const candidates: LevelCandidate[] = [];
       for (const n of volNodes) candidates.push({ price: n.price, kind: 'VOLUME', score: n.score });
@@ -106,13 +131,18 @@ export class SrEvidenceService {
       for (const p of computeProfileLevels(candles, atr14, ltp)) candidates.push(p);
       for (const p of anchoredVwap(candles, ltp)) candidates.push(p);
 
-      // Daily-structure levels: moving averages (20/50/200), unfilled gaps,
-      // and fib retracements of the dominant swing — computed off DAILY candles.
-      const dailyCandles = await this.fetchCandles(token, exchange, '1d', 365);
-      if (dailyCandles.length >= 20) {
-        for (const p of maLevels(dailyCandles, ltp)) candidates.push(p);
-        for (const p of gapLevels(dailyCandles, ltp)) candidates.push(p);
-        for (const p of fibLevels(dailyCandles, ltp)) candidates.push(p);
+      // Structural levels: moving averages (20/50/200), unfilled gaps, and fib
+      // retracements of the dominant swing. Intraday TFs compute these off a
+      // separate DAILY series; positional TFs (1d/1w/1mo) compute them off the
+      // SAME candles we fetched, so a weekly request yields weekly MAs and a
+      // monthly request monthly MAs. Detectors self-skip when bars are short.
+      const structuralCandles = isPositionalInterval(interval)
+        ? candles
+        : await this.fetchCandles(token, exchange, '1d', 365);
+      if (structuralCandles.length >= 20) {
+        for (const p of maLevels(structuralCandles, ltp)) candidates.push(p);
+        for (const p of gapLevels(structuralCandles, ltp)) candidates.push(p);
+        for (const p of fibLevels(structuralCandles, ltp)) candidates.push(p);
       }
 
       if (isFifteen) {
@@ -132,11 +162,12 @@ export class SrEvidenceService {
       }
 
       const levels = scoreAndCluster(candidates, ltp, atr14, { softRoundGrid: roundGrid });
-      // Native low timeframes over-produce levels; cap per side to keep the
-      // chart readable. 15m is FROZEN — never capped.
+      // Native timeframes over-produce levels; cap per side to keep the chart
+      // readable. The cap is timeframe-aware (intraday 3, positional 5/6 — see
+      // maxPerSideFor). 15m is FROZEN — never capped.
       const finalLevels = isFifteen
         ? levels
-        : capLevelsPerSide(levels, EVIDENCE_MAX_PER_SIDE_INTRADAY);
+        : capLevelsPerSide(levels, maxPerSideFor(interval));
       this.cache.set(cacheKey, { at: Date.now(), levels: finalLevels });
       // Fire-and-forget: persist this snapshot so reactions can later be
       // classified and per-kind hold-rates calibrated (sr-hold-rate script).
@@ -146,6 +177,40 @@ export class SrEvidenceService {
       this.logger.warn(`SrEvidence levelsFor failed for ${token}: ${err instanceof Error ? err.message : err}`);
       return [];
     }
+  }
+
+  /**
+   * Candle source for the NATIVE (non-15m) branch, routed by timeframe:
+   *
+   * - intraday (1m–1h) and `1d`: Angel adapter (it maps up to ONE_DAY) via
+   *   `fetchCandles`, over the per-TF lookback window.
+   * - `1w` / `1mo`: Angel has no weekly/monthly interval, so these come from
+   *   Yahoo. Our `1mo` maps to Yahoo's `1M` code; Yahoo's candle shape is
+   *   converted to `ProfileCandle`. Returns [] (no throw) when Yahoo is
+   *   unwired or returns null/empty.
+   */
+  private async fetchNativeCandles(
+    token: string,
+    exchange: string,
+    symbol: string,
+    interval: string,
+  ): Promise<ProfileCandle[]> {
+    if (interval === '1w' || interval === '1mo') {
+      if (!this.yahooFinanceService || !symbol) return [];
+      const code = interval === '1mo' ? '1M' : '1w';
+      const now = new Date();
+      const from = new Date(now.getTime() - lookbackDaysFor(interval) * 24 * 60 * 60 * 1000);
+      try {
+        const rows = await this.yahooFinanceService.getCandles(symbol, exchange, token, code, from, now);
+        if (!Array.isArray(rows) || rows.length === 0) return [];
+        return rows.map((c) => ({ high: c.high, low: c.low, close: c.close, volume: Number(c.volume) }));
+      } catch (err) {
+        this.logger.debug(`SrEvidence Yahoo ${interval} fetch failed for ${symbol}: ${err instanceof Error ? err.message : err}`);
+        return [];
+      }
+    }
+    // intraday + 1d → Angel adapter (DB fallback), per-TF lookback.
+    return this.fetchCandles(token, exchange, interval, lookbackDaysFor(interval));
   }
 
   /**

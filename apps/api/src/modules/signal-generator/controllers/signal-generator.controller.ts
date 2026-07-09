@@ -27,7 +27,7 @@ import { LevelBookService } from '../services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { SrEvidenceService } from '../services/sr-evidence.service';
-import { isIntradayInterval, lookbackDaysFor } from '../services/timeframe-lookback';
+import { isIntradayInterval, isSupportedInterval, normalizeInterval, lookbackDaysFor } from '../services/timeframe-lookback';
 import { computeAtrFromCandles } from '../services/per-tf-atr';
 import { AdminOnly } from '../../../common/decorators';
 
@@ -281,8 +281,11 @@ export class SignalGeneratorController {
   ) {
     if (!token) throw new BadRequestException('token is required');
     if (!this.srEvidenceService) return [];
-    // Validate against the intraday set; anything else falls back to 15m.
-    const tf = isIntradayInterval(interval ?? '') ? interval! : '15m';
+    // Accept any supported timeframe — intraday (1m–1h) OR positional
+    // (1d/1w/1mo) as its own path. `1M` (Yahoo-style monthly) is normalised to
+    // `1mo`. Anything else (omitted/bogus) falls back to the proven 15m path.
+    const norm = normalizeInterval(interval ?? '');
+    const tf = isSupportedInterval(norm) ? norm : '15m';
     let resolvedSymbol = symbol;
     let resolvedExchange = exchange ?? 'NSE';
     if (!resolvedSymbol && this.marketDataRepository) {

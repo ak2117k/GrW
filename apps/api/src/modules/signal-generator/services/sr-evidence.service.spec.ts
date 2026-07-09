@@ -15,6 +15,17 @@ describe('SrEvidenceService', () => {
     ...Array.from({ length: 8 }, () => ({ high: 150, low: 150, close: 150, volume: 300 })),
   ];
 
+  // Yahoo's candle shape carries an `open` and a `timestamp` too; the heavy
+  // shelf above spot mirrors the Angel fixture so positional TFs score a
+  // resistance the same way the intraday fixtures do.
+  const yahooCandles = [
+    ...Array.from({ length: 16 }, (_, i) => {
+      const p = 130 + (i % 3);
+      return { timestamp: new Date(), open: p, high: p, low: p, close: p, volume: 10 };
+    }),
+    ...Array.from({ length: 8 }, () => ({ timestamp: new Date(), open: 150, high: 150, low: 150, close: 150, volume: 300 })),
+  ];
+
   function build(overrides: Partial<any> = {}) {
     const deps = {
       levelBookService: { lazyLoad: jest.fn().mockResolvedValue(book) },
@@ -25,6 +36,8 @@ describe('SrEvidenceService', () => {
       },
       zoneRepository: { findActiveByToken: jest.fn().mockResolvedValue([]) },
       oiWallService: { wallsExtended: jest.fn().mockResolvedValue([]) },
+      tracking: undefined,
+      yahooFinanceService: { getCandles: jest.fn().mockResolvedValue(yahooCandles) },
       ...overrides,
     };
     return new SrEvidenceService(
@@ -33,6 +46,8 @@ describe('SrEvidenceService', () => {
       deps.marketDataRepository as never,
       deps.zoneRepository as never,
       deps.oiWallService as never,
+      deps.tracking as never,
+      deps.yahooFinanceService as never,
     );
   }
 
@@ -116,5 +131,61 @@ describe('SrEvidenceService', () => {
     adapter.getHistoricalData.mockClear();
     await s.levelsFor('18520', 'NSE', 'CUPID', '5m');
     expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+  });
+
+  // ── Positional path (1d / 1w / 1mo) ─────────────────────────────
+
+  it("interval='1d' ⇒ fetches 1d candles via Angel and does NOT call OI walls", async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const oi = { wallsExtended: jest.fn().mockResolvedValue([]) };
+    const zoneRepo = { findActiveByToken: jest.fn().mockResolvedValue([]) };
+    const s = build({ angelOneAdapter: adapter, oiWallService: oi, zoneRepository: zoneRepo });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '1d');
+    // Daily candles come from Angel (it maps ONE_DAY).
+    expect(adapter.getHistoricalData).toHaveBeenCalledWith('18520', 'NSE', '1d', expect.any(Date), expect.any(Date));
+    // OI walls are intraday-only — skipped positionally.
+    expect(oi.wallsExtended).not.toHaveBeenCalled();
+    // Native path — never touches the shared zone DB.
+    expect(zoneRepo.findActiveByToken).not.toHaveBeenCalled();
+  });
+
+  it("interval='1w' ⇒ fetches weekly candles via Yahoo, skips OI, and skips Angel", async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+    const oi = { wallsExtended: jest.fn().mockResolvedValue([]) };
+    const yahoo = { getCandles: jest.fn().mockResolvedValue(yahooCandles) };
+    const s = build({ angelOneAdapter: adapter, oiWallService: oi, yahooFinanceService: yahoo });
+    const levels = await s.levelsFor('18520', 'NSE', 'CUPID', '1w');
+    // Weekly comes from Yahoo with the `1w` code (Angel has no weekly interval).
+    expect(yahoo.getCandles).toHaveBeenCalledWith('CUPID', 'NSE', '18520', '1w', expect.any(Date), expect.any(Date));
+    expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+    expect(oi.wallsExtended).not.toHaveBeenCalled();
+    // The volume shelf above spot still scores a resistance.
+    expect(levels.some((l) => l.side === 'resistance' && !l.soft && l.kinds.includes('VOLUME'))).toBe(true);
+  });
+
+  it("interval='1mo' ⇒ maps to Yahoo's 1M code", async () => {
+    const yahoo = { getCandles: jest.fn().mockResolvedValue(yahooCandles) };
+    const s = build({ yahooFinanceService: yahoo });
+    await s.levelsFor('18520', 'NSE', 'CUPID', '1mo');
+    expect(yahoo.getCandles).toHaveBeenCalledWith('CUPID', 'NSE', '18520', '1M', expect.any(Date), expect.any(Date));
+  });
+
+  it('positional Yahoo fetch returning null degrades gracefully to []', async () => {
+    const yahoo = { getCandles: jest.fn().mockResolvedValue(null) };
+    const s = build({ yahooFinanceService: yahoo });
+    const levels = await s.levelsFor('18520', 'NSE', 'CUPID', '1w');
+    expect(Array.isArray(levels)).toBe(true);
+  });
+
+  it('positional caps levels to ≤5 (1d/1w) or ≤6 (1mo) per side', async () => {
+    const s = build();
+    for (const tf of ['1d', '1w', '1mo'] as const) {
+      const levels = await s.levelsFor('18520', 'NSE', 'CUPID', tf);
+      const cap = tf === '1mo' ? 6 : 5;
+      const res = levels.filter((l) => l.side === 'resistance' && !l.soft).length;
+      const sup = levels.filter((l) => l.side === 'support' && !l.soft).length;
+      expect(res).toBeLessThanOrEqual(cap);
+      expect(sup).toBeLessThanOrEqual(cap);
+    }
   });
 });

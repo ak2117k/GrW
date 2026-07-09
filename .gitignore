@@ -88,3 +88,4 @@ apps/api/data/
 /.playwright-mcp/
 /saas-*.png
 /.superpowers/
+.superpowers/

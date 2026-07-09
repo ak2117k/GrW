@@ -1,0 +1,5 @@
+{
+  "lastSyncedTdSha": "3ae21c742a6fbf23e92016f0f8d566cc7c0b41a6",
+  "syncedAt": "2026-07-09T00:00:00Z",
+  "note": "Baseline set by Phase 1 parity port (feature/td-parity-port). Ported: signal-generator positional-timeframe feature, ungated-track square-off endpoint. Other tracked modules were already at/ahead of TD@this SHA. The Phase 2 sync pipeline syncs TD commits AFTER this SHA."
+}

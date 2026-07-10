@@ -127,7 +127,11 @@ change there.
 existing feed account and sets the flag on `userId` (also verifies that user has a
 `brokerCredential`, else 400). Returns the new feed account's id/email.
 
-For immediate use, the flag will also be set directly on `anandmarks@gmail.com`.
+For immediate use, the flag is set on the account that has actually connected a
+broker credential in the vault — currently `user@td.local` (the only account with a
+`brokerCredential` row). `anandmarks@gmail.com` was created only for login and has no
+connected broker, so it cannot serve as the vault feed account until it connects one.
+Locally the root `.env` Angel One creds win via the env-first path regardless.
 
 ## 4. Trigger model / scope
 

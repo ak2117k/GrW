@@ -16,7 +16,10 @@ export interface DecryptedBrokerCredentials {
 }
 
 export interface DecryptContext {
-  reason: 'ORDER' | 'REVALIDATE';
+  // 'FEED' is used by the vault->market-feed bridge: the shared market-data feed
+  // leases the designated account's credentials to log in, distinct from an
+  // order-time ('ORDER') or revalidation ('REVALIDATE') decrypt in the audit log.
+  reason: 'ORDER' | 'REVALIDATE' | 'FEED';
   signalId?: string;
 }
 

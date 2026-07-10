@@ -11,6 +11,7 @@ import { StockSectorRepository } from './repositories/stock-sector.repository';
 import { OITrackerProcessor } from './workers/oi-tracker.processor';
 import { DailyBackfillWorker } from './workers/daily-backfill.worker';
 import { AngelOneAuthService } from './services/angel-one-auth.service';
+import { FeedCredentialProvider } from './services/feed-credential-provider';
 import { AngelOneValidator } from './services/angel-one-validator.service';
 import { AngelOneWebSocketService } from './services/angel-one-websocket.service';
 import { AngelOneAdapterService } from './services/angel-one-adapter.service';
@@ -22,6 +23,10 @@ import { PremarketSessionCron } from './services/premarket-session.cron';
 import { GapDetectorService } from './services/gap-detector.service';
 import { NseSectorIndexService } from './services/nse-sector-index.service';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
+// Provides CREDENTIAL_DECRYPTOR — the vault->market-feed bridge leases the
+// designated feed account's credentials through it (one-way dep; the decryptor
+// module depends only on Prisma/KMS/Audit, so no import cycle).
+import { CredentialDecryptorModule } from '../credential-vault/execution/credential-decryptor.module';
 // LevelBookService comes from SignalGeneratorModule which is @Global —
 // no import needed here. Importing the module would create a bootstrap
 // cycle because SignalGeneratorModule already imports MarketDataModule.
@@ -38,6 +43,7 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
     // MarketDataModule (for MarketFeedService) and we now need
     // OptionsChainService here for MarketContextService.
     forwardRef(() => OptionsChainModule),
+    CredentialDecryptorModule,
   ],
   controllers: [MarketDataController],
   providers: [
@@ -50,6 +56,9 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
 
     // Angel One broker services
     AngelOneAuthService,
+    // Resolves the shared feed's credentials: env-first, then the designated
+    // vault account (isFeedAccount). Injected by AngelOneAuthService.login().
+    FeedCredentialProvider,
     // Per-user ephemeral credential validator (TDA-005) — never mutates the
     // singleton session above.
     AngelOneValidator,

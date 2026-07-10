@@ -34,6 +34,7 @@ import { AuthModule } from '../../src/modules/auth/auth.module';
 import { BrokerController } from '../../src/modules/credential-vault/controllers/broker.controller';
 import { CredentialVaultService } from '../../src/modules/credential-vault/services/credential-vault.service';
 import { AngelOneValidator } from '../../src/modules/market-data/services/angel-one-validator.service';
+import { BrokerOverviewService } from '../../src/modules/credential-vault/services/broker-overview.service';
 
 const raw = new PrismaClient({ datasources: { db: { url: testUrl } } });
 const validator = { validateLogin: jest.fn() };
@@ -53,6 +54,9 @@ const validator = { validateLogin: jest.fn() };
   providers: [
     CredentialVaultService,
     { provide: AngelOneValidator, useValue: validator },
+    // GET /api/broker/overview isn't exercised here, but BrokerController requires
+    // BrokerOverviewService at construction (TDA-017); stub so DI resolves.
+    { provide: BrokerOverviewService, useValue: {} },
   ],
 })
 class BrokerTestModule {}

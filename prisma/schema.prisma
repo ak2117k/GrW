@@ -1397,6 +1397,10 @@ model User {
   mfaEnabled      Boolean     @default(false)
   mfaSecretEnc    String?     // encrypted TOTP secret (interim AES-GCM; KMS in TDA-005)
   lastLoginAt     DateTime?
+  // Designates the ONE account whose vault credentials power the shared market-data
+  // feed (vault->market-feed bridge). A partial unique index (added in the migration,
+  // `WHERE "isFeedAccount" = true`) enforces at most one feed account at a time.
+  isFeedAccount   Boolean     @default(false)
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
   subscriptions     Subscription[]

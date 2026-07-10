@@ -1,7 +1,9 @@
 import {
+  BadRequestException,
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -21,6 +23,12 @@ export interface ReqMeta {
 export interface ConnectResult {
   connected: true;
   validatedAt: Date;
+}
+
+/** The account now powering the shared market-data feed (design §3.5). */
+export interface FeedAccountResult {
+  userId: string;
+  email: string;
 }
 
 /** Non-secret status surface — decrypts NOTHING (TDA-005 §4.1). */
@@ -133,6 +141,44 @@ export class CredentialVaultService {
       userId,
       target: 'angel_one',
       meta: { ...reqMeta },
+    });
+  }
+
+  /**
+   * ADMIN-only: designate `userId` as the single account whose vault credentials
+   * power the shared market-data feed (design §3.5). Runs in ONE transaction:
+   *   1. the target user must exist (404) and have a BrokerCredential (400);
+   *   2. clear any current feed account (isFeedAccount=true → false);
+   *   3. flag the target.
+   * The clear-then-set order keeps the partial unique index
+   * (`WHERE "isFeedAccount" = true`) satisfied at commit. Returns the new feed
+   * account's id + email — NO secret fields are read or returned.
+   */
+  async setFeedAccount(userId: string): Promise<FeedAccountResult> {
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findUnique({
+        where: { id: userId },
+        select: { id: true, email: true, brokerCredential: { select: { id: true } } },
+      });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+      if (!user.brokerCredential) {
+        throw new BadRequestException('User has no connected broker account');
+      }
+
+      // Clear the prior feed account BEFORE setting the new one, so the partial
+      // unique index never sees two `isFeedAccount = true` rows.
+      await tx.user.updateMany({
+        where: { isFeedAccount: true },
+        data: { isFeedAccount: false },
+      });
+      await tx.user.update({
+        where: { id: userId },
+        data: { isFeedAccount: true },
+      });
+
+      return { userId: user.id, email: user.email };
     });
   }
 

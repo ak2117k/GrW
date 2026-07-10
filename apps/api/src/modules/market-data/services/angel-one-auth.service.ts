@@ -1,16 +1,16 @@
 import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 // @ts-ignore — smartapi-javascript has no type declarations
 import { SmartAPI } from 'smartapi-javascript';
 // RFC-6238 TOTP extracted to a shared util (TDA-005) so the live login here and
 // the per-user AngelOneValidator produce codes identically.
 import { generateTOTP } from '../utils/angel-one-totp';
+import { FeedCredentialProvider } from './feed-credential-provider';
 
 @Injectable()
 export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AngelOneAuthService.name);
 
-  private smartApi: any;
+  private smartApi: any = null;
   private jwtToken: string | null = null;
   private refreshTokenValue: string | null = null;
   private feedToken: string | null = null;
@@ -18,35 +18,33 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private authenticated = false;
 
-  // Mutable so updateCredentials() can swap in DB-stored credentials at runtime
-  // (the broker settings flow); seeded from env in the constructor.
-  private apiKey: string;
-  private clientId: string;
-  private password: string;
-  private totpSecret: string;
+  // The feed account's NON-secret identifiers, set at login() from the leased
+  // credentials. The raw password / TOTP secret are NEVER stored on the instance —
+  // they live only inside the FeedCredentialProvider lease and are zeroized on
+  // exit. Only the ~24h session (jwt/feed token + the authenticated SmartAPI
+  // client, which holds the JWT internally) is held warm.
+  private apiKey = '';
+  private clientId = '';
 
   private static readonly MAX_LOGIN_RETRIES = 3;
   private static readonly RETRY_DELAY_MS = 2000;
   /** Refresh 1 hour before expiry (tokens last ~24hrs) */
   private static readonly TOKEN_REFRESH_BUFFER_MS = 60 * 60 * 1000;
 
-  constructor(private readonly configService: ConfigService) {
-    // Angel One env creds are OPTIONAL (paper mode / SaaS uses per-user encrypted
-    // creds entered in-app, not a global boot secret). Default to the same
-    // placeholders onModuleInit checks for, so a deploy without these vars skips
-    // auto-login gracefully instead of crashing the whole app at construction.
-    this.apiKey = this.configService.get<string>('ANGEL_ONE_API_KEY', 'your_api_key_here');
-    this.clientId = this.configService.get<string>('ANGEL_ONE_CLIENT_ID', 'your_client_id_here');
-    this.password = this.configService.get<string>('ANGEL_ONE_PASSWORD', '');
-    this.totpSecret = this.configService.get<string>('ANGEL_ONE_TOTP_SECRET', '');
-
-    this.smartApi = new SmartAPI({ api_key: this.apiKey });
-  }
+  // Credential resolution (env-first, vault fallback) is delegated to the
+  // FeedCredentialProvider; this service only owns the session lifecycle.
+  constructor(private readonly feedCredentials: FeedCredentialProvider) {}
 
   async onModuleInit(): Promise<void> {
-    // Skip auto-login if placeholder credentials are still in .env
-    if (this.apiKey === 'your_api_key_here' || this.clientId === 'your_client_id_here') {
-      this.logger.warn('Angel One credentials not configured — skipping auto-login');
+    // Only attempt auto-login when a feed account is resolvable (env creds set,
+    // or a designated vault account with connected credentials). Otherwise skip
+    // gracefully — the feed serves demo/REST data until one is configured.
+    if (!(await this.feedCredentials.hasFeedCredentials())) {
+      this.logger.warn(
+        'No market-data feed credentials configured (env or designated vault ' +
+        'account) — skipping auto-login. Live market data unavailable until a ' +
+        'feed account is set.',
+      );
       return;
     }
 
@@ -67,55 +65,69 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Authenticate with Angel One SmartAPI using TOTP-based login.
-   * Retries up to 3 times on failure.
+   *
+   * Credentials are LEASED from the {@link FeedCredentialProvider} for the
+   * duration of the login only: the SmartAPI client is (re)built from the leased
+   * api key, `generateSession` is retried up to 3× within the lease (a fresh TOTP
+   * per attempt), and the raw password/TOTP secret are zeroized when the lease
+   * returns. On success only the session (jwt/refresh/feed tokens + the
+   * authenticated client) survives.
    */
   async login(): Promise<void> {
-    let lastError: Error | undefined;
+    await this.feedCredentials.withFeedCredentials(async (creds) => {
+      // Build the client from the feed account's api key; it retains the JWT
+      // internally after generateSession, so it is the warm session handle.
+      this.smartApi = new SmartAPI({ api_key: creds.apiKey });
+      this.apiKey = creds.apiKey;
+      this.clientId = creds.clientId;
 
-    for (let attempt = 1; attempt <= AngelOneAuthService.MAX_LOGIN_RETRIES; attempt++) {
-      try {
-        this.logger.log(`Login attempt ${attempt}/${AngelOneAuthService.MAX_LOGIN_RETRIES}`);
+      let lastError: Error | undefined;
 
-        const totp = generateTOTP(this.totpSecret);
-        const session = await this.smartApi.generateSession(
-          this.clientId,
-          this.password,
-          totp,
-        );
+      for (let attempt = 1; attempt <= AngelOneAuthService.MAX_LOGIN_RETRIES; attempt++) {
+        try {
+          this.logger.log(`Login attempt ${attempt}/${AngelOneAuthService.MAX_LOGIN_RETRIES}`);
 
-        if (!session?.data?.jwtToken) {
-          throw new Error(
-            `Invalid session response: ${JSON.stringify(session?.message ?? session)}`,
+          const totp = generateTOTP(creds.totpSecret);
+          const session = await this.smartApi.generateSession(
+            creds.clientId,
+            creds.password,
+            totp,
           );
-        }
 
-        this.jwtToken = session.data.jwtToken;
-        this.refreshTokenValue = session.data.refreshToken;
-        this.feedToken = session.data.feedToken;
-        this.authenticated = true;
+          if (!session?.data?.jwtToken) {
+            throw new Error(
+              `Invalid session response: ${JSON.stringify(session?.message ?? session)}`,
+            );
+          }
 
-        // Tokens last ~24 hours
-        this.tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          this.jwtToken = session.data.jwtToken;
+          this.refreshTokenValue = session.data.refreshToken;
+          this.feedToken = session.data.feedToken;
+          this.authenticated = true;
 
-        this.scheduleTokenRefresh();
-        this.logger.log('Successfully authenticated with Angel One SmartAPI');
-        return;
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        this.logger.warn(
-          `Login attempt ${attempt} failed: ${lastError.message}`,
-        );
+          // Tokens last ~24 hours
+          this.tokenExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-        if (attempt < AngelOneAuthService.MAX_LOGIN_RETRIES) {
-          await this.delay(AngelOneAuthService.RETRY_DELAY_MS * attempt);
+          this.scheduleTokenRefresh();
+          this.logger.log('Successfully authenticated with Angel One SmartAPI');
+          return;
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          this.logger.warn(
+            `Login attempt ${attempt} failed: ${lastError.message}`,
+          );
+
+          if (attempt < AngelOneAuthService.MAX_LOGIN_RETRIES) {
+            await this.delay(AngelOneAuthService.RETRY_DELAY_MS * attempt);
+          }
         }
       }
-    }
 
-    this.authenticated = false;
-    throw new Error(
-      `Angel One login failed after ${AngelOneAuthService.MAX_LOGIN_RETRIES} attempts: ${lastError?.message}`,
-    );
+      this.authenticated = false;
+      throw new Error(
+        `Angel One login failed after ${AngelOneAuthService.MAX_LOGIN_RETRIES} attempts: ${lastError?.message}`,
+      );
+    });
   }
 
   /**
@@ -208,25 +220,6 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Swap in new credentials at runtime (broker settings flow). Recreates the
-   * SmartAPI client with the new API key and clears the current session so the
-   * next login() uses the new values. Does NOT auto-login — the caller decides.
-   */
-  updateCredentials(
-    apiKey: string,
-    clientId: string,
-    password: string,
-    totpSecret: string,
-  ): void {
-    this.apiKey = apiKey;
-    this.clientId = clientId;
-    this.password = password;
-    this.totpSecret = totpSecret;
-    this.smartApi = new SmartAPI({ api_key: apiKey });
-    this.clearSession();
-  }
-
-  /**
    * Get the client ID.
    */
   getClientId(): string {
@@ -259,7 +252,9 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
    */
   async logout(): Promise<void> {
     try {
-      await this.smartApi.logout(this.clientId);
+      if (this.smartApi) {
+        await this.smartApi.logout(this.clientId);
+      }
     } catch (error) {
       this.logger.warn(
         `Logout API call failed: ${error instanceof Error ? error.message : error}`,

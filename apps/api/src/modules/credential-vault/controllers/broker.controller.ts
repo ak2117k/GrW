@@ -6,13 +6,16 @@ import {
   HttpCode,
   HttpStatus,
   Ip,
+  Patch,
   Post,
 } from '@nestjs/common';
-import { CurrentUser } from '../../../common/decorators';
+import { AdminOnly, CurrentUser } from '../../../common/decorators';
 import { ConnectAngelOneDto } from '../dto/connect-angel-one.dto';
+import { SetFeedAccountDto } from '../dto/set-feed-account.dto';
 import {
   BrokerStatus,
   ConnectResult,
+  FeedAccountResult,
   CredentialVaultService,
 } from '../services/credential-vault.service';
 import {
@@ -66,5 +69,18 @@ export class BrokerController {
   @HttpCode(HttpStatus.NO_CONTENT)
   disconnect(@CurrentUser('userId') userId: string, @Ip() ip: string): Promise<void> {
     return this.vault.disconnect(userId, { ip });
+  }
+
+  /**
+   * ADMIN-only: designate WHICH connected account powers the shared market-data
+   * feed (design §3.5). Transactionally clears any prior feed account and flags
+   * the target `userId` (400 if it has no broker credential, 404 if it does not
+   * exist). Handler-level `@AdminOnly()` — the rest of this controller is
+   * caller-scoped USER surface — enforced by the global RolesGuard.
+   */
+  @Patch('feed-account')
+  @AdminOnly()
+  setFeedAccount(@Body() dto: SetFeedAccountDto): Promise<FeedAccountResult> {
+    return this.vault.setFeedAccount(dto.userId);
   }
 }

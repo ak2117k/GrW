@@ -18,7 +18,10 @@
     // (/login, /dashboard, ...) resolve on hard refresh.
     "not_found_handling": "single-page-application",
     // Run the Worker (proxy) ONLY for these paths; everything else is served
-    // directly from the static assets with no Worker invocation.
-    "run_worker_first": ["/api/*", "/auth/*"]
+    // directly from the static assets with no Worker invocation. /socket.io/*
+    // MUST be here — otherwise the WebSocket handshake is served the SPA
+    // index.html instead of being proxied to Render, and the live feed never
+    // connects (the app shows "Disconnected").
+    "run_worker_first": ["/api/*", "/auth/*", "/socket.io/*"]
   }
 }

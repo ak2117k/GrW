@@ -1,10 +1,14 @@
 // Cloudflare Worker for the GrW frontend.
 //
 // It does two jobs:
-//   1. Proxy /api/* and /auth/* to the Render backend, server-side. The browser
-//      only ever talks to this Worker's origin, so these are SAME-ORIGIN calls
-//      — no CORS preflight, and the React client keeps its relative axios
-//      baseURL ('/api', '/auth/refresh') with zero code changes.
+//   1. Proxy /api/*, /auth/*, and /socket.io/* to the Render backend,
+//      server-side. The browser only ever talks to this Worker's origin, so
+//      these are SAME-ORIGIN calls — no CORS preflight, and the React client
+//      keeps its relative axios baseURL ('/api', '/auth/refresh') and relative
+//      socket.io connection (io('/ws', { path: '/socket.io' })) with zero code
+//      changes. The socket.io proxy also carries the WebSocket upgrade: passing
+//      the original request through fetch() preserves the Upgrade header, which
+//      Cloudflare tunnels transparently (and polling transport works either way).
 //   2. Everything else is served from the static SPA (apps/web/dist) via the
 //      ASSETS binding. Because wrangler.jsonc sets
 //      run_worker_first: ["/api/*", "/auth/*"], non-API paths are served
@@ -19,7 +23,11 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) {
+    if (
+      url.pathname.startsWith('/api/') ||
+      url.pathname.startsWith('/auth/') ||
+      url.pathname.startsWith('/socket.io/')
+    ) {
       // Forward method, headers, and body unchanged to Render. Passing the
       // original request as init preserves everything; the runtime sets the
       // Host header from the target URL.

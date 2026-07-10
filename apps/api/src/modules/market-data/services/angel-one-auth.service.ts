@@ -39,22 +39,26 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
     // Only attempt auto-login when a feed account is resolvable (env creds set,
     // or a designated vault account with connected credentials). Otherwise skip
     // gracefully — the feed serves demo/REST data until one is configured.
-    if (!(await this.feedCredentials.hasFeedCredentials())) {
-      this.logger.warn(
-        'No market-data feed credentials configured (env or designated vault ' +
-        'account) — skipping auto-login. Live market data unavailable until a ' +
-        'feed account is set.',
-      );
-      return;
-    }
-
     try {
+      if (!(await this.feedCredentials.hasFeedCredentials())) {
+        this.logger.warn(
+          'No market-data feed credentials configured (env or designated vault ' +
+          'account) — skipping auto-login. Live market data unavailable until a ' +
+          'feed account is set.',
+        );
+        return;
+      }
+
       await this.login();
       this.logger.log('Auto-login succeeded');
     } catch (error) {
+      // NEVER let feed-credential resolution or login crash app bootstrap — the
+      // market feed is non-critical to boot and degrades to demo/REST data. This
+      // also survives a not-yet-applied migration (a missing isFeedAccount column
+      // makes hasFeedCredentials() throw) instead of taking the entire API down.
       this.logger.error(
-        `Auto-login failed: ${error instanceof Error ? error.message : error}. ` +
-        'Live market data will be unavailable until login succeeds.',
+        `Market-data feed auto-login skipped: ${error instanceof Error ? error.message : error}. ` +
+        'Live market data unavailable until resolved (feed serves demo/REST data).',
       );
     }
   }

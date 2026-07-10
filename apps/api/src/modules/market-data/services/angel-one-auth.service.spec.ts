@@ -62,6 +62,17 @@ describe('AngelOneAuthService (vault->market-feed bridge)', () => {
       expect(service.isAuthenticated()).toBe(false);
     });
 
+    it('does NOT crash boot when feed-credential resolution throws (e.g. isFeedAccount column not yet migrated)', async () => {
+      const boom = new Error('column "isFeedAccount" does not exist');
+      const provider = makeProvider({ hasFeedCredentials: jest.fn().mockRejectedValue(boom) });
+      service = new AngelOneAuthService(provider);
+
+      // onModuleInit must resolve (never reject) so a missing migration / DB
+      // hiccup can't abort NestJS bootstrap and take the whole API down.
+      await expect(service.onModuleInit()).resolves.toBeUndefined();
+      expect(service.isAuthenticated()).toBe(false);
+    });
+
     it('logs in when feed credentials are available', async () => {
       const provider = makeProvider();
       service = new AngelOneAuthService(provider);

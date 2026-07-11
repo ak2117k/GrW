@@ -16,6 +16,7 @@ import ChartinkPage from '@/pages/chartink/ChartinkPage';
 import AutoTradePage from '@/pages/auto-trade/AutoTradePage';
 import ManualTradePage from '@/pages/manual-trade/ManualTradePage';
 import PositionsPage from '@/pages/positions/PositionsPage';
+import PortfolioPage from '@/pages/portfolio/PortfolioPage';
 import NewsPage from '@/pages/news/NewsPage';
 import JournalPage from '@/pages/journal/JournalPage';
 import AdvisorPage from '@/pages/advisor/AdvisorPage';
@@ -159,6 +160,7 @@ export default function App() {
         <Route path="auto-trade" element={<RequireRole role="ADMIN"><AutoTradePage /></RequireRole>} />
         <Route path="manual-trade" element={<RequireRole role="ADMIN"><ManualTradePage /></RequireRole>} />
         <Route path="positions" element={<PositionsPage />} />
+        <Route path="portfolio" element={<PortfolioPage />} />
         <Route path="payments" element={<PaymentsPage />} />
         <Route path="news" element={<RequireRole role="ADMIN"><NewsPage /></RequireRole>} />
         <Route path="journal" element={<RequireRole role="ADMIN"><JournalPage /></RequireRole>} />

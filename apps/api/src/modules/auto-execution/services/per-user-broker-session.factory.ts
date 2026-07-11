@@ -36,10 +36,12 @@ export interface UserSmartApiLike {
   placeOrder(params: Record<string, string>): Promise<any>;
   logout(clientId: string): Promise<any>;
   // Read-only account surface (TDA-017 overview). Names match the installed
-  // smartapi-javascript@1.0.27 client exactly (get_rms / get_profile / get_position).
+  // smartapi-javascript@1.0.27 client exactly (get_rms / get_profile / get_position
+  // / get_all_holding).
   getRMS(): Promise<any>;
   getProfile(): Promise<any>;
   getPosition(): Promise<any>;
+  getAllHolding(): Promise<any>;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -74,6 +76,7 @@ export interface UserBrokerSession {
   getFunds(): Promise<any>;
   getProfile(): Promise<any>;
   getPositions(): Promise<any>;
+  getHoldings(): Promise<any>;
 }
 
 /** Map our generic order types to Angel One SmartAPI order-type strings. */
@@ -208,6 +211,15 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
   /** Fetch this user's open positions. Returns the RAW broker `data` (or null). */
   async getPositions(): Promise<any> {
     return this.read(() => this.client.getPosition(), 'Angel One getPosition');
+  }
+
+  /**
+   * Fetch this user's equity holdings + portfolio totals (Angel One
+   * `get_all_holding`: `{ holdings: [...], totalholding: {...} }`). Returns the
+   * RAW broker `data` (or null); same disposed-guard + timeout as getPositions.
+   */
+  async getHoldings(): Promise<any> {
+    return this.read(() => this.client.getAllHolding(), 'Angel One getAllHolding');
   }
 
   /**

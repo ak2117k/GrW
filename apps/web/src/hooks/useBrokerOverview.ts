@@ -4,6 +4,19 @@ import api from '@/services/api';
 // GET /api/broker/overview — a live, read-only Angel One account snapshot.
 // Each call performs a REAL broker login (rate-limited on the backend), so this
 // is driven from a manual Refresh button — it does NOT auto-poll on mount.
+export interface Holding {
+  symbol: string;
+  exchange: string;
+  qty: number;
+  avgPrice: number;
+  ltp: number;
+  close: number;
+  currentValue: number;
+  pnl: number;
+  pnlPercent: number;
+  dayChangePercent: number;
+}
+
 export interface BrokerOverview {
   funds: { availableCash: number; net: number; utilisedMargin: number };
   profile: { name: string; broker: string; exchanges: string[] };
@@ -14,6 +27,13 @@ export interface BrokerOverview {
     ltp: number;
     pnl: number;
   }>;
+  holdings: Holding[];
+  holdingSummary: {
+    investedValue: number;
+    currentValue: number;
+    totalPnl: number;
+    totalPnlPercent: number;
+  };
 }
 
 export interface UseBrokerOverview {

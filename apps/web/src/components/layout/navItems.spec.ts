@@ -1,10 +1,21 @@
 import { describe, it, expect } from 'vitest';
 import { navItems, visibleNavItems } from './navItems';
 
-const USER_PATHS = ['/intraday', '/swing', '/positions', '/settings', '/market', '/charts'];
+// The USER-visible product surface (must mirror USER_VISIBLE in navItems.ts).
+const USER_PATHS = [
+  '/',
+  '/intraday',
+  '/swing',
+  '/positions',
+  '/portfolio',
+  '/payments',
+  '/market',
+  '/charts',
+  '/settings',
+];
 
 describe('visibleNavItems', () => {
-  it('USER sees exactly the product items (Intraday/Swing/Positions/Settings + Market/Charts)', () => {
+  it('USER sees exactly the product items (Dashboard/Intraday/Swing/Positions/Portfolio/Payments/Market/Charts/Settings)', () => {
     expect(visibleNavItems('USER').map((i) => i.path).sort()).toEqual([...USER_PATHS].sort());
   });
 

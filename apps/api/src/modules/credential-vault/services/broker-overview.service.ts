@@ -11,6 +11,20 @@ import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-u
  * Contains ONLY the safe fields below — never a token, credential, or the raw
  * Angel One envelope (TDA-017 security seam).
  */
+/** A single sanitized equity holding (delivered stock) row. */
+export interface Holding {
+  symbol: string;
+  exchange: string;
+  qty: number;
+  avgPrice: number;
+  ltp: number;
+  close: number;
+  currentValue: number;
+  pnl: number;
+  pnlPercent: number;
+  dayChangePercent: number;
+}
+
 export interface BrokerOverview {
   funds: { availableCash: number; net: number; utilisedMargin: number };
   profile: { name: string; broker: string; exchanges: string[] };
@@ -21,6 +35,13 @@ export interface BrokerOverview {
     ltp: number;
     pnl: number;
   }>;
+  holdings: Holding[];
+  holdingSummary: {
+    investedValue: number;
+    currentValue: number;
+    totalPnl: number;
+    totalPnlPercent: number;
+  };
 }
 
 /** Coerce a broker numeric-string (or number/null/undefined) to a finite number. */
@@ -62,11 +83,50 @@ function mapPositions(positions: any): BrokerOverview['positions'] {
   }));
 }
 
+/**
+ * Angel One `get_all_holding` `data.holdings[]` → sanitized holding rows (empty
+ * array when the section is absent/malformed). `data` here is the whole
+ * get_all_holding envelope (`{ holdings, totalholding }`).
+ */
+function mapHoldings(data: any): Holding[] {
+  const holdings = data?.holdings;
+  if (!Array.isArray(holdings)) return [];
+  return holdings.map((h: any) => {
+    const qty = toNum(h?.quantity);
+    const ltp = toNum(h?.ltp);
+    const close = toNum(h?.close);
+    return {
+      symbol: h?.tradingsymbol ? String(h.tradingsymbol) : '',
+      exchange: h?.exchange ? String(h.exchange) : '',
+      qty,
+      avgPrice: toNum(h?.averageprice),
+      ltp,
+      close,
+      currentValue: ltp * qty,
+      pnl: toNum(h?.profitandloss),
+      pnlPercent: toNum(h?.pnlpercentage),
+      dayChangePercent: close > 0 ? ((ltp - close) / close) * 100 : 0,
+    };
+  });
+}
+
+/** Angel One `get_all_holding` `data.totalholding` → portfolio summary (zeros when absent). */
+function mapHoldingSummary(data: any): BrokerOverview['holdingSummary'] {
+  const t = data?.totalholding;
+  return {
+    investedValue: toNum(t?.totalinvvalue),
+    currentValue: toNum(t?.totalholdingvalue),
+    totalPnl: toNum(t?.totalprofitandloss),
+    totalPnlPercent: toNum(t?.totalpnlpercentage),
+  };
+}
+
 /** Raw broker sections gathered inside the single ephemeral session. */
 interface RawOverview {
   funds: any;
   profile: any;
   positions: any;
+  holdings: any;
 }
 
 /** Map the raw broker sections into the sanitized, secret-free DTO. */
@@ -75,6 +135,8 @@ export function sanitizeOverview(raw: RawOverview): BrokerOverview {
     funds: mapFunds(raw.funds),
     profile: mapProfile(raw.profile),
     positions: mapPositions(raw.positions),
+    holdings: mapHoldings(raw.holdings),
+    holdingSummary: mapHoldingSummary(raw.holdings),
   };
 }
 
@@ -121,6 +183,7 @@ export class BrokerOverviewService {
           funds: await session.getFunds(),
           profile: await session.getProfile(),
           positions: await session.getPositions(),
+          holdings: await session.getHoldings(),
         })),
     );
 

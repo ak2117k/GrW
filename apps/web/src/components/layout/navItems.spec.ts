@@ -8,6 +8,7 @@ const USER_PATHS = [
   '/swing',
   '/positions',
   '/portfolio',
+  '/monitor',
   '/payments',
   '/market',
   '/charts',
@@ -15,7 +16,7 @@ const USER_PATHS = [
 ];
 
 describe('visibleNavItems', () => {
-  it('USER sees exactly the product items (Dashboard/Intraday/Swing/Positions/Portfolio/Payments/Market/Charts/Settings)', () => {
+  it('USER sees exactly the product items (Dashboard/Intraday/Swing/Positions/Portfolio/Monitor/Payments/Market/Charts/Settings)', () => {
     expect(visibleNavItems('USER').map((i) => i.path).sort()).toEqual([...USER_PATHS].sort());
   });
 

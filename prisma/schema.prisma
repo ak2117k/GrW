@@ -1419,8 +1419,36 @@ model User {
   billingProfile     BillingProfile?
   payments          Payment[]
   tradeTrackers      TradeTracker[]
+  stockMonitors      StockMonitor[]
   @@index([status])
   @@map("users")
+}
+
+/// Stock monitor (feature: target-profit watcher). A user adds a stock with a
+/// target profit %; `referencePrice` is the LTP captured at add-time and
+/// `targetPrice = referencePrice * (1 + targetPercent/100)`. A poller sweeps
+/// live socket prices; on `lastLtp >= targetPrice` it flips to TARGET_HIT and
+/// fires an alert once.
+model StockMonitor {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol         String
+  exchange       String
+  token          String
+  referencePrice Float?
+  targetPercent  Float
+  targetPrice    Float?
+  status         String    @default("WATCHING") // 'WATCHING' | 'TARGET_HIT'
+  lastLtp        Float?
+  currentPercent Float?
+  triggeredAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([userId, token])
+  @@index([userId, status])
+  @@map("stock_monitors")
 }
 
 /// Per-trade tracker (feature: portfolio trade tracker). One row per real Angel

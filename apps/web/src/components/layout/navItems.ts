@@ -26,6 +26,7 @@ import {
   Send,
   CreditCard,
   PieChart,
+  Target,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -49,6 +50,7 @@ export const navItems: NavItem[] = [
   { path: '/auto-trade', label: 'Auto-Trade', icon: Bot },
   { path: '/positions', label: 'Positions', icon: Briefcase },
   { path: '/portfolio', label: 'Portfolio', icon: PieChart },
+  { path: '/monitor', label: 'Monitor', icon: Target },
   { path: '/payments', label: 'Payments', icon: CreditCard },
   { path: '/news', label: 'News', icon: Newspaper },
   { path: '/journal', label: 'Journal', icon: BookOpen },
@@ -63,7 +65,7 @@ export const navItems: NavItem[] = [
 // the single source of truth for what a non-ADMIN sees; everything else is
 // ADMIN-only. Treat null/unknown roles as USER (fail closed) so a missing or
 // malformed role never leaks the full nav.
-const USER_VISIBLE = new Set(['/', '/intraday', '/swing', '/positions', '/portfolio', '/payments', '/market', '/charts', '/settings']);
+const USER_VISIBLE = new Set(['/', '/intraday', '/swing', '/positions', '/portfolio', '/monitor', '/payments', '/market', '/charts', '/settings']);
 
 export function visibleNavItems(role: string | null | undefined): NavItem[] {
   if (role === 'ADMIN') return navItems;

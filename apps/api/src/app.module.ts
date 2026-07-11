@@ -41,6 +41,7 @@ import { BillingModule } from './modules/billing/billing.module';
 import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module';
 import { AutoExecutionModule } from './modules/auto-execution/auto-execution.module';
 import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module';
+import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 
 @Module({
   imports: [
@@ -205,6 +206,12 @@ import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module
     // position/holding with entry/exit, holding + day high/low, LTP and P&L,
     // filled from periodic broker snapshots + live socket ticks.
     TradeTrackerModule,
+
+    // Target-profit stock monitor (design feature 2) — per-user watched stocks
+    // with an upside profit target captured at add-time; a poller sweeps live
+    // socket quotes and, on a hit, flips to TARGET_HIT and fires a persisted
+    // Alert + a WS `alert` toast.
+    StockMonitorModule,
   ],
   providers: [
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,

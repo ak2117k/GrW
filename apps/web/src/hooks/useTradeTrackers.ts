@@ -63,7 +63,10 @@ export function useTradeTrackers(): UseTradeTrackers {
     setError(null);
     setNotConnected(false);
     try {
-      const { data: res } = await api.get<TrackersResponse>('/portfolio/trackers');
+      // POST /refresh BACKFILLS the caller's book (broker snapshot + reconcile)
+      // and returns the full list — so opening the page fills previous / ongoing
+      // trades instead of showing an empty table before the cron poller runs.
+      const { data: res } = await api.post<TrackersResponse>('/portfolio/trackers/refresh');
       setData(res.trackers ?? []);
     } catch (err) {
       const status = (err as { response?: { status?: number } })?.response?.status;

@@ -63,10 +63,14 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
     return { ctrl, deps };
   }
 
+  // The chart-display reads are subscription-gated; an ADMIN user bypasses the
+  // check (so these unit tests don't need a wired SubscriptionService).
+  const ADMIN = { userId: 'u1', role: 'ADMIN' } as never;
+
   describe('getZones', () => {
     it("non-15m (interval='5m'): never reads or writes the shared zone DB; detects with interval", async () => {
       const { ctrl, deps } = build();
-      const zones = await ctrl.getZones('18520', 'NSE', 'CUPID', '5m');
+      const zones = await ctrl.getZones(ADMIN, '18520', 'NSE', 'CUPID', '5m');
       expect(deps.zoneRepository.findActiveByToken).not.toHaveBeenCalled();
       expect(deps.zoneRepository.upsertMany).not.toHaveBeenCalled();
       expect(deps.strongZoneDetector.detectZones).toHaveBeenCalledWith(
@@ -77,7 +81,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
 
     it('regression: no interval ⇒ reads DB cache then persists (frozen 15m path)', async () => {
       const { ctrl, deps } = build();
-      await ctrl.getZones('18520', 'NSE', 'CUPID');
+      await ctrl.getZones(ADMIN, '18520', 'NSE', 'CUPID');
       expect(deps.zoneRepository.findActiveByToken).toHaveBeenCalledWith('18520');
       // Cache miss → compute + persist (upsertMany) as today.
       expect(deps.zoneRepository.upsertMany).toHaveBeenCalledWith('18520', [{ id: 'z1' }]);
@@ -88,14 +92,14 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
 
     it("regression: explicit interval='15m' behaves like no interval (DB read + persist)", async () => {
       const { ctrl, deps } = build();
-      await ctrl.getZones('18520', 'NSE', 'CUPID', '15m');
+      await ctrl.getZones(ADMIN, '18520', 'NSE', 'CUPID', '15m');
       expect(deps.zoneRepository.findActiveByToken).toHaveBeenCalledWith('18520');
       expect(deps.zoneRepository.upsertMany).toHaveBeenCalled();
     });
 
     it("invalid interval='foo' ⇒ treated as 15m (DB read + persist)", async () => {
       const { ctrl, deps } = build();
-      await ctrl.getZones('18520', 'NSE', 'CUPID', 'foo');
+      await ctrl.getZones(ADMIN, '18520', 'NSE', 'CUPID', 'foo');
       expect(deps.zoneRepository.findActiveByToken).toHaveBeenCalledWith('18520');
       expect(deps.strongZoneDetector.detectZones).toHaveBeenCalledWith(
         expect.objectContaining({ interval: '15m' }),
@@ -109,14 +113,14 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
           upsertMany: jest.fn(),
         },
       });
-      const zones = await ctrl.getZones('18520', 'NSE', 'CUPID');
+      const zones = await ctrl.getZones(ADMIN, '18520', 'NSE', 'CUPID');
       expect(zones).toEqual([{ id: 'cached' }]);
       expect(deps.strongZoneDetector.detectZones).not.toHaveBeenCalled();
     });
 
     it("non-15m fetches candles at the selected interval with per-TF lookback", async () => {
       const { ctrl, deps } = build();
-      await ctrl.getZones('18520', 'NSE', 'CUPID', '1m');
+      await ctrl.getZones(ADMIN, '18520', 'NSE', 'CUPID', '1m');
       const call = deps.angelOneAdapter.getHistoricalData.mock.calls[0];
       expect(call[2]).toBe('1m');
       const days = (call[4].getTime() - call[3].getTime()) / (24 * 60 * 60 * 1000);
@@ -127,19 +131,19 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
   describe('getSrEvidence', () => {
     it("passes the validated interval through to levelsFor (interval='5m')", async () => {
       const { ctrl, deps } = build();
-      await ctrl.getSrEvidence('18520', 'NSE', 'CUPID', '5m');
+      await ctrl.getSrEvidence(ADMIN, '18520', 'NSE', 'CUPID', '5m');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
     });
 
     it('regression: no interval ⇒ levelsFor called with 15m', async () => {
       const { ctrl, deps } = build();
-      await ctrl.getSrEvidence('18520', 'NSE', 'CUPID');
+      await ctrl.getSrEvidence(ADMIN, '18520', 'NSE', 'CUPID');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '15m');
     });
 
     it("invalid interval ⇒ levelsFor called with 15m", async () => {
       const { ctrl, deps } = build();
-      await ctrl.getSrEvidence('18520', 'NSE', 'CUPID', 'bogus');
+      await ctrl.getSrEvidence(ADMIN, '18520', 'NSE', 'CUPID', 'bogus');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '15m');
     });
 
@@ -147,14 +151,14 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       "positional interval='%s' is accepted as its own timeframe (not collapsed to 15m)",
       async (tf) => {
         const { ctrl, deps } = build();
-        await ctrl.getSrEvidence('18520', 'NSE', 'CUPID', tf);
+        await ctrl.getSrEvidence(ADMIN, '18520', 'NSE', 'CUPID', tf);
         expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', tf);
       },
     );
 
     it("normalizes Yahoo-style '1M' to '1mo'", async () => {
       const { ctrl, deps } = build();
-      await ctrl.getSrEvidence('18520', 'NSE', 'CUPID', '1M');
+      await ctrl.getSrEvidence(ADMIN, '18520', 'NSE', 'CUPID', '1M');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '1mo');
     });
   });

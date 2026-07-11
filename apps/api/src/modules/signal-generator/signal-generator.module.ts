@@ -6,6 +6,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { OptionsChainModule } from '../options-chain/options-chain.module';
 import { TradeEngineModule } from '../trade-engine/trade-engine.module';
 import { PrismaModule } from '../../common/prisma/prisma.module';
+import { SubscriptionModule } from '../subscription/subscription.module';
 import { SignalGeneratorController } from './controllers/signal-generator.controller';
 import { SignalGeneratorService } from './services/signal-generator.service';
 import { SignalScoringService } from './services/signal-scoring.service';
@@ -61,6 +62,7 @@ import type { ContextFactor } from './services/context-scoring/types';
     SettingsModule,
     OptionsChainModule,
     TradeEngineModule,
+    SubscriptionModule,
   ],
   controllers: [SignalGeneratorController, StrategyBuilderController],
   providers: [

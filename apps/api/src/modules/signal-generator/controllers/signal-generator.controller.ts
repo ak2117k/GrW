@@ -10,6 +10,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   Optional,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
@@ -29,7 +30,8 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { SrEvidenceService } from '../services/sr-evidence.service';
 import { isIntradayInterval, isSupportedInterval, normalizeInterval, lookbackDaysFor } from '../services/timeframe-lookback';
 import { computeAtrFromCandles } from '../services/per-tf-atr';
-import { AdminOnly } from '../../../common/decorators';
+import { AdminOnly, Roles, CurrentUser, AuthenticatedUser } from '../../../common/decorators';
+import { SubscriptionService } from '../../subscription/subscription.service';
 
 @AdminOnly()
 @Controller('api/signals')
@@ -61,7 +63,27 @@ export class SignalGeneratorController {
     // test wirings still construct.
     @Optional() private readonly angelOneAdapter?: AngelOneAdapterService,
     @Optional() private readonly srEvidenceService?: SrEvidenceService,
+    // Subscription plan-gate for the chart/indicator DISPLAY reads below
+    // (analyze/zones/indicators/sr-evidence). Optional so existing test wirings
+    // still construct; when absent, non-ADMIN callers are denied (fail closed).
+    @Optional() private readonly subs?: SubscriptionService,
   ) {}
+
+  /**
+   * Chart/indicator display reads are open to ADMIN or any USER holding an
+   * ACTIVE subscription (INTRADAY or SWING). Everything else on this controller
+   * stays ADMIN-only via the class-level `@AdminOnly()`; these four reads
+   * override that with `@Roles('USER','ADMIN')` and defer to this check.
+   * Non-subscribed users get 403 {code:'NOT_SUBSCRIBED'}. Fails closed if the
+   * SubscriptionService isn't wired.
+   */
+  private async assertChartAccess(user: AuthenticatedUser): Promise<void> {
+    if (user?.role === 'ADMIN') return;
+    const active = this.subs ? await this.subs.listForUser(user.userId) : null;
+    if (!active || (!active.INTRADAY && !active.SWING)) {
+      throw new ForbiddenException({ code: 'NOT_SUBSCRIBED' });
+    }
+  }
 
   /**
    * Enrich a signal with its `chartinkSource` if any. Looks up the
@@ -149,13 +171,16 @@ export class SignalGeneratorController {
    * insufficient candles, no detector wired) so the chart overlay
    * stays mounted and doesn't crash.
    */
+  @Roles('USER', 'ADMIN')
   @Get('zones')
   async getZones(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('token') token: string,
     @Query('exchange') exchange?: string,
     @Query('symbol') symbol?: string,
     @Query('interval') interval?: string,
   ) {
+    await this.assertChartAccess(user);
     if (!token) {
       throw new BadRequestException('token is required');
     }
@@ -272,13 +297,16 @@ export class SignalGeneratorController {
    * adaptive round numbers, OI walls, pivot history) scored + sided vs spot.
    * Returns [] (not 404) when unavailable so the overlay stays mounted.
    */
+  @Roles('USER', 'ADMIN')
   @Get('sr-evidence')
   async getSrEvidence(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('token') token: string,
     @Query('exchange') exchange?: string,
     @Query('symbol') symbol?: string,
     @Query('interval') interval?: string,
   ) {
+    await this.assertChartAccess(user);
     if (!token) throw new BadRequestException('token is required');
     if (!this.srEvidenceService) return [];
     // Accept any supported timeframe — intraday (1m–1h) OR positional
@@ -371,13 +399,16 @@ export class SignalGeneratorController {
     return this.strategyRegistry.getAllStrategies();
   }
 
+  @Roles('USER', 'ADMIN')
   @Get('analyze')
   async analyzeChart(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('token') token: string,
     @Query('exchange') exchange: string,
     @Query('symbol') symbol: string,
     @Query('timeframe') timeframe?: string,
   ) {
+    await this.assertChartAccess(user);
     if (!token || !exchange || !symbol) {
       throw new BadRequestException('token, exchange, symbol are required');
     }
@@ -402,12 +433,15 @@ export class SignalGeneratorController {
    * StockOverviewPanel's IndicatorsCard. Returns `{ indicators: null }`
    * when there aren't enough candles; the frontend renders 'unavailable'.
    */
+  @Roles('USER', 'ADMIN')
   @Get('indicators')
   async getIndicators(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('token') token: string,
     @Query('exchange') exchange: string,
     @Query('timeframe') timeframe: string,
   ) {
+    await this.assertChartAccess(user);
     if (!token || !exchange || !timeframe) {
       throw new BadRequestException('token, exchange, timeframe are required');
     }

@@ -95,71 +95,24 @@ function StatusBadge({ status }: { status: TradeTracker['status'] }) {
  * (independent of the live broker snapshot above), with a client-side Excel/PDF
  * export of the loaded rows.
  */
-function TradeTrackerSection() {
-  const { data, loading, error, notConnected, refresh } = useTradeTrackers();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+function TradeTrackerSection({
+  data,
+  loading,
+  error,
+  notConnected,
+}: {
+  data: TradeTracker[] | null;
+  loading: boolean;
+  error: string | null;
+  notConnected: boolean;
+}) {
   const rows = data ?? [];
   const hasRows = rows.length > 0;
-
-  // Dismiss the download menu on any outside click.
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [menuOpen]);
-
-  const download = (fn: (r: TradeTracker[]) => Promise<void>) => {
-    setMenuOpen(false);
-    void fn(rows);
-  };
 
   return (
     <section className="rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)]">
       <div className="flex items-center justify-between border-b border-[var(--color-border-subtle)] px-4 py-2.5">
         <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Trade Tracker</h2>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => void refresh()}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
-          >
-            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
-            Refresh
-          </button>
-          <div className="relative" ref={menuRef}>
-            <button
-              onClick={() => setMenuOpen((o) => !o)}
-              disabled={!hasRows}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
-            >
-              <Download size={12} />
-              Download
-              <ChevronDown size={12} />
-            </button>
-            {menuOpen && (
-              <div className="absolute right-0 z-10 mt-1 w-40 overflow-hidden rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-card)] shadow-lg">
-                <button
-                  onClick={() => download(exportTrackersXlsx)}
-                  className="block w-full px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)]"
-                >
-                  Excel (.xlsx)
-                </button>
-                <button
-                  onClick={() => download(exportTrackersPdf)}
-                  className="block w-full px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)]"
-                >
-                  PDF
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
       </div>
 
       {loading && !data && <LoadingSkeleton variant="card" count={1} className="m-3 h-24" />}
@@ -246,11 +199,39 @@ function TradeTrackerSection() {
 
 export default function PortfolioPage() {
   const { data, loading, error, notConnected, refresh } = useBrokerOverview();
+  // Trade trackers lifted to the page so the Download button (top header) can
+  // export ALL tracked-trade data. The hook backfills the book on load.
+  const trackers = useTradeTrackers();
+  const trackerRows = trackers.data ?? [];
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
-  // Fetch on mount; the button drives subsequent refreshes (each = one broker login).
+  // Fetch overview on mount; the trade-tracker hook loads (+ backfills) itself.
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Dismiss the download menu on any outside click.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
+
+  const download = (fn: (r: TradeTracker[]) => Promise<void>) => {
+    setMenuOpen(false);
+    void fn(trackerRows);
+  };
+
+  const refreshAll = () => {
+    void refresh();
+    void trackers.refresh();
+  };
+
+  const busy = loading || trackers.loading;
 
   return (
     <div className="space-y-4">
@@ -259,14 +240,44 @@ export default function PortfolioPage() {
           <PieChart size={22} className="text-[var(--color-accent-blue)]" />
           <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Portfolio</h1>
         </div>
-        <button
-          onClick={() => void refresh()}
-          disabled={loading}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border-default)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
-        >
-          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Page-level export of ALL tracked-trade data. */}
+          <div className="relative" ref={menuRef}>
+            <button
+              onClick={() => setMenuOpen((o) => !o)}
+              disabled={trackerRows.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border-default)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
+            >
+              <Download size={13} />
+              Download
+              <ChevronDown size={13} />
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 z-10 mt-1 w-40 overflow-hidden rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-card)] shadow-lg">
+                <button
+                  onClick={() => download(exportTrackersXlsx)}
+                  className="block w-full px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)]"
+                >
+                  Excel (.xlsx)
+                </button>
+                <button
+                  onClick={() => download(exportTrackersPdf)}
+                  className="block w-full px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)]"
+                >
+                  PDF
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            onClick={refreshAll}
+            disabled={busy}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border-default)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
+          >
+            <RefreshCw size={13} className={busy ? 'animate-spin' : ''} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {loading && !data && <LoadingSkeleton variant="card" count={1} className="h-32" />}
@@ -386,8 +397,13 @@ export default function PortfolioPage() {
         </>
       )}
 
-      {/* Persistent per-trade trackers (DB-backed) + Excel/PDF export. */}
-      <TradeTrackerSection />
+      {/* Persistent per-trade trackers (DB-backed). Export lives in the top header. */}
+      <TradeTrackerSection
+        data={trackers.data}
+        loading={trackers.loading}
+        error={trackers.error}
+        notConnected={trackers.notConnected}
+      />
     </div>
   );
 }

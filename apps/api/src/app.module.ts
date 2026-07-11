@@ -40,6 +40,7 @@ import { SubscriptionModule } from './modules/subscription/subscription.module';
 import { BillingModule } from './modules/billing/billing.module';
 import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module';
 import { AutoExecutionModule } from './modules/auto-execution/auto-execution.module';
+import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module';
 
 @Module({
   imports: [
@@ -199,6 +200,11 @@ import { AutoExecutionModule } from './modules/auto-execution/auto-execution.mod
     // per-user execution pipeline behind the AUTO_EXECUTION_PORT seam.
     SignalFanoutModule,
     AutoExecutionModule,
+
+    // Per-trade tracker (design feature 1) — persistent tracker per Angel One
+    // position/holding with entry/exit, holding + day high/low, LTP and P&L,
+    // filled from periodic broker snapshots + live socket ticks.
+    TradeTrackerModule,
   ],
   providers: [
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,

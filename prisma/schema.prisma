@@ -1418,8 +1418,44 @@ model User {
   verificationTokens VerificationToken[]
   billingProfile     BillingProfile?
   payments          Payment[]
+  tradeTrackers      TradeTracker[]
   @@index([status])
   @@map("users")
+}
+
+/// Per-trade tracker (feature: portfolio trade tracker). One row per real Angel
+/// One position/holding being tracked: entry (avg cost), exit + exit time, the
+/// holding-period high/low AND the day's high/low, latest LTP + P&L%. Prices come
+/// from the socket feed; entry/exit is detected from periodic broker snapshots.
+model TradeTracker {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol      String
+  exchange    String
+  token       String
+  kind        String    // 'POSITION' | 'HOLDING'
+  entryPrice  Float
+  qty         Float
+  entryTime   DateTime  @default(now())
+  exitPrice   Float?
+  exitTime    DateTime?
+  status      String    @default("OPEN") // 'OPEN' | 'CLOSED'
+  holdingHigh Float?
+  holdingLow  Float?
+  dayHigh     Float?
+  dayLow      Float?
+  dayDate     String?   // 'YYYY-MM-DD' IST — day-rollover marker
+  lastLtp     Float?
+  pnl         Float?
+  pnlPercent  Float?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // A partial unique index enforcing one OPEN row per (userId, token, kind) is
+  // added in the migration SQL (Prisma can't express a filtered unique index).
+  @@index([userId, status])
+  @@map("trade_trackers")
 }
 
 model RefreshToken {

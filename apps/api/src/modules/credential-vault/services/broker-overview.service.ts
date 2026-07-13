@@ -59,6 +59,24 @@ export interface BrokerOverview {
   };
 }
 
+/**
+ * A single sanitized executed-trade row from the caller's Angel One day trade
+ * book (GET /api/broker/trades). Field names/types are a HARD contract — the
+ * frontend depends on them. Contains ONLY the safe fields below — never a token,
+ * credential, or the raw Angel One envelope (TDA-017 security seam).
+ */
+export interface BrokerTradeDto {
+  symbol: string;
+  exchange: string;
+  side: 'BUY' | 'SELL' | string;
+  qty: number;
+  price: number;
+  /** Angel One `filltime` string, '' if absent. */
+  time: string;
+  product: string;
+  orderId: string;
+}
+
 /** Coerce a broker numeric-string (or number/null/undefined) to a finite number. */
 function toNum(v: unknown): number {
   const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
@@ -158,6 +176,33 @@ export function sanitizeOverview(raw: RawOverview): BrokerOverview {
 }
 
 /**
+ * Angel One `getTradeBook` `data` (array of executed-trade rows) → sanitized,
+ * secret-free trade DTOs (empty array when the section is null/[]/malformed).
+ * Sorted newest-first when EVERY row carries a sortable `filltime`; otherwise the
+ * broker's own order is preserved.
+ */
+export function sanitizeTrades(data: any): BrokerTradeDto[] {
+  if (!Array.isArray(data)) return [];
+  const trades = data.map((t: any) => ({
+    symbol: t?.tradingsymbol ? String(t.tradingsymbol) : '',
+    exchange: t?.exchange ? String(t.exchange) : '',
+    side: t?.transactiontype ? String(t.transactiontype) : '',
+    qty: toNum(t?.fillsize ?? t?.quantity),
+    price: toNum(t?.fillprice),
+    time: String(t?.filltime ?? ''),
+    product: String(t?.producttype ?? ''),
+    orderId: String(t?.orderid ?? ''),
+  }));
+  // Newest-first only when every row has a non-empty time to sort by; a same-day
+  // Angel One `filltime` (HH:MM:SS) sorts correctly as a string. Otherwise keep
+  // the broker's order rather than shuffle rows on partial/absent times.
+  if (trades.length > 1 && trades.every((t) => t.time !== '')) {
+    trades.sort((a, b) => (a.time < b.time ? 1 : a.time > b.time ? -1 : 0));
+  }
+  return trades;
+}
+
+/**
  * Live, read-only Angel One account overview for the calling user (TDA-017).
  *
  * Performs exactly ONE ephemeral broker login (not three) to respect Angel One
@@ -235,5 +280,48 @@ export class BrokerOverviewService {
     );
 
     return sanitizeOverview(raw);
+  }
+
+  /**
+   * Fetch + sanitize the caller's day trade book (executed trades) from Angel
+   * One's `getTradeBook`. Uses the SAME feed-session-reuse-or-ephemeral dual path
+   * as {@link getOverview}: if the caller IS the market-data feed account and its
+   * session is live, read through it (a second login on the same client code
+   * would invalidate the feed's WebSocket session); otherwise fall back to one
+   * disposable ephemeral login. Returns a sanitized, secret-free list. Throws
+   * NotFoundException (→ 404) when the user has no stored Angel One credentials.
+   */
+  async getTrades(userId: string): Promise<BrokerTradeDto[]> {
+    const row = await this.prisma.brokerCredential.findUnique({ where: { userId } });
+    if (!row) {
+      throw new NotFoundException('No Angel One account connected');
+    }
+
+    // Same account, one session: reuse the live feed session when the caller IS
+    // the feed account, so we never trigger a second login that would stall the
+    // shared market-data WebSocket (see getOverview for the full rationale).
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isFeedAccount: true },
+    });
+    if (user?.isFeedAccount && this.authService.isAuthenticated()) {
+      try {
+        const api = this.authService.getSmartApi();
+        return sanitizeTrades((await api.getTradeBook())?.data ?? null);
+      } catch (err) {
+        this.logger.warn(
+          `Feed-session trade-book read failed; falling back to ephemeral login: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    const raw = await this.decryptor.withDecryptedCredentials(
+      userId,
+      { reason: 'REVALIDATE' },
+      (creds) =>
+        this.brokerFactory.withSession(creds, (session) => session.getTradeBook()),
+    );
+
+    return sanitizeTrades(raw);
   }
 }

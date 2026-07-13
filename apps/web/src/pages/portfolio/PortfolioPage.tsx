@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { PieChart, RefreshCw, Download, ChevronDown } from 'lucide-react';
 import { useBrokerOverview } from '@/hooks/useBrokerOverview';
+import { useBrokerTrades, type BrokerTrade } from '@/hooks/useBrokerTrades';
 import { useTradeTrackers, type TradeTracker } from '@/hooks/useTradeTrackers';
 import { formatMoney } from '@/hooks/formatMoney';
 import { exportTrackersXlsx, exportTrackersPdf } from '@/utils/exportTrackers';
@@ -93,6 +94,25 @@ function fmtDateTime(iso: string | null | undefined): string {
     minute: '2-digit',
     hour12: false,
   });
+}
+
+/**
+ * Angel One's raw filltime string → a trimmed display string, or em-dash when
+ * absent. The broker sends an already-formatted string (e.g. "13:37:57" or a
+ * full datetime) and an empty string when it omits the time — we render it
+ * verbatim rather than re-parsing, since the format is broker-defined.
+ */
+export function fmtFillTime(time: string | null | undefined): string {
+  const t = typeof time === 'string' ? time.trim() : '';
+  return t === '' ? '—' : t;
+}
+
+/** Tailwind text color for a trade side — BUY green, SELL red, else muted. */
+function sideColor(side: string): string {
+  const s = side.toUpperCase();
+  if (s === 'BUY') return 'text-[var(--color-accent-green)]';
+  if (s === 'SELL') return 'text-[var(--color-accent-red)]';
+  return 'text-[var(--color-text-secondary)]';
 }
 
 /** A pill distinguishing OPEN (green) from CLOSED (muted). */
@@ -236,12 +256,101 @@ function TradeTrackerSection({
   );
 }
 
+/**
+ * Trades (Angel One) — the connected account's executed trades for the day,
+ * pulled live from the broker (independent of the DB-backed Trade Tracker
+ * above). Read-only; mirrors the loading / notConnected / empty patterns used
+ * across this page.
+ */
+function BrokerTradesSection({
+  data,
+  loading,
+  error,
+  notConnected,
+}: {
+  data: BrokerTrade[] | null;
+  loading: boolean;
+  error: string | null;
+  notConnected: boolean;
+}) {
+  const rows = data ?? [];
+  const hasRows = rows.length > 0;
+
+  return (
+    <section className="rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)]">
+      <div className="flex items-center justify-between border-b border-[var(--color-border-subtle)] px-4 py-2.5">
+        <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Trades (Angel One)</h2>
+      </div>
+
+      {loading && !data && <LoadingSkeleton variant="card" count={1} className="m-3 h-24" />}
+
+      {notConnected && (
+        <p className="px-4 py-6 text-center text-xs text-[var(--color-text-muted)]">
+          Connect your Angel One account on the Dashboard to see your trades.
+        </p>
+      )}
+
+      {error && (
+        <p className="px-4 py-6 text-center text-xs text-[var(--color-accent-red)]">{error}</p>
+      )}
+
+      {!loading && !error && !notConnected && !hasRows && (
+        <p className="px-4 py-6 text-center text-xs text-[var(--color-text-muted)]">
+          No trades today.
+        </p>
+      )}
+
+      {hasRows && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <th className={TH}>Symbol</th>
+                <th className={TH}>Exch</th>
+                <th className={TH}>Side</th>
+                <th className={THR}>Qty</th>
+                <th className={THR}>Price</th>
+                <th className={THR}>Time</th>
+                <th className={TH}>Product</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((t, i) => (
+                <tr
+                  key={`${t.orderId}-${i}`}
+                  className="border-b border-[var(--color-border-subtle)] last:border-0"
+                >
+                  <td className="px-3 py-1.5 font-medium text-[var(--color-text-primary)]">
+                    {t.symbol}
+                  </td>
+                  <td className="px-3 py-1.5 text-[10px] text-[var(--color-text-muted)]">
+                    {t.exchange}
+                  </td>
+                  <td className={`px-3 py-1.5 font-semibold ${sideColor(t.side)}`}>{t.side}</td>
+                  <td className={TDR}>{t.qty}</td>
+                  <td className={TDR}>{formatMoney(t.price)}</td>
+                  <td className={TDR}>{fmtFillTime(t.time)}</td>
+                  <td className="px-3 py-1.5 text-[10px] text-[var(--color-text-muted)]">
+                    {t.product}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function PortfolioPage() {
   const { data, loading, error, notConnected, refresh } = useBrokerOverview();
   // Trade trackers lifted to the page so the Download button (top header) can
   // export ALL tracked-trade data. The hook backfills the book on load.
   const trackers = useTradeTrackers();
   const trackerRows = trackers.data ?? [];
+  // The connected account's executed trades (live broker book). Loads on mount.
+  const brokerTrades = useBrokerTrades();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -278,9 +387,10 @@ export default function PortfolioPage() {
   const refreshAll = () => {
     void refresh();
     void trackers.refresh();
+    void brokerTrades.refresh();
   };
 
-  const busy = loading || trackers.loading;
+  const busy = loading || trackers.loading || brokerTrades.loading;
 
   return (
     <div className="space-y-4">
@@ -454,6 +564,14 @@ export default function PortfolioPage() {
         loading={trackers.loading}
         error={trackers.error}
         notConnected={trackers.notConnected}
+      />
+
+      {/* Executed trades pulled live from the connected Angel One account. */}
+      <BrokerTradesSection
+        data={brokerTrades.data}
+        loading={brokerTrades.loading}
+        error={brokerTrades.error}
+        notConnected={brokerTrades.notConnected}
       />
     </div>
   );

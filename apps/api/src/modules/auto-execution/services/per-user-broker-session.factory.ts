@@ -42,6 +42,7 @@ export interface UserSmartApiLike {
   getProfile(): Promise<any>;
   getPosition(): Promise<any>;
   getAllHolding(): Promise<any>;
+  getTradeBook(): Promise<any>;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -77,6 +78,7 @@ export interface UserBrokerSession {
   getProfile(): Promise<any>;
   getPositions(): Promise<any>;
   getHoldings(): Promise<any>;
+  getTradeBook(): Promise<any>;
 }
 
 /** Map our generic order types to Angel One SmartAPI order-type strings. */
@@ -220,6 +222,15 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
    */
   async getHoldings(): Promise<any> {
     return this.read(() => this.client.getAllHolding(), 'Angel One getAllHolding');
+  }
+
+  /**
+   * Fetch this user's day trade book (Angel One `getTradeBook`: `data` is an
+   * array of executed-trade rows, or null/[] when there are no trades). Returns
+   * the RAW broker `data` (or null); same disposed-guard + timeout as getHoldings.
+   */
+  async getTradeBook(): Promise<any> {
+    return this.read(() => this.client.getTradeBook(), 'Angel One getTradeBook');
   }
 
   /**

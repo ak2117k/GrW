@@ -20,6 +20,7 @@ import {
 } from '../services/credential-vault.service';
 import {
   BrokerOverview,
+  BrokerTradeDto,
   BrokerOverviewService,
 } from '../services/broker-overview.service';
 
@@ -31,6 +32,7 @@ import {
  *   POST   /api/broker/connect   validate + envelope-encrypt + upsert (422 on failure)
  *   GET    /api/broker/status    non-secret metadata (no KMS calls)
  *   GET    /api/broker/overview  ONE ephemeral login → sanitized funds+profile+positions (404 if not connected)
+ *   GET    /api/broker/trades    caller's day executed trades → sanitized trade book (404 if not connected)
  *   DELETE /api/broker           delete row + CREDENTIAL_DELETE (204)
  */
 @Controller('api/broker')
@@ -63,6 +65,18 @@ export class BrokerController {
   @Get('overview')
   getOverview(@CurrentUser('userId') userId: string): Promise<BrokerOverview> {
     return this.overview.getOverview(userId);
+  }
+
+  /**
+   * The caller's day's executed trades (Angel One trade book), sanitized — no
+   * tokens/creds/raw envelope. Uses the same feed-session-reuse-or-ephemeral
+   * dual path as /overview. 404 when no account is connected.
+   */
+  @Get('trades')
+  async getTrades(
+    @CurrentUser('userId') userId: string,
+  ): Promise<{ trades: BrokerTradeDto[] }> {
+    return { trades: await this.overview.getTrades(userId) };
   }
 
   @Delete()

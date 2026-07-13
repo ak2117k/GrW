@@ -38,7 +38,7 @@ ML (Phase 3).
 | # | Lesson | Code | Status |
 |---|--------|------|--------|
 | 01 | **Swing points** (the keystone — every chart pattern needs these) | `patterns/swing-points.ts` | ✅ |
-| 02 | Candlestick patterns (engulfing, hammer, doji) | `patterns/candlestick.ts` | ⏳ |
+| 02 | Candlestick patterns (engulfing, hammer, doji) | `patterns/candlestick.ts` | ✅ |
 | 03 | Chart patterns (double top/bottom) — built on swing points | `patterns/chart-patterns.ts` | ⏳ |
 | 04 | Wiring detections onto the chart (endpoint + markers) | — | ⏳ |
 | 05 | Labeling outcomes → the ML layer (XGBoost) | `ai-engine/` | ⏳ |

@@ -6,6 +6,7 @@ import { PerUserBrokerSessionFactory } from '../auto-execution/services/per-user
 import { TradeTrackerService } from './services/trade-tracker.service';
 import { TradeTrackerPoller } from './services/trade-tracker-poller.service';
 import { TradeTrackerController } from './controllers/trade-tracker.controller';
+import { SoldTradesController } from './controllers/sold-trades.controller';
 
 /**
  * Per-trade tracker (design feature 1). Maintains a persistent `trade_trackers`
@@ -21,7 +22,7 @@ import { TradeTrackerController } from './controllers/trade-tracker.controller';
  */
 @Module({
   imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule],
-  controllers: [TradeTrackerController],
+  controllers: [TradeTrackerController, SoldTradesController],
   providers: [TradeTrackerService, TradeTrackerPoller, PerUserBrokerSessionFactory],
   exports: [TradeTrackerService],
 })

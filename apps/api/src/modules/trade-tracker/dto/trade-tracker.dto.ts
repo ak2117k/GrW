@@ -57,3 +57,56 @@ export function toTradeTrackerDto(t: TradeTracker): TradeTrackerDto {
     updatedAt: t.updatedAt.toISOString(),
   };
 }
+
+/**
+ * The EXACT wire shape the Portfolio-page "Sold" section consumes
+ * (2026-07-13 sold-trades design). A CLOSED trade-tracker row IS the persistent
+ * "sold" record. Hard frontend contract: field names/types must not drift.
+ * DateTime columns → ISO-8601 strings; nullable columns → `T | null`.
+ */
+export interface SoldTradeDto {
+  id: string;
+  symbol: string;
+  exchange: string;
+  token: string;
+  kind: 'POSITION' | 'HOLDING';
+  entryPrice: number;
+  qty: number;
+  exitPrice: number | null;
+  exitTime: string | null; // ISO | null
+  pnl: number | null;
+  pnlPercent: number | null;
+  holdingHigh: number | null;
+  holdingLow: number | null;
+}
+
+/** Map a CLOSED TradeTracker row to the "sold" DTO (ISO dates, explicit nulls). */
+export function toSoldTradeDto(t: TradeTracker): SoldTradeDto {
+  return {
+    id: t.id,
+    symbol: t.symbol,
+    exchange: t.exchange,
+    token: t.token,
+    kind: t.kind as 'POSITION' | 'HOLDING',
+    entryPrice: t.entryPrice,
+    qty: t.qty,
+    exitPrice: t.exitPrice ?? null,
+    exitTime: t.exitTime ? t.exitTime.toISOString() : null,
+    pnl: t.pnl ?? null,
+    pnlPercent: t.pnlPercent ?? null,
+    holdingHigh: t.holdingHigh ?? null,
+    holdingLow: t.holdingLow ?? null,
+  };
+}
+
+/**
+ * One daily candle in a sold trade's OHLC series (2026-07-13 sold-trades
+ * design). Hard frontend contract. `date` is an ISO-8601 string.
+ */
+export interface DailyOhlcDto {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}

@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { PieChart, RefreshCw, Download, ChevronDown } from 'lucide-react';
+import { PieChart, RefreshCw, Download, ChevronDown, Loader2 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { useBrokerOverview } from '@/hooks/useBrokerOverview';
 import { useBrokerTrades, type BrokerTrade } from '@/hooks/useBrokerTrades';
 import { useTradeTrackers, type TradeTracker } from '@/hooks/useTradeTrackers';
+import { useSoldTrades, type SoldTrade } from '@/hooks/useSoldTrades';
 import { formatMoney } from '@/hooks/formatMoney';
 import { exportTrackersXlsx, exportTrackersPdf } from '@/utils/exportTrackers';
+import { exportOhlcXlsx, exportOhlcPdf, type DailyOhlc } from '@/utils/exportOhlc';
+import api from '@/services/api';
 import { LoadingSkeleton } from '@/components/common';
 
 /** How often to re-pull Angel One's live holdings/positions during market hours. */
@@ -343,6 +347,173 @@ function BrokerTradesSection({
   );
 }
 
+/** Response shape of `GET /api/portfolio/sold/:id/ohlc`. */
+interface OhlcResponse {
+  symbol: string;
+  ohlc: DailyOhlc[];
+}
+
+/**
+ * A single Sold row with its own per-row **Download ▾** menu (Excel / PDF).
+ * On download it fetches the trade's daily OHLC series on demand, then hands it
+ * to the OHLC exporter. While that fetch is in flight the row shows an inline
+ * spinner and disables its button; an empty series toasts instead of exporting.
+ */
+function SoldTradeRow({ t }: { t: SoldTrade }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
+
+  const download = async (fmt: 'xlsx' | 'pdf') => {
+    setMenuOpen(false);
+    setBusy(true);
+    try {
+      const { data } = await api.get<OhlcResponse>(`/portfolio/sold/${t.id}/ohlc`);
+      if (!data.ohlc || data.ohlc.length === 0) {
+        toast.error(`No daily data for ${data.symbol || t.symbol}`);
+        return;
+      }
+      if (fmt === 'xlsx') await exportOhlcXlsx(data.symbol, data.ohlc);
+      else await exportOhlcPdf(data.symbol, data.ohlc);
+    } catch {
+      toast.error(`Could not load daily data for ${t.symbol}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <tr className="border-b border-[var(--color-border-subtle)] last:border-0">
+      <td className="px-3 py-1.5 font-medium text-[var(--color-text-primary)]">{t.symbol}</td>
+      <td className="px-3 py-1.5 text-[10px] text-[var(--color-text-muted)]">{t.exchange}</td>
+      <td className="px-3 py-1.5 text-[10px] text-[var(--color-text-muted)]">{t.kind}</td>
+      <td className={TDR}>{t.qty}</td>
+      <td className={TDR}>{money(t.entryPrice)}</td>
+      <td className={TDR}>{money(t.exitPrice)}</td>
+      <td className={TDR}>{fmtDateTime(t.exitTime)}</td>
+      <td className={`${TDR} ${pnlColor(t.pnl ?? 0)}`}>
+        {money(t.pnl)}
+        {t.pnlPercent != null && <span className="text-[10px]"> ({fmtPct(t.pnlPercent)})</span>}
+      </td>
+      <td className={TDR}>
+        {money(t.holdingHigh)} <span className="text-[var(--color-text-muted)]">/</span>{' '}
+        {money(t.holdingLow)}
+      </td>
+      <td className="px-3 py-1.5 text-right">
+        <div className="relative inline-block text-left" ref={menuRef}>
+          <button
+            onClick={() => setMenuOpen((o) => !o)}
+            disabled={busy}
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border-default)] px-2 py-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50"
+          >
+            {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+            Download
+            <ChevronDown size={12} />
+          </button>
+          {menuOpen && (
+            <div className="absolute right-0 z-10 mt-1 w-36 overflow-hidden rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-card)] shadow-lg">
+              <button
+                onClick={() => void download('xlsx')}
+                className="block w-full px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)]"
+              >
+                Excel (.xlsx)
+              </button>
+              <button
+                onClick={() => void download('pdf')}
+                className="block w-full px-3 py-2 text-left text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-tertiary)]"
+              >
+                PDF
+              </button>
+            </div>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * Sold — the caller's CLOSED trade-tracker rows (positions/holdings they've
+ * sold), newest exit first. Per row the user can download that stock's daily
+ * OHLC series (fetched on demand) as Excel/PDF for post-trade review. Mirrors
+ * the loading / notConnected / empty patterns used across this page.
+ */
+function SoldTradesSection({
+  data,
+  loading,
+  error,
+  notConnected,
+}: {
+  data: SoldTrade[] | null;
+  loading: boolean;
+  error: string | null;
+  notConnected: boolean;
+}) {
+  const rows = data ?? [];
+  const hasRows = rows.length > 0;
+
+  return (
+    <section className="rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)]">
+      <div className="flex items-center justify-between border-b border-[var(--color-border-subtle)] px-4 py-2.5">
+        <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Sold</h2>
+      </div>
+
+      {loading && !data && <LoadingSkeleton variant="card" count={1} className="m-3 h-24" />}
+
+      {notConnected && (
+        <p className="px-4 py-6 text-center text-xs text-[var(--color-text-muted)]">
+          Connect your Angel One account on the Dashboard to see your sold trades.
+        </p>
+      )}
+
+      {error && (
+        <p className="px-4 py-6 text-center text-xs text-[var(--color-accent-red)]">{error}</p>
+      )}
+
+      {!loading && !error && !notConnected && !hasRows && (
+        <p className="px-4 py-6 text-center text-xs text-[var(--color-text-muted)]">
+          No sold trades yet.
+        </p>
+      )}
+
+      {hasRows && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-[var(--color-border-subtle)]">
+                <th className={TH}>Symbol</th>
+                <th className={TH}>Exch</th>
+                <th className={TH}>Kind</th>
+                <th className={THR}>Qty</th>
+                <th className={THR}>Entry</th>
+                <th className={THR}>Exit</th>
+                <th className={THR}>Exit Time</th>
+                <th className={THR}>P&amp;L</th>
+                <th className={THR}>Holding H/L</th>
+                <th className={THR}>Download</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((t) => (
+                <SoldTradeRow key={t.id} t={t} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function PortfolioPage() {
   const { data, loading, error, notConnected, refresh } = useBrokerOverview();
   // Trade trackers lifted to the page so the Download button (top header) can
@@ -351,6 +522,8 @@ export default function PortfolioPage() {
   const trackerRows = trackers.data ?? [];
   // The connected account's executed trades (live broker book). Loads on mount.
   const brokerTrades = useBrokerTrades();
+  // The caller's sold trades (CLOSED trackers). Loads on mount + manual refresh.
+  const sold = useSoldTrades();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -388,9 +561,10 @@ export default function PortfolioPage() {
     void refresh();
     void trackers.refresh();
     void brokerTrades.refresh();
+    void sold.refresh();
   };
 
-  const busy = loading || trackers.loading || brokerTrades.loading;
+  const busy = loading || trackers.loading || brokerTrades.loading || sold.loading;
 
   return (
     <div className="space-y-4">
@@ -572,6 +746,14 @@ export default function PortfolioPage() {
         loading={brokerTrades.loading}
         error={brokerTrades.error}
         notConnected={brokerTrades.notConnected}
+      />
+
+      {/* Sold trades (CLOSED trackers) with per-row daily-OHLC Excel/PDF export. */}
+      <SoldTradesSection
+        data={sold.data}
+        loading={sold.loading}
+        error={sold.error}
+        notConnected={sold.notConnected}
       />
     </div>
   );

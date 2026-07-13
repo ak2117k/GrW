@@ -1,11 +1,14 @@
+import { NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { TradeTracker } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CREDENTIAL_DECRYPTOR } from '../../credential-vault/execution/credential-decryptor';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import {
   TradeTrackerService,
+  computeOhlcWindow,
   computePnl,
   computeTickPatch,
   istDateString,
@@ -141,6 +144,43 @@ describe('trade-tracker pure helpers', () => {
     });
   });
 
+  describe('computeOhlcWindow', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = new Date('2026-07-13T00:00:00.000Z');
+
+    it('spans (entry − 3d) → (exit + 10d) when the tail stays before now', () => {
+      const entry = new Date('2026-06-01T00:00:00.000Z');
+      const exit = new Date('2026-06-20T00:00:00.000Z');
+      const { from, to } = computeOhlcWindow(entry, exit, now);
+      expect(from.getTime()).toBe(entry.getTime() - 3 * DAY);
+      expect(to.getTime()).toBe(exit.getTime() + 10 * DAY);
+    });
+
+    it('falls back to a 30-day pre-exit lookback when entryTime is null', () => {
+      const exit = new Date('2026-06-20T00:00:00.000Z');
+      const { from, to } = computeOhlcWindow(null, exit, now);
+      // base = exit − 30d, then − 3d pad
+      expect(from.getTime()).toBe(exit.getTime() - 30 * DAY - 3 * DAY);
+      expect(to.getTime()).toBe(exit.getTime() + 10 * DAY);
+    });
+
+    it('clamps the post-exit tail to now', () => {
+      const entry = new Date('2026-07-05T00:00:00.000Z');
+      const exit = new Date('2026-07-12T00:00:00.000Z'); // exit + 10d is well past now
+      const { from, to } = computeOhlcWindow(entry, exit, now);
+      expect(from.getTime()).toBe(entry.getTime() - 3 * DAY);
+      expect(to.getTime()).toBe(now.getTime()); // clamped
+    });
+
+    it('uses now as the exit anchor when exitTime is null', () => {
+      const entry = new Date('2026-07-01T00:00:00.000Z');
+      const { from, to } = computeOhlcWindow(entry, null, now);
+      expect(from.getTime()).toBe(entry.getTime() - 3 * DAY);
+      // exit anchor = now → tail would be now + 10d, clamped back to now
+      expect(to.getTime()).toBe(now.getTime());
+    });
+  });
+
   describe('normalizeHoldings', () => {
     it('maps holdings and drops zero-quantity rows', () => {
       const items = normalizeHoldings([
@@ -164,6 +204,7 @@ describe('TradeTrackerService', () => {
   let prisma: {
     tradeTracker: {
       findMany: jest.Mock;
+      findFirst: jest.Mock;
       create: jest.Mock;
       updateMany: jest.Mock;
     };
@@ -172,11 +213,13 @@ describe('TradeTrackerService', () => {
   };
   let decryptor: { withDecryptedCredentials: jest.Mock };
   let brokerFactory: { withSession: jest.Mock };
+  let adapter: { getHistoricalData: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
       tradeTracker: {
         findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue(undefined),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
@@ -186,6 +229,7 @@ describe('TradeTrackerService', () => {
     };
     decryptor = { withDecryptedCredentials: jest.fn() };
     brokerFactory = { withSession: jest.fn() };
+    adapter = { getHistoricalData: jest.fn().mockResolvedValue([]) };
     const authService = { isAuthenticated: () => false, getSmartApi: () => null };
 
     const mod = await Test.createTestingModule({
@@ -195,6 +239,7 @@ describe('TradeTrackerService', () => {
         { provide: CREDENTIAL_DECRYPTOR, useValue: decryptor },
         { provide: PerUserBrokerSessionFactory, useValue: brokerFactory },
         { provide: AngelOneAuthService, useValue: authService },
+        { provide: AngelOneAdapterService, useValue: adapter },
       ],
     }).compile();
 
@@ -426,6 +471,153 @@ describe('TradeTrackerService', () => {
       expect(dto.status).toBe('CLOSED');
       expect(dto.exitPrice).toBe(130);
       expect(dto.exitTime).toBe('2026-07-11T09:00:00.000Z');
+    });
+  });
+
+  describe('listSold', () => {
+    it('queries CLOSED only, newest exit first, scoped to the caller', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([]);
+      await service.listSold('user_7');
+      expect(prisma.tradeTracker.findMany).toHaveBeenCalledWith({
+        where: { userId: 'user_7', status: 'CLOSED' },
+        orderBy: { exitTime: 'desc' },
+      });
+    });
+
+    it('maps a CLOSED row to the sold DTO with ISO dates and explicit nulls', async () => {
+      const exitTime = new Date('2026-07-11T09:00:00.000Z');
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        tracker({
+          id: 'sold_1',
+          status: 'CLOSED',
+          kind: 'HOLDING',
+          entryPrice: 100,
+          qty: 10,
+          exitPrice: 130,
+          exitTime,
+          pnl: 300,
+          pnlPercent: 30,
+          holdingHigh: 140,
+          holdingLow: 95,
+        }),
+      ]);
+
+      const [dto] = await service.listSold('user_1');
+
+      expect(dto).toEqual({
+        id: 'sold_1',
+        symbol: 'INFY',
+        exchange: 'NSE',
+        token: '1594',
+        kind: 'HOLDING',
+        entryPrice: 100,
+        qty: 10,
+        exitPrice: 130,
+        exitTime: '2026-07-11T09:00:00.000Z',
+        pnl: 300,
+        pnlPercent: 30,
+        holdingHigh: 140,
+        holdingLow: 95,
+      });
+      // No open-book fields leak into the sold contract.
+      expect(dto).not.toHaveProperty('dayHigh');
+      expect(dto).not.toHaveProperty('lastLtp');
+      expect(dto).not.toHaveProperty('status');
+    });
+
+    it('maps null exit/pnl/extremes to null (never undefined)', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        tracker({
+          status: 'CLOSED',
+          exitPrice: null,
+          exitTime: null,
+          pnl: null,
+          pnlPercent: null,
+          holdingHigh: null,
+          holdingLow: null,
+        }),
+      ]);
+      const [dto] = await service.listSold('user_1');
+      expect(dto.exitPrice).toBeNull();
+      expect(dto.exitTime).toBeNull();
+      expect(dto.pnl).toBeNull();
+      expect(dto.pnlPercent).toBeNull();
+      expect(dto.holdingHigh).toBeNull();
+      expect(dto.holdingLow).toBeNull();
+    });
+  });
+
+  describe('listSoldOhlc', () => {
+    it('404s when the tracker is not the caller’s', async () => {
+      prisma.tradeTracker.findFirst.mockResolvedValue(null);
+      await expect(service.listSoldOhlc('user_1', 'nope')).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(prisma.tradeTracker.findFirst).toHaveBeenCalledWith({
+        where: { id: 'nope', userId: 'user_1' },
+      });
+      expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+    });
+
+    it('fetches DAILY candles over the window and maps them to the OHLC DTO', async () => {
+      const entryTime = new Date('2026-06-01T04:00:00.000Z');
+      const exitTime = new Date('2026-06-20T09:00:00.000Z');
+      prisma.tradeTracker.findFirst.mockResolvedValue(
+        tracker({
+          id: 'sold_1',
+          symbol: 'INFY',
+          exchange: 'NSE',
+          token: '1594',
+          status: 'CLOSED',
+          entryTime,
+          exitTime,
+        }),
+      );
+      adapter.getHistoricalData.mockResolvedValue([
+        { timestamp: '2026-06-02T00:00:00.000Z', open: '100', high: '110', low: '95', close: '105' },
+        { timestamp: '2026-06-03T00:00:00.000Z', open: 105, high: 112, low: 104, close: 109 },
+      ]);
+
+      const res = await service.listSoldOhlc('user_1', 'sold_1');
+
+      // token + exchange + DAILY interval, in that arg order.
+      expect(adapter.getHistoricalData).toHaveBeenCalledTimes(1);
+      const [token, exchange, interval, from, to] =
+        adapter.getHistoricalData.mock.calls[0];
+      expect(token).toBe('1594');
+      expect(exchange).toBe('NSE');
+      expect(interval).toBe('ONE_DAY');
+      const DAY = 24 * 60 * 60 * 1000;
+      expect((from as Date).getTime()).toBe(entryTime.getTime() - 3 * DAY);
+      expect((to as Date).getTime()).toBe(exitTime.getTime() + 10 * DAY);
+
+      expect(res.symbol).toBe('INFY');
+      expect(res.ohlc).toEqual([
+        { date: '2026-06-02T00:00:00.000Z', open: 100, high: 110, low: 95, close: 105 },
+        { date: '2026-06-03T00:00:00.000Z', open: 105, high: 112, low: 104, close: 109 },
+      ]);
+    });
+
+    it('degrades to an empty series when the adapter throws (never 500s)', async () => {
+      prisma.tradeTracker.findFirst.mockResolvedValue(
+        tracker({ id: 'sold_1', symbol: 'INFY', status: 'CLOSED', exitTime: new Date() }),
+      );
+      adapter.getHistoricalData.mockRejectedValue(new Error('angel down'));
+
+      const res = await service.listSoldOhlc('user_1', 'sold_1');
+
+      expect(res).toEqual({ symbol: 'INFY', ohlc: [] });
+    });
+
+    it('degrades to an empty series when the adapter returns a non-array', async () => {
+      prisma.tradeTracker.findFirst.mockResolvedValue(
+        tracker({ id: 'sold_1', symbol: 'INFY', status: 'CLOSED', exitTime: new Date() }),
+      );
+      adapter.getHistoricalData.mockResolvedValue(null);
+
+      const res = await service.listSoldOhlc('user_1', 'sold_1');
+
+      expect(res).toEqual({ symbol: 'INFY', ohlc: [] });
     });
   });
 });

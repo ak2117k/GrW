@@ -2,6 +2,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  NotFoundException,
   OnModuleDestroy,
 } from '@nestjs/common';
 import type { TradeTracker } from '@prisma/client';
@@ -12,7 +13,14 @@ import {
 } from '../../credential-vault/execution/credential-decryptor';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
-import { TradeTrackerDto, toTradeTrackerDto } from '../dto/trade-tracker.dto';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import {
+  DailyOhlcDto,
+  SoldTradeDto,
+  TradeTrackerDto,
+  toSoldTradeDto,
+  toTradeTrackerDto,
+} from '../dto/trade-tracker.dto';
 
 /** A normalized open-book instrument (one open position or one holding). */
 export interface BookItem {
@@ -57,6 +65,28 @@ export function computePnl(
   const pnlPercent =
     entryPrice !== 0 ? ((price - entryPrice) / entryPrice) * 100 : 0;
   return { pnl, pnlPercent };
+}
+
+/** One day in milliseconds — used by the sold-trade OHLC window math. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Compute the daily-OHLC fetch window for a sold trade (2026-07-13 design):
+ * `from` = (entryTime ?? exitTime − 30d) − 3d small pre-entry pad;
+ * `to`   = (exitTime ?? now) + 10d post-exit tail, clamped to <= now.
+ * Pure + exported so the window rules are unit-tested without a DB or broker.
+ */
+export function computeOhlcWindow(
+  entryTime: Date | null,
+  exitTime: Date | null,
+  now: Date = new Date(),
+): { from: Date; to: Date } {
+  const exit = exitTime ?? now;
+  const base = entryTime ?? new Date(exit.getTime() - 30 * DAY_MS);
+  const from = new Date(base.getTime() - 3 * DAY_MS);
+  let to = new Date(exit.getTime() + 10 * DAY_MS);
+  if (to.getTime() > now.getTime()) to = now;
+  return { from, to };
 }
 
 /** Fields updated on every applied tick. */
@@ -196,6 +226,9 @@ export class TradeTrackerService implements OnModuleDestroy {
     // Persistent feed session — reused for the feed account's snapshot so a
     // second login doesn't kill the live feed (see snapshotBook).
     private readonly authService: AngelOneAuthService,
+    // Daily historical candles for the sold-trade OHLC series (TTL-cached +
+    // rate-paced; returns [] on any broker hiccup rather than throwing).
+    private readonly adapter: AngelOneAdapterService,
   ) {}
 
   onModuleDestroy(): void {
@@ -420,5 +453,69 @@ export class TradeTrackerService implements OnModuleDestroy {
       orderBy: { entryTime: 'desc' },
     });
     return rows.map(toTradeTrackerDto);
+  }
+
+  /**
+   * The caller's CLOSED trackers (the persistent "sold" record), newest exit
+   * first, mapped to the sold-trade DTO (2026-07-13 design).
+   */
+  async listSold(userId: string): Promise<SoldTradeDto[]> {
+    const rows = await this.prisma.tradeTracker.findMany({
+      where: { userId, status: 'CLOSED' },
+      orderBy: { exitTime: 'desc' },
+    });
+    return rows.map(toSoldTradeDto);
+  }
+
+  /**
+   * Daily OHLC series for one sold trade over its window (hold + short
+   * post-exit tail; see {@link computeOhlcWindow}). Caller-scoped: the tracker
+   * must belong to `userId` (else 404). A broker/data hiccup degrades to an
+   * empty series (logged warn) — it never 500s the request.
+   */
+  async listSoldOhlc(
+    userId: string,
+    id: string,
+  ): Promise<{ symbol: string; ohlc: DailyOhlcDto[] }> {
+    const tracker = await this.prisma.tradeTracker.findFirst({
+      where: { id, userId },
+    });
+    if (!tracker) {
+      throw new NotFoundException(`Sold trade ${id} not found`);
+    }
+
+    const { from, to } = computeOhlcWindow(tracker.entryTime, tracker.exitTime);
+
+    let candles: unknown;
+    try {
+      candles = await this.adapter.getHistoricalData(
+        tracker.token,
+        tracker.exchange,
+        'ONE_DAY',
+        from,
+        to,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `[sold-ohlc] historical fetch failed for tracker ${id} (${tracker.symbol}): ` +
+          `${err instanceof Error ? err.message : err}`,
+      );
+      return { symbol: tracker.symbol, ohlc: [] };
+    }
+
+    if (!Array.isArray(candles)) {
+      return { symbol: tracker.symbol, ohlc: [] };
+    }
+
+    const ohlc: DailyOhlcDto[] = (candles as Array<Record<string, unknown>>).map(
+      (c) => ({
+        date: new Date(c.timestamp as string).toISOString(),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+      }),
+    );
+    return { symbol: tracker.symbol, ohlc };
   }
 }

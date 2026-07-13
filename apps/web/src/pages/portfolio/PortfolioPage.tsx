@@ -75,6 +75,22 @@ function fmtDateTime(iso: string | null | undefined): string {
 }
 
 /** A pill distinguishing OPEN (green) from CLOSED (muted). */
+/** Pledged/MTF badge on a holding; NORMAL renders a muted dash. */
+function HoldingTypeBadge({ type }: { type: 'NORMAL' | 'MTF' | 'PLEDGED' }) {
+  if (type === 'NORMAL') {
+    return <span className="text-[10px] text-[var(--color-text-muted)]">—</span>;
+  }
+  const cls =
+    type === 'PLEDGED'
+      ? 'bg-[var(--color-accent-yellow)]/15 text-[var(--color-accent-yellow)]'
+      : 'bg-[var(--color-accent-purple)]/15 text-[var(--color-accent-purple)]';
+  return (
+    <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
+      {type}
+    </span>
+  );
+}
+
 function StatusBadge({ status }: { status: TradeTracker['status'] }) {
   const open = status === 'OPEN';
   return (
@@ -322,6 +338,7 @@ export default function PortfolioPage() {
                   <thead>
                     <tr className="border-b border-[var(--color-border-subtle)]">
                       <th className={TH}>Symbol</th>
+                      <th className={TH}>Type</th>
                       <th className={THR}>Qty</th>
                       <th className={THR}>Avg Cost</th>
                       <th className={THR}>LTP</th>
@@ -337,6 +354,7 @@ export default function PortfolioPage() {
                           <span className="font-medium text-[var(--color-text-primary)]">{h.symbol}</span>
                           <span className="ml-1.5 text-[10px] text-[var(--color-text-muted)]">{h.exchange}</span>
                         </td>
+                        <td className="px-3 py-1.5"><HoldingTypeBadge type={h.holdingType} /></td>
                         <td className={TDR}>{h.qty}</td>
                         <td className={TDR}>{formatMoney(h.avgPrice)}</td>
                         <td className={TDR}>{formatMoney(h.ltp)}</td>

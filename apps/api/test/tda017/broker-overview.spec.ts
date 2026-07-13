@@ -91,6 +91,8 @@ describe('BrokerOverviewService — sanitized overview (TDA-017)', () => {
           pnl: 500,
           pnlPercent: 7.14,
           dayChangePercent: 20,
+          product: '',
+          holdingType: 'NORMAL',
         },
       ],
       holdingSummary: {
@@ -163,9 +165,29 @@ describe('sanitizeOverview — holdings mapping', () => {
       },
     });
     expect(out.holdings).toEqual([
-      { symbol: 'TCS', exchange: 'NSE', qty: 2, avgPrice: 3000, ltp: 3600, close: 3000, currentValue: 7200, pnl: 1200, pnlPercent: 20, dayChangePercent: 20 },
+      { symbol: 'TCS', exchange: 'NSE', qty: 2, avgPrice: 3000, ltp: 3600, close: 3000, currentValue: 7200, pnl: 1200, pnlPercent: 20, dayChangePercent: 20, product: '', holdingType: 'NORMAL' },
     ]);
     expect(out.holdingSummary).toEqual({ investedValue: 6000, currentValue: 7200, totalPnl: 1200, totalPnlPercent: 20 });
+  });
+
+  it('classifies pledged (collateral) and MTF holdings', () => {
+    const out = sanitizeOverview({
+      funds: null,
+      profile: null,
+      positions: null,
+      holdings: {
+        holdings: [
+          { tradingsymbol: 'PLEDGED1', exchange: 'NSE', quantity: '10', ltp: '100', close: '100', product: 'DELIVERY', collateralquantity: '10' },
+          { tradingsymbol: 'MTF1', exchange: 'NSE', quantity: '5', ltp: '200', close: '200', product: 'MTF' },
+          { tradingsymbol: 'NORMAL1', exchange: 'NSE', quantity: '3', ltp: '50', close: '50', product: 'DELIVERY' },
+        ],
+      },
+    });
+    expect(out.holdings.map((h) => [h.symbol, h.holdingType, h.product])).toEqual([
+      ['PLEDGED1', 'PLEDGED', 'DELIVERY'],
+      ['MTF1', 'MTF', 'MTF'],
+      ['NORMAL1', 'NORMAL', 'DELIVERY'],
+    ]);
   });
 
   it('tolerates a missing holdings array and zero close (no NaN day-change)', () => {

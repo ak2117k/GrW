@@ -4,6 +4,7 @@ import type { StockMonitor } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { MarketDataGateway } from '../../market-data/gateways/market-data.gateway';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import {
   CreateStockMonitorDto,
   StockMonitorDto,
@@ -59,7 +60,53 @@ export class StockMonitorService {
     private readonly prisma: PrismaService,
     private readonly feed: MarketFeedService,
     private readonly gateway: MarketDataGateway,
+    private readonly adapter: AngelOneAdapterService,
   ) {}
+
+  /** Single-token REST LTP fallback (socket-cache miss). Null on any failure. */
+  private async restLtp(exchange: string, token: string): Promise<number | null> {
+    try {
+      const map = await this.adapter.getLtpsBatch(exchange, [token]);
+      const ltp = map.get(token);
+      return ltp && ltp > 0 ? ltp : null;
+    } catch (err) {
+      this.logger.warn(
+        `[stock-monitor] REST LTP failed for ${exchange}:${token}: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Resolve a live LTP per monitored token: socket cache first, then ONE batched
+   * REST LTP call per exchange for the tokens the socket doesn't carry (BSE /
+   * illiquid / beyond the ~50-token WS subscription cap).
+   */
+  private async resolveLtps(monitors: StockMonitor[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const missingByExchange = new Map<string, Set<string>>();
+    for (const m of monitors) {
+      const q = this.feed.getQuote(m.token);
+      if (q && q.ltp > 0) {
+        out.set(m.token, q.ltp);
+      } else {
+        const set = missingByExchange.get(m.exchange) ?? new Set<string>();
+        set.add(m.token);
+        missingByExchange.set(m.exchange, set);
+      }
+    }
+    for (const [exchange, tokens] of missingByExchange) {
+      try {
+        const map = await this.adapter.getLtpsBatch(exchange, [...tokens]);
+        for (const [tok, ltp] of map) out.set(tok, ltp);
+      } catch (err) {
+        this.logger.warn(
+          `[stock-monitor] REST LTP batch failed for ${exchange}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    return out;
+  }
 
   /**
    * Add a stock to the caller's monitor list. Subscribes the token to the live
@@ -81,8 +128,14 @@ export class StockMonitorService {
       );
     }
 
+    // Reference price: prefer the socket cache, else a REST LTP — so stocks the
+    // WS feed doesn't carry (BSE / illiquid) still get a reference at add-time
+    // (REST returns the last close when the market is shut).
     const quote = this.feed.getQuote(token);
-    const referencePrice = quote && quote.ltp > 0 ? quote.ltp : null;
+    let referencePrice = quote && quote.ltp > 0 ? quote.ltp : null;
+    if (referencePrice === null) {
+      referencePrice = await this.restLtp(exchange, token);
+    }
     const targetPrice =
       referencePrice !== null
         ? computeTargetPrice(referencePrice, targetPercent)
@@ -160,11 +213,11 @@ export class StockMonitorService {
     });
     if (monitors.length === 0) return;
 
+    const ltpByToken = await this.resolveLtps(monitors);
     const now = new Date();
     for (const monitor of monitors) {
-      const quote = this.feed.getQuote(monitor.token);
-      if (!quote || !(quote.ltp > 0)) continue;
-      const ltp = quote.ltp;
+      const ltp = ltpByToken.get(monitor.token);
+      if (!ltp || !(ltp > 0)) continue;
 
       // First priced tick: capture the reference + target and skip the hit test.
       if (monitor.referencePrice === null) {

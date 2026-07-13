@@ -5,6 +5,7 @@ import type { StockMonitor } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { MarketDataGateway } from '../../market-data/gateways/market-data.gateway';
+import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import {
   StockMonitorService,
   computePercent,
@@ -82,6 +83,7 @@ describe('StockMonitorService', () => {
   };
   let feed: { subscribe: jest.Mock; getQuote: jest.Mock; isMarketOpen: jest.Mock };
   let gateway: { server: { emit: jest.Mock } };
+  let adapter: { getLtpsBatch: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
@@ -99,6 +101,7 @@ describe('StockMonitorService', () => {
       isMarketOpen: jest.fn().mockReturnValue(true),
     };
     gateway = { server: { emit: jest.fn() } };
+    adapter = { getLtpsBatch: jest.fn().mockResolvedValue(new Map<string, number>()) };
 
     const mod = await Test.createTestingModule({
       providers: [
@@ -106,6 +109,7 @@ describe('StockMonitorService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: MarketFeedService, useValue: feed },
         { provide: MarketDataGateway, useValue: gateway },
+        { provide: AngelOneAdapterService, useValue: adapter },
       ],
     }).compile();
 
@@ -162,6 +166,21 @@ describe('StockMonitorService', () => {
       await service.add('user_1', dto);
 
       expect(prisma.stockMonitor.create.mock.calls[0][0].data.referencePrice).toBeNull();
+    });
+
+    it('falls back to a REST LTP when the socket cache has no quote (BSE / illiquid)', async () => {
+      feed.getQuote.mockReturnValue(null);
+      adapter.getLtpsBatch.mockResolvedValue(new Map<string, number>([[dto.token, 250]]));
+      prisma.stockMonitor.create.mockResolvedValue(
+        monitor({ referencePrice: 250, targetPrice: 275, lastLtp: 250, currentPercent: 0 }),
+      );
+
+      await service.add('user_1', dto);
+
+      expect(adapter.getLtpsBatch).toHaveBeenCalledWith(dto.exchange, [dto.token]);
+      const data = prisma.stockMonitor.create.mock.calls[0][0].data;
+      expect(data.referencePrice).toBe(250);
+      expect(data.targetPrice).toBe(275); // 250 * (1 + 10%)
     });
 
     it('still creates the row when the feed subscribe throws', async () => {

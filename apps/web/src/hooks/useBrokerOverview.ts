@@ -15,6 +15,8 @@ export interface Holding {
   pnl: number;
   pnlPercent: number;
   dayChangePercent: number;
+  product: string;
+  holdingType: 'NORMAL' | 'MTF' | 'PLEDGED';
 }
 
 export interface BrokerOverview {

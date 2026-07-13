@@ -23,6 +23,20 @@ export interface Holding {
   pnl: number;
   pnlPercent: number;
   dayChangePercent: number;
+  /** Raw Angel One product code (e.g. DELIVERY / MTF). */
+  product: string;
+  /** Derived holding classification for the UI badge. */
+  holdingType: 'NORMAL' | 'MTF' | 'PLEDGED';
+}
+
+/**
+ * Classify a raw Angel One holding: pledged (collateralised for margin) →
+ * PLEDGED; product flagged MTF (margin-trading facility) → MTF; else NORMAL.
+ */
+function classifyHolding(h: any): Holding['holdingType'] {
+  if (toNum(h?.collateralquantity) > 0) return 'PLEDGED';
+  if (String(h?.product ?? '').toUpperCase().includes('MTF')) return 'MTF';
+  return 'NORMAL';
 }
 
 export interface BrokerOverview {
@@ -106,6 +120,8 @@ function mapHoldings(data: any): Holding[] {
       pnl: toNum(h?.profitandloss),
       pnlPercent: toNum(h?.pnlpercentage),
       dayChangePercent: close > 0 ? ((ltp - close) / close) * 100 : 0,
+      product: h?.product ? String(h.product) : '',
+      holdingType: classifyHolding(h),
     };
   });
 }

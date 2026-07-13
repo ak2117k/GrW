@@ -3,6 +3,7 @@ import type { TradeTracker } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { CREDENTIAL_DECRYPTOR } from '../../credential-vault/execution/credential-decryptor';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
+import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import {
   TradeTrackerService,
   computePnl,
@@ -167,6 +168,7 @@ describe('TradeTrackerService', () => {
       updateMany: jest.Mock;
     };
     brokerCredential: { findMany: jest.Mock };
+    user: { findUnique: jest.Mock };
   };
   let decryptor: { withDecryptedCredentials: jest.Mock };
   let brokerFactory: { withSession: jest.Mock };
@@ -179,9 +181,12 @@ describe('TradeTrackerService', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
       brokerCredential: { findMany: jest.fn().mockResolvedValue([]) },
+      // Default: not the feed account → snapshotBook takes the ephemeral path.
+      user: { findUnique: jest.fn().mockResolvedValue({ isFeedAccount: false }) },
     };
     decryptor = { withDecryptedCredentials: jest.fn() };
     brokerFactory = { withSession: jest.fn() };
+    const authService = { isAuthenticated: () => false, getSmartApi: () => null };
 
     const mod = await Test.createTestingModule({
       providers: [
@@ -189,6 +194,7 @@ describe('TradeTrackerService', () => {
         { provide: PrismaService, useValue: prisma },
         { provide: CREDENTIAL_DECRYPTOR, useValue: decryptor },
         { provide: PerUserBrokerSessionFactory, useValue: brokerFactory },
+        { provide: AngelOneAuthService, useValue: authService },
       ],
     }).compile();
 

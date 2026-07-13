@@ -1,10 +1,11 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   CREDENTIAL_DECRYPTOR,
   CredentialDecryptor,
 } from '../execution/credential-decryptor';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
+import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 
 /**
  * Sanitized, secret-free account overview returned by GET /api/broker/overview.
@@ -172,10 +173,15 @@ export function sanitizeOverview(raw: RawOverview): BrokerOverview {
  */
 @Injectable()
 export class BrokerOverviewService {
+  private readonly logger = new Logger(BrokerOverviewService.name);
+
   constructor(
     @Inject(CREDENTIAL_DECRYPTOR) private readonly decryptor: CredentialDecryptor,
     private readonly brokerFactory: PerUserBrokerSessionFactory,
     private readonly prisma: PrismaService,
+    // The persistent market-data feed session. When the caller IS the feed
+    // account, reads reuse this session instead of a fresh login (see getOverview).
+    private readonly authService: AngelOneAuthService,
   ) {}
 
   /**
@@ -189,6 +195,31 @@ export class BrokerOverviewService {
     const row = await this.prisma.brokerCredential.findUnique({ where: { userId } });
     if (!row) {
       throw new NotFoundException('No Angel One account connected');
+    }
+
+    // If the caller IS the market-data feed account, read through the feed's
+    // ALREADY-authenticated session instead of a fresh ephemeral login. A second
+    // login on the same Angel One client code invalidates the feed's live
+    // WebSocket session (Angel One allows ~one session per account), which would
+    // stall live prices/charts for the whole app. Same account, one session.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isFeedAccount: true },
+    });
+    if (user?.isFeedAccount && this.authService.isAuthenticated()) {
+      try {
+        const api = this.authService.getSmartApi();
+        return sanitizeOverview({
+          funds: (await api.getRMS())?.data ?? null,
+          profile: (await api.getProfile())?.data ?? null,
+          positions: (await api.getPosition())?.data ?? null,
+          holdings: (await api.getAllHolding())?.data ?? null,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Feed-session overview read failed; falling back to ephemeral login: ${err instanceof Error ? err.message : err}`,
+        );
+      }
     }
 
     const raw = await this.decryptor.withDecryptedCredentials(

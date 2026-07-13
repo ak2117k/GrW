@@ -11,6 +11,7 @@ import {
   CredentialDecryptor,
 } from '../../credential-vault/execution/credential-decryptor';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
+import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { TradeTrackerDto, toTradeTrackerDto } from '../dto/trade-tracker.dto';
 
 /** A normalized open-book instrument (one open position or one holding). */
@@ -192,6 +193,9 @@ export class TradeTrackerService implements OnModuleDestroy {
     @Inject(CREDENTIAL_DECRYPTOR)
     private readonly decryptor: CredentialDecryptor,
     private readonly brokerFactory: PerUserBrokerSessionFactory,
+    // Persistent feed session — reused for the feed account's snapshot so a
+    // second login doesn't kill the live feed (see snapshotBook).
+    private readonly authService: AngelOneAuthService,
   ) {}
 
   onModuleDestroy(): void {
@@ -210,21 +214,49 @@ export class TradeTrackerService implements OnModuleDestroy {
   async snapshotBook(
     userId: string,
   ): Promise<{ positions: unknown[]; holdings: unknown[] }> {
-    const raw = await this.decryptor.withDecryptedCredentials(
-      userId,
-      { reason: 'REVALIDATE' },
-      (creds) =>
-        this.brokerFactory.withSession(creds, async (session) => ({
-          positions: await session.getPositions(),
-          holdings: await session.getHoldings(),
-        })),
-    );
+    // If the caller IS the market-data feed account, read via the feed's live
+    // session instead of a fresh login — a second login on the same Angel One
+    // client code would kill the feed's streaming session. Falls back to an
+    // ephemeral login on any failure.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isFeedAccount: true },
+    });
+    let raw: { positions: unknown; holdings: unknown };
+    if (user?.isFeedAccount && this.authService.isAuthenticated()) {
+      try {
+        const api = this.authService.getSmartApi();
+        raw = {
+          positions: (await api.getPosition())?.data ?? null,
+          holdings: (await api.getAllHolding())?.data ?? null,
+        };
+      } catch (err) {
+        this.logger.warn(
+          `Feed-session snapshot failed; falling back to ephemeral login: ${err instanceof Error ? err.message : err}`,
+        );
+        raw = await this.ephemeralSnapshot(userId);
+      }
+    } else {
+      raw = await this.ephemeralSnapshot(userId);
+    }
     const positions = Array.isArray(raw.positions) ? raw.positions : [];
     // getHoldings() returns the `{ holdings, totalholding }` envelope.
     const holdings = Array.isArray((raw.holdings as any)?.holdings)
       ? (raw.holdings as any).holdings
       : [];
     return { positions, holdings };
+  }
+
+  /** One-login ephemeral broker snapshot via the isolated decrypt lease. */
+  private ephemeralSnapshot(
+    userId: string,
+  ): Promise<{ positions: unknown; holdings: unknown }> {
+    return this.decryptor.withDecryptedCredentials(userId, { reason: 'REVALIDATE' }, (creds) =>
+      this.brokerFactory.withSession(creds, async (session) => ({
+        positions: await session.getPositions(),
+        holdings: await session.getHoldings(),
+      })),
+    );
   }
 
   /**

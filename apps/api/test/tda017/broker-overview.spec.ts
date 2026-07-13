@@ -63,9 +63,15 @@ const fakeDecryptor = {
     }),
 };
 
-function serviceWith(prisma: any) {
+// Default: NOT the feed account (isFeedAccount:false) + no feed session, so
+// getOverview takes the ephemeral path. A test can override either.
+function serviceWith(
+  prisma: any,
+  authService: any = { isAuthenticated: () => false, getSmartApi: () => null },
+) {
+  const p = { user: { findUnique: async () => ({ isFeedAccount: false }) }, ...prisma };
   const factory = new PerUserBrokerSessionFactory(() => fakeSmartApi() as any);
-  return new BrokerOverviewService(fakeDecryptor as any, factory, prisma as any);
+  return new BrokerOverviewService(fakeDecryptor as any, factory, p as any, authService as any);
 }
 
 describe('BrokerOverviewService — sanitized overview (TDA-017)', () => {
@@ -124,6 +130,29 @@ describe('BrokerOverviewService — sanitized overview (TDA-017)', () => {
   it('throws NotFoundException (→404) when the user has no stored creds', async () => {
     const prisma = { brokerCredential: { findUnique: async () => null } };
     await expect(serviceWith(prisma).getOverview('u1')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('reads via the feed session (NO ephemeral login) when the caller IS the feed account', async () => {
+    const prisma = {
+      brokerCredential: { findUnique: async () => ({ userId: 'u1' }) },
+      user: { findUnique: async () => ({ isFeedAccount: true }) },
+    };
+    let ephemeralUsed = false;
+    const decryptorSpy = {
+      withDecryptedCredentials: async () => {
+        ephemeralUsed = true;
+        return { funds: null, profile: null, positions: null, holdings: null };
+      },
+    };
+    const factory = new PerUserBrokerSessionFactory(() => fakeSmartApi() as any);
+    const authService = { isAuthenticated: () => true, getSmartApi: () => fakeSmartApi() };
+    const svc = new BrokerOverviewService(decryptorSpy as any, factory, prisma as any, authService as any);
+
+    const out = await svc.getOverview('u1');
+
+    expect(ephemeralUsed).toBe(false); // reused the live feed session — no second login
+    expect(out.funds.availableCash).toBe(1000.5);
+    expect(out.holdings[0].symbol).toBe('INFY');
   });
 });
 

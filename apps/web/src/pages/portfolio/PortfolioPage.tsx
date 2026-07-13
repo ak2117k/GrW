@@ -6,6 +6,27 @@ import { formatMoney } from '@/hooks/formatMoney';
 import { exportTrackersXlsx, exportTrackersPdf } from '@/utils/exportTrackers';
 import { LoadingSkeleton } from '@/components/common';
 
+/** How often to re-pull Angel One's live holdings/positions during market hours. */
+const AUTO_REFRESH_MS = 20_000;
+
+/** True during NSE cash hours (Mon–Fri, 09:15–15:30 IST). Off-hours we don't
+ *  auto-poll — each pull is a broker login, and prices don't move anyway. */
+function isMarketHoursIST(): boolean {
+  const parts = new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  }).formatToParts(new Date());
+  const weekday = parts.find((p) => p.type === 'weekday')?.value ?? '';
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
+  const mins = hour * 60 + minute;
+  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+}
+
 /** Tailwind text color for a signed P&L value. */
 function pnlColor(v: number): string {
   if (v > 0) return 'text-[var(--color-accent-green)]';
@@ -229,6 +250,16 @@ export default function PortfolioPage() {
     void refresh();
   }, [refresh]);
 
+  // Auto-refresh Angel One's live holdings/positions during market hours so the
+  // page tracks the broker instead of a frozen snapshot. Uses Angel One's own
+  // LTP/P&L (no recompute) — just pulled continuously. Manual Refresh still works.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (isMarketHoursIST()) void refresh();
+    }, AUTO_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [refresh]);
+
   // Dismiss the download menu on any outside click.
   useEffect(() => {
     if (!menuOpen) return;
@@ -412,7 +443,7 @@ export default function PortfolioPage() {
           </section>
 
           <p className="text-center text-[10px] text-[var(--color-text-muted)]">
-            Values are a live snapshot from Angel One. Press Refresh to update (each refresh performs one broker login).
+            Angel One's own LTP &amp; P&amp;L, auto-refreshed every {AUTO_REFRESH_MS / 1000}s during market hours (09:15–15:30 IST). Press Refresh to pull now.
           </p>
         </>
       )}

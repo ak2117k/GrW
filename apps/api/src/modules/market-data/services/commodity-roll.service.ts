@@ -21,7 +21,15 @@ const POST_ROLL_DAILY_BACKFILL_DAYS = 30;
 /** Per-commodity roll outcome — one entry per tracked symbol. */
 export interface CommodityRollResult {
   symbol: string;
-  status: 'NOOP' | 'ROLLED' | 'NO_FRONT_MONTH' | 'NO_DB_ROW' | 'ERROR' | 'DRY_RUN';
+  status:
+    | 'NOOP'
+    | 'ROLLED'
+    | 'CREATED'
+    | 'NO_FRONT_MONTH'
+    | 'NO_DB_ROW'
+    | 'WOULD_CREATE'
+    | 'ERROR'
+    | 'DRY_RUN';
   oldToken?: string;
   newToken?: string;
   oldContractSymbol?: string;
@@ -148,8 +156,64 @@ export class CommodityRollService {
       select: { id: true, token: true, symbol: true, lotSize: true },
     });
     if (!row) {
-      this.logger.warn(`${symbol}: no DB instrument row — run scripts/seed-mcx-commodities.mjs first`);
-      return { symbol, status: 'NO_DB_ROW', newToken, newContractSymbol, newContractExpiry };
+      // First-time seed. No instrument row exists for this commodity yet, so
+      // there is nothing to "roll" — we CREATE the row at today's front-month
+      // token. (This branch used to bail with NO_DB_ROW, which is exactly why
+      // the Commodities tab was empty on a fresh DB: the roll only ever updated
+      // pre-existing rows, and the manual seed script was never run.)
+      if (dryRun) {
+        return { symbol, status: 'WOULD_CREATE', newToken, newContractSymbol, newContractExpiry };
+      }
+
+      const created = await this.prisma.instrument.upsert({
+        where: { symbol_exchange_token: { symbol, exchange: 'MCX', token: newToken } },
+        create: {
+          symbol,
+          name: symbol,
+          token: newToken,
+          exchange: 'MCX',
+          segment: 'COMMODITY',
+          lotSize: Number(front.lotsize) || 1,
+          isActive: true,
+        },
+        update: { isActive: true },
+        select: { id: true },
+      });
+
+      // Sync the in-memory COMMODITIES constant so the feed routes ticks to the
+      // right token immediately.
+      const constEntry = (COMMODITIES as Record<string, { symbol: string; token: string }>)[symbol];
+      if (constEntry) {
+        constEntry.token = newToken;
+      }
+
+      const backfilled = await this.backfillDailyCandles(created.id, newToken, symbol);
+
+      let wsSubscribed = false;
+      if (this.marketFeedService) {
+        try {
+          await this.marketFeedService.subscribe([newToken]);
+          wsSubscribed = true;
+        } catch (err) {
+          this.logger.warn(
+            `${symbol}: WS subscribe after seed failed — ${err instanceof Error ? err.message : String(err)}.`,
+          );
+        }
+      }
+
+      this.logger.log(
+        `${symbol}: seeded instrument row at ${newToken} (${newContractSymbol}, expiry ` +
+        `${newContractExpiry}), backfilled ${backfilled} daily candles`,
+      );
+      return {
+        symbol,
+        status: 'CREATED',
+        newToken,
+        newContractSymbol,
+        newContractExpiry,
+        newCandlesBackfilled: backfilled,
+        wsResubscribed: wsSubscribed,
+      };
     }
 
     if (row.token === newToken) {
@@ -202,38 +266,7 @@ export class CommodityRollService {
     }
 
     // 4. Backfill recent daily candles so PDH/PDL/atr14 work immediately.
-    let backfilled = 0;
-    try {
-      const to = new Date();
-      const from = new Date(to.getTime() - POST_ROLL_DAILY_BACKFILL_DAYS * 24 * 60 * 60 * 1000);
-      const rows = await this.adapter.getHistoricalData(newToken, 'MCX', '1d', from, to);
-      const CHUNK = 50;
-      for (let i = 0; i < rows.length; i += CHUNK) {
-        const chunk = rows.slice(i, i + CHUNK);
-        await Promise.all(
-          chunk.map((c: { timestamp: Date; open: number; high: number; low: number; close: number; volume: number }) =>
-            this.repository.upsertCandle({
-              instrumentId: row.id,
-              timeframe: '1d',
-              timestamp: new Date(c.timestamp),
-              open: Number(c.open),
-              high: Number(c.high),
-              low: Number(c.low),
-              close: Number(c.close),
-              volume: Number(c.volume) || 0,
-            }),
-          ),
-        );
-        backfilled += chunk.length;
-      }
-    } catch (err) {
-      // Non-fatal — the roll itself succeeded. Daily-backfill cron + lazy
-      // chart fetches will fill the gap. Log loudly.
-      this.logger.warn(
-        `${symbol}: post-roll backfill failed — ${err instanceof Error ? err.message : String(err)}. ` +
-        `Roll itself succeeded; data will fill in via lazy chart fetches.`,
-      );
-    }
+    const backfilled = await this.backfillDailyCandles(row.id, newToken, symbol);
 
     // 5. Drop the cached level book so the next read rebuilds from new candles.
     let levelBookInvalidated = false;
@@ -275,6 +308,51 @@ export class CommodityRollService {
       levelBookInvalidated,
       wsResubscribed,
     };
+  }
+
+  /**
+   * Backfill the most-recent POST_ROLL_DAILY_BACKFILL_DAYS of daily candles for
+   * a freshly created OR freshly rolled commodity instrument. Non-fatal: on
+   * failure it logs and returns however many it managed to persist, so the
+   * caller's create/roll still succeeds (lazy chart fetches fill any gap).
+   * Returns the number of daily candles upserted.
+   */
+  private async backfillDailyCandles(
+    instrumentId: string,
+    token: string,
+    symbol: string,
+  ): Promise<number> {
+    let backfilled = 0;
+    try {
+      const to = new Date();
+      const from = new Date(to.getTime() - POST_ROLL_DAILY_BACKFILL_DAYS * 24 * 60 * 60 * 1000);
+      const rows = await this.adapter.getHistoricalData(token, 'MCX', '1d', from, to);
+      const CHUNK = 50;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK);
+        await Promise.all(
+          chunk.map((c: { timestamp: Date; open: number; high: number; low: number; close: number; volume: number }) =>
+            this.repository.upsertCandle({
+              instrumentId,
+              timeframe: '1d',
+              timestamp: new Date(c.timestamp),
+              open: Number(c.open),
+              high: Number(c.high),
+              low: Number(c.low),
+              close: Number(c.close),
+              volume: Number(c.volume) || 0,
+            }),
+          ),
+        );
+        backfilled += chunk.length;
+      }
+    } catch (err) {
+      this.logger.warn(
+        `${symbol}: daily backfill failed — ${err instanceof Error ? err.message : String(err)}. ` +
+        `Data will fill in via lazy chart fetches.`,
+      );
+    }
+    return backfilled;
   }
 
   /**

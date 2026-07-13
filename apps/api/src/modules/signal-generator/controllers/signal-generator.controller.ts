@@ -32,6 +32,9 @@ import { isIntradayInterval, isSupportedInterval, normalizeInterval, lookbackDay
 import { computeAtrFromCandles } from '../services/per-tf-atr';
 import { AdminOnly, Roles, CurrentUser, AuthenticatedUser } from '../../../common/decorators';
 import { SubscriptionService } from '../../subscription/subscription.service';
+import type { Candle } from '../patterns/swing-points';
+import { buildPatternMarkers } from '../patterns/to-markers';
+import { PatternsResponseDto } from '../dto/pattern-marker.dto';
 
 @AdminOnly()
 @Controller('api/signals')
@@ -425,6 +428,96 @@ export class SignalGeneratorController {
       );
       throw err;
     }
+  }
+
+  /**
+   * GET /api/signals/patterns — detected candlestick + chart patterns for a
+   * token / timeframe. Backs the chart's pattern-marker overlay. Returns an
+   * empty pattern list (not 404) whenever there aren't enough candles to detect
+   * anything, so the overlay stays mounted.
+   */
+  @Roles('USER', 'ADMIN')
+  @Get('patterns')
+  async getPatterns(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('token') token: string,
+    @Query('exchange') exchange?: string,
+    @Query('timeframe') timeframe?: string,
+  ): Promise<PatternsResponseDto> {
+    await this.assertChartAccess(user);
+    if (!token) {
+      throw new BadRequestException('token is required');
+    }
+    return this.detectPatterns(token, exchange, timeframe);
+  }
+
+  /**
+   * Fetch candles for `token` at `timeframe` and run the pattern detectors,
+   * returning the flat wire shape. Lookback widens for positional timeframes so
+   * the swing/chart detectors see enough bars. Returns an empty list (never
+   * throws) when the fetch throttles or yields too few candles.
+   */
+  private async detectPatterns(
+    token: string,
+    exchange?: string,
+    timeframe?: string,
+  ): Promise<PatternsResponseDto> {
+    const tf = timeframe ?? '15m';
+    let resolvedSymbol = token;
+    let resolvedExchange = exchange ?? 'NSE';
+    if (this.marketDataRepository) {
+      try {
+        const inst = await this.marketDataRepository.getInstrumentByToken(token);
+        resolvedSymbol = inst?.symbol ?? resolvedSymbol;
+        resolvedExchange = inst?.exchange ?? resolvedExchange;
+      } catch (err) {
+        this.logger.debug(
+          `getPatterns: instrument lookup failed for ${token}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    // Intraday (contains 'm' or 'h') needs ~15 days of bars; daily/weekly
+    // ('d'/'w') need a much longer window for the swing detector to find pivots.
+    const lower = tf.toLowerCase();
+    const isPositional = lower.includes('d') || lower.includes('w');
+    const now = new Date();
+    const lookbackDays = isPositional ? 300 : 15;
+    const from = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+
+    let raw: Awaited<ReturnType<AngelOneAdapterService['getHistoricalData']>> = [];
+    if (this.angelOneAdapter) {
+      try {
+        raw = await this.angelOneAdapter.getHistoricalData(
+          token,
+          resolvedExchange,
+          tf,
+          from,
+          now,
+          'interactive',
+        );
+      } catch (err) {
+        this.logger.debug(
+          `getPatterns: candle fetch failed for ${token}: ${err instanceof Error ? err.message : err}`,
+        );
+        raw = [];
+      }
+    }
+
+    const candles: Candle[] = (raw ?? []).map((c) => ({
+      time: c.timestamp.getTime(),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+
+    if (candles.length < 25) {
+      return { symbol: resolvedSymbol, timeframe: tf, count: 0, patterns: [] };
+    }
+
+    const patterns = buildPatternMarkers(candles);
+    return { symbol: resolvedSymbol, timeframe: tf, count: patterns.length, patterns };
   }
 
   /**

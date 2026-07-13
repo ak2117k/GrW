@@ -59,6 +59,14 @@ services:
       - key: WEB_ORIGIN
         sync: false
 
+      # --- Chartink webhook ---
+      # Shared secret in the webhook path: Chartink POSTs alerts to
+      # /webhooks/chartink/<this-value>. MUST be set or every webhook is 401'd.
+      # Point Chartink's alert URL at
+      #   https://grw-api.onrender.com/webhooks/chartink/<CHARTINK_WEBHOOK_SECRET>
+      - key: CHARTINK_WEBHOOK_SECRET
+        sync: false
+
       # --- Redis (Render Key Value, INTERNAL endpoint) ---
       # The app reads REDIS_HOST/REDIS_PORT/REDIS_PASSWORD (NOT REDIS_URL).
       # Use Render Key Value's INTERNAL connection: it lives on Render's private

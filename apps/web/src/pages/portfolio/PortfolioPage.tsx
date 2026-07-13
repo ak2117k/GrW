@@ -75,18 +75,20 @@ function fmtDateTime(iso: string | null | undefined): string {
 }
 
 /** A pill distinguishing OPEN (green) from CLOSED (muted). */
-/** Pledged/MTF badge on a holding; NORMAL renders a muted dash. */
-function HoldingTypeBadge({ type }: { type: 'NORMAL' | 'MTF' | 'PLEDGED' }) {
-  if (type === 'NORMAL') {
-    return <span className="text-[10px] text-[var(--color-text-muted)]">—</span>;
-  }
+/** Holding classification badge. Always shows a visible label (Normal / MTF /
+ *  Pledged); an unknown/missing value falls back to Normal. */
+function HoldingTypeBadge({ type }: { type?: 'NORMAL' | 'MTF' | 'PLEDGED' | null }) {
+  const t = type === 'MTF' || type === 'PLEDGED' ? type : 'NORMAL';
   const cls =
-    type === 'PLEDGED'
+    t === 'PLEDGED'
       ? 'bg-[var(--color-accent-yellow)]/15 text-[var(--color-accent-yellow)]'
-      : 'bg-[var(--color-accent-purple)]/15 text-[var(--color-accent-purple)]';
+      : t === 'MTF'
+        ? 'bg-[var(--color-accent-purple)]/15 text-[var(--color-accent-purple)]'
+        : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-muted)]';
+  const label = t === 'NORMAL' ? 'Normal' : t;
   return (
     <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
-      {type}
+      {label}
     </span>
   );
 }

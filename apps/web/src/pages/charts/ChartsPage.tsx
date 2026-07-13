@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import clsx from 'clsx';
-import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay, DrawingToolbar, DrawingsOverlay } from '@/components/charts';
+import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay, DrawingToolbar, DrawingsOverlay, PatternOverlay } from '@/components/charts';
 import type { CandlestickChartHandle } from '@/components/charts';
 import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
 import SetupMarker from '@/components/charts/SetupMarker';
@@ -11,6 +11,7 @@ import { buildSRView } from '@/components/charts/buildSRView';
 import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
 import { useSrEvidence } from '@/hooks/useSrEvidence';
 import { useZones } from '@/hooks/useZones';
+import { usePatterns } from '@/hooks/usePatterns';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
 import { useChartAnalysis } from '@/hooks/useChartAnalysis';
@@ -42,6 +43,8 @@ interface CrosshairData {
 export default function ChartsPage() {
   const chartRef = useRef<CandlestickChartHandle>(null);
   const [showIndicators, setShowIndicators] = useState(false);
+  // Pattern overlays default OFF — opt-in so a chart never boots cluttered.
+  const [showPatterns, setShowPatterns] = useState(false);
   const [crosshairData, setCrosshairData] = useState<CrosshairData | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -232,6 +235,15 @@ export default function ChartsPage() {
     timeframe,
   );
 
+  // Chart-pattern overlays (candlestick + chart patterns). Only fetches while
+  // the toggle is ON.
+  const { patterns } = usePatterns(
+    selectedSymbol.token,
+    timeframe,
+    selectedSymbol.exchange,
+    showPatterns,
+  );
+
   // Last candle close — memoised separately so it only recomputes when a new
   // candle actually arrives (not on every live tick that re-creates the
   // `candles` array reference).
@@ -288,6 +300,8 @@ export default function ChartsPage() {
         priceChangePercent={priceChangePercent}
         onToggleIndicators={() => setShowIndicators(!showIndicators)}
         showIndicatorPanel={showIndicators}
+        onTogglePatterns={() => setShowPatterns((v) => !v)}
+        showPatterns={showPatterns}
       />
 
       {/* OHLCV data bar */}
@@ -417,6 +431,17 @@ export default function ChartsPage() {
             series={chartRef.current?.candleSeries ?? null}
             realTimeMap={realTimeMap}
           />
+
+          {/* Pattern overlay — candlestick + chart-pattern markers + necklines.
+              Default OFF; opt-in via the toolbar "Patterns" toggle. */}
+          {showPatterns && (
+            <PatternOverlay
+              series={chartRef.current?.candleSeries ?? null}
+              chart={chartRef.current?.chart ?? null}
+              patterns={patterns}
+              realTimeMap={realTimeMap}
+            />
+          )}
 
           {/* OI Overlay (renders onto the chart, no DOM) */}
           <OIOverlay

@@ -5,6 +5,7 @@ import {
   LineChart,
   AreaChart,
   Activity,
+  Shapes,
 } from 'lucide-react';
 import { useChartStore } from '@/stores/chart-store';
 import SymbolSearch from './SymbolSearch';
@@ -17,6 +18,8 @@ interface ChartToolbarProps {
   priceChangePercent: number | null;
   onToggleIndicators: () => void;
   showIndicatorPanel: boolean;
+  onTogglePatterns: () => void;
+  showPatterns: boolean;
 }
 
 export default function ChartToolbar({
@@ -25,6 +28,8 @@ export default function ChartToolbar({
   priceChangePercent,
   onToggleIndicators,
   showIndicatorPanel,
+  onTogglePatterns,
+  showPatterns,
 }: ChartToolbarProps) {
   const isFullscreen = useChartStore((s) => s.isFullscreen);
   const toggleFullscreen = useChartStore((s) => s.toggleFullscreen);
@@ -117,6 +122,21 @@ export default function ChartToolbar({
         >
           <Activity size={13} />
           <span>Indicators</span>
+        </button>
+
+        {/* Patterns toggle */}
+        <button
+          onClick={onTogglePatterns}
+          title="Chart patterns"
+          className={clsx(
+            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors',
+            showPatterns
+              ? 'bg-[var(--color-accent-blue)] text-white'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-tertiary)]',
+          )}
+        >
+          <Shapes size={13} />
+          <span>Patterns</span>
         </button>
 
         {/* Fullscreen toggle */}

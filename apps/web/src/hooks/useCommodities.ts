@@ -11,6 +11,13 @@ interface CommodityDto {
   contractSymbol: string;
   expiry: string;
   ltp: number | null;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  change: number;
+  changePercent: number;
 }
 
 const POLL_MS = 10_000;
@@ -44,13 +51,13 @@ export function useCommodities(enabled: boolean): void {
             token: c.token,
             exchange: c.exchange,
             ltp: c.ltp,
-            open: 0,
-            high: 0,
-            low: 0,
-            close: c.ltp,
-            change: 0,
-            changePercent: 0,
-            volume: 0,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            change: c.change,
+            changePercent: c.changePercent,
+            volume: c.volume,
             timestamp: new Date(),
           } as Quote);
         }

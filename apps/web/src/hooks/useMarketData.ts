@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { wsService } from '@/services/websocket';
 import api from '@/services/api';
 import { useMarketStore } from '@/stores/market-store';
@@ -50,7 +50,6 @@ export function useMarketData(): void {
   const updateQuote = useMarketStore((s) => s.updateQuote);
   const setConnected = useMarketStore((s) => s.setConnected);
   const setMarketStatus = useMarketStore((s) => s.setMarketStatus);
-  const hasFetched = useRef(false);
 
   // Compute market status on mount and refresh every 30 seconds
   useEffect(() => {
@@ -59,28 +58,36 @@ export function useMarketData(): void {
     return () => clearInterval(id);
   }, [setMarketStatus]);
 
-  // Fetch initial index data via REST. REAL data only — apply whatever live
-  // quotes the API returns and let live WebSocket ticks fill in the rest. If
-  // nothing is available yet we leave the quotes empty (the UI shows real
-  // data or nothing at all — never fabricated demo numbers).
+  // Poll the index snapshot on an interval so the overview stays current even
+  // when the live tick socket isn't delivering (the WS `tick` feed can stall on
+  // a multi-process deploy / handshake issue while the badge still reads "Live").
+  // WS ticks below still update instantly when they DO arrive — this poll is the
+  // topology-independent floor. The endpoint reads a warm in-memory cache
+  // server-side, so a 5s cadence is cheap. REAL data only, never demo numbers.
   useEffect(() => {
-    if (hasFetched.current) return;
-    hasFetched.current = true;
+    let cancelled = false;
 
-    (async () => {
+    const fetchIndices = async () => {
       try {
         const res = await api.get('/market-data/indices');
         const indices = res.data?.indices ?? [];
-
+        if (cancelled) return;
         for (const idx of indices) {
           if (idx.quote && idx.quote.ltp) {
             updateQuote(idx.quote as Quote);
           }
         }
       } catch {
-        // API unreachable — leave quotes empty; no demo fallback.
+        // API unreachable — leave quotes as-is; no demo fallback.
       }
-    })();
+    };
+
+    void fetchIndices();
+    const id = setInterval(fetchIndices, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, [updateQuote]);
 
   // WebSocket for live tick updates

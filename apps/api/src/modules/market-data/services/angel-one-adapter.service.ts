@@ -629,6 +629,53 @@ export class AngelOneAdapterService implements BrokerAdapter {
     return out;
   }
 
+  /**
+   * Batch FULL-mode snapshot for several tokens on one exchange, in a single
+   * SmartAPI call. Like {@link getLtpsBatch} but returns OHLC + previous close
+   * (so callers can compute change/%), not just LTP. Same cross-segment guard.
+   * Tokens the account can't quote are simply absent from the returned map.
+   */
+  async getQuotesBatch(
+    exchange: string,
+    tokens: string[],
+  ): Promise<Map<string, { ltp: number; open: number; high: number; low: number; close: number; volume: number }>> {
+    const out = new Map<string, { ltp: number; open: number; high: number; low: number; close: number; volume: number }>();
+    const uniq = [...new Set(tokens)];
+    if (uniq.length === 0) return out;
+    try {
+      const smartApi = this.authService.getSmartApi();
+      const response = await smartApi.marketData({
+        mode: 'FULL',
+        exchangeTokens: { [exchange]: uniq },
+      });
+      const fetched: any[] = response?.data?.fetched ?? [];
+      const wantExchange = this.normalizeExchange(exchange);
+      for (const d of fetched) {
+        const tok = String(d.symbolToken ?? d.symboltoken ?? '');
+        const ltp = Number(d.ltp ?? 0);
+        if (!tok || ltp <= 0) continue;
+        const rowExchange = d.exchange ?? d.exchangeType ?? d.exch_seg ?? null;
+        if (rowExchange != null && this.normalizeExchange(String(rowExchange)) !== wantExchange) {
+          this.warnAmbiguousToken(tok, this.normalizeExchange(String(rowExchange)), wantExchange);
+          continue;
+        }
+        out.set(tok, {
+          ltp,
+          open: Number(d.open ?? 0),
+          high: Number(d.high ?? 0),
+          low: Number(d.low ?? 0),
+          close: Number(d.close ?? 0), // previous close in FULL mode
+          volume: Number(d.tradeVolume ?? d.volume ?? 0),
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `getQuotesBatch(${exchange}, ${uniq.length} tokens) failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    return out;
+  }
+
   async getLiveQuote(token: string, exchange: string): Promise<TickData> {
     // Try the REST quote endpoint first. It returns the freshest snapshot
     // (with proper prev-close) for any token the API key is entitled to.

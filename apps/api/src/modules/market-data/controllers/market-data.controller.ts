@@ -981,18 +981,30 @@ export class MarketDataController {
   @Get('commodities')
   async getCommodities() {
     const contracts = await this.commodityRollService.resolveFrontMonthTokens();
-    const ltps = await this.angelOneAdapter.getLtpsBatch(
+    const quotes = await this.angelOneAdapter.getQuotesBatch(
       'MCX',
       contracts.map((c) => c.token),
     );
-    const commodities = contracts.map((c) => ({
-      symbol: c.symbol,
-      token: c.token,
-      exchange: c.exchange,
-      contractSymbol: c.contractSymbol,
-      expiry: c.expiry,
-      ltp: ltps.get(c.token) ?? null,
-    }));
+    const commodities = contracts.map((c) => {
+      const q = quotes.get(c.token);
+      // Angel FULL mode gives previous close, so change = ltp − prevClose.
+      const hasChange = q != null && q.close > 0;
+      return {
+        symbol: c.symbol,
+        token: c.token,
+        exchange: c.exchange,
+        contractSymbol: c.contractSymbol,
+        expiry: c.expiry,
+        ltp: q?.ltp ?? null,
+        open: q?.open ?? 0,
+        high: q?.high ?? 0,
+        low: q?.low ?? 0,
+        close: q?.close ?? 0,
+        volume: q?.volume ?? 0,
+        change: hasChange ? Number((q!.ltp - q!.close).toFixed(2)) : 0,
+        changePercent: hasChange ? Number((((q!.ltp - q!.close) / q!.close) * 100).toFixed(2)) : 0,
+      };
+    });
     return { commodities, count: commodities.length };
   }
 

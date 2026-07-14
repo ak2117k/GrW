@@ -4,6 +4,7 @@ import { Search, Globe, Wifi, WifiOff, Loader2 } from 'lucide-react';
 import { useMarketStore } from '@/stores/market-store';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import { useInstrumentSearch } from '@/hooks/useInstrumentSearch';
+import { useCommodities } from '@/hooks/useCommodities';
 import api from '@/services/api';
 import {
   IndicesBar,
@@ -24,6 +25,10 @@ const TABS: { key: Tab; label: string }[] = [
 
 export default function MarketPage() {
   const [activeTab, setActiveTab] = useState<Tab>('all');
+
+  // Commodities come straight from Angel (front-month resolved server-side) into
+  // the quote store; only poll while the Commodities tab is open.
+  useCommodities(activeTab === 'commodities');
   const [searchText, setSearchText] = useState('');
   const [exchangeFilter, setExchangeFilter] = useState('ALL');
   const [showDropdown, setShowDropdown] = useState(false);

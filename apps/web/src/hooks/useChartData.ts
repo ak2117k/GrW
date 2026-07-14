@@ -454,6 +454,112 @@ export function useChartData(): UseChartDataReturn {
       });
   }, [selectedSymbol.token, selectedSymbol.exchange]);
 
+  // Merge a batch of freshly-fetched REAL-time candles onto the compressed
+  // axis. Used by the live-edge REST poll below (and mirrors the single-candle
+  // logic in the WS 'candle' handler). Processes candles ascending: any bucket
+  // OLDER than our current last bar is skipped (already have it); a bucket that
+  // EQUALS the last bar replaces its OHLC (finalises a still-forming bar); a
+  // NEWER bucket appends at lastCompressed + tfSec. All new compressed→real
+  // mappings are applied in one setRealTimeMap call. Done in ONE setCandles
+  // updater so lastRealBucket advances correctly across the whole batch (a
+  // per-candle loop would read a stale ref between iterations).
+  const applyClosedCandles = useCallback(
+    (reals: ChartCandle[]) => {
+      if (reals.length === 0) return;
+      const tfSec = timeframeMsRef.current / 1000;
+      setCandles((prev) => {
+        if (prev.length === 0) return prev; // cold start owned by fetchCandles
+        const next = prev.slice();
+        let curBucket = lastRealBucketRef.current;
+        let lastCompressed = next[next.length - 1].time;
+        const mapAdditions: Array<[number, number]> = [];
+        let changed = false;
+
+        for (const rc of reals) {
+          const bucket = Math.floor(rc.time / tfSec) * tfSec;
+          if (bucket < curBucket) continue;
+          if (bucket === curBucket) {
+            const last = next[next.length - 1];
+            // Only replace if something actually differs — avoids needless
+            // re-renders when the poll returns the same last completed bar.
+            if (
+              last.open !== rc.open || last.high !== rc.high ||
+              last.low !== rc.low || last.close !== rc.close ||
+              last.volume !== rc.volume
+            ) {
+              next[next.length - 1] = { ...last, open: rc.open, high: rc.high, low: rc.low, close: rc.close, volume: rc.volume };
+              changed = true;
+            }
+          } else {
+            const compressedTime = lastCompressed + tfSec;
+            next.push({
+              time: compressedTime,
+              open: rc.open,
+              high: rc.high,
+              low: rc.low,
+              close: rc.close,
+              volume: rc.volume,
+            });
+            mapAdditions.push([compressedTime, bucket]);
+            lastCompressed = compressedTime;
+            curBucket = bucket;
+            changed = true;
+          }
+        }
+
+        if (!changed) return prev;
+        if (mapAdditions.length > 0) {
+          setRealTimeMap((m) => {
+            const nm = new Map(m);
+            for (const [ct, b] of mapAdditions) nm.set(ct, b);
+            realTimeMapRef.current = nm;
+            return nm;
+          });
+          lastRealBucketRef.current = curBucket;
+        }
+        candlesRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  // Live-edge REST refresh. The completed-candle series must advance with the
+  // live market even when the WS tick/candle feed doesn't reach the browser
+  // (Cloudflare polling-transport stalls) — otherwise the chart freezes at
+  // load-time's last bar while the LTP (fed by the other REST polls) keeps
+  // moving. Fetches a SMALL recent window every 20s and merges only the new
+  // completed bars. Scoped narrow (1 chunk) + paused when the tab is hidden to
+  // keep Angel's ~3/s historical budget clear. This is the belt-and-suspenders
+  // twin of useWatchlistQuotes / useCommodities, for candles.
+  useEffect(() => {
+    if (!selectedSymbol.token || selectedSymbol.token === '0') return;
+    const REFRESH_MS = 20_000;
+    // Enough lookback to always include the current session tail (crude/NSE
+    // sessions are < 6.5h to lunch; 8h covers the whole day for intraday TFs).
+    const WINDOW_MS = 8 * 60 * 60 * 1000;
+
+    const refresh = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const to = new Date().toISOString();
+        const from = new Date(Date.now() - WINDOW_MS).toISOString();
+        const response = await api.get(
+          `/market-data/instruments/${selectedSymbol.token}/candles`,
+          { params: { timeframe, from, to, exchange: selectedSymbol.exchange } },
+        );
+        const raw: Candle[] = response.data?.candles ?? response.data?.data ?? [];
+        const meaningful = cleanCandles(raw);
+        applyClosedCandles(meaningful);
+      } catch {
+        // Soft failure — the next tick or poll will catch up.
+      }
+    };
+
+    const id = setInterval(refresh, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [selectedSymbol.token, selectedSymbol.exchange, timeframe, applyClosedCandles]);
+
   // Subscribe to WebSocket tick updates for real-time candle building.
   // Live updates have to play nicely with the compressed-time axis: a tick
   // arriving at real time T either extends the current bar (same real-time

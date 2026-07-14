@@ -74,3 +74,25 @@ describe('CommodityRollService — first-time seed (no DB row)', () => {
     expect(prisma.instrument.upsert).not.toHaveBeenCalled();
   });
 });
+
+describe('CommodityRollService.resolveFrontMonthTokens (direct-quote resolver)', () => {
+  it('resolves current front-month contracts and caches the ScripMaster fetch', async () => {
+    const { svc, http } = makeService();
+
+    const first = await svc.resolveFrontMonthTokens();
+    expect(first).toEqual([
+      {
+        symbol: 'GOLD',
+        token: '466583',
+        exchange: 'MCX',
+        contractSymbol: 'GOLD05AUG26FUT',
+        expiry: '31DEC2099',
+      },
+    ]);
+
+    // A second call within the TTL must reuse the cache — no extra 30MB fetch.
+    const second = await svc.resolveFrontMonthTokens();
+    expect(second).toBe(first);
+    expect(http.get).toHaveBeenCalledTimes(1);
+  });
+});

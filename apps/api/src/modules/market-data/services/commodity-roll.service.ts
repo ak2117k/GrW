@@ -79,9 +79,24 @@ interface ScripMasterEntry {
  *   - Daily cron at 08:30 IST (via CommodityRollCron) — before MCX 09:00 open.
  *   - Manual trigger via POST /api/market-data/commodity-roll/trigger.
  */
+/** A commodity's currently-live front-month contract. */
+export interface FrontMonthContract {
+  symbol: string;
+  token: string;
+  exchange: 'MCX';
+  contractSymbol: string;
+  expiry: string;
+}
+
+/** How long a resolved front-month set is cached before re-fetching the ~30MB ScripMaster. */
+const FRONT_MONTH_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
 @Injectable()
 export class CommodityRollService {
   private readonly logger = new Logger(CommodityRollService.name);
+
+  /** Cache of resolved front-month contracts so the direct-quote path never pulls the 30MB ScripMaster per request. */
+  private frontMonthCache: { at: number; contracts: FrontMonthContract[] } | null = null;
 
   constructor(
     private readonly http: HttpService,
@@ -91,6 +106,45 @@ export class CommodityRollService {
     @Optional() private readonly levelBookService: LevelBookService | null,
     @Optional() private readonly marketFeedService: MarketFeedService | null,
   ) {}
+
+  /**
+   * Resolve the current front-month contract for every tracked commodity from
+   * the Angel ScripMaster. Cached for FRONT_MONTH_CACHE_TTL_MS so the direct
+   * commodities-quote endpoint never pulls the ~30MB master per request. This
+   * is read-only (the resolution half of a roll, with no DB writes) and is what
+   * lets commodities be shown/charted straight from Angel without a DB row or
+   * feed subscription. Returns the last good cache (or []) if the fetch fails.
+   */
+  async resolveFrontMonthTokens(): Promise<FrontMonthContract[]> {
+    if (this.frontMonthCache && Date.now() - this.frontMonthCache.at < FRONT_MONTH_CACHE_TTL_MS) {
+      return this.frontMonthCache.contracts;
+    }
+    let master: ScripMasterEntry[];
+    try {
+      master = await this.fetchScripMaster();
+    } catch (err) {
+      this.logger.warn(
+        `resolveFrontMonthTokens: ScripMaster fetch failed — ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return this.frontMonthCache?.contracts ?? [];
+    }
+    const contracts: FrontMonthContract[] = [];
+    for (const symbol of Object.keys(COMMODITIES)) {
+      const front = this.pickFrontMonth(master, symbol);
+      if (front) {
+        contracts.push({
+          symbol,
+          token: String(front.token),
+          exchange: 'MCX',
+          contractSymbol: front.symbol ?? '',
+          expiry: front.expiry ?? '',
+        });
+      }
+    }
+    this.frontMonthCache = { at: Date.now(), contracts };
+    this.logger.log(`resolveFrontMonthTokens: resolved ${contracts.length}/${Object.keys(COMMODITIES).length} commodities`);
+    return contracts;
+  }
 
   /**
    * Run a roll across all (or a subset of) tracked commodities.

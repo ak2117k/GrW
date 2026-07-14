@@ -972,26 +972,39 @@ export class AngelOneAdapterService implements BrokerAdapter {
 
     const merged: any[] = [];
     const seenTs = new Set<number>();
-    let cursor = from.getTime();
     let chunkIndex = 0;
     let droppedChunks = 0;
-    while (cursor < to.getTime()) {
+
+    // Build the chunk windows oldest→newest, then fetch them NEWEST-FIRST. This
+    // is the key ordering choice for a live chart: if a chunk still throttles
+    // after retries we drop it (partial result), and fetching newest-first means
+    // the dropped chunk is the OLDEST (far-left history) — NEVER the most-recent
+    // candles the chart actually needs. (Previously we fetched oldest-first, so
+    // throttling silently ate today's candles and the chart froze mid-session.)
+    const windows: Array<{ start: number; end: number }> = [];
+    for (let cursor = from.getTime(); cursor < to.getTime(); ) {
       const chunkEnd = Math.min(cursor + maxRangeMs, to.getTime());
+      windows.push({ start: cursor, end: chunkEnd });
+      cursor = chunkEnd;
+    }
+    windows.reverse();
+
+    for (const { start, end } of windows) {
       // Resilient chunk fetch: fetchChunkWithRetry retries a throttled chunk
-      // with backoff. If it STILL throttles after the retries, we catch the
-      // AngelThrottleError here, log a warning naming the dropped window, and
-      // continue with an empty chunk — so one throttled day no longer aborts
-      // the whole fetch and discards the days that already succeeded. The
-      // result is a PARTIAL (e.g. 6-of-7) candle set instead of []. Genuine
-      // (non-throttle) errors are NOT caught here — they propagate.
+      // with backoff. If it STILL throttles after the retries, catch the
+      // AngelThrottleError here and continue with an empty chunk — one throttled
+      // window yields a PARTIAL set (oldest dropped first) instead of []. Genuine
+      // (non-throttle) errors are NOT caught here — they propagate. Pacing is
+      // handled globally by serializeHistoricalCall (350ms gap), so no per-chunk
+      // sleep is needed here.
       let chunk: any[];
       try {
         chunk = await this.fetchChunkWithRetry(
           token,
           exchange,
           interval,
-          new Date(cursor),
-          new Date(chunkEnd),
+          new Date(start),
+          new Date(end),
           priority,
         );
       } catch (err) {
@@ -999,9 +1012,9 @@ export class AngelOneAdapterService implements BrokerAdapter {
           droppedChunks++;
           this.logger.warn(
             `Auto-chunk: dropping throttled chunk for token=${token} ` +
-              `interval=${interval} window=${this.formatDateTime(new Date(cursor))} ` +
-              `→ ${this.formatDateTime(new Date(chunkEnd))} after retries — ` +
-              `keeping the other chunks (partial result): ${err.message}`,
+              `interval=${interval} window=${this.formatDateTime(new Date(start))} ` +
+              `→ ${this.formatDateTime(new Date(end))} after retries — keeping the ` +
+              `other chunks (partial result, oldest-dropped-first): ${err.message}`,
           );
           chunk = [];
         } else {
@@ -1016,15 +1029,6 @@ export class AngelOneAdapterService implements BrokerAdapter {
         }
       }
       chunkIndex++;
-      // NO explicit inter-chunk pacer here. Every chunk's getCandleData call
-      // already routes through `serializeHistoricalCall`, which serialises ALL
-      // historical calls (across every caller) and enforces a hard
-      // HISTORICAL_MIN_GAP_MS (350ms) gap between consecutive calls — i.e. the
-      // 3 req/sec cap is satisfied globally. The old extra ~350ms per-chunk
-      // sleep here was redundant double-pacing that ~doubled cold chart-load
-      // time (per chunk paid the global gap PLUS this sleep ≈ 700ms) without
-      // buying any additional rate-limit safety.
-      cursor = chunkEnd;
     }
 
     if (droppedChunks > 0) {

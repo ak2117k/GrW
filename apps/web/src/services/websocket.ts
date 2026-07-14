@@ -212,6 +212,15 @@ class WebSocketService {
     this.listeners.get(event)?.forEach((cb) => cb(data));
   }
 
+  /**
+   * Inject a synthetic event into local subscribers WITHOUT a server round-trip.
+   * Used by REST-poll fallbacks (e.g. the chart's live-candle poll) to drive the
+   * same 'tick' consumers when the live socket isn't delivering ticks.
+   */
+  emitLocal(event: string, data: unknown): void {
+    this.emit(event, data);
+  }
+
   get connected(): boolean {
     return this.connectedCount > 0;
   }

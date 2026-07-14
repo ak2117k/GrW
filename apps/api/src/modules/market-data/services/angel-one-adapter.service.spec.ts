@@ -260,6 +260,69 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
       await adapter.getHistoricalData('2885', 'NSE', '1m', from, to);
       expect(mock).toHaveBeenCalledTimes(3);
     });
+
+    // ─── Interactive (live-chart) age cap ───────────────────────────────
+    // A live chart re-fetches every ~20s expecting the newest completed bar.
+    // The per-timeframe TTL (1m→45s, 15m→10min) is tuned for background
+    // scoring reuse and is far too long for that — it froze the chart on the
+    // same snapshot. INTERACTIVE reads are therefore capped at 15s of age;
+    // BACKGROUND reads keep the full TTL.
+    it('does NOT serve an INTERACTIVE fetch a cache entry older than the 15s cap', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15')] });
+      const adapter = buildAdapter(mock);
+      const { from, to } = liveWindow();
+
+      jest.useFakeTimers({ now: to.getTime() });
+      try {
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to, 'interactive');
+        // 16s later: still within the 45s 1m TTL, but past the 15s cap.
+        jest.advanceTimersByTime(16_000);
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to, 'interactive');
+      } finally {
+        jest.useRealTimers();
+      }
+      // Interactive refetched fresh instead of serving the stale snapshot.
+      expect(mock).toHaveBeenCalledTimes(2);
+    });
+
+    it('DOES serve an interactive fetch from cache when the entry is still fresh (<15s)', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15')] });
+      const adapter = buildAdapter(mock);
+      const { from, to } = liveWindow();
+
+      jest.useFakeTimers({ now: to.getTime() });
+      try {
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to, 'interactive');
+        jest.advanceTimersByTime(5_000); // 5s < 15s cap
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to, 'interactive');
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(mock).toHaveBeenCalledTimes(1);
+    });
+
+    it('still serves a BACKGROUND fetch at that same 16s age (cap is interactive-only)', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValue({ status: true, data: [row('2026-05-15 09:15')] });
+      const adapter = buildAdapter(mock);
+      const { from, to } = liveWindow();
+
+      jest.useFakeTimers({ now: to.getTime() });
+      try {
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to, 'background');
+        jest.advanceTimersByTime(16_000); // past 15s cap, within 45s TTL
+        await adapter.getHistoricalData('2885', 'NSE', '1m', from, to, 'background');
+      } finally {
+        jest.useRealTimers();
+      }
+      // Background is unaffected by the interactive cap → served from cache.
+      expect(mock).toHaveBeenCalledTimes(1);
+    });
   });
 
   // ─── Historical cache live-window guard (backtest replay bypass) ──────

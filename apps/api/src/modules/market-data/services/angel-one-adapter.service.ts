@@ -140,6 +140,16 @@ const HISTORICAL_CACHE_TTL_MS: Record<string, number> = {
 const HISTORICAL_CACHE_TTL_DEFAULT_MS = 60 * 1000;
 
 /**
+ * Max age a cached live-window entry may have when served to an INTERACTIVE
+ * (user-facing chart) fetch. The per-timeframe TTL above is tuned for
+ * background scoring reuse and is far too long for a live chart (15m → 10min),
+ * which polls every ~20s for the newest completed bar. Capping interactive
+ * reads at 15s lets the chart advance within one poll of a bar completing
+ * while still coalescing refresh-mashing. Background reads ignore this.
+ */
+const INTERACTIVE_MAX_AGE_MS = 15 * 1000;
+
+/**
  * Live-fetch window for the historical cache. The TTL cache is meaningful
  * ONLY for "give me the last N bars up to now" fetches — the cache key
  * ignores [from,to], so a slightly-stale cached window is an acceptable
@@ -340,7 +350,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
    */
   private readonly historicalCache = new Map<
     string,
-    { data: any[]; expiresAt: number }
+    { data: any[]; expiresAt: number; cachedAt: number }
   >();
 
   constructor(
@@ -890,7 +900,19 @@ export class AngelOneAdapterService implements BrokerAdapter {
     if (isLiveFetch) {
       const cached = this.historicalCache.get(cacheKey);
       if (cached && cached.expiresAt > Date.now()) {
-        return cached.data;
+        // The cache key ignores [from,to], so a cached entry can be up to its
+        // full per-timeframe TTL old (15m → 10min). That staleness is fine for
+        // BACKGROUND scoring (a shared window across a ~100-token pass) but
+        // FREEZES a live chart: the chart re-fetches every ~20s expecting the
+        // newest completed bar and instead gets the same 10-min-old snapshot.
+        // So cap the age for INTERACTIVE (chart) reads — never serve them
+        // anything older than INTERACTIVE_MAX_AGE_MS; fall through to a fresh
+        // fetch instead. Background reads keep the long TTL untouched.
+        const maxAge =
+          priority === 'interactive' ? INTERACTIVE_MAX_AGE_MS : Infinity;
+        if (Date.now() - cached.cachedAt <= maxAge) {
+          return cached.data;
+        }
       }
     }
 
@@ -932,6 +954,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
       this.historicalCache.set(cacheKey, {
         data: result,
         expiresAt: Date.now() + ttl,
+        cachedAt: Date.now(),
       });
     }
     return result;

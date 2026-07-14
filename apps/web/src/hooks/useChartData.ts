@@ -422,6 +422,49 @@ export function useChartData(): UseChartDataReturn {
       });
   }, [selectedSymbol.token, selectedSymbol.exchange]);
 
+  // Live-candle fallback: when the WS tick feed isn't delivering (the /ws socket
+  // can stall while the badge still reads "Live"), poll the charted token's
+  // quote every 5s and inject it as a LOCAL 'tick'. The existing tick handler
+  // below then extends/appends the live bar exactly as it would for a real tick.
+  // Harmless when WS works — a real tick just arrives first with the same value.
+  useEffect(() => {
+    if (!selectedSymbol.token) return;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await api.post('/market-data/quotes', {
+          items: [{ token: selectedSymbol.token, exchange: selectedSymbol.exchange }],
+        });
+        const q = res.data?.quotes?.[0];
+        if (cancelled || !q || q.ltp == null) return;
+        wsService.emitLocal('tick', {
+          symbol: selectedSymbol.symbol,
+          token: selectedSymbol.token,
+          exchange: selectedSymbol.exchange,
+          ltp: q.ltp,
+          open: q.open,
+          high: q.high,
+          low: q.low,
+          close: q.close,
+          change: q.change,
+          changePercent: q.changePercent,
+          volume: 0, // cumulative day volume — never add per-poll or the bar inflates
+          timestamp: new Date(),
+        } as Quote);
+      } catch {
+        // Silent — chart keeps its last bar until a poll succeeds.
+      }
+    };
+
+    void poll();
+    const id = setInterval(poll, 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [selectedSymbol.token, selectedSymbol.exchange, selectedSymbol.symbol]);
+
   // Subscribe to WebSocket tick updates for real-time candle building.
   // Live updates have to play nicely with the compressed-time axis: a tick
   // arriving at real time T either extends the current bar (same real-time

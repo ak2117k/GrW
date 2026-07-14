@@ -1022,13 +1022,7 @@ export class MarketDataController {
   @Post('quotes')
   @HttpCode(HttpStatus.OK)
   async getQuotes(@Body() body: { items?: { token: string; exchange: string }[] }) {
-    const byExchange = new Map<string, string[]>();
-    for (const it of body?.items ?? []) {
-      if (!it?.token || !it?.exchange) continue;
-      const ex = String(it.exchange).toUpperCase();
-      (byExchange.get(ex) ?? byExchange.set(ex, []).get(ex)!).push(it.token);
-    }
-    const quotes: Array<{
+    interface QuoteRow {
       token: string;
       exchange: string;
       ltp: number;
@@ -1039,8 +1033,36 @@ export class MarketDataController {
       volume: number;
       change: number;
       changePercent: number;
-    }> = [];
-    for (const [exchange, tokens] of byExchange) {
+    }
+    const quotes: QuoteRow[] = [];
+    // Cache-FIRST: subscribed tokens (indices, major stocks) are already warm in
+    // the feed's quote cache, so serve them with ZERO Angel calls. Only tokens
+    // the feed isn't tracking fall through to a direct Angel batch. This keeps
+    // the frequent watchlist/quote polls off Angel's rate limit so the chart's
+    // historical fetch (a separate, heavier call) isn't starved/throttled.
+    const missesByExchange = new Map<string, string[]>();
+    for (const it of body?.items ?? []) {
+      if (!it?.token || !it?.exchange) continue;
+      const ex = String(it.exchange).toUpperCase();
+      const cached = this.marketFeedService.getQuote(it.token);
+      if (cached && cached.ltp > 0) {
+        quotes.push({
+          token: it.token,
+          exchange: ex,
+          ltp: cached.ltp,
+          open: cached.open ?? 0,
+          high: cached.high ?? 0,
+          low: cached.low ?? 0,
+          close: cached.close ?? 0,
+          volume: cached.volume ?? 0,
+          change: cached.change ?? 0,
+          changePercent: cached.changePercent ?? 0,
+        });
+      } else {
+        (missesByExchange.get(ex) ?? missesByExchange.set(ex, []).get(ex)!).push(it.token);
+      }
+    }
+    for (const [exchange, tokens] of missesByExchange) {
       const map = await this.angelOneAdapter.getQuotesBatch(exchange, tokens);
       for (const [token, q] of map) {
         const hasChange = q.close > 0;

@@ -968,6 +968,35 @@ export class MarketDataController {
   }
 
   /**
+   * GET /api/market-data/commodities
+   *
+   * Live commodity snapshot fetched DIRECTLY from Angel One — no DB row, no feed
+   * subscription, and no roll required. Resolves each tracked commodity's
+   * current front-month token (cached ~6h so we don't pull the ~30MB
+   * ScripMaster per request), then batch-fetches LTP over REST via the shared
+   * feed session. Self-heals on monthly contract rollover because the
+   * front-month is always re-resolved. `ltp` is null for any commodity the
+   * account isn't entitled to quote (e.g. MCX segment not enabled).
+   */
+  @Get('commodities')
+  async getCommodities() {
+    const contracts = await this.commodityRollService.resolveFrontMonthTokens();
+    const ltps = await this.angelOneAdapter.getLtpsBatch(
+      'MCX',
+      contracts.map((c) => c.token),
+    );
+    const commodities = contracts.map((c) => ({
+      symbol: c.symbol,
+      token: c.token,
+      exchange: c.exchange,
+      contractSymbol: c.contractSymbol,
+      expiry: c.expiry,
+      ltp: ltps.get(c.token) ?? null,
+    }));
+    return { commodities, count: commodities.length };
+  }
+
+  /**
    * POST /api/market-data/gap-check/trigger
    *
    * Manual trigger for the same gap-detection logic that runs at boot

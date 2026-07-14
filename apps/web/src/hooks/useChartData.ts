@@ -249,6 +249,38 @@ export function useChartData(): UseChartDataReturn {
         `[useChartData] ${selectedSymbol.symbol} ${timeframe}: raw=${rawCandles.length} kept=${meaningful.length} compressed=${compressed.length} realGapsCollapsed=${realByCompressed.size > 0 ? realByCompressed.size - 1 : 0}`,
       );
 
+      // GAP DIAGNOSTIC: walk the REAL-time series and report every hole larger
+      // than 2× the timeframe (i.e. anything that isn't a normal next-bar step).
+      // A hole that straddles an overnight/weekend boundary is EXPECTED; a hole
+      // WITHIN a single trading session means Angel silently dropped candles
+      // (throttled chunk) — that's the "10:00 → 15:30 jump" the user sees.
+      // This tells us exactly which case we're in without guessing.
+      {
+        const fmt = (sec: number) =>
+          new Date(sec * 1000).toLocaleString('en-IN', {
+            day: '2-digit',
+            month: 'short',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          });
+        const holes: string[] = [];
+        for (let i = 1; i < meaningful.length; i++) {
+          const gap = meaningful[i].time - meaningful[i - 1].time;
+          if (gap > tfSec * 2) {
+            const bars = Math.round(gap / tfSec) - 1;
+            holes.push(
+              `${fmt(meaningful[i - 1].time)} → ${fmt(meaningful[i].time)} (~${bars} bars missing)`,
+            );
+          }
+        }
+        // eslint-disable-next-line no-console
+        console.log(
+          `[useChartData] ${selectedSymbol.symbol} range: ${meaningful.length > 0 ? fmt(meaningful[0].time) : 'n/a'} → ${meaningful.length > 0 ? fmt(meaningful[meaningful.length - 1].time) : 'n/a'} | ${holes.length} hole(s):`,
+          holes,
+        );
+      }
+
       setCandles(compressed);
       candlesRef.current = compressed;
       setRealTimeMap(realByCompressed);

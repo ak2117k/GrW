@@ -82,13 +82,26 @@ export default function OIOverlay({ chart, oiData, visible }: OIOverlayProps) {
       value: d.value,
     }));
 
-    seriesRef.current.setData(lineData);
+    // The series can be disposed out from under us: a symbol switch remounts
+    // CandlestickChart (key={token}) whose cleanup calls chart.remove(), which
+    // disposes THIS series too, but seriesRef.current is only nulled by our own
+    // [chart] cleanup — a window where setData hits a dead series and throws
+    // "Object is disposed". Guard + null-on-failure (matches sibling overlays).
+    try {
+      seriesRef.current.setData(lineData);
+    } catch {
+      seriesRef.current = null;
+    }
   }, [oiData]);
 
   // Toggle visibility
   useEffect(() => {
     if (!seriesRef.current) return;
-    seriesRef.current.applyOptions({ visible });
+    try {
+      seriesRef.current.applyOptions({ visible });
+    } catch {
+      seriesRef.current = null;
+    }
   }, [visible]);
 
   // This component renders no DOM -- it adds a series to the parent chart

@@ -69,18 +69,37 @@ At detection bar *t* with `close_t`, `ATR_t`, and pattern bias direction `dir`
 - **TIMEOUT:** neither within N bars → **excluded from v1 training** (ambiguous),
   still logged for analysis.
 
-**Defaults:** `k = 1.5`, `m = 1.0`, `N = 10 bars`, primary timeframe **15m**. All
-are config, tunable without code changes. Path-aware (checks order of touches,
-not just the endpoint) and ATR-normalized so labels are comparable across
-instruments and volatility regimes.
+**Defaults:** `k = 1.5`, `m = 1.0`, `N = 10 bars`. All are config, tunable
+without code changes. Path-aware (checks order of touches, not just the
+endpoint) and ATR-normalized so labels are comparable across instruments and
+volatility regimes.
+
+**Timeframe-relative by construction.** `N` is measured in **bars** and `ATR` is
+computed **per timeframe**, so the same label definition applies unchanged to
+every timeframe — `N=10` bars is 10 minutes on 1m and 10 days on 1d, each with
+its own ATR scale. We do NOT need per-timeframe label params; the label
+self-normalizes. (Per-tf `k/m/N` overrides remain possible via config if a
+timeframe later warrants it.)
 
 ### 4.2 Features (computed in Python from the candle window)
-- **Identity:** patternName (one-hot), category (CANDLESTICK/CHART), bias.
+- **Identity:** patternName (one-hot), category (CANDLESTICK/CHART), bias,
+  **`timeframe` (first-class categorical feature)**.
 - **Context:** ATR and ATR percentile, EMA-trend / MTF alignment, RSI,
   volume-vs-average, distance to nearest SR level, position-in-range,
   time-of-day bucket, volatility regime (`market_regime.py`).
 - **Geometry:** body/range ratio, upper/lower wick ratios, engulfing size,
   gap presence.
+
+**Timeframe as a first-class feature.** Because different patterns work on
+different timeframes (a hammer may follow through far more reliably on 1h than on
+1m), `timeframe` is an explicit input to the model. The scorer therefore learns a
+**per-(pattern, timeframe)** notion of quality rather than one global rule. A
+single model conditioned on `timeframe` is preferred over N separate per-tf
+models: it shares signal across timeframes where behaviour is similar and still
+specialises where it differs, and it degrades gracefully for timeframes with
+fewer samples. Evaluation reports precision/recall **broken down by
+(pattern, timeframe)** so we can see, e.g., "double-bottom on 1h" vs
+"double-bottom on 5m" quality separately.
 
 ### 4.3 Model
 XGBoost binary classifier → **calibrated** probability (reuse `xgboost_scorer.py`;
@@ -123,8 +142,14 @@ Python /api/score-patterns ◄─ model artifact ◄── TRAIN (Python, schedu
 - **Resolution:** a NestJS job fills `label`/`outcome` once N bars exist past
   `barTime` (immediate for backfill; +N-bars-later for live).
 - **Backfill:** a re-runnable NestJS job replays 6–12 months of history for a
-  seed instrument set (NIFTY, BANKNIFTY, CRUDEOIL, top liquid stocks), producing
-  the initial labeled dataset (~5–20k rows).
+  seed instrument set (NIFTY, BANKNIFTY, CRUDEOIL, top liquid stocks) **across
+  ALL supported timeframes** (1m, 3m, 5m, 10m, 15m, 30m, 1h, 1d — the Angel-native
+  set; 4h/1w join later once timeframe aggregation lands). Each (instrument ×
+  timeframe) replay produces labeled rows tagged with their `timeframe`, so the
+  dataset spans every timeframe from day one. Note the per-tf data-volume skew
+  (1m yields far more bars/patterns than 1d over the same window); training
+  accounts for this (class/timeframe weighting) so sparse timeframes aren't
+  drowned out.
 - **Training:** Python `self_learning_service` reads resolved rows (via a NestJS
   internal endpoint or direct read-only DB — decided in the plan), trains,
   writes a versioned model artifact + metrics.
@@ -200,11 +225,12 @@ Lesson-per-concept, tied to the code we write (mirrors `docs/learning/pattern-de
 ## 13. Success Criteria
 
 - Overlay markers reduced to high-probability set; each carries a `P(follow-through)`.
-- `pattern_observations` accumulating labeled rows (backfill seed + live).
+- `pattern_observations` accumulating labeled rows (backfill seed + live) **across
+  all supported timeframes**, each row tagged with its `timeframe`.
 - Python ai-engine deployed (free tier) and reachable; scoring fail-opens cleanly
   when asleep.
-- A versioned model with reported validation precision/recall; retrain re-runnable
-  via heartbeat.
+- A versioned model with reported validation precision/recall **broken down by
+  (pattern, timeframe)** — so timeframe-specific quality is visible.
 - Seven ML lessons written and committed.
 
 ## 14. Out of Scope (this spec)

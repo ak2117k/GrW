@@ -478,6 +478,28 @@ describe('AngelOneAdapterService — historical chunk throttle resilience', () =
   const FROM = new Date('2026-05-04T00:00:00');
   const TO = new Date('2026-05-11T00:00:00');
 
+  it('formats fromdate/todate for Angel in IST regardless of server timezone', async () => {
+    // Angel's getCandleData interprets fromdate/todate as IST wall-clock. The
+    // API runs on Render in UTC; formatting with local getHours() sent a
+    // `todate` 5:30h early, so the live edge came back ~5.5h stale (e.g. at
+    // 20:22 IST the chart stopped at 14:45). These instants are given in UTC;
+    // Angel must receive their IST wall-clock equivalents.
+    const getCandleData = jest
+      .fn()
+      .mockResolvedValue(candleResponse('2026-07-14T14:45:00+05:30'));
+    const adapter = makeAdapter(getCandleData);
+
+    // 09:00Z = 14:30 IST, 09:15Z = 14:45 IST (single-shot, one call).
+    const from = new Date('2026-07-14T09:00:00Z');
+    const to = new Date('2026-07-14T09:15:00Z');
+    await adapter.getHistoricalData('12345', 'MCX', '15m', from, to, 'interactive');
+
+    expect(getCandleData).toHaveBeenCalledTimes(1);
+    const params = getCandleData.mock.calls[0][0];
+    expect(params.fromdate).toBe('2026-07-14 14:30');
+    expect(params.todate).toBe('2026-07-14 14:45');
+  });
+
   it('returns the other 6 chunks when one chunk is throttled on every attempt', async () => {
     // The chunk whose window starts on day 07 throttles on every attempt;
     // all other chunks succeed. Identify the chunk by its fromdate so the

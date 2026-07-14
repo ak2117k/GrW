@@ -1671,12 +1671,25 @@ export class AngelOneAdapterService implements BrokerAdapter {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  /**
+   * Format a Date as an Angel-One historical "YYYY-MM-DD HH:mm" string in
+   * IST — Angel's getCandleData interprets fromdate/todate as IST wall-clock.
+   *
+   * CRITICAL: this MUST NOT use the local getHours()/getDate() etc. The API
+   * runs on Render in UTC, so local-time formatting sent Angel a `todate`
+   * 5:30h too early → the live edge always came back ~5.5h stale (e.g. at
+   * 20:22 IST the chart stopped at 14:45). We add the fixed IST offset (no
+   * DST in India) to the absolute instant and read UTC parts, which yields
+   * IST wall-clock on any server timezone.
+   */
+  private static readonly IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   private formatDateTime(date: Date): string {
-    const y = date.getFullYear();
-    const m = String(date.getMonth() + 1).padStart(2, '0');
-    const d = String(date.getDate()).padStart(2, '0');
-    const hh = String(date.getHours()).padStart(2, '0');
-    const mm = String(date.getMinutes()).padStart(2, '0');
+    const ist = new Date(date.getTime() + AngelOneAdapterService.IST_OFFSET_MS);
+    const y = ist.getUTCFullYear();
+    const m = String(ist.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(ist.getUTCDate()).padStart(2, '0');
+    const hh = String(ist.getUTCHours()).padStart(2, '0');
+    const mm = String(ist.getUTCMinutes()).padStart(2, '0');
     return `${y}-${m}-${d} ${hh}:${mm}`;
   }
 }

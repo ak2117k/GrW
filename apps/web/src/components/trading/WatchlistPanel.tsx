@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { X, Plus, Search, Star } from 'lucide-react';
 import { useWatchlist } from '@/hooks/useWatchlist';
+import { useWatchlistQuotes } from '@/hooks/useWatchlistQuotes';
 import type { WatchlistItem } from '@/stores/watchlist-store';
 import PriceCell from './PriceCell';
 
@@ -22,7 +23,9 @@ const SEARCH_SUGGESTIONS: WatchlistItem[] = [
 ];
 
 export default function WatchlistPanel() {
-  const { entries, addToWatchlist, removeFromWatchlist } = useWatchlist();
+  const { entries, watchlist, addToWatchlist, removeFromWatchlist } = useWatchlist();
+  // Keep every watchlist row live (esp. stocks the WS tick feed doesn't push).
+  useWatchlistQuotes(watchlist);
   const navigate = useNavigate();
   const [showAdd, setShowAdd] = useState(false);
   const [searchText, setSearchText] = useState('');

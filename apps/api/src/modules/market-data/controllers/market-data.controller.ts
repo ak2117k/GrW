@@ -1009,6 +1009,59 @@ export class MarketDataController {
   }
 
   /**
+   * POST /api/market-data/quotes
+   *
+   * Batch snapshot for arbitrary tokens, fetched directly from Angel (FULL
+   * mode), grouped by exchange. Used by the watchlist poll so its rows stay live
+   * even when the WebSocket tick feed stalls. Returns per-token ltp/OHLC +
+   * computed change/changePercent (from the previous close). Tokens the account
+   * can't quote are simply absent from the result.
+   *
+   * Body: { items: { token: string; exchange: string }[] }
+   */
+  @Post('quotes')
+  @HttpCode(HttpStatus.OK)
+  async getQuotes(@Body() body: { items?: { token: string; exchange: string }[] }) {
+    const byExchange = new Map<string, string[]>();
+    for (const it of body?.items ?? []) {
+      if (!it?.token || !it?.exchange) continue;
+      const ex = String(it.exchange).toUpperCase();
+      (byExchange.get(ex) ?? byExchange.set(ex, []).get(ex)!).push(it.token);
+    }
+    const quotes: Array<{
+      token: string;
+      exchange: string;
+      ltp: number;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+      change: number;
+      changePercent: number;
+    }> = [];
+    for (const [exchange, tokens] of byExchange) {
+      const map = await this.angelOneAdapter.getQuotesBatch(exchange, tokens);
+      for (const [token, q] of map) {
+        const hasChange = q.close > 0;
+        quotes.push({
+          token,
+          exchange,
+          ltp: q.ltp,
+          open: q.open,
+          high: q.high,
+          low: q.low,
+          close: q.close,
+          volume: q.volume,
+          change: hasChange ? Number((q.ltp - q.close).toFixed(2)) : 0,
+          changePercent: hasChange ? Number((((q.ltp - q.close) / q.close) * 100).toFixed(2)) : 0,
+        });
+      }
+    }
+    return { quotes, count: quotes.length };
+  }
+
+  /**
    * POST /api/market-data/gap-check/trigger
    *
    * Manual trigger for the same gap-detection logic that runs at boot

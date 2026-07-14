@@ -1733,3 +1733,41 @@ model SrLevelObservation {
   @@index([reaction, snapshotAt])
   @@map("sr_level_observations")
 }
+
+// ============================================
+// ML Pattern Quality Pipeline (Phase 1)
+// ============================================
+
+enum PatternOutcome {
+  WIN
+  LOSS
+  TIMEOUT
+  PENDING
+}
+
+/// One detected pattern instance + its realized ATR-follow-through outcome.
+/// Feeds the ML pattern-quality scorer (see
+/// docs/superpowers/specs/2026-07-14-ml-pattern-quality-pipeline-design.md).
+model PatternObservation {
+  id             String         @id @default(cuid())
+  token          String
+  exchange       String
+  timeframe      String         // 1m, 3m, 5m, 10m, 15m, 30m, 1h, 1d
+  patternName    String         // e.g. BULLISH_ENGULFING, DOUBLE_TOP
+  category       String         // CANDLESTICK | CHART
+  bias           String         // BULLISH | BEARISH
+  barTime        DateTime       // anchor (signal) candle time, IST-correct instant
+  candleWindow   Json           // OhlcvCandle[] up to & including the anchor bar
+  atrAtDetection Float
+  outcome        PatternOutcome @default(PENDING)
+  label          Int?           // WIN=1, LOSS=0, null while PENDING/TIMEOUT
+  resolvedAt     DateTime?
+  modelScore     Float?         // filled by later phases
+  modelVersion   String?
+  createdAt      DateTime       @default(now())
+
+  @@unique([token, exchange, timeframe, patternName, barTime])
+  @@index([outcome])
+  @@index([timeframe])
+  @@map("pattern_observations")
+}

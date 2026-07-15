@@ -35,10 +35,32 @@ export interface BackfillResult {
 export class PatternBackfillService {
   private readonly logger = new Logger(PatternBackfillService.name);
 
+  /**
+   * In-flight guard. One pass is ~527 serialized broker calls behind a 350ms
+   * gate (~5-7 min), far longer than the external heartbeat's timeout — so the
+   * heartbeat fires again while the previous pass is still running. Without
+   * this flag those runs stack and the historical queue grows without bound.
+   *
+   * The guard lives on the SERVICE, not the controller, so it protects every
+   * caller (HTTP trigger, future @Cron, a direct call) rather than one route.
+   */
+  private running = false;
+
   constructor(
     private readonly adapter: AngelOneAdapterService,
     private readonly repo: PatternObservationRepository,
   ) {}
+
+  /**
+   * True while a `run()` pass is in flight. Callers that need to REPORT the
+   * refusal (rather than just be protected from it) check this before calling
+   * `run()`. That check is race-free despite being two steps: `run()` sets the
+   * flag synchronously before its first `await`, and Node runs this
+   * check-then-call sequence to completion without interleaving.
+   */
+  get isRunning(): boolean {
+    return this.running;
+  }
 
   /**
    * Replay history for each target across all (or the given) timeframes,
@@ -56,10 +78,38 @@ export class PatternBackfillService {
    *   - a 'background' WRITE would publish this deep window under the shared
    *     key, where live consumers (e.g. the intraday supertrend trailing stop)
    *     would read ~3000 bars where they expect ~150 and shift a real stop.
+   *
+   * Concurrency: at most ONE pass runs at a time. A call made while a pass is
+   * in flight is REFUSED — it does not start a second pass, and it does not
+   * queue behind the first (queueing is what made overlapping heartbeats stack
+   * up in the first place). It logs a warning and returns an empty result list
+   * immediately; callers that need to distinguish "refused" from "ran and found
+   * nothing" should check `isRunning` first, as the HTTP trigger does.
    */
   async run(
     targets: BackfillTarget[],
     opts: { timeframes?: string[]; lookbackDays?: number } = {},
+  ): Promise<BackfillResult[]> {
+    if (this.running) {
+      this.logger.warn(
+        'backfill run refused — a pass is already in progress (overlapping trigger?)',
+      );
+      return [];
+    }
+    this.running = true;
+    try {
+      return await this.runPass(targets, opts);
+    } finally {
+      // Always release, even if a pass throws — otherwise one unexpected error
+      // wedges the flag on and every later run is refused forever.
+      this.running = false;
+    }
+  }
+
+  /** The actual pass. Guarded by `run()`; never call this directly. */
+  private async runPass(
+    targets: BackfillTarget[],
+    opts: { timeframes?: string[]; lookbackDays?: number },
   ): Promise<BackfillResult[]> {
     const timeframes = opts.timeframes ?? BACKFILL_TIMEFRAMES;
     const results: BackfillResult[] = [];

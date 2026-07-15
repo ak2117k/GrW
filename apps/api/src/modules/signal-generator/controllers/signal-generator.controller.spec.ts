@@ -195,18 +195,72 @@ describe('SignalGeneratorController — ML capture triggers', () => {
   }
 
   describe('triggerPatternBackfill', () => {
-    it('runs the backfill for the posted targets and totals the rows written', async () => {
+    it('starts the backfill for the posted targets and accepts immediately', async () => {
       const { ctrl, deps } = build();
       const res = await ctrl.triggerPatternBackfill({ targets: [TARGET] });
       expect(deps.patternBackfill.run).toHaveBeenCalledWith([TARGET], {
         timeframes: undefined,
         lookbackDays: undefined,
       });
-      // 4 + 3 — a handler that returned results.length would say 2.
+      expect(res).toEqual({ accepted: true, targets: 1 });
+    });
+
+    // The pass is ~527 serialized broker calls (~5-7 min) — far past the
+    // ~30-60s timeout of the heartbeats that drive this. The handler must
+    // return on its own tick rather than awaiting the run.
+    it('returns WITHOUT awaiting the run', async () => {
+      let finished = false;
+      const { ctrl } = build({
+        patternBackfill: {
+          isRunning: false,
+          run: jest.fn().mockImplementation(
+            () =>
+              new Promise((resolve) =>
+                setTimeout(() => {
+                  finished = true;
+                  resolve([]);
+                }, 50),
+              ),
+          ),
+        },
+      });
+
+      const res = await ctrl.triggerPatternBackfill({ targets: [TARGET] });
+
+      // Handler resolved while the run is still in flight.
+      expect(res).toEqual({ accepted: true, targets: 1 });
+      expect(finished).toBe(false);
+    });
+
+    it('reports a refusal instead of stacking a second run when one is in flight', async () => {
+      const { ctrl, deps } = build({
+        patternBackfill: { isRunning: true, run: jest.fn() },
+      });
+
+      const res = await ctrl.triggerPatternBackfill({ targets: [TARGET] });
+
       expect(res).toEqual(
-        expect.objectContaining({ ok: true, targets: 1, observations: 7 }),
+        expect.objectContaining({ accepted: false }),
       );
-      expect(res.results).toHaveLength(2);
+      expect(deps.patternBackfill.run).not.toHaveBeenCalled();
+    });
+
+    // A detached promise that rejects with no .catch() can take the process
+    // down. The handler must still accept, and must not reject.
+    it('does not reject when the detached run fails', async () => {
+      const { ctrl } = build({
+        patternBackfill: {
+          isRunning: false,
+          run: jest.fn().mockRejectedValue(new Error('angel down')),
+        },
+      });
+
+      await expect(
+        ctrl.triggerPatternBackfill({ targets: [TARGET] }),
+      ).resolves.toEqual({ accepted: true, targets: 1 });
+      // Let the rejected detached promise settle — an unhandled rejection here
+      // would surface as a process warning/failure rather than being swallowed.
+      await new Promise((r) => setImmediate(r));
     });
 
     it('passes timeframes and lookbackDays through', async () => {

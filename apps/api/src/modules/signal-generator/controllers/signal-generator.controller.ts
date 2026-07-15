@@ -373,8 +373,18 @@ export class SignalGeneratorController {
    * POST /api/signals/ml/backfill/trigger
    *
    * Replay history for the given instruments, detect patterns, and persist the
-   * labeled observations that train the ML pattern-quality scorer. Returns the
-   * per-target × per-timeframe row counts so ops can audit what was written.
+   * labeled observations that train the ML pattern-quality scorer.
+   *
+   * ASYNCHRONOUS: returns 202 immediately and runs the pass detached. One pass
+   * is ~527 serialized broker calls behind a 350ms gate (~5-7 min) because
+   * sub-hour timeframes auto-chunk at 1 day each — far past the ~30-60s timeout
+   * of the external heartbeats that drive this. Awaiting it meant the caller
+   * ALWAYS timed out while the work continued server-side, and the next
+   * heartbeat piled another run on top. Per-(target × timeframe) results go to
+   * the logger, so a detached run stays observable.
+   *
+   * If a pass is already in flight this returns {accepted:false} rather than
+   * starting or queueing a second one (the guard itself lives in the service).
    *
    * ADMIN-only (class-level @AdminOnly): this is an ops action that burns Angel
    * One history quota and writes to the shared training set.
@@ -393,7 +403,10 @@ export class SignalGeneratorController {
    *   lookbackDays: override the per-timeframe default window.
    */
   @Post('ml/backfill/trigger')
-  @HttpCode(HttpStatus.OK)
+  @HttpCode(HttpStatus.ACCEPTED)
+  // Deliberately `async` while never awaiting `run()`: the handler still
+  // returns on its first tick (that IS the fix), but the validation throws
+  // above surface as rejections rather than synchronous throws.
   async triggerPatternBackfill(
     @Body() body: { targets?: BackfillTarget[]; timeframes?: string[]; lookbackDays?: number } = {},
   ) {
@@ -409,16 +422,25 @@ export class SignalGeneratorController {
         throw new BadRequestException('each target needs token, exchange and symbol');
       }
     }
-    const results = await this.patternBackfill.run(targets, {
-      timeframes: body.timeframes,
-      lookbackDays: body.lookbackDays,
-    });
-    return {
-      ok: true,
-      targets: targets.length,
-      observations: results.reduce((sum, r) => sum + r.observations, 0),
-      results,
-    };
+    // Report the refusal rather than silently no-op'ing. Checked before the
+    // call (not from run()'s return) because the run is detached — its result
+    // is never seen here. Race-free: run() flips the flag synchronously.
+    if (this.patternBackfill.isRunning) {
+      return {
+        accepted: false,
+        reason: 'a pattern backfill run is already in progress',
+      };
+    }
+    // Fire-and-forget. The .catch() is REQUIRED: an unhandled rejection from a
+    // detached promise can take the Node process down.
+    void this.patternBackfill
+      .run(targets, { timeframes: body.timeframes, lookbackDays: body.lookbackDays })
+      .catch((err) =>
+        this.logger.error(
+          `pattern backfill run failed: ${err instanceof Error ? err.message : err}`,
+        ),
+      );
+    return { accepted: true, targets: targets.length };
   }
 
   /**

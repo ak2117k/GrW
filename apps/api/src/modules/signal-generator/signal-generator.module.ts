@@ -45,6 +45,9 @@ import { FiiFactor } from './services/context-scoring/factors/fii.factor';
 import { NasdaqFactor } from './services/context-scoring/factors/nasdaq.factor';
 import { CrudeOilFactor } from './services/context-scoring/factors/crude-oil.factor';
 import { GoldFactor } from './services/context-scoring/factors/gold.factor';
+import { PatternObservationRepository } from './ml/pattern-observation.repository';
+import { PatternBackfillService } from './ml/pattern-backfill.service';
+import { PatternCaptureService } from './ml/pattern-capture.service';
 import type { ContextFactor } from './services/context-scoring/types';
 
 // @Global so LevelBookService is injectable from MarketFeedService
@@ -128,6 +131,14 @@ import type { ContextFactor } from './services/context-scoring/types';
     SrLevelObservationRepository,
     SrLevelTrackingService,
     SrEvidenceService,
+
+    // ML pattern-quality data capture — persists detected patterns with their
+    // realized ATR-follow-through outcome, building the training set for the
+    // pattern-quality scorer. Backfill replays history; capture records live
+    // detections; the resolver finalizes rows once their horizon completes.
+    PatternObservationRepository,
+    PatternBackfillService,
+    PatternCaptureService,
 
     // Context scoring engine — Mama's 10-factor framework v1.
     // Each factor is registered as a provider so it can be unit-tested

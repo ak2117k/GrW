@@ -9,6 +9,8 @@ export interface PendingObservation {
   exchange: string;
   timeframe: string;
   barTime: Date;
+  /** Direction the row committed to at capture — the resolver labels against it. */
+  bias: string;
 }
 
 /**
@@ -56,7 +58,9 @@ export class PatternObservationRepository {
       where: { outcome: 'PENDING' },
       orderBy: { barTime: 'asc' },
       take: limit,
-      select: { id: true, token: true, exchange: true, timeframe: true, barTime: true },
+      select: {
+        id: true, token: true, exchange: true, timeframe: true, barTime: true, bias: true,
+      },
     });
     return rows;
   }

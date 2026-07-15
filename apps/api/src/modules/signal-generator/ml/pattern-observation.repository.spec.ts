@@ -77,9 +77,10 @@ describe('PatternObservationRepository', () => {
         where: { outcome: 'PENDING' },
         orderBy: { barTime: 'asc' },
         take: 50,
-        // objectContaining, not exact: Task 6 legitimately adds `bias: true` here.
+        // `bias` is load-bearing: resolvePending labels against the direction the
+        // row committed to at capture, and has no other source for it.
         select: expect.objectContaining({
-          id: true, token: true, exchange: true, timeframe: true, barTime: true,
+          id: true, token: true, exchange: true, timeframe: true, barTime: true, bias: true,
         }),
       }),
     );
@@ -88,7 +89,10 @@ describe('PatternObservationRepository', () => {
   it('findPending returns the rows it read', async () => {
     const prisma = fakePrisma();
     const rows = [
-      { id: 'a', token: '2885', exchange: 'NSE', timeframe: '15m', barTime: new Date(1000) },
+      {
+        id: 'a', token: '2885', exchange: 'NSE', timeframe: '15m',
+        barTime: new Date(1000), bias: 'BULLISH',
+      },
     ];
     prisma.patternObservation.findMany.mockResolvedValue(rows);
     const repo = new PatternObservationRepository(prisma);

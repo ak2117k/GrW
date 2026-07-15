@@ -163,3 +163,104 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
     });
   });
 });
+
+/**
+ * The ML data-capture ops triggers. These are what actually cause Phase 1 to
+ * produce a training set — nothing else calls the backfill or the resolver.
+ * Both are ADMIN-only via the class-level @AdminOnly(); they are driven by an
+ * external heartbeat because the free tier idles the in-process scheduler out.
+ */
+describe('SignalGeneratorController — ML capture triggers', () => {
+  const TARGET = { token: '2885', exchange: 'NSE', symbol: 'RELIANCE' };
+
+  function build(overrides: Partial<any> = {}) {
+    const deps = {
+      patternBackfill: {
+        run: jest.fn().mockResolvedValue([
+          { target: 'RELIANCE', timeframe: '15m', observations: 4 },
+          { target: 'RELIANCE', timeframe: '1h', observations: 3 },
+        ]),
+      },
+      patternCapture: { resolvePending: jest.fn().mockResolvedValue(7) },
+      ...overrides,
+    };
+    const ctrl = new SignalGeneratorController(
+      {} as never, {} as never, {} as never, {} as never, {} as never, {} as never,
+      undefined as never, undefined as never, undefined as never, undefined as never,
+      undefined as never, undefined as never, undefined as never, undefined as never,
+      deps.patternBackfill as never,
+      deps.patternCapture as never,
+    );
+    return { ctrl, deps };
+  }
+
+  describe('triggerPatternBackfill', () => {
+    it('runs the backfill for the posted targets and totals the rows written', async () => {
+      const { ctrl, deps } = build();
+      const res = await ctrl.triggerPatternBackfill({ targets: [TARGET] });
+      expect(deps.patternBackfill.run).toHaveBeenCalledWith([TARGET], {
+        timeframes: undefined,
+        lookbackDays: undefined,
+      });
+      // 4 + 3 — a handler that returned results.length would say 2.
+      expect(res).toEqual(
+        expect.objectContaining({ ok: true, targets: 1, observations: 7 }),
+      );
+      expect(res.results).toHaveLength(2);
+    });
+
+    it('passes timeframes and lookbackDays through', async () => {
+      const { ctrl, deps } = build();
+      await ctrl.triggerPatternBackfill({
+        targets: [TARGET], timeframes: ['15m'], lookbackDays: 30,
+      });
+      expect(deps.patternBackfill.run).toHaveBeenCalledWith([TARGET], {
+        timeframes: ['15m'], lookbackDays: 30,
+      });
+    });
+
+    it.each([
+      ['missing body', {}],
+      ['empty targets', { targets: [] }],
+    ])('rejects %s with 400 and never calls the service', async (_label, body) => {
+      const { ctrl, deps } = build();
+      await expect(ctrl.triggerPatternBackfill(body)).rejects.toMatchObject({ status: 400 });
+      expect(deps.patternBackfill.run).not.toHaveBeenCalled();
+    });
+
+    it('rejects a target missing token/exchange/symbol with 400', async () => {
+      const { ctrl, deps } = build();
+      await expect(
+        ctrl.triggerPatternBackfill({ targets: [{ token: '2885' } as never] }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(deps.patternBackfill.run).not.toHaveBeenCalled();
+    });
+
+    it('503s when the backfill service is not wired', async () => {
+      const { ctrl } = build({ patternBackfill: undefined });
+      await expect(
+        ctrl.triggerPatternBackfill({ targets: [TARGET] }),
+      ).rejects.toMatchObject({ status: 503 });
+    });
+  });
+
+  describe('triggerResolvePending', () => {
+    it('resolves pending rows and returns the count', async () => {
+      const { ctrl, deps } = build();
+      const res = await ctrl.triggerResolvePending({});
+      expect(deps.patternCapture.resolvePending).toHaveBeenCalledWith(undefined);
+      expect(res).toEqual({ ok: true, resolved: 7 });
+    });
+
+    it('passes an explicit limit through', async () => {
+      const { ctrl, deps } = build();
+      await ctrl.triggerResolvePending({ limit: 25 });
+      expect(deps.patternCapture.resolvePending).toHaveBeenCalledWith(25);
+    });
+
+    it('503s when the capture service is not wired', async () => {
+      const { ctrl } = build({ patternCapture: undefined });
+      await expect(ctrl.triggerResolvePending({})).rejects.toMatchObject({ status: 503 });
+    });
+  });
+});

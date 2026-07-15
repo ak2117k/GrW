@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Delete,
+  Body,
   Param,
   Query,
   HttpCode,
@@ -11,6 +12,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ServiceUnavailableException,
   Optional,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
@@ -35,6 +37,8 @@ import { SubscriptionService } from '../../subscription/subscription.service';
 import type { Candle } from '../patterns/swing-points';
 import { buildPatternMarkers } from '../patterns/to-markers';
 import { PatternsResponseDto } from '../dto/pattern-marker.dto';
+import { PatternBackfillService, type BackfillTarget } from '../ml/pattern-backfill.service';
+import { PatternCaptureService } from '../ml/pattern-capture.service';
 
 @AdminOnly()
 @Controller('api/signals')
@@ -70,6 +74,10 @@ export class SignalGeneratorController {
     // (analyze/zones/indicators/sr-evidence). Optional so existing test wirings
     // still construct; when absent, non-ADMIN callers are denied (fail closed).
     @Optional() private readonly subs?: SubscriptionService,
+    // ML pattern-quality data capture, driven by the /ml/* ops triggers below.
+    // Optional for the same test-wiring reason; the triggers 503 when unwired.
+    @Optional() private readonly patternBackfill?: PatternBackfillService,
+    @Optional() private readonly patternCapture?: PatternCaptureService,
   ) {}
 
   /**
@@ -359,6 +367,81 @@ export class SignalGeneratorController {
       return { ok: true, reset: 'anand-sniper-v25-combined' };
     }
     return { ok: false, reason: 'strategy not found or does not support reset' };
+  }
+
+  /**
+   * POST /api/signals/ml/backfill/trigger
+   *
+   * Replay history for the given instruments, detect patterns, and persist the
+   * labeled observations that train the ML pattern-quality scorer. Returns the
+   * per-target × per-timeframe row counts so ops can audit what was written.
+   *
+   * ADMIN-only (class-level @AdminOnly): this is an ops action that burns Angel
+   * One history quota and writes to the shared training set.
+   *
+   * Invoked by an external heartbeat (cron-job.org / UptimeRobot) rather than an
+   * in-process @Cron — the free tier spins the service down when idle, so a
+   * fixed-time in-process scheduler would simply never fire.
+   *
+   * Body:
+   *   { targets: [{token, exchange, symbol}], timeframes?: string[], lookbackDays?: number }
+   *
+   *   targets:     required, non-empty. Explicit by design — there is no
+   *                instrument-universe lookup here.
+   *   timeframes:  restrict the replay (e.g. ["15m"]). Default: all of
+   *                BACKFILL_TIMEFRAMES.
+   *   lookbackDays: override the per-timeframe default window.
+   */
+  @Post('ml/backfill/trigger')
+  @HttpCode(HttpStatus.OK)
+  async triggerPatternBackfill(
+    @Body() body: { targets?: BackfillTarget[]; timeframes?: string[]; lookbackDays?: number } = {},
+  ) {
+    if (!this.patternBackfill) {
+      throw new ServiceUnavailableException('pattern backfill is not wired');
+    }
+    const targets = body.targets ?? [];
+    if (targets.length === 0) {
+      throw new BadRequestException('targets is required and must be non-empty');
+    }
+    for (const t of targets) {
+      if (!t?.token || !t?.exchange || !t?.symbol) {
+        throw new BadRequestException('each target needs token, exchange and symbol');
+      }
+    }
+    const results = await this.patternBackfill.run(targets, {
+      timeframes: body.timeframes,
+      lookbackDays: body.lookbackDays,
+    });
+    return {
+      ok: true,
+      targets: targets.length,
+      observations: results.reduce((sum, r) => sum + r.observations, 0),
+      results,
+    };
+  }
+
+  /**
+   * POST /api/signals/ml/resolve-pending/trigger
+   *
+   * Finalize observations whose follow-through horizon has since completed:
+   * re-fetches their bars, recomputes the outcome, and stamps WIN/LOSS/TIMEOUT.
+   * Rows still inside their horizon are left PENDING for a later run.
+   *
+   * ADMIN-only (class-level @AdminOnly) and external-heartbeat driven, for the
+   * same reasons as the backfill trigger above.
+   *
+   * Body (all optional):
+   *   { limit?: number }  — max PENDING rows to attempt. Default 200.
+   */
+  @Post('ml/resolve-pending/trigger')
+  @HttpCode(HttpStatus.OK)
+  async triggerResolvePending(@Body() body: { limit?: number } = {}) {
+    if (!this.patternCapture) {
+      throw new ServiceUnavailableException('pattern capture is not wired');
+    }
+    const resolved = await this.patternCapture.resolvePending(body.limit);
+    return { ok: true, resolved };
   }
 
   /**

@@ -44,8 +44,18 @@ export class PatternBackfillService {
    * Replay history for each target across all (or the given) timeframes,
    * detect patterns, assemble labeled observations, and persist. One adapter
    * call per (target × timeframe); failures for one timeframe never abort the
-   * rest. Uses the 'background' priority lane so it never contends with live
-   * chart fetches.
+   * rest.
+   *
+   * Uses the 'bulk' priority lane, NOT 'background'. Bulk shares background's
+   * queue and rate gate (so it still never contends with live chart fetches),
+   * but it bypasses the adapter's candle cache in both directions. That matters
+   * because the cache key is `token:exchange:timeframe` and IGNORES [from,to]:
+   *   - a 'background' READ would be handed whatever short window a live scan
+   *     last cached (~7 days of 15m), silently truncating this replay — and for
+   *     '1d' it would fall under the >= 25 bar guard and write ZERO rows;
+   *   - a 'background' WRITE would publish this deep window under the shared
+   *     key, where live consumers (e.g. the intraday supertrend trailing stop)
+   *     would read ~3000 bars where they expect ~150 and shift a real stop.
    */
   async run(
     targets: BackfillTarget[],
@@ -68,7 +78,7 @@ export class PatternBackfillService {
             tf,
             from,
             to,
-            'background',
+            'bulk',
           );
           const candles: OhlcvCandle[] = (raw ?? []).map((c: any) => ({
             time: c.timestamp.getTime(),

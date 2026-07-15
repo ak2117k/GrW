@@ -323,6 +323,105 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
       // Background is unaffected by the interactive cap → served from cache.
       expect(mock).toHaveBeenCalledTimes(1);
     });
+
+    // ─── Bulk (deep-history backfill) cache bypass ──────────────────────
+    // The cache key is token:exchange:timeframe and IGNORES [from,to]. A
+    // backfill asking for 120 days of 15m would otherwise be handed the ~7-day
+    // window a live scan cached (truncating its dataset), and its own 120-day
+    // array would be published under the shared key to live consumers — one of
+    // which drives a real intraday trailing stop. Bulk therefore neither reads
+    // nor writes the cache.
+    // These use the '1d' timeframe deliberately. Sub-hour intervals are capped
+    // at 1 day by TIMEFRAME_MAX_RANGE_DAYS, so a 120-day 15m request auto-chunks
+    // into 120 broker calls and the call counts stop being legible. ONE_DAY's cap
+    // is 1800 days, so a 365-day window is a single call — and 365d of '1d' is
+    // exactly what the backfill asks for, making this the real C1 case: it was
+    // served the live scan's ~7 bars, fell under the >= 25 guard, and wrote ZERO
+    // rows silently.
+    /** The backfill's real '1d' window: 365 days back from now. */
+    function deepWindow(): { from: Date; to: Date } {
+      const to = new Date();
+      const from = new Date(to.getTime() - 365 * 24 * 60 * 60 * 1000);
+      return { from, to };
+    }
+    /** What a live scan leaves under the same key: ~7 days. */
+    function scanWindow(): { from: Date; to: Date } {
+      const to = new Date();
+      const from = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
+      return { from, to };
+    }
+    const sevenBars = {
+      status: true,
+      data: Array.from({ length: 7 }, (_, i) => row(`2026-05-${10 + i} 09:15`)),
+    };
+    const yearOfBars = {
+      status: true,
+      data: Array.from({ length: 250 }, (_, i) => row(`2026-05-15 09:${String(i % 60).padStart(2, '0')}`)),
+    };
+
+    it('does NOT serve a BULK fetch from cache — it hits the broker for its own window', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValueOnce(sevenBars)
+        .mockResolvedValue(yearOfBars);
+      const adapter = buildAdapter(mock);
+
+      // A live scan populates 2885:NSE:1d with its short ~7-bar window.
+      const scan = scanWindow();
+      const scanned = await adapter.getHistoricalData('2885', 'NSE', '1d', scan.from, scan.to, 'background');
+      expect(scanned).toHaveLength(7);
+      expect(mock).toHaveBeenCalledTimes(1);
+
+      // The backfill asks for 365 days under the SAME key. It must NOT be
+      // handed the cached 7-bar window (which would fail the >= 25 guard).
+      const deep = deepWindow();
+      const bulk = await adapter.getHistoricalData('2885', 'NSE', '1d', deep.from, deep.to, 'bulk');
+
+      expect(mock).toHaveBeenCalledTimes(2); // hit the broker, not the cache
+      expect(bulk).toHaveLength(250); // its own deep window, not the truncated 7
+    });
+
+    it('does NOT let a BULK fetch write the cache — a later background read is unaffected', async () => {
+      const mock = jest
+        .fn()
+        .mockResolvedValueOnce(yearOfBars)
+        .mockResolvedValue(sevenBars);
+      const adapter = buildAdapter(mock);
+
+      // Backfill runs first. Its `to` is now, so it PASSES the live-window
+      // guard — this is precisely why that guard did not stop the poisoning.
+      const deep = deepWindow();
+      const bulk = await adapter.getHistoricalData('2885', 'NSE', '1d', deep.from, deep.to, 'bulk');
+      expect(bulk).toHaveLength(250);
+      expect(mock).toHaveBeenCalledTimes(1);
+
+      // A live consumer now reads the same key. It must NOT receive the 250-bar
+      // bulk array — that is the trailing-stop poisoning path.
+      const scan = scanWindow();
+      const live = await adapter.getHistoricalData('2885', 'NSE', '1d', scan.from, scan.to, 'background');
+      expect(mock).toHaveBeenCalledTimes(2); // bulk cached nothing → broker hit
+      expect(live).toHaveLength(7); // its own short window, not the bulk one
+    });
+
+    it('does NOT serve a BULK fetch even a cache entry well inside its TTL', async () => {
+      const mock = jest.fn().mockResolvedValue(sevenBars);
+      const adapter = buildAdapter(mock);
+      const scan = scanWindow();
+
+      jest.useFakeTimers({ now: scan.to.getTime() });
+      try {
+        await adapter.getHistoricalData('2885', 'NSE', '1d', scan.from, scan.to, 'background');
+        // 1s later a background read is certainly served from cache (1d TTL is
+        // 2h). Bulk must still bypass: the bypass is about the cached WINDOW
+        // being wrong for this caller, not about the entry being stale.
+        jest.advanceTimersByTime(1_000);
+        const deep = deepWindow();
+        await adapter.getHistoricalData('2885', 'NSE', '1d', deep.from, deep.to, 'bulk');
+      } finally {
+        jest.useRealTimers();
+      }
+      expect(mock).toHaveBeenCalledTimes(2);
+    });
   });
 
   // ─── Historical cache live-window guard (backtest replay bypass) ──────

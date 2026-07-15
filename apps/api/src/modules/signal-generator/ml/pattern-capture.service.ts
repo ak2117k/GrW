@@ -75,7 +75,12 @@ export class PatternCaptureService {
           row.timeframe,
           from,
           to,
-          'background',
+          // 'bulk', not 'background': RESOLVE_LOOKBACK_DAYS spans a window that
+          // differs from the live-scan norm, and the adapter's cache key ignores
+          // [from,to]. A background read would be served whatever short window a
+          // live scan last cached (losing the anchor bar), and a background write
+          // would publish this window to live consumers under the shared key.
+          'bulk',
         );
         const candles: OhlcvCandle[] = (raw ?? []).map((c: any) => ({
           time: c.timestamp.getTime(),

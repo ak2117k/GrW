@@ -109,9 +109,14 @@ export interface BrokerAdapter {
    *
    * `priority` selects the rate-gated scheduler lane in the Angel One
    * adapter: `interactive` (user-facing chart/quote fetches) jumps ahead of
-   * `background` batch work. Declared inline here (rather than imported from
-   * the adapter) to keep this interface free of an implementation import
-   * cycle; the adapter's `HistoricalPriority` type is structurally identical.
+   * `background` batch work. `bulk` shares background's lane but bypasses the
+   * adapter's candle cache in both directions — it is for deep-history reads
+   * whose [from,to] window differs from the live-scan norm, and the cache key
+   * ignores [from,to]. Declared inline here (rather than imported from the
+   * adapter) to keep this interface free of an implementation import cycle;
+   * the adapter's `HistoricalPriority` type is structurally identical, and
+   * MUST be kept in sync — callers typed against this interface pass a
+   * `HistoricalPriority` straight through (see level-book.service.ts).
    */
   getHistoricalData(
     symbol: string,
@@ -119,7 +124,7 @@ export interface BrokerAdapter {
     timeframe: string,
     from: Date,
     to: Date,
-    priority?: 'interactive' | 'background',
+    priority?: 'interactive' | 'background' | 'bulk',
   ): Promise<any[]>;
 
   /** Search instruments */

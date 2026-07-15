@@ -110,7 +110,11 @@ describe('PatternCaptureService', () => {
       expect(repo.updateOutcome).toHaveBeenCalledWith('p1', 'WIN', 1);
     });
 
-    it('fetches history on the background priority lane', async () => {
+    // Must be 'bulk', not 'background'. The adapter's cache key ignores
+    // [from,to], so a background read here would be served whatever short
+    // window a live scan last cached (losing the anchor bar), and a background
+    // write would publish this window to live consumers under the shared key.
+    it('fetches history on the bulk priority lane (cache-bypassing)', async () => {
       const repo = pendingRepo([bullishPending]);
       const adapter = {
         getHistoricalData: jest.fn().mockResolvedValue(asHistorical(rising(30))),
@@ -120,7 +124,7 @@ describe('PatternCaptureService', () => {
       await svc.resolvePending(10);
 
       expect(adapter.getHistoricalData).toHaveBeenCalledWith(
-        '2885', 'NSE', '15m', expect.any(Date), expect.any(Date), 'background',
+        '2885', 'NSE', '15m', expect.any(Date), expect.any(Date), 'bulk',
       );
     });
 

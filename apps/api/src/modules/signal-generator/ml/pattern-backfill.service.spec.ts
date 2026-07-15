@@ -57,4 +57,23 @@ describe('PatternBackfillService', () => {
     expect(results).toHaveLength(2);
     expect(results[0].observations).toBe(0); // first threw → 0
   });
+
+  // The adapter's candle cache is keyed token:exchange:timeframe and IGNORES
+  // [from,to]. On 'background' this replay would be handed the ~7-day window a
+  // live scan cached (truncating it — and for '1d', dropping under the >=25 bar
+  // guard to write ZERO rows), and would publish its own 120-day array to live
+  // consumers under the shared key. 'bulk' bypasses the cache both ways.
+  it('fetches history on the bulk priority lane (cache-bypassing)', async () => {
+    const adapter = { getHistoricalData: jest.fn().mockResolvedValue(makeCandles(120)) } as any;
+    const repo = { saveMany: jest.fn().mockResolvedValue(3) } as any;
+    const svc = new PatternBackfillService(adapter, repo);
+
+    await svc.run([{ token: '2885', exchange: 'NSE', symbol: 'RELIANCE' }], {
+      timeframes: ['15m'],
+    });
+
+    expect(adapter.getHistoricalData).toHaveBeenCalledWith(
+      '2885', 'NSE', '15m', expect.any(Date), expect.any(Date), 'bulk',
+    );
+  });
 });

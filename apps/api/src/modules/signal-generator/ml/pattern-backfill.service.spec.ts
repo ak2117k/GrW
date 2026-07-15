@@ -29,7 +29,7 @@ describe('PatternBackfillService', () => {
     expect(repo.saveMany).toHaveBeenCalled();
   });
 
-  it('skips a timeframe with too few candles without throwing', async () => {
+  it('skips a timeframe with too few candles without hitting the repo', async () => {
     const adapter = { getHistoricalData: jest.fn().mockResolvedValue(makeCandles(5)) } as any;
     const repo = { saveMany: jest.fn().mockResolvedValue(0) } as any;
     const svc = new PatternBackfillService(adapter, repo);
@@ -37,6 +37,9 @@ describe('PatternBackfillService', () => {
       timeframes: ['15m'],
     });
     expect(results[0].observations).toBe(0);
+    // The <25-candle guard must short-circuit BEFORE the repo call — asserting
+    // only on `observations` can't see the guard (saveMany is mocked to 0).
+    expect(repo.saveMany).not.toHaveBeenCalled();
   });
 
   it('continues to the next timeframe when the adapter throws', async () => {

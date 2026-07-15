@@ -846,7 +846,7 @@ git commit -m "feat(ml): pattern backfill service across all timeframes"
 - Consumes: `buildObservationInputs` (Task 3), `PatternObservationRepository` (Task 4), `AngelOneAdapterService`, `resolveFollowThrough` (Task 2).
 - Produces:
   - `capture(candles: OhlcvCandle[], markers: PatternMarkerDto[], meta: ObservationMeta): Promise<number>` — writes observations (PENDING or resolved) for a live detection; **never throws** (fail-open).
-  - `resolvePending(limit?: number): Promise<number>` — re-fetches recent candles for each PENDING row's (token,exchange,timeframe), recomputes the outcome, and finalizes non-PENDING ones. Returns count resolved.
+  - `resolvePending(limit?: number): Promise<number>` — re-fetches recent candles for each PENDING row's (token,exchange,timeframe), recomputes the outcome **against the row's stored `atrAtDetection`** (never an ATR recomputed from the resolve window — see Step 4), and finalizes non-PENDING ones. Returns count resolved.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -961,7 +961,8 @@ export class PatternCaptureService {
   /**
    * For each PENDING observation, re-fetch recent candles for its
    * (token, exchange, timeframe), recompute the ATR-follow-through outcome from
-   * the anchor bar, and finalize any that are now WIN/LOSS/TIMEOUT.
+   * the anchor bar — against the row's STORED atrAtDetection, not a fresh one —
+   * and finalize any that are now WIN/LOSS/TIMEOUT.
    */
   async resolvePending(limit = 200): Promise<number> {
     let resolved = 0;
@@ -989,8 +990,6 @@ export class PatternCaptureService {
         const anchor = candles.findIndex((c) => c.time === row.barTime.getTime());
         if (anchor < 0) continue;
 
-        const atr = computeAtrFromCandles(candles.slice(0, anchor + 1), 14);
-        if (atr <= 0) continue;
         // Direction is implied by the stored bias; re-read it from the anchor bar's
         // pattern is unnecessary — we stored bias, but resolvePending only needs a
         // dir. We recompute both directions is wrong; instead we rely on the fact
@@ -999,7 +998,9 @@ export class PatternCaptureService {
         // Simplter: recompute using the SAME sign we labeled with, carried on the row.
         // findPending must therefore include bias — added below.
         const dir: 1 | -1 = (row as any).bias === 'BEARISH' ? -1 : 1;
-        const ft = resolveFollowThrough(candles, anchor, dir, atr, DEFAULT_FT_PARAMS);
+        // ATR is NOT recomputed here — the row's stored atrAtDetection is the only
+        // yardstick its label may use. See Step 4.
+        const ft = resolveFollowThrough(candles, anchor, dir, (row as any).atrAtDetection, DEFAULT_FT_PARAMS);
         if (ft.outcome === 'PENDING') continue;
         await this.repo.updateOutcome(row.id, ft.outcome, ft.label);
         resolved++;
@@ -1012,7 +1013,7 @@ export class PatternCaptureService {
 }
 ```
 
-- [ ] **Step 4: Add `bias` to `findPending` so resolvePending has the direction**
+- [ ] **Step 4: Add `bias` and `atrAtDetection` to `findPending` so resolvePending has the direction and the ATR**
 
 In `pattern-observation.repository.ts`, update `PendingObservation` and the `select`:
 
@@ -1024,13 +1025,35 @@ export interface PendingObservation {
   timeframe: string;
   barTime: Date;
   bias: string;
+  atrAtDetection: number;
 }
 ```
-and in `findPending`, add `bias: true` to the `select`. Then in `pattern-capture.service.ts` replace `(row as any).bias` with `row.bias` and delete the long explanatory comment block, leaving:
+and in `findPending`, add `bias: true` and `atrAtDetection: true` to the `select`. Then in `pattern-capture.service.ts` replace `(row as any).bias` with `row.bias` and delete the long explanatory comment block, leaving:
 
 ```typescript
         const dir: 1 | -1 = row.bias === 'BEARISH' ? -1 : 1;
 ```
+
+**Label against the STORED `atrAtDetection` — never recompute one in the resolver.**
+Wilder ATR is recursive off an SMA seed (`services/per-tf-atr.ts`), so its value
+depends on where the window starts. The resolver's window (`RESOLVE_LOOKBACK_DAYS`,
+e.g. 10 days of 15m) is not the window the row was captured from (a live scan's, or
+the backfill's ~120 days), so a recomputed ATR = Y would scale the favorable/adverse
+levels while the row keeps feature `atrAtDetection` = X. Rows in one training table
+would then be labeled against different yardsticks — silently, and worst where the
+anchor sits near the window start (1m rows, 2-day lookback), where the seed has
+barely any bars and `computeAtrFromCandles` may return 0 outright, stranding the row
+PENDING forever. Passing `row.atrAtDetection` makes feature/label consistency hold
+by construction:
+
+```typescript
+        const ft = resolveFollowThrough(candles, anchor, dir, row.atrAtDetection, DEFAULT_FT_PARAMS);
+```
+
+No `if (atr <= 0)` guard is needed on the stored value: `atrAtDetection` is a
+non-nullable `Float`, and the only writer (`saveMany`) is fed exclusively by
+`buildObservationInputs`, which itself skips any marker with `atr <= 0` — so a
+persisted row cannot carry a non-positive ATR.
 
 - [ ] **Step 5: Register providers in the module**
 
@@ -1091,5 +1114,5 @@ git commit -m "docs(learning): ML lessons 01-02 (pattern-quality scorer, ATR lab
 
 - **Spec coverage:** `pattern_observations` table (Task 1) ✓; ATR-follow-through resolver (Task 2) ✓; timeframe-tagged observations + window + ATR (Task 3) ✓; repository (Task 4) ✓; backfill across ALL timeframes (Task 5, `BACKFILL_TIMEFRAMES`) ✓; live detection→observation writer + resolver (Task 6) ✓; lessons 01–02 (Task 7) ✓. Deferred to later phases (correctly out of Phase 1): Python features/training, `/score-patterns`, overlay filtering, heartbeat retrain.
 - **NEUTRAL exclusion, PENDING vs TIMEOUT, same-bar tie → LOSS** are all pinned with tests.
-- **Type consistency:** `OhlcvCandle`, `FollowThroughParams`, `PatternObservationInput`, `ObservationMeta` defined once (Task 2/3) and reused everywhere; `findPending` returns `bias` (Task 6 Step 4) which `resolvePending` consumes.
+- **Type consistency:** `OhlcvCandle`, `FollowThroughParams`, `PatternObservationInput`, `ObservationMeta` defined once (Task 2/3) and reused everywhere; `findPending` returns `bias` and `atrAtDetection` (Task 6 Step 4), both of which `resolvePending` consumes — it derives neither, so each row's label is decided by the same direction and the same ATR the row carries as features.
 - **Follow-up (Phase 1 finish task, do last):** wire `PatternCaptureService.capture(...)` into the `/patterns` controller path (`detectPatterns`) so live detections are recorded, and add a `resolvePending` trigger endpoint for the external heartbeat. Left as a small integration step after the units land so the controller change is reviewed on its own.

@@ -3,7 +3,6 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import type { PatternMarkerDto } from '../dto/pattern-marker.dto';
 import { buildObservationInputs, type ObservationMeta } from './observation-assembler';
 import { resolveFollowThrough } from './follow-through';
-import { computeAtrFromCandles } from '../services/per-tf-atr';
 import { PatternObservationRepository } from './pattern-observation.repository';
 import { DEFAULT_FT_PARAMS, type OhlcvCandle } from './pattern-observation.types';
 
@@ -51,8 +50,9 @@ export class PatternCaptureService {
   /**
    * For each PENDING observation, re-fetch recent candles for its
    * (token, exchange, timeframe), recompute the ATR-follow-through outcome from
-   * the anchor bar, and finalize any that are now WIN/LOSS/TIMEOUT. Returns the
-   * number finalized. One row's failure never aborts the rest.
+   * the anchor bar — against the row's STORED atrAtDetection, not a fresh one —
+   * and finalize any that are now WIN/LOSS/TIMEOUT. Returns the number
+   * finalized. One row's failure never aborts the rest.
    */
   async resolvePending(limit = 200): Promise<number> {
     let resolved = 0;
@@ -94,14 +94,20 @@ export class PatternCaptureService {
         const anchor = candles.findIndex((c) => c.time === row.barTime.getTime());
         if (anchor < 0) continue;
 
-        const atr = computeAtrFromCandles(candles.slice(0, anchor + 1), 14);
-        if (atr <= 0) continue; // can't scale a follow-through target without ATR
-
         // The stored bias is the direction: the row committed to one when it was
         // captured, and the label must be recomputed against that same direction
         // for the outcome to mean anything.
         const dir: 1 | -1 = row.bias === 'BEARISH' ? -1 : 1;
-        const ft = resolveFollowThrough(candles, anchor, dir, atr, DEFAULT_FT_PARAMS);
+        // Label against the STORED atrAtDetection, never an ATR recomputed here.
+        // Wilder ATR is recursive off an SMA seed, so its value depends on where
+        // the window starts — and this window (RESOLVE_LOOKBACK_DAYS) is not the
+        // one the row was captured from (a live scan's, or the backfill's ~120d).
+        // A recompute would therefore scale the favorable/adverse levels by some
+        // Y while the row keeps feature atrAtDetection = X, silently labeling
+        // rows in one training table against different yardsticks — worst where
+        // the anchor sits near the window start and the seed barely has bars.
+        // Reusing the stored number makes feature/label consistency structural.
+        const ft = resolveFollowThrough(candles, anchor, dir, row.atrAtDetection, DEFAULT_FT_PARAMS);
         if (ft.outcome === 'PENDING') continue;
 
         await this.repo.updateOutcome(row.id, ft.outcome, ft.label);

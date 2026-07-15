@@ -116,7 +116,7 @@ New Prisma table `pattern_observations`:
 | patternName, category, bias | detection identity |
 | barTime | detection bar timestamp (IST-correct) |
 | candleWindow | JSON: fixed lookback OHLCV up to detection (feature input) |
-| atrAtDetection | for label geometry |
+| atrAtDetection | for label geometry — written once at detection and **reused verbatim** by the resolver; never recomputed (see §6) |
 | label | nullable: 1 / 0 |
 | outcome | WIN / LOSS / TIMEOUT / PENDING |
 | resolvedAt | when the label was filled |
@@ -140,7 +140,14 @@ Python /api/score-patterns ◄─ model artifact ◄── TRAIN (Python, schedu
 - **Detection → observation:** every detector hit writes a `PENDING` row with its
   candle window + ATR.
 - **Resolution:** a NestJS job fills `label`/`outcome` once N bars exist past
-  `barTime` (immediate for backfill; +N-bars-later for live).
+  `barTime` (immediate for backfill; +N-bars-later for live). The job scales the
+  favorable/adverse levels with the row's **stored `atrAtDetection`** — it must
+  never recompute an ATR from the bars it re-fetched. Wilder ATR is recursive off
+  an SMA seed, so an ATR recomputed from the resolver's (shorter, differently
+  aligned) lookback would not equal the value the row carries as a feature, and
+  rows in the same training table would end up labeled against different
+  yardsticks. Reusing the stored number keeps each row's features and its label on
+  one scale by construction.
 - **Backfill:** a re-runnable NestJS job replays 6–12 months of history for a
   seed instrument set (NIFTY, BANKNIFTY, CRUDEOIL, top liquid stocks) **across
   ALL supported timeframes** (1m, 3m, 5m, 10m, 15m, 30m, 1h, 1d — the Angel-native

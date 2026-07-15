@@ -88,13 +88,17 @@ describe('PatternCaptureService', () => {
     }
 
     /**
-     * Anchor at bar 20 of the rising fixture: ATR = 3, entry = close@20 = 120,
-     * favorable = 120 + 1.5*3 = 124.5, adverse = 120 - 1*3 = 117. Bar 23's high
-     * (125) clears the favorable level first → WIN.
+     * Anchor at bar 20 of the rising fixture, entry = close@20 = 120.
+     *
+     * `atrAtDetection` is deliberately 2, NOT the 3 that recomputing ATR(14)
+     * over this fixture would yield: the resolver must label against the number
+     * the row stored at capture, not one derived from the resolve window. So
+     * favorable = 120 + 1.5*2 = 123 and adverse = 120 - 1*2 = 118, and bar 21's
+     * high (123) clears the favorable level → WIN.
      */
     const bullishPending = {
       id: 'p1', token: '2885', exchange: 'NSE', timeframe: '15m',
-      barTime: new Date(20 * 1000), bias: 'BULLISH',
+      barTime: new Date(20 * 1000), bias: 'BULLISH', atrAtDetection: 2,
     };
 
     it('finalizes a row whose horizon has now resolved', async () => {
@@ -140,8 +144,8 @@ describe('PatternCaptureService', () => {
 
       const n = await svc.resolvePending(10);
 
-      // Short from 120: adverse = 120 + 3 = 123, hit by bar 21's high (123) before
-      // the favorable 115.5 could ever print in a rising market.
+      // Short from 120: adverse = 120 + 1*2 = 122, hit by bar 21's high (123)
+      // before the favorable 117 could ever print in a rising market.
       expect(n).toBe(1);
       expect(repo.updateOutcome).toHaveBeenCalledWith('p1', 'LOSS', 0);
     });
@@ -199,15 +203,47 @@ describe('PatternCaptureService', () => {
       await expect(svc.resolvePending(10)).resolves.toBe(0);
     });
 
-    it('skips a row with too little history to compute an ATR', async () => {
+    // The two tests below are the point of labeling against the stored ATR:
+    // each pins an outcome that a resolver recomputing ATR from its own window
+    // could not produce. Together they bracket the behaviour from both sides —
+    // one resolves where a recompute would skip, one holds where a recompute
+    // would resolve.
+
+    // Anchor 5 leaves only 6 bars of history inside the resolve window, so a
+    // recomputed ATR(14) would be 0 (computeAtrFromCandles needs > period bars)
+    // and the row would be skipped — forever, since the window start advances
+    // with the row. The row already carries a good ATR from its capture window,
+    // so it labels fine: entry = close@5 = 105, favorable = 105 + 1.5*2 = 108,
+    // adverse = 103; bar 6's high (108) clears favorable → WIN.
+    it('labels an anchor near the window start against the stored ATR', async () => {
       const repo = pendingRepo([{ ...bullishPending, barTime: new Date(5 * 1000) }]);
-      // Anchor 5 → only 6 bars behind it → ATR(14) = 0 → cannot scale a target.
       const adapter = {
         getHistoricalData: jest.fn().mockResolvedValue(asHistorical(rising(30))),
       } as any;
       const svc = new PatternCaptureService(adapter, repo);
 
-      await expect(svc.resolvePending(10)).resolves.toBe(0);
+      const n = await svc.resolvePending(10);
+
+      expect(n).toBe(1);
+      expect(repo.updateOutcome).toHaveBeenCalledWith('p1', 'WIN', 1);
+    });
+
+    // Mirror of the above. A stored ATR of 10 puts favorable at 120 + 1.5*10 =
+    // 135 and adverse at 110 — neither printed by bar 29 (max high 131, min low
+    // 120), and the 10-bar horizon runs past the fixture, so the row stays
+    // PENDING. A resolver recomputing ATR = 3 off this window would instead see
+    // favorable = 124.5, call bar 23's high (125) a WIN, and finalize the row
+    // against a yardstick it never stored.
+    it('holds a row PENDING when the stored ATR puts both levels out of reach', async () => {
+      const repo = pendingRepo([{ ...bullishPending, atrAtDetection: 10 }]);
+      const adapter = {
+        getHistoricalData: jest.fn().mockResolvedValue(asHistorical(rising(30))),
+      } as any;
+      const svc = new PatternCaptureService(adapter, repo);
+
+      const n = await svc.resolvePending(10);
+
+      expect(n).toBe(0);
       expect(repo.updateOutcome).not.toHaveBeenCalled();
     });
 

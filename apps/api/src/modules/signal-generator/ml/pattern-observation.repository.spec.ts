@@ -77,10 +77,15 @@ describe('PatternObservationRepository', () => {
         where: { outcome: 'PENDING' },
         orderBy: { barTime: 'asc' },
         take: 50,
-        // `bias` is load-bearing: resolvePending labels against the direction the
-        // row committed to at capture, and has no other source for it.
+        // `bias` and `atrAtDetection` are both load-bearing: resolvePending
+        // labels against the direction AND the ATR the row committed to at
+        // capture, and has no other source for either. Dropping atrAtDetection
+        // from the select would push the resolver back to recomputing an ATR
+        // from its own lookback window — a different Wilder seed, hence a label
+        // scaled by a number the row does not carry as its feature.
         select: expect.objectContaining({
           id: true, token: true, exchange: true, timeframe: true, barTime: true, bias: true,
+          atrAtDetection: true,
         }),
       }),
     );
@@ -91,7 +96,7 @@ describe('PatternObservationRepository', () => {
     const rows = [
       {
         id: 'a', token: '2885', exchange: 'NSE', timeframe: '15m',
-        barTime: new Date(1000), bias: 'BULLISH',
+        barTime: new Date(1000), bias: 'BULLISH', atrAtDetection: 2,
       },
     ];
     prisma.patternObservation.findMany.mockResolvedValue(rows);

@@ -11,6 +11,15 @@ export interface PendingObservation {
   barTime: Date;
   /** Direction the row committed to at capture — the resolver labels against it. */
   bias: string;
+  /**
+   * ATR at the detection bar, as stored at capture. The resolver labels against
+   * THIS value rather than recomputing one: Wilder ATR is recursive with an SMA
+   * seed, so an ATR recomputed from the resolver's own (differently-sized)
+   * lookback window would not equal the `atrAtDetection` the row carries as a
+   * feature. Reusing the stored number keeps each row's feature and its label on
+   * the same yardstick by construction.
+   */
+  atrAtDetection: number;
 }
 
 /**
@@ -60,6 +69,7 @@ export class PatternObservationRepository {
       take: limit,
       select: {
         id: true, token: true, exchange: true, timeframe: true, barTime: true, bias: true,
+        atrAtDetection: true,
       },
     });
     return rows;

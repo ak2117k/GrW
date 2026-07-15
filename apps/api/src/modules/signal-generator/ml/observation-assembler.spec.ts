@@ -7,7 +7,10 @@ function bar(time: number, o: number, h: number, l: number, c: number): OhlcvCan
 }
 
 describe('buildObservationInputs', () => {
-  // 20 flat-ish candles so ATR>0, then a bullish marker at index 15.
+  // 30 flat candles, with a bullish marker anchored at index 15.
+  // The counts are load-bearing: 16 candles up to the anchor > atrPeriod 14, so ATR
+  // resolves to 2 rather than 0; and the full n=10 horizon (bars 16-25) fits inside
+  // the 30, so the outcome is a definite TIMEOUT rather than PENDING.
   const candles: OhlcvCandle[] = Array.from({ length: 30 }, (_, i) =>
     bar(i * 1000, 100, 101, 99, 100),
   );
@@ -47,8 +50,9 @@ describe('buildObservationInputs', () => {
 
   it('computes an outcome and a numeric ATR', () => {
     const out = buildObservationInputs(candles, [bullMarker], meta, { windowBars: 10 });
-    expect(out[0].atrAtDetection).toBeGreaterThan(0);
-    expect(['WIN', 'LOSS', 'TIMEOUT', 'PENDING']).toContain(out[0].outcome);
+    expect(out[0].outcome).toBe('TIMEOUT');
+    expect(out[0].label).toBeNull();
+    expect(out[0].atrAtDetection).toBeCloseTo(2);
   });
 
   it('drops a marker whose time has no matching candle', () => {

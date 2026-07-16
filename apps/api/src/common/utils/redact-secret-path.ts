@@ -56,3 +56,29 @@ export function redactSecretPath(url: string): string {
   // secret, so none of it survives.
   return `${WEBHOOK_PREFIX}${REDACTED}`;
 }
+
+/**
+ * A webhook path appearing ANYWHERE inside a free-text string. Stops at
+ * whitespace and the usual quoting/punctuation that ends a URL in prose, so the
+ * surrounding message survives intact.
+ */
+const WEBHOOK_PATH_IN_TEXT = /\/webhooks\/[^\s"'`,)\]}]*/g;
+
+/**
+ * Redact webhook secrets embedded in arbitrary text — log messages, exception
+ * messages, stack traces.
+ *
+ * {@link redactSecretPath} only helps when the string IS a path. That is not the
+ * only place a path shows up: Nest generates its own message for an unmatched
+ * route — `Cannot POST /webhooks/ml/backfill/<secret>` — and that message then
+ * travels into the log line, the exception's stack, and the JSON error body. A
+ * stale caller using the retired path-secret URL therefore leaked its secret
+ * three ways while `request.url` sat redacted right next to it.
+ *
+ * Total and never throws: this runs inside the global exception filter, where an
+ * error would break the error path itself.
+ */
+export function redactSecretsInText(text: string): string {
+  if (typeof text !== 'string' || !text.includes(WEBHOOK_PREFIX)) return text;
+  return text.replace(WEBHOOK_PATH_IN_TEXT, (match) => redactSecretPath(match));
+}

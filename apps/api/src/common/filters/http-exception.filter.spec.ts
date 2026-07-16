@@ -93,6 +93,44 @@ describe('HttpExceptionFilter', () => {
     expect(all).toContain('/webhooks/ml/backfill/<redacted>');
   });
 
+  /**
+   * The case the original tests missed, found by driving the running app.
+   *
+   * Above, the filter is handed `new NotFoundException()` — a message this test
+   * chose. A REAL unmatched-route 404 is thrown by Nest with a message it
+   * generates itself: `Cannot POST /webhooks/ml/backfill/<secret>`. That string
+   * is not `request.url`, so redacting the URL did nothing for it, and it reached
+   * the log line, the stack, and the response body while the tests stayed green.
+   *
+   * This is exactly the shape a stale heartbeat produces during cutover.
+   */
+  describe("Nest's auto-generated 404 message (the real unmatched-route case)", () => {
+    const realNotFound = (url: string) => new NotFoundException(`Cannot POST ${url}`);
+
+    it('does not echo the secret back in the response body', () => {
+      const filter = new HttpExceptionFilter();
+      const url = `/webhooks/ml/backfill/${SECRET}`;
+      const { host, json } = makeHost(url);
+
+      filter.catch(realNotFound(url), host);
+
+      expect(JSON.stringify(json.mock.calls[0][0])).not.toContain(SECRET);
+      expect(json.mock.calls[0][0].message).toBe('Cannot POST /webhooks/ml/backfill/<redacted>');
+    });
+
+    it('does not leak the secret into the log line or the stack', () => {
+      const filter = new HttpExceptionFilter();
+      const url = `/webhooks/chartink/${SECRET}`;
+      const { host } = makeHost(url);
+
+      filter.catch(realNotFound(url), host);
+
+      // Both args — the stack is passed as the second arg and carries the
+      // message inside it.
+      expect(logged.join('\n')).not.toContain(SECRET);
+    });
+  });
+
   it('logs ordinary URLs unchanged', () => {
     // The redaction is scoped to webhooks; normal request logging is untouched.
     const filter = new HttpExceptionFilter();

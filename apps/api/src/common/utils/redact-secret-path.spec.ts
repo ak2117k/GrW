@@ -1,4 +1,4 @@
-import { redactSecretPath, KNOWN_WEBHOOK_ROUTES } from './redact-secret-path';
+import { redactSecretPath, redactSecretsInText, KNOWN_WEBHOOK_ROUTES } from './redact-secret-path';
 
 /**
  * Webhook secrets must never reach the logs — logs ship to a third party and a
@@ -85,5 +85,60 @@ describe('redactSecretPath', () => {
     expect(redactSecretPath('')).toBe('');
     expect(redactSecretPath('/webhooks/')).toBe('/webhooks/<redacted>');
     expect(redactSecretPath('/webhooks')).toBe('/webhooks');
+  });
+});
+
+/**
+ * Redacting `request.url` is not enough, and this was found by running the app
+ * rather than by any test here.
+ *
+ * Nest generates its own message for an unmatched route — literally
+ * `Cannot POST /webhooks/ml/backfill/<secret>` — and that string then travels
+ * into the log line, the exception's stack, AND the JSON error body. So a stale
+ * caller's secret leaked three ways while `request.url` sat neatly redacted next
+ * to it. The URL is not the only place a URL appears.
+ */
+describe('redactSecretsInText', () => {
+  const SECRET = 'k7Hn3Fp9q2X-correct-horse-battery-staple-32chars';
+
+  it("redacts Nest's auto-generated unmatched-route message", () => {
+    expect(redactSecretsInText(`Cannot POST /webhooks/ml/backfill/${SECRET}`)).toBe(
+      'Cannot POST /webhooks/ml/backfill/<redacted>',
+    );
+    expect(redactSecretsInText(`Cannot POST /webhooks/chartink/${SECRET}`)).toBe(
+      'Cannot POST /webhooks/chartink/<redacted>',
+    );
+  });
+
+  it('redacts a secret embedded in a multi-line stack trace', () => {
+    const stack = `NotFoundException: Cannot POST /webhooks/chartink/${SECRET}\n    at foo (/app/x.js:1:1)`;
+    const out = redactSecretsInText(stack);
+    expect(out).not.toContain(SECRET);
+    expect(out).toContain('/webhooks/chartink/<redacted>');
+    // The rest of the trace must survive — it's the diagnostic value.
+    expect(out).toContain('at foo (/app/x.js:1:1)');
+  });
+
+  it('leaves known static routes readable inside text', () => {
+    expect(redactSecretsInText('POST /webhooks/ml/backfill 401 - Unauthorized')).toBe(
+      'POST /webhooks/ml/backfill 401 - Unauthorized',
+    );
+  });
+
+  it('leaves text with no webhook path completely alone', () => {
+    expect(redactSecretsInText('Cannot GET /api/signals/123')).toBe('Cannot GET /api/signals/123');
+    expect(redactSecretsInText('some random error')).toBe('some random error');
+  });
+
+  it('redacts every occurrence, not just the first', () => {
+    const out = redactSecretsInText(
+      `Cannot POST /webhooks/ml/backfill/${SECRET} after /webhooks/chartink/${SECRET}`,
+    );
+    expect(out).not.toContain(SECRET);
+  });
+
+  it('is total — never throws on odd input', () => {
+    expect(redactSecretsInText('')).toBe('');
+    expect(redactSecretsInText(undefined as never)).toBeUndefined();
   });
 });

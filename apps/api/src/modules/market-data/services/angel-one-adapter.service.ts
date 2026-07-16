@@ -9,6 +9,7 @@ import {
 } from '../../../common/interfaces/broker-adapter.interface';
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { AngelOneWebSocketService, WsFeedMode, ExchangeType } from './angel-one-websocket.service';
+import { matchSymbolToken } from './symbol-token-match';
 import { COMMODITIES, INDICES } from '@td/shared/constants';
 import { MarketDepth, MarketDepthLevel } from '@td/shared/types';
 
@@ -1413,6 +1414,26 @@ export class AngelOneAdapterService implements BrokerAdapter {
     const filtered = all.filter((i: any) => i.exch_seg === exchange);
     this.logger.log(`Filtered to ${filtered.length} instruments for ${exchange}`);
     return filtered;
+  }
+
+  /**
+   * Resolve a bare trading symbol (e.g. "NEOGEN") to its Angel One token by an
+   * exact match against the full in-memory scrip master — the WHOLE listed
+   * universe, not the hand-seeded local `instruments` table.
+   *
+   * This is what lets a Chartink alert for any listed symbol become a trade: the
+   * DB table only ever held a handful of stocks, so everything else rejected as
+   * "symbol not in local DB". The master already carries every symbol; this just
+   * consults it. Matching (series priority, exactness, exchange scoping) lives in
+   * the pure {@link matchSymbolToken}. Returns null only for a genuinely unlisted
+   * / mistyped symbol.
+   */
+  async resolveSymbolToken(
+    symbol: string,
+    exchange = 'NSE',
+  ): Promise<{ token: string; tradingSymbol: string } | null> {
+    const master = await this.fetchInstrumentMaster(exchange);
+    return matchSymbolToken(master, symbol, exchange);
   }
 
   /**

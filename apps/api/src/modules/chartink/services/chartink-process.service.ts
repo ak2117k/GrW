@@ -160,15 +160,13 @@ export class ChartinkProcessService {
     //   -BE  trade-to-trade (low-liquidity / surveillance)
     //   -BL  block deal series (sometimes used for ETF tranches)
     //   -IV  insurance / other special series
-    // Try bare first (defensive), then each suffix.
-    const SUFFIXES = ['', '-EQ', '-BE', '-BL', '-IV'];
-    let instrument = null as Awaited<ReturnType<typeof this.mdRepo.getInstrumentBySymbol>>;
-    for (const suffix of SUFFIXES) {
-      const lookup = suffix ? `${hit.symbol}${suffix}` : hit.symbol;
-      instrument = await this.mdRepo.getInstrumentBySymbol(lookup, 'NSE');
-      if (instrument) break;
-    }
-    if (!instrument) {
+    // Resolve the symbol directly against Angel's full in-memory scrip master —
+    // the WHOLE listed NSE universe — NOT the local `instruments` table, which
+    // only ever held a hand-seeded handful of stocks (so NEOGEN and most of the
+    // market rejected here as "not in local DB"). Everything downstream needs
+    // only the token, so a `{ token }` shape keeps the rest of processOne intact.
+    const resolved = await this.angelOne.resolveSymbolToken(hit.symbol, 'NSE');
+    if (!resolved) {
       await this.rejectSetup(
         {
           alertId,
@@ -177,12 +175,13 @@ export class ChartinkProcessService {
           hitPrice: hit.hitPrice,
           kind: 'unresolved',
           setupId: null,
-          rejectReason: `symbol not in local DB (tried ${SUFFIXES.map(s => s || 'bare').join(', ')})`,
+          rejectReason: `symbol not found in Angel instrument master (NSE)`,
         },
         { scan: scanName },
       );
       return;
     }
+    const instrument = { token: resolved.token };
 
     // === 1b. ANAND DUAL TRACK (intraday 5% + swing 10%) ===
     // Fires IMMEDIATELY after symbol resolution — BEFORE the direction gate and

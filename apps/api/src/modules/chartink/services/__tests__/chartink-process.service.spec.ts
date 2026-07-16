@@ -47,7 +47,7 @@ describe('ChartinkProcessService', () => {
   let mdRepo: { getInstrumentBySymbol: jest.Mock; getInstrumentByToken: jest.Mock };
   let mtf: { check: jest.Mock };
   let scoring: { score: jest.Mock; scoreToLotCount: jest.Mock };
-  let angelOne: { getHistoricalData: jest.Mock };
+  let angelOne: { getHistoricalData: jest.Mock; resolveSymbolToken: jest.Mock };
   let nseSector: { getSectorIndexForSymbol: jest.Mock };
   let watchSvc: { createFromAlert: jest.Mock };
   let ungatedWatch: { createFromAlert: jest.Mock };
@@ -87,8 +87,14 @@ describe('ChartinkProcessService', () => {
       score: jest.fn().mockResolvedValue({ score: 70, lotCount: 2, checks: [macd5mCheck(true), supertrendCheck(true)] }),
       scoreToLotCount: jest.fn(),
     };
-    // Default: 50 UP-trending candles so classifyTrend returns 'UP'
-    angelOne = { getHistoricalData: jest.fn().mockResolvedValue(UP_CANDLES) };
+    // Default: 50 UP-trending candles so classifyTrend returns 'UP'.
+    // resolveSymbolToken now sources the stock token straight from Angel's master
+    // (token 2885 = RELIANCE) — the DB `instruments` table is no longer consulted
+    // for the stock. getInstrumentByToken (below) still resolves the sector INDEX.
+    angelOne = {
+      getHistoricalData: jest.fn().mockResolvedValue(UP_CANDLES),
+      resolveSymbolToken: jest.fn().mockResolvedValue({ token: '2885', tradingSymbol: 'RELIANCE-EQ' }),
+    };
     nseSector = { getSectorIndexForSymbol: jest.fn().mockResolvedValue('99926019') };
     watchSvc = { createFromAlert: jest.fn().mockResolvedValue({ id: 'w1' }) };
     ungatedWatch = { createFromAlert: jest.fn().mockResolvedValue({ id: 'uw1' }) };
@@ -133,8 +139,10 @@ describe('ChartinkProcessService', () => {
 
   // ─── Step 1: Symbol resolution ─────────────────────────────────────────────
 
-  it('persists kind=unresolved when symbol not in DB', async () => {
-    mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+  it('persists kind=unresolved when the symbol is not in the Angel master', async () => {
+    // Only a genuinely unlisted / mistyped symbol reaches here now — the master
+    // holds the whole listed universe, so this is rare rather than the norm.
+    angelOne.resolveSymbolToken.mockResolvedValue(null);
 
     await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
 
@@ -145,15 +153,29 @@ describe('ChartinkProcessService', () => {
       hitPrice: 100,
       kind: 'unresolved',
       setupId: null,
-      rejectReason: 'symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)',
+      rejectReason: 'symbol not found in Angel instrument master (NSE)',
     });
   });
 
   it('does NOT proceed to scoring when symbol fails to resolve', async () => {
-    mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+    angelOne.resolveSymbolToken.mockResolvedValue(null);
     await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
     expect(scoring.score).not.toHaveBeenCalled();
     expect(repo.createAlertSetup).toHaveBeenCalledWith(expect.objectContaining({ kind: 'unresolved' }));
+  });
+
+  it('resolves the stock token from the Angel master, not the local DB', async () => {
+    // The core of the change: a symbol absent from the instruments table (NEOGEN)
+    // now resolves via Angel and flows through to the swing track.
+    angelOne.resolveSymbolToken.mockResolvedValue({ token: '15380', tradingSymbol: 'NEOGEN-EQ' });
+
+    await service.processOne('alert-1', { symbol: 'NEOGEN', hitPrice: 100 });
+
+    expect(angelOne.resolveSymbolToken).toHaveBeenCalledWith('NEOGEN', 'NSE');
+    expect(mdRepo.getInstrumentBySymbol).not.toHaveBeenCalled();
+    expect(repo.createAlertSetup).not.toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'unresolved' }),
+    );
   });
 
   // ─── Step 2: MTF no longer gates ───────────────────────────────────────────
@@ -706,12 +728,12 @@ describe('ChartinkProcessService', () => {
     });
 
     it('logs a [trade-rejected] line for unresolved symbols (process stage)', async () => {
-      mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+      angelOne.resolveSymbolToken.mockResolvedValue(null);
 
       await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 }, 'MY SCANNER');
 
       expect(logSpy).toHaveBeenCalledWith(
-        '[trade-rejected] UNKNOWN | scan="MY SCANNER" hit=100 | stage=process reason="symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)"',
+        '[trade-rejected] UNKNOWN | scan="MY SCANNER" hit=100 | stage=process reason="symbol not found in Angel instrument master (NSE)"',
       );
     });
 
@@ -759,12 +781,12 @@ describe('ChartinkProcessService', () => {
     });
 
     it('omits the scan ctx field when no scan name is supplied', async () => {
-      mdRepo.getInstrumentBySymbol.mockResolvedValue(null);
+      angelOne.resolveSymbolToken.mockResolvedValue(null);
 
       await service.processOne('alert-1', { symbol: 'UNKNOWN', hitPrice: 100 });
 
       expect(logSpy).toHaveBeenCalledWith(
-        '[trade-rejected] UNKNOWN | hit=100 | stage=process reason="symbol not in local DB (tried bare, -EQ, -BE, -BL, -IV)"',
+        '[trade-rejected] UNKNOWN | hit=100 | stage=process reason="symbol not found in Angel instrument master (NSE)"',
       );
     });
 

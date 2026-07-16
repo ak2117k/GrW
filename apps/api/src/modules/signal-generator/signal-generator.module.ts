@@ -8,6 +8,7 @@ import { TradeEngineModule } from '../trade-engine/trade-engine.module';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { SubscriptionModule } from '../subscription/subscription.module';
 import { SignalGeneratorController } from './controllers/signal-generator.controller';
+import { MlTriggerController } from './controllers/ml-trigger.controller';
 import { SignalGeneratorService } from './services/signal-generator.service';
 import { SignalScoringService } from './services/signal-scoring.service';
 import { StrategyRegistryService } from './services/strategy-registry.service';
@@ -67,7 +68,10 @@ import type { ContextFactor } from './services/context-scoring/types';
     TradeEngineModule,
     SubscriptionModule,
   ],
-  controllers: [SignalGeneratorController, StrategyBuilderController],
+  // MlTriggerController is @Public() + secret-authed (ML_TRIGGER_SECRET): the
+  // external heartbeat that drives the ML capture ops cannot present a JWT.
+  // Kept off SignalGeneratorController so its class-level @AdminOnly() stays intact.
+  controllers: [SignalGeneratorController, StrategyBuilderController, MlTriggerController],
   providers: [
     // Core services
     SignalGeneratorService,

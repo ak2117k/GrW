@@ -1,5 +1,5 @@
 import {
-  Body, Controller, HttpCode, HttpStatus, Logger, Param, Post,
+  Body, Controller, Headers, HttpCode, HttpStatus, Logger, Post,
   UnauthorizedException, UsePipes, ValidationPipe,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -8,9 +8,19 @@ import { Public } from '../../../common/decorators';
 import { ChartinkIngestService } from '../services/chartink-ingest.service';
 import { ChartinkWebhookDto } from '../dto/chartink-webhook.dto';
 
+/** Header carrying the shared secret. Set it on the Chartink alert destination. */
+export const CHARTINK_SECRET_HEADER = 'x-chartink-webhook-secret';
+
 // External machine-to-machine endpoint: Chartink cannot present a Bearer JWT.
-// It authenticates via a constant-time path-secret check below, so opt this
+// It authenticates via a constant-time shared-secret check below, so opt this
 // controller out of the global JwtAuthGuard.
+//
+// The secret arrives in CHARTINK_SECRET_HEADER and NEVER in the URL. It used to
+// be a path segment, which meant everything that records request paths logged it
+// verbatim — the global LoggingInterceptor on success, the HttpExceptionFilter on
+// every 401, plus the platform access logs outside this process. Those logs ship
+// to a third party and this secret is the entire auth boundary for a @Public()
+// route, so the URL is the one place it must not go.
 @Public()
 @Controller('webhooks/chartink')
 export class ChartinkWebhookController {
@@ -21,11 +31,11 @@ export class ChartinkWebhookController {
     private readonly config: ConfigService,
   ) {}
 
-  @Post(':secret')
+  @Post()
   @HttpCode(HttpStatus.OK)
   @UsePipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: false }))
   async receive(
-    @Param('secret') providedSecret: string,
+    @Headers(CHARTINK_SECRET_HEADER) providedSecret: string | undefined,
     @Body() body: ChartinkWebhookDto,
   ): Promise<{ received: true; alertId: string; hitCount: number }> {
     const expected = this.config.get<string>('CHARTINK_WEBHOOK_SECRET');
@@ -33,8 +43,11 @@ export class ChartinkWebhookController {
       this.logger.warn('CHARTINK_WEBHOOK_SECRET is not configured — rejecting all webhooks');
       throw new UnauthorizedException();
     }
-    if (!this.constantTimeEqual(providedSecret, expected)) {
-      this.logger.warn(`Chartink webhook auth failed (provided length=${providedSecret.length})`);
+    // A header can be absent outright, unlike the path param this replaced.
+    // Normalise so a missing one is a clean 401, not a 500 off `undefined.length`.
+    const provided = providedSecret ?? '';
+    if (!this.constantTimeEqual(provided, expected)) {
+      this.logger.warn(`Chartink webhook auth failed (provided length=${provided.length})`);
       throw new UnauthorizedException();
     }
 
@@ -43,7 +56,7 @@ export class ChartinkWebhookController {
   }
 
   private constantTimeEqual(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
+    if (typeof a !== 'string' || a.length !== b.length) return false;
     return timingSafeEqual(Buffer.from(a), Buffer.from(b));
   }
 }

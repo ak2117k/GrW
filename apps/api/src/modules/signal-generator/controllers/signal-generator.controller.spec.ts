@@ -34,6 +34,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
     };
     const angelOneAdapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
     const srEvidenceService = { levelsFor: jest.fn().mockResolvedValue([]) };
+    const patternCapture = { capture: jest.fn().mockResolvedValue(2) };
 
     const deps = {
       zoneRepository,
@@ -42,6 +43,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       marketDataRepository,
       angelOneAdapter,
       srEvidenceService,
+      patternCapture,
       ...overrides,
     };
 
@@ -59,6 +61,8 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       deps.marketDataRepository as never,
       deps.angelOneAdapter as never,
       deps.srEvidenceService as never,
+      undefined as never, // subs
+      deps.patternCapture as never,
     );
     return { ctrl, deps };
   }
@@ -66,6 +70,104 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
   // The chart-display reads are subscription-gated; an ADMIN user bypasses the
   // check (so these unit tests don't need a wired SubscriptionService).
   const ADMIN = { userId: 'u1', role: 'ADMIN' } as never;
+
+  /**
+   * The Phase 1 finish task: `/patterns` is the ONLY place live detections can be
+   * recorded from, so if `capture(...)` isn't called here it isn't called at all —
+   * `PatternCaptureService` becomes elaborate dead code and the training set is
+   * backfill-only, silently.
+   *
+   * Nothing about that failure is visible from the service's own unit tests: they
+   * prove `capture` WORKS, never that it is REACHED. These tests are the ones that
+   * pin reachability, so they assert on the call itself rather than on any output.
+   */
+  describe('getPatterns — live ML capture', () => {
+    const ADMIN_USER = { userId: 'u1', role: 'ADMIN' } as never;
+
+    it('captures the detected patterns for the ML training set', async () => {
+      const { ctrl, deps } = build();
+
+      await ctrl.getPatterns(ADMIN_USER, '18520', 'NSE', '15m');
+
+      expect(deps.patternCapture.capture).toHaveBeenCalledTimes(1);
+      const [capturedCandles, markers, meta] = deps.patternCapture.capture.mock.calls[0];
+      // Tagged with the resolved instrument + the requested timeframe: these three
+      // are the row's identity, and a row mis-tagged here is unusable forever.
+      expect(meta).toEqual({ token: '18520', exchange: 'NSE', timeframe: '15m' });
+      expect(Array.isArray(markers)).toBe(true);
+      // The assembler needs volume; the detector's Candle type doesn't carry it.
+      // A window of volume-less candles would poison every row it writes.
+      expect(capturedCandles).toHaveLength(candles.length);
+      expect(capturedCandles[0]).toEqual(
+        expect.objectContaining({ time: expect.any(Number), volume: 1000 }),
+      );
+    });
+
+    it('defaults the timeframe tag to 15m, matching what was detected', async () => {
+      const { ctrl, deps } = build();
+
+      await ctrl.getPatterns(ADMIN_USER, '18520', 'NSE');
+
+      expect(deps.patternCapture.capture.mock.calls[0][2]).toEqual(
+        expect.objectContaining({ timeframe: '15m' }),
+      );
+    });
+
+    // Capture is a training-data side effect on a user-facing chart read. It must
+    // never be able to break the overlay, and must not add latency to it.
+    it('still returns the patterns when capture rejects (fail-open)', async () => {
+      const { ctrl } = build({
+        patternCapture: { capture: jest.fn().mockRejectedValue(new Error('db down')) },
+      });
+
+      const res = await ctrl.getPatterns(ADMIN_USER, '18520', 'NSE', '15m');
+
+      expect(res).toEqual(expect.objectContaining({ symbol: 'CUPID', timeframe: '15m' }));
+      // Let the rejected detached promise settle — an unhandled rejection can take
+      // the Node process down.
+      await new Promise((r) => setImmediate(r));
+    });
+
+    it('does not await the capture write', async () => {
+      let finished = false;
+      const { ctrl } = build({
+        patternCapture: {
+          capture: jest.fn().mockImplementation(
+            () => new Promise((resolve) => setTimeout(() => { finished = true; resolve(1); }, 50)),
+          ),
+        },
+      });
+
+      await ctrl.getPatterns(ADMIN_USER, '18520', 'NSE', '15m');
+
+      // The overlay is on the <500ms market-data path; a DB write must not sit in
+      // front of it.
+      expect(finished).toBe(false);
+    });
+
+    it('constructs cleanly and still serves patterns when capture is unwired', async () => {
+      // @Optional() — non-ML test wirings and any container without the ML
+      // providers must keep working.
+      const { ctrl } = build({ patternCapture: undefined });
+
+      await expect(ctrl.getPatterns(ADMIN_USER, '18520', 'NSE', '15m')).resolves.toEqual(
+        expect.objectContaining({ symbol: 'CUPID' }),
+      );
+    });
+
+    it('captures nothing when there are too few candles to detect', async () => {
+      // The <25-candle guard returns early with an empty list — there is nothing
+      // to record, and a capture call here would write rows off a stub window.
+      const { ctrl, deps } = build({
+        angelOneAdapter: { getHistoricalData: jest.fn().mockResolvedValue(candles.slice(0, 10)) },
+      });
+
+      const res = await ctrl.getPatterns(ADMIN_USER, '18520', 'NSE', '15m');
+
+      expect(res.count).toBe(0);
+      expect(deps.patternCapture.capture).not.toHaveBeenCalled();
+    });
+  });
 
   describe('getZones', () => {
     it("non-15m (interval='5m'): never reads or writes the shared zone DB; detects with interval", async () => {
@@ -160,161 +262,6 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       const { ctrl, deps } = build();
       await ctrl.getSrEvidence(ADMIN, '18520', 'NSE', 'CUPID', '1M');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '1mo');
-    });
-  });
-});
-
-/**
- * The ML data-capture ops triggers. These are what actually cause Phase 1 to
- * produce a training set — nothing else calls the backfill or the resolver.
- * Both are ADMIN-only via the class-level @AdminOnly(); they are driven by an
- * external heartbeat because the free tier idles the in-process scheduler out.
- */
-describe('SignalGeneratorController — ML capture triggers', () => {
-  const TARGET = { token: '2885', exchange: 'NSE', symbol: 'RELIANCE' };
-
-  function build(overrides: Partial<any> = {}) {
-    const deps = {
-      patternBackfill: {
-        run: jest.fn().mockResolvedValue([
-          { target: 'RELIANCE', timeframe: '15m', observations: 4 },
-          { target: 'RELIANCE', timeframe: '1h', observations: 3 },
-        ]),
-      },
-      patternCapture: { resolvePending: jest.fn().mockResolvedValue(7) },
-      ...overrides,
-    };
-    const ctrl = new SignalGeneratorController(
-      {} as never, {} as never, {} as never, {} as never, {} as never, {} as never,
-      undefined as never, undefined as never, undefined as never, undefined as never,
-      undefined as never, undefined as never, undefined as never, undefined as never,
-      deps.patternBackfill as never,
-      deps.patternCapture as never,
-    );
-    return { ctrl, deps };
-  }
-
-  describe('triggerPatternBackfill', () => {
-    it('starts the backfill for the posted targets and accepts immediately', async () => {
-      const { ctrl, deps } = build();
-      const res = await ctrl.triggerPatternBackfill({ targets: [TARGET] });
-      expect(deps.patternBackfill.run).toHaveBeenCalledWith([TARGET], {
-        timeframes: undefined,
-        lookbackDays: undefined,
-      });
-      expect(res).toEqual({ accepted: true, targets: 1 });
-    });
-
-    // The pass is ~527 serialized broker calls (~5-7 min) — far past the
-    // ~30-60s timeout of the heartbeats that drive this. The handler must
-    // return on its own tick rather than awaiting the run.
-    it('returns WITHOUT awaiting the run', async () => {
-      let finished = false;
-      const { ctrl } = build({
-        patternBackfill: {
-          isRunning: false,
-          run: jest.fn().mockImplementation(
-            () =>
-              new Promise((resolve) =>
-                setTimeout(() => {
-                  finished = true;
-                  resolve([]);
-                }, 50),
-              ),
-          ),
-        },
-      });
-
-      const res = await ctrl.triggerPatternBackfill({ targets: [TARGET] });
-
-      // Handler resolved while the run is still in flight.
-      expect(res).toEqual({ accepted: true, targets: 1 });
-      expect(finished).toBe(false);
-    });
-
-    it('reports a refusal instead of stacking a second run when one is in flight', async () => {
-      const { ctrl, deps } = build({
-        patternBackfill: { isRunning: true, run: jest.fn() },
-      });
-
-      const res = await ctrl.triggerPatternBackfill({ targets: [TARGET] });
-
-      expect(res).toEqual(
-        expect.objectContaining({ accepted: false }),
-      );
-      expect(deps.patternBackfill.run).not.toHaveBeenCalled();
-    });
-
-    // A detached promise that rejects with no .catch() can take the process
-    // down. The handler must still accept, and must not reject.
-    it('does not reject when the detached run fails', async () => {
-      const { ctrl } = build({
-        patternBackfill: {
-          isRunning: false,
-          run: jest.fn().mockRejectedValue(new Error('angel down')),
-        },
-      });
-
-      await expect(
-        ctrl.triggerPatternBackfill({ targets: [TARGET] }),
-      ).resolves.toEqual({ accepted: true, targets: 1 });
-      // Let the rejected detached promise settle — an unhandled rejection here
-      // would surface as a process warning/failure rather than being swallowed.
-      await new Promise((r) => setImmediate(r));
-    });
-
-    it('passes timeframes and lookbackDays through', async () => {
-      const { ctrl, deps } = build();
-      await ctrl.triggerPatternBackfill({
-        targets: [TARGET], timeframes: ['15m'], lookbackDays: 30,
-      });
-      expect(deps.patternBackfill.run).toHaveBeenCalledWith([TARGET], {
-        timeframes: ['15m'], lookbackDays: 30,
-      });
-    });
-
-    it.each([
-      ['missing body', {}],
-      ['empty targets', { targets: [] }],
-    ])('rejects %s with 400 and never calls the service', async (_label, body) => {
-      const { ctrl, deps } = build();
-      await expect(ctrl.triggerPatternBackfill(body)).rejects.toMatchObject({ status: 400 });
-      expect(deps.patternBackfill.run).not.toHaveBeenCalled();
-    });
-
-    it('rejects a target missing token/exchange/symbol with 400', async () => {
-      const { ctrl, deps } = build();
-      await expect(
-        ctrl.triggerPatternBackfill({ targets: [{ token: '2885' } as never] }),
-      ).rejects.toMatchObject({ status: 400 });
-      expect(deps.patternBackfill.run).not.toHaveBeenCalled();
-    });
-
-    it('503s when the backfill service is not wired', async () => {
-      const { ctrl } = build({ patternBackfill: undefined });
-      await expect(
-        ctrl.triggerPatternBackfill({ targets: [TARGET] }),
-      ).rejects.toMatchObject({ status: 503 });
-    });
-  });
-
-  describe('triggerResolvePending', () => {
-    it('resolves pending rows and returns the count', async () => {
-      const { ctrl, deps } = build();
-      const res = await ctrl.triggerResolvePending({});
-      expect(deps.patternCapture.resolvePending).toHaveBeenCalledWith(undefined);
-      expect(res).toEqual({ ok: true, resolved: 7 });
-    });
-
-    it('passes an explicit limit through', async () => {
-      const { ctrl, deps } = build();
-      await ctrl.triggerResolvePending({ limit: 25 });
-      expect(deps.patternCapture.resolvePending).toHaveBeenCalledWith(25);
-    });
-
-    it('503s when the capture service is not wired', async () => {
-      const { ctrl } = build({ patternCapture: undefined });
-      await expect(ctrl.triggerResolvePending({})).rejects.toMatchObject({ status: 503 });
     });
   });
 });

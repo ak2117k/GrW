@@ -12,7 +12,6 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
-  ServiceUnavailableException,
   Optional,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
@@ -37,8 +36,8 @@ import { SubscriptionService } from '../../subscription/subscription.service';
 import type { Candle } from '../patterns/swing-points';
 import { buildPatternMarkers } from '../patterns/to-markers';
 import { PatternsResponseDto } from '../dto/pattern-marker.dto';
-import { PatternBackfillService, type BackfillTarget } from '../ml/pattern-backfill.service';
 import { PatternCaptureService } from '../ml/pattern-capture.service';
+import type { OhlcvCandle } from '../ml/pattern-observation.types';
 
 @AdminOnly()
 @Controller('api/signals')
@@ -74,9 +73,10 @@ export class SignalGeneratorController {
     // (analyze/zones/indicators/sr-evidence). Optional so existing test wirings
     // still construct; when absent, non-ADMIN callers are denied (fail closed).
     @Optional() private readonly subs?: SubscriptionService,
-    // ML pattern-quality data capture, driven by the /ml/* ops triggers below.
-    // Optional for the same test-wiring reason; the triggers 503 when unwired.
-    @Optional() private readonly patternBackfill?: PatternBackfillService,
+    // Records live pattern detections into the ML training set from the
+    // /patterns path — the only place live detections exist. Optional so test
+    // wirings and non-ML containers still construct; when absent, detection
+    // simply isn't captured and the overlay is unaffected.
     @Optional() private readonly patternCapture?: PatternCaptureService,
   ) {}
 
@@ -370,103 +370,6 @@ export class SignalGeneratorController {
   }
 
   /**
-   * POST /api/signals/ml/backfill/trigger
-   *
-   * Replay history for the given instruments, detect patterns, and persist the
-   * labeled observations that train the ML pattern-quality scorer.
-   *
-   * ASYNCHRONOUS: returns 202 immediately and runs the pass detached. One pass
-   * is ~527 serialized broker calls behind a 350ms gate (~5-7 min) because
-   * sub-hour timeframes auto-chunk at 1 day each — far past the ~30-60s timeout
-   * of the external heartbeats that drive this. Awaiting it meant the caller
-   * ALWAYS timed out while the work continued server-side, and the next
-   * heartbeat piled another run on top. Per-(target × timeframe) results go to
-   * the logger, so a detached run stays observable.
-   *
-   * If a pass is already in flight this returns {accepted:false} rather than
-   * starting or queueing a second one (the guard itself lives in the service).
-   *
-   * ADMIN-only (class-level @AdminOnly): this is an ops action that burns Angel
-   * One history quota and writes to the shared training set.
-   *
-   * Invoked by an external heartbeat (cron-job.org / UptimeRobot) rather than an
-   * in-process @Cron — the free tier spins the service down when idle, so a
-   * fixed-time in-process scheduler would simply never fire.
-   *
-   * Body:
-   *   { targets: [{token, exchange, symbol}], timeframes?: string[], lookbackDays?: number }
-   *
-   *   targets:     required, non-empty. Explicit by design — there is no
-   *                instrument-universe lookup here.
-   *   timeframes:  restrict the replay (e.g. ["15m"]). Default: all of
-   *                BACKFILL_TIMEFRAMES.
-   *   lookbackDays: override the per-timeframe default window.
-   */
-  @Post('ml/backfill/trigger')
-  @HttpCode(HttpStatus.ACCEPTED)
-  // Deliberately `async` while never awaiting `run()`: the handler still
-  // returns on its first tick (that IS the fix), but the validation throws
-  // above surface as rejections rather than synchronous throws.
-  async triggerPatternBackfill(
-    @Body() body: { targets?: BackfillTarget[]; timeframes?: string[]; lookbackDays?: number } = {},
-  ) {
-    if (!this.patternBackfill) {
-      throw new ServiceUnavailableException('pattern backfill is not wired');
-    }
-    const targets = body.targets ?? [];
-    if (targets.length === 0) {
-      throw new BadRequestException('targets is required and must be non-empty');
-    }
-    for (const t of targets) {
-      if (!t?.token || !t?.exchange || !t?.symbol) {
-        throw new BadRequestException('each target needs token, exchange and symbol');
-      }
-    }
-    // Report the refusal rather than silently no-op'ing. Checked before the
-    // call (not from run()'s return) because the run is detached — its result
-    // is never seen here. Race-free: run() flips the flag synchronously.
-    if (this.patternBackfill.isRunning) {
-      return {
-        accepted: false,
-        reason: 'a pattern backfill run is already in progress',
-      };
-    }
-    // Fire-and-forget. The .catch() is REQUIRED: an unhandled rejection from a
-    // detached promise can take the Node process down.
-    void this.patternBackfill
-      .run(targets, { timeframes: body.timeframes, lookbackDays: body.lookbackDays })
-      .catch((err) =>
-        this.logger.error(
-          `pattern backfill run failed: ${err instanceof Error ? err.message : err}`,
-        ),
-      );
-    return { accepted: true, targets: targets.length };
-  }
-
-  /**
-   * POST /api/signals/ml/resolve-pending/trigger
-   *
-   * Finalize observations whose follow-through horizon has since completed:
-   * re-fetches their bars, recomputes the outcome, and stamps WIN/LOSS/TIMEOUT.
-   * Rows still inside their horizon are left PENDING for a later run.
-   *
-   * ADMIN-only (class-level @AdminOnly) and external-heartbeat driven, for the
-   * same reasons as the backfill trigger above.
-   *
-   * Body (all optional):
-   *   { limit?: number }  — max PENDING rows to attempt. Default 200.
-   */
-  @Post('ml/resolve-pending/trigger')
-  @HttpCode(HttpStatus.OK)
-  async triggerResolvePending(@Body() body: { limit?: number } = {}) {
-    if (!this.patternCapture) {
-      throw new ServiceUnavailableException('pattern capture is not wired');
-    }
-    const resolved = await this.patternCapture.resolvePending(body.limit);
-    return { ok: true, resolved };
-  }
-
-  /**
    * GET /api/signals — list signals with filters and pagination.
    */
   @Get()
@@ -609,12 +512,17 @@ export class SignalGeneratorController {
       }
     }
 
-    const candles: Candle[] = (raw ?? []).map((c) => ({
+    // Typed OhlcvCandle (not Candle) so this one array serves both consumers:
+    // the detectors need `Candle`, which OhlcvCandle structurally satisfies, and
+    // the ML assembler additionally needs `volume`. Mapping once means the
+    // detected patterns and the captured feature window can never disagree.
+    const candles: OhlcvCandle[] = (raw ?? []).map((c) => ({
       time: c.timestamp.getTime(),
       open: c.open,
       high: c.high,
       low: c.low,
       close: c.close,
+      volume: Number(c.volume ?? 0),
     }));
 
     if (candles.length < 25) {
@@ -622,6 +530,27 @@ export class SignalGeneratorController {
     }
 
     const patterns = buildPatternMarkers(candles);
+
+    // Record the live detection for the ML pattern-quality training set. This is
+    // the ONLY path live detections are captured from — backfill covers history,
+    // nothing else covers now.
+    //
+    // Detached on purpose. This is a chart-overlay read on the <500ms market-data
+    // path, and a training-data write has no business sitting in front of the
+    // user's chart. `capture` is fail-open internally (returns 0, never throws);
+    // the .catch() guards the detached promise regardless, since an unhandled
+    // rejection can take the process down. Duplicate loads are harmless — the
+    // repo writes with skipDuplicates against the row's unique key.
+    if (this.patternCapture) {
+      void this.patternCapture
+        .capture(candles, patterns, { token, exchange: resolvedExchange, timeframe: tf })
+        .catch((err) =>
+          this.logger.debug(
+            `pattern capture failed for ${token}: ${err instanceof Error ? err.message : err}`,
+          ),
+        );
+    }
+
     return { symbol: resolvedSymbol, timeframe: tf, count: patterns.length, patterns };
   }
 

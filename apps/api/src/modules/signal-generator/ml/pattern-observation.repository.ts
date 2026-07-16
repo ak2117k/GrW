@@ -8,9 +8,23 @@ export interface PendingObservation {
   token: string;
   exchange: string;
   timeframe: string;
+  /**
+   * The ANCHOR bar — the row's identity, not necessarily the bar it is labelled
+   * from. A CHART pattern is not detectable at its own anchor, so the resolver
+   * must shift to the decision bar; see `category`.
+   */
   barTime: Date;
   /** Direction the row committed to at capture — the resolver labels against it. */
   bias: string;
+  /**
+   * CHART or CANDLESTICK. Selected because it is what tells the resolver the
+   * DETECTION LAG: a CHART pattern only becomes detectable
+   * `CHART_DETECTION_LAG_BARS` after its anchor, and the assembler labelled it
+   * from that decision bar at capture. Without this the resolver would label from
+   * `barTime` and put a second, more optimistic yardstick in the same table —
+   * affecting exactly the rows that went PENDING, i.e. the live ones.
+   */
+  category: string;
   /**
    * ATR at the detection bar, as stored at capture. The resolver labels against
    * THIS value rather than recomputing one: Wilder ATR is recursive with an SMA
@@ -69,7 +83,7 @@ export class PatternObservationRepository {
       take: limit,
       select: {
         id: true, token: true, exchange: true, timeframe: true, barTime: true, bias: true,
-        atrAtDetection: true,
+        category: true, atrAtDetection: true,
       },
     });
     return rows;

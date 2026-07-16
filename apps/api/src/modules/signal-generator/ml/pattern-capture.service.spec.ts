@@ -26,6 +26,24 @@ function asHistorical(candles: OhlcvCandle[]) {
   }));
 }
 
+/**
+ * 40 quiet candles (close 100, range 99.5/100.5) with exactly ONE event: bar 21
+ * wicks down to 98 and closes straight back at 100.
+ *
+ * Built so the decision-bar shift CHANGES THE ANSWER. For a BEARISH row anchored
+ * at bar 20 with a stored ATR of 1 (favorable = 100 - 1.5 = 98.5):
+ *   - from the ANCHOR (20):      bar 21's low of 98 clears 98.5      ⇒ WIN
+ *   - from the DECISION bar (23): bar 21 is in the past, 24-33 flat  ⇒ TIMEOUT
+ * The whole move happens inside the 3 bars spent detecting the pattern.
+ */
+function quietWithSpike(): OhlcvCandle[] {
+  return Array.from({ length: 40 }, (_, i) =>
+    i === 21
+      ? { time: 21 * 1000, open: 100, high: 100.5, low: 98, close: 100, volume: 10 }
+      : { time: i * 1000, open: 100, high: 100.5, low: 99.5, close: 100, volume: 10 },
+  );
+}
+
 const marker: PatternMarkerDto = {
   category: 'CANDLESTICK', name: 'HAMMER', bias: 'BULLISH',
   time: 20 * 1000, points: [], necklinePrice: null, confirmed: null, confirmTime: null,
@@ -252,6 +270,69 @@ describe('PatternCaptureService', () => {
       const svc = new PatternCaptureService({} as any, repo);
 
       await expect(svc.capture(flat(30), [marker], meta)).resolves.toBe(0);
+    });
+
+    /**
+     * The resolver must use the SAME reference bar the assembler used at capture,
+     * or one training table ends up holding two different yardsticks.
+     *
+     * `buildObservationInputs` labels a CHART pattern from its decision bar
+     * (anchor + CHART_DETECTION_LAG_BARS) but deliberately stores `barTime` as the
+     * ANCHOR — barTime is the row's identity, not its decision point. So a resolver
+     * that treats barTime as the reference bar silently reintroduces exactly the
+     * optimistic skew the assembler shift exists to remove, and it does so ONLY for
+     * rows that went PENDING — i.e. the recent, live ones.
+     */
+    describe('decision-bar consistency with the assembler', () => {
+      const chartPending = {
+        id: 'c1', token: '2885', exchange: 'NSE', timeframe: '15m',
+        barTime: new Date(20 * 1000), bias: 'BEARISH', atrAtDetection: 1,
+        category: 'CHART',
+      };
+
+      it('labels a PENDING CHART row from its decision bar, not its anchor', async () => {
+        const repo = pendingRepo([chartPending]);
+        const adapter = {
+          getHistoricalData: jest.fn().mockResolvedValue(asHistorical(quietWithSpike())),
+        } as any;
+        const svc = new PatternCaptureService(adapter, repo);
+
+        const n = await svc.resolvePending(10);
+
+        // Anchor-labelling would book bar 21's spike as a WIN. It isn't one —
+        // nobody could see this pattern until bar 23, by which point it's gone.
+        expect(repo.updateOutcome).toHaveBeenCalledWith('c1', 'TIMEOUT', null);
+        expect(n).toBe(1);
+      });
+
+      it('does NOT shift a CANDLESTICK row — same bar, same bias, WIN', async () => {
+        // The control. A 1-3 bar shape is knowable at its anchor's close, so bar
+        // 21 is genuine follow-through. Pins the contrast to the CHART shift alone.
+        const repo = pendingRepo([{ ...chartPending, category: 'CANDLESTICK' }]);
+        const adapter = {
+          getHistoricalData: jest.fn().mockResolvedValue(asHistorical(quietWithSpike())),
+        } as any;
+        const svc = new PatternCaptureService(adapter, repo);
+
+        const n = await svc.resolvePending(10);
+
+        expect(repo.updateOutcome).toHaveBeenCalledWith('c1', 'WIN', 1);
+        expect(n).toBe(1);
+      });
+
+      it('holds a CHART row PENDING when its decision bar is past the fetched history', async () => {
+        // Anchor 38 ⇒ decision bar 41, but the series ends at 39. Not knowable yet
+        // and no bar to price the entry from — leave it for a later run rather
+        // than indexing off the end of the array.
+        const repo = pendingRepo([{ ...chartPending, barTime: new Date(38 * 1000) }]);
+        const adapter = {
+          getHistoricalData: jest.fn().mockResolvedValue(asHistorical(quietWithSpike())),
+        } as any;
+        const svc = new PatternCaptureService(adapter, repo);
+
+        await expect(svc.resolvePending(10)).resolves.toBe(0);
+        expect(repo.updateOutcome).not.toHaveBeenCalled();
+      });
     });
   });
 });

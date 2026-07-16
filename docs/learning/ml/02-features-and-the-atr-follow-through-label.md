@@ -33,6 +33,13 @@ Both halves touch the same candle array. The whole trick is that they touch
 **disjoint slices** of it. Hold that thought; the section on lookahead is where it
 gets teeth.
 
+(One simplification to unwind later: "the anchor" is where the line sits for
+*candlestick* patterns. Chart patterns can't be detected at their own anchor —
+they need a few more bars before anyone knows they exist — so the line sits at
+what the code calls the **decision bar**. Read `anchor` throughout until
+[the decision bar](#the-decision-bar-when-the-anchor-itself-is-a-lie) unwinds it;
+the reasoning is identical, the index just moves.)
+
 ## Choosing a label: three bad answers first
 
 We have to turn "did the pattern work?" into a number. The obvious candidates all
@@ -263,41 +270,46 @@ This is the loop:
     const anchor = indexByTime.get(marker.time);
     if (anchor === undefined) continue;
 
+    // The bar we could actually have ACTED on. See "the decision bar" below.
+    const lag = marker.category === 'CHART' ? CHART_DETECTION_LAG_BARS : 0;
+    const decisionIndex = anchor + lag;
+    if (decisionIndex >= candles.length) continue;
+
     const dir: 1 | -1 = marker.bias === 'BULLISH' ? 1 : -1;
-    const atr = computeAtrFromCandles(candles.slice(0, anchor + 1), atrPeriod);
+    const atr = computeAtrFromCandles(candles.slice(0, decisionIndex + 1), atrPeriod);
     if (atr <= 0) continue; // can't scale a follow-through target without ATR
 
-    const ft = resolveFollowThrough(candles, anchor, dir, atr, params);
-    const window = candles.slice(Math.max(0, anchor - windowBars + 1), anchor + 1);
+    const ft = resolveFollowThrough(candles, decisionIndex, dir, atr, params);
+    const window = candles.slice(Math.max(0, decisionIndex - windowBars + 1), decisionIndex + 1);
     ...
   }
 ```
 
-**Read those three lines against each other. This is the most important thing in
-the lesson.** Pulled out of the loop above and annotated (the `←` comments are
-mine; in the file the lines aren't adjacent):
+Ignore `decisionIndex` for one more minute — pretend it reads `anchor`, which is
+what it used to. **Read those three lines against each other. This is the most
+important thing in the lesson.** Pulled out of the loop above and annotated (in
+the file the lines aren't adjacent):
 
 ```text
-const atr = computeAtrFromCandles(candles.slice(0, anchor + 1), atrPeriod);
-                                            └── bars ≤ anchor ──┘
+const atr = computeAtrFromCandles(candles.slice(0, decisionIndex + 1), atrPeriod);
+                                            └── bars ≤ decision ──┘
 
-const ft = resolveFollowThrough(candles, anchor, dir, atr, params);
+const ft = resolveFollowThrough(candles, decisionIndex, dir, atr, params);
                                 └── the FULL array — reads FORWARD ──┘
 
-const window = candles.slice(Math.max(0, anchor - windowBars + 1), anchor + 1);
-                                    └────────── bars ≤ anchor ──────────┘
+const window = candles.slice(Math.max(0, decisionIndex - windowBars + 1), decisionIndex + 1);
+                                    └──────────── bars ≤ decision ────────────┘
 ```
 
-- **ATR** gets `candles.slice(0, anchor + 1)` — history up to and including the
-  anchor. Never a bar beyond it.
-- **The feature window** gets `candles.slice(anchor - windowBars + 1, anchor + 1)`
-  — the last `windowBars` (default 50) bars ending *at* the anchor. Also never
-  beyond.
+- **ATR** gets `candles.slice(0, decisionIndex + 1)` — history up to and including
+  the decision bar. Never a bar beyond it.
+- **The feature window** gets the last `windowBars` (default 50) bars ending *at*
+  the decision bar. Also never beyond.
 - **The label** gets the **full `candles` array** — because reading forward is
   precisely its job.
 
 That asymmetry is not incidental; it *is* the design. Everything the model will
-ever see is truncated at the anchor. Only the answer key sees past it.
+ever see is truncated at the decision bar. Only the answer key sees past it.
 
 ### Why it matters: lookahead bias
 
@@ -322,10 +334,110 @@ way a quant pipeline dies:
 
 It's insidious because nothing errors. No exception, no test failure, no red. Just
 an optimistic number that means nothing — and every incentive to believe it. The
-defense is structural, not vigilance: features slice `0 … anchor`, the label reads
+defense is structural, not vigilance: features slice `0 … decision`, the label reads
 everything, and the two never mix. That's why the ATR slice is written the way it
 is. (The spec, §10, calls for an explicit leakage-guard test asserting no feature
-reads a bar > anchor. Worth knowing that's the standard, not a nicety.)
+reads a bar past the decision bar. Worth knowing that's the standard, not a nicety.)
+
+### The decision bar: when the anchor itself is a lie
+
+Everything above polices one question: *does anything on the feature side reach
+across the line into the future?* Draw the line, never cross it, and you're safe.
+
+Now the harder question, and the reason `decisionIndex` exists:
+
+> **What if the line is in the wrong place?**
+
+You can honour every rule above — no feature reads past the anchor, the slices are
+immaculate, a leakage-guard test passes — and still ship an optimistic model. The
+discipline of not crossing the line is worthless if the line was drawn somewhere
+you couldn't actually stand.
+
+Here's how it happens. A chart pattern's anchor is its second peak or trough: a
+**swing pivot**. And look at what a swing pivot requires (`patterns/swing-points.ts`):
+a pivot at index `i` must strictly beat `CHART_SWING_STRENGTH` (3) candles on
+**both sides**. Read that again — *both sides*. Bar `i` cannot be known to be a
+pivot until bar `i + 3` has closed. Before that, it's just a bar.
+
+So a DOUBLE_TOP "at bar 20" is a statement made at **bar 23**. Live, `/patterns`
+physically cannot surface that marker any earlier; the detector wouldn't have
+found it. Labelling it from bar 20 makes two false claims at once:
+
+1. **The entry is priced at a bar you couldn't trade.** `entry = close[20]`, but
+   nobody could have known to act at bar 20's close.
+2. **Bars 21–23 count as follow-through.** They were spent *detecting the
+   pattern*, not reacting to it — but the label counts them toward the `k × ATR`
+   move anyway.
+
+Both errors point the same way: **flattering**. Worse than a coin flip, because
+the bias is systematic. Every chart pattern gets a 3-bar head start that no live
+trader ever gets.
+
+Make it concrete (this fixture is `observation-assembler.spec.ts`, near enough
+verbatim). Forty quiet candles, ATR = 1, and exactly one event — at bar 21 price
+wicks down to 98 and closes straight back at 100:
+
+```text
+bar:    20        21         22    23    24 ............ 33
+       ┌──┐     ┌──┐        ┌──┐  ┌──┐
+close  100      100         100   100   100 (flat forever)
+low    99.5      98 ◄── the entire move   99.5
+       ▲         ▲                 ▲
+       │         │                 │
+    anchor    happens HERE     decision bar
+              (while we're     (what we could
+               still           actually act on)
+               detecting)
+
+BEARISH, ATR = 1, k = 1.5  ⇒  favorable target = 100 − 1.5 = 98.5
+
+labelled from anchor 20   → bar 21's low of 98 reaches 98.5   ⇒ WIN   ✗ a lie
+labelled from decision 23 → bar 21 is in the PAST; 24-33 flat ⇒ TIMEOUT ✓ the truth
+```
+
+The whole favorable move happened inside the three bars spent recognising the
+pattern. A trader who couldn't see the pattern until bar 23 captured **none of
+it** — and anchor-labelling books it as a win regardless. That is the bug in
+miniature, and note that no leakage rule catches it: bar 21 is genuinely in the
+past *from bar 23*. Nothing crossed any line. The line was just wrong.
+
+The fix is to label from the bar you could have **acted** on:
+
+```ts
+const lag = marker.category === 'CHART' ? CHART_DETECTION_LAG_BARS : 0;
+const decisionIndex = anchor + lag;
+```
+
+- **CANDLESTICK patterns shift by 0.** A shooting star is a 1–3 bar shape that
+  *ends* at its anchor — it's knowable at that bar's close, so the anchor already
+  is the decision bar. (This is the control in the spec: same bar, same bias, and
+  it correctly stays a WIN. The contrast is the test.)
+- **CHART patterns shift by `CHART_SWING_STRENGTH`.**
+
+Two details worth their own beat:
+
+**`barTime` does not shift.** It stays the marker's own anchor, because it's the
+pattern's *identity* — part of the unique key `(token, exchange, timeframe,
+patternName, barTime)`. Only the label and feature computation move. Identity and
+point-in-time are different concepts and it's worth keeping them that way.
+
+**`CHART_DETECTION_LAG_BARS` is not a `3` typed into the assembler.** It's an
+alias of the detector's own `CHART_SWING_STRENGTH`:
+
+```ts
+export const CHART_DETECTION_LAG_BARS = CHART_SWING_STRENGTH;
+```
+
+If someone tunes the detector to `strength = 5` and the assembler still shifted by
+3, the skew silently returns — two bars of it — and, per everything above, nothing
+would error. Green tests, glowing metrics, quietly optimistic labels. Making them
+literally the same constant means there is exactly one number to change. Coupling
+here is the *point*, not a smell.
+
+The generalisation worth carrying out of this lesson:
+
+> **"Don't read the future" is the easy half. The hard half is being honest about
+> when the present actually started.**
 
 ### Why NEUTRAL is excluded
 
@@ -417,6 +529,15 @@ model conditioned on `1d` borrows structure from its better-fed neighbours.
    pessimistically labeled. That's the conservative choice compounding — worth
    remembering when you compare win rates *across* timeframes, since it's a
    property of the label, not of the patterns.
+
+6. **The newest CHART patterns silently drop.** Mirror image of gotcha 1. A CHART
+   marker anchored within `CHART_DETECTION_LAG_BARS` of the end of the series has
+   a decision bar past the last candle — the pattern isn't knowable yet, and
+   there's no bar to price the entry from — so it's skipped:
+   `if (decisionIndex >= candles.length) continue;`. Backfill loses the last few
+   bars' worth of chart patterns on every pass; they'll be picked up next run once
+   the bars exist. A CANDLESTICK marker at the same anchor assembles fine (lag 0),
+   so a tail-end gap that hits only CHART rows is this, working as intended.
 
 ## Next
 

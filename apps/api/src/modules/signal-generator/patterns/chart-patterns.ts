@@ -13,6 +13,21 @@
 import type { Candle, SwingPoint } from './swing-points';
 import { swingHighs, swingLows } from './swing-points';
 
+/**
+ * Swing `strength` every chart-pattern detector uses: a pivot must strictly beat
+ * this many candles on BOTH sides.
+ *
+ * This is exported rather than inlined because it is also the pattern's DETECTION
+ * LAG: a pivot at index `i` needs bars `i+1 … i+CHART_SWING_STRENGTH` to exist
+ * before it can be recognised as a pivot at all, so a chart pattern anchored at
+ * `i` is not knowable until bar `i + CHART_SWING_STRENGTH`. The ML observation
+ * assembler shifts its label/feature computation by exactly that many bars to
+ * avoid a train/serve skew (see `ml/observation-assembler.ts`
+ * CHART_DETECTION_LAG_BARS). Those two numbers MUST be the same number — so they
+ * are literally the same constant. Do not re-inline `3` below.
+ */
+export const CHART_SWING_STRENGTH = 3;
+
 export type ChartPatternName = 'DOUBLE_TOP' | 'DOUBLE_BOTTOM';
 
 /** Directional lean a completed chart pattern implies. */
@@ -37,7 +52,7 @@ export interface ChartPattern {
 }
 
 export interface ChartPatternOptions {
-  /** Passed straight to swingHighs/swingLows. Bigger ⇒ fewer, weightier pivots. Default 3. */
+  /** Passed straight to swingHighs/swingLows. Bigger ⇒ fewer, weightier pivots. Default {@link CHART_SWING_STRENGTH}. */
   strength?: number;
   /** |p1 - p2| / p1 <= this ⇒ the two peaks/troughs count as "equal height". Default 0.02 (2%). */
   priceTolerance?: number;
@@ -55,7 +70,7 @@ export interface ChartPatternOptions {
  * the first later candle to CLOSE below the neckline — a breakdown. Bias is BEARISH.
  */
 export function findDoubleTops(candles: Candle[], opts?: ChartPatternOptions): ChartPattern[] {
-  const { strength = 3, priceTolerance = 0.02, minDepthRatio = 0.03 } = opts ?? {};
+  const { strength = CHART_SWING_STRENGTH, priceTolerance = 0.02, minDepthRatio = 0.03 } = opts ?? {};
   const highs = swingHighs(candles, strength);
   const lows = swingLows(candles, strength);
   const patterns: ChartPattern[] = [];
@@ -111,7 +126,7 @@ export function findDoubleTops(candles: Candle[], opts?: ChartPatternOptions): C
  * is the first later candle to CLOSE above the neckline — a breakout up. Bias BULLISH.
  */
 export function findDoubleBottoms(candles: Candle[], opts?: ChartPatternOptions): ChartPattern[] {
-  const { strength = 3, priceTolerance = 0.02, minDepthRatio = 0.03 } = opts ?? {};
+  const { strength = CHART_SWING_STRENGTH, priceTolerance = 0.02, minDepthRatio = 0.03 } = opts ?? {};
   const lows = swingLows(candles, strength);
   const highs = swingHighs(candles, strength);
   const patterns: ChartPattern[] = [];

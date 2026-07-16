@@ -60,11 +60,29 @@ services:
         sync: false
 
       # --- Chartink webhook ---
-      # Shared secret in the webhook path: Chartink POSTs alerts to
-      # /webhooks/chartink/<this-value>. MUST be set or every webhook is 401'd.
-      # Point Chartink's alert URL at
-      #   https://grw-api.onrender.com/webhooks/chartink/<CHARTINK_WEBHOOK_SECRET>
+      # Shared secret sent as a HEADER (never in the URL — Render's access logs
+      # record request paths, and this value is the whole auth boundary for a
+      # public route). MUST be set or every webhook is 401'd.
+      # Point Chartink's alert action at
+      #   URL:    https://grw-api.onrender.com/webhooks/chartink
+      #   header: X-Chartink-Webhook-Secret: <CHARTINK_WEBHOOK_SECRET>
+      # ROTATE this: the previous path-secret value was logged in plaintext.
       - key: CHARTINK_WEBHOOK_SECRET
+        sync: false
+
+      # --- ML pattern-quality ops triggers ---
+      # Shared secret for the ML data-capture triggers, sent as a HEADER for the
+      # same reason as above. Until this is set the triggers reject EVERY request
+      # (fail-closed), so pattern backfill never runs and no training data is
+      # produced from history.
+      # An external heartbeat (cron-job.org / UptimeRobot — both support custom
+      # headers) POSTs, with header  X-ML-Trigger-Secret: <this-value> , to
+      #   https://grw-api.onrender.com/webhooks/ml/backfill         (202, detached)
+      #   https://grw-api.onrender.com/webhooks/ml/resolve-pending  (200, sync)
+      # Driven externally because the free plan spins the service down when idle,
+      # so an in-process @Cron would simply never fire.
+      # Generate: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+      - key: ML_TRIGGER_SECRET
         sync: false
 
       # --- Redis (Render Key Value, INTERNAL endpoint) ---

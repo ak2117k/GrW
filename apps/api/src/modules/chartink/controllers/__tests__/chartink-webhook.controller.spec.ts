@@ -53,29 +53,31 @@ describe('ChartinkWebhookController', () => {
   });
 
   /**
-   * The secret travels in a HEADER, never the URL. A path secret is logged
-   * verbatim by everything that records request paths — the global
-   * LoggingInterceptor on success, the HttpExceptionFilter on every 401, and the
-   * hosting platform's access logs, which are outside this process entirely.
-   * Since those logs ship to a third party and this secret IS the auth boundary
-   * for a @Public() route, the URL is the one place it must not go.
+   * The secret is in the PATH, deliberately — for now.
    *
-   * Asserted on route metadata because no functional test can defend a route's
-   * shape: re-add `:secret` and every other test here still passes.
+   * The header is the right end state (see MlTriggerController), and this was
+   * briefly migrated there. It got reverted: the URL lives in Chartink's alert
+   * config, a third party that must be reconfigured BY HAND, so deploying the
+   * code first 404'd every live alert and silently dropped real trading signals
+   * mid-session. The lesson is ordering, not direction — cut the SENDER over
+   * first, confirm it arrives, then drop the path param.
+   *
+   * This test pins the URL shape so the route can't be changed out from under
+   * Chartink again without someone deleting this comment and thinking about it.
+   * Our own logs are protected meanwhile by redactSecretPath/redactSecretsInText.
    */
-  it('exposes a static route with no path param — the secret must not be in the URL', () => {
-    const path = Reflect.getMetadata(PATH_METADATA, ChartinkWebhookController.prototype.receive);
-    expect(path).not.toContain(':');
+  it('keeps the :secret path param — Chartink is configured with the URL', () => {
+    expect(Reflect.getMetadata(PATH_METADATA, ChartinkWebhookController.prototype.receive)).toBe(
+      ':secret',
+    );
     expect(Reflect.getMetadata(PATH_METADATA, ChartinkWebhookController)).toBe(
       'webhooks/chartink',
     );
   });
 
-  // A header, unlike the path param this replaced, can be absent entirely.
-  // Must 401 rather than blow up reading `.length` off undefined (a 500 + stack).
   it.each([
-    ['a missing header', undefined],
-    ['a null header', null],
+    ['a missing secret', undefined],
+    ['a null secret', null],
   ])('throws UnauthorizedException for %s rather than a 500', async (_label, provided) => {
     await expect(controller.receive(provided as never, validBody)).rejects.toThrow(
       UnauthorizedException,

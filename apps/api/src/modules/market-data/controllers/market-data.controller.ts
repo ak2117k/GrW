@@ -38,6 +38,7 @@ import {
 } from '@td/shared/constants';
 import { seriesCautionary } from '../../trade-engine/utils/cautionary';
 import { dedupePreferNse } from '../utils/dedupe-prefer-nse';
+import { scoreSymbolMatch } from '../utils/rank-symbol-matches';
 
 /**
  * Look up a symbol and exchange for a token from the known constant maps.
@@ -225,12 +226,19 @@ export class MarketDataController {
         }
       }
 
-      // Dedup NSE/BSE BEFORE slicing, so a preferred NSE row is never dropped in
-      // favour of the BSE duplicate it should have replaced.
-      const combined = dedupePreferNse([...localResults, ...brokerResults, ...masterResults]).slice(
-        0,
-        50,
-      );
+      // Dedup NSE/BSE, then relevance-rank the merged tiers (local + broker +
+      // master) so the best match leads regardless of which tier produced it.
+      // Stable sort that KEEPS every row — a name-resolved match that doesn't
+      // lexically hit the query (score 0) sinks to the bottom, never dropped.
+      const combined = dedupePreferNse([...localResults, ...brokerResults, ...masterResults])
+        .map((r, idx) => ({
+          r,
+          idx,
+          score: scoreSymbolMatch(trimmed, r.symbol, r.name) + (r.exchange === 'NSE' ? 3 : 0),
+        }))
+        .sort((a, b) => b.score - a.score || a.idx - b.idx)
+        .map((x) => x.r)
+        .slice(0, 50);
       const sourceParts: string[] = [];
       if (localResults.length > 0) sourceParts.push('local');
       if (brokerResults.length > 0) sourceParts.push('angel_one');

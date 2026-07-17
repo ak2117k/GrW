@@ -10,6 +10,7 @@ import {
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { AngelOneWebSocketService, WsFeedMode, ExchangeType } from './angel-one-websocket.service';
 import { matchSymbolToken } from './symbol-token-match';
+import { rankSymbolMatches } from '../utils/rank-symbol-matches';
 import { COMMODITIES, INDICES } from '@td/shared/constants';
 import { MarketDepth, MarketDepthLevel } from '@td/shared/types';
 
@@ -1491,20 +1492,15 @@ export class AngelOneAdapterService implements BrokerAdapter {
       return inst.exch_seg === 'NSE' ? sym.endsWith('-EQ') : inst.exch_seg === 'BSE';
     };
 
-    const matches: any[] = [];
-    const seen = new Set<string>();
-
-    for (const inst of all) {
-      if (!exchanges.includes(inst.exch_seg)) continue;
-      if (!isEqRow(inst)) continue;
-      const sym = String(inst.symbol ?? '').toUpperCase();
-      const name = String(inst.name ?? '').toUpperCase();
-      if (sym.includes(q) || name.includes(q)) {
-        matches.push(inst);
-        seen.add(String(inst.token ?? ''));
-        if (matches.length >= limit) break;
-      }
-    }
+    // Collect the eligible EQ rows for the requested exchanges, then RANK by
+    // relevance (exact > symbol-prefix > substring > name > fuzzy subsequence)
+    // instead of returning them in arrival order — so typing a few letters puts
+    // the obvious pick first, the Angel-One feel.
+    const eligible = all.filter(
+      (inst: any) => exchanges.includes(inst.exch_seg) && isEqRow(inst),
+    );
+    const matches: any[] = rankSymbolMatches(query, eligible, limit);
+    const seen = new Set<string>(matches.map((m) => String(m.token ?? '')));
 
     // If we have headroom, ask Yahoo to map the query to tickers and
     // pull the matching master rows. Skips when query is short or

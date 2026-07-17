@@ -7,3 +7,6 @@ httpx==0.28.0
 redis==5.2.0
 python-dotenv==1.0.0
 websockets==13.0
+# Pattern-quality model (Phase 2): XGBoost classifier + sklearn for calibration/metrics.
+xgboost>=2.1
+scikit-learn>=1.5

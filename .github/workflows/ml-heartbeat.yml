@@ -1,0 +1,71 @@
+# ML pipeline heartbeat.
+#
+# Render free-tier spins the API down when idle, so an in-process @Cron never
+# fires reliably. This external heartbeat drives the two market-hours ML ops:
+#   - /webhooks/ml/scan            → capture LIVE-EDGE detections WITH context
+#                                    (MTF/SR/sector) — the rich rows a model needs.
+#   - /webhooks/ml/resolve-pending → finalize PENDING labels whose horizon closed.
+#
+# Both authenticate with the X-ML-Trigger-Secret HEADER (never a URL secret).
+#
+# ── ONE-TIME SETUP (required, or every run 401s) ──────────────────────────────
+#   GitHub → repo Settings → Secrets and variables → Actions → New repository
+#   secret:  name = ML_TRIGGER_SECRET,  value = the SAME value set in Render.
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Schedule note: cron is UTC. NSE trades 09:15–15:30 IST = 03:45–10:00 UTC. We run
+# every 15 min across 04:00–10:45 UTC (covers each 15m bar close ~09:30–16:15 IST,
+# weekdays). GitHub may delay scheduled runs by several minutes — harmless here,
+# since the scan keeps whatever the latest completed bar is. Edit `targets` below
+# to widen the watchlist.
+
+name: ml-heartbeat
+
+on:
+  schedule:
+    - cron: '*/15 4-10 * * 1-5' # every 15 min, ~09:30–16:15 IST, Mon–Fri
+  workflow_dispatch: {} # manual run for testing
+
+concurrency:
+  group: ml-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    env:
+      API: https://grw-api.onrender.com
+      SECRET: ${{ secrets.ML_TRIGGER_SECRET }}
+    steps:
+      - name: Guard — secret configured
+        run: |
+          if [ -z "$SECRET" ]; then
+            echo "::error::ML_TRIGGER_SECRET repo secret is not set — every trigger would 401. See this workflow's header for setup."
+            exit 1
+          fi
+
+      - name: Live-edge pattern scan (rich rows)
+        run: |
+          code=$(curl -sS -m 120 --retry 2 --retry-all-errors -o /tmp/scan.json -w "%{http_code}" \
+            -X POST "$API/webhooks/ml/scan" \
+            -H "X-ML-Trigger-Secret: $SECRET" -H "Content-Type: application/json" \
+            -d '{"targets":[
+                  {"token":"2885","exchange":"NSE","symbol":"RELIANCE"},
+                  {"token":"11536","exchange":"NSE","symbol":"TCS"},
+                  {"token":"1333","exchange":"NSE","symbol":"HDFCBANK"},
+                  {"token":"1594","exchange":"NSE","symbol":"INFY"},
+                  {"token":"4963","exchange":"NSE","symbol":"ICICIBANK"},
+                  {"token":"3045","exchange":"NSE","symbol":"SBIN"}
+                ],"timeframes":["15m"]}')
+          echo "scan HTTP $code"; cat /tmp/scan.json; echo
+          case "$code" in 2*) : ;; *) echo "::error::scan returned $code"; exit 1 ;; esac
+
+      - name: Resolve pending labels
+        if: always()
+        run: |
+          code=$(curl -sS -m 120 --retry 2 --retry-all-errors -o /tmp/resolve.json -w "%{http_code}" \
+            -X POST "$API/webhooks/ml/resolve-pending" \
+            -H "X-ML-Trigger-Secret: $SECRET" -H "Content-Type: application/json" \
+            -d '{"limit":500}')
+          echo "resolve HTTP $code"; cat /tmp/resolve.json; echo
+          case "$code" in 2*) : ;; *) echo "::error::resolve-pending returned $code"; exit 1 ;; esac

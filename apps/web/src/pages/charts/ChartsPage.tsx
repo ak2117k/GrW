@@ -46,6 +46,9 @@ export default function ChartsPage() {
   // Pattern overlays default OFF — opt-in so a chart never boots cluttered.
   const [showPatterns, setShowPatterns] = useState(false);
   const [crosshairData, setCrosshairData] = useState<CrosshairData | null>(null);
+  // Mobile watchlist drawer: the sidebar can't sit beside the chart on a phone,
+  // so on <md it becomes an off-canvas drawer toggled from a chart button.
+  const [watchlistOpen, setWatchlistOpen] = useState(false);
   const [searchParams, setSearchParams] = useSearchParams();
 
   const selectedSymbol = useChartStore((s) => s.selectedSymbol);
@@ -318,9 +321,27 @@ export default function ChartsPage() {
           to scroll into view without squishing the chart. */}
       <div className={clsx('flex min-h-0', isFullscreen ? 'flex-1' : 'h-[70vh]')}>
 
-        {/* Watchlist sidebar */}
+        {/* Watchlist — static column on md+, off-canvas drawer on mobile */}
         {!isFullscreen && (
-          <div className="w-48 shrink-0 border-r border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] overflow-y-auto">
+          <>
+            {/* Mobile backdrop (tap to close) */}
+            {watchlistOpen && (
+              <div
+                className="fixed inset-0 z-30 bg-black/40 md:hidden"
+                onClick={() => setWatchlistOpen(false)}
+                aria-hidden
+              />
+            )}
+          <div
+            className={clsx(
+              'border-r border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] overflow-y-auto',
+              // md+: in-flow fixed-width column (unchanged desktop look)
+              'md:static md:z-auto md:w-48 md:shrink-0 md:translate-x-0',
+              // <md: off-canvas drawer that slides in when open
+              'fixed inset-y-0 left-0 z-40 w-64 transition-transform duration-200',
+              watchlistOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
+            )}
+          >
             <div className="px-3 py-2 border-b border-[var(--color-border-subtle)]">
               <h3 className="text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
                 Watchlist
@@ -331,7 +352,10 @@ export default function ChartsPage() {
               return (
                 <button
                   key={item.token}
-                  onClick={() => setSymbol(item)}
+                  onClick={() => {
+                    setSymbol(item);
+                    setWatchlistOpen(false); // close the drawer after picking on mobile
+                  }}
                   className={clsx(
                     'w-full px-3 py-2.5 text-left border-b border-[var(--color-border-subtle)] transition-colors',
                     isActive
@@ -361,10 +385,14 @@ export default function ChartsPage() {
               );
             })}
           </div>
+          </>
         )}
 
-        {/* Drawing toolbar — left-side vertical, Groww-style */}
-        <DrawingToolbar token={selectedSymbol.token} />
+        {/* Drawing toolbar — left-side vertical, Groww-style. Hidden on mobile so
+            the chart gets full width; drawing is a desktop interaction. */}
+        <div className="hidden md:block">
+          <DrawingToolbar token={selectedSymbol.token} />
+        </div>
 
         {/* Chart area. h-full is required because the inner CandlestickChart
             uses height: '100%' which can't resolve on a flex item without an
@@ -372,6 +400,17 @@ export default function ChartsPage() {
             min-h-* (not a fixed h-*). Without this, the chart collapsed to
             its 300px minHeight or disappeared entirely. */}
         <div className="flex-1 relative min-w-0 h-full">
+          {/* Mobile-only watchlist toggle — opens the off-canvas drawer. Hidden
+              on md+ where the sidebar is always visible. */}
+          {!isFullscreen && (
+            <button
+              onClick={() => setWatchlistOpen(true)}
+              aria-label="Open watchlist"
+              className="md:hidden absolute top-2 left-2 z-20 flex items-center gap-1 rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/90 px-2 py-1 text-xs text-[var(--color-text-secondary)] shadow backdrop-blur-sm"
+            >
+              ☰ Watchlist
+            </button>
+          )}
           {/* Full-area loader during any candle fetch. The chart's `key`
               prop already unmounts the previous symbol's chart on switch,
               so the loader overlays an empty area — no flash of stale

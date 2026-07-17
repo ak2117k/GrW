@@ -38,7 +38,7 @@ export default function ChartToolbar({
   const isUp = (priceChange ?? 0) >= 0;
 
   return (
-    <div className="flex items-center justify-between gap-3 px-4 py-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]">
+    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 px-4 py-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]">
       {/* Left section: Symbol + Price */}
       <div className="flex items-center gap-4">
         <SymbolSearch />

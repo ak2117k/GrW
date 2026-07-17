@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { categorizeScannerByName } from '../scanner-category';
 
 export interface UpsertScannerInput {
   scanUrl: string;
@@ -45,6 +46,13 @@ export class ChartinkRepository {
         firstSeenAt: input.firedAt,
         lastFiredAt: input.firedAt,
         fireCount: 1,
+        // Tag from the name at creation so a swing scanner takes the swing track
+        // on its FIRST fire — the previous default-OTHER + manual-tag flow meant a
+        // "ANAND SWING" scanner silently ran as non-swing until someone remembered
+        // to tag it (one fired 345×, zero swing entries). Create-only on purpose:
+        // an admin's later category change (via updateScannerCategory) must win, so
+        // the update branch never re-derives it.
+        category: categorizeScannerByName(input.scanName),
       },
       update: {
         scanName: input.scanName,
@@ -52,8 +60,6 @@ export class ChartinkRepository {
         lastFiredAt: input.firedAt,
         fireCount: { increment: 1 },
       },
-      // `category` lets the ingest path prioritise ANAND_SWING jobs so the
-      // intraday/swing track isn't starved behind the scoring backlog.
       select: { id: true, category: true },
     });
     return row;

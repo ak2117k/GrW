@@ -37,6 +37,7 @@ import {
   COMMODITIES,
 } from '@td/shared/constants';
 import { seriesCautionary } from '../../trade-engine/utils/cautionary';
+import { dedupePreferNse } from '../utils/dedupe-prefer-nse';
 
 /**
  * Look up a symbol and exchange for a token from the known constant maps.
@@ -127,11 +128,13 @@ export class MarketDataController {
         segment,
       );
 
-      // If local results are sufficient, return them directly
+      // If local results are sufficient, return them directly (NSE-deduped:
+      // a stock on both exchanges must show once, as NSE — like Angel One).
       if (localResults.length >= 10) {
+        const deduped = dedupePreferNse(localResults);
         return {
-          instruments: localResults,
-          count: localResults.length,
+          instruments: deduped,
+          count: deduped.length,
           source: 'local',
         };
       }
@@ -222,7 +225,12 @@ export class MarketDataController {
         }
       }
 
-      const combined = [...localResults, ...brokerResults, ...masterResults].slice(0, 50);
+      // Dedup NSE/BSE BEFORE slicing, so a preferred NSE row is never dropped in
+      // favour of the BSE duplicate it should have replaced.
+      const combined = dedupePreferNse([...localResults, ...brokerResults, ...masterResults]).slice(
+        0,
+        50,
+      );
       const sourceParts: string[] = [];
       if (localResults.length > 0) sourceParts.push('local');
       if (brokerResults.length > 0) sourceParts.push('angel_one');

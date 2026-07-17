@@ -1,7 +1,12 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PortfolioService } from '../services/portfolio.service';
-import { DateRangeDto, JournalFilterDto, MonthlyReportDto } from '../dto/portfolio.dto';
+import {
+  DateRangeDto,
+  JournalFilterDto,
+  MonthlyReportDto,
+  ChartTradesQueryDto,
+} from '../dto/portfolio.dto';
 
 @ApiTags('Portfolio')
 @Controller('api/portfolio')
@@ -67,6 +72,13 @@ export class PortfolioController {
       sortBy: dto.sortBy ?? 'date',
       order: dto.order ?? 'desc',
     });
+  }
+
+  @Get('chart-trades')
+  @ApiOperation({ summary: "Get the current user's trades on an instrument, shaped for chart annotation" })
+  @ApiResponse({ status: 200, description: 'Chart trade annotations returned' })
+  async getChartTrades(@Query() dto: ChartTradesQueryDto) {
+    return this.portfolioService.getChartTrades(dto.token);
   }
 
   @Get('monthly-report')

@@ -1,1 +1,1 @@
-export { DateRangeDto, JournalFilterDto, MonthlyReportDto, JournalSortBy, SortOrder } from './portfolio.dto';
+export { DateRangeDto, JournalFilterDto, MonthlyReportDto, ChartTradesQueryDto, JournalSortBy, SortOrder } from './portfolio.dto';

@@ -322,6 +322,22 @@ export class PortfolioRepository {
   }
 
   /**
+   * Get every trade for a given instrument token, WITH its lifecycle events,
+   * for the chart-trade annotation endpoint.
+   *
+   * `userId` is intentionally NOT filtered here: `Trade` is a tenant-owned model,
+   * so the PrismaService tenant-scoping interceptor AND-merges `userId` for the
+   * active request context automatically (same convention as every other read in
+   * this repository). The relation filter narrows to the instrument by its token.
+   */
+  async getTradesWithEventsByToken(token: string) {
+    return this.prisma.trade.findMany({
+      where: { instrument: { token } },
+      include: { events: true },
+    });
+  }
+
+  /**
    * Get recent closed trades
    */
   async getRecentTrades(limit: number = 5) {

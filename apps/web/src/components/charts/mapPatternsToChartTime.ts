@@ -39,31 +39,15 @@ export function mapPatternsToChartTime(
   patterns: PatternMarker[],
   realTimeMap: Map<number, number>,
 ): MappedPattern[] {
-  // Invert compressed→real into real→compressed.
-  const realToCompressed = new Map<number, number>();
-  for (const [compressed, real] of realTimeMap) {
-    realToCompressed.set(real, compressed);
-  }
-  const sortedReals = [...realToCompressed.keys()].sort((a, b) => a - b);
-  const tfSec = deriveTfSec(sortedReals);
+  const resolver = buildChartTimeResolver(realTimeMap);
 
   const out: MappedPattern[] = [];
   for (const p of patterns) {
-    const anchorTime = resolveSec(
-      Math.round(p.time / 1000),
-      realToCompressed,
-      sortedReals,
-      tfSec,
-    );
+    const anchorTime = resolver.resolveMs(p.time);
 
     const pointTimes: number[] = [];
     for (const ptMs of p.points ?? []) {
-      const c = resolveSec(
-        Math.round(ptMs / 1000),
-        realToCompressed,
-        sortedReals,
-        tfSec,
-      );
+      const c = resolver.resolveMs(ptMs);
       if (c !== null) pointTimes.push(c);
     }
 
@@ -72,6 +56,37 @@ export function mapPatternsToChartTime(
     out.push({ pattern: p, anchorTime, pointTimes });
   }
   return out;
+}
+
+/**
+ * Resolves ONE real epoch-MS timestamp onto the chart's gap-compressed time
+ * axis, using the exact same MS→real-seconds→compressed logic the pattern
+ * overlay uses (bar-inside tolerance included). Build it once per render from
+ * the current `realTimeMap`, then call `resolveMs` per timestamp.
+ *
+ * Shared so other overlays (e.g. trade markers) place elements on the SAME
+ * bars the pattern markers land on — a single source of truth for the mapping.
+ */
+export interface ChartTimeResolver {
+  /** Real epoch MS → compressed chart time, or null when outside the window. */
+  resolveMs: (epochMs: number) => number | null;
+}
+
+export function buildChartTimeResolver(
+  realTimeMap: Map<number, number>,
+): ChartTimeResolver {
+  // Invert compressed→real into real→compressed.
+  const realToCompressed = new Map<number, number>();
+  for (const [compressed, real] of realTimeMap) {
+    realToCompressed.set(real, compressed);
+  }
+  const sortedReals = [...realToCompressed.keys()].sort((a, b) => a - b);
+  const tfSec = deriveTfSec(sortedReals);
+
+  return {
+    resolveMs: (epochMs: number) =>
+      resolveSec(Math.round(epochMs / 1000), realToCompressed, sortedReals, tfSec),
+  };
 }
 
 /** Smallest positive gap between consecutive real bar-starts = the timeframe. */

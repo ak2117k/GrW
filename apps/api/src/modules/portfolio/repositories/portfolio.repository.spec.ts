@@ -106,6 +106,23 @@ describe('PortfolioRepository — aggregate refactor', () => {
     });
   });
 
+  describe('getTradesWithEventsByToken', () => {
+    beforeEach(async () => {
+      groupBy = jest.fn();
+      findMany = jest.fn(async () => [{ id: 'trade-1', events: [] }]);
+      await build();
+    });
+
+    it('queries trades for the token WITH their events (userId scoped by the tenant interceptor)', async () => {
+      const rows = await repo.getTradesWithEventsByToken('45678');
+
+      expect(rows).toEqual([{ id: 'trade-1', events: [] }]);
+      const arg = findMany.mock.calls[0][0];
+      expect(arg.where).toEqual({ instrument: { token: '45678' } });
+      expect(arg.include).toEqual({ events: true });
+    });
+  });
+
   describe('getTradesBySegment', () => {
     beforeEach(async () => {
       groupBy = jest.fn(async () => [

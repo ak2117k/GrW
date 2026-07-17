@@ -95,6 +95,12 @@ export class JournalFilterDto extends DateRangeDto {
   order?: SortOrder = SortOrder.DESC;
 }
 
+export class ChartTradesQueryDto {
+  @ApiPropertyOptional({ description: 'Instrument token to fetch annotated trades for' })
+  @IsString()
+  token: string;
+}
+
 export class MonthlyReportDto {
   @ApiPropertyOptional({ description: 'Year (e.g. 2026)' })
   @Type(() => Number)

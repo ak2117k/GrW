@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import clsx from 'clsx';
-import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay, DrawingToolbar, DrawingsOverlay, PatternOverlay } from '@/components/charts';
+import { CandlestickChart, ChartToolbar, IndicatorPanel, OIOverlay, DrawingToolbar, DrawingsOverlay, PatternOverlay, TradeMarkerOverlay } from '@/components/charts';
 import type { CandlestickChartHandle } from '@/components/charts';
 import LevelOverlay, { LEVEL_COLORS } from '@/components/charts/LevelOverlay';
 import SetupMarker from '@/components/charts/SetupMarker';
@@ -442,6 +442,16 @@ export default function ChartsPage() {
               realTimeMap={realTimeMap}
             />
           )}
+
+          {/* Realized-trade annotations — entry (▲/▼) + exit (●) markers with
+              sold/remaining/source hover. Custom-positioned HTML, so it never
+              touches the shared setMarkers() that PatternOverlay owns. */}
+          <TradeMarkerOverlay
+            token={selectedSymbol.token}
+            chart={chartRef.current?.chart ?? null}
+            series={chartRef.current?.candleSeries ?? null}
+            realTimeMap={realTimeMap}
+          />
 
           {/* OI Overlay (renders onto the chart, no DOM) */}
           <OIOverlay

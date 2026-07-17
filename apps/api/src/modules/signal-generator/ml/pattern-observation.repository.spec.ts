@@ -1,5 +1,6 @@
+import { Prisma } from '@prisma/client';
 import { PatternObservationRepository } from './pattern-observation.repository';
-import type { PatternObservationInput } from './pattern-observation.types';
+import type { PatternObservationInput, DetectionContext } from './pattern-observation.types';
 
 function fakePrisma() {
   return {
@@ -53,11 +54,33 @@ describe('PatternObservationRepository', () => {
             atrAtDetection: 2,
             outcome: 'WIN',
             label: 1,
+            detectionContext: Prisma.DbNull, // fixture has no context → SQL NULL
           },
           expect.objectContaining({ barTime: new Date(2000), token: '2885' }),
         ],
       }),
     );
+  });
+
+  // Bucket-A context: present on live-edge (scan) rows, absent on backfill /
+  // chart-load rows. Absent must persist as SQL NULL (DbNull) so training can
+  // query `WHERE "detectionContext" IS NULL`, not a JSON `null` literal.
+  it('saveMany persists detectionContext when present and DbNull when absent', async () => {
+    const ctx: DetectionContext = {
+      v: 1,
+      mtf: { aligned: true, direction: 'UP' },
+      sr: { distanceAtr: 0.4, atLevel: true },
+      sector: { trend: 'UP', alignment: 'with' },
+    };
+    const prisma = fakePrisma();
+    const repo = new PatternObservationRepository(prisma);
+    await repo.saveMany([
+      { ...input, detectionContext: ctx },
+      input, // no detectionContext
+    ]);
+    const data = prisma.patternObservation.createMany.mock.calls[0][0].data;
+    expect(data[0].detectionContext).toEqual(ctx);
+    expect(data[1].detectionContext).toBe(Prisma.DbNull);
   });
 
   it('saveMany with empty input does not hit the db', async () => {

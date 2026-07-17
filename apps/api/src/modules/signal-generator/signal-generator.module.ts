@@ -49,6 +49,8 @@ import { GoldFactor } from './services/context-scoring/factors/gold.factor';
 import { PatternObservationRepository } from './ml/pattern-observation.repository';
 import { PatternBackfillService } from './ml/pattern-backfill.service';
 import { PatternCaptureService } from './ml/pattern-capture.service';
+import { DetectionContextService } from './ml/detection-context.service';
+import { PatternScanService } from './ml/pattern-scan.service';
 import type { ContextFactor } from './services/context-scoring/types';
 
 // @Global so LevelBookService is injectable from MarketFeedService
@@ -143,6 +145,11 @@ import type { ContextFactor } from './services/context-scoring/types';
     PatternObservationRepository,
     PatternBackfillService,
     PatternCaptureService,
+    // Bucket-A context enrichment (MTF/SR/sector) + the live-edge scan that is
+    // the only path producing richly-featured observations. See
+    // docs/superpowers/specs/2026-07-17-ml-detection-context-enrichment-design.md.
+    DetectionContextService,
+    PatternScanService,
 
     // Context scoring engine — Mama's 10-factor framework v1.
     // Each factor is registered as a provider so it can be unit-tested

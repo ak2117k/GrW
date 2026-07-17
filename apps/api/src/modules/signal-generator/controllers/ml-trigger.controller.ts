@@ -16,6 +16,7 @@ import { timingSafeEqual } from 'crypto';
 import { Public } from '../../../common/decorators';
 import { PatternBackfillService, type BackfillTarget } from '../ml/pattern-backfill.service';
 import { PatternCaptureService } from '../ml/pattern-capture.service';
+import { PatternScanService } from '../ml/pattern-scan.service';
 
 /** Header carrying the shared secret. Configure it on the external heartbeat. */
 export const ML_TRIGGER_SECRET_HEADER = 'x-ml-trigger-secret';
@@ -55,6 +56,7 @@ export class MlTriggerController {
     // the triggers 503 when unwired.
     @Optional() private readonly patternBackfill?: PatternBackfillService,
     @Optional() private readonly patternCapture?: PatternCaptureService,
+    @Optional() private readonly patternScan?: PatternScanService,
   ) {}
 
   /**
@@ -177,5 +179,47 @@ export class MlTriggerController {
     }
     const resolved = await this.patternCapture.resolvePending(body.limit);
     return { ok: true, resolved };
+  }
+
+  /**
+   * POST /webhooks/ml/scan   (secret in the X-ML-Trigger-Secret header)
+   *
+   * Detect patterns at the LIVE EDGE for the given instruments and persist them
+   * with full external context (MTF / S/R / sector). This is the only path that
+   * produces richly-featured observations: the context services are as-of-now
+   * only, so a pattern can be enriched without lookahead ONLY when its decision
+   * bar is the latest bar — which is exactly what this scan keeps.
+   *
+   * Meant to run each bar-close from the external heartbeat. Synchronous and
+   * bounded (one latest-bar pass over a modest watchlist), like resolve-pending —
+   * keep the target list small enough to finish within the heartbeat's timeout.
+   *
+   * Body:
+   *   { targets: [{token, exchange, symbol}], timeframes?: string[], lookbackDays?: number }
+   */
+  @Post('scan')
+  @HttpCode(HttpStatus.OK)
+  async triggerScan(
+    @Headers(ML_TRIGGER_SECRET_HEADER) providedSecret: string | undefined,
+    @Body() body: { targets?: BackfillTarget[]; timeframes?: string[]; lookbackDays?: number } = {},
+  ) {
+    this.assertAuthorized(providedSecret);
+    if (!this.patternScan) {
+      throw new ServiceUnavailableException('pattern scan is not wired');
+    }
+    const targets = body.targets ?? [];
+    if (targets.length === 0) {
+      throw new BadRequestException('targets is required and must be non-empty');
+    }
+    for (const t of targets) {
+      if (!t?.token || !t?.exchange || !t?.symbol) {
+        throw new BadRequestException('each target needs token, exchange and symbol');
+      }
+    }
+    const results = await this.patternScan.scan(targets, {
+      timeframes: body.timeframes,
+      lookbackDays: body.lookbackDays,
+    });
+    return { ok: true, results };
   }
 }

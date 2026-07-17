@@ -1761,6 +1761,11 @@ model PatternObservation {
   atrAtDetection Float
   outcome        PatternOutcome @default(PENDING)
   label          Int?           // WIN=1, LOSS=0, null while PENDING/TIMEOUT
+  // Bucket-A external context captured AT the live edge (MTF/SR/sector). Null for
+  // backfill and chart-load rows — the context services are as-of-now only, so
+  // only a live-edge detection can be enriched without lookahead. See the
+  // DetectionContext type + 2026-07-17-ml-detection-context-enrichment-design.md.
+  detectionContext Json?
   resolvedAt     DateTime?
   modelScore     Float?         // filled by later phases
   modelVersion   String?

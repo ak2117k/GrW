@@ -30,6 +30,25 @@ export interface FollowThroughResult {
   resolvedIndex: number | null;
 }
 
+/**
+ * Bucket-A context captured AT the detection bar (external market state the
+ * candle window does not hold). Only trustworthy when captured at the live edge
+ * — the context services are as-of-now only — so it is null for backfill and
+ * chart-load rows. Each sub-object is independently nullable: one failing service
+ * nulls only its own slice, never the whole snapshot (fail-open per signal).
+ * Versioned via `v` so Python can interpret older snapshots as the shape evolves.
+ * See docs/superpowers/specs/2026-07-17-ml-detection-context-enrichment-design.md.
+ */
+export interface DetectionContext {
+  v: 1;
+  /** Higher-timeframe (MTF) alignment at detection. */
+  mtf: { aligned: boolean; direction: 'UP' | 'DOWN' | null } | null;
+  /** Proximity to the nearest S/R level, distance in ATR units. */
+  sr: { distanceAtr: number; atLevel: boolean } | null;
+  /** Sector-index trend and whether it agrees with the pattern's bias. */
+  sector: { trend: 'UP' | 'DOWN' | 'NEUTRAL' | null; alignment: 'with' | 'against' | 'neutral' } | null;
+}
+
 /** A row ready to persist to `pattern_observations`. */
 export interface PatternObservationInput {
   token: string;
@@ -43,4 +62,10 @@ export interface PatternObservationInput {
   atrAtDetection: number;
   outcome: PatternOutcomeName;
   label: 0 | 1 | null;
+  /**
+   * Bucket-A external context, captured only at the live edge (scan path). Absent
+   * / null for chart-load capture and backfill. Persisted to the nullable
+   * `detectionContext` JSON column.
+   */
+  detectionContext?: DetectionContext | null;
 }

@@ -30,12 +30,18 @@ describe('MlTriggerController', () => {
         ]),
       },
       patternCapture: { resolvePending: jest.fn().mockResolvedValue(7) },
+      patternScan: {
+        scan: jest.fn().mockResolvedValue([
+          { target: 'RELIANCE', timeframe: '15m', observations: 1 },
+        ]),
+      },
       ...overrides,
     };
     const ctrl = new MlTriggerController(
       deps.config as never,
       deps.patternBackfill as never,
       deps.patternCapture as never,
+      deps.patternScan as never,
     );
     return { ctrl, deps };
   }
@@ -342,6 +348,62 @@ describe('MlTriggerController', () => {
     it('503s when the capture service is not wired', async () => {
       const { ctrl } = build({ patternCapture: undefined });
       await expect(ctrl.triggerResolvePending(SECRET, {})).rejects.toMatchObject({
+        status: 503,
+      });
+    });
+  });
+
+  describe('triggerScan', () => {
+    it('scans the posted targets and returns the per-target results', async () => {
+      const { ctrl, deps } = build();
+      const res = await ctrl.triggerScan(SECRET, { targets: [TARGET] });
+      expect(deps.patternScan.scan).toHaveBeenCalledWith([TARGET], {
+        timeframes: undefined,
+        lookbackDays: undefined,
+      });
+      expect(res).toEqual({
+        ok: true,
+        results: [{ target: 'RELIANCE', timeframe: '15m', observations: 1 }],
+      });
+    });
+
+    it('passes timeframes and lookbackDays through', async () => {
+      const { ctrl, deps } = build();
+      await ctrl.triggerScan(SECRET, { targets: [TARGET], timeframes: ['15m'], lookbackDays: 5 });
+      expect(deps.patternScan.scan).toHaveBeenCalledWith([TARGET], {
+        timeframes: ['15m'],
+        lookbackDays: 5,
+      });
+    });
+
+    it('rejects a WRONG secret with 401 and never scans', async () => {
+      const { ctrl, deps } = build();
+      await expect(ctrl.triggerScan('wrong', { targets: [TARGET] })).rejects.toThrow(
+        UnauthorizedException,
+      );
+      expect(deps.patternScan.scan).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['missing body', {}],
+      ['empty targets', { targets: [] }],
+    ])('rejects %s with 400 and never scans', async (_label, body) => {
+      const { ctrl, deps } = build();
+      await expect(ctrl.triggerScan(SECRET, body)).rejects.toMatchObject({ status: 400 });
+      expect(deps.patternScan.scan).not.toHaveBeenCalled();
+    });
+
+    it('rejects a target missing token/exchange/symbol with 400', async () => {
+      const { ctrl, deps } = build();
+      await expect(
+        ctrl.triggerScan(SECRET, { targets: [{ token: '2885' } as never] }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(deps.patternScan.scan).not.toHaveBeenCalled();
+    });
+
+    it('503s when the scan service is not wired', async () => {
+      const { ctrl } = build({ patternScan: undefined });
+      await expect(ctrl.triggerScan(SECRET, { targets: [TARGET] })).rejects.toMatchObject({
         status: 503,
       });
     });

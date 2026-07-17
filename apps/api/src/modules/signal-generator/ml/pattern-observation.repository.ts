@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { PatternObservationInput } from './pattern-observation.types';
 
@@ -69,6 +70,12 @@ export class PatternObservationRepository {
         atrAtDetection: i.atrAtDetection,
         outcome: i.outcome,
         label: i.label,
+        // Absent context → SQL NULL (DbNull), not a JSON `null` literal, so
+        // training can filter on `IS NULL`. Only live-edge (scan) rows carry it.
+        detectionContext:
+          i.detectionContext == null
+            ? Prisma.DbNull
+            : (i.detectionContext as unknown as Prisma.InputJsonValue),
       })),
       skipDuplicates: true,
     });

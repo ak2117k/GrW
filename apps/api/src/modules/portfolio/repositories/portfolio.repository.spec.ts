@@ -106,20 +106,78 @@ describe('PortfolioRepository — aggregate refactor', () => {
     });
   });
 
-  describe('getTradesWithEventsByToken', () => {
+  describe('getPositionEntriesByToken', () => {
+    let swingFindMany: jest.Mock;
+    let intradayFindMany: jest.Mock;
+    let breakoutFindMany: jest.Mock;
+    let alertFindMany: jest.Mock;
+
+    const buildWith = async () => {
+      module = await Test.createTestingModule({
+        providers: [
+          PortfolioRepository,
+          {
+            provide: PrismaService,
+            useValue: {
+              swingEntry: { findMany: swingFindMany },
+              intradayEntry: { findMany: intradayFindMany },
+              breakoutSwingEntry: { findMany: breakoutFindMany },
+              chartinkAlert: { findMany: alertFindMany },
+            },
+          },
+        ],
+      }).compile();
+      repo = module.get(PortfolioRepository);
+    };
+
     beforeEach(async () => {
-      groupBy = jest.fn();
-      findMany = jest.fn(async () => [{ id: 'trade-1', events: [] }]);
-      await build();
+      swingFindMany = jest.fn(async () => [{ id: 's1', alertId: 'a1' }]);
+      intradayFindMany = jest.fn(async () => [{ id: 'i1', alertId: 'a2' }]);
+      breakoutFindMany = jest.fn(async () => [{ id: 'b1', alertId: 'a2' }]); // shares a2
+      alertFindMany = jest.fn(async () => [
+        { id: 'a1', scanner: { scanName: 'Swing Scan' } },
+        { id: 'a2', scanner: { scanName: 'Momentum Scan' } },
+      ]);
+      await buildWith();
     });
 
-    it('queries trades for the token WITH their events (userId scoped by the tenant interceptor)', async () => {
-      const rows = await repo.getTradesWithEventsByToken('45678');
+    it('queries all three entry tables by token only (NO userId scoping)', async () => {
+      await repo.getPositionEntriesByToken('45678');
 
-      expect(rows).toEqual([{ id: 'trade-1', events: [] }]);
-      const arg = findMany.mock.calls[0][0];
-      expect(arg.where).toEqual({ instrument: { token: '45678' } });
-      expect(arg.include).toEqual({ events: true });
+      expect(swingFindMany.mock.calls[0][0]).toEqual({ where: { token: '45678' } });
+      expect(intradayFindMany.mock.calls[0][0]).toEqual({ where: { token: '45678' } });
+      expect(breakoutFindMany.mock.calls[0][0]).toEqual({ where: { token: '45678' } });
+    });
+
+    it('returns the raw rows for each track', async () => {
+      const result = await repo.getPositionEntriesByToken('45678');
+
+      expect(result.swing).toEqual([{ id: 's1', alertId: 'a1' }]);
+      expect(result.intraday).toEqual([{ id: 'i1', alertId: 'a2' }]);
+      expect(result.breakout).toEqual([{ id: 'b1', alertId: 'a2' }]);
+    });
+
+    it('batch-resolves the DISTINCT alertIds into a scanName map in one query', async () => {
+      const result = await repo.getPositionEntriesByToken('45678');
+
+      expect(alertFindMany).toHaveBeenCalledTimes(1);
+      const arg = alertFindMany.mock.calls[0][0];
+      expect(arg.where.id.in.sort()).toEqual(['a1', 'a2']); // de-duped
+      expect(arg.select).toEqual({ id: true, scanner: { select: { scanName: true } } });
+      expect(result.scannerByAlertId).toEqual({ a1: 'Swing Scan', a2: 'Momentum Scan' });
+    });
+
+    it('skips the alert query entirely when there are no positions', async () => {
+      swingFindMany = jest.fn(async () => []);
+      intradayFindMany = jest.fn(async () => []);
+      breakoutFindMany = jest.fn(async () => []);
+      alertFindMany = jest.fn();
+      await buildWith();
+
+      const result = await repo.getPositionEntriesByToken('nope');
+
+      expect(alertFindMany).not.toHaveBeenCalled();
+      expect(result).toEqual({ swing: [], intraday: [], breakout: [], scannerByAlertId: {} });
     });
   });
 

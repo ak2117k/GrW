@@ -1,131 +1,152 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildTradeMarkers,
-  entryGlyph,
-  entryColor,
-  resolveEntryQty,
+  formatPrice,
+  formatSignedPct,
+  formatEntryTooltip,
+  formatEntryDetail,
+  formatPartialTooltip,
   formatExitTooltip,
-  ENTRY_BUY_COLOR,
-  ENTRY_SELL_COLOR,
-  EXIT_COLOR,
+  exitColor,
+  ENTRY_COLOR,
+  PARTIAL_COLOR,
+  EXIT_PROFIT_COLOR,
+  EXIT_LOSS_COLOR,
 } from '../tradeMarkers';
-import type { ChartTrade } from '@/services/chartTrades.service';
+import type { PositionMarker } from '@/services/chartTrades.service';
 
-function trade(over: Partial<ChartTrade>): ChartTrade {
+function position(over: Partial<PositionMarker>): PositionMarker {
   return {
-    tradeId: 't1',
-    side: 'BUY',
+    id: 'p1',
+    track: 'SWING',
     provenance: 'Manual',
-    entry: { time: 1_000_000, price: 100, quantity: 50 },
-    exits: [],
+    status: 'TRADED',
+    targetPct: 10,
+    stopPct: -5,
+    entry: { time: 1_000_000, price: 100 },
+    partial: null,
+    exit: null,
     ...over,
   };
 }
 
-describe('entryGlyph / entryColor', () => {
-  it('uses ▲ + green for a long (BUY)', () => {
-    expect(entryGlyph('BUY')).toBe('▲');
-    expect(entryColor('BUY')).toBe(ENTRY_BUY_COLOR);
-  });
-
-  it('uses ▼ + red for a short (SELL), case-insensitively', () => {
-    expect(entryGlyph('sell')).toBe('▼');
-    expect(entryColor('SELL')).toBe(ENTRY_SELL_COLOR);
-  });
-
-  it('defaults to the long glyph for an unknown/empty side', () => {
-    expect(entryGlyph('')).toBe('▲');
-    expect(entryGlyph(undefined as unknown as string)).toBe('▲');
+describe('formatSignedPct', () => {
+  it('always carries a sign to 1 dp', () => {
+    expect(formatSignedPct(-10)).toBe('-10.0%');
+    expect(formatSignedPct(5.25)).toBe('+5.3%');
+    expect(formatSignedPct(0)).toBe('+0.0%');
   });
 });
 
-describe('resolveEntryQty', () => {
-  it('prefers the declared entry quantity', () => {
-    expect(resolveEntryQty(50, 10, 40)).toBe(50);
-  });
-
-  it('reconstructs from sold + remaining when entry qty is unknown', () => {
-    expect(resolveEntryQty(null, 10, 40)).toBe(50);
-    expect(resolveEntryQty(0, 30, 20)).toBe(50);
+describe('exitColor', () => {
+  it('is green at/above break-even and red below', () => {
+    expect(exitColor(0)).toBe(EXIT_PROFIT_COLOR);
+    expect(exitColor(12.3)).toBe(EXIT_PROFIT_COLOR);
+    expect(exitColor(-0.1)).toBe(EXIT_LOSS_COLOR);
   });
 });
 
-describe('formatExitTooltip', () => {
-  it('shows sold/total, remaining and source', () => {
-    expect(formatExitTooltip(20, 50, 30, 'Chartink (chartink-gated)')).toBe(
-      'sold 20 / 50 · 30 remaining · src: Chartink (chartink-gated)',
+describe('tooltip formatters', () => {
+  it('entry names the price and provenance', () => {
+    expect(formatEntryTooltip(100, 'Chartink (breakout)')).toBe(
+      `Entered ${formatPrice(100)} · from Chartink (breakout)`,
+    );
+  });
+
+  it('entry detail shows signed target/stop %', () => {
+    expect(formatEntryDetail(10, -5)).toBe('Target +10.0% · Stop -5.0%');
+  });
+
+  it('partial formats fraction 0.5 as 50%', () => {
+    expect(formatPartialTooltip(0.5, 105)).toBe(`Booked 50% at ${formatPrice(105)}`);
+    expect(formatPartialTooltip(0.333, 105)).toBe(`Booked 33% at ${formatPrice(105)}`);
+  });
+
+  it('exit shows price, status and signed pnl', () => {
+    expect(formatExitTooltip(90, 'STOPPED', -10)).toBe(
+      `Exited ${formatPrice(90)} · STOPPED · -10.0%`,
     );
   });
 });
 
 describe('buildTradeMarkers', () => {
-  it('emits one entry marker and one marker per exit', () => {
+  it('emits an entry-only marker for an open position and carries provenance', () => {
     const markers = buildTradeMarkers([
-      trade({
-        exits: [
-          { time: 2_000_000, price: 110, quantitySold: 20, quantityRemaining: 30, reason: 'PARTIAL_EXIT' },
-          { time: 3_000_000, price: 120, quantitySold: 30, quantityRemaining: 0, reason: 'TARGET_HIT' },
-        ],
-      }),
+      position({ provenance: 'Chartink (gated)', status: 'TRADED', exit: null }),
     ]);
 
-    expect(markers).toHaveLength(3);
-
+    expect(markers).toHaveLength(1);
     const entry = markers[0];
     expect(entry.kind).toBe('entry');
     expect(entry.glyph).toBe('▲');
+    expect(entry.color).toBe(ENTRY_COLOR);
     expect(entry.timeMs).toBe(1_000_000);
     expect(entry.price).toBe(100);
-    expect(entry.tooltip).toBe('Manual');
-    expect(entry.key).toBe('t1:entry');
-
-    const [, e1, e2] = markers;
-    expect(e1.kind).toBe('exit');
-    expect(e1.glyph).toBe('●');
-    expect(e1.color).toBe(EXIT_COLOR);
-    // "sold X / entryQty" uses the entry's declared quantity (50).
-    expect(e1.tooltip).toBe('sold 20 / 50 · 30 remaining · src: Manual');
-    expect(e2.tooltip).toBe('sold 30 / 50 · 0 remaining · src: Manual');
-    expect(e1.key).toBe('t1:exit:0');
-    expect(e2.key).toBe('t1:exit:1');
+    expect(entry.tooltip).toBe(`Entered ${formatPrice(100)} · from Chartink (gated)`);
+    expect(entry.detail).toBe('Target +10.0% · Stop -5.0%');
+    expect(entry.key).toBe('p1:entry');
   });
 
-  it('cumulative remaining maths hold across multiple partial exits', () => {
+  it('emits entry + exit for a closed position with the pnl sign and loss colour', () => {
     const markers = buildTradeMarkers([
-      trade({
-        side: 'SELL',
-        entry: { time: 1_000_000, price: 200, quantity: 90 },
-        exits: [
-          { time: 2_000_000, price: 190, quantitySold: 30, quantityRemaining: 60, reason: 'PARTIAL_EXIT' },
-          { time: 3_000_000, price: 180, quantitySold: 30, quantityRemaining: 30, reason: 'PARTIAL_EXIT' },
-          { time: 4_000_000, price: 170, quantitySold: 30, quantityRemaining: 0, reason: 'CLOSED' },
-        ],
+      position({
+        status: 'STOPPED',
+        exit: { time: 3_000_000, price: 90, status: 'STOPPED', pnlPct: -10, reason: 'SL hit' },
       }),
     ]);
-    expect(markers[0].glyph).toBe('▼'); // SELL entry
-    expect(markers.slice(1).map((m) => m.tooltip)).toEqual([
-      'sold 30 / 90 · 60 remaining · src: Manual',
-      'sold 30 / 90 · 30 remaining · src: Manual',
-      'sold 30 / 90 · 0 remaining · src: Manual',
-    ]);
+
+    expect(markers).toHaveLength(2);
+    const [, exit] = markers;
+    expect(exit.kind).toBe('exit');
+    expect(exit.glyph).toBe('●');
+    expect(exit.color).toBe(EXIT_LOSS_COLOR);
+    expect(exit.timeMs).toBe(3_000_000);
+    expect(exit.price).toBe(90);
+    expect(exit.tooltip).toBe(`Exited ${formatPrice(90)} · STOPPED · -10.0%`);
+    expect(exit.detail).toBe('SL hit');
+    expect(exit.key).toBe('p1:exit');
   });
 
-  it('skips the entry marker when entry is null but still emits exits (total reconstructed)', () => {
+  it('colours a profitable exit green', () => {
     const markers = buildTradeMarkers([
-      trade({
-        entry: null,
-        exits: [
-          { time: 2_000_000, price: 110, quantitySold: 20, quantityRemaining: 30, reason: 'CLOSED' },
-        ],
+      position({
+        status: 'TARGET_HIT',
+        exit: { time: 3_000_000, price: 120, status: 'TARGET_HIT', pnlPct: 20, reason: null },
       }),
     ]);
-    expect(markers).toHaveLength(1);
-    expect(markers[0].kind).toBe('exit');
-    // entryQty reconstructed as 20 + 30 = 50.
-    expect(markers[0].tooltip).toBe('sold 20 / 50 · 30 remaining · src: Manual');
+    const exit = markers[1];
+    expect(exit.color).toBe(EXIT_PROFIT_COLOR);
+    expect(exit.tooltip).toBe(`Exited ${formatPrice(120)} · TARGET_HIT · +20.0%`);
+    // A null reason leaves no hover detail.
+    expect(exit.detail).toBeUndefined();
   });
 
-  it('returns an empty list for no trades', () => {
+  it('emits an intraday partial (◐) between entry and exit, formatting the fraction as %', () => {
+    const markers = buildTradeMarkers([
+      position({
+        track: 'INTRADAY',
+        partial: { time: 2_000_000, price: 105, fraction: 0.5 },
+        exit: { time: 3_000_000, price: 110, status: 'TARGET_HIT', pnlPct: 10, reason: null },
+      }),
+    ]);
+
+    expect(markers.map((m) => m.kind)).toEqual(['entry', 'partial', 'exit']);
+    const partial = markers[1];
+    expect(partial.glyph).toBe('◐');
+    expect(partial.color).toBe(PARTIAL_COLOR);
+    expect(partial.timeMs).toBe(2_000_000);
+    expect(partial.tooltip).toBe(`Booked 50% at ${formatPrice(105)}`);
+    expect(partial.key).toBe('p1:partial');
+  });
+
+  it('skips a not-yet-entered breakout (entry null)', () => {
+    const markers = buildTradeMarkers([
+      position({ track: 'BREAKOUT', status: 'QUEUED', entry: null }),
+    ]);
+    expect(markers).toEqual([]);
+  });
+
+  it('returns an empty list for no positions', () => {
     expect(buildTradeMarkers([])).toEqual([]);
   });
 });

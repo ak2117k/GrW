@@ -18,9 +18,9 @@ interface PositionedMarker extends TradeMarkerDescriptor {
 }
 
 /**
- * Annotates realized trades on the app's own chart: an entry marker (▲ long /
- * ▼ short) at the fill and a ● at each exit, hover-revealing the sold/remaining
- * quantities and the signal source.
+ * Annotates paper positions on the app's own chart: an entry marker (▲) at the
+ * fill, a ◐ at an intraday partial book and a ● at the exit, hover-revealing the
+ * status, % result and signal source. An open position shows just the entry.
  *
  * Rendered as custom absolutely-positioned HTML — NOT `series.setMarkers()`,
  * which `PatternOverlay` owns and which REPLACES all markers (the two would
@@ -40,7 +40,7 @@ export default function TradeMarkerOverlay({
   realTimeMap,
 }: TradeMarkerOverlayProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { trades } = useChartTrades(token);
+  const { positions: trades } = useChartTrades(token);
   const [positions, setPositions] = useState<PositionedMarker[]>([]);
   const [hovered, setHovered] = useState<string | null>(null);
 
@@ -134,7 +134,7 @@ export default function TradeMarkerOverlay({
           <span
             style={{
               color: p.color,
-              fontSize: p.kind === 'exit' ? 11 : 14,
+              fontSize: p.kind === 'entry' ? 14 : 11,
               textShadow: '0 0 3px rgba(0,0,0,0.9)',
               userSelect: 'none',
             }}
@@ -160,7 +160,10 @@ export default function TradeMarkerOverlay({
                 boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
               }}
             >
-              {p.tooltip}
+              <div>{p.tooltip}</div>
+              {p.detail && (
+                <div style={{ color: '#94a3b8', marginTop: 2 }}>{p.detail}</div>
+              )}
             </div>
           )}
         </div>

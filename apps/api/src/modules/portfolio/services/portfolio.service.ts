@@ -29,25 +29,47 @@ export interface StrategyStats {
   winRate: number;
 }
 
-// ---- Chart-trade annotations (spec 2026-07-17-chart-trade-annotations-design §2) ----
-// All `time` fields are epoch MILLISECONDS.
-export interface ChartTradeExit {
-  time: number;
-  price: number;
-  quantitySold: number;
-  quantityRemaining: number; // cumulative: entryQty − running sold, clamped at 0
-  reason: string | null;
+// ---- Chart-trade annotations (spec 2026-07-17-chart-trade-annotations-design,
+// "CORRECTION (2026-07-18)") ----
+// The endpoint reads the real paper positions (swing_entries / intraday_entries /
+// breakout_swing_entries) by `token` and returns status + % result. Positions are
+// LONG and percentage/fraction-based (no share quantities). All `time` = epoch MS.
+export type PositionTrack = 'SWING' | 'INTRADAY' | 'BREAKOUT';
+
+export interface PositionEntry {
+  time: number; // enteredAt epoch MS
+  price: number; // entryPrice
 }
-export interface ChartTrade {
-  tradeId: string;
-  side: string; // "BUY" | "SELL" (position direction)
-  provenance: string; // "Chartink (…)" | "Manual" | "Signal: …" | raw source
-  entry: { time: number; price: number; quantity: number } | null;
-  exits: ChartTradeExit[]; // sorted by time asc
+export interface PositionPartial {
+  time: number; // partialBookedAt epoch MS
+  price: number; // partialExitPrice
+  fraction: number; // partialFraction (0..1)
+}
+export interface PositionExit {
+  time: number; // exitedAt epoch MS
+  price: number; // exitPrice
+  status: string; // row status at exit (STOPPED | TARGET_HIT | ...)
+  pnlPct: number; // (exitPrice − entryPrice) / entryPrice × 100, LONG, 2dp
+  reason: string | null; // exitReason (SwingEntry has none → null)
+}
+export interface PositionMarker {
+  id: string;
+  track: PositionTrack;
+  provenance: string; // scanner name via alertId→scanner, else the track label
+  status: string; // TRADED | STOPPED | TARGET_HIT | QUEUED | ...
+  targetPct: number;
+  stopPct: number;
+  entry: PositionEntry | null; // null if not entered (breakout still QUEUED)
+  partial: PositionPartial | null; // intraday only
+  exit: PositionExit | null; // null while open
 }
 
-/** TradeEvent.eventType values that represent a (partial or full) exit. */
-const EXIT_EVENT_TYPES = new Set(['PARTIAL_EXIT', 'SL_HIT', 'TARGET_HIT', 'CLOSED']);
+/** Human-readable fallback label per track when the alert has no scanner name. */
+const TRACK_LABEL: Record<PositionTrack, string> = {
+  SWING: 'Swing',
+  INTRADAY: 'Intraday',
+  BREAKOUT: 'Breakout',
+};
 
 @Injectable()
 export class PortfolioService {
@@ -234,79 +256,83 @@ export class PortfolioService {
   }
 
   /**
-   * Build chart-trade annotations for one instrument token: an entry marker and
-   * an exit marker per sell, for the current user's trades on that instrument.
-   * See docs/superpowers/specs/2026-07-17-chart-trade-annotations-design.md §2.
+   * Build chart-position annotations for one instrument token: the real paper
+   * positions (swing / intraday / breakout) on that instrument, shaped as
+   * status + % result. Queried by `token` only (these tables have NO userId).
+   * See docs/superpowers/specs/2026-07-17-chart-trade-annotations-design.md
+   * ("CORRECTION (2026-07-18)").
    */
-  async getChartTrades(token: string): Promise<{ trades: ChartTrade[] }> {
-    const trades = await this.repo.getTradesWithEventsByToken(token);
-    return { trades: trades.map((trade) => this.toChartTrade(trade)) };
+  async getChartTrades(token: string): Promise<{ positions: PositionMarker[] }> {
+    const { swing, intraday, breakout, scannerByAlertId } =
+      await this.repo.getPositionEntriesByToken(token);
+
+    const positions: PositionMarker[] = [];
+    for (const row of swing) {
+      this.pushMarker(positions, row, 'SWING', scannerByAlertId);
+    }
+    for (const row of intraday) {
+      this.pushMarker(positions, row, 'INTRADAY', scannerByAlertId);
+    }
+    for (const row of breakout) {
+      this.pushMarker(positions, row, 'BREAKOUT', scannerByAlertId);
+    }
+    return { positions };
   }
 
-  /** Shape one Trade (+ its events) into the fixed ChartTrade contract. */
-  private toChartTrade(trade: any): ChartTrade {
-    const events: any[] = trade.events ?? [];
+  /** Shape one entry row into a PositionMarker; skip rows with nothing to plot. */
+  private pushMarker(
+    out: PositionMarker[],
+    row: any,
+    track: PositionTrack,
+    scannerByAlertId: Record<string, string>,
+  ): void {
+    const hasEntry = row.entryPrice != null && row.enteredAt != null;
+    // Breakout rows still QUEUED have no fill — nothing to draw. (Swing/intraday
+    // always carry an entry, so this only skips unfilled breakouts.)
+    if (!hasEntry) return;
 
-    // --- entry: prefer the FILLED event, else fall back to Trade fields. ---
-    const filled = events.find((e) => e.eventType === 'FILLED');
-    const entryTime: Date | null = filled?.createdAt ?? trade.entryTime ?? null;
-    const entryPrice: number | null = filled?.price ?? trade.entryPrice ?? null;
-    // Base quantity for the running remaining maths (independent of whether a
-    // renderable entry marker exists).
-    const entryQty: number = filled?.quantity ?? trade.quantity ?? 0;
+    const entry: PositionEntry = {
+      time: new Date(row.enteredAt).getTime(),
+      price: row.entryPrice,
+    };
 
-    const entry =
-      entryTime != null && entryPrice != null
-        ? { time: entryTime.getTime(), price: entryPrice, quantity: entryQty }
+    // Partial book-out (intraday only) — all three fields must be present.
+    const partial: PositionPartial | null =
+      row.partialBookedAt != null &&
+      row.partialExitPrice != null &&
+      row.partialFraction != null
+        ? {
+            time: new Date(row.partialBookedAt).getTime(),
+            price: row.partialExitPrice,
+            fraction: row.partialFraction,
+          }
         : null;
 
-    // --- exits: exit-type events sorted ascending, with cumulative remaining. ---
-    const exitEvents = events
-      .filter((e) => EXIT_EVENT_TYPES.has(e.eventType))
-      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    // Exit — only when both the time and price are recorded. LONG P&L %.
+    const exit: PositionExit | null =
+      row.exitedAt != null && row.exitPrice != null
+        ? {
+            time: new Date(row.exitedAt).getTime(),
+            price: row.exitPrice,
+            status: row.status,
+            pnlPct: Number(
+              (((row.exitPrice - row.entryPrice) / row.entryPrice) * 100).toFixed(2),
+            ),
+            reason: row.exitReason ?? null,
+          }
+        : null;
 
-    let cumulativeSold = 0;
-    const exits: ChartTradeExit[] = exitEvents.map((e) => {
-      const remainingBefore = Math.max(entryQty - cumulativeSold, 0);
-      // A null event quantity (e.g. a CLOSED square-off) sells whatever remains.
-      const quantitySold = e.quantity ?? remainingBefore;
-      cumulativeSold += quantitySold;
-      const quantityRemaining = Math.max(entryQty - cumulativeSold, 0);
-      const reason =
-        e.eventType === 'CLOSED' ? trade.exitReasonTag ?? e.eventType : e.eventType;
-      return {
-        time: e.createdAt.getTime(),
-        price: e.price ?? trade.exitPrice ?? 0,
-        quantitySold,
-        quantityRemaining,
-        reason,
-      };
-    });
-
-    return {
-      tradeId: trade.id,
-      side: trade.side,
-      provenance: this.deriveProvenance(trade.source, trade.strategy),
+    out.push({
+      id: row.id,
+      track,
+      provenance: scannerByAlertId[row.alertId] ?? TRACK_LABEL[track],
+      status: row.status,
+      targetPct: row.targetPct,
+      stopPct: row.stopPct,
       entry,
-      exits,
-    };
-  }
-
-  /**
-   * Derive a human-readable provenance from a trade's `source` + `strategy`
-   * (v1 depth — deep Chartink scanner-name join is a fast-follow).
-   */
-  private deriveProvenance(source: string, strategy: string | null | undefined): string {
-    const strat = strategy ?? '';
-    if (
-      (source === 'SCANNER' || source === 'AUTO') &&
-      strat.toLowerCase().includes('chartink')
-    ) {
-      return `Chartink (${strategy})`;
-    }
-    if (source === 'MANUAL') return 'Manual';
-    if (source === 'AUTO' && strategy) return `Signal: ${strategy}`;
-    return source;
+      partial,
+      exit,
+    });
   }
 
   /**

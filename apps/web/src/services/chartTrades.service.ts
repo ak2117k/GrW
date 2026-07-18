@@ -1,53 +1,69 @@
 import api from './api';
 
 /**
- * One realized exit (sell) on a trade, as returned by
+ * One realized entry on a position, as returned by
  * `GET /api/portfolio/chart-trades`.
  *
  * `time` is REAL epoch MILLISECONDS — it must be mapped onto the chart's
  * gap-compressed time axis before positioning (see `buildChartTimeResolver`).
  */
-export interface ChartTradeExit {
+export interface PositionEntry {
   time: number; // epoch MS
   price: number;
-  quantitySold: number;
-  quantityRemaining: number; // cumulative: entryQty − running sold
-  reason: string | null; // e.g. "TARGET_HIT" | "SL_HIT" | "PARTIAL_EXIT"
-}
-
-export interface ChartTradeEntry {
-  time: number; // epoch MS
-  price: number;
-  quantity: number;
 }
 
 /**
- * A single trade's chart-annotation shape: the entry (may be null if the fill
- * is unknown) plus one marker per realized exit, sorted ascending by time.
+ * A partial book (intraday only): a fraction (0..1) of the position exited
+ * ahead of the final exit.
  */
-export interface ChartTrade {
-  tradeId: string;
-  side: string; // "BUY" | "SELL" (position direction)
-  provenance: string; // "Chartink (...)" | "Manual" | "Signal: RSI" | source
-  entry: ChartTradeEntry | null;
-  exits: ChartTradeExit[];
+export interface PositionPartial {
+  time: number; // epoch MS
+  price: number;
+  fraction: number; // 0..1
+}
+
+/** The final realized exit on a position, present once `exitedAt`+`exitPrice` exist. */
+export interface PositionExit {
+  time: number; // epoch MS
+  price: number;
+  status: string; // e.g. "TARGET_HIT" | "STOPPED"
+  pnlPct: number; // (exitPrice − entryPrice) / entryPrice * 100 (positions are LONG)
+  reason: string | null;
+}
+
+/**
+ * A single position's chart-annotation shape. Positions come from the paper
+ * `swing_entries` / `intraday_entries` / `breakout_swing_entries` tables and are
+ * status/percentage-based (no share quantities). `entry` may be null for a
+ * not-yet-entered breakout (QUEUED); `partial` is intraday-only.
+ */
+export interface PositionMarker {
+  id: string;
+  track: 'SWING' | 'INTRADAY' | 'BREAKOUT';
+  provenance: string; // scanner name or track label
+  status: string; // TRADED (open) | STOPPED | TARGET_HIT | QUEUED | ...
+  targetPct: number;
+  stopPct: number;
+  entry: PositionEntry | null;
+  partial: PositionPartial | null; // intraday only
+  exit: PositionExit | null; // null while the position is open
 }
 
 interface ChartTradesResponse {
-  trades: ChartTrade[];
+  positions: PositionMarker[];
 }
 
 /**
- * Fetch the current user's realized trades for one instrument, shaped for
- * chart annotation.
+ * Fetch the paper positions for one instrument, shaped for chart annotation.
  *
  * Backend contract: `GET /api/portfolio/chart-trades?token=<token>` →
- * `{ trades: ChartTrade[] }`. The endpoint may 404 until the backend ships —
- * callers should treat a failed/empty fetch as "no trades" rather than error.
+ * `{ positions: PositionMarker[] }`. The endpoint may 404 until the backend
+ * ships — callers should treat a failed/empty fetch as "no positions" rather
+ * than error.
  */
-export async function getChartTrades(token: string): Promise<ChartTrade[]> {
+export async function getChartTrades(token: string): Promise<PositionMarker[]> {
   const { data } = await api.get<ChartTradesResponse>('/portfolio/chart-trades', {
     params: { token },
   });
-  return Array.isArray(data?.trades) ? data.trades : [];
+  return Array.isArray(data?.positions) ? data.positions : [];
 }

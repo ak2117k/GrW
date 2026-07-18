@@ -75,8 +75,8 @@ export class PortfolioController {
   }
 
   @Get('chart-trades')
-  @ApiOperation({ summary: "Get the current user's trades on an instrument, shaped for chart annotation" })
-  @ApiResponse({ status: 200, description: 'Chart trade annotations returned' })
+  @ApiOperation({ summary: 'Get the paper positions on an instrument (by token), shaped for chart annotation' })
+  @ApiResponse({ status: 200, description: 'Position markers returned' })
   async getChartTrades(@Query() dto: ChartTradesQueryDto) {
     return this.portfolioService.getChartTrades(dto.token);
   }

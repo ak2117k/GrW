@@ -4,6 +4,9 @@ export type {
   DailyPnLPoint,
   SegmentStats,
   StrategyStats,
-  ChartTrade,
-  ChartTradeExit,
+  PositionTrack,
+  PositionEntry,
+  PositionPartial,
+  PositionExit,
+  PositionMarker,
 } from './portfolio.service';

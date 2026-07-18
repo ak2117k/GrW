@@ -3,18 +3,20 @@ import { PortfolioService } from './portfolio.service';
 import { PortfolioRepository } from '../repositories/portfolio.repository';
 
 /**
- * Unit tests for PortfolioService.getChartTrades — the chart-trade annotation
- * contract (docs/superpowers/specs/2026-07-17-chart-trade-annotations-design.md §2).
+ * Unit tests for PortfolioService.getChartTrades — the CORRECTED chart-trade
+ * annotation contract (docs/superpowers/specs/2026-07-17-chart-trade-annotations-design.md
+ * §"CORRECTION (2026-07-18)").
  *
- * The real logic under test is the SHAPING of Trade + TradeEvent rows into the
- * fixed { trades: ChartTrade[] } contract: entry resolution (FILLED event vs.
- * Trade fallback), cumulative quantity-remaining maths across multiple exits,
- * and provenance derivation. The repository (the Prisma query) is mocked.
+ * The endpoint now reads the real paper positions — swing_entries /
+ * intraday_entries / breakout_swing_entries — by `token` (NO per-user scoping,
+ * NO share quantities) and returns { positions: PositionMarker[] } shaped as
+ * status + % result. The repository (Prisma queries + alert→scanner resolution)
+ * is mocked; the shaping is what's under test.
  */
 describe('PortfolioService — getChartTrades', () => {
   let module: TestingModule;
   let service: PortfolioService;
-  let getTradesWithEventsByToken: jest.Mock;
+  let getPositionEntriesByToken: jest.Mock;
 
   const build = async () => {
     module = await Test.createTestingModule({
@@ -22,212 +24,300 @@ describe('PortfolioService — getChartTrades', () => {
         PortfolioService,
         {
           provide: PortfolioRepository,
-          useValue: { getTradesWithEventsByToken },
+          useValue: { getPositionEntriesByToken },
         },
       ],
     }).compile();
     service = module.get(PortfolioService);
   };
 
-  // Convenience for deterministic, ordered timestamps.
+  // Convenience for deterministic timestamps.
   const at = (min: number) => new Date(Date.UTC(2026, 6, 17, 9, min, 0));
 
-  beforeEach(() => {
-    getTradesWithEventsByToken = jest.fn();
+  // Default empty repo payload; individual tests override the track they exercise.
+  const payload = (over: Partial<{
+    swing: any[];
+    intraday: any[];
+    breakout: any[];
+    scannerByAlertId: Record<string, string>;
+  }>) => ({
+    swing: [],
+    intraday: [],
+    breakout: [],
+    scannerByAlertId: {},
+    ...over,
   });
 
-  it('returns { trades: [] } when there are no trades for the token', async () => {
-    getTradesWithEventsByToken.mockResolvedValue([]);
+  beforeEach(() => {
+    getPositionEntriesByToken = jest.fn();
+  });
+
+  it('returns { positions: [] } when there are no positions for the token', async () => {
+    getPositionEntriesByToken.mockResolvedValue(payload({}));
     await build();
 
     const result = await service.getChartTrades('99999');
 
-    expect(result).toEqual({ trades: [] });
-    expect(getTradesWithEventsByToken).toHaveBeenCalledWith('99999');
+    expect(result).toEqual({ positions: [] });
+    expect(getPositionEntriesByToken).toHaveBeenCalledWith('99999');
   });
 
-  it('computes cumulative quantityRemaining across two PARTIAL_EXITs', async () => {
-    getTradesWithEventsByToken.mockResolvedValue([
-      {
-        id: 'trade-1',
-        side: 'BUY',
-        source: 'MANUAL',
-        strategy: null,
-        quantity: 100,
-        entryPrice: 500,
-        entryTime: at(0),
-        exitReasonTag: null,
-        events: [
-          // Intentionally out of chronological order to prove sorting.
-          { eventType: 'PARTIAL_EXIT', price: 520, quantity: 30, createdAt: at(20) },
-          { eventType: 'FILLED', price: 500, quantity: 100, createdAt: at(0) },
-          { eventType: 'PARTIAL_EXIT', price: 510, quantity: 40, createdAt: at(10) },
+  it('shapes an exited SWING long with pnlPct = (exit − entry)/entry × 100, rounded to 2dp', async () => {
+    getPositionEntriesByToken.mockResolvedValue(
+      payload({
+        swing: [
+          {
+            id: 'swing-1',
+            token: '123',
+            alertId: 'alert-1',
+            entryPrice: 1000,
+            enteredAt: at(0),
+            targetPct: 10,
+            stopPct: 10,
+            status: 'TARGET_HIT',
+            exitPrice: 1012.345, // 1.2345% → rounds to 1.23
+            exitedAt: at(30),
+          },
         ],
-      },
-    ]);
+        scannerByAlertId: { 'alert-1': 'Weekly Breakout Scan' },
+      }),
+    );
     await build();
 
-    const { trades } = await service.getChartTrades('123');
+    const { positions } = await service.getChartTrades('123');
 
-    expect(trades).toHaveLength(1);
-    expect(trades[0].entry).toEqual({ time: at(0).getTime(), price: 500, quantity: 100 });
-    expect(trades[0].exits).toEqual([
-      {
-        time: at(10).getTime(),
-        price: 510,
-        quantitySold: 40,
-        quantityRemaining: 60,
-        reason: 'PARTIAL_EXIT',
+    expect(positions).toHaveLength(1);
+    expect(positions[0]).toEqual({
+      id: 'swing-1',
+      track: 'SWING',
+      provenance: 'Weekly Breakout Scan',
+      status: 'TARGET_HIT',
+      targetPct: 10,
+      stopPct: 10,
+      entry: { time: at(0).getTime(), price: 1000 },
+      partial: null,
+      exit: {
+        time: at(30).getTime(),
+        price: 1012.345,
+        status: 'TARGET_HIT',
+        pnlPct: 1.23,
+        reason: null, // SwingEntry has no exitReason field → null
       },
-      {
-        time: at(20).getTime(),
-        price: 520,
-        quantitySold: 30,
-        quantityRemaining: 30,
-        reason: 'PARTIAL_EXIT',
-      },
-    ]);
+    });
   });
 
-  it('treats a CLOSED event with null quantity as selling the remaining (remaining → 0)', async () => {
-    getTradesWithEventsByToken.mockResolvedValue([
-      {
-        id: 'trade-2',
-        side: 'BUY',
-        source: 'AUTO',
-        strategy: 'RSI',
-        quantity: 100,
-        entryPrice: 500,
-        entryTime: at(0),
-        exitReasonTag: 'HIT_TARGET',
-        events: [
-          { eventType: 'FILLED', price: 500, quantity: 100, createdAt: at(0) },
-          { eventType: 'PARTIAL_EXIT', price: 510, quantity: 40, createdAt: at(10) },
-          { eventType: 'CLOSED', price: 520, quantity: null, createdAt: at(20) },
+  it('leaves exit null for an open SWING position and falls back to the track label', async () => {
+    getPositionEntriesByToken.mockResolvedValue(
+      payload({
+        swing: [
+          {
+            id: 'swing-open',
+            token: '123',
+            alertId: 'alert-x',
+            entryPrice: 500,
+            enteredAt: at(0),
+            targetPct: 10,
+            stopPct: 10,
+            status: 'TRADED',
+            exitPrice: null,
+            exitedAt: null,
+          },
         ],
-      },
-    ]);
+        scannerByAlertId: {}, // alert-x not resolved → fallback
+      }),
+    );
     await build();
 
-    const { trades } = await service.getChartTrades('123');
+    const { positions } = await service.getChartTrades('123');
 
-    expect(trades[0].exits).toEqual([
-      {
-        time: at(10).getTime(),
-        price: 510,
-        quantitySold: 40,
-        quantityRemaining: 60,
-        reason: 'PARTIAL_EXIT',
-      },
-      {
-        time: at(20).getTime(),
-        price: 520,
-        quantitySold: 60,
-        quantityRemaining: 0,
-        reason: 'HIT_TARGET', // CLOSED uses exitReasonTag when present
-      },
-    ]);
+    expect(positions[0].exit).toBeNull();
+    expect(positions[0].entry).toEqual({ time: at(0).getTime(), price: 500 });
+    expect(positions[0].provenance).toBe('Swing');
   });
 
-  it('falls back to Trade entryTime/entryPrice/quantity when there is no FILLED event', async () => {
-    getTradesWithEventsByToken.mockResolvedValue([
-      {
-        id: 'trade-3',
-        side: 'SELL',
-        source: 'MANUAL',
-        strategy: null,
-        quantity: 50,
-        entryPrice: 250,
-        entryTime: at(0),
-        exitReasonTag: null,
-        events: [
-          { eventType: 'SL_HIT', price: 240, quantity: 50, createdAt: at(15) },
+  it('shapes the intraday partial book and carries exitReason on the exit', async () => {
+    getPositionEntriesByToken.mockResolvedValue(
+      payload({
+        intraday: [
+          {
+            id: 'intra-1',
+            token: '123',
+            alertId: 'alert-2',
+            entryPrice: 200,
+            enteredAt: at(0),
+            targetPct: 5,
+            stopPct: 5,
+            status: 'STOPPED',
+            partialBookedAt: at(10),
+            partialExitPrice: 210,
+            partialFraction: 0.5,
+            exitPrice: 190,
+            exitedAt: at(20),
+            exitReason: 'TRAIL_STOP',
+          },
         ],
-      },
-    ]);
+        scannerByAlertId: { 'alert-2': 'Intraday Momentum' },
+      }),
+    );
     await build();
 
-    const { trades } = await service.getChartTrades('123');
+    const { positions } = await service.getChartTrades('123');
 
-    expect(trades[0].entry).toEqual({ time: at(0).getTime(), price: 250, quantity: 50 });
-    expect(trades[0].exits[0]).toEqual({
-      time: at(15).getTime(),
-      price: 240,
-      quantitySold: 50,
-      quantityRemaining: 0,
-      reason: 'SL_HIT',
+    expect(positions[0].track).toBe('INTRADAY');
+    expect(positions[0].provenance).toBe('Intraday Momentum');
+    expect(positions[0].partial).toEqual({
+      time: at(10).getTime(),
+      price: 210,
+      fraction: 0.5,
+    });
+    expect(positions[0].exit).toEqual({
+      time: at(20).getTime(),
+      price: 190,
+      status: 'STOPPED',
+      pnlPct: -5, // (190-200)/200*100
+      reason: 'TRAIL_STOP',
     });
   });
 
-  it('yields entry = null when neither a FILLED event nor Trade fields give a time + price', async () => {
-    getTradesWithEventsByToken.mockResolvedValue([
-      {
-        id: 'trade-4',
-        side: 'BUY',
-        source: 'MANUAL',
-        strategy: null,
-        quantity: 10,
-        entryPrice: null,
-        entryTime: null,
-        exitReasonTag: null,
-        events: [],
-      },
-    ]);
+  it('leaves partial null for an intraday position that has not booked partially', async () => {
+    getPositionEntriesByToken.mockResolvedValue(
+      payload({
+        intraday: [
+          {
+            id: 'intra-2',
+            token: '123',
+            alertId: 'alert-2',
+            entryPrice: 200,
+            enteredAt: at(0),
+            targetPct: 5,
+            stopPct: 5,
+            status: 'TRADED',
+            partialBookedAt: null,
+            partialExitPrice: null,
+            partialFraction: null,
+            exitPrice: null,
+            exitedAt: null,
+            exitReason: null,
+          },
+        ],
+      }),
+    );
     await build();
 
-    const { trades } = await service.getChartTrades('123');
-
-    expect(trades[0].entry).toBeNull();
-    expect(trades[0].exits).toEqual([]);
+    const { positions } = await service.getChartTrades('123');
+    expect(positions[0].partial).toBeNull();
+    expect(positions[0].exit).toBeNull();
   });
 
-  describe('provenance derivation', () => {
-    const tradeWith = (source: string, strategy: string | null) => ({
-      id: `t-${source}-${strategy}`,
-      side: 'BUY',
-      source,
-      strategy,
-      quantity: 10,
-      entryPrice: 100,
-      entryTime: at(0),
-      exitReasonTag: null,
-      events: [],
-    });
+  it('emits an entered BREAKOUT position and skips a QUEUED one with no entry', async () => {
+    getPositionEntriesByToken.mockResolvedValue(
+      payload({
+        breakout: [
+          {
+            id: 'brk-queued',
+            token: '123',
+            alertId: 'alert-3',
+            entryPrice: null, // QUEUED — nothing to plot
+            enteredAt: null,
+            targetPct: 10,
+            stopPct: 10,
+            status: 'QUEUED',
+            quantity: 7, // ignored
+            exitPrice: null,
+            exitedAt: null,
+            exitReason: null,
+          },
+          {
+            id: 'brk-filled',
+            token: '123',
+            alertId: 'alert-3',
+            entryPrice: 800,
+            enteredAt: at(0),
+            targetPct: 10,
+            stopPct: 10,
+            status: 'TRADED',
+            quantity: 7, // ignored
+            exitPrice: null,
+            exitedAt: null,
+            exitReason: null,
+          },
+        ],
+        scannerByAlertId: {}, // fallback to track label
+      }),
+    );
+    await build();
 
-    it('maps a chartink SCANNER/AUTO strategy to "Chartink (<strategy>)"', async () => {
-      getTradesWithEventsByToken.mockResolvedValue([
-        tradeWith('SCANNER', 'chartink-gated'),
-        tradeWith('AUTO', 'Chartink-Breakout'),
-      ]);
-      await build();
+    const { positions } = await service.getChartTrades('123');
 
-      const { trades } = await service.getChartTrades('123');
-      expect(trades[0].provenance).toBe('Chartink (chartink-gated)');
-      expect(trades[1].provenance).toBe('Chartink (Chartink-Breakout)');
-    });
+    expect(positions).toHaveLength(1);
+    expect(positions[0].id).toBe('brk-filled');
+    expect(positions[0].track).toBe('BREAKOUT');
+    expect(positions[0].provenance).toBe('Breakout');
+    expect(positions[0].entry).toEqual({ time: at(0).getTime(), price: 800 });
+    expect(positions[0].exit).toBeNull();
+  });
 
-    it('maps MANUAL to "Manual"', async () => {
-      getTradesWithEventsByToken.mockResolvedValue([tradeWith('MANUAL', null)]);
-      await build();
+  it('combines all three tracks and resolves provenance per-row via the map', async () => {
+    getPositionEntriesByToken.mockResolvedValue(
+      payload({
+        swing: [
+          {
+            id: 's',
+            token: '123',
+            alertId: 'a-swing',
+            entryPrice: 100,
+            enteredAt: at(0),
+            targetPct: 10,
+            stopPct: 10,
+            status: 'TRADED',
+            exitPrice: null,
+            exitedAt: null,
+          },
+        ],
+        intraday: [
+          {
+            id: 'i',
+            token: '123',
+            alertId: 'a-intra',
+            entryPrice: 100,
+            enteredAt: at(0),
+            targetPct: 5,
+            stopPct: 5,
+            status: 'TRADED',
+            partialBookedAt: null,
+            partialExitPrice: null,
+            partialFraction: null,
+            exitPrice: null,
+            exitedAt: null,
+            exitReason: null,
+          },
+        ],
+        breakout: [
+          {
+            id: 'b',
+            token: '123',
+            alertId: 'a-brk',
+            entryPrice: 100,
+            enteredAt: at(0),
+            targetPct: 10,
+            stopPct: 10,
+            status: 'TRADED',
+            exitPrice: null,
+            exitedAt: null,
+            exitReason: null,
+          },
+        ],
+        scannerByAlertId: { 'a-swing': 'Swing Scan', 'a-brk': 'Breakout Scan' },
+      }),
+    );
+    await build();
 
-      const { trades } = await service.getChartTrades('123');
-      expect(trades[0].provenance).toBe('Manual');
-    });
+    const { positions } = await service.getChartTrades('123');
+    const byId = Object.fromEntries(positions.map((p) => [p.id, p]));
 
-    it('maps AUTO with a non-chartink strategy to "Signal: <strategy>"', async () => {
-      getTradesWithEventsByToken.mockResolvedValue([tradeWith('AUTO', 'RSI')]);
-      await build();
-
-      const { trades } = await service.getChartTrades('123');
-      expect(trades[0].provenance).toBe('Signal: RSI');
-    });
-
-    it('falls back to the raw source otherwise', async () => {
-      getTradesWithEventsByToken.mockResolvedValue([tradeWith('WATCH', null)]);
-      await build();
-
-      const { trades } = await service.getChartTrades('123');
-      expect(trades[0].provenance).toBe('WATCH');
-    });
+    expect(positions).toHaveLength(3);
+    expect(byId['s'].provenance).toBe('Swing Scan');
+    expect(byId['i'].provenance).toBe('Intraday'); // unresolved → track label
+    expect(byId['b'].provenance).toBe('Breakout Scan');
   });
 });

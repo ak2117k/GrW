@@ -322,19 +322,47 @@ export class PortfolioRepository {
   }
 
   /**
-   * Get every trade for a given instrument token, WITH its lifecycle events,
-   * for the chart-trade annotation endpoint.
+   * Fetch the real paper positions for a given instrument token across all three
+   * tracks — swing_entries / intraday_entries / breakout_swing_entries — and
+   * batch-resolve each row's `alertId` to its Chartink scanner name.
    *
-   * `userId` is intentionally NOT filtered here: `Trade` is a tenant-owned model,
-   * so the PrismaService tenant-scoping interceptor AND-merges `userId` for the
-   * active request context automatically (same convention as every other read in
-   * this repository). The relation filter narrows to the instrument by its token.
+   * These tables have NO userId column, so they are queried by `token` ONLY (no
+   * tenant scoping). The alert→scanner resolution is one extra findMany over the
+   * DISTINCT alertIds seen across the three result sets, returned as an
+   * `alertId → scanName` map for the service to shape provenance from.
    */
-  async getTradesWithEventsByToken(token: string) {
-    return this.prisma.trade.findMany({
-      where: { instrument: { token } },
-      include: { events: true },
-    });
+  async getPositionEntriesByToken(token: string): Promise<{
+    swing: any[];
+    intraday: any[];
+    breakout: any[];
+    scannerByAlertId: Record<string, string>;
+  }> {
+    const [swing, intraday, breakout] = await Promise.all([
+      this.prisma.swingEntry.findMany({ where: { token } }),
+      this.prisma.intradayEntry.findMany({ where: { token } }),
+      this.prisma.breakoutSwingEntry.findMany({ where: { token } }),
+    ]);
+
+    const alertIds = Array.from(
+      new Set(
+        [...swing, ...intraday, ...breakout]
+          .map((row: any) => row.alertId)
+          .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0),
+      ),
+    );
+
+    const scannerByAlertId: Record<string, string> = {};
+    if (alertIds.length > 0) {
+      const alerts = await this.prisma.chartinkAlert.findMany({
+        where: { id: { in: alertIds } },
+        select: { id: true, scanner: { select: { scanName: true } } },
+      });
+      for (const alert of alerts as any[]) {
+        if (alert.scanner?.scanName) scannerByAlertId[alert.id] = alert.scanner.scanName;
+      }
+    }
+
+    return { swing, intraday, breakout, scannerByAlertId };
   }
 
   /**

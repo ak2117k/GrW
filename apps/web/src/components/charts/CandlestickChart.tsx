@@ -9,6 +9,7 @@ import {
   type DeepPartial,
   type MouseEventParams,
   type Time,
+  TickMarkType,
 } from 'lightweight-charts';
 
 export interface ChartCandle {
@@ -61,13 +62,23 @@ function formatRealTime(realSec: number): string {
   });
 }
 
-function formatRealTimeShort(realSec: number): string {
+/**
+ * Bottom-axis tick label. Formats by the tick's granularity so daily/weekly bars
+ * (timestamped at midnight) show a DATE, not "00:00", and intraday bars show the
+ * time. Without honouring `tickMarkType` every daily tick rendered as "00:00".
+ */
+function formatAxisTick(realSec: number, tickMarkType: TickMarkType): string {
   const d = new Date(realSec * 1000);
-  return d.toLocaleTimeString('en-IN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
+  switch (tickMarkType) {
+    case TickMarkType.Year:
+      return d.toLocaleDateString('en-IN', { year: 'numeric' });
+    case TickMarkType.Month:
+      return d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+    case TickMarkType.DayOfMonth:
+      return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+    default: // Time / TimeWithSeconds — intraday
+      return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
 }
 
 const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProps>(
@@ -174,10 +185,10 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
           // time when labelling the bottom axis. If no map is provided
           // (e.g. very early during initial load), fall back to formatting
           // the raw value so labels never go blank.
-          tickMarkFormatter: (time: Time) => {
+          tickMarkFormatter: (time: Time, tickMarkType: TickMarkType) => {
             const t = time as number;
             const real = realTimeMapRef.current?.get(t) ?? t;
-            return formatRealTimeShort(real);
+            return formatAxisTick(real, tickMarkType);
           },
         },
         localization: {

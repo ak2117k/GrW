@@ -117,30 +117,56 @@ export default function TradeMarkerOverlay({
       style={{ pointerEvents: 'none', zIndex: 6, overflow: 'hidden' }}
     >
       {positions.map((p) => (
-        <div
-          key={p.key}
-          style={{
-            position: 'absolute',
-            left: p.x,
-            top: p.y,
-            transform: 'translate(-50%, -50%)',
-            pointerEvents: 'auto',
-            cursor: 'default',
-            lineHeight: 1,
-          }}
-          onMouseEnter={() => setHovered(p.key)}
-          onMouseLeave={() => setHovered((h) => (h === p.key ? null : h))}
-        >
-          <span
+        <div key={p.key}>
+          {/* Dashed vertical guide at the entry/exit TIME — spans the pane so the
+              marker is findable instead of lost among candles at the same price. */}
+          <div
             style={{
-              color: p.color,
-              fontSize: p.kind === 'entry' ? 14 : 11,
-              textShadow: '0 0 3px rgba(0,0,0,0.9)',
-              userSelect: 'none',
+              position: 'absolute',
+              left: p.x,
+              top: 0,
+              bottom: 0,
+              width: 0,
+              borderLeft: `1px dashed ${p.color}`,
+              opacity: 0.4,
+              pointerEvents: 'none',
             }}
+          />
+          {/* Badged glyph at the PRICE — a dark pill with a coloured border reads
+              clearly over red/green candles where a bare glyph disappeared. */}
+          <div
+            style={{
+              position: 'absolute',
+              left: p.x,
+              top: p.y,
+              transform: 'translate(-50%, -50%)',
+              pointerEvents: 'auto',
+              cursor: 'default',
+              lineHeight: 1,
+            }}
+            onMouseEnter={() => setHovered(p.key)}
+            onMouseLeave={() => setHovered((h) => (h === p.key ? null : h))}
           >
-            {p.glyph}
-          </span>
+            <span
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: p.kind === 'entry' ? 20 : 16,
+                height: p.kind === 'entry' ? 20 : 16,
+                padding: '0 3px',
+                background: 'rgba(15,23,42,0.92)',
+                border: `1.5px solid ${p.color}`,
+                borderRadius: 4,
+                color: p.color,
+                fontSize: p.kind === 'entry' ? 12 : 10,
+                fontWeight: 700,
+                boxShadow: '0 0 5px rgba(0,0,0,0.7)',
+                userSelect: 'none',
+              }}
+            >
+              {p.glyph}
+            </span>
           {hovered === p.key && (
             <div
               style={{
@@ -166,6 +192,7 @@ export default function TradeMarkerOverlay({
               )}
             </div>
           )}
+          </div>
         </div>
       ))}
     </div>

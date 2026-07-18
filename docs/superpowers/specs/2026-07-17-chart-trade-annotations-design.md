@@ -90,3 +90,37 @@ multiple PARTIAL_EXITs; provenance mapping; empty when no trades).
 - Deep Chartink scanner-name provenance (trade→signal→alert→scanner join).
 - Annotating anything outside the app's own chart (Angel One is impossible).
 - Live/streaming updates — fetch on symbol/timeframe change is enough.
+
+---
+
+## CORRECTION (2026-07-18) — real data source & status/% model
+
+The first cut queried the `trades` table (empty) with a share-quantity model.
+Actual paper positions live in `swing_entries` (35), `intraday_entries`,
+`breakout_swing_entries` — **no per-user scoping (query by `token`)** and **no
+share quantities** (percentage/fraction-based). Rebuild to these tables and show
+status + % result, not sold/remaining quantities.
+
+### Corrected contract — `GET /api/portfolio/chart-trades?token=<token>` → `{ positions: PositionMarker[] }`
+```ts
+interface PositionMarker {
+  id: string;
+  track: 'SWING' | 'INTRADAY' | 'BREAKOUT';
+  provenance: string;   // scanner name via alertId→chartink_alerts→chartink_scanners.scanName; else the track label
+  status: string;       // TRADED (open) | STOPPED | TARGET_HIT | QUEUED | ...
+  targetPct: number;
+  stopPct: number;
+  entry: { time: number; price: number } | null;                          // enteredAt/entryPrice; null if not entered (breakout QUEUED)
+  partial: { time: number; price: number; fraction: number } | null;      // intraday only (partialBookedAt/partialExitPrice/partialFraction)
+  exit: { time: number; price: number; status: string; pnlPct: number; reason: string | null } | null; // when exitedAt+exitPrice present
+}
+```
+- All `time` = epoch MS. Positions are LONG: `pnlPct = (exitPrice − entryPrice) / entryPrice * 100`.
+- Fields per table: SwingEntry {entryPrice, enteredAt, exitPrice, exitedAt, status, targetPct, stopPct, alertId}; IntradayEntry adds {partialBookedAt, partialExitPrice, partialFraction, exitReason}; BreakoutSwingEntry {entryPrice?, enteredAt?, status, targetPct, stopPct, alertId} (skip rows with no entry).
+- Provenance: batch-resolve alertIds → scanner names in one pass.
+
+### Display (frontend tooltips — replace sold/remaining)
+- ▲ Entry: "Entered ₹<price> · from <provenance>" (hover: target/stop %).
+- ◐ Partial (intraday): "Booked <fraction%> at ₹<price>".
+- ● Exit: "Exited ₹<price> · <status> · <pnlPct>%" (hover: reason).
+- Open position (no exit) → entry marker only.

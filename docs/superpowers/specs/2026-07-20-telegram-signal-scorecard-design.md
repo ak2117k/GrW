@@ -1,6 +1,6 @@
 # Telegram Signal Scorecard — Design Spec
 
-> **Status:** Draft for review
+> **Status:** Implemented (2026-07-21) — Phase 1 complete. See runbook: `docs/guides/telegram-listener-runbook.md`. (DB migration generated offline, not yet applied to a live DB.)
 > **Date:** 2026-07-20
 > **Scope:** Admin-only R&D feature. Read-only. No coupling to `trade-engine`.
 

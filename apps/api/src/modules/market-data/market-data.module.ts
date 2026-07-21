@@ -19,6 +19,7 @@ import { YahooFinanceService } from './services/yahoo-finance.service';
 import { MarketContextService } from './services/market-context.service';
 import { CommodityRollService } from './services/commodity-roll.service';
 import { CommodityRollCron } from './services/commodity-roll.cron';
+import { InstrumentMasterRefreshCron } from './services/instrument-master-refresh.cron';
 import { PremarketSessionCron } from './services/premarket-session.cron';
 import { GapDetectorService } from './services/gap-detector.service';
 import { NseSectorIndexService } from './services/nse-sector-index.service';
@@ -88,6 +89,11 @@ import { CredentialDecryptorModule } from '../credential-vault/execution/credent
     // automatically. Replaces the manual roll-mcx-front-month.mjs script.
     CommodityRollService,
     CommodityRollCron,
+
+    // Boot-time + daily 08:00 IST cron — reconciles the local `instruments`
+    // allowlist with Angel One's listed cash-equity universe so newly-listed
+    // symbols resolve (symbol→token) instead of rejecting as "not in local DB".
+    InstrumentMasterRefreshCron,
 
     // Boot-time + on-demand: scans tracked instruments for stale daily
     // candles (cron didn't fire / API was offline overnight) and

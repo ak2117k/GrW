@@ -1418,6 +1418,16 @@ export class AngelOneAdapterService implements BrokerAdapter {
   }
 
   /**
+   * Public accessor for the full in-memory ScripMaster (all exchanges/segments).
+   * Downloads it on first use and reuses the 24h cache thereafter. Used by
+   * InstrumentMasterRefreshCron to reconcile the local instruments allowlist
+   * with the broker's listed universe. Returns the raw Angel One rows.
+   */
+  async getInstrumentMaster(): Promise<any[]> {
+    return this.ensureMasterCache();
+  }
+
+  /**
    * Resolve a bare trading symbol (e.g. "NEOGEN") to its Angel One token by an
    * exact match against the full in-memory scrip master — the WHOLE listed
    * universe, not the hand-seeded local `instruments` table.

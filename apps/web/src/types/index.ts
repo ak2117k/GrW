@@ -310,6 +310,38 @@ export interface ChartinkSourceRef {
   alertId: string;
 }
 
+// --- Telegram signal scorecard (admin-only) --------------------------------
+export interface TelegramChannel {
+  id: string;
+  tgChannelId: string;
+  username: string | null;
+  title: string;
+  isActive: boolean;
+  addedAt: string;
+}
+export interface ChannelScorecard {
+  channelId: string;
+  title: string;
+  total: number;
+  wins: number;
+  losses: number;
+  expired: number;
+  untrackable: number;
+  winRate: number | null;
+  avgResultPct: number | null;
+}
+export interface TelegramSignalRow {
+  id: string;
+  symbol: string;
+  instrument: string;
+  side: string;
+  signalType: string;
+  status: string;
+  resultPct: number | null;
+  createdAt: string;
+  message?: { rawText: string; postedAt: string };
+}
+
 // Evidence-weighted S/R (mirrors apps/api .../types/evidence-level.types.ts).
 export type EvidenceKind =
   | 'VOLUME' | 'HISTORY' | 'OI_CALL' | 'OI_PUT' | 'ROUND'

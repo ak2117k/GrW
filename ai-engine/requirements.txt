@@ -13,3 +13,5 @@ scikit-learn>=1.5
 # Telegram signal parser (Phase 1): Claude Agent SDK — subscription-auth LLM backend
 # (host Claude Code login), NOT an ANTHROPIC_API_KEY. Swappable seam in _call_llm.
 claude-agent-sdk==0.2.124
+# Telegram signal scorecard (Phase 1): persistent Telethon MTProto listener.
+telethon==1.36.0

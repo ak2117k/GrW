@@ -58,6 +58,13 @@ except ImportError as exc:
     _failed_modules.append("strategy_validator")
     logger.warning("Strategy validator routes unavailable (missing dependency: %s)", exc)
 
+try:
+    from .routes.telegram_parse import router as telegram_parse_router
+except ImportError as exc:
+    telegram_parse_router = None  # type: ignore[assignment]
+    _failed_modules.append("telegram_parse")
+    logger.warning("Telegram parse routes unavailable (missing dependency: %s)", exc)
+
 app = FastAPI(
     title="TD Automation AI Engine",
     description="AI-powered trade analysis, scoring, and self-learning engine",
@@ -83,6 +90,8 @@ if advisor_router is not None:
     app.include_router(advisor_router, prefix="/api", tags=["advisor"])
 if strategy_validator_router is not None:
     app.include_router(strategy_validator_router, prefix="/api", tags=["strategy-validator"])
+if telegram_parse_router is not None:
+    app.include_router(telegram_parse_router, prefix="/api", tags=["telegram"])
 
 
 @app.get("/health")

@@ -10,3 +10,6 @@ websockets==13.0
 # Pattern-quality model (Phase 2): XGBoost classifier + sklearn for calibration/metrics.
 xgboost>=2.1
 scikit-learn>=1.5
+# Telegram signal parser (Phase 1): Claude Agent SDK — subscription-auth LLM backend
+# (host Claude Code login), NOT an ANTHROPIC_API_KEY. Swappable seam in _call_llm.
+claude-agent-sdk==0.2.124

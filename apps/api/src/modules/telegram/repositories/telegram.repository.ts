@@ -64,6 +64,10 @@ export class TelegramRepository {
     });
   }
 
+  async findSignal(id: string) {
+    return this.prisma.telegramSignal.findUnique({ where: { id } });
+  }
+
   async transition(signalId: string, patch: Prisma.TelegramSignalUpdateInput): Promise<void> {
     await this.prisma.telegramSignal.update({ where: { id: signalId }, data: patch });
   }

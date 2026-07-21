@@ -572,6 +572,101 @@ model ChartinkAlertSetup {
 }
 
 // ============================================
+// Telegram Signal Scorecard
+// ============================================
+
+model TelegramChannel {
+  id            String            @id @default(cuid())
+  tgChannelId   String            @unique
+  username      String?
+  title         String
+  inviteLink    String?
+  isActive      Boolean           @default(true)
+  lastSeenMsgId Int               @default(0)
+  joinedAt      DateTime?
+  addedAt       DateTime          @default(now())
+  messages      TelegramMessage[]
+  signals       TelegramSignal[]
+  @@map("telegram_channels")
+}
+
+model TelegramMessage {
+  id          String           @id @default(cuid())
+  channelId   String
+  channel     TelegramChannel  @relation(fields: [channelId], references: [id])
+  tgMessageId Int
+  rawText     String
+  postedAt    DateTime
+  receivedAt  DateTime         @default(now())
+  parseStatus String
+  rawPayload  Json
+  signal      TelegramSignal?
+  @@unique([channelId, tgMessageId])
+  @@index([channelId, postedAt])
+  @@map("telegram_messages")
+}
+
+model TelegramSignal {
+  id              String                @id @default(cuid())
+  messageId       String                @unique
+  message         TelegramMessage       @relation(fields: [messageId], references: [id])
+  channelId       String
+  channel         TelegramChannel       @relation(fields: [channelId], references: [id])
+  symbol          String
+  token           String?
+  exchange        String?
+  instrument      String
+  side            String
+  optionType      String?
+  strike          Float?
+  expiry          DateTime?
+  signalType      String
+  entryMode       String
+  entryLow        Float?
+  entryHigh       Float?
+  slMode          String
+  stopLoss        Float?
+  targets         Float[]
+  horizon         String
+  parseConfidence Float
+  status          TelegramSignalStatus  @default(PENDING)
+  entryPrice      Float?
+  entryFilledAt   DateTime?
+  exitPrice       Float?
+  exitAt          DateTime?
+  hitTargetIndex  Int?
+  resultPct       Float?
+  trackExpiresAt  DateTime?
+  createdAt       DateTime              @default(now())
+  events          TelegramSignalEvent[]
+  @@index([channelId, status])
+  @@index([token, status])
+  @@map("telegram_signals")
+}
+
+model TelegramSignalEvent {
+  id       String          @id @default(cuid())
+  signalId String
+  signal   TelegramSignal  @relation(fields: [signalId], references: [id])
+  type     String
+  price    Float?
+  note     String?
+  at       DateTime        @default(now())
+  @@index([signalId])
+  @@map("telegram_signal_events")
+}
+
+enum TelegramSignalStatus {
+  PENDING
+  ACTIVE
+  TARGET_HIT
+  SL_HIT
+  EXPIRED
+  UNTRACKABLE
+  INVALIDATED
+}
+
+// ============================================
 // Watch Monitor (Chartink Stage 2)
 // ============================================
 

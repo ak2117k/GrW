@@ -70,6 +70,10 @@ const NAMESPACES: readonly NamespaceConfig[] = [
       'auto-trade:error',
     ],
   },
+  {
+    path: '/ws/telegram',
+    events: ['telegram:signal-update'] as const,
+  },
 ];
 
 class WebSocketService {

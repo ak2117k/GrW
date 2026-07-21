@@ -36,6 +36,7 @@ import ReinvestPage from '@/pages/reinvest/ReinvestPage';
 import LandingPage from '@/pages/landing/LandingPage';
 import SignupPage from '@/pages/signup/SignupPage';
 import VerifyEmailPage from '@/pages/verify-email/VerifyEmailPage';
+import TelegramSignalsPage from '@/pages/telegram/TelegramSignalsPage';
 
 // Gate the authenticated app. While the stored session is being verified we
 // show a minimal loader; once resolved we either render children or bounce to
@@ -150,6 +151,7 @@ export default function App() {
         <Route path="signals" element={<RequireRole role="ADMIN"><SignalsPage /></RequireRole>} />
         <Route path="rejections" element={<RequireRole role="ADMIN"><RejectionsPage /></RequireRole>} />
         <Route path="chartink" element={<RequireRole role="ADMIN"><ChartinkPage /></RequireRole>} />
+        <Route path="telegram" element={<RequireRole role="ADMIN"><TelegramSignalsPage /></RequireRole>} />
         <Route path="watch" element={<RequireRole role="ADMIN"><WatchPage /></RequireRole>} />
         <Route path="ungated-watch" element={<RequireRole role="ADMIN"><UngatedWatchPage /></RequireRole>} />
         <Route path="adaptive-stop" element={<RequireRole role="ADMIN"><AdaptiveStopPage /></RequireRole>} />

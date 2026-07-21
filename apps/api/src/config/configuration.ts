@@ -60,4 +60,17 @@ export default () => ({
     // the SEBI/legal review lands (spec §11). Does not gate the test path.
     liveEnabled: process.env.LIVE_BILLING_ENABLED === 'true',
   },
+  telegram: {
+    // Min parser confidence for a message to be promoted to a tracked signal.
+    minConfidence: parseFloat(process.env.TELEGRAM_MIN_CONFIDENCE || '0.55'),
+    // Leaderboard win-rate is null below this many resolved (win+loss) signals.
+    minSample: parseInt(process.env.TELEGRAM_MIN_SAMPLE || '5', 10),
+    // Days a SWING signal stays tracked before EXPIRED.
+    swingTrackDays: parseInt(process.env.TELEGRAM_SWING_TRACK_DAYS || '10', 10),
+    // Forward-return thresholds for DIRECTIONAL (level-less) signals.
+    directional: {
+      intraday: { winPct: 3, lossPct: 2 },
+      swing: { winPct: 8, lossPct: 5 },
+    },
+  },
 });

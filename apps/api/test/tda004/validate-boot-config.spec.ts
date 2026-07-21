@@ -22,7 +22,7 @@ describe('validateBootConfig', () => {
     expect(() => validateBootConfig({
       ...base, NODE_ENV: 'production', WEB_ORIGIN: 'https://app.example.com',
       DATABASE_URL: 'postgresql://x/db?sslmode=require', AI_ENGINE_URL: 'https://ai.example.com',
-      REDIS_TLS: 'true', REDIS_THROTTLER: 'true',
+      REDIS_TLS: 'true', REDIS_THROTTLER: 'true', TELEGRAM_INGEST_SECRET: 'sekret',
     } as any)).not.toThrow();
   });
   it('rejects the public default key sentinel even if non-empty', () => {

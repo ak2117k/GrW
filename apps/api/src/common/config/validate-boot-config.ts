@@ -35,6 +35,9 @@ export function validateBootConfig(env: NodeJS.ProcessEnv = process.env): void {
     if (env.REDIS_TLS !== 'true' && env.REDIS_ALLOW_PLAINTEXT !== 'true')
       fail.push('REDIS_TLS must be "true" in production (in-transit encryption), or set REDIS_ALLOW_PLAINTEXT=true for a trusted private-network Redis (e.g. Render Key Value internal endpoint)');
     if (env.REDIS_THROTTLER !== 'true') fail.push('REDIS_THROTTLER must be "true" in production (durable cross-replica limits)');
+    // The Telegram ingest endpoint is shared-secret gated; without the secret it
+    // fails closed (rejects all), so a production boot with it unset is a misconfig.
+    if (!env.TELEGRAM_INGEST_SECRET) fail.push('TELEGRAM_INGEST_SECRET is required in production');
   }
   if (fail.length) throw new BootConfigError(fail);
 }

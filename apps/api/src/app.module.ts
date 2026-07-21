@@ -42,6 +42,7 @@ import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module
 import { AutoExecutionModule } from './modules/auto-execution/auto-execution.module';
 import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
+import { TelegramModule } from './modules/telegram/telegram.module';
 
 @Module({
   imports: [
@@ -212,6 +213,11 @@ import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module
     // socket quotes and, on a hit, flips to TARGET_HIT and fires a persisted
     // Alert + a WS `alert` toast.
     StockMonitorModule,
+
+    // Telegram signal scorecard — ingests admin-curated channel signals, tracks
+    // each outcome against market data, and serves an admin-only win-rate
+    // scorecard. Read-only: never imports trade-engine (no order placement).
+    TelegramModule,
   ],
   providers: [
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,

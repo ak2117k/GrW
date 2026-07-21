@@ -23,6 +23,7 @@
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,md}\"",
     "db:migrate": "cd apps/api && npx prisma migrate dev",
     "db:seed": "cd apps/api && npx prisma db seed",
+    "admin:set-password": "tsx scripts/set-admin-password.ts",
     "db:studio": "cd apps/api && npx prisma studio",
     "db:generate": "cd apps/api && npx prisma generate",
     "verify:m5": "node scripts/verify-m5.mjs",

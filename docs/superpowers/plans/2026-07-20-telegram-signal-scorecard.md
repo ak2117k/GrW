@@ -218,15 +218,18 @@ git commit -m "feat(telegram): add scorecard data model (channels, messages, sig
 ```
 Field domains: `instrument ∈ {EQUITY,OPTION,FUTURE,INDEX}`, `side ∈ {LONG,SHORT}`, `signalType ∈ {LEVELED,DIRECTIONAL}`, `entryMode ∈ {CMP,ZONE,TRIGGER_ABOVE,TRIGGER_BELOW,NEAR}`, `slMode ∈ {NUMERIC,PREMIUM_PAID,NONE}`, `horizon ∈ {INTRADAY,SWING}`, `confidence ∈ [0,1]`.
 
-> **NOTE — new LLM dependency.** The ai-engine has no LLM client today. This task adds `anthropic` and requires `ANTHROPIC_API_KEY`. Model: `claude-haiku-4-5-20251001` (cheap, fast, sufficient for extraction). The implementer MUST load the `claude-api` skill before writing the Anthropic client call (correct client init, tool-use / JSON-mode, token params). Use the SDK's structured/tool-use so the model returns the schema, not prose.
+> **NOTE — LLM backend is the Claude Agent SDK (subscription auth), not the raw Messages API.** The ai-engine has no LLM client today. This task adds the **`claude-agent-sdk`** Python package and calls it from `_call_llm`. It authenticates via the user's **Claude Pro/Max subscription login** (`claude` / Claude Code login on the host) — **no `ANTHROPIC_API_KEY`**. This lets local R&D run on the existing Max plan at ₹0. Keep `_call_llm` as the single swappable seam so a raw-API-key backend (`anthropic` SDK + `claude-haiku-4-5`) can be dropped in for always-on production later without touching `parse_signal`/`_normalize`.
+>
+> **The implementer MUST verify the exact current `claude-agent-sdk` Python API before writing the call** — dispatch the `claude-code-guide` agent or WebFetch `https://code.claude.com/docs/en/agent-sdk` for the precise `query()` / `ClaudeAgentOptions` signatures and how to read assistant text from the returned messages. Do NOT guess the API. The prompt must instruct the model to return ONLY the JSON object (the schema in the Interfaces block); `_call_llm` extracts the assistant text, `json.loads` it, and returns the dict. The golden-set tests monkeypatch `_call_llm`, so they pass without any login — the real call is verified separately by the user on their logged-in machine.
 
 - [ ] **Step 1: Add the dependency**
 
 Edit `ai-engine/requirements.txt`, append:
 ```
-anthropic==0.40.0
+claude-agent-sdk
 ```
 Run: `pip install -r ai-engine/requirements.txt`
+(Pin the version the implementer confirms is current from the Agent SDK docs.)
 
 - [ ] **Step 2: Write failing golden-set tests**
 
@@ -318,49 +321,46 @@ _NOT_A_SIGNAL = {
 }
 
 
+_SCHEMA_HINT = (
+    'Return ONLY a JSON object, no prose, with these keys: '
+    'isSignal(bool), symbol(str), instrument(one of EQUITY|OPTION|FUTURE|INDEX), '
+    'exchange(str|null), side(LONG|SHORT), optionType(CE|PE|null), strike(number|null), '
+    'expiry(str|null), signalType(LEVELED|DIRECTIONAL), '
+    'entryMode(CMP|ZONE|TRIGGER_ABOVE|TRIGGER_BELOW|NEAR), entryLow(number|null), '
+    'entryHigh(number|null), slMode(NUMERIC|PREMIUM_PAID|NONE), stopLoss(number|null), '
+    'targets(array of numbers), horizon(INTRADAY|SWING), confidence(0..1 number).'
+)
+
+
 async def _call_llm(text: str) -> Dict[str, Any]:
-    """Call Claude and return the parsed JSON object. Patched in tests."""
-    from anthropic import AsyncAnthropic  # imported lazily so tests need no key
-    client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    tool = {
-        "name": "emit_signal",
-        "description": "Emit the structured trade signal.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "isSignal": {"type": "boolean"},
-                "symbol": {"type": "string"},
-                "instrument": {"type": "string", "enum": list(_INSTRUMENT)},
-                "exchange": {"type": ["string", "null"]},
-                "side": {"type": "string", "enum": list(_SIDE)},
-                "optionType": {"type": ["string", "null"], "enum": ["CE", "PE", None]},
-                "strike": {"type": ["number", "null"]},
-                "expiry": {"type": ["string", "null"]},
-                "signalType": {"type": "string", "enum": list(_SIGNAL_TYPE)},
-                "entryMode": {"type": "string", "enum": list(_ENTRY_MODE)},
-                "entryLow": {"type": ["number", "null"]},
-                "entryHigh": {"type": ["number", "null"]},
-                "slMode": {"type": "string", "enum": list(_SL_MODE)},
-                "stopLoss": {"type": ["number", "null"]},
-                "targets": {"type": "array", "items": {"type": "number"}},
-                "horizon": {"type": "string", "enum": list(_HORIZON)},
-                "confidence": {"type": "number"},
-            },
-            "required": ["isSignal", "signalType", "confidence"],
-        },
-    }
-    resp = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=512,
-        system=_SYSTEM,
-        tools=[tool],
-        tool_choice={"type": "tool", "name": "emit_signal"},
-        messages=[{"role": "user", "content": text}],
-    )
-    for block in resp.content:
-        if block.type == "tool_use":
-            return dict(block.input)
-    return dict(_NOT_A_SIGNAL)
+    """Extract a structured signal via the Claude Agent SDK. Patched in tests.
+
+    Auth: the Claude Agent SDK uses the host's Claude subscription login (Claude
+    Code / `claude` login) — NO ANTHROPIC_API_KEY. Runs on the user's Max plan
+    in local R&D. Production can swap this body for a raw `anthropic` Messages API
+    call keyed by ANTHROPIC_API_KEY without touching parse_signal/_normalize.
+
+    IMPLEMENTER: verify the exact claude-agent-sdk API (query()/ClaudeAgentOptions
+    signatures, how to read assistant text) from https://code.claude.com/docs/en/agent-sdk
+    or via the claude-code-guide agent BEFORE writing this. The shape below is
+    indicative, not verified — confirm names against the docs.
+    """
+    from claude_agent_sdk import query, ClaudeAgentOptions  # lazy: tests don't import
+    options = ClaudeAgentOptions(system_prompt=f"{_SYSTEM}\n\n{_SCHEMA_HINT}", max_turns=1)
+    chunks: list[str] = []
+    async for message in query(prompt=text, options=options):
+        for block in getattr(message, "content", []) or []:
+            piece = getattr(block, "text", None)
+            if piece:
+                chunks.append(piece)
+    raw = "".join(chunks).strip()
+    # Strip ```json fences if present, then parse.
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1].removeprefix("json").strip()
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return dict(_NOT_A_SIGNAL)
 
 
 def _normalize(raw: Dict[str, Any]) -> Dict[str, Any]:

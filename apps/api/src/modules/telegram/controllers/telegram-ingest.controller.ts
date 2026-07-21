@@ -15,6 +15,7 @@ import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { Public } from '../../../common/decorators';
 import { TelegramIngestService } from '../services/telegram-ingest.service';
+import { TelegramTrackerService } from '../services/telegram-tracker.service';
 import { TelegramRepository } from '../repositories/telegram.repository';
 import { TelegramIngestDto } from '../dto/telegram-ingest.dto';
 
@@ -27,6 +28,7 @@ export class TelegramIngestController {
 
   constructor(
     private readonly ingest: TelegramIngestService,
+    private readonly tracker: TelegramTrackerService,
     private readonly repo: TelegramRepository,
     private readonly config: ConfigService,
   ) {}
@@ -46,6 +48,20 @@ export class TelegramIngestController {
   async lastSeen(@Headers(TELEGRAM_INGEST_SECRET_HEADER) secret: string | undefined) {
     this.assertAuthorized(secret);
     return this.repo.lastSeenByChannel();
+  }
+
+  /**
+   * External heartbeat trigger for the outcome tracker. The in-process @Cron
+   * never fires on the spun-down free tier, so an external cron POSTs here during
+   * market hours to wake the service AND sweep PENDING/ACTIVE signals for
+   * target/SL/expiry. Same shared secret as ingest.
+   */
+  @Post('track')
+  @HttpCode(HttpStatus.OK)
+  async track(@Headers(TELEGRAM_INGEST_SECRET_HEADER) secret: string | undefined) {
+    this.assertAuthorized(secret);
+    await this.tracker.pollActive();
+    return { triggered: true };
   }
 
   private assertAuthorized(provided: string | undefined): void {

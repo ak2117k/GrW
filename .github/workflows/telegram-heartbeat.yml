@@ -1,0 +1,51 @@
+# Telegram scorecard — outcome-tracker heartbeat.
+#
+# Render free-tier spins the API down when idle, so the tracker's in-process
+# @Cron (pollActive) never fires reliably. This external heartbeat POSTs during
+# market hours to wake the service AND sweep every PENDING/ACTIVE Telegram signal
+# for target/SL/expiry — so win-rates actually resolve.
+#
+# Authenticates with the X-Telegram-Ingest-Secret HEADER (the SAME shared secret
+# the listener and grw-api already use — no new secret to manage).
+#
+# ── ONE-TIME SETUP (required, or every run 401s) ──────────────────────────────
+#   GitHub → repo Settings → Secrets and variables → Actions → New repository
+#   secret:  name = TELEGRAM_INGEST_SECRET,  value = the SAME value set in Render.
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# Schedule note: cron is UTC. NSE trades 09:15–15:30 IST = 03:45–10:00 UTC. We run
+# every 15 min across 04:00–10:45 UTC. GitHub may delay scheduled runs by several
+# minutes — harmless here, since the poll just re-evaluates whatever is open.
+
+name: telegram-heartbeat
+
+on:
+  schedule:
+    - cron: '*/15 4-10 * * 1-5' # every 15 min, ~09:30–16:15 IST, Mon–Fri
+  workflow_dispatch: {} # manual run for testing
+
+concurrency:
+  group: telegram-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    env:
+      API: https://grw-api.onrender.com
+      SECRET: ${{ secrets.TELEGRAM_INGEST_SECRET }}
+    steps:
+      - name: Guard — secret configured
+        run: |
+          if [ -z "$SECRET" ]; then
+            echo "::error::TELEGRAM_INGEST_SECRET repo secret is not set — every trigger would 401. See this workflow's header for setup."
+            exit 1
+          fi
+
+      - name: Sweep active Telegram signals (target/SL/expiry)
+        run: |
+          code=$(curl -sS -m 180 --retry 2 --retry-all-errors -o /tmp/track.json -w "%{http_code}" \
+            -X POST "$API/webhooks/telegram/track" \
+            -H "X-Telegram-Ingest-Secret: $SECRET" -H "Content-Type: application/json")
+          echo "track HTTP $code"; cat /tmp/track.json; echo
+          case "$code" in 2*) : ;; *) echo "::error::track returned $code"; exit 1 ;; esac

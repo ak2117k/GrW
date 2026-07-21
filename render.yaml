@@ -85,6 +85,16 @@ services:
       - key: ML_TRIGGER_SECRET
         sync: false
 
+      # --- Telegram signal scorecard (admin-only) ---
+      # Shared secret between the Telethon listener and POST /webhooks/telegram/ingest,
+      # sent as header  X-Telegram-Ingest-Secret . REQUIRED IN PRODUCTION —
+      # validate-boot-config CRASHES boot (BootConfigError) if unset, so this MUST be
+      # set in the Render dashboard before the first deploy that includes the telegram
+      # module. Generate:
+      # node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+      - key: TELEGRAM_INGEST_SECRET
+        sync: false
+
       # --- Redis (Render Key Value, INTERNAL endpoint) ---
       # The app reads REDIS_HOST/REDIS_PORT/REDIS_PASSWORD (NOT REDIS_URL).
       # Use Render Key Value's INTERNAL connection: it lives on Render's private

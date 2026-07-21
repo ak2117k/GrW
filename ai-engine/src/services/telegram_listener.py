@@ -1,11 +1,14 @@
-"""Persistent Telethon listener → parse → forward to NestJS ingest.
+"""Persistent Telethon listener → parse (in-process) → forward to NestJS ingest.
 
 Holds a long-lived MTProto connection to admin-curated Telegram channels. For
-each new (or backfilled) message it calls the local parser route, then POSTs the
-structured signal to the NestJS ingest endpoint over a shared-secret header.
+each new (or backfilled) message it parses the text IN-PROCESS via the Claude
+Agent SDK (``parse_signal`` — authenticated by the host's Claude login), then
+POSTs the structured signal to the NestJS ingest endpoint over a shared-secret
+header. No separate parser HTTP service is needed.
 
-``telethon`` is imported lazily inside ``run()``/``backfill()`` so this module
-imports (and its pure ``build_ingest_payload`` unit-tests) with no telethon
+``telethon`` is imported lazily inside ``run()``/``backfill()`` and the Agent SDK
+lazily inside ``parse_signal._call_llm`` so this module imports (and its pure
+``build_ingest_payload`` unit-tests) with no telethon / claude-agent-sdk
 installed and no network access.
 """
 import logging
@@ -13,6 +16,8 @@ import os
 from typing import Any, Dict, List
 
 import httpx
+
+from .telegram_parser_service import parse_signal
 
 logger = logging.getLogger("telegram_listener")
 
@@ -24,16 +29,14 @@ def build_ingest_payload(channel: Dict[str, Any], message: Dict[str, Any],
 
 class TelegramListener:
     def __init__(self) -> None:
-        self.parse_url = f"{os.environ.get('AI_ENGINE_URL', 'http://localhost:5000')}/api/telegram/parse"
         self.ingest_url = os.environ["TELEGRAM_INGEST_URL"]
         self.ingest_secret = os.environ["TELEGRAM_INGEST_SECRET"]
         self.watch = [c.strip() for c in os.environ.get("TELEGRAM_WATCH_CHANNELS", "").split(",") if c.strip()]
         self._http = httpx.AsyncClient(timeout=30)
 
     async def parse(self, text: str) -> Dict[str, Any]:
-        r = await self._http.post(self.parse_url, json={"text": text})
-        r.raise_for_status()
-        return r.json()
+        """Parse in-process via the Claude Agent SDK (uses the host's Claude login)."""
+        return await parse_signal(text)
 
     async def forward(self, payload: Dict[str, Any]) -> None:
         r = await self._http.post(

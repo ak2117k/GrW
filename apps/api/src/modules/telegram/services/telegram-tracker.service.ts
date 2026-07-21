@@ -52,6 +52,25 @@ export class TelegramTrackerService {
       return;
     }
 
+    // Directional and CMP-entry signals arrive ACTIVE with no entryPrice — the
+    // PENDING→ACTIVE branch that seeds entries never runs for them, and
+    // evaluateDirectional early-returns ACTIVE while entryPrice is null. Seed the
+    // entry from the first available candle close (≈ post-time price) so they can
+    // actually reach TARGET_HIT/SL_HIT. LEVELED-with-zone signals seed their own
+    // entry via evaluateLeveled and are left untouched.
+    if (
+      s.entryPrice == null &&
+      (s.signalType === 'DIRECTIONAL' || s.entryMode === 'CMP') &&
+      bars.length > 0
+    ) {
+      const seededEntry = bars[0].close;
+      await this.repo.transition(signalId, {
+        entryPrice: seededEntry, entryFilledAt: bars[0].timestamp,
+      });
+      await this.repo.addEvent({ signalId, type: 'ENTRY_FILLED', price: seededEntry });
+      s.entryPrice = seededEntry;
+    }
+
     const evalSig: EvalSignal = {
       side: s.side, signalType: s.signalType, entryLow: s.entryLow, entryHigh: s.entryHigh,
       entryMode: s.entryMode, stopLoss: s.stopLoss, slMode: s.slMode, targets: s.targets,

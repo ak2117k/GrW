@@ -49,6 +49,34 @@ it('marks an option with no live premium and a past window UNTRACKABLE', async (
     expect.objectContaining({ status: 'UNTRACKABLE' }));
 });
 
+it('seeds entry and resolves a DIRECTIONAL signal to TARGET_HIT', async () => {
+  const d = deps();
+  d.repo.findSignal.mockResolvedValue({
+    id: 's4', status: 'ACTIVE', token: '111', exchange: 'NSE', instrument: 'EQUITY', side: 'LONG',
+    signalType: 'DIRECTIONAL', entryLow: null, entryHigh: null, entryMode: 'CMP',
+    stopLoss: null, slMode: 'NONE', targets: [], entryPrice: null, horizon: 'SWING',
+    createdAt: new Date('2026-07-20T04:00:00Z'), trackExpiresAt: new Date('2026-07-25T10:00:00Z'),
+  });
+  // Entry seeds from first close (100). Win +8% => 108, loss -5% => 95.
+  // Price rises past 108 before ever dropping to 95 → TARGET_HIT.
+  d.marketRepo.getCandles.mockResolvedValue([
+    { high: 101, low: 99, close: 100, timestamp: new Date('2026-07-20T05:00:00Z') },
+    { high: 104, low: 100, close: 103, timestamp: new Date('2026-07-21T05:00:00Z') },
+    { high: 110, low: 105, close: 109, timestamp: new Date('2026-07-22T05:00:00Z') },
+  ]);
+  await d.svc.evaluateOne('s4');
+  // Entry got seeded from the first candle close.
+  expect(d.repo.transition).toHaveBeenCalledWith('s4',
+    expect.objectContaining({ entryPrice: 100 }));
+  expect(d.repo.addEvent).toHaveBeenCalledWith(
+    expect.objectContaining({ type: 'ENTRY_FILLED', price: 100 }));
+  // And the signal resolved to a win.
+  expect(d.repo.transition).toHaveBeenCalledWith('s4',
+    expect.objectContaining({ status: 'TARGET_HIT' }));
+  expect(d.gateway.emit).toHaveBeenCalledWith('signal-update',
+    expect.objectContaining({ id: 's4', status: 'TARGET_HIT' }));
+});
+
 it('does nothing for a signal already in a terminal state', async () => {
   const d = deps();
   d.repo.findSignal.mockResolvedValue({ id: 's3', status: 'TARGET_HIT' });

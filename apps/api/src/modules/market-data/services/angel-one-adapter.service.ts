@@ -1392,7 +1392,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
       const url =
         'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json';
       this.logger.log('Downloading instrument master from Angel One CDN');
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
       if (!response.ok) {
         throw new Error(`Failed to download instrument master: HTTP ${response.status}`);
       }

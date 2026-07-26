@@ -740,6 +740,10 @@ export function useChartData(): UseChartDataReturn {
     // These also need to land on the compressed time axis. We map the real
     // candle timestamp to its bucket, then either replace (if it matches the
     // most-recent bar's bucket) or append at the next compressed slot.
+    // NOTE: currently UNFED — nothing calls the gateway's emitCandleToUser in
+    // the per-user feed, so no 'candle' event reaches this handler today. Kept
+    // (harmless) for when a per-user candle emitter is wired; live bars come via
+    // the 'tick' handler above and the 20s liveEdgeRefresh in the meantime.
     const unsubCandle = wsService.subscribe('candle', (data) => {
       const candle = data as {
         token: string;

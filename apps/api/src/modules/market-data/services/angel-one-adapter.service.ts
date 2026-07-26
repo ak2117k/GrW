@@ -103,14 +103,15 @@ const HISTORICAL_MIN_GAP_MS = 350;
  * `bulk` is for deep-history / backfill reads whose [from,to] window is far
  * longer than the live-scan norm (e.g. 120 days of 15m vs the ~7 days a live
  * scan fetches). It shares `background`'s queue and rate gate, but it BYPASSES
- * the candle cache in BOTH directions, because `historicalCache` is keyed on
- * `token:exchange:timeframe` ONLY — the key ignores [from,to]. Without the
- * bypass:
- *   - READ:  a bulk caller asking for 120 days would be handed whatever short
- *            window a live scan last cached, silently truncating its dataset.
- *   - WRITE: a bulk 120-day array would land under the shared key and be served
- *            to live consumers (e.g. the intraday supertrend trailing stop),
- *            which expect the short live-scan window.
+ * the candle cache in BOTH directions. The cache key now includes [from,to], so
+ * a bulk window no longer collides with a live-scan window under a shared key;
+ * bulk still bypasses so we neither serve nor retain large deep-history arrays
+ * in the short-lived TTL cache:
+ *   - READ:  a bulk caller always hits the broker for the freshest deep window
+ *            rather than reusing a cached (and TTL-stale) large array.
+ *   - WRITE: a bulk 120-day array is not what live consumers (e.g. the intraday
+ *            supertrend trailing stop) expect, so it is never published to the
+ *            cache even though its `to` ≈ now would otherwise qualify.
  * Bulk reads therefore always hit the broker and never publish their result.
  */
 export type HistoricalPriority = 'interactive' | 'background' | 'bulk';
@@ -912,9 +913,8 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // entirely: fetch fresh, never store.
     //
     // A `bulk` read (deep-history backfill) additionally bypasses the cache in
-    // both directions: the key ignores [from,to], so a cached entry populated
-    // by a live scan's short window would silently truncate a 120-day request.
-    // See HistoricalPriority.
+    // both directions: it always hits the broker for the freshest deep window
+    // rather than reuse a TTL-stale large cached array. See HistoricalPriority.
     // Include the requested [from,to] window in the key (was:
     // `${token}:${exchange}:${timeframe}`) so distinct windows of the same
     // (token, exchange, timeframe) never collide — a shorter live-scan window
@@ -980,9 +980,10 @@ export class AngelOneAdapterService implements BrokerAdapter {
     //
     // A `bulk` fetch must not populate it either. `isLiveFetch` only checks
     // that `to` ≈ now, so a backfill's 120-day window (fresh `to`, LONG `from`)
-    // passes that guard — but the cache key ignores [from,to], so the deep
-    // array would be served to live consumers under the shared key. A bulk
-    // window is not representative of what live consumers expect here: they
+    // passes that guard. Even though the key now includes [from,to] (so it would
+    // not collide with a live-scan key), a bulk window is still not what live
+    // consumers expect here and there is no point retaining such a large deep
+    // array in the short-lived TTL cache: they
     // fetch ~6-7 days and feed recursive indicators (supertrend) whose output
     // shifts if handed ~3000 bars instead of ~150. See HistoricalPriority.
     if (isLiveFetch && result.length > 0 && priority !== 'bulk') {

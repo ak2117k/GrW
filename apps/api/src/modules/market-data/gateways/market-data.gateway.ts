@@ -138,7 +138,15 @@ export class MarketDataGateway
     const userId = client.data?.userId as string | undefined;
 
     if (userId && tokens.length > 0) {
-      void this.userFeedManager.subscribe(userId, tokens.map(toTokenRef));
+      // Floated: the ack returns immediately. subscribe() can reject (e.g. the
+      // per-user feed flag is disabled → factory throws) — swallow it here so a
+      // rejected promise never becomes an unhandledRejection / process crash.
+      // No secrets in the message.
+      this.userFeedManager.subscribe(userId, tokens.map(toTokenRef)).catch((err) => {
+        this.logger.debug(
+          `subscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
+        );
+      });
     }
 
     this.logger.debug(
@@ -163,7 +171,13 @@ export class MarketDataGateway
     const userId = client.data?.userId as string | undefined;
 
     if (userId && tokens.length > 0) {
-      void this.userFeedManager.unsubscribe(userId, tokens.map(toTokenRef));
+      // Floated + guarded like handleSubscribe: a rejection must not surface as
+      // an unhandledRejection.
+      this.userFeedManager.unsubscribe(userId, tokens.map(toTokenRef)).catch((err) => {
+        this.logger.debug(
+          `unsubscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
+        );
+      });
     }
 
     this.logger.debug(
@@ -225,8 +239,10 @@ export class MarketDataGateway
 
   /**
    * Emit OI update to clients subscribed to that token's room.
-   * NOTE: per-user OI routing is out of scope for this task; retained on the
-   * legacy `token:` room so `oi-tracker.processor` keeps compiling.
+   * NOTE: currently inert — there is NO frontend `'oi-update'` consumer, and
+   * this still emits to the legacy `token:` room (no client joins it) rather
+   * than the per-user room. Retained so `oi-tracker.processor` keeps compiling;
+   * needs per-user OI routing (like emitTickToUser) when a consumer returns.
    */
   emitOIUpdate(data: OIData): void {
     this.server.to(`token:${data.token}`).emit('oi-update', data);

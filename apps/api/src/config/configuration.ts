@@ -66,9 +66,11 @@ export default () => ({
     // broker socket is ever opened. Set PER_USER_FEED_ENABLED=false to disable.
     perUserEnabled: process.env.PER_USER_FEED_ENABLED !== 'false',
     // How long a user's session lingers with zero live interest before teardown.
-    idleTeardownMs: Number(process.env.USER_FEED_IDLE_TEARDOWN_MS ?? 120000),
+    // `+(... || default)` (not `?? `) so an empty-string env falls back to the
+    // default instead of coercing to 0 — matches the billing/telegram blocks.
+    idleTeardownMs: +(process.env.USER_FEED_IDLE_TEARDOWN_MS || 120000),
     // Max concurrent per-user sessions before the LRU idle one is evicted.
-    maxSessions: Number(process.env.USER_FEED_MAX_SESSIONS ?? 40),
+    maxSessions: +(process.env.USER_FEED_MAX_SESSIONS || 40),
   },
   telegram: {
     // Min parser confidence for a message to be promoted to a tracked signal.

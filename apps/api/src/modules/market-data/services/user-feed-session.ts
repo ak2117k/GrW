@@ -104,11 +104,25 @@ export class UserFeedSession implements UserFeedSessionLike {
    * live, returns immediately.
    */
   async ensureConnected(): Promise<void> {
+    return this.ensureConnectedInternal(false);
+  }
+
+  /**
+   * Shared connect guard used by BOTH the public `ensureConnected()` and the
+   * reconnect timer. Concurrent callers share ONE `connectPromise` (one login,
+   * one socket). `isReconnect` flows into `doConnect` so the reconnect path
+   * keeps the `'reconnecting'` state (no intervening `'connecting'`) — the
+   * client only gap-fills on a `reconnecting → live` transition. Routing the
+   * reconnect through this same promise means a `subscribe()` → `ensureConnected()`
+   * arriving in the reconnect window joins the in-flight login instead of
+   * starting a SECOND `generateSession`.
+   */
+  private ensureConnectedInternal(isReconnect: boolean): Promise<void> {
     if (this.disposed) throw new Error('UserFeedSession is disposed');
-    if (this.connected) return;
+    if (this.connected) return Promise.resolve();
     if (!this.connectPromise) {
-      this.connectPromise = this.doConnect().catch((err) => {
-        // Allow a later ensureConnected() to retry a failed login.
+      this.connectPromise = this.doConnect(isReconnect).catch((err) => {
+        // Allow a later ensureConnected() / reconnect to retry a failed login.
         this.connectPromise = null;
         throw err;
       });
@@ -177,8 +191,15 @@ export class UserFeedSession implements UserFeedSessionLike {
   // Private — connect / login
   // ──────────────────────────────────────────────
 
-  private async doConnect(): Promise<void> {
-    this.setState('connecting');
+  private async doConnect(isReconnect = false): Promise<void> {
+    // First connect emits 'connecting' → 'live'. A reconnect keeps the
+    // 'reconnecting' state set by onSocketDown and goes STRAIGHT to 'live' — no
+    // intervening 'connecting', so the client's reconnecting → live gap-fill
+    // fires. (State check is belt-and-suspenders for an ensureConnected() that
+    // races into the reconnect window before the timer sets the flag.)
+    if (!isReconnect && this.state !== 'reconnecting') {
+      this.setState('connecting');
+    }
 
     // Lease decrypted creds only for the duration of the login. We build the
     // SmartAPI client + WebSocket INSIDE the lease so the api key never lives
@@ -397,7 +418,10 @@ export class UserFeedSession implements UserFeedSessionLike {
 
     this.reconnectTimer = setTimeout(() => {
       // Full re-login: re-lease creds, rebuild socket, resubscribe activeTokens.
-      this.doConnect().catch((error) => {
+      // Routed through the shared connect guard (isReconnect=true) so a
+      // concurrent ensureConnected() shares this ONE login instead of starting
+      // a second generateSession.
+      this.ensureConnectedInternal(true).catch((error) => {
         this.logger.warn(
           `Reconnect attempt ${this.reconnectAttempts} failed: ${
             error instanceof Error ? error.message : error

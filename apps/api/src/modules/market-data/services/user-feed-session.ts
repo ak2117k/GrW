@@ -9,6 +9,18 @@ import type {
   TokenRef,
   UserFeedSessionLike,
 } from './user-feed.types';
+import {
+  TIMEFRAME_MAP,
+  TIMEFRAME_MAX_RANGE_DAYS,
+  buildChunkWindows,
+  formatAngelDateTime,
+  mapCandleRows,
+  mapFullQuote,
+  type Candle,
+} from './user-historical.util';
+
+/** Delay between successive chunked historical calls (Angel rate limit). */
+const CHUNK_DELAY_MS = 300;
 
 /**
  * Angel One WebSocket feed mode. Mirrors `WsFeedMode` in
@@ -47,7 +59,12 @@ export interface UserFeedSessionDeps {
     userId: string,
     cb: (creds: DecryptedBrokerCredentials) => Promise<T>,
   ) => Promise<T>;
-  smartApiFactory: (apiKey: string) => { generateSession: Function; logout: Function };
+  smartApiFactory: (apiKey: string) => {
+    generateSession: Function;
+    logout: Function;
+    getCandleData: Function;
+    marketData: Function;
+  };
   wsFactory: (opts: {
     jwttoken: string;
     clientcode: string;
@@ -70,7 +87,12 @@ export class UserFeedSession implements UserFeedSessionLike {
   private readonly logger = new Logger(UserFeedSession.name);
 
   private ws: any = null;
-  private smartApi: { generateSession: Function; logout: Function } | null = null;
+  private smartApi: {
+    generateSession: Function;
+    logout: Function;
+    getCandleData: Function;
+    marketData: Function;
+  } | null = null;
   /** Client code — kept for logout() on dispose; not a secret credential. */
   private clientId: string | null = null;
 
@@ -154,6 +176,89 @@ export class UserFeedSession implements UserFeedSessionLike {
 
   activeTokenCount(): number {
     return this.activeTokens.size;
+  }
+
+  /**
+   * Fetch historical candles using THIS user's own authenticated Angel session
+   * (reuses the JWT held inside `this.smartApi`; no separate REST login). Chunks
+   * ranges wider than the interval's per-call limit, fetching newest-first so a
+   * throttled window drops the OLDEST candles (never the live edge). A `data:null`
+   * response is a throttle / no-data marker and is treated as an empty chunk
+   * (never thrown) — mirrors the shared adapter's chart-fetch contract.
+   */
+  async getCandles(
+    token: string,
+    exchange: string,
+    timeframe: string,
+    from: Date,
+    to: Date,
+  ): Promise<Candle[]> {
+    await this.ensureConnected();
+    if (!this.smartApi) {
+      throw new Error('UserFeedSession has no SmartAPI client after connect');
+    }
+
+    const interval = TIMEFRAME_MAP[timeframe] ?? timeframe;
+    const maxDays = TIMEFRAME_MAX_RANGE_DAYS[interval] ?? 30;
+    const maxRangeMs = maxDays * 24 * 60 * 60 * 1000;
+
+    // Build oldest→newest, then fetch newest-first (reverse) to protect the
+    // live edge if a later window gets throttled.
+    const windows = buildChunkWindows(from.getTime(), to.getTime(), maxRangeMs);
+    windows.reverse();
+
+    const merged: Candle[] = [];
+    const seenTs = new Set<number>();
+    let firstChunk = true;
+
+    for (const { start, end } of windows) {
+      // Respect Angel's historical rate limit between chunk calls.
+      if (!firstChunk) await this.delay(CHUNK_DELAY_MS);
+      firstChunk = false;
+
+      const response: any = await this.smartApi.getCandleData({
+        exchange,
+        symboltoken: token,
+        interval,
+        fromdate: formatAngelDateTime(new Date(start)),
+        todate: formatAngelDateTime(new Date(end)),
+      });
+
+      // data:null → throttle / no data; data:non-array → empty. Both map to [].
+      const rows = response?.data == null || !Array.isArray(response.data) ? [] : response.data;
+      for (const c of mapCandleRows(rows)) {
+        const ts = c.timestamp.getTime();
+        if (!seenTs.has(ts)) {
+          seenTs.add(ts);
+          merged.push(c);
+        }
+      }
+    }
+
+    merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    return merged;
+  }
+
+  /**
+   * Fetch a single FULL-mode quote using THIS user's own authenticated Angel
+   * session. Returns null when the account can't quote the token (nothing
+   * fetched) — the caller decides the not-found contract.
+   */
+  async getQuote(token: string, exchange: string): Promise<TickData | null> {
+    await this.ensureConnected();
+    if (!this.smartApi) {
+      throw new Error('UserFeedSession has no SmartAPI client after connect');
+    }
+
+    const response: any = await this.smartApi.marketData({
+      mode: 'FULL',
+      exchangeTokens: { [exchange]: [token] },
+    });
+    return mapFullQuote(response?.data?.fetched, token);
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   onTick(listener: TickListener): void {

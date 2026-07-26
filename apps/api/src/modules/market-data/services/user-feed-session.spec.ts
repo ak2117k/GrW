@@ -18,6 +18,29 @@ function makeDeps() {
       data: { jwtToken: 'jwt', feedToken: 'feed' },
     }),
     logout: jest.fn().mockResolvedValue(undefined),
+    getCandleData: jest.fn().mockResolvedValue({
+      data: [
+        ['2026-05-15T09:15:00+05:30', 100, 110, 90, 105, 1000],
+        ['2026-05-15T09:16:00+05:30', 105, 108, 104, 106, 500],
+      ],
+    }),
+    marketData: jest.fn().mockResolvedValue({
+      data: {
+        fetched: [
+          {
+            symbolToken: '111',
+            tradingSymbol: 'FOO-EQ',
+            ltp: 250.5,
+            open: 248,
+            high: 252,
+            low: 247,
+            close: 249,
+            tradeVolume: 4242,
+            opnInterest: 77,
+          },
+        ],
+      },
+    }),
   };
   // Vault lease that just hands fake decrypted creds to the callback.
   const withCreds = jest.fn(async (_userId: string, cb: (c: any) => Promise<any>) =>
@@ -101,6 +124,78 @@ it('reconnect emits reconnecting → live with NO intervening connecting', async
   } finally {
     jest.useRealTimers();
   }
+});
+
+it('getCandles connects then returns mapped candles from the user session', async () => {
+  const d = makeDeps();
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  // 8h window on a 1m interval → single chunk (no inter-chunk delay).
+  const from = new Date('2026-05-15T03:45:00.000Z'); // 09:15 IST
+  const to = new Date('2026-05-15T05:45:00.000Z'); // 11:15 IST
+  const candles = await s.getCandles('111', 'NSE', '1m', from, to);
+
+  expect(d.smartApi.generateSession).toHaveBeenCalledTimes(1); // ensureConnected ran
+  expect(d.smartApi.getCandleData).toHaveBeenCalledWith(
+    expect.objectContaining({
+      exchange: 'NSE',
+      symboltoken: '111',
+      interval: 'ONE_MINUTE',
+    }),
+  );
+  expect(candles).toHaveLength(2);
+  expect(candles[0].open).toBe(100);
+  expect(candles[1].close).toBe(106);
+  // ascending by timestamp
+  expect(candles[0].timestamp.getTime()).toBeLessThanOrEqual(candles[1].timestamp.getTime());
+});
+
+it('getCandles treats data:null as empty (no throw)', async () => {
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValueOnce({ data: null });
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  const from = new Date('2026-05-15T03:45:00.000Z');
+  const to = new Date('2026-05-15T05:45:00.000Z');
+  const candles = await s.getCandles('111', 'NSE', '1m', from, to);
+  expect(candles).toEqual([]);
+});
+
+it('getQuote connects then returns a mapped FULL quote', async () => {
+  const d = makeDeps();
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  const quote = await s.getQuote('111', 'NSE');
+  expect(d.smartApi.generateSession).toHaveBeenCalledTimes(1); // ensureConnected ran
+  expect(d.smartApi.marketData).toHaveBeenCalledWith({
+    mode: 'FULL',
+    exchangeTokens: { NSE: ['111'] },
+  });
+  expect(quote).not.toBeNull();
+  expect(quote!.token).toBe('111');
+  expect(quote!.ltp).toBe(250.5);
+  expect(quote!.oi).toBe(77);
+});
+
+it('getQuote returns null when nothing is fetched', async () => {
+  const d = makeDeps();
+  d.smartApi.marketData.mockResolvedValueOnce({ data: { fetched: [] } });
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  const quote = await s.getQuote('111', 'NSE');
+  expect(quote).toBeNull();
 });
 
 it('dispose closes the socket and logs out', async () => {

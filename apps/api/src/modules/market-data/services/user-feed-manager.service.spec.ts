@@ -15,6 +15,8 @@ function fakeSession() {
     onTick: (l: any) => (listeners.tick = l),
     onState: (l: any) => (listeners.state = l),
     dispose: jest.fn().mockResolvedValue(undefined),
+    getCandles: jest.fn().mockResolvedValue([{ timestamp: new Date(), open: 1, high: 2, low: 0, close: 1, volume: 10 }]),
+    getQuote: jest.fn().mockResolvedValue({ token: '1', ltp: 100 }),
     __listeners: listeners,
   };
 }
@@ -51,6 +53,31 @@ it('tears down an idle session after idleMs', async () => {
   await Promise.resolve();
   expect(sessions[0].dispose).toHaveBeenCalled();
   jest.useRealTimers();
+});
+
+it('fetchCandles delegates to the user session (creating it on first use)', async () => {
+  const sessions: any[] = [];
+  const factory = jest.fn(() => {
+    const s = fakeSession();
+    sessions.push(s);
+    return s;
+  });
+  const mgr = new UserFeedManager(factory as any, { idleMs: 120000, maxSessions: 40 });
+  const from = new Date('2026-05-15T03:45:00.000Z');
+  const to = new Date('2026-05-15T05:45:00.000Z');
+  const candles = await mgr.fetchCandles('u1', '111', 'NSE', '1m', from, to);
+  expect(factory).toHaveBeenCalledTimes(1);
+  expect(sessions[0].getCandles).toHaveBeenCalledWith('111', 'NSE', '1m', from, to);
+  expect(candles).toHaveLength(1);
+  expect(candles[0].open).toBe(1);
+});
+
+it('fetchQuote delegates to the user session', async () => {
+  const s = fakeSession();
+  const mgr = new UserFeedManager((() => s) as any, { idleMs: 120000, maxSessions: 40 });
+  const quote = await mgr.fetchQuote('u1', '111', 'NSE');
+  expect(s.getQuote).toHaveBeenCalledWith('111', 'NSE');
+  expect(quote).toEqual({ token: '1', ltp: 100 });
 });
 
 it('routes ticks through the global handler tagged by userId', async () => {

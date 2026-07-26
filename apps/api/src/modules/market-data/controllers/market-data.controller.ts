@@ -39,6 +39,8 @@ import {
 import { seriesCautionary } from '../../trade-engine/utils/cautionary';
 import { dedupePreferNse } from '../utils/dedupe-prefer-nse';
 import { scoreSymbolMatch } from '../utils/rank-symbol-matches';
+import { UserFeedManager } from '../services/user-feed-manager.service';
+import { CurrentUser } from '../../../common/decorators';
 
 /**
  * Look up a symbol and exchange for a token from the known constant maps.
@@ -91,6 +93,10 @@ export class MarketDataController {
     private readonly angelOneAdapter: AngelOneAdapterService,
     private readonly commodityRollService: CommodityRollService,
     private readonly gapDetector: GapDetectorService,
+    // Per-user live feed manager — chart candles + quote reuse the LOGGED-IN
+    // user's OWN already-authenticated Angel session (via their UserFeedSession)
+    // instead of the shared feed account.
+    private readonly userFeedManager: UserFeedManager,
     // Optional + forwardRef because LevelBookService lives in the
     // signal-generator module (which is @Global) and we don't want a
     // hard import cycle. Used only to seed quote responses outside
@@ -294,6 +300,7 @@ export class MarketDataController {
   async getCandles(
     @Param('token') token: string,
     @Query() query: GetCandlesQueryDto,
+    @CurrentUser('userId') userId: string,
   ) {
     const from = new Date(query.from);
     const to = new Date(query.to);
@@ -333,13 +340,13 @@ export class MarketDataController {
 
     const fetchPromise = (async () => {
       try {
-        const liveCandles = await this.angelOneAdapter.getHistoricalData(
+        const liveCandles = await this.userFeedManager.fetchCandles(
+          userId,
           token,
           exchange,
           query.timeframe,
           from,
           to,
-          'interactive', // user-facing chart fetch — jump the background queue
         );
         return {
           token,
@@ -433,21 +440,40 @@ export class MarketDataController {
   @ApiQuery({ name: 'exchange', required: false })
   async getQuote(
     @Param('token') token: string,
+    @CurrentUser('userId') userId: string,
     @Query('exchange') exchange?: string,
   ) {
-    const quote = this.marketFeedService.getQuote(token);
-    if (quote) {
-      return { token, quote };
-    }
-
-    // No live tick — try the level book (seeds OHLC + VWAP from daily
-    // candles even when the feed is offline / market is closed).
+    // Resolve exchange + symbol once (needed for both the per-user broker fetch
+    // and the level-book fallback). Cheap single-row metadata read.
     const instrument = await this.instrumentService.getByToken(token);
     const constantEntry = resolveTokenFromConstants(token);
     const resolvedExchange =
       exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
     const resolvedSymbol = instrument?.symbol ?? constantEntry?.symbol ?? '';
 
+    // Primary: the LOGGED-IN user's OWN Angel session (FULL-mode REST quote).
+    // If the per-user feed is disabled or the user has no broker creds, the
+    // manager/session throws — caught here so we fall through to the level-book
+    // seed and the existing not-found contract rather than crashing.
+    try {
+      const quote = await this.userFeedManager.fetchQuote(
+        userId,
+        token,
+        resolvedExchange,
+      );
+      if (quote) {
+        return { token, quote };
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Per-user quote fetch for ${resolvedExchange}:${token} failed: ${
+          err instanceof Error ? err.message : err
+        }. Falling back to level book.`,
+      );
+    }
+
+    // No live quote — try the level book (seeds OHLC + VWAP from daily
+    // candles even when the feed is offline / market is closed).
     if (this.levelBookService) {
       try {
         const book = await this.levelBookService.lazyLoad(

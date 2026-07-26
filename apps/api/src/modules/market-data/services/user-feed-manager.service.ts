@@ -140,6 +140,30 @@ export class UserFeedManager {
     this.startIdleTimer(userId, entry);
   }
 
+  /**
+   * One-shot historical candle fetch over the user's OWN Angel session. Reuses
+   * (or lazily creates) the user's session — the session's own ensureConnected
+   * handles login. A fetch adds NO token ref, so an otherwise-idle session may
+   * still idle-teardown later; the chart's separate subscribe() keeps it alive.
+   */
+  async fetchCandles(
+    userId: string,
+    token: string,
+    exchange: string,
+    timeframe: string,
+    from: Date,
+    to: Date,
+  ) {
+    const entry = this.getOrCreateEntry(userId);
+    return entry.session.getCandles(token, exchange, timeframe, from, to);
+  }
+
+  /** One-shot FULL-mode quote over the user's OWN Angel session (null if unquotable). */
+  async fetchQuote(userId: string, token: string, exchange: string) {
+    const entry = this.getOrCreateEntry(userId);
+    return entry.session.getQuote(token, exchange);
+  }
+
   // ──────────────────────────────────────────────
   // Private
   // ──────────────────────────────────────────────

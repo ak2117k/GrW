@@ -1,25 +1,19 @@
-import { useState, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { AxiosError } from 'axios';
 import { Lock, Mail, ShieldCheck, Loader2 } from 'lucide-react';
 import { login, loginMfa, getMe, isMfaChallenge } from '@/services/auth';
+import { classifyLoginError } from './loginError';
 import { useAuthStore } from '@/stores/auth-store';
 
 interface LocationState {
   from?: { pathname?: string };
 }
 
-function errorMessage(err: unknown, fallback: string): string {
-  if (err instanceof AxiosError) {
-    const status = err.response?.status;
-    if (status === 401) return 'Invalid email or password.';
-    if (status === 429) return 'Too many attempts. Please wait and try again.';
-    const msg = err.response?.data?.message;
-    if (typeof msg === 'string') return msg;
-    if (Array.isArray(msg) && msg.length) return String(msg[0]);
-  }
-  return fallback;
-}
+/**
+ * After this many ms of a pending request, hint that the (free-tier) server may
+ * be cold-starting — so a multi-second wait reads as "waking up", not "hung".
+ */
+const WAKING_HINT_DELAY_MS = 5000;
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -32,9 +26,21 @@ export default function LoginPage() {
   const [code, setCode] = useState('');
   const [mfaToken, setMfaToken] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [waking, setWaking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const from = (location.state as LocationState | null)?.from?.pathname || '/';
+
+  // While a request is in flight past WAKING_HINT_DELAY_MS, surface the
+  // cold-start hint so a long wait doesn't look like a frozen form.
+  useEffect(() => {
+    if (!submitting) {
+      setWaking(false);
+      return;
+    }
+    const t = setTimeout(() => setWaking(true), WAKING_HINT_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [submitting]);
 
   async function finishLogin(accessToken: string, refreshToken: string) {
     setTokens({ accessToken, refreshToken });
@@ -61,7 +67,7 @@ export default function LoginPage() {
         await finishLogin(result.accessToken, result.refreshToken);
       }
     } catch (err) {
-      setError(errorMessage(err, 'Unable to sign in. Please try again.'));
+      setError(classifyLoginError(err, 'Unable to sign in. Please try again.'));
     } finally {
       setSubmitting(false);
     }
@@ -76,7 +82,7 @@ export default function LoginPage() {
       const pair = await loginMfa(mfaToken, code.trim());
       await finishLogin(pair.accessToken, pair.refreshToken);
     } catch (err) {
-      setError(errorMessage(err, 'Invalid code. Please try again.'));
+      setError(classifyLoginError(err, 'Invalid code. Please try again.'));
     } finally {
       setSubmitting(false);
     }
@@ -99,6 +105,13 @@ export default function LoginPage() {
           {error && (
             <div className="mb-4 rounded-lg border border-[var(--color-accent-red)]/40 bg-[var(--color-accent-red)]/10 px-3 py-2 text-sm text-[var(--color-accent-red)]">
               {error}
+            </div>
+          )}
+
+          {waking && submitting && !error && (
+            <div className="mb-4 flex items-center gap-2 rounded-lg border border-[var(--color-accent-blue)]/40 bg-[var(--color-accent-blue)]/10 px-3 py-2 text-sm text-[var(--color-text-muted)]">
+              <Loader2 size={14} className="animate-spin shrink-0" />
+              <span>Waking up the server — this can take up to a minute…</span>
             </div>
           )}
 

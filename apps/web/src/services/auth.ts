@@ -7,7 +7,12 @@ import axios from 'axios';
 // (refreshing inside login/refresh would loop).
 const authApi = axios.create({
   baseURL: '/auth',
-  timeout: 15000,
+  // Render's free tier sleeps after ~15 min idle; the first request then
+  // cold-starts (Node boot + Neon DB waking) in 30-90s. A short 15s timeout
+  // aborted mid-cold-start and surfaced as a bogus "unable to sign in". 45s
+  // rides out a typical cold start in one shot; the keep-warm cron
+  // (.github/workflows/keep-warm.yml) makes cold starts rare in the first place.
+  timeout: 45000,
   headers: {
     'Content-Type': 'application/json',
   },

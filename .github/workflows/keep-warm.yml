@@ -1,0 +1,45 @@
+# Keep-warm — prevents the Render free-tier API from cold-starting.
+#
+# WHY: Render's free web service sleeps after ~15 min idle. The first request
+# then cold-starts in 30-90s (Node boot + Neon DB waking). The frontend aborts
+# well before that, so users saw a bogus "Unable to sign in. Please try again."
+# Pinging /healthz more often than the ~15-min sleep timer keeps the dyno awake,
+# and /healthz runs a `SELECT 1` so Neon stays warm too — logins stay fast.
+#
+# SCHEDULE: every 10 min across ~06:00-19:30 IST (00:00-13:59 UTC), 7 days/week.
+# The 10-min gap is deliberately under Render's ~15-min sleep timer. The existing
+# telegram-heartbeat covers market hours; this covers the rest of the day/week.
+#
+# GITHUB ACTIONS MINUTES: each run bills ~1 min (rounded up). This schedule is
+# ~84 runs/day ≈ ~2.5k min/month.
+#   • PUBLIC repo  → Actions minutes are FREE/unlimited. Nothing to do.
+#   • PRIVATE repo → free plan is 2000 min/month. This can exceed it. If so,
+#     either narrow the `cron` window / widen the interval to `*/14`, or move
+#     the ping to a free external pinger (UptimeRobot / cron-job.org) hitting
+#     https://grw-api.onrender.com/healthz every 10 min and DISABLE this file.
+
+name: keep-warm
+
+on:
+  schedule:
+    - cron: '*/10 0-13 * * *' # every 10 min, ~06:00-19:30 IST, 7 days/week
+  workflow_dispatch: {} # manual run for testing
+
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    env:
+      API: https://grw-api.onrender.com
+    steps:
+      - name: Warm the API + DB
+        run: |
+          # -m 120 tolerates a cold start in progress; --retry rides out the
+          # boot window so a single sleeping dyno doesn't fail the run.
+          code=$(curl -sS -m 120 --retry 3 --retry-all-errors -o /tmp/health.json -w "%{http_code}" \
+            "$API/healthz")
+          echo "healthz HTTP $code"; cat /tmp/health.json 2>/dev/null; echo
+          case "$code" in 2*) : ;; *) echo "::error::healthz returned $code"; exit 1 ;; esac

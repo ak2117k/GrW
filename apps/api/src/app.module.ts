@@ -43,6 +43,7 @@ import { AutoExecutionModule } from './modules/auto-execution/auto-execution.mod
 import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
+import { HealthModule } from './modules/health/health.module';
 
 @Module({
   imports: [
@@ -218,6 +219,10 @@ import { TelegramModule } from './modules/telegram/telegram.module';
     // each outcome against market data, and serves an admin-only win-rate
     // scorecard. Read-only: never imports trade-engine (no order placement).
     TelegramModule,
+
+    // Liveness + keep-warm probe (/healthz) — pinged by the keep-warm cron so
+    // the free-tier stack rarely cold-starts and logins stay fast.
+    HealthModule,
   ],
   providers: [
     // Global tenant-context interceptor (TDA-003 §3). Runs after JwtAuthGuard,

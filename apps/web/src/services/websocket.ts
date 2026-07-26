@@ -135,23 +135,30 @@ class WebSocketService {
         path: '/socket.io',
         // websocket first — fall back to polling only if the upgrade fails.
         transports: ['websocket', 'polling'],
-        // Per-user auth: the backend gateway requires a JWT in the handshake
-        // and disconnects sockets without one.
-        auth: buildHandshakeAuth(getAccessToken()),
+        // Per-user auth: the backend gateway requires a JWT in the handshake and
+        // disconnects sockets without a valid one. FUNCTION form (not a static
+        // object) so the token is read FRESH on every attempt — the initial
+        // connect AND every retry. A static `auth` would capture whatever token
+        // existed when connect() ran (possibly empty pre-login, or an expired
+        // access token), and socket.io never refreshes it on its own.
+        auth: (cb: (data: { token: string }) => void) =>
+          cb(buildHandshakeAuth(getAccessToken())),
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
         reconnectionAttempts: Infinity,
       });
 
-      // Re-send a FRESH token on every (re)connection attempt. socket.io keeps
-      // the last `auth` object across reconnects, so a token refreshed while we
-      // were offline would otherwise never reach the server.
-      sock.io.on('reconnect_attempt', () => {
-        sock.auth = buildHandshakeAuth(getAccessToken());
-      });
+      // socket.io does NOT auto-reconnect after an "io server disconnect": a
+      // server-initiated disconnect (here, the gateway rejecting a stale/empty
+      // handshake token) is treated as terminal. So we retry manually — with a
+      // fresh token via the auth function above — capped and back-off delayed so
+      // a genuinely-invalid token (logged out) can't spin a hot loop. The count
+      // resets on a successful connect.
+      let serverDropRetries = 0;
 
       sock.on('connect', () => {
+        serverDropRetries = 0;
         this.connectedCount++;
         this.nsConnected.set(ns.path, true); // DIAG
         console.log(`[WS] Connected: ${ns.path}`);
@@ -209,6 +216,17 @@ class WebSocketService {
           namespace: ns.path,
           totalConnected: this.connectedCount,
         });
+
+        // Recover from a terminal server-side rejection (socket.io won't).
+        // Only while we hold a token (else we're logged out — stay down), and
+        // capped with a backoff so a permanently-bad token can't hot-loop.
+        if (reason === 'io server disconnect' && getAccessToken() && serverDropRetries < 10) {
+          serverDropRetries++;
+          const delay = Math.min(5000, 1000 * serverDropRetries);
+          setTimeout(() => {
+            if (!sock.connected) sock.connect();
+          }, delay);
+        }
       });
 
       for (const event of ns.events) {

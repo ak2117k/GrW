@@ -81,7 +81,7 @@ Cloudflare Worker  "grw"  (wrangler.jsonc + worker/index.js)
    UPDATE users SET "emailVerifiedAt" = now(), status = 'ACTIVE' WHERE email = '<email>';
    ```
    (Alternatively, grab the `[email] … Verify your email address … <link>` line from the Render logs and open it.)
-8. **No live socket feed.** `socket.io` (WebSocket) is not proxied by the Worker; paper mode has no live Angel One stream anyway. Real-time charts won't stream — expected on this stack.
+8. **Per-user real-time socket feed.** Real-time charts now stream over a **per-user** server-held Angel One WebSocket: each logged-in user's *own* Angel One account subscribes to the symbols they're viewing, and ticks route to that user's own socket.io room (`user:{userId}`) on the JWT-authenticated `/ws` gateway — no cross-user leakage. Sessions connect on demand and tear down after an idle window. The `/socket.io/*` Worker proxy **is** in place (wrangler `run_worker_first`), so the WebSocket upgrade reaches Render. Controlled by `PER_USER_FEED_ENABLED` (default `true`), `USER_FEED_IDLE_TEARDOWN_MS` (default `120000`), and `USER_FEED_MAX_SESSIONS` (default `40`). REST polling is kept only as a surfaced "Delayed" fallback. Requires a user with valid Angel One credentials on file and market hours to see live ticks.
 
 ---
 
@@ -91,7 +91,7 @@ Cloudflare Worker  "grw"  (wrangler.jsonc + worker/index.js)
 - [ ] **Real email** (optional). Implement the SES transport (`apps/api/src/modules/auth/services/email/ses.transport.ts`, currently stubbed) or wire a provider (e.g. Resend) + set `EMAIL_TRANSPORT`, so signups self-verify without DB edits.
 - [ ] **Rotate secrets** exposed during setup (Neon password; old Upstash password).
 - [ ] **Change temporary account passwords** (§3).
-- [ ] **(Optional) live feed** — would need a WebSocket-capable proxy (the current Worker only proxies HTTP `/api` + `/auth`) and a live data source; out of scope for paper mode.
+- [x] **Live feed** — done. Per-user real-time market feed is in place: the Worker now proxies `/socket.io/*` (wrangler `run_worker_first`) for the WebSocket upgrade, and each user streams their viewed symbols over their own Angel One account into their `user:{userId}` room (see §5.8). Flag `PER_USER_FEED_ENABLED` (default `true`). Follow-ups: migrate dashboard index tiles / watchlist widgets off the shared feed onto per-user subscriptions, and add Redis fan-out for >30 concurrent users.
 - [ ] **(Optional) build chunk size** — `apps/web` emits a >500 kB JS chunk; code-split if it matters.
 
 ---

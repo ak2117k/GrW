@@ -33,7 +33,7 @@ import {
 } from '@td/shared/constants';
 import { CandleAggregatorService } from './candle-aggregator.service';
 import { InstrumentService } from './instrument.service';
-import { MarketDataGateway, CandlePayload } from '../gateways/market-data.gateway';
+import { MarketDataGateway } from '../gateways/market-data.gateway';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 
 /** Redis pub/sub channel for tick distribution across services. */
@@ -146,20 +146,10 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     await this.initRedis();
 
-    // Register candle close listener so we can push to the gateway
-    this.candleAggregator.onCandleClose((candle) => {
-      const payload: CandlePayload = {
-        token: candle.token,
-        timeframe: candle.timeframe,
-        timestamp: candle.timestamp,
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: candle.volume,
-      };
-      this.gateway.emitCandle(payload);
-    });
+    // Per-user migration: closed candles are no longer pushed to the gateway
+    // from the shared feed. The chart builds forming candles from per-user
+    // ticks and fetches closed candles via REST. The aggregator still runs
+    // (processTick below) to warm caches; its onCandleClose is unused here.
 
     this.logger.log('MarketFeedService initialized');
 
@@ -694,8 +684,8 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       // 5. Pass to candle aggregator
       this.candleAggregator.processTick(tick);
 
-      // 6. Emit live tick to frontend via WebSocket gateway
-      this.gateway.emitTick(quote);
+      // Per-user migration: live ticks reach the frontend via the per-user
+      // UserFeedManager → gateway.emitTickToUser path, not this shared feed.
     } catch (error) {
       this.logger.error(
         `Error processing tick for ${tick.token}: ${error instanceof Error ? error.message : error}`,

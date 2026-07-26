@@ -1,6 +1,9 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
+import { ConfigService } from '@nestjs/config';
 import { HttpModule } from '@nestjs/axios';
+// @ts-ignore — smartapi-javascript has no type declarations
+import { SmartAPI, WebSocketV2 } from 'smartapi-javascript';
 import { MarketDataController } from './controllers/market-data.controller';
 import { MarketDataGateway } from './gateways/market-data.gateway';
 import { MarketFeedService, BROKER_ADAPTER_TOKEN } from './services/market-feed.service';
@@ -28,6 +31,14 @@ import { OptionsChainModule } from '../options-chain/options-chain.module';
 // designated feed account's credentials through it (one-way dep; the decryptor
 // module depends only on Prisma/KMS/Audit, so no import cycle).
 import { CredentialDecryptorModule } from '../credential-vault/execution/credential-decryptor.module';
+import {
+  CREDENTIAL_DECRYPTOR,
+  CredentialDecryptor,
+} from '../credential-vault/execution/credential-decryptor';
+import { UserFeedManager } from './services/user-feed-manager.service';
+import { UserFeedSession } from './services/user-feed-session';
+import { USER_FEED_SESSION_FACTORY } from './services/user-feed.types';
+import type { UserFeedSessionFactory } from './services/user-feed.types';
 // LevelBookService comes from SignalGeneratorModule which is @Global —
 // no import needed here. Importing the module would create a bootstrap
 // cycle because SignalGeneratorModule already imports MarketDataModule.
@@ -111,6 +122,43 @@ import { CredentialDecryptorModule } from '../credential-vault/execution/credent
     {
       provide: BROKER_ADAPTER_TOKEN,
       useExisting: AngelOneAdapterService,
+    },
+
+    // ── Per-user live market feed (TDA per-user realtime) ──────────────
+    // Builds one UserFeedSession per user. The session leases the user's
+    // decrypted broker creds through the vault (reason 'FEED'), logs in with a
+    // throwaway SmartAPI client, and owns its OWN WebSocketV2 socket. The api
+    // key never lives beyond the lease (see UserFeedSession.doConnect).
+    {
+      provide: USER_FEED_SESSION_FACTORY,
+      inject: [CREDENTIAL_DECRYPTOR],
+      useFactory: (decryptor: CredentialDecryptor): UserFeedSessionFactory => (userId: string) =>
+        new UserFeedSession(userId, {
+          // Adapt the 3-arg vault lease to the session's 2-arg dep, pinning 'FEED'.
+          withDecryptedCreds: (uid, cb) =>
+            decryptor.withDecryptedCredentials(uid, { reason: 'FEED' }, cb),
+          smartApiFactory: (apiKey: string) => new SmartAPI({ api_key: apiKey }),
+          wsFactory: (opts) => new WebSocketV2(opts),
+        }),
+    },
+    // The manager owns the per-user session registry (ref-counting, idle
+    // teardown, capacity). When the feed is disabled the factory throws so no
+    // socket is ever opened.
+    {
+      provide: UserFeedManager,
+      inject: [USER_FEED_SESSION_FACTORY, ConfigService],
+      useFactory: (factory: UserFeedSessionFactory, config: ConfigService) =>
+        new UserFeedManager(
+          config.get<boolean>('feed.perUserEnabled')
+            ? factory
+            : () => {
+                throw new Error('per-user feed disabled');
+              },
+          {
+            idleMs: config.get<number>('feed.idleTeardownMs') as number,
+            maxSessions: config.get<number>('feed.maxSessions') as number,
+          },
+        ),
     },
   ],
   exports: [

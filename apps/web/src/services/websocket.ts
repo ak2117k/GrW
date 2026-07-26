@@ -1,4 +1,32 @@
 import { io, Socket } from 'socket.io-client';
+import { getStoredAccessToken } from './auth-storage';
+
+/**
+ * Shape the socket.io handshake `auth` payload from a JWT access token.
+ * The backend `/ws` gateway REQUIRES `handshake.auth.token` and disconnects
+ * unauthenticated sockets. Pure so it can be unit-tested without a socket.
+ */
+export function buildHandshakeAuth(token: string): { token: string } {
+  return { token };
+}
+
+/**
+ * Shape the outbound `subscribe`/`unsubscribe` message body. The server
+ * drives a per-user Angel feed from these token lists. Pure by design.
+ */
+export function toSubscribePayload(tokens: string[]): { tokens: string[] } {
+  return { tokens };
+}
+
+/**
+ * Read the current access token the SAME way the shared api instance does —
+ * straight from localStorage (never importing the auth-store, which would
+ * create an import cycle: auth-store imports services). Reading fresh on each
+ * call means reconnects pick up a token refreshed by the api interceptor.
+ */
+function getAccessToken(): string {
+  return getStoredAccessToken() ?? '';
+}
 
 /**
  * Frontend names for events delivered across all WebSocket namespaces.
@@ -16,6 +44,7 @@ export type WSEventName =
   | 'signal'
   | 'alert'
   | 'candle'
+  | 'feed-state'
   // /ws/trades
   | 'trade-update'
   | 'position-update'
@@ -48,7 +77,7 @@ interface NamespaceConfig {
 const NAMESPACES: readonly NamespaceConfig[] = [
   {
     path: '/ws',
-    events: ['tick', 'signal', 'alert', 'candle'],
+    events: ['tick', 'signal', 'alert', 'candle', 'feed-state'],
   },
   {
     path: '/ws/trades',
@@ -90,17 +119,36 @@ class WebSocketService {
   private diagTimer: ReturnType<typeof setInterval> | null = null;
   // -------------------------------------------------------------------
 
+  /** Negotiated transport for the /ws socket ('polling' | 'websocket'), or null. */
+  private transport: string | null = null;
+  /**
+   * Tokens the app has asked the server to stream on /ws. Held so we can
+   * re-emit `subscribe` after a reconnect (the server forgets on disconnect).
+   */
+  private subscribedTokens = new Set<string>();
+
   connect(): void {
     if (this.sockets.size > 0) return;
 
     for (const ns of NAMESPACES) {
       const sock = io(ns.path, {
         path: '/socket.io',
-        transports: ['polling', 'websocket'],
+        // websocket first — fall back to polling only if the upgrade fails.
+        transports: ['websocket', 'polling'],
+        // Per-user auth: the backend gateway requires a JWT in the handshake
+        // and disconnects sockets without one.
+        auth: buildHandshakeAuth(getAccessToken()),
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionDelayMax: 5000,
         reconnectionAttempts: Infinity,
+      });
+
+      // Re-send a FRESH token on every (re)connection attempt. socket.io keeps
+      // the last `auth` object across reconnects, so a token refreshed while we
+      // were offline would otherwise never reach the server.
+      sock.io.on('reconnect_attempt', () => {
+        sock.auth = buildHandshakeAuth(getAccessToken());
       });
 
       sock.on('connect', () => {
@@ -113,6 +161,23 @@ class WebSocketService {
             '%c[WS-DIAG] /ws (TICK FEED) connected — live ticks should flow',
             'color:#16a34a;font-weight:bold',
           );
+          // Record the transport we landed on, then watch for the upgrade
+          // (polling -> websocket). Only /ws carries the tick feed, so its
+          // transport is the one that matters for diagnostics.
+          this.transport = sock.io.engine?.transport?.name ?? null;
+          console.log(`[WS] /ws transport: ${this.transport}`);
+          sock.io.engine?.on('upgrade', () => {
+            this.transport = sock.io.engine?.transport?.name ?? this.transport;
+            console.log(`[WS] /ws transport upgraded: ${this.transport}`);
+          });
+          // Replay any active subscriptions — the server forgets our token
+          // list when the socket drops, so a reconnect must re-request them.
+          if (this.subscribedTokens.size > 0) {
+            sock.emit(
+              'subscribe',
+              toSubscribePayload([...this.subscribedTokens]),
+            );
+          }
         }
         // Emit on the FIRST namespace going up so connection-aware UI
         // doesn't flicker as each namespace lands. Emit on subsequent
@@ -172,6 +237,8 @@ class WebSocketService {
       indicatorSaysLive: this.connectedCount > 0,
       perNamespace: Object.fromEntries(this.nsConnected),
       tickSocketUp: this.nsConnected.get('/ws') ?? false,
+      transport: this.transport,
+      subscribedTokens: [...this.subscribedTokens],
       secondsSinceLastTick: this.lastTickAt
         ? Math.round((Date.now() - this.lastTickAt) / 1000)
         : null,
@@ -223,6 +290,28 @@ class WebSocketService {
    */
   emitLocal(event: string, data: unknown): void {
     this.emit(event, data);
+  }
+
+  /**
+   * Ask the server to start streaming ticks for `tokens` on /ws. The server
+   * drives a per-user Angel feed from these. Tokens are remembered so they can
+   * be replayed after a reconnect. Safe to call before connect() — they'll be
+   * sent once /ws comes up.
+   */
+  emitSubscribe(tokens: string[]): void {
+    for (const t of tokens) this.subscribedTokens.add(t);
+    this.sockets.get('/ws')?.emit('subscribe', toSubscribePayload(tokens));
+  }
+
+  /** Stop streaming ticks for `tokens` on /ws and forget them locally. */
+  emitUnsubscribe(tokens: string[]): void {
+    for (const t of tokens) this.subscribedTokens.delete(t);
+    this.sockets.get('/ws')?.emit('unsubscribe', toSubscribePayload(tokens));
+  }
+
+  /** Negotiated /ws transport ('websocket' | 'polling'), or null if unknown. */
+  getTransport(): string | null {
+    return this.transport;
   }
 
   get connected(): boolean {

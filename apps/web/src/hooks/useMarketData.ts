@@ -95,7 +95,17 @@ export function useMarketData(): void {
     wsService.connect();
 
     const unsubTick = wsService.subscribe('tick', (data) => {
-      updateQuote(data as Quote);
+      // The socket now carries per-user `TickData` (no change/changePercent/
+      // exchange/vwap; `symbol` may be blank in SNAP_QUOTE), NOT a full Quote.
+      // Writing that into the store would clobber the REST-fetched full quote
+      // with a partial one (blank change%) and could create a junk ''-keyed
+      // entry. Only accept a payload that is actually a full quote — a numeric
+      // `change` plus a non-empty `symbol` — mirroring the guard in
+      // ManualTradePage. Partial per-user ticks are ignored here; the 5s REST
+      // poll above keeps the overview quotes current.
+      const q = data as Quote;
+      if (!q?.symbol || typeof q.change !== 'number') return;
+      updateQuote(q);
     });
 
     const unsubConn = wsService.subscribe('connection-status', (data) => {

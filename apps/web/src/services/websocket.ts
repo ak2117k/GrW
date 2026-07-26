@@ -44,6 +44,7 @@ export type WSEventName =
   | 'signal'
   | 'alert'
   | 'candle'
+  | 'feed-state'
   // /ws/trades
   | 'trade-update'
   | 'position-update'
@@ -76,7 +77,7 @@ interface NamespaceConfig {
 const NAMESPACES: readonly NamespaceConfig[] = [
   {
     path: '/ws',
-    events: ['tick', 'signal', 'alert', 'candle'],
+    events: ['tick', 'signal', 'alert', 'candle', 'feed-state'],
   },
   {
     path: '/ws/trades',

@@ -17,8 +17,21 @@ import { useChartData } from '@/hooks/useChartData';
 import { useChartAnalysis } from '@/hooks/useChartAnalysis';
 import { useDrawingPersistence } from '@/hooks/useDrawingPersistence';
 import { useChartStore, type SelectedSymbol } from '@/stores/chart-store';
+import { useMarketStore } from '@/stores/market-store';
 import api from '@/services/api';
 import type { SetupContext } from '@/types';
+import { deriveBadge, type BadgeTone } from './feedState';
+
+/** Tailwind classes per badge tone — kept beside the page that renders it. */
+const BADGE_TONE_CLASSES: Record<BadgeTone, string> = {
+  green:
+    'border-emerald-500/30 bg-emerald-500/10 text-emerald-400 [&>span:first-child]:bg-emerald-400',
+  amber:
+    'border-amber-500/30 bg-amber-500/10 text-amber-400 [&>span:first-child]:bg-amber-400',
+  red: 'border-red-500/30 bg-red-500/10 text-red-400 [&>span:first-child]:bg-red-400',
+  muted:
+    'border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)]/90 text-[var(--color-text-muted)] [&>span:first-child]:bg-[var(--color-text-muted)]',
+};
 
 const WATCHLIST_ITEMS: SelectedSymbol[] = [
   { symbol: 'NIFTY', token: '99926000', exchange: 'NSE', name: 'NIFTY 50' },
@@ -217,7 +230,18 @@ export default function ChartsPage() {
     isLoadingMore,
     hasMoreHistory,
     prependSeq,
+    feedState,
   } = useChartData();
+
+  // Connection-state badge inputs.
+  //  · marketOpen  — from the app-wide market-store status (populated by
+  //    useMarketData() mounted in AppLayout; 'open' covers NSE/MCX hours).
+  //  · brokerConnected — no lightweight global broker-connection signal exists
+  //    (only heavy page hooks that also fetch balances/positions), so default
+  //    to true: authenticated users reaching charts have a connected account,
+  //    and the feedState 'error' branch already surfaces a real feed outage.
+  const marketOpen = useMarketStore((s) => s.marketStatus === 'open');
+  const badge = deriveBadge({ feedState, marketOpen, brokerConnected: true });
 
   useDrawingPersistence(selectedSymbol.token);
 
@@ -431,12 +455,27 @@ export default function ChartsPage() {
             </div>
           )}
 
+          {/* Connection-state badge — an honest, always-visible read of the
+              per-user live feed (replaces the old ambiguous "demo data" text). */}
+          {!isFullscreen && (
+            <div
+              className={clsx(
+                'absolute top-2 right-2 z-20 flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium shadow backdrop-blur-sm',
+                BADGE_TONE_CLASSES[badge.tone],
+              )}
+              title={`Feed: ${feedState}`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full" aria-hidden />
+              {badge.label}
+            </div>
+          )}
+
           {error && candles.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center bg-[var(--color-bg-primary)] z-10">
               <div className="text-center">
                 <p className="text-sm text-[var(--color-accent-red)]">{error}</p>
                 <p className="text-xs text-[var(--color-text-muted)] mt-1">
-                  Displaying demo data
+                  {badge.label}
                 </p>
               </div>
             </div>

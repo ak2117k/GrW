@@ -3,7 +3,53 @@ import api from '@/services/api';
 import { wsService } from '@/services/websocket';
 import { useChartStore } from '@/stores/chart-store';
 import { prependOlderCandles } from '@/utils/chartHistory';
-import type { Candle, OIData, Quote } from '@/types';
+import type { Candle, OIData } from '@/types';
+
+/**
+ * Per-user broker-feed lifecycle state, mirrored from the backend
+ * `FeedState` (apps/api/.../user-feed.types.ts). The server emits one of
+ * these over the `'feed-state'` socket event scoped to the user's room.
+ * Task 9 renders this as the chart's live/reconnecting badge.
+ */
+export type FeedState = 'connecting' | 'live' | 'reconnecting' | 'closed' | 'error';
+
+/**
+ * The per-user tick payload emitted on the `'tick'` socket event. Mirrors
+ * the backend `TickData` (apps/api/.../broker-adapter.interface.ts) — prices
+ * are in RUPEES and `timestamp` arrives as an ISO string over socket.io (it
+ * is a `Date` on the server). This is NOT a `Quote`: there is no
+ * `change`/`changePercent`/`exchange`/`vwap`; the day-change baseline comes
+ * from the separate `/quote` REST call in this hook.
+ */
+interface TickData {
+  token: string;
+  symbol: string;
+  ltp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  oi?: number;
+  timestamp: string;
+}
+
+/**
+ * Pure diff of the chart's single-token subscription across a symbol switch.
+ * Returns the tokens to `subscribe` (add) and `unsubscribe` (remove) so the
+ * hook can drive the per-user server feed with exactly one add + one remove.
+ * A null token means "nothing subscribed" (empty/`'0'` guarded by the caller).
+ */
+export function computeSubscriptionDelta(
+  prev: string | null,
+  next: string | null,
+): { add: string[]; remove: string[] } {
+  if (prev === next) return { add: [], remove: [] };
+  return {
+    add: next ? [next] : [],
+    remove: prev ? [prev] : [],
+  };
+}
 
 interface ChartCandle {
   time: number;
@@ -41,6 +87,9 @@ interface UseChartDataReturn {
   // Bumps on each successful prepend so the chart preserves scroll position
   // instead of default-zooming (distinguishes a prepend from a symbol reset).
   prependSeq: number;
+  // Latest per-user broker-feed lifecycle state (from the 'feed-state' socket
+  // event). Task 9 renders this as the chart's live/reconnecting badge.
+  feedState: FeedState;
 }
 
 /**
@@ -181,6 +230,15 @@ export function useChartData(): UseChartDataReturn {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
   const [prependSeq, setPrependSeq] = useState(0);
+  // Per-user broker-feed lifecycle, driven by the 'feed-state' socket event.
+  const [feedState, setFeedState] = useState<FeedState>('connecting');
+  // Previous feed-state, so we can detect a reconnecting → live transition and
+  // gap-fill missed bars exactly once. Kept in a ref (not state) so the change
+  // is observed synchronously inside the event handler.
+  const prevFeedStateRef = useRef<FeedState | null>(null);
+  // The token currently subscribed on the per-user server feed. Drives the
+  // subscribe/unsubscribe delta on symbol switch and the unmount cleanup.
+  const subscribedTokenRef = useRef<string | null>(null);
   // Live-update path needs to know the real-time bucket of the most-recent
   // bar so a new tick can decide "extend last bar" vs "append a new one".
   const lastRealBucketRef = useRef<number>(0);
@@ -528,37 +586,90 @@ export function useChartData(): UseChartDataReturn {
   // live market even when the WS tick/candle feed doesn't reach the browser
   // (Cloudflare polling-transport stalls) — otherwise the chart freezes at
   // load-time's last bar while the LTP (fed by the other REST polls) keeps
-  // moving. Fetches a SMALL recent window every 20s and merges only the new
-  // completed bars. Scoped narrow (1 chunk) + paused when the tab is hidden to
-  // keep Angel's ~3/s historical budget clear. This is the belt-and-suspenders
-  // twin of useWatchlistQuotes / useCommodities, for candles.
-  useEffect(() => {
+  // moving. Fetches a SMALL recent window and merges only the new completed
+  // bars. Scoped narrow (1 chunk) + paused when the tab is hidden to keep
+  // Angel's ~3/s historical budget clear. This is the belt-and-suspenders twin
+  // of useWatchlistQuotes / useCommodities, for candles.
+  //
+  // Single-sourced as a callback so BOTH the 20s poll below AND the
+  // reconnecting → live gap-fill (in the feed-state effect) invoke the exact
+  // same fetch — no duplicated fetch/merge logic.
+  const liveEdgeRefresh = useCallback(async () => {
     if (!selectedSymbol.token || selectedSymbol.token === '0') return;
-    const REFRESH_MS = 20_000;
+    if (typeof document !== 'undefined' && document.hidden) return;
     // Enough lookback to always include the current session tail (crude/NSE
     // sessions are < 6.5h to lunch; 8h covers the whole day for intraday TFs).
     const WINDOW_MS = 8 * 60 * 60 * 1000;
+    try {
+      const to = new Date().toISOString();
+      const from = new Date(Date.now() - WINDOW_MS).toISOString();
+      const response = await api.get(
+        `/market-data/instruments/${selectedSymbol.token}/candles`,
+        { params: { timeframe, from, to, exchange: selectedSymbol.exchange } },
+      );
+      const raw: Candle[] = response.data?.candles ?? response.data?.data ?? [];
+      const meaningful = cleanCandles(raw);
+      applyClosedCandles(meaningful);
+    } catch {
+      // Soft failure — the next tick or poll will catch up.
+    }
+  }, [selectedSymbol.token, selectedSymbol.exchange, timeframe, applyClosedCandles]);
 
-    const refresh = async () => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      try {
-        const to = new Date().toISOString();
-        const from = new Date(Date.now() - WINDOW_MS).toISOString();
-        const response = await api.get(
-          `/market-data/instruments/${selectedSymbol.token}/candles`,
-          { params: { timeframe, from, to, exchange: selectedSymbol.exchange } },
-        );
-        const raw: Candle[] = response.data?.candles ?? response.data?.data ?? [];
-        const meaningful = cleanCandles(raw);
-        applyClosedCandles(meaningful);
-      } catch {
-        // Soft failure — the next tick or poll will catch up.
+  useEffect(() => {
+    if (!selectedSymbol.token || selectedSymbol.token === '0') return;
+    const REFRESH_MS = 20_000;
+    const id = setInterval(liveEdgeRefresh, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [selectedSymbol.token, liveEdgeRefresh]);
+
+  // Drive the per-user server feed for this chart's symbol. On every symbol
+  // switch we diff the previous vs next token and emit exactly one
+  // unsubscribe (old) + one subscribe (new); without an explicit subscribe the
+  // server streams no ticks for this token. Guard empty/'0' like the sibling
+  // effects. wsService remembers the token and replays it on reconnect.
+  useEffect(() => {
+    const token = selectedSymbol.token;
+    const next = token && token !== '0' ? token : null;
+    const delta = computeSubscriptionDelta(subscribedTokenRef.current, next);
+    if (delta.remove.length > 0) wsService.emitUnsubscribe(delta.remove);
+    if (delta.add.length > 0) wsService.emitSubscribe(delta.add);
+    subscribedTokenRef.current = next;
+  }, [selectedSymbol.token]);
+
+  // Unmount cleanup: release the current token from the server feed so the
+  // per-user subscription pool doesn't leak when the chart is torn down.
+  // Separate empty-deps effect so it fires ONLY on unmount (a symbol switch is
+  // handled by the delta effect above, which must not unsubscribe the new
+  // token). Reads the live ref, not a closed-over token.
+  useEffect(() => {
+    return () => {
+      if (subscribedTokenRef.current) {
+        wsService.emitUnsubscribe([subscribedTokenRef.current]);
       }
     };
+  }, []);
 
-    const id = setInterval(refresh, REFRESH_MS);
-    return () => clearInterval(id);
-  }, [selectedSymbol.token, selectedSymbol.exchange, timeframe, applyClosedCandles]);
+  // Track the per-user broker-feed lifecycle. On a reconnecting → live
+  // transition, the feed dropped and came back, so any bars that closed during
+  // the gap never reached us — trigger the live-edge REST refetch ONCE to
+  // gap-fill them (the same fetch the 20s poll uses).
+  useEffect(() => {
+    const unsub = wsService.subscribe('feed-state', (data) => {
+      // Server emits the FeedState as a bare string; tolerate a { state }
+      // wrapper defensively in case the wire shape ever changes.
+      const next = (
+        typeof data === 'string' ? data : (data as { state?: string } | null)?.state
+      ) as FeedState | undefined;
+      if (!next) return;
+      const prev = prevFeedStateRef.current;
+      prevFeedStateRef.current = next;
+      setFeedState(next);
+      if (next === 'live' && prev === 'reconnecting') {
+        void liveEdgeRefresh();
+      }
+    });
+    return unsub;
+  }, [liveEdgeRefresh]);
 
   // Subscribe to WebSocket tick updates for real-time candle building.
   // Live updates have to play nicely with the compressed-time axis: a tick
@@ -567,18 +678,19 @@ export function useChartData(): UseChartDataReturn {
   // lastCompressedTime + tfSec, regardless of how much real time elapsed.
   useEffect(() => {
     const unsubTick = wsService.subscribe('tick', (data) => {
-      const quote = data as Quote;
-      if (quote.token !== selectedSymbol.token) return;
+      // Per-user 'tick' payload is a TickData (prices in rupees, timestamp an
+      // ISO string) — NOT a Quote. There is no change/changePercent here; the
+      // day-change baseline is owned by the separate /quote REST call above.
+      const tick = data as TickData;
+      if (tick.token !== selectedSymbol.token) return;
 
-      const price = quote.ltp;
+      const price = tick.ltp;
       setCurrentPrice(price);
-      setPriceChange(quote.change);
-      setPriceChangePercent(quote.changePercent);
 
       setCandles((prev) => {
         if (prev.length === 0) return prev;
 
-        const tickTime = new Date(quote.timestamp).getTime() / 1000;
+        const tickTime = new Date(tick.timestamp).getTime() / 1000;
         const tfSec = timeframeMsRef.current / 1000;
         const tickRealBucket = Math.floor(tickTime / tfSec) * tfSec;
 
@@ -591,7 +703,7 @@ export function useChartData(): UseChartDataReturn {
             high: Math.max(last.high, price),
             low: Math.min(last.low, price),
             close: price,
-            volume: last.volume + (quote.volume ?? 0),
+            volume: last.volume + (tick.volume ?? 0),
           };
           const next = [...prev.slice(0, -1), updated];
           candlesRef.current = next;
@@ -613,7 +725,7 @@ export function useChartData(): UseChartDataReturn {
             high: price,
             low: price,
             close: price,
-            volume: quote.volume ?? 0,
+            volume: tick.volume ?? 0,
           };
           const next = [...prev, newCandle];
           candlesRef.current = next;
@@ -730,5 +842,6 @@ export function useChartData(): UseChartDataReturn {
     isLoadingMore,
     hasMoreHistory,
     prependSeq,
+    feedState,
   };
 }

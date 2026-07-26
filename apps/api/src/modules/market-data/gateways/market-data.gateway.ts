@@ -11,7 +11,8 @@ import {
 import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { WS_NAMESPACE } from '@td/shared/constants';
-import { Quote, OIData } from '@td/shared/types';
+import { OIData } from '@td/shared/types';
+import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import { getUserIdFromSocket } from '../../../common/ws/authenticate-user-socket';
 import { UserFeedManager } from '../services/user-feed-manager.service';
 import type { FeedState, TokenRef } from '../services/user-feed.types';
@@ -74,7 +75,7 @@ export class MarketDataGateway
    * Outer key: userId; inner key: token. Writes overwrite — stale prices are
    * discarded in favor of the newest before the next flush.
    */
-  private readonly pendingTicks = new Map<string, Map<string, Quote>>();
+  private readonly pendingTicks = new Map<string, Map<string, TickData>>();
   private flushInterval: NodeJS.Timeout | null = null;
 
   constructor(private readonly userFeedManager: UserFeedManager) {}
@@ -84,7 +85,7 @@ export class MarketDataGateway
 
     // Route the manager's userId-tagged tick/state events to the right room.
     this.userFeedManager.setHandlers(
-      (userId, tick) => this.emitTickToUser(userId, tick as unknown as Quote),
+      (userId, tick) => this.emitTickToUser(userId, tick),
       (userId, state) => this.emitFeedStateToUser(userId, state),
     );
 
@@ -182,22 +183,23 @@ export class MarketDataGateway
   /**
    * Queue a tick for the next flush, scoped to one user. Per-user, per-token
    * coalescing: if multiple ticks for the same token arrive within the flush
-   * window, only the latest is broadcast to that user's room.
+   * window, only the latest is broadcast to that user's room. The emitted
+   * `'tick'` payload is the raw `TickData` shape (NOT a `Quote`).
    */
-  emitTickToUser(userId: string, quote: Quote): void {
+  emitTickToUser(userId: string, tick: TickData): void {
     let userPending = this.pendingTicks.get(userId);
     if (!userPending) {
-      userPending = new Map<string, Quote>();
+      userPending = new Map<string, TickData>();
       this.pendingTicks.set(userId, userPending);
     }
-    userPending.set(quote.token, quote);
+    userPending.set(tick.token, tick);
   }
 
   private flushPendingTicks(): void {
     if (this.pendingTicks.size === 0) return;
     for (const [userId, userPending] of this.pendingTicks) {
-      for (const quote of userPending.values()) {
-        this.server.to(`user:${userId}`).emit('tick', quote);
+      for (const tick of userPending.values()) {
+        this.server.to(`user:${userId}`).emit('tick', tick);
       }
     }
     this.pendingTicks.clear();
@@ -219,25 +221,6 @@ export class MarketDataGateway
   /** Emit the broker feed lifecycle state to a single user's room. */
   emitFeedStateToUser(userId: string, state: FeedState): void {
     this.server.to(`user:${userId}`).emit('feed-state', state);
-  }
-
-  // ------------------------------------------------------------------
-  //  DEPRECATED global push methods — kept only so the legacy single-feed
-  //  `MarketFeedService` still compiles during the per-user migration.
-  //  In the per-user design ticks/candles flow via UserFeedManager handlers
-  //  → emitTickToUser / emitCandleToUser. These are intentional no-ops: the
-  //  old global broadcast is removed. Task 6 rewires MarketFeedService (or its
-  //  callers) to the per-user path and can then delete these stubs.
-  // ------------------------------------------------------------------
-
-  /** @deprecated No-op. Global tick broadcast removed; use emitTickToUser. */
-  emitTick(_quote: Quote): void {
-    // intentionally empty — see block comment above
-  }
-
-  /** @deprecated No-op. Global candle broadcast removed; use emitCandleToUser. */
-  emitCandle(_candle: CandlePayload): void {
-    // intentionally empty — see block comment above
   }
 
   /**

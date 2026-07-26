@@ -60,6 +60,16 @@ export default () => ({
     // the SEBI/legal review lands (spec §11). Does not gate the test path.
     liveEnabled: process.env.LIVE_BILLING_ENABLED === 'true',
   },
+  feed: {
+    // Per-user live market feed (TDA per-user realtime). When disabled the
+    // UserFeedManager is built with a factory that throws, so no per-user
+    // broker socket is ever opened. Set PER_USER_FEED_ENABLED=false to disable.
+    perUserEnabled: process.env.PER_USER_FEED_ENABLED !== 'false',
+    // How long a user's session lingers with zero live interest before teardown.
+    idleTeardownMs: Number(process.env.USER_FEED_IDLE_TEARDOWN_MS ?? 120000),
+    // Max concurrent per-user sessions before the LRU idle one is evicted.
+    maxSessions: Number(process.env.USER_FEED_MAX_SESSIONS ?? 40),
+  },
   telegram: {
     // Min parser confidence for a message to be promoted to a tracked signal.
     minConfidence: parseFloat(process.env.TELEGRAM_MIN_CONFIDENCE || '0.55'),

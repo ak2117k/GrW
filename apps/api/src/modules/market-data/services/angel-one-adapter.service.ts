@@ -344,7 +344,8 @@ export class AngelOneAdapterService implements BrokerAdapter {
 
   /**
    * In-memory TTL cache for `getHistoricalData`, keyed by
-   * `${token}:${exchange}:${timeframe}`. A re-scoring pass over ~100 watch
+   * `${token}:${exchange}:${timeframe}:${fromSec}:${toSec}` (the requested
+   * window is part of the key). A re-scoring pass over ~100 watch
    * entries would otherwise issue ~600 fresh broker calls; many of those
    * are for shared tokens (NIFTY, sector indices) or stocks fetched
    * seconds earlier. Caching the merged candle array per key collapses
@@ -357,11 +358,11 @@ export class AngelOneAdapterService implements BrokerAdapter {
    *     transient miss self-heals.
    *   - TTL is per-timeframe (see HISTORICAL_CACHE_TTL_MS). Expired entries
    *     are refetched on next access.
-   *   - The cache key intentionally ignores the [from,to] range: scoring
-   *     always asks for "the last N bars up to now", so a slightly-older
-   *     cached window of the same timeframe is an acceptable, in-TTL
-   *     substitute. Callers needing an exact historical range should not
-   *     rely on this cache being range-precise.
+   *   - The cache key includes the requested [from,to] window (rounded to
+   *     whole seconds), so distinct windows of the same timeframe never
+   *     collide. Repeated "the last N bars up to now" fetches with a
+   *     byte-identical window still share the entry; a caller asking for a
+   *     different range gets its own entry rather than a wrong-window array.
    */
   private readonly historicalCache = new Map<
     string,
@@ -914,13 +915,21 @@ export class AngelOneAdapterService implements BrokerAdapter {
     // both directions: the key ignores [from,to], so a cached entry populated
     // by a live scan's short window would silently truncate a 120-day request.
     // See HistoricalPriority.
-    const cacheKey = `${token}:${exchange}:${timeframe}`;
+    // Include the requested [from,to] window in the key (was:
+    // `${token}:${exchange}:${timeframe}`) so distinct windows of the same
+    // (token, exchange, timeframe) never collide — a shorter live-scan window
+    // must not be served to a caller asking for a wider one, and vice versa.
+    // Round to whole seconds so byte-identical windows still share a cache
+    // entry (repeated "last N bars up to now" fetches still coalesce).
+    const fromKey = Math.floor(from.getTime() / 1000);
+    const toKey = Math.floor(to.getTime() / 1000);
+    const cacheKey = `${token}:${exchange}:${timeframe}:${fromKey}:${toKey}`;
     const isLiveFetch =
       Date.now() - to.getTime() <= HISTORICAL_CACHE_LIVE_WINDOW_MS;
     if (isLiveFetch && priority !== 'bulk') {
       const cached = this.historicalCache.get(cacheKey);
       if (cached && cached.expiresAt > Date.now()) {
-        // The cache key ignores [from,to], so a cached entry can be up to its
+        // Even for a byte-identical window, a cached entry can be up to its
         // full per-timeframe TTL old (15m → 10min). That staleness is fine for
         // BACKGROUND scoring (a shared window across a ~100-token pass) but
         // FREEZES a live chart: the chart re-fetches every ~20s expecting the

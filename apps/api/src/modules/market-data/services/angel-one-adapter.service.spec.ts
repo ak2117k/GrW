@@ -261,6 +261,31 @@ describe('AngelOneAdapterService — historical cache + throttle detection', () 
       expect(mock).toHaveBeenCalledTimes(3);
     });
 
+    it('does not serve a different [from,to] window from cache', async () => {
+      // Same token:exchange:timeframe, two DIFFERENT live windows. When the
+      // cache key omitted [from,to], the second call was wrongly served the
+      // first window's cached array (only 1 broker call). Both `to`s are ≈ now
+      // (live fetch, so the cache is active) and background priority (no
+      // interactive age cap); the distinct `from`s must keep the entries apart.
+      const calls: Array<{ from: string; to: string }> = [];
+      const mock = jest.fn().mockImplementation((p: any) => {
+        // Echo the requested window as the candle's timestamp so each window
+        // yields a window-specific, non-empty (hence cacheable) result.
+        calls.push({ from: p.fromdate, to: p.todate });
+        return Promise.resolve({ status: true, data: [row(p.fromdate)] });
+      });
+      const adapter = buildAdapter(mock);
+
+      const to = new Date();
+      const windowA = { from: new Date(to.getTime() - 15 * 60 * 1000), to };
+      const windowB = { from: new Date(to.getTime() - 60 * 60 * 1000), to };
+
+      await adapter.getHistoricalData('99926000', 'NSE', '1m', windowA.from, windowA.to, 'background');
+      await adapter.getHistoricalData('99926000', 'NSE', '1m', windowB.from, windowB.to, 'background');
+
+      expect(calls.length).toBe(2); // second window must NOT be served from cache
+    });
+
     // ─── Interactive (live-chart) age cap ───────────────────────────────
     // A live chart re-fetches every ~20s expecting the newest completed bar.
     // The per-timeframe TTL (1m→45s, 15m→10min) is tuned for background

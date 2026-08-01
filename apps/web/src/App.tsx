@@ -94,6 +94,7 @@ function RedirectIfAuthed({ children }: { children: ReactNode }) {
 
 export default function App() {
   const hydrate = useAuthStore((s) => s.hydrate);
+  const authStatus = useAuthStore((s) => s.status);
 
   // Verify any stored session once on boot (loads tokens from localStorage,
   // calls /auth/me to populate the user, marks authed/anon accordingly).
@@ -101,15 +102,21 @@ export default function App() {
     void hydrate();
   }, [hydrate]);
 
-  // Open the live-data WebSocket once at app boot. wsService.connect() is
-  // idempotent — repeat calls are no-ops once sockets are open. Without
-  // this, only the AutoTrade page (which calls connect itself) would
-  // ever bring up live ticks; charts and signals would silently fall
-  // back to historical-only data and require a page refresh to pick up
-  // anything new.
+  // Open the live-data WebSocket when (and only when) we hold a session, and
+  // close it on logout. Driven off auth STATUS rather than mount: the gateways
+  // reject a handshake without a JWT and socket.io treats that rejection as
+  // terminal, so connecting at boot — before hydrate/login has a token — left
+  // the tick feed permanently dead. Firing on 'authed' covers both paths into a
+  // session (boot with a stored token, and a fresh sign-in). connect() is
+  // idempotent, so the per-page connect() calls (AutoTrade, charts, trades)
+  // remain harmless no-ops.
   useEffect(() => {
-    wsService.connect();
-  }, []);
+    if (authStatus === 'authed') {
+      wsService.connect();
+    } else if (authStatus === 'anon') {
+      wsService.disconnect();
+    }
+  }, [authStatus]);
 
   return (
     <Routes>

@@ -130,6 +130,14 @@ class WebSocketService {
   connect(): void {
     if (this.sockets.size > 0) return;
 
+    // No token yet (app booting on /login) — do NOT open the sockets. The /ws
+    // gateway rejects a handshake without a JWT, socket.io treats that "io
+    // server disconnect" as terminal, and our manual retry below is token-gated,
+    // so a pre-login connect() would leave the tick feed dead for the whole
+    // session. Bailing here keeps `sockets` empty so the post-login connect()
+    // (App.tsx, on auth status -> 'authed') actually opens them.
+    if (!getAccessToken()) return;
+
     for (const ns of NAMESPACES) {
       const sock = io(ns.path, {
         path: '/socket.io',

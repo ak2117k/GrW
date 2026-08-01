@@ -31,9 +31,16 @@ export function isAdminSocket(client: Socket): boolean {
 /**
  * Disconnect the socket unless it carries a valid ADMIN access token.
  * Returns true if the socket was accepted (ADMIN), false if it was disconnected.
+ *
+ * MUST use `disconnect()` (close=false), never `disconnect(true)`: socket.io
+ * multiplexes every namespace a browser opens over ONE engine.io transport, and
+ * close=true runs `client._disconnect()` — disconnecting EVERY namespace on that
+ * transport and closing it. A non-admin hitting an admin namespace would then
+ * lose their `/ws` tick feed, `/ws/trades` and `/ws/auto-trade` as collateral.
+ * close=false sends a DISCONNECT packet for THIS namespace only.
  */
 export function requireAdminSocket(client: Socket): boolean {
   if (isAdminSocket(client)) return true;
-  client.disconnect(true);
+  client.disconnect();
   return false;
 }

@@ -22,7 +22,9 @@ export class WatchGateway implements OnGatewayInit, OnGatewayConnection {
   // trailing fields). Reject any socket without a valid ADMIN access token.
   handleConnection(client: Socket) {
     if (!isAdminSocket(client)) {
-      client.disconnect(true);
+      // `disconnect()` NOT `disconnect(true)` — close=true would tear down the
+      // shared engine.io transport and every other namespace on it.
+      client.disconnect();
     }
   }
 

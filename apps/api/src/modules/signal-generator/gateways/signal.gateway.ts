@@ -12,7 +12,7 @@ import { isAdminSocket } from '../../../common/ws/authenticate-admin-socket';
 
 // IMPORTANT: this gateway MUST NOT share the public '/ws' namespace with
 // MarketDataGateway. It admin-gates its handshake and disconnects non-admin
-// sockets (isAdminSocket → client.disconnect(true)); on a shared namespace that
+// sockets (isAdminSocket → client.disconnect()); on a shared namespace that
 // disconnect also kills the public tick feed for every browser (they connect to
 // '/ws' with no admin token). So it lives on its own sub-namespace, like the
 // trades ('/ws/trades') and auto-trade ('/ws/auto-trade') gateways.
@@ -34,7 +34,9 @@ export class SignalGateway
 
   handleConnection(client: Socket): void {
     if (!isAdminSocket(client)) {
-      client.disconnect(true);
+      // `disconnect()` NOT `disconnect(true)` — close=true would tear down the
+      // shared engine.io transport and every other namespace on it.
+      client.disconnect();
       return;
     }
     this.logger.debug(`Signal ADMIN socket connected: ${client.id}`);

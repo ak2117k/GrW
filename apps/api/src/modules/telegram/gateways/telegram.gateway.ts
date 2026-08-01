@@ -34,7 +34,10 @@ export class TelegramGateway implements OnGatewayInit, OnGatewayConnection {
 
   handleConnection(client: Socket) {
     if (!isAdminSocket(client)) {
-      client.disconnect(true);
+      // `disconnect()` NOT `disconnect(true)` — close=true tears down the shared
+      // engine.io transport, killing this user's /ws, /ws/trades and
+      // /ws/auto-trade too. See requireAdminSocket in authenticate-admin-socket.
+      client.disconnect();
     }
   }
 

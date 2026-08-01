@@ -31,7 +31,9 @@ export class UngatedWatchGateway implements OnGatewayInit, OnGatewayConnection {
   // ungated:entry carries raw provenance. Reject non-ADMIN sockets.
   handleConnection(client: Socket) {
     if (!isAdminSocket(client)) {
-      client.disconnect(true);
+      // `disconnect()` NOT `disconnect(true)` — close=true would tear down the
+      // shared engine.io transport and every other namespace on it.
+      client.disconnect();
     }
   }
 

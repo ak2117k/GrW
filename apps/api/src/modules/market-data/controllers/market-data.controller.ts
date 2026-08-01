@@ -38,6 +38,7 @@ import {
 } from '@td/shared/constants';
 import { seriesCautionary } from '../../trade-engine/utils/cautionary';
 import { dedupePreferNse } from '../utils/dedupe-prefer-nse';
+import { tickToQuote } from '../utils/tick-to-quote';
 import { scoreSymbolMatch } from '../utils/rank-symbol-matches';
 import { UserFeedManager } from '../services/user-feed-manager.service';
 import { CurrentUser } from '../../../common/decorators';
@@ -456,13 +457,24 @@ export class MarketDataController {
     // manager/session throws — caught here so we fall through to the level-book
     // seed and the existing not-found contract rather than crashing.
     try {
-      const quote = await this.userFeedManager.fetchQuote(
+      const tick = await this.userFeedManager.fetchQuote(
         userId,
         token,
         resolvedExchange,
       );
-      if (quote) {
-        return { token, quote };
+      if (tick) {
+        // Adapt TickData -> Quote. The session returns a raw tick (no change /
+        // changePercent / exchange); this endpoint contracts for a Quote and
+        // the client calls .toFixed() on those fields unguarded, so returning
+        // the tick as-is white-screens the page. Same shape the level-book
+        // branch below produces.
+        return {
+          token,
+          quote: tickToQuote(tick, {
+            exchange: resolvedExchange,
+            symbol: resolvedSymbol,
+          }),
+        };
       }
     } catch (err) {
       this.logger.warn(

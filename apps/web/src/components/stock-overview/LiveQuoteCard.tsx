@@ -3,6 +3,7 @@ import { useMarketStore } from '@/stores/market-store';
 import api from '@/services/api';
 import type { Quote } from '@/types';
 import { Card, Stat } from './_shared';
+import { fmtNumOrDash, fmtPriceOrDash } from './formatQuote';
 
 interface Props {
   token: string;
@@ -78,17 +79,17 @@ export default function LiveQuoteCard({ token, exchange, symbol }: Props) {
     <Card title="Live Quote">
       <div className="flex flex-wrap gap-x-8 gap-y-3 items-baseline">
         <div className={`text-3xl font-semibold tabular-nums ${positive ? 'text-emerald-400' : 'text-red-400'}`}>
-          {q.ltp.toFixed(2)}
+          {fmtNumOrDash(q.ltp)}
         </div>
         <div className={`text-sm tabular-nums ${positive ? 'text-emerald-400' : 'text-red-400'}`}>
           {positive ? '+' : ''}
-          {q.change.toFixed(2)} ({q.changePercent.toFixed(2)}%)
+          {fmtNumOrDash(q.change)} ({fmtNumOrDash(q.changePercent)}%)
         </div>
         <Stat label="Day H" value={fmtPriceOrDash(q.high)} />
         <Stat label="Day L" value={fmtPriceOrDash(q.low)} />
         <Stat label="Open" value={fmtPriceOrDash(q.open)} />
         <Stat label="Prev Close" value={fmtPriceOrDash(q.close)} />
-        <Stat label="VWAP" value={q.vwap ? q.vwap.toFixed(2) : '—'} />
+        <Stat label="VWAP" value={fmtPriceOrDash(q.vwap)} />
         <Stat label="Volume" value={q.volume > 0 ? q.volume.toLocaleString('en-IN') : '—'} />
       </div>
 
@@ -103,21 +104,11 @@ export default function LiveQuoteCard({ token, exchange, symbol }: Props) {
             />
           </div>
           <div className="flex justify-between text-[10px] text-zinc-500 mt-1 tabular-nums">
-            <span>L {q.low.toFixed(2)}</span>
-            <span>H {q.high.toFixed(2)}</span>
+            <span>L {fmtNumOrDash(q.low)}</span>
+            <span>H {fmtNumOrDash(q.high)}</span>
           </div>
         </div>
       )}
     </Card>
   );
-}
-
-/**
- * Render a price field, but coerce 0 → "—". The level-book-seeded quote
- * (used after-hours when no live tick is cached) reports 0 for fields the
- * book doesn't track yet (Day H/L/Open before today's first tick). Showing
- * "0.00" in that case is misleading — the value is unknown, not zero.
- */
-function fmtPriceOrDash(value: number): string {
-  return value > 0 ? value.toFixed(2) : '—';
 }

@@ -10,6 +10,7 @@ import type {
 } from 'lightweight-charts';
 import type { PatternMarker } from '@/hooks/usePatterns';
 import { mapPatternsToChartTime } from './mapPatternsToChartTime';
+import { isChartDisposed, withLiveSeries } from './chart-lifecycle';
 
 interface PatternOverlayProps {
   series: ISeriesApi<'Candlestick'> | null;
@@ -75,6 +76,7 @@ function shortLabel(name: string): string {
  */
 export default function PatternOverlay({
   series,
+  chart,
   patterns,
   realTimeMap,
 }: PatternOverlayProps) {
@@ -82,6 +84,10 @@ export default function PatternOverlay({
 
   useEffect(() => {
     if (!series) return;
+    // `chart` is read for LIVENESS only (markers/price lines go on the series):
+    // a symbol switch removes the chart, disposing this series with it, while
+    // this unkeyed overlay still holds the stale handle.
+    if (isChartDisposed(chart)) return;
     const s = series;
 
     const mapped = mapPatternsToChartTime(patterns, realTimeMap);
@@ -122,46 +128,37 @@ export default function PatternOverlay({
       }
 
       if (p.necklinePrice !== null) {
-        try {
-          const line = s.createPriceLine({
-            price: p.necklinePrice,
-            color,
-            lineWidth: 1,
-            lineStyle: 2, // dashed
-            axisLabelVisible: true,
-            title: 'neckline',
-          });
-          linesRef.current.push(line);
-        } catch {
-          /* chart may be disposed mid-cycle */
-        }
+        withLiveSeries(s, (live) => {
+          linesRef.current.push(
+            live.createPriceLine({
+              price: p.necklinePrice as number,
+              color,
+              lineWidth: 1,
+              lineStyle: 2, // dashed
+              axisLabelVisible: true,
+              title: 'neckline',
+            }),
+          );
+        });
       }
     }
 
     // Markers MUST be sorted ascending by time before setMarkers.
     markers.sort((a, b) => (a.time as number) - (b.time as number));
-    try {
-      s.setMarkers(markers);
-    } catch {
-      /* disposed */
-    }
+    withLiveSeries(s, (live) => live.setMarkers(markers));
 
     return () => {
-      try {
-        s.setMarkers([]);
-      } catch {
-        /* ignore */
-      }
-      for (const line of linesRef.current) {
-        try {
-          s.removePriceLine(line);
-        } catch {
-          /* ignore */
+      // Nothing to clear when the chart is gone — remove() disposed the series
+      // and every price line on it.
+      withLiveSeries(s, (live) => {
+        live.setMarkers([]);
+        for (const line of linesRef.current) {
+          live.removePriceLine(line);
         }
-      }
+      });
       linesRef.current = [];
     };
-  }, [series, patterns, realTimeMap]);
+  }, [series, chart, patterns, realTimeMap]);
 
   return null;
 }

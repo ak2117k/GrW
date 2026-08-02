@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import { useChartStore, type IndicatorState } from '@/stores/chart-store';
 import { computeSessionVWAP } from '@/utils/computeVWAP';
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts';
+import { isChartDisposed, withLiveChart } from './chart-lifecycle';
 
 interface IndicatorConfig {
   key: keyof IndicatorState;
@@ -135,6 +136,10 @@ export default function IndicatorPanel({ onClose, chart, candles }: IndicatorPan
   // RSI uses its own price scale so it doesn't fight the price-axis range.
   useEffect(() => {
     if (!chart || candles.length === 0) return;
+    // A symbol switch remounts CandlestickChart (key={token}); this unkeyed
+    // sibling can still be holding the removed instance. Touching it would
+    // queue a repaint against a null canvas.
+    if (isChartDisposed(chart)) return;
 
     const closes = candles.map((c) => c.close);
     const bb = calculateBollinger(closes, 20, 2);
@@ -196,11 +201,7 @@ export default function IndicatorPanel({ onClose, chart, candles }: IndicatorPan
       } else if (spec.enabled && existing) {
         existing.setData(lineData);
       } else if (!spec.enabled && existing) {
-        try {
-          chart.removeSeries(existing);
-        } catch {
-          // Chart may be disposed
-        }
+        withLiveChart(chart, (c) => c.removeSeries(existing));
         emaSeriesRef.current.delete(spec.mapKey);
       }
     }
@@ -209,14 +210,13 @@ export default function IndicatorPanel({ onClose, chart, candles }: IndicatorPan
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (!chart) return;
-      for (const [, series] of emaSeriesRef.current) {
-        try {
-          chart.removeSeries(series);
-        } catch {
-          // ignore
+      // If the chart is already disposed, remove() tore down these series with
+      // it — skipping is correct, not a leak.
+      withLiveChart(chart, (c) => {
+        for (const [, series] of emaSeriesRef.current) {
+          c.removeSeries(series);
         }
-      }
+      });
       emaSeriesRef.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

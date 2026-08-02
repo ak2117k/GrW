@@ -4,8 +4,10 @@ import {
   ColorType,
   type IChartApi,
   type ISeriesApi,
+  type LogicalRange,
   type Time,
 } from 'lightweight-charts';
+import { markChartDisposed, withLiveChart } from './chart-lifecycle';
 
 interface VolumeData {
   time: number;
@@ -59,19 +61,25 @@ export default function VolumeChart({ data, height = 120, mainChart }: VolumeCha
     chartRef.current = chart;
     seriesRef.current = series;
 
-    // Sync with main chart time scale
-    if (mainChart) {
-      mainChart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-        if (range) {
-          chart.timeScale().setVisibleLogicalRange(range);
-        }
-      });
+    // Sync with main chart time scale.
+    //
+    // The main->volume handler lives on the MAIN chart's emitter, so it
+    // OUTLIVES this component: without the unsubscribe below it keeps firing
+    // after our chart.remove() and drives a repaint into a disposed canvas.
+    // Both directions are also liveness-gated, because either chart can be
+    // removed while the other is still emitting.
+    const syncToVolume = (range: LogicalRange | null) => {
+      if (!range) return;
+      withLiveChart(chart, (c) => c.timeScale().setVisibleLogicalRange(range));
+    };
+    const syncToMain = (range: LogicalRange | null) => {
+      if (!range) return;
+      withLiveChart(mainChart, (c) => c.timeScale().setVisibleLogicalRange(range));
+    };
 
-      chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-        if (range) {
-          mainChart.timeScale().setVisibleLogicalRange(range);
-        }
-      });
+    if (mainChart) {
+      mainChart.timeScale().subscribeVisibleLogicalRangeChange(syncToVolume);
+      chart.timeScale().subscribeVisibleLogicalRangeChange(syncToMain);
     }
 
     const resizeObserver = new ResizeObserver((entries) => {
@@ -86,6 +94,13 @@ export default function VolumeChart({ data, height = 120, mainChart }: VolumeCha
 
     return () => {
       resizeObserver.disconnect();
+      // Detach the handler we installed on the MAIN chart first — it is not
+      // ours to leave behind, and it closes over the chart we are about to
+      // destroy.
+      withLiveChart(mainChart, (c) =>
+        c.timeScale().unsubscribeVisibleLogicalRangeChange(syncToVolume),
+      );
+      markChartDisposed(chart);
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;

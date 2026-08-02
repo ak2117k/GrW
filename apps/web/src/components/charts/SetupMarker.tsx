@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import type { ISeriesApi, Time } from 'lightweight-charts';
+import { withLiveSeries } from './chart-lifecycle';
 
 interface SetupMarkerProps {
   series: ISeriesApi<'Candlestick'> | null;
@@ -18,9 +19,10 @@ export default function SetupMarker({ series, time, side, text }: SetupMarkerPro
       shape: side === 'BUY' ? 'arrowUp' as const : 'arrowDown' as const,
       text,
     };
-    series.setMarkers([marker]);
+    withLiveSeries(series, (s) => s.setMarkers([marker]));
     return () => {
-      try { series.setMarkers([]); } catch { /* ignore */ }
+      // Skip when the series died with its chart — see chart-lifecycle.ts.
+      withLiveSeries(series, (s) => s.setMarkers([]));
     };
   }, [series, time, side, text]);
 

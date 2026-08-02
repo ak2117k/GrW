@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { IPriceLine, ISeriesApi } from 'lightweight-charts';
+import { withLiveSeries } from './chart-lifecycle';
 
 interface Level {
   type: string;
@@ -44,9 +45,10 @@ export default function LevelOverlay({ series, levels }: LevelOverlayProps) {
     }
 
     return () => {
-      for (const line of linesRef.current) {
-        try { series.removePriceLine(line); } catch { /* ignore */ }
-      }
+      // Skip when the series died with its chart — see chart-lifecycle.ts.
+      withLiveSeries(series, (s) => {
+        for (const line of linesRef.current) s.removePriceLine(line);
+      });
       linesRef.current = [];
     };
   }, [series, levels]);

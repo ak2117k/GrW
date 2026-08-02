@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts';
+import { withLiveChart, withLiveSeries } from './chart-lifecycle';
 
 interface OIDataPoint {
   time: number;
@@ -28,7 +29,10 @@ export default function OIOverlay({ chart, oiData, visible }: OIOverlayProps) {
     const setup = () => {
       if (cancelled) return;
 
-      try {
+      // Gate on the disposal registry: between scheduling this task and running
+      // it, a symbol switch can have removed the chart. Calling addLineSeries on
+      // a disposed chart queues a repaint against a null canvas.
+      withLiveChart(chart, () => {
         const series = chart.addLineSeries({
           color: '#fbbf24',
           lineWidth: 2,
@@ -47,10 +51,7 @@ export default function OIOverlay({ chart, oiData, visible }: OIOverlayProps) {
 
         createdSeries = series;
         seriesRef.current = series;
-      } catch (err) {
-        // Chart was disposed or not yet ready — skip silently.
-        console.warn('[OIOverlay] addLineSeries failed (chart not ready):', err);
-      }
+      });
     };
 
     // Use setTimeout(0) instead of queueMicrotask so we yield past the
@@ -62,13 +63,9 @@ export default function OIOverlay({ chart, oiData, visible }: OIOverlayProps) {
       clearTimeout(timerId);
       // createdSeries may still be null if the timeout never fired.
       const seriesToRemove = createdSeries ?? seriesRef.current;
-      if (seriesToRemove) {
-        try {
-          chart.removeSeries(seriesToRemove);
-        } catch {
-          // Chart may already be disposed during remount.
-        }
-      }
+      // Skipping removeSeries on a disposed chart is safe: remove() already
+      // tore down every series it owned.
+      withLiveSeries(seriesToRemove, (s) => chart.removeSeries(s));
       seriesRef.current = null;
     };
   }, [chart]);
@@ -84,25 +81,20 @@ export default function OIOverlay({ chart, oiData, visible }: OIOverlayProps) {
 
     // The series can be disposed out from under us: a symbol switch remounts
     // CandlestickChart (key={token}) whose cleanup calls chart.remove(), which
-    // disposes THIS series too, but seriesRef.current is only nulled by our own
-    // [chart] cleanup — a window where setData hits a dead series and throws
-    // "Object is disposed". Guard + null-on-failure (matches sibling overlays).
-    try {
-      seriesRef.current.setData(lineData);
-    } catch {
+    // disposes THIS series too, while seriesRef.current is only nulled by our
+    // own [chart] cleanup. Gate on the owning chart so setData is never issued
+    // into that window.
+    if (!withLiveSeries(seriesRef.current, (s) => s.setData(lineData))) {
       seriesRef.current = null;
     }
-  }, [oiData]);
+  }, [chart, oiData]);
 
   // Toggle visibility
   useEffect(() => {
-    if (!seriesRef.current) return;
-    try {
-      seriesRef.current.applyOptions({ visible });
-    } catch {
+    if (!withLiveSeries(seriesRef.current, (s) => s.applyOptions({ visible }))) {
       seriesRef.current = null;
     }
-  }, [visible]);
+  }, [chart, visible]);
 
   // This component renders no DOM -- it adds a series to the parent chart
   return null;

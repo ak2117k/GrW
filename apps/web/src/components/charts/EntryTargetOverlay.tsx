@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { IPriceLine, ISeriesApi } from 'lightweight-charts';
+import { withLiveSeries } from './chart-lifecycle';
 
 interface EntryTargetOverlayProps {
   series: ISeriesApi<'Candlestick'> | null;
@@ -103,9 +104,12 @@ export default function EntryTargetOverlay({
     }
 
     return () => {
-      for (const line of linesRef.current) {
-        try { series.removePriceLine(line); } catch { /* ignore */ }
-      }
+      // Skip when the series died with its chart (symbol-switch remount) —
+      // remove() already disposed these lines, and calling in would queue a
+      // repaint against a null canvas.
+      withLiveSeries(series, (s) => {
+        for (const line of linesRef.current) s.removePriceLine(line);
+      });
       linesRef.current = [];
     };
   }, [series, entry, stoploss, target, partialTakeAt, trailingSl, status]);

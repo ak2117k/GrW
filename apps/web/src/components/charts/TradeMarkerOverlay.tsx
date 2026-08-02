@@ -3,6 +3,7 @@ import type { IChartApi, ISeriesApi, Time } from 'lightweight-charts';
 import { useChartTrades } from '@/hooks/useChartTrades';
 import { buildChartTimeResolver } from './mapPatternsToChartTime';
 import { buildTradeMarkers, type TradeMarkerDescriptor } from './tradeMarkers';
+import { isChartDisposed, withLiveChart } from './chart-lifecycle';
 
 interface TradeMarkerOverlayProps {
   token: string;
@@ -51,6 +52,12 @@ export default function TradeMarkerOverlay({
       setPositions([]);
       return;
     }
+    // Coordinate lookups on a removed chart queue a repaint against a null
+    // canvas — skip the whole pass rather than catching each call.
+    if (isChartDisposed(chart)) {
+      setPositions([]);
+      return;
+    }
     const resolver = buildChartTimeResolver(realTimeMap);
     const next: PositionedMarker[] = [];
     for (const m of markers) {
@@ -79,24 +86,19 @@ export default function TradeMarkerOverlay({
   // Reposition on pan/zoom + crosshair move.
   useEffect(() => {
     if (!chart) return;
-    const ts = chart.timeScale();
     const handler = () => recompute();
-    try {
-      ts.subscribeVisibleLogicalRangeChange(handler);
-      chart.subscribeCrosshairMove(handler);
-    } catch {
-      /* disposed */
-    }
+    const subscribed = withLiveChart(chart, (c) => {
+      c.timeScale().subscribeVisibleLogicalRangeChange(handler);
+      c.subscribeCrosshairMove(handler);
+    });
     return () => {
-      try {
-        ts.unsubscribeVisibleLogicalRangeChange(handler);
-      } catch {
-        /* ignore */
-      }
-      try {
-        chart.unsubscribeCrosshairMove(handler);
-      } catch {
-        /* ignore */
+      // Only unsubscribe if we actually subscribed AND the chart is still
+      // alive — remove() drops every subscription with it.
+      if (subscribed) {
+        withLiveChart(chart, (c) => {
+          c.timeScale().unsubscribeVisibleLogicalRangeChange(handler);
+          c.unsubscribeCrosshairMove(handler);
+        });
       }
     };
   }, [chart, recompute]);

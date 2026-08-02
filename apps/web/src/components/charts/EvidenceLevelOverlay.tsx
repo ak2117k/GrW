@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { IPriceLine, ISeriesApi } from 'lightweight-charts';
+import { withLiveSeries } from './chart-lifecycle';
 import type { EvidenceLevel } from '@/types';
 
 interface Props {
@@ -35,11 +36,16 @@ function title(e: EvidenceLevel): string {
   return `${tag} ${role} ${price} (${sign}${e.distancePct.toFixed(1)}%)`;
 }
 
+// Both gate on the disposal registry rather than catching the throw: a call
+// into a disposed series queues a repaint against a null canvas, which no
+// try/catch here can intercept (it lands on a later animation frame).
 function safeCreate(series: ISeriesApi<'Candlestick'>, opts: Parameters<ISeriesApi<'Candlestick'>['createPriceLine']>[0]): IPriceLine | null {
-  try { return series.createPriceLine(opts); } catch { return null; }
+  let line: IPriceLine | null = null;
+  withLiveSeries(series, (s) => { line = s.createPriceLine(opts); });
+  return line;
 }
 function safeRemove(series: ISeriesApi<'Candlestick'>, line: IPriceLine): void {
-  try { series.removePriceLine(line); } catch { /* disposed */ }
+  withLiveSeries(series, (s) => s.removePriceLine(line));
 }
 
 export default function EvidenceLevelOverlay({ candleSeries, evidence }: Props) {

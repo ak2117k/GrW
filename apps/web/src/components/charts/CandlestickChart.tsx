@@ -1,4 +1,5 @@
 import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
+import { markChartDisposed, withLiveChart } from './chart-lifecycle';
 import {
   createChart,
   ColorType,
@@ -277,6 +278,14 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         chart
           .timeScale()
           .unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
+        // Mark BEFORE remove(): the overlays are unkeyed siblings holding this
+        // instance via `chartRef.current?.chart`, and their cleanups run around
+        // this one. Marking first means any of their calls that land after this
+        // point are skipped rather than queuing a repaint on a dead canvas.
+        // Mark the series too: several overlays (LevelOverlay, SetupMarker,
+        // EntryTargetOverlay, EvidenceLevelOverlay) receive ONLY a series and
+        // have no chart handle to check liveness against.
+        markChartDisposed(chart, [candleSeriesRef.current, volumeSeriesRef.current]);
         chart.remove();
         chartRef.current = null;
         candleSeriesRef.current = null;
@@ -381,18 +390,23 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         // after setData races the chart's internal time-scale state.
         if (prevCandlesLenRef.current === 0) {
           requestAnimationFrame(() => {
-            const ts = chartRef.current?.timeScale();
-            if (!ts) return;
-            const totalBars = candleData.length;
-            const defaultVisible = 100;
-            if (totalBars > defaultVisible) {
-              ts.setVisibleLogicalRange({
-                from: totalBars - defaultVisible,
-                to: totalBars + 2, // small right pad for live tick growth
-              });
-            } else {
-              ts.fitContent();
-            }
+            // The chart can be removed between scheduling and this frame (a
+            // symbol switch remounts this component). Checking `chartRef.current`
+            // alone is not enough — the ref is nulled by OUR cleanup, but the
+            // instance may be disposed by a path that runs first.
+            withLiveChart(chartRef.current, (c) => {
+              const ts = c.timeScale();
+              const totalBars = candleData.length;
+              const defaultVisible = 100;
+              if (totalBars > defaultVisible) {
+                ts.setVisibleLogicalRange({
+                  from: totalBars - defaultVisible,
+                  to: totalBars + 2, // small right pad for live tick growth
+                });
+              } else {
+                ts.fitContent();
+              }
+            });
           });
         }
       }

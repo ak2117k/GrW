@@ -7,6 +7,7 @@ import {
   DEFAULT_FIB_LEVELS,
 } from '@/types/drawings';
 import { useCoordinateConverter } from '@/hooks/useCoordinateConverter';
+import { isChartDisposed, withLiveSeries } from './chart-lifecycle';
 import { hitTestDrawing, type DrawingScreen } from './drawing-renderers/hitTest';
 import {
   drawTrendLine, drawVerticalLine, drawRectangle, drawText, drawArrow, drawHandles,
@@ -56,14 +57,18 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
 
   function reconcilePriceLines() {
     if (!series) return;
+    // The owning chart may have been removed by a symbol-switch remount while
+    // this unkeyed overlay still holds its series. Every call below would then
+    // queue a repaint against a null canvas.
+    if (isChartDisposed(chart)) return;
     const existing = priceLinesRef.current;
     const wantedIds = new Set(drawings.filter((d) => d.kind === 'hline' || d.kind === 'hzone' || d.kind === 'fib').map((d) => d.id));
 
     for (const [id, lines] of existing) {
       if (!wantedIds.has(id)) {
-        for (const l of lines) {
-          try { series.removePriceLine(l); } catch { /* disposed */ }
-        }
+        withLiveSeries(series, (s) => {
+          for (const l of lines) s.removePriceLine(l);
+        });
         existing.delete(id);
       }
     }
@@ -83,7 +88,9 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
         else if (d.kind === 'hzone') ok = reconcileHZone(lines, d);
         else ok = reconcileFib(lines, d);
         if (!ok) {
-          for (const l of lines) try { series.removePriceLine(l); } catch { /* */ }
+          withLiveSeries(series, (s) => {
+            for (const l of lines) s.removePriceLine(l);
+          });
           let built: IPriceLine[] = [];
           if (d.kind === 'hline') built = buildHLine(series, d);
           else if (d.kind === 'hzone') built = buildHZone(series, d);
@@ -251,10 +258,13 @@ export default function DrawingsOverlay({ token, chart, series, realTimeMap }: D
 
   useEffect(() => {
     return () => {
-      if (!series) return;
-      for (const [, lines] of priceLinesRef.current) {
-        for (const l of lines) try { series.removePriceLine(l); } catch { /* */ }
-      }
+      // Skip entirely when the chart is gone: remove() already disposed these
+      // price lines along with the series that owned them.
+      withLiveSeries(series, (s) => {
+        for (const [, lines] of priceLinesRef.current) {
+          for (const l of lines) s.removePriceLine(l);
+        }
+      });
       priceLinesRef.current.clear();
     };
   }, [token, series]);

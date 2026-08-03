@@ -18,6 +18,7 @@ import {
   mapFullQuote,
   type Candle,
 } from './user-historical.util';
+import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
 
 /** Delay between successive chunked historical calls (Angel rate limit). */
 const CHUNK_DELAY_MS = 300;
@@ -255,6 +256,29 @@ export class UserFeedSession implements UserFeedSessionLike {
       exchangeTokens: { [exchange]: [token] },
     });
     return mapFullQuote(response?.data?.fetched, token);
+  }
+
+  /**
+   * Batched FULL-mode quotes over THIS user's own Angel session — one broker
+   * call for every requested token (Angel's `exchangeTokens` takes a list per
+   * exchange). Used by `/market-data/indices`, which is polled every 5s and
+   * would otherwise spend ~7 of Angel's 10 req/sec on a single page.
+   *
+   * Returns a token -> tick map; tokens the account can't quote are simply
+   * absent rather than throwing, so one unentitled index can't blank the page.
+   */
+  async getQuotes(refs: TokenRef[]): Promise<Map<string, TickData>> {
+    if (refs.length === 0) return new Map();
+    await this.ensureConnected();
+    if (!this.smartApi) {
+      throw new Error('UserFeedSession has no SmartAPI client after connect');
+    }
+
+    const response: any = await this.smartApi.marketData({
+      mode: 'FULL',
+      exchangeTokens: groupTokensByExchange(refs),
+    });
+    return mapFullQuotes(response?.data?.fetched);
   }
 
   private delay(ms: number): Promise<void> {

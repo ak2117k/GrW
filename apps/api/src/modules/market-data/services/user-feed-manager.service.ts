@@ -164,6 +164,16 @@ export class UserFeedManager {
     return entry.session.getQuote(token, exchange);
   }
 
+  /**
+   * Batched FULL-mode quotes over the user's OWN Angel session — ONE broker
+   * call for all tokens. Used by the indices snapshot, which is polled every 5s
+   * and must not spend the whole Angel rate-limit budget per refresh.
+   */
+  async fetchQuotes(userId: string, refs: TokenRef[]) {
+    const entry = this.getOrCreateEntry(userId);
+    return entry.session.getQuotes(refs);
+  }
+
   // ──────────────────────────────────────────────
   // Private
   // ──────────────────────────────────────────────

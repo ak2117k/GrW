@@ -39,6 +39,7 @@ import {
 import { seriesCautionary } from '../../trade-engine/utils/cautionary';
 import { dedupePreferNse } from '../utils/dedupe-prefer-nse';
 import { tickToQuote } from '../utils/tick-to-quote';
+import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import { scoreSymbolMatch } from '../utils/rank-symbol-matches';
 import { UserFeedManager } from '../services/user-feed-manager.service';
 import { CurrentUser } from '../../../common/decorators';
@@ -630,17 +631,44 @@ export class MarketDataController {
    */
   @Get('indices')
   @ApiOperation({ summary: 'Get major market indices with live data' })
-  async getIndices() {
+  async getIndices(@CurrentUser('userId') userId: string) {
     const indices = this.instrumentService.getIndices();
 
+    // Per-user broker fetch, ONE call for every index. This endpoint used to
+    // read MarketFeedService's shared-feed cache — which is never populated
+    // (the shared feed account was abandoned), so every index came back
+    // `quote: null` and the market overview rendered blank. Falls back to that
+    // cache only so a user without broker creds still gets whatever a
+    // subscribed feed happened to warm.
+    let fetched = new Map<string, TickData>();
+    try {
+      fetched = await this.userFeedManager.fetchQuotes(
+        userId,
+        indices.map((idx) => ({ token: idx.token, exchange: idx.exchange })),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Per-user indices quote fetch failed: ${
+          err instanceof Error ? err.message : err
+        }. Falling back to the feed cache.`,
+      );
+    }
+
     return {
-      indices: indices.map((idx) => ({
-        key: idx.key,
-        symbol: idx.symbol,
-        token: idx.token,
-        exchange: idx.exchange,
-        quote: this.marketFeedService.getQuote(idx.token),
-      })),
+      indices: indices.map((idx) => {
+        const tick = fetched.get(idx.token);
+        return {
+          key: idx.key,
+          symbol: idx.symbol,
+          token: idx.token,
+          exchange: idx.exchange,
+          // Adapt to the Quote contract the client renders (change /
+          // changePercent), same as the single-quote endpoint.
+          quote: tick
+            ? tickToQuote(tick, { exchange: idx.exchange, symbol: idx.symbol })
+            : this.marketFeedService.getQuote(idx.token),
+        };
+      }),
     };
   }
 

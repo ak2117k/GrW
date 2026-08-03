@@ -1,5 +1,10 @@
 import { io, Socket } from 'socket.io-client';
 import { getStoredAccessToken } from './auth-storage';
+import {
+  nextRetryDelayMs,
+  shouldResetRetries,
+  shouldRetryServerDisconnect,
+} from './ws-retry';
 
 /**
  * Shape the socket.io handshake `auth` payload from a JWT access token.
@@ -164,9 +169,15 @@ class WebSocketService {
       // a genuinely-invalid token (logged out) can't spin a hot loop. The count
       // resets on a successful connect.
       let serverDropRetries = 0;
+      // When this socket last came up. The ADMIN-only gateways accept the
+      // handshake and reject inside handleConnection, so 'connect' fires on
+      // every FAILED attempt too — clearing the counter here would defeat the
+      // cap entirely (that is the /ws/telegram connect/disconnect loop). Only a
+      // connection that STAYS up clears it; see ws-retry.ts.
+      let connectedAt = 0;
 
       sock.on('connect', () => {
-        serverDropRetries = 0;
+        connectedAt = Date.now();
         this.connectedCount++;
         this.nsConnected.set(ns.path, true); // DIAG
         console.log(`[WS] Connected: ${ns.path}`);
@@ -227,13 +238,25 @@ class WebSocketService {
 
         // Recover from a terminal server-side rejection (socket.io won't).
         // Only while we hold a token (else we're logged out — stay down), and
-        // capped with a backoff so a permanently-bad token can't hot-loop.
-        if (reason === 'io server disconnect' && getAccessToken() && serverDropRetries < 10) {
+        // capped with a backoff so a permanently-rejected namespace goes quiet
+        // instead of hot-looping. The counter clears only after a connection
+        // that actually held — see ws-retry.ts for why 'connect' isn't enough.
+        if (connectedAt && shouldResetRetries(Date.now() - connectedAt)) {
+          serverDropRetries = 0;
+        }
+        connectedAt = 0;
+
+        if (
+          reason === 'io server disconnect' &&
+          shouldRetryServerDisconnect({
+            hasToken: Boolean(getAccessToken()),
+            retries: serverDropRetries,
+          })
+        ) {
           serverDropRetries++;
-          const delay = Math.min(5000, 1000 * serverDropRetries);
           setTimeout(() => {
             if (!sock.connected) sock.connect();
-          }, delay);
+          }, nextRetryDelayMs(serverDropRetries));
         }
       });
 

@@ -39,10 +39,12 @@ import {
 import { seriesCautionary } from '../../trade-engine/utils/cautionary';
 import { dedupePreferNse } from '../utils/dedupe-prefer-nse';
 import { tickToQuote } from '../utils/tick-to-quote';
-import { quoteFromDailyCandles } from '../utils/quote-from-candles';
-import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import { scoreSymbolMatch } from '../utils/rank-symbol-matches';
 import { UserFeedManager } from '../services/user-feed-manager.service';
+import { MarketQuoteResolver } from '../services/market-quote-resolver.service';
+import { CommoditiesSnapshotService } from '../services/commodities-snapshot.service';
+import { BreadthSectorService } from '../services/breadth-sector.service';
+import { BatchQuotesService } from '../services/batch-quotes.service';
 import { CurrentUser } from '../../../common/decorators';
 
 /**
@@ -83,15 +85,6 @@ interface CandleCacheEntry {
 const candleCache = new Map<string, CandleCacheEntry>();
 const CANDLE_CACHE_TTL_MS = 30_000;
 
-/**
- * Candle-derived index quotes, keyed userId:exchange:token. Separate from
- * `candleCache` because the TTL is tuned to a different caller: `/indices` is
- * polled every 5s by every open market page, and each miss costs one historical
- * call against Angel's 3 req/sec limit. Bounded by the index count per user.
- */
-const indexQuoteCache = new Map<string, CandleCacheEntry>();
-const INDEX_QUOTE_CACHE_TTL_MS = 60_000;
-
 @ApiTags('Market Data')
 @Controller('api/market-data')
 export class MarketDataController {
@@ -109,6 +102,13 @@ export class MarketDataController {
     // user's OWN already-authenticated Angel session (via their UserFeedSession)
     // instead of the shared feed account.
     private readonly userFeedManager: UserFeedManager,
+    // Single quote path shared by every market-page section. Each section used
+    // to reach for data its own way, and every one of those ways went through
+    // the retired shared feed account.
+    private readonly marketQuoteResolver: MarketQuoteResolver,
+    private readonly commoditiesSnapshot: CommoditiesSnapshotService,
+    private readonly breadthSector: BreadthSectorService,
+    private readonly batchQuotes: BatchQuotesService,
     // Optional + forwardRef because LevelBookService lives in the
     // signal-generator module (which is @Global) and we don't want a
     // hard import cycle. Used only to seed quote responses outside
@@ -644,129 +644,51 @@ export class MarketDataController {
   async getIndices(@CurrentUser('userId') userId: string) {
     const indices = this.instrumentService.getIndices();
 
-    // Per-user broker fetch, ONE call for every index. This endpoint used to
-    // read MarketFeedService's shared-feed cache — which is never populated
-    // (the shared feed account was abandoned), so every index came back
-    // `quote: null` and the market overview rendered blank. Falls back to that
-    // cache only so a user without broker creds still gets whatever a
-    // subscribed feed happened to warm.
-    let fetched = new Map<string, TickData>();
-    try {
-      fetched = await this.userFeedManager.fetchQuotes(
-        userId,
-        indices.map((idx) => ({ token: idx.token, exchange: idx.exchange })),
-      );
-    } catch (err) {
-      this.logger.warn(
-        `Per-user indices quote fetch failed: ${
-          err instanceof Error ? err.message : err
-        }. Falling back to the feed cache.`,
-      );
-    }
-
-    // Angel's quote API refuses NSE index tokens (999260xx) for most API keys —
-    // they come back in `data.unfetched`, which is why only SENSEX (BSE) had
-    // numbers. getCandleData DOES serve them, so anything the quote call
-    // skipped is rebuilt from that instrument's last two daily candles.
-    const resolved = await Promise.all(
-      indices.map(async (idx) => {
-        const tick = fetched.get(idx.token);
-        if (tick) {
-          // Adapt to the Quote contract the client renders (change /
-          // changePercent), same as the single-quote endpoint.
-          return tickToQuote(tick, { exchange: idx.exchange, symbol: idx.symbol });
-        }
-        const derived = await this.indexQuoteFromCandles(userId, idx);
-        // Last resort: the feed cache (empty in practice, but harmless).
-        return derived ?? this.marketFeedService.getQuote(idx.token);
-      }),
+    // One resolver call: batched broker quotes, with a daily-candle fallback for
+    // the NSE index tokens Angel refuses to quote. Replaces the shared-feed
+    // cache read that left every tile blank.
+    const resolved = await this.marketQuoteResolver.resolveQuotes(
+      userId,
+      indices.map((idx) => ({
+        token: idx.token,
+        exchange: idx.exchange,
+        symbol: idx.symbol,
+      })),
     );
 
     return {
-      indices: indices.map((idx, i) => ({
+      indices: indices.map((idx) => ({
         key: idx.key,
         symbol: idx.symbol,
         token: idx.token,
         exchange: idx.exchange,
-        quote: resolved[i],
+        quote: resolved.get(idx.token) ?? null,
       })),
     };
   }
 
   /**
-   * Daily-candle-derived quote for one index, coalesced + cached.
-   *
-   * `/indices` is polled every 5s per open market page; a candle fetch per
-   * index per poll would blow Angel's 3 req/sec historical limit immediately.
-   * A daily candle only moves as fast as the last traded price rolls into it,
-   * so a minute of staleness is invisible while cutting the call rate ~12x.
-   * Concurrent callers share one in-flight promise.
-   */
-  private async indexQuoteFromCandles(
-    userId: string,
-    idx: { token: string; symbol: string; exchange: string },
-  ) {
-    const key = `${userId}:${idx.exchange}:${idx.token}`;
-    const cached = indexQuoteCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.promise;
-
-    const promise = (async () => {
-      try {
-        const to = new Date();
-        // 10 days back reliably spans a long weekend + holidays to guarantee
-        // TWO sessions (today's candle + a real previous close).
-        const from = new Date(to.getTime() - 10 * 24 * 60 * 60 * 1000);
-        const candles = await this.userFeedManager.fetchCandles(
-          userId,
-          idx.token,
-          idx.exchange,
-          '1d',
-          from,
-          to,
-        );
-        return quoteFromDailyCandles(candles, {
-          token: idx.token,
-          symbol: idx.symbol,
-          exchange: idx.exchange,
-        });
-      } catch (err) {
-        this.logger.warn(
-          `Candle-derived quote failed for ${idx.exchange}:${idx.token}: ${
-            err instanceof Error ? err.message : err
-          }`,
-        );
-        return null;
-      }
-    })();
-
-    indexQuoteCache.set(key, {
-      promise,
-      expiresAt: Date.now() + INDEX_QUOTE_CACHE_TTL_MS,
-    });
-    // Evict on failure so a transient error isn't served for the whole TTL.
-    promise.catch(() => indexQuoteCache.delete(key));
-    return promise;
-  }
-
-  /**
    * GET /api/market-data/breadth
-   * Get market breadth (advances, declines, unchanged) from cached quotes.
+   * Advances/declines/unchanged across the major-stock + sector universe,
+   * priced from the REQUEST USER'S own broker session. Previously read
+   * MarketFeedService's shared-feed cache, which is never populated.
    */
   @Get('breadth')
-  @ApiOperation({ summary: 'Get market breadth from cached quotes' })
-  getBreadth() {
-    return this.marketFeedService.getBreadth();
+  @ApiOperation({ summary: 'Get market breadth' })
+  getBreadth(@CurrentUser('userId') userId: string) {
+    return this.breadthSector.getBreadth(userId);
   }
 
   /**
    * GET /api/market-data/sector-performance
-   * Get sector index performance from cached quotes.
+   * Sector index performance, priced from the request user's own broker
+   * session (same shared-feed-cache fix as /breadth).
    */
   @Get('sector-performance')
   @ApiOperation({ summary: 'Get sector index performance' })
-  getSectorPerformance() {
+  async getSectorPerformance(@CurrentUser('userId') userId: string) {
     return {
-      sectors: this.marketFeedService.getSectorPerformance(),
+      sectors: await this.breadthSector.getSectorPerformance(userId),
     };
   }
 
@@ -1131,39 +1053,18 @@ export class MarketDataController {
    * Live commodity snapshot fetched DIRECTLY from Angel One — no DB row, no feed
    * subscription, and no roll required. Resolves each tracked commodity's
    * current front-month token (cached ~6h so we don't pull the ~30MB
-   * ScripMaster per request), then batch-fetches LTP over REST via the shared
-   * feed session. Self-heals on monthly contract rollover because the
+   * ScripMaster per request), then prices them over the REQUEST USER'S own
+   * broker session. Self-heals on monthly contract rollover because the
    * front-month is always re-resolved. `ltp` is null for any commodity the
    * account isn't entitled to quote (e.g. MCX segment not enabled).
+   *
+   * Front-month RESOLUTION was always fine (it reads Angel's PUBLIC
+   * ScripMaster); the quotes were not — they came from the retired shared feed
+   * account, so every row rendered blank.
    */
   @Get('commodities')
-  async getCommodities() {
-    const contracts = await this.commodityRollService.resolveFrontMonthTokens();
-    const quotes = await this.angelOneAdapter.getQuotesBatch(
-      'MCX',
-      contracts.map((c) => c.token),
-    );
-    const commodities = contracts.map((c) => {
-      const q = quotes.get(c.token);
-      // Angel FULL mode gives previous close, so change = ltp − prevClose.
-      const hasChange = q != null && q.close > 0;
-      return {
-        symbol: c.symbol,
-        token: c.token,
-        exchange: c.exchange,
-        contractSymbol: c.contractSymbol,
-        expiry: c.expiry,
-        ltp: q?.ltp ?? null,
-        open: q?.open ?? 0,
-        high: q?.high ?? 0,
-        low: q?.low ?? 0,
-        close: q?.close ?? 0,
-        volume: q?.volume ?? 0,
-        change: hasChange ? Number((q!.ltp - q!.close).toFixed(2)) : 0,
-        changePercent: hasChange ? Number((((q!.ltp - q!.close) / q!.close) * 100).toFixed(2)) : 0,
-      };
-    });
-    return { commodities, count: commodities.length };
+  async getCommodities(@CurrentUser('userId') userId: string) {
+    return this.commoditiesSnapshot.getSnapshot(userId);
   }
 
   /**
@@ -1179,66 +1080,11 @@ export class MarketDataController {
    */
   @Post('quotes')
   @HttpCode(HttpStatus.OK)
-  async getQuotes(@Body() body: { items?: { token: string; exchange: string }[] }) {
-    interface QuoteRow {
-      token: string;
-      exchange: string;
-      ltp: number;
-      open: number;
-      high: number;
-      low: number;
-      close: number;
-      volume: number;
-      change: number;
-      changePercent: number;
-    }
-    const quotes: QuoteRow[] = [];
-    // Cache-FIRST: subscribed tokens (indices, major stocks) are already warm in
-    // the feed's quote cache, so serve them with ZERO Angel calls. Only tokens
-    // the feed isn't tracking fall through to a direct Angel batch. This keeps
-    // the frequent watchlist/quote polls off Angel's rate limit so the chart's
-    // historical fetch (a separate, heavier call) isn't starved/throttled.
-    const missesByExchange = new Map<string, string[]>();
-    for (const it of body?.items ?? []) {
-      if (!it?.token || !it?.exchange) continue;
-      const ex = String(it.exchange).toUpperCase();
-      const cached = this.marketFeedService.getQuote(it.token);
-      if (cached && cached.ltp > 0) {
-        quotes.push({
-          token: it.token,
-          exchange: ex,
-          ltp: cached.ltp,
-          open: cached.open ?? 0,
-          high: cached.high ?? 0,
-          low: cached.low ?? 0,
-          close: cached.close ?? 0,
-          volume: cached.volume ?? 0,
-          change: cached.change ?? 0,
-          changePercent: cached.changePercent ?? 0,
-        });
-      } else {
-        (missesByExchange.get(ex) ?? missesByExchange.set(ex, []).get(ex)!).push(it.token);
-      }
-    }
-    for (const [exchange, tokens] of missesByExchange) {
-      const map = await this.angelOneAdapter.getQuotesBatch(exchange, tokens);
-      for (const [token, q] of map) {
-        const hasChange = q.close > 0;
-        quotes.push({
-          token,
-          exchange,
-          ltp: q.ltp,
-          open: q.open,
-          high: q.high,
-          low: q.low,
-          close: q.close,
-          volume: q.volume,
-          change: hasChange ? Number((q.ltp - q.close).toFixed(2)) : 0,
-          changePercent: hasChange ? Number((((q.ltp - q.close) / q.close) * 100).toFixed(2)) : 0,
-        });
-      }
-    }
-    return { quotes, count: quotes.length };
+  async getQuotes(
+    @CurrentUser('userId') userId: string,
+    @Body() body: { items?: { token: string; exchange: string }[] },
+  ) {
+    return this.batchQuotes.getQuotes(userId, body?.items);
   }
 
   /**

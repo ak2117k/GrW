@@ -36,6 +36,10 @@ import {
   CredentialDecryptor,
 } from '../credential-vault/execution/credential-decryptor';
 import { UserFeedManager } from './services/user-feed-manager.service';
+import { MarketQuoteResolver } from './services/market-quote-resolver.service';
+import { CommoditiesSnapshotService } from './services/commodities-snapshot.service';
+import { BreadthSectorService, BREADTH_QUOTE_RESOLVER } from './services/breadth-sector.service';
+import { BatchQuotesService, MARKET_QUOTE_RESOLVER } from './services/batch-quotes.service';
 import { UserFeedSession } from './services/user-feed-session';
 import { USER_FEED_SESSION_FACTORY } from './services/user-feed.types';
 import type { UserFeedSessionFactory } from './services/user-feed.types';
@@ -160,6 +164,20 @@ import type { UserFeedSessionFactory } from './services/user-feed.types';
           },
         ),
     },
+    // Single quote path for every market-page section (indices, commodities,
+    // breadth, sector performance, watchlist). Each of those used to reach for
+    // data its own way, and every one of those ways went through the retired
+    // shared feed account.
+    MarketQuoteResolver,
+    CommoditiesSnapshotService,
+    BreadthSectorService,
+    BatchQuotesService,
+    // BreadthSectorService and BatchQuotesService inject the resolver through a
+    // structural port + string token rather than the concrete class, so they can
+    // be unit-tested with a plain fake and stay decoupled from the broker stack.
+    // These aliases bind both ports to the one real implementation.
+    { provide: BREADTH_QUOTE_RESOLVER, useExisting: MarketQuoteResolver },
+    { provide: MARKET_QUOTE_RESOLVER, useExisting: MarketQuoteResolver },
   ],
   exports: [
     MarketFeedService,

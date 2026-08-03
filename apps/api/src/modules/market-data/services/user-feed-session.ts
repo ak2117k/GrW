@@ -19,6 +19,7 @@ import {
   type Candle,
 } from './user-historical.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
+import { describeUnfetched } from '../utils/quote-from-candles';
 
 /** Delay between successive chunked historical calls (Angel rate limit). */
 const CHUNK_DELAY_MS = 300;
@@ -278,6 +279,16 @@ export class UserFeedSession implements UserFeedSessionLike {
       mode: 'FULL',
       exchangeTokens: groupTokensByExchange(refs),
     });
+
+    // `data.unfetched` is the ONLY place the broker says WHY a token was
+    // refused. Angel declines NSE index tokens (999260xx) for most API keys,
+    // and silently dropping this array is what made the blank index tiles so
+    // hard to attribute. Debug-level: it is expected traffic, not an error.
+    const refused = describeUnfetched(response?.data?.unfetched);
+    if (refused) {
+      this.logger.debug(`marketData did not quote: ${refused}`);
+    }
+
     return mapFullQuotes(response?.data?.fetched);
   }
 

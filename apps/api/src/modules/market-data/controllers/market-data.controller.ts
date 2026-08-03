@@ -39,6 +39,7 @@ import {
 import { seriesCautionary } from '../../trade-engine/utils/cautionary';
 import { dedupePreferNse } from '../utils/dedupe-prefer-nse';
 import { tickToQuote } from '../utils/tick-to-quote';
+import { quoteFromDailyCandles } from '../utils/quote-from-candles';
 import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import { scoreSymbolMatch } from '../utils/rank-symbol-matches';
 import { UserFeedManager } from '../services/user-feed-manager.service';
@@ -81,6 +82,15 @@ interface CandleCacheEntry {
 }
 const candleCache = new Map<string, CandleCacheEntry>();
 const CANDLE_CACHE_TTL_MS = 30_000;
+
+/**
+ * Candle-derived index quotes, keyed userId:exchange:token. Separate from
+ * `candleCache` because the TTL is tuned to a different caller: `/indices` is
+ * polled every 5s by every open market page, and each miss costs one historical
+ * call against Angel's 3 req/sec limit. Bounded by the index count per user.
+ */
+const indexQuoteCache = new Map<string, CandleCacheEntry>();
+const INDEX_QUOTE_CACHE_TTL_MS = 60_000;
 
 @ApiTags('Market Data')
 @Controller('api/market-data')
@@ -654,22 +664,88 @@ export class MarketDataController {
       );
     }
 
-    return {
-      indices: indices.map((idx) => {
+    // Angel's quote API refuses NSE index tokens (999260xx) for most API keys —
+    // they come back in `data.unfetched`, which is why only SENSEX (BSE) had
+    // numbers. getCandleData DOES serve them, so anything the quote call
+    // skipped is rebuilt from that instrument's last two daily candles.
+    const resolved = await Promise.all(
+      indices.map(async (idx) => {
         const tick = fetched.get(idx.token);
-        return {
-          key: idx.key,
-          symbol: idx.symbol,
-          token: idx.token,
-          exchange: idx.exchange,
+        if (tick) {
           // Adapt to the Quote contract the client renders (change /
           // changePercent), same as the single-quote endpoint.
-          quote: tick
-            ? tickToQuote(tick, { exchange: idx.exchange, symbol: idx.symbol })
-            : this.marketFeedService.getQuote(idx.token),
-        };
+          return tickToQuote(tick, { exchange: idx.exchange, symbol: idx.symbol });
+        }
+        const derived = await this.indexQuoteFromCandles(userId, idx);
+        // Last resort: the feed cache (empty in practice, but harmless).
+        return derived ?? this.marketFeedService.getQuote(idx.token);
       }),
+    );
+
+    return {
+      indices: indices.map((idx, i) => ({
+        key: idx.key,
+        symbol: idx.symbol,
+        token: idx.token,
+        exchange: idx.exchange,
+        quote: resolved[i],
+      })),
     };
+  }
+
+  /**
+   * Daily-candle-derived quote for one index, coalesced + cached.
+   *
+   * `/indices` is polled every 5s per open market page; a candle fetch per
+   * index per poll would blow Angel's 3 req/sec historical limit immediately.
+   * A daily candle only moves as fast as the last traded price rolls into it,
+   * so a minute of staleness is invisible while cutting the call rate ~12x.
+   * Concurrent callers share one in-flight promise.
+   */
+  private async indexQuoteFromCandles(
+    userId: string,
+    idx: { token: string; symbol: string; exchange: string },
+  ) {
+    const key = `${userId}:${idx.exchange}:${idx.token}`;
+    const cached = indexQuoteCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+    const promise = (async () => {
+      try {
+        const to = new Date();
+        // 10 days back reliably spans a long weekend + holidays to guarantee
+        // TWO sessions (today's candle + a real previous close).
+        const from = new Date(to.getTime() - 10 * 24 * 60 * 60 * 1000);
+        const candles = await this.userFeedManager.fetchCandles(
+          userId,
+          idx.token,
+          idx.exchange,
+          '1d',
+          from,
+          to,
+        );
+        return quoteFromDailyCandles(candles, {
+          token: idx.token,
+          symbol: idx.symbol,
+          exchange: idx.exchange,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Candle-derived quote failed for ${idx.exchange}:${idx.token}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+        return null;
+      }
+    })();
+
+    indexQuoteCache.set(key, {
+      promise,
+      expiresAt: Date.now() + INDEX_QUOTE_CACHE_TTL_MS,
+    });
+    // Evict on failure so a transient error isn't served for the whole TTL.
+    promise.catch(() => indexQuoteCache.delete(key));
+    return promise;
   }
 
   /**

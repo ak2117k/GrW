@@ -8,6 +8,7 @@ import {
   applyTick,
   applyRealBars,
   prependBars,
+  findRealGaps,
   toRealTimeMap,
   type ChartSeries,
   type RealBar,
@@ -147,6 +148,42 @@ function toRealBars(raw: Candle[]): RealBar[] {
   }));
 }
 
+/**
+ * Report, in the devtools console, exactly which market times are missing from
+ * a freshly-loaded series.
+ *
+ * A hole that straddles an overnight/weekend boundary is EXPECTED. A hole
+ * WITHIN one trading session means the broker never gave us those bars — the
+ * usual cause being a throttled history chunk. This is the difference between
+ * "the chart looks wrong" and a precise, reportable fact, so it stays in the
+ * production bundle deliberately.
+ */
+function logGapDiagnostic(
+  symbol: string,
+  timeframe: string,
+  bars: RealBar[],
+  tfSec: number,
+  source?: string,
+): void {
+  const gaps = findRealGaps(buildSeries(bars, tfSec));
+  const fmt = (sec: number) =>
+    new Date(sec * 1000).toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'Asia/Kolkata',
+    });
+  // eslint-disable-next-line no-console
+  console.log(
+    `[chart] ${symbol} ${timeframe}: ${bars.length} bars` +
+      (source ? ` (source=${source})` : '') +
+      ` | ${gaps.length} gap(s)`,
+    gaps.map((g) => `${fmt(g.fromReal)} → ${fmt(g.toReal)} (~${g.missingBars} bars missing)`),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Series state: ONE reducer owns the bars.
 //
@@ -268,6 +305,7 @@ export function useChartData(): UseChartDataReturn {
 
       const bars = toRealBars(response.data?.candles ?? response.data?.data ?? []);
       dispatch({ type: 'load', epoch, bars });
+      logGapDiagnostic(selectedSymbol.symbol, timeframe, bars, tfSec, response.data?.source);
 
       if (bars.length > 0) {
         setCurrentPrice(bars[bars.length - 1].close);

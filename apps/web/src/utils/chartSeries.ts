@@ -171,6 +171,33 @@ export function buildSeries(input: readonly RealBar[], tfSec: number): ChartSeri
   return { bars: layout(normalize(input), tfSec), tfSec };
 }
 
+/**
+ * Every hole in the series larger than a normal next-bar step, in REAL time.
+ *
+ * A hole straddling an overnight/weekend boundary is EXPECTED (that is what
+ * the compressed axis exists to hide). A hole WITHIN one trading session means
+ * bars we never received — historically, a broker chunk that was throttled and
+ * silently discarded. Reporting them is what tells those two cases apart
+ * without guessing.
+ */
+export function findRealGaps(
+  series: ChartSeries,
+): Array<{ fromReal: number; toReal: number; missingBars: number }> {
+  const { bars, tfSec } = series;
+  const gaps: Array<{ fromReal: number; toReal: number; missingBars: number }> = [];
+  for (let i = 1; i < bars.length; i++) {
+    const span = bars[i].realTime - bars[i - 1].realTime;
+    if (span > tfSec * 2) {
+      gaps.push({
+        fromReal: bars[i - 1].realTime,
+        toReal: bars[i].realTime,
+        missingBars: Math.round(span / tfSec) - 1,
+      });
+    }
+  }
+  return gaps;
+}
+
 /** Derived compressed-time -> real-time map for the chart's axis formatters. */
 export function toRealTimeMap(series: ChartSeries): Map<number, number> {
   const m = new Map<number, number>();

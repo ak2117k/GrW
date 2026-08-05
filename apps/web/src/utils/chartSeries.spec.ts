@@ -5,6 +5,7 @@ import {
   applyRealBars,
   prependBars,
   planRender,
+  findRealGaps,
   toRealTimeMap,
   emptySeries,
   type RealBar,
@@ -287,6 +288,36 @@ describe('toRealTimeMap', () => {
     expect(m.get(1060)).toBe(50_000);
     // Every plotted bar is present — a lookup miss is structurally impossible.
     expect(m.size).toBe(s.bars.length);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findRealGaps — the missing-candle diagnostic
+// ---------------------------------------------------------------------------
+
+describe('findRealGaps', () => {
+  it('reports nothing for a contiguous series', () => {
+    expect(findRealGaps(buildSeries([real(1000), real(1060), real(1120)], TF))).toEqual([]);
+  });
+
+  it('reports a hole with the count of bars that never arrived', () => {
+    const s = buildSeries([real(1000), real(1300)], TF);
+    expect(findRealGaps(s)).toEqual([
+      { fromReal: 1000, toReal: 1300, missingBars: 4 },
+    ]);
+  });
+
+  it('reports in REAL time, not the compressed axis time', () => {
+    // The compressed times here are 1000/1060 — useless for diagnosis. The
+    // whole point is to name the actual market times bounding the hole.
+    const s = buildSeries([real(1000), real(50_000)], TF);
+    const [gap] = findRealGaps(s);
+    expect(gap.fromReal).toBe(1000);
+    expect(gap.toReal).toBe(50_000);
+  });
+
+  it('does not report a single genuinely-missing bar (exactly 2x)', () => {
+    expect(findRealGaps(buildSeries([real(1000), real(1120)], TF))).toEqual([]);
   });
 });
 

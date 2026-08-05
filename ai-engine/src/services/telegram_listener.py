@@ -32,7 +32,7 @@ class TelegramListener:
         self.ingest_url = os.environ["TELEGRAM_INGEST_URL"]
         self.ingest_secret = os.environ["TELEGRAM_INGEST_SECRET"]
         self.watch = [c.strip() for c in os.environ.get("TELEGRAM_WATCH_CHANNELS", "").split(",") if c.strip()]
-        self._http = httpx.AsyncClient(timeout=30)
+        self._http = httpx.AsyncClient(timeout=90)  # tolerate Render free-tier cold-start wakes
 
     async def parse(self, text: str) -> Dict[str, Any]:
         """Parse in-process via the Claude Agent SDK (uses the host's Claude login)."""
@@ -52,6 +52,8 @@ class TelegramListener:
             logger.warning("parse failed for msg %s: %s", message.get("tgMessageId"), exc)
             parsed = {"isSignal": False, "parseError": str(exc)}
         await self.forward(build_ingest_payload(channel, message, parsed))
+        logger.info("forwarded msg %s from %s (isSignal=%s)",
+                    message.get("tgMessageId"), channel.get("title"), parsed.get("isSignal"))
 
     async def run(self) -> None:
         from telethon import TelegramClient, events
@@ -88,13 +90,23 @@ class TelegramListener:
             last_seen = r.json() if r.status_code == 200 else {}
         except Exception:  # noqa: BLE001
             last_seen = {}
+        limit = int(os.environ.get("TELEGRAM_BACKFILL_LIMIT", "50"))
         for ch in watched:
             min_id = int(last_seen.get(str(ch), 0))
-            async for msg in client.iter_messages(ch, min_id=min_id, reverse=True):
-                chat = await msg.get_chat()
-                await self.handle_message(
-                    {"tgChannelId": str(ch), "username": getattr(chat, "username", None),
-                     "title": getattr(chat, "title", str(ch))},
-                    {"tgMessageId": msg.id, "rawText": msg.message or "",
-                     "postedAt": msg.date.isoformat()},
-                )
+            # Newest `limit` messages above min_id, replayed oldest→newest so the
+            # server-side lastSeen pointer advances monotonically. Caps the cold-start
+            # backfill so a first run doesn't parse a channel's entire history.
+            recent = []
+            async for msg in client.iter_messages(ch, limit=limit, min_id=min_id):
+                recent.append(msg)
+            for msg in reversed(recent):
+                try:
+                    chat = await msg.get_chat()
+                    await self.handle_message(
+                        {"tgChannelId": str(ch), "username": getattr(chat, "username", None),
+                         "title": getattr(chat, "title", str(ch))},
+                        {"tgMessageId": msg.id, "rawText": msg.message or "",
+                         "postedAt": msg.date.isoformat()},
+                    )
+                except Exception as exc:  # noqa: BLE001 — one failed message must not stop backfill
+                    logger.warning("backfill msg %s failed: %s", msg.id, exc)

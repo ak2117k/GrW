@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { markChartDisposed, withLiveChart } from './chart-lifecycle';
+import { planRender, type SeriesBar } from '@/utils/chartSeries';
 import {
   createChart,
   ColorType,
@@ -29,7 +30,7 @@ export interface CandlestickChartHandle {
 }
 
 interface CandlestickChartProps {
-  candles: ChartCandle[];
+  candles: SeriesBar[];
   width?: number;
   height?: number;
   onCrosshairMove?: (params: MouseEventParams<Time>) => void;
@@ -82,6 +83,25 @@ function formatAxisTick(realSec: number, tickMarkType: TickMarkType): string {
   }
 }
 
+/** A plotted bar -> the point shapes lightweight-charts wants. */
+function toCandlePoint(bar: SeriesBar) {
+  return {
+    time: Math.floor(bar.time) as Time,
+    open: bar.open,
+    high: bar.high,
+    low: bar.low,
+    close: bar.close,
+  };
+}
+
+function toVolumePoint(bar: SeriesBar) {
+  return {
+    time: Math.floor(bar.time) as Time,
+    value: bar.volume,
+    color: bar.close >= bar.open ? 'rgba(0, 207, 132, 0.35)' : 'rgba(239, 68, 68, 0.35)',
+  };
+}
+
 const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProps>(
   function CandlestickChart(
     {
@@ -101,8 +121,13 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
     const chartRef = useRef<IChartApi | null>(null);
     const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
     const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
-    const prevCandlesLenRef = useRef(0);
-    const prevFirstCandleTimeRef = useRef<number | null>(null);
+    // The exact bars array last pushed to the canvas. `planRender` diffs the
+    // incoming array against it by reference, which is exact because every
+    // series transition copy-on-writes only the bars it touched.
+    const prevBarsRef = useRef<SeriesBar[] | null>(null);
+    // Whether this dataset has had its one default zoom. Cleared when the
+    // series empties (symbol/timeframe switch).
+    const hasZoomedRef = useRef(false);
     // Tracks the last seen prependSeq so updateData can distinguish a PREPEND
     // (older bars added at the front — preserve scroll) from a real dataset
     // reset (symbol/timeframe change — default-zoom).
@@ -183,20 +208,24 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
           // minBarSpacing, the chart scrolls horizontally instead.
           minBarSpacing: 2,
           // Translate the chart's compressed time back to the real market
-          // time when labelling the bottom axis. If no map is provided
-          // (e.g. very early during initial load), fall back to formatting
-          // the raw value so labels never go blank.
+          // time when labelling the bottom axis.
+          //
+          // There is deliberately NO `?? time` fallback. A compressed time IS
+          // a valid-looking timestamp (compression subtracts the overnight
+          // gap), so falling back to it renders the PREVIOUS DAY's date on a
+          // bar and reads as real. The map is derived from the plotted bars,
+          // so a miss means the axis is ahead of the data — show nothing
+          // rather than a plausible lie.
           tickMarkFormatter: (time: Time, tickMarkType: TickMarkType) => {
-            const t = time as number;
-            const real = realTimeMapRef.current?.get(t) ?? t;
-            return formatAxisTick(real, tickMarkType);
+            const real = realTimeMapRef.current?.get(time as number);
+            return real === undefined ? '' : formatAxisTick(real, tickMarkType);
           },
         },
         localization: {
           // Same translation for the crosshair tooltip on the time axis.
           timeFormatter: (time: number) => {
-            const real = realTimeMapRef.current?.get(time) ?? time;
-            return formatRealTime(real);
+            const real = realTimeMapRef.current?.get(time);
+            return real === undefined ? '—' : formatRealTime(real);
           },
         },
         width: width ?? containerRef.current.clientWidth,
@@ -215,10 +244,17 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
       const candleSeries = chart.addCandlestickSeries(candleOptions);
       candleSeriesRef.current = candleSeries;
 
-      // Volume histogram on the same chart
+      // Volume histogram on the same chart.
+      //
+      // lastValueVisible/priceLineVisible default to TRUE, which draws the
+      // histogram's own last-value line and axis badge on the volume scale.
+      // Indices (NIFTY, BANKNIFTY, SENSEX) report volume 0, so that rendered
+      // a stray line and a red "0" badge overlapping the price axis labels.
       const volumeSeries = chart.addHistogramSeries({
         priceFormat: { type: 'volume' },
         priceScaleId: 'volume',
+        lastValueVisible: false,
+        priceLineVisible: false,
       });
 
       chart.priceScale('volume').applyOptions({
@@ -290,130 +326,92 @@ const CandlestickChart = forwardRef<CandlestickChartHandle, CandlestickChartProp
         chartRef.current = null;
         candleSeriesRef.current = null;
         volumeSeriesRef.current = null;
-        prevCandlesLenRef.current = 0;
-        prevFirstCandleTimeRef.current = null;
+        prevBarsRef.current = null;
+        hasZoomedRef.current = false;
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // Update candle data
+    // Update candle data.
+    //
+    // What the canvas is told is decided by `planRender`, an exact reference
+    // diff of the bars array — NOT by a length delta. The old heuristic
+    // ("length changed by <= 1 → update the last bar") was wrong in exactly
+    // the case the 20s REST poll produces: correct an earlier bar AND append
+    // a new one. That reads as "+1 bar", so only the appended bar was pushed
+    // and the correction never reached the canvas, leaving the drawn chart
+    // permanently disagreeing with the data behind the OHLC readout.
     const updateData = useCallback(() => {
-      if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
+      const candleApi = candleSeriesRef.current;
+      const volumeApi = volumeSeriesRef.current;
+      if (!candleApi || !volumeApi) return;
 
-      // Clear chart when candles are empty (e.g. symbol just changed)
-      if (candles.length === 0) {
-        candleSeriesRef.current.setData([]);
-        volumeSeriesRef.current.setData([]);
-        prevCandlesLenRef.current = 0;
-        prevFirstCandleTimeRef.current = null;
-        prevPrependSeqRef.current = prependSeq;
-        return;
-      }
-
-      const candleData = candles.map((c) => ({
-        time: Math.floor(c.time) as Time,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      }));
-
-      const volumeData = candles.map((c) => ({
-        time: Math.floor(c.time) as Time,
-        value: c.volume,
-        color: c.close >= c.open ? 'rgba(0, 207, 132, 0.35)' : 'rgba(239, 68, 68, 0.35)',
-      }));
-
-      const newFirstTime = candles[0].time;
-
-      // PREPEND update: older bars were just added at the FRONT (lower compressed
-      // times) while existing bars keep their times. This also changes the first
-      // candle time, so we use prependSeq — not the first-candle-time delta — to
-      // distinguish it from a real dataset reset. Preserve the user's scroll
-      // position by capturing the visible range before setData and restoring it
-      // after, and skip the default-zoom logic entirely.
+      // A prepend must preserve the user's scroll position; every other
+      // reset is a fresh dataset.
       const isPrepend = prependSeq !== prevPrependSeqRef.current;
-      if (isPrepend) {
-        const ts = chartRef.current?.timeScale();
-        const savedRange = ts?.getVisibleRange() ?? null;
-        candleSeriesRef.current.setData(candleData);
-        volumeSeriesRef.current.setData(volumeData);
-        if (ts && savedRange) {
-          ts.setVisibleRange(savedRange);
-        }
-        // Now that more history exists to the left, re-arm so a subsequent
-        // scroll back to the (new) edge can request the next page.
-        loadOlderArmedRef.current = true;
-        prevCandlesLenRef.current = candles.length;
-        prevFirstCandleTimeRef.current = newFirstTime;
-        prevPrependSeqRef.current = prependSeq;
+      prevPrependSeqRef.current = prependSeq;
+
+      const plan = planRender(prevBarsRef.current, candles);
+      if (plan.kind === 'none') return;
+
+      if (candles.length === 0) {
+        candleApi.setData([]);
+        volumeApi.setData([]);
+        prevBarsRef.current = candles;
+        hasZoomedRef.current = false;
         return;
       }
 
-      // Detect a symbol/dataset change: if the first candle's timestamp differs
-      // from what we saw before, this is a completely new dataset — force a full
-      // setData() by resetting the incremental counter.
-      if (prevFirstCandleTimeRef.current !== null && prevFirstCandleTimeRef.current !== newFirstTime) {
-        prevCandlesLenRef.current = 0;
+      if (plan.kind === 'update') {
+        candleApi.update(toCandlePoint(plan.bar));
+        volumeApi.update(toVolumePoint(plan.bar));
+        prevBarsRef.current = candles;
+        return;
       }
 
-      const isIncremental =
-        prevCandlesLenRef.current > 0 &&
-        Math.abs(candles.length - prevCandlesLenRef.current) <= 1;
+      const ts = chartRef.current?.timeScale();
+      const savedRange = isPrepend ? (ts?.getVisibleRange() ?? null) : null;
+      candleApi.setData(candles.map(toCandlePoint));
+      volumeApi.setData(candles.map(toVolumePoint));
+      prevBarsRef.current = candles;
 
-      if (isIncremental) {
-        // Real-time update: try to update/append the last candle
-        try {
-          const lastCandle = candleData[candleData.length - 1];
-          const lastVolume = volumeData[volumeData.length - 1];
-          candleSeriesRef.current.update(lastCandle);
-          volumeSeriesRef.current.update(lastVolume);
-        } catch {
-          // Fallback to full setData if update fails (e.g. time out of order)
-          candleSeriesRef.current.setData(candleData);
-          volumeSeriesRef.current.setData(volumeData);
-        }
-      } else {
-        candleSeriesRef.current.setData(candleData);
-        volumeSeriesRef.current.setData(volumeData);
+      if (isPrepend) {
+        if (ts && savedRange) ts.setVisibleRange(savedRange);
+        // More history now exists to the left — re-arm so a subsequent scroll
+        // to the (new) edge can request the next page.
+        loadOlderArmedRef.current = true;
+        return;
+      }
 
-        // Default-zoom to the LATEST ~100 bars on dataset reset (initial load
-        // OR symbol/timeframe change). The chart still HAS all fetched bars
-        // (often 250-400) — user can scroll/zoom left to see older history.
-        //
-        // Why not fitContent(): with 250+ bars and a typical 800px chart,
-        // fitContent compresses bars to <4px wide, making them invisible/
-        // squished. Showing the most-recent 100 keeps bars at usable width
-        // for default-view trading decisions.
-        //
-        // Deferred via rAF: calling setVisibleLogicalRange synchronously
-        // after setData races the chart's internal time-scale state.
-        if (prevCandlesLenRef.current === 0) {
-          requestAnimationFrame(() => {
-            // The chart can be removed between scheduling and this frame (a
-            // symbol switch remounts this component). Checking `chartRef.current`
-            // alone is not enough — the ref is nulled by OUR cleanup, but the
-            // instance may be disposed by a path that runs first.
-            withLiveChart(chartRef.current, (c) => {
-              const ts = c.timeScale();
-              const totalBars = candleData.length;
-              const defaultVisible = 100;
-              if (totalBars > defaultVisible) {
-                ts.setVisibleLogicalRange({
-                  from: totalBars - defaultVisible,
-                  to: totalBars + 2, // small right pad for live tick growth
-                });
-              } else {
-                ts.fitContent();
-              }
+      // Default-zoom to the LATEST ~100 bars, once per dataset. The chart
+      // still HOLDS all fetched bars (often 250-400) — the user can scroll
+      // left for history. Not fitContent(): with 250+ bars in ~800px, bars
+      // compress below 4px and effectively vanish.
+      //
+      // Guarded by hasZoomedRef (cleared when the series empties on a symbol
+      // switch) so a later full setData — a poll filling an interior hole,
+      // say — re-renders without yanking the user's view back.
+      if (hasZoomedRef.current) return;
+      hasZoomedRef.current = true;
+      const totalBars = candles.length;
+      requestAnimationFrame(() => {
+        // The chart can be removed between scheduling and this frame (a symbol
+        // switch remounts this component). Checking `chartRef.current` alone is
+        // not enough — the ref is nulled by OUR cleanup, but the instance may
+        // be disposed by a path that runs first.
+        withLiveChart(chartRef.current, (c) => {
+          const scale = c.timeScale();
+          const defaultVisible = 100;
+          if (totalBars > defaultVisible) {
+            scale.setVisibleLogicalRange({
+              from: totalBars - defaultVisible,
+              to: totalBars + 2, // small right pad for live tick growth
             });
-          });
-        }
-      }
-
-      prevCandlesLenRef.current = candles.length;
-      prevFirstCandleTimeRef.current = newFirstTime;
-      prevPrependSeqRef.current = prependSeq;
+          } else {
+            scale.fitContent();
+          }
+        });
+      });
     }, [candles, prependSeq]);
 
     useEffect(() => {

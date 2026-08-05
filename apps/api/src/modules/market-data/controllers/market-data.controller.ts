@@ -334,9 +334,17 @@ export class MarketDataController {
     const symbol = instrument?.symbol ?? constantEntry?.symbol ?? token;
 
     // Coalesce concurrent identical requests onto a single broker call.
-    // Cache key includes from/to so a chart panning to a different range
-    // gets its own fetch.
-    const cacheKey = `${exchange}:${token}:${query.timeframe}:${from.toISOString()}:${to.toISOString()}`;
+    //
+    // Keyed per USER: the fetch runs on the requesting user's own Angel
+    // session, and entitlements differ between broker accounts, so a shared
+    // key would let one user be served another's result for the TTL.
+    //
+    // from/to are bucketed to the TTL rather than used verbatim. A live chart
+    // builds its window from `Date.now()`, so a millisecond-precision key is
+    // unique on every request — the cache never hit, and the 20s live-edge
+    // poll went to the broker every single time.
+    const bucket = (d: Date) => Math.floor(d.getTime() / CANDLE_CACHE_TTL_MS);
+    const cacheKey = `${userId}:${exchange}:${token}:${query.timeframe}:${bucket(from)}:${bucket(to)}`;
     // Lazy sweep — drop expired entries on every read so the Map doesn't
     // grow unbounded. Cheap (one Map iteration per request).
     if (candleCache.size > 256) {

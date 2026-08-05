@@ -45,12 +45,15 @@ const WATCHLIST_ITEMS: SelectedSymbol[] = [
   { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', name: 'NATURAL GAS' },
 ];
 
-interface CrosshairData {
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  time: number;
+
+/**
+ * A level book that hasn't warmed yet reports 0 for PDH/PDL/VWAP (and the
+ * lazy VWAP build leaves 0 outside market hours). Drawing those puts a
+ * horizontal line and an axis label at price 0, which on an index chart
+ * collapses the price scale and reads as a real support level.
+ */
+function isPlottableLevel(l: { value: number | null | undefined }): boolean {
+  return typeof l.value === 'number' && Number.isFinite(l.value) && l.value > 0;
 }
 
 export default function ChartsPage() {
@@ -58,7 +61,11 @@ export default function ChartsPage() {
   const [showIndicators, setShowIndicators] = useState(false);
   // Pattern overlays default OFF — opt-in so a chart never boots cluttered.
   const [showPatterns, setShowPatterns] = useState(false);
-  const [crosshairData, setCrosshairData] = useState<CrosshairData | null>(null);
+  // Only the hovered bar's TIME is stored — the bar itself is looked up from
+  // `candles` at render. Storing a snapshot of the OHLC froze the readout at
+  // whatever the bar looked like when the pointer landed, so the header and
+  // the bar under the crosshair drifted apart as live ticks came in.
+  const [crosshairTime, setCrosshairTime] = useState<number | null>(null);
   // Mobile watchlist drawer: the sidebar can't sit beside the chart on a phone,
   // so on <md it becomes an off-canvas drawer toggled from a chart button.
   const [watchlistOpen, setWatchlistOpen] = useState(false);
@@ -182,7 +189,7 @@ export default function ChartsPage() {
       ...(lb.orh !== null ? [{ type: 'ORH', value: lb.orh, color: LEVEL_COLORS.ORH, label: 'ORH' }] : []),
       ...(lb.orl !== null ? [{ type: 'ORL', value: lb.orl, color: LEVEL_COLORS.ORL, label: 'ORL' }] : []),
       { type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' },
-    ];
+    ].filter(isPlottableLevel);
   }, [setupContext]);
 
   // Always-on level lines derived from the live analysis. Drawn whenever
@@ -213,8 +220,8 @@ export default function ChartsPage() {
       { type: 'PDL', value: lb.pdl, color: LEVEL_COLORS.PDL, label: 'PDL' },
       ...(orhLine ? [orhLine] : []),
       ...(orlLine ? [orlLine] : []),
-      ...(lb.vwap > 0 ? [{ type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' }] : []),
-    ];
+      { type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' },
+    ].filter(isPlottableLevel);
   }, [analysis, setupContext]);
 
   const {
@@ -295,20 +302,18 @@ export default function ChartsPage() {
   );
 
   const handleCrosshairMove = useCallback((params: unknown) => {
-    const p = params as { seriesData?: Map<unknown, unknown> };
-    if (!p.seriesData || p.seriesData.size === 0) {
-      setCrosshairData(null);
-      return;
-    }
-    // Get first series data (candlestick)
-    const values = p.seriesData.values();
-    const first = values.next().value as CrosshairData | undefined;
-    if (first && 'open' in first) {
-      setCrosshairData(first);
-    }
+    const p = params as { time?: number; seriesData?: Map<unknown, unknown> };
+    const over = typeof p.time === 'number' && !!p.seriesData && p.seriesData.size > 0;
+    setCrosshairTime(over ? (p.time as number) : null);
   }, []);
 
-  const ohlcData = crosshairData ?? (candles.length > 0 ? candles[candles.length - 1] : null);
+  // Hovered bar, resolved fresh from the current series so it tracks live
+  // updates; falls back to the forming bar when the pointer is off the chart.
+  const hoveredBar = useMemo(
+    () => (crosshairTime === null ? null : candles.find((c) => c.time === crosshairTime) ?? null),
+    [crosshairTime, candles],
+  );
+  const ohlcData = hoveredBar ?? (candles.length > 0 ? candles[candles.length - 1] : null);
   const ohlcUp = ohlcData ? ohlcData.close >= ohlcData.open : true;
 
   return (

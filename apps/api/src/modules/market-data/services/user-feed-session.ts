@@ -20,9 +20,7 @@ import {
 } from './user-historical.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
 import { describeUnfetched } from '../utils/quote-from-candles';
-
-/** Delay between successive chunked historical calls (Angel rate limit). */
-const CHUNK_DELAY_MS = 300;
+import { fetchChunksResilient, rowsOrThrottle } from './angel-throttle';
 
 /**
  * Angel One WebSocket feed mode. Mirrors `WsFeedMode` in
@@ -184,9 +182,17 @@ export class UserFeedSession implements UserFeedSessionLike {
    * Fetch historical candles using THIS user's own authenticated Angel session
    * (reuses the JWT held inside `this.smartApi`; no separate REST login). Chunks
    * ranges wider than the interval's per-call limit, fetching newest-first so a
-   * throttled window drops the OLDEST candles (never the live edge). A `data:null`
-   * response is a throttle / no-data marker and is treated as an empty chunk
-   * (never thrown) — mirrors the shared adapter's chart-fetch contract.
+   * throttled window drops the OLDEST candles (never the live edge).
+   *
+   * A `data:null` response is Angel's THROTTLE shape (a genuine empty window is
+   * `data:[]`). It is retried with backoff, and only dropped — loudly — once the
+   * retries are exhausted.
+   *
+   * This used to swallow `data:null` as an empty chunk with no retry and no log,
+   * so every throttled window became a permanent, silent hole in the chart. The
+   * 300ms inter-chunk gap made that routine rather than rare: 3.33 req/sec
+   * against Angel's 3 req/sec historical limit, i.e. the loop provoked the very
+   * throttling whose result it then discarded.
    */
   async getCandles(
     token: string,
@@ -199,6 +205,7 @@ export class UserFeedSession implements UserFeedSessionLike {
     if (!this.smartApi) {
       throw new Error('UserFeedSession has no SmartAPI client after connect');
     }
+    const smartApi = this.smartApi;
 
     const interval = TIMEFRAME_MAP[timeframe] ?? timeframe;
     const maxDays = TIMEFRAME_MAX_RANGE_DAYS[interval] ?? 30;
@@ -209,34 +216,41 @@ export class UserFeedSession implements UserFeedSessionLike {
     const windows = buildChunkWindows(from.getTime(), to.getTime(), maxRangeMs);
     windows.reverse();
 
-    const merged: Candle[] = [];
-    const seenTs = new Set<number>();
-    let firstChunk = true;
+    const { items, dropped, attempted } = await fetchChunksResilient<Candle>(
+      windows,
+      async (start, end) => {
+        const response: any = await smartApi.getCandleData({
+          exchange,
+          symboltoken: token,
+          interval,
+          fromdate: formatAngelDateTime(new Date(start)),
+          todate: formatAngelDateTime(new Date(end)),
+        });
+        const context = `token=${token} interval=${interval} ${formatAngelDateTime(
+          new Date(start),
+        )} → ${formatAngelDateTime(new Date(end))}`;
+        return mapCandleRows(rowsOrThrottle(response?.data, context));
+      },
+      { sleep: (ms) => this.delay(ms), onWarn: (m) => this.logger.warn(m) },
+    );
 
-    for (const { start, end } of windows) {
-      // Respect Angel's historical rate limit between chunk calls.
-      if (!firstChunk) await this.delay(CHUNK_DELAY_MS);
-      firstChunk = false;
-
-      const response: any = await this.smartApi.getCandleData({
-        exchange,
-        symboltoken: token,
-        interval,
-        fromdate: formatAngelDateTime(new Date(start)),
-        todate: formatAngelDateTime(new Date(end)),
-      });
-
-      // data:null → throttle / no data; data:non-array → empty. Both map to [].
-      const rows = response?.data == null || !Array.isArray(response.data) ? [] : response.data;
-      for (const c of mapCandleRows(rows)) {
-        const ts = c.timestamp.getTime();
-        if (!seenTs.has(ts)) {
-          seenTs.add(ts);
-          merged.push(c);
-        }
-      }
+    if (dropped > 0) {
+      this.logger.warn(
+        `getCandles for token=${token} interval=${interval} returned a PARTIAL ` +
+          `series: ${dropped}/${attempted} chunk(s) dropped to throttling.`,
+      );
     }
 
+    // Dedupe by timestamp (Angel's window boundaries are inclusive, so adjacent
+    // chunks repeat a bar) and return ascending.
+    const seenTs = new Set<number>();
+    const merged: Candle[] = [];
+    for (const c of items) {
+      const ts = c.timestamp.getTime();
+      if (seenTs.has(ts)) continue;
+      seenTs.add(ts);
+      merged.push(c);
+    }
     merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
     return merged;
   }

@@ -13,6 +13,16 @@ import { matchSymbolToken } from './symbol-token-match';
 import { rankSymbolMatches } from '../utils/rank-symbol-matches';
 import { COMMODITIES, INDICES } from '@td/shared/constants';
 import { MarketDepth, MarketDepthLevel } from '@td/shared/types';
+import {
+  AngelThrottleError,
+  HISTORICAL_MIN_GAP_MS,
+  HISTORICAL_THROTTLE_RETRY_DELAYS_MS,
+} from './angel-throttle';
+
+// Re-exported for existing importers (and this file's own spec). Defined in
+// ./angel-throttle so the per-user UserFeedSession shares the SAME class —
+// `instanceof` must agree across both broker paths.
+export { AngelThrottleError };
 
 /**
  * Tokens that live on BSE (not NSE). SENSEX and other BSE-listed indices
@@ -85,14 +95,11 @@ const TIMEFRAME_MAX_RANGE_DAYS: Record<string, number> = {
   ONE_DAY: 1800,
 };
 
-/**
- * Minimum gap between ANY two historical calls (across all callers), enforced
- * by `serializeHistoricalCall`. Angel One's historical limit is 3 req/sec →
- * 350ms keeps us under it. This is the SINGLE source of historical-call
- * pacing: the auto-chunk loop deliberately does NOT add its own per-chunk
- * sleep, since every chunk call funnels through the same serialiser.
- */
-const HISTORICAL_MIN_GAP_MS = 350;
+// HISTORICAL_MIN_GAP_MS (350ms — Angel historical is 3 req/sec) is imported
+// from ./angel-throttle and enforced here by `serializeHistoricalCall`. It is
+// the SINGLE source of historical-call pacing for this adapter: the auto-chunk
+// loop deliberately adds no per-chunk sleep, since every chunk call funnels
+// through the same serialiser.
 
 /**
  * Priority lane for the historical scheduler. `interactive` (chart candles,
@@ -122,16 +129,11 @@ interface HistoricalTask {
   reject: (reason?: unknown) => void;
 }
 
-/**
- * Backoff schedule for retrying a throttled (`AngelThrottleError`) historical
- * chunk. The array length is the retry count; each entry is the delay BEFORE
- * that retry. `[1000, 2000]` → after a throttle, wait ~1s and retry; if that
- * also throttles, wait ~2s and retry once more. A throttle still standing
- * after the last retry is treated as terminal for that chunk (the multi-chunk
- * loop then drops the chunk and keeps the rest; the single-shot path lets it
- * propagate). Non-throttle errors are never retried.
- */
-const HISTORICAL_THROTTLE_RETRY_DELAYS_MS = [1000, 2000];
+// HISTORICAL_THROTTLE_RETRY_DELAYS_MS ([1000, 2000] — one retry after ~1s, a
+// second after ~2s) is imported from ./angel-throttle. A throttle still
+// standing after the last retry is terminal for that chunk: the multi-chunk
+// loop drops it and keeps the rest, the single-shot path lets it propagate.
+// Non-throttle errors are never retried.
 
 /**
  * Per-timeframe TTL for the in-memory historical-candle cache (see
@@ -192,14 +194,7 @@ const HISTORICAL_CACHE_LIVE_WINDOW_MS = 2 * 60 * 1000;
  * the latter is a genuine signal failure. The `name` is set explicitly so
  * the marker survives serialization / `instanceof` across module boundaries.
  */
-export class AngelThrottleError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'AngelThrottleError';
-    // Restore prototype chain — required when targeting ES5/ES2015 down-level.
-    Object.setPrototypeOf(this, AngelThrottleError.prototype);
-  }
-}
+// (class moved to ./angel-throttle and re-exported from the imports above)
 
 @Injectable()
 export class AngelOneAdapterService implements BrokerAdapter {

@@ -153,7 +153,10 @@ it('getCandles connects then returns mapped candles from the user session', asyn
   expect(candles[0].timestamp.getTime()).toBeLessThanOrEqual(candles[1].timestamp.getTime());
 });
 
-it('getCandles treats data:null as empty (no throw)', async () => {
+it('getCandles RETRIES a transient data:null throttle and keeps the candles', async () => {
+  // data:null is Angel's THROTTLE shape, not "no data". Treating it as an
+  // empty chunk (the previous behaviour) turned every throttled window into a
+  // permanent, silent hole in the chart — the "missing candles" bug.
   const d = makeDeps();
   d.smartApi.getCandleData.mockResolvedValueOnce({ data: null });
   const s = new UserFeedSession('u1', {
@@ -164,7 +167,40 @@ it('getCandles treats data:null as empty (no throw)', async () => {
   const from = new Date('2026-05-15T03:45:00.000Z');
   const to = new Date('2026-05-15T05:45:00.000Z');
   const candles = await s.getCandles('111', 'NSE', '1m', from, to);
+  expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(2); // throttled, then retried
+  expect(candles).toHaveLength(2);
+}, 15_000);
+
+it('getCandles degrades to [] (no throw) when the throttle never clears', async () => {
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValue({ data: null });
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  const from = new Date('2026-05-15T03:45:00.000Z');
+  const to = new Date('2026-05-15T05:45:00.000Z');
+  const candles = await s.getCandles('111', 'NSE', '1m', from, to);
   expect(candles).toEqual([]);
+  expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+}, 15_000);
+
+it('getCandles does NOT retry a genuine empty window (data:[])', async () => {
+  // A holiday or pre-listing window must resolve immediately, not burn the
+  // retry budget against a broker that is answering correctly.
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValue({ data: [] });
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  const from = new Date('2026-05-15T03:45:00.000Z');
+  const to = new Date('2026-05-15T05:45:00.000Z');
+  const candles = await s.getCandles('111', 'NSE', '1m', from, to);
+  expect(candles).toEqual([]);
+  expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(1);
 });
 
 it('getQuote connects then returns a mapped FULL quote', async () => {

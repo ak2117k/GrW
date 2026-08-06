@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { StrongZone } from '../types/zone.types';
 import type { EvidenceLevel } from '../types/evidence-level.types';
-import type { LevelsSnapshot } from './signal-generator.service';
+import type { AnalyzeResult } from './signal-generator.service';
 
 /**
  * Per-source outcome. The whole point of this endpoint is that these three
@@ -13,7 +13,7 @@ import type { LevelsSnapshot } from './signal-generator.service';
 export type SourceState = 'ok' | 'empty' | 'failed';
 
 export interface ChartContextSources {
-  levels: SourceState;
+  analysis: SourceState;
   zones: SourceState;
   evidence: SourceState;
   trend: SourceState;
@@ -23,8 +23,17 @@ export type ChartContextStatus = 'ready' | 'partial' | 'unavailable';
 
 export interface ChartContextDto {
   interval: string;
-  /** Anchored level book (PDH/PDL/ORH/ORL/VWAP) — as served by /analyze. */
-  levels: LevelsSnapshot | null;
+  /**
+   * The WHOLE /analyze result, not just its level book.
+   *
+   * This loader already called `analyze()` and threw everything but `.levels`
+   * away, which forced the chart to keep polling /analyze separately for the
+   * setup payload (entry/SL/target, `kind`). Two endpoints, two cadences, one
+   * underlying computation — so the drawn level lines and the S/R readout
+   * could disagree mid-poll. Returning the whole result costs nothing extra
+   * and gives the chart a single source.
+   */
+  analysis: AnalyzeResult | null;
   zones: StrongZone[];
   evidence: EvidenceLevel[];
   /** Slice 2. Always null here; `sources.trend` is 'empty', never 'failed'. */
@@ -35,7 +44,7 @@ export interface ChartContextDto {
 
 /** Loaders for the three composed sources — supplied by the controller. */
 export interface ChartContextLoaders {
-  levels: () => Promise<LevelsSnapshot | null | undefined>;
+  analysis: () => Promise<AnalyzeResult | null | undefined>;
   zones: () => Promise<StrongZone[] | undefined>;
   evidence: () => Promise<EvidenceLevel[] | undefined>;
 }
@@ -92,14 +101,18 @@ export class ChartContextService {
     const hit = this.cache.get(cacheKey);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.dto;
 
-    const [levels, zones, evidence] = await Promise.all([
-      this.resolve('levels', key, loaders.levels, (v) => v == null),
+    const [analysis, zones, evidence] = await Promise.all([
+      // 'empty' means "ran, produced no usable level book". An analyze result
+      // that came back without levels is exactly that — the chart has nothing
+      // to anchor on — so it must not read as 'ok' just because the call
+      // returned an object.
+      this.resolve('analysis', key, loaders.analysis, (v) => v == null || v.levels == null),
       this.resolve('zones', key, loaders.zones, (v) => v.length === 0),
       this.resolve('evidence', key, loaders.evidence, (v) => v.length === 0),
     ]);
 
     const sources: ChartContextSources = {
-      levels: levels.state,
+      analysis: analysis.state,
       zones: zones.state,
       evidence: evidence.state,
       // Slice 2 hasn't shipped. 'empty' (not 'failed') so an unimplemented
@@ -109,7 +122,7 @@ export class ChartContextService {
 
     const dto: ChartContextDto = {
       interval: key.interval,
-      levels: levels.value ?? null,
+      analysis: analysis.value ?? null,
       zones: zones.value ?? [],
       evidence: evidence.value ?? [],
       trend: null,
@@ -118,7 +131,7 @@ export class ChartContextService {
       // unreachable — a total outage would report 'partial' forever. When
       // trend ships it joins this object and the rule needs no change.
       status: deriveChartContextStatus({
-        levels: sources.levels,
+        analysis: sources.analysis,
         zones: sources.zones,
         evidence: sources.evidence,
       }),

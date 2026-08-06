@@ -13,7 +13,6 @@ import { useChartContext } from '@/hooks/useChartContext';
 import { usePatterns } from '@/hooks/usePatterns';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
-import { useChartAnalysis } from '@/hooks/useChartAnalysis';
 import { useDrawingPersistence } from '@/hooks/useDrawingPersistence';
 import { useChartStore, type SelectedSymbol } from '@/stores/chart-store';
 import { useMarketStore } from '@/stores/market-store';
@@ -87,18 +86,29 @@ export default function ChartsPage() {
   const timeframe = useChartStore((s) => s.timeframe);
   const setTimeframe = useChartStore((s) => s.setTimeframe);
 
-  // Live always-on chart analysis. Polls /signals/analyze every 60s and
-  // returns either a setup payload (entry/SL/target/grade) or a no-setup
-  // result with the current PDH/PDL/VWAP context. Distinct from
-  // signal-mode (?signal=<id>) — analyze runs continuously on whatever
-  // the user is looking at, signal-mode only fires when navigated from
-  // a SignalCard's "View Chart" link.
-  const { analysis, loading: analysisLoading } = useChartAnalysis(
+  // Live always-on chart analysis — either a setup payload
+  // (entry/SL/target/grade) or a no-setup result carrying the current
+  // PDH/PDL/VWAP context. Distinct from signal-mode (?signal=<id>): analysis
+  // runs continuously on whatever the user is looking at, signal-mode only
+  // fires when navigated from a SignalCard's "View Chart" link.
+  //
+  // Sourced from ONE composite poll (/signals/chart-context, 60s) that also
+  // carries zones + evidence, NOT a second poll of /analyze. The composite
+  // already runs analyze() to build this; polling it separately meant the
+  // drawn level lines and the S/R readout came from two requests on two
+  // cadences over one computation, free to disagree in the window between
+  // them. Per-source status also means partial arrival can no longer read as
+  // "no levels" — the DTO says which it is.
+  const { context: chartContext } = useChartContext(
     selectedSymbol.token,
     selectedSymbol.exchange,
-    selectedSymbol.symbol,
     timeframe,
   );
+  const zones = chartContext?.zones ?? EMPTY_ZONES;
+  const evidence = chartContext?.evidence ?? EMPTY_EVIDENCE;
+  const analysis = chartContext?.analysis ?? null;
+  // No response yet for the current symbol/timeframe.
+  const analysisLoading = chartContext === null;
 
   // ─── URL ↔ chart-store sync (refresh-safe) ──────────────────────────
   //
@@ -266,16 +276,6 @@ export default function ChartsPage() {
   // here is analysable. Previously an intraday-only set silently blanked 1d/1w.
   const showSR = SR_OFFERED_TIMEFRAMES.has(timeframe);
 
-  // One composite poll (/signals/chart-context, 60s) for levels + zones +
-  // evidence, so partial arrival across three independent polls can no longer
-  // read as "no levels" — the DTO's status says which it is.
-  const { context: chartContext } = useChartContext(
-    selectedSymbol.token,
-    selectedSymbol.exchange,
-    timeframe,
-  );
-  const zones = chartContext?.zones ?? EMPTY_ZONES;
-  const evidence = chartContext?.evidence ?? EMPTY_EVIDENCE;
 
   // Chart-pattern overlays (candlestick + chart patterns). Only fetches while
   // the toggle is ON.
@@ -305,8 +305,8 @@ export default function ChartsPage() {
   // BOTH the anchored level book (PDH/PDL/ORH/ORL/VWAP) and the pivot zones.
   // Anchored levels are always present, so a moving stock always gets a read.
   const srView = useMemo(
-    () => buildSRView(chartContext?.levels ?? null, zones, evidence, ltp),
-    [chartContext?.levels, zones, evidence, ltp],
+    () => buildSRView(analysis?.levels ?? null, zones, evidence, ltp),
+    [analysis?.levels, zones, evidence, ltp],
   );
 
   // Chip text is a pure decision over (response state, levels) — extracted so

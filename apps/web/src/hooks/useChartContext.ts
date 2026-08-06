@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '@/services/api';
 import type { EvidenceLevel, StrongZone } from '@/types';
-import type { LevelsSnapshot } from '@/components/stock-overview/SetupContextCard';
+import type { AnalysisDto } from '@/components/stock-overview/SetupContextCard';
 
 /** Per-source outcome, as composed server-side. */
 export type SourceState = 'ok' | 'empty' | 'failed';
 
 export interface ChartContextSources {
-  levels: SourceState;
+  analysis: SourceState;
   zones: SourceState;
   evidence: SourceState;
   trend: SourceState;
@@ -15,7 +15,7 @@ export interface ChartContextSources {
 
 export interface ChartContextDto {
   interval: string;
-  levels: LevelsSnapshot | null;
+  analysis: AnalysisDto | null;
   zones: StrongZone[];
   evidence: EvidenceLevel[];
   // Slice 2. The endpoint sends `null` until the trend fitter lands.
@@ -37,12 +37,12 @@ const POLL_INTERVAL_MS = 60_000;
 /** A transport failure is indistinguishable, to the chart, from every source failing. */
 const UNAVAILABLE: ChartContextDto = {
   interval: '',
-  levels: null,
+  analysis: null,
   zones: [],
   evidence: [],
   trend: null,
   status: 'unavailable',
-  sources: { levels: 'failed', zones: 'failed', evidence: 'failed', trend: 'failed' },
+  sources: { analysis: 'failed', zones: 'failed', evidence: 'failed', trend: 'failed' },
 };
 
 /**

@@ -419,28 +419,32 @@ export class SignalGeneratorController {
 
     const resolvedExchange = exchange ?? 'NSE';
     // /analyze needs a symbol; the chart only knows the token. Resolved once
-    // here and handed to the levels loader — a lookup failure is that loader's
-    // failure, not the whole response's.
-    const levelsLoader = async () => {
+    // here and handed to the analysis loader — a lookup failure is that
+    // loader's failure, not the whole response's.
+    //
+    // Returns the WHOLE analyze result, not just `.levels`. It used to discard
+    // everything else, which left the chart polling /analyze separately for the
+    // setup payload — two endpoints and two cadences over one computation, free
+    // to disagree mid-poll. Keeping the whole result costs nothing.
+    const analysisLoader = async () => {
       let resolvedSymbol = symbol;
       if (!resolvedSymbol && this.marketDataRepository) {
         const inst = await this.marketDataRepository.getInstrumentByToken(token);
         resolvedSymbol = inst?.symbol;
       }
       if (!resolvedSymbol) return null;
-      const analysis = await this.signalGeneratorService.analyze(
+      return this.signalGeneratorService.analyze(
         token,
         resolvedExchange,
         resolvedSymbol,
         tf,
       );
-      return analysis?.levels ?? null;
     };
 
     return this.chartContext.build(
       { token, exchange: resolvedExchange, interval: tf },
       {
-        levels: levelsLoader,
+        analysis: analysisLoader,
         zones: () => this.computeZones(token, resolvedExchange, symbol, tf),
         evidence: () => this.computeSrEvidence(token, resolvedExchange, symbol, tf),
       },

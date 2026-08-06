@@ -10,13 +10,13 @@ function ctx(
 ): ChartContextDto {
   return {
     interval: '15m',
-    levels: null,
+    analysis: null,
     zones: [],
     evidence: [],
     trend: null,
     status,
     sources: {
-      levels: 'ok',
+      analysis: 'ok',
       zones: 'ok',
       evidence: 'ok',
       trend: 'empty',
@@ -60,7 +60,7 @@ describe('deriveSrChip', () => {
   it('says unavailable when every source failed', () => {
     const chip = deriveSrChip({
       context: ctx('unavailable', {
-        levels: 'failed',
+        analysis: 'failed',
         zones: 'failed',
         evidence: 'failed',
         trend: 'failed',
@@ -95,7 +95,7 @@ describe('deriveSrChip', () => {
 
   it('says none in range only for a successful, genuinely empty response', () => {
     const chip = deriveSrChip({
-      context: ctx('ready', { levels: 'empty', zones: 'empty', evidence: 'empty' }),
+      context: ctx('ready', { analysis: 'empty', zones: 'empty', evidence: 'empty' }),
       ltp: 24_580,
       immediateResistance: null,
       immediateSupport: null,

@@ -293,12 +293,12 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
 
       expect(dto).toEqual({
         interval: '5m',
-        levels: LEVELS,
+        analysis: { kind: 'no-setup', levels: LEVELS },
         zones: [{ id: 'z1' }],
         evidence: [{ price: 105 }],
         trend: null,
         status: 'ready',
-        sources: { levels: 'ok', zones: 'ok', evidence: 'ok', trend: 'empty' },
+        sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'empty' },
       });
       // Composed from the SAME services the three routes use, at the SAME
       // interval — no re-implemented or retuned scoring.
@@ -321,7 +321,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       expect(dto.sources.zones).toBe('failed');
       expect(dto.sources.evidence).toBe('ok');
       expect(dto.evidence).toEqual([{ price: 105 }]);
-      expect(dto.levels).toEqual(LEVELS);
+      expect(dto.analysis).toEqual({ kind: 'no-setup', levels: LEVELS });
     });
 
     it('all sources failing is status unavailable, NOT a thrown error', async () => {
@@ -336,12 +336,12 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
 
       expect(dto.status).toBe('unavailable');
       expect(dto.sources).toEqual({
-        levels: 'failed',
+        analysis: 'failed',
         zones: 'failed',
         evidence: 'failed',
         trend: 'empty',
       });
-      expect(dto.levels).toBeNull();
+      expect(dto.analysis).toBeNull();
       expect(dto.zones).toEqual([]);
       expect(dto.evidence).toEqual([]);
     });
@@ -361,7 +361,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       // allowed to state, unlike the other two states.
       expect(dto.status).toBe('ready');
       expect(dto.sources).toEqual({
-        levels: 'empty',
+        analysis: 'empty',
         zones: 'empty',
         evidence: 'empty',
         trend: 'empty',

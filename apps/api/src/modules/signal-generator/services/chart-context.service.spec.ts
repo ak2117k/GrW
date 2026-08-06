@@ -8,13 +8,14 @@ import {
 
 const KEY = { token: '1594', exchange: 'NSE', interval: '15m' };
 
-const LEVELS = { pdh: 110, pdl: 90, vwap: 100 } as never;
+const LEVELS = { pdh: 110, pdl: 90, vwap: 100 };
+const ANALYSIS = { kind: 'no-setup', levels: LEVELS } as never;
 const ZONE = { id: 'z1' } as never;
 const EVIDENCE = { price: 105, side: 'resistance' } as never;
 
-function loaders(over: Partial<Record<'levels' | 'zones' | 'evidence', () => Promise<never>>> = {}) {
+function loaders(over: Partial<Record<'analysis' | 'zones' | 'evidence', () => Promise<never>>> = {}) {
   return {
-    levels: over.levels ?? (async () => LEVELS),
+    analysis: over.analysis ?? (async () => ANALYSIS),
     zones: over.zones ?? (async () => [ZONE] as never),
     evidence: over.evidence ?? (async () => [EVIDENCE] as never),
   } as never;
@@ -29,12 +30,12 @@ describe('deriveChartContextStatus — full truth table', () => {
    * change exists to kill (claiming "no levels" while broken).
    */
   it('is ready iff nothing failed, unavailable iff everything failed, partial otherwise', () => {
-    for (const levels of states)
+    for (const analysis of states)
       for (const zones of states)
         for (const evidence of states)
           for (const trend of states) {
-            const sources: ChartContextSources = { levels, zones, evidence, trend };
-            const failed = [levels, zones, evidence, trend].filter((s) => s === 'failed').length;
+            const sources: ChartContextSources = { analysis, zones, evidence, trend };
+            const failed = [analysis, zones, evidence, trend].filter((s) => s === 'failed').length;
             const expected =
               failed === 0 ? 'ready' : failed === 4 ? 'unavailable' : 'partial';
             expect(deriveChartContextStatus(sources)).toBe(expected);
@@ -44,7 +45,7 @@ describe('deriveChartContextStatus — full truth table', () => {
   it('treats an all-empty response as ready — "genuinely no levels" is an answer', () => {
     expect(
       deriveChartContextStatus({
-        levels: 'empty',
+        analysis: 'empty',
         zones: 'empty',
         evidence: 'empty',
         trend: 'empty',
@@ -66,12 +67,12 @@ describe('ChartContextService', () => {
     const dto = await svc.build(KEY, loaders());
     expect(dto).toEqual({
       interval: '15m',
-      levels: LEVELS,
+      analysis: ANALYSIS,
       zones: [ZONE],
       evidence: [EVIDENCE],
       trend: null,
       status: 'ready',
-      sources: { levels: 'ok', zones: 'ok', evidence: 'ok', trend: 'empty' },
+      sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'empty' },
     });
   });
 
@@ -86,13 +87,13 @@ describe('ChartContextService', () => {
     );
     expect(dto.status).toBe('partial');
     expect(dto.sources).toEqual({
-      levels: 'ok',
+      analysis: 'ok',
       zones: 'failed',
       evidence: 'ok',
       trend: 'empty',
     });
     // The whole point: a failed source must not take the others with it.
-    expect(dto.levels).toBe(LEVELS);
+    expect(dto.analysis).toBe(ANALYSIS);
     expect(dto.evidence).toEqual([EVIDENCE]);
     expect(dto.zones).toEqual([]);
   });
@@ -101,28 +102,28 @@ describe('ChartContextService', () => {
     const boom = async () => {
       throw new Error('down');
     };
-    const dto = await svc.build(KEY, loaders({ levels: boom, zones: boom, evidence: boom }) );
+    const dto = await svc.build(KEY, loaders({ analysis: boom, zones: boom, evidence: boom }) );
     expect(dto.status).toBe('unavailable');
     expect(dto.sources).toEqual({
-      levels: 'failed',
+      analysis: 'failed',
       zones: 'failed',
       evidence: 'failed',
       trend: 'empty',
     });
-    expect(dto.levels).toBeNull();
+    expect(dto.analysis).toBeNull();
     expect(dto.zones).toEqual([]);
     expect(dto.evidence).toEqual([]);
   });
 
   it('marks a successful-but-empty source empty, not failed, and stays ready', async () => {
     const dto = await svc.build(KEY, loaders({
-      levels: async () => null as never,
+      analysis: async () => null as never,
       zones: async () => [] as never,
       evidence: async () => [] as never,
     }));
     expect(dto.status).toBe('ready');
     expect(dto.sources).toEqual({
-      levels: 'empty',
+      analysis: 'empty',
       zones: 'empty',
       evidence: 'empty',
       trend: 'empty',
@@ -130,11 +131,11 @@ describe('ChartContextService', () => {
   });
 
   it('serves a second call for the same key from cache (collapses the poll)', async () => {
-    const levels = jest.fn(async () => LEVELS);
-    const first = await svc.build(KEY, loaders({ levels: levels as never }));
-    const second = await svc.build(KEY, loaders({ levels: levels as never }));
+    const analysis = jest.fn(async () => ANALYSIS);
+    const first = await svc.build(KEY, loaders({ analysis: analysis as never }));
+    const second = await svc.build(KEY, loaders({ analysis: analysis as never }));
     expect(second).toBe(first);
-    expect(levels).toHaveBeenCalledTimes(1);
+    expect(analysis).toHaveBeenCalledTimes(1);
   });
 
   it('caches per token:exchange:interval, so switching timeframe recomputes', async () => {
@@ -148,7 +149,7 @@ describe('ChartContextService', () => {
     const boom = async () => {
       throw new Error('down');
     };
-    await svc.build(KEY, loaders({ levels: boom, zones: boom, evidence: boom }));
+    await svc.build(KEY, loaders({ analysis: boom, zones: boom, evidence: boom }));
     const recovered = await svc.build(KEY, loaders());
     expect(recovered.status).toBe('ready');
   });

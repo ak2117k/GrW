@@ -29,6 +29,8 @@ import { LevelBookService } from '../services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { SrEvidenceService } from '../services/sr-evidence.service';
+import { ChartContextService } from '../services/chart-context.service';
+import type { ChartContextDto } from '../services/chart-context.service';
 import { isIntradayInterval, isSupportedInterval, normalizeInterval, lookbackDaysFor } from '../services/timeframe-lookback';
 import { computeAtrFromCandles } from '../services/per-tf-atr';
 import { AdminOnly, Roles, CurrentUser, AuthenticatedUser } from '../../../common/decorators';
@@ -78,7 +80,21 @@ export class SignalGeneratorController {
     // wirings and non-ML containers still construct; when absent, detection
     // simply isn't captured and the overlay is unaffected.
     @Optional() private readonly patternCapture?: PatternCaptureService,
+    // Composes /analyze + /zones + /sr-evidence for the charts page. Optional
+    // for the same test-wiring reason as the rest; /chart-context is the only
+    // route that needs it and constructs a plain instance if unwired.
+    @Optional() private readonly chartContextService?: ChartContextService,
   ) {}
+
+  /** The injected composer, or a local one so an unwired container still serves. */
+  private get chartContext(): ChartContextService {
+    if (!this.chartContextService) {
+      this.fallbackChartContext ??= new ChartContextService();
+      return this.fallbackChartContext;
+    }
+    return this.chartContextService;
+  }
+  private fallbackChartContext?: ChartContextService;
 
   /**
    * Chart/indicator display reads are open to ADMIN or any USER holding an
@@ -195,6 +211,30 @@ export class SignalGeneratorController {
     if (!token) {
       throw new BadRequestException('token is required');
     }
+    try {
+      return await this.computeZones(token, exchange, symbol, interval);
+    } catch (err) {
+      this.logger.warn(
+        `getZones: compute failed for ${token}: ${err instanceof Error ? err.message : err}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * The /zones body, minus the auth guard and minus the swallow-to-`[]`.
+   *
+   * Extracted so `/chart-context` can compose the same zone path without
+   * re-running the subscription check three times per poll — and so it can see
+   * a genuine failure as a failure. The HTTP route above keeps its existing
+   * contract (never throws, returns []) for its current consumers.
+   */
+  private async computeZones(
+    token: string,
+    exchange?: string,
+    symbol?: string,
+    interval?: string,
+  ) {
     // Validate interval against the intraday set; anything else (1d, bogus,
     // omitted) collapses to the proven 15m path.
     const tf = isIntradayInterval(interval ?? '') ? interval! : '15m';
@@ -235,72 +275,65 @@ export class SignalGeneratorController {
     }
     if (!resolvedSymbol || !resolvedExchange) return [];
 
-    try {
-      const book = await this.levelBookService.lazyLoad(token, resolvedExchange, resolvedSymbol);
-      if (!book) return [];
+    const book = await this.levelBookService.lazyLoad(token, resolvedExchange, resolvedSymbol);
+    if (!book) return [];
 
-      const now = new Date();
-      const lookbackMs = lookbackDaysFor(tf) * 24 * 60 * 60 * 1000;
-      const from = new Date(now.getTime() - lookbackMs);
+    const now = new Date();
+    const lookbackMs = lookbackDaysFor(tf) * 24 * 60 * 60 * 1000;
+    const from = new Date(now.getTime() - lookbackMs);
 
-      // Prefer LIVE candles at the selected interval (token-based) — robust to
-      // duplicate instrument rows that split candle history and starve the
-      // DB-by-instrumentId path. Fall back to the DB only when the live fetch
-      // is unavailable (throttle / offline) so indices with seeded DB candles
-      // still produce zones.
-      let candles = await this.fetchLiveCandles(token, resolvedExchange, tf, from, now);
-      if (candles.length < 10 && resolvedInstrument) {
-        const rows = await this.marketDataRepository.getCandles(
-          resolvedInstrument.id, tf, from, now, 200,
-        );
-        candles = rows.map((r) => ({
-          timestamp: r.timestamp,
-          open: r.open,
-          high: r.high,
-          low: r.low,
-          close: r.close,
-          volume: typeof r.volume === 'bigint' ? Number(r.volume) : r.volume,
-        }));
-      }
-
-      if (candles.length < 10) return [];
-
-      // 15m keeps the daily book ATR (frozen). Non-15m derives a per-TF ATR
-      // from the selected-interval candles, falling back to the book ATR.
-      const atr14 = isFifteen
-        ? book.atr14
-        : computeAtrFromCandles(candles, 14) || book.atr14;
-
-      const zones = this.strongZoneDetector.detectZones({
-        token,
-        symbol: resolvedSymbol,
-        exchange: resolvedExchange,
-        candles15m: candles,
-        levelBook: book,
-        ltp: book.spot,
-        atr14,
-        interval: tf,
-      });
-
-      // Persist ONLY on the 15m path — the chart-only non-15m path must never
-      // pollute the shared zone DB the scanner reads.
-      if (isFifteen && this.zoneRepository) {
-        try {
-          await this.zoneRepository.upsertMany(token, zones);
-        } catch (err) {
-          this.logger.warn(
-            `getZones: persist failed for ${token}: ${err instanceof Error ? err.message : err}`,
-          );
-        }
-      }
-
-      return zones;
-    } catch (err) {
-      this.logger.warn(
-        `getZones: compute failed for ${token}: ${err instanceof Error ? err.message : err}`,
+    // Prefer LIVE candles at the selected interval (token-based) — robust to
+    // duplicate instrument rows that split candle history and starve the
+    // DB-by-instrumentId path. Fall back to the DB only when the live fetch
+    // is unavailable (throttle / offline) so indices with seeded DB candles
+    // still produce zones.
+    let candles = await this.fetchLiveCandles(token, resolvedExchange, tf, from, now);
+    if (candles.length < 10 && resolvedInstrument) {
+      const rows = await this.marketDataRepository.getCandles(
+        resolvedInstrument.id, tf, from, now, 200,
       );
-      return [];
+      candles = rows.map((r) => ({
+        timestamp: r.timestamp,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: typeof r.volume === 'bigint' ? Number(r.volume) : r.volume,
+      }));
     }
+
+    if (candles.length < 10) return [];
+
+    // 15m keeps the daily book ATR (frozen). Non-15m derives a per-TF ATR
+    // from the selected-interval candles, falling back to the book ATR.
+    const atr14 = isFifteen
+      ? book.atr14
+      : computeAtrFromCandles(candles, 14) || book.atr14;
+
+    const zones = this.strongZoneDetector.detectZones({
+      token,
+      symbol: resolvedSymbol,
+      exchange: resolvedExchange,
+      candles15m: candles,
+      levelBook: book,
+      ltp: book.spot,
+      atr14,
+      interval: tf,
+    });
+
+    // Persist ONLY on the 15m path — the chart-only non-15m path must never
+    // pollute the shared zone DB the scanner reads.
+    if (isFifteen && this.zoneRepository) {
+      try {
+        await this.zoneRepository.upsertMany(token, zones);
+      } catch (err) {
+        this.logger.warn(
+          `getZones: persist failed for ${token}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    return zones;
   }
 
   /**
@@ -319,6 +352,19 @@ export class SignalGeneratorController {
   ) {
     await this.assertChartAccess(user);
     if (!token) throw new BadRequestException('token is required');
+    return this.computeSrEvidence(token, exchange, symbol, interval);
+  }
+
+  /**
+   * The /sr-evidence body minus the auth guard, so /chart-context composes the
+   * identical evidence path without re-checking the subscription.
+   */
+  private async computeSrEvidence(
+    token: string,
+    exchange?: string,
+    symbol?: string,
+    interval?: string,
+  ) {
     if (!this.srEvidenceService) return [];
     // Accept any supported timeframe — intraday (1m–1h) OR positional
     // (1d/1w/1mo) as its own path. `1M` (Yahoo-style monthly) is normalised to
@@ -337,6 +383,68 @@ export class SignalGeneratorController {
       }
     }
     return this.srEvidenceService.levelsFor(token, resolvedExchange, resolvedSymbol ?? '', tf);
+  }
+
+  /**
+   * GET /api/signals/chart-context — the charts page's single S/R read.
+   *
+   * Composes the three sources the page used to poll separately (/analyze's
+   * level book, /zones, /sr-evidence) behind one 60s cache and one status.
+   * Each source is resolved independently: one of them failing degrades that
+   * source and nothing else. This route NEVER throws to the client for a
+   * source failure — all-failed is HTTP 200 with status 'unavailable', because
+   * the chart has to render that state rather than catch an exception.
+   *
+   * The only 4xx is an unsupported `interval`, which is a caller bug: the
+   * toolbar renders CHART_TIMEFRAMES, a subset of the engine's roster.
+   */
+  @Roles('USER', 'ADMIN')
+  @Get('chart-context')
+  async getChartContext(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('token') token: string,
+    @Query('exchange') exchange?: string,
+    @Query('interval') interval?: string,
+    @Query('symbol') symbol?: string,
+  ): Promise<ChartContextDto> {
+    await this.assertChartAccess(user);
+    if (!token) throw new BadRequestException('token is required');
+
+    // Omitted interval keeps the proven 15m default (every other chart read
+    // does the same); a value that was actually supplied must be analysable.
+    const tf = interval ? normalizeInterval(interval) : '15m';
+    if (!isSupportedInterval(tf)) {
+      throw new BadRequestException(`unsupported interval: ${interval}`);
+    }
+
+    const resolvedExchange = exchange ?? 'NSE';
+    // /analyze needs a symbol; the chart only knows the token. Resolved once
+    // here and handed to the levels loader — a lookup failure is that loader's
+    // failure, not the whole response's.
+    const levelsLoader = async () => {
+      let resolvedSymbol = symbol;
+      if (!resolvedSymbol && this.marketDataRepository) {
+        const inst = await this.marketDataRepository.getInstrumentByToken(token);
+        resolvedSymbol = inst?.symbol;
+      }
+      if (!resolvedSymbol) return null;
+      const analysis = await this.signalGeneratorService.analyze(
+        token,
+        resolvedExchange,
+        resolvedSymbol,
+        tf,
+      );
+      return analysis?.levels ?? null;
+    };
+
+    return this.chartContext.build(
+      { token, exchange: resolvedExchange, interval: tf },
+      {
+        levels: levelsLoader,
+        zones: () => this.computeZones(token, resolvedExchange, symbol, tf),
+        evidence: () => this.computeSrEvidence(token, resolvedExchange, symbol, tf),
+      },
+    );
   }
 
   /**

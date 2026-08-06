@@ -1,12 +1,32 @@
-/** Intraday intervals that get native per-timeframe S/R. */
-export const INTRADAY_INTERVALS = new Set(['1m', '3m', '5m', '15m', '30m', '1h']);
+import { SR_SUPPORTED_INTERVALS } from '@td/shared';
 
 /**
- * Positional intervals (daily/weekly/monthly). Like intraday they get the
- * native per-timeframe S/R path, but their candle source and assembly differ
- * (weekly/monthly come from Yahoo; OI walls are skipped — see SrEvidenceService).
+ * The set of analysable intervals has EXACTLY ONE source of truth —
+ * `SR_SUPPORTED_INTERVALS` in `@td/shared` — because two hand-maintained
+ * rosters (this file and the chart toolbar) drifted: `4h` was offered without
+ * engine support, `1mo` was supported and unreachable. Everything below is a
+ * partition of that roster, never a parallel list.
  */
-export const POSITIONAL_INTERVALS = new Set(['1d', '1w', '1mo']);
+const SUPPORTED_INTERVALS = new Set<string>(SR_SUPPORTED_INTERVALS);
+
+/**
+ * Which members of the roster are positional (daily and slower). Intraday and
+ * positional both get the native per-timeframe S/R path, but they branch in
+ * SrEvidenceService: positional candles come from Yahoo for 1w/1mo and OI
+ * walls are skipped. This is the only judgement call here — membership of the
+ * supported set is not.
+ */
+const POSITIONAL_MEMBERS = new Set<string>(['1d', '1w', '1mo']);
+
+/** Intraday intervals that get native per-timeframe S/R. */
+export const INTRADAY_INTERVALS = new Set<string>(
+  SR_SUPPORTED_INTERVALS.filter((i) => !POSITIONAL_MEMBERS.has(i)),
+);
+
+/** Positional intervals (daily/weekly/monthly) — see POSITIONAL_MEMBERS. */
+export const POSITIONAL_INTERVALS = new Set<string>(
+  SR_SUPPORTED_INTERVALS.filter((i) => POSITIONAL_MEMBERS.has(i)),
+);
 
 /** Days of history to fetch per interval — tuned for ~200-400 bars (NSE ~6.25h/day). */
 const LOOKBACK_DAYS: Record<string, number> = {
@@ -31,9 +51,13 @@ export function isPositionalInterval(interval: string): boolean {
   return POSITIONAL_INTERVALS.has(interval);
 }
 
-/** Any interval we natively support — intraday OR positional. */
+/**
+ * Any interval we natively support. Answered straight from the shared roster
+ * rather than from the intraday/positional split, so an interval added to the
+ * roster is supported even before anyone classifies it.
+ */
 export function isSupportedInterval(interval: string): boolean {
-  return isIntradayInterval(interval) || isPositionalInterval(interval);
+  return SUPPORTED_INTERVALS.has(interval);
 }
 
 /**

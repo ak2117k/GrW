@@ -1,3 +1,4 @@
+import { SR_SUPPORTED_INTERVALS, CHART_TIMEFRAMES } from '@td/shared';
 import {
   lookbackDaysFor,
   isIntradayInterval,
@@ -45,6 +46,25 @@ describe('timeframe-lookback', () => {
     expect(isSupportedInterval('1mo')).toBe(true);
     expect(isSupportedInterval('bogus')).toBe(false);
     expect(isSupportedInterval('')).toBe(false);
+  });
+  /**
+   * The regression guard for the roster drift that caused the bug: the toolbar
+   * once offered `4h`, which the engine cannot analyse at all. Any timeframe
+   * added to the toolbar without engine support fails HERE, not on a user's
+   * chart.
+   */
+  it('every offered chart timeframe is analysable (CHART_TIMEFRAMES ⊆ SR_SUPPORTED_INTERVALS)', () => {
+    const unsupported = CHART_TIMEFRAMES.filter((tf) => !isSupportedInterval(tf));
+    expect(unsupported).toEqual([]);
+  });
+  it('derives its supported set from the shared roster, not a parallel list', () => {
+    for (const interval of SR_SUPPORTED_INTERVALS) {
+      expect(isSupportedInterval(interval)).toBe(true);
+    }
+    // The intraday/positional split is a partition of that roster.
+    expect([...INTRADAY_INTERVALS, ...POSITIONAL_INTERVALS].sort()).toEqual(
+      [...SR_SUPPORTED_INTERVALS].sort(),
+    );
   });
   it('normalizes Yahoo-style 1M to 1mo, passes everything else through', () => {
     expect(normalizeInterval('1M')).toBe('1mo');

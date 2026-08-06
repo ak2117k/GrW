@@ -1,4 +1,5 @@
 import { SignalGeneratorController } from './signal-generator.controller';
+import { ChartContextService } from '../services/chart-context.service';
 
 /**
  * Focused unit tests for the interval-aware /zones and /sr-evidence wiring.
@@ -11,6 +12,8 @@ import { SignalGeneratorController } from './signal-generator.controller';
  */
 describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
   const book = { spot: 100, atr14: 5 };
+  // Anchored level snapshot as analyze() returns it.
+  const LEVELS = { pdh: 110, pdl: 90, vwap: 100, atr14: 5 };
   // Enough synthetic candles to clear the < 10 guard.
   const candles = Array.from({ length: 30 }, (_, i) => ({
     timestamp: new Date(2026, 0, 1, 9, 15 + i),
@@ -35,8 +38,15 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
     const angelOneAdapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
     const srEvidenceService = { levelsFor: jest.fn().mockResolvedValue([]) };
     const patternCapture = { capture: jest.fn().mockResolvedValue(2) };
+    // /chart-context takes its anchored levels from analyze()'s `levels`.
+    const signalGeneratorService = {
+      analyze: jest.fn().mockResolvedValue({ kind: 'no-setup', levels: LEVELS }),
+    };
+    const chartContextService = new ChartContextService();
 
     const deps = {
+      signalGeneratorService,
+      chartContextService,
       zoneRepository,
       strongZoneDetector,
       levelBookService,
@@ -48,7 +58,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
     };
 
     const ctrl = new SignalGeneratorController(
-      {} as never, // signalGeneratorService
+      deps.signalGeneratorService as never,
       {} as never, // strategyRegistry
       {} as never, // signalRepository
       {} as never, // universeScannerWorker
@@ -63,6 +73,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       deps.srEvidenceService as never,
       undefined as never, // subs
       deps.patternCapture as never,
+      deps.chartContextService as never,
     );
     return { ctrl, deps };
   }
@@ -262,6 +273,139 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       const { ctrl, deps } = build();
       await ctrl.getSrEvidence(ADMIN, '18520', 'NSE', 'CUPID', '1M');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '1mo');
+    });
+  });
+
+  /**
+   * /chart-context is the charts page's single S/R read. The behaviour that
+   * matters is degradation: the page must be able to tell "loading" from
+   * "broken" from "genuinely no levels", so a partial outage must return the
+   * surviving data with an honest per-source state, and a total outage must
+   * still be a 200 the chart can render.
+   */
+  describe('getChartContext', () => {
+    it('composes levels + zones + evidence into one ready response', async () => {
+      const { ctrl, deps } = build({
+        srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([{ price: 105 }]) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(dto).toEqual({
+        interval: '5m',
+        levels: LEVELS,
+        zones: [{ id: 'z1' }],
+        evidence: [{ price: 105 }],
+        trend: null,
+        status: 'ready',
+        sources: { levels: 'ok', zones: 'ok', evidence: 'ok', trend: 'empty' },
+      });
+      // Composed from the SAME services the three routes use, at the SAME
+      // interval — no re-implemented or retuned scoring.
+      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
+      expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
+      expect(deps.strongZoneDetector.detectZones).toHaveBeenCalledWith(
+        expect.objectContaining({ interval: '5m' }),
+      );
+    });
+
+    it('one failing source yields partial with the other sources intact', async () => {
+      const { ctrl } = build({
+        levelBookService: { lazyLoad: jest.fn().mockRejectedValue(new Error('book down')) },
+        srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([{ price: 105 }]) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(dto.status).toBe('partial');
+      expect(dto.sources.zones).toBe('failed');
+      expect(dto.sources.evidence).toBe('ok');
+      expect(dto.evidence).toEqual([{ price: 105 }]);
+      expect(dto.levels).toEqual(LEVELS);
+    });
+
+    it('all sources failing is status unavailable, NOT a thrown error', async () => {
+      const boom = new Error('down');
+      const { ctrl } = build({
+        signalGeneratorService: { analyze: jest.fn().mockRejectedValue(boom) },
+        levelBookService: { lazyLoad: jest.fn().mockRejectedValue(boom) },
+        srEvidenceService: { levelsFor: jest.fn().mockRejectedValue(boom) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(dto.status).toBe('unavailable');
+      expect(dto.sources).toEqual({
+        levels: 'failed',
+        zones: 'failed',
+        evidence: 'failed',
+        trend: 'empty',
+      });
+      expect(dto.levels).toBeNull();
+      expect(dto.zones).toEqual([]);
+      expect(dto.evidence).toEqual([]);
+    });
+
+    it('empty-but-successful sources are ready with empty states', async () => {
+      const { ctrl } = build({
+        signalGeneratorService: {
+          analyze: jest.fn().mockResolvedValue({ kind: 'no-setup', levels: null }),
+        },
+        strongZoneDetector: { detectZones: jest.fn().mockReturnValue([]) },
+        srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([]) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      // "This symbol genuinely has no levels right now" — a fact the chip is
+      // allowed to state, unlike the other two states.
+      expect(dto.status).toBe('ready');
+      expect(dto.sources).toEqual({
+        levels: 'empty',
+        zones: 'empty',
+        evidence: 'empty',
+        trend: 'empty',
+      });
+    });
+
+    it.each(['1d', '1w', '1mo'])('accepts positional interval %s', async (tf) => {
+      const { ctrl } = build();
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', tf, 'CUPID');
+      expect(dto.interval).toBe(tf);
+    });
+
+    it("normalizes Yahoo-style '1M' to '1mo'", async () => {
+      const { ctrl } = build();
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '1M', 'CUPID');
+      expect(dto.interval).toBe('1mo');
+    });
+
+    it('rejects an unsupported interval with 400', async () => {
+      const { ctrl } = build();
+      // `4h` is the exact drift that caused the bug — it must be refused loudly
+      // rather than silently analysed on the 15m window.
+      await expect(ctrl.getChartContext(ADMIN, '18520', 'NSE', '4h', 'CUPID')).rejects.toThrow(
+        /unsupported interval/,
+      );
+    });
+
+    it('defaults an omitted interval to 15m', async () => {
+      const { ctrl } = build();
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE');
+      expect(dto.interval).toBe('15m');
+    });
+
+    it('requires a token', async () => {
+      const { ctrl } = build();
+      await expect(ctrl.getChartContext(ADMIN, '' as never, 'NSE', '5m')).rejects.toThrow(
+        /token is required/,
+      );
+    });
+
+    it('resolves the symbol from the token when the caller omits it', async () => {
+      const { ctrl, deps } = build();
+      await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m');
+      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
     });
   });
 });

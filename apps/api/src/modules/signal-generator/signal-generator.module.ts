@@ -33,6 +33,7 @@ import { MtfAlignmentService } from './services/mtf-alignment.service';
 import { ZoneRepository } from './repositories/zone.repository';
 import { StrongZoneDetectorService } from './services/strong-zone-detector.service';
 import { SrEvidenceService } from './services/sr-evidence.service';
+import { ChartContextService } from './services/chart-context.service';
 import { OiWallService } from './services/oi-wall.service';
 import { SrLevelTrackingService } from './services/sr-level-tracking.service';
 import { SrLevelObservationRepository } from './repositories/sr-level-observation.repository';
@@ -137,6 +138,8 @@ import type { ContextFactor } from './services/context-scoring/types';
     SrLevelObservationRepository,
     SrLevelTrackingService,
     SrEvidenceService,
+    // Collapses the charts page's three S/R polls into one honest response.
+    ChartContextService,
 
     // ML pattern-quality data capture — persists detected patterns with their
     // realized ATR-follow-through outcome, building the training set for the

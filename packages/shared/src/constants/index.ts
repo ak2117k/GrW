@@ -94,3 +94,46 @@ export const ANGEL_ONE_WEBSOCKET_MAX_TOKENS = 50;
 // Application
 export const API_PREFIX = '/api';
 export const WS_NAMESPACE = '/ws';
+
+// ============================================
+// Chart timeframes
+// ============================================
+//
+// SINGLE SOURCE for the interval rosters. These lists were previously
+// maintained by hand in two places -- the chart toolbar
+// (apps/web/.../TimeframeSelector.tsx) and the S/R engine
+// (apps/api/.../timeframe-lookback.ts) -- and drifted: the toolbar offered
+// `4h`, which the engine cannot analyse and for which no candle source
+// exists, while `1mo` was fully supported by the engine and unreachable from
+// the UI. Both sides now derive from here, and a test asserts the subset
+// invariant below, so a timeframe can never again be offered without support.
+
+/** Intervals the S/R evidence engine can analyse. */
+export const SR_SUPPORTED_INTERVALS = [
+  '1m', '3m', '5m', '15m', '30m', '1h', '1d', '1w', '1mo',
+] as const;
+
+/**
+ * Intervals the chart toolbar offers.
+ *
+ * INVARIANT: must be a subset of SR_SUPPORTED_INTERVALS. `3m` and `30m` are
+ * analysable but deliberately not offered -- no demand, and the toolbar stays
+ * readable.
+ */
+export const CHART_TIMEFRAMES = [
+  '1m', '5m', '15m', '1h', '1d', '1w', '1mo',
+] as const;
+
+export type SrSupportedInterval = (typeof SR_SUPPORTED_INTERVALS)[number];
+export type ChartTimeframe = (typeof CHART_TIMEFRAMES)[number];
+
+/** Display label for a chart timeframe (toolbar buttons). */
+export const CHART_TIMEFRAME_LABELS: Record<ChartTimeframe, string> = {
+  '1m': '1m',
+  '5m': '5m',
+  '15m': '15m',
+  '1h': '1H',
+  '1d': '1D',
+  '1w': '1W',
+  '1mo': '1M',
+};

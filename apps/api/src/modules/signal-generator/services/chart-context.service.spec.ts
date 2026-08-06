@@ -12,12 +12,24 @@ const LEVELS = { pdh: 110, pdl: 90, vwap: 100 };
 const ANALYSIS = { kind: 'no-setup', levels: LEVELS } as never;
 const ZONE = { id: 'z1' } as never;
 const EVIDENCE = { price: 105, side: 'resistance' } as never;
+const TREND = {
+  kind: 'uptrend',
+  slope: 0.001,
+  intercept: 100,
+  fromTime: 1_700_000_000,
+  toTime: 1_700_020_000,
+  touches: 4,
+  r2: 0.9,
+} as never;
 
-function loaders(over: Partial<Record<'analysis' | 'zones' | 'evidence', () => Promise<never>>> = {}) {
+function loaders(
+  over: Partial<Record<'analysis' | 'zones' | 'evidence' | 'trend', () => Promise<never>>> = {},
+) {
   return {
     analysis: over.analysis ?? (async () => ANALYSIS),
     zones: over.zones ?? (async () => [ZONE] as never),
     evidence: over.evidence ?? (async () => [EVIDENCE] as never),
+    trend: over.trend ?? (async () => TREND),
   } as never;
 }
 
@@ -63,17 +75,44 @@ describe('ChartContextService', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('composes all three sources on the happy path', async () => {
+  it('composes all four sources on the happy path', async () => {
     const dto = await svc.build(KEY, loaders());
     expect(dto).toEqual({
       interval: '15m',
       analysis: ANALYSIS,
       zones: [ZONE],
       evidence: [EVIDENCE],
-      trend: null,
+      trend: TREND,
       status: 'ready',
-      sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'empty' },
+      sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'ok' },
     });
+  });
+
+  /**
+   * "No clear trend" is an answer, not an outage. A null line must read as
+   * 'empty' and leave the response 'ready' — the same distinction the whole
+   * endpoint exists to preserve for levels.
+   */
+  it('reports a null trend line as empty, not failed, and stays ready', async () => {
+    const dto = await svc.build(KEY, loaders({ trend: async () => null as never }));
+    expect(dto.trend).toBeNull();
+    expect(dto.sources.trend).toBe('empty');
+    expect(dto.status).toBe('ready');
+  });
+
+  it('marks the trend failed — and only partial — when the fit throws', async () => {
+    const dto = await svc.build(
+      KEY,
+      loaders({
+        trend: async () => {
+          throw new Error('candle fetch exploded');
+        },
+      }),
+    );
+    expect(dto.status).toBe('partial');
+    expect(dto.sources.trend).toBe('failed');
+    expect(dto.trend).toBeNull();
+    expect(dto.evidence).toEqual([EVIDENCE]);
   });
 
   it('keeps the surviving sources intact when ONE source throws', async () => {
@@ -90,7 +129,7 @@ describe('ChartContextService', () => {
       analysis: 'ok',
       zones: 'failed',
       evidence: 'ok',
-      trend: 'empty',
+      trend: 'ok',
     });
     // The whole point: a failed source must not take the others with it.
     expect(dto.analysis).toBe(ANALYSIS);
@@ -102,17 +141,36 @@ describe('ChartContextService', () => {
     const boom = async () => {
       throw new Error('down');
     };
-    const dto = await svc.build(KEY, loaders({ analysis: boom, zones: boom, evidence: boom }) );
+    const dto = await svc.build(
+      KEY,
+      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom }),
+    );
     expect(dto.status).toBe('unavailable');
     expect(dto.sources).toEqual({
       analysis: 'failed',
       zones: 'failed',
       evidence: 'failed',
-      trend: 'empty',
+      trend: 'failed',
     });
     expect(dto.analysis).toBeNull();
     expect(dto.zones).toEqual([]);
     expect(dto.evidence).toEqual([]);
+    expect(dto.trend).toBeNull();
+  });
+
+  /**
+   * Trend used to be excluded from the derivation because it was hard-wired to
+   * 'empty'; leaving that exclusion in place would make 'unavailable'
+   * unreachable the moment trend shipped, since three failures out of four
+   * would read as 'partial'. This pins that it does not.
+   */
+  it('a surviving trend keeps a three-source outage merely partial', async () => {
+    const boom = async () => {
+      throw new Error('down');
+    };
+    const dto = await svc.build(KEY, loaders({ analysis: boom, zones: boom, evidence: boom }));
+    expect(dto.status).toBe('partial');
+    expect(dto.trend).toBe(TREND);
   });
 
   it('marks a successful-but-empty source empty, not failed, and stays ready', async () => {
@@ -120,6 +178,7 @@ describe('ChartContextService', () => {
       analysis: async () => null as never,
       zones: async () => [] as never,
       evidence: async () => [] as never,
+      trend: async () => null as never,
     }));
     expect(dto.status).toBe('ready');
     expect(dto.sources).toEqual({
@@ -149,7 +208,7 @@ describe('ChartContextService', () => {
     const boom = async () => {
       throw new Error('down');
     };
-    await svc.build(KEY, loaders({ analysis: boom, zones: boom, evidence: boom }));
+    await svc.build(KEY, loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom }));
     const recovered = await svc.build(KEY, loaders());
     expect(recovered.status).toBe('ready');
   });

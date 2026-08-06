@@ -11,6 +11,13 @@ export interface PivotCandle {
 export interface SwingPivot {
   price: number;
   kind: 'high' | 'low';
+  /**
+   * Index of the candle the pivot sits on. Price alone can't anchor anything
+   * to the time axis — the trend-line fit needs WHERE each swing happened, not
+   * just at what price — so the detector reports position rather than every
+   * caller re-deriving it (and re-implementing the fractal rule to do so).
+   */
+  index: number;
 }
 
 /**
@@ -37,7 +44,7 @@ export function detectSwingPivots(candles: PivotCandle[]): SwingPivot[] {
       c.high > candles[i + 2].high &&
       c.high > candles[i + 3].high;
     if (isHigh) {
-      pivots.push({ price: c.high, kind: 'high' });
+      pivots.push({ price: c.high, kind: 'high', index: i });
       continue;
     }
     const isLow =
@@ -48,7 +55,7 @@ export function detectSwingPivots(candles: PivotCandle[]): SwingPivot[] {
       c.low < candles[i + 2].low &&
       c.low < candles[i + 3].low;
     if (isLow) {
-      pivots.push({ price: c.low, kind: 'low' });
+      pivots.push({ price: c.low, kind: 'low', index: i });
     }
   }
   return pivots;

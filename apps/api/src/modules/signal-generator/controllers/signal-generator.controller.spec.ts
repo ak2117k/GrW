@@ -24,6 +24,32 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
     volume: 1000,
   }));
 
+  /**
+   * Candle series /chart-context's trend source reads (SrEvidenceService
+   * .candlesFor). A clean staircase uptrend — rising baseline with a deep dip
+   * every 8 bars — so the fit has four rising swing lows and yields a line.
+   */
+  const TREND_T0 = 1_700_000_000;
+  const trendCandles = Array.from({ length: 40 }, (_, i) => {
+    const base = 100 + 0.5 * i;
+    const isDip = i % 8 === 0 && i >= 8 && i <= 32;
+    return {
+      time: TREND_T0 + i * 900,
+      high: base + 1,
+      low: isDip ? base - 5 : base,
+      close: base,
+      volume: 1000,
+    };
+  });
+  /** Flat bars — the fit runs and legitimately finds nothing. */
+  const flatCandles = Array.from({ length: 40 }, (_, i) => ({
+    time: TREND_T0 + i * 900,
+    high: 105,
+    low: 95,
+    close: 100,
+    volume: 1000,
+  }));
+
   function build(overrides: Partial<any> = {}) {
     const zoneRepository = {
       findActiveByToken: jest.fn().mockResolvedValue([]),
@@ -36,7 +62,10 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       getCandles: jest.fn().mockResolvedValue([]),
     };
     const angelOneAdapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
-    const srEvidenceService = { levelsFor: jest.fn().mockResolvedValue([]) };
+    const srEvidenceService = {
+      levelsFor: jest.fn().mockResolvedValue([]),
+      candlesFor: jest.fn().mockResolvedValue(trendCandles),
+    };
     const patternCapture = { capture: jest.fn().mockResolvedValue(2) };
     // /chart-context takes its anchored levels from analyze()'s `levels`.
     const signalGeneratorService = {
@@ -52,9 +81,15 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       levelBookService,
       marketDataRepository,
       angelOneAdapter,
-      srEvidenceService,
       patternCapture,
       ...overrides,
+      // The trend source pulls its candles from this same service. Tests
+      // override `srEvidenceService` to steer the LEVELS, so merge rather than
+      // replace — otherwise a levels-focused override silently breaks the
+      // trend source and the assertion under test drifts.
+      srEvidenceService: overrides.srEvidenceService
+        ? { ...srEvidenceService, ...overrides.srEvidenceService }
+        : srEvidenceService,
     };
 
     const ctrl = new SignalGeneratorController(
@@ -284,7 +319,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
    * still be a 200 the chart can render.
    */
   describe('getChartContext', () => {
-    it('composes levels + zones + evidence into one ready response', async () => {
+    it('composes levels + zones + evidence + trend into one ready response', async () => {
       const { ctrl, deps } = build({
         srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([{ price: 105 }]) },
       });
@@ -296,17 +331,49 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         analysis: { kind: 'no-setup', levels: LEVELS },
         zones: [{ id: 'z1' }],
         evidence: [{ price: 105 }],
-        trend: null,
+        trend: expect.objectContaining({ kind: 'uptrend', touches: 4 }),
         status: 'ready',
-        sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'empty' },
+        sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'ok' },
       });
-      // Composed from the SAME services the three routes use, at the SAME
-      // interval — no re-implemented or retuned scoring.
+      expect(dto.trend!.slope).toBeGreaterThan(0);
+      expect(dto.trend!.r2).toBeGreaterThanOrEqual(0.75);
+      // Composed from the SAME services the four routes use, at the SAME
+      // interval — no re-implemented or retuned scoring. The trend candles
+      // come from the evidence service's own per-timeframe series, so the
+      // line and the levels can't be derived from different data.
       expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
       expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
+      expect(deps.srEvidenceService.candlesFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
       expect(deps.strongZoneDetector.detectZones).toHaveBeenCalledWith(
         expect.objectContaining({ interval: '5m' }),
       );
+    });
+
+    it('reports "no clear trend" as empty, not failed — the chart may state it', async () => {
+      const { ctrl } = build({
+        srEvidenceService: { candlesFor: jest.fn().mockResolvedValue(flatCandles) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(dto.trend).toBeNull();
+      expect(dto.sources.trend).toBe('empty');
+      expect(dto.status).toBe('ready');
+    });
+
+    it('degrades only the trend source when its candle fetch throws', async () => {
+      const { ctrl } = build({
+        srEvidenceService: {
+          candlesFor: jest.fn().mockRejectedValue(new Error('broker down')),
+        },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(dto.sources.trend).toBe('failed');
+      expect(dto.status).toBe('partial');
+      expect(dto.trend).toBeNull();
+      expect(dto.analysis).toEqual({ kind: 'no-setup', levels: LEVELS });
     });
 
     it('one failing source yields partial with the other sources intact', async () => {
@@ -329,7 +396,10 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       const { ctrl } = build({
         signalGeneratorService: { analyze: jest.fn().mockRejectedValue(boom) },
         levelBookService: { lazyLoad: jest.fn().mockRejectedValue(boom) },
-        srEvidenceService: { levelsFor: jest.fn().mockRejectedValue(boom) },
+        srEvidenceService: {
+          levelsFor: jest.fn().mockRejectedValue(boom),
+          candlesFor: jest.fn().mockRejectedValue(boom),
+        },
       });
 
       const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
@@ -339,7 +409,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         analysis: 'failed',
         zones: 'failed',
         evidence: 'failed',
-        trend: 'empty',
+        trend: 'failed',
       });
       expect(dto.analysis).toBeNull();
       expect(dto.zones).toEqual([]);
@@ -352,7 +422,10 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
           analyze: jest.fn().mockResolvedValue({ kind: 'no-setup', levels: null }),
         },
         strongZoneDetector: { detectZones: jest.fn().mockReturnValue([]) },
-        srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([]) },
+        srEvidenceService: {
+          levelsFor: jest.fn().mockResolvedValue([]),
+          candlesFor: jest.fn().mockResolvedValue(flatCandles),
+        },
       });
 
       const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');

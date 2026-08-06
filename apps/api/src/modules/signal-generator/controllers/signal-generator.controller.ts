@@ -31,6 +31,7 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { SrEvidenceService } from '../services/sr-evidence.service';
 import { ChartContextService } from '../services/chart-context.service';
 import type { ChartContextDto } from '../services/chart-context.service';
+import { fitTrendLine, type TrendLine } from '../services/trend-line';
 import { isIntradayInterval, isSupportedInterval, normalizeInterval, lookbackDaysFor } from '../services/timeframe-lookback';
 import { computeAtrFromCandles } from '../services/per-tf-atr';
 import { AdminOnly, Roles, CurrentUser, AuthenticatedUser } from '../../../common/decorators';
@@ -386,6 +387,48 @@ export class SignalGeneratorController {
   }
 
   /**
+   * The trend source of /chart-context: a least-squares line through the swing
+   * pivots of the SAME per-timeframe candles SrEvidenceService scores its
+   * levels from, so the line and the levels can never be derived from
+   * different data. No extra broker call in the normal case — the adapter's
+   * TTL historical cache serves the repeat fetch.
+   *
+   * Returns null ("no clear trend") when the series is unavailable or nothing
+   * fits; only a genuine throw propagates, which is what marks the source
+   * 'failed' rather than 'empty'.
+   */
+  private async computeTrend(
+    token: string,
+    exchange: string,
+    symbol: string | undefined,
+    interval: string,
+  ): Promise<TrendLine | null> {
+    if (!this.srEvidenceService) return null;
+    let resolvedSymbol = symbol;
+    // Only the Yahoo (1w/1mo) branch needs a symbol; resolve it the same way
+    // computeSrEvidence does, and let a lookup failure fall through rather
+    // than fail the whole source.
+    if (!resolvedSymbol && this.marketDataRepository) {
+      try {
+        resolvedSymbol = (await this.marketDataRepository.getInstrumentByToken(token))?.symbol;
+      } catch {
+        /* fall through — the intraday/daily branch doesn't need it */
+      }
+    }
+    const candles = await this.srEvidenceService.candlesFor(
+      token,
+      exchange,
+      resolvedSymbol ?? '',
+      interval,
+    );
+    if (!Array.isArray(candles)) return null;
+    const series = candles
+      .filter((c) => Number.isFinite(c.time))
+      .map((c) => ({ time: c.time as number, high: c.high, low: c.low }));
+    return fitTrendLine(series);
+  }
+
+  /**
    * GET /api/signals/chart-context — the charts page's single S/R read.
    *
    * Composes the three sources the page used to poll separately (/analyze's
@@ -447,6 +490,7 @@ export class SignalGeneratorController {
         analysis: analysisLoader,
         zones: () => this.computeZones(token, resolvedExchange, symbol, tf),
         evidence: () => this.computeSrEvidence(token, resolvedExchange, symbol, tf),
+        trend: () => this.computeTrend(token, resolvedExchange, symbol, tf),
       },
     );
   }

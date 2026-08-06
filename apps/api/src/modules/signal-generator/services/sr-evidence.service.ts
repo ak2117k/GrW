@@ -35,6 +35,16 @@ const EVIDENCE_MAX_PER_SIDE_INTRADAY = 3;
  * more room: 5 for daily/weekly, 6 for monthly. The frozen 15m path is never
  * capped (handled by the caller, not this helper).
  */
+/**
+ * Bar time as unix SECONDS (the chart's unit). Every candle source here hands
+ * back a `timestamp: Date`; anything else yields undefined so a bad row is
+ * simply position-less rather than NaN-positioned.
+ */
+function toUnixSeconds(ts: unknown): number | undefined {
+  const ms = ts instanceof Date ? ts.getTime() : typeof ts === 'number' ? ts : NaN;
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
+}
+
 function maxPerSideFor(interval: string): number {
   if (interval === '1mo') return 6;
   if (interval === '1d' || interval === '1w') return 5;
@@ -180,6 +190,31 @@ export class SrEvidenceService {
   }
 
   /**
+   * The per-timeframe candle series, time-stamped, for callers that need the
+   * bars themselves rather than levels — today only the chart's trend-line fit.
+   *
+   * It deliberately routes through the SAME `fetchNativeCandles` the level
+   * computation uses (same interval, same `lookbackDaysFor` window, same
+   * Angel/Yahoo split), so the drawn trend and the drawn levels are derived
+   * from one series and cannot disagree. The adapter's TTL historical cache
+   * means the repeat call for an interval already scored is normally a cache
+   * hit, not a fresh broker request.
+   *
+   * Note this is the NATIVE branch even for 15m: `levelsFor('15m')` is frozen
+   * on a 5m basis, but a trend line drawn on a 15m chart must come from 15m
+   * swings. Nothing about the frozen path is touched by asking for these bars.
+   */
+  async candlesFor(
+    token: string,
+    exchange: string,
+    symbol: string,
+    interval: string = '15m',
+  ): Promise<ProfileCandle[]> {
+    if (!token) return [];
+    return this.fetchNativeCandles(token, exchange, symbol, interval);
+  }
+
+  /**
    * Candle source for the NATIVE (non-15m) branch, routed by timeframe:
    *
    * - intraday (1m–1h) and `1d`: Angel adapter (it maps up to ONE_DAY) via
@@ -203,7 +238,13 @@ export class SrEvidenceService {
       try {
         const rows = await this.yahooFinanceService.getCandles(symbol, exchange, token, code, from, now);
         if (!Array.isArray(rows) || rows.length === 0) return [];
-        return rows.map((c) => ({ high: c.high, low: c.low, close: c.close, volume: Number(c.volume) }));
+        return rows.map((c) => ({
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: Number(c.volume),
+          time: toUnixSeconds(c.timestamp),
+        }));
       } catch (err) {
         this.logger.debug(`SrEvidence Yahoo ${interval} fetch failed for ${symbol}: ${err instanceof Error ? err.message : err}`);
         return [];
@@ -230,7 +271,13 @@ export class SrEvidenceService {
       try {
         const live = await this.angelOneAdapter.getHistoricalData(token, exchange, interval, from, now);
         if (Array.isArray(live) && live.length >= 10) {
-          return live.map((c: any) => ({ high: c.high, low: c.low, close: c.close, volume: Number(c.volume) }));
+          return live.map((c: any) => ({
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: Number(c.volume),
+            time: toUnixSeconds(c.timestamp),
+          }));
         }
       } catch (err) {
         this.logger.debug(`SrEvidence live ${interval} fetch failed for ${token}: ${err instanceof Error ? err.message : err}`);
@@ -240,7 +287,13 @@ export class SrEvidenceService {
       const inst = await this.marketDataRepository.getInstrumentByToken(token);
       if (inst) {
         const rows = await this.marketDataRepository.getCandles(inst.id, interval, from, now, 800);
-        return rows.map((r: any) => ({ high: r.high, low: r.low, close: r.close, volume: Number(r.volume) }));
+        return rows.map((r: any) => ({
+          high: r.high,
+          low: r.low,
+          close: r.close,
+          volume: Number(r.volume),
+          time: toUnixSeconds(r.timestamp),
+        }));
       }
     }
     return [];

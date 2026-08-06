@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { StrongZone } from '../types/zone.types';
 import type { EvidenceLevel } from '../types/evidence-level.types';
 import type { AnalyzeResult } from './signal-generator.service';
+import type { TrendLine } from './trend-line';
 
 /**
  * Per-source outcome. The whole point of this endpoint is that these three
@@ -36,17 +37,22 @@ export interface ChartContextDto {
   analysis: AnalyzeResult | null;
   zones: StrongZone[];
   evidence: EvidenceLevel[];
-  /** Slice 2. Always null here; `sources.trend` is 'empty', never 'failed'. */
-  trend: null;
+  /**
+   * The fitted trend line, or null for "no clear trend" — a first-class
+   * answer, not a failure. `sources.trend` tells the two apart: 'empty' means
+   * the fit ran and nothing qualified, 'failed' means we don't know.
+   */
+  trend: TrendLine | null;
   status: ChartContextStatus;
   sources: ChartContextSources;
 }
 
-/** Loaders for the three composed sources — supplied by the controller. */
+/** Loaders for the four composed sources — supplied by the controller. */
 export interface ChartContextLoaders {
   analysis: () => Promise<AnalyzeResult | null | undefined>;
   zones: () => Promise<StrongZone[] | undefined>;
   evidence: () => Promise<EvidenceLevel[] | undefined>;
+  trend: () => Promise<TrendLine | null | undefined>;
 }
 
 export interface ChartContextKey {
@@ -101,7 +107,7 @@ export class ChartContextService {
     const hit = this.cache.get(cacheKey);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.dto;
 
-    const [analysis, zones, evidence] = await Promise.all([
+    const [analysis, zones, evidence, trend] = await Promise.all([
       // 'empty' means "ran, produced no usable level book". An analyze result
       // that came back without levels is exactly that — the chart has nothing
       // to anchor on — so it must not read as 'ok' just because the call
@@ -109,15 +115,16 @@ export class ChartContextService {
       this.resolve('analysis', key, loaders.analysis, (v) => v == null || v.levels == null),
       this.resolve('zones', key, loaders.zones, (v) => v.length === 0),
       this.resolve('evidence', key, loaders.evidence, (v) => v.length === 0),
+      // A null line means the fit ran and nothing qualified — 'empty', the
+      // honest "no clear trend". Only a throw is 'failed'.
+      this.resolve('trend', key, loaders.trend, (v) => v == null),
     ]);
 
     const sources: ChartContextSources = {
       analysis: analysis.state,
       zones: zones.state,
       evidence: evidence.state,
-      // Slice 2 hasn't shipped. 'empty' (not 'failed') so an unimplemented
-      // feature can never drag the response to 'partial'.
-      trend: 'empty',
+      trend: trend.state,
     };
 
     const dto: ChartContextDto = {
@@ -125,16 +132,12 @@ export class ChartContextService {
       analysis: analysis.value ?? null,
       zones: zones.value ?? [],
       evidence: evidence.value ?? [],
-      trend: null,
-      // Derived over the IMPLEMENTED sources only. `trend` is Slice 2 and is
-      // hard-wired to 'empty', so including it would make 'unavailable'
-      // unreachable — a total outage would report 'partial' forever. When
-      // trend ships it joins this object and the rule needs no change.
-      status: deriveChartContextStatus({
-        analysis: sources.analysis,
-        zones: sources.zones,
-        evidence: sources.evidence,
-      }),
+      trend: trend.value ?? null,
+      // Over ALL four sources. Trend was excluded while it was unimplemented
+      // and hard-wired to 'empty' — including it then would have made
+      // 'unavailable' unreachable, so a total outage reported 'partial'
+      // forever. Now that it can genuinely fail, it belongs in the derivation.
+      status: deriveChartContextStatus(sources),
       sources,
     };
 

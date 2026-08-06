@@ -8,6 +8,13 @@ export interface ProfileCandle {
   low: number;
   close: number;
   volume: number;
+  /**
+   * Bar time in unix SECONDS. Optional and ignored by every profile/level
+   * computation here — it is carried so callers that need POSITION (the
+   * trend-line fit) can work off the very same bars as the levels instead of
+   * fetching a second, possibly different, series.
+   */
+  time?: number;
 }
 
 export interface VolumeNode {

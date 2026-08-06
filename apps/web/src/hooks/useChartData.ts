@@ -103,9 +103,11 @@ function getTimeframeDurationMs(timeframe: string): number {
     '15m': 15 * 60_000,
     '30m': 30 * 60_000,
     '1h': 60 * 60_000,
-    '4h': 4 * 60 * 60_000,
     '1d': 24 * 60 * 60_000,
     '1w': 7 * 24 * 60 * 60_000,
+    // Nominal month — only used as the series' bar width for gap detection,
+    // so the calendar's uneven months don't matter.
+    '1mo': 30 * 24 * 60 * 60_000,
   };
   return map[timeframe] ?? 15 * 60_000;
 }
@@ -128,9 +130,11 @@ export function getHistoryRangeDays(timeframe: string): number {
     '15m': 5,
     '30m': 30, // hour+ intervals fetch in one wide chunk — no per-day penalty
     '1h': 60,
-    '4h': 120,
     '1d': 365,
     '1w': 730,
+    // ~100 monthly bars to fill the default view; the server aggregates these
+    // from daily bars, so the wide window is still one chunked daily fetch.
+    '1mo': 3650,
   };
   return map[timeframe] ?? 3;
 }

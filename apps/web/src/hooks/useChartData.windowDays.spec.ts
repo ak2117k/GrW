@@ -48,6 +48,11 @@ describe('getHistoryRangeDays (cold first-paint window)', () => {
     expect(newDays).toBeLessThanOrEqual(oldDays / 3);
   });
 
+  it('gives 1mo a decade of lookback so ~100 monthly bars fill the view', () => {
+    // Server-aggregated from daily bars, so a wide window is still one fetch.
+    expect(getHistoryRangeDays('1mo')).toBeGreaterThanOrEqual(365 * 8);
+  });
+
   it('falls back to a small window for unknown timeframes', () => {
     expect(getHistoryRangeDays('7m')).toBe(3);
   });

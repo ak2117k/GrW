@@ -1,15 +1,10 @@
 import { useChartStore } from '@/stores/chart-store';
 import clsx from 'clsx';
+import { CHART_TIMEFRAMES, CHART_TIMEFRAME_LABELS } from '@td/shared';
 
-const TIMEFRAMES = [
-  { label: '1m', value: '1m' },
-  { label: '5m', value: '5m' },
-  { label: '15m', value: '15m' },
-  { label: '1H', value: '1h' },
-  { label: '4H', value: '4h' },
-  { label: '1D', value: '1d' },
-  { label: '1W', value: '1w' },
-];
+// Rendered from the shared roster, not a local list: the hand-maintained copy
+// drifted from the S/R engine's supported set (offered 4H, which nothing can
+// analyse; omitted 1M, which everything can).
 
 export default function TimeframeSelector() {
   const timeframe = useChartStore((s) => s.timeframe);
@@ -17,18 +12,18 @@ export default function TimeframeSelector() {
 
   return (
     <div className="flex items-center gap-0.5 rounded-lg bg-[var(--color-bg-primary)] p-0.5">
-      {TIMEFRAMES.map((tf) => (
+      {CHART_TIMEFRAMES.map((tf) => (
         <button
-          key={tf.value}
-          onClick={() => setTimeframe(tf.value)}
+          key={tf}
+          onClick={() => setTimeframe(tf)}
           className={clsx(
             'px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-150',
-            timeframe === tf.value
+            timeframe === tf
               ? 'bg-[var(--color-accent-blue)] text-white shadow-sm'
               : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-tertiary)]',
           )}
         >
-          {tf.label}
+          {CHART_TIMEFRAME_LABELS[tf]}
         </button>
       ))}
     </div>

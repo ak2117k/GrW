@@ -9,8 +9,7 @@ import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
 import ChartZoneOverlay from '@/components/charts/ChartZoneOverlay';
 import { buildSRView } from '@/components/charts/buildSRView';
 import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
-import { useSrEvidence } from '@/hooks/useSrEvidence';
-import { useZones } from '@/hooks/useZones';
+import { useChartContext } from '@/hooks/useChartContext';
 import { usePatterns } from '@/hooks/usePatterns';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
 import { useChartData } from '@/hooks/useChartData';
@@ -19,8 +18,10 @@ import { useDrawingPersistence } from '@/hooks/useDrawingPersistence';
 import { useChartStore, type SelectedSymbol } from '@/stores/chart-store';
 import { useMarketStore } from '@/stores/market-store';
 import api from '@/services/api';
-import type { SetupContext } from '@/types';
+import type { EvidenceLevel, SetupContext, StrongZone } from '@/types';
+import { CHART_TIMEFRAMES } from '@td/shared';
 import { deriveBadge, type BadgeTone } from './feedState';
+import { deriveSrChip } from './srChip';
 
 /** Tailwind classes per badge tone — kept beside the page that renders it. */
 const BADGE_TONE_CLASSES: Record<BadgeTone, string> = {
@@ -45,6 +46,14 @@ const WATCHLIST_ITEMS: SelectedSymbol[] = [
   { symbol: 'NATURALGAS', token: '538685', exchange: 'MCX', name: 'NATURAL GAS' },
 ];
 
+
+/** Toolbar roster, as a membership test for the S/R gate. */
+const SR_OFFERED_TIMEFRAMES = new Set<string>(CHART_TIMEFRAMES);
+
+// Stable empty fallbacks — a fresh `[]` per render would re-run every memo
+// that depends on the zone/evidence arrays on every tick.
+const EMPTY_ZONES: StrongZone[] = [];
+const EMPTY_EVIDENCE: EvidenceLevel[] = [];
 
 /**
  * A level book that hasn't warmed yet reports 0 for PDH/PDL/VWAP (and the
@@ -252,22 +261,21 @@ export default function ChartsPage() {
 
   useDrawingPersistence(selectedSymbol.token);
 
-  // S/R overlays render on every native intraday timeframe; the backend
-  // computes per-TF levels. `1d` is intentionally excluded.
-  const SR_INTRADAY = new Set(['1m', '3m', '5m', '15m', '30m', '1h']);
-  const showSR = SR_INTRADAY.has(timeframe);
+  // S/R renders on every timeframe the toolbar can select — the engine
+  // supports all of them (that is the roster invariant), so anything reachable
+  // here is analysable. Previously an intraday-only set silently blanked 1d/1w.
+  const showSR = SR_OFFERED_TIMEFRAMES.has(timeframe);
 
-  // Strong-zone S/R (display-only). Polls /signals/zones every 60s.
-  const { zones } = useZones(
+  // One composite poll (/signals/chart-context, 60s) for levels + zones +
+  // evidence, so partial arrival across three independent polls can no longer
+  // read as "no levels" — the DTO's status says which it is.
+  const { context: chartContext } = useChartContext(
     selectedSymbol.token,
     selectedSymbol.exchange,
     timeframe,
   );
-  const { evidence } = useSrEvidence(
-    selectedSymbol.token,
-    selectedSymbol.exchange,
-    timeframe,
-  );
+  const zones = chartContext?.zones ?? EMPTY_ZONES;
+  const evidence = chartContext?.evidence ?? EMPTY_EVIDENCE;
 
   // Chart-pattern overlays (candlestick + chart patterns). Only fetches while
   // the toggle is ON.
@@ -297,8 +305,21 @@ export default function ChartsPage() {
   // BOTH the anchored level book (PDH/PDL/ORH/ORL/VWAP) and the pivot zones.
   // Anchored levels are always present, so a moving stock always gets a read.
   const srView = useMemo(
-    () => buildSRView(analysis?.levels ?? null, zones, evidence, ltp),
-    [analysis?.levels, zones, evidence, ltp],
+    () => buildSRView(chartContext?.levels ?? null, zones, evidence, ltp),
+    [chartContext?.levels, zones, evidence, ltp],
+  );
+
+  // Chip text is a pure decision over (response state, levels) — extracted so
+  // the "never claim no levels while loading" rule is unit-testable.
+  const srChip = useMemo(
+    () =>
+      deriveSrChip({
+        context: chartContext,
+        ltp,
+        immediateResistance: srView.immediateResistance,
+        immediateSupport: srView.immediateSupport,
+      }),
+    [chartContext, ltp, srView.immediateResistance, srView.immediateSupport],
   );
 
   const handleCrosshairMove = useCallback((params: unknown) => {
@@ -601,24 +622,17 @@ export default function ChartsPage() {
             />
           )}
 
-          {/* S/R status chip — an empty overlay is normal when candle history
-              is insufficient (e.g. Angel daily session expiry). Surface that
-              explicitly so a blank chart doesn't look like a bug. */}
+          {/* S/R status chip — distinguishes loading / unavailable / no levels
+              so a not-yet-arrived (or failed) fetch is never rendered as a
+              definitive statement about the market. */}
           {showSR && (
             <div className="absolute top-3 right-3 z-20 rounded-full bg-[var(--color-bg-secondary)]/90 px-3 py-1 text-[11px] font-medium tabular-nums text-[var(--color-text-secondary)] shadow backdrop-blur-sm">
-              {(() => {
-                const fmt = (n: number) =>
-                  n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
-                const pct = (p: number) =>
-                  `${p >= 0 ? '+' : ''}${p.toFixed(1)}%`;
-                if (ltp <= 0) return 'S/R: insufficient data';
-                const r = srView.immediateResistance;
-                const s = srView.immediateSupport;
-                if (!r && !s) return 'S/R: no levels';
-                const rTxt = r ? `R ${fmt(r.price)} (${pct(r.distancePct)})` : 'R —';
-                const sTxt = s ? `S ${fmt(s.price)} (${pct(s.distancePct)})` : 'S —';
-                return `${rTxt} · ${sTxt}`;
-              })()}
+              {srChip.text}
+              {srChip.warning && (
+                <span className="ml-1 text-[var(--color-accent-amber,#f59e0b)]" title={srChip.warning}>
+                  ⚠
+                </span>
+              )}
             </div>
           )}
 

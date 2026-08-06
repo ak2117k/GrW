@@ -9,6 +9,7 @@ import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
 import ChartZoneOverlay from '@/components/charts/ChartZoneOverlay';
 import { buildSRView } from '@/components/charts/buildSRView';
 import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
+import TrendLineOverlay from '@/components/charts/TrendLineOverlay';
 import { useChartContext } from '@/hooks/useChartContext';
 import { usePatterns } from '@/hooks/usePatterns';
 import StockOverviewPanel from '@/components/stock-overview/StockOverviewPanel';
@@ -599,6 +600,16 @@ export default function ChartsPage() {
             <EvidenceLevelOverlay
               candleSeries={chartRef.current?.candleSeries ?? null}
               evidence={evidence}
+            />
+          )}
+          {/* Fitted trend line. Needs no `ltp` (it is anchored on pivots, not
+              on distance from price) and draws nothing when the fit was
+              rejected — `trend: null` is a valid answer, not a missing one. */}
+          {showSR && (
+            <TrendLineOverlay
+              chart={chartRef.current?.chart ?? null}
+              trend={chartContext?.trend ?? null}
+              candles={candles}
             />
           )}
           {!setupContext && analysis?.kind === 'setup' && (

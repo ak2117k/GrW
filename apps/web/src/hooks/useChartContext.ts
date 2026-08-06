@@ -6,6 +6,28 @@ import type { AnalysisDto } from '@/components/stock-overview/SetupContextCard';
 /** Per-source outcome, as composed server-side. */
 export type SourceState = 'ok' | 'empty' | 'failed';
 
+/**
+ * A fitted trend line, as the server computes it from the same weighted pivots
+ * the levels come from.
+ *
+ * Times are REAL market time (unix seconds) and the slope is price per SECOND,
+ * so the line must be evaluated against a bar's `realTime` — never against the
+ * gap-compressed axis time the chart actually plots. See `trendLinePoints`.
+ */
+export interface TrendLine {
+  kind: 'uptrend' | 'downtrend';
+  /** Price per second. */
+  slope: number;
+  /** Price AT `fromTime`. */
+  intercept: number;
+  /** Unix seconds, first anchoring pivot. */
+  fromTime: number;
+  /** Unix seconds, last anchoring pivot. */
+  toTime: number;
+  touches: number;
+  r2: number;
+}
+
 export interface ChartContextSources {
   analysis: SourceState;
   zones: SourceState;
@@ -18,8 +40,10 @@ export interface ChartContextDto {
   analysis: AnalysisDto | null;
   zones: StrongZone[];
   evidence: EvidenceLevel[];
-  // Slice 2. The endpoint sends `null` until the trend fitter lands.
-  trend: null;
+  // `null` is a first-class answer meaning "no clear trend" — the fitter
+  // rejects poor fits rather than drawing a line through noise. It is never a
+  // loading or error state (those live in `status` / the hook's own flags).
+  trend: TrendLine | null;
   status: 'ready' | 'partial' | 'unavailable';
   sources: ChartContextSources;
 }

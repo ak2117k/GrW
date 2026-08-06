@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { deriveSrChip } from './srChip';
-import type { ChartContextDto, SourceState } from '@/hooks/useChartContext';
+import type { ChartContextDto, SourceState, TrendLine } from '@/hooks/useChartContext';
 import type { SRLevel } from '@/components/charts/buildSRView';
 import { CHART_TIMEFRAMES, SR_SUPPORTED_INTERVALS } from '@td/shared';
 
@@ -134,6 +134,72 @@ describe('deriveSrChip', () => {
       immediateSupport: null,
     });
     expect(chip.text).toBe('S/R: insufficient data');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Trend prefix
+// ---------------------------------------------------------------------------
+
+function trend(kind: TrendLine['kind']): TrendLine {
+  return { kind, slope: 0.01, intercept: 24_500, fromTime: 1_000, toTime: 2_000, touches: 3, r2: 0.9 };
+}
+
+function ctxWithTrend(kind: TrendLine['kind'] | null): ChartContextDto {
+  return { ...ctx('ready'), trend: kind ? trend(kind) : null, sources: { ...ctx('ready').sources, trend: kind ? 'ok' : 'empty' } };
+}
+
+describe('deriveSrChip trend prefix', () => {
+  it('prefixes an uptrend', () => {
+    const chip = deriveSrChip({
+      context: ctxWithTrend('uptrend'),
+      ltp: 24_580,
+      immediateResistance: R,
+      immediateSupport: S,
+    });
+    expect(chip.text).toBe('▲ UPTREND · R 24,680 (+0.4%) · S 24,510 (-0.3%)');
+  });
+
+  it('prefixes a downtrend', () => {
+    const chip = deriveSrChip({
+      context: ctxWithTrend('downtrend'),
+      ltp: 24_580,
+      immediateResistance: R,
+      immediateSupport: S,
+    });
+    expect(chip.text).toBe('▼ DOWNTREND · R 24,680 (+0.4%) · S 24,510 (-0.3%)');
+  });
+
+  it('adds NO label at all when there is no clear trend', () => {
+    const chip = deriveSrChip({
+      context: ctxWithTrend(null),
+      ltp: 24_580,
+      immediateResistance: R,
+      immediateSupport: S,
+    });
+    expect(chip.text).toBe('R 24,680 (+0.4%) · S 24,510 (-0.3%)');
+    // "RANGE" would be a claim the server never made.
+    expect(chip.text).not.toMatch(/RANGE|TREND/);
+  });
+
+  it('leaves loading and unavailable unprefixed', () => {
+    const loading = deriveSrChip({
+      context: null,
+      ltp: 24_580,
+      immediateResistance: R,
+      immediateSupport: S,
+    });
+    expect(loading.text).toBe('S/R: loading…');
+
+    // An `unavailable` body can still carry a trend field; it must not surface.
+    const dead: ChartContextDto = { ...ctxWithTrend('uptrend'), status: 'unavailable' };
+    const unavailable = deriveSrChip({
+      context: dead,
+      ltp: 24_580,
+      immediateResistance: R,
+      immediateSupport: S,
+    });
+    expect(unavailable.text).toBe('S/R: unavailable');
   });
 });
 

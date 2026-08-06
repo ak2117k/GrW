@@ -1,4 +1,4 @@
-import type { ChartContextDto, ChartContextSources } from '@/hooks/useChartContext';
+import type { ChartContextDto, ChartContextSources, TrendLine } from '@/hooks/useChartContext';
 import type { SRLevel } from '@/components/charts/buildSRView';
 
 export interface SrChip {
@@ -31,6 +31,17 @@ function failedSources(sources: ChartContextSources): string[] {
 }
 
 /**
+ * `▲ UPTREND` / `▼ DOWNTREND`, or '' when the fitter found no clear trend.
+ *
+ * A null trend gets NO label at all — not "RANGE". The server rejects a poor
+ * fit; it never claims the market is ranging, and the chip must not either.
+ */
+function trendPrefix(trend: TrendLine | null | undefined): string {
+  if (!trend) return '';
+  return trend.kind === 'uptrend' ? '▲ UPTREND · ' : '▼ DOWNTREND · ';
+}
+
+/**
  * Pure state -> chip text for the S/R readout.
  *
  * The bug this exists to prevent: the old inline version saw only an empty
@@ -42,8 +53,15 @@ function failedSources(sources: ChartContextSources): string[] {
 export function deriveSrChip(input: DeriveSrChipInput): SrChip {
   const { context, ltp, immediateResistance, immediateSupport } = input;
 
+  // Loading and unavailable stay bare: with no response (or a failed one)
+  // there is no trend to report either, so they precede the prefix as well as
+  // the levels.
   if (!context) return { text: 'S/R: loading…', warning: null };
   if (context.status === 'unavailable') return { text: 'S/R: unavailable', warning: null };
+
+  // The trend is fitted independently of the levels, so it prefixes whatever
+  // the level state turns out to be.
+  const trend = trendPrefix(context.trend);
 
   const failed = failedSources(context.sources);
   // `partial` degrades the read but doesn't invalidate it — surface which
@@ -55,10 +73,10 @@ export function deriveSrChip(input: DeriveSrChipInput): SrChip {
 
   // No price means nothing to measure distance from; buildSRView returns
   // nothing here, which is not the same as "no levels exist".
-  if (!(ltp > 0)) return { text: 'S/R: insufficient data', warning };
+  if (!(ltp > 0)) return { text: `${trend}S/R: insufficient data`, warning };
 
   if (!immediateResistance && !immediateSupport) {
-    return { text: 'S/R: none in range', warning };
+    return { text: `${trend}S/R: none in range`, warning };
   }
 
   const r = immediateResistance
@@ -67,5 +85,5 @@ export function deriveSrChip(input: DeriveSrChipInput): SrChip {
   const s = immediateSupport
     ? `S ${fmtPrice(immediateSupport.price)} (${fmtPct(immediateSupport.distancePct)})`
     : 'S —';
-  return { text: `${r} · ${s}`, warning };
+  return { text: `${trend}${r} · ${s}`, warning };
 }

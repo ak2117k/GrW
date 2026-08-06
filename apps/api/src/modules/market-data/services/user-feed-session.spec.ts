@@ -203,6 +203,66 @@ it('getCandles does NOT retry a genuine empty window (data:[])', async () => {
   expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(1);
 });
 
+it('getCandles serves 1w from ONE_DAY bars aggregated into IST weeks', async () => {
+  // '1w' is not an Angel interval — sending it literally came back data:null
+  // and the weekly chart rendered empty. It must be fetched as ONE_DAY and
+  // rolled up locally.
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValue({
+    data: [
+      // Week of Mon 3 Aug 2026 (IST)
+      ['2026-08-03T00:00:00+05:30', 100, 112, 98, 105, 1000],
+      ['2026-08-04T00:00:00+05:30', 105, 120, 103, 118, 2000],
+      // Week of Mon 10 Aug 2026 — partial (Monday only), still emitted.
+      ['2026-08-10T00:00:00+05:30', 118, 125, 117, 124, 3000],
+    ],
+  });
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  const from = new Date('2026-06-15T00:00:00.000Z');
+  const to = new Date('2026-08-14T00:00:00.000Z');
+  const candles = await s.getCandles('111', 'NSE', '1w', from, to);
+
+  expect(d.smartApi.getCandleData).toHaveBeenCalledWith(
+    expect.objectContaining({ symboltoken: '111', interval: 'ONE_DAY' }),
+  );
+  expect(candles).toHaveLength(2);
+  expect(candles[0].timestamp.getTime()).toBe(Date.parse('2026-08-03T00:00:00+05:30'));
+  expect(candles[0].open).toBe(100);
+  expect(candles[0].high).toBe(120);
+  expect(candles[0].low).toBe(98);
+  expect(candles[0].close).toBe(118);
+  expect(candles[0].volume).toBe(3000);
+  expect(candles[1].timestamp.getTime()).toBe(Date.parse('2026-08-10T00:00:00+05:30'));
+  expect(candles[1].close).toBe(124);
+}, 15_000);
+
+it('getCandles widens the 1w daily window past the caller’s narrow request', async () => {
+  // The chart sizes its window for the timeframe it asked for (~730 days for
+  // 1w), which is barely a hundred weekly bars. The daily fetch is floored at
+  // 5 years so the weekly chart has history to draw.
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValue({ data: [] });
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  const to = new Date('2026-08-14T00:00:00.000Z');
+  const from = new Date('2026-07-14T00:00:00.000Z'); // one month — far too narrow
+  await s.getCandles('111', 'NSE', '1w', from, to);
+
+  // 5 * 365 = 1825 days at ONE_DAY's 1800-day cap → 2 chunks.
+  expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(2);
+  const oldest = d.smartApi.getCandleData.mock.calls
+    .map((c: any[]) => c[0].fromdate as string)
+    .sort()[0];
+  expect(oldest < '2021-09' && oldest > '2021-07').toBe(true);
+}, 15_000);
+
 it('getQuote connects then returns a mapped FULL quote', async () => {
   const d = makeDeps();
   const s = new UserFeedSession('u1', {

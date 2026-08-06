@@ -10,8 +10,11 @@ import type {
   UserFeedSessionLike,
 } from './user-feed.types';
 import {
+  AGGREGATED_MIN_LOOKBACK_DAYS,
+  AGGREGATED_TIMEFRAMES,
   TIMEFRAME_MAP,
   TIMEFRAME_MAX_RANGE_DAYS,
+  aggregateCandles,
   buildChunkWindows,
   formatAngelDateTime,
   mapCandleRows,
@@ -184,6 +187,10 @@ export class UserFeedSession implements UserFeedSessionLike {
    * ranges wider than the interval's per-call limit, fetching newest-first so a
    * throttled window drops the OLDEST candles (never the live edge).
    *
+   * `1w`/`1mo` are not Angel intervals at all (the request came back
+   * `data:null` and the chart rendered empty), so they are fetched as ONE_DAY
+   * over a widened window and rolled up by `aggregateCandles`.
+   *
    * A `data:null` response is Angel's THROTTLE shape (a genuine empty window is
    * `data:[]`). It is retried with backoff, and only dropped — loudly — once the
    * retries are exhausted.
@@ -207,13 +214,26 @@ export class UserFeedSession implements UserFeedSessionLike {
     }
     const smartApi = this.smartApi;
 
-    const interval = TIMEFRAME_MAP[timeframe] ?? timeframe;
+    // 1w/1mo have no broker interval — fetch ONE_DAY and roll up locally.
+    // Resolving the interval FIRST is also what sizes the chunker correctly:
+    // TIMEFRAME_MAX_RANGE_DAYS is keyed by Angel interval, so the daily fetch
+    // gets ONE_DAY's 1800-day windows rather than the 30-day fallback.
+    const bucket = AGGREGATED_TIMEFRAMES[timeframe];
+    const interval = bucket ? 'ONE_DAY' : (TIMEFRAME_MAP[timeframe] ?? timeframe);
     const maxDays = TIMEFRAME_MAX_RANGE_DAYS[interval] ?? 30;
     const maxRangeMs = maxDays * 24 * 60 * 60 * 1000;
 
+    // A weekly/monthly chart needs years of dailies underneath it, and the
+    // caller sized its window for the timeframe it asked for. Widen to the
+    // floor; a caller reaching further back than the floor keeps its own range.
+    const dayMs = 24 * 60 * 60 * 1000;
+    const fromMs = bucket
+      ? Math.min(from.getTime(), to.getTime() - AGGREGATED_MIN_LOOKBACK_DAYS[timeframe] * dayMs)
+      : from.getTime();
+
     // Build oldest→newest, then fetch newest-first (reverse) to protect the
     // live edge if a later window gets throttled.
-    const windows = buildChunkWindows(from.getTime(), to.getTime(), maxRangeMs);
+    const windows = buildChunkWindows(fromMs, to.getTime(), maxRangeMs);
     windows.reverse();
 
     const { items, dropped, attempted } = await fetchChunksResilient<Candle>(
@@ -252,7 +272,8 @@ export class UserFeedSession implements UserFeedSessionLike {
       merged.push(c);
     }
     merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-    return merged;
+
+    return bucket ? aggregateCandles(merged, bucket) : merged;
   }
 
   /**

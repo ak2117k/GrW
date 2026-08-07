@@ -142,3 +142,30 @@ describe('AngelThrottleError', () => {
     expect(FromAdapter).toBe(AngelThrottleError);
   });
 });
+
+describe('isNotAuthenticatedError', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { isNotAuthenticatedError } = require('./angel-one-adapter.service');
+
+  it('recognises the exact message AngelOneAuthService throws', () => {
+    // This string is the contract. AngelOneAuthService throws it from every
+    // accessor when no feed account resolved at boot, and the NO_FEED_SESSION
+    // warning keys off it — reword one without the other and a silent outage
+    // goes back to being invisible.
+    expect(isNotAuthenticatedError(new Error('Not authenticated. Call login() first.'))).toBe(true);
+  });
+
+  it('is case-insensitive and tolerates non-Error throws', () => {
+    expect(isNotAuthenticatedError(new Error('NOT AUTHENTICATED'))).toBe(true);
+    expect(isNotAuthenticatedError('not authenticated')).toBe(true);
+  });
+
+  it('does NOT fire for genuine broker errors', () => {
+    // A real failure must keep its own handling; mislabelling it would send
+    // people hunting a credentials problem that isn't there.
+    expect(isNotAuthenticatedError(new Error('Access denied because of exceeding access rate'))).toBe(false);
+    expect(isNotAuthenticatedError(new Error('ECONNRESET'))).toBe(false);
+    expect(isNotAuthenticatedError(null)).toBe(false);
+    expect(isNotAuthenticatedError(undefined)).toBe(false);
+  });
+});

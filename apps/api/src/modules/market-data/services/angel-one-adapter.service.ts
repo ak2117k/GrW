@@ -194,11 +194,57 @@ const HISTORICAL_CACHE_LIVE_WINDOW_MS = 2 * 60 * 1000;
  * the latter is a genuine signal failure. The `name` is set explicitly so
  * the marker survives serialization / `instanceof` across module boundaries.
  */
-// (class moved to ./angel-throttle and re-exported from the imports above)
+// (AngelThrottleError moved to ./angel-throttle and re-exported above)
+
+/**
+ * Is this the shared feed account having no session at all?
+ *
+ * `AngelOneAuthService` throws `Not authenticated. Call login() first.` from
+ * every accessor when no feed credentials were resolvable at boot. Told apart
+ * from genuine broker errors so the "your background jobs are silently getting
+ * nothing" warning fires only when that is actually what happened.
+ *
+ * Exported for testing — the message is the contract, so it needs a test that
+ * fails if the auth service ever rewords it.
+ */
+export function isNotAuthenticatedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  return /not authenticated/i.test(msg);
+}
 
 @Injectable()
 export class AngelOneAdapterService implements BrokerAdapter {
   private readonly logger = new Logger(AngelOneAdapterService.name);
+
+  /**
+   * Timeframes already warned about for "no feed session". Bounded by the
+   * timeframe roster (<10 keys), so a 60s scan tick can't firehose — the very
+   * pressure that got the equivalent logs demoted to `debug` elsewhere, which
+   * is why this outage stayed invisible.
+   */
+  private readonly noSessionWarned = new Set<string>();
+
+  /**
+   * Say plainly that a background consumer just got nothing, and why.
+   *
+   * Consumers with a user context now pass a per-user CandleSource (see
+   * signal-generator/services/candle-source.ts). Anything still reaching the
+   * shared adapter has no user to borrow a session from — universe-scanner,
+   * signal-scan, chartink scoring, ml/*, exit-price, mtf-alignment — so it
+   * returns empty results with no error and no 5xx, which is indistinguishable
+   * from "scanned everything, found nothing".
+   */
+  private warnNoFeedSession(timeframe: string): void {
+    if (this.noSessionWarned.has(timeframe)) return;
+    this.noSessionWarned.add(timeframe);
+    this.logger.warn(
+      `NO_FEED_SESSION: shared-adapter historical fetch (${timeframe}) failed — no ` +
+        `market-data feed account is logged in. Background consumers with no user ` +
+        `context (universe scanner, signal scan, chartink scoring, ml capture, ` +
+        `exit-price, mtf-alignment) are receiving EMPTY candles and will silently ` +
+        `produce no results. Further ${timeframe} occurrences suppressed.`,
+    );
+  }
 
   /**
    * Serialized promise chain for ALL historical SmartAPI calls (across all
@@ -964,6 +1010,15 @@ export class AngelOneAdapterService implements BrokerAdapter {
         );
         return [];
       }
+      // The shared feed account is gone in this multi-tenant deployment, so
+      // this throw is "no session" far more often than a real broker error.
+      // It is rethrown (as always) and every consumer swallows it differently
+      // — which is exactly how the chart's S/R produced nothing for the whole
+      // life of the feature without a single log line. Consumers WITH a user
+      // context now pass a per-user CandleSource; the ones that reach here are
+      // by definition the background ones that cannot. Name that here, once,
+      // so a silent outage is greppable instead of invisible.
+      if (isNotAuthenticatedError(err)) this.warnNoFeedSession(timeframe);
       throw err;
     }
 

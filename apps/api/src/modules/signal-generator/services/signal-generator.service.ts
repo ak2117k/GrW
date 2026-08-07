@@ -47,6 +47,7 @@ import {
   MCX_CLOSE_MINUTE,
 } from '@td/shared/constants';
 import { Exchange } from '@td/shared/types';
+import { lookbackDaysFor } from './timeframe-lookback';
 
 /** Minimum number of timeframes that must agree for signal confirmation. */
 const MIN_TIMEFRAME_AGREEMENT = 2;
@@ -332,7 +333,16 @@ export class SignalGeneratorService {
 
     const instrument = await this.marketDataRepository.getInstrumentByToken(token);
     const now = new Date();
-    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+    // Window sized to the TIMEFRAME, not a flat 5 days. A hardcoded 5-day
+    // window assumes intraday: it yields ~125 bars on 15m but only FIVE on 1d
+    // and ~31 on 1h, so every check below that needs 25-100 bars could never
+    // pass above 15m. That is why the Setup & Context panel reported
+    // "not enough candles (got 5, need 25 for 1d)" on every daily chart.
+    // lookbackDaysFor is the same tuned per-interval table the S/R evidence
+    // engine uses — single-sourced rather than a second heuristic.
+    const windowStart = new Date(
+      now.getTime() - lookbackDaysFor(timeframe) * 24 * 60 * 60 * 1000,
+    );
 
     // Try DB first when the symbol is seeded; fall back to broker
     // historical API otherwise (any stock the user picks via search).
@@ -341,7 +351,7 @@ export class SignalGeneratorService {
     }> = [];
     if (instrument) {
       const candleRows = await this.marketDataRepository.getCandles(
-        instrument.id, timeframe, fiveDaysAgo, now, 25,
+        instrument.id, timeframe, windowStart, now, 25,
       );
       candles = candleRows.map((c) => ({
         timestamp: c.timestamp,
@@ -352,7 +362,7 @@ export class SignalGeneratorService {
     if (candles.length < 25) {
       try {
         const broker = await this.fetchHistorical(
-          token, exchange, timeframe, fiveDaysAgo, now, source,
+          token, exchange, timeframe, windowStart, now, source,
         );
         candles = broker.slice(-30).map((c: any) => ({
           timestamp: new Date(c.timestamp),
@@ -603,7 +613,16 @@ export class SignalGeneratorService {
   ): Promise<IndicatorReadings | null> {
     const instrument = await this.marketDataRepository.getInstrumentByToken(token);
     const now = new Date();
-    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+    // Window sized to the TIMEFRAME, not a flat 5 days. A hardcoded 5-day
+    // window assumes intraday: it yields ~125 bars on 15m but only FIVE on 1d
+    // and ~31 on 1h, so every check below that needs 25-100 bars could never
+    // pass above 15m. That is why the Setup & Context panel reported
+    // "not enough candles (got 5, need 25 for 1d)" on every daily chart.
+    // lookbackDaysFor is the same tuned per-interval table the S/R evidence
+    // engine uses — single-sourced rather than a second heuristic.
+    const windowStart = new Date(
+      now.getTime() - lookbackDaysFor(timeframe) * 24 * 60 * 60 * 1000,
+    );
 
     let candles: Array<{
       timestamp: Date; open: number; high: number; low: number; close: number; volume: number;
@@ -613,7 +632,7 @@ export class SignalGeneratorService {
     if (instrument) {
       try {
         const rows = await this.marketDataRepository.getCandles(
-          instrument.id, timeframe, fiveDaysAgo, now, 100,
+          instrument.id, timeframe, windowStart, now, 100,
         );
         candles = rows.map((c) => ({
           timestamp: c.timestamp,
@@ -629,7 +648,7 @@ export class SignalGeneratorService {
     if (candles.length < 30) {
       try {
         const broker = await this.angelOneAdapter.getHistoricalData(
-          token, exchange, timeframe, fiveDaysAgo, now,
+          token, exchange, timeframe, windowStart, now,
         );
         candles = broker.slice(-100).map((c: any) => ({
           timestamp: new Date(c.timestamp),
@@ -1043,12 +1062,19 @@ export class SignalGeneratorService {
       return null;
     }
 
-    // We need enough candles for the most demanding strategy.
-    // EMA crossover needs signalPeriod(50) + 2 = 52 candles minimum.
-    // RSI needs 26+ candles. Use 5 days of 15-min candles (~125 candles)
-    // to ensure sufficient data even for commodities with limited intraday history.
+    // We need enough candles for the most demanding strategy: EMA crossover
+    // needs signalPeriod(50) + 2 = 52, RSI needs 26+.
+    //
+    // Unlike analyze() and the indicator chips, this snapshot is hardcoded to
+    // FIFTEEN_MIN below, so the window is sized for 15m specifically rather
+    // than for a caller-supplied timeframe. Still routed through
+    // lookbackDaysFor so all three windows come from one table — the previous
+    // flat 5 days was the same literal that starved the timeframe-aware
+    // callers, and leaving a bare `5` here invites the bug back.
     const now = new Date();
-    const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
+    const windowStart = new Date(
+      now.getTime() - lookbackDaysFor(TIMEFRAMES.FIFTEEN_MIN) * 24 * 60 * 60 * 1000,
+    );
 
     let candles: Array<{
       timestamp: Date;
@@ -1066,7 +1092,7 @@ export class SignalGeneratorService {
         const dbCandles = await this.marketDataRepository.getCandles(
           instrument.id,
           TIMEFRAMES.FIFTEEN_MIN,
-          fiveDaysAgo,
+          windowStart,
           now,
         );
         candles = dbCandles;
@@ -1084,7 +1110,7 @@ export class SignalGeneratorService {
           token,
           quote.exchange,
           TIMEFRAMES.FIFTEEN_MIN,
-          fiveDaysAgo,
+          windowStart,
           now,
         );
 

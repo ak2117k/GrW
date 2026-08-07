@@ -15,6 +15,11 @@ import { ZoneRepository } from '../repositories/zone.repository';
 import { SignalGateway } from '../gateways/signal.gateway';
 import { SignalFilterDto } from '../dto/signal.dto';
 import { LevelBookService } from './level-book.service';
+import type { CandleSource } from './candle-source';
+import {
+  AGGREGATED_TIMEFRAMES,
+  TIMEFRAME_MAP,
+} from '../../market-data/services/user-historical.util';
 import {
   SetupTrackerService,
   SetupStatus,
@@ -216,6 +221,9 @@ export class SignalGeneratorService {
    */
   private readonly lastBrokerRefreshAt = new Map<string, number>();
 
+  /** token:timeframe keys already warned about in fetchHistorical. */
+  private readonly warnedUserFetchKeys = new Set<string>();
+
   constructor(
     private readonly strategyRegistry: StrategyRegistryService,
     private readonly signalScoring: SignalScoringService,
@@ -236,11 +244,21 @@ export class SignalGeneratorService {
     private readonly contextScoring: ContextScoringService | null = null,
   ) {}
 
+  /**
+   * `source` (optional) is the caller's own per-request candle source — see
+   * candle-source.ts. It is threaded into every broker fetch this analysis
+   * makes (the level book's daily statics + session bars, the working-TF
+   * candles, and the higher-TF trend series), because the anchored levels this
+   * returns — PDH/PDL/ORH/ORL/VWAP — are what the chart draws, and on this
+   * deployment the shared adapter cannot authenticate for a user request.
+   * Omit it and every fetch is byte-identical to before.
+   */
   async analyze(
     token: string,
     exchange: string,
     symbol: string,
     timeframe: string = '15m',
+    source?: CandleSource,
   ): Promise<AnalyzeResult> {
     // Locked-setup short-circuit: if there's already an active setup for
     // this token, return its FROZEN entry/SL/target rather than re-running
@@ -269,7 +287,7 @@ export class SignalGeneratorService {
       Date.now() - lastRefreshAt >= REFRESH_FROM_BROKER_FRESH_MS
     ) {
       this.lastBrokerRefreshAt.set(token, Date.now());
-      await this.levelBookService.refreshFromBroker(token, exchange, symbol);
+      await this.levelBookService.refreshFromBroker(token, exchange, symbol, source);
     }
 
     const existing = this.setupTracker.getActive(token);
@@ -279,7 +297,9 @@ export class SignalGeneratorService {
         existing.status === 'ACTIVE' ||
         existing.status === 'PARTIAL_BOOKED')
     ) {
-      const liveBook = await this.levelBookService.lazyLoad(token, exchange, symbol);
+      const liveBook = await this.levelBookService.lazyLoad(
+        token, exchange, symbol, 'background', source,
+      );
       // Update tracker against the latest spot so PENDING -> ACTIVE etc.
       // transitions don't lag behind the chart.
       if (liveBook) {
@@ -289,7 +309,9 @@ export class SignalGeneratorService {
       return this.lockedToResult(refreshed, liveBook);
     }
 
-    const book = await this.levelBookService.lazyLoad(token, exchange, symbol);
+    const book = await this.levelBookService.lazyLoad(
+      token, exchange, symbol, 'background', source,
+    );
     if (!book) {
       return {
         kind: 'no-setup',
@@ -329,8 +351,8 @@ export class SignalGeneratorService {
     }
     if (candles.length < 25) {
       try {
-        const broker = await this.angelOneAdapter.getHistoricalData(
-          token, exchange, timeframe, fiveDaysAgo, now,
+        const broker = await this.fetchHistorical(
+          token, exchange, timeframe, fiveDaysAgo, now, source,
         );
         candles = broker.slice(-30).map((c: any) => ({
           timestamp: new Date(c.timestamp),
@@ -366,6 +388,7 @@ export class SignalGeneratorService {
       timeframe,
       instrument?.id ?? null,
       now,
+      source,
     );
 
     const istParts = new Intl.DateTimeFormat('en-IN', {
@@ -1105,12 +1128,62 @@ export class SignalGeneratorService {
    * The strategy treats null as "skip the gate" so a transient broker
    * failure here never suppresses signals.
    */
+  /**
+   * Historical bars: the caller's own per-request `source` first, the shared
+   * adapter second.
+   *
+   * WHY: there is no shared feed account on this deployment, so the shared
+   * adapter cannot authenticate for a user-facing request — it throws
+   * `Not authenticated` every time. Background callers (crons, scanners, the
+   * signal-scan worker) have no user context, pass no source, and keep using
+   * the adapter exactly as before. A source that throws or comes back empty
+   * falls through to the adapter rather than failing the fetch; adapter errors
+   * propagate to the caller's own catch, unchanged.
+   */
+  private async fetchHistorical(
+    token: string,
+    exchange: string,
+    timeframe: string,
+    from: Date,
+    to: Date,
+    source?: CandleSource,
+  ): Promise<any[]> {
+    // A timeframe the broker has no interval for (today: `4h`, which
+    // HIGHER_TF_MAP asks for on a 1h chart) must NOT go to the per-user
+    // session. That session treats Angel's `data:null` as a throttle and
+    // retries it with backoff — seconds of latency, on a user's chart request,
+    // to rediscover that `4h` is not an Angel interval. The shared adapter
+    // rejects it immediately, which is the right answer for a request that
+    // cannot succeed.
+    const brokerServable = timeframe in TIMEFRAME_MAP || timeframe in AGGREGATED_TIMEFRAMES;
+    if (source && brokerServable) {
+      try {
+        const rows = await source.getCandles(token, exchange, timeframe, from, to);
+        if (Array.isArray(rows) && rows.length > 0) return rows;
+      } catch (err) {
+        // Once per token+timeframe: analyze() is polled every ~60s, and a
+        // per-poll warn on a persistent outage is the noise that gets messages
+        // demoted to debug — which is how the S/R path stayed silently dead.
+        const key = `${token}:${timeframe}`;
+        if (!this.warnedUserFetchKeys.has(key)) {
+          if (this.warnedUserFetchKeys.size >= 1000) this.warnedUserFetchKeys.clear();
+          this.warnedUserFetchKeys.add(key);
+          this.logger.warn(
+            `analyze: per-user ${timeframe} candle fetch failed for ${token} — falling back to the shared adapter: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+    }
+    return this.angelOneAdapter.getHistoricalData(token, exchange, timeframe, from, to);
+  }
+
   private async computeHigherTimeframeTrend(
     token: string,
     exchange: string,
     workingTimeframe: string,
     instrumentId: string | null,
     now: Date,
+    source?: CandleSource,
   ): Promise<SetupContext['higherTimeframeTrend']> {
     const higherTf = HIGHER_TF_MAP[workingTimeframe];
     if (!higherTf) return null;
@@ -1140,8 +1213,8 @@ export class SignalGeneratorService {
 
     if (candles.length < 22) {
       try {
-        const broker = await this.angelOneAdapter.getHistoricalData(
-          token, exchange, higherTf, from, now,
+        const broker = await this.fetchHistorical(
+          token, exchange, higherTf, from, now, source,
         );
         candles = (broker as Array<{ close: number | string }>).slice(
           -HIGHER_TF_CANDLE_TARGET,

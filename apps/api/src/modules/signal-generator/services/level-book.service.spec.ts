@@ -205,6 +205,86 @@ describe('LevelBookService', () => {
       expect(repo.getCandles).toHaveBeenCalled();
     });
 
+    /**
+     * The anchored level book (PDH/PDL/ORH/ORL/VWAP) is what a user most
+     * expects to see drawn on the chart, and its broker fallback ran through
+     * the SHARED Angel adapter — which has no feed account on this platform and
+     * throws `Not authenticated` for every user-facing request. `lazyLoad` and
+     * `refreshFromBroker` therefore take the caller's own candle source.
+     */
+    describe('per-request CandleSource', () => {
+      const dailyRows = () =>
+        Array.from({ length: 16 }, (_, i) => mkDaily(16 - i, 110 + i, 90 + i, 100 + i));
+
+      it('builds the book from the source when the DB has nothing', async () => {
+        const broker = { getHistoricalData: jest.fn().mockResolvedValue([]) } as any;
+        const source = { getCandles: jest.fn().mockResolvedValue(dailyRows()) };
+        const svc = new LevelBookService(undefined, undefined, broker);
+
+        const book = await svc.lazyLoad('TKN', 'NSE', 'NIFTY', 'background', source as never);
+
+        expect(book!.pdh).toBe(125);
+        expect(source.getCandles).toHaveBeenCalled();
+        // The adapter cannot authenticate for this request; it must not be the
+        // thing the anchored levels depend on.
+        expect(broker.getHistoricalData).not.toHaveBeenCalled();
+      });
+
+      it('falls back to the shared adapter when the source throws', async () => {
+        const broker = {
+          getHistoricalData: jest.fn().mockResolvedValue(dailyRows()),
+        } as any;
+        const source = { getCandles: jest.fn().mockRejectedValue(new Error('no session')) };
+        const svc = new LevelBookService(undefined, undefined, broker);
+
+        const book = await svc.lazyLoad('TKN', 'NSE', 'NIFTY', 'background', source as never);
+
+        expect(book!.pdh).toBe(125);
+        expect(broker.getHistoricalData).toHaveBeenCalled();
+      });
+
+      it('builds a book even with no adapter at all, given a source', async () => {
+        // A container with no broker adapter used to be a guaranteed null book.
+        const source = { getCandles: jest.fn().mockResolvedValue(dailyRows()) };
+        const svc = new LevelBookService();
+
+        const book = await svc.lazyLoad('TKN', 'NSE', 'NIFTY', 'background', source as never);
+
+        expect(book).not.toBeNull();
+        expect(book!.pdh).toBe(125);
+      });
+
+      it('regression: with NO source, the adapter is called exactly as before', async () => {
+        const broker = { getHistoricalData: jest.fn().mockResolvedValue(dailyRows()) } as any;
+        const svc = new LevelBookService(undefined, undefined, broker);
+
+        await svc.lazyLoad('TKN', 'NSE', 'NIFTY');
+
+        // Original arity and arguments — 'background' is the default priority
+        // every existing caller relies on.
+        expect(broker.getHistoricalData).toHaveBeenCalledWith(
+          'TKN', 'NSE', '1d', expect.any(Date), expect.any(Date), 'background',
+        );
+      });
+
+      it('refreshFromBroker uses the source, and still works with no adapter', async () => {
+        const source = { getCandles: jest.fn().mockResolvedValue(dailyRows()) };
+        const svc = new LevelBookService();
+
+        const book = await svc.refreshFromBroker('TKN', 'NSE', 'NIFTY', source as never);
+
+        expect(book).not.toBeNull();
+        expect(source.getCandles).toHaveBeenCalledWith(
+          'TKN', 'NSE', '1d', expect.any(Date), expect.any(Date),
+        );
+      });
+
+      it('regression: refreshFromBroker with no source and no adapter is still null', async () => {
+        const svc = new LevelBookService();
+        await expect(svc.refreshFromBroker('TKN', 'NSE', 'NIFTY')).resolves.toBeNull();
+      });
+    });
+
     it('insufficient daily candles returns null', async () => {
       const instrumentService = {
         getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),

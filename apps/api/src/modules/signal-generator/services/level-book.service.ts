@@ -4,6 +4,7 @@ import { InstrumentService } from '../../market-data/services/instrument.service
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { BrokerAdapter } from '../../../common/interfaces/broker-adapter.interface';
 import { HistoricalPriority } from '../../market-data/services/angel-one-adapter.service';
+import type { CandleSource } from './candle-source';
 import { TIMEFRAMES } from '@td/shared/constants';
 
 // Use the literal injection token string instead of importing
@@ -75,6 +76,8 @@ export class LevelBookService {
    * is fresher than any DB snapshot would be.
    */
   private readonly liveBooks = new Set<string>();
+  /** Per-user candle-fetch failures already warned about — see warnOnce. */
+  private readonly warnedFetchKeys = new Set<string>();
 
   constructor(
     @Optional() private readonly instrumentService?: InstrumentService,
@@ -262,25 +265,34 @@ export class LevelBookService {
    * failed / didn't return enough daily candles for ATR. On null, the
    * caller should fall back to the existing `lazyLoad` path which
    * tolerates partial data.
+   *
+   * `source` (optional) is the caller's own per-request candle source — see
+   * candle-source.ts. Omit it and this behaves exactly as before, on the shared
+   * adapter.
    */
   async refreshFromBroker(
     token: string,
     exchange: string,
     symbol: string,
+    source?: CandleSource,
   ): Promise<LevelBook | null> {
-    if (!this.brokerAdapter?.getHistoricalData) return null;
+    // A per-request source is a broker of its own, so the shared adapter is
+    // only a hard requirement when there isn't one.
+    if (!source && !this.brokerAdapter?.getHistoricalData) return null;
 
     const now = new Date();
     const sessionOpen = getTodayMidnightIstAsUtc(now);
     const dailyFrom = new Date(sessionOpen.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     try {
-      const brokerDaily = await this.brokerAdapter.getHistoricalData(
+      const brokerDaily = await this.fetchHistorical(
         token,
         exchange,
         '1d',
         dailyFrom,
         sessionOpen,
+        undefined,
+        source,
       );
       const dailyCandles = brokerDaily
         .filter((c: { timestamp: Date | string }) => new Date(c.timestamp).getTime() < sessionOpen.getTime())
@@ -311,11 +323,18 @@ export class LevelBookService {
     }
   }
 
+  /**
+   * `source` (optional) is the caller's own per-request candle source — see
+   * candle-source.ts. It is tried ahead of the shared adapter on each of the
+   * three broker fallbacks below (daily statics, today's 5m bars, previous
+   * session's OR). Omit it and every one of those is byte-identical to before.
+   */
   async lazyLoad(
     token: string,
     exchange: string,
     symbol: string,
     priority: HistoricalPriority = 'background',
+    source?: CandleSource,
   ): Promise<LevelBook | null> {
     const cached = this.books.get(token);
 
@@ -391,11 +410,11 @@ export class LevelBookService {
     // Broker fallback — fires when the local DB doesn't have the symbol
     // (e.g. user searched a stock that isn't in the seeded universe) or
     // doesn't have enough daily candles for ATR.
-    if (dailyCandles.length < 14 && this.brokerAdapter?.getHistoricalData) {
+    if (dailyCandles.length < 14 && (source || this.brokerAdapter?.getHistoricalData)) {
       try {
         const dailyFrom = new Date(sessionOpen.getTime() - 30 * 24 * 60 * 60 * 1000);
-        const brokerDaily = await this.brokerAdapter.getHistoricalData(
-          token, exchange, '1d', dailyFrom, sessionOpen, priority,
+        const brokerDaily = await this.fetchHistorical(
+          token, exchange, '1d', dailyFrom, sessionOpen, priority, source,
         );
         dailyCandles = brokerDaily
           .filter((c: any) => new Date(c.timestamp).getTime() < sessionOpen.getTime())
@@ -437,10 +456,10 @@ export class LevelBookService {
         volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
       }));
     }
-    if (fiveMinBars.length === 0 && this.brokerAdapter?.getHistoricalData) {
+    if (fiveMinBars.length === 0 && (source || this.brokerAdapter?.getHistoricalData)) {
       try {
-        const broker5m = await this.brokerAdapter.getHistoricalData(
-          token, exchange, '5m', sessionOpen, now, priority,
+        const broker5m = await this.fetchHistorical(
+          token, exchange, '5m', sessionOpen, now, priority, source,
         );
         fiveMinBars = broker5m.map((c: any) => ({
           timestamp: new Date(c.timestamp),
@@ -481,6 +500,7 @@ export class LevelBookService {
       instrument?.id,
       sessionOpen,
       priority,
+      source,
     );
     const cachedBook = this.books.get(token);
     if (cachedBook) {
@@ -507,6 +527,7 @@ export class LevelBookService {
     instrumentId: string | undefined,
     todaySessionOpen: Date,
     priority: HistoricalPriority = 'background',
+    source?: CandleSource,
   ): Promise<{ orh: number; orl: number } | null> {
     const istOffsetMs = 5.5 * 60 * 60 * 1000;
     for (let dayOffset = 1; dayOffset <= 5; dayOffset++) {
@@ -527,10 +548,10 @@ export class LevelBookService {
         );
         bars = rows.map((c) => ({ high: c.high, low: c.low }));
       }
-      if (bars.length < 3 && this.brokerAdapter?.getHistoricalData) {
+      if (bars.length < 3 && (source || this.brokerAdapter?.getHistoricalData)) {
         try {
-          const broker = await this.brokerAdapter.getHistoricalData(
-            token, exchange, '5m', prevSessionOROpen, prevSessionORClose, priority,
+          const broker = await this.fetchHistorical(
+            token, exchange, '5m', prevSessionOROpen, prevSessionORClose, priority, source,
           );
           bars = broker.map((c: { high: number | string; low: number | string }) => ({
             high: Number(c.high),
@@ -614,6 +635,63 @@ export class LevelBookService {
         `(latest daily: ${refreshed.lastDailyTimestamp?.toISOString()})`,
       );
     }
+  }
+
+  /**
+   * Historical bars: the caller's own per-request `source` first, the shared
+   * broker adapter second.
+   *
+   * WHY the order: this deployment has NO shared feed account, so on a
+   * user-facing request the shared adapter cannot authenticate at all and every
+   * call throws. The adapter stays in the chain because the background callers
+   * (crons, scanners, workers) have no user context and pass no source.
+   *
+   * A `source` that throws or returns nothing falls through to the adapter
+   * rather than failing the fetch — the caller's existing fallback contract is
+   * preserved either way. Adapter errors still propagate, because every call
+   * site already has its own catch for them and must keep behaving identically
+   * when no source is supplied.
+   */
+  private async fetchHistorical(
+    token: string,
+    exchange: string,
+    timeframe: string,
+    from: Date,
+    to: Date,
+    priority: HistoricalPriority | undefined,
+    source?: CandleSource,
+  ): Promise<any[]> {
+    if (source) {
+      try {
+        const rows = await source.getCandles(token, exchange, timeframe, from, to);
+        if (Array.isArray(rows) && rows.length > 0) return rows;
+      } catch (err) {
+        this.warnOnce(
+          `${token}:${timeframe}`,
+          `levelBook: per-user ${timeframe} fetch failed for ${token} — falling back to the shared adapter: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+    if (!this.brokerAdapter?.getHistoricalData) return [];
+    // Preserve the exact call arity of the pre-existing sites: the adapter
+    // defaults `priority` to 'background', and a caller that never passed one
+    // must keep not passing one.
+    return priority
+      ? this.brokerAdapter.getHistoricalData(token, exchange, timeframe, from, to, priority)
+      : this.brokerAdapter.getHistoricalData(token, exchange, timeframe, from, to);
+  }
+
+  /**
+   * WARN once per key. These fetches sit behind a ~60s chart poll, so an
+   * unconditional warn on a persistent outage is a firehose — and pushing such
+   * messages down to `debug` to avoid that is exactly how a permanently broken
+   * candle path stayed invisible.
+   */
+  private warnOnce(key: string, message: string): void {
+    if (this.warnedFetchKeys.has(key)) return;
+    if (this.warnedFetchKeys.size >= 1000) this.warnedFetchKeys.clear();
+    this.warnedFetchKeys.add(key);
+    this.logger.warn(message);
   }
 
   /** Wilder-smoothed ATR over the last ATR_PERIOD candles. */

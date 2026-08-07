@@ -191,6 +191,13 @@ import type { UserFeedSessionFactory } from './services/user-feed.types';
     YahooFinanceService,
     MarketContextService,
     NseSectorIndexService,
+    // Exported so USER-SCOPED request paths outside this module can fetch
+    // candles over the caller's OWN Angel session. There is no shared feed
+    // account, so anything that reaches for AngelOneAdapterService on behalf of
+    // a signed-in user gets `Not authenticated` — see candle-source.ts in
+    // signal-generator for the failure this unblocks. SignalGeneratorModule
+    // already imports MarketDataModule; only the export was missing.
+    UserFeedManager,
     BROKER_ADAPTER_TOKEN,
   ],
 })

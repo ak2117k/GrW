@@ -183,6 +183,110 @@ describe('SrEvidenceService', () => {
     expect(levels.every((l) => l.soft)).toBe(true);
   });
 
+  /**
+   * The root cause this service was fixed for: `fetchCandles` went through the
+   * SHARED Angel adapter, and this platform has no shared feed account — the
+   * adapter throws `Not authenticated` on every call, the DB fallback misses
+   * for indices, and `levelsFor` returned [] for every symbol on every
+   * timeframe. Permanently, and silently: the throw was logged at debug.
+   *
+   * The fix is an optional per-request CandleSource bound to the calling user's
+   * own broker session. These tests pin both halves of its contract — that it
+   * is used when supplied, and that its absence changes nothing.
+   */
+  describe('per-request CandleSource', () => {
+    /** The user session's candle shape (rows carry a timestamp). */
+    const userCandles = candles.map((c) => ({ timestamp: new Date(), open: c.close, ...c }));
+    const sourceOf = (rows: unknown) => ({ getCandles: jest.fn().mockResolvedValue(rows) });
+
+    it('uses the supplied source and never touches the shared adapter', async () => {
+      const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+      const src = sourceOf(userCandles);
+      const s = build({ angelOneAdapter: adapter });
+
+      const levels = await s.levelsFor('18520', 'NSE', 'CUPID', '5m', src as never);
+
+      expect(src.getCandles).toHaveBeenCalledWith('18520', 'NSE', '5m', expect.any(Date), expect.any(Date));
+      // The adapter is the thing that cannot authenticate — reaching it at all
+      // on a user request is the bug.
+      expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+      // And the levels are real, not the empty list this path used to return.
+      expect(levels.some((l) => l.side === 'resistance' && !l.soft)).toBe(true);
+    });
+
+    it('threads the source into the FROZEN 15m branch too (5m basis, 10-day window)', async () => {
+      const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+      const src = sourceOf(userCandles);
+      const s = build({ angelOneAdapter: adapter });
+
+      await s.levelsFor('18520', 'NSE', 'CUPID', '15m', src as never);
+
+      // Same interval and window as the frozen path always used — only the
+      // transport changed.
+      expect(src.getCandles).toHaveBeenCalledWith('18520', 'NSE', '5m', expect.any(Date), expect.any(Date));
+      expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+    });
+
+    it('candlesFor (the chart trend source) uses it as well', async () => {
+      const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+      const src = sourceOf(userCandles);
+      const s = build({ angelOneAdapter: adapter });
+
+      const rows = await s.candlesFor('18520', 'NSE', 'CUPID', '5m', src as never);
+
+      expect(src.getCandles).toHaveBeenCalled();
+      expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+      expect(rows).toHaveLength(candles.length);
+    });
+
+    it('a THROWING source degrades to the shared adapter, not to an error', async () => {
+      const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+      const src = { getCandles: jest.fn().mockRejectedValue(new Error('no session')) };
+      const s = build({ angelOneAdapter: adapter });
+
+      const levels = await s.levelsFor('18520', 'NSE', 'CUPID', '5m', src as never);
+
+      expect(adapter.getHistoricalData).toHaveBeenCalledWith('18520', 'NSE', '5m', expect.any(Date), expect.any(Date));
+      expect(levels.some((l) => l.side === 'resistance' && !l.soft)).toBe(true);
+    });
+
+    it('an EMPTY source degrades to the shared adapter', async () => {
+      const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+      const src = sourceOf([]);
+      const s = build({ angelOneAdapter: adapter });
+
+      const levels = await s.levelsFor('18520', 'NSE', 'CUPID', '5m', src as never);
+
+      expect(adapter.getHistoricalData).toHaveBeenCalled();
+      expect(levels.some((l) => l.side === 'resistance' && !l.soft)).toBe(true);
+    });
+
+    it('a source AND an adapter both failing falls through to the DB, still no throw', async () => {
+      const adapter = { getHistoricalData: jest.fn().mockRejectedValue(new Error('not authenticated')) };
+      const src = { getCandles: jest.fn().mockRejectedValue(new Error('no session')) };
+      const s = build({ angelOneAdapter: adapter });
+
+      // The documented last resort. It legitimately finds nothing here (the DB
+      // stub returns no rows) — what matters is that it is a returned answer,
+      // not an exception escaping to the chart.
+      await expect(s.levelsFor('18520', 'NSE', 'CUPID', '5m', src as never)).resolves.toEqual(
+        expect.any(Array),
+      );
+    });
+
+    // The no-regression contract, stated explicitly: EVERY background caller
+    // (universe-scanner, chartink, ml/*, asymmetric-scanner) passes no source
+    // and must keep hitting the shared adapter exactly as before.
+    it('with NO source, the shared adapter is used exactly as before', async () => {
+      const adapter = { getHistoricalData: jest.fn().mockResolvedValue(candles) };
+      const s = build({ angelOneAdapter: adapter });
+
+      await s.levelsFor('18520', 'NSE', 'CUPID', '5m');
+
+      expect(adapter.getHistoricalData).toHaveBeenCalledWith('18520', 'NSE', '5m', expect.any(Date), expect.any(Date));
+    });
+  });
+
   // Over-producing fixture: five heavy, non-round volume shelves per side plus
   // strong swing-pivot rejections landing on the adaptive round-number grid.
   // This yields ≥8 surviving evidence clusters PER SIDE before the cap (verified

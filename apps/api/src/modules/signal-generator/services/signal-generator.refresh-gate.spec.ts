@@ -48,7 +48,10 @@ describe('SignalGeneratorService — refreshFromBroker staleness gate', () => {
     await service.analyze(TOKEN, EXCHANGE, SYMBOL, '15m');
 
     expect(refreshFromBroker).toHaveBeenCalledTimes(1);
-    expect(refreshFromBroker).toHaveBeenCalledWith(TOKEN, EXCHANGE, SYMBOL);
+    // The trailing `undefined` is the optional per-request CandleSource: this
+    // caller supplies none, which is the contract that keeps every background
+    // caller on the shared adapter exactly as before.
+    expect(refreshFromBroker).toHaveBeenCalledWith(TOKEN, EXCHANGE, SYMBOL, undefined);
   });
 
   it('does NOT re-hit the broker on a second poll within the freshness window', async () => {
@@ -83,7 +86,7 @@ describe('SignalGeneratorService — refreshFromBroker staleness gate', () => {
     await service.analyze('500325', EXCHANGE, 'RELIANCE', '15m');
 
     expect(refreshFromBroker).toHaveBeenCalledTimes(2);
-    expect(refreshFromBroker).toHaveBeenCalledWith(TOKEN, EXCHANGE, SYMBOL);
-    expect(refreshFromBroker).toHaveBeenCalledWith('500325', EXCHANGE, 'RELIANCE');
+    expect(refreshFromBroker).toHaveBeenCalledWith(TOKEN, EXCHANGE, SYMBOL, undefined);
+    expect(refreshFromBroker).toHaveBeenCalledWith('500325', EXCHANGE, 'RELIANCE', undefined);
   });
 });

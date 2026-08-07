@@ -15,6 +15,7 @@ import { maLevels, anchoredVwap } from './dynamic-sr';
 import { gapLevels } from './gaps';
 import { fibLevels } from './fibonacci';
 import { SrLevelTrackingService } from './sr-level-tracking.service';
+import type { CandleSource } from './candle-source';
 import type { EvidenceLevel, LevelCandidate } from '../types/evidence-level.types';
 
 interface CacheEntry { at: number; levels: EvidenceLevel[]; }
@@ -45,6 +46,21 @@ function toUnixSeconds(ts: unknown): number | undefined {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
 }
 
+/**
+ * Every candle source here (per-user session, shared adapter, DB rows, Yahoo)
+ * hands back the same OHLCV row shape, so one mapper serves all of them and the
+ * branches cannot drift into producing subtly different series.
+ */
+function toProfileCandle(c: any): ProfileCandle {
+  return {
+    high: c.high,
+    low: c.low,
+    close: c.close,
+    volume: Number(c.volume),
+    time: toUnixSeconds(c.timestamp),
+  };
+}
+
 function maxPerSideFor(interval: string): number {
   if (interval === '1mo') return 6;
   if (interval === '1d' || interval === '1w') return 5;
@@ -61,6 +77,8 @@ function maxPerSideFor(interval: string): number {
 export class SrEvidenceService {
   private readonly logger = new Logger(SrEvidenceService.name);
   private readonly cache = new Map<string, CacheEntry>();
+  /** Keys already warned about — see warnOnce. */
+  private readonly warned = new Set<string>();
 
   constructor(
     @Optional() private readonly levelBookService?: LevelBookService,
@@ -86,12 +104,23 @@ export class SrEvidenceService {
    *   are fetched at that interval (per-TF lookback), the ATR is computed
    *   from those candles, and HISTORY candidates come from swing pivots in
    *   the same candles — never touching the shared 15m zone DB.
+   *
+   * `source` (optional) is a per-request candle source — see candle-source.ts.
+   * User-facing callers pass one bound to the caller's own broker session,
+   * because the shared adapter this service otherwise uses cannot authenticate
+   * at all. Omitting it keeps the pre-existing shared-adapter → DB path.
+   *
+   * The 15-min cache is keyed `token:exchange:interval` and is deliberately
+   * NOT keyed by user: candles are public market data, so a series fetched
+   * through one user's session is the same series for everyone. Which user
+   * paid the broker call is not a property of the answer.
    */
   async levelsFor(
     token: string,
     exchange: string,
     symbol: string,
     interval: string = '15m',
+    source?: CandleSource,
   ): Promise<EvidenceLevel[]> {
     if (!token || !this.levelBookService) return [];
     const cacheKey = `${token}:${exchange}:${interval}`;
@@ -113,8 +142,8 @@ export class SrEvidenceService {
       // come from Angel (it maps up to ONE_DAY); weekly/monthly can only come
       // from Yahoo (Angel has no weekly/monthly interval).
       const candles = isFifteen
-        ? await this.fetchCandles(token, exchange, '5m', 10)
-        : await this.fetchNativeCandles(token, exchange, symbol, interval);
+        ? await this.fetchCandles(token, exchange, '5m', 10, source)
+        : await this.fetchNativeCandles(token, exchange, symbol, interval, source);
       const atr14 = isFifteen
         ? book.atr14
         : computeAtrFromCandles(candles, 14) || book.atr14;
@@ -148,7 +177,7 @@ export class SrEvidenceService {
       // monthly request monthly MAs. Detectors self-skip when bars are short.
       const structuralCandles = isPositionalInterval(interval)
         ? candles
-        : await this.fetchCandles(token, exchange, '1d', 365);
+        : await this.fetchCandles(token, exchange, '1d', 365, source);
       if (structuralCandles.length >= 20) {
         for (const p of maLevels(structuralCandles, ltp)) candidates.push(p);
         for (const p of gapLevels(structuralCandles, ltp)) candidates.push(p);
@@ -209,9 +238,10 @@ export class SrEvidenceService {
     exchange: string,
     symbol: string,
     interval: string = '15m',
+    source?: CandleSource,
   ): Promise<ProfileCandle[]> {
     if (!token) return [];
-    return this.fetchNativeCandles(token, exchange, symbol, interval);
+    return this.fetchNativeCandles(token, exchange, symbol, interval, source);
   }
 
   /**
@@ -223,12 +253,18 @@ export class SrEvidenceService {
    *   Yahoo. Our `1mo` maps to Yahoo's `1M` code; Yahoo's candle shape is
    *   converted to `ProfileCandle`. Returns [] (no throw) when Yahoo is
    *   unwired or returns null/empty.
+   *
+   * `source` only applies to the Angel-backed branch. Yahoo is not a broker
+   * session — it needs no authentication and therefore never had the
+   * shared-feed-account problem the per-request source exists to solve, so the
+   * weekly/monthly path is left exactly as it is.
    */
   private async fetchNativeCandles(
     token: string,
     exchange: string,
     symbol: string,
     interval: string,
+    source?: CandleSource,
   ): Promise<ProfileCandle[]> {
     if (interval === '1w' || interval === '1mo') {
       if (!this.yahooFinanceService || !symbol) return [];
@@ -238,64 +274,104 @@ export class SrEvidenceService {
       try {
         const rows = await this.yahooFinanceService.getCandles(symbol, exchange, token, code, from, now);
         if (!Array.isArray(rows) || rows.length === 0) return [];
-        return rows.map((c) => ({
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          volume: Number(c.volume),
-          time: toUnixSeconds(c.timestamp),
-        }));
+        return rows.map(toProfileCandle);
       } catch (err) {
-        this.logger.debug(`SrEvidence Yahoo ${interval} fetch failed for ${symbol}: ${err instanceof Error ? err.message : err}`);
+        // WARN, not debug: with no weekly/monthly candles this timeframe has no
+        // evidence at all. A source the feature cannot work without is not a
+        // debug-level event — that is how the emptiness went unnoticed.
+        this.warnOnce(
+          `yahoo:${symbol}:${interval}`,
+          `SrEvidence Yahoo ${interval} fetch failed for ${symbol} — no weekly/monthly S/R for this symbol: ${err instanceof Error ? err.message : err}`,
+        );
         return [];
       }
     }
-    // intraday + 1d → Angel adapter (DB fallback), per-TF lookback.
-    return this.fetchCandles(token, exchange, interval, lookbackDaysFor(interval));
+    // intraday + 1d → per-request source (when supplied), else the shared
+    // Angel adapter, else DB. Per-TF lookback either way.
+    return this.fetchCandles(token, exchange, interval, lookbackDaysFor(interval), source);
   }
 
   /**
-   * Live candles at the given interval over the last `lookbackDays` via the
-   * adapter; DB fallback. Generalises the old hardcoded-5m fetch — the 15m
-   * branch passes `'5m'`/10 to keep its proven basis identical.
+   * Live candles at the given interval over the last `lookbackDays`:
+   * per-request `source` first (when supplied), then the shared adapter, then
+   * the DB. Generalises the old hardcoded-5m fetch — the 15m branch passes
+   * `'5m'`/10 to keep its proven basis identical.
+   *
+   * The order matters. The shared adapter has no feed account to log in with on
+   * this deployment, so for a user-facing request it is guaranteed to throw;
+   * trying it first would spend a round-trip to learn that every single time.
+   * It stays in the chain because the background callers (universe-scanner,
+   * chartink, ml/*) pass no source and rely on it.
    */
   private async fetchCandles(
     token: string,
     exchange: string,
     interval: string,
     lookbackDays: number,
+    source?: CandleSource,
   ): Promise<ProfileCandle[]> {
     const now = new Date();
     const from = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+    if (source) {
+      try {
+        const rows = await source.getCandles(token, exchange, interval, from, now);
+        if (Array.isArray(rows) && rows.length >= 10) return rows.map(toProfileCandle);
+        // Too short to score anything: fall through to the adapter/DB chain
+        // rather than returning a series the detectors would silently ignore.
+        this.warnOnce(
+          `user:${token}:${interval}:short`,
+          `SrEvidence per-user ${interval} fetch for ${token} returned ${Array.isArray(rows) ? rows.length : 0} candles (need 10) — falling back to the shared adapter/DB.`,
+        );
+      } catch (err) {
+        this.warnOnce(
+          `user:${token}:${interval}:throw`,
+          `SrEvidence per-user ${interval} fetch failed for ${token}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
     if (this.angelOneAdapter) {
       try {
         const live = await this.angelOneAdapter.getHistoricalData(token, exchange, interval, from, now);
         if (Array.isArray(live) && live.length >= 10) {
-          return live.map((c: any) => ({
-            high: c.high,
-            low: c.low,
-            close: c.close,
-            volume: Number(c.volume),
-            time: toUnixSeconds(c.timestamp),
-          }));
+          return live.map(toProfileCandle);
         }
       } catch (err) {
-        this.logger.debug(`SrEvidence live ${interval} fetch failed for ${token}: ${err instanceof Error ? err.message : err}`);
+        // WARN, not debug. On a deployment with no shared feed account this
+        // throws `Not authenticated` for EVERY call, the DB fallback below
+        // misses for indices, and the engine returns [] forever. Logged at
+        // debug, that read as "S/R genuinely has no levels" for months. Once
+        // per token+interval so a 60s poll doesn't turn it into a firehose.
+        this.warnOnce(
+          `shared:${token}:${interval}`,
+          `SrEvidence shared-adapter ${interval} fetch failed for ${token} — S/R will fall back to DB candles and may be empty: ${err instanceof Error ? err.message : err}`,
+        );
       }
     }
     if (this.marketDataRepository) {
       const inst = await this.marketDataRepository.getInstrumentByToken(token);
       if (inst) {
         const rows = await this.marketDataRepository.getCandles(inst.id, interval, from, now, 800);
-        return rows.map((r: any) => ({
-          high: r.high,
-          low: r.low,
-          close: r.close,
-          volume: Number(r.volume),
-          time: toUnixSeconds(r.timestamp),
-        }));
+        return rows.map(toProfileCandle);
       }
     }
     return [];
+  }
+
+  /**
+   * Log `message` at WARN the first time this `key` is seen.
+   *
+   * Every candle fetch here sits behind a 60s chart poll, so an unconditional
+   * warn on a persistent outage would be a log firehose — which is precisely
+   * the pressure that pushed these messages down to `debug` in the first place,
+   * and that is what hid a permanently broken feature. Once per key keeps the
+   * signal without the noise.
+   */
+  private warnOnce(key: string, message: string): void {
+    if (this.warned.has(key)) return;
+    // Keyed by token+interval+reason, so the set is bounded by the tracked
+    // universe; the clear is a belt-and-braces bound on a long-lived process.
+    if (this.warned.size >= 1000) this.warned.clear();
+    this.warned.add(key);
+    this.logger.warn(message);
   }
 }

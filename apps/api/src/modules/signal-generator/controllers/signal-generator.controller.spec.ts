@@ -72,10 +72,16 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       analyze: jest.fn().mockResolvedValue({ kind: 'no-setup', levels: LEVELS }),
     };
     const chartContextService = new ChartContextService();
+    // The per-user feed. /chart-context must read candles through the SIGNED-IN
+    // USER's own Angel session — the shared adapter has no feed account to log
+    // in with on this platform, which is why the S/R engine returned [] for
+    // every symbol and timeframe until this was wired.
+    const userFeedManager = { fetchCandles: jest.fn().mockResolvedValue(candles) };
 
     const deps = {
       signalGeneratorService,
       chartContextService,
+      userFeedManager,
       zoneRepository,
       strongZoneDetector,
       levelBookService,
@@ -109,6 +115,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       undefined as never, // subs
       deps.patternCapture as never,
       deps.chartContextService as never,
+      deps.userFeedManager as never,
     );
     return { ctrl, deps };
   }
@@ -116,6 +123,9 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
   // The chart-display reads are subscription-gated; an ADMIN user bypasses the
   // check (so these unit tests don't need a wired SubscriptionService).
   const ADMIN = { userId: 'u1', role: 'ADMIN' } as never;
+
+  /** The per-request CandleSource the user-scoped path threads into its loaders. */
+  const CANDLE_SOURCE = expect.objectContaining({ getCandles: expect.any(Function) });
 
   /**
    * The Phase 1 finish task: `/patterns` is the ONLY place live detections can be
@@ -341,9 +351,9 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       // interval — no re-implemented or retuned scoring. The trend candles
       // come from the evidence service's own per-timeframe series, so the
       // line and the levels can't be derived from different data.
-      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
-      expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
-      expect(deps.srEvidenceService.candlesFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
+      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m', CANDLE_SOURCE);
+      expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m', CANDLE_SOURCE);
+      expect(deps.srEvidenceService.candlesFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m', CANDLE_SOURCE);
       expect(deps.strongZoneDetector.detectZones).toHaveBeenCalledWith(
         expect.objectContaining({ interval: '5m' }),
       );
@@ -478,7 +488,114 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
     it('resolves the symbol from the token when the caller omits it', async () => {
       const { ctrl, deps } = build();
       await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m');
-      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
+      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m', CANDLE_SOURCE);
+    });
+  });
+
+  /**
+   * The root cause this endpoint was fixed for: every one of its four sources
+   * fetched candles through the SHARED Angel adapter, and this platform has no
+   * shared feed account — `getSmartApi()` throws `Not authenticated`, the DB
+   * fallback misses for indices, and the engine returned [] for every symbol on
+   * every timeframe. Silently, because the throw was logged at debug.
+   *
+   * These tests pin the fix at the seam: candles come from the REQUESTING
+   * USER's own session, and absent that manager nothing about the old path
+   * changes.
+   */
+  describe('getChartContext — per-user candle source', () => {
+    it('fetches candles through the requesting user\'s own session, not the shared adapter', async () => {
+      const { ctrl, deps } = build();
+
+      await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      // Bound to THIS user — the whole point; a source bound to anyone else
+      // would be back to a shared session by another name.
+      expect(deps.userFeedManager.fetchCandles).toHaveBeenCalledWith(
+        'u1', '18520', 'NSE', '5m', expect.any(Date), expect.any(Date),
+      );
+      // The shared adapter is the thing that cannot authenticate. It must not
+      // even be reached while the per-user source is serving.
+      expect(deps.angelOneAdapter.getHistoricalData).not.toHaveBeenCalled();
+    });
+
+    it('hands the same source to all four loaders', async () => {
+      const { ctrl, deps } = build({
+        srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([{ price: 105 }]) },
+      });
+
+      await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      // analysis (the anchored PDH/PDL/ORH/ORL/VWAP book), evidence and trend
+      // take it as an argument; zones is the loader that fetches inline, and
+      // its per-user fetch above is its evidence.
+      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith(
+        '18520', 'NSE', 'CUPID', '5m', CANDLE_SOURCE,
+      );
+      expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith(
+        '18520', 'NSE', 'CUPID', '5m', CANDLE_SOURCE,
+      );
+      expect(deps.srEvidenceService.candlesFor).toHaveBeenCalledWith(
+        '18520', 'NSE', 'CUPID', '5m', CANDLE_SOURCE,
+      );
+      expect(deps.userFeedManager.fetchCandles).toHaveBeenCalled();
+    });
+
+    // The no-regression contract: an unwired per-user feed (test containers,
+    // feed-disabled deployments) must behave EXACTLY as before — shared
+    // adapter, no source argument anywhere.
+    it('without a per-user feed, falls back to the shared adapter and passes no source', async () => {
+      const { ctrl, deps } = build({ userFeedManager: undefined });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(deps.angelOneAdapter.getHistoricalData).toHaveBeenCalled();
+      expect(deps.signalGeneratorService.analyze).toHaveBeenCalledWith(
+        '18520', 'NSE', 'CUPID', '5m', undefined,
+      );
+      // levelsFor keeps its ORIGINAL 4-argument shape — the /sr-evidence route
+      // shares this call site and must not see a new trailing argument.
+      expect(deps.srEvidenceService.levelsFor).toHaveBeenCalledWith('18520', 'NSE', 'CUPID', '5m');
+      expect(deps.srEvidenceService.candlesFor).toHaveBeenCalledWith(
+        '18520', 'NSE', 'CUPID', '5m', undefined,
+      );
+      expect(dto.zones).toEqual([{ id: 'z1' }]);
+    });
+
+    it('degrades to the shared adapter when the per-user fetch throws', async () => {
+      const { ctrl, deps } = build({
+        userFeedManager: { fetchCandles: jest.fn().mockRejectedValue(new Error('no session')) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      // Documented fallback, not an explosion: zones still compute off the
+      // adapter's candles and the source stays 'ok'.
+      expect(deps.angelOneAdapter.getHistoricalData).toHaveBeenCalled();
+      expect(dto.zones).toEqual([{ id: 'z1' }]);
+      expect(dto.sources.zones).toBe('ok');
+    });
+
+    it('degrades to the shared adapter when the per-user fetch returns nothing', async () => {
+      const { ctrl, deps } = build({
+        userFeedManager: { fetchCandles: jest.fn().mockResolvedValue([]) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(deps.angelOneAdapter.getHistoricalData).toHaveBeenCalled();
+      expect(dto.zones).toEqual([{ id: 'z1' }]);
+    });
+
+    // Scope guard: the standalone routes are NOT part of the /chart-context
+    // request path and keep their existing behaviour byte-for-byte.
+    it('the standalone /zones route does not use the per-user source', async () => {
+      const { ctrl, deps } = build();
+
+      await ctrl.getZones(ADMIN, '18520', 'NSE', 'CUPID', '5m');
+
+      expect(deps.userFeedManager.fetchCandles).not.toHaveBeenCalled();
+      expect(deps.angelOneAdapter.getHistoricalData).toHaveBeenCalled();
     });
   });
 });

@@ -28,6 +28,8 @@ import { StrongZoneDetectorService } from '../services/strong-zone-detector.serv
 import { LevelBookService } from '../services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
+import type { CandleSource } from '../services/candle-source';
 import { SrEvidenceService } from '../services/sr-evidence.service';
 import { ChartContextService } from '../services/chart-context.service';
 import type { ChartContextDto } from '../services/chart-context.service';
@@ -41,6 +43,21 @@ import { buildPatternMarkers } from '../patterns/to-markers';
 import { PatternsResponseDto } from '../dto/pattern-marker.dto';
 import { PatternCaptureService } from '../ml/pattern-capture.service';
 import type { OhlcvCandle } from '../ml/pattern-observation.types';
+
+/**
+ * One mapper for every candle source (per-user session, shared adapter) so the
+ * two branches cannot drift into producing subtly different rows.
+ */
+function toOhlcvRow(c: any) {
+  return {
+    timestamp: c.timestamp,
+    open: c.open,
+    high: c.high,
+    low: c.low,
+    close: c.close,
+    volume: Number(c.volume),
+  };
+}
 
 @AdminOnly()
 @Controller('api/signals')
@@ -85,7 +102,32 @@ export class SignalGeneratorController {
     // for the same test-wiring reason as the rest; /chart-context is the only
     // route that needs it and constructs a plain instance if unwired.
     @Optional() private readonly chartContextService?: ChartContextService,
+    // The per-user broker feed. /chart-context fetches its candles through the
+    // SIGNED-IN USER's own Angel session, because this platform has no shared
+    // feed account: every read that goes through `angelOneAdapter` on behalf of
+    // a user throws `Not authenticated`. Optional so existing test wirings (and
+    // any container without the per-user feed) still construct — when absent,
+    // /chart-context falls back to exactly the shared-adapter path it used
+    // before, which is the honest degradation, not a hidden one.
+    @Optional() private readonly userFeedManager?: UserFeedManager,
   ) {}
+
+  /**
+   * A CandleSource bound to ONE user, or undefined when the per-user feed
+   * isn't wired (tests / feed-disabled containers), in which case every
+   * consumer keeps its pre-existing shared-adapter behaviour.
+   *
+   * Built per request rather than injected because the binding IS the user —
+   * see candle-source.ts for why the shared adapter cannot serve these reads.
+   */
+  private candleSourceFor(userId: string | undefined): CandleSource | undefined {
+    const manager = this.userFeedManager;
+    if (!manager || !userId) return undefined;
+    return {
+      getCandles: (token, exchange, interval, from, to) =>
+        manager.fetchCandles(userId, token, exchange, interval, from, to),
+    };
+  }
 
   /** The injected composer, or a local one so an unwired container still serves. */
   private get chartContext(): ChartContextService {
@@ -154,6 +196,10 @@ export class SignalGeneratorController {
    * Token-based so it is immune to the duplicate-instrument-row problem that
    * starves the DB-by-instrumentId path. Returns [] when the adapter is
    * unwired or the fetch fails/throttles, so the caller can fall back to DB.
+   *
+   * `source` (optional) is the requesting user's own candle source — see
+   * candle-source.ts. It is tried first and falls through to the shared
+   * adapter, so an absent source leaves this byte-identical to before.
    */
   private async fetchLiveCandles(
     token: string,
@@ -161,24 +207,41 @@ export class SignalGeneratorController {
     interval: string,
     from: Date,
     to: Date,
+    source?: CandleSource,
   ): Promise<Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>> {
+    if (source) {
+      try {
+        const rows = await source.getCandles(token, exchange, interval, from, to);
+        if (Array.isArray(rows) && rows.length > 0) return rows.map(toOhlcvRow);
+      } catch (err) {
+        // WARN, not debug: the shared adapter below cannot authenticate for a
+        // user request on this deployment, so if the per-user fetch is failing
+        // the zone overlay is about to be empty for a reason nobody can see.
+        this.warnOnce(
+          `zones-user:${token}:${interval}`,
+          `getZones: per-user candle fetch failed for ${token}/${interval} — falling back to the shared adapter: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
     if (!this.angelOneAdapter) return [];
     try {
       const live = await this.angelOneAdapter.getHistoricalData(token, exchange, interval, from, to);
-      return (live ?? []).map((c: any) => ({
-        timestamp: c.timestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: Number(c.volume),
-      }));
+      return (live ?? []).map(toOhlcvRow);
     } catch (err) {
       this.logger.debug(
         `getZones: live candle fetch failed for ${token}: ${err instanceof Error ? err.message : err}`,
       );
       return [];
     }
+  }
+
+  /** WARN once per key — a 60s poll must not turn an outage into a firehose. */
+  private readonly warnedKeys = new Set<string>();
+  private warnOnce(key: string, message: string): void {
+    if (this.warnedKeys.has(key)) return;
+    if (this.warnedKeys.size >= 1000) this.warnedKeys.clear();
+    this.warnedKeys.add(key);
+    this.logger.warn(message);
   }
 
   /**
@@ -235,6 +298,9 @@ export class SignalGeneratorController {
     exchange?: string,
     symbol?: string,
     interval?: string,
+    // Supplied only by /chart-context (the user-scoped path). The /zones route
+    // passes nothing, so its behaviour is untouched.
+    source?: CandleSource,
   ) {
     // Validate interval against the intraday set; anything else (1d, bogus,
     // omitted) collapses to the proven 15m path.
@@ -288,7 +354,7 @@ export class SignalGeneratorController {
     // DB-by-instrumentId path. Fall back to the DB only when the live fetch
     // is unavailable (throttle / offline) so indices with seeded DB candles
     // still produce zones.
-    let candles = await this.fetchLiveCandles(token, resolvedExchange, tf, from, now);
+    let candles = await this.fetchLiveCandles(token, resolvedExchange, tf, from, now, source);
     if (candles.length < 10 && resolvedInstrument) {
       const rows = await this.marketDataRepository.getCandles(
         resolvedInstrument.id, tf, from, now, 200,
@@ -365,6 +431,8 @@ export class SignalGeneratorController {
     exchange?: string,
     symbol?: string,
     interval?: string,
+    // See computeZones — only /chart-context supplies this.
+    source?: CandleSource,
   ) {
     if (!this.srEvidenceService) return [];
     // Accept any supported timeframe — intraday (1m–1h) OR positional
@@ -383,7 +451,11 @@ export class SignalGeneratorController {
         /* fall through — service handles missing symbol */
       }
     }
-    return this.srEvidenceService.levelsFor(token, resolvedExchange, resolvedSymbol ?? '', tf);
+    // Only pass the 5th argument when there is one: the /sr-evidence route
+    // supplies no source and must keep calling levelsFor exactly as it did.
+    return source
+      ? this.srEvidenceService.levelsFor(token, resolvedExchange, resolvedSymbol ?? '', tf, source)
+      : this.srEvidenceService.levelsFor(token, resolvedExchange, resolvedSymbol ?? '', tf);
   }
 
   /**
@@ -402,6 +474,7 @@ export class SignalGeneratorController {
     exchange: string,
     symbol: string | undefined,
     interval: string,
+    source?: CandleSource,
   ): Promise<TrendLine | null> {
     if (!this.srEvidenceService) return null;
     let resolvedSymbol = symbol;
@@ -420,6 +493,7 @@ export class SignalGeneratorController {
       exchange,
       resolvedSymbol ?? '',
       interval,
+      source,
     );
     if (!Array.isArray(candles)) return null;
     const series = candles
@@ -461,6 +535,12 @@ export class SignalGeneratorController {
     }
 
     const resolvedExchange = exchange ?? 'NSE';
+    // Every candle these four sources read comes from THIS user's own Angel
+    // session. Before this, all four went through the shared adapter, which has
+    // no feed account to log in with — so the S/R engine returned [] for every
+    // symbol and timeframe, permanently, and the chart faithfully reported "no
+    // levels in range". See candle-source.ts.
+    const source = this.candleSourceFor(user?.userId);
     // /analyze needs a symbol; the chart only knows the token. Resolved once
     // here and handed to the analysis loader — a lookup failure is that
     // loader's failure, not the whole response's.
@@ -476,11 +556,16 @@ export class SignalGeneratorController {
         resolvedSymbol = inst?.symbol;
       }
       if (!resolvedSymbol) return null;
+      // The anchored lines (PDH/PDL/ORH/ORL/VWAP) are what a user most expects
+      // to see on the chart, so this loader gets the per-user source too — the
+      // level book's daily statics come from a broker fetch like everything
+      // else here.
       return this.signalGeneratorService.analyze(
         token,
         resolvedExchange,
         resolvedSymbol,
         tf,
+        source,
       );
     };
 
@@ -488,9 +573,9 @@ export class SignalGeneratorController {
       { token, exchange: resolvedExchange, interval: tf },
       {
         analysis: analysisLoader,
-        zones: () => this.computeZones(token, resolvedExchange, symbol, tf),
-        evidence: () => this.computeSrEvidence(token, resolvedExchange, symbol, tf),
-        trend: () => this.computeTrend(token, resolvedExchange, symbol, tf),
+        zones: () => this.computeZones(token, resolvedExchange, symbol, tf, source),
+        evidence: () => this.computeSrEvidence(token, resolvedExchange, symbol, tf, source),
+        trend: () => this.computeTrend(token, resolvedExchange, symbol, tf, source),
       },
     );
   }

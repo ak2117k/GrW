@@ -58,6 +58,30 @@ export interface UseChartContextReturn {
 
 const POLL_INTERVAL_MS = 60_000;
 
+/**
+ * Query params for a /chart-context read. Pure and exported so the contract is
+ * testable without a DOM.
+ *
+ * `symbol` is the load-bearing one. Server-side it gates the analysis, evidence
+ * and trend loaders alike — omit it and the server falls back to a token->symbol
+ * instrument lookup that misses for indices, emptying all three at once. The
+ * hook this replaced passed the symbol explicitly; dropping it is what made a
+ * NIFTY chart honestly report "none in range".
+ */
+export function chartContextParams(
+  token: string,
+  exchange: string,
+  interval: string | null,
+  symbol?: string | null,
+): Record<string, string> {
+  return {
+    token,
+    exchange,
+    interval: interval ?? '15m',
+    ...(symbol ? { symbol } : {}),
+  };
+}
+
 /** A transport failure is indistinguishable, to the chart, from every source failing. */
 const UNAVAILABLE: ChartContextDto = {
   interval: '',
@@ -88,6 +112,17 @@ export function useChartContext(
   token: string | null,
   exchange: string | null,
   interval: string | null,
+  /**
+   * Passed through so the server does not have to resolve it from the token.
+   *
+   * REGRESSION GUARD: the hook this replaced took the symbol explicitly. When
+   * it is omitted the server falls back to an instrument-table lookup, which
+   * misses for INDICES (NIFTY's 99926000 is not a cash-equity row) — and the
+   * resolved symbol gates the analysis, evidence AND trend loaders alike, so
+   * one failed lookup empties all three at once and the chip honestly reports
+   * "none in range" for a symbol that has plenty.
+   */
+  symbol?: string | null,
 ): UseChartContextReturn {
   const [context, setContext] = useState<ChartContextDto | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -109,7 +144,7 @@ export function useChartContext(
     setIsLoading(true);
     try {
       const response = await api.get<ChartContextDto>('/signals/chart-context', {
-        params: { token, exchange, interval: interval ?? '15m' },
+        params: chartContextParams(token, exchange, interval, symbol),
         signal: controller.signal,
       });
       const payload = response.data;
@@ -136,7 +171,7 @@ export function useChartContext(
     } finally {
       if (abortRef.current === controller) setIsLoading(false);
     }
-  }, [token, exchange, interval]);
+  }, [token, exchange, interval, symbol]);
 
   useEffect(() => {
     // Drop the previous symbol's context immediately so the chip falls back to

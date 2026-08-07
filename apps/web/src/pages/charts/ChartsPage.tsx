@@ -104,6 +104,10 @@ export default function ChartsPage() {
     selectedSymbol.token,
     selectedSymbol.exchange,
     timeframe,
+    // The symbol is known here; sending it spares the server a token->symbol
+    // instrument lookup that misses for indices and would silently empty the
+    // analysis, evidence AND trend loaders together.
+    selectedSymbol.symbol,
   );
   const zones = chartContext?.zones ?? EMPTY_ZONES;
   const evidence = chartContext?.evidence ?? EMPTY_EVIDENCE;

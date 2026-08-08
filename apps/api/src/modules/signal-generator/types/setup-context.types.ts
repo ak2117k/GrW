@@ -116,7 +116,19 @@ export interface SetupContext {
   };
 
   atr14: number;
-  volumeRatio: number; // 5m volume / VMA20
+  /**
+   * Traded volume of the trigger bar over its VMA20 — or, for an index
+   * (whose candles carry no volume), total option-chain traded volume over
+   * its own 20-period average.
+   *
+   * Tri-state: a number is a real measurement (including a genuine 0);
+   * `null` means NO READING EXISTS and the volume factor was skipped at
+   * both the breakout gate and the grade. Never conflate the two — a 0
+   * asserts "volume disconfirmed this trade", which is a lie on an
+   * instrument with no volume to read.
+   * See docs/superpowers/specs/2026-08-07-trade-plan-design.md §3.4.
+   */
+  volumeRatio: number | null;
   timeOfDayWindow: TimeOfDayWindow;
   indicators: IndicatorReadings;
   /**

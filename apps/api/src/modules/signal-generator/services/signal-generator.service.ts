@@ -36,6 +36,12 @@ import { SetupContext, IndicatorReadings } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
 import { computeExpiry } from '../utils/compute-expiry';
 import {
+  IndexVolumeTracker,
+  chainUnderlyingFor,
+  isIndexInstrument,
+  totalChainVolume,
+} from './index-volume';
+import {
   TIMEFRAMES,
   MARKET_OPEN_HOUR,
   MARKET_OPEN_MINUTE,
@@ -224,6 +230,22 @@ export class SignalGeneratorService {
 
   /** token:timeframe keys already warned about in fetchHistorical. */
   private readonly warnedUserFetchKeys = new Set<string>();
+
+  /**
+   * Rolling option-chain volume series backing the index volume proxy.
+   * Indices report `volume: 0` on every candle, so their participation is
+   * read from the option chain instead — see services/index-volume.ts and
+   * the design spec §3.4.
+   */
+  private readonly indexVolume = new IndexVolumeTracker();
+
+  /**
+   * token:timeframe keys already warned about for an unavailable option
+   * chain. The warn fires ONCE per key — silence would be worse (this
+   * codebase has been bitten by silent zero-defaults), but a per-poll
+   * warn would drown the log.
+   */
+  private readonly warnedChainVolumeKeys = new Set<string>();
 
   constructor(
     private readonly strategyRegistry: StrategyRegistryService,
@@ -430,6 +452,13 @@ export class SignalGeneratorService {
     // misleading "reject:stale".
     const nowMsForStrategy = book.lastTickAt.getTime() + 1000;
     const zones = await this.zoneRepository.findActiveByToken(token);
+    // Index volume proxy — indices report volume:0 on every candle, so
+    // their participation comes from the option chain. Null when the
+    // instrument isn't an index or the chain can't be read; the strategy
+    // then leaves volumeRatio null (no reading) instead of 0.
+    const proxyVolumeRatio = await this.computeIndexVolumeRatio(
+      token, symbol, timeframe,
+    );
     const output = strategy.analyze({
       candles,
       levelBook: book,
@@ -438,6 +467,7 @@ export class SignalGeneratorService {
       higherTimeframeTrend,
       regime,
       zones,
+      proxyVolumeRatio,
       debug,
     });
 
@@ -720,6 +750,81 @@ export class SignalGeneratorService {
       contextCoverage: setup.contextCoverage,
       contextFactors: setup.contextFactors,
     };
+  }
+
+  /**
+   * Volume-ratio proxy for index instruments, derived from TOTAL traded
+   * option-chain volume (CE + PE across every strike) against its own
+   * rolling 20-period average. See the design spec §3.4 and
+   * services/index-volume.ts.
+   *
+   * Returns `null` — explicitly "no reading", never 0 — when this isn't an
+   * index, the underlying has no option chain, the chain can't be fetched,
+   * or not enough periods have accumulated to average against. Every null
+   * caused by an unavailable chain is warned ONCE per token+timeframe:
+   * silently defaulting to 0 is exactly the failure this replaces.
+   */
+  private async computeIndexVolumeRatio(
+    token: string,
+    symbol: string,
+    timeframe: string,
+  ): Promise<number | null> {
+    if (!isIndexInstrument({ token, symbol })) return null;
+
+    const key = `${token}:${timeframe}`;
+    const underlying = chainUnderlyingFor({ token, symbol });
+    if (!underlying) {
+      this.warnChainVolumeUnavailable(key, symbol, 'no option chain for this index');
+      return null;
+    }
+    if (!this.optionsChainService) {
+      this.warnChainVolumeUnavailable(key, symbol, 'options-chain service not available');
+      return null;
+    }
+
+    try {
+      const expiries = await this.optionsChainService.getExpiries(underlying);
+      if (expiries.length === 0) {
+        this.warnChainVolumeUnavailable(key, symbol, 'no expiries returned');
+        return null;
+      }
+      const chain = await this.optionsChainService.getOptionsChain(
+        underlying, expiries[0],
+      );
+      if (chain.length === 0) {
+        this.warnChainVolumeUnavailable(key, symbol, 'empty chain');
+        return null;
+      }
+      const total = totalChainVolume(chain);
+      if (total <= 0) {
+        this.warnChainVolumeUnavailable(key, symbol, 'chain carries no traded volume');
+        return null;
+      }
+      // A null here is normal, not an error: the tracker needs several
+      // period-deltas before it can report a ratio. No warn for that.
+      return this.indexVolume.record(key, total);
+    } catch (err) {
+      this.warnChainVolumeUnavailable(
+        key, symbol,
+        `chain fetch failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
+    }
+  }
+
+  /** Warn once per token+timeframe that the index volume proxy has no reading. */
+  private warnChainVolumeUnavailable(
+    key: string,
+    symbol: string,
+    why: string,
+  ): void {
+    if (this.warnedChainVolumeKeys.has(key)) return;
+    this.warnedChainVolumeKeys.add(key);
+    this.logger.warn(
+      `Index volume proxy unavailable for ${symbol} (${key}) — ${why}. ` +
+        `volumeRatio stays null (no reading); the volume gate and grade ` +
+        `factor are skipped rather than scored 0.`,
+    );
   }
 
   /**

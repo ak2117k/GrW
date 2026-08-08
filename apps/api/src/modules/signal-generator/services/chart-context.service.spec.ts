@@ -21,15 +21,30 @@ const TREND = {
   touches: 4,
   r2: 0.9,
 } as never;
+const TRIGGER = {
+  side: 'BUY',
+  triggerPrice: 110,
+  levelSource: 'PDH',
+  entry: 110,
+  stoploss: 105,
+  target: 120,
+  rr: 2,
+  state: 'pending',
+  reason: 'a close above 110 (PDH) arms this long',
+} as never;
+const TRADE_PLAN = { active: null, above: TRIGGER, below: null } as never;
 
 function loaders(
-  over: Partial<Record<'analysis' | 'zones' | 'evidence' | 'trend', () => Promise<never>>> = {},
+  over: Partial<
+    Record<'analysis' | 'zones' | 'evidence' | 'trend' | 'tradePlan', () => Promise<never>>
+  > = {},
 ) {
   return {
     analysis: over.analysis ?? (async () => ANALYSIS),
     zones: over.zones ?? (async () => [ZONE] as never),
     evidence: over.evidence ?? (async () => [EVIDENCE] as never),
     trend: over.trend ?? (async () => TREND),
+    tradePlan: over.tradePlan ?? (async () => TRADE_PLAN),
   } as never;
 }
 
@@ -37,7 +52,7 @@ describe('deriveChartContextStatus — full truth table', () => {
   const states: SourceState[] = ['ok', 'empty', 'failed'];
 
   /**
-   * Exhaustive over all 3^4 source-state combinations, because the three
+   * Exhaustive over all 3^5 source-state combinations, because the three
    * outcomes are exactly what the chip renders and a wrong one is the bug this
    * change exists to kill (claiming "no levels" while broken).
    */
@@ -45,13 +60,13 @@ describe('deriveChartContextStatus — full truth table', () => {
     for (const analysis of states)
       for (const zones of states)
         for (const evidence of states)
-          for (const trend of states) {
-            const sources: ChartContextSources = { analysis, zones, evidence, trend };
-            const failed = [analysis, zones, evidence, trend].filter((s) => s === 'failed').length;
-            const expected =
-              failed === 0 ? 'ready' : failed === 4 ? 'unavailable' : 'partial';
-            expect(deriveChartContextStatus(sources)).toBe(expected);
-          }
+          for (const trend of states)
+            for (const tradePlan of states) {
+              const sources: ChartContextSources = { analysis, zones, evidence, trend, tradePlan };
+              const failed = Object.values(sources).filter((s) => s === 'failed').length;
+              const expected = failed === 0 ? 'ready' : failed === 5 ? 'unavailable' : 'partial';
+              expect(deriveChartContextStatus(sources)).toBe(expected);
+            }
   });
 
   it('treats an all-empty response as ready — "genuinely no levels" is an answer', () => {
@@ -61,6 +76,7 @@ describe('deriveChartContextStatus — full truth table', () => {
         zones: 'empty',
         evidence: 'empty',
         trend: 'empty',
+        tradePlan: 'empty',
       }),
     ).toBe('ready');
   });
@@ -75,7 +91,7 @@ describe('ChartContextService', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('composes all four sources on the happy path', async () => {
+  it('composes all five sources on the happy path', async () => {
     const dto = await svc.build(KEY, loaders());
     expect(dto).toEqual({
       interval: '15m',
@@ -83,9 +99,44 @@ describe('ChartContextService', () => {
       zones: [ZONE],
       evidence: [EVIDENCE],
       trend: TREND,
+      tradePlan: TRADE_PLAN,
       status: 'ready',
-      sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'ok' },
+      sources: {
+        analysis: 'ok',
+        zones: 'ok',
+        evidence: 'ok',
+        trend: 'ok',
+        tradePlan: 'ok',
+      },
     });
+  });
+
+  /**
+   * A plan with all three triggers null is the builder saying "no level
+   * qualifies on either side" — the card renders that in words. It must read
+   * 'empty' and leave the response 'ready', never 'failed'.
+   */
+  it('reports an all-null trade plan as empty, not failed, and stays ready', async () => {
+    const dto = await svc.build(
+      KEY,
+      loaders({ tradePlan: async () => ({ active: null, above: null, below: null }) as never }),
+    );
+    expect(dto.tradePlan).toEqual({ active: null, above: null, below: null });
+    expect(dto.sources.tradePlan).toBe('empty');
+    expect(dto.status).toBe('ready');
+  });
+
+  /**
+   * The plan loader is optional so a container wired before the trade plan
+   * existed still builds. Absent must degrade to an empty plan, not a failure
+   * and not a missing field the chart would read as undefined.
+   */
+  it('substitutes an empty plan when no tradePlan loader is supplied', async () => {
+    const { tradePlan: _omitted, ...withoutPlan } = loaders() as Record<string, unknown>;
+    const dto = await svc.build(KEY, withoutPlan as never);
+    expect(dto.tradePlan).toEqual({ active: null, above: null, below: null });
+    expect(dto.sources.tradePlan).toBe('empty');
+    expect(dto.status).toBe('ready');
   });
 
   /**
@@ -130,6 +181,7 @@ describe('ChartContextService', () => {
       zones: 'failed',
       evidence: 'ok',
       trend: 'ok',
+      tradePlan: 'ok',
     });
     // The whole point: a failed source must not take the others with it.
     expect(dto.analysis).toBe(ANALYSIS);
@@ -143,7 +195,7 @@ describe('ChartContextService', () => {
     };
     const dto = await svc.build(
       KEY,
-      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom }),
+      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom, tradePlan: boom }),
     );
     expect(dto.status).toBe('unavailable');
     expect(dto.sources).toEqual({
@@ -151,11 +203,14 @@ describe('ChartContextService', () => {
       zones: 'failed',
       evidence: 'failed',
       trend: 'failed',
+      tradePlan: 'failed',
     });
     expect(dto.analysis).toBeNull();
     expect(dto.zones).toEqual([]);
     expect(dto.evidence).toEqual([]);
     expect(dto.trend).toBeNull();
+    // Never undefined: the card reads `tradePlan.above` unguarded.
+    expect(dto.tradePlan).toEqual({ active: null, above: null, below: null });
   });
 
   /**
@@ -179,6 +234,7 @@ describe('ChartContextService', () => {
       zones: async () => [] as never,
       evidence: async () => [] as never,
       trend: async () => null as never,
+      tradePlan: async () => null as never,
     }));
     expect(dto.status).toBe('ready');
     expect(dto.sources).toEqual({
@@ -186,6 +242,7 @@ describe('ChartContextService', () => {
       zones: 'empty',
       evidence: 'empty',
       trend: 'empty',
+      tradePlan: 'empty',
     });
   });
 
@@ -208,7 +265,10 @@ describe('ChartContextService', () => {
     const boom = async () => {
       throw new Error('down');
     };
-    await svc.build(KEY, loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom }));
+    await svc.build(
+      KEY,
+      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom, tradePlan: boom }),
+    );
     const recovered = await svc.build(KEY, loaders());
     expect(recovered.status).toBe('ready');
   });

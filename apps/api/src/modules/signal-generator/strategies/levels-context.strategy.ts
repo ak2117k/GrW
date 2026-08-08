@@ -8,7 +8,6 @@ import {
 } from '../../../common/interfaces/trading-strategy.interface';
 import { LevelBook } from '../types/level-book.types';
 import {
-  LevelType,
   SetupType,
   SetupGrade,
   SetupContext,
@@ -18,17 +17,25 @@ import {
 } from '../types/setup-context.types';
 import { StrongZone } from '../types/zone.types';
 import { ema, rsi, macd, bollinger, roc } from './indicators';
+// Entry/SL/target arithmetic and the level-candidate set live in trade-plan.ts
+// so the LIVE setup path and the PENDING triggers on /chart-context run the
+// same code. A pending trade and the trade it becomes cannot disagree.
+import {
+  BREAKOUT_BODY_ATR,
+  RR_FLOOR_STRICT,
+  collectLevelCandidates,
+  computeSetupPrices,
+  type CandidateLevel,
+  type SetupPrices,
+} from '../services/trade-plan';
 
 const DISTANCE_GATE_ATR = 0.5;       // |spot - level| ≤ 0.5 × ATR14
                                      // (was 0.3 — too tight for low-vol
                                      // stocks where levels are spread
                                      // in wider ATR-multiples)
-const BREAKOUT_BODY_ATR = 0.15;      // close must be > level + 0.15 × ATR (tightened from 0.1)
 const BREAKOUT_WICK_MAX_RATIO = 0.3; // wick on the breakout side < 30% of full bar range
 const VOLUME_RATIO_MIN = 1.2;        // 5m volume / VMA20
 const PINBAR_BODY_PCT = 0.3;         // body ≤ 30% of full candle range
-const SL_BUFFER_ATR = 0.25;          // SL = level + 0.25 × ATR (asymmetric direction-aware)
-const RR_FLOOR_STRICT = 2.0;
 const STALE_TICK_MS = 60_000;
 // Trading-window bounds. The strategy now evaluates the FULL session
 // (no midday-chop filter). Per-exchange:
@@ -213,6 +220,18 @@ export interface AnalyzeInput {
    */
   regime?: Regime;
   /**
+   * Volume-ratio proxy supplied by the caller for instruments whose own
+   * candles carry no volume at all — i.e. indices, where Angel reports
+   * `volume: 0` on every bar. Derived from total option-chain traded
+   * volume (see services/index-volume.ts).
+   *
+   * Only consulted when the candle series yields NO reading (VMA20 of 0).
+   * A real instrument always wins with its own volume, including a
+   * genuine 0. `null`/undefined means "no proxy either" — volumeRatio
+   * then stays null and the volume factor is skipped, not scored zero.
+   */
+  proxyVolumeRatio?: number | null;
+  /**
    * Active strong/medium zones for this token. Pre-fetched by
    * SignalGeneratorService from ZoneRepository.findActiveByToken so the
    * strategy stays pure (no DB / detector calls here). Empty array when
@@ -223,10 +242,8 @@ export interface AnalyzeInput {
   debug?: (event: string, detail?: Record<string, unknown>) => void;
 }
 
-interface CandidateLevel {
-  type: LevelType;
-  value: number;
-}
+/** Re-export so existing importers of this module keep resolving the type. */
+export type { CandidateLevel };
 
 export class LevelsContextStrategy implements TradingStrategy {
   readonly name = 'levels-context';
@@ -287,8 +304,27 @@ export class LevelsContextStrategy implements TradingStrategy {
       : candles.slice(-22, -2); // 20 bars BEFORE the closed bar
     const vma20 = this.vma(vmaWindow);
     const lastVolume = Number(last.volume) || 0;
-    const volumeRatio = vma20 > 0 ? lastVolume / vma20 : 0;
-    debug?.('in-window', { atr14: levelBook.atr14, volumeRatio, spot: levelBook.spot });
+    // Tri-state volume. `null` means NO READING — distinct from a real 0.
+    //   • VMA20 > 0  → a genuine measurement, even when it is 0.0
+    //   • VMA20 === 0 → this instrument reports no volume at all (every
+    //     index token: Angel sends volume:0 on NIFTY/BANKNIFTY/…). Fall
+    //     back to the caller's option-chain proxy; if there isn't one,
+    //     stay null rather than assert "volume disconfirmed this".
+    // See the spec's §3.4 table.
+    const candleVolumeRatio: number | null = vma20 > 0 ? lastVolume / vma20 : null;
+    const volumeRatio: number | null =
+      candleVolumeRatio ?? input.proxyVolumeRatio ?? null;
+    debug?.('in-window', {
+      atr14: levelBook.atr14,
+      volumeRatio,
+      volumeSource:
+        candleVolumeRatio !== null
+          ? 'candles'
+          : volumeRatio !== null
+            ? 'option-chain'
+            : 'none',
+      spot: levelBook.spot,
+    });
 
     const candidates = this.collectLevels(levelBook);
     // Track the closest distance-rejected level so the final rejection
@@ -481,6 +517,7 @@ export class LevelsContextStrategy implements TradingStrategy {
       higherTimeframeTrend: meta.higherTimeframeTrend ?? null,
       regime: meta.regime,
       zones: meta.zones ?? [],
+      proxyVolumeRatio: meta.proxyVolumeRatio ?? null,
     };
   }
 
@@ -497,30 +534,26 @@ export class LevelsContextStrategy implements TradingStrategy {
     return hhmm >= lo && hhmm <= hi;
   }
 
+  /** Delegates to the shared candidate set — see trade-plan.ts. */
   private collectLevels(book: LevelBook): CandidateLevel[] {
-    const out: CandidateLevel[] = [
-      { type: 'PDH', value: book.pdh },
-      { type: 'PDL', value: book.pdl },
-      { type: 'VWAP', value: book.vwap },
-    ];
-    if (book.orh !== null) out.push({ type: 'ORH', value: book.orh });
-    if (book.orl !== null) out.push({ type: 'ORL', value: book.orl });
-    for (const r of book.roundNumbers) out.push({ type: 'ROUND', value: r });
-    if (book.topVolStrikes) {
-      for (const s of book.topVolStrikes) out.push({ type: 'VOL_STRIKE', value: s });
-    }
-    return out.filter((l) => Number.isFinite(l.value) && l.value > 0);
+    return collectLevelCandidates(book);
   }
 
   private detectBreakout(
     candle: CandleData,
     level: CandidateLevel,
     atr: number,
-    volumeRatio: number,
+    volumeRatio: number | null,
     spot: number,
   ): boolean {
     if (Math.abs(spot - level.value) < 0.01) return false; // spot AT the level is not a breakout
-    if (volumeRatio < VOLUME_RATIO_MIN) return false;
+    // `null` = no volume reading exists for this instrument (index with no
+    // option-chain proxy available). "Cannot confirm by volume" must not
+    // behave like "volume said no" — fall through to the geometry-only
+    // confirmation path (body beyond the level + wick quality) instead of
+    // hard-failing. A REAL reading below the floor — including 0 — still
+    // rejects.
+    if (volumeRatio !== null && volumeRatio < VOLUME_RATIO_MIN) return false;
     const buffer = BREAKOUT_BODY_ATR * atr;
     const above = candle.close > level.value + buffer;
     const below = candle.close < level.value - buffer;
@@ -576,104 +609,26 @@ export class LevelsContextStrategy implements TradingStrategy {
     candidates: CandidateLevel[];
     triggerCandle: CandleData;
     zones?: StrongZone[];
-  }): {
-    entry: number;
-    stoploss: number;
-    target: number;
-    partialTakeAt: number;
-    tp1Source: 'obstacle' | 'fixed';
-    tp1Obstacle: { classification: 'STRONG' | 'MEDIUM'; touchCount: number; nearEdge: number } | null;
-  } | null {
-    const { setupType, isLong, level, atr, candidates, triggerCandle, zones = [] } = args;
-    const buffer = SL_BUFFER_ATR * atr;
-
-    let entry: number;
-    if (setupType === 'BREAKOUT') {
-      const trigger = BREAKOUT_BODY_ATR * atr;
-      entry = isLong ? level + trigger : level - trigger;
-    } else {
-      entry = triggerCandle.close;
-    }
-
-    const stoploss = isLong ? level - buffer : level + buffer;
-    const slDist = Math.abs(entry - stoploss);
-    if (slDist <= 0) return null;
-    const minTargetDist = 2 * slDist;
-
-    const opposing = candidates
-      .filter((c) => (isLong ? c.value > entry : c.value < entry))
-      .sort((a, b) => Math.abs(a.value - entry) - Math.abs(b.value - entry));
-    const target =
-      opposing.length > 0 && Math.abs(opposing[0].value - entry) >= minTargetDist
-        ? opposing[0].value
-        : (isLong ? entry + minTargetDist : entry - minTargetDist);
-
-    const defaultTp1 = isLong ? entry + slDist : entry - slDist;
-
-    // Obstacle-aware TP1. See docs/superpowers/specs/2026-05-05-tp1-at-obstacle-design.md §Algorithm.
-    const TP1_OBSTACLE_BUFFER_ATR = 0.1;
-    const MIN_TP1_R = 0.4;
-    const obstacleBuffer = TP1_OBSTACLE_BUFFER_ATR * atr;
-
-    const obstacleCandidates = zones
-      .filter((z) =>
-        (z.classification === 'STRONG' || z.classification === 'MEDIUM') &&
-        z.touchCount >= 3,
-      )
-      .map((z) => ({
-        classification: z.classification as 'STRONG' | 'MEDIUM',
-        touchCount: z.touchCount,
-        nearEdge: isLong ? z.lower : z.upper,
-      }))
-      .filter((z) =>
-        isLong
-          ? z.nearEdge > entry && z.nearEdge < target
-          : z.nearEdge < entry && z.nearEdge > target,
-      );
-
-    const closest = isLong
-      ? obstacleCandidates.reduce<typeof obstacleCandidates[number] | null>(
-          (best, z) => (best === null || z.nearEdge < best.nearEdge ? z : best),
-          null,
-        )
-      : obstacleCandidates.reduce<typeof obstacleCandidates[number] | null>(
-          (best, z) => (best === null || z.nearEdge > best.nearEdge ? z : best),
-          null,
-        );
-
-    let partialTakeAt = defaultTp1;
-    let tp1Source: 'obstacle' | 'fixed' = 'fixed';
-    let tp1Obstacle:
-      | { classification: 'STRONG' | 'MEDIUM'; touchCount: number; nearEdge: number }
-      | null = null;
-
-    if (closest) {
-      const rawObstacleTp1 = isLong
-        ? closest.nearEdge - obstacleBuffer
-        : closest.nearEdge + obstacleBuffer;
-      const clampedTp1 = isLong
-        ? Math.min(rawObstacleTp1, target - 1e-6)
-        : Math.max(rawObstacleTp1, target + 1e-6);
-      const obstacleR = Math.abs(clampedTp1 - entry) / slDist;
-      if (obstacleR >= MIN_TP1_R) {
-        partialTakeAt = clampedTp1;
-        tp1Source = 'obstacle';
-        tp1Obstacle = {
-          classification: closest.classification,
-          touchCount: closest.touchCount,
-          nearEdge: closest.nearEdge,
-        };
-      }
-    }
-
-    return { entry, stoploss, target, partialTakeAt, tp1Source, tp1Obstacle };
+  }): SetupPrices | null {
+    // Delegates to the shared setup arithmetic in trade-plan.ts, which is now
+    // the single implementation — /chart-context's PENDING triggers and the
+    // live setups they become run the same lines of code.
+    return computeSetupPrices({
+      setupType: args.setupType,
+      isLong: args.isLong,
+      level: args.level,
+      atr: args.atr,
+      candidates: args.candidates,
+      triggerClose: args.triggerCandle.close,
+      zones: args.zones ?? [],
+    });
   }
 
   private gradeSetup(args: {
     candidates: CandidateLevel[];
     level: CandidateLevel;
     atr: number;
-    volumeRatio: number;
+    volumeRatio: number | null;
     nowIst: string;
     agreement: number;
     exchange: string;
@@ -694,9 +649,24 @@ export class LevelsContextStrategy implements TradingStrategy {
       this.between(nowIst, primeMorningStart, primeMorningEnd) ||
       this.between(nowIst, PRIME_AFTERNOON_START, PRIME_AFTERNOON_END);
     let base: SetupGrade;
-    if (confluence >= 1 && volumeRatio >= VOLUME_RATIO_GRADE_A && primeWindow) base = 'A';
-    else if (volumeRatio >= VOLUME_RATIO_MIN) base = 'B';
-    else base = 'C';
+    if (volumeRatio === null) {
+      // No volume reading exists for this instrument. Scoring the missing
+      // factor as a zero is what produced "Grade A · vol 0.00×" — an
+      // assertion that volume disconfirmed a trade on an instrument with
+      // no volume to read. Instead SKIP the volume factor and renormalise
+      // over the factors we do have (confluence + prime window), so the
+      // base grade reflects the evidence available rather than being
+      // dragged down by evidence that does not exist.
+      const present = [confluence >= 1, primeWindow];
+      const score = present.filter(Boolean).length / present.length;
+      base = score >= 1 ? 'A' : score >= 0.5 ? 'B' : 'C';
+    } else if (confluence >= 1 && volumeRatio >= VOLUME_RATIO_GRADE_A && primeWindow) {
+      base = 'A';
+    } else if (volumeRatio >= VOLUME_RATIO_MIN) {
+      base = 'B';
+    } else {
+      base = 'C';
+    }
 
     // Indicator-confluence adjustment: strong agreement (≥4) bumps up one
     // tier; meaningful opposition (≤-2) bumps down one tier; otherwise the
@@ -759,6 +729,12 @@ export class LevelsContextStrategy implements TradingStrategy {
 
   private buildReason(ctx: SetupContext, book: LevelBook): string {
     const dir = ctx.setupType === 'BREAKOUT' ? 'broke' : 'rejected';
-    return `${book.symbol} ${dir} ${ctx.levelType} (${ctx.levelValue}). Volume ${ctx.volumeRatio.toFixed(2)}× VMA20. SL ${ctx.stoploss.toFixed(2)}, target ${ctx.target.toFixed(2)}, R:R ${(Math.abs(ctx.target - ctx.entry) / Math.abs(ctx.entry - ctx.stoploss)).toFixed(2)}. Grade ${ctx.grade}.`;
+    // null volumeRatio = no reading. Say so — never print "0.00×", which
+    // reads as "volume disconfirmed" on an instrument with no volume.
+    const volumeText =
+      ctx.volumeRatio === null
+        ? 'Volume not available (no reading for this instrument)'
+        : `Volume ${ctx.volumeRatio.toFixed(2)}× VMA20`;
+    return `${book.symbol} ${dir} ${ctx.levelType} (${ctx.levelValue}). ${volumeText}. SL ${ctx.stoploss.toFixed(2)}, target ${ctx.target.toFixed(2)}, R:R ${(Math.abs(ctx.target - ctx.entry) / Math.abs(ctx.entry - ctx.stoploss)).toFixed(2)}. Grade ${ctx.grade}.`;
   }
 }

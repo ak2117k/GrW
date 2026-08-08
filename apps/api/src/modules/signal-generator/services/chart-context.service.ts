@@ -3,6 +3,7 @@ import type { StrongZone } from '../types/zone.types';
 import type { EvidenceLevel } from '../types/evidence-level.types';
 import type { AnalyzeResult } from './signal-generator.service';
 import type { TrendLine } from './trend-line';
+import type { TradePlan } from './trade-plan';
 
 /**
  * Per-source outcome. The whole point of this endpoint is that these three
@@ -18,6 +19,7 @@ export interface ChartContextSources {
   zones: SourceState;
   evidence: SourceState;
   trend: SourceState;
+  tradePlan: SourceState;
 }
 
 export type ChartContextStatus = 'ready' | 'partial' | 'unavailable';
@@ -43,17 +45,37 @@ export interface ChartContextDto {
    * the fit ran and nothing qualified, 'failed' means we don't know.
    */
   trend: TrendLine | null;
+  /**
+   * The one trade to take now, plus the trades that would trigger on either
+   * side of spot. The chart draws its two S/R lines from `above`/`below` and
+   * the setup card reads the same object, so the drawn levels and the card's
+   * numbers cannot disagree.
+   *
+   * Never null — the plan itself is always present; it is its three TRIGGERS
+   * that are nullable. An all-null plan is `sources.tradePlan === 'empty'`:
+   * the builder ran and no level qualified, which is a legitimate answer the
+   * card states in words. Only a throw is 'failed'.
+   */
+  tradePlan: TradePlan;
   status: ChartContextStatus;
   sources: ChartContextSources;
 }
 
-/** Loaders for the four composed sources — supplied by the controller. */
+/** Loaders for the five composed sources — supplied by the controller. */
 export interface ChartContextLoaders {
   analysis: () => Promise<AnalyzeResult | null | undefined>;
   zones: () => Promise<StrongZone[] | undefined>;
   evidence: () => Promise<EvidenceLevel[] | undefined>;
   trend: () => Promise<TrendLine | null | undefined>;
+  /**
+   * Composed from what the other loaders already fetched — it must not make a
+   * broker call of its own. Optional so containers wired before the trade plan
+   * existed still build (the plan then reports 'empty', not 'failed').
+   */
+  tradePlan?: () => Promise<TradePlan | null | undefined>;
 }
+
+const EMPTY_TRADE_PLAN: TradePlan = { active: null, above: null, below: null };
 
 export interface ChartContextKey {
   token: string;
@@ -107,7 +129,7 @@ export class ChartContextService {
     const hit = this.cache.get(cacheKey);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.dto;
 
-    const [analysis, zones, evidence, trend] = await Promise.all([
+    const [analysis, zones, evidence, trend, tradePlan] = await Promise.all([
       // 'empty' means "ran, produced no usable level book". An analyze result
       // that came back without levels is exactly that — the chart has nothing
       // to anchor on — so it must not read as 'ok' just because the call
@@ -118,6 +140,16 @@ export class ChartContextService {
       // A null line means the fit ran and nothing qualified — 'empty', the
       // honest "no clear trend". Only a throw is 'failed'.
       this.resolve('trend', key, loaders.trend, (v) => v == null),
+      // A plan whose three triggers are all null is 'empty' — the builder ran
+      // and no level qualified, which the card states in words. Only a throw
+      // is 'failed'. Never fabricating a level means "nothing on this side" has
+      // to be a first-class answer, exactly as `trend: null` is.
+      this.resolve(
+        'tradePlan',
+        key,
+        loaders.tradePlan ?? (async () => undefined),
+        (v) => v == null || (v.active === null && v.above === null && v.below === null),
+      ),
     ]);
 
     const sources: ChartContextSources = {
@@ -125,6 +157,7 @@ export class ChartContextService {
       zones: zones.state,
       evidence: evidence.state,
       trend: trend.state,
+      tradePlan: tradePlan.state,
     };
 
     const dto: ChartContextDto = {
@@ -133,7 +166,8 @@ export class ChartContextService {
       zones: zones.value ?? [],
       evidence: evidence.value ?? [],
       trend: trend.value ?? null,
-      // Over ALL four sources. Trend was excluded while it was unimplemented
+      tradePlan: tradePlan.value ?? EMPTY_TRADE_PLAN,
+      // Over ALL five sources. Trend was excluded while it was unimplemented
       // and hard-wired to 'empty' — including it then would have made
       // 'unavailable' unreachable, so a total outage reported 'partial'
       // forever. Now that it can genuinely fail, it belongs in the derivation.

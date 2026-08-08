@@ -34,6 +34,7 @@ import { SrEvidenceService } from '../services/sr-evidence.service';
 import { ChartContextService } from '../services/chart-context.service';
 import type { ChartContextDto } from '../services/chart-context.service';
 import { fitTrendLine, type TrendLine } from '../services/trend-line';
+import { buildTradePlan, type TradePlan } from '../services/trade-plan';
 import { isIntradayInterval, isSupportedInterval, normalizeInterval, lookbackDaysFor } from '../services/timeframe-lookback';
 import { computeAtrFromCandles } from '../services/per-tf-atr';
 import { AdminOnly, Roles, CurrentUser, AuthenticatedUser } from '../../../common/decorators';
@@ -503,6 +504,42 @@ export class SignalGeneratorController {
   }
 
   /**
+   * The trade plan — composed, never fetched.
+   *
+   * Every input here has already been paid for by another loader: the analysis
+   * promise is the memoised /analyze call, the evidence promise is the memoised
+   * S/R evidence read, and the level book is an in-memory read of the book that
+   * same analyze() call populated (spot, plus the round numbers and vol strikes
+   * `LevelsSnapshot` doesn't carry). Supplying those keeps the pending
+   * candidate set IDENTICAL to the one the live strategy scans.
+   *
+   * Evidence is allowed to fail on its own without taking the plan with it — it
+   * only annotates the reason sentence. A failed ANALYSIS does propagate: with
+   * no levels and no spot there is no plan, and "we don't know" is the honest
+   * answer rather than an empty one.
+   */
+  private async composeTradePlan(
+    token: string,
+    analysis: () => Promise<Awaited<ReturnType<SignalGeneratorService['analyze']>> | null>,
+    evidence: () => Promise<Array<{ price: number; score: number }>>,
+  ): Promise<TradePlan> {
+    const result = await analysis();
+    const evidenceLevels = await evidence().catch(() => []);
+    // In-memory read of the book analyze() just refreshed — no broker call.
+    const book = this.levelBookService?.getLevels?.(token) ?? null;
+    const levels = result?.levels ?? null;
+    return buildTradePlan({
+      analysis: result,
+      levels,
+      evidence: evidenceLevels as never,
+      ltp: book?.spot ?? null,
+      atr14: levels?.atr14 ?? book?.atr14 ?? null,
+      roundNumbers: book?.roundNumbers,
+      volStrikes: book?.topVolStrikes,
+    });
+  }
+
+  /**
    * GET /api/signals/chart-context — the charts page's single S/R read.
    *
    * Composes the three sources the page used to poll separately (/analyze's
@@ -569,13 +606,24 @@ export class SignalGeneratorController {
       );
     };
 
+    // Memoised so the trade-plan loader can COMPOSE from these two rather than
+    // re-fetch them. Both run at most once per request; the plan adds no broker
+    // call of its own, which is the whole reason it rides this endpoint instead
+    // of being one.
+    let analysisOnce: ReturnType<typeof analysisLoader> | undefined;
+    const analysis = () => (analysisOnce ??= analysisLoader());
+    let evidenceOnce: Promise<Awaited<ReturnType<typeof this.computeSrEvidence>>> | undefined;
+    const evidence = () =>
+      (evidenceOnce ??= this.computeSrEvidence(token, resolvedExchange, symbol, tf, source));
+
     return this.chartContext.build(
       { token, exchange: resolvedExchange, interval: tf },
       {
-        analysis: analysisLoader,
+        analysis,
         zones: () => this.computeZones(token, resolvedExchange, symbol, tf, source),
-        evidence: () => this.computeSrEvidence(token, resolvedExchange, symbol, tf, source),
+        evidence,
         trend: () => this.computeTrend(token, resolvedExchange, symbol, tf, source),
+        tradePlan: () => this.composeTradePlan(token, analysis, evidence),
       },
     );
   }

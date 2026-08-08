@@ -329,7 +329,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
    * still be a 200 the chart can render.
    */
   describe('getChartContext', () => {
-    it('composes levels + zones + evidence + trend into one ready response', async () => {
+    it('composes levels + zones + evidence + trend + plan into one ready response', async () => {
       const { ctrl, deps } = build({
         srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([{ price: 105 }]) },
       });
@@ -342,8 +342,18 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         zones: [{ id: 'z1' }],
         evidence: [{ price: 105 }],
         trend: expect.objectContaining({ kind: 'uptrend', touches: 4 }),
+        // This book mock exposes no getLevels, so the plan has no spot to place
+        // triggers around. All-null is the builder refusing to fabricate a
+        // level — 'empty', and the response stays ready.
+        tradePlan: { active: null, above: null, below: null },
         status: 'ready',
-        sources: { analysis: 'ok', zones: 'ok', evidence: 'ok', trend: 'ok' },
+        sources: {
+          analysis: 'ok',
+          zones: 'ok',
+          evidence: 'ok',
+          trend: 'ok',
+          tradePlan: 'empty',
+        },
       });
       expect(dto.trend!.slope).toBeGreaterThan(0);
       expect(dto.trend!.r2).toBeGreaterThanOrEqual(0.75);
@@ -420,10 +430,14 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         zones: 'failed',
         evidence: 'failed',
         trend: 'failed',
+        // A failed analysis takes the plan with it by design: with no levels
+        // and no spot, "we don't know" is honest and "no trades set up" is not.
+        tradePlan: 'failed',
       });
       expect(dto.analysis).toBeNull();
       expect(dto.zones).toEqual([]);
       expect(dto.evidence).toEqual([]);
+      expect(dto.tradePlan).toEqual({ active: null, above: null, below: null });
     });
 
     it('empty-but-successful sources are ready with empty states', async () => {
@@ -448,6 +462,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         zones: 'empty',
         evidence: 'empty',
         trend: 'empty',
+        tradePlan: 'empty',
       });
     });
 

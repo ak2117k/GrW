@@ -8,6 +8,7 @@ import SetupMarker from '@/components/charts/SetupMarker';
 import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
 import ChartZoneOverlay from '@/components/charts/ChartZoneOverlay';
 import { buildSRView } from '@/components/charts/buildSRView';
+import { tradePlanLines } from '@/components/charts/tradePlanView';
 import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
 import TrendLineOverlay from '@/components/charts/TrendLineOverlay';
 import { useChartContext } from '@/hooks/useChartContext';
@@ -216,37 +217,20 @@ export default function ChartsPage() {
     ].filter(isPlottableLevel);
   }, [setupContext]);
 
-  // Always-on level lines derived from the live analysis. Drawn whenever
-  // we're not in signal-mode and the analyze endpoint returned a level
-  // book — works for both setup and no-setup states. VWAP is omitted
-  // when 0 since the lazy-build path leaves it at 0 outside market hours.
+  // The two lines the chart draws outside signal-mode: the resistance and
+  // support that ARM a trade, straight off `tradePlan`.
   //
-  // ORH/ORL fallback: when today's OR hasn't locked yet (null), fall back
-  // to the previous session's OR via `prevOrh`/`prevOrl` and render those
-  // as dimmed `Y-ORH`/`Y-ORL` lines. The `else` (not addition) means the
-  // prior-session lines disappear the moment today's OR locks — no
-  // visual duplication.
-  const analysisOverlayLevels = useMemo(() => {
-    if (setupContext || !analysis?.levels) return [];
-    const lb = analysis.levels;
-    const orhLine = lb.orh !== null
-      ? { type: 'ORH', value: lb.orh, color: LEVEL_COLORS.ORH, label: 'ORH' }
-      : lb.prevOrh != null
-        ? { type: 'Y_ORH', value: lb.prevOrh, color: LEVEL_COLORS.Y_ORH, label: 'Y-ORH' }
-        : null;
-    const orlLine = lb.orl !== null
-      ? { type: 'ORL', value: lb.orl, color: LEVEL_COLORS.ORL, label: 'ORL' }
-      : lb.prevOrl != null
-        ? { type: 'Y_ORL', value: lb.prevOrl, color: LEVEL_COLORS.Y_ORL, label: 'Y-ORL' }
-        : null;
-    return [
-      { type: 'PDH', value: lb.pdh, color: LEVEL_COLORS.PDH, label: 'PDH' },
-      { type: 'PDL', value: lb.pdl, color: LEVEL_COLORS.PDL, label: 'PDL' },
-      ...(orhLine ? [orhLine] : []),
-      ...(orlLine ? [orlLine] : []),
-      { type: 'VWAP', value: lb.vwap, color: LEVEL_COLORS.VWAP, label: 'VWAP' },
-    ].filter(isPlottableLevel);
-  }, [analysis, setupContext]);
+  // This replaces the eight always-on level lines (PDH/PDL/ORH/ORL/VWAP plus
+  // the zone and evidence overlays). Those levels are all still computed and
+  // still feed scoring server-side; they are simply not drawn, because eight
+  // labelled lines with none marked as the one that matters left the user to
+  // do the synthesis the engine had already done.
+  //
+  // A null side draws NOTHING on that side — never a fabricated level.
+  const tradePlanOverlayLevels = useMemo(
+    () => (setupContext ? [] : tradePlanLines(chartContext?.tradePlan)),
+    [chartContext?.tradePlan, setupContext],
+  );
 
   const {
     candles,
@@ -582,25 +566,26 @@ export default function ChartsPage() {
             </>
           )}
 
-          {/* Always-on analysis overlays — only when not in signal-mode.
-              Levels render in both setup and no-setup states; entry/SL/target
-              lines only when there's a setup. */}
-          {!setupContext && analysisOverlayLevels.length > 0 && (
+          {/* The trade plan's two lines — resistance above, support below —
+              outside signal-mode. Entry/SL/target still render below when a
+              setup is actually formed. */}
+          {!setupContext && tradePlanOverlayLevels.length > 0 && (
             <LevelOverlay
               series={chartRef.current?.candleSeries ?? null}
-              levels={analysisOverlayLevels}
+              levels={tradePlanOverlayLevels}
             />
           )}
-          {/* Strong-zone S/R overlay — immediate (next wall) + major (STRONG
-              structural) tiers. Rendered on every native intraday timeframe. */}
-          {showSR && ltp > 0 && (
+          {/* Zone + evidence overlays are now SIGNAL-MODE ONLY. That view is a
+              deliberate "show me everything about this one setup"; the default
+              chart is not, and these were most of its clutter. */}
+          {setupContext && showSR && ltp > 0 && (
             <ChartZoneOverlay
               candleSeries={chartRef.current?.candleSeries ?? null}
               zones={zones}
               ltp={ltp}
             />
           )}
-          {showSR && ltp > 0 && (
+          {setupContext && showSR && ltp > 0 && (
             <EvidenceLevelOverlay
               candleSeries={chartRef.current?.candleSeries ?? null}
               evidence={evidence}
@@ -670,6 +655,10 @@ export default function ChartsPage() {
           timeframe={timeframe}
           analysis={analysis}
           analysisLoading={analysisLoading}
+          // Same object the two drawn lines come from, so the card and the
+          // chart cannot disagree about where the trade is.
+          tradePlan={chartContext?.tradePlan ?? null}
+          tradePlanSource={chartContext?.sources.tradePlan}
         />
       )}
     </div>

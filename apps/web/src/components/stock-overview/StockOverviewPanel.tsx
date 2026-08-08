@@ -1,3 +1,4 @@
+import type { SourceState, TradePlan } from '@/hooks/useChartContext';
 import SetupContextCard, { type AnalysisDto } from './SetupContextCard';
 import LiveQuoteCard from './LiveQuoteCard';
 import MarketDepthCard from './MarketDepthCard';
@@ -13,6 +14,9 @@ interface Props {
   timeframe: string;
   analysis: AnalysisDto | null;
   analysisLoading: boolean;
+  /** The server's one trade plan — the same object the chart draws from. */
+  tradePlan?: TradePlan | null;
+  tradePlanSource?: SourceState;
 }
 
 /**
@@ -41,10 +45,17 @@ export default function StockOverviewPanel({
   timeframe,
   analysis,
   analysisLoading,
+  tradePlan,
+  tradePlanSource,
 }: Props) {
   return (
     <div className="flex flex-col gap-4 p-4 max-w-full">
-      <SetupContextCard analysis={analysis} loading={analysisLoading} />
+      <SetupContextCard
+        analysis={analysis}
+        loading={analysisLoading}
+        tradePlan={tradePlan}
+        tradePlanSource={tradePlanSource}
+      />
       <LiveQuoteCard token={token} exchange={exchange} symbol={symbol} />
       <MarketDepthCard token={token} exchange={exchange} />
       <IndicatorsCard token={token} exchange={exchange} timeframe={timeframe} />

@@ -28,11 +28,44 @@ export interface TrendLine {
   r2: number;
 }
 
+/**
+ * One armed trade. `triggerPrice` is the level that arms it — and the price
+ * the chart draws — so the drawn line and the card's numbers are the same
+ * object and cannot drift apart.
+ */
+export interface TradeTrigger {
+  side: 'BUY' | 'SELL';
+  triggerPrice: number;
+  /** 'PDH' | 'PDL' | 'ORH' | 'ORL' | 'ROUND' | 'MA' | 'AVWAP' | 'PIVOT'. */
+  levelSource: string;
+  entry: number;
+  stoploss: number;
+  target: number;
+  /** Reward:risk, e.g. 2.0. Computed server-side, never hand-set. */
+  rr: number;
+  /** 'active' = conditions met now. 'pending' = would trigger if reached. */
+  state: 'active' | 'pending';
+  /** One plain sentence. No JSON, no debug payloads. */
+  reason: string;
+}
+
+export interface TradePlan {
+  /** A setup formed right now, if any. */
+  active: TradeTrigger | null;
+  /** Nearest untriggered LONG above spot. `null` is a legitimate answer. */
+  above: TradeTrigger | null;
+  /** Nearest untriggered SHORT below spot. `null` is a legitimate answer. */
+  below: TradeTrigger | null;
+}
+
+const EMPTY_TRADE_PLAN: TradePlan = { active: null, above: null, below: null };
+
 export interface ChartContextSources {
   analysis: SourceState;
   zones: SourceState;
   evidence: SourceState;
   trend: SourceState;
+  tradePlan: SourceState;
 }
 
 export interface ChartContextDto {
@@ -44,6 +77,12 @@ export interface ChartContextDto {
   // rejects poor fits rather than drawing a line through noise. It is never a
   // loading or error state (those live in `status` / the hook's own flags).
   trend: TrendLine | null;
+  /**
+   * The one trade the chart draws and the card reads. Always an object — a
+   * plan with all-null triggers means "ran, nothing qualified", which is a
+   * different statement from `sources.tradePlan === 'failed'`.
+   */
+  tradePlan: TradePlan;
   status: 'ready' | 'partial' | 'unavailable';
   sources: ChartContextSources;
 }
@@ -89,8 +128,15 @@ const UNAVAILABLE: ChartContextDto = {
   zones: [],
   evidence: [],
   trend: null,
+  tradePlan: EMPTY_TRADE_PLAN,
   status: 'unavailable',
-  sources: { analysis: 'failed', zones: 'failed', evidence: 'failed', trend: 'failed' },
+  sources: {
+    analysis: 'failed',
+    zones: 'failed',
+    evidence: 'failed',
+    trend: 'failed',
+    tradePlan: 'failed',
+  },
 };
 
 /**
@@ -156,6 +202,15 @@ export function useChartContext(
               ...payload,
               zones: Array.isArray(payload.zones) ? payload.zones : [],
               evidence: Array.isArray(payload.evidence) ? payload.evidence : [],
+              // A body without a plan is a server that couldn't produce one
+              // (or predates the field): normalise to an empty plan and mark
+              // the SOURCE failed, so the card says "unavailable" rather than
+              // the far stronger "nothing is setting up".
+              tradePlan: payload.tradePlan ?? EMPTY_TRADE_PLAN,
+              sources: {
+                ...payload.sources,
+                tradePlan: payload.sources?.tradePlan ?? (payload.tradePlan ? 'ok' : 'failed'),
+              },
             }
           : { ...UNAVAILABLE, interval: interval ?? '' },
       );

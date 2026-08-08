@@ -1,5 +1,10 @@
 import clsx from 'clsx';
 import type { CombinedTier, ContextFactorBreakdown } from '@/types';
+import type { SourceState, TradePlan } from '@/hooks/useChartContext';
+import {
+  deriveTradePlanView,
+  type TriggerLineView,
+} from '@/components/charts/tradePlanView';
 import { Card } from './_shared';
 
 // ─── Types (lifted from the old AnalysisPanel.tsx) ─────────────────────────
@@ -143,6 +148,10 @@ export type AnalysisDto = SetupAnalysis | NoSetupAnalysis;
 interface Props {
   analysis: AnalysisDto | null;
   loading?: boolean;
+  /** The server's one trade plan. Undefined until the first response lands. */
+  tradePlan?: TradePlan | null;
+  /** `sources.tradePlan` — 'failed' means "we don't know", not "nothing". */
+  tradePlanSource?: SourceState;
 }
 
 function fmt(n: number): string {
@@ -160,24 +169,35 @@ function fmtPremium(n: number): string {
   return `₹ ${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function computeRR(setup: SetupAnalysis): string {
-  const risk = Math.abs(setup.entry - setup.stoploss);
-  const reward = Math.abs(setup.target - setup.entry);
-  if (risk === 0) return '–';
-  return `1:${(reward / risk).toFixed(2)}`;
-}
-
 /**
- * Card 1 of the StockOverviewPanel. Lifts the body of the (deleted) floating
- * AnalysisPanel into a regular in-flow card. Renders setup details (entry,
- * SL, target, TP1, RR, grade, options play, context-scoring breakdown) when
- * a setup is active; falls back to a "No active setup" placeholder otherwise.
+ * Card 1 of the StockOverviewPanel.
  *
- * The drag wrapper, localStorage position, and absolute placement from the
- * old AnalysisPanel are all gone — this card lives in the document flow.
+ * It answers ONE question: what is the trade? When a setup is formed it shows
+ * that trade; otherwise it shows the two triggers that would fire, one line
+ * each. Everything the engine used to reach that answer — confluence chips,
+ * regime, higher-timeframe bias, volume ratio, and the raw reject payload
+ * (`reject:confirmation {...}`) — is still computed server-side and still
+ * gates the setup, but is no longer rendered: it was engine state, not a
+ * trade, and reading it was the user's job to synthesize.
+ *
+ * The state -> content decision lives in `deriveTradePlanView` so it is
+ * testable without a DOM, and so the chart's two drawn lines come off the
+ * same `TradePlan` fields this card reads.
  */
-export default function SetupContextCard({ analysis, loading }: Props) {
-  if (analysis === null && loading) {
+export default function SetupContextCard({
+  analysis,
+  loading,
+  tradePlan,
+  tradePlanSource,
+}: Props) {
+  const view = deriveTradePlanView({
+    plan: tradePlan,
+    analysis,
+    source: tradePlanSource,
+    loading: !!loading,
+  });
+
+  if (view.kind === 'loading') {
     return (
       <Card title="Setup &amp; Context">
         <div className="space-y-2">
@@ -190,70 +210,46 @@ export default function SetupContextCard({ analysis, loading }: Props) {
     );
   }
 
-  if (analysis === null) {
+  if (view.kind === 'unavailable' || view.kind === 'none') {
     return (
       <Card title="Setup &amp; Context">
-        <p className="text-sm text-zinc-500">
-          No active setup on this instrument right now.
-        </p>
+        <p className="text-sm text-zinc-400">{view.message}</p>
       </Card>
     );
   }
 
-  if (analysis.kind === 'no-setup') {
-    const topRejects = (analysis.rejections ?? []).slice(0, 3);
+  if (view.kind === 'triggers') {
     return (
       <Card title="Setup &amp; Context">
         <div className="text-sm font-semibold text-zinc-300">No setup right now</div>
-
-        {topRejects.length > 0 ? (
-          <div className="mt-2 space-y-1.5 border-t border-zinc-700/60 pt-2">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-              Closest to firing
-            </div>
-            {topRejects.map((r, i) => (
-              <RejectRow
-                key={`${r.levelType}-${r.levelValue}-${i}`}
-                reject={r}
-                highlight={i === 0}
-              />
-            ))}
+        <div className="mt-2 space-y-1.5 border-t border-zinc-700/60 pt-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+            Waiting for
           </div>
-        ) : (
-          <div className="mt-1 text-[11px] italic text-zinc-500" title={analysis.reason}>
-            {analysis.reason}
-          </div>
-        )}
-
-        {analysis.levels && (
-          <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 border-t border-zinc-700/60 pt-2 text-[11px]">
-            <div className="flex justify-between">
-              <span className="text-zinc-500">PDH</span>
-              <span className="font-mono tabular-nums text-zinc-300">{fmt(analysis.levels.pdh)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">PDL</span>
-              <span className="font-mono tabular-nums text-zinc-300">{fmt(analysis.levels.pdl)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">VWAP</span>
-              <span className="font-mono tabular-nums text-zinc-300">{fmt(analysis.levels.vwap)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-zinc-500">ATR14</span>
-              <span className="font-mono tabular-nums text-zinc-300">{fmt(analysis.levels.atr14)}</span>
-            </div>
-          </div>
-        )}
+          {view.above ? (
+            <TriggerRow trigger={view.above} />
+          ) : (
+            <div className="text-[11px] text-zinc-500">Nothing set up above.</div>
+          )}
+          {view.below ? (
+            <TriggerRow trigger={view.below} />
+          ) : (
+            <div className="text-[11px] text-zinc-500">Nothing set up below.</div>
+          )}
+        </div>
       </Card>
     );
   }
 
-  const isBuy = analysis.side === 'BUY';
+  const trade = view.trade;
+  // The extras (status, TP1, options play, market context) only exist on a
+  // live setup payload; the plan alone carries the trade itself.
+  const setup = analysis?.kind === 'setup' ? analysis : null;
+  const isBuy = trade.side === 'BUY';
   const gradeClass =
-    analysis.grade === 'A'
+    trade.grade === 'A'
       ? 'bg-emerald-500/20 text-emerald-300'
-      : analysis.grade === 'B'
+      : trade.grade === 'B'
         ? 'bg-blue-500/20 text-blue-300'
         : 'bg-zinc-500/20 text-zinc-300';
 
@@ -270,31 +266,29 @@ export default function SetupContextCard({ analysis, loading }: Props) {
               isBuy ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400',
             )}
           >
-            {analysis.side}
+            {trade.side}
           </div>
-          {analysis.status && (
+          {setup?.status && (
             <StatusBadge
-              status={analysis.status}
-              invalidationKind={analysis.invalidationKind ?? null}
+              status={setup.status}
+              invalidationKind={setup.invalidationKind ?? null}
             />
           )}
         </div>
         <div className="text-[11px] text-zinc-300">
-          <span className="font-semibold text-zinc-100">{analysis.symbol}</span>
+          {setup && <span className="font-semibold text-zinc-100">{setup.symbol}</span>}
           <span className="mx-1 text-zinc-500">·</span>
-          <span className="text-zinc-400">
-            {analysis.levelType} {analysis.setupType}
-          </span>
+          <span className="text-zinc-400">{trade.levelSource}</span>
         </div>
       </div>
 
-      {analysis.status === 'INVALIDATED' && analysis.invalidationReason && (() => {
+      {setup?.status === 'INVALIDATED' && setup.invalidationReason && (() => {
         const kindLabel =
-          analysis.invalidationKind === 'structural'
+          setup.invalidationKind === 'structural'
             ? 'STRUCTURAL EXIT'
-            : analysis.invalidationKind === 'counter-setup'
+            : setup.invalidationKind === 'counter-setup'
               ? 'COUNTER FLIP'
-              : analysis.invalidationKind === 'time-mfe'
+              : setup.invalidationKind === 'time-mfe'
                 ? 'TIMED OUT'
                 : 'CLOSED';
         return (
@@ -304,7 +298,7 @@ export default function SetupContextCard({ analysis, loading }: Props) {
               <span>Invalidated — {kindLabel}</span>
             </div>
             <div className="mt-1 text-[11px] leading-snug text-amber-100/90">
-              {analysis.invalidationReason}
+              {setup.invalidationReason}
             </div>
           </div>
         );
@@ -313,58 +307,58 @@ export default function SetupContextCard({ analysis, loading }: Props) {
       <div
         className={clsx(
           'mt-3 space-y-1.5 text-[12px]',
-          analysis.status === 'INVALIDATED' && 'opacity-60',
+          setup?.status === 'INVALIDATED' && 'opacity-60',
         )}
       >
         <div className="flex items-center justify-between">
           <span className="text-amber-400">Entry</span>
-          <span className="font-mono tabular-nums text-zinc-100">{fmt(analysis.entry)}</span>
+          <span className="font-mono tabular-nums text-zinc-100">{trade.entryText}</span>
         </div>
         <div className="flex items-center justify-between">
           <span className="text-red-400">SL</span>
-          <span className="font-mono tabular-nums text-zinc-100">{fmt(analysis.stoploss)}</span>
+          <span className="font-mono tabular-nums text-zinc-100">{trade.stoplossText}</span>
         </div>
         <div className="flex items-center justify-between">
           <span className="text-emerald-400">Target</span>
-          <span className="font-mono tabular-nums text-zinc-100">{fmt(analysis.target)}</span>
+          <span className="font-mono tabular-nums text-zinc-100">{trade.targetText}</span>
         </div>
       </div>
 
-      {analysis.partialTakeAt !== undefined && analysis.partialTakeAt !== null && (
+      {setup && setup.partialTakeAt !== undefined && setup.partialTakeAt !== null && (
         <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 border-t border-zinc-700/60 pt-2">
           <span className="text-[10px] uppercase tracking-wider text-zinc-500">TP1</span>
           <span className="text-right">
             <span className="font-mono text-[11px] tabular-nums text-white">
-              {fmt(analysis.partialTakeAt)}
+              {fmt(setup.partialTakeAt)}
             </span>
-            {analysis.tp1Source === 'obstacle' && analysis.tp1Obstacle && (
+            {setup.tp1Source === 'obstacle' && setup.tp1Obstacle && (
               <span
                 className="ml-1.5 text-[9px] uppercase tracking-wider text-zinc-500"
-                title={`TP1 sits just before a ${analysis.tp1Obstacle.classification} zone with ${analysis.tp1Obstacle.touchCount} historical touches at ${analysis.tp1Obstacle.nearEdge.toFixed(2)}`}
+                title={`TP1 sits just before a ${setup.tp1Obstacle.classification} zone with ${setup.tp1Obstacle.touchCount} historical touches at ${setup.tp1Obstacle.nearEdge.toFixed(2)}`}
               >
-                at {analysis.tp1Obstacle.classification.toLowerCase()} zone · {analysis.tp1Obstacle.touchCount}t
+                at {setup.tp1Obstacle.classification.toLowerCase()} zone · {setup.tp1Obstacle.touchCount}t
               </span>
             )}
           </span>
-          {analysis.status === 'PARTIAL_BOOKED' && (
+          {setup.status === 'PARTIAL_BOOKED' && (
             <>
               <span className="text-[10px] uppercase tracking-wider text-zinc-500">Trail</span>
               <span className="text-right font-mono text-[11px] tabular-nums text-white">
-                {analysis.trailingSl !== null && analysis.trailingSl !== undefined
-                  ? fmt(analysis.trailingSl)
+                {setup.trailingSl !== null && setup.trailingSl !== undefined
+                  ? fmt(setup.trailingSl)
                   : '—'}
               </span>
             </>
           )}
           <span className="text-[10px] uppercase tracking-wider text-zinc-500">Tgt2</span>
           <span className="text-right font-mono text-[11px] tabular-nums text-white">
-            {fmt(analysis.target)}
+            {trade.targetText}
           </span>
         </div>
       )}
 
-      {analysis.recommendedStrike && (() => {
-        const r = analysis.recommendedStrike!;
+      {setup?.recommendedStrike && (() => {
+        const r = setup.recommendedStrike!;
         const expiryShort = r.expiry.slice(0, 10);
         const showLot = r.lotSize > 1;
         return (
@@ -415,129 +409,25 @@ export default function SetupContextCard({ analysis, loading }: Props) {
         );
       })()}
 
+      {/* R:R and Grade only. `vol ×` is gone: for an index it was always
+          0.00× (no volume is reported for index tokens), which read as
+          "volume disconfirmed this" when the truth was "nothing to read". */}
       <div className="mt-3 flex items-center justify-between border-t border-zinc-700/60 pt-2 text-[10px]">
         <span className="rounded bg-zinc-700/60 px-1.5 py-0.5 font-mono tabular-nums text-zinc-200">
-          {computeRR(analysis)}
+          {trade.rrText}
         </span>
-        <span className={clsx('rounded px-1.5 py-0.5 font-bold', gradeClass)}>
-          Grade {analysis.grade}
-        </span>
-        <span className="font-mono tabular-nums text-zinc-400">
-          vol {analysis.volumeRatio.toFixed(2)}×
-        </span>
+        {trade.grade && (
+          <span className={clsx('rounded px-1.5 py-0.5 font-bold', gradeClass)}>
+            Grade {trade.grade}
+          </span>
+        )}
       </div>
 
-      {analysis.higherTimeframeTrend && (() => {
-        const mtf = analysis.higherTimeframeTrend!;
-        const label =
-          mtf.bias === 'bullish'
-            ? 'BULLISH'
-            : mtf.bias === 'bearish'
-              ? 'BEARISH'
-              : 'NEUTRAL';
-        const arrow = mtf.bias === 'bullish' ? '↑' : mtf.bias === 'bearish' ? '↓' : '—';
-        const tone = clsx(
-          mtf.bias === 'bullish' && 'text-emerald-400',
-          mtf.bias === 'bearish' && 'text-red-400',
-          mtf.bias === 'neutral' && 'text-zinc-400',
-        );
-        return (
-          <div className="mt-2 flex items-center justify-between border-t border-zinc-700/60 pt-2 text-[10px]">
-            <span className="font-semibold uppercase tracking-wider text-zinc-500">
-              {mtf.tf.toUpperCase()} Trend
-            </span>
-            <span className={clsx('font-semibold uppercase tracking-wider', tone)}>
-              {label} {arrow}
-            </span>
-          </div>
-        );
-      })()}
+      {/* Confluence chips (EMA/RSI/MACD/BB/MOM), Regime and the 1H-trend row
+          used to render here. They are engine state, not a trade — still
+          computed and still gating the setup, just no longer shown. */}
 
-      {analysis.regime && (() => {
-        const regime = analysis.regime!;
-        const ratio = analysis.intradayRangeRatio ?? 0;
-        const label =
-          regime === 'trending' ? 'TRENDING' : regime === 'choppy' ? 'CHOPPY' : 'NORMAL';
-        const tone = clsx(
-          regime === 'trending' && 'text-emerald-400',
-          regime === 'choppy' && 'text-amber-400',
-          regime === 'normal' && 'text-zinc-400',
-        );
-        return (
-          <div className="mt-2 flex items-center justify-between border-t border-zinc-700/60 pt-2 text-[10px]">
-            <span className="font-semibold uppercase tracking-wider text-zinc-500">
-              Regime
-            </span>
-            <span className={clsx('font-semibold uppercase tracking-wider', tone)}>
-              {label} ({ratio.toFixed(1)}×)
-            </span>
-          </div>
-        );
-      })()}
-
-      {analysis.indicators && (() => {
-        const ind = analysis.indicators;
-        const aligned = (
-          [ind.alignment.ema, ind.alignment.rsi, ind.alignment.macd, ind.alignment.bollinger, ind.alignment.momentum] as const
-        ).filter((v) => v === 1).length;
-        const arrow = isBuy ? '↑' : '↓';
-        const headerClass =
-          ind.agreement >= 4
-            ? 'text-emerald-400'
-            : ind.agreement <= -2
-              ? 'text-red-400'
-              : 'text-zinc-400';
-
-        const fmtMacd = (v: number | null) =>
-          v === null ? 'n/a' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}`;
-        const fmtRsi = (v: number | null) => (v === null ? 'n/a' : v.toFixed(1));
-        const fmtRoc = (v: number | null) =>
-          v === null ? 'n/a' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
-        const emaTitle =
-          ind.ema9 !== null && ind.ema21 !== null
-            ? `EMA9${ind.ema9 > ind.ema21 ? '>' : ind.ema9 < ind.ema21 ? '<' : '='}EMA21`
-            : 'EMA n/a';
-        const bbTitle =
-          ind.bollingerPosition === null
-            ? 'BB n/a'
-            : `BB pos ${ind.bollingerPosition >= 0 ? '+' : ''}${ind.bollingerPosition.toFixed(2)}`;
-
-        const chips: { label: string; alignment: 1 | 0 | -1; title: string }[] = [
-          { label: 'EMA', alignment: ind.alignment.ema, title: emaTitle },
-          { label: 'RSI', alignment: ind.alignment.rsi, title: `RSI ${fmtRsi(ind.rsi14)}` },
-          { label: 'MACD', alignment: ind.alignment.macd, title: `MACD hist ${fmtMacd(ind.macdHistogram)}` },
-          { label: 'BB', alignment: ind.alignment.bollinger, title: bbTitle },
-          { label: 'MOM', alignment: ind.alignment.momentum, title: `ROC10 ${fmtRoc(ind.roc10)}` },
-        ];
-
-        return (
-          <div className="mt-3 border-t border-zinc-700/60 pt-2">
-            <div className={clsx('text-[10px] font-semibold uppercase tracking-wider', headerClass)}>
-              Confluence: {aligned}/5 {arrow}
-            </div>
-            <div className="mt-1.5 flex items-center gap-1">
-              {chips.map((chip) => (
-                <span
-                  key={chip.label}
-                  title={chip.title}
-                  className={clsx(
-                    'text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded',
-                    chip.alignment === 1
-                      ? 'bg-emerald-500/15 text-emerald-400'
-                      : chip.alignment === -1
-                        ? 'bg-red-500/15 text-red-400'
-                        : 'bg-zinc-700/40 text-zinc-500',
-                  )}
-                >
-                  {chip.label}
-                </span>
-              ))}
-            </div>
-          </div>
-        );
-      })()}
-
-      {analysis.contextScore !== undefined && analysis.contextFactors && (
+      {setup && setup.contextScore !== undefined && setup.contextFactors && (
         <div className="mt-3 border-t border-zinc-700/60 pt-2">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
@@ -546,24 +436,24 @@ export default function SetupContextCard({ analysis, loading }: Props) {
             <span
               className={clsx(
                 'text-[11px] font-bold tabular-nums',
-                analysis.contextTier === 'STRONG_BULL' && 'text-emerald-400',
-                analysis.contextTier === 'BULL' && 'text-emerald-300',
-                analysis.contextTier === 'STRONG_BEAR' && 'text-red-400',
-                analysis.contextTier === 'BEAR' && 'text-red-300',
-                analysis.contextTier === 'NEUTRAL' && 'text-zinc-300',
+                setup.contextTier === 'STRONG_BULL' && 'text-emerald-400',
+                setup.contextTier === 'BULL' && 'text-emerald-300',
+                setup.contextTier === 'STRONG_BEAR' && 'text-red-400',
+                setup.contextTier === 'BEAR' && 'text-red-300',
+                setup.contextTier === 'NEUTRAL' && 'text-zinc-300',
               )}
             >
-              {analysis.contextScore > 0 ? '+' : ''}
-              {analysis.contextScore} {analysis.contextTier?.replace('_', ' ')}
+              {setup.contextScore > 0 ? '+' : ''}
+              {setup.contextScore} {setup.contextTier?.replace('_', ' ')}
             </span>
           </div>
           <div className="mt-0.5 text-[9px] text-zinc-500">
-            {analysis.contextFactors.filter((f) => !f.isStub).length}/
-            {analysis.contextFactors.length} factors active · coverage{' '}
-            {Math.round((analysis.contextCoverage ?? 0) * 100)}%
+            {setup.contextFactors.filter((f) => !f.isStub).length}/
+            {setup.contextFactors.length} factors active · coverage{' '}
+            {Math.round((setup.contextCoverage ?? 0) * 100)}%
           </div>
           <div className="mt-1.5 space-y-0.5">
-            {analysis.contextFactors.map((f) => (
+            {setup.contextFactors.map((f) => (
               <div
                 key={f.name}
                 className="flex items-center justify-between text-[10px]"
@@ -620,49 +510,59 @@ export default function SetupContextCard({ analysis, loading }: Props) {
         </div>
       )}
 
-      <div className="mt-2 truncate text-[10px] italic text-zinc-500" title={analysis.reason}>
-        {analysis.reason}
-      </div>
+      {/* Sanitized upstream: a reason carrying an engine debug payload
+          (`reject:confirmation {...}`) is dropped, never rendered. */}
+      {trade.reason && (
+        <div className="mt-2 text-[10px] italic leading-snug text-zinc-500">{trade.reason}</div>
+      )}
     </Card>
   );
 }
 
-function RejectRow({ reject, highlight }: { reject: RankedReject; highlight: boolean }) {
-  const tone =
-    reject.progress >= 4
-      ? 'border-emerald-500/40 bg-emerald-500/5'
-      : reject.progress >= 2
-        ? 'border-amber-500/30 bg-amber-500/5'
-        : 'border-zinc-700/60 bg-zinc-800/40';
-  const sideColor =
-    reject.side === 'BUY'
-      ? 'text-emerald-400'
-      : reject.side === 'SELL'
-        ? 'text-red-400'
-        : 'text-zinc-400';
+/**
+ * One forward trigger, e.g.
+ * `Above 24,630 (PDH) → BUY  SL 24,590  T 24,720  1:2.0`.
+ *
+ * The pieces are laid out here but composed in `deriveTradePlanView`, so the
+ * single-line form the tests assert on and the rendered form are the same
+ * numbers off the same trigger object.
+ */
+function TriggerRow({ trigger }: { trigger: TriggerLineView }) {
+  const isBuy = trigger.side === 'BUY';
   return (
-    <div className={clsx('rounded border px-2 py-1.5', tone, highlight && 'ring-1 ring-amber-500/30')}>
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 min-w-0">
-          {reject.side && (
-            <span className={clsx('text-[9px] font-bold uppercase', sideColor)}>{reject.side}</span>
-          )}
-          <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-zinc-300">
-            {reject.levelType}
-          </span>
-          <span className="font-mono tabular-nums text-[11px] text-zinc-200">
-            {fmt(reject.levelValue)}
-          </span>
-        </div>
-        <span className="text-[9px] font-mono tabular-nums text-zinc-500">{reject.progress}/5</span>
-      </div>
-      <div className="mt-0.5 text-[10px] leading-tight text-zinc-400">{reject.blockedReason}</div>
-      {reject.needsFor && (
-        <div className="text-[10px] leading-tight text-zinc-500">
-          <span className="text-zinc-600">needs: </span>
-          {reject.needsFor}
-        </div>
+    <div
+      className={clsx(
+        'rounded border px-2 py-1.5',
+        isBuy ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5',
       )}
+      title={trigger.text}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+            {trigger.prefix}
+          </span>
+          <span className="font-mono text-[12px] tabular-nums text-zinc-100">
+            {trigger.priceText}
+          </span>
+          <span className="rounded bg-zinc-700/60 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-zinc-300">
+            {trigger.levelSource}
+          </span>
+        </div>
+        <span
+          className={clsx(
+            'text-[10px] font-bold uppercase',
+            isBuy ? 'text-emerald-400' : 'text-red-400',
+          )}
+        >
+          {trigger.side}
+        </span>
+      </div>
+      <div className="mt-0.5 flex items-center gap-3 font-mono text-[10px] tabular-nums text-zinc-400">
+        <span>SL {trigger.stoplossText}</span>
+        <span>T {trigger.targetText}</span>
+        <span className="text-zinc-300">{trigger.rrText}</span>
+      </div>
     </div>
   );
 }

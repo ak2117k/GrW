@@ -14,12 +14,14 @@ function ctx(
     zones: [],
     evidence: [],
     trend: null,
+    tradePlan: { active: null, above: null, below: null },
     status,
     sources: {
       analysis: 'ok',
       zones: 'ok',
       evidence: 'ok',
       trend: 'empty',
+      tradePlan: 'empty',
       ...sources,
     },
   };

@@ -271,6 +271,44 @@ describe('LevelBookService', () => {
       expect(book!.orl).toBe(100);
     });
 
+    /**
+     * The lookback must never reach the BROKER.
+     *
+     * Angel returns empty for sub-hour intervals spanning a session boundary,
+     * so 5m is capped at one day and the adapter chunks anything wider into
+     * per-day calls — on a queue globally serialised at 350ms (3 req/sec) that
+     * every other consumer shares. Routing an overnight 5-day lookback there
+     * put five extra round trips in front of the chart's own candle fetches,
+     * and the trend line, indicator card and S/R all went blank together.
+     */
+    it('never widens the 5m lookback onto the rate-limited broker path', async () => {
+      const dailyRows = Array.from({ length: 16 }, (_, i) =>
+        mkDaily(16 - i, 110 + i, 90 + i, 100 + i),
+      );
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      // DB has daily candles but NO 5m bars at all — the case that used to fall
+      // through to a five-chunk broker fetch.
+      const repo = {
+        getCandles: jest.fn().mockImplementation(
+          async (_id: string, tf: string) => (tf === '1d' ? dailyRows : []),
+        ),
+      } as any;
+      const getHistoricalData = jest.fn().mockResolvedValue([]);
+      const svc = new LevelBookService(instrumentService, repo, { getHistoricalData } as any);
+
+      await svc.lazyLoad('TKN_RL', 'NSE', 'X');
+
+      // Today's window may still consult the broker (one day, one call). The
+      // widened lookback may not — so no 5m call may span more than a day.
+      const fiveMinCalls = getHistoricalData.mock.calls.filter((c) => c[2] === '5m');
+      for (const call of fiveMinCalls) {
+        const spanMs = new Date(call[4]).getTime() - new Date(call[3]).getTime();
+        expect(spanMs).toBeLessThanOrEqual(24 * 3600 * 1000);
+      }
+    });
+
     it('cache-hit returns existing book without DB call', async () => {
       const instrumentService = { getByToken: jest.fn() } as any;
       const repo = { getCandles: jest.fn() } as any;

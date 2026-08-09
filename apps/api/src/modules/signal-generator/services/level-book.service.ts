@@ -451,7 +451,21 @@ export class LevelBookService {
     this.seedSession({ token, symbol, exchange, recentDailyCandles: dailyCandles });
 
     // 5m bars for the session being replayed — DB first, broker fallback.
-    const fetch5m = async (from: Date, to: Date): Promise<typeof dailyCandles> => {
+    //
+    // `allowBroker` exists because the two windows have wildly different costs.
+    // Angel silently returns empty for sub-hour intervals spanning a session
+    // boundary, so TIMEFRAME_MAX_RANGE_DAYS caps 5m at ONE day and the adapter
+    // chunks anything wider into per-day calls — and every historical call is
+    // globally serialised at 350ms (Angel allows 3 req/sec). A multi-day BROKER
+    // window therefore costs one queued round trip per day and delays every
+    // other consumer sharing that queue: the chart's own candles, the indicator
+    // card, the trend fit. The DB read has no such cost, so only it is allowed
+    // to look back.
+    const fetch5m = async (
+      from: Date,
+      to: Date,
+      allowBroker: boolean,
+    ): Promise<typeof dailyCandles> => {
       let bars: typeof dailyCandles = [];
       if (instrument && this.marketDataRepository) {
         const rows = await this.marketDataRepository.getCandles(
@@ -463,7 +477,7 @@ export class LevelBookService {
           volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
         }));
       }
-      if (bars.length === 0 && (source || this.brokerAdapter?.getHistoricalData)) {
+      if (allowBroker && bars.length === 0 && (source || this.brokerAdapter?.getHistoricalData)) {
         try {
           const broker5m = await this.fetchHistorical(
             token, exchange, '5m', from, to, priority, source,
@@ -484,19 +498,26 @@ export class LevelBookService {
     };
 
     // Today's session first, so during market hours this is byte-identical to
-    // before — one fetch over exactly the old window.
-    let fiveMinBars = await fetch5m(sessionOpen, now);
+    // before — one fetch over exactly the old window, broker fallback included.
+    let fiveMinBars = await fetch5m(sessionOpen, now, true);
 
     // Empty means the session hasn't started (we are before today's open, so
     // the window above was inverted) or today isn't a trading day at all. Reach
     // back and replay the newest session that DID trade, rather than leaving
     // the book's intraday state at its 0 seed and letting every consumer read
     // it as a symbol that has never traded. See session-window.ts.
+    //
+    // DB ONLY — see fetch5m. Overnight this runs on every book refresh, and
+    // routing it to the broker would put five chunked, rate-limited calls in
+    // front of the chart's own candle fetches on a shared 3 req/sec queue.
+    // A symbol with no stored history simply keeps an unseeded intraday state
+    // here; the chart no longer depends on it for a price (see the trade plan's
+    // last-close fallback).
     if (fiveMinBars.length === 0) {
       const lookbackFrom = new Date(
         sessionOpen.getTime() - SESSION_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
       );
-      fiveMinBars = mostRecentSessionBars(await fetch5m(lookbackFrom, now));
+      fiveMinBars = mostRecentSessionBars(await fetch5m(lookbackFrom, now, false));
     }
 
     if (fiveMinBars.length >= 3) {

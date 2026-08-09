@@ -35,6 +35,24 @@ import { ChartContextService } from '../services/chart-context.service';
 import type { ChartContextDto } from '../services/chart-context.service';
 import { fitTrendLine, type TrendLine } from '../services/trend-line';
 import { buildTradePlan, type TradePlan } from '../services/trade-plan';
+import type { ProfileCandle as ChartCandle } from '../services/volume-profile';
+
+/** First argument that is genuinely a price. 0 and NaN are not prices. */
+function firstPrice(...values: Array<number | null | undefined>): number | null {
+  for (const v of values) {
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+  }
+  return null;
+}
+
+/** Close of the last bar carrying one, or null for an empty/unusable series. */
+function lastClose(candles: ChartCandle[]): number | null {
+  for (let i = candles.length - 1; i >= 0; i--) {
+    const c = candles[i]?.close;
+    if (typeof c === 'number' && Number.isFinite(c) && c > 0) return c;
+  }
+  return null;
+}
 import { isIntradayInterval, isSupportedInterval, normalizeInterval, lookbackDaysFor } from '../services/timeframe-lookback';
 import { computeAtrFromCandles } from '../services/per-tf-atr';
 import { AdminOnly, Roles, CurrentUser, AuthenticatedUser } from '../../../common/decorators';
@@ -471,13 +489,30 @@ export class SignalGeneratorController {
    * 'failed' rather than 'empty'.
    */
   private async computeTrend(
+    candles: () => Promise<ChartCandle[]>,
+  ): Promise<TrendLine | null> {
+    const series = (await candles())
+      .filter((c) => Number.isFinite(c.time))
+      .map((c) => ({ time: c.time as number, high: c.high, low: c.low }));
+    return fitTrendLine(series);
+  }
+
+  /**
+   * The candle series /chart-context's trend and trade plan both read.
+   *
+   * Memoised by the caller so the two share ONE fetch, and so the plan's
+   * fallback spot is by construction the last bar of the very series the trend
+   * was fitted on — the chart cannot be drawing a line from one dataset and a
+   * level from another.
+   */
+  private async chartCandles(
     token: string,
     exchange: string,
     symbol: string | undefined,
     interval: string,
     source?: CandleSource,
-  ): Promise<TrendLine | null> {
-    if (!this.srEvidenceService) return null;
+  ): Promise<ChartCandle[]> {
+    if (!this.srEvidenceService) return [];
     let resolvedSymbol = symbol;
     // Only the Yahoo (1w/1mo) branch needs a symbol; resolve it the same way
     // computeSrEvidence does, and let a lookup failure fall through rather
@@ -496,11 +531,7 @@ export class SignalGeneratorController {
       interval,
       source,
     );
-    if (!Array.isArray(candles)) return null;
-    const series = candles
-      .filter((c) => Number.isFinite(c.time))
-      .map((c) => ({ time: c.time as number, high: c.high, low: c.low }));
-    return fitTrendLine(series);
+    return Array.isArray(candles) ? candles : [];
   }
 
   /**
@@ -522,6 +553,7 @@ export class SignalGeneratorController {
     token: string,
     analysis: () => Promise<Awaited<ReturnType<SignalGeneratorService['analyze']>> | null>,
     evidence: () => Promise<Array<{ price: number; score: number }>>,
+    candles: () => Promise<ChartCandle[]>,
   ): Promise<TradePlan> {
     const result = await analysis();
     const evidenceLevels = await evidence().catch(() => []);
@@ -532,7 +564,18 @@ export class SignalGeneratorController {
       analysis: result,
       levels,
       evidence: evidenceLevels as never,
-      ltp: book?.spot ?? null,
+      // `book.spot` is written ONLY by updateFromTick and seeded to 0, so it is
+      // a real price only once a tick has landed. Before the first tick of a
+      // session — overnight, weekends, or any symbol this user has no live
+      // subscription to — it stays 0, and anchoring the plan on it produced an
+      // all-null plan reported as 'empty'. That read as "no level qualifies"
+      // when the truth was "the scan never ran", which is the exact empty-vs-
+      // failed conflation this endpoint exists to prevent.
+      //
+      // The last close of the chart's own candle series is a real price
+      // whenever the chart has bars to draw, so the plan is anchored on
+      // whichever of the two is genuinely a price, live tick preferred.
+      ltp: firstPrice(book?.spot, lastClose(await candles().catch(() => []))),
       atr14: levels?.atr14 ?? book?.atr14 ?? null,
       roundNumbers: book?.roundNumbers,
       volStrikes: book?.topVolStrikes,
@@ -615,6 +658,11 @@ export class SignalGeneratorController {
     let evidenceOnce: Promise<Awaited<ReturnType<typeof this.computeSrEvidence>>> | undefined;
     const evidence = () =>
       (evidenceOnce ??= this.computeSrEvidence(token, resolvedExchange, symbol, tf, source));
+    // Shared by the trend fit and the plan's fallback spot — one fetch, and by
+    // construction the same bars behind both.
+    let candlesOnce: Promise<ChartCandle[]> | undefined;
+    const candles = () =>
+      (candlesOnce ??= this.chartCandles(token, resolvedExchange, symbol, tf, source));
 
     return this.chartContext.build(
       { token, exchange: resolvedExchange, interval: tf },
@@ -622,8 +670,8 @@ export class SignalGeneratorController {
         analysis,
         zones: () => this.computeZones(token, resolvedExchange, symbol, tf, source),
         evidence,
-        trend: () => this.computeTrend(token, resolvedExchange, symbol, tf, source),
-        tradePlan: () => this.composeTradePlan(token, analysis, evidence),
+        trend: () => this.computeTrend(candles),
+        tradePlan: () => this.composeTradePlan(token, analysis, evidence, candles),
       },
     );
   }

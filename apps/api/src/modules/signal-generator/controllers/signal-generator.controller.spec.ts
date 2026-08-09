@@ -56,7 +56,13 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       upsertMany: jest.fn().mockResolvedValue(0),
     };
     const strongZoneDetector = { detectZones: jest.fn().mockReturnValue([{ id: 'z1' }]) };
-    const levelBookService = { lazyLoad: jest.fn().mockResolvedValue(book) };
+    // getLevels is the in-memory read the trade plan takes spot from. The
+    // default book is a LIVE one (spot 100); the overnight case — spot 0
+    // because no tick has ever landed — is exercised explicitly below.
+    const levelBookService = {
+      lazyLoad: jest.fn().mockResolvedValue(book),
+      getLevels: jest.fn().mockReturnValue(book),
+    };
     const marketDataRepository = {
       getInstrumentByToken: jest.fn().mockResolvedValue({ id: 'i1', symbol: 'CUPID', exchange: 'NSE' }),
       getCandles: jest.fn().mockResolvedValue([]),
@@ -342,17 +348,20 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         zones: [{ id: 'z1' }],
         evidence: [{ price: 105 }],
         trend: expect.objectContaining({ kind: 'uptrend', touches: 4 }),
-        // This book mock exposes no getLevels, so the plan has no spot to place
-        // triggers around. All-null is the builder refusing to fabricate a
-        // level — 'empty', and the response stays ready.
-        tradePlan: { active: null, above: null, below: null },
+        // Spot 100 sits between PDL 90 and PDH 110, so the plan arms a long
+        // above and a short below — the two lines the chart draws.
+        tradePlan: {
+          active: null,
+          above: expect.objectContaining({ side: 'BUY', levelSource: 'PDH', triggerPrice: 110 }),
+          below: expect.objectContaining({ side: 'SELL', levelSource: 'PDL', triggerPrice: 90 }),
+        },
         status: 'ready',
         sources: {
           analysis: 'ok',
           zones: 'ok',
           evidence: 'ok',
           trend: 'ok',
-          tradePlan: 'empty',
+          tradePlan: 'ok',
         },
       });
       expect(dto.trend!.slope).toBeGreaterThan(0);
@@ -367,6 +376,54 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       expect(deps.strongZoneDetector.detectZones).toHaveBeenCalledWith(
         expect.objectContaining({ interval: '5m' }),
       );
+    });
+
+    /**
+     * The overnight/weekend bug this test exists to prevent.
+     *
+     * `book.spot` is written in exactly ONE place — updateFromTick — and seeded
+     * to 0. lazyLoad's 5m replay would fill it, but lazyLoad windows that fetch
+     * as [today 09:15 IST, now], which before the open (or on a weekend) is an
+     * inverted range returning zero bars. So the book comes back with spot 0,
+     * the plan refuses to place triggers around a non-price, and the chart
+     * silently drew nothing while the S/R chip — which uses the CLIENT's ltp —
+     * happily showed levels.
+     *
+     * The plan must anchor on a price that exists whenever the chart has bars.
+     */
+    it('still builds a plan when the book has no tick-fed spot (overnight)', async () => {
+      const { ctrl } = build({
+        levelBookService: {
+          lazyLoad: jest.fn().mockResolvedValue({ spot: 0, atr14: 5 }),
+          getLevels: jest.fn().mockReturnValue({ spot: 0, atr14: 5 }),
+        },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      // Last close of the trend series is 119.5, which sits above every
+      // anchored level — so the short below is the trigger that qualifies.
+      expect(dto.sources.tradePlan).toBe('ok');
+      expect(dto.tradePlan.below).not.toBeNull();
+      expect(dto.tradePlan.below!.side).toBe('SELL');
+    });
+
+    it('leaves the plan empty — not fabricated — when there is no price anywhere', async () => {
+      const { ctrl } = build({
+        levelBookService: {
+          lazyLoad: jest.fn().mockResolvedValue({ spot: 0, atr14: 5 }),
+          getLevels: jest.fn().mockReturnValue({ spot: 0, atr14: 5 }),
+        },
+        srEvidenceService: {
+          levelsFor: jest.fn().mockResolvedValue([]),
+          candlesFor: jest.fn().mockResolvedValue([]),
+        },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      expect(dto.tradePlan).toEqual({ active: null, above: null, below: null });
+      expect(dto.sources.tradePlan).toBe('empty');
     });
 
     it('reports "no clear trend" as empty, not failed — the chart may state it', async () => {

@@ -152,6 +152,50 @@ describe('LevelBookService', () => {
     });
   });
 
+  /**
+   * The cron's seeding path had the same defect in a different shape: it fell
+   * back a flat 24 hours before today's open, which from a Monday morning
+   * lands on Sunday and replays nothing. Books seeded overnight therefore kept
+   * VWAP=0 and spot=0 until the first live tick.
+   */
+  describe('replaySessionToBook', () => {
+    it('replays the last session that traded, not merely yesterday', async () => {
+      const istOffsetMs = 5.5 * 60 * 60 * 1000;
+      // Three days back — beyond a flat -24h reach, within the lookback.
+      const threeDaysAgo = new Date(Date.now() - 3 * 24 * 3600 * 1000);
+      const bars = [201, 202, 203].map((close, i) => {
+        const ist = Date.UTC(
+          threeDaysAgo.getUTCFullYear(), threeDaysAgo.getUTCMonth(), threeDaysAgo.getUTCDate(),
+          9, 15 + i * 5, 0, 0,
+        );
+        return {
+          timestamp: new Date(ist - istOffsetMs),
+          open: close, high: close + 1, low: close - 1, close,
+          volume: BigInt(1000),
+        };
+      });
+
+      const repo = {
+        getCandles: jest.fn().mockImplementation(async (_id: string, _tf: string, from: Date, to: Date) =>
+          bars.filter(
+            (b) => b.timestamp.getTime() >= from.getTime() && b.timestamp.getTime() <= to.getTime(),
+          ),
+        ),
+      } as any;
+      const svc = new LevelBookService(undefined, repo);
+
+      svc.seedSession({
+        token: 'TKN_R', symbol: 'X', exchange: 'NSE',
+        recentDailyCandles: [candle('2026-04-26', 100, 110, 90, 105)],
+      });
+      await svc.replaySessionToBook('TKN_R', 'NSE', 'inst1');
+
+      const book = svc.getLevels('TKN_R');
+      expect(book!.spot).toBe(203);
+      expect(book!.vwap).toBeGreaterThan(0);
+    });
+  });
+
   describe('lazyLoad', () => {
     const mkDaily = (offsetDays: number, h: number, l: number, c: number) => {
       const ts = new Date();
@@ -163,6 +207,69 @@ describe('LevelBookService', () => {
         volume: BigInt(1000),
       };
     };
+
+    /**
+     * The overnight/weekend gap.
+     *
+     * The 5m replay used to fetch `[today 09:15 IST, now]`. Before the open
+     * that range is inverted and after a weekend it covers a day that never
+     * traded, so it returned nothing, `updateFromTick` never ran, and the book
+     * came back with spot / VWAP / today's H-L / OR all at their 0 seed — a
+     * symbol that looks like it has never traded. The chart's trade plan then
+     * had no price to anchor on and silently drew nothing.
+     *
+     * The bars here are two days old, so this window is empty whatever time of
+     * day the suite runs — the test does not depend on a clock.
+     */
+    it('replays the most recent session when today has no bars yet', async () => {
+      const dailyRows = Array.from({ length: 16 }, (_, i) =>
+        mkDaily(16 - i, 110 + i, 90 + i, 100 + i),
+      );
+      // A prior session: 09:15, 09:20, 09:25 … IST two days back.
+      const istOffsetMs = 5.5 * 60 * 60 * 1000;
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600 * 1000);
+      const sessionBars = [101, 102, 103, 104].map((close, i) => {
+        const ist = Date.UTC(
+          twoDaysAgo.getUTCFullYear(), twoDaysAgo.getUTCMonth(), twoDaysAgo.getUTCDate(),
+          9, 15 + i * 5, 0, 0,
+        );
+        return {
+          timestamp: new Date(ist - istOffsetMs),
+          open: close, high: close + 1, low: close - 1, close,
+          volume: BigInt(1000),
+        };
+      });
+
+      const instrumentService = {
+        getByToken: jest.fn().mockResolvedValue({ id: 'inst1' }),
+      } as any;
+      // Honest window semantics: return only rows inside [from, to].
+      const repo = {
+        getCandles: jest.fn().mockImplementation(
+          async (_id: string, tf: string, from: Date, to: Date) => {
+            const rows = tf === '1d' ? dailyRows : sessionBars;
+            return rows.filter(
+              (r) => r.timestamp.getTime() >= from.getTime() && r.timestamp.getTime() <= to.getTime(),
+            );
+          },
+        ),
+      } as any;
+      const svc = new LevelBookService(instrumentService, repo);
+
+      const book = await svc.lazyLoad('TKN_ON', 'NSE', 'X');
+
+      expect(book).not.toBeNull();
+      // Last close of that session — a real price the trade plan can anchor on.
+      expect(book!.spot).toBe(104);
+      // The replay pushes each bar's CLOSE through updateFromTick, exactly as a
+      // live tick would have arrived, so today's H/L track closes (104/101) —
+      // not the bars' own extremes.
+      expect(book!.todayHigh).toBe(104);
+      expect(book!.todayLow).toBe(101);
+      // OR comes from the first three bars of the SAME session.
+      expect(book!.orh).toBe(104);
+      expect(book!.orl).toBe(100);
+    });
 
     it('cache-hit returns existing book without DB call', async () => {
       const instrumentService = { getByToken: jest.fn() } as any;

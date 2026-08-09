@@ -6,6 +6,7 @@ import { BrokerAdapter } from '../../../common/interfaces/broker-adapter.interfa
 import { HistoricalPriority } from '../../market-data/services/angel-one-adapter.service';
 import type { CandleSource } from './candle-source';
 import { TIMEFRAMES } from '@td/shared/constants';
+import { SESSION_LOOKBACK_DAYS, mostRecentSessionBars } from './session-window';
 
 // Use the literal injection token string instead of importing
 // BROKER_ADAPTER_TOKEN from market-feed.service — that import creates
@@ -116,12 +117,17 @@ export class LevelBookService {
       openH, openM, 0, 0,
     ));
     const todayOpenUtc = new Date(todayOpenIst.getTime() - istOffsetMs);
+    // Before today's open, reach back far enough to clear a weekend or a
+    // holiday and keep the newest session that actually traded. A flat -24h
+    // lands on Sunday every Monday morning and replays nothing at all.
     const sessionStart = now.getTime() >= todayOpenUtc.getTime()
       ? todayOpenUtc
-      : new Date(todayOpenUtc.getTime() - 24 * 3600 * 1000);
+      : new Date(todayOpenUtc.getTime() - SESSION_LOOKBACK_DAYS * 24 * 3600 * 1000);
 
-    const fiveMinRows = await this.marketDataRepository.getCandles(
-      instrumentId, TIMEFRAMES.FIVE_MIN, sessionStart, now,
+    const fiveMinRows = mostRecentSessionBars(
+      await this.marketDataRepository.getCandles(
+        instrumentId, TIMEFRAMES.FIVE_MIN, sessionStart, now,
+      ),
     );
 
     if (fiveMinRows.length >= 3 && this.books.has(token)) {
@@ -444,34 +450,53 @@ export class LevelBookService {
 
     this.seedSession({ token, symbol, exchange, recentDailyCandles: dailyCandles });
 
-    // 5m bars for today's session — DB first, broker fallback.
-    let fiveMinBars: typeof dailyCandles = [];
-    if (instrument && this.marketDataRepository) {
-      const fiveMinRows = await this.marketDataRepository.getCandles(
-        instrument.id, TIMEFRAMES.FIVE_MIN, sessionOpen, now,
-      );
-      fiveMinBars = fiveMinRows.map((c) => ({
-        timestamp: c.timestamp,
-        open: c.open, high: c.high, low: c.low, close: c.close,
-        volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
-      }));
-    }
-    if (fiveMinBars.length === 0 && (source || this.brokerAdapter?.getHistoricalData)) {
-      try {
-        const broker5m = await this.fetchHistorical(
-          token, exchange, '5m', sessionOpen, now, priority, source,
+    // 5m bars for the session being replayed — DB first, broker fallback.
+    const fetch5m = async (from: Date, to: Date): Promise<typeof dailyCandles> => {
+      let bars: typeof dailyCandles = [];
+      if (instrument && this.marketDataRepository) {
+        const rows = await this.marketDataRepository.getCandles(
+          instrument.id, TIMEFRAMES.FIVE_MIN, from, to,
         );
-        fiveMinBars = broker5m.map((c: any) => ({
-          timestamp: new Date(c.timestamp),
-          open: Number(c.open), high: Number(c.high),
-          low: Number(c.low), close: Number(c.close),
-          volume: Number(c.volume) || 0,
+        bars = rows.map((c) => ({
+          timestamp: c.timestamp,
+          open: c.open, high: c.high, low: c.low, close: c.close,
+          volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
         }));
-      } catch (err) {
-        this.logger.warn(
-          `lazyLoad: broker 5m fetch failed for ${symbol}: ${err instanceof Error ? err.message : err}`,
-        );
       }
+      if (bars.length === 0 && (source || this.brokerAdapter?.getHistoricalData)) {
+        try {
+          const broker5m = await this.fetchHistorical(
+            token, exchange, '5m', from, to, priority, source,
+          );
+          bars = broker5m.map((c: any) => ({
+            timestamp: new Date(c.timestamp),
+            open: Number(c.open), high: Number(c.high),
+            low: Number(c.low), close: Number(c.close),
+            volume: Number(c.volume) || 0,
+          }));
+        } catch (err) {
+          this.logger.warn(
+            `lazyLoad: broker 5m fetch failed for ${symbol}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
+      }
+      return bars;
+    };
+
+    // Today's session first, so during market hours this is byte-identical to
+    // before — one fetch over exactly the old window.
+    let fiveMinBars = await fetch5m(sessionOpen, now);
+
+    // Empty means the session hasn't started (we are before today's open, so
+    // the window above was inverted) or today isn't a trading day at all. Reach
+    // back and replay the newest session that DID trade, rather than leaving
+    // the book's intraday state at its 0 seed and letting every consumer read
+    // it as a symbol that has never traded. See session-window.ts.
+    if (fiveMinBars.length === 0) {
+      const lookbackFrom = new Date(
+        sessionOpen.getTime() - SESSION_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+      );
+      fiveMinBars = mostRecentSessionBars(await fetch5m(lookbackFrom, now));
     }
 
     if (fiveMinBars.length >= 3) {

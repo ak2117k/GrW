@@ -213,6 +213,43 @@ describe('buildProjectionZones — box geometry', () => {
     expect(both.up!.breakLevel).toBe(1000);
   });
 
+  /**
+   * The index case that drew nothing at all.
+   *
+   * The zone detector needs ten candles, a valid ATR AND clustered pivots, and
+   * for an index it routinely produces none — so a chart with ORH, PDH and
+   * round levels visibly drawn on it had no anchor and no box. Levels are the
+   * fallback anchor precisely so that cannot happen again. Spec §0.4.
+   */
+  it('anchors on the level book when the detector produced no zones', () => {
+    const levels = {
+      pdh: 24620,
+      pdl: 24500,
+      orh: 24610,
+      orl: 24560,
+      prevOrh: null,
+      prevOrl: null,
+      vwap: 24580,
+      todayHigh: 24618,
+      todayLow: 24560,
+      atr14: 40,
+    } as LevelsSnapshot;
+
+    const fromLevels = buildProjectionZones({
+      timeframe: '15m',
+      ltp: 24591,
+      atr14: 40,
+      zones: [],
+      levels,
+    });
+
+    expect(fromLevels.up ?? fromLevels.down).not.toBeNull();
+    // A bare level carries no confirmation, so it can only ever arm.
+    for (const box of [fromLevels.up, fromLevels.down]) {
+      if (box) expect(box.state).toBe('armed');
+    }
+  });
+
   it('only ever emits the side that actually broke', () => {
     expect(buildProjectionZones(up()).down).toBeNull();
     expect(buildProjectionZones(down()).up).toBeNull();

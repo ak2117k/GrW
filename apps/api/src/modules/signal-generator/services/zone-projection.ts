@@ -5,6 +5,7 @@ import type { LevelsSnapshot } from './signal-generator.service';
 import {
   RR_FLOOR_STRICT,
   SL_BUFFER_ATR,
+  collectLevelCandidates,
   computeSetupPrices,
   rewardRisk,
   type CandidateLevel,
@@ -135,14 +136,13 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   if (!isPrice(ltp) || !isPrice(atr)) return null;
 
   const zones = Array.isArray(input.zones) ? input.zones : [];
-  const broken = findAnchorZone(zones, ltp, isUp);
-  if (!broken) return null;
+  const anchor = findAnchor(zones, input.levels, ltp, isUp);
+  if (!anchor) return null;
 
-  // Near edge is the edge price actually crossed; the far side is what the stop
-  // hides behind. Getting these the wrong way round would put the stop INSIDE
-  // the zone, where the noise that formed the zone lives.
-  const breakLevel = isUp ? broken.upper : broken.lower;
-  const zoneFarSide = isUp ? broken.lower : broken.upper;
+  // Near edge is the edge price crosses; the far side is what the stop hides
+  // behind. Getting these the wrong way round would put the stop INSIDE the
+  // zone, where the noise that formed the zone lives.
+  const { breakLevel, farSide: zoneFarSide, flipped } = anchor;
   if (!isPrice(breakLevel) || !isPrice(zoneFarSide)) return null;
 
   // The stop and the ATR-fallback target come from the shared setup arithmetic
@@ -158,7 +158,7 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   if (!base) return null;
   const stop = base.stoploss;
 
-  const picked = selectTarget({ input, isUp, breakLevel, zoneFarSide, atr, brokenId: broken.id });
+  const picked = selectTarget({ input, isUp, breakLevel, zoneFarSide, atr, brokenId: anchor.id });
   const rawTarget = picked ? picked.target : atrFallbackTarget(breakLevel, stop, isUp);
   const targetSource = picked ? picked.source : 'ATR';
 
@@ -182,7 +182,7 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   const rr = rewardRisk(entryNear, stop, target);
   if (!Number.isFinite(rr) || rr < RR_FLOOR_STRICT) return null;
 
-  const state: 'armed' | 'confirmed' = broken.flippedAt ? 'confirmed' : 'armed';
+  const state: 'armed' | 'confirmed' = flipped ? 'confirmed' : 'armed';
 
   return {
     side: isUp ? 'UP' : 'DOWN',
@@ -222,6 +222,85 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
  * search. Nearest wins because a level three zones away is not the level a
  * trader is looking at.
  */
+interface ProjectionAnchor {
+  /** The price a break crosses — the box's near edge. */
+  breakLevel: number;
+  /** The far side of the structure, which the stop hides behind. */
+  farSide: number;
+  /** True once the engine has confirmed the break (a flipped zone). */
+  flipped: boolean;
+  /** Stable id, used to exclude the anchor from its own target search. */
+  id: string;
+}
+
+/**
+ * The structure this side's box is anchored on.
+ *
+ * Zones first, because a band carries a real far side for the stop to hide
+ * behind. But the detector needs ten candles, a valid ATR AND clustered pivots,
+ * and for an index it routinely produces none — which left the box with nothing
+ * to anchor on while the level book had ORH, PDH and round levels drawn on the
+ * very same chart. So an anchored LEVEL is the fallback: a line rather than a
+ * band, with the stop taken a buffer below it exactly as the live setup path
+ * does for line levels. Spec §0.4.
+ *
+ * A chart showing levels can therefore always project from one.
+ */
+function findAnchor(
+  zones: StrongZone[],
+  levels: LevelsSnapshot | null | undefined,
+  ltp: number,
+  isUp: boolean,
+): ProjectionAnchor | null {
+  const zone = findAnchorZone(zones, ltp, isUp);
+  if (zone) {
+    return {
+      breakLevel: isUp ? zone.upper : zone.lower,
+      farSide: isUp ? zone.lower : zone.upper,
+      flipped: !!zone.flippedAt,
+      id: zone.id,
+    };
+  }
+
+  if (!levels) return null;
+  const candidates = collectLevelCandidates({
+    pdh: levels.pdh,
+    pdl: levels.pdl,
+    vwap: levels.vwap,
+    orh: levels.orh,
+    orl: levels.orl,
+  }).filter((c) => isPrice(c.value));
+  if (candidates.length === 0) return null;
+
+  // Nearest level AHEAD on this side. The side filter is load-bearing: without
+  // it both boxes select the same nearest-by-distance level (VWAP sitting on
+  // spot wins for up AND down), and the two sides describe the same break in
+  // opposite directions.
+  //
+  // "Ahead" mirrors the armed case exactly — the resistance price is trapped
+  // under, or the support it is sitting above.
+  const ahead = candidates.filter((c) => (isUp ? c.value > ltp + EPS : c.value < ltp - EPS));
+  if (ahead.length === 0) return null;
+
+  // A level is a line, so breakLevel and farSide coincide and the stop comes
+  // from the shared buffer rather than from a band width.
+  const nearest = ahead.reduce<CandidateLevel | null>(
+    (best, c) => (best === null || Math.abs(c.value - ltp) < Math.abs(best.value - ltp) ? c : best),
+    null,
+  );
+  if (!nearest) return null;
+
+  return {
+    breakLevel: nearest.value,
+    farSide: nearest.value,
+    // A level cannot record a confirmed break — only a zone flip does that, so
+    // a level-anchored box is always ARMED. Claiming 'confirmed' off a bare
+    // level would assert a confirmation nothing actually checked.
+    flipped: false,
+    id: `level:${nearest.type}:${nearest.value}`,
+  };
+}
+
 function findAnchorZone(zones: StrongZone[], ltp: number, isUp: boolean): StrongZone | null {
   const wanted = isUp ? 'resistance' : 'support';
 

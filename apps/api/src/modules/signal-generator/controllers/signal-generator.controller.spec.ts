@@ -355,11 +355,13 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
           above: expect.objectContaining({ side: 'BUY', levelSource: 'PDH', triggerPrice: 110 }),
           below: expect.objectContaining({ side: 'SELL', levelSource: 'PDL', triggerPrice: 90 }),
         },
-        // The zone mock is a bare {id} — not a real StrongZone — so no broken
-        // zone is found and the geometry has nothing to anchor a box on. Both
-        // null is 'empty': it ran and nothing qualified. A real zone is
-        // exercised in the test below.
-        projections: { up: null, down: null },
+        // The zone mock is a bare {id}, not a real StrongZone — but the level
+        // book still carries PDH 110 / PDL 90 around spot 100, and levels are
+        // the fallback anchor. This is the index case: a chart with visible
+        // levels and no detected zones must still project. Spec §0.4.
+        projections: expect.objectContaining({
+          up: expect.objectContaining({ side: 'UP', state: 'armed' }),
+        }),
         status: 'ready',
         sources: {
           analysis: 'ok',
@@ -367,7 +369,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
           evidence: 'ok',
           trend: 'ok',
           tradePlan: 'ok',
-          projections: 'empty',
+          projections: 'ok',
         },
       });
       expect(dto.trend!.slope).toBeGreaterThan(0);

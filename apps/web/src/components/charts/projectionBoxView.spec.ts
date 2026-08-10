@@ -433,3 +433,28 @@ describe('trap zone', () => {
     expect(bands.some((b) => b.role === 'travel')).toBe(true);
   });
 });
+
+/**
+ * The arrow the reference design shows: break level on the left, arrowhead at
+ * the target. Two horizontal edges say "somewhere in here"; the arrow is what
+ * makes the band read as a MOVE. It is NOT the fitted trend line — that is a
+ * regression through past pivots and answers a different question.
+ */
+describe('direction arrow', () => {
+  it('rides the travel band only, never the entry or trap bands', () => {
+    const bands = projectionBands(
+      deriveProjectionZonesView({ ...OK, zones: zones({ up: box() }) }),
+    );
+    expect(bands.find((b) => b.role === 'travel')!.arrow).toBe(true);
+    expect(bands.find((b) => b.role === 'entry')!.arrow).toBeFalsy();
+  });
+
+  it('runs from the break level to the target, so it cannot point elsewhere', () => {
+    const travel = projectionBands(
+      deriveProjectionZonesView({ ...OK, zones: zones({ up: box() }) }),
+    ).find((b) => b.role === 'travel')!;
+    // The renderer draws from `from` to `to`; those ARE the claim.
+    expect(travel.from).toBe(24_630);
+    expect(travel.to).toBe(24_800);
+  });
+});

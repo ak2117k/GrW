@@ -440,6 +440,16 @@ export interface ProjectionBand {
    * range price is stuck in, between the two unbroken levels.
    */
   role: 'travel' | 'entry' | 'trap';
+  /**
+   * Draw a direction arrow across this band, break level → target.
+   *
+   * Only the travel band carries one. It is what makes the box read as a MOVE
+   * rather than as a static region: two horizontal edges say "somewhere in
+   * here", an arrow says "from here, to there". Distinct from the fitted trend
+   * line, which is a regression through past pivots and answers a different
+   * question entirely.
+   */
+  arrow?: boolean;
 }
 
 /**
@@ -505,6 +515,7 @@ export function projectionBands(view: ProjectionZonesView): ProjectionBand[] {
         border: style.edgeColor,
         dashed: style.dashed,
         role: 'travel',
+        arrow: true,
       });
     }
     if (usable(box.entryNear, box.entryFar)) {

@@ -70,6 +70,41 @@ export class ProjectionBandPrimitive implements ISeriesPrimitive<Time> {
             ctx.moveTo(0, bottom);
             ctx.lineTo(bitmapSize.width, bottom);
             ctx.stroke();
+
+            // The direction arrow: break level on the left, target on the
+            // right, arrowhead at the target. Two horizontal edges say
+            // "somewhere in here"; the arrow is what makes the band read as a
+            // MOVE. Drawn from the band's own endpoints, so it can never point
+            // somewhere the box does not claim.
+            if (band.arrow) {
+              const yStart = y1 * verticalPixelRatio;
+              const yEnd = y2 * verticalPixelRatio;
+              const xStart = bitmapSize.width * 0.08;
+              const xEnd = bitmapSize.width * 0.92;
+
+              ctx.beginPath();
+              ctx.moveTo(xStart, yStart);
+              ctx.lineTo(xEnd, yEnd);
+              ctx.stroke();
+
+              // Arrowhead, rotated along the line so it points at the target
+              // regardless of how steep the projection is.
+              const angle = Math.atan2(yEnd - yStart, xEnd - xStart);
+              const head = 10 * verticalPixelRatio;
+              ctx.setLineDash([]);
+              ctx.beginPath();
+              ctx.moveTo(xEnd, yEnd);
+              ctx.lineTo(
+                xEnd - head * Math.cos(angle - Math.PI / 7),
+                yEnd - head * Math.sin(angle - Math.PI / 7),
+              );
+              ctx.moveTo(xEnd, yEnd);
+              ctx.lineTo(
+                xEnd - head * Math.cos(angle + Math.PI / 7),
+                yEnd - head * Math.sin(angle + Math.PI / 7),
+              );
+              ctx.stroke();
+            }
             ctx.restore();
           }
         });

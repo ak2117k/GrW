@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   deriveProjectionZonesView,
   formatHitRate,
+  projectionBands,
   projectionBoxLines,
   DOWN_COLOR,
   UP_COLOR,
@@ -19,7 +20,9 @@ function box(over: Partial<ProjectionBox> = {}): ProjectionBox {
     stop: 24_590,
     target: 24_800,
     targetSource: 'ZONE',
+    conviction: 72,
     cappedByHtf: false,
+    cappedBySession: false,
     rr: 2,
     hitRate: { pct: 63, sample: 41, scope: 'symbol' },
     reason: 'Broke the 24,630 resistance zone on above-average volume.',
@@ -282,5 +285,86 @@ describe('projectionBoxLines', () => {
     expect(projectionBoxLines({ kind: 'loading' })).toHaveLength(0);
     expect(projectionBoxLines({ kind: 'unavailable', message: 'x' })).toHaveLength(0);
     expect(projectionBoxLines({ kind: 'none', message: 'x' })).toHaveLength(0);
+  });
+});
+
+/**
+ * The band is the object the design is actually about: the projected TRAVEL,
+ * break level → target. The entry region is an inner detail of it. Drawing only
+ * the entry sliver — which is what the first implementation did — shows the
+ * least interesting part of the projection and none of the claim.
+ */
+describe('projectionBands', () => {
+  it('spans break level to target, with the entry region inside it', () => {
+    const view = deriveProjectionZonesView({ ...OK, zones: zones({ up: box() }) });
+    const bands = projectionBands(view);
+
+    const travel = bands.find((b) => b.role === 'travel')!;
+    expect(travel.from).toBe(24_630);
+    expect(travel.to).toBe(24_800);
+
+    const entry = bands.find((b) => b.role === 'entry')!;
+    // The entry band lies within the travel band, never outside it.
+    expect(Math.min(entry.from, entry.to)).toBeGreaterThanOrEqual(
+      Math.min(travel.from, travel.to),
+    );
+    expect(Math.max(entry.from, entry.to)).toBeLessThanOrEqual(Math.max(travel.from, travel.to));
+  });
+
+  it('paints travel before entry, so the inner band is not buried', () => {
+    const bands = projectionBands(
+      deriveProjectionZonesView({ ...OK, zones: zones({ up: box() }) }),
+    );
+    expect(bands[0].role).toBe('travel');
+  });
+
+  it('drops a degenerate band rather than drawing it flat', () => {
+    const flat = box({ breakLevel: 24_630, target: 24_630, entryNear: 100, entryFar: 100 });
+    const bands = projectionBands(
+      deriveProjectionZonesView({ ...OK, zones: zones({ up: flat }) }),
+    );
+    expect(bands).toHaveLength(0);
+  });
+
+  it('draws nothing for loading, unavailable or none', () => {
+    expect(projectionBands({ kind: 'loading' })).toHaveLength(0);
+    expect(projectionBands({ kind: 'unavailable', message: 'x' })).toHaveLength(0);
+    expect(projectionBands({ kind: 'none', message: 'x' })).toHaveLength(0);
+  });
+});
+
+describe('cap disclosure', () => {
+  /**
+   * A session cap changes what the box CLAIMS — from "price should reach here"
+   * to "this is as far as today can carry it". Leaving that unsaid turns a
+   * shortened target into a dishonest one.
+   */
+  it('says when the target was cut to what is left of the day', () => {
+    const view = deriveProjectionZonesView({
+      ...OK,
+      zones: zones({ up: box({ cappedBySession: true }) }),
+    });
+    if (view.kind !== 'boxes') throw new Error('expected boxes');
+    expect(view.up!.reason).toMatch(/left of today's range/i);
+    expect(view.up!.cappedBySession).toBe(true);
+  });
+
+  it('names the barrier and its conviction', () => {
+    const view = deriveProjectionZonesView({
+      ...OK,
+      zones: zones({ up: box({ targetSource: 'OI_WALL', conviction: 84 }) }),
+    });
+    if (view.kind !== 'boxes') throw new Error('expected boxes');
+    expect(view.up!.convictionText).toMatch(/OI wall/i);
+    expect(view.up!.convictionText).toMatch(/84/);
+  });
+
+  it('carries no conviction text for the ATR fallback', () => {
+    const view = deriveProjectionZonesView({
+      ...OK,
+      zones: zones({ up: box({ targetSource: 'ATR', conviction: null }) }),
+    });
+    if (view.kind !== 'boxes') throw new Error('expected boxes');
+    expect(view.up!.convictionText).toBe('');
   });
 });

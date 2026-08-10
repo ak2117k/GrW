@@ -218,6 +218,15 @@ function ProjectionRow({ box }: { box: ProjectionBoxView }) {
       <div className="mt-0.5 text-[11px] text-zinc-400">
         Enter {box.entryText} · SL {box.stopText} · T {box.targetText} · {box.rrText}
       </div>
+      {/* Why THAT target. A projection without its reason is just a number. */}
+      {box.convictionText && (
+        <div className="text-[11px] text-zinc-500">{box.convictionText}</div>
+      )}
+      {box.cappedBySession && (
+        <div className="text-[11px] text-amber-500/80">
+          Capped by what&apos;s left of today&apos;s range
+        </div>
+      )}
       <div
         className={clsx(
           'text-[11px]',

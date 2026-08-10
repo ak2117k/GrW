@@ -2,10 +2,13 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { IPriceLine, ISeriesApi } from 'lightweight-charts';
 import { withLiveSeries } from './chart-lifecycle';
 import {
+  projectionBands,
   projectionBoxLines,
+  type ProjectionBand,
   type ProjectionBoxLine,
   type ProjectionZonesView,
 } from './projectionBoxView';
+import { ProjectionBandPrimitive } from './projectionBandPrimitive';
 
 interface ProjectionBoxOverlayProps {
   series: ISeriesApi<'Candlestick'> | null;
@@ -58,8 +61,10 @@ export default function ProjectionBoxOverlay({
   view,
 }: ProjectionBoxOverlayProps) {
   const linesRef = useRef<IPriceLine[]>([]);
+  const bandRef = useRef<ProjectionBandPrimitive | null>(null);
 
   const lines = useMemo<ProjectionBoxLine[]>(() => projectionBoxLines(view), [view]);
+  const bands = useMemo<ProjectionBand[]>(() => projectionBands(view), [view]);
 
   // Redraw only when the VISIBLE output changes. `view` is a fresh object on
   // every 60s poll even when nothing moved; without this the effect would tear
@@ -71,6 +76,32 @@ export default function ProjectionBoxOverlay({
         .join('|'),
     [lines],
   );
+
+  /**
+   * The filled travel bands live in a series PRIMITIVE, attached once and
+   * updated in place. Attaching/detaching per poll would rebuild the renderer
+   * on every 60s tick, and a primitive left attached to a disposed series is
+   * the leak this ref exists to prevent.
+   */
+  useEffect(() => {
+    if (!series) return;
+    const target = series;
+    const primitive = new ProjectionBandPrimitive();
+    bandRef.current = primitive;
+    withLiveSeries(target, (s) => {
+      (s as unknown as { attachPrimitive?: (p: unknown) => void }).attachPrimitive?.(primitive);
+    });
+    return () => {
+      withLiveSeries(target, (s) => {
+        (s as unknown as { detachPrimitive?: (p: unknown) => void }).detachPrimitive?.(primitive);
+      });
+      bandRef.current = null;
+    };
+  }, [series]);
+
+  useEffect(() => {
+    bandRef.current?.setBands(bands);
+  }, [bands]);
 
   useEffect(() => {
     if (!series) return;

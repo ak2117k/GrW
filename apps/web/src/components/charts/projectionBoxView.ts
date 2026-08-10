@@ -37,8 +37,12 @@ export interface ProjectionBox {
   entryFar: number;
   stop: number;
   target: number;
-  targetSource: 'ZONE' | 'EVIDENCE' | 'POC' | 'VALUE_AREA' | 'MAX_PAIN' | 'ATR';
+  targetSource: 'OI_WALL' | 'HVN' | 'VALUE_AREA' | 'MAX_PAIN' | 'ZONE' | 'LEVEL' | 'ATR';
+  /** 0-100. Why this price should stop the move. Null for the ATR fallback. */
+  conviction: number | null;
   cappedByHtf: boolean;
+  /** Barrier lies beyond what the rest of the session can deliver. */
+  cappedBySession: boolean;
   rr: number;
   /** null = no measured history yet. NEVER a fabricated number. */
   hitRate: HitRate | null;
@@ -106,9 +110,12 @@ export interface ProjectionBoxView {
   hitRateText: string;
   /** False when `hitRate` was null — lets the card mute the text rather than hide it. */
   hasMeasuredHistory: boolean;
-  /** Sanitized sentence, with the HTF-cap clause folded in when it applies. */
+  /** Sanitized sentence, with any cap clauses folded in. */
   reason: string;
   cappedByHtf: boolean;
+  cappedBySession: boolean;
+  /** `OI wall · conviction 84`, or '' when the target carries no conviction. */
+  convictionText: string;
   style: ProjectionBoxStyle;
   /** The SAME wire object the chart draws from. No parallel arithmetic. */
   box: ProjectionBox;
@@ -213,12 +220,16 @@ export function formatHitRate(
 /** Why the target sits where it does. The ATR case says "fallback" out loud. */
 function targetSourceText(box: ProjectionBox): string {
   switch (box.targetSource) {
+    case 'OI_WALL':
+      return 'the option-chain OI wall';
+    case 'HVN':
+      return 'a high-volume node';
     case 'ZONE':
-      return 'the next opposing zone';
-    case 'EVIDENCE':
-      return 'a clustered evidence level';
-    case 'POC':
-      return 'the volume point of control';
+      return 'a tested zone';
+    case 'LEVEL':
+      // Named as weak on purpose. Aiming at whatever level was nearest is what
+      // made every projection a treadmill; when it is all we have, say so.
+      return 'the next level — no stronger barrier ahead';
     case 'VALUE_AREA':
       return 'the value-area edge';
     case 'MAX_PAIN':
@@ -256,9 +267,13 @@ function styleFor(box: ProjectionBox): ProjectionBoxStyle {
  */
 function reasonText(box: ProjectionBox): string {
   const base = sanitizeReason(box.reason);
-  if (!box.cappedByHtf) return base;
-  const capped = 'Target capped by the higher timeframe.';
-  return base ? `${base} ${capped}` : capped;
+  const notes: string[] = [];
+  if (box.cappedByHtf) notes.push('Target capped by the higher timeframe.');
+  // A session cap changes what the box is CLAIMING — it is no longer "price
+  // should reach here" but "this is as far as today can carry it". Saying so
+  // is the difference between a shortened target and a dishonest one.
+  if (box.cappedBySession) notes.push("Capped by what's left of today's range.");
+  return [base, ...notes].filter(Boolean).join(' ');
 }
 
 function boxView(
@@ -290,6 +305,11 @@ function boxView(
     targetText: fmtPrice(box.target),
     rrText: fmtRR(box.rr),
     targetSourceText: targetSourceText(box),
+    cappedBySession: box.cappedBySession,
+    convictionText:
+      typeof box.conviction === 'number' && Number.isFinite(box.conviction)
+        ? `${targetSourceText(box)} · conviction ${Math.round(box.conviction)}`
+        : '',
     hitRateText,
     hasMeasuredHistory: hitRateText !== NO_HISTORY_TEXT,
     reason: reasonText(box),
@@ -391,4 +411,66 @@ export function projectionBoxLines(view: ProjectionZonesView): ProjectionBoxLine
   if (view.up) lines.push(...linesForBox(view.up));
   if (view.down) lines.push(...linesForBox(view.down));
   return lines;
+}
+
+/**
+ * A filled band the chart paints: the projected TRAVEL, break level → target.
+ *
+ * This is the object the reference design is about — the box IS the move, not
+ * the sliver of it where entry stays valid. The entry region is drawn as an
+ * inner band so both are visible without being confused for one another.
+ */
+export interface ProjectionBand {
+  side: 'UP' | 'DOWN';
+  /** Price bounds, unordered — the renderer sorts them into pixel space. */
+  from: number;
+  to: number;
+  fill: string;
+  border: string;
+  dashed: boolean;
+  /** 'travel' spans break→target; 'entry' is the region inside it. */
+  role: 'travel' | 'entry';
+}
+
+/**
+ * Bands for both sides, travel first so the entry band paints on top of it.
+ *
+ * Degenerate bands are dropped rather than drawn flat: a zero-height rectangle
+ * reads as a line, and a line at a price the engine never claimed is worse than
+ * nothing.
+ */
+export function projectionBands(view: ProjectionZonesView): ProjectionBand[] {
+  if (view.kind !== 'boxes') return [];
+  const out: ProjectionBand[] = [];
+
+  for (const v of [view.up, view.down]) {
+    if (!v) continue;
+    const { box, style } = v;
+    const usable = (a: number, b: number) =>
+      Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) > 1e-9;
+
+    if (usable(box.breakLevel, box.target)) {
+      out.push({
+        side: box.side,
+        from: box.breakLevel,
+        to: box.target,
+        fill: style.fillColor,
+        border: style.edgeColor,
+        dashed: style.dashed,
+        role: 'travel',
+      });
+    }
+    if (usable(box.entryNear, box.entryFar)) {
+      out.push({
+        side: box.side,
+        from: box.entryNear,
+        to: box.entryFar,
+        fill: style.fillColor,
+        border: style.edgeColor,
+        dashed: style.dashed,
+        role: 'entry',
+      });
+    }
+  }
+  return out;
 }

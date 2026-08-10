@@ -5,7 +5,7 @@ import {
   deriveTradePlanView,
   type TriggerLineView,
 } from '@/components/charts/tradePlanView';
-import type { ProjectionBoxView, ProjectionZonesView } from '@/components/charts/projectionBoxView';
+import { trapBand, type ProjectionBoxView, type ProjectionZonesView } from '@/components/charts/projectionBoxView';
 import { Card } from './_shared';
 
 // ─── Types (lifted from the old AnalysisPanel.tsx) ─────────────────────────
@@ -245,9 +245,18 @@ function ProjectionSection({ view }: { view: ProjectionZonesView }) {
     return <div className="mt-3 border-t border-zinc-800 pt-2 text-[11px] italic text-zinc-500">{view.message}</div>;
   }
   if (!view.up && !view.down) return null;
+  const trap = trapBand(view);
   return (
     <div className="mt-3 space-y-1.5 border-t border-zinc-800 pt-2">
       <div className="text-[11px] uppercase tracking-wide text-zinc-500">Projected breaks</div>
+      {/* Named as well as drawn: "range-bound, waiting" is a position a trader
+          takes deliberately, not the absence of a signal. */}
+      {trap && (
+        <div className="rounded border-l-2 border-zinc-500/70 py-1 pl-2 text-[11px] text-zinc-400">
+          Range-bound between {trap.from.toLocaleString('en-IN')} and{' '}
+          {trap.to.toLocaleString('en-IN')} — neither side has broken yet.
+        </div>
+      )}
       {view.up && <ProjectionRow box={view.up} />}
       {view.down && <ProjectionRow box={view.down} />}
     </div>

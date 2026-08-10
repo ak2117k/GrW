@@ -315,6 +315,45 @@ describe('buildProjectionZones — box geometry', () => {
     expect(box.target).toBe(1200);
   });
 
+  /**
+   * The boundary that made projections flicker between timeframes.
+   *
+   * A LEVEL anchor is a line, so risk is SL_BUFFER_ATR (0.25) x ATR, while the
+   * barrier noise filter admits targets from 0.5 x ATR — exactly 2 x risk. Entry
+   * room is (n - 2) / 3 x risk, so a barrier sitting right at that threshold
+   * produced EXACTLY zero room and the old guard deleted the whole box. The
+   * projection is the TRAVEL now; a degenerate inner band is not a reason to
+   * draw nothing.
+   */
+  it('still projects when the entry region collapses to the break level', () => {
+    const levels = {
+      pdh: 1005, // exactly 0.5 x ATR beyond the 1000 anchor
+      pdl: 900,
+      orh: 1000,
+      orl: 950,
+      prevOrh: null,
+      prevOrl: null,
+      vwap: 940,
+      todayHigh: 1002,
+      todayLow: 995,
+      atr14: ATR,
+    } as LevelsSnapshot;
+
+    const box = buildProjectionZones({
+      timeframe: '15m',
+      ltp: 998,
+      atr14: ATR,
+      zones: [],
+      levels,
+    }).up;
+
+    expect(box).not.toBeNull();
+    // Entry collapses onto the break level rather than inverting past it.
+    expect(box!.entryFar).toBeGreaterThanOrEqual(box!.breakLevel);
+    // The travel span — the thing actually drawn — is still real.
+    expect(box!.target).toBeGreaterThan(box!.breakLevel);
+  });
+
   it('only ever emits the side that actually broke', () => {
     expect(buildProjectionZones(up()).down).toBeNull();
     expect(buildProjectionZones(down()).up).toBeNull();

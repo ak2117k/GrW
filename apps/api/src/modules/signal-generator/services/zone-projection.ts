@@ -213,11 +213,23 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   const entryFar = solveFarEdge(stop, target);
   const entryNear = breakLevel;
 
-  // A far edge that has not cleared the near edge means price has already taken
-  // the whole reward; there is no enterable region left. Returning a box here
-  // would draw a zero-width or inverted band.
-  const room = isUp ? entryFar - entryNear : entryNear - entryFar;
-  if (!Number.isFinite(room) || room <= EPS) return null;
+  // A far edge that has not cleared the near edge means the only entry worth
+  // taking is the break level itself. That USED to null the box, back when the
+  // box WAS the entry region — but the box is now the projected travel, and a
+  // degenerate inner band is no reason to delete the whole projection.
+  //
+  // It was also a boundary the geometry hit constantly: a level anchor is a
+  // line, so risk is SL_BUFFER_ATR (0.25) x ATR, while the barrier noise filter
+  // admits targets from 0.5 x ATR — exactly 2 x risk. Entry room is
+  // (n - 2) / 3 x risk, so every barrier sitting near that threshold produced
+  // EXACTLY zero room and silently suppressed the box. That is why projections
+  // appeared on one timeframe and not another, and why they came and went.
+  //
+  // Whether the trade is worth taking is the R:R floor's job, checked below.
+  if (!Number.isFinite(entryFar)) return null;
+  const clampedFar = isUp
+    ? Math.max(entryFar, entryNear)
+    : Math.min(entryFar, entryNear);
 
   // Reported at the near edge: that is the best entry the box offers, and it is
   // the number the card quotes. Anywhere inside the box it is lower, but never
@@ -232,7 +244,7 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
     state,
     breakLevel,
     entryNear,
-    entryFar,
+    entryFar: clampedFar,
     stop,
     target,
     targetSource,

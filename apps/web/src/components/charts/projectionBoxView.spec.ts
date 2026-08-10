@@ -4,7 +4,9 @@ import {
   formatHitRate,
   projectionBands,
   projectionBoxLines,
+  trapBand,
   DOWN_COLOR,
+  TRAP_COLOR,
   UP_COLOR,
   type ProjectionBox,
   type ProjectionZones,
@@ -366,5 +368,68 @@ describe('cap disclosure', () => {
     });
     if (view.kind !== 'boxes') throw new Error('expected boxes');
     expect(view.up!.convictionText).toBe('');
+  });
+});
+
+/**
+ * A range-bound market is a THIRD state, not the absence of the other two.
+ * Price trapped between two untested levels is exactly when a trader is
+ * watching, and showing it in a direction colour would assert a break that has
+ * not happened.
+ */
+describe('trap zone', () => {
+  const trapped = () =>
+    deriveProjectionZonesView({
+      ...OK,
+      zones: zones({
+        up: box({ state: 'armed', breakLevel: 24_630 }),
+        down: box({
+          side: 'DOWN',
+          state: 'armed',
+          breakLevel: 24_522,
+          entryNear: 24_522,
+          entryFar: 24_480,
+          stop: 24_562,
+          target: 24_350,
+        }),
+      }),
+    });
+
+  it('marks the range between two unbroken levels, in a neutral hue', () => {
+    const band = trapBand(trapped())!;
+    expect(band).not.toBeNull();
+    expect(band.role).toBe('trap');
+    expect(band.side).toBe('RANGE');
+    expect(band.from).toBe(24_522);
+    expect(band.to).toBe(24_630);
+    // Neither green nor red: no direction has been called.
+    expect(band.fill.startsWith(TRAP_COLOR)).toBe(true);
+    expect(band.fill.startsWith(UP_COLOR)).toBe(false);
+    expect(band.fill.startsWith(DOWN_COLOR)).toBe(false);
+  });
+
+  it('stops being a range the moment one side confirms', () => {
+    const broken = deriveProjectionZonesView({
+      ...OK,
+      zones: zones({
+        up: box({ state: 'confirmed', breakLevel: 24_630 }),
+        down: box({ side: 'DOWN', state: 'armed', breakLevel: 24_522, target: 24_350 }),
+      }),
+    });
+    expect(trapBand(broken)).toBeNull();
+  });
+
+  it('needs BOTH sides — one armed box is a pending break, not a range', () => {
+    const oneSided = deriveProjectionZonesView({
+      ...OK,
+      zones: zones({ up: box({ state: 'armed' }) }),
+    });
+    expect(trapBand(oneSided)).toBeNull();
+  });
+
+  it('paints the range behind the directional bands', () => {
+    const bands = projectionBands(trapped());
+    expect(bands[0].role).toBe('trap');
+    expect(bands.some((b) => b.role === 'travel')).toBe(true);
   });
 });

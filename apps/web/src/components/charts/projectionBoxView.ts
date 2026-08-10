@@ -420,16 +420,58 @@ export function projectionBoxLines(view: ProjectionZonesView): ProjectionBoxLine
  * the sliver of it where entry stays valid. The entry region is drawn as an
  * inner band so both are visible without being confused for one another.
  */
+/**
+ * Neutral hue for the trap zone. Deliberately NOT green or red: while price is
+ * still inside the range neither side has happened, and colouring it either way
+ * would assert a direction the engine has not called.
+ */
+export const TRAP_COLOR = '#a1a1aa';
+
 export interface ProjectionBand {
-  side: 'UP' | 'DOWN';
+  side: 'UP' | 'DOWN' | 'RANGE';
   /** Price bounds, unordered — the renderer sorts them into pixel space. */
   from: number;
   to: number;
   fill: string;
   border: string;
   dashed: boolean;
-  /** 'travel' spans break→target; 'entry' is the region inside it. */
-  role: 'travel' | 'entry';
+  /**
+   * 'travel' spans break→target; 'entry' is the region inside it; 'trap' is the
+   * range price is stuck in, between the two unbroken levels.
+   */
+  role: 'travel' | 'entry' | 'trap';
+}
+
+/**
+ * The range price is trapped in: both sides armed, neither broken.
+ *
+ * This is a genuinely different state from "a break is running", and the
+ * reference design calls for it to look different. Drawn neutral because the
+ * engine has not called a direction — a green or red trap zone would assert
+ * one. Returns null the moment either side confirms, because then it is no
+ * longer a range, it is a break.
+ */
+export function trapBand(view: ProjectionZonesView): ProjectionBand | null {
+  if (view.kind !== 'boxes') return null;
+  const up = view.up;
+  const down = view.down;
+  if (!up || !down) return null;
+  if (up.state !== 'armed' || down.state !== 'armed') return null;
+
+  const upper = up.box.breakLevel;
+  const lower = down.box.breakLevel;
+  if (!Number.isFinite(upper) || !Number.isFinite(lower)) return null;
+  if (!(upper > lower)) return null;
+
+  return {
+    side: 'RANGE',
+    from: lower,
+    to: upper,
+    fill: `${TRAP_COLOR}1a`,
+    border: `${TRAP_COLOR}66`,
+    dashed: true,
+    role: 'trap',
+  };
 }
 
 /**
@@ -442,6 +484,11 @@ export interface ProjectionBand {
 export function projectionBands(view: ProjectionZonesView): ProjectionBand[] {
   if (view.kind !== 'boxes') return [];
   const out: ProjectionBand[] = [];
+
+  // Trap first so the directional bands paint over it — the range is context
+  // behind the projections, not a competing claim on top of them.
+  const trap = trapBand(view);
+  if (trap) out.push(trap);
 
   for (const v of [view.up, view.down]) {
     if (!v) continue;

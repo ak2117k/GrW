@@ -154,6 +154,65 @@ describe('buildProjectionZones — box geometry', () => {
     expect(collapsed.up).toBeNull();
   });
 
+  /**
+   * The ARMED case, and the whole reason the feature exists: price is still
+   * TRAPPED under the resistance and the box says "if this breaks, here is the
+   * plan". Selecting only zones price had already crossed made armed
+   * unreachable — on a range-bound chart (the exact case a trader is watching
+   * a level for) nothing was ever drawn.
+   */
+  it('arms a box above a resistance price has NOT broken yet', () => {
+    const trapped = buildProjectionZones(
+      up({
+        ltp: 24591,
+        zones: [zone({ lower: 24595, upper: 24600, isLine: false })],
+      }),
+    );
+
+    expect(trapped.up).not.toBeNull();
+    expect(trapped.up!.state).toBe('armed');
+    // The box sits ABOVE the level, which is where entry becomes valid.
+    expect(trapped.up!.breakLevel).toBe(24600);
+    expect(trapped.up!.entryNear).toBe(24600);
+    expect(trapped.up!.entryFar).toBeGreaterThan(24600);
+  });
+
+  it('arms a box below a support price has NOT broken yet', () => {
+    const trapped = buildProjectionZones(
+      down({
+        ltp: 24591,
+        zones: [
+          zone({ type: 'support', lower: 24550, upper: 24555, isLine: false }),
+        ],
+      }),
+    );
+
+    expect(trapped.down).not.toBeNull();
+    expect(trapped.down!.state).toBe('armed');
+    expect(trapped.down!.breakLevel).toBe(24550);
+    expect(trapped.down!.entryFar).toBeLessThan(24550);
+  });
+
+  /**
+   * A confirmed break outranks a level still ahead: once the engine has
+   * accepted the break, that is the live trade and the level above becomes its
+   * target, not a second box.
+   */
+  it('prefers a confirmed break over a level still ahead', () => {
+    const both = buildProjectionZones(
+      up({
+        ltp: 1005,
+        zones: [
+          zone({ id: 'flipped', lower: 998, upper: 1000, isLine: false, flippedAt: 1, wasType: 'resistance', type: 'support' }),
+          zone({ id: 'ahead', lower: 1040, upper: 1045, isLine: false }),
+        ],
+      }),
+    );
+
+    expect(both.up!.state).toBe('confirmed');
+    expect(both.up!.breakLevel).toBe(1000);
+  });
+
   it('only ever emits the side that actually broke', () => {
     expect(buildProjectionZones(up()).down).toBeNull();
     expect(buildProjectionZones(down()).up).toBeNull();
@@ -422,9 +481,14 @@ describe('buildProjectionZones — honest degradation', () => {
     expect(buildProjectionZones(up()).up!.reason).toMatch(/No measured history yet/);
   });
 
-  it('is empty when there is no broken zone to project from', () => {
+  it('is empty when there is no zone on that side to project from', () => {
     expect(buildProjectionZones(up({ zones: [] }))).toEqual({ up: null, down: null });
-    expect(buildProjectionZones(up({ zones: [zone({ upper: 1100, lower: 1090 })] })).up).toBeNull();
+    // Only a SUPPORT zone exists, so the up side has nothing to anchor on —
+    // whereas a resistance ahead of price now correctly ARMS a box rather than
+    // producing nothing, which is what the two armed cases above pin down.
+    expect(
+      buildProjectionZones(up({ zones: [zone({ type: 'support', upper: 900, lower: 890 })] })).up,
+    ).toBeNull();
   });
 
   it('is empty without a spot or an ATR — never a box on a number it does not have', () => {

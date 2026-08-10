@@ -135,7 +135,7 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   if (!isPrice(ltp) || !isPrice(atr)) return null;
 
   const zones = Array.isArray(input.zones) ? input.zones : [];
-  const broken = findBrokenZone(zones, ltp, isUp);
+  const broken = findAnchorZone(zones, ltp, isUp);
   if (!broken) return null;
 
   // Near edge is the edge price actually crossed; the far side is what the stop
@@ -208,29 +208,45 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
 }
 
 /**
- * The zone price has already left behind, nearest to spot.
+ * The zone this side's box is anchored on: the one in play, nearest to spot.
  *
- * A zone that flipped keeps its pre-flip polarity in `wasType`, so both the
- * confirmed case (flipped resistance now acting as support) and the armed case
- * (price through a resistance the detector has not confirmed) are the same
- * search. Nearest wins because a break three zones ago is not the break a
+ * Deliberately NOT restricted to zones price has already crossed. That
+ * restriction made the ARMED state — the dimmed "if this breaks, here is the
+ * plan" box drawn while price is still trapped UNDER a resistance — impossible
+ * to reach, so a range-bound chart drew nothing at all. That is the exact case
+ * a trader is watching a level for, and it is the reason the feature exists.
+ *
+ * A zone that flipped keeps its pre-flip polarity in `wasType`, so the
+ * confirmed case (flipped resistance now acting as support) and the armed
+ * cases (price through an unconfirmed break, or not yet there at all) are one
+ * search. Nearest wins because a level three zones away is not the level a
  * trader is looking at.
  */
-function findBrokenZone(zones: StrongZone[], ltp: number, isUp: boolean): StrongZone | null {
+function findAnchorZone(zones: StrongZone[], ltp: number, isUp: boolean): StrongZone | null {
   const wanted = isUp ? 'resistance' : 'support';
-  let best: StrongZone | null = null;
-  for (const z of zones) {
-    if (!z || (z.type !== wanted && z.wasType !== wanted)) continue;
-    if (!isPrice(z.upper) || !isPrice(z.lower)) continue;
-    const edge = isUp ? z.upper : z.lower;
-    if (isUp ? ltp <= edge : ltp >= edge) continue;
-    if (best === null) best = z;
-    else {
-      const bestEdge = isUp ? best.upper : best.lower;
-      if (isUp ? edge > bestEdge : edge < bestEdge) best = z;
-    }
-  }
-  return best;
+
+  const candidates = zones.filter(
+    (z) =>
+      z &&
+      (z.type === wanted || z.wasType === wanted) &&
+      isPrice(z.upper) &&
+      isPrice(z.lower),
+  );
+  if (candidates.length === 0) return null;
+
+  const edgeOf = (z: StrongZone) => (isUp ? z.upper : z.lower);
+  const nearest = (pool: StrongZone[]) =>
+    pool.reduce<StrongZone | null>(
+      (best, z) =>
+        best === null || Math.abs(edgeOf(z) - ltp) < Math.abs(edgeOf(best) - ltp) ? z : best,
+      null,
+    );
+
+  // A CONFIRMED break outranks a level still ahead: once the engine has
+  // accepted the break that is the live trade, and the level above it becomes
+  // that trade's target rather than a second box.
+  const flipped = candidates.filter((z) => z.flippedAt);
+  return nearest(flipped.length > 0 ? flipped : candidates);
 }
 
 type TargetSource = ProjectionBox['targetSource'];

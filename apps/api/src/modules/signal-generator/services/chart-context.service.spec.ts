@@ -33,10 +33,28 @@ const TRIGGER = {
   reason: 'a close above 110 (PDH) arms this long',
 } as never;
 const TRADE_PLAN = { active: null, above: TRIGGER, below: null } as never;
+const BOX = {
+  side: 'UP',
+  state: 'armed',
+  breakLevel: 110,
+  entryNear: 110,
+  entryFar: 113,
+  stop: 105,
+  target: 125,
+  targetSource: 'ZONE',
+  cappedByHtf: false,
+  rr: 2.5,
+  hitRate: null,
+  reason: 'a close above 110 arms this long',
+} as never;
+const PROJECTIONS = { up: BOX, down: null } as never;
 
 function loaders(
   over: Partial<
-    Record<'analysis' | 'zones' | 'evidence' | 'trend' | 'tradePlan', () => Promise<never>>
+    Record<
+      'analysis' | 'zones' | 'evidence' | 'trend' | 'tradePlan' | 'projections',
+      () => Promise<never>
+    >
   > = {},
 ) {
   return {
@@ -45,6 +63,7 @@ function loaders(
     evidence: over.evidence ?? (async () => [EVIDENCE] as never),
     trend: over.trend ?? (async () => TREND),
     tradePlan: over.tradePlan ?? (async () => TRADE_PLAN),
+    projections: over.projections ?? (async () => PROJECTIONS),
   } as never;
 }
 
@@ -52,21 +71,38 @@ describe('deriveChartContextStatus — full truth table', () => {
   const states: SourceState[] = ['ok', 'empty', 'failed'];
 
   /**
-   * Exhaustive over all 3^5 source-state combinations, because the three
-   * outcomes are exactly what the chip renders and a wrong one is the bug this
-   * change exists to kill (claiming "no levels" while broken).
+   * Exhaustive over every source-state combination, because the three outcomes
+   * are exactly what the chip renders and a wrong one is the bug this test
+   * exists to kill (claiming "no levels" while broken).
+   *
+   * Enumerated rather than nested so adding a source touches ONE list instead
+   * of growing another loop — the nesting had already been edited twice for
+   * exactly that reason, and a source silently left out of the derivation is
+   * the bug this test exists to catch.
    */
+  const SOURCE_KEYS: (keyof ChartContextSources)[] = [
+    'analysis',
+    'zones',
+    'evidence',
+    'trend',
+    'tradePlan',
+    'projections',
+  ];
+
   it('is ready iff nothing failed, unavailable iff everything failed, partial otherwise', () => {
-    for (const analysis of states)
-      for (const zones of states)
-        for (const evidence of states)
-          for (const trend of states)
-            for (const tradePlan of states) {
-              const sources: ChartContextSources = { analysis, zones, evidence, trend, tradePlan };
-              const failed = Object.values(sources).filter((s) => s === 'failed').length;
-              const expected = failed === 0 ? 'ready' : failed === 5 ? 'unavailable' : 'partial';
-              expect(deriveChartContextStatus(sources)).toBe(expected);
-            }
+    const total = states.length ** SOURCE_KEYS.length;
+    for (let n = 0; n < total; n++) {
+      let rem = n;
+      const sources = {} as ChartContextSources;
+      for (const key of SOURCE_KEYS) {
+        sources[key] = states[rem % states.length];
+        rem = Math.floor(rem / states.length);
+      }
+      const failed = Object.values(sources).filter((s) => s === 'failed').length;
+      const expected =
+        failed === 0 ? 'ready' : failed === SOURCE_KEYS.length ? 'unavailable' : 'partial';
+      expect(deriveChartContextStatus(sources)).toBe(expected);
+    }
   });
 
   it('treats an all-empty response as ready — "genuinely no levels" is an answer', () => {
@@ -77,6 +113,7 @@ describe('deriveChartContextStatus — full truth table', () => {
         evidence: 'empty',
         trend: 'empty',
         tradePlan: 'empty',
+        projections: 'empty',
       }),
     ).toBe('ready');
   });
@@ -91,7 +128,7 @@ describe('ChartContextService', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('composes all five sources on the happy path', async () => {
+  it('composes all six sources on the happy path', async () => {
     const dto = await svc.build(KEY, loaders());
     expect(dto).toEqual({
       interval: '15m',
@@ -100,6 +137,7 @@ describe('ChartContextService', () => {
       evidence: [EVIDENCE],
       trend: TREND,
       tradePlan: TRADE_PLAN,
+      projections: PROJECTIONS,
       status: 'ready',
       sources: {
         analysis: 'ok',
@@ -107,6 +145,7 @@ describe('ChartContextService', () => {
         evidence: 'ok',
         trend: 'ok',
         tradePlan: 'ok',
+        projections: 'ok',
       },
     });
   });
@@ -182,6 +221,7 @@ describe('ChartContextService', () => {
       evidence: 'ok',
       trend: 'ok',
       tradePlan: 'ok',
+      projections: 'ok',
     });
     // The whole point: a failed source must not take the others with it.
     expect(dto.analysis).toBe(ANALYSIS);
@@ -195,7 +235,7 @@ describe('ChartContextService', () => {
     };
     const dto = await svc.build(
       KEY,
-      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom, tradePlan: boom }),
+      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom, tradePlan: boom, projections: boom }),
     );
     expect(dto.status).toBe('unavailable');
     expect(dto.sources).toEqual({
@@ -204,6 +244,7 @@ describe('ChartContextService', () => {
       evidence: 'failed',
       trend: 'failed',
       tradePlan: 'failed',
+      projections: 'failed',
     });
     expect(dto.analysis).toBeNull();
     expect(dto.zones).toEqual([]);
@@ -235,6 +276,7 @@ describe('ChartContextService', () => {
       evidence: async () => [] as never,
       trend: async () => null as never,
       tradePlan: async () => null as never,
+      projections: async () => null as never,
     }));
     expect(dto.status).toBe('ready');
     expect(dto.sources).toEqual({
@@ -243,6 +285,7 @@ describe('ChartContextService', () => {
       evidence: 'empty',
       trend: 'empty',
       tradePlan: 'empty',
+      projections: 'empty',
     });
   });
 
@@ -267,7 +310,7 @@ describe('ChartContextService', () => {
     };
     await svc.build(
       KEY,
-      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom, tradePlan: boom }),
+      loaders({ analysis: boom, zones: boom, evidence: boom, trend: boom, tradePlan: boom, projections: boom }),
     );
     const recovered = await svc.build(KEY, loaders());
     expect(recovered.status).toBe('ready');

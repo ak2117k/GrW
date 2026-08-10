@@ -9,6 +9,8 @@ import EntryTargetOverlay from '@/components/charts/EntryTargetOverlay';
 import ChartZoneOverlay from '@/components/charts/ChartZoneOverlay';
 import { buildSRView } from '@/components/charts/buildSRView';
 import { tradePlanLines } from '@/components/charts/tradePlanView';
+import { deriveProjectionZonesView } from '@/components/charts/projectionBoxView';
+import ProjectionBoxOverlay from '@/components/charts/ProjectionBoxOverlay';
 import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
 import TrendLineOverlay from '@/components/charts/TrendLineOverlay';
 import { useChartContext } from '@/hooks/useChartContext';
@@ -101,7 +103,7 @@ export default function ChartsPage() {
   // cadences over one computation, free to disagree in the window between
   // them. Per-source status also means partial arrival can no longer read as
   // "no levels" — the DTO says which it is.
-  const { context: chartContext } = useChartContext(
+  const { context: chartContext, isLoading: contextLoading } = useChartContext(
     selectedSymbol.token,
     selectedSymbol.exchange,
     timeframe,
@@ -230,6 +232,27 @@ export default function ChartsPage() {
   const tradePlanOverlayLevels = useMemo(
     () => (setupContext ? [] : tradePlanLines(chartContext?.tradePlan)),
     [chartContext?.tradePlan, setupContext],
+  );
+
+  // Derived ONCE and handed to both the overlay and the card, so a box on the
+  // chart and the words beside it cannot describe different states — the same
+  // rule the trade plan follows.
+  const projectionView = useMemo(
+    () =>
+      deriveProjectionZonesView({
+        zones: chartContext?.projections,
+        source: chartContext?.sources.projections,
+        loading: contextLoading,
+        symbol: selectedSymbol.symbol,
+        exchange: selectedSymbol.exchange,
+      }),
+    [
+      chartContext?.projections,
+      chartContext?.sources.projections,
+      contextLoading,
+      selectedSymbol.symbol,
+      selectedSymbol.exchange,
+    ],
   );
 
   const {
@@ -575,6 +598,15 @@ export default function ChartsPage() {
               levels={tradePlanOverlayLevels}
             />
           )}
+          {/* Projection boxes — the entry region above a broken resistance and
+              below a broken support. Outside signal-mode only, for the same
+              reason the plan lines are: signal-mode is a single-setup view. */}
+          {!setupContext && (
+            <ProjectionBoxOverlay
+              series={chartRef.current?.candleSeries ?? null}
+              view={projectionView}
+            />
+          )}
           {/* Zone + evidence overlays are now SIGNAL-MODE ONLY. That view is a
               deliberate "show me everything about this one setup"; the default
               chart is not, and these were most of its clutter. */}
@@ -659,6 +691,7 @@ export default function ChartsPage() {
           // chart cannot disagree about where the trade is.
           tradePlan={chartContext?.tradePlan ?? null}
           tradePlanSource={chartContext?.sources.tradePlan}
+          projectionView={projectionView}
         />
       )}
     </div>

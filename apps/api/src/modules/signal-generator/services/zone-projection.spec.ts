@@ -1,0 +1,458 @@
+import {
+  HTF_FOR_TIMEFRAME,
+  buildProjectionZones,
+  solveFarEdge,
+  type BuildProjectionZonesInput,
+} from './zone-projection';
+import { RR_FLOOR_STRICT, computeSetupPrices, rewardRisk } from './trade-plan';
+import type { EvidenceKind, EvidenceLevel } from '../types/evidence-level.types';
+import type { StrongZone } from '../types/zone.types';
+import type { LevelsSnapshot } from './signal-generator.service';
+
+/**
+ * A projection box is an invitation to enter a trade, so the properties worth
+ * pinning down are the ones that keep it honest: its far edge is solved rather
+ * than guessed, its target is real structure or is labelled as not being real
+ * structure, the higher timeframe can only ever take room away, and a box with
+ * no room left is absent rather than flat.
+ *
+ * See docs/superpowers/specs/2026-08-10-projection-zones-design.md §6.
+ */
+
+const ATR = 10;
+
+function zone(over: Partial<StrongZone> = {}): StrongZone {
+  return {
+    id: 'z1',
+    token: '18520',
+    symbol: 'CUPID',
+    exchange: 'NSE',
+    type: 'resistance',
+    upper: 1000,
+    lower: 1000,
+    isLine: true,
+    strength: 80,
+    classification: 'STRONG',
+    touchCount: 4,
+    lastTouchTimestamp: 0,
+    scoreBreakdown: {
+      touchCount: 0,
+      reversalScore: 0,
+      volumeScore: 0,
+      recencyScore: 0,
+      confluenceBonus: 0,
+      wickDensity: 0,
+    },
+    computedAt: 0,
+    expiresAt: 0,
+    ...over,
+  };
+}
+
+function ev(price: number, score: number, kinds: EvidenceKind[] = ['VOLUME']): EvidenceLevel {
+  return { price, score, kinds, side: 'resistance', soft: false, distancePct: 0 };
+}
+
+/** Broken resistance line at 1000, spot just above it. */
+function up(over: Partial<BuildProjectionZonesInput> = {}): BuildProjectionZonesInput {
+  return { timeframe: '15m', ltp: 1005, atr14: ATR, zones: [zone()], ...over };
+}
+
+/** Mirror of `up`: broken support line at 1000, spot just below it. */
+function down(over: Partial<BuildProjectionZonesInput> = {}): BuildProjectionZonesInput {
+  return {
+    timeframe: '15m',
+    ltp: 995,
+    atr14: ATR,
+    zones: [zone({ type: 'support' })],
+    ...over,
+  };
+}
+
+describe('solveFarEdge — the floor is a solved identity, not a tuned constant', () => {
+  /**
+   * The one property the whole box rests on. If reward:risk at the far edge is
+   * anything other than the floor, the box is offering entries the live engine
+   * would reject — the exact disagreement this design exists to prevent.
+   */
+  it.each([
+    ['up-break', 997.5, 1030],
+    ['up-break, tight', 999, 1001.5],
+    ['down-break', 1002.5, 970],
+    ['down-break, tight', 1001, 998.5],
+  ])('reward:risk at the far edge equals the floor exactly (%s)', (_label, stop, target) => {
+    const farEdge = solveFarEdge(stop as number, target as number);
+    expect(rewardRisk(farEdge, stop as number, target as number)).toBeCloseTo(RR_FLOOR_STRICT, 9);
+  });
+
+  /**
+   * The far edge must sit between stop and target on the reward side; a solve
+   * that landed outside would silently invert the box.
+   */
+  it('lands strictly between the stop and the target', () => {
+    expect(solveFarEdge(997.5, 1030)).toBeGreaterThan(997.5);
+    expect(solveFarEdge(997.5, 1030)).toBeLessThan(1030);
+    expect(solveFarEdge(1002.5, 970)).toBeLessThan(1002.5);
+    expect(solveFarEdge(1002.5, 970)).toBeGreaterThan(970);
+  });
+});
+
+describe('buildProjectionZones — box geometry', () => {
+  it('places the near edge on the broken level and the far edge in the direction of the move', () => {
+    const box = buildProjectionZones(up()).up!;
+    expect(box.side).toBe('UP');
+    expect(box.breakLevel).toBe(1000);
+    expect(box.entryNear).toBe(1000);
+    expect(box.entryFar).toBeGreaterThan(box.entryNear);
+    expect(box.stop).toBeLessThan(box.breakLevel);
+    expect(box.target).toBeGreaterThan(box.entryFar);
+  });
+
+  it('mirrors every inequality for a down-break', () => {
+    const box = buildProjectionZones(down()).down!;
+    expect(box.side).toBe('DOWN');
+    expect(box.entryFar).toBeLessThan(box.entryNear);
+    expect(box.stop).toBeGreaterThan(box.breakLevel);
+    expect(box.target).toBeLessThan(box.entryFar);
+  });
+
+  /**
+   * Every entry the box offers must clear the floor, not just its best one —
+   * otherwise the band is wider than the trade it represents.
+   */
+  it('clears the R:R floor at both edges of the entry region', () => {
+    for (const box of [buildProjectionZones(up()).up!, buildProjectionZones(down()).down!]) {
+      expect(rewardRisk(box.entryNear, box.stop, box.target)).toBeGreaterThanOrEqual(
+        RR_FLOOR_STRICT,
+      );
+      expect(rewardRisk(box.entryFar, box.stop, box.target)).toBeCloseTo(RR_FLOOR_STRICT, 9);
+      expect(box.rr).toBeCloseTo(rewardRisk(box.entryNear, box.stop, box.target), 9);
+    }
+  });
+
+  /**
+   * "Already extended" is a legitimate answer. A zero-width band would be read
+   * as a real entry region by anyone glancing at the chart.
+   */
+  it('returns null — never a zero-width box — when structure sits too close to be worth it', () => {
+    // A 20-point zone puts the stop 22.5 below the broken edge, so clearing the
+    // floor needs 45 points of room. The next structure is 10 points up: the
+    // trade is real but not worth taking, and a box would invite it anyway.
+    //
+    // The collapse has to be driven by STRUCTURE — the ATR fallback is fixed at
+    // 3R by construction and can no longer produce a flat box, which is the
+    // whole reason it is 3R and not 2R.
+    const collapsed = buildProjectionZones(
+      up({
+        ltp: 1001,
+        zones: [
+          zone({ lower: 980, upper: 1000, isLine: false }),
+          zone({ id: 'z-near', lower: 1010, upper: 1012, isLine: false }),
+        ],
+      }),
+    );
+    expect(collapsed.up).toBeNull();
+  });
+
+  it('only ever emits the side that actually broke', () => {
+    expect(buildProjectionZones(up()).down).toBeNull();
+    expect(buildProjectionZones(down()).up).toBeNull();
+  });
+});
+
+describe('buildProjectionZones — geometry parity with the live setup maths', () => {
+  /**
+   * The parity the spec exists to guarantee: a box and the TradeTrigger it
+   * becomes are produced by the SAME arithmetic, so they cannot disagree about
+   * where the STOP is — the number that decides how much is lost when the
+   * thesis fails, and the one a trader acts on identically in both views.
+   *
+   * The TARGET is deliberately NOT shared. `computeSetupPrices` measures its
+   * reward from a breakout entry just past the zone's far side, whereas a box's
+   * entry region starts at the broken edge — so a shared target would put the
+   * whole reward inside the zone and collapse every fallback box to null. The
+   * sibling test below makes the same point from the structural direction: a
+   * structural target diverges from `computeSetupPrices` too, and must.
+   */
+  it('reproduces the shared stop for the same level', () => {
+    const box = buildProjectionZones(up()).up!;
+    const direct = computeSetupPrices({
+      setupType: 'BREAKOUT',
+      isLong: true,
+      level: 1000, // the zone's far side — what the stop hides behind
+      atr: ATR,
+      candidates: [],
+    })!;
+
+    expect(box.stop).toBe(direct.stoploss);
+    // Reward is measured from the break level, so it must clear the floor there.
+    expect(rewardRisk(box.entryNear, box.stop, box.target)).toBeGreaterThanOrEqual(
+      RR_FLOOR_STRICT,
+    );
+  });
+
+  it('keeps the stop on the shared arithmetic even when the target is structural', () => {
+    const box = buildProjectionZones(
+      up({ zones: [zone(), zone({ id: 'z2', lower: 1030, upper: 1040 })] }),
+    ).up!;
+    const direct = computeSetupPrices({
+      setupType: 'BREAKOUT',
+      isLong: true,
+      level: 1000,
+      atr: ATR,
+      candidates: [],
+    })!;
+
+    expect(box.stop).toBe(direct.stoploss);
+    expect(box.target).toBe(1030);
+  });
+});
+
+describe('buildProjectionZones — target selection', () => {
+  it('takes an opposing STRONG/MEDIUM zone first', () => {
+    const box = buildProjectionZones(
+      up({ zones: [zone(), zone({ id: 'z2', lower: 1030, upper: 1040 })] }),
+    ).up!;
+    expect(box.targetSource).toBe('ZONE');
+    expect(box.target).toBe(1030);
+  });
+
+  /**
+   * Priority is by class, not by distance. A nearby evidence level outranking a
+   * further STRONG zone would quietly reorder the spec's table.
+   */
+  it('prefers a further zone over a nearer evidence level', () => {
+    const box = buildProjectionZones(
+      up({ zones: [zone(), zone({ id: 'z2', lower: 1050, upper: 1060 })], evidence: [ev(1020, 90)] }),
+    ).up!;
+    expect(box.targetSource).toBe('ZONE');
+    expect(box.target).toBe(1050);
+  });
+
+  it('falls to an evidence cluster scoring at least 60', () => {
+    const box = buildProjectionZones(up({ evidence: [ev(1040, 75)] })).up!;
+    expect(box.targetSource).toBe('EVIDENCE');
+    expect(box.target).toBe(1040);
+  });
+
+  /** Below the score floor an evidence level is noise, not a destination. */
+  it('ignores an evidence cluster under the score floor', () => {
+    const box = buildProjectionZones(up({ evidence: [ev(1040, 55)] })).up!;
+    expect(box.targetSource).toBe('ATR');
+    expect(box.target).not.toBe(1040);
+  });
+
+  it.each<[EvidenceKind, string]>([
+    ['POC', 'POC'],
+    ['VALUE_AREA', 'VALUE_AREA'],
+    ['MAX_PAIN', 'MAX_PAIN'],
+  ])('uses a low-scored %s level and names it as the source', (kind, source) => {
+    const box = buildProjectionZones(up({ evidence: [ev(1040, 20, [kind])] })).up!;
+    expect(box.targetSource).toBe(source);
+    expect(box.target).toBe(1040);
+  });
+
+  /**
+   * A fallback presented as structure is the one lie this object must never
+   * tell — the trader has to be able to discount it.
+   */
+  it('labels the ATR fallback, in the source AND in the sentence', () => {
+    const box = buildProjectionZones(up()).up!;
+    expect(box.targetSource).toBe('ATR');
+    expect(box.reason).toMatch(/ATR projection/);
+  });
+
+  /**
+   * A level behind the break is a level price has already passed. Aiming at it
+   * would produce a target on the wrong side of the trade.
+   */
+  it('never selects a level on the wrong side of the break', () => {
+    const box = buildProjectionZones(
+      up({
+        zones: [zone(), zone({ id: 'z2', lower: 985, upper: 990 })],
+        evidence: [ev(980, 95)],
+      }),
+    ).up!;
+    expect(box.target).toBeGreaterThan(box.breakLevel);
+    expect(box.targetSource).toBe('ATR');
+  });
+
+  it('applies the same side rule downward', () => {
+    const box = buildProjectionZones(
+      down({
+        zones: [zone({ type: 'support' }), zone({ id: 'z2', type: 'support', lower: 1010, upper: 1015 })],
+      }),
+    ).down!;
+    expect(box.target).toBeLessThan(box.breakLevel);
+  });
+});
+
+describe('buildProjectionZones — higher-timeframe capping', () => {
+  const withZones = (over: Partial<BuildProjectionZonesInput> = {}) =>
+    up({ zones: [zone(), zone({ id: 'z2', lower: 1050, upper: 1060 })], ...over });
+
+  it('maps each timeframe to exactly one higher timeframe', () => {
+    expect(HTF_FOR_TIMEFRAME).toMatchObject({
+      '1m': '15m',
+      '5m': '1h',
+      '15m': '1h',
+      '1h': '1d',
+      '1d': '1w',
+      '1w': null,
+      '1mo': null,
+    });
+  });
+
+  it('caps the target to an intervening HTF zone', () => {
+    const box = buildProjectionZones(
+      withZones({ htfZones: [zone({ id: 'h1', lower: 1030, upper: 1035 })] }),
+    ).up!;
+    expect(box.target).toBe(1030);
+    expect(box.cappedByHtf).toBe(true);
+    expect(box.reason).toMatch(/Capped by 1h/);
+  });
+
+  /**
+   * The asymmetry is the point: the higher timeframe may say "there is a wall",
+   * never "there is more room than you thought".
+   */
+  it('never extends a target — an HTF zone beyond it changes nothing', () => {
+    const box = buildProjectionZones(
+      withZones({ htfZones: [zone({ id: 'h1', lower: 1080, upper: 1090 })] }),
+    ).up!;
+    expect(box.target).toBe(1050);
+    expect(box.cappedByHtf).toBe(false);
+  });
+
+  it('ignores an HTF zone behind the break level', () => {
+    const box = buildProjectionZones(
+      withZones({ htfZones: [zone({ id: 'h1', lower: 970, upper: 990 })] }),
+    ).up!;
+    expect(box.target).toBe(1050);
+    expect(box.cappedByHtf).toBe(false);
+  });
+
+  it('caps to the NEAREST intervening HTF zone', () => {
+    const box = buildProjectionZones(
+      withZones({
+        htfZones: [
+          zone({ id: 'h1', lower: 1040, upper: 1045 }),
+          zone({ id: 'h2', lower: 1020, upper: 1025 }),
+        ],
+      }),
+    ).up!;
+    expect(box.target).toBe(1020);
+  });
+
+  it('ignores a WEAK HTF zone — only STRONG/MEDIUM structure vetoes', () => {
+    const box = buildProjectionZones(
+      withZones({ htfZones: [zone({ id: 'h1', lower: 1030, upper: 1035, classification: 'WEAK' })] }),
+    ).up!;
+    expect(box.target).toBe(1050);
+    expect(box.cappedByHtf).toBe(false);
+  });
+
+  /**
+   * A cap that breaks the floor is not a smaller trade, it is no trade. The
+   * higher timeframe saying "no room" has to be able to remove the box.
+   */
+  it('yields a null box when the cap pushes R:R under the floor', () => {
+    const zones = buildProjectionZones(
+      withZones({ htfZones: [zone({ id: 'h1', lower: 1002, upper: 1004 })] }),
+    );
+    expect(zones.up).toBeNull();
+  });
+
+  /**
+   * "Not checked" and "checked, nothing in the way" are different claims. A
+   * silently uncapped projection would present the weaker one as the stronger.
+   */
+  it('says so when the HTF was not consulted', () => {
+    const box = buildProjectionZones(withZones({ htfZones: undefined })).up!;
+    expect(box.cappedByHtf).toBe(false);
+    expect(box.reason).toMatch(/1h structure was not checked/);
+  });
+
+  it('stays silent about the HTF on a timeframe that has none', () => {
+    const box = buildProjectionZones(withZones({ timeframe: '1w' })).up!;
+    expect(box.cappedByHtf).toBe(false);
+    expect(box.reason).not.toMatch(/not checked/);
+  });
+
+  it('caps a down-break upward-in-price the same way', () => {
+    const box = buildProjectionZones(
+      down({
+        zones: [zone({ type: 'support' }), zone({ id: 'z2', type: 'support', lower: 940, upper: 950 })],
+        htfZones: [zone({ id: 'h1', lower: 965, upper: 970 })],
+      }),
+    ).down!;
+    expect(box.target).toBe(970);
+    expect(box.cappedByHtf).toBe(true);
+  });
+});
+
+describe('buildProjectionZones — break state', () => {
+  /**
+   * A confirmed break and a merely armed one are different bets; the overlay
+   * renders them differently, so the flag has to come from the detector's own
+   * flip record rather than from price position.
+   */
+  it('reports armed until the zone records a flip', () => {
+    expect(buildProjectionZones(up()).up!.state).toBe('armed');
+  });
+
+  it('reports confirmed for a zone the detector has flipped', () => {
+    const flipped = zone({ type: 'support', wasType: 'resistance', flippedAt: 1_700_000_000_000 });
+    expect(buildProjectionZones(up({ zones: [flipped] })).up!.state).toBe('confirmed');
+  });
+
+  /** The break a trader is looking at is the most recent one, not the oldest. */
+  it('projects from the nearest broken zone, not the furthest', () => {
+    const box = buildProjectionZones(
+      up({ zones: [zone({ id: 'far', upper: 900, lower: 900 }), zone({ id: 'near' })] }),
+    ).up!;
+    expect(box.breakLevel).toBe(1000);
+  });
+});
+
+describe('buildProjectionZones — honest degradation', () => {
+  it('never claims a hit-rate it has not measured', () => {
+    expect(buildProjectionZones(up()).up!.hitRate).toBeNull();
+    expect(buildProjectionZones(down()).down!.hitRate).toBeNull();
+    expect(buildProjectionZones(up()).up!.reason).toMatch(/No measured history yet/);
+  });
+
+  it('is empty when there is no broken zone to project from', () => {
+    expect(buildProjectionZones(up({ zones: [] }))).toEqual({ up: null, down: null });
+    expect(buildProjectionZones(up({ zones: [zone({ upper: 1100, lower: 1090 })] })).up).toBeNull();
+  });
+
+  it('is empty without a spot or an ATR — never a box on a number it does not have', () => {
+    expect(buildProjectionZones(up({ ltp: null }))).toEqual({ up: null, down: null });
+    expect(buildProjectionZones(up({ atr14: null }))).toEqual({ up: null, down: null });
+  });
+
+  it('falls back to the levels snapshot for ATR', () => {
+    const levels = { atr14: ATR } as unknown as LevelsSnapshot;
+    expect(buildProjectionZones(up({ atr14: null, levels })).up).not.toBeNull();
+  });
+
+  /**
+   * The composite must survive a malformed projection input. A pure helper that
+   * can take down /chart-context is worse than one that admits it knows nothing.
+   */
+  it('never throws — malformed input yields empty zones', () => {
+    expect(buildProjectionZones({} as never)).toEqual({ up: null, down: null });
+    expect(buildProjectionZones(up({ zones: 'nope' as never }))).toEqual({ up: null, down: null });
+    expect(buildProjectionZones(up({ evidence: 'nope' as never })).up).not.toBeNull();
+    expect(() => buildProjectionZones(up({ htfZones: 'nope' as never }))).not.toThrow();
+  });
+
+  /** Same rule as the trade plan: no engine debug payload reaches a trader. */
+  it('emits a plain sentence with no debug payload', () => {
+    const box = buildProjectionZones(up()).up!;
+    expect(box.reason).not.toMatch(/reject:/);
+    expect(box.reason).not.toMatch(/[{}]/);
+    expect(box.reason.length).toBeGreaterThan(0);
+  });
+});

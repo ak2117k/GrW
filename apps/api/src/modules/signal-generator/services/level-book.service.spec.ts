@@ -159,6 +159,21 @@ describe('LevelBookService', () => {
    * VWAP=0 and spot=0 until the first live tick.
    */
   describe('replaySessionToBook', () => {
+    /**
+     * The clock is PINNED to 03:00 IST because the branch under test is the
+     * overnight one. Left on the wall clock this passes at night and fails
+     * during market hours — when `now >= today's open` the routine correctly
+     * replays TODAY, and three-day-old fixture bars fall outside the window.
+     * That is right behaviour and a wrong test, which is exactly how it first
+     * showed up: green when written, red hours later with nothing changed.
+     */
+    beforeEach(() => {
+      // 2026-08-10T21:30:00Z == 2026-08-11 03:00 IST — before that day's open.
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      jest.setSystemTime(new Date('2026-08-10T21:30:00Z'));
+    });
+    afterEach(() => jest.useRealTimers());
+
     it('replays the last session that traded, not merely yesterday', async () => {
       const istOffsetMs = 5.5 * 60 * 60 * 1000;
       // Three days back — beyond a flat -24h reach, within the lookback.

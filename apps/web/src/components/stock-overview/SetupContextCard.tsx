@@ -5,6 +5,7 @@ import {
   deriveTradePlanView,
   type TriggerLineView,
 } from '@/components/charts/tradePlanView';
+import type { ProjectionBoxView, ProjectionZonesView } from '@/components/charts/projectionBoxView';
 import { Card } from './_shared';
 
 // ─── Types (lifted from the old AnalysisPanel.tsx) ─────────────────────────
@@ -152,6 +153,12 @@ interface Props {
   tradePlan?: TradePlan | null;
   /** `sources.tradePlan` — 'failed' means "we don't know", not "nothing". */
   tradePlanSource?: SourceState;
+  /**
+   * The projection view, ALREADY DERIVED by the page and shared with the
+   * chart overlay. Passing the derived view rather than the raw zones is what
+   * makes "chart draws a box while the card says unavailable" unexpressible.
+   */
+  projectionView?: ProjectionZonesView;
 }
 
 function fmt(n: number): string {
@@ -184,11 +191,66 @@ function fmtPremium(n: number): string {
  * testable without a DOM, and so the chart's two drawn lines come off the
  * same `TradePlan` fields this card reads.
  */
+/**
+ * One projected break: where entry is still valid, where it is aiming, and how
+ * often that has actually happened.
+ *
+ * The hit-rate line is deliberately never omitted. "no measured history yet"
+ * is a weaker claim than a percentage but it is a TRUE one, and a box with a
+ * silent confidence reads as a confident box.
+ */
+function ProjectionRow({ box }: { box: ProjectionBoxView }) {
+  const up = box.side === 'UP';
+  return (
+    <div
+      className={clsx(
+        'rounded border-l-2 py-1 pl-2',
+        up ? 'border-emerald-500/70' : 'border-red-500/70',
+        box.state === 'armed' && 'opacity-60',
+      )}
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span className={clsx('text-xs font-semibold', up ? 'text-emerald-400' : 'text-red-400')}>
+          {box.headline}
+        </span>
+        <span className="text-[11px] text-zinc-500">{box.state}</span>
+      </div>
+      <div className="mt-0.5 text-[11px] text-zinc-400">
+        Enter {box.entryText} · SL {box.stopText} · T {box.targetText} · {box.rrText}
+      </div>
+      <div
+        className={clsx(
+          'text-[11px]',
+          box.hasMeasuredHistory ? 'text-zinc-300' : 'italic text-zinc-500',
+        )}
+      >
+        {box.hitRateText}
+      </div>
+    </div>
+  );
+}
+
+function ProjectionSection({ view }: { view: ProjectionZonesView }) {
+  if (view.kind === 'loading') return null;
+  if (view.kind === 'unavailable' || view.kind === 'none') {
+    return <div className="mt-3 border-t border-zinc-800 pt-2 text-[11px] italic text-zinc-500">{view.message}</div>;
+  }
+  if (!view.up && !view.down) return null;
+  return (
+    <div className="mt-3 space-y-1.5 border-t border-zinc-800 pt-2">
+      <div className="text-[11px] uppercase tracking-wide text-zinc-500">Projected breaks</div>
+      {view.up && <ProjectionRow box={view.up} />}
+      {view.down && <ProjectionRow box={view.down} />}
+    </div>
+  );
+}
+
 export default function SetupContextCard({
   analysis,
   loading,
   tradePlan,
   tradePlanSource,
+  projectionView,
 }: Props) {
   const view = deriveTradePlanView({
     plan: tradePlan,
@@ -214,6 +276,9 @@ export default function SetupContextCard({
     return (
       <Card title="Setup &amp; Context">
         <p className="text-sm text-zinc-400">{view.message}</p>
+        {/* A break can be projected even when no trigger qualifies — the two
+            answer different questions, so the boxes still render here. */}
+        {projectionView && <ProjectionSection view={projectionView} />}
       </Card>
     );
   }
@@ -237,6 +302,7 @@ export default function SetupContextCard({
             <div className="text-[11px] text-zinc-500">Nothing set up below.</div>
           )}
         </div>
+        {projectionView && <ProjectionSection view={projectionView} />}
       </Card>
     );
   }
@@ -515,6 +581,7 @@ export default function SetupContextCard({
       {trade.reason && (
         <div className="mt-2 text-[10px] italic leading-snug text-zinc-500">{trade.reason}</div>
       )}
+      {projectionView && <ProjectionSection view={projectionView} />}
     </Card>
   );
 }

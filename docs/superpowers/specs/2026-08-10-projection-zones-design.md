@@ -88,7 +88,17 @@ First qualifying candidate, nearest first, on the break side:
 1. Opposing `StrongZone` near edge (`classification` STRONG or MEDIUM)
 2. Evidence cluster with `score ≥ 60` (`EvidenceLevel`, any `kinds`)
 3. `POC` / `VALUE_AREA` / `MAX_PAIN` evidence levels
-4. ATR fallback: `entry ± 2 × |entry − stop|`
+4. Fallback with nothing ahead: `breakLevel ± 3 × |breakLevel − stop|`
+
+**Corrected during implementation.** This originally read
+`entry ± 2 × |entry − stop|`, which was wrong twice over. It anchored on the
+breakout entry (just past the zone's FAR side) while the entry region starts at
+the BREAK level, putting the whole reward inside the zone — the solved far edge
+landed below the break level and every fallback box came out null for any zone
+wider than `0.15 × ATR`. And the multiple could not be 2: substituting a target
+`n` risk-units away into the far-edge solve gives a box exactly `(n − 2) / 3`
+risk-units wide, so `n = 2` is a zero-width box by construction. Three is the
+smallest whole multiple leaving a region.
 
 `targetSource` records which fired, so the UI can say *why* that price. The ATR
 fallback is labelled as such — a fallback must never be presented as structure.

@@ -355,6 +355,11 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
           above: expect.objectContaining({ side: 'BUY', levelSource: 'PDH', triggerPrice: 110 }),
           below: expect.objectContaining({ side: 'SELL', levelSource: 'PDL', triggerPrice: 90 }),
         },
+        // The zone mock is a bare {id} — not a real StrongZone — so no broken
+        // zone is found and the geometry has nothing to anchor a box on. Both
+        // null is 'empty': it ran and nothing qualified. A real zone is
+        // exercised in the test below.
+        projections: { up: null, down: null },
         status: 'ready',
         sources: {
           analysis: 'ok',
@@ -362,6 +367,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
           evidence: 'ok',
           trend: 'ok',
           tradePlan: 'ok',
+          projections: 'empty',
         },
       });
       expect(dto.trend!.slope).toBeGreaterThan(0);
@@ -424,6 +430,49 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
 
       expect(dto.tradePlan).toEqual({ active: null, above: null, below: null });
       expect(dto.sources.tradePlan).toBe('empty');
+    });
+
+    /**
+     * Reachability, not geometry — zone-projection.spec.ts owns the maths.
+     * What this pins is that a real broken zone actually travels through the
+     * controller's composition into the response. Without it the builder could
+     * be perfect and still never be called, exactly as the trade plan was
+     * silently empty for a different reason.
+     */
+    it('composes a projection box from a genuinely broken zone', async () => {
+      const brokenResistance = {
+        id: 'z-res',
+        token: '18520',
+        symbol: 'CUPID',
+        exchange: 'NSE',
+        type: 'resistance',
+        upper: 96,
+        lower: 94,
+        isLine: false,
+        strength: 80,
+        classification: 'STRONG',
+        touchCount: 4,
+        lastTouchTimestamp: Date.now(),
+        computedAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      };
+      const { ctrl } = build({
+        strongZoneDetector: { detectZones: jest.fn().mockReturnValue([brokenResistance]) },
+      });
+
+      const dto = await ctrl.getChartContext(ADMIN, '18520', 'NSE', '5m', 'CUPID');
+
+      // Spot 100 is above the zone's upper edge, so the resistance is broken
+      // and the up-side box is the one that arms.
+      expect(dto.sources.projections).toBe('ok');
+      expect(dto.projections.up).not.toBeNull();
+      expect(dto.projections.up!.side).toBe('UP');
+      expect(dto.projections.up!.breakLevel).toBe(96);
+      // Reward:risk at the far edge is the floor, by construction.
+      expect(dto.projections.up!.rr).toBeGreaterThanOrEqual(2);
+      // Slice B fills this in; until then "no measured history" is the honest
+      // answer and must never be a fabricated percentage.
+      expect(dto.projections.up!.hitRate).toBeNull();
     });
 
     it('reports "no clear trend" as empty, not failed — the chart may state it', async () => {
@@ -490,6 +539,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         // A failed analysis takes the plan with it by design: with no levels
         // and no spot, "we don't know" is honest and "no trades set up" is not.
         tradePlan: 'failed',
+        projections: 'failed',
       });
       expect(dto.analysis).toBeNull();
       expect(dto.zones).toEqual([]);
@@ -520,6 +570,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         evidence: 'empty',
         trend: 'empty',
         tradePlan: 'empty',
+        projections: 'empty',
       });
     });
 

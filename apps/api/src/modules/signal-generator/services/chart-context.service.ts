@@ -4,6 +4,7 @@ import type { EvidenceLevel } from '../types/evidence-level.types';
 import type { AnalyzeResult } from './signal-generator.service';
 import type { TrendLine } from './trend-line';
 import type { TradePlan } from './trade-plan';
+import type { ProjectionZones } from './zone-projection';
 
 /**
  * Per-source outcome. The whole point of this endpoint is that these three
@@ -20,6 +21,7 @@ export interface ChartContextSources {
   evidence: SourceState;
   trend: SourceState;
   tradePlan: SourceState;
+  projections: SourceState;
 }
 
 export type ChartContextStatus = 'ready' | 'partial' | 'unavailable';
@@ -57,6 +59,17 @@ export interface ChartContextDto {
    * card states in words. Only a throw is 'failed'.
    */
   tradePlan: TradePlan;
+  /**
+   * The entry boxes drawn above a broken resistance and below a broken
+   * support, with the projected target and — when history supports one — a
+   * measured hit-rate.
+   *
+   * Never null: like `tradePlan`, the container always exists and it is the
+   * two BOXES that are nullable. A both-null plan is
+   * `sources.projections === 'empty'`: nothing qualified, which the card
+   * states in words. Only a throw is 'failed'.
+   */
+  projections: ProjectionZones;
   status: ChartContextStatus;
   sources: ChartContextSources;
 }
@@ -73,9 +86,16 @@ export interface ChartContextLoaders {
    * existed still build (the plan then reports 'empty', not 'failed').
    */
   tradePlan?: () => Promise<TradePlan | null | undefined>;
+  /**
+   * Composed from what the other loaders already fetched, exactly as the trade
+   * plan is. Optional for the same reason: a container wired before projection
+   * zones existed still builds, reporting 'empty' rather than 'failed'.
+   */
+  projections?: () => Promise<ProjectionZones | null | undefined>;
 }
 
 const EMPTY_TRADE_PLAN: TradePlan = { active: null, above: null, below: null };
+const EMPTY_PROJECTIONS: ProjectionZones = { up: null, down: null };
 
 export interface ChartContextKey {
   token: string;
@@ -129,7 +149,7 @@ export class ChartContextService {
     const hit = this.cache.get(cacheKey);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.dto;
 
-    const [analysis, zones, evidence, trend, tradePlan] = await Promise.all([
+    const [analysis, zones, evidence, trend, tradePlan, projections] = await Promise.all([
       // 'empty' means "ran, produced no usable level book". An analyze result
       // that came back without levels is exactly that — the chart has nothing
       // to anchor on — so it must not read as 'ok' just because the call
@@ -150,6 +170,15 @@ export class ChartContextService {
         loaders.tradePlan ?? (async () => undefined),
         (v) => v == null || (v.active === null && v.above === null && v.below === null),
       ),
+      // Both boxes null is 'empty' — the geometry ran and no side had a broken
+      // zone with an enterable region left. The card says so in words; only a
+      // throw is 'failed'. Same rule as the trade plan above.
+      this.resolve(
+        'projections',
+        key,
+        loaders.projections ?? (async () => undefined),
+        (v) => v == null || (v.up === null && v.down === null),
+      ),
     ]);
 
     const sources: ChartContextSources = {
@@ -158,6 +187,7 @@ export class ChartContextService {
       evidence: evidence.state,
       trend: trend.state,
       tradePlan: tradePlan.state,
+      projections: projections.state,
     };
 
     const dto: ChartContextDto = {
@@ -167,6 +197,7 @@ export class ChartContextService {
       evidence: evidence.value ?? [],
       trend: trend.value ?? null,
       tradePlan: tradePlan.value ?? EMPTY_TRADE_PLAN,
+      projections: projections.value ?? EMPTY_PROJECTIONS,
       // Over ALL five sources. Trend was excluded while it was unimplemented
       // and hard-wired to 'empty' — including it then would have made
       // 'unavailable' unreachable, so a total outage reported 'partial'

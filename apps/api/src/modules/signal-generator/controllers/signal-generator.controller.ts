@@ -25,6 +25,7 @@ import { SignalFilterDto } from '../dto/signal.dto';
 import { ChartinkRepository } from '../../chartink/repositories/chartink.repository';
 import { ZoneRepository } from '../repositories/zone.repository';
 import { StrongZoneDetectorService } from '../services/strong-zone-detector.service';
+import type { StrongZone } from '../types/zone.types';
 import { LevelBookService } from '../services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
@@ -36,6 +37,11 @@ import type { ChartContextDto } from '../services/chart-context.service';
 import { fitTrendLine, type TrendLine } from '../services/trend-line';
 import { buildTradePlan, type TradePlan } from '../services/trade-plan';
 import type { ProfileCandle as ChartCandle } from '../services/volume-profile';
+import {
+  HTF_FOR_TIMEFRAME,
+  buildProjectionZones,
+  type ProjectionZones,
+} from '../services/zone-projection';
 
 /** First argument that is genuinely a price. 0 and NaN are not prices. */
 function firstPrice(...values: Array<number | null | undefined>): number | null {
@@ -583,6 +589,69 @@ export class SignalGeneratorController {
   }
 
   /**
+   * The projection boxes — composed, never fetched.
+   *
+   * Every input is already paid for: the memoised analysis, evidence and zone
+   * promises, plus the level book's in-memory spot. The geometry itself is
+   * pure (see zone-projection.ts).
+   *
+   * Higher-timeframe zones are read from the zone CACHE only. Detecting them
+   * live would mean a second candle series at another timeframe — a chunked,
+   * rate-limited broker fetch on the queue the chart's own candles share, which
+   * is exactly the regression 49d1fc1 fixed. When the cache has nothing, the
+   * HTF is reported as NOT CONSULTED rather than as clear: `htfZones`
+   * undefined makes the builder say so in its reason instead of silently
+   * drawing an uncapped projection.
+   */
+  private async composeProjections(
+    timeframe: string,
+    token: string,
+    analysis: () => Promise<Awaited<ReturnType<SignalGeneratorService['analyze']>> | null>,
+    evidence: () => Promise<Array<{ price: number; score: number }>>,
+    zones: () => Promise<StrongZone[]>,
+    candles: () => Promise<ChartCandle[]>,
+  ): Promise<ProjectionZones> {
+    const result = await analysis();
+    const [evidenceLevels, chartZones] = await Promise.all([
+      evidence().catch(() => []),
+      zones().catch(() => []),
+    ]);
+    const book = this.levelBookService?.getLevels?.(token) ?? null;
+    const levels = result?.levels ?? null;
+
+    const htf = HTF_FOR_TIMEFRAME[timeframe] ?? null;
+    const htfZones = htf ? await this.cachedZonesFor(token, htf) : undefined;
+
+    return buildProjectionZones({
+      timeframe,
+      ltp: firstPrice(book?.spot, lastClose(await candles().catch(() => []))),
+      atr14: levels?.atr14 ?? book?.atr14 ?? null,
+      zones: chartZones,
+      htfZones,
+      evidence: evidenceLevels as never,
+      levels,
+    });
+  }
+
+  /**
+   * Higher-timeframe zones from the persisted zone cache, or undefined when we
+   * have none — "not consulted", which the projection builder distinguishes
+   * from "consulted and clear". Never computes, never fetches.
+   */
+  private async cachedZonesFor(token: string, timeframe: string): Promise<StrongZone[] | undefined> {
+    if (!this.zoneRepository) return undefined;
+    try {
+      const cached = await this.zoneRepository.findActiveByToken(token);
+      if (!Array.isArray(cached) || cached.length === 0) return undefined;
+      // The 15m zone table is the only persisted one; treat it as the HTF view
+      // only when the chart is BELOW it, never as a peer of itself.
+      return timeframe === '15m' ? cached : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * GET /api/signals/chart-context — the charts page's single S/R read.
    *
    * Composes the three sources the page used to poll separately (/analyze's
@@ -663,15 +732,22 @@ export class SignalGeneratorController {
     let candlesOnce: Promise<ChartCandle[]> | undefined;
     const candles = () =>
       (candlesOnce ??= this.chartCandles(token, resolvedExchange, symbol, tf, source));
+    // Memoised for the same reason: the projection geometry needs the very
+    // zones the response reports, not a second detection pass that could
+    // disagree with the one the chart is drawing.
+    let zonesOnce: Promise<Awaited<ReturnType<typeof this.computeZones>>> | undefined;
+    const zones = () =>
+      (zonesOnce ??= this.computeZones(token, resolvedExchange, symbol, tf, source));
 
     return this.chartContext.build(
       { token, exchange: resolvedExchange, interval: tf },
       {
         analysis,
-        zones: () => this.computeZones(token, resolvedExchange, symbol, tf, source),
+        zones,
         evidence,
         trend: () => this.computeTrend(candles),
         tradePlan: () => this.composeTradePlan(token, analysis, evidence, candles),
+        projections: () => this.composeProjections(tf, token, analysis, evidence, zones, candles),
       },
     );
   }

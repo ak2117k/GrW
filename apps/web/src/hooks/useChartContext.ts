@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '@/services/api';
 import type { EvidenceLevel, StrongZone } from '@/types';
 import type { AnalysisDto } from '@/components/stock-overview/SetupContextCard';
+import type { ProjectionZones } from '@/components/charts/projectionBoxView';
+
+export type { HitRate, ProjectionBox, ProjectionZones } from '@/components/charts/projectionBoxView';
 
 /** Per-source outcome, as composed server-side. */
 export type SourceState = 'ok' | 'empty' | 'failed';
@@ -59,6 +62,7 @@ export interface TradePlan {
 }
 
 const EMPTY_TRADE_PLAN: TradePlan = { active: null, above: null, below: null };
+const EMPTY_PROJECTIONS: ProjectionZones = { up: null, down: null };
 
 export interface ChartContextSources {
   analysis: SourceState;
@@ -66,6 +70,7 @@ export interface ChartContextSources {
   evidence: SourceState;
   trend: SourceState;
   tradePlan: SourceState;
+  projections: SourceState;
 }
 
 export interface ChartContextDto {
@@ -83,6 +88,12 @@ export interface ChartContextDto {
    * different statement from `sources.tradePlan === 'failed'`.
    */
   tradePlan: TradePlan;
+  /**
+   * The entry boxes the chart draws and the card reads. Always an object —
+   * both sides null means "ran, nothing qualified", which is a different
+   * statement from `sources.projections === 'failed'`.
+   */
+  projections: ProjectionZones;
   status: 'ready' | 'partial' | 'unavailable';
   sources: ChartContextSources;
 }
@@ -129,6 +140,7 @@ const UNAVAILABLE: ChartContextDto = {
   evidence: [],
   trend: null,
   tradePlan: EMPTY_TRADE_PLAN,
+  projections: EMPTY_PROJECTIONS,
   status: 'unavailable',
   sources: {
     analysis: 'failed',
@@ -136,6 +148,7 @@ const UNAVAILABLE: ChartContextDto = {
     evidence: 'failed',
     trend: 'failed',
     tradePlan: 'failed',
+    projections: 'failed',
   },
 };
 
@@ -207,9 +220,16 @@ export function useChartContext(
               // the SOURCE failed, so the card says "unavailable" rather than
               // the far stronger "nothing is setting up".
               tradePlan: payload.tradePlan ?? EMPTY_TRADE_PLAN,
+              // Same rule for the boxes: a body without them is a server that
+              // could not produce them (or predates the field). Marking the
+              // source failed makes the card say "unavailable" rather than the
+              // far stronger — and here far more dangerous — "no setup ahead".
+              projections: payload.projections ?? EMPTY_PROJECTIONS,
               sources: {
                 ...payload.sources,
                 tradePlan: payload.sources?.tradePlan ?? (payload.tradePlan ? 'ok' : 'failed'),
+                projections:
+                  payload.sources?.projections ?? (payload.projections ? 'ok' : 'failed'),
               },
             }
           : { ...UNAVAILABLE, interval: interval ?? '' },

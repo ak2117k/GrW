@@ -15,6 +15,7 @@ function ctx(
     evidence: [],
     trend: null,
     tradePlan: { active: null, above: null, below: null },
+    projections: { up: null, down: null },
     status,
     sources: {
       analysis: 'ok',
@@ -22,6 +23,7 @@ function ctx(
       evidence: 'ok',
       trend: 'empty',
       tradePlan: 'empty',
+      projections: 'empty',
       ...sources,
     },
   };

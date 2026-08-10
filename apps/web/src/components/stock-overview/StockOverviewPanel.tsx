@@ -1,4 +1,5 @@
 import type { SourceState, TradePlan } from '@/hooks/useChartContext';
+import type { ProjectionZonesView } from '@/components/charts/projectionBoxView';
 import SetupContextCard, { type AnalysisDto } from './SetupContextCard';
 import LiveQuoteCard from './LiveQuoteCard';
 import MarketDepthCard from './MarketDepthCard';
@@ -17,6 +18,8 @@ interface Props {
   /** The server's one trade plan — the same object the chart draws from. */
   tradePlan?: TradePlan | null;
   tradePlanSource?: SourceState;
+  /** Derived once by the page and shared with the chart overlay. */
+  projectionView?: ProjectionZonesView;
 }
 
 /**
@@ -47,6 +50,7 @@ export default function StockOverviewPanel({
   analysisLoading,
   tradePlan,
   tradePlanSource,
+  projectionView,
 }: Props) {
   return (
     <div className="flex flex-col gap-4 p-4 max-w-full">
@@ -55,6 +59,7 @@ export default function StockOverviewPanel({
         loading={analysisLoading}
         tradePlan={tradePlan}
         tradePlanSource={tradePlanSource}
+        projectionView={projectionView}
       />
       <LiveQuoteCard token={token} exchange={exchange} symbol={symbol} />
       <MarketDepthCard token={token} exchange={exchange} />

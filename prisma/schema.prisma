@@ -1871,3 +1871,49 @@ model PatternObservation {
   @@index([timeframe])
   @@map("pattern_observations")
 }
+
+// ============================================
+// Projection Zones — measured hit-rate
+// ============================================
+
+/// One confirmed zone break and how it resolved against ITS OWN target.
+///
+/// Deliberately separate from PatternObservation: that table's follow-through is
+/// defined at a fixed k = 1.5 ATR, whereas each projection resolves against the
+/// target distance it was actually drawn with. Overloading one table would put
+/// two yardsticks in one label column and corrupt both.
+///
+/// Not tenant-scoped — zone breaks are global market data (same class as Candle
+/// and PatternObservation), so the model is absent from TENANT_MODELS and rows
+/// carry no userId.
+/// See docs/superpowers/specs/2026-08-10-projection-zones-design.md §3.4.
+model ZoneBreakObservation {
+  id                 String    @id @default(cuid())
+  token              String
+  exchange           String
+  timeframe          String
+  side               String // UP | DOWN
+  barTime            DateTime
+  // Cohort key — what a break is grouped BY when the symbol itself has too few
+  // resolved rows to speak for itself.
+  zoneClassification String // STRONG | MEDIUM | WEAK
+  touchCount         Int
+  volumeBucket       String // LOW | NORMAL | HIGH | UNKNOWN
+  htfAgreed          Boolean
+  // Geometry at detection, in ATR units so it is comparable across symbols.
+  atrAtDetection     Float
+  targetDistAtr      Float
+  stopDistAtr        Float
+  targetSource       String
+  // Outcome. PENDING until the horizon has enough bars to decide.
+  outcome            String    @default("PENDING") // WIN | LOSS | TIMEOUT | PENDING
+  label              Int? // WIN=1, LOSS=0, null while PENDING/TIMEOUT
+  resolvedAt         DateTime?
+  createdAt          DateTime  @default(now())
+
+  @@unique([token, exchange, timeframe, side, barTime])
+  @@index([timeframe, zoneClassification, volumeBucket])
+  @@index([token, exchange, timeframe])
+  @@index([outcome])
+  @@map("zone_break_observations")
+}

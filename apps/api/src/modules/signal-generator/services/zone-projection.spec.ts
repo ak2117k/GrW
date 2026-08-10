@@ -354,6 +354,29 @@ describe('buildProjectionZones — box geometry', () => {
     expect(box!.target).toBeGreaterThan(box!.breakLevel);
   });
 
+  /**
+   * The blank-chart bug. After 15:30 IST the budget correctly reports zero
+   * travel left TODAY, and applying that as a cap collapsed the target onto the
+   * break level, failed the R:R floor and deleted every box — so the chart went
+   * empty exactly when a trader sits down to plan the next day.
+   *
+   * A projection is not a claim about the minutes left in a finished session.
+   */
+  it('still projects after the close, sized for the next session', () => {
+    const afterHours = up({
+      evidence: [ev(1200, 90, ['OI_CALL'])],
+      now: new Date('2026-08-10T11:37:00Z'), // 17:07 IST — the payload that found this
+      exchange: 'NSE',
+      dailyAtr: 200,
+      levels: { todayHigh: 1018, todayLow: 1000, atr14: ATR } as LevelsSnapshot,
+    });
+
+    const box = buildProjectionZones(afterHours).up;
+    expect(box).not.toBeNull();
+    expect(box!.target).toBeGreaterThan(box!.breakLevel);
+    expect(box!.reason).toMatch(/next session/i);
+  });
+
   it('only ever emits the side that actually broke', () => {
     expect(buildProjectionZones(up()).down).toBeNull();
     expect(buildProjectionZones(down()).up).toBeNull();

@@ -444,6 +444,27 @@ function capToSessionBudget(args: {
     return { target, cappedBySession: false, note: " Today's range was not sized." };
   }
 
+  // The session is OVER. `points: 0` is a true statement about the minutes that
+  // remain today, and applying it as a cap collapsed the target onto the break
+  // level and deleted every box — so outside market hours the chart went blank,
+  // which is precisely when a trader sits down to plan.
+  //
+  // A projection is not a claim about today's remaining minutes; it answers
+  // "if this breaks, where does it go". After the close the honest frame is the
+  // NEXT session, which starts with a full ATR of expected range and nothing
+  // consumed. Sized that way, and labelled so the box is not read as live.
+  if (budget.sessionFractionLeft <= 0) {
+    const nextSession = input.dailyAtr;
+    if (!Number.isFinite(nextSession as number) || (nextSession as number) <= 0) {
+      return { target, cappedBySession: false, note: ' Sized for the next session.' };
+    }
+    const reach = isUp ? breakLevel + (nextSession as number) : breakLevel - (nextSession as number);
+    const beyond = isUp ? target > reach + EPS : target < reach - EPS;
+    return beyond
+      ? { target: reach, cappedBySession: true, note: " Sized for the next session's range." }
+      : { target, cappedBySession: false, note: ' Sized for the next session.' };
+  }
+
   const reach = isUp ? breakLevel + budget.points : breakLevel - budget.points;
   const beyond = isUp ? target > reach + EPS : target < reach - EPS;
   if (!beyond) return { target, cappedBySession: false, note: '' };

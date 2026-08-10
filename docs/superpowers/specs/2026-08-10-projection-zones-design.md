@@ -1,7 +1,67 @@
 # Projection Zones — Entry Boxes With A Measured Target
 
 **Date:** 2026-08-10
-**Status:** Approved, ready for implementation
+**Status:** Approved. Revised 2026-08-10 after first render — see §0.
+
+---
+
+## 0. Revision — what the first implementation got wrong
+
+Three defects, found by looking at the thing on a real chart.
+
+### 0.1 The box is the TRAVEL, not the entry region
+
+The box was built as a thin band hugging the break level (where entry stays
+valid). The intended object is the full projected travel: two large boxes
+sharing a boundary at the decision level — green spanning UP to the upside
+destination, red spanning DOWN to the downside one. The entry region is a
+detail inside that span, not the span itself.
+
+`entryNear`/`entryFar` therefore stop being the box and become an inner band;
+`breakLevel → target` is what gets drawn and filled.
+
+### 0.2 Nearest-level targeting is a treadmill
+
+`selectTarget` took the NEAREST opposing level, so a break of ORH targeted the
+round number 20 points up; breaking that targeted the next. Each projection was
+superseded within minutes and none of them described where the move was
+actually going.
+
+A projection must aim at the next **high-conviction barrier** and treat the
+minor levels between it and price as terrain to be crossed, not destinations.
+Conviction, in descending order of evidence:
+
+1. **Option-chain OI wall** — the strike with the largest CE OI above spot is
+   the practical ceiling for an index; largest PE OI below is the floor.
+   Already available: `OI_CALL`, `OI_PUT`, `MAX_PAIN`, `OI_CHANGE`.
+2. **High-volume node / value-area edge** — price traverses low-volume nodes
+   quickly and stalls at high-volume ones. Already available: `POC`,
+   `VALUE_AREA`.
+3. **A zone with real touch history** — STRONG/MEDIUM with `touchCount ≥ 3`.
+
+A round number nobody has traded against is not a barrier. This is also what
+"the decision becomes indecisive there" means: the first level strong enough
+that the engine cannot call the resolution is the honest end of the projection.
+
+### 0.3 A target must fit in the day that is left
+
+`TGT 24,719.61` from `ENTRY 24,606.80` — 113 points — was issued at 12:44 IST
+on a low-volatility day with roughly 40% of the session remaining and most of
+the daily range already spent. No amount of structural correctness makes that
+reachable.
+
+Every projection is capped by a **session budget**: the expected travel still
+available, from the daily ATR, the range already consumed today, and the
+fraction of the session left. Like the HTF cap, it can only ever take room
+away. When the barrier lies beyond the budget the box is drawn to the budget
+and the reason names the barrier and says it is beyond today's range.
+
+### 0.4 Anchoring only on StrongZones left indices blank
+
+Boxes anchored exclusively on `StrongZone`, which the detector does not always
+produce for an index — while the level book demonstrably had ORH, PDH and round
+levels drawn on the very same chart. The anchor falls back to the level book so
+a chart with visible levels always has something to project from.
 
 ---
 

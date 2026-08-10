@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { OiWallService } from './oi-wall.service';
 
 describe('OiWallService', () => {
@@ -156,5 +157,66 @@ describe('OiWallService', () => {
       expect(ext.some((w) => w.kind === 'OI_CALL')).toBe(true);
       expect(ext.some((w) => w.kind === 'MAX_PAIN')).toBe(true);
     });
+  });
+});
+
+/**
+ * The OI walls were silently absent in production and nothing said why.
+ *
+ * `wallsExtended` caught every failure into `logger.debug`, which at production
+ * log levels is silence. "This is a cash stock" and "the chain fetch failed"
+ * then looked identical from outside: no OI kinds in evidence, the barrier
+ * ranking fell through to bare levels, and every projection came out an ATR
+ * guess with no way to diagnose it. These tests pin that each cause is now
+ * REPORTED and distinguishable.
+ */
+describe('OiWallService — reporting why walls are missing', () => {
+  const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => {});
+
+  beforeEach(() => {
+    warn.mockClear();
+    debug.mockClear();
+  });
+  afterAll(() => jest.restoreAllMocks());
+
+  it('warns when the options-chain service is not wired', async () => {
+    const svc = new OiWallService(undefined);
+    await svc.wallsExtended('NIFTY', 24_591);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/not wired/i));
+  });
+
+  it('warns when expiries exist but the chain comes back empty', async () => {
+    const svc = new OiWallService({
+      getExpiries: jest.fn().mockResolvedValue(['2026-08-14']),
+      getOptionsChain: jest.fn().mockResolvedValue([]),
+    } as never);
+    await svc.wallsExtended('NIFTY', 24_591);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/chain empty/i));
+  });
+
+  it('warns with the underlying error when the fetch throws', async () => {
+    const svc = new OiWallService({
+      getExpiries: jest.fn().mockRejectedValue(new Error('instrument master not loaded')),
+    } as never);
+    await svc.wallsExtended('NIFTY', 24_591);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/instrument master not loaded/));
+  });
+
+  /** A cash stock having no chain is a fact, not a fault — warning would bury the real ones. */
+  it('does NOT warn for a cash stock with no options', async () => {
+    const svc = new OiWallService({ getExpiries: jest.fn().mockResolvedValue([]) } as never);
+    await svc.wallsExtended('SOMESTOCK', 100);
+    expect(warn).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalledWith(expect.stringMatching(/no-options/));
+  });
+
+  /** A 60s chart poll must not reprint the same cause every minute. */
+  it('reports each symbol+cause once, not on every poll', async () => {
+    const svc = new OiWallService(undefined);
+    await svc.wallsExtended('NIFTY', 24_591);
+    await svc.wallsExtended('NIFTY', 24_591);
+    await svc.wallsExtended('NIFTY', 24_591);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

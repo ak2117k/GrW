@@ -11,10 +11,43 @@ import type { LevelCandidate } from '../types/evidence-level.types';
 export class OiWallService {
   private readonly logger = new Logger(OiWallService.name);
 
+  /**
+   * Symbols already warned about, so a 60s chart poll logs the cause ONCE
+   * instead of every minute. Keyed by symbol+cause so a changed cause is
+   * still reported.
+   */
+  private readonly warned = new Set<string>();
+
   constructor(@Optional() private readonly optionsChain?: OptionsChainService) {}
 
+  /**
+   * Report WHY there are no OI walls, exactly once per symbol+cause.
+   *
+   * This exists because the failure used to be a `logger.debug` inside a catch,
+   * which at production log levels is silence. "This stock has no options" and
+   * "the chain fetch failed" then looked identical from the outside: the
+   * evidence array simply had no OI kinds, the barrier ranking fell through to
+   * bare levels, and every projection came out as an ATR guess with no way to
+   * find out why. A missing input must be loud — the same empty-vs-failed rule
+   * the rest of this pipeline runs on.
+   *
+   * `no-options` stays at debug: a cash stock having no chain is a fact, not a
+   * fault, and warning on it would bury the real failures.
+   */
+  private report(symbol: string, cause: string, detail?: string): void {
+    const key = `${symbol}:${cause}`;
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    const msg = `OI walls unavailable for ${symbol}: ${cause}${detail ? ` — ${detail}` : ''}`;
+    if (cause === 'no-options') this.logger.debug(msg);
+    else this.logger.warn(msg);
+  }
+
   async walls(symbol: string, ltp: number): Promise<LevelCandidate[]> {
-    if (!this.optionsChain || !symbol) return [];
+    if (!this.optionsChain || !symbol) {
+      this.report(symbol || '(no symbol)', 'options-chain service not wired');
+      return [];
+    }
     try {
       const expiries = await this.optionsChain.getExpiries(symbol);
       if (!expiries || expiries.length === 0) return []; // cash stock — no OI
@@ -63,21 +96,44 @@ export class OiWallService {
    * F&O underlyings only; non-F&O / failure → []. Never throws.
    */
   async wallsExtended(symbol: string, ltp: number): Promise<LevelCandidate[]> {
-    if (!this.optionsChain || !symbol) return [];
+    if (!this.optionsChain) {
+      this.report(symbol || '(no symbol)', 'options-chain service not wired');
+      return [];
+    }
+    if (!symbol) {
+      this.report('(no symbol)', 'caller passed no underlying');
+      return [];
+    }
     try {
       const expiries = await this.optionsChain.getExpiries(symbol);
-      if (!expiries || expiries.length === 0) return []; // cash stock — no OI
+      if (!expiries || expiries.length === 0) {
+        // A cash stock genuinely has no chain. Fact, not fault.
+        this.report(symbol, 'no-options');
+        return [];
+      }
       const chain = await this.optionsChain.getOptionsChain(symbol, expiries[0]);
-      if (!Array.isArray(chain) || chain.length === 0) return [];
+      if (!Array.isArray(chain) || chain.length === 0) {
+        // Expiries exist but the chain is empty — this IS a fault, and the one
+        // most likely to be hiding here: the underlying is an F&O name whose
+        // chain could not be served.
+        this.report(symbol, 'chain empty', `expiry ${expiries[0]}`);
+        return [];
+      }
 
       const out: LevelCandidate[] = [];
       out.push(...this.staticWalls(chain, ltp));
       const maxPain = this.maxPainCandidate(chain);
       if (maxPain) out.push(maxPain);
       out.push(...this.oiChangeWalls(chain, ltp));
+
+      if (out.length === 0) {
+        // A chain that carries no usable OI at all — every strike zero, or the
+        // spot filter excluded everything. Distinct from a failed fetch.
+        this.report(symbol, 'chain carries no open interest', `${chain.length} strikes, ltp ${ltp}`);
+      }
       return out;
     } catch (err) {
-      this.logger.debug(`OI wallsExtended failed for ${symbol}: ${err instanceof Error ? err.message : err}`);
+      this.report(symbol, 'fetch failed', err instanceof Error ? err.message : String(err));
       return [];
     }
   }

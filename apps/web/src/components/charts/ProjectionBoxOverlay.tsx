@@ -88,13 +88,13 @@ export default function ProjectionBoxOverlay({
     const target = series;
     const primitive = new ProjectionBandPrimitive();
     bandRef.current = primitive;
-    withLiveSeries(target, (s) => {
-      (s as unknown as { attachPrimitive?: (p: unknown) => void }).attachPrimitive?.(primitive);
-    });
+    // Called directly, NOT through an optional chain on a cast. The previous
+    // form silently drew nothing if the method was ever absent, which is
+    // indistinguishable from "no projection qualified" — the one confusion this
+    // whole feature exists to prevent. A missing method must be loud.
+    withLiveSeries(target, (s) => s.attachPrimitive(primitive));
     return () => {
-      withLiveSeries(target, (s) => {
-        (s as unknown as { detachPrimitive?: (p: unknown) => void }).detachPrimitive?.(primitive);
-      });
+      withLiveSeries(target, (s) => s.detachPrimitive(primitive));
       bandRef.current = null;
     };
   }, [series]);

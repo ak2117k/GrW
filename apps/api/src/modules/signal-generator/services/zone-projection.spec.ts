@@ -250,6 +250,71 @@ describe('buildProjectionZones — box geometry', () => {
     }
   });
 
+  /**
+   * The reported incident: a 113-point NIFTY target issued at 12:44 IST on a
+   * low-volatility day with most of the daily range already spent. Structurally
+   * correct, practically impossible. Spec §0.3.
+   */
+  it('caps a barrier that today can no longer reach', () => {
+    const far = up({
+      evidence: [ev(1200, 90, ['OI_CALL'])],
+      now: new Date('2026-08-10T07:14:00Z'), // 12:44 IST
+      exchange: 'NSE',
+      dailyAtr: 200,
+      levels: { todayHigh: 1018, todayLow: 1000, atr14: ATR } as LevelsSnapshot,
+    });
+
+    const box = buildProjectionZones(far).up!;
+    expect(box.cappedBySession).toBe(true);
+    expect(box.target).toBeLessThan(1200);
+    // The barrier is still NAMED — a capped box says what it could not reach.
+    expect(box.reason).toMatch(/beyond today's remaining range/);
+  });
+
+  /**
+   * A budget so small that the capped target can no longer clear the R:R floor
+   * yields NO box. That is deliberate: a box drawn to two points of remaining
+   * range would promise a trade the day cannot pay for. The card is what has to
+   * explain the absence — the geometry's job is to refuse.
+   */
+  it('suppresses the box when the day has no worthwhile move left', () => {
+    const spent = up({
+      evidence: [ev(1200, 90, ['OI_CALL'])],
+      now: new Date('2026-08-10T09:50:00Z'), // 15:20 IST, ten minutes left
+      exchange: 'NSE',
+      dailyAtr: 20,
+      levels: { todayHigh: 1019, todayLow: 1000, atr14: ATR } as LevelsSnapshot,
+    });
+
+    expect(buildProjectionZones(spent).up).toBeNull();
+  });
+
+  it('leaves a reachable barrier alone', () => {
+    const near = up({
+      evidence: [ev(1012, 90, ['OI_CALL'])],
+      now: new Date('2026-08-10T04:00:00Z'), // 09:30 IST, session barely begun
+      exchange: 'NSE',
+      dailyAtr: 60,
+      levels: { todayHigh: 1002, todayLow: 1000, atr14: ATR } as LevelsSnapshot,
+    });
+
+    const box = buildProjectionZones(near).up!;
+    expect(box.cappedBySession).toBe(false);
+    expect(box.target).toBe(1012);
+  });
+
+  /**
+   * No clock, or no daily ATR, means the day could not be SIZED. That must not
+   * silently become "no room" — it weakens the claim, it does not delete it.
+   */
+  it('does not cap when the day could not be sized', () => {
+    const box = buildProjectionZones(
+      up({ evidence: [ev(1200, 90, ['OI_CALL'])], now: null }),
+    ).up!;
+    expect(box.cappedBySession).toBe(false);
+    expect(box.target).toBe(1200);
+  });
+
   it('only ever emits the side that actually broke', () => {
     expect(buildProjectionZones(up()).down).toBeNull();
     expect(buildProjectionZones(down()).up).toBeNull();
@@ -325,10 +390,25 @@ describe('buildProjectionZones — target selection', () => {
     expect(box.target).toBe(1050);
   });
 
-  it('falls to an evidence cluster scoring at least 60', () => {
+  /**
+   * A plain VOLUME cluster is no longer a destination on its own — aiming at
+   * whatever level happened to be nearest is what made every projection a
+   * treadmill. Only a level with a named reason to stop price (an OI wall, a
+   * volume node, a tested zone) qualifies now; the rest is terrain. Spec §0.2,
+   * and `barrier-selection.spec.ts` owns the ranking itself.
+   */
+  it('does not aim at a bare evidence cluster with no barrier kind', () => {
     const box = buildProjectionZones(up({ evidence: [ev(1040, 75)] })).up!;
-    expect(box.targetSource).toBe('EVIDENCE');
+    expect(box.targetSource).not.toBe('ZONE');
+    expect(box.target).not.toBe(1040);
+  });
+
+  it('aims at an option-chain wall ahead of it', () => {
+    const box = buildProjectionZones(up({ evidence: [ev(1040, 75, ['OI_CALL'])] })).up!;
+    expect(box.targetSource).toBe('OI_WALL');
     expect(box.target).toBe(1040);
+    // Conviction is derived from the evidence, never a per-class constant.
+    expect(box.conviction).toBeGreaterThan(0);
   });
 
   /** Below the score floor an evidence level is noise, not a destination. */
@@ -339,11 +419,11 @@ describe('buildProjectionZones — target selection', () => {
   });
 
   it.each<[EvidenceKind, string]>([
-    ['POC', 'POC'],
+    ['POC', 'HVN'],
     ['VALUE_AREA', 'VALUE_AREA'],
     ['MAX_PAIN', 'MAX_PAIN'],
-  ])('uses a low-scored %s level and names it as the source', (kind, source) => {
-    const box = buildProjectionZones(up({ evidence: [ev(1040, 20, [kind])] })).up!;
+  ])('uses a %s level and names it as the source', (kind, source) => {
+    const box = buildProjectionZones(up({ evidence: [ev(1040, 70, [kind])] })).up!;
     expect(box.targetSource).toBe(source);
     expect(box.target).toBe(1040);
   });

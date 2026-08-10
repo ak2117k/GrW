@@ -606,6 +606,7 @@ export class SignalGeneratorController {
   private async composeProjections(
     timeframe: string,
     token: string,
+    exchange: string,
     analysis: () => Promise<Awaited<ReturnType<SignalGeneratorService['analyze']>> | null>,
     evidence: () => Promise<Array<{ price: number; score: number }>>,
     zones: () => Promise<StrongZone[]>,
@@ -630,6 +631,15 @@ export class SignalGeneratorController {
       htfZones,
       evidence: evidenceLevels as never,
       levels,
+      // The clock is injected so the geometry stays pure and its session-cap
+      // behaviour is testable without freezing time.
+      now: new Date(),
+      exchange,
+      // The level book's ATR is seeded from DAILY candles, which is what the
+      // session budget needs — it asks how much of a typical DAY's range is
+      // left. `levels.atr14` is the CHART timeframe's and would cap every
+      // projection to a few points.
+      dailyAtr: book?.atr14 ?? null,
     });
   }
 
@@ -747,7 +757,7 @@ export class SignalGeneratorController {
         evidence,
         trend: () => this.computeTrend(candles),
         tradePlan: () => this.composeTradePlan(token, analysis, evidence, candles),
-        projections: () => this.composeProjections(tf, token, analysis, evidence, zones, candles),
+        projections: () => this.composeProjections(tf, token, resolvedExchange, analysis, evidence, zones, candles),
       },
     );
   }

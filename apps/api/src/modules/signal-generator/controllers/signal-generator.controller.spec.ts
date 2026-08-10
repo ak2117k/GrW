@@ -335,6 +335,22 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
    * still be a 200 the chart can render.
    */
   describe('getChartContext', () => {
+    /**
+     * The clock is PINNED because the projection's session budget reads it: the
+     * travel still available depends on how much of the session is left, so
+     * outside market hours the budget is zero and every box is correctly
+     * suppressed. Left on the wall clock these tests would pass during the
+     * session and fail after it — green when written, red overnight, with
+     * nothing changed. Mid-session so the budget is generous and the assertions
+     * are about composition rather than about the cap.
+     */
+    beforeEach(() => {
+      // 2026-08-10T05:00:00Z == 10:30 IST, a bit over an hour into the session.
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      jest.setSystemTime(new Date('2026-08-10T05:00:00Z'));
+    });
+    afterEach(() => jest.useRealTimers());
+
     it('composes levels + zones + evidence + trend + plan into one ready response', async () => {
       const { ctrl, deps } = build({
         srEvidenceService: { levelsFor: jest.fn().mockResolvedValue([{ price: 105 }]) },
@@ -448,8 +464,11 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         symbol: 'CUPID',
         exchange: 'NSE',
         type: 'resistance',
-        upper: 96,
-        lower: 94,
+        // Just under spot 100. A zone far below would put the stop so wide that
+        // the next barrier cannot pay for it, and the box would correctly
+        // vanish — which tests nothing about composition.
+        upper: 99,
+        lower: 98,
         isLine: false,
         strength: 80,
         classification: 'STRONG',
@@ -469,7 +488,7 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
       expect(dto.sources.projections).toBe('ok');
       expect(dto.projections.up).not.toBeNull();
       expect(dto.projections.up!.side).toBe('UP');
-      expect(dto.projections.up!.breakLevel).toBe(96);
+      expect(dto.projections.up!.breakLevel).toBe(99);
       // Reward:risk at the far edge is the floor, by construction.
       expect(dto.projections.up!.rr).toBeGreaterThanOrEqual(2);
       // Slice B fills this in; until then "no measured history" is the honest

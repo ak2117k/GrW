@@ -2,6 +2,8 @@ import type { LevelType } from '../types/setup-context.types';
 import type { EvidenceLevel } from '../types/evidence-level.types';
 import type { StrongZone } from '../types/zone.types';
 import type { LevelsSnapshot } from './signal-generator.service';
+import { selectBarrier } from './barrier-selection';
+import { sessionBudget } from './session-budget';
 import {
   RR_FLOOR_STRICT,
   SL_BUFFER_ATR,
@@ -42,8 +44,22 @@ export interface ProjectionBox {
   entryFar: number;
   stop: number;
   target: number;
-  targetSource: 'ZONE' | 'EVIDENCE' | 'POC' | 'VALUE_AREA' | 'MAX_PAIN' | 'ATR';
+  /**
+   * What the target is, strongest first. `LEVEL` is the weak fallback — a
+   * plain anchored level — and `ATR` means no structure was found at all.
+   * Both are labelled so the card can say the projection is unsupported
+   * rather than presenting it as a real barrier.
+   */
+  targetSource: 'OI_WALL' | 'HVN' | 'VALUE_AREA' | 'MAX_PAIN' | 'ZONE' | 'LEVEL' | 'ATR';
+  /** 0–100. Why this price is expected to stop the move. Null for the ATR fallback. */
+  conviction: number | null;
   cappedByHtf: boolean;
+  /**
+   * True when the barrier lies beyond the travel the rest of the session can
+   * realistically deliver, so the box was drawn to that budget instead. The
+   * reason names the barrier and says it is out of today's reach.
+   */
+  cappedBySession: boolean;
   rr: number;
   /** null = no measured history yet. NEVER a fabricated number. */
   hitRate: HitRate | null;
@@ -91,8 +107,22 @@ export interface BuildProjectionZonesInput {
   htfZones?: StrongZone[] | null;
   /** Evidence-weighted levels, used as target candidates 2 and 3. */
   evidence?: EvidenceLevel[] | null;
-  /** Anchored snapshot. Only consulted for ATR when `atr14` is absent. */
+  /** Anchored snapshot. Consulted for ATR, and as the fallback anchor. */
   levels?: LevelsSnapshot | null;
+  /**
+   * Clock for the session budget. Supplied by the caller — this module stays
+   * pure, so it never reads the clock itself. Omit it and no session cap is
+   * applied (and the reason says the day was not sized).
+   */
+  now?: Date | null;
+  /** Session hours differ by exchange. See session-budget.ts. */
+  exchange?: string | null;
+  /**
+   * DAILY ATR — not the chart timeframe's. The budget asks how much of a
+   * typical DAY's range is left, so a 15m ATR here would cap every projection
+   * to a handful of points.
+   */
+  dailyAtr?: number | null;
 }
 
 const EMPTY_ZONES: ProjectionZones = { up: null, down: null };
@@ -103,13 +133,6 @@ const EMPTY_ZONES: ProjectionZones = { up: null, down: null };
  * hairline a trader would read as a real entry region.
  */
 const EPS = 1e-6;
-
-/** Evidence below this score is noise, not a level worth aiming at. Spec §3.2. */
-const EVIDENCE_TARGET_SCORE_FLOOR = 60;
-
-/** Evidence kinds that get their own `targetSource` label. Spec §3.2 rule 3. */
-const PROFILE_KINDS = ['POC', 'VALUE_AREA', 'MAX_PAIN'] as const;
-type ProfileKind = (typeof PROFILE_KINDS)[number];
 
 /**
  * Build both boxes. NEVER throws and NEVER fabricates: a side with no broken
@@ -158,11 +181,31 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   if (!base) return null;
   const stop = base.stoploss;
 
-  const picked = selectTarget({ input, isUp, breakLevel, zoneFarSide, atr, brokenId: anchor.id });
-  const rawTarget = picked ? picked.target : atrFallbackTarget(breakLevel, stop, isUp);
-  const targetSource = picked ? picked.source : 'ATR';
+  // The next HIGH-CONVICTION barrier, not the nearest level. Nearest-level
+  // targeting made every projection a treadmill: a break of ORH aimed at the
+  // round number twenty points up, and breaking that aimed at the next. The
+  // minor levels in between are terrain to cross, not destinations. Spec §0.2.
+  const barrier = selectBarrier({
+    from: breakLevel,
+    isUp,
+    atr,
+    zones: (input.zones ?? []).filter((z) => z && z.id !== anchor.id),
+    evidence: input.evidence,
+    levels: anchorLevelPrices(input.levels),
+  });
+  const rawTarget = barrier ? barrier.price : atrFallbackTarget(breakLevel, stop, isUp);
+  const targetSource: ProjectionBox['targetSource'] = barrier ? barrier.kind : 'ATR';
 
-  const capped = capToHtf({ input, isUp, breakLevel, target: rawTarget });
+  const htf = capToHtf({ input, isUp, breakLevel, target: rawTarget });
+  // Both caps can only ever move the target CLOSER, so applying them in
+  // sequence is safe in either order — the tighter one simply wins.
+  const budget = capToSessionBudget({ input, isUp, breakLevel, target: htf.target });
+  const capped = {
+    target: budget.target,
+    cappedByHtf: htf.cappedByHtf,
+    cappedBySession: budget.cappedBySession,
+    note: `${htf.note}${budget.note}`,
+  };
   const target = capped.target;
 
   // Solved, not guessed: with stop and target fixed, reward:risk is monotonic
@@ -193,7 +236,9 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
     stop,
     target,
     targetSource,
+    conviction: barrier ? barrier.conviction : null,
     cappedByHtf: capped.cappedByHtf,
+    cappedBySession: capped.cappedBySession,
     rr,
     // Slice A ships geometry only. A percentage the platform has not measured
     // is worse than no percentage, so this stays null until Slice B fills it.
@@ -330,94 +375,7 @@ function findAnchorZone(zones: StrongZone[], ltp: number, isUp: boolean): Strong
 
 type TargetSource = ProjectionBox['targetSource'];
 
-interface TargetCandidate {
-  value: number;
-  source: TargetSource;
-}
 
-/**
- * Spec §3.2: first qualifying candidate, nearest first, by priority class.
- *
- * Each class is offered to `computeSetupPrices` on its own rather than merged
- * into one list, because that function picks the nearest candidate overall —
- * merging would let a weak evidence level outrank a STRONG zone purely by being
- * closer, which is precisely the ordering the spec pins down. Reusing it also
- * means the minimum-distance rule and the side filter are the live ones.
- */
-function selectTarget(args: {
-  input: BuildProjectionZonesInput;
-  isUp: boolean;
-  breakLevel: number;
-  zoneFarSide: number;
-  atr: number;
-  brokenId: string;
-}): { target: number; source: TargetSource } | null {
-  const { input, isUp, breakLevel, zoneFarSide, atr, brokenId } = args;
-
-  for (const cls of targetClasses(input, isUp, brokenId)) {
-    // Anything not strictly beyond the break level is behind the trader, not in
-    // front of them. Filtering here — not inside the setup maths, whose entry
-    // sits below the break level for an up-break — is what makes "never selects
-    // a level on the wrong side of the break" true.
-    const ahead = cls.filter((c) => (isUp ? c.value > breakLevel + EPS : c.value < breakLevel - EPS));
-    if (ahead.length === 0) continue;
-
-    const prices = computeSetupPrices({
-      setupType: 'BREAKOUT',
-      isLong: isUp,
-      level: zoneFarSide,
-      atr,
-      candidates: ahead.map((c): CandidateLevel => ({ type: 'ROUND' as LevelType, value: c.value })),
-    });
-    if (!prices) continue;
-
-    const hit = ahead.find((c) => c.value === prices.target);
-    // No hit means the class was there but too close to qualify, and the maths
-    // fell back to its own 2R target. That is not this class's answer, so we
-    // keep descending rather than mislabelling a fallback as structure.
-    if (hit) return { target: hit.value, source: hit.source };
-  }
-  return null;
-}
-
-function targetClasses(
-  input: BuildProjectionZonesInput,
-  isUp: boolean,
-  brokenId: string,
-): TargetCandidate[][] {
-  const zones = Array.isArray(input.zones) ? input.zones : [];
-  const evidence = Array.isArray(input.evidence) ? input.evidence : [];
-
-  const zoneCandidates: TargetCandidate[] = zones
-    .filter(
-      (z) =>
-        z &&
-        z.id !== brokenId &&
-        (z.classification === 'STRONG' || z.classification === 'MEDIUM') &&
-        isPrice(z.upper) &&
-        isPrice(z.lower),
-    )
-    // Near edge: the side the move meets first. A target set at the far side
-    // would ask a trader to hold through the whole obstacle.
-    .map((z) => ({ value: isUp ? z.lower : z.upper, source: 'ZONE' as TargetSource }));
-
-  const scored: TargetCandidate[] = evidence
-    .filter((e) => e && isPrice(e.price) && typeof e.score === 'number' && e.score >= EVIDENCE_TARGET_SCORE_FLOOR)
-    .map((e) => ({ value: e.price, source: 'EVIDENCE' as TargetSource }));
-
-  const profile: TargetCandidate[] = evidence
-    .filter((e) => e && isPrice(e.price) && profileKindOf(e) !== null)
-    .map((e) => ({ value: e.price, source: profileKindOf(e) as TargetSource }));
-
-  return [zoneCandidates, scored, profile];
-}
-
-/** POC beats VALUE_AREA beats MAX_PAIN when one level carries several. */
-function profileKindOf(e: EvidenceLevel): ProfileKind | null {
-  if (!Array.isArray(e.kinds)) return null;
-  for (const k of PROFILE_KINDS) if (e.kinds.includes(k)) return k;
-  return null;
-}
 
 /**
  * Spec §3.3. A cap can only ever pull the target CLOSER.
@@ -427,6 +385,64 @@ function profileKindOf(e: EvidenceLevel): ProfileKind | null {
  * cap that leaves too little reward is handled upstream by the far-edge solve,
  * which collapses the box — the higher timeframe vetoing the trade outright.
  */
+/** The anchored level prices, as the barrier selector's weakest candidate class. */
+function anchorLevelPrices(levels: LevelsSnapshot | null | undefined): number[] {
+  if (!levels) return [];
+  return collectLevelCandidates({
+    pdh: levels.pdh,
+    pdl: levels.pdl,
+    vwap: levels.vwap,
+    orh: levels.orh,
+    orl: levels.orl,
+  })
+    .map((c) => c.value)
+    .filter((v) => isPrice(v));
+}
+
+/**
+ * Cap the target at the travel the rest of the session can realistically
+ * deliver. Spec §0.3.
+ *
+ * A 113-point target issued at 12:44 on a low-volatility day with most of the
+ * daily range already spent is not wrong about structure — it is wrong about
+ * time. Like the HTF cap this can only ever take room away.
+ *
+ * A budget of `null` means the day could NOT be sized (no daily ATR, or no
+ * clock supplied). That is not permission to project without limit, but it is
+ * also not a reason to draw nothing — the target stands and the reason says
+ * the day was not sized, so the claim is weaker rather than silently absent.
+ */
+function capToSessionBudget(args: {
+  input: BuildProjectionZonesInput;
+  isUp: boolean;
+  breakLevel: number;
+  target: number;
+}): { target: number; cappedBySession: boolean; note: string } {
+  const { input, isUp, breakLevel, target } = args;
+  if (!input.now) return { target, cappedBySession: false, note: '' };
+
+  const budget = sessionBudget({
+    now: input.now,
+    exchange: input.exchange ?? 'NSE',
+    dailyAtr: input.dailyAtr ?? null,
+    todayHigh: input.levels?.todayHigh ?? null,
+    todayLow: input.levels?.todayLow ?? null,
+  });
+  if (budget.points === null) {
+    return { target, cappedBySession: false, note: " Today's range was not sized." };
+  }
+
+  const reach = isUp ? breakLevel + budget.points : breakLevel - budget.points;
+  const beyond = isUp ? target > reach + EPS : target < reach - EPS;
+  if (!beyond) return { target, cappedBySession: false, note: '' };
+
+  return {
+    target: reach,
+    cappedBySession: true,
+    note: ` Barrier ${fmt(target)} is beyond today's remaining range (${budget.reason}).`,
+  };
+}
+
 function capToHtf(args: {
   input: BuildProjectionZonesInput;
   isUp: boolean;
@@ -512,16 +528,21 @@ function resolveAtr(input: BuildProjectionZonesInput): number | null {
 
 function describeSource(source: TargetSource): string {
   switch (source) {
-    case 'ZONE':
-      return 'at the next zone';
-    case 'EVIDENCE':
-      return 'at the next evidence level';
-    case 'POC':
-      return 'at the point of control';
+    case 'OI_WALL':
+      return 'at the option-chain wall';
+    case 'HVN':
+      return 'at the high-volume node';
     case 'VALUE_AREA':
       return 'at the value area edge';
     case 'MAX_PAIN':
       return 'at max pain';
+    case 'ZONE':
+      return 'at the next tested zone';
+    case 'LEVEL':
+      // Named as the weak class it is. Aiming at a plain level is what made
+      // every projection a treadmill, so when it is all we have the card says
+      // so rather than dressing it up. Spec §0.2.
+      return 'at the next level (no stronger barrier ahead)';
     default:
       // Labelled, always. A measured-distance fallback dressed up as structure
       // is the one lie this object must never tell. Spec §3.2, §4.

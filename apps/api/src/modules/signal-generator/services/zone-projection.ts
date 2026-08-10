@@ -200,12 +200,37 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   // Both caps can only ever move the target CLOSER, so applying them in
   // sequence is safe in either order — the tighter one simply wins.
   const budget = capToSessionBudget({ input, isUp, breakLevel, target: htf.target });
-  const capped = {
-    target: budget.target,
-    cappedByHtf: htf.cappedByHtf,
-    cappedBySession: budget.cappedBySession,
-    note: `${htf.note}${budget.note}`,
-  };
+
+  // The session budget CAPS a projection; it must never DELETE one.
+  //
+  // On a day that has already run its full ATR the budget floors low, and
+  // capping the target there can drop reward:risk under the floor — which
+  // suppressed the box entirely. That blanked the chart on precisely the most
+  // active days, which is when a projection is worth most. Crude at +1.87%
+  // produced no box on any timeframe for exactly this reason.
+  //
+  // A projection is a STRUCTURAL claim: "if this breaks, here is where it is
+  // going". "Today cannot finish it" is a caveat on that claim, not a refutation
+  // of it. So when the capped target is no longer a tradeable setup, fall back
+  // to the structural target and say the day cannot complete it — rather than
+  // showing nothing and letting the trader infer there is nothing there.
+  const cappedRr = rewardRisk(breakLevel, stop, budget.target);
+  const useCapped = Number.isFinite(cappedRr) && cappedRr >= RR_FLOOR_STRICT;
+  const capped = useCapped
+    ? {
+        target: budget.target,
+        cappedByHtf: htf.cappedByHtf,
+        cappedBySession: budget.cappedBySession,
+        note: `${htf.note}${budget.note}`,
+      }
+    : {
+        target: htf.target,
+        cappedByHtf: htf.cappedByHtf,
+        cappedBySession: false,
+        note: `${htf.note} Unlikely to complete today — ${
+          budget.cappedBySession ? "beyond what's left of the session" : 'little range remains'
+        }.`,
+      };
   const target = capped.target;
 
   // Solved, not guessed: with stop and target fixed, reward:risk is monotonic

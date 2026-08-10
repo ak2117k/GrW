@@ -272,12 +272,19 @@ describe('buildProjectionZones — box geometry', () => {
   });
 
   /**
-   * A budget so small that the capped target can no longer clear the R:R floor
-   * yields NO box. That is deliberate: a box drawn to two points of remaining
-   * range would promise a trade the day cannot pay for. The card is what has to
-   * explain the absence — the geometry's job is to refuse.
+   * The budget CAPS a projection; it must never DELETE one.
+   *
+   * On a day that has already run its full ATR the budget floors low, and
+   * capping the target there drops reward:risk under the floor — which used to
+   * suppress the box entirely. That blanked the chart on precisely the most
+   * active days, when a projection is worth most: CRUDEOIL at +1.87% produced
+   * nothing on any timeframe for exactly this reason.
+   *
+   * A projection is a structural claim. "Today cannot finish it" is a caveat on
+   * that claim, not a refutation, and showing nothing lets a trader infer there
+   * is nothing there.
    */
-  it('suppresses the box when the day has no worthwhile move left', () => {
+  it('keeps the structural projection when the day cannot complete it', () => {
     const spent = up({
       evidence: [ev(1200, 90, ['OI_CALL'])],
       now: new Date('2026-08-10T09:50:00Z'), // 15:20 IST, ten minutes left
@@ -286,7 +293,12 @@ describe('buildProjectionZones — box geometry', () => {
       levels: { todayHigh: 1019, todayLow: 1000, atr14: ATR } as LevelsSnapshot,
     });
 
-    expect(buildProjectionZones(spent).up).toBeNull();
+    const box = buildProjectionZones(spent).up;
+    expect(box).not.toBeNull();
+    // The structural target stands, and the caveat is stated rather than implied
+    // by an empty chart.
+    expect(box!.target).toBe(1200);
+    expect(box!.reason).toMatch(/unlikely to complete today/i);
   });
 
   it('leaves a reachable barrier alone', () => {

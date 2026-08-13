@@ -3,7 +3,7 @@ import type { TripwireInput } from './types';
 
 const base: TripwireInput = {
   trackerId: 't1', symbol: 'INFY', segment: 'EQ_INTRADAY', side: 'LONG',
-  entryPrice: 100, qty: 100, ltp: 100,
+  entryPrice: 100, qty: 100, ltp: 100, underlyingLtp: 100,
   holdingHigh: 100, holdingLow: 100,
   nearestSupport: null, nearestResistance: null,
   volumeRatio: null, oiWallNow: null, oiWallPrev: null,
@@ -42,12 +42,17 @@ describe('givebackOffPeak', () => {
   it('places its threshold at GIVEBACK_FRACTION of the peak gain', () => {
     // Derived from the constant, not from a literal, so that changing the
     // constant moves the sensor's threshold with it. Peak gain is 20/share.
+    // Both probes sit one notch clear of the boundary rather than exactly on
+    // it: at some fractions (0.33, for one) the boundary case turns on
+    // floating-point error alone, which would make this test's pass depend on
+    // the constant's binary representation instead of on the sensor's logic.
     const peakGain = 20;
     const atThreshold = base.entryPrice + peakGain * (1 - GIVEBACK_FRACTION);
+    const justPast = atThreshold - peakGain * 0.05;
     const stillInside = atThreshold + peakGain * 0.05;
 
     expect(
-      givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: atThreshold }),
+      givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: justPast }),
     ).not.toBeNull();
     expect(
       givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: stillInside }),

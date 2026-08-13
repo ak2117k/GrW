@@ -690,7 +690,7 @@ import type { TripwireInput } from './types';
 
 const base: TripwireInput = {
   trackerId: 't1', symbol: 'INFY', segment: 'EQ_INTRADAY', side: 'LONG',
-  entryPrice: 100, qty: 100, ltp: 100,
+  entryPrice: 100, qty: 100, ltp: 100, underlyingLtp: 100,
   holdingHigh: null, holdingLow: null,
   nearestSupport: 95, nearestResistance: 110,
   volumeRatio: null, oiWallNow: null, oiWallPrev: null,
@@ -716,6 +716,26 @@ describe('levelBreak', () => {
   it('stays silent when the symbol has no level book', () => {
     expect(levelBreak.check({ ...base, nearestSupport: null, nearestResistance: null, ltp: 1 })).toBeNull();
   });
+
+  // SCALE HAZARD regression. An option's `ltp` is the premium (~120) while its
+  // levels are strikes (~24000). Comparing the premium against a strike breaches
+  // permanently, so this sensor would fire on EVERY tick for the life of the
+  // position. Both tests below fail if the implementation reads `ltp`.
+  it('compares the underlying against the level, not the option premium', () => {
+    const optionHoldingUp = {
+      ...base,
+      segment: 'OPT' as const,
+      ltp: 120,              // premium — far below the strike, but irrelevant here
+      underlyingLtp: 24500,  // underlying is comfortably above support
+      nearestSupport: 24000,
+      nearestResistance: 24800,
+    };
+    expect(levelBreak.check(optionHoldingUp)).toBeNull();
+  });
+
+  it('stays silent when the underlying price cannot be resolved', () => {
+    expect(levelBreak.check({ ...base, underlyingLtp: null, nearestSupport: 95, ltp: 1 })).toBeNull();
+  });
 });
 ```
 
@@ -727,7 +747,7 @@ import type { TripwireInput } from './types';
 
 const base: TripwireInput = {
   trackerId: 't1', symbol: 'INFY', segment: 'EQ_INTRADAY', side: 'LONG',
-  entryPrice: 100, qty: 100, ltp: 100,
+  entryPrice: 100, qty: 100, ltp: 100, underlyingLtp: 100,
   holdingHigh: null, holdingLow: null,
   nearestSupport: null, nearestResistance: null,
   volumeRatio: 1, oiWallNow: null, oiWallPrev: null,
@@ -772,16 +792,22 @@ import type { Tripwire, TripwireFire, TripwireInput } from './types';
 export const levelBreak: Tripwire = {
   name: 'level-break',
 
-  check({ side, ltp, nearestSupport, nearestResistance }: TripwireInput): TripwireFire | null {
+  check({ side, underlyingLtp, nearestSupport, nearestResistance }: TripwireInput): TripwireFire | null {
+    // SCALE HAZARD: levels live on the UNDERLYING's scale. For an option, `ltp`
+    // is the premium (~120) while a level is a strike (~24000) — comparing them
+    // breaches permanently and fires every tick. Compare against `underlyingLtp`,
+    // and when it is null stay silent rather than falling back to `ltp`.
+    if (underlyingLtp === null) return null;
+
     if (side === 'LONG') {
       if (nearestSupport === null) return null;
-      if (ltp >= nearestSupport) return null;
-      return { name: 'level-break', detail: `lost nearest support ${nearestSupport} (now ${ltp})` };
+      if (underlyingLtp >= nearestSupport) return null;
+      return { name: 'level-break', detail: `lost nearest support ${nearestSupport} (now ${underlyingLtp})` };
     }
 
     if (nearestResistance === null) return null;
-    if (ltp <= nearestResistance) return null;
-    return { name: 'level-break', detail: `lost nearest resistance ${nearestResistance} (now ${ltp})` };
+    if (underlyingLtp <= nearestResistance) return null;
+    return { name: 'level-break', detail: `lost nearest resistance ${nearestResistance} (now ${underlyingLtp})` };
   },
 };
 ```
@@ -972,7 +998,7 @@ import type { TripwireInput } from './types';
 
 const base: TripwireInput = {
   trackerId: 't1', symbol: 'NIFTY', segment: 'OPT', side: 'LONG',
-  entryPrice: 100, qty: 50, ltp: 100,
+  entryPrice: 100, qty: 50, ltp: 100, underlyingLtp: 24100,
   holdingHigh: null, holdingLow: null,
   nearestSupport: null, nearestResistance: null,
   volumeRatio: null,
@@ -1145,7 +1171,7 @@ import type { TripwireInput } from '../tripwires/types';
 
 const quiet: TripwireInput = {
   trackerId: 't1', symbol: 'INFY', segment: 'EQ_INTRADAY', side: 'LONG',
-  entryPrice: 100, qty: 100, ltp: 100,
+  entryPrice: 100, qty: 100, ltp: 100, underlyingLtp: 100,
   holdingHigh: 100, holdingLow: 100,
   nearestSupport: 90, nearestResistance: 110,
   volumeRatio: 1, oiWallNow: null, oiWallPrev: null,
@@ -1573,6 +1599,16 @@ export interface TickSnapshot {
   entryPrice: number;
   qty: number;
   ltp: number;
+  /**
+   * Price of the UNDERLYING. Equal to `ltp` for cash segments; for OPT/FUT this
+   * is the spot while `ltp` is the contract's own price. Null when unresolvable —
+   * sensors that compare against levels or OI walls must then stay silent rather
+   * than fall back to `ltp` (see the SCALE HAZARD note on TripwireInput).
+   */
+  underlyingLtp: number | null;
+  /** Nearest level from the level book, on the UNDERLYING's scale. */
+  nearestSupport: number | null;
+  nearestResistance: number | null;
   holdingHigh: number | null;
   holdingLow: number | null;
   entryTime: Date;
@@ -2480,10 +2516,11 @@ export class SentinelCycleService {
             entryPrice: tick.entryPrice,
             qty: tick.qty,
             ltp: tick.ltp,
+            underlyingLtp: tick.underlyingLtp,
             holdingHigh: tick.holdingHigh,
             holdingLow: tick.holdingLow,
-            nearestSupport: null,
-            nearestResistance: null,
+            nearestSupport: tick.nearestSupport,
+            nearestResistance: tick.nearestResistance,
             volumeRatio: tick.volumeRatio,
             oiWallNow: walls.now,
             oiWallPrev: walls.prev,

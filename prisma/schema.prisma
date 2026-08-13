@@ -1581,6 +1581,62 @@ model TradeTracker {
   @@map("trade_trackers")
 }
 
+model SentinelThesis {
+  id            String   @id @default(cuid())
+  userId        String
+  trackerId     String   @unique
+  direction     String   // 'LONG' | 'SHORT'
+  reason        String
+  levelPrice    Float?
+  targetPrice   Float?
+  invalidation  Float?
+  source        String   @default("INFERRED") // 'INFERRED' | 'USER'
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId])
+  @@map("sentinel_theses")
+}
+
+model SentinelVerdict {
+  id             String   @id @default(cuid())
+  userId         String
+  trackerId      String
+  symbol         String
+  verdict        String   // 'HOLD' | 'EXIT_ARMED' | 'EXIT_NOW' | 'ESCALATE'
+  confidence     String   // 'low' | 'medium' | 'high'
+  thesisStatus   String   // 'INTACT' | 'WEAKENING' | 'BROKEN'
+  recoveryAvailable Boolean
+  reason         String
+  evidence       Json
+  invalidationPoint String?
+  reviewInSec    Int
+  packet         Json     // the full context packet, verbatim
+  promptVersion  String
+  triggeredBy    Json     // tripwire names that fired, or ["heartbeat"]
+  netPnl         Float
+  greenFloor     Float?
+  createdAt      DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([trackerId, createdAt])
+  @@map("sentinel_verdicts")
+}
+
+model OiWallSnapshot {
+  id           String   @id @default(cuid())
+  symbol       String
+  expiry       String
+  callWall     Float?
+  putWall      Float?
+  callWallOi   Float?
+  putWallOi    Float?
+  capturedAt   DateTime @default(now())
+
+  @@index([symbol, capturedAt])
+  @@map("oi_wall_snapshots")
+}
+
 model RefreshToken {
   id           String    @id @default(cuid())
   userId       String

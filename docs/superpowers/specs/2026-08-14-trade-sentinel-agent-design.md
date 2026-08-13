@@ -194,7 +194,37 @@ the agent sees.
 4. **The packet is stored verbatim alongside its verdict.** This is what makes the agent
    replayable, diffable and backtestable.
 
-### 5.2 Why "Memory" is in the packet
+### 5.2 Data availability — what actually exists today
+
+Six of the eight `context-scoring` factors are **stubs** returning `isStub: true` and a
+neutral zero. The packet must not present them as real data.
+
+| Source | State | In Stage 0 |
+|---|---|---|
+| `level-book`, `chart-context`, `strong-zone-detector`, projection zones | Real | Yes |
+| `oi-wall.service` (walls from the live chain) | Real | Yes |
+| `news-aggregator`, `news-sentiment` | Real | Yes |
+| `greeks.factor`, `mtf-trend.factor`, `volatility.factor` | Real | Yes |
+| Price / volume / P&L plumbing | Real | Yes |
+| **OI *shift*** (successive wall snapshots + delta) | **Does not exist** | **Built in Stage 0** |
+| `fii.factor` (FII/DII) | STUB | Marked unavailable |
+| `sector`, `gold`, `crude-oil`, `nasdaq` factors | STUB | Marked unavailable |
+
+Stubbed factors enter the packet as an **explicit absence** per §5.1 rule 3 — never as a
+zero. The agent is told it cannot see them and reasons accordingly. Adding them later
+requires no change to the agent.
+
+**On FII/DII specifically:** NSE publishes these figures **after market close**. FII/DII
+is therefore standing daily context ("FIIs sold ₹3,400cr yesterday"), never an intraday
+trigger. It cannot fire a tripwire, and any future implementation should treat it as a
+once-daily packet field rather than a live input.
+
+**OI shift is built in Stage 0** because it is genuine intraday data, it was central to
+the original requirement ("OI walls shifting against the position"), and it powers the
+`oi-wall-shift` tripwire. It requires persisting successive `oi-wall.service` snapshots
+and diffing them — `oi-shift.factor` remains a stub and is not used.
+
+### 5.3 Why "Memory" is in the packet
 
 Without the trade's own prior verdicts, each evaluation is an independent opinion and
 the agent will say HOLD at 10:15 and EXIT at 10:16 on near-identical data. Showing it

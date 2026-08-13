@@ -1,0 +1,65 @@
+import { givebackOffPeak, GIVEBACK_FRACTION } from './giveback-off-peak.tripwire';
+import type { TripwireInput } from './types';
+
+const base: TripwireInput = {
+  trackerId: 't1', symbol: 'INFY', segment: 'EQ_INTRADAY', side: 'LONG',
+  entryPrice: 100, qty: 100, ltp: 100,
+  holdingHigh: 100, holdingLow: 100,
+  nearestSupport: null, nearestResistance: null,
+  volumeRatio: null, oiWallNow: null, oiWallPrev: null,
+  freshNewsCount: null, factorValues: {}, prevFactorValues: {},
+};
+
+describe('givebackOffPeak', () => {
+  it('stays silent when the trade never went favourably', () => {
+    expect(givebackOffPeak.check({ ...base, holdingHigh: 100, ltp: 95 })).toBeNull();
+  });
+
+  it('stays silent while the trade is still near its peak', () => {
+    expect(givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: 119 })).toBeNull();
+  });
+
+  it('fires when a long gives back more than the threshold fraction of its peak gain', () => {
+    // Peak gain 20/share; giving back 60% leaves ltp at 108.
+    const fire = givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: 108 });
+    expect(fire).not.toBeNull();
+    expect(fire!.name).toBe('giveback-off-peak');
+    expect(fire!.detail).toMatch(/gave back/i);
+  });
+
+  it('fires for a short measured off holdingLow', () => {
+    const fire = givebackOffPeak.check({
+      ...base, side: 'SHORT', holdingLow: 80, holdingHigh: 100, ltp: 92,
+    });
+    expect(fire).not.toBeNull();
+  });
+
+  it('uses a fraction strictly between 0 and 1', () => {
+    expect(GIVEBACK_FRACTION).toBeGreaterThan(0);
+    expect(GIVEBACK_FRACTION).toBeLessThan(1);
+  });
+
+  it('places its threshold at GIVEBACK_FRACTION of the peak gain', () => {
+    // Derived from the constant, not from a literal, so that changing the
+    // constant moves the sensor's threshold with it. Peak gain is 20/share.
+    const peakGain = 20;
+    const atThreshold = base.entryPrice + peakGain * (1 - GIVEBACK_FRACTION);
+    const stillInside = atThreshold + peakGain * 0.05;
+
+    expect(
+      givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: atThreshold }),
+    ).not.toBeNull();
+    expect(
+      givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: stillInside }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the extreme it measures off is unavailable', () => {
+    // Absent data is not a signal: a null extreme must not fire, even when the
+    // rest of the input would otherwise look like a large giveback.
+    expect(givebackOffPeak.check({ ...base, holdingHigh: null, ltp: 108 })).toBeNull();
+    expect(
+      givebackOffPeak.check({ ...base, side: 'SHORT', holdingLow: null, ltp: 92 }),
+    ).toBeNull();
+  });
+});

@@ -31,7 +31,33 @@ describe('SentinelVerdictRepository', () => {
       greenFloor: 1455,
     });
 
-    expect(create).toHaveBeenCalledWith({ data: expect.objectContaining({ packet }) });
+    // Every mapped field, spelled out: `record` hand-maps 16 columns, which is
+    // exactly the shape where a transposition (`reason: input.symbol`) hides.
+    expect(create).toHaveBeenCalledWith({
+      data: {
+        userId: 'u1',
+        trackerId: 't1',
+        symbol: 'INFY',
+        verdict: 'HOLD',
+        confidence: 'high',
+        thesisStatus: 'INTACT',
+        recoveryAvailable: true,
+        reason: 'structure holding',
+        evidence: ['structure.nearestSupport'],
+        invalidationPoint: 'close below 1450',
+        reviewInSec: 300,
+        packet,
+        promptVersion: 'v1',
+        triggeredBy: ['heartbeat'],
+        netPnl: 1200,
+        greenFloor: 1455,
+      },
+    });
+
+    // Reference identity, not structural equality. The assertion above would pass
+    // against a deep clone or a key reorder; verbatim passthrough is the property
+    // the replay harness depends on, so it gets its own `toBe`.
+    expect(create.mock.calls[0][0].data.packet).toBe(packet);
   });
 
   it('returns the most recent verdicts for one tracker, newest first', async () => {

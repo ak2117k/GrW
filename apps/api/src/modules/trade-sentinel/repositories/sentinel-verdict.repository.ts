@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { SentinelVerdict } from '@prisma/client';
+import { Prisma, type SentinelVerdict } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 
 /** Everything needed to persist one agent decision together with the evidence it saw. */
@@ -15,7 +15,14 @@ export interface RecordVerdictInput {
   evidence: string[];
   invalidationPoint: string | null;
   reviewInSec: number;
-  packet: unknown;
+  /**
+   * The full context packet, stored verbatim. Typed as `Prisma.InputJsonValue`
+   * rather than `unknown` so the compiler rejects `undefined`/`null` here — the
+   * column is a required Json, and a blanket cast would only surface that as a
+   * runtime Prisma error. Build packets as object literals or `type` aliases:
+   * a declared `interface` has no implicit index signature and will not assign.
+   */
+  packet: Prisma.InputJsonValue;
   promptVersion: string;
   triggeredBy: string[];
   netPnl: number;
@@ -42,12 +49,14 @@ export class SentinelVerdictRepository {
         thesisStatus: input.thesisStatus,
         recoveryAvailable: input.recoveryAvailable,
         reason: input.reason,
-        evidence: input.evidence as never,
+        evidence: input.evidence satisfies Prisma.InputJsonValue,
         invalidationPoint: input.invalidationPoint,
         reviewInSec: input.reviewInSec,
-        packet: input.packet as never,
+        // Passed through by reference — never cloned, re-serialised or reordered.
+        // The replay harness re-runs these packets and must see what the agent saw.
+        packet: input.packet,
         promptVersion: input.promptVersion,
-        triggeredBy: input.triggeredBy as never,
+        triggeredBy: input.triggeredBy satisfies Prisma.InputJsonValue,
         netPnl: input.netPnl,
         greenFloor: input.greenFloor,
       },

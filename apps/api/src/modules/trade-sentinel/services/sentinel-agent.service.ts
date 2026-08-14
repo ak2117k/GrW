@@ -100,12 +100,20 @@ function packetPaths(
   return out;
 }
 
-/** `structure.nearestSupport.value` and `memory[0].verdict` both normalise to a real path. */
+/**
+ * `structure.nearestSupport.value`, `memory[0].verdict` and `money.netPnl (₹6080)`
+ * all normalise to a real path. The trailing parenthetical is the common one:
+ * a model quoting the value it read alongside the path it read it from is
+ * citing correctly, and discarding the whole verdict over the annotation would
+ * be a rejection with no trading meaning.
+ */
 function normaliseCitation(citation: string): string {
   return citation
     .trim()
+    .replace(/\s*\([^)]*\)\s*$/, '')
     .replace(/\[\d+\]/g, '')
-    .replace(/^\.+|\.+$/g, '');
+    .replace(/^\.+|\.+$/g, '')
+    .trim();
 }
 
 function citesRealPath(citation: string, paths: PacketPaths): boolean {
@@ -141,12 +149,19 @@ export class SentinelAgentService {
   async judge(packet: ContextPacket): Promise<Verdict> {
     let response: Anthropic.Message;
     try {
+      // Deliberately NO server-side `fallbacks`: a refusal that quietly reran on
+      // a different model would change the serving model without changing the
+      // packet, and Task 13's replay diff would attribute the behaviour change
+      // to the prompt. A refusal must surface as a refusal.
       response = await this.client.messages.create({
         model: SENTINEL_MODEL,
         max_tokens: MAX_TOKENS,
         output_config: {
           effort: 'high',
-          format: { type: 'json_schema', schema: VERDICT_SCHEMA as unknown as Record<string, unknown> },
+          format: {
+            type: 'json_schema',
+            schema: VERDICT_SCHEMA as unknown as Record<string, unknown>,
+          },
         },
         system: [
           {
@@ -182,6 +197,20 @@ export class SentinelAgentService {
     if (response.stop_reason === 'refusal') {
       throw new Error('sentinel agent: the model refused this packet — no verdict recorded');
     }
+    // A truncated reply is a BUDGET failure, and it must not be reported as a
+    // parse failure: Task 13 reads "could not parse" as a prompt regression and
+    // someone rewrites a prompt that was fine. Thinking and response share
+    // `max_tokens`, so deep reasoning is what exhausts it.
+    if (response.stop_reason === 'max_tokens') {
+      throw new Error(
+        `sentinel agent: reply truncated at the ${MAX_TOKENS}-token cap (thinking plus response) — no verdict recorded`,
+      );
+    }
+    if (response.stop_reason === 'model_context_window_exceeded') {
+      throw new Error(
+        'sentinel agent: the packet plus reply exceeded the model context window — no verdict recorded',
+      );
+    }
     const text = response.content.find((b) => b.type === 'text')?.text;
     if (!text) throw new Error('sentinel agent: could not parse reply — no text block returned');
     try {
@@ -198,6 +227,12 @@ export class SentinelAgentService {
    * than recorded — a bad verdict in the corpus poisons every future replay run.
    */
   private validate(raw: unknown, packet: ContextPacket): Verdict {
+    // `JSON.parse('null')` and `JSON.parse('"hold"')` both parse. Reject them
+    // here so every rejection leaves Task 12 a stated reason rather than a bare
+    // TypeError from the first property read.
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('sentinel agent: reply is not a verdict object — rejected');
+    }
     const v = raw as Verdict;
 
     if (!Array.isArray(v.evidence) || v.evidence.length === 0) {
@@ -216,7 +251,10 @@ export class SentinelAgentService {
     if (v.verdict === 'EXIT_NOW' && v.confidence !== 'high') {
       throw new Error('sentinel agent: EXIT_NOW requires high confidence — rejected');
     }
-    if (v.recoveryAvailable === false && !(v.thesisStatus === 'BROKEN' && v.confidence === 'high')) {
+    if (
+      v.recoveryAvailable === false &&
+      !(v.thesisStatus === 'BROKEN' && v.confidence === 'high')
+    ) {
       throw new Error(
         'sentinel agent: recovery declared unavailable without a broken thesis at high confidence — rejected',
       );

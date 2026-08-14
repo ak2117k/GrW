@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+import { APIConnectionError, RateLimitError } from '@anthropic-ai/sdk';
 import { SentinelAgentService, type Verdict } from './sentinel-agent.service';
 import { absent, present, type ContextPacket } from './context-packet.service';
 import { SENTINEL_SYSTEM_PROMPT } from '../prompts/sentinel-system-prompt';
@@ -9,75 +11,83 @@ const AT = '2026-08-14T04:30:00.000Z';
  * `evidence` citation points at a field the packet actually has — cannot be
  * tested against `{position: {symbol}}`: every legitimate citation would look
  * invented and every test would pass for the wrong reason.
+ *
+ * ANNOTATED, NOT ASSERTED. `const base: ContextPacket` is checked against the
+ * real type; `as ContextPacket` would not be — a type assertion tolerates
+ * missing properties, so a rename in `ContextPacket` would leave this fixture
+ * compiling, the prompt drift guard below comparing the prompt against a
+ * fixture that drifted with it, and the guard green while the packet moved.
  */
-function packet(overrides: Partial<ContextPacket> = {}): ContextPacket {
-  return {
-    position: {
-      symbol: 'INFY',
-      kind: 'POSITION',
-      segment: 'CASH',
-      side: 'LONG',
-      qty: 100,
-      entryPrice: 1400,
-      ltp: 1462,
-      underlyingLtp: present(1462, 'market-data (underlying spot)', AT),
-      entryTime: '2026-08-13T04:15:00.000Z',
-      expiry: null,
+const base: ContextPacket = {
+  position: {
+    symbol: 'INFY',
+    kind: 'POSITION',
+    segment: 'EQ_DELIVERY',
+    side: 'LONG',
+    qty: 100,
+    entryPrice: 1400,
+    ltp: 1462,
+    underlyingLtp: present(1462, 'market-data (underlying spot)', AT),
+    entryTime: '2026-08-13T04:15:00.000Z',
+    expiry: null,
+  },
+  money: {
+    grossPnl: 6200,
+    charges: 120,
+    netPnl: 6080,
+    greenFloorPrice: 1441,
+    greenFloorArmed: true,
+    mfe: 1478,
+    mae: 1396,
+  },
+  thesis: present(
+    {
+      direction: 'LONG',
+      reason: 'breakout above the 1400 shelf',
+      levelPrice: 1400,
+      targetPrice: 1500,
+      invalidation: 1380,
+      source: 'AGENT',
     },
-    money: {
-      grossPnl: 6200,
-      charges: 120,
-      netPnl: 6080,
-      greenFloorPrice: 1441,
-      greenFloorArmed: true,
-      mfe: 1478,
-      mae: 1396,
-    },
-    thesis: present(
-      {
-        direction: 'LONG',
-        reason: 'breakout above the 1400 shelf',
-        levelPrice: 1400,
-        targetPrice: 1500,
-        invalidation: 1380,
-        source: 'AGENT',
-      },
-      'agent inference',
+    'agent inference',
+    AT,
+  ),
+  structure: {
+    levelBook: present([{ price: 1450, kind: 'SUPPORT' }], 'chart-context.service (1d)', AT),
+    nearestSupport: present(1450, 'level book (underlying scale)', AT),
+    nearestResistance: present(1500, 'level book (underlying scale)', AT),
+  },
+  flow: {
+    volumeRatio: present(1.8, 'market-data', AT),
+    oiWalls: present(
+      { now: { callWall: 1500, putWall: 1400 }, previous: { callWall: 1520, putWall: 1400 } },
+      'oi-wall.service',
       AT,
     ),
-    structure: {
-      levelBook: present([{ price: 1450, kind: 'SUPPORT' }], 'chart-context.service (1d)', AT),
-      nearestSupport: present(1450, 'level book (underlying scale)', AT),
-      nearestResistance: present(1500, 'level book (underlying scale)', AT),
-    },
-    flow: {
-      volumeRatio: present(1.8, 'market-data', AT),
-      oiWalls: present(
-        { now: { callWall: 1500, putWall: 1400 }, previous: { callWall: 1520, putWall: 1400 } },
-        'oi-wall.service',
-        AT,
-      ),
-    },
-    macro: {
-      fiiDii: absent('stub'),
-      sector: absent('stub'),
-      globalCues: absent('stub'),
-      realFactors: present({ mtfTrend: 0.6 }, 'context-scoring', AT),
-    },
-    news: {
-      headlines: absent('news aggregator returned nothing for this symbol'),
-      freshCount: present(0, 'news-aggregator.service', AT),
-    },
-    session: {
-      nowIst: '2026-08-14 10:00:00 IST',
-      nowUtc: AT,
-      minutesToClose: present(330, 'derived from IST wall clock', AT),
-      expiry: null,
-    },
-    trigger: present([{ name: 'heartbeat', detail: 'scheduled review' }], 'tripwire.service', AT),
-    memory: absent('no prior verdicts for this position — this is the first look'),
-    ...overrides,
-  } as ContextPacket;
+  },
+  macro: {
+    fiiDii: absent('stub'),
+    sector: absent('stub'),
+    globalCues: absent('stub'),
+    realFactors: present({ mtfTrend: 0.6 }, 'context-scoring', AT),
+  },
+  news: {
+    headlines: absent('news aggregator returned nothing for this symbol'),
+    freshCount: present(0, 'news-aggregator.service', AT),
+  },
+  session: {
+    nowIst: '2026-08-14 10:00:00 IST',
+    nowUtc: AT,
+    minutesToClose: present(330, 'derived from IST wall clock', AT),
+    expiry: null,
+  },
+  trigger: present([{ name: 'heartbeat', detail: 'scheduled review' }], 'tripwire.service', AT),
+  memory: absent('no prior verdicts for this position — this is the first look'),
+};
+
+/** The cast lives HERE, on the override spread only — never on `base`. */
+function packet(overrides: Partial<ContextPacket> = {}): ContextPacket {
+  return { ...base, ...overrides } as ContextPacket;
 }
 
 const validVerdict: Verdict = {
@@ -130,6 +140,7 @@ describe('SentinelAgentService', () => {
     create.mockResolvedValue(reply(validVerdict));
     await svc.judge(packet());
     const args = create.mock.calls[0][0];
+    expect(args.output_config.effort).toBe('high');
     expect(args.output_config.format.type).toBe('json_schema');
     expect(args.output_config.format.schema.additionalProperties).toBe(false);
     expect(args.output_config.format.schema.required).toEqual(
@@ -154,6 +165,22 @@ describe('SentinelAgentService', () => {
   it('rejects a verdict citing prose instead of a field path', async () => {
     create.mockResolvedValue(reply({ ...validVerdict, evidence: ['price is holding up well'] }));
     await expect(svc.judge(packet())).rejects.toThrow(/not in the packet/i);
+  });
+
+  it('accepts a citation annotated with the value it read', async () => {
+    create.mockResolvedValue(
+      reply({ ...validVerdict, evidence: ['money.netPnl (₹6080)', 'structure.nearestSupport'] }),
+    );
+    await expect(svc.judge(packet())).resolves.toMatchObject({ verdict: 'HOLD' });
+  });
+
+  it('accepts a citation of a block that is unavailable in this packet', async () => {
+    // Reasoning about what it CANNOT see is the behaviour the packet's block
+    // design asks for — citing the absence must not be punished as invention.
+    create.mockResolvedValue(
+      reply({ ...validVerdict, evidence: ['news.headlines', 'macro.sector'] }),
+    );
+    await expect(svc.judge(packet())).resolves.toMatchObject({ verdict: 'HOLD' });
   });
 
   it('accepts a citation that reaches inside an opaque block value', async () => {
@@ -230,6 +257,26 @@ describe('SentinelAgentService', () => {
     await expect(svc.judge(packet())).rejects.toThrow(/reviewIn/);
   });
 
+  it('carries an ESCALATE at low confidence on a weakening thesis through unchanged', async () => {
+    // The three enum values no other test exercises. `validate()` constrains
+    // EXIT_NOW and recoveryAvailable only — everything else must pass through,
+    // or the runner loses the verdicts that ask a human to look.
+    create.mockResolvedValue(
+      reply({
+        ...validVerdict,
+        verdict: 'ESCALATE',
+        confidence: 'low',
+        thesisStatus: 'WEAKENING',
+        evidence: ['flow.volumeRatio'],
+      }),
+    );
+    await expect(svc.judge(packet())).resolves.toMatchObject({
+      verdict: 'ESCALATE',
+      confidence: 'low',
+      thesisStatus: 'WEAKENING',
+    });
+  });
+
   it('rejects a reply that is not JSON at all', async () => {
     create.mockResolvedValue({
       stop_reason: 'end_turn',
@@ -238,9 +285,43 @@ describe('SentinelAgentService', () => {
     await expect(svc.judge(packet())).rejects.toThrow(/parse/i);
   });
 
+  it('rejects a reply whose JSON is not an object', async () => {
+    create.mockResolvedValue({
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'null' }],
+    });
+    // Must be a stated rejection, not a raw TypeError off the first field read.
+    await expect(svc.judge(packet())).rejects.toThrow(/not a verdict object/i);
+  });
+
+  it('rejects a reply that carries no text block at all', async () => {
+    create.mockResolvedValue({
+      stop_reason: 'end_turn',
+      content: [{ type: 'thinking', thinking: 'weighing the level' }],
+    });
+    await expect(svc.judge(packet())).rejects.toThrow(/no text block/i);
+  });
+
   it('rejects a refusal rather than reading a verdict out of it', async () => {
     create.mockResolvedValue({ stop_reason: 'refusal', content: [] });
     await expect(svc.judge(packet())).rejects.toThrow(/refused/i);
+  });
+
+  it('reports a truncated reply as a token-budget failure, not a parse failure', async () => {
+    // Thinking and response share max_tokens. Reported as "could not parse",
+    // Task 13 would read a budget problem as a prompt regression.
+    create.mockResolvedValue({
+      stop_reason: 'max_tokens',
+      content: [{ type: 'text', text: '{"verdict":"HO' }],
+    });
+    const judged = svc.judge(packet());
+    await expect(judged).rejects.toThrow(/truncated/i);
+    await expect(judged).rejects.not.toThrow(/parse/i);
+  });
+
+  it('reports an over-long packet as a context-window failure', async () => {
+    create.mockResolvedValue({ stop_reason: 'model_context_window_exceeded', content: [] });
+    await expect(svc.judge(packet())).rejects.toThrow(/context window/i);
   });
 
   it('propagates a transport failure instead of inventing a verdict', async () => {
@@ -252,24 +333,80 @@ describe('SentinelAgentService', () => {
     await expect(svc.judge(packet())).rejects.toBe(boom);
   });
 
+  it('classifies a rate limit by the SDK exception class, not by its message', async () => {
+    // The message deliberately says nothing about rate limiting: only the CLASS
+    // identifies it. String-matching `err.message` — or deleting
+    // describeFailure — must fail this test, or the requirement is unobserved.
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    create.mockRejectedValue(new RateLimitError(429, undefined, 'quota exhausted', new Headers()));
+    await expect(svc.judge(packet())).rejects.toBeInstanceOf(RateLimitError);
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('rate limited'));
+    logged.mockRestore();
+  });
+
+  it('classifies a transport failure by the SDK exception class', async () => {
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    create.mockRejectedValue(new APIConnectionError({ message: 'ECONNRESET' }));
+    await expect(svc.judge(packet())).rejects.toBeInstanceOf(APIConnectionError);
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('could not reach'));
+    logged.mockRestore();
+  });
+
   it('makes exactly one API call per judgement', async () => {
     create.mockResolvedValue(reply(validVerdict));
     await svc.judge(packet());
     expect(create).toHaveBeenCalledTimes(1);
   });
 
-  it('describes the packet as it actually is — every field path it names exists', () => {
-    const built = packet() as unknown as Record<string, Record<string, unknown>>;
-    const cited = SENTINEL_SYSTEM_PROMPT.match(
-      /\b(position|money|thesis|structure|flow|macro|news|session)\.[A-Za-z]+/g,
-    );
-    expect(cited).not.toBeNull();
-    const missing = [...new Set(cited as string[])].filter((path) => {
-      const [group, field] = path.split('.');
-      return !(field in (built[group] ?? {}));
+  describe('the prompt describes the packet as it actually is', () => {
+    const GROUPS = ['position', 'money', 'structure', 'flow', 'macro', 'news', 'session'];
+
+    /**
+     * Both forms the prompt names fields in:
+     *  - dotted paths anywhere in the text ("session.minutesToClose")
+     *  - the enumeration lines ("- money: grossPnl, charges, netPnl, ...")
+     * The enumeration lines carry ~25 of the ~35 field names, so a guard that
+     * reads only dotted paths misses a rename of greenFloorPrice or nowIst
+     * entirely — which is most of what it exists to catch.
+     */
+    function pathsNamedByPrompt(prompt: string): string[] {
+      const dotted = prompt.match(new RegExp(`\\b(?:${GROUPS.join('|')})\\.[A-Za-z]+`, 'g')) ?? [];
+      const enumerated: string[] = [];
+      for (const line of prompt.split('\n')) {
+        const m = /^- ([a-z]+): ([^.]+)\.\s*$/.exec(line);
+        if (!m || !GROUPS.includes(m[1])) continue;
+        for (const field of m[2].split(',')) enumerated.push(`${m[1]}.${field.trim()}`);
+      }
+      // Every group must have contributed an enumeration line, or the parser
+      // silently stopped matching and the guard degrades to the dotted subset.
+      const covered = new Set(enumerated.map((p) => p.split('.')[0]));
+      expect([...covered].sort()).toEqual([...GROUPS].sort());
+      return [...new Set([...dotted, ...enumerated])];
+    }
+
+    it('names only fields the packet has', () => {
+      const built = base as unknown as Record<string, Record<string, unknown>>;
+      const named = pathsNamedByPrompt(SENTINEL_SYSTEM_PROMPT);
+      // Guard against the guard: it must actually be looking at ~every field.
+      expect(named.length).toBeGreaterThanOrEqual(30);
+      const missing = named.filter((path) => {
+        const [group, field] = path.split('.');
+        return !(field in (built[group] ?? {}));
+      });
+      // A prompt that names a field the packet does not have teaches the model
+      // to cite one — and `validate()` would then reject its own verdict.
+      expect(missing).toEqual([]);
     });
-    // A prompt that names a field the packet does not have teaches the model to
-    // cite one — and `validate()` would then reject its own verdict.
-    expect(missing).toEqual([]);
+
+    it('names every field the packet has', () => {
+      const named = new Set(pathsNamedByPrompt(SENTINEL_SYSTEM_PROMPT));
+      const built = base as unknown as Record<string, Record<string, unknown>>;
+      const undocumented = GROUPS.flatMap((group) =>
+        Object.keys(built[group]).map((field) => `${group}.${field}`),
+      ).filter((path) => !named.has(path));
+      // The other direction: a field ADDED to the packet that the prompt never
+      // mentions is evidence the agent is never told it can see.
+      expect(undocumented).toEqual([]);
+    });
   });
 });

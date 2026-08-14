@@ -1597,6 +1597,24 @@ export function present<T>(value: T, source: string, at: string): Block<T> {
   return { available: true, value, source, at };
 }
 
+/**
+ * Keep the reported floor on the market's side of `ltp`.
+ *
+ * `computeGreenFloor` rounds one tick conservatively after convergence, so at
+ * the exact arming tick the floor can land one tick beyond the current price.
+ * Clamping costs at most one paisa of floor precision and removes a whole class
+ * of Stage 1 stop-placement bug. Null passes through untouched.
+ */
+export function clampFloorTowardLtp(
+  floorPrice: number | null,
+  ltp: number,
+  side: Side,
+): number | null {
+  if (floorPrice === null || !Number.isFinite(floorPrice)) return null;
+  // A LONG's floor sits below the market; a SHORT's sits above it.
+  return side === 'LONG' ? Math.min(floorPrice, ltp) : Math.max(floorPrice, ltp);
+}
+
 export interface TickSnapshot {
   segment: Segment;
   side: Side;
@@ -1624,16 +1642,25 @@ export interface TickSnapshot {
   oiWallPrev: { callWall: number | null; putWall: number | null } | null;
 }
 
-export interface StoredThesis {
+/**
+ * NOTE: `type`, not `interface` — and the same for `ContextPacket` and `Block`.
+ * A declared `interface` gets no implicit index signature, so it does NOT assign
+ * to `Prisma.InputJsonValue`, and the whole packet is written to a `jsonb`
+ * column by SentinelVerdictRepository.record(). Declaring these as interfaces
+ * makes Task 11 fail to compile. Verified against the generated client:
+ * `type Alias = {x: number}` assigns; `interface Iface {x: number}` does not;
+ * neither does `Record<string, unknown>` or a nested hand-written interface.
+ */
+export type StoredThesis = {
   direction: string;
   reason: string;
   levelPrice: number | null;
   targetPrice: number | null;
   invalidation: number | null;
   source: string;
-}
+};
 
-export interface ContextPacket {
+export type ContextPacket = {
   position: {
     symbol: string;
     kind: string;
@@ -1654,10 +1681,10 @@ export interface ContextPacket {
     mae: number | null;
   };
   thesis: Block<StoredThesis>;
-  structure: Block<unknown>;
+  structure: Block<Prisma.InputJsonValue>;
   flow: {
     volumeRatio: Block<number>;
-    oiWalls: Block<unknown>;
+    oiWalls: Block<Prisma.InputJsonValue>;
   };
   macro: {
     fiiDii: Block<never>;
@@ -1665,11 +1692,11 @@ export interface ContextPacket {
     globalCues: Block<never>;
     realFactors: Block<Record<string, number>>;
   };
-  news: Block<unknown>;
+  news: Block<Prisma.InputJsonValue>;
   session: { nowIst: string; expiry: string | null };
-  trigger: Block<unknown>;
-  memory: Block<unknown>;
-}
+  trigger: Block<Prisma.InputJsonValue>;
+  memory: Block<Prisma.InputJsonValue>;
+};
 
 const STUB_REASON = 'context-scoring factor is a stub (returns isStub: true) — no real data behind it';
 
@@ -1728,7 +1755,14 @@ export class ContextPacketService {
         grossPnl,
         charges: floor.charges,
         netPnl: floor.netPnl,
-        greenFloorPrice: floor.floorPrice,
+        // Clamped toward ltp. `computeGreenFloor` rounds one tick in the
+        // conservative direction after convergence, which means that at the
+        // exact arming tick the floor can sit one tick BEYOND the market —
+        // above it for a LONG, below for a SHORT. Harmless in Stage 0 (nothing
+        // places orders), but a Stage 1 executor placing a stop at floorPrice
+        // the instant it arms would emit a stop on the wrong side of the book.
+        // Clamp here so that defect never reaches the executor.
+        greenFloorPrice: clampFloorTowardLtp(floor.floorPrice, tick.ltp, tick.side),
         greenFloorArmed: floor.armed,
         mfe: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
         mae: tick.side === 'LONG' ? tick.holdingLow : tick.holdingHigh,
@@ -1738,9 +1772,14 @@ export class ContextPacketService {
         : absent('no thesis formed yet for this position'),
       structure,
       flow: {
-        volumeRatio: tick.volumeRatio === null
-          ? absent('session volume vs average not available for this symbol')
-          : present(tick.volumeRatio, 'market-data', at),
+        // `Number.isFinite`, not `!== null`. A NaN or Infinity here would be
+        // marked `present` and shipped to the LLM as a real reading — the agent
+        // does not crash on "volume NaN x the 20-day average", it reasons
+        // confidently from it. Task 6 hardened the sensors the same way; the
+        // packet is the second, independent consumer of the same fields.
+        volumeRatio: Number.isFinite(tick.volumeRatio as number)
+          ? present(tick.volumeRatio as number, 'market-data', at)
+          : absent('session volume vs average not available or not a finite reading'),
         oiWalls: tick.oiWallNow === null
           ? absent('no options chain for this symbol, so no OI walls')
           : present({ now: tick.oiWallNow, previous: tick.oiWallPrev }, 'oi-wall.service', at),

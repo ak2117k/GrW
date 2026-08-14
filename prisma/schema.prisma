@@ -1634,6 +1634,12 @@ model OiWallSnapshot {
   capturedAt   DateTime @default(now())
 
   @@index([symbol, capturedAt])
+  // Retention prune (SentinelRunnerService.pruneOiSnapshots) filters on
+  // capturedAt ALONE. The composite above leads with `symbol`, so Postgres
+  // cannot use it for that predicate and the nightly cleanup degrades to a
+  // sequential scan that gets slower exactly as the table gets bigger — i.e.
+  // the cleanup gets worst precisely when it matters most.
+  @@index([capturedAt])
   @@map("oi_wall_snapshots")
 }
 

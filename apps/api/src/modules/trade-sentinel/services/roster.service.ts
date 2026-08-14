@@ -103,8 +103,20 @@ export class RosterService {
 
   async build(userId: string): Promise<RosterEntry[]> {
     const open = await this.trackers.listOpen(userId);
-    const ownedElsewhere =
-      await this.ownership.symbolsOwnedByOtherEngines(userId);
+    // Re-normalised HERE as well as in the probe, rather than trusted.
+    //
+    // The probe's contract says its set is already normalised, and the shipped
+    // adapter honours it — but the contract is a comment and a probe is exactly
+    // the kind of thing that gets a second implementation. Normalising only our
+    // OWN side makes the guarantee ONE-DIRECTIONAL: a probe returning
+    // `SUZLON-EQ` against a tracker holding `SUZLON` silently never matches,
+    // and this failure FAILS OPEN — no match means the sentinel CLAIMS a
+    // position another engine is managing. `normaliseSymbol` is idempotent, so
+    // the cost of making it symmetric is one pass over at most a handful of
+    // strings.
+    const ownedElsewhere = new Set(
+      [...(await this.ownership.symbolsOwnedByOtherEngines(userId))].map(normaliseSymbol),
+    );
 
     // Slot allocation is decided HERE, not by listOpen's orderBy — see
     // byWatchPriority for the policy and why it is stated in this module.
@@ -129,9 +141,10 @@ export class RosterService {
         };
       }
 
-      // Normalised on BOTH sides — the probe's contract says its set already is.
-      // A raw compare here silently never matches (`SUZLON-EQ` vs `SUZLON`) and
-      // the sentinel claims a position another engine manages. See symbols.ts.
+      // Normalised on BOTH sides, both of them here — see the note on the set's
+      // construction above. A raw compare silently never matches
+      // (`SUZLON-EQ` vs `SUZLON`) and the sentinel then claims a position
+      // another engine manages. See symbols.ts.
       if (ownedElsewhere.has(normaliseSymbol(t.symbol))) {
         return {
           userId,

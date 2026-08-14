@@ -359,7 +359,21 @@ describe('SentinelCycleService — failure isolation', () => {
 
 describe('SentinelCycleService — shadow mode is structural', () => {
   const FORBIDDEN = /execution|order|broker|angel|smart-?api|trade-engine|auto-trade/i;
-  const ENTRY = join(__dirname, 'sentinel-cycle.service.ts');
+  /**
+   * Both anchors, because the cycle is the object under test but the RUNNER is
+   * what production actually calls.
+   *
+   * `SentinelRunnerService` is what the scheduler invokes every 30 seconds; the
+   * cycle is reached through it. Walking only the cycle would leave the
+   * scheduler's own dependency graph unchecked, so an executor injected there —
+   * one hop from every tick — would satisfy this test while defeating it
+   * entirely. It costs one array element to keep the property attached to the
+   * thing that runs.
+   */
+  const ENTRIES = [
+    join(__dirname, 'sentinel-cycle.service.ts'),
+    join(__dirname, 'sentinel-runner.service.ts'),
+  ];
 
   /**
    * Every module reachable from the cycle by following relative imports, with
@@ -382,7 +396,10 @@ describe('SentinelCycleService — shadow mode is structural', () => {
   function reachable(): Array<{ file: string; trail: string[] }> {
     const seen = new Set<string>();
     const out: Array<{ file: string; trail: string[] }> = [];
-    const stack: Array<{ file: string; trail: string[] }> = [{ file: ENTRY, trail: [ENTRY] }];
+    const stack: Array<{ file: string; trail: string[] }> = ENTRIES.map((e) => ({
+      file: e,
+      trail: [e],
+    }));
 
     const resolve = (from: string, spec: string): string | null => {
       if (!spec.startsWith('.')) return null; // package import; not part of our graph
@@ -413,10 +430,23 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     return out;
   }
 
+  it('every entry point exists, so the walk cannot start from nothing', () => {
+    for (const entry of ENTRIES) expect(existsSync(entry)).toBe(true);
+  });
+
   it('cannot reach anything that places an order, however many hops away', () => {
     const graph = reachable();
     // Guard against the walker silently resolving nothing and passing vacuously.
     expect(graph.length).toBeGreaterThan(10);
+    // Both anchors were actually walked. Named LITERALLY rather than iterated
+    // over ENTRIES: an assertion driven by the same array it is checking passes
+    // happily after someone deletes an entry from it, which is precisely the
+    // regression worth catching — the runner is what the scheduler calls, and
+    // dropping it from the walk would silently unguard the production entry
+    // point while every test stayed green.
+    const files = graph.map((n) => n.file);
+    expect(files).toContain(join(__dirname, 'sentinel-cycle.service.ts'));
+    expect(files).toContain(join(__dirname, 'sentinel-runner.service.ts'));
 
     const offenders = graph
       .filter((n) => FORBIDDEN.test(n.file))

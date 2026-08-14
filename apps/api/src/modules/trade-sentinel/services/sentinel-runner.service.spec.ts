@@ -1,7 +1,10 @@
 import { Logger } from '@nestjs/common';
+import { SCHEDULE_CRON_OPTIONS } from '@nestjs/schedule/dist/schedule.constants';
 import {
+  OI_SNAPSHOT_CLEANUP_CRON,
   OI_SNAPSHOT_RETENTION_DAYS,
   SENTINEL_ENABLED_KEY,
+  SENTINEL_TICK_CRON,
   SentinelRunnerService,
   isWithinSession,
 } from './sentinel-runner.service';
@@ -169,6 +172,43 @@ describe('SentinelRunnerService — the tick is gated', () => {
     await expect(t.svc.tick()).resolves.toBeUndefined();
     jest.useRealTimers();
     expect(error.mock.calls.map((c) => String(c[0])).join('')).toContain('db down');
+  });
+});
+
+describe('SentinelRunnerService — the schedule itself', () => {
+  /** What `@Cron` recorded on the method, straight off the decorator metadata. */
+  const cronMeta = (method: string) =>
+    (Reflect as { getMetadata?: (k: unknown, t: unknown) => unknown }).getMetadata?.(
+      SCHEDULE_CRON_OPTIONS,
+      (SentinelRunnerService.prototype as unknown as Record<string, unknown>)[method] as object,
+    ) as { cronTime?: string; timeZone?: string } | undefined;
+
+  it('ticks every 30 SECONDS — the six-field form', () => {
+    // A typo dropping the seconds field turns '*/30 * * * * *' into
+    // '*/30 * * * *', which is every 30 MINUTES. It compiles, it schedules
+    // happily, and no behavioural test would notice: the sentinel would simply
+    // be 60x slower to see a level break.
+    expect(SENTINEL_TICK_CRON.trim().split(/\s+/)).toHaveLength(6);
+    expect(SENTINEL_TICK_CRON).toBe('*/30 * * * * *');
+  });
+
+  it('prunes nightly at a fixed time, also in the six-field form', () => {
+    expect(OI_SNAPSHOT_CLEANUP_CRON.trim().split(/\s+/)).toHaveLength(6);
+    expect(OI_SNAPSHOT_CLEANUP_CRON).toBe('0 30 2 * * *');
+  });
+
+  it('registers both crons in IST, not in the host timezone', () => {
+    // The tick's window is IST wall-clock (09:15–15:29) and the prune is timed
+    // to sit between the session and the pre-market crons. On a UTC host — this
+    // deploys to Render/Oregon — an unzoned schedule shifts both by 5.5 hours.
+    expect(cronMeta('tick')).toEqual({
+      cronTime: SENTINEL_TICK_CRON,
+      timeZone: 'Asia/Kolkata',
+    });
+    expect(cronMeta('pruneOiSnapshots')).toEqual({
+      cronTime: OI_SNAPSHOT_CLEANUP_CRON,
+      timeZone: 'Asia/Kolkata',
+    });
   });
 });
 

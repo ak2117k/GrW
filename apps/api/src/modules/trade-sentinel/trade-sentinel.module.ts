@@ -73,8 +73,15 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
     {
       provide: ANTHROPIC_CLIENT,
       // The SDK reads ANTHROPIC_API_KEY from the environment itself; it is
-      // passed through ConfigService so a missing key fails at boot with a
-      // named provider rather than on the first live judgement.
+      // passed through ConfigService so the key's source is visible here.
+      //
+      // IT DOES NOT VALIDATE THE KEY. The SDK does NOT throw on construction
+      // with a missing one — it fails on the first REQUEST, as an API error the
+      // agent and thesis services already classify and degrade from. So a
+      // deploy without ANTHROPIC_API_KEY boots fine and the sentinel simply
+      // records no verdicts, which is the right behaviour for a default-off
+      // feature (crashing the whole API over it would be far worse) but is NOT
+      // a boot-time guarantee. Do not rely on one.
       useFactory: (config: ConfigService) =>
         new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }),
       inject: [ConfigService],

@@ -323,9 +323,21 @@ describe('RosterService — ownership across two symbol spellings', () => {
     expect(entry.symbol).toBe('SUZLON-EQ');
   });
 
-  it('matches when the mismatch runs the other way', async () => {
+  it('matches when the mismatch runs the OTHER way — an un-normalised probe', async () => {
+    // The literal reverse: a suffixed symbol in the PROBE's set against a bare
+    // one on the tracker. The probe's contract says its set is normalised, but
+    // a contract is a comment — and a probe that breaks it fails OPEN, which is
+    // the dangerous direction. So the roster normalises the incoming set too.
     list.mockResolvedValue([tracker('t1', 'POSITION', 'SUZLON')]);
-    ownedElsewhere.mockResolvedValue(new Set(['SUZLON-EQ'.replace('-EQ', '')]));
+    ownedElsewhere.mockResolvedValue(new Set(['SUZLON-EQ']));
+
+    const [entry] = await svc.build('u1');
+    expect(entry.ownership).toBe('OBSERVE_ONLY');
+  });
+
+  it('matches when BOTH sides are un-normalised in different series', async () => {
+    list.mockResolvedValue([tracker('t1', 'POSITION', 'SUZLON-EQ')]);
+    ownedElsewhere.mockResolvedValue(new Set(['SUZLON-BE']));
 
     const [entry] = await svc.build('u1');
     expect(entry.ownership).toBe('OBSERVE_ONLY');

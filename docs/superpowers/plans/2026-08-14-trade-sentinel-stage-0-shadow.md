@@ -2465,6 +2465,36 @@ export interface CycleReport {
   unwatched: number;
 }
 
+/**
+ * The factor readings the agent saw when it last looked at this trade, pulled
+ * back out of the packet stored with that verdict.
+ *
+ * Returns `{}` when there is no previous verdict, or when the previous packet
+ * marked the factors unavailable — in both cases `contextFactorFlip` correctly
+ * cannot fire, because there is no earlier reading to have flipped away from.
+ * Never throws: a malformed stored packet degrades to "no baseline", never to a
+ * fabricated one.
+ */
+export function previousFactorValues(
+  last: { packet: unknown } | undefined,
+): Record<string, number> {
+  const macro = (last?.packet as { macro?: { realFactors?: unknown } } | undefined)?.macro;
+  const block = macro?.realFactors as { available?: boolean; value?: unknown } | undefined;
+  if (!block || block.available !== true) return {};
+
+  const value = block.value;
+  if (typeof value !== 'object' || value === null) return {};
+
+  // Only finite numbers survive: a NaN baseline would manufacture a sign flip
+  // on the next evaluation, which is the hazard Task 6 hardened its sensors
+  // against. Absent data must not become signal on either side of the diff.
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+  }
+  return out;
+}
+
 /** Supplies the per-tick numbers a tripwire needs. Implemented over trade-tracker + market-data. */
 export interface TickSource {
   tickFor(trackerId: string): Promise<TickSnapshot>;
@@ -2530,7 +2560,13 @@ export class SentinelCycleService {
             oiWallPrev: walls.prev,
             freshNewsCount: tick.freshNewsCount,
             factorValues: tick.factorValues,
-            prevFactorValues: {},
+            // "Changed since I last LOOKED at this trade" — not since the last
+            // tick. The previous verdict's stored packet already holds the
+            // factor readings the agent last saw, so it is the correct baseline
+            // and needs no extra state. Empty on first sight, which correctly
+            // means contextFactorFlip cannot fire until there is something to
+            // compare against.
+            prevFactorValues: previousFactorValues(last),
           },
           last ? last.createdAt : null,
           now,

@@ -103,10 +103,30 @@ describe('SentinelChartContextAdapter', () => {
     expect(t.analyze).toHaveBeenCalledWith('12345', 'NSE', 'SUZLON-EQ', SENTINEL_LEVEL_INTERVAL);
   });
 
-  it('returns null when the instrument cannot be resolved', async () => {
+  it('returns null when the instrument cannot be resolved, and says so at WARN', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const t = make();
     t.getInstrumentBySymbol.mockResolvedValue(null);
-    await expect(t.svc.levelsFor('NOSUCH')).resolves.toBeNull();
+
+    await expect(t.svc.levelsFor('NIFTY28AUG2524000CE')).resolves.toBeNull();
+
+    // At debug this is silence in production, and an unresolvable symbol means
+    // an empty level book for the LIFE of the position — indistinguishable
+    // from a symbol whose levels were simply never touched.
+    const logged = warn.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain('NIFTY28AUG2524000CE');
+    expect(logged).toMatch(/level book/i);
+  });
+
+  it('warns ONCE per symbol, not once per poll', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = make();
+    t.getInstrumentBySymbol.mockResolvedValue(null);
+
+    await t.svc.levelsFor('NOSUCH');
+    await t.svc.levelsFor('NOSUCH');
+
+    expect(warn.mock.calls.filter((c) => /NOSUCH/.test(String(c[0])))).toHaveLength(1);
   });
 
   it('returns null when analyze produced no level book', async () => {

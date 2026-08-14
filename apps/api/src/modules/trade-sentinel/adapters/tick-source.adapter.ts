@@ -74,6 +74,31 @@ export function sideFor(qty: number): Side {
 class TickUnavailable extends Error {}
 
 /**
+ * What a derivative's underlying resolves to.
+ *
+ * BOTH HALVES ARE NEEDED AND THEY FAIL INDEPENDENTLY. `name` is what the level
+ * book and the news feed are keyed by ('NIFTY'); `token` is what the live level
+ * book's spot is keyed by ('26000'). The name comes off the derivative's own
+ * instrument row, the token needs a second lookup of the CASH row — so a
+ * missing cash row leaves the name usable and only the spot unavailable.
+ * Collapsing them into one nullable value would take the level book and the
+ * news down with the spot.
+ */
+interface Underlying {
+  name: string | null;
+  token: string | null;
+}
+
+const NO_UNDERLYING: Underlying = { name: null, token: null };
+
+/** What the level book reports when there is no symbol to ask about. */
+const NO_STRUCTURE = {
+  nearestSupport: null,
+  nearestResistance: null,
+  volumeRatio: null,
+} as const;
+
+/**
  * `TickSource` over `trade_trackers` plus the level book and the news feed.
  *
  * PRISMA DIRECTLY, NOT `TradeTrackerService` — the same argument as
@@ -89,13 +114,23 @@ class TickUnavailable extends Error {}
  *  - `underlyingLtp` for a derivative depends on the underlying's spot being in
  *    the live level book. When the underlying is not subscribed, it is null and
  *    `levelBreak` and the OI capture both correctly stay silent.
+ *
+ * SCALE AND IDENTITY ARE TWO SEPARATE CORRECTIONS. For a derivative, both the
+ * PRICE handed to the level book and the SYMBOL it is looked up by have to be
+ * the underlying's — the spot AND `NIFTY`, not the spot and
+ * `NIFTY28AUG2524000CE`. Getting only the price right leaves the lookup missing
+ * permanently and silently, which looks exactly like a symbol with no levels.
+ * See `structureSymbol` in {@link SentinelTickSource.tickFor}.
  */
 @Injectable()
 export class SentinelTickSource implements TickSource {
   private readonly logger = new Logger(SentinelTickSource.name);
 
-  /** Resolved underlying token per instrument token — the master does not change intraday. */
-  private readonly underlyingToken = new Map<string, string | null>();
+  /** Resolved underlying per instrument token — the master does not change intraday. */
+  private readonly underlyings = new Map<string, Underlying>();
+
+  /** Derivatives already warned about having no resolvable underlying. */
+  private readonly warnedNoUnderlying = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -139,16 +174,44 @@ export class SentinelTickSource implements TickSource {
     const side = sideFor(row.qty);
     const isCash = segment === 'EQ_DELIVERY' || segment === 'EQ_INTRADAY';
 
+    // Resolved ONCE and used three times below — for the spot, for the level
+    // book and for the news. They must all be talking about the same underlying.
+    const underlying = isCash ? NO_UNDERLYING : await this.resolveUnderlying(row.token, row.symbol);
+
     // For cash the contract IS the underlying, so this must be `ltp` and never
     // null — a null silences every level-comparing sensor on every equity
     // position, and does so in a way that looks exactly like "no level was
     // touched". The cycle repairs this defensively too; it is set here so the
     // repair never has to fire.
-    const underlyingLtp = isCash ? ltp : await this.spotFor(row.token, row.symbol);
+    const underlyingLtp = isCash ? ltp : this.spotFor(underlying.token);
+
+    /**
+     * THE SYMBOL THE LEVEL BOOK AND THE NEWS FEED ARE KEYED BY — and for a
+     * derivative that is NOT the tradingsymbol.
+     *
+     * `underlyingLtp` above already answers "which PRICE is on the level book's
+     * scale". This is the other half of the same question, and getting only the
+     * price right buys nothing: `SentinelChartContextAdapter` resolves its
+     * symbol through `getInstrumentBySymbol(symbol, 'NSE')`, which filters
+     * `{ symbol, exchange }` exactly. `NIFTY28AUG2524000CE` is an NFO
+     * tradingsymbol — and per the instrument-master refresh only CASH equities
+     * are in that table at all — so it matches NOTHING, permanently, for every
+     * derivative position, no matter how good the spot is. Same for the news:
+     * `relatedSymbols` holds base symbols, so the tradingsymbol never matches
+     * and `newsHit` is dark too.
+     *
+     * Null rather than a fallback to the tradingsymbol when the underlying
+     * cannot be resolved. Falling back would restore exactly the silent
+     * permanent miss this fixes, dressed as an attempt.
+     */
+    const structureSymbol = isCash ? row.symbol : underlying.name;
 
     const [structure, freshNewsCount] = await Promise.all([
-      this.charts.structureFor(row.symbol, underlyingLtp),
-      this.freshNewsCount(row.symbol),
+      structureSymbol
+        ? this.charts.structureFor(structureSymbol, underlyingLtp)
+        : Promise.resolve(NO_STRUCTURE),
+      // Null, not 0 — "no reading" and "nothing published" must stay apart.
+      structureSymbol ? this.freshNewsCount(structureSymbol) : Promise.resolve(null),
     ]);
 
     return {
@@ -185,22 +248,29 @@ export class SentinelTickSource implements TickSource {
    * the underlying's scale while the contract's `ltp` is a premium — comparing
    * 120 against a 24000 strike reads as a permanent breach.
    */
-  private async spotFor(token: string, symbol: string): Promise<number | null> {
-    const underlying = await this.resolveUnderlying(token, symbol);
-    if (!underlying) return null;
+  private spotFor(underlyingToken: string | null): number | null {
+    if (!underlyingToken) return null;
 
-    const book = this.levelBooks.getLevels(underlying);
+    const book = this.levelBooks.getLevels(underlyingToken);
     if (!book || !Number.isFinite(book.spot) || book.spot <= 0) return null;
     // See SPOT_STALENESS_MS — a frozen spot is worse than no spot.
     if (Date.now() - book.lastTickAt.getTime() > SPOT_STALENESS_MS) return null;
     return book.spot;
   }
 
-  /** The underlying's NSE token, memoised. `null` is cached too — it will not change today. */
-  private async resolveUnderlying(token: string, symbol: string): Promise<string | null> {
-    if (this.underlyingToken.has(token)) return this.underlyingToken.get(token) ?? null;
+  /**
+   * The underlying behind a derivative, memoised.
+   *
+   * A resolved answer is cached — the instrument master does not change
+   * intraday — and so is a resolved-to-nothing answer, which is a FACT about
+   * this contract. A THROW is not cached: caching it would let one bad lookup
+   * silence the level sensors for the rest of the process's life.
+   */
+  private async resolveUnderlying(token: string, symbol: string): Promise<Underlying> {
+    const cached = this.underlyings.get(token);
+    if (cached) return cached;
 
-    let resolved: string | null = null;
+    let resolved: Underlying = NO_UNDERLYING;
     try {
       const contract = await this.instruments.getInstrumentByToken(token);
       // The instrument master stores the UNDERLYING under `name` for a
@@ -211,24 +281,40 @@ export class SentinelTickSource implements TickSource {
           (await this.instruments.getInstrumentBySymbol(name, 'NSE')) ??
           // Cash equities carry the series suffix in the master.
           (await this.instruments.getInstrumentBySymbol(`${name}-EQ`, 'NSE'));
-        resolved = cash?.token ?? null;
+        // The name survives a missing cash row: only the SPOT needs the token,
+        // while the level book and the news only ever needed the name.
+        resolved = { name, token: cash?.token ?? null };
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`could not resolve the underlying for ${symbol}: ${message}`);
-      // NOT cached: this is a failure, not a fact, and caching it would make one
-      // bad lookup silence the level sensors for the rest of the process's life.
-      return null;
+      return NO_UNDERLYING;
     }
 
-    if (resolved === null) {
-      this.logger.warn(
-        `no NSE underlying found for ${symbol} — its levels and OI walls stay unavailable, ` +
-          'so the level and OI sensors will correctly stay silent on this position',
+    if (resolved.name === null) {
+      this.warnOnce(
+        token,
+        `no underlying name on the instrument master for ${symbol} — its level book, its news ` +
+          'and its OI walls are all unavailable, so the level, volume and news sensors will ' +
+          'stay silent on this position for as long as it is held',
+      );
+    } else if (resolved.token === null) {
+      this.warnOnce(
+        token,
+        `resolved ${symbol} to underlying ${resolved.name}, but no NSE cash/index instrument ` +
+          'for it — the level book and news still work, the underlying SPOT does not, so the ' +
+          'level and OI sensors stay silent',
       );
     }
-    this.underlyingToken.set(token, resolved);
+    this.underlyings.set(token, resolved);
     return resolved;
+  }
+
+  /** One line per contract, not one per tick — this is polled every 30 seconds. */
+  private warnOnce(token: string, message: string): void {
+    if (this.warnedNoUnderlying.has(token)) return;
+    this.warnedNoUnderlying.add(token);
+    this.logger.warn(message);
   }
 
   /** The nearest expiry as 'YYYY-MM-DD', or null for cash (the OI capture key). */

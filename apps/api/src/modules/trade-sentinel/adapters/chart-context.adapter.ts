@@ -130,6 +130,9 @@ export class SentinelChartContextAdapter implements ChartContextShim {
   private readonly logger = new Logger(SentinelChartContextAdapter.name);
   private readonly cache = new Map<string, CachedBook>();
 
+  /** Symbols already reported as unresolvable — warn once, not once per poll. */
+  private readonly warned = new Set<string>();
+
   constructor(
     private readonly signals: SignalGeneratorService,
     private readonly instruments: MarketDataRepository,
@@ -185,7 +188,19 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         (await this.instruments.getInstrumentBySymbol(symbol, 'NSE')) ??
         (await this.instruments.getInstrumentBySymbol(base, 'NSE'));
       if (!instrument) {
-        this.logger.debug(`no NSE instrument for ${symbol} — no level book`);
+        // WARN, not debug. An unresolvable symbol here means an EMPTY LEVEL BOOK
+        // FOR THE LIFE OF THE POSITION — `levelBreak` never fires and the packet
+        // records the structure as absent every single time — and at production
+        // log levels a `debug` is silence. That is indistinguishable from a
+        // symbol whose levels were simply never touched, which is the exact
+        // failure the instrument table's cash-only contents make likely for
+        // anything passed an NFO tradingsymbol. Once per symbol, not per tick.
+        this.warnOnce(
+          base,
+          `no NSE instrument matches "${symbol}" — its level book will be empty for as long as ` +
+            'this symbol is watched, so the level and volume sensors stay silent. For a ' +
+            'derivative, callers must pass the UNDERLYING\'s name, not the tradingsymbol.',
+        );
         return this.store(base, { at: Date.now(), levels: null, volumeRatio: null });
       }
 
@@ -209,6 +224,12 @@ export class SentinelChartContextAdapter implements ChartContextShim {
       this.logger.warn(`level book failed for ${symbol}: ${message}`);
       return null;
     }
+  }
+
+  private warnOnce(key: string, message: string): void {
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    this.logger.warn(message);
   }
 
   private store(key: string, entry: CachedBook): CachedBook {

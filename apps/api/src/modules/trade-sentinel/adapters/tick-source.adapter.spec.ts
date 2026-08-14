@@ -187,6 +187,8 @@ describe('SentinelTickSource', () => {
   it('passes the UNDERLYING price to the level lookup, not the contract price', async () => {
     const t = make();
     await t.svc.tickFor('t1');
+    // For cash the tradingsymbol IS the level book's key — the instrument
+    // master holds cash equities under exactly this spelling.
     expect(t.structureFor).toHaveBeenCalledWith('SUZLON-EQ', 105);
   });
 
@@ -227,6 +229,106 @@ describe('SentinelTickSource', () => {
 
       expect(tick.segment).toBe('OPT');
       expect(tick.expiry).toBe('2026-08-28');
+    });
+
+    it('looks the level book up by the UNDERLYING NAME, not the tradingsymbol', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+      t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+      t.getLevels.mockReturnValue({ spot: 24010, lastTickAt: NOW });
+
+      await t.svc.tickFor('t1');
+
+      // `getInstrumentBySymbol` filters {symbol, exchange} EXACTLY, and only
+      // cash equities are in that table — so an NFO tradingsymbol matches
+      // nothing, permanently, however good the spot is.
+      expect(t.structureFor).toHaveBeenCalledWith('NIFTY', 24010);
+      expect(t.structureFor).not.toHaveBeenCalledWith(
+        'NIFTY28AUG2524000CE',
+        expect.anything(),
+      );
+    });
+
+    it('looks the NEWS up by the underlying name too', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+      t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+      t.getLevels.mockReturnValue({ spot: 24010, lastTickAt: NOW });
+
+      await t.svc.tickFor('t1');
+
+      // `relatedSymbols` holds base symbols; a tradingsymbol never matches and
+      // `newsHit` would be dark on every derivative.
+      expect(t.getNewsForSymbol).toHaveBeenCalledWith('NIFTY');
+    });
+
+    it('resolves the underlying ONCE and uses the same one for spot, levels and news', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+      t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+      t.getLevels.mockReturnValue({ spot: 24010, lastTickAt: NOW });
+
+      await t.svc.tickFor('t1');
+
+      // All three must be talking about the same underlying, or the packet
+      // describes one instrument with another's evidence.
+      expect(t.getLevels).toHaveBeenCalledWith('26000');
+      expect(t.structureFor.mock.calls[0][0]).toBe('NIFTY');
+      expect(t.getNewsForSymbol.mock.calls[0][0]).toBe('NIFTY');
+    });
+
+    it('keeps the level book and the news when only the SPOT cannot be resolved', async () => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+      // The NAME resolved; the cash/index instrument row did not.
+      t.getInstrumentBySymbol.mockResolvedValue(null);
+
+      const tick = await t.svc.tickFor('t1');
+
+      // Only the spot needs the token. Collapsing the two would take the level
+      // book and the news down with it for no reason.
+      expect(tick.underlyingLtp).toBeNull();
+      expect(t.structureFor).toHaveBeenCalledWith('NIFTY', null);
+      expect(t.getNewsForSymbol).toHaveBeenCalledWith('NIFTY');
+    });
+
+    it('asks NEITHER adapter anything when the underlying name is unknown', async () => {
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue(null);
+
+      const tick = await t.svc.tickFor('t1');
+
+      // Falling back to the tradingsymbol would restore exactly the silent
+      // permanent miss this fixes, dressed up as an attempt.
+      expect(t.structureFor).not.toHaveBeenCalled();
+      expect(t.getNewsForSymbol).not.toHaveBeenCalled();
+      expect(tick.nearestSupport).toBeNull();
+      expect(tick.volumeRatio).toBeNull();
+      // Null, not 0: nobody read the news, as opposed to nothing being published.
+      expect(tick.freshNewsCount).toBeNull();
+    });
+
+    it('warns ONCE per contract rather than on every 30-second poll', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue(null);
+
+      await t.svc.tickFor('t1');
+      await t.svc.tickFor('t1');
+      await t.svc.tickFor('t1');
+
+      const hits = warn.mock.calls.filter((c) => /underlying/i.test(String(c[0])));
+      expect(hits).toHaveLength(1);
+      // And it must say what goes dark, or the line cannot be acted on.
+      expect(String(hits[0][0])).toMatch(/level book/i);
     });
 
     it('takes the underlying spot from the live level book', async () => {

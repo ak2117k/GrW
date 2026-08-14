@@ -1,6 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { OiWallService } from '../../signal-generator/services/oi-wall.service';
+import { OI_WALL_SOURCE, type OiWallSource } from '../ports/open-positions.port';
 
 export interface WallPair {
   callWall: number | null;
@@ -29,7 +29,10 @@ export class OiWallSnapshotService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly oiWall: OiWallService,
+    // A narrow port, not the concrete OiWallService: that service reaches the
+    // options-chain service, the market feed and from there the Angel One
+    // adapter's placeOrder. See the note on OiWallSource.
+    @Inject(OI_WALL_SOURCE) private readonly oiWall: OiWallSource,
   ) {}
 
   private warnOnce(symbol: string, cause: string, detail: string): void {

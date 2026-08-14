@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { computeGreenFloor } from '../charges';
 import { RosterService, type RosterEntry } from './roster.service';
-import { TripwireService } from './tripwire.service';
+import { TripwireService, type TripwireResult } from './tripwire.service';
 import {
   ContextPacketService,
   packetAsJson,
@@ -115,6 +115,10 @@ export const TICK_SOURCE = 'SENTINEL_TICK_SOURCE';
  * is the only component that sees the same position across ticks, so the cycle
  * owns it — see {@link SentinelCycleService.armedLatch}.
  *
+ * The OI wall fields are omitted as well as the latch: the cycle captures walls
+ * on its own cadence and owns their provenance, so a tick source that tried to
+ * supply them would be silently overwritten.
+ *
  * CASH SEGMENTS: `underlyingLtp` must equal `ltp` for `EQ_DELIVERY`/`EQ_INTRADAY`,
  * because for cash the contract IS the underlying. A null there silences every
  * level-comparing sensor on every equity position — silently, since a sensor that
@@ -122,7 +126,10 @@ export const TICK_SOURCE = 'SENTINEL_TICK_SOURCE';
  * case defensively (see `withCashUnderlying`) rather than trusting each adapter to
  * remember, but the adapter should still set it.
  */
-export type TickReading = Omit<TickSnapshot, 'greenFloorArmedLatched'>;
+export type TickReading = Omit<
+  TickSnapshot,
+  'greenFloorArmedLatched' | 'oiWallNow' | 'oiWallPrev' | 'oiWallsAt'
+>;
 
 /** Supplies the per-tick numbers a tripwire needs. Implemented over trade-tracker + market-data. */
 export interface TickSource {
@@ -216,6 +223,16 @@ interface TrackerState {
   agentRetryAt: number;
   /** The last OI capture and when, so capture is decoupled from the poll rate. */
   oi: { at: number; walls: { now: WallPair | null; prev: WallPair | null } } | null;
+  /**
+   * The wall pair the agent has already been woken for, as a comparable key.
+   *
+   * Tripwires are pure and stateless, and `wallsFor` now serves the SAME pair
+   * for up to a minute — so a genuine shift re-fires `oi-wall-shift` on every
+   * tick of that window (~12 wakes at a 5s poll where the old per-tick capture
+   * produced one). Suppressing the repeat is the other half of the capture-
+   * cadence change; without it the fix trades a flapping cost for a sticking one.
+   */
+  oiEvaluatedKey: string | null;
 }
 
 /**
@@ -318,9 +335,10 @@ export class SentinelCycleService {
     // armed, and the agent must not be shown it un-arming.
     const greenFloorArmedLatched = this.armedLatch(entry, tick, last);
 
-    const walls = await this.wallsFor(entry, tick, now);
+    const capture = await this.wallsFor(entry, tick, now);
+    const walls = capture.walls;
 
-    const decision = this.tripwires.evaluate(
+    const rawDecision = this.tripwires.evaluate(
       {
         trackerId: entry.trackerId,
         symbol: entry.symbol,
@@ -350,6 +368,9 @@ export class SentinelCycleService {
       now,
     );
 
+    const state = this.stateFor(entry);
+    const decision = suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey);
+
     if (!decision.shouldEvaluate) {
       report.skipped += 1;
       return;
@@ -359,22 +380,32 @@ export class SentinelCycleService {
     // already rate-limited) and keeping them running means the ratchet, the wall
     // series and the fire log stay continuous through an agent outage. What the
     // backoff suppresses is the expensive tail — thesis, packet, judge.
-    const state = this.stateFor(entry);
+    //
+    // Silent per tick: the window is announced once, when it is opened, in the
+    // catch below. Logging here would emit ~720 lines/hour/position through an
+    // outage, which buries the one line that says what actually broke.
     if (now.getTime() < state.agentRetryAt) {
       report.skipped += 1;
-      this.logger.warn(
-        `sentinel agent backing off ${entry.symbol} (${entry.trackerId}) after ` +
-          `${state.agentFailures} consecutive failures; next attempt in ` +
-          `${Math.ceil((state.agentRetryAt - now.getTime()) / 1000)}s`,
-      );
       return;
     }
+
+    // Committed to looking at this wall pair. Recorded BEFORE the work rather
+    // than after it, so a transient packet or agent failure does not re-wake on
+    // the identical unchanged transition — the backoff owns retries, and the
+    // heartbeat still guarantees a look within HEARTBEAT_INTERVAL_MS.
+    state.oiEvaluatedKey = wallKey(walls);
 
     const thesis = await this.thesisFor(entry, tick, now);
 
     const packet: ContextPacket = await this.packets.build(
       entry,
-      { ...tick, oiWallNow: walls.now, oiWallPrev: walls.prev, greenFloorArmedLatched },
+      {
+        ...tick,
+        oiWallNow: walls.now,
+        oiWallPrev: walls.prev,
+        oiWallsAt: capture.at,
+        greenFloorArmedLatched,
+      },
       thesis,
       decision.fires,
     );
@@ -384,7 +415,13 @@ export class SentinelCycleService {
       verdict = await this.agent.judge(packet);
     } catch (err) {
       state.agentFailures += 1;
-      state.agentRetryAt = now.getTime() + agentBackoffMs(state.agentFailures);
+      const wait = agentBackoffMs(state.agentFailures);
+      state.agentRetryAt = now.getTime() + wait;
+      // Once per window, here — not once per suppressed tick at the gate above.
+      this.logger.warn(
+        `sentinel agent failed on ${entry.symbol} (${entry.trackerId}), ` +
+          `${state.agentFailures} consecutive; backing off ${Math.round(wait / 1000)}s`,
+      );
       throw err;
     }
     // A verdict came back and passed validation, so whatever was wrong has
@@ -488,6 +525,13 @@ export class SentinelCycleService {
     // independent of cycle state, which matters if it is ever replayed.
     const thesis = await this.thesis.ensureFor(entry, {
       ...tick,
+      // The thesis reads side, entry price, entry time and qty; the walls and the
+      // latch are irrelevant to it. Passed as empty rather than as live cycle
+      // state so the inference input stays independent of it, which matters if
+      // it is ever replayed.
+      oiWallNow: null,
+      oiWallPrev: null,
+      oiWallsAt: null,
       greenFloorArmedLatched: false,
     });
     state.thesis = { value: thesis, at: now.getTime() };
@@ -504,6 +548,7 @@ export class SentinelCycleService {
         agentFailures: 0,
         agentRetryAt: 0,
         oi: null,
+        oiEvaluatedKey: null,
       };
       this.state.set(entry.trackerId, state);
     }
@@ -523,12 +568,16 @@ export class SentinelCycleService {
     entry: RosterEntry,
     tick: TickReading,
     now: Date,
-  ): Promise<{ now: WallPair | null; prev: WallPair | null }> {
-    if (!tick.expiry) return { now: null, prev: null };
+  ): Promise<{ walls: { now: WallPair | null; prev: WallPair | null }; at: string | null }> {
+    if (!tick.expiry) return { walls: { now: null, prev: null }, at: null };
 
     const state = this.stateFor(entry);
     const cached = state.oi;
-    if (cached && now.getTime() - cached.at < OI_CAPTURE_INTERVAL_MS) return cached.walls;
+    if (cached && now.getTime() - cached.at < OI_CAPTURE_INTERVAL_MS) {
+      // The CAPTURE time, not this tick's — the packet must not claim a
+      // minute-old reading was taken just now.
+      return { walls: cached.walls, at: new Date(cached.at).toISOString() };
+    }
 
     const walls = await this.oiWalls.captureAndCompare(
       entry.symbol,
@@ -536,7 +585,7 @@ export class SentinelCycleService {
       tick.underlyingLtp,
     );
     state.oi = { at: now.getTime(), walls };
-    return walls;
+    return { walls, at: now.toISOString() };
   }
 
   private warnMissingUnderlying(entry: RosterEntry): void {
@@ -558,6 +607,47 @@ export class SentinelCycleService {
       }
     }
   }
+}
+
+/** The sensor whose fire depends only on the wall pair, and so can repeat. */
+export const OI_WALL_SHIFT = 'oi-wall-shift';
+
+/**
+ * A comparable identity for a wall pair. `null` when there are no walls, which
+ * can never match a real reading and so never suppresses anything.
+ */
+export function wallKey(walls: { now: WallPair | null; prev: WallPair | null }): string | null {
+  if (walls.now === null) return null;
+  const p = walls.prev;
+  return `${walls.now.callWall}/${walls.now.putWall}|${p ? `${p.callWall}/${p.putWall}` : 'none'}`;
+}
+
+/**
+ * Drop an `oi-wall-shift` fire for a transition the agent has already been woken
+ * for, and recompute whether anything is left worth waking it for.
+ *
+ * The sensors are pure and stateless by design — they answer "do these two
+ * readings differ", which is the right question for a sensor and the wrong one
+ * for a scheduler. Since `wallsFor` serves the same pair for up to a minute, the
+ * honest answer stays "yes" for the whole window, so the de-duplication has to
+ * live in the caller that knows what it has already looked at.
+ *
+ * Only this one sensor is de-duplicated. The others read live prices, volume or
+ * news counts that move on their own between ticks; `oi-wall-shift` is the only
+ * one whose entire input is a value this service deliberately holds still.
+ */
+export function suppressRepeatWallShift(
+  decision: TripwireResult,
+  key: string | null,
+  evaluatedKey: string | null,
+): TripwireResult {
+  if (key === null || key !== evaluatedKey) return decision;
+
+  const fires = decision.fires.filter((f) => f.name !== OI_WALL_SHIFT);
+  if (fires.length === decision.fires.length) return decision;
+  // The heartbeat is untouched: suppressing a repeat must never suppress the
+  // scheduled look that exists to catch what the sensors miss.
+  return { ...decision, fires, shouldEvaluate: fires.length > 0 || decision.heartbeat };
 }
 
 /** See {@link AGENT_RETRY_BASE_MS}. Exported so the backoff shape is testable directly. */

@@ -140,9 +140,10 @@ describe('ContextPacketService', () => {
     volumeRatio: null,
     freshNewsCount: null,
     factorValues: {},
-    oiWallNow: null,
-    oiWallPrev: null,
-    greenFloorArmedLatched: false,
+  oiWallNow: null,
+  oiWallPrev: null,
+  oiWallsAt: null,
+  greenFloorArmedLatched: false,
   };
 
   /** The floor solved for this fixture, independent of the ltp being tested. */
@@ -511,6 +512,39 @@ describe('ContextPacketService', () => {
       expect(packet.position.ownership).toBe(ownership);
     },
   );
+
+  it('dates the OI block from the capture, not from the packet build', async () => {
+    const capturedAt = '2026-08-14T05:59:15.000Z';
+    const packet = await svc.build(
+      entry,
+      {
+        ...tick,
+        oiWallNow: { callWall: 24200, putWall: 23800 },
+        oiWallPrev: null,
+        oiWallsAt: capturedAt,
+      },
+      null,
+    );
+    // Walls are captured on their own cadence, so this block can be up to a
+    // minute older than every other one. The packet's contract is "present WITH
+    // provenance" and the prompt teaches the model to read `at` — a build-time
+    // stamp here would be a wrong value carrying provenance, which is the one
+    // failure mode this type exists to prevent.
+    expect(packet.flow.oiWalls.available).toBe(true);
+    if (packet.flow.oiWalls.available) expect(packet.flow.oiWalls.at).toBe(capturedAt);
+  });
+
+  it('falls back to the build time when no capture time is supplied', async () => {
+    const packet = await svc.build(
+      entry,
+      { ...tick, oiWallNow: { callWall: 1, putWall: 2 }, oiWallPrev: null, oiWallsAt: null },
+      null,
+    );
+    expect(packet.flow.oiWalls.available).toBe(true);
+    if (packet.flow.oiWalls.available) {
+      expect(packet.flow.oiWalls.at).toBe(packet.session.nowUtc);
+    }
+  });
 
   it('stamps the session clock in IST alongside the UTC instant', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-14T09:45:00Z')); // Fri 15:15 IST

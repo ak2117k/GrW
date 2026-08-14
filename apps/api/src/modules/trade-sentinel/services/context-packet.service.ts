@@ -172,6 +172,18 @@ export interface TickSnapshot {
   oiWallNow: { callWall: number | null; putWall: number | null } | null;
   oiWallPrev: { callWall: number | null; putWall: number | null } | null;
   /**
+   * When the OI walls above were actually READ, as an ISO string, or null to
+   * fall back to the packet's build time.
+   *
+   * Walls are captured on their own cadence rather than per tick (see
+   * `OI_CAPTURE_INTERVAL_MS`), so this pair can be up to a minute older than
+   * every other block in the packet. Stamping it with the build time would put
+   * a wrong `at` on a block whose whole contract is "present WITH provenance",
+   * and the prompt teaches the model to read `at` — so the one block that is not
+   * from this instant has to say so.
+   */
+  oiWallsAt: string | null;
+  /**
    * Whether the green floor has EVER armed for this position.
    *
    * `charges.ts` states that `computeGreenFloor.armed` is computed from the
@@ -449,7 +461,13 @@ export class ContextPacketService {
         oiWalls:
           tick.oiWallNow === null
             ? absent('no options chain for this symbol, so no OI walls')
-            : present({ now: tick.oiWallNow, previous: tick.oiWallPrev }, 'oi-wall.service', at),
+            : present(
+                { now: tick.oiWallNow, previous: tick.oiWallPrev },
+                'oi-wall.service',
+                // The capture time, NOT the packet build time — these walls are
+                // read on their own cadence and can be up to a minute old.
+                tick.oiWallsAt ?? at,
+              ),
       },
       macro: {
         fiiDii: absent(

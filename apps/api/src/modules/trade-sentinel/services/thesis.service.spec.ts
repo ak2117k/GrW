@@ -48,6 +48,7 @@ const tick: TickSnapshot = {
   factorValues: {},
   oiWallNow: null,
   oiWallPrev: null,
+  oiWallsAt: null,
   greenFloorArmedLatched: false,
 };
 

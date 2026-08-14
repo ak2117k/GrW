@@ -1,5 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { TradeTrackerService } from '../../trade-tracker/services/trade-tracker.service';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { OPEN_POSITIONS, type OpenPositionsPort } from '../ports/open-positions.port';
 
 /** Hard cap on concurrently watched positions (spec §2). */
 export const SENTINEL_MAX_WATCHED = 5;
@@ -82,7 +82,10 @@ export class RosterService {
   private readonly logger = new Logger(RosterService.name);
 
   constructor(
-    private readonly trackers: TradeTrackerService,
+    // A narrow READ-ONLY port, not TradeTrackerService: that service holds the
+    // Angel One adapter, which would put placeOrder one property access away
+    // from a live cycle. See the note on OpenPositionsPort.
+    @Inject(OPEN_POSITIONS) private readonly trackers: OpenPositionsPort,
     private readonly ownership: EngineOwnershipProbe,
   ) {}
 

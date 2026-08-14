@@ -1,5 +1,5 @@
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync } from 'fs';
+import { dirname, join } from 'path';
 import { Logger } from '@nestjs/common';
 import {
   AGENT_RETRY_BASE_MS,
@@ -11,6 +11,8 @@ import {
   agentBackoffMs,
   previousFactorValues,
   storedFloorArmed,
+  suppressRepeatWallShift,
+  wallKey,
   withCashUnderlying,
   type TickReading,
 } from './sentinel-cycle.service';
@@ -47,8 +49,8 @@ const tick = (over: Partial<TickReading> = {}): TickReading => ({
   volumeRatio: null,
   freshNewsCount: null,
   factorValues: {},
-  oiWallNow: null,
-  oiWallPrev: null,
+  // No OI fields: the cycle captures walls on its own cadence and owns their
+  // provenance, so `TickReading` excludes them.
   ...over,
 });
 
@@ -356,14 +358,91 @@ describe('SentinelCycleService — failure isolation', () => {
 });
 
 describe('SentinelCycleService — shadow mode is structural', () => {
-  const source = readFileSync(join(__dirname, 'sentinel-cycle.service.ts'), 'utf8');
+  const FORBIDDEN = /execution|order|broker|angel|smart-?api|trade-engine|auto-trade/i;
+  const ENTRY = join(__dirname, 'sentinel-cycle.service.ts');
 
-  it('imports nothing that can place an order', () => {
-    const specifiers = [...source.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1]);
-    expect(specifiers.length).toBeGreaterThan(0);
-    for (const spec of specifiers) {
-      expect(spec).not.toMatch(/execution|order|broker|angel|smart-?api|trade-engine|auto-trade/i);
+  /**
+   * Every module reachable from the cycle by following relative imports, with
+   * the trail that reached it.
+   *
+   * TRANSITIVE, not first-hop. The earlier version of this test scanned only
+   * `sentinel-cycle.service.ts` and passed while `RosterService` ->
+   * `TradeTrackerService` -> `angel-one-adapter.service` (placeOrder,
+   * modifyOrder, cancelOrder) was reachable at runtime from any live cycle
+   * instance, and while `OiWallSnapshotService` -> `OiWallService` ->
+   * `OptionsChainService` -> the market feed reached the same adapter by a
+   * second, independent route. A first-hop check cannot see either, which makes
+   * it a check that reports the property rather than enforcing it.
+   *
+   * Type-only imports are followed too, even though they are erased at runtime
+   * and cannot make anything reachable. That is deliberate over-strictness: a
+   * `import type` is one keyword away from a value import, and the cost of the
+   * false positive is a port that was going to be worth extracting anyway.
+   */
+  function reachable(): Array<{ file: string; trail: string[] }> {
+    const seen = new Set<string>();
+    const out: Array<{ file: string; trail: string[] }> = [];
+    const stack: Array<{ file: string; trail: string[] }> = [{ file: ENTRY, trail: [ENTRY] }];
+
+    const resolve = (from: string, spec: string): string | null => {
+      if (!spec.startsWith('.')) return null; // package import; not part of our graph
+      const base = join(dirname(from), spec);
+      for (const candidate of [`${base}.ts`, join(base, 'index.ts')]) {
+        if (existsSync(candidate)) return candidate;
+      }
+      return null;
+    };
+
+    while (stack.length > 0) {
+      const node = stack.pop() as { file: string; trail: string[] };
+      if (seen.has(node.file)) continue;
+      seen.add(node.file);
+      out.push(node);
+      for (const m of readFileSync(node.file, 'utf8').matchAll(/from\s+'([^']+)'/g)) {
+        const spec = m[1];
+        // The specifier itself is checked even when it does not resolve to a
+        // file in this repo, so a package like `smartapi-javascript` is caught.
+        if (FORBIDDEN.test(spec)) {
+          out.push({ file: spec, trail: [...node.trail, spec] });
+          continue;
+        }
+        const next = resolve(node.file, spec);
+        if (next && !seen.has(next)) stack.push({ file: next, trail: [...node.trail, next] });
+      }
     }
+    return out;
+  }
+
+  it('cannot reach anything that places an order, however many hops away', () => {
+    const graph = reachable();
+    // Guard against the walker silently resolving nothing and passing vacuously.
+    expect(graph.length).toBeGreaterThan(10);
+
+    const offenders = graph
+      .filter((n) => FORBIDDEN.test(n.file))
+      .map((n) => n.trail.map((t) => t.replace(/^.*[\\/]src[\\/]/, 'src/')).join('\n    -> '));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('the guard is live — it catches a reintroduced path', () => {
+    // The property is only as good as the walker. Prove the walker actually
+    // follows edges by running it from a file that IS on such a path: if this
+    // returns nothing, the test above is vacuous and would keep passing after
+    // someone re-points the roster at TradeTrackerService.
+    const withRealPath = join(
+      __dirname,
+      '..',
+      '..',
+      'trade-tracker',
+      'services',
+      'trade-tracker.service.ts',
+    );
+    expect(existsSync(withRealPath)).toBe(true);
+    const specs = [...readFileSync(withRealPath, 'utf8').matchAll(/from\s+'([^']+)'/g)].map(
+      (m) => m[1],
+    );
+    expect(specs.some((s) => FORBIDDEN.test(s))).toBe(true);
   });
 
   it('exposes no method through which an order could be placed', () => {
@@ -874,6 +953,178 @@ describe('SentinelCycleService — OI walls', () => {
   });
 });
 
+describe('wallKey / suppressRepeatWallShift', () => {
+  const pair = (c: number | null, p: number | null) => ({ callWall: c, putWall: p });
+  const decision = (names: string[], heartbeat = false) => ({
+    fires: names.map((name) => ({ name, detail: 'd' })),
+    heartbeat,
+    shouldEvaluate: names.length > 0 || heartbeat,
+  });
+
+  it('distinguishes a moved wall from an unmoved one', () => {
+    const a = wallKey({ now: pair(24200, 23800), prev: pair(24500, 23800) });
+    expect(wallKey({ now: pair(24200, 23800), prev: pair(24500, 23800) })).toBe(a);
+    expect(wallKey({ now: pair(24300, 23800), prev: pair(24500, 23800) })).not.toBe(a);
+    // The PREVIOUS side matters too: same walls now, different transition.
+    expect(wallKey({ now: pair(24200, 23800), prev: pair(24100, 23800) })).not.toBe(a);
+  });
+
+  it('never produces a key for absent walls, so absence cannot suppress', () => {
+    expect(wallKey({ now: null, prev: null })).toBeNull();
+    expect(wallKey({ now: null, prev: pair(1, 2) })).toBeNull();
+  });
+
+  it('drops a repeated wall-shift fire and re-decides whether to wake', () => {
+    const out = suppressRepeatWallShift(decision(['oi-wall-shift']), 'k', 'k');
+    expect(out.fires).toEqual([]);
+    expect(out.shouldEvaluate).toBe(false);
+  });
+
+  it('keeps the fire when the transition is a new one', () => {
+    const out = suppressRepeatWallShift(decision(['oi-wall-shift']), 'k2', 'k1');
+    expect(out.fires).toHaveLength(1);
+    expect(out.shouldEvaluate).toBe(true);
+  });
+
+  it('still wakes when another sensor fired alongside it', () => {
+    const out = suppressRepeatWallShift(decision(['oi-wall-shift', 'level-break']), 'k', 'k');
+    expect(out.fires.map((f) => f.name)).toEqual(['level-break']);
+    expect(out.shouldEvaluate).toBe(true);
+  });
+
+  it('never suppresses the heartbeat', () => {
+    const out = suppressRepeatWallShift(decision(['oi-wall-shift'], true), 'k', 'k');
+    expect(out.fires).toEqual([]);
+    // The scheduled look exists to catch what the sensors miss; a de-duplication
+    // that cancelled it would make a quiet position invisible.
+    expect(out.shouldEvaluate).toBe(true);
+  });
+
+  it('leaves other sensors alone — they read inputs that move on their own', () => {
+    const d = decision(['volume-anomaly']);
+    expect(suppressRepeatWallShift(d, 'k', 'k')).toBe(d);
+  });
+});
+
+describe('SentinelCycleService — a wall shift wakes the agent once, not every tick', () => {
+  const optTick = () =>
+    tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000 });
+
+  function shifting() {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(optTick());
+    t.captureAndCompare.mockResolvedValue({
+      now: { callWall: 24200, putWall: 23800 },
+      prev: { callWall: 24500, putWall: 23800 },
+    });
+    t.evaluate.mockReturnValue({
+      fires: [{ name: 'oi-wall-shift', detail: 'call wall 24500 -> 24200' }],
+      heartbeat: false,
+      shouldEvaluate: true,
+    });
+    return t;
+  }
+
+  it('does not re-judge the same transition while the pair is being reused', async () => {
+    const t = shifting();
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    // A 5s poll across the 60s reuse window. The sensors are pure and the served
+    // pair is identical, so without de-duplication this is ~12 agent calls for
+    // one shift — which would eat most of the saving the cadence change bought.
+    for (let i = 0; i < 12; i += 1) {
+      await t.svc.runForUser(USER, new Date(now.getTime() + i * 5_000));
+    }
+
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    expect(t.captureAndCompare).toHaveBeenCalledTimes(1);
+  });
+
+  it('wakes again as soon as the walls actually move', async () => {
+    const t = shifting();
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    await t.svc.runForUser(USER, now);
+    await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+    expect(t.judge).toHaveBeenCalledTimes(1);
+
+    // Next capture window, and the walls have moved again.
+    t.captureAndCompare.mockResolvedValue({
+      now: { callWall: 24100, putWall: 23800 },
+      prev: { callWall: 24200, putWall: 23800 },
+    });
+    await t.svc.runForUser(USER, new Date(now.getTime() + OI_CAPTURE_INTERVAL_MS));
+
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('still lets the heartbeat through on a repeated transition', async () => {
+    const t = shifting();
+    const now = new Date('2026-08-14T06:00:00.000Z');
+    await t.svc.runForUser(USER, now);
+
+    t.evaluate.mockReturnValue({
+      fires: [{ name: 'oi-wall-shift', detail: 'same' }],
+      heartbeat: true,
+      shouldEvaluate: true,
+    });
+    await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+
+    expect(t.judge).toHaveBeenCalledTimes(2);
+    // Attributed to the heartbeat, since the suppressed fire is no longer a cause.
+    expect(t.record.mock.calls[1][0].triggeredBy).toEqual(['heartbeat']);
+  });
+
+  it('de-duplicates per position', async () => {
+    const t = shifting();
+    t.build.mockResolvedValue([watched('t1'), watched('t2')]);
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    await t.svc.runForUser(USER, now);
+    await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+
+    expect(t.judge).toHaveBeenCalledTimes(2); // one each on the first run only
+  });
+});
+
+describe('SentinelCycleService — OI provenance', () => {
+  it('stamps the walls with when they were CAPTURED, not when the packet was built', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000 }),
+    );
+    t.captureAndCompare.mockResolvedValue({ now: { callWall: 24200, putWall: 23800 }, prev: null });
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    await t.svc.runForUser(USER, now);
+    expect(t.buildPacket.mock.calls[0][1].oiWallsAt).toBe(now.toISOString());
+
+    // 45s later the pair is being reused. Reporting THIS tick's time would tell
+    // the agent a 45-second-old reading is current, on the one block in the
+    // packet that is not.
+    await t.svc.runForUser(USER, new Date(now.getTime() + 45_000));
+    expect(t.buildPacket.mock.calls[1][1].oiWallsAt).toBe(now.toISOString());
+
+    // A fresh capture carries its own time.
+    await t.svc.runForUser(USER, new Date(now.getTime() + OI_CAPTURE_INTERVAL_MS));
+    expect(t.buildPacket.mock.calls[2][1].oiWallsAt).toBe(
+      new Date(now.getTime() + OI_CAPTURE_INTERVAL_MS).toISOString(),
+    );
+  });
+
+  it('carries no wall time when the symbol has no chain', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ expiry: null }));
+
+    await t.svc.runForUser(USER);
+
+    expect(t.buildPacket.mock.calls[0][1].oiWallsAt).toBeNull();
+  });
+});
+
 describe('SentinelCycleService — thesis', () => {
   it('calls ensureFor with the entry and the tick — the userId argument is gone', async () => {
     const t = makeSvc();
@@ -1168,6 +1419,29 @@ describe('SentinelCycleService — the agent-failure backoff', () => {
     await t.svc.runForUser(USER, at(AGENT_RETRY_BASE_MS * 3));
 
     expect(t.judge).toHaveBeenCalledTimes(4);
+  });
+
+  it('announces the backoff once per window, not once per suppressed tick', async () => {
+    const t = makeSvc();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      t.build.mockResolvedValue([watched('t1')]);
+      t.judge.mockRejectedValue(new Error('boom'));
+      const now = new Date('2026-08-14T06:00:00.000Z');
+
+      await t.svc.runForUser(USER, now);
+      for (let i = 1; i <= 5; i += 1) {
+        await t.svc.runForUser(USER, new Date(now.getTime() + i * 5_000));
+      }
+
+      // A line per suppressed tick is ~720/hour/position through an outage, and
+      // it buries the one line that says what actually broke.
+      const hits = warn.mock.calls.filter((c) => /backing off/.test(String(c[0])));
+      expect(hits).toHaveLength(1);
+      expect(String(hits[0][0])).toMatch(/1 consecutive; backing off 30s/);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('does not back off the agent for a database write failure', async () => {

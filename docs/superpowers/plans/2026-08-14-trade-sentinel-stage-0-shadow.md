@@ -2637,6 +2637,24 @@ git commit -m "feat(sentinel): run the shadow cycle, with no wire to the broker 
 ## Task 12: Module wiring, controller, and the scheduled tick
 
 **Files:**
+> **Two blockers discovered in Task 7 — settle both while wiring `EngineOwnershipProbe`.**
+>
+> 1. **`EngineOwnershipProbe` cannot be DI-injected as written.** `RosterService`'s
+>    constructor types it as an interface, which erases to `Object` at runtime, so Nest
+>    cannot resolve it. Define an injection token (e.g.
+>    `export const ENGINE_OWNERSHIP_PROBE = 'ENGINE_OWNERSHIP_PROBE'`) and
+>    `@Inject(...)` it, following whatever token style the neighbouring modules use.
+> 2. **Symbol formats may not match across engines — and the failure is silent and
+>    dangerous.** `RosterService` matches ownership on `t.symbol`, which for trackers is
+>    the broker `tradingsymbol` (`SUZLON-EQ`), while at least one engine table stores a
+>    base symbol with the series suffix explicitly stripped (`prisma/schema.prisma:1439`,
+>    `"SUZLON"`). A mismatch means the probe returns nothing, the sentinel labels a trade
+>    `SENTINEL` that `watch-monitor` already owns, and two engines race to exit one
+>    position — precisely the hazard Task 7 exists to prevent. Normalise on both sides, or
+>    key on `token` + `kind` the way `bookKey` does
+>    (`trade-tracker.service.ts:196-198`). Whichever you choose, add a test with a
+>    realistically-suffixed symbol on one side and a stripped one on the other.
+>
 > **Blocker discovered in Task 5 — fix this first.** `OiWallService` is listed under
 > `providers` in `apps/api/src/modules/signal-generator/signal-generator.module.ts:137`
 > but is **not in that module's `exports` array**. `TradeSentinelModule` imports

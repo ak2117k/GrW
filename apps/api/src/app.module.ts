@@ -41,6 +41,7 @@ import { BillingModule } from './modules/billing/billing.module';
 import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module';
 import { AutoExecutionModule } from './modules/auto-execution/auto-execution.module';
 import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module';
+import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
@@ -208,6 +209,14 @@ import { HealthModule } from './modules/health/health.module';
     // position/holding with entry/exit, holding + day high/low, LTP and P&L,
     // filled from periodic broker snapshots + live socket ticks.
     TradeTrackerModule,
+
+    // Trade Sentinel — Stage 0 (shadow). Watches the open positions the tracker
+    // maintains and RECORDS the exits it would have taken; it places no orders
+    // and imports no execution module. Its scheduled tick is off unless
+    // SENTINEL_SHADOW_ENABLED=true, because every tick can spend Anthropic API
+    // credit. See trade-sentinel.module.ts for exactly what its ports are
+    // wired to and what that does and does not guarantee.
+    TradeSentinelModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

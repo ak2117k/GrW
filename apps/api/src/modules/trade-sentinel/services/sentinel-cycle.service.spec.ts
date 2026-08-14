@@ -1472,3 +1472,31 @@ describe('SentinelCycleService — the agent-failure backoff', () => {
     expect(t.record.mock.calls.every((c) => c[0].trackerId === 't2')).toBe(true);
   });
 });
+
+describe('SentinelCycleService — a rejected verdict is never a quiet outage', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('logs the agent’s REASON at error, not just that something failed', async () => {
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    // `judge` REJECTS a malformed verdict rather than recording it — a refusal,
+    // an unparseable reply, evidence citing a field that is not in the packet.
+    // No verdict row is written on any of those paths, so without a loud log a
+    // prompt regression looks exactly like the sentinel going quiet: verdicts
+    // simply stop appearing and nothing says why.
+    t.judge.mockRejectedValue(
+      new Error('verdict cited evidence not present in the packet: money.rsi'),
+    );
+
+    const report = await t.svc.runForUser(USER);
+
+    expect(report.failed).toBe(1);
+    expect(t.record).not.toHaveBeenCalled();
+    const logged = error.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('money.rsi');
+    // And which position it was about, or the line cannot be acted on.
+    expect(logged).toContain('T1');
+  });
+});

@@ -1,9 +1,13 @@
 import { computeGreenFloor } from '../charges';
 import {
   ContextPacketService,
+  FLOOR_CLAMP_TOLERANCE_RUPEES,
   absent,
   clampFloorTowardLtp,
+  istWallClock,
+  minutesToSessionClose,
   present,
+  type StoredThesis,
   type TickSnapshot,
 } from './context-packet.service';
 
@@ -26,12 +30,27 @@ describe('block helpers', () => {
 });
 
 describe('clampFloorTowardLtp', () => {
-  it('pulls a long floor that sits above the market back down to it', () => {
-    expect(clampFloorTowardLtp(101.6, 101, 'LONG')).toBe(101);
+  it('closes a one-tick rounding artifact onto the market', () => {
+    // The only defect the clamp exists for: the floor is a single tick beyond ltp.
+    expect(clampFloorTowardLtp(102.01, 102.0, 'LONG')).toBe(102.0);
+    expect(clampFloorTowardLtp(97.99, 98.0, 'SHORT')).toBe(98.0);
   });
 
-  it('pushes a short floor that sits below the market back up to it', () => {
-    expect(clampFloorTowardLtp(98.4, 99, 'SHORT')).toBe(99);
+  it('reports real distance as real distance, however wrong-sided', () => {
+    // A LONG ₹12 under its floor is NOT sitting on its floor. Clamping here is
+    // the C1 lie: a wrong number with provenance, persisted for replay.
+    expect(clampFloorTowardLtp(102.01, 90, 'LONG')).toBe(102.01);
+    expect(clampFloorTowardLtp(97.99, 110, 'SHORT')).toBe(97.99);
+    // ...including the armed-then-pulled-back case, where the gap IS the signal.
+    expect(clampFloorTowardLtp(102.01, 100.5, 'LONG')).toBe(102.01);
+  });
+
+  it('clamps up to the tolerance and not one paisa beyond it', () => {
+    const ltp = 100;
+    const inside = ltp + FLOOR_CLAMP_TOLERANCE_RUPEES;
+    const outside = ltp + FLOOR_CLAMP_TOLERANCE_RUPEES + 0.01;
+    expect(clampFloorTowardLtp(inside, ltp, 'LONG')).toBe(ltp);
+    expect(clampFloorTowardLtp(outside, ltp, 'LONG')).toBeCloseTo(outside, 10);
   });
 
   it('leaves a floor already on the market’s side untouched', () => {
@@ -46,10 +65,40 @@ describe('clampFloorTowardLtp', () => {
   });
 });
 
+describe('IST session clock', () => {
+  it('renders the IST wall clock, not the UTC instant under an IST label', () => {
+    // 10:00:00 UTC is 15:30:00 IST on the same date.
+    expect(istWallClock(new Date('2026-08-14T10:00:00Z'))).toBe('2026-08-14 15:30:00 IST');
+    // An instant that is still the previous day in UTC but already IST tomorrow.
+    expect(istWallClock(new Date('2026-08-13T19:00:00Z'))).toBe('2026-08-14 00:30:00 IST');
+  });
+
+  it('counts the minutes left in the session so the agent never does timezone math', () => {
+    // Friday 2026-08-14, 09:15 IST = 03:45 UTC — a full session ahead.
+    const open = minutesToSessionClose(new Date('2026-08-14T03:45:00Z'));
+    expect(open.available).toBe(true);
+    if (open.available) expect(open.value).toBe(375); // 09:15 -> 15:30
+
+    const late = minutesToSessionClose(new Date('2026-08-14T09:45:00Z')); // 15:15 IST
+    expect(late.available).toBe(true);
+    if (late.available) expect(late.value).toBe(15);
+  });
+
+  it('states why there is no countdown rather than reporting zero', () => {
+    const afterClose = minutesToSessionClose(new Date('2026-08-14T10:30:00Z')); // 16:00 IST
+    expect(afterClose.available).toBe(false);
+    if (!afterClose.available) expect(afterClose.reason).toMatch(/closed/i);
+
+    const saturday = minutesToSessionClose(new Date('2026-08-15T05:00:00Z')); // Sat 10:30 IST
+    expect(saturday.available).toBe(false);
+    if (!saturday.available) expect(saturday.reason).toMatch(/weekend|trading day/i);
+  });
+});
+
 describe('ContextPacketService', () => {
   const recentForTracker = jest.fn().mockResolvedValue([]);
   const levelsFor = jest.fn().mockResolvedValue(null);
-  const recentFor = jest.fn().mockResolvedValue([]);
+  const recentFor = jest.fn().mockResolvedValue(null);
 
   const svc = new ContextPacketService(
     { recentForTracker } as any,
@@ -61,7 +110,7 @@ describe('ContextPacketService', () => {
     jest.clearAllMocks();
     recentForTracker.mockResolvedValue([]);
     levelsFor.mockResolvedValue(null);
-    recentFor.mockResolvedValue([]);
+    recentFor.mockResolvedValue(null);
     jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
   });
 
@@ -92,7 +141,18 @@ describe('ContextPacketService', () => {
     factorValues: {},
     oiWallNow: null,
     oiWallPrev: null,
+    greenFloorArmedLatched: false,
   };
+
+  /** The floor solved for this fixture, independent of the ltp being tested. */
+  const floorFor = (t: TickSnapshot) =>
+    computeGreenFloor({
+      segment: t.segment,
+      entryPrice: t.entryPrice,
+      ltp: t.ltp,
+      qty: t.qty,
+      side: t.side,
+    }).floorPrice as number;
 
   it('marks every stubbed macro factor unavailable with a stated reason', async () => {
     const packet = await svc.build(entry, tick, null);
@@ -101,6 +161,7 @@ describe('ContextPacketService', () => {
       if (!block.available) expect(block.reason).toMatch(/stub/i);
     }
     // FII/DII is post-close data; the agent must never treat it as intraday.
+    expect(packet.macro.fiiDii.available).toBe(false);
     if (!packet.macro.fiiDii.available) {
       expect(packet.macro.fiiDii.reason).toMatch(/post-close/i);
     }
@@ -126,36 +187,65 @@ describe('ContextPacketService', () => {
     expect(packet.money.grossPnl).toBe((100 - 80) * 100);
   });
 
-  it('never reports a long’s floor above the market it would be stopped in', async () => {
-    // At the arming tick the solved floor lands one conservative tick ABOVE ltp.
-    const armingTick = { ...tick, ltp: 101 };
-    const raw = computeGreenFloor({
-      segment: armingTick.segment,
-      entryPrice: armingTick.entryPrice,
-      ltp: armingTick.ltp,
-      qty: armingTick.qty,
-      side: armingTick.side,
-    }).floorPrice;
-    expect(raw).not.toBeNull();
-    expect(raw as number).toBeGreaterThan(armingTick.ltp); // the defect is really present
+  it('never reports a long’s floor a tick above the market at the arming tick', async () => {
+    // At ltp 102.00 the solved floor is 102.01 — one tick beyond the market,
+    // purely the conservative rounding. THAT is what the clamp is for.
+    const armingTick = { ...tick, ltp: 102.0 };
+    const raw = floorFor(armingTick);
+    expect(raw).toBeGreaterThan(armingTick.ltp); // the artifact is really present
+    expect(raw - armingTick.ltp).toBeLessThanOrEqual(FLOOR_CLAMP_TOLERANCE_RUPEES);
 
     const packet = await svc.build(entry, armingTick, null);
     expect(packet.money.greenFloorPrice).toBe(armingTick.ltp);
   });
 
-  it('never reports a short’s floor below the market it would be stopped in', async () => {
-    const armingTick = { ...tick, side: 'SHORT' as const, ltp: 99 };
-    const raw = computeGreenFloor({
-      segment: armingTick.segment,
-      entryPrice: armingTick.entryPrice,
-      ltp: armingTick.ltp,
-      qty: armingTick.qty,
-      side: armingTick.side,
-    }).floorPrice;
-    expect(raw as number).toBeLessThan(armingTick.ltp);
+  it('never reports a short’s floor a tick below the market at the arming tick', async () => {
+    const armingTick = { ...tick, side: 'SHORT' as const, ltp: 98.0 };
+    const raw = floorFor(armingTick);
+    expect(raw).toBeLessThan(armingTick.ltp);
+    expect(armingTick.ltp - raw).toBeLessThanOrEqual(FLOOR_CLAMP_TOLERANCE_RUPEES);
 
     const packet = await svc.build(entry, armingTick, null);
     expect(packet.money.greenFloorPrice).toBe(armingTick.ltp);
+  });
+
+  it('does not collapse a losing position’s floor onto the market', async () => {
+    // LONG, entry 100, qty 100, ltp 90: ~₹1050 down, floor ~102.01, unarmed.
+    // Reporting greenFloorPrice 90 beside netPnl -1050 would tell the agent it
+    // is sitting exactly on its protected floor when it is ₹12 away.
+    const red = { ...tick, ltp: 90 };
+    const packet = await svc.build(entry, red, null);
+    expect(packet.money.netPnl).toBeLessThan(-1000);
+    expect(packet.money.greenFloorPrice).toBe(floorFor(red));
+    expect(packet.money.greenFloorPrice as number).toBeGreaterThan(red.ltp + 1);
+  });
+
+  it('does not collapse an armed-then-pulled-back floor onto the market', async () => {
+    // The gap between a latched floor and a pulled-back price IS the signal.
+    const pulledBack = { ...tick, ltp: 100.5, greenFloorArmedLatched: true };
+    const packet = await svc.build(entry, pulledBack, null);
+    expect(packet.money.greenFloorArmed).toBe(true);
+    expect(packet.money.greenFloorPrice).toBe(floorFor(pulledBack));
+    expect(packet.money.greenFloorPrice as number).toBeGreaterThan(pulledBack.ltp);
+  });
+
+  it('keeps the floor armed once latched, even when the tick alone says otherwise', async () => {
+    const pulledBack = { ...tick, ltp: 99, greenFloorArmedLatched: true };
+    expect(
+      computeGreenFloor({
+        segment: pulledBack.segment,
+        entryPrice: pulledBack.entryPrice,
+        ltp: pulledBack.ltp,
+        qty: pulledBack.qty,
+        side: pulledBack.side,
+      }).armed,
+    ).toBe(false); // this tick, on its own, is not armed
+
+    const packet = await svc.build(entry, pulledBack, null);
+    expect(packet.money.greenFloorArmed).toBe(true);
+
+    const neverArmed = await svc.build(entry, { ...tick, ltp: 99 }, null);
+    expect(neverArmed.money.greenFloorArmed).toBe(false);
   });
 
   it('states plainly when no thesis has been formed yet', async () => {
@@ -164,8 +254,8 @@ describe('ContextPacketService', () => {
     if (!packet.thesis.available) expect(packet.thesis.reason).toMatch(/no thesis/i);
   });
 
-  it('attributes a thesis to the user when the user set it', async () => {
-    const thesis = {
+  it('attributes a thesis to the user when the user set it, and copies it', async () => {
+    const thesis: StoredThesis = {
       direction: 'UP',
       reason: 'holding above the breakout',
       levelPrice: 100,
@@ -176,11 +266,18 @@ describe('ContextPacketService', () => {
     const packet = await svc.build(entry, tick, thesis);
     expect(packet.thesis.available).toBe(true);
     if (packet.thesis.available) {
-      expect(packet.thesis.value).toBe(thesis);
+      expect(packet.thesis.value).toEqual(thesis);
       expect(packet.thesis.source).toMatch(/user/i);
+      // Persisted verbatim means persisted immutably: mutating the caller's
+      // object must not rewrite what the record says the agent saw.
+      thesis.reason = 'rewritten after the fact';
+      thesis.targetPrice = 999;
+      expect(packet.thesis.value.reason).toBe('holding above the breakout');
+      expect(packet.thesis.value.targetPrice).toBe(130);
     }
 
     const inferred = await svc.build(entry, tick, { ...thesis, source: 'AGENT' });
+    expect(inferred.thesis.available).toBe(true);
     if (inferred.thesis.available) expect(inferred.thesis.source).not.toMatch(/user/i);
   });
 
@@ -219,6 +316,66 @@ describe('ContextPacketService', () => {
     }
   });
 
+  it('surfaces the underlying price, and says when it could not be resolved', async () => {
+    // An OPT position: ltp is the premium, underlyingLtp is the spot. Without
+    // the latter the agent has OI walls at 24000 and an entry at 120 with
+    // nothing relating them.
+    const opt = { ...tick, segment: 'OPT' as const, ltp: 120, underlyingLtp: 24380 };
+    const packet = await svc.build(entry, opt, null);
+    expect(packet.position.ltp).toBe(120);
+    expect(packet.position.underlyingLtp.available).toBe(true);
+    if (packet.position.underlyingLtp.available) {
+      expect(packet.position.underlyingLtp.value).toBe(24380);
+    }
+
+    const blind = await svc.build(entry, { ...opt, underlyingLtp: null }, null);
+    expect(blind.position.underlyingLtp.available).toBe(false);
+    if (!blind.position.underlyingLtp.available) {
+      expect(blind.position.underlyingLtp.reason).toMatch(/cannot be compared|scale/i);
+    }
+  });
+
+  it('carries the current price so the agent never infers it from P&L', async () => {
+    const packet = await svc.build(entry, { ...tick, ltp: 113.25 }, null);
+    expect(packet.position.ltp).toBe(113.25);
+  });
+
+  it('surfaces the nearest levels, each present or absent with a reason', async () => {
+    const withLevels = await svc.build(
+      entry,
+      { ...tick, nearestSupport: 118, nearestResistance: 124 },
+      null,
+    );
+    expect(withLevels.structure.nearestSupport.available).toBe(true);
+    if (withLevels.structure.nearestSupport.available) {
+      expect(withLevels.structure.nearestSupport.value).toBe(118);
+    }
+    expect(withLevels.structure.nearestResistance.available).toBe(true);
+    if (withLevels.structure.nearestResistance.available) {
+      expect(withLevels.structure.nearestResistance.value).toBe(124);
+    }
+
+    const without = await svc.build(entry, tick, null);
+    expect(without.structure.nearestSupport.available).toBe(false);
+    expect(without.structure.nearestResistance.available).toBe(false);
+
+    // A NaN level must not reach the agent as a real level either.
+    const broken = await svc.build(entry, { ...tick, nearestSupport: NaN }, null);
+    expect(broken.structure.nearestSupport.available).toBe(false);
+  });
+
+  it('surfaces the 30-minute headline count, including a real zero', async () => {
+    const quiet = await svc.build(entry, { ...tick, freshNewsCount: 0 }, null);
+    expect(quiet.news.freshCount.available).toBe(true);
+    if (quiet.news.freshCount.available) expect(quiet.news.freshCount.value).toBe(0);
+
+    const unknown = await svc.build(entry, tick, null);
+    expect(unknown.news.freshCount.available).toBe(false);
+    if (!unknown.news.freshCount.available) {
+      expect(unknown.news.freshCount.reason).toMatch(/30-minute|headline/i);
+    }
+  });
+
   it('distinguishes "no real factors computed" from a factor set', async () => {
     const empty = await svc.build(entry, tick, null);
     expect(empty.macro.realFactors.available).toBe(false);
@@ -233,26 +390,53 @@ describe('ContextPacketService', () => {
   it('turns a failing evidence source into a stated absence, not an exception', async () => {
     levelsFor.mockRejectedValue(new Error('level book timed out'));
     const packet = await svc.build(entry, tick, null);
-    expect(packet.structure.available).toBe(false);
-    if (!packet.structure.available) {
-      expect(packet.structure.reason).toMatch(/level book timed out/);
-      expect(packet.structure.reason).toMatch(/chart-context/);
+    expect(packet.structure.levelBook.available).toBe(false);
+    if (!packet.structure.levelBook.available) {
+      expect(packet.structure.levelBook.reason).toMatch(/level book timed out/);
+      expect(packet.structure.levelBook.reason).toMatch(/chart-context/);
     }
     // The rest of the packet still got built.
     expect(packet.money.netPnl).toBeLessThan(2000);
   });
 
   it('treats an empty source result as absent rather than as evidence of nothing', async () => {
-    recentFor.mockResolvedValue([]);
+    recentFor.mockResolvedValue({ value: [], source: 'news-aggregator.service' });
     const packet = await svc.build(entry, tick, null);
-    expect(packet.news.available).toBe(false);
+    expect(packet.news.headlines.available).toBe(false);
 
-    recentFor.mockResolvedValue([{ headline: 'Q1 beat' }]);
-    const withNews = await svc.build(entry, tick, null);
-    expect(withNews.news.available).toBe(true);
-    if (withNews.news.available) {
-      expect(withNews.news.value).toEqual([{ headline: 'Q1 beat' }]);
-      expect(withNews.news.source).toBe('news-aggregator.service');
+    recentFor.mockResolvedValue(null);
+    const nothingAtAll = await svc.build(entry, tick, null);
+    expect(nothingAtAll.news.headlines.available).toBe(false);
+  });
+
+  it('takes provenance from the source, because the packet cannot know it', async () => {
+    // Two level books from the same service differ entirely by interval; a
+    // constant source string would make them indistinguishable in the corpus.
+    levelsFor.mockResolvedValue({
+      value: { support: [23900], resistance: [24500] },
+      source: 'chart-context.service (15m)',
+      at: '2026-08-14T09:45:00.000Z',
+    });
+    const packet = await svc.build(entry, tick, null);
+    expect(packet.structure.levelBook.available).toBe(true);
+    if (packet.structure.levelBook.available) {
+      expect(packet.structure.levelBook.value).toEqual({ support: [23900], resistance: [24500] });
+      expect(packet.structure.levelBook.source).toBe('chart-context.service (15m)');
+      // The DATA's own capture time, not the packet build time.
+      expect(packet.structure.levelBook.at).toBe('2026-08-14T09:45:00.000Z');
+    }
+  });
+
+  it('falls back to the packet’s own build time when a source has no timestamp', async () => {
+    recentFor.mockResolvedValue({
+      value: [{ headline: 'Q1 beat' }],
+      source: 'news-aggregator.service (last 30m)',
+    });
+    const packet = await svc.build(entry, tick, null);
+    expect(packet.news.headlines.available).toBe(true);
+    if (packet.news.headlines.available) {
+      expect(packet.news.headlines.source).toBe('news-aggregator.service (last 30m)');
+      expect(packet.news.headlines.at).toBe(packet.session.nowUtc);
     }
   });
 
@@ -267,6 +451,7 @@ describe('ContextPacketService', () => {
 
     const fires = [{ name: 'level-break', detail: 'closed below 98' }];
     const fired = await svc.build(entry, tick, null, fires);
+    expect(fired.trigger.available).toBe(true);
     if (fired.trigger.available) {
       expect(fired.trigger.value).toEqual(fires);
     }
@@ -299,16 +484,32 @@ describe('ContextPacketService', () => {
 
   it('copies the position’s identity through verbatim', async () => {
     const packet = await svc.build(entry, { ...tick, expiry: '2026-08-28' }, null);
-    expect(packet.position).toEqual({
+    expect(packet.position).toMatchObject({
       symbol: 'INFY',
       kind: 'POSITION',
       segment: 'EQ_INTRADAY',
       side: 'LONG',
       qty: 100,
       entryPrice: 100,
+      ltp: 120,
       entryTime: '2026-08-14T04:00:00.000Z',
       expiry: '2026-08-28',
     });
     expect(packet.session.expiry).toBe('2026-08-28');
+  });
+
+  it('stamps the session clock in IST alongside the UTC instant', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-14T09:45:00Z')); // Fri 15:15 IST
+    try {
+      const packet = await svc.build(entry, tick, null);
+      expect(packet.session.nowIst).toBe('2026-08-14 15:15:00 IST');
+      expect(packet.session.nowUtc).toBe('2026-08-14T09:45:00.000Z');
+      expect(packet.session.minutesToClose.available).toBe(true);
+      if (packet.session.minutesToClose.available) {
+        expect(packet.session.minutesToClose.value).toBe(15);
+      }
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

@@ -14,6 +14,11 @@ import type { RosterEntry } from './roster.service';
  * OI" — it will reason fluently from the eight blocks it can see and sound
  * exactly as confident. Absent evidence must be present as an absence.
  * (Same lesson as commit 34e1268.)
+ *
+ * The corollary bites just as hard in the other direction: a field that is
+ * present but WRONG is worse than one that is missing, because it arrives with
+ * provenance attached and is persisted verbatim for replay. See
+ * `clampFloorTowardLtp` for the case that taught us that here.
  */
 export type Block<T> =
   | { available: true; value: T; source: string; at: string }
@@ -28,12 +33,51 @@ export function present<T>(value: T, source: string, at: string): Block<T> {
 }
 
 /**
- * Keep the reported floor on the market's side of `ltp`.
+ * A finite number, or a stated absence. Every numeric block in the packet goes
+ * through here: `Number.isFinite`, never `!== null`. A NaN marked `present`
+ * reaches the agent as a real reading — it does not crash on "volume NaN x the
+ * 20-day average", it reasons confidently from it. Task 6 hardened the sensors
+ * the same way; the packet is the second, independent consumer of the same
+ * fields.
+ */
+function numberBlock(
+  value: number | null | undefined,
+  source: string,
+  at: string,
+  reason: string,
+): Block<number> {
+  return Number.isFinite(value as number) ? present(value as number, source, at) : absent(reason);
+}
+
+/**
+ * The widest gap between the solved floor and `ltp` that can be a rounding
+ * artifact rather than real distance: two ticks of ₹0.01. See
+ * {@link clampFloorTowardLtp}.
+ */
+export const FLOOR_CLAMP_TOLERANCE_RUPEES = 0.02;
+
+/**
+ * Repair the one-tick rounding artifact in the floor — and NOTHING else.
  *
- * `computeGreenFloor` rounds one tick conservatively after convergence, so at
- * the exact arming tick the floor can land one tick beyond the current price.
- * Clamping costs at most one paisa of floor precision and removes a whole class
- * of Stage 1 stop-placement bug. Null passes through untouched.
+ * `computeGreenFloor` returns a `floorPrice` for every position with qty != 0.
+ * It is a TARGET while the trade is unarmed and a PROTECTIVE LEVEL once armed,
+ * and the same number serves both roles. The only defect worth repairing here is
+ * the conservative one-tick rounding applied after convergence: at the arming
+ * tick that can leave the floor a single tick on the wrong side of the market —
+ * above `ltp` for a LONG, below it for a SHORT — which a Stage 1 executor would
+ * turn into a stop on the wrong side of the book.
+ *
+ * Clamping unconditionally is far worse than not clamping at all. A LONG at
+ * entry 100, qty 100, ltp 90 is ₹1050 underwater and its floor is ₹102.01; an
+ * unscoped clamp reports `greenFloorPrice: 90` next to `netPnl: -1050`, and the
+ * agent reads "I am sitting exactly on my protected floor" when it is ₹12 away.
+ * That lie carries provenance and is persisted, so it replays identically
+ * forever. Hence the tolerance: only a gap small enough to BE the rounding
+ * artifact is closed. Anything larger is real distance and is reported as it is.
+ *
+ * Gating on `armed` instead would not be enough — a latched-armed position that
+ * has pulled back to 100.50 with a floor at 102.01 is genuinely ₹1.51 below its
+ * floor, and that gap is the whole signal.
  */
 export function clampFloorTowardLtp(
   floorPrice: number | null,
@@ -42,7 +86,64 @@ export function clampFloorTowardLtp(
 ): number | null {
   if (floorPrice === null || !Number.isFinite(floorPrice)) return null;
   // A LONG's floor sits below the market; a SHORT's sits above it.
-  return side === 'LONG' ? Math.min(floorPrice, ltp) : Math.max(floorPrice, ltp);
+  const onWrongSide = side === 'LONG' ? floorPrice > ltp : floorPrice < ltp;
+  if (!onWrongSide) return floorPrice;
+  if (Math.abs(floorPrice - ltp) > FLOOR_CLAMP_TOLERANCE_RUPEES) return floorPrice;
+  return ltp;
+}
+
+/** IST is UTC + 5:30. Same convention as `common/utils/market-hours.ts`. */
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/** NSE regular session ends 15:30 IST — minutes since IST midnight. */
+export const SESSION_CLOSE_MIN = 15 * 60 + 30;
+
+/**
+ * IST wall-clock time as 'YYYY-MM-DD HH:mm:ss IST'.
+ *
+ * The packet's clock field is named `nowIst` and must therefore BE IST. A UTC
+ * instant under that label invites the agent to be wrong about the close by five
+ * and a half hours — exactly the confident-from-bad-evidence failure the packet
+ * exists to prevent. Same `Asia/Kolkata` formatter as
+ * `TradeTrackerService.istDateString`, extended to the time of day.
+ */
+export function istWallClock(now: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(now);
+  const part = (type: string) => parts.find((p) => p.type === type)?.value ?? '00';
+  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')} IST`;
+}
+
+/**
+ * Minutes remaining in the IST session, as a block.
+ *
+ * Derived here rather than left to the agent: "how long have I got" is the
+ * quantity every prompt actually wants, and computing it from a timestamp is
+ * timezone arithmetic an LLM should never be asked to perform.
+ */
+export function minutesToSessionClose(now: Date): Block<number> {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  const day = ist.getUTCDay();
+  if (day === 0 || day === 6) {
+    return absent('not a trading day (IST weekend) — no session close to count down to');
+  }
+  const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  if (minutes >= SESSION_CLOSE_MIN) {
+    return absent('the IST session has already closed (15:30) — nothing left to run today');
+  }
+  return present(
+    SESSION_CLOSE_MIN - minutes,
+    'derived from IST wall clock (15:30 close; NSE trading holidays are NOT modelled)',
+    now.toISOString(),
+  );
 }
 
 export interface TickSnapshot {
@@ -70,6 +171,17 @@ export interface TickSnapshot {
   factorValues: Record<string, number>;
   oiWallNow: { callWall: number | null; putWall: number | null } | null;
   oiWallPrev: { callWall: number | null; putWall: number | null } | null;
+  /**
+   * Whether the green floor has EVER armed for this position.
+   *
+   * `charges.ts` states that `computeGreenFloor.armed` is computed from the
+   * current ltp only and that the caller owns the ratchet — and this service is
+   * that caller. It is legitimately stateless, so the latch is passed in: Task
+   * 12's cycle state owns and persists it. Without this the agent watches the
+   * floor un-arm on every pullback, which contradicts the whole promise the
+   * floor makes.
+   */
+  greenFloorArmedLatched: boolean;
 }
 
 /**
@@ -80,6 +192,7 @@ export interface TickSnapshot {
  * makes Task 11 fail to compile. Verified against the generated client:
  * `type Alias = {x: number}` assigns; `interface Iface {x: number}` does not;
  * neither does `Record<string, unknown>` or a nested hand-written interface.
+ * `packetAsJson` below turns a regression into a compile error at this file.
  */
 export type StoredThesis = {
   direction: string;
@@ -98,6 +211,15 @@ export type ContextPacket = {
     side: Side;
     qty: number;
     entryPrice: number;
+    /**
+     * The contract's OWN current price — the premium for an option. Carried
+     * explicitly: it is the single most important number in the packet, and
+     * making the agent back it out of grossPnl/qty/direction is how a floor that
+     * has collapsed onto the market goes unnoticed.
+     */
+    ltp: number;
+    /** SCALE HAZARD: levels and OI walls are on THIS scale, `ltp` is not. */
+    underlyingLtp: Block<number>;
     entryTime: string;
     expiry: string | null;
   };
@@ -111,7 +233,11 @@ export type ContextPacket = {
     mae: number | null;
   };
   thesis: Block<StoredThesis>;
-  structure: Block<Prisma.InputJsonValue>;
+  structure: {
+    levelBook: Block<Prisma.InputJsonValue>;
+    nearestSupport: Block<number>;
+    nearestResistance: Block<number>;
+  };
   flow: {
     volumeRatio: Block<number>;
     oiWalls: Block<Prisma.InputJsonValue>;
@@ -122,8 +248,17 @@ export type ContextPacket = {
     globalCues: Block<never>;
     realFactors: Block<Record<string, number>>;
   };
-  news: Block<Prisma.InputJsonValue>;
-  session: { nowIst: string; expiry: string | null };
+  news: {
+    headlines: Block<Prisma.InputJsonValue>;
+    /** Headlines in the last 30 minutes — the recency signal the list lacks. */
+    freshCount: Block<number>;
+  };
+  session: {
+    nowIst: string;
+    nowUtc: string;
+    minutesToClose: Block<number>;
+    expiry: string | null;
+  };
   trigger: Block<Prisma.InputJsonValue>;
   memory: Block<Prisma.InputJsonValue>;
 };
@@ -146,17 +281,33 @@ const STUB_REASON =
   'context-scoring factor is a stub (returns isStub: true) — no real data behind it';
 
 /**
+ * What an evidence shim returns: the value AND its own provenance.
+ *
+ * The source must come from the shim, not from a constant here. A level book
+ * depends entirely on the interval it was built from, which this service never
+ * names — without this, two packets both reading `source: 'chart-context.service'`
+ * could carry a 5-minute and a daily level book and nothing would distinguish
+ * them. `at` is optional and should be the moment the DATA was captured, not the
+ * moment the packet was built; the packet's own build time is the fallback.
+ */
+export type SourcedValue = {
+  value: Prisma.InputJsonValue | null;
+  source: string;
+  at?: string;
+};
+
+/**
  * The evidence sources are injected as NARROW shims, not as the real services.
- * Task 12 supplies the adapters. Keeping them JSON-shaped here is deliberate:
- * whatever comes back is copied verbatim into a `jsonb` column, so a source
- * that cannot produce JSON cannot be an evidence source.
+ * Task 12 supplies the adapters. Keeping them JSON-shaped is deliberate:
+ * whatever comes back is copied verbatim into a `jsonb` column, so a source that
+ * cannot produce JSON cannot be an evidence source.
  */
 export interface ChartContextShim {
-  levelsFor(symbol: string): Promise<Prisma.InputJsonValue | null>;
+  levelsFor(symbol: string): Promise<SourcedValue | null>;
 }
 
 export interface NewsShim {
-  recentFor(symbol: string): Promise<Prisma.InputJsonValue[]>;
+  recentFor(symbol: string): Promise<SourcedValue | null>;
 }
 
 @Injectable()
@@ -175,7 +326,8 @@ export class ContextPacketService {
     thesis: StoredThesis | null,
     fires: TripwireFire[] = [],
   ): Promise<ContextPacket> {
-    const at = new Date().toISOString();
+    const now = new Date();
+    const at = now.toISOString();
 
     const floor = computeGreenFloor({
       segment: tick.segment,
@@ -187,14 +339,14 @@ export class ContextPacketService {
     const dir = tick.side === 'LONG' ? 1 : -1;
     const grossPnl = (tick.ltp - tick.entryPrice) * tick.qty * dir;
 
-    const structure = await this.safely(
+    const levelBook = await this.safely(
       () => this.chartContext.levelsFor(entry.symbol),
       'chart-context.service',
       at,
       'level book unavailable for this symbol',
     );
 
-    const newsBlock = await this.safely(
+    const headlines = await this.safely(
       () => this.news.recentFor(entry.symbol),
       'news-aggregator.service',
       at,
@@ -214,6 +366,14 @@ export class ContextPacketService {
         side: tick.side,
         qty: tick.qty,
         entryPrice: tick.entryPrice,
+        ltp: tick.ltp,
+        underlyingLtp: numberBlock(
+          tick.underlyingLtp,
+          'market-data (underlying spot)',
+          at,
+          "the underlying's price could not be resolved — levels and OI walls below " +
+            'are on the underlying scale and CANNOT be compared against ltp',
+        ),
         entryTime: tick.entryTime.toISOString(),
         expiry: tick.expiry,
       },
@@ -221,33 +381,57 @@ export class ContextPacketService {
         grossPnl,
         charges: floor.charges,
         netPnl: floor.netPnl,
-        // Clamped toward ltp. `computeGreenFloor` rounds one tick in the
-        // conservative direction after convergence, which means that at the
-        // exact arming tick the floor can sit one tick BEYOND the market —
-        // above it for a LONG, below for a SHORT. Harmless in Stage 0 (nothing
-        // places orders), but a Stage 1 executor placing a stop at floorPrice
-        // the instant it arms would emit a stop on the wrong side of the book.
-        // Clamp here so that defect never reaches the executor.
+        // Only the one-tick rounding artifact is repaired — see
+        // clampFloorTowardLtp for why an unconditional clamp makes the packet
+        // lie about a losing position.
         greenFloorPrice: clampFloorTowardLtp(floor.floorPrice, tick.ltp, tick.side),
-        greenFloorArmed: floor.armed,
+        // The latch wins: `floor.armed` is a snapshot of the CURRENT ltp, and a
+        // floor that un-arms on a pullback is not a floor.
+        greenFloorArmed: tick.greenFloorArmedLatched || floor.armed,
         // Excursions are read from the position's side: a LONG's best case is
-        // the high, a SHORT's is the low.
+        // the high, a SHORT's is the low. Both are PRICES, not rupee figures.
         mfe: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
         mae: tick.side === 'LONG' ? tick.holdingLow : tick.holdingHigh,
       },
+      // Copied field-by-field rather than passed by reference: the packet is
+      // persisted verbatim as the evidence the agent saw, so a later mutation of
+      // the caller's thesis object must not retroactively rewrite the record.
       thesis: thesis
-        ? present(thesis, thesis.source === 'USER' ? 'user correction' : 'agent inference', at)
+        ? present(
+            {
+              direction: thesis.direction,
+              reason: thesis.reason,
+              levelPrice: thesis.levelPrice,
+              targetPrice: thesis.targetPrice,
+              invalidation: thesis.invalidation,
+              source: thesis.source,
+            },
+            thesis.source === 'USER' ? 'user correction' : 'agent inference',
+            at,
+          )
         : absent('no thesis formed yet for this position'),
-      structure,
+      structure: {
+        levelBook,
+        nearestSupport: numberBlock(
+          tick.nearestSupport,
+          'level book (underlying scale)',
+          at,
+          'no support level below this price in the level book',
+        ),
+        nearestResistance: numberBlock(
+          tick.nearestResistance,
+          'level book (underlying scale)',
+          at,
+          'no resistance level above this price in the level book',
+        ),
+      },
       flow: {
-        // `Number.isFinite`, not `!== null`. A NaN or Infinity here would be
-        // marked `present` and shipped to the LLM as a real reading — the agent
-        // does not crash on "volume NaN x the 20-day average", it reasons
-        // confidently from it. Task 6 hardened the sensors the same way; the
-        // packet is the second, independent consumer of the same fields.
-        volumeRatio: Number.isFinite(tick.volumeRatio as number)
-          ? present(tick.volumeRatio as number, 'market-data', at)
-          : absent('session volume vs average not available or not a finite reading'),
+        volumeRatio: numberBlock(
+          tick.volumeRatio,
+          'market-data',
+          at,
+          'session volume vs average not available or not a finite reading',
+        ),
         oiWalls:
           tick.oiWallNow === null
             ? absent('no options chain for this symbol, so no OI walls')
@@ -264,8 +448,21 @@ export class ContextPacketService {
             ? present(tick.factorValues, 'context-scoring (greeks, mtfTrend, volatility only)', at)
             : absent('no real context factors computed for this symbol'),
       },
-      news: newsBlock,
-      session: { nowIst: at, expiry: tick.expiry },
+      news: {
+        headlines,
+        freshCount: numberBlock(
+          tick.freshNewsCount,
+          'news-aggregator.service (headlines in the last 30 minutes)',
+          at,
+          'no 30-minute headline count available for this symbol',
+        ),
+      },
+      session: {
+        nowIst: istWallClock(now),
+        nowUtc: at,
+        minutesToClose: minutesToSessionClose(now),
+        expiry: tick.expiry,
+      },
       // Re-built as plain object literals rather than passed through: `TripwireFire`
       // and `SentinelVerdict` are declared types without an implicit index
       // signature, so neither array assigns to `Prisma.InputJsonValue` — and the
@@ -299,24 +496,33 @@ export class ContextPacketService {
 
   /**
    * A source that throws must become a stated absence, never an exception that
-   * kills the whole evaluation and never a silently empty block.
+   * kills the whole evaluation and never a silently empty block. Provenance is
+   * taken from the shim when it supplies it — `label` and `at` are only the
+   * fallbacks for a shim that does not know its own.
    */
   private async safely(
-    fn: () => Promise<Prisma.InputJsonValue | null | undefined>,
-    source: string,
+    fn: () => Promise<SourcedValue | null | undefined>,
+    label: string,
     at: string,
     fallbackReason: string,
   ): Promise<Block<Prisma.InputJsonValue>> {
     try {
-      const value = await fn();
-      if (value === null || value === undefined || (Array.isArray(value) && value.length === 0)) {
+      const result = await fn();
+      const value = result?.value;
+      if (
+        result === null ||
+        result === undefined ||
+        value === null ||
+        value === undefined ||
+        (Array.isArray(value) && value.length === 0)
+      ) {
         return absent(fallbackReason);
       }
-      return present(value, source, at);
+      return present(value, result.source || label, result.at ?? at);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`${source} failed while building packet: ${message}`);
-      return absent(`${source} failed: ${message}`);
+      this.logger.warn(`${label} failed while building packet: ${message}`);
+      return absent(`${label} failed: ${message}`);
     }
   }
 }

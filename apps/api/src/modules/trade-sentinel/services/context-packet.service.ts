@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { computeGreenFloor, type Segment, type Side } from '../charges';
 import type { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import type { TripwireFire } from '../tripwires/types';
-import type { RosterEntry } from './roster.service';
+import type { Ownership, RosterEntry } from './roster.service';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -207,6 +207,19 @@ export type ContextPacket = {
   position: {
     symbol: string;
     kind: string;
+    /**
+     * Whether the sentinel would ever be permitted to act on this trade.
+     *
+     * `OBSERVE_ONLY` covers holdings (which the roster says are "observed, never
+     * closed") and positions another engine already manages. Such trades ARE
+     * still evaluated and their verdicts ARE still recorded — a Stage 0 shadow
+     * whose whole purpose is measuring judgement quality should not throw away
+     * judgements — but the verdict has to be attributable, for two reasons:
+     * Task 13's accuracy scoring must be able to separate verdicts the sentinel
+     * could have acted on from ones it never could, and a Stage 1 reader wiring
+     * an executor must key off THIS field and not off `watched`.
+     */
+    ownership: Ownership;
     segment: Segment;
     side: Side;
     qty: number;
@@ -362,6 +375,7 @@ export class ContextPacketService {
       position: {
         symbol: entry.symbol,
         kind: entry.kind,
+        ownership: entry.ownership,
         segment: tick.segment,
         side: tick.side,
         qty: tick.qty,

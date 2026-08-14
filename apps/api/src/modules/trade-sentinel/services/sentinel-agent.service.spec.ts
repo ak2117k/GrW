@@ -22,6 +22,7 @@ const base: ContextPacket = {
   position: {
     symbol: 'INFY',
     kind: 'POSITION',
+    ownership: 'SENTINEL',
     segment: 'EQ_DELIVERY',
     side: 'LONG',
     qty: 100,

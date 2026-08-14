@@ -3,7 +3,7 @@
  * it, because the replay harness cannot attribute a behaviour change to a prompt
  * change without it.
  */
-export const SENTINEL_PROMPT_VERSION = 'v1';
+export const SENTINEL_PROMPT_VERSION = 'v2';
 
 /** Exact model id. No date suffix — see docs/claude-api model table. */
 export const SENTINEL_MODEL = 'claude-opus-5';
@@ -32,7 +32,7 @@ How to read the packet:
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
-- position: symbol, kind, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
 - money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
 - structure: levelBook, nearestSupport, nearestResistance.
 - flow: volumeRatio, oiWalls.
@@ -48,6 +48,7 @@ Reading those fields:
 - money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
 - money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
 - SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
 - thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
 - macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
 - news.freshCount counts headlines in the last 30 minutes.

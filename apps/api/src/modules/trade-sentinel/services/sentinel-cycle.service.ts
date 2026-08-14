@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { computeGreenFloor } from '../charges';
 import { RosterService, type RosterEntry } from './roster.service';
 import { TripwireService } from './tripwire.service';
@@ -11,10 +11,17 @@ import {
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
-import { OiWallSnapshotService } from './oi-wall-snapshot.service';
+import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service';
 
 export interface CycleReport {
   evaluated: number;
+  /**
+   * Watched, but not evaluated on this tick. Three causes, all logged and all
+   * deliberate: no sensor fired and the heartbeat was not due; the agent is in
+   * its failure backoff; the position is waiting out neither and simply had
+   * nothing to say. "Skipped" is the absence of a verdict, never the absence of
+   * attention — the ratchet and the OI series keep running underneath it.
+   */
   skipped: number;
   failed: number;
   unwatched: number;
@@ -28,16 +35,75 @@ export interface CycleReport {
  * that placeholder — one Anthropic call per call, with no cooldown of its own
  * (it says so, and it is the right default for a service that must never let a
  * failed thesis blind the watch). The cadence therefore has to be owned here,
- * because only the cycle knows how often it ticks. Set equal to
- * `HEARTBEAT_INTERVAL_MS`: while the API is down a placeholder position costs at
- * most one inference attempt per fifteen minutes rather than one per tick.
+ * because only the cycle knows how often it ticks. While the API is down a
+ * placeholder position costs at most one inference attempt per fifteen minutes
+ * rather than one per tick.
  *
- * The cooldown applies ONLY to a placeholder. A real thesis still goes through
- * `ensureFor` every evaluation — that path makes no API call, just a row read,
- * and it is how a USER correction takes effect on the very next look instead of
- * up to fifteen minutes later.
+ * Held at or above `HEARTBEAT_INTERVAL_MS` rather than pinned equal to it: the
+ * safe invariant is one-sided. Lowering the heartbeat must never drag the retry
+ * cooldown down with it and multiply the cost of an outage.
+ *
+ * The cooldown applies ONLY to a placeholder — a real thesis goes through
+ * `ensureFor` on every evaluation, which is one row read and no API call. For
+ * the staleness this DOES impose on a correction, and why that is accepted
+ * rather than fixed here, see `TrackerState.thesis`.
  */
 export const THESIS_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
+
+/**
+ * The agent-failure backoff: `AGENT_RETRY_BASE_MS * 2^(consecutive failures - 1)`,
+ * capped at `AGENT_RETRY_MAX_MS`. So 30s, 1m, 2m, 4m, 8m, then 15m forever.
+ *
+ * `SentinelAgentService.judge` throws on a refusal, an unparseable reply, a
+ * truncated one, a verdict citing evidence that is not in the packet, an
+ * `EXIT_NOW` below high confidence, and a non-positive `reviewIn`. Every one of
+ * those aborts the position's evaluation, so NO VERDICT ROW IS WRITTEN — and a
+ * position with no verdict row has `lastVerdictAt === null`, which makes the
+ * heartbeat permanently due. Without this the next tick calls `judge` again
+ * immediately: at a 5-second poll that is ~720 failed agent calls per hour per
+ * position, each preceded by a packet build, for as long as the failure lasts.
+ * It is the same amplification `THESIS_RETRY_COOLDOWN_MS` exists for, on the
+ * call that costs roughly a hundred times more.
+ *
+ * EXPONENTIAL rather than the thesis path's flat interval, because the failure
+ * distribution is different. A thesis placeholder means inference has already
+ * failed and is being retried on a schedule. An agent throw is more often a
+ * one-off — one malformed reply, one rate-limit spike — and making a position
+ * wait a full heartbeat to recover from a single bad reply would be its own
+ * kind of blindness. So the first retry is quick (30s) and only a genuinely
+ * SYSTEMATIC failure decays to the heartbeat rate. No jitter: five positions per
+ * user is far too few for a thundering herd to matter, and determinism is worth
+ * more here because these intervals are what a replay has to reproduce.
+ */
+export const AGENT_RETRY_BASE_MS = 30 * 1000;
+export const AGENT_RETRY_MAX_MS = 15 * 60 * 1000;
+
+/**
+ * How often the OI walls are actually captured, independent of the poll rate.
+ *
+ * `OiWallSnapshotService` reads `prev` as the immediately preceding STORED row,
+ * and the table is durable — so skipping a capture never makes a shift
+ * invisible, it makes `prev` OLDER and the comparison window WIDER. Capturing
+ * every tick therefore does the opposite of protecting the sensor: it pins
+ * `oiWallPrev` to the reading from a few seconds ago, so `oiWallShift` can only
+ * ever see a single-tick strike flip. Its threshold is 0.2%, and one Nifty
+ * strike step at 24000 is 0.208% — just over — so a wall flapping between two
+ * near-equal-OI strikes would fire the sensor on roughly every other tick and
+ * wake the agent continuously.
+ *
+ * A minute is ample at strike granularity, and it puts the OI baseline on the
+ * same footing as `prevFactorValues`: both answer "what has changed since a
+ * meaningful earlier look", not "since the last few seconds".
+ */
+export const OI_CAPTURE_INTERVAL_MS = 60 * 1000;
+
+/**
+ * DI token for {@link TickSource}. It is an interface, so `design:paramtypes`
+ * emits `Object` for it and Nest cannot resolve the parameter by type — without
+ * an explicit token, Task 12 could not register the adapter without editing this
+ * file.
+ */
+export const TICK_SOURCE = 'SENTINEL_TICK_SOURCE';
 
 /**
  * What the tick source supplies: every field of the packet's `TickSnapshot`
@@ -119,8 +185,37 @@ interface TrackerState {
   userId: string;
   /** The in-process half of the green-floor ratchet. */
   greenFloorArmed: boolean;
-  /** The last thesis obtained, and when — the placeholder-retry cooldown reads this. */
+  /**
+   * The last thesis obtained, and when.
+   *
+   * STALENESS BOUND — read this before trusting a thesis downstream. While the
+   * cached thesis is the honest-unknown placeholder, the cycle holds off calling
+   * `ensureFor` for up to {@link THESIS_RETRY_COOLDOWN_MS}. A USER correction
+   * made during that window is therefore NOT seen until the window lapses: the
+   * gate reads the CACHED value, and the cache cannot know a row it did not
+   * read has changed. So the guarantee is narrower than "corrections land at
+   * once" — it is:
+   *
+   *   - thesis on record is real  -> `ensureFor` runs on every look (one row
+   *     read, no API call), so a correction lands on the very next look;
+   *   - thesis on record is the placeholder -> a correction lands within
+   *     {@link THESIS_RETRY_COOLDOWN_MS}.
+   *
+   * Accepted rather than fixed, because the only correct fix is invalidation at
+   * the WRITE — `ThesisService.correct` telling the cycle to drop this entry —
+   * and wiring a controller-driven write back into a polling service is Task
+   * 12's composition problem, not something to hard-code here. The delay is
+   * bounded, it only affects a position whose thesis was already unknown, and
+   * the stale value it serves is the placeholder, which explicitly says it is
+   * unknown. Worth doing properly in Stage 1; not worth a back-channel now.
+   */
   thesis: { value: EnsuredThesis; at: number } | null;
+  /** Consecutive `judge` failures, driving the exponential backoff. */
+  agentFailures: number;
+  /** Epoch ms before which the agent must not be called again. 0 when clear. */
+  agentRetryAt: number;
+  /** The last OI capture and when, so capture is decoupled from the poll rate. */
+  oi: { at: number; walls: { now: WallPair | null; prev: WallPair | null } } | null;
 }
 
 /**
@@ -144,6 +239,9 @@ export class SentinelCycleService {
    */
   private readonly state = new Map<string, TrackerState>();
 
+  /** Trackers already warned about a missing cash underlying — warn once, not per tick. */
+  private readonly warnedMissingUnderlying = new Set<string>();
+
   constructor(
     private readonly roster: RosterService,
     private readonly tripwires: TripwireService,
@@ -152,7 +250,7 @@ export class SentinelCycleService {
     private readonly agent: SentinelAgentService,
     private readonly verdicts: SentinelVerdictRepository,
     private readonly oiWalls: OiWallSnapshotService,
-    private readonly ticks: TickSource,
+    @Inject(TICK_SOURCE) private readonly ticks: TickSource,
   ) {}
 
   async runForUser(userId: string, now: Date = new Date()): Promise<CycleReport> {
@@ -178,12 +276,41 @@ export class SentinelCycleService {
       }
     }
 
-    this.prune(userId, new Set(entries.map((e) => e.trackerId)));
+    this.prune(
+      // Prune on the tenants the ENTRIES claim, not only on the argument: an
+      // entry whose userId differs from the argument stores its state under that
+      // userId, and pruning on the argument alone would never reach it. The
+      // argument is included so that an EMPTY roster — every position closed —
+      // still clears this user's state.
+      new Set([userId, ...entries.map((e) => e.userId)]),
+      new Set(entries.map((e) => e.trackerId)),
+    );
     return report;
   }
 
+  /**
+   * OWNERSHIP IS NOT A GATE HERE, DELIBERATELY. An `OBSERVE_ONLY` entry — a
+   * holding, or a position another engine already manages — is evaluated and its
+   * verdict recorded exactly like a `SENTINEL` one. Stage 0 exists to measure the
+   * quality of the judgement, and discarding the judgements on a third of the
+   * roster would measure it on a biased sample.
+   *
+   * What that costs is that the agent can return `EXIT_NOW` on a holding the
+   * roster describes as "observed, never closed". Harmless while nothing can
+   * execute — but it is only harmless because of that, so the packet carries
+   * `position.ownership` and every verdict is attributable to it. Two readers
+   * depend on that: Task 13 must be able to score acted-upon and never-actionable
+   * verdicts separately, and STAGE 1 MUST KEY ITS EXECUTOR OFF `ownership`, NOT
+   * OFF `watched` — watched means "worth looking at", never "ours to close".
+   */
   private async evaluateOne(entry: RosterEntry, now: Date, report: CycleReport): Promise<void> {
-    const tick = withCashUnderlying(await this.ticks.tickFor(entry.trackerId));
+    const raw = await this.ticks.tickFor(entry.trackerId);
+    const tick = withCashUnderlying(raw);
+    // Identity, not value: `withCashUnderlying` returns the same object when it
+    // had nothing to repair. A tick source that never sets `underlyingLtp` would
+    // otherwise look permanently healthy behind the repair.
+    if (tick !== raw) this.warnMissingUnderlying(entry);
+
     const [last] = await this.verdicts.recentForTracker(entry.trackerId, 1);
 
     // The ratchet is updated BEFORE the skip decision, deliberately: a floor that
@@ -191,11 +318,7 @@ export class SentinelCycleService {
     // armed, and the agent must not be shown it un-arming.
     const greenFloorArmedLatched = this.armedLatch(entry, tick, last);
 
-    // Captured on every tick, evaluated or not — shift detection needs an
-    // unbroken history, and a reading skipped is a shift that can never be seen.
-    const walls = tick.expiry
-      ? await this.oiWalls.captureAndCompare(entry.symbol, tick.expiry, tick.underlyingLtp)
-      : { now: null, prev: null };
+    const walls = await this.wallsFor(entry, tick, now);
 
     const decision = this.tripwires.evaluate(
       {
@@ -232,6 +355,21 @@ export class SentinelCycleService {
       return;
     }
 
+    // Placed AFTER the sensors and the OI capture, not before: those are free (or
+    // already rate-limited) and keeping them running means the ratchet, the wall
+    // series and the fire log stay continuous through an agent outage. What the
+    // backoff suppresses is the expensive tail — thesis, packet, judge.
+    const state = this.stateFor(entry);
+    if (now.getTime() < state.agentRetryAt) {
+      report.skipped += 1;
+      this.logger.warn(
+        `sentinel agent backing off ${entry.symbol} (${entry.trackerId}) after ` +
+          `${state.agentFailures} consecutive failures; next attempt in ` +
+          `${Math.ceil((state.agentRetryAt - now.getTime()) / 1000)}s`,
+      );
+      return;
+    }
+
     const thesis = await this.thesisFor(entry, tick, now);
 
     const packet: ContextPacket = await this.packets.build(
@@ -241,7 +379,27 @@ export class SentinelCycleService {
       decision.fires,
     );
 
-    const verdict = await this.agent.judge(packet);
+    let verdict;
+    try {
+      verdict = await this.agent.judge(packet);
+    } catch (err) {
+      state.agentFailures += 1;
+      state.agentRetryAt = now.getTime() + agentBackoffMs(state.agentFailures);
+      throw err;
+    }
+    // A verdict came back and passed validation, so whatever was wrong has
+    // cleared. Reset before the write: the write failing is a database problem,
+    // and punishing the agent for it would back off the wrong component.
+    // Resetting the COUNTER is what matters, and it is why the backoff is over
+    // consecutive failures rather than lifetime ones: without it, an occasional
+    // bad reply spread over a long session would eventually silence a perfectly
+    // healthy position for fifteen minutes at a time.
+    state.agentFailures = 0;
+    // Clearing the deadline is belt-and-braces — this line is only reachable when
+    // `now >= agentRetryAt`, so the deadline is already in the past and cannot
+    // gate a later tick. Kept because it makes the "no backoff pending" state
+    // representable rather than merely unreachable.
+    state.agentRetryAt = 0;
 
     await this.verdicts.record({
       // Taken from the entry, not from the argument: the roster carries the
@@ -339,18 +497,76 @@ export class SentinelCycleService {
   private stateFor(entry: RosterEntry): TrackerState {
     let state = this.state.get(entry.trackerId);
     if (!state) {
-      state = { userId: entry.userId, greenFloorArmed: false, thesis: null };
+      state = {
+        userId: entry.userId,
+        greenFloorArmed: false,
+        thesis: null,
+        agentFailures: 0,
+        agentRetryAt: 0,
+        oi: null,
+      };
       this.state.set(entry.trackerId, state);
     }
     return state;
   }
 
-  /** Drop carry-over for this user's trackers that are no longer on the roster. */
-  private prune(userId: string, live: Set<string>): void {
+  /**
+   * The OI walls for this tick, captured at {@link OI_CAPTURE_INTERVAL_MS} rather
+   * than at the poll rate, and reused from the last capture in between.
+   *
+   * Reusing rather than returning nulls between captures matters: a null pair
+   * would make `oiWallShift` see the walls appear and disappear, and the packet
+   * would report "no options chain for this symbol" on a symbol that plainly has
+   * one. The sensors see a slightly older reading; they never see a hole.
+   */
+  private async wallsFor(
+    entry: RosterEntry,
+    tick: TickReading,
+    now: Date,
+  ): Promise<{ now: WallPair | null; prev: WallPair | null }> {
+    if (!tick.expiry) return { now: null, prev: null };
+
+    const state = this.stateFor(entry);
+    const cached = state.oi;
+    if (cached && now.getTime() - cached.at < OI_CAPTURE_INTERVAL_MS) return cached.walls;
+
+    const walls = await this.oiWalls.captureAndCompare(
+      entry.symbol,
+      tick.expiry,
+      tick.underlyingLtp,
+    );
+    state.oi = { at: now.getTime(), walls };
+    return walls;
+  }
+
+  private warnMissingUnderlying(entry: RosterEntry): void {
+    if (this.warnedMissingUnderlying.has(entry.trackerId)) return;
+    this.warnedMissingUnderlying.add(entry.trackerId);
+    this.logger.warn(
+      `tick for ${entry.symbol} (${entry.trackerId}) arrived with no underlyingLtp on a cash ` +
+        'segment; the cycle set it to ltp so the level sensors can still see. The tick source ' +
+        'should be setting it — for cash the contract IS the underlying.',
+    );
+  }
+
+  /** Drop carry-over for these tenants' trackers that are no longer on the roster. */
+  private prune(owners: Set<string>, live: Set<string>): void {
     for (const [trackerId, state] of this.state) {
-      if (state.userId === userId && !live.has(trackerId)) this.state.delete(trackerId);
+      if (owners.has(state.userId) && !live.has(trackerId)) {
+        this.state.delete(trackerId);
+        this.warnedMissingUnderlying.delete(trackerId);
+      }
     }
   }
+}
+
+/** See {@link AGENT_RETRY_BASE_MS}. Exported so the backoff shape is testable directly. */
+export function agentBackoffMs(consecutiveFailures: number): number {
+  if (consecutiveFailures <= 0) return 0;
+  // Shift rather than Math.pow, and cap the exponent: 2 ** 1024 is Infinity, and
+  // an Infinity retry time would take the position offline permanently.
+  const exponent = Math.min(consecutiveFailures - 1, 20);
+  return Math.min(AGENT_RETRY_BASE_MS * 2 ** exponent, AGENT_RETRY_MAX_MS);
 }
 
 /**

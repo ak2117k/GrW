@@ -499,6 +499,19 @@ describe('ContextPacketService', () => {
     expect(packet.session.expiry).toBe('2026-08-28');
   });
 
+  it.each(['SENTINEL', 'OBSERVE_ONLY'] as const)(
+    'carries ownership %s through, so the verdict is attributable to it',
+    async (ownership) => {
+      const packet = await svc.build({ ...entry, ownership }, tick, null);
+      // A holding is "observed, never closed" and another engine's position is
+      // not ours to touch — but both are still judged in Stage 0. The verdict has
+      // to record which kind of trade it was about: Task 13 scores actionable and
+      // never-actionable verdicts separately, and a Stage 1 executor must gate on
+      // THIS field rather than on `watched`.
+      expect(packet.position.ownership).toBe(ownership);
+    },
+  );
+
   it('stamps the session clock in IST alongside the UTC instant', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-08-14T09:45:00Z')); // Fri 15:15 IST
     try {

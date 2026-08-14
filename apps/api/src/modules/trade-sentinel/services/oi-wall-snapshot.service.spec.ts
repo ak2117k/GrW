@@ -74,6 +74,48 @@ describe('OiWallSnapshotService', () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
+  it('does not store a row for a reading identical to the last stored one', async () => {
+    oiWall.walls.mockResolvedValue([
+      { price: 24200, kind: 'OI_CALL', score: 30 },
+      { price: 24000, kind: 'OI_PUT', score: 30 },
+    ]);
+    findFirst.mockResolvedValue({ callWall: 24200, putWall: 24000 });
+
+    const result = await svc.captureAndCompare('NIFTY', '2026-08-28', 24100);
+
+    expect(create).not.toHaveBeenCalled();
+    // The caller must still get the pair — the row is redundant, the reading is not.
+    expect(result.now).toEqual({ callWall: 24200, putWall: 24000 });
+    expect(result.prev).toEqual({ callWall: 24200, putWall: 24000 });
+  });
+
+  it('stores again as soon as either wall moves', async () => {
+    oiWall.walls.mockResolvedValue([
+      { price: 24200, kind: 'OI_CALL', score: 30 },
+      { price: 24000, kind: 'OI_PUT', score: 30 },
+    ]);
+    // Only the put side moved; a row is still owed.
+    findFirst.mockResolvedValue({ callWall: 24200, putWall: 23900 });
+
+    await svc.captureAndCompare('NIFTY', '2026-08-28', 24100);
+
+    expect(create).toHaveBeenCalledWith({
+      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: 24200, putWall: 24000 },
+    });
+  });
+
+  it('treats a null wall as a value, not as a wildcard, when deduplicating', async () => {
+    oiWall.walls.mockResolvedValue([{ price: 24000, kind: 'OI_PUT', score: 30 }]);
+    // Stored row has a call wall; the new reading has none. That is a change.
+    findFirst.mockResolvedValue({ callWall: 24200, putWall: 24000 });
+
+    await svc.captureAndCompare('NIFTY', '2026-08-28', 24100);
+
+    expect(create).toHaveBeenCalledWith({
+      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: null, putWall: 24000 },
+    });
+  });
+
   it('compares against the latest snapshot for this symbol and expiry', async () => {
     oiWall.walls.mockResolvedValue([{ price: 100, kind: 'OI_CALL', score: 30 }]);
     findFirst.mockResolvedValue(null);

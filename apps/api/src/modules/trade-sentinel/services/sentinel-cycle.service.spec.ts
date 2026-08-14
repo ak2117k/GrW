@@ -1,8 +1,14 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { Logger } from '@nestjs/common';
 import {
+  AGENT_RETRY_BASE_MS,
+  AGENT_RETRY_MAX_MS,
+  OI_CAPTURE_INTERVAL_MS,
   SentinelCycleService,
   THESIS_RETRY_COOLDOWN_MS,
+  TICK_SOURCE,
+  agentBackoffMs,
   previousFactorValues,
   storedFloorArmed,
   withCashUnderlying,
@@ -164,7 +170,7 @@ describe('SentinelCycleService — roster gating', () => {
     expect(report).toEqual({ evaluated: 0, skipped: 1, failed: 0, unwatched: 0 });
   });
 
-  it('still captures the OI snapshot on a skipped tick — a gap in the series is an invisible shift', async () => {
+  it('still captures the OI walls on a skipped tick — the series is independent of the verdict', async () => {
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
     t.tickFor.mockResolvedValue(tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000 }));
@@ -173,6 +179,36 @@ describe('SentinelCycleService — roster gating', () => {
     await t.svc.runForUser(USER);
 
     expect(t.captureAndCompare).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an empty roster as an empty cycle rather than throwing', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([]);
+
+    await expect(t.svc.runForUser(USER)).resolves.toEqual({
+      evaluated: 0,
+      skipped: 0,
+      failed: 0,
+      unwatched: 0,
+    });
+    expect(t.tickFor).not.toHaveBeenCalled();
+  });
+
+  it('evaluates an OBSERVE_ONLY position, and makes the verdict attributable to it', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([
+      watched('t1', { kind: 'HOLDING', ownership: 'OBSERVE_ONLY', reason: 'holding — observed, never closed' }),
+    ]);
+
+    const report = await t.svc.runForUser(USER);
+
+    // Deliberate: Stage 0 measures judgement quality, and dropping the verdicts
+    // on every holding would measure it on a biased sample.
+    expect(report.evaluated).toBe(1);
+    expect(t.record).toHaveBeenCalledTimes(1);
+    // But it must be separable afterwards — Task 13 scores these apart, and a
+    // Stage 1 executor must key off ownership rather than off `watched`.
+    expect(t.buildPacket.mock.calls[0][0].ownership).toBe('OBSERVE_ONLY');
   });
 
   it('reports one bucket per entry — the four counts always account for the whole roster', async () => {
@@ -351,6 +387,17 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         SentinelCycleService,
       ) ?? [];
     expect(injected).toHaveLength(8);
+    // `TickSource` is an interface, so paramtypes emits Object for it and Nest
+    // cannot resolve it by type. Without an explicit token Task 12 could not
+    // register an adapter without editing this file.
+    const byToken: Array<{ index: number; param: unknown }> =
+      (Reflect as { getMetadata?: (k: string, t: unknown) => unknown }).getMetadata?.(
+        'self:paramtypes',
+        SentinelCycleService,
+      ) as never;
+    expect(byToken).toEqual(
+      expect.arrayContaining([expect.objectContaining({ index: 7, param: TICK_SOURCE })]),
+    );
 
     for (const dep of injected) {
       if (typeof dep !== 'function') continue; // `TickSource` is an interface: emitted as Object.
@@ -615,6 +662,106 @@ describe('withCashUnderlying', () => {
     // exactly like the level was never touched.
     expect(tripwireInput(t.evaluate).underlyingLtp).toBe(1450);
   });
+
+  it('does not repair silently — a tick source that omits it is reported, once', async () => {
+    const t = makeSvc();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      t.build.mockResolvedValue([watched('t1')]);
+      t.tickFor.mockResolvedValue(tick({ segment: 'EQ_INTRADAY', underlyingLtp: null }));
+
+      await t.svc.runForUser(USER);
+      await t.svc.runForUser(USER);
+
+      // A repair that logs nothing lets a broken Task 12 adapter look permanently
+      // healthy. Once per tracker, not per tick — the same warn-once discipline
+      // OiWallSnapshotService already uses in this module.
+      const hits = warn.mock.calls.filter((c) => /underlyingLtp/.test(String(c[0])));
+      expect(hits).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('says nothing when the tick source did its job', async () => {
+    const t = makeSvc();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      t.build.mockResolvedValue([watched('t1')]);
+      t.tickFor.mockResolvedValue(tick({ segment: 'EQ_INTRADAY', ltp: 1450, underlyingLtp: 1450 }));
+
+      await t.svc.runForUser(USER);
+
+      expect(warn.mock.calls.filter((c) => /underlyingLtp/.test(String(c[0])))).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('SentinelCycleService — the tripwire input', () => {
+  it('delivers every field to the sensors, with nothing dropped or crossed over', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    // Every value distinct, so a field copied from the wrong source is visible
+    // rather than accidentally equal to the right one.
+    t.tickFor.mockResolvedValue(
+      tick({
+        segment: 'FUT',
+        side: 'SHORT',
+        entryPrice: 24011,
+        qty: 75,
+        ltp: 24022,
+        underlyingLtp: 24033,
+        holdingHigh: 24044,
+        holdingLow: 24055,
+        nearestSupport: 24066,
+        nearestResistance: 24077,
+        volumeRatio: 1.88,
+        freshNewsCount: 9,
+        factorValues: { mtfTrend: 0.11 },
+        expiry: '2026-08-27',
+      }),
+    );
+    t.recentForTracker.mockResolvedValue([
+      verdictRow({
+        packet: {
+          money: { greenFloorArmed: false },
+          macro: { realFactors: { available: true, value: { mtfTrend: -0.22 } } },
+        },
+      }),
+    ]);
+    const walls = { now: { callWall: 24200, putWall: 23800 }, prev: { callWall: 24500, putWall: 23700 } };
+    t.captureAndCompare.mockResolvedValue(walls);
+
+    await t.svc.runForUser(USER);
+
+    // toEqual on the WHOLE object, not toMatchObject: the input is an 18-field
+    // hand-copied literal, and dropping any one field makes a sensor go silent in
+    // exactly the way `types.ts` says a sensor must go silent when it cannot see
+    // — indistinguishable from "nothing happened". An extra field fails too,
+    // which is what forces this test to be updated deliberately.
+    expect(tripwireInput(t.evaluate)).toEqual({
+      trackerId: 't1',
+      symbol: 'T1',
+      segment: 'FUT',
+      side: 'SHORT',
+      entryPrice: 24011,
+      qty: 75,
+      ltp: 24022,
+      underlyingLtp: 24033,
+      holdingHigh: 24044,
+      holdingLow: 24055,
+      nearestSupport: 24066,
+      nearestResistance: 24077,
+      volumeRatio: 1.88,
+      oiWallNow: walls.now,
+      oiWallPrev: walls.prev,
+      freshNewsCount: 9,
+      factorValues: { mtfTrend: 0.11 },
+      prevFactorValues: { mtfTrend: -0.22 },
+    });
+  });
 });
 
 describe('SentinelCycleService — OI walls', () => {
@@ -653,6 +800,58 @@ describe('SentinelCycleService — OI walls', () => {
     await t.svc.runForUser(USER);
 
     expect(t.captureAndCompare).toHaveBeenCalledWith('T1', '2026-08-27', null);
+  });
+
+  it('captures on its own cadence, not on the poll rate', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000 }),
+    );
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    // A 5-second poll. Capturing on every one of these would pin oiWallPrev to
+    // the reading 5s ago — the window would be NARROWER, not wider, and a wall
+    // flapping between two adjacent strikes (one Nifty step at 24000 is 0.208%,
+    // just over the sensor's 0.2% threshold) would wake the agent continuously.
+    for (let i = 0; i < 6; i += 1) {
+      await t.svc.runForUser(USER, new Date(now.getTime() + i * 5_000));
+    }
+    expect(t.captureAndCompare).toHaveBeenCalledTimes(1);
+
+    await t.svc.runForUser(USER, new Date(now.getTime() + OI_CAPTURE_INTERVAL_MS));
+    expect(t.captureAndCompare).toHaveBeenCalledTimes(2);
+  });
+
+  it('serves the last captured walls between captures — never a hole', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000 }),
+    );
+    const walls = { now: { callWall: 24200, putWall: 23800 }, prev: null };
+    t.captureAndCompare.mockResolvedValue(walls);
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    await t.svc.runForUser(USER, now);
+    await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+
+    // A null pair here would make oiWallShift watch the walls blink in and out,
+    // and the packet would report "no options chain" for a symbol that has one.
+    expect(tripwireInput(t.evaluate, 1).oiWallNow).toBe(walls.now);
+    expect(t.buildPacket.mock.calls[1][1].oiWallNow).toBe(walls.now);
+  });
+
+  it('captures per position, not per cycle', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1'), watched('t2')]);
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000 }),
+    );
+
+    await t.svc.runForUser(USER, new Date('2026-08-14T06:00:00.000Z'));
+
+    expect(t.captureAndCompare).toHaveBeenCalledTimes(2);
   });
 
   it('feeds the captured walls to both the sensors and the packet', async () => {
@@ -774,7 +973,11 @@ describe('SentinelCycleService — thesis', () => {
     expect(t.ensureFor).toHaveBeenCalledTimes(3);
   });
 
-  it('never holds back a USER correction, even one that reads like the placeholder', async () => {
+  // NAME PINS THE ACTUAL PROPERTY: an ALREADY-corrected thesis is never cooled
+  // down. That is weaker than "a correction lands at once" — for the case this
+  // does NOT cover, see 'does not see a correction made while a placeholder is
+  // cooling down' below.
+  it('does not cool down a thesis the user has already corrected', async () => {
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
     t.ensureFor.mockResolvedValue({ ...placeholderThesis(), source: 'USER' });
@@ -800,7 +1003,198 @@ describe('SentinelCycleService — thesis', () => {
     expect(t.ensureFor.mock.calls[2][0].trackerId).toBe('t2');
   });
 
-  it('is set to the heartbeat cadence — one inference attempt per scheduled look', () => {
-    expect(THESIS_RETRY_COOLDOWN_MS).toBe(HEARTBEAT_INTERVAL_MS);
+  it('is never faster than the heartbeat, whatever the heartbeat becomes', () => {
+    // One-sided on purpose. Equality would let someone dropping the heartbeat to
+    // one minute drag the retry cooldown down with it and 15x the cost of an
+    // outage — a test that enforces the harmful direction of a coupling.
+    expect(THESIS_RETRY_COOLDOWN_MS).toBeGreaterThanOrEqual(HEARTBEAT_INTERVAL_MS);
+  });
+
+  it('does not see a correction made while a placeholder is cooling down', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.ensureFor.mockResolvedValue(placeholderThesis());
+    const now = new Date('2026-08-14T06:00:00.000Z');
+    await t.svc.runForUser(USER, now);
+
+    // The user corrects the thesis here. The gate reads the CACHED value, which
+    // is still the placeholder, so the row is not re-read and the correction is
+    // not seen. This is the documented staleness bound on TrackerState.thesis —
+    // pinned so that anyone changing it changes a failing test, not a comment.
+    t.ensureFor.mockResolvedValue(inferredThesis({ source: 'USER', reason: 'bought the gap fill' }));
+    await t.svc.runForUser(USER, new Date(now.getTime() + 60_000));
+    expect(t.buildPacket.mock.calls[1][2].reason).toMatch(/^thesis could not be inferred/);
+
+    // ...and it does land once the bound elapses.
+    await t.svc.runForUser(USER, new Date(now.getTime() + THESIS_RETRY_COOLDOWN_MS));
+    expect(t.buildPacket.mock.calls[2][2].reason).toBe('bought the gap fill');
+  });
+});
+
+describe('SentinelCycleService — the agent-failure backoff', () => {
+  it('doubles from the base and stops at the cap', () => {
+    expect(agentBackoffMs(0)).toBe(0);
+    expect(agentBackoffMs(1)).toBe(AGENT_RETRY_BASE_MS);
+    expect(agentBackoffMs(2)).toBe(AGENT_RETRY_BASE_MS * 2);
+    expect(agentBackoffMs(3)).toBe(AGENT_RETRY_BASE_MS * 4);
+    expect(agentBackoffMs(6)).toBe(AGENT_RETRY_MAX_MS);
+    // No overflow to Infinity, which would take the position offline for good.
+    expect(agentBackoffMs(2000)).toBe(AGENT_RETRY_MAX_MS);
+  });
+
+  it('does not re-call the agent on the very next tick after a failure', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.judge.mockRejectedValue(new Error('the model refused this packet'));
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    // A refusal writes NO verdict row, so lastVerdictAt stays null and the
+    // heartbeat is permanently due. Without a backoff this is an unbounded
+    // hot loop against the most expensive call in the cycle.
+    const first = await t.svc.runForUser(USER, now);
+    expect(first.failed).toBe(1);
+
+    const second = await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    expect(second).toEqual({ evaluated: 0, skipped: 1, failed: 0, unwatched: 0 });
+    // The whole expensive tail is suppressed, not just the agent call.
+    expect(t.buildPacket).toHaveBeenCalledTimes(1);
+    expect(t.ensureFor).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the sensors, the ratchet and the OI series running while it backs off', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000, ltp: 100 }),
+    );
+    t.judge.mockRejectedValue(new Error('boom'));
+    const now = new Date('2026-08-14T06:00:00.000Z');
+    const at = (ms: number) => new Date(now.getTime() + ms);
+
+    // Three failures walk the backoff out to two minutes, which is longer than
+    // the OI capture interval — so the window below is genuinely "inside the
+    // agent backoff, past the OI cadence", which no single failure can produce.
+    await t.svc.runForUser(USER, at(0)); // fail 1 -> retry at 30s. OI captured.
+    await t.svc.runForUser(USER, at(30_000)); // fail 2 -> retry at 90s.
+    await t.svc.runForUser(USER, at(90_000)); // fail 3 -> retry at 210s. OI captured.
+    expect(t.judge).toHaveBeenCalledTimes(3);
+
+    // Deep inside the backoff, and the floor arms here.
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000, ltp: 120 }),
+    );
+    await t.svc.runForUser(USER, at(150_000));
+
+    expect(t.judge).toHaveBeenCalledTimes(3);
+    expect(t.evaluate).toHaveBeenCalledTimes(4);
+    expect(t.captureAndCompare).toHaveBeenCalledTimes(3);
+    // The three failing runs each built a packet before `judge` threw; the
+    // backed-off fourth built none. That is the expensive tail being suppressed.
+    expect(t.buildPacket).toHaveBeenCalledTimes(3);
+
+    // And the ratchet kept moving underneath: the floor armed during the outage,
+    // so the first packet built after recovery must already show it latched.
+    t.judge.mockResolvedValue({
+      verdict: 'HOLD',
+      confidence: 'high',
+      thesisStatus: 'INTACT',
+      recoveryAvailable: true,
+      reason: 'ok',
+      evidence: ['money.netPnl'],
+      invalidationPoint: 'x',
+      reviewIn: 300,
+    });
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000, ltp: 90 }),
+    );
+    await t.svc.runForUser(USER, at(210_000));
+    expect(t.buildPacket).toHaveBeenCalledTimes(4);
+    expect(t.buildPacket.mock.calls[3][1].greenFloorArmedLatched).toBe(true);
+  });
+
+  it('retries once the backoff elapses, and lengthens it on each further failure', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.judge.mockRejectedValue(new Error('boom'));
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    await t.svc.runForUser(USER, now);
+    await t.svc.runForUser(USER, new Date(now.getTime() + AGENT_RETRY_BASE_MS));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+
+    // Second failure: the window is now 2x the base, so 1x is too early.
+    await t.svc.runForUser(USER, new Date(now.getTime() + AGENT_RETRY_BASE_MS * 2));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+
+    await t.svc.runForUser(USER, new Date(now.getTime() + AGENT_RETRY_BASE_MS * 3));
+    expect(t.judge).toHaveBeenCalledTimes(3);
+  });
+
+  it('clears the backoff as soon as a verdict comes back', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    t.judge.mockRejectedValueOnce(new Error('boom'));
+    await t.svc.runForUser(USER, now);
+    await t.svc.runForUser(USER, new Date(now.getTime() + AGENT_RETRY_BASE_MS));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+
+    // Recovered — the next tick must not still be serving the old window.
+    await t.svc.runForUser(USER, new Date(now.getTime() + AGENT_RETRY_BASE_MS + 1000));
+    expect(t.judge).toHaveBeenCalledTimes(3);
+  });
+
+  it('counts CONSECUTIVE failures, not cumulative ones', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const now = new Date('2026-08-14T06:00:00.000Z');
+    const at = (ms: number) => new Date(now.getTime() + ms);
+
+    t.judge.mockRejectedValueOnce(new Error('boom')); // failure 1
+    await t.svc.runForUser(USER, at(0));
+    await t.svc.runForUser(USER, at(AGENT_RETRY_BASE_MS)); // recovers
+    expect(t.judge).toHaveBeenCalledTimes(2);
+
+    // A later, unrelated failure must start the backoff from the BASE again. If
+    // the counter merely accumulated, an occasional bad reply over a long session
+    // would eventually silence a perfectly healthy position for 15 minutes at a
+    // time. (This is what the success-path reset of `agentFailures` buys, and
+    // nothing else in this file observes it.)
+    t.judge.mockRejectedValueOnce(new Error('boom')); // failure 2, non-consecutive
+    await t.svc.runForUser(USER, at(AGENT_RETRY_BASE_MS * 2));
+    await t.svc.runForUser(USER, at(AGENT_RETRY_BASE_MS * 3));
+
+    expect(t.judge).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not back off the agent for a database write failure', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.record.mockRejectedValueOnce(new Error('connection terminated'));
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    await t.svc.runForUser(USER, now);
+    // The agent did its job; punishing it for a Postgres problem would back off
+    // the wrong component and hide a healthy agent behind a broken write path.
+    await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs off each position independently', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1'), watched('t2')]);
+    t.judge.mockRejectedValueOnce(new Error('boom'));
+    const now = new Date('2026-08-14T06:00:00.000Z');
+
+    await t.svc.runForUser(USER, now);
+    await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+
+    // t1 cooling down, t2 unaffected: 2 calls on the first run, 1 on the second.
+    expect(t.judge).toHaveBeenCalledTimes(3);
+    expect(t.record.mock.calls.every((c) => c[0].trackerId === 't2')).toBe(true);
   });
 });

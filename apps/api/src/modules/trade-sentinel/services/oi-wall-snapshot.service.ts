@@ -97,16 +97,28 @@ export class OiWallSnapshotService {
       orderBy: { capturedAt: 'desc' },
     });
 
-    // callWallOi/putWallOi are left unset: `LevelCandidate` carries only a rank
-    // score (30/20), never the open-interest figure, so there is no honest value
-    // to put in those columns. Writing the score there would be a lie.
-    await this.prisma.oiWallSnapshot.create({
-      data: { symbol, expiry, callWall: now.callWall, putWall: now.putWall },
-    });
+    const prev = previous ? { callWall: previous.callWall, putWall: previous.putWall } : null;
 
-    return {
-      now,
-      prev: previous ? { callWall: previous.callWall, putWall: previous.putWall } : null,
-    };
+    // An unchanged reading is not worth a row. `prev` is always "the last STORED
+    // reading", so collapsing a run of identical readings into the first of them
+    // leaves every future `prev` VALUE exactly as it would have been — the only
+    // thing that changes is that the retained row's `capturedAt` is the moment
+    // the walls last MOVED, which is the more useful timestamp anyway. At a
+    // per-tick poll this is the difference between a row every few seconds and a
+    // row per actual wall move.
+    //
+    // Retention of the rows that remain is Task 12's — `daily-housekeeping`
+    // already exists for exactly this and nothing here should grow its own.
+    const unchanged = prev !== null && prev.callWall === now.callWall && prev.putWall === now.putWall;
+    if (!unchanged) {
+      // callWallOi/putWallOi are left unset: `LevelCandidate` carries only a rank
+      // score (30/20), never the open-interest figure, so there is no honest value
+      // to put in those columns. Writing the score there would be a lie.
+      await this.prisma.oiWallSnapshot.create({
+        data: { symbol, expiry, callWall: now.callWall, putWall: now.putWall },
+      });
+    }
+
+    return { now, prev };
   }
 }

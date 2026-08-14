@@ -30,4 +30,15 @@ describe('newsHit', () => {
     // null through and emit "null fresh headline(s)" to the agent as evidence.
     expect(newsHit.check({ ...base, freshNewsCount: null })).toBeNull();
   });
+
+  it('stays silent on a NaN count rather than reporting "NaN fresh headline(s)"', () => {
+    // NaN < 1 is false, so a threshold test alone would fire and hand the agent
+    // a fabricated headline count as evidence.
+    expect(newsHit.check({ ...base, freshNewsCount: NaN })).toBeNull();
+  });
+
+  it('stays silent on an undefined count', () => {
+    const missing = undefined as unknown as number;
+    expect(newsHit.check({ ...base, freshNewsCount: missing })).toBeNull();
+  });
 });

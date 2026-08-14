@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { Tripwire, TripwireFire, TripwireInput } from '../tripwires/types';
 import { givebackOffPeak } from '../tripwires/giveback-off-peak.tripwire';
 import { levelBreak } from '../tripwires/level-break.tripwire';
@@ -32,14 +32,36 @@ export interface TripwireResult {
 
 @Injectable()
 export class TripwireService {
+  private readonly logger = new Logger(TripwireService.name);
+
   evaluate(input: TripwireInput, lastVerdictAt: Date | null, now: Date): TripwireResult {
     const fires = ALL_TRIPWIRES
-      .map((t) => t.check(input))
+      .map((t) => this.checkSafely(t, input))
       .filter((f): f is TripwireFire => f !== null);
 
     const heartbeat =
       lastVerdictAt === null || now.getTime() - lastVerdictAt.getTime() >= HEARTBEAT_INTERVAL_MS;
 
     return { fires, heartbeat, shouldEvaluate: fires.length > 0 || heartbeat };
+  }
+
+  /**
+   * One sensor's failure must never blind the other five. Without this, a single
+   * `check` that throws propagates out of `evaluate`, the cycle counts the whole
+   * position as failed and skips it — no fires from any other sensor, no packet,
+   * no verdict. A broken sensor degrades to silence, loudly logged.
+   */
+  private checkSafely(tripwire: Tripwire, input: TripwireInput): TripwireFire | null {
+    try {
+      return tripwire.check(input);
+    } catch (err) {
+      this.logger.error(
+        `tripwire "${tripwire.name}" threw on ${input.symbol} (tracker ${input.trackerId}); ` +
+          `treating it as silent — the other sensors still ran: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+      );
+      return null;
+    }
   }
 }

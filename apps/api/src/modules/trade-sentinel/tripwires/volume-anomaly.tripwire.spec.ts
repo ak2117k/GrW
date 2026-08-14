@@ -23,4 +23,15 @@ describe('volumeAnomaly', () => {
   it('stays silent — not fires — when volume data is unavailable', () => {
     expect(volumeAnomaly.check({ ...base, volumeRatio: null })).toBeNull();
   });
+
+  it('stays silent on a NaN ratio rather than reporting "volume NaN x the 20-day average"', () => {
+    // NaN < VOLUME_SPIKE_RATIO is false, so a threshold test alone would fire
+    // and hand the agent a fabricated volume reading as evidence.
+    expect(volumeAnomaly.check({ ...base, volumeRatio: NaN })).toBeNull();
+  });
+
+  it('stays silent on an undefined ratio', () => {
+    const missing = undefined as unknown as number;
+    expect(volumeAnomaly.check({ ...base, volumeRatio: missing })).toBeNull();
+  });
 });

@@ -12,7 +12,11 @@ export const volumeAnomaly: Tripwire = {
   name: 'volume-anomaly',
 
   check({ volumeRatio }: TripwireInput): TripwireFire | null {
-    if (volumeRatio === null) return null;
+    // Absent data is not a signal. `=== null` alone is not enough: `undefined`
+    // and `NaN` both fail the threshold test below, so they would fire and hand
+    // the agent "volume NaN x the 20-day average" as evidence. Same defence the
+    // volume producer already applies at index-volume.ts (`Number.isFinite`).
+    if (volumeRatio === null || !Number.isFinite(volumeRatio)) return null;
     if (volumeRatio < VOLUME_SPIKE_RATIO) return null;
     return {
       name: 'volume-anomaly',

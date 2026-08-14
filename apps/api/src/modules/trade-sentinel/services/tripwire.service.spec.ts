@@ -1,4 +1,6 @@
+import { Logger } from '@nestjs/common';
 import { TripwireService, HEARTBEAT_INTERVAL_MS } from './tripwire.service';
+import { volumeAnomaly } from '../tripwires/volume-anomaly.tripwire';
 import type { TripwireInput } from '../tripwires/types';
 
 const quiet: TripwireInput = {
@@ -85,6 +87,64 @@ describe('TripwireService', () => {
 
     const oneMsShort = new Date(now.getTime() - HEARTBEAT_INTERVAL_MS + 1);
     expect(svc.evaluate(quiet, oneMsShort, now).heartbeat).toBe(false);
+  });
+
+  describe('when one sensor is broken', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    const noisy: TripwireInput = {
+      ...quiet,
+      holdingHigh: 130, ltp: 105,   // giveback
+      nearestSupport: 110,          // level break
+      volumeRatio: 5,               // volume spike (this is the sensor we break)
+      freshNewsCount: 3,            // news
+    };
+
+    it('does not let a throwing sensor blind the other five', () => {
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      jest.spyOn(volumeAnomaly, 'check').mockImplementation(() => {
+        throw new Error('boom');
+      });
+
+      const result = svc.evaluate(noisy, new Date(now.getTime() - 1000), now);
+
+      // volume-anomaly is absent because it broke; the rest still reported.
+      expect(result.fires.map((f) => f.name).sort())
+        .toEqual(['giveback-off-peak', 'level-break', 'news-hit']);
+      expect(result.shouldEvaluate).toBe(true);
+    });
+
+    it('does not propagate the sensor failure out of evaluate', () => {
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      jest.spyOn(volumeAnomaly, 'check').mockImplementation(() => {
+        throw new Error('boom');
+      });
+
+      expect(() => svc.evaluate(noisy, null, now)).not.toThrow();
+    });
+
+    it('logs the failure with the offending sensor name', () => {
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      jest.spyOn(volumeAnomaly, 'check').mockImplementation(() => {
+        throw new Error('boom');
+      });
+
+      svc.evaluate(noisy, null, now);
+
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged.mock.calls[0][0]).toContain('volume-anomaly');
+      expect(logged.mock.calls[0][0]).toContain('boom');
+    });
+
+    it('still reaches the heartbeat decision when a sensor throws', () => {
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      jest.spyOn(volumeAnomaly, 'check').mockImplementation(() => {
+        throw new Error('boom');
+      });
+
+      const stale = new Date(now.getTime() - HEARTBEAT_INTERVAL_MS);
+      expect(svc.evaluate(quiet, stale, now).heartbeat).toBe(true);
+    });
   });
 
   it('never throws when a sensor sees only nulls', () => {

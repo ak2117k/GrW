@@ -96,4 +96,40 @@ describe('contextFactorFlip', () => {
   it('stays silent when both snapshots are empty', () => {
     expect(contextFactorFlip.check(base)).toBeNull();
   });
+
+  it('does not report a flip from a NaN current value', () => {
+    // NaN passes `typeof x === "number"`, and Math.sign(NaN) is NaN — which is
+    // !== 0 and !== the other sign, so a typeof guard alone reports a sign
+    // change that never happened. `greeks` can emit NaN from a malformed delta.
+    expect(contextFactorFlip.check({
+      ...base,
+      factorValues: { greeks: NaN },
+      prevFactorValues: { greeks: 0.6 },
+    })).toBeNull();
+  });
+
+  it('does not report a flip from a NaN previous value', () => {
+    expect(contextFactorFlip.check({
+      ...base,
+      factorValues: { greeks: 0.6 },
+      prevFactorValues: { greeks: NaN },
+    })).toBeNull();
+  });
+
+  it('does not report a flip when both values are NaN', () => {
+    expect(contextFactorFlip.check({
+      ...base,
+      factorValues: { greeks: NaN },
+      prevFactorValues: { greeks: NaN },
+    })).toBeNull();
+  });
+
+  it('does not report a flip from an undefined value', () => {
+    const missing = undefined as unknown as number;
+    expect(contextFactorFlip.check({
+      ...base,
+      factorValues: { greeks: missing },
+      prevFactorValues: { greeks: 0.6 },
+    })).toBeNull();
+  });
 });

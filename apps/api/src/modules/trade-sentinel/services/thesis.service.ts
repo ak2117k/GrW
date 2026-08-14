@@ -4,7 +4,9 @@ import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk'
 import {
   SentinelThesisRepository,
   THESIS_SOURCE_INFERRED,
+  THESIS_SOURCE_USER,
   type ThesisDraft,
+  type UserThesisPatch,
 } from '../repositories/sentinel-thesis.repository';
 import { ANTHROPIC_CLIENT } from './sentinel-agent.service';
 import { SENTINEL_MODEL } from '../prompts/sentinel-system-prompt';
@@ -19,15 +21,27 @@ import {
 import type { Side } from '../charges';
 import type { RosterEntry } from './roster.service';
 
+/**
+ * A price the model may decline to give.
+ *
+ * `anyOf`, NOT `type: ['number', 'null']`. The structured-outputs subset covers
+ * scalar `type` values plus `enum`/`const`/`anyOf`/`allOf`/`$ref`; JSON Schema
+ * type ARRAYS are not in it, so the array form risks a 400 on the first live
+ * call — and nothing in this stage makes a live call, so it would surface in
+ * production rather than in CI. `required` still lists all five: the model must
+ * answer for every price, and `null` is how it declines.
+ */
+const NULLABLE_PRICE = { anyOf: [{ type: 'number' }, { type: 'null' }] } as const;
+
 /** Structured-output schema. `additionalProperties: false` and a full `required` are mandatory. */
 export const THESIS_SCHEMA = {
   type: 'object',
   properties: {
     direction: { type: 'string', enum: ['LONG', 'SHORT'] },
     reason: { type: 'string' },
-    levelPrice: { type: ['number', 'null'] },
-    targetPrice: { type: ['number', 'null'] },
-    invalidation: { type: ['number', 'null'] },
+    levelPrice: NULLABLE_PRICE,
+    targetPrice: NULLABLE_PRICE,
+    invalidation: NULLABLE_PRICE,
   },
   required: ['direction', 'reason', 'levelPrice', 'targetPrice', 'invalidation'],
   additionalProperties: false,
@@ -62,6 +76,23 @@ Rules:
 - "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
 - If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
 - Do not hedge across both directions. One thesis, the most plausible one.`;
+
+/**
+ * A thesis plus the one thing about forming it that the row cannot hold.
+ *
+ * `modelDirectionDisagreed` is deliberately optional and NEVER `false`. It is a
+ * property of the inference EVENT, not of the position, and there is no column
+ * for it — so on any later tick, where no inference ran, a `false` would not
+ * mean "the model agreed", it would mean "nobody asked". Absent is the honest
+ * encoding, and it is the same present-or-stated-absent discipline the context
+ * packet uses.
+ *
+ * It sits here rather than on `StoredThesis` for that reason: `StoredThesis` is
+ * what `find()` reconstructs from the row, and it must not carry a field the row
+ * cannot round-trip. `EnsuredThesis` is assignable to `StoredThesis`, so the
+ * packet builder is unaffected and simply ignores the extra.
+ */
+export type EnsuredThesis = StoredThesis & { modelDirectionDisagreed?: true };
 
 /** Everything the model is allowed to see about the position. */
 type InferenceRequest = {
@@ -103,10 +134,11 @@ export class ThesisService {
   ) {}
 
   /**
-   * The thesis for this position, forming one if there is none. Never throws:
-   * see rule 1 above.
+   * The thesis for this position, forming one if there is none — or if the one
+   * on record is the honest-unknown placeholder. Never throws: see rule 1.
    */
-  async ensureFor(entry: RosterEntry, tick: TickSnapshot, userId = ''): Promise<StoredThesis> {
+  async ensureFor(entry: RosterEntry, tick: TickSnapshot): Promise<EnsuredThesis> {
+    const { userId } = entry;
     let existing: StoredThesis | null;
     try {
       existing = await this.repo.find(entry.trackerId);
@@ -119,34 +151,40 @@ export class ThesisService {
       return asStored(unknownDraft(userId, tick.side, cause));
     }
 
-    if (existing) return existing;
+    if (existing && !isRetryable(existing)) return existing;
 
-    const draft = await this.infer(entry, tick, userId);
+    const { draft, directionDisagreed } = await this.infer(entry, tick, userId);
+    let saved: StoredThesis;
     try {
-      return await this.repo.upsertInferred(entry.trackerId, draft);
+      saved = await this.repo.upsertInferred(entry.trackerId, draft);
     } catch (err) {
       // Unpersisted, so the next tick infers again — but this tick still has a
       // thesis and the position stays watched.
       const cause = this.describeFailure(err);
       this.logger.warn(`thesis write failed for ${entry.symbol} (${entry.trackerId}): ${cause}`);
-      return asStored(draft);
+      saved = asStored(draft);
     }
+    return directionDisagreed ? { ...saved, modelDirectionDisagreed: true } : saved;
   }
 
   /**
    * A user stating what they were actually trading. Unlike inference this DOES
    * throw on failure: a user is watching, and a silent no-op would leave them
-   * believing a wrong thesis had been fixed.
+   * believing a wrong thesis had been fixed. Tenant-scoped — see the repository.
    */
-  async correct(trackerId: string, patch: Partial<ThesisDraft>): Promise<StoredThesis> {
-    return this.repo.overrideByUser(trackerId, patch);
+  async correct(
+    trackerId: string,
+    userId: string,
+    patch: UserThesisPatch,
+  ): Promise<StoredThesis> {
+    return this.repo.overrideByUser(trackerId, userId, patch);
   }
 
   private async infer(
     entry: RosterEntry,
     tick: TickSnapshot,
     userId: string,
-  ): Promise<ThesisDraft> {
+  ): Promise<{ draft: ThesisDraft; directionDisagreed: boolean }> {
     try {
       const request: InferenceRequest = {
         symbol: entry.symbol,
@@ -183,8 +221,12 @@ export class ThesisService {
 
       // Side is an observed fact off the broker's position, not something to
       // infer. A thesis whose direction disagrees inverts every later "has it
-      // turned?" read, so the fact wins and the disagreement is recorded.
-      if (parsed.direction !== tick.side) {
+      // turned?" read, so the fact wins — but the disagreement is a signal in
+      // its own right, and arguably a more useful one than the thesis prose:
+      // "the structure at entry reads as a short setup, but you are long" is
+      // worth putting in front of the user. It is returned as well as logged.
+      const directionDisagreed = parsed.direction !== tick.side;
+      if (directionDisagreed) {
         this.logger.warn(
           `thesis direction ${parsed.direction} disagrees with the ${tick.side} position on ` +
             `${entry.symbol} (${entry.trackerId}) — keeping the broker's side`,
@@ -192,17 +234,22 @@ export class ThesisService {
       }
 
       return {
-        userId,
-        direction: tick.side,
-        reason: parsed.reason,
-        levelPrice: parsed.levelPrice,
-        targetPrice: parsed.targetPrice,
-        invalidation: parsed.invalidation,
+        directionDisagreed,
+        draft: {
+          userId,
+          direction: tick.side,
+          reason: parsed.reason,
+          levelPrice: parsed.levelPrice,
+          targetPrice: parsed.targetPrice,
+          invalidation: parsed.invalidation,
+        },
       };
     } catch (err) {
       const cause = this.describeFailure(err);
       this.logger.warn(`thesis inference failed for ${entry.symbol} (${entry.trackerId}): ${cause}`);
-      return unknownDraft(userId, tick.side, cause);
+      // No reading happened, so there is no disagreement to report — as opposed
+      // to a disagreement that did not occur.
+      return { draft: unknownDraft(userId, tick.side, cause), directionDisagreed: false };
     }
   }
 
@@ -288,6 +335,32 @@ export class ThesisService {
       invalidation: price(body.invalidation, 'invalidation'),
     };
   }
+}
+
+/**
+ * Whether a thesis already on record should be thrown away and inferred again.
+ *
+ * Without this, rule 1 is satisfied in the letter and defeated in the spirit: a
+ * thirty-second API outage writes the honest-unknown placeholder, `find()`
+ * returns it forever after, and the position is watched for the rest of its life
+ * against a thesis that cannot answer the only question this service exists to
+ * answer. The placeholder is a STOPGAP, and nothing was treating it as one.
+ *
+ * The prefix is the marker — which is what `UNKNOWN_REASON_PREFIX` was always
+ * for. Two guards keep it honest:
+ *  - `source !== 'USER'`, so a correction is never re-inferred over, even in the
+ *    (absurd) case that a user typed the placeholder text themselves.
+ *  - `startsWith`, not `includes`, so a real thesis that happens to discuss the
+ *    phrase mid-sentence is not discarded.
+ *
+ * Cost: while the API is down this re-infers once per tick per position, capped
+ * by SENTINEL_MAX_WATCHED. That is the correct trade — the alternative is a
+ * permanently blind watch — but it is why the failure is logged every time.
+ */
+function isRetryable(existing: StoredThesis): boolean {
+  return (
+    existing.source !== THESIS_SOURCE_USER && existing.reason.startsWith(UNKNOWN_REASON_PREFIX)
+  );
 }
 
 /**

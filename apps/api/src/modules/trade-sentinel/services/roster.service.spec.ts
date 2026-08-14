@@ -90,6 +90,29 @@ describe('RosterService', () => {
     });
   });
 
+  it('stamps the tenant on every entry, whatever branch built it', async () => {
+    // All three construction branches, in one assertion. Everything downstream
+    // of the roster is tenant-scoped, so an entry that reaches ThesisService
+    // without a userId writes a row nobody owns — and the branch that forgets
+    // it would be the one nothing else covers.
+    list.mockResolvedValue([
+      tracker('t1', 'POSITION'), // sentinel-claimed
+      tracker('t2', 'POSITION', 'NIFTY24800CE'), // owned elsewhere
+      tracker('h1', 'HOLDING'), // holding
+    ]);
+    ownedElsewhere.mockResolvedValue(new Set(['NIFTY24800CE']));
+
+    const roster = await svc.build('u42');
+
+    expect(roster.map((r) => r.userId)).toEqual(['u42', 'u42', 'u42']);
+    // Guard against the guard: the fixture must really have exercised all three.
+    expect(roster.map((r) => `${r.kind}/${r.ownership}`).sort()).toEqual([
+      'HOLDING/OBSERVE_ONLY',
+      'POSITION/OBSERVE_ONLY',
+      'POSITION/SENTINEL',
+    ]);
+  });
+
   it('gives positions first claim on the watch slots ahead of holdings', async () => {
     // Holdings come FIRST out of the tracker store, so a roster that did not
     // reorder would spend three of the five slots on instruments that can never

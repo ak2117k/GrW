@@ -7,6 +7,15 @@ export const SENTINEL_MAX_WATCHED = 5;
 export type Ownership = 'SENTINEL' | 'OBSERVE_ONLY';
 
 export interface RosterEntry {
+  /**
+   * The tenant this trade belongs to.
+   *
+   * Carried on the entry rather than passed alongside it: everything downstream
+   * (the thesis row, the verdict row) is tenant-scoped, and a userId travelling
+   * as a separate argument is a userId that can be forgotten at one call site or
+   * paired with the wrong entry at another. `build()` already has it.
+   */
+  userId: string;
   trackerId: string;
   symbol: string;
   kind: 'POSITION' | 'HOLDING';
@@ -93,6 +102,7 @@ export class RosterService {
 
       if (t.kind === 'HOLDING') {
         return {
+          userId,
           trackerId: t.id,
           symbol: t.symbol,
           kind: 'HOLDING',
@@ -106,6 +116,7 @@ export class RosterService {
 
       if (ownedElsewhere.has(t.symbol)) {
         return {
+          userId,
           trackerId: t.id,
           symbol: t.symbol,
           kind: 'POSITION',
@@ -118,6 +129,7 @@ export class RosterService {
       }
 
       return {
+        userId,
         trackerId: t.id,
         symbol: t.symbol,
         kind: 'POSITION',

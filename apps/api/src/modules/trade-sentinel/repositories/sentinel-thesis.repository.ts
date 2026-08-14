@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, type SentinelThesis } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { StoredThesis } from '../services/context-packet.service';
@@ -10,8 +10,6 @@ export const THESIS_SOURCE_USER = 'USER';
 
 /** Prisma's unique-constraint code — a lost create race, not a fault. */
 const UNIQUE_VIOLATION = 'P2002';
-/** Prisma's "record to update not found" code. */
-const RECORD_NOT_FOUND = 'P2025';
 
 export interface ThesisDraft {
   userId: string;
@@ -20,6 +18,74 @@ export interface ThesisDraft {
   levelPrice: number | null;
   targetPrice: number | null;
   invalidation: number | null;
+}
+
+/**
+ * What a user is allowed to change about their own thesis.
+ *
+ * `userId` is excluded BY TYPE and stripped again at runtime — a patch able to
+ * set its own tenant could re-attribute the row to another account, which is the
+ * same defect as an unscoped `where` approached from the other side. `source` is
+ * absent for the same reason: a correction that could set itself back to
+ * INFERRED would silently re-open itself to being overwritten.
+ */
+export type UserThesisPatch = Omit<Partial<ThesisDraft>, 'userId'>;
+
+/** The only keys a correction may write. Everything else is discarded, not trusted. */
+const PATCHABLE = ['direction', 'reason', 'levelPrice', 'targetPrice', 'invalidation'] as const;
+
+const DIRECTIONS = ['LONG', 'SHORT'];
+
+/**
+ * `UserThesisPatch` is a COMPILE-TIME claim and the correction endpoint receives
+ * runtime JSON, so the type guarantees nothing about what actually arrives. This
+ * rebuilds the update from a whitelist rather than spreading the caller's object:
+ * a spread would carry `userId`, `id` or `createdAt` straight into Prisma.
+ *
+ * The value checks are the same ones inference is held to — `direction: 'FLAT'`
+ * or `levelPrice: '1450'` reaching a Float column reads back fine and breaks
+ * arithmetic several modules downstream, and a thesis is the thing every later
+ * "has it turned?" judgement is measured against.
+ */
+function sanitisePatch(patch: UserThesisPatch): Record<string, string | number | null> {
+  const raw = patch as Record<string, unknown>;
+  const data: Record<string, string | number | null> = {};
+
+  for (const key of PATCHABLE) {
+    const value = raw[key];
+    if (value === undefined) continue;
+
+    if (key === 'direction') {
+      if (typeof value !== 'string' || !DIRECTIONS.includes(value)) {
+        throw new BadRequestException(
+          `thesis direction must be one of ${DIRECTIONS.join(', ')}`,
+        );
+      }
+      data[key] = value;
+      continue;
+    }
+
+    if (key === 'reason') {
+      if (typeof value !== 'string' || value.trim() === '') {
+        throw new BadRequestException('thesis reason must be a non-empty sentence');
+      }
+      data[key] = value.trim();
+      continue;
+    }
+
+    if (value !== null && !(typeof value === 'number' && Number.isFinite(value))) {
+      throw new BadRequestException(`thesis ${key} must be a number or null`);
+    }
+    data[key] = value as number | null;
+  }
+
+  // An empty patch would stamp `source: 'USER'` on whatever is stored and say
+  // nothing — freezing an inferred (or stated-unknown) thesis as permanent and
+  // beyond the reach of re-inference, which is the opposite of a correction.
+  if (Object.keys(data).length === 0) {
+    throw new BadRequestException('a thesis correction must change at least one field');
+  }
+  return data;
 }
 
 /**
@@ -107,25 +173,50 @@ export class SentinelThesisRepository {
     }
   }
 
+  /**
+   * A user restating what they were actually trading.
+   *
+   * TENANT-SCOPED, and that is the whole point of the signature. This is the
+   * module's one user-facing write, and `where: { trackerId }` alone — with
+   * `trackerId` a guessable cuid — is an IDOR: any account could rewrite another
+   * account's thesis, and since the thesis is what every later "has it turned?"
+   * judgement is measured against, that is an attacker steering someone else's
+   * exit decisions.
+   *
+   * `updateMany` rather than `update` deliberately: `update` needs a unique
+   * `where`, and `userId` is not part of one, so scoping it would rely on
+   * Prisma's extended-unique filter and would raise P2025 on a cross-tenant
+   * attempt — a 500 that also confirms the row exists. `updateMany` simply
+   * matches nothing, and a miss is reported as an indistinguishable 404 whether
+   * the row belongs to someone else or does not exist at all.
+   */
   async overrideByUser(
     trackerId: string,
-    patch: Partial<ThesisDraft>,
+    userId: string,
+    patch: UserThesisPatch,
   ): Promise<StoredThesis> {
-    try {
-      const row = await this.prisma.sentinelThesis.update({
-        where: { trackerId },
-        // `source` is applied LAST and unconditionally: a patch that could set
-        // its own source would let a correction be re-opened to inference.
-        data: { ...patch, source: THESIS_SOURCE_USER },
-      });
-      return toStored(row);
-    } catch (err) {
-      if (isPrismaCode(err, RECORD_NOT_FOUND)) {
-        throw new Error(
-          `no thesis on record for tracker ${trackerId} yet — nothing to correct`,
-        );
-      }
-      throw err;
+    const data = sanitisePatch(patch);
+
+    const { count } = await this.prisma.sentinelThesis.updateMany({
+      where: { trackerId, userId },
+      // `source` is applied LAST and unconditionally, over sanitised data that
+      // cannot contain it: a correction must not be able to re-open itself.
+      data: { ...data, source: THESIS_SOURCE_USER },
+    });
+
+    if (count === 0) {
+      throw new NotFoundException(
+        `no thesis on record for tracker ${trackerId} — nothing to correct`,
+      );
     }
+
+    // Safe to read by trackerId alone: ownership was just proven by the write.
+    const row = await this.find(trackerId);
+    if (!row) {
+      throw new NotFoundException(
+        `no thesis on record for tracker ${trackerId} — nothing to correct`,
+      );
+    }
+    return row;
   }
 }

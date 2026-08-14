@@ -1,3 +1,4 @@
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
   SentinelThesisRepository,
@@ -186,38 +187,137 @@ describe('SentinelThesisRepository', () => {
   });
 
   describe('overrideByUser', () => {
-    it('stamps the correction as USER', async () => {
-      update.mockResolvedValue(row({ source: 'USER', reason: 'momentum breakout' }));
+    it('stamps the correction as USER, scoped to the owning tenant', async () => {
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(row({ source: 'USER', reason: 'momentum breakout' }));
 
-      const result = await repo.overrideByUser('t1', { reason: 'momentum breakout' });
+      const result = await repo.overrideByUser('t1', 'u1', { reason: 'momentum breakout' });
 
-      expect(update).toHaveBeenCalledWith({
-        where: { trackerId: 't1' },
+      expect(updateMany).toHaveBeenCalledWith({
+        where: { trackerId: 't1', userId: 'u1' },
         data: { reason: 'momentum breakout', source: 'USER' },
       });
       expect(result.source).toBe('USER');
     });
 
+    it('writes nothing when another tenant asks to correct this thesis', async () => {
+      // IDOR. `trackerId` is a cuid on the wire; scoping only by it lets any
+      // account rewrite the thesis every later exit decision is measured
+      // against. The predicate must simply match zero rows.
+      updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        repo.overrideByUser('t1', 'attacker', { reason: 'sell it all' }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(updateMany).toHaveBeenCalledWith({
+        where: { trackerId: 't1', userId: 'attacker' },
+        data: { reason: 'sell it all', source: 'USER' },
+      });
+      expect(update).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('always carries the tenant in the write predicate', async () => {
+      // Guard against the guard: both tests above stub `count` regardless of
+      // the predicate, so neither would notice `userId` being dropped from it.
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(row({ source: 'USER' }));
+      await repo.overrideByUser('t1', 'u1', { reason: 'x' });
+      expect(updateMany.mock.calls[0][0].where).toEqual({ trackerId: 't1', userId: 'u1' });
+    });
+
+    it('answers a missing row and another tenant’s row identically', async () => {
+      // Distinguishable errors would confirm that a given trackerId exists.
+      updateMany.mockResolvedValue({ count: 0 });
+      const mine = repo.overrideByUser('t-absent', 'u1', { reason: 'x' });
+      const theirs = repo.overrideByUser('t1', 'attacker', { reason: 'x' });
+      await expect(mine).rejects.toThrow(/no thesis on record/i);
+      await expect(theirs).rejects.toThrow(/no thesis on record/i);
+    });
+
     it('cannot be talked out of the USER stamp by the patch', async () => {
-      update.mockResolvedValue(row({ source: 'USER' }));
-      await repo.overrideByUser('t1', {
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(row({ source: 'USER' }));
+      await repo.overrideByUser('t1', 'u1', {
         reason: 'momentum breakout',
         source: 'INFERRED',
       } as never);
-      // `source` is applied last. A patch that could downgrade its own row would
-      // let a correction be silently re-opened to inference on the next tick.
-      expect(update.mock.calls[0][0].data.source).toBe('USER');
+      // `source` is applied last over a whitelisted patch. A patch that could
+      // downgrade its own row would re-open a correction to inference.
+      expect(updateMany.mock.calls[0][0].data).toEqual({
+        reason: 'momentum breakout',
+        source: 'USER',
+      });
     });
 
-    it('states plainly that there is nothing to correct yet', async () => {
-      update.mockRejectedValue(
-        new Prisma.PrismaClientKnownRequestError('record not found', {
-          code: 'P2025',
-          clientVersion: '6.19.2',
-        }),
+    it('cannot re-attribute the row to a different tenant', async () => {
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(row({ source: 'USER' }));
+      // Excluded by type AND stripped at runtime: `UserThesisPatch` is a
+      // compile-time claim about JSON that arrived over the wire.
+      await repo.overrideByUser('t1', 'u1', {
+        reason: 'momentum breakout',
+        userId: 'attacker',
+      } as never);
+      expect(updateMany.mock.calls[0][0].data.userId).toBeUndefined();
+    });
+
+    it('drops keys that are not the user’s to set', async () => {
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(row({ source: 'USER' }));
+      await repo.overrideByUser('t1', 'u1', {
+        reason: 'momentum breakout',
+        id: 'forged',
+        createdAt: new Date(0),
+      } as never);
+      // The update is rebuilt from a whitelist, never spread from the caller.
+      expect(updateMany.mock.calls[0][0].data).toEqual({
+        reason: 'momentum breakout',
+        source: 'USER',
+      });
+    });
+
+    it.each([
+      ['a direction outside the enum', { direction: 'FLAT' }],
+      ['a price as a string', { levelPrice: '1450' }],
+      ['a price as an object', { targetPrice: { v: 1 } }],
+      ['a non-finite price', { invalidation: Number.NaN }],
+      ['a blank reason', { reason: '   ' }],
+      ['a reason that is not a string', { reason: 42 }],
+      ['nothing at all', {}],
+    ])('refuses %s before it reaches the database', async (_label, patch) => {
+      await expect(repo.overrideByUser('t1', 'u1', patch as never)).rejects.toBeInstanceOf(
+        BadRequestException,
       );
-      await expect(repo.overrideByUser('t1', { reason: 'x' })).rejects.toThrow(
-        /no thesis on record/i,
+      // A 400, not a 500 and not a corrupt row: the endpoint takes untrusted
+      // JSON, and `UserThesisPatch` guarantees nothing at runtime.
+      expect(updateMany).not.toHaveBeenCalled();
+    });
+
+    it('accepts an explicit null price as a real correction', async () => {
+      // "I had no target" is a legitimate thing to state, and must not be
+      // rejected alongside the malformed values above.
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(row({ source: 'USER', targetPrice: null }));
+
+      await repo.overrideByUser('t1', 'u1', { targetPrice: null });
+
+      expect(updateMany.mock.calls[0][0].data).toEqual({ targetPrice: null, source: 'USER' });
+    });
+
+    it('trims the corrected reason', async () => {
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(row({ source: 'USER' }));
+      await repo.overrideByUser('t1', 'u1', { reason: '  momentum breakout  ' });
+      expect(updateMany.mock.calls[0][0].data.reason).toBe('momentum breakout');
+    });
+
+    it('reports a row that vanished between the write and the read', async () => {
+      updateMany.mockResolvedValue({ count: 1 });
+      findUnique.mockResolvedValue(null);
+      await expect(repo.overrideByUser('t1', 'u1', { reason: 'x' })).rejects.toBeInstanceOf(
+        NotFoundException,
       );
     });
   });

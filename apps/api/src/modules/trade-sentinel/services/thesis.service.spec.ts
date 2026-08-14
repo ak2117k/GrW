@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { APIConnectionError, RateLimitError } from '@anthropic-ai/sdk';
 import { ThesisService, THESIS_MAX_TOKENS } from './thesis.service';
 import type { ThesisDraft } from '../repositories/sentinel-thesis.repository';
@@ -19,6 +19,7 @@ const stored = {
  * roster; the annotation makes one a compile error here.
  */
 const entry: RosterEntry = {
+  userId: 'u1',
   trackerId: 't1',
   symbol: 'INFY',
   kind: 'POSITION',
@@ -93,11 +94,64 @@ describe('ThesisService', () => {
     it('reuses a stored thesis instead of inferring again', async () => {
       find.mockResolvedValue(stored);
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result).toEqual(stored);
       expect(create).not.toHaveBeenCalled();
       expect(upsertInferred).not.toHaveBeenCalled();
+    });
+
+    it('re-infers over a stated-unknown thesis on a later tick', async () => {
+      // A thirty-second outage must not blind the watch permanently. Without
+      // this the placeholder is written once, `find` returns it forever, and
+      // the position is watched against a thesis that cannot answer the only
+      // question this service exists to answer.
+      find.mockResolvedValue({
+        direction: 'LONG',
+        reason:
+          'thesis could not be inferred — could not reach the Anthropic API. The intent ' +
+          'behind this LONG position is UNKNOWN; do not read it as a confirmed setup.',
+        levelPrice: null,
+        targetPrice: null,
+        invalidation: null,
+        source: 'INFERRED',
+      });
+      create.mockResolvedValue(reply(goodDraft));
+      upsertInferred.mockResolvedValue(stored);
+
+      const result = await svc.ensureFor(entry, tick);
+
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(result).toEqual(stored);
+    });
+
+    it('leaves a real thesis alone even when it talks about inference', async () => {
+      // `startsWith`, not `includes`: a genuine thesis is not discarded because
+      // its prose happens to contain the placeholder's words.
+      find.mockResolvedValue({
+        ...stored,
+        reason: 'bought the demand zone; the thesis could not be inferred from volume alone',
+      });
+
+      await svc.ensureFor(entry, tick);
+
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('never re-infers over a USER thesis even if it reads as unknown', async () => {
+      // The retry predicate must be guarded by source, not by text alone —
+      // otherwise a user who typed the placeholder wording loses their own
+      // correction on the next tick.
+      find.mockResolvedValue({
+        ...stored,
+        source: 'USER',
+        reason: 'thesis could not be inferred — I honestly do not remember why I took this',
+      });
+
+      const result = await svc.ensureFor(entry, tick);
+
+      expect(create).not.toHaveBeenCalled();
+      expect(result.source).toBe('USER');
     });
 
     it('never re-infers over a thesis the user corrected', async () => {
@@ -106,7 +160,7 @@ describe('ThesisService', () => {
       // a race window that the predicate cannot cover.
       find.mockResolvedValue({ ...stored, source: 'USER', reason: 'momentum breakout' });
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result.source).toBe('USER');
       expect(create).not.toHaveBeenCalled();
@@ -129,7 +183,7 @@ describe('ThesisService', () => {
     it('infers and stores a thesis the first time it sees a position', async () => {
       create.mockResolvedValue(reply(goodDraft));
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(create).toHaveBeenCalledTimes(1);
       expect(upsertInferred).toHaveBeenCalledWith(
@@ -148,7 +202,7 @@ describe('ThesisService', () => {
 
     it('asks for the thesis schema with room for thinking plus the reply', async () => {
       create.mockResolvedValue(reply(goodDraft));
-      await svc.ensureFor(entry, tick, 'u1');
+      await svc.ensureFor(entry, tick);
 
       const args = create.mock.calls[0][0];
       expect(args.model).toBe('claude-opus-5');
@@ -170,7 +224,7 @@ describe('ThesisService', () => {
 
     it('puts the position in the user turn so the prompt prefix stays cacheable', async () => {
       create.mockResolvedValue(reply(goodDraft));
-      await svc.ensureFor(entry, tick, 'u1');
+      await svc.ensureFor(entry, tick);
 
       const args = create.mock.calls[0][0];
       expect(args.messages[0].role).toBe('user');
@@ -189,7 +243,7 @@ describe('ThesisService', () => {
     it('tells the model in so many words when there is no structure to read', async () => {
       levelsFor.mockResolvedValue(null);
       create.mockResolvedValue(reply(goodDraft));
-      await svc.ensureFor(entry, tick, 'u1');
+      await svc.ensureFor(entry, tick);
 
       const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
       // Absent evidence must arrive AS an absence with a reason — omitting the
@@ -205,7 +259,7 @@ describe('ThesisService', () => {
         at: '2026-08-14T04:00:00.000Z',
       });
       create.mockResolvedValue(reply(goodDraft));
-      await svc.ensureFor(entry, tick, 'u1');
+      await svc.ensureFor(entry, tick);
 
       const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
       expect(payload.structure).toEqual({
@@ -224,7 +278,7 @@ describe('ThesisService', () => {
       levelsFor.mockRejectedValue(new Error('chart context down'));
       create.mockResolvedValue(reply(goodDraft));
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(create).toHaveBeenCalledTimes(1);
       const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
@@ -233,16 +287,64 @@ describe('ThesisService', () => {
       expect(result.reason).toBe('bought the demand zone');
     });
 
+    it('describes nullable prices with anyOf, not a JSON Schema type array', async () => {
+      // `type: ['number','null']` is outside the documented structured-outputs
+      // subset and would 400 on the first LIVE call — which no test in this
+      // stage makes, so only a shape assertion can catch it.
+      create.mockResolvedValue(reply(goodDraft));
+      await svc.ensureFor(entry, tick);
+
+      const props = create.mock.calls[0][0].output_config.format.schema.properties;
+      for (const field of ['levelPrice', 'targetPrice', 'invalidation']) {
+        expect(props[field]).toEqual({ anyOf: [{ type: 'number' }, { type: 'null' }] });
+        expect(Array.isArray(props[field].type)).toBe(false);
+      }
+      // The enum field is a plain scalar type and must stay that way.
+      expect(props.direction).toEqual({ type: 'string', enum: ['LONG', 'SHORT'] });
+    });
+
+    it('takes the tenant from the roster entry rather than a defaulted argument', async () => {
+      create.mockResolvedValue(reply(goodDraft));
+      await svc.ensureFor({ ...entry, userId: 'u-tenant-9' }, tick);
+      // An empty userId writes a row no tenant owns, and `upsertInferred`'s
+      // data spread would clobber a good value with it on re-inference.
+      expect(savedDraft().userId).toBe('u-tenant-9');
+    });
+
     it('takes direction from the broker, not from the model', async () => {
       // Side is an observed fact off the position. A thesis whose direction
       // disagrees with the position inverts every later "has it turned?" read,
       // so the fact wins and the disagreement is logged rather than stored.
       create.mockResolvedValue(reply({ ...goodDraft, direction: 'SHORT' }));
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result.direction).toBe('LONG');
       expect(warned).toHaveBeenCalledWith(expect.stringMatching(/direction/i));
+      // "the structure at entry reads short, but you are long" is arguably more
+      // useful to the user than the thesis prose, and a log line surfaces to
+      // nobody — so it is returned for Task 12 as well as logged.
+      expect(result.modelDirectionDisagreed).toBe(true);
+    });
+
+    it('does not claim a disagreement when the model agreed', async () => {
+      create.mockResolvedValue(reply(goodDraft));
+
+      const result = await svc.ensureFor(entry, tick);
+
+      // Absent, never `false`. There is no column for this, so on a later tick
+      // (where nothing was inferred) a `false` would read as "the model agreed"
+      // when it means "nobody asked".
+      expect(result.modelDirectionDisagreed).toBeUndefined();
+      expect('modelDirectionDisagreed' in result).toBe(false);
+    });
+
+    it('reports no disagreement when the reading never happened', async () => {
+      create.mockRejectedValue(new Error('api down'));
+
+      const result = await svc.ensureFor(entry, tick);
+
+      expect(result.modelDirectionDisagreed).toBeUndefined();
     });
 
     it('infers a SHORT position without flipping any of its numbers', async () => {
@@ -257,7 +359,7 @@ describe('ThesisService', () => {
         }),
       );
 
-      const result = await svc.ensureFor(entry, shortTick, 'u1');
+      const result = await svc.ensureFor(entry, shortTick);
 
       expect(result).toMatchObject({
         direction: 'SHORT',
@@ -284,7 +386,7 @@ describe('ThesisService', () => {
     it('falls back to a stated-unknown thesis rather than throwing when inference fails', async () => {
       create.mockRejectedValue(new Error('api down'));
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result.reason).toMatch(/could not be inferred/i);
       expect(result.levelPrice).toBeNull();
@@ -297,13 +399,13 @@ describe('ThesisService', () => {
 
     it('persists the unknown thesis so the position is watched from the next tick on', async () => {
       create.mockRejectedValue(new Error('api down'));
-      await svc.ensureFor(entry, tick, 'u1');
+      await svc.ensureFor(entry, tick);
       expect(upsertInferred).toHaveBeenCalledWith('t1', expect.objectContaining({ userId: 'u1' }));
     });
 
     it('warns the agent not to read the unknown thesis as a confirmed setup', async () => {
       create.mockRejectedValue(new Error('api down'));
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
       // This string is fed verbatim to the sentinel agent. "no thesis" read as
       // an empty thesis is the same confident-from-nothing failure the packet's
       // block design exists to prevent.
@@ -316,7 +418,7 @@ describe('ThesisService', () => {
     ])('names %s by the SDK exception class, not by its message', async (_label, err, matcher) => {
       create.mockRejectedValue(err);
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       // The messages deliberately say nothing about the category; only the
       // CLASS identifies it. String-matching err.message must fail this.
@@ -330,7 +432,7 @@ describe('ThesisService', () => {
         content: [{ type: 'text', text: '{"direction":"LO' }],
       });
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result.reason).toMatch(/truncated/i);
       expect(result.reason).not.toMatch(/not JSON/i);
@@ -339,13 +441,13 @@ describe('ThesisService', () => {
 
     it('reports an over-long request as a context-window failure', async () => {
       create.mockResolvedValue({ stop_reason: 'model_context_window_exceeded', content: [] });
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
       expect(result.reason).toMatch(/context window/i);
     });
 
     it('reports a refusal as a refusal', async () => {
       create.mockResolvedValue({ stop_reason: 'refusal', content: [] });
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
       expect(result.reason).toMatch(/refused/i);
     });
 
@@ -355,7 +457,7 @@ describe('ThesisService', () => {
       ['JSON that is not an object', { stop_reason: 'end_turn', content: [{ type: 'text', text: 'null' }] }],
     ])('degrades to unknown on %s', async (_label, response) => {
       create.mockResolvedValue(response);
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
       expect(result.reason).toMatch(/could not be inferred/i);
       expect(result.levelPrice).toBeNull();
     });
@@ -369,7 +471,7 @@ describe('ThesisService', () => {
     ])('degrades to unknown rather than storing %s', async (_label, body) => {
       create.mockResolvedValue(reply(body));
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result.reason).toMatch(/could not be inferred/i);
       // A '1450' string stored in a Float column is the kind of thing that
@@ -391,7 +493,7 @@ describe('ThesisService', () => {
         }),
       );
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result.reason).toBe('no clean structure at entry — looks like a discretionary add');
       expect(result.reason).not.toMatch(/could not be inferred/i);
@@ -402,7 +504,7 @@ describe('ThesisService', () => {
     it('returns an unknown thesis without calling the API when the store is unreachable', async () => {
       find.mockRejectedValue(new Error('connection refused'));
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       expect(result.reason).toMatch(/could not be inferred/i);
       expect(result.reason).toMatch(/connection refused/);
@@ -417,7 +519,7 @@ describe('ThesisService', () => {
       create.mockResolvedValue(reply(goodDraft));
       upsertInferred.mockRejectedValue(new Error('write failed'));
 
-      const result = await svc.ensureFor(entry, tick, 'u1');
+      const result = await svc.ensureFor(entry, tick);
 
       // Unpersisted, so the next tick infers again — but the position is
       // watched THIS tick, which is the whole point.
@@ -430,18 +532,21 @@ describe('ThesisService', () => {
     it('marks a user correction as USER so it outranks future inference', async () => {
       overrideByUser.mockResolvedValue({ ...stored, source: 'USER', reason: 'momentum breakout' });
 
-      const result = await svc.correct('t1', { reason: 'momentum breakout' });
+      const result = await svc.correct('t1', 'u1', { reason: 'momentum breakout' });
 
       expect(result.source).toBe('USER');
-      expect(overrideByUser).toHaveBeenCalledWith('t1', { reason: 'momentum breakout' });
+      // The tenant reaches the repository, where it scopes the write. Dropping
+      // it here would make the repository's `where` unsatisfiable-by-accident
+      // rather than tenant-scoped-by-design.
+      expect(overrideByUser).toHaveBeenCalledWith('t1', 'u1', { reason: 'momentum breakout' });
     });
 
     it('lets a correction failure surface instead of pretending it was saved', async () => {
-      const boom = new Error('no thesis on record for this position yet');
+      const boom = new NotFoundException('no thesis on record');
       overrideByUser.mockRejectedValue(boom);
       // Unlike inference, this one is a user action with a user watching it —
       // a silent no-op would leave them believing a wrong thesis was fixed.
-      await expect(svc.correct('t1', { reason: 'x' })).rejects.toBe(boom);
+      await expect(svc.correct('t1', 'u1', { reason: 'x' })).rejects.toBe(boom);
     });
   });
 });

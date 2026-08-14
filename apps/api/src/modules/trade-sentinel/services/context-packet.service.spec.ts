@@ -115,6 +115,7 @@ describe('ContextPacketService', () => {
   });
 
   const entry = {
+    userId: 'u1',
     trackerId: 't1',
     symbol: 'INFY',
     kind: 'POSITION' as const,

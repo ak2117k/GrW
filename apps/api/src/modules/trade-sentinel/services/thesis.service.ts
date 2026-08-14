@@ -355,9 +355,13 @@ export class ThesisService {
  *
  * Cost: while the API is down this re-infers once per tick per position, capped
  * by SENTINEL_MAX_WATCHED. That is the correct trade — the alternative is a
- * permanently blind watch — but it is why the failure is logged every time.
+ * permanently blind watch — but it is why the failure is logged every time, and
+ * why it is EXPORTED: the caller owns the retry cadence, because only the caller
+ * knows how often it ticks, and it needs this exact predicate to hold back
+ * precisely the calls that would re-infer and no others. See
+ * `THESIS_RETRY_COOLDOWN_MS` in the cycle.
  */
-function isRetryable(existing: StoredThesis): boolean {
+export function isRetryable(existing: StoredThesis): boolean {
   return (
     existing.source !== THESIS_SOURCE_USER && existing.reason.startsWith(UNKNOWN_REASON_PREFIX)
   );

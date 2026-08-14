@@ -117,6 +117,10 @@ model OiWallSnapshot {
   expiry       String
   callWall     Float?
   putWall      Float?
+  // Deliberately unset in Stage 0: OiWallService returns LevelCandidate
+  // {price, kind, score} and discards the raw OI, so nothing can fill these
+  // honestly. Populate from OptionsChainService if ever needed — never from
+  // `score`, which is a rank weight (30/20), not open interest.
   callWallOi   Float?
   putWallOi    Float?
   capturedAt   DateTime @default(now())
@@ -2503,7 +2507,7 @@ export class SentinelCycleService {
         const tick = await this.ticks.tickFor(entry.trackerId);
 
         const walls = tick.expiry
-          ? await this.oiWalls.captureAndCompare(entry.symbol, tick.expiry)
+          ? await this.oiWalls.captureAndCompare(entry.symbol, tick.expiry, tick.underlyingLtp)
           : { now: null, prev: null };
 
         const [last] = await this.verdicts.recentForTracker(entry.trackerId, 1);
@@ -2597,6 +2601,14 @@ git commit -m "feat(sentinel): run the shadow cycle, with no wire to the broker 
 ## Task 12: Module wiring, controller, and the scheduled tick
 
 **Files:**
+> **Blocker discovered in Task 5 — fix this first.** `OiWallService` is listed under
+> `providers` in `apps/api/src/modules/signal-generator/signal-generator.module.ts:137`
+> but is **not in that module's `exports` array**. `TradeSentinelModule` imports
+> `SignalGeneratorModule` and injects `OiWallService`, so Nest will fail at bootstrap
+> with an unresolved-dependency error until `OiWallService` is added to `exports`.
+> Add it there; do not work around it by re-providing the service locally, which would
+> give the sentinel its own instance and defeat the `warned` de-duplication set.
+
 - Create: `apps/api/src/modules/trade-sentinel/trade-sentinel.module.ts`
 - Create: `apps/api/src/modules/trade-sentinel/controllers/sentinel.controller.ts`
 - Create: `apps/api/src/modules/trade-sentinel/dto/sentinel.dto.ts`

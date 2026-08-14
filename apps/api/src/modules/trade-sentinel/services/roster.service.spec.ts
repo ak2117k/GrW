@@ -1,6 +1,11 @@
 import { RosterService, SENTINEL_MAX_WATCHED } from './roster.service';
 
-const tracker = (id: string, kind: 'POSITION' | 'HOLDING', symbol = id) => ({
+const tracker = (
+  id: string,
+  kind: 'POSITION' | 'HOLDING',
+  symbol = id,
+  entryTime?: Date,
+) => ({
   id,
   kind,
   symbol,
@@ -8,7 +13,11 @@ const tracker = (id: string, kind: 'POSITION' | 'HOLDING', symbol = id) => ({
   token: '1',
   entryPrice: 100,
   qty: 10,
+  ...(entryTime ? { entryTime } : {}),
 });
+
+/** `day`-th of Jan 2026 — a legible entryTime for the ordering tests. */
+const at = (day: number) => new Date(Date.UTC(2026, 0, day));
 
 describe('RosterService', () => {
   const list = jest.fn();
@@ -153,6 +162,105 @@ describe('RosterService', () => {
     expect(roster.find((r) => r.symbol === 'THEIRS')!.ownership).toBe(
       'OBSERVE_ONLY',
     );
+  });
+
+  // The watch-slot policy is the roster's own, NOT whatever order listOpen
+  // happened to return. Every array below is deliberately shuffled, so these
+  // pass only if RosterService sorts for itself.
+  describe('watch-slot ordering policy', () => {
+    it('gives the slots to the oldest positions when the store order is shuffled', async () => {
+      list.mockResolvedValue([
+        tracker('p-newest', 'POSITION', 'A', at(9)),
+        tracker('p-2nd', 'POSITION', 'B', at(2)),
+        tracker('p-oldest', 'POSITION', 'C', at(1)),
+        tracker('p-5th', 'POSITION', 'D', at(5)),
+        tracker('p-2nd-newest', 'POSITION', 'E', at(7)),
+        tracker('p-3rd', 'POSITION', 'F', at(3)),
+      ]);
+      const roster = await svc.build('u1');
+
+      expect(roster.filter((r) => r.watched).map((r) => r.trackerId)).toEqual([
+        'p-oldest',
+        'p-2nd',
+        'p-3rd',
+        'p-5th',
+        'p-2nd-newest',
+      ]);
+      expect(roster.filter((r) => !r.watched).map((r) => r.trackerId)).toEqual([
+        'p-newest',
+      ]);
+    });
+
+    it('applies oldest-first within holdings too, after every position', async () => {
+      list.mockResolvedValue([
+        tracker('h-newest', 'HOLDING', 'A', at(8)),
+        tracker('p-new', 'POSITION', 'B', at(6)),
+        tracker('h-oldest', 'HOLDING', 'C', at(2)),
+        tracker('h-mid', 'HOLDING', 'D', at(4)),
+        tracker('p-old', 'POSITION', 'E', at(1)),
+        tracker('h-2nd-newest', 'HOLDING', 'F', at(7)),
+      ]);
+      const roster = await svc.build('u1');
+
+      // Positions first regardless of age, then holdings oldest-first.
+      expect(roster.map((r) => r.trackerId)).toEqual([
+        'p-old',
+        'p-new',
+        'h-oldest',
+        'h-mid',
+        'h-2nd-newest',
+        'h-newest',
+      ]);
+      expect(roster.filter((r) => !r.watched).map((r) => r.trackerId)).toEqual([
+        'h-newest',
+      ]);
+    });
+
+    it('keeps a younger position ahead of every older holding', async () => {
+      // The kind rank must dominate the age tie-break: a position opened today
+      // outranks a holding held for a year, because only it is ever closable.
+      list.mockResolvedValue([
+        tracker('h-ancient', 'HOLDING', 'A', at(1)),
+        tracker('p-today', 'POSITION', 'B', at(28)),
+      ]);
+      const roster = await svc.build('u1');
+      expect(roster.map((r) => r.trackerId)).toEqual(['p-today', 'h-ancient']);
+    });
+
+    it('preserves store order for same-kind rows with no usable entryTime', async () => {
+      list.mockResolvedValue([
+        tracker('t3', 'POSITION'),
+        tracker('t1', 'POSITION'),
+        tracker('t2', 'POSITION'),
+      ]);
+      const roster = await svc.build('u1');
+      expect(roster.map((r) => r.trackerId)).toEqual(['t3', 't1', 't2']);
+    });
+
+    it('does not let a dated row jump an undated one within a kind', async () => {
+      // Mixed dated/undated is the only case where "compare equal" is
+      // observable: any fallback constant would rank the dated row against it
+      // and reorder the book on a field that is merely absent.
+      // Asserted in BOTH input orders: any fallback constant ranks the dated
+      // row consistently against it, so it must reorder one of the two.
+      list.mockResolvedValue([
+        tracker('undated', 'POSITION', 'A'),
+        tracker('dated', 'POSITION', 'B', at(1)),
+      ]);
+      expect((await svc.build('u1')).map((r) => r.trackerId)).toEqual([
+        'undated',
+        'dated',
+      ]);
+
+      list.mockResolvedValue([
+        tracker('dated', 'POSITION', 'B', at(1)),
+        tracker('undated', 'POSITION', 'A'),
+      ]);
+      expect((await svc.build('u1')).map((r) => r.trackerId)).toEqual([
+        'dated',
+        'undated',
+      ]);
+    });
   });
 
   it('returns an empty roster for an empty book', async () => {

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { OiWallService } from '../../signal-generator/services/oi-wall.service';
 
@@ -18,29 +18,71 @@ export interface WallPair {
  */
 @Injectable()
 export class OiWallSnapshotService {
+  private readonly logger = new Logger(OiWallSnapshotService.name);
+
+  /**
+   * Symbols already warned about, so a per-tick poll reports a missing chain
+   * ONCE rather than every poll. Keyed by symbol+cause so a changed cause is
+   * still reported. Mirrors the pattern in `OiWallService`.
+   */
+  private readonly warned = new Set<string>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly oiWall: OiWallService,
   ) {}
+
+  private warnOnce(symbol: string, cause: string, detail: string): void {
+    const key = `${symbol}:${cause}`;
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    this.logger.warn(`OI wall snapshot skipped for ${symbol}: ${cause} — ${detail}`);
+  }
 
   /**
    * @param expiry Storage key only — it segregates snapshot lineages so a
    *   rollover does not diff this expiry's walls against last expiry's. It is
    *   NOT passed to `OiWallService`, which always reads the nearest expiry
    *   itself; callers should pass the nearest expiry to keep the two aligned.
-   * @param underlyingLtp Spot price of the underlying. `OiWallService.walls`
-   *   uses it to keep only OTM strikes — an ITM high-OI strike is not a wall.
-   *   Passing 0 (or omitting it) disables that filter rather than erroring.
+   * @param underlyingLtp Spot price of the underlying, or null when it is
+   *   unavailable. Required — not defaulted — because `OiWallService.walls`
+   *   uses it to keep only OTM strikes, and a missing/zero spot disables that
+   *   filter and yields ITM strikes labelled as walls. Those would be WRITTEN
+   *   to the snapshot table, so the next correctly-sided capture would diff
+   *   against a mis-sided stored reading and emit a large spurious shift. A
+   *   persisted false positive outlives the bad call that made it, so on a
+   *   null/non-positive spot this stores nothing and returns nothing — the
+   *   same "stay silent rather than fall back" rule the sensors follow
+   *   (see `tripwires/types.ts`).
    */
   async captureAndCompare(
     symbol: string,
     expiry: string,
-    underlyingLtp = 0,
+    underlyingLtp: number | null,
   ): Promise<{ now: WallPair | null; prev: WallPair | null }> {
+    if (underlyingLtp === null || underlyingLtp <= 0) {
+      this.warnOnce(
+        symbol,
+        'no underlying spot',
+        'walls cannot be sided OTM without one, and storing an unsided reading would poison the next comparison',
+      );
+      return { now: null, prev: null };
+    }
+
     const walls = await this.oiWall.walls(symbol, underlyingLtp);
     if (!walls || walls.length === 0) {
-      // Cash stocks have no chain, and `walls()` never throws — it returns [].
-      // Not an error, just nothing to compare.
+      // `walls()` never throws — it returns [] for THREE different situations
+      // that are indistinguishable from here: a cash stock genuinely having no
+      // chain (a fact), a chain fetch that failed (logged only at debug inside
+      // that service), and the options-chain service not being wired at all.
+      // So this is NOT safely "just nothing to compare": a permanently failing
+      // chain would otherwise leave this sensor silent forever with no trace.
+      // Warn once per symbol, and say that the cause is ambiguous.
+      this.warnOnce(
+        symbol,
+        'no OI walls returned',
+        'cause is indistinguishable between no chain (cash stock), a failed chain fetch, and an unwired options-chain service',
+      );
       return { now: null, prev: null };
     }
 

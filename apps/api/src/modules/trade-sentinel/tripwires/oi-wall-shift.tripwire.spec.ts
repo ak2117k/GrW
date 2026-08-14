@@ -48,6 +48,38 @@ describe('oiWallShift', () => {
     ).toBeNull();
   });
 
+  // The SHORT mirror of the above. Without it, deleting the SHORT null-guard
+  // goes unnoticed: a null putWall makes `moved` NaN, `NaN < PCT` is false, and
+  // the sensor FIRES with "put wall rose null -> null" — absent data reported
+  // as a signal, the one thing a sensor must never do.
+  it('stays silent for a short when the put wall is missing on one side', () => {
+    expect(
+      oiWallShift.check({ ...base, side: 'SHORT', oiWallNow: { callWall: 24200, putWall: null } }),
+    ).toBeNull();
+    expect(
+      oiWallShift.check({ ...base, side: 'SHORT', oiWallPrev: { callWall: 24200, putWall: null } }),
+    ).toBeNull();
+  });
+
+  it('stays silent for a short when the walls have not moved', () => {
+    expect(oiWallShift.check({ ...base, side: 'SHORT' })).toBeNull();
+  });
+
+  it('ignores a wall moving against the OTHER side than a short holds', () => {
+    const movedCall = 24200 * (1 - OI_WALL_SHIFT_PCT * 4);
+    expect(
+      oiWallShift.check({ ...base, side: 'SHORT', oiWallNow: { callWall: movedCall, putWall: 24000 } }),
+    ).toBeNull();
+  });
+
+  it('stays silent for a short with no previous snapshot', () => {
+    expect(oiWallShift.check({ ...base, side: 'SHORT', oiWallPrev: null })).toBeNull();
+  });
+
+  it('stays silent for a short when the current reading has no chain', () => {
+    expect(oiWallShift.check({ ...base, side: 'SHORT', oiWallNow: null })).toBeNull();
+  });
+
   it('fires when the call wall moves down against a long', () => {
     const moved = 24200 * (1 - OI_WALL_SHIFT_PCT * 2);
     const fire = oiWallShift.check({ ...base, oiWallNow: { callWall: moved, putWall: 24000 } });

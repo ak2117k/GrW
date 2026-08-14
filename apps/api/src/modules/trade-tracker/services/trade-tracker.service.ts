@@ -445,6 +445,20 @@ export class TradeTrackerService implements OnModuleDestroy {
   }
 
   /**
+   * All OPEN trackers (positions and holdings) for ONE user, oldest entry
+   * first. Returns raw rows, not the §5 DTO: callers such as the trade
+   * sentinel's roster need the model fields (`kind`, `token`, extremes), and
+   * ordering is oldest-first so a stable "who was here longest" ordering exists
+   * for the roster's watch-slot cap.
+   */
+  async listOpen(userId: string): Promise<TradeTracker[]> {
+    return this.prisma.tradeTracker.findMany({
+      where: { userId, status: 'OPEN' },
+      orderBy: { entryTime: 'asc' },
+    });
+  }
+
+  /**
    * The caller's trackers (OPEN + CLOSED), newest first, mapped to the §5 DTO.
    */
   async list(userId: string): Promise<TradeTrackerDto[]> {

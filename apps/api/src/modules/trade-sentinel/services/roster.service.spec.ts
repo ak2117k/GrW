@@ -291,3 +291,66 @@ describe('RosterService', () => {
     await expect(svc.build('u1')).resolves.toEqual([]);
   });
 });
+
+/**
+ * The failure this guards against is SILENT AND IT FAILS OPEN: a spelling
+ * mismatch means the probe's set never matches, so the sentinel labels
+ * `SENTINEL` a position `watch-monitor` is already managing. In Stage 0 that is
+ * a mislabelled row; in Stage 1 it is two engines racing to exit one position.
+ */
+describe('RosterService — ownership across two symbol spellings', () => {
+  const list = jest.fn();
+  const ownedElsewhere = jest.fn();
+  const svc = new RosterService({ listOpen: list } as any, {
+    symbolsOwnedByOtherEngines: ownedElsewhere,
+  } as any);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('matches a suffixed broker symbol against a stripped engine symbol', async () => {
+    // Exactly the real pair: `trade_trackers.symbol` is Angel One's
+    // tradingsymbol, `watch_entries.symbol` is the Chartink base symbol.
+    list.mockResolvedValue([tracker('t1', 'POSITION', 'SUZLON-EQ')]);
+    ownedElsewhere.mockResolvedValue(new Set(['SUZLON']));
+
+    const [entry] = await svc.build('u1');
+
+    expect(entry.ownership).toBe('OBSERVE_ONLY');
+    expect(entry.reason).toContain('another engine');
+    // The entry keeps the BROKER's spelling — normalisation is for the compare
+    // only. A verdict row carrying a symbol the broker never used would be
+    // unjoinable against the tracker it came from.
+    expect(entry.symbol).toBe('SUZLON-EQ');
+  });
+
+  it('matches when the mismatch runs the other way', async () => {
+    list.mockResolvedValue([tracker('t1', 'POSITION', 'SUZLON')]);
+    ownedElsewhere.mockResolvedValue(new Set(['SUZLON-EQ'.replace('-EQ', '')]));
+
+    const [entry] = await svc.build('u1');
+    expect(entry.ownership).toBe('OBSERVE_ONLY');
+  });
+
+  it('still claims a position no engine holds, so normalisation is not blanket-matching', async () => {
+    // Without this the test above passes for a `build` that marked EVERYTHING
+    // OBSERVE_ONLY, which would be the opposite bug and just as wrong.
+    list.mockResolvedValue([
+      tracker('t1', 'POSITION', 'SUZLON-EQ'),
+      tracker('t2', 'POSITION', 'RELIANCE-EQ'),
+    ]);
+    ownedElsewhere.mockResolvedValue(new Set(['SUZLON']));
+
+    const roster = await svc.build('u1');
+    expect(roster.map((r) => r.ownership)).toEqual(['OBSERVE_ONLY', 'SENTINEL']);
+  });
+
+  it('does not let one option strike claim another on the same underlying', async () => {
+    // Normalisation must not reach derivative tradingsymbols: owning the 24000
+    // call says nothing about the 24500 call.
+    list.mockResolvedValue([tracker('t1', 'POSITION', 'NIFTY28AUG2524500CE')]);
+    ownedElsewhere.mockResolvedValue(new Set(['NIFTY28AUG2524000CE']));
+
+    const [entry] = await svc.build('u1');
+    expect(entry.ownership).toBe('SENTINEL');
+  });
+});

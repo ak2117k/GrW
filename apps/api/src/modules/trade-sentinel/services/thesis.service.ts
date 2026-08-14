@@ -11,6 +11,7 @@ import {
 import { ANTHROPIC_CLIENT } from './sentinel-agent.service';
 import { SENTINEL_MODEL } from '../prompts/sentinel-system-prompt';
 import {
+  CHART_CONTEXT_SHIM,
   absent,
   present,
   type Block,
@@ -130,7 +131,7 @@ export class ThesisService {
   constructor(
     private readonly repo: SentinelThesisRepository,
     @Inject(ANTHROPIC_CLIENT) private readonly client: Anthropic,
-    private readonly chartContext: ChartContextShim,
+    @Inject(CHART_CONTEXT_SHIM) private readonly chartContext: ChartContextShim,
   ) {}
 
   /**

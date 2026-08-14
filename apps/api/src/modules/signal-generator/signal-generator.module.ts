@@ -204,6 +204,14 @@ import type { ContextFactor } from './services/context-scoring/types';
     ContextScoringService,
     MtfAlignmentService,
     SrEvidenceService,
+    // Exported for TradeSentinelModule, which composes the same level book the
+    // charts page reads. Exported rather than re-provided there ON PURPOSE:
+    // both services de-duplicate their "no chain / no levels for this symbol"
+    // warnings through an instance-level `warned` Set, and ChartContextService
+    // holds a 60s composite cache. A second instance would restart the log
+    // spam and double the broker work.
+    ChartContextService,
+    OiWallService,
   ],
 })
 export class SignalGeneratorModule {}

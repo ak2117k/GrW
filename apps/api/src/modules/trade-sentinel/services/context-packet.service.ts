@@ -1,7 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { computeGreenFloor, type Segment, type Side } from '../charges';
-import type { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
+// A VALUE import, deliberately. `import type` is erased, so
+// `design:paramtypes` would emit `Object` for this parameter and Nest could not
+// resolve it by type — the class has to survive to runtime to be its own token.
+import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import type { TripwireFire } from '../tripwires/types';
 import type { Ownership, RosterEntry } from './roster.service';
 
@@ -335,14 +338,22 @@ export interface NewsShim {
   recentFor(symbol: string): Promise<SourcedValue | null>;
 }
 
+/**
+ * DI tokens for the two shims. Both are interfaces, so `design:paramtypes`
+ * emits `Object` and Nest cannot resolve them by type — the same reason
+ * `OPEN_POSITIONS`, `OI_WALL_SOURCE` and `TICK_SOURCE` exist.
+ */
+export const CHART_CONTEXT_SHIM = 'SENTINEL_CHART_CONTEXT_SHIM';
+export const NEWS_SHIM = 'SENTINEL_NEWS_SHIM';
+
 @Injectable()
 export class ContextPacketService {
   private readonly logger = new Logger(ContextPacketService.name);
 
   constructor(
     private readonly verdicts: SentinelVerdictRepository,
-    private readonly chartContext: ChartContextShim,
-    private readonly news: NewsShim,
+    @Inject(CHART_CONTEXT_SHIM) private readonly chartContext: ChartContextShim,
+    @Inject(NEWS_SHIM) private readonly news: NewsShim,
   ) {}
 
   async build(

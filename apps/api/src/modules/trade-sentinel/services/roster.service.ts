@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { OPEN_POSITIONS, type OpenPositionsPort } from '../ports/open-positions.port';
+import { normaliseSymbol } from '../symbols';
 
 /** Hard cap on concurrently watched positions (spec §2). */
 export const SENTINEL_MAX_WATCHED = 5;
@@ -29,11 +30,22 @@ export interface RosterEntry {
  * `*-track` modules already close trades they own, so a position they manage is
  * observed but never claimed. One owner per trade.
  *
- * Stage 0 defines only the interface — Task 12 supplies the concrete probe.
+ * THE RETURNED SET IS NORMALISED — every member must have been through
+ * {@link normaliseSymbol}, because that is what `build()` compares against. The
+ * two sides spell symbols differently (broker `tradingsymbol` here, base symbol
+ * there) and an un-normalised set fails OPEN: no match, so the sentinel CLAIMS a
+ * position another engine is managing. See `symbols.ts` for the full argument.
  */
 export interface EngineOwnershipProbe {
   symbolsOwnedByOtherEngines(userId: string): Promise<Set<string>>;
 }
+
+/**
+ * DI token for {@link EngineOwnershipProbe}. It is an interface, so
+ * `design:paramtypes` emits `Object` and Nest cannot resolve the parameter by
+ * type — the same reason `OPEN_POSITIONS` and `TICK_SOURCE` exist.
+ */
+export const ENGINE_OWNERSHIP_PROBE = 'SENTINEL_ENGINE_OWNERSHIP_PROBE';
 
 /** Why an entry is not watched. Never dropped silently — the reason is recorded. */
 const OVER_CAPACITY_REASON = `over capacity: more than ${SENTINEL_MAX_WATCHED} open, not watched`;
@@ -86,7 +98,7 @@ export class RosterService {
     // Angel One adapter, which would put placeOrder one property access away
     // from a live cycle. See the note on OpenPositionsPort.
     @Inject(OPEN_POSITIONS) private readonly trackers: OpenPositionsPort,
-    private readonly ownership: EngineOwnershipProbe,
+    @Inject(ENGINE_OWNERSHIP_PROBE) private readonly ownership: EngineOwnershipProbe,
   ) {}
 
   async build(userId: string): Promise<RosterEntry[]> {
@@ -117,7 +129,10 @@ export class RosterService {
         };
       }
 
-      if (ownedElsewhere.has(t.symbol)) {
+      // Normalised on BOTH sides — the probe's contract says its set already is.
+      // A raw compare here silently never matches (`SUZLON-EQ` vs `SUZLON`) and
+      // the sentinel claims a position another engine manages. See symbols.ts.
+      if (ownedElsewhere.has(normaliseSymbol(t.symbol))) {
         return {
           userId,
           trackerId: t.id,

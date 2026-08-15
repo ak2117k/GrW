@@ -46,9 +46,52 @@ export interface NearestLevels {
   nearestResistance: number | null;
 }
 
+/**
+ * Why `nearestSupport`/`nearestResistance` came back null, in the three cases
+ * where the answer is NOT a fact about the market.
+ *
+ * These exist because the packet used to describe every null level with one
+ * fixed sentence — "no support level below this price in the level book" — which
+ * is a POSITIVE CLAIM ABOUT MARKET STRUCTURE. It is true in exactly one of the
+ * four ways the value can be null; in the other three we never got as far as
+ * looking, and an LLM told "there is no support below" reasons very differently
+ * from one told "we could not see the levels". Wording mirrors
+ * `unresolvedUnderlying`: the absence has to name itself as a failure to look.
+ */
+export const LEVEL_BOOK_UNBUILT =
+  'no level book could be built for this symbol — either no NSE instrument matched it or the ' +
+  'level engine returned no setup — so no support or resistance was ever computed. This is a ' +
+  'FAILURE TO LOOK, not a finding: do not read it as an instrument with no structure.';
+
+export const LEVEL_BOOK_FAILED =
+  'the level-book lookup FAILED for this symbol, so no support or resistance was ever computed. ' +
+  'This is a FAILURE TO LOOK, not a finding: do not read it as an instrument with no structure.';
+
+export const LEVEL_BOOK_NO_PRICE =
+  "the underlying's price was unavailable, so the level book could not be placed against it and " +
+  'no nearest level was ever selected. This is a FAILURE TO LOOK, not a finding — the levels ' +
+  'themselves may well exist.';
+
 /** What the tick source reads off the level book in one call. */
 export interface SentinelStructure extends NearestLevels {
   volumeRatio: number | null;
+  /**
+   * Why the two levels are null, or NULL when the book WAS built and compared
+   * and simply had no level on that side — which is the one case where "no
+   * support below this price" is a true statement about the market.
+   *
+   * Threaded rather than discarded: this method already knows which of the four
+   * cases it is in, and the packet, which does not, was inventing the answer.
+   */
+  reason: string | null;
+  /**
+   * When the level book behind these numbers was DERIVED, as an ISO string, or
+   * null when there is no book. Up to {@link CACHE_TTL_MS} before the caller
+   * asked — the packet must stamp THIS, not its own build time.
+   */
+  at: string | null;
+  /** Who produced them, interval included. See {@link SENTINEL_LEVEL_SOURCE}. */
+  source: string;
 }
 
 /**
@@ -162,12 +205,35 @@ export class SentinelChartContextAdapter implements ChartContextShim {
   async structureFor(symbol: string, price: number | null): Promise<SentinelStructure> {
     const book = await this.bookFor(symbol);
     const volumeRatio = book?.volumeRatio ?? null;
-    // A null/NaN price cannot be compared against a level. Silence, not a
-    // fabricated side — `levelBreak` is required to stay quiet without one.
-    if (price === null || !Number.isFinite(price) || !book?.levels) {
-      return { nearestSupport: null, nearestResistance: null, volumeRatio };
-    }
-    return { ...nearestLevels(book.levels, price), volumeRatio };
+    // The DERIVE time of the book, never "now" — the same instant `levelsFor`
+    // reports, so one packet cannot carry two ages for one cached object.
+    const at = book ? new Date(book.at).toISOString() : null;
+    const blind = (reason: string): SentinelStructure => ({
+      nearestSupport: null,
+      nearestResistance: null,
+      volumeRatio,
+      reason,
+      at,
+      source: SENTINEL_LEVEL_SOURCE,
+    });
+
+    // The three distinctions this method knows and used to throw away. A null/NaN
+    // price cannot be compared against a level: silence, not a fabricated side —
+    // `levelBreak` is required to stay quiet without one — but silence WITH ITS
+    // OWN REASON, which is not the same reason as having no book at all.
+    if (!book) return blind(LEVEL_BOOK_FAILED);
+    if (!book.levels) return blind(LEVEL_BOOK_UNBUILT);
+    if (price === null || !Number.isFinite(price)) return blind(LEVEL_BOOK_NO_PRICE);
+
+    // Book built, price finite, comparison made: a null from here IS a fact about
+    // the market, so no reason is attached and the packet's own wording stands.
+    return {
+      ...nearestLevels(book.levels, price),
+      volumeRatio,
+      reason: null,
+      at,
+      source: SENTINEL_LEVEL_SOURCE,
+    };
   }
 
   /**

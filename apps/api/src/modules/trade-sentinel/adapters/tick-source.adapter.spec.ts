@@ -29,9 +29,16 @@ function make() {
   const getInstrumentBySymbol = jest.fn().mockResolvedValue(null);
   const getLevels = jest.fn().mockReturnValue(null);
   const getNewsForSymbol = jest.fn().mockResolvedValue([]);
-  const structureFor = jest
-    .fn()
-    .mockResolvedValue({ nearestSupport: null, nearestResistance: null, volumeRatio: null });
+  const structureFor = jest.fn().mockResolvedValue({
+    nearestSupport: null,
+    nearestResistance: null,
+    volumeRatio: null,
+    // The adapter now reports WHY the levels are null and WHEN the book behind
+    // them was derived; the tick carries both through to the packet unchanged.
+    reason: 'no level book could be built for this symbol',
+    at: '2026-08-14T06:00:00.000Z',
+    source: 'signal-generator.analyze (15m level book)',
+  });
 
   const svc = new SentinelTickSource(
     { tradeTracker: { findUnique } } as never,
@@ -207,6 +214,41 @@ describe('SentinelTickSource', () => {
     expect(tick.volumeRatio).toBe(2.4);
   });
 
+  it('carries the level book’s REASON and derive time, not just its numbers', async () => {
+    const t = make();
+    t.structureFor.mockResolvedValue({
+      nearestSupport: null,
+      nearestResistance: null,
+      volumeRatio: null,
+      reason: 'the level-book lookup FAILED for this symbol',
+      at: '2026-08-14T05:59:00.000Z',
+      source: 'signal-generator.analyze (15m level book)',
+    });
+
+    const tick = await t.svc.tickFor('t1');
+
+    // Dropping any of these three is how the packet came to assert "no support
+    // level below this price" about a book it never managed to build, and to
+    // stamp a 60s-old cached reading with the packet's own build time.
+    expect(tick.structureReason).toBe('the level-book lookup FAILED for this symbol');
+    expect(tick.structureAt).toBe('2026-08-14T05:59:00.000Z');
+    expect(tick.structureSource).toBe('signal-generator.analyze (15m level book)');
+  });
+
+  it('carries a null reason through, so a real finding keeps its own wording', async () => {
+    const t = make();
+    t.structureFor.mockResolvedValue({
+      nearestSupport: 102,
+      nearestResistance: null,
+      volumeRatio: 2.4,
+      reason: null,
+      at: '2026-08-14T05:59:00.000Z',
+      source: 'signal-generator.analyze (15m level book)',
+    });
+
+    expect((await t.svc.tickFor('t1')).structureReason).toBeNull();
+  });
+
   it('has no expiry for cash, so the OI capture is correctly skipped', async () => {
     const t = make();
     await expect((await t.svc.tickFor('t1')).expiry).toBeNull();
@@ -229,6 +271,44 @@ describe('SentinelTickSource', () => {
 
       expect(tick.segment).toBe('OPT');
       expect(tick.expiry).toBe('2026-08-28');
+    });
+
+    it('reads the expiry date in IST, so it is not a day early east of UTC', async () => {
+      // The instrument master builds expiry at LOCAL midnight, so on an IST host
+      // a 28-Aug contract IS this instant. `toISOString().slice(0, 10)` gives
+      // '2026-08-27' for it — correct on a UTC host, wrong on every host that
+      // actually runs an Indian market session, and wrong ON EXPIRY DAY, when
+      // the agent is told the contract expired yesterday. It is also the
+      // OI-snapshot lineage key, so the two spellings orphan the series.
+      //
+      // Fixed to an ABSOLUTE instant rather than `new Date(2026, 7, 28)`: a
+      // local-midnight fixture is the same as UTC midnight on a UTC CI host, so
+      // the assertion would pass vacuously exactly where the bug is invisible.
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({
+        name: 'NIFTY',
+        expiry: new Date('2026-08-27T18:30:00.000Z'), // = 2026-08-28 00:00 IST
+      });
+
+      const tick = await t.svc.tickFor('t1');
+
+      expect(tick.expiry).toBe('2026-08-28');
+      expect(tick.expiry).not.toBe(
+        new Date('2026-08-27T18:30:00.000Z').toISOString().slice(0, 10),
+      );
+    });
+
+    it('does not roll the expiry FORWARD for a late-IST instant either', async () => {
+      // The mirror mutant: an IST-evening instant must stay on its own IST day.
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({
+        name: 'NIFTY',
+        expiry: new Date('2026-08-28T18:29:00.000Z'), // = 2026-08-28 23:59 IST
+      });
+
+      expect((await t.svc.tickFor('t1')).expiry).toBe('2026-08-28');
     });
 
     it('looks the level book up by the UNDERLYING NAME, not the tradingsymbol', async () => {
@@ -345,6 +425,11 @@ describe('SentinelTickSource', () => {
       // comparable against a level or a strike.
       expect(tick.underlyingLtp).toBe(24010);
       expect(t.getLevels).toHaveBeenCalledWith('26000');
+      // The TICK's time, not this instant. The spot may be up to
+      // SPOT_STALENESS_MS old and still be served, so stamping "now" on it tells
+      // the agent a minute-old price was read at packet build.
+      expect(tick.underlyingLtpAt).toBe(new Date(NOW.getTime() - 1000).toISOString());
+      expect(tick.underlyingLtpAt).not.toBe(NOW.toISOString());
     });
 
     it('drops a STALE spot rather than comparing levels against a frozen number', async () => {
@@ -359,6 +444,8 @@ describe('SentinelTickSource', () => {
 
       const tick = await t.svc.tickFor('t1');
       expect(tick.underlyingLtp).toBeNull();
+      // No reading, so no read time to claim for one.
+      expect(tick.underlyingLtpAt).toBeNull();
     });
 
     it('reports no spot rather than falling back to the premium', async () => {

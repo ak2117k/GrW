@@ -40,9 +40,13 @@ const tick = (over: Partial<TickReading> = {}): TickReading => ({
   qty: 10,
   ltp: 100,
   underlyingLtp: 100,
+  underlyingLtpAt: null,
   structureSymbol: 'T1',
   nearestSupport: null,
   nearestResistance: null,
+  structureReason: null,
+  structureAt: null,
+  structureSource: 'signal-generator.analyze (15m level book)',
   holdingHigh: null,
   holdingLow: null,
   entryTime: new Date('2026-08-14T04:00:00.000Z'),
@@ -360,6 +364,30 @@ describe('SentinelCycleService — failure isolation', () => {
 
 describe('SentinelCycleService — shadow mode is structural', () => {
   const FORBIDDEN = /execution|order|broker|angel|smart-?api|trade-engine|auto-trade/i;
+
+  /**
+   * How an import specifier is recognised while walking the graph. BOTH quote
+   * styles — a single-quote-only pattern is a hole the whole guard falls
+   * through. One double-quoted import, which a formatter change or a hand edit
+   * produces without comment, is invisible to the walk; the edge it hides is
+   * never followed, so the entire subgraph beyond it goes unchecked while the
+   * suite stays green. The guard would then report the property rather than
+   * enforce it, which is precisely what the transitive walk exists to avoid.
+   *
+   * Extracted and asserted directly below, because the repo happens to contain
+   * no double-quoted imports today — so widening the pattern changes no
+   * behaviour that any graph-walking test could observe.
+   */
+  const IMPORT_SPECIFIER = /from\s+['"]([^'"]+)['"]/g;
+
+  it('recognises an import specifier in either quote style', () => {
+    const specs = (src: string) => [...src.matchAll(IMPORT_SPECIFIER)].map((m) => m[1]);
+    expect(specs("import { a } from './single';")).toEqual(['./single']);
+    expect(specs('import { a } from "./double";')).toEqual(['./double']);
+    expect(specs('export type { T } from "../far/away";')).toEqual(['../far/away']);
+    // And the two together, in the order they appear.
+    expect(specs("import a from './x';\nimport b from \"./y\";")).toEqual(['./x', './y']);
+  });
   /**
    * Both anchors, because the cycle is the object under test but the RUNNER is
    * what production actually calls.
@@ -423,7 +451,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
       if (seen.has(node.file)) continue;
       seen.add(node.file);
       out.push(node);
-      for (const m of readFileSync(node.file, 'utf8').matchAll(/from\s+'([^']+)'/g)) {
+      for (const m of readFileSync(node.file, 'utf8').matchAll(IMPORT_SPECIFIER)) {
         const spec = m[1];
         // The specifier itself is checked even when it does not resolve to a
         // file in this repo, so a package like `smartapi-javascript` is caught.

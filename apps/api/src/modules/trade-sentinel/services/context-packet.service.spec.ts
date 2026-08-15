@@ -11,6 +11,15 @@ import {
   type TickSnapshot,
 } from './context-packet.service';
 
+/**
+ * What `SentinelChartContextAdapter.SENTINEL_LEVEL_SOURCE` evaluates to, written
+ * as a literal rather than imported: importing the adapter would drag
+ * `SignalGeneratorService` and its whole graph into a unit spec for a service
+ * that never touches it. The point being tested here is that the packet uses
+ * WHATEVER the tick carried, not this particular string.
+ */
+const LEVEL_SOURCE = 'signal-generator.analyze (15m level book)';
+
 describe('block helpers', () => {
   it('marks a missing block with a reason, never a zero', () => {
     const block = absent('fii factor is a stub');
@@ -133,8 +142,12 @@ describe('ContextPacketService', () => {
     qty: 100,
     ltp: 120,
     underlyingLtp: 120,
+    underlyingLtpAt: null,
     nearestSupport: null,
     nearestResistance: null,
+    structureReason: null,
+    structureAt: null,
+    structureSource: LEVEL_SOURCE,
     holdingHigh: 125,
     holdingLow: 98,
     entryTime: new Date('2026-08-14T04:00:00Z'),
@@ -301,9 +314,145 @@ describe('ContextPacketService', () => {
       expect(packet.flow.volumeRatio.available).toBe(true);
       if (packet.flow.volumeRatio.available) {
         expect(packet.flow.volumeRatio.value).toBe(good);
-        expect(packet.flow.volumeRatio.source).toBe('market-data');
       }
     }
+  });
+
+  it('names the real producer of the volume ratio, with its interval', async () => {
+    // It comes off `SignalGeneratorService.analyze(..., '15m').volumeRatio`, not
+    // out of market-data — which is what this block used to claim. The interval
+    // is part of the identity: two packets whose provenance strings match must
+    // not be able to carry a 5-minute and a daily reading.
+    const packet = await svc.build(
+      entry,
+      { ...tick, volumeRatio: 1.8, structureSource: LEVEL_SOURCE },
+      null,
+    );
+    expect(packet.flow.volumeRatio.available).toBe(true);
+    if (packet.flow.volumeRatio.available) {
+      expect(packet.flow.volumeRatio.source).toBe(LEVEL_SOURCE);
+      expect(packet.flow.volumeRatio.source).toMatch(/15m/);
+      expect(packet.flow.volumeRatio.source).not.toBe('market-data');
+    }
+  });
+
+  it('dates the level-derived blocks from the BOOK, not from the packet build', async () => {
+    // `nearestSupport`, `nearestResistance` and `volumeRatio` all come off one
+    // cached level book that may be up to 60s old — the same object whose derive
+    // time `structure.levelBook` reports. Stamping the build time on them made
+    // one packet carry two different ages for a single read.
+    const derivedAt = '2026-08-14T06:00:00.000Z';
+    const packet = await svc.build(
+      entry,
+      {
+        ...tick,
+        nearestSupport: 118,
+        nearestResistance: 124,
+        volumeRatio: 1.8,
+        structureAt: derivedAt,
+      },
+      null,
+    );
+
+    expect(packet.structure.nearestSupport).toMatchObject({ available: true, at: derivedAt });
+    expect(packet.structure.nearestResistance).toMatchObject({ available: true, at: derivedAt });
+    expect(packet.flow.volumeRatio).toMatchObject({ available: true, at: derivedAt });
+    // And it is genuinely NOT the build time, or this test proves nothing.
+    expect(packet.session.nowUtc).not.toBe(derivedAt);
+  });
+
+  it('dates the underlying spot from when it was read, not from the packet build', async () => {
+    const readAt = '2026-08-14T05:59:10.000Z';
+    const packet = await svc.build(
+      entry,
+      { ...tick, underlyingLtp: 24010, underlyingLtpAt: readAt },
+      null,
+    );
+    expect(packet.position.underlyingLtp).toMatchObject({ available: true, at: readAt });
+    expect(packet.session.nowUtc).not.toBe(readAt);
+  });
+
+  it('falls back to the build time only when the tick has no capture time', async () => {
+    const packet = await svc.build(
+      entry,
+      { ...tick, nearestSupport: 118, volumeRatio: 1.8, underlyingLtp: 120 },
+      null,
+    );
+    expect(packet.structure.nearestSupport).toMatchObject({ at: packet.session.nowUtc });
+    expect(packet.flow.volumeRatio).toMatchObject({ at: packet.session.nowUtc });
+    expect(packet.position.underlyingLtp).toMatchObject({ at: packet.session.nowUtc });
+  });
+
+  describe('a null level never asserts a market fact the sensor did not establish', () => {
+    // The defect this replaces: `nearestSupport` carried the fixed reason "no
+    // support level below this price in the level book" in all FOUR cases it can
+    // be null, only one of which that sentence describes. In the other three the
+    // packet asserted market structure — with provenance, persisted verbatim —
+    // where the truth was that we never looked. It contradicted `levelBook` in
+    // the very same block.
+    const STRUCTURE_UNSEEN =
+      'the underlying behind this contract could not be resolved, so this instrument’s level ' +
+      'book was never looked up.';
+
+    it('uses the tick’s reason when the level book was never consulted', async () => {
+      const packet = await svc.build(
+        entry,
+        { ...tick, nearestSupport: null, nearestResistance: null, structureReason: STRUCTURE_UNSEEN },
+        null,
+      );
+
+      expect(packet.structure.nearestSupport.available).toBe(false);
+      expect(packet.structure.nearestResistance.available).toBe(false);
+      if (!packet.structure.nearestSupport.available) {
+        expect(packet.structure.nearestSupport.reason).toBe(STRUCTURE_UNSEEN);
+        // The positive claim about market structure must be GONE, not merely
+        // accompanied — an LLM handed both reads the confident one.
+        expect(packet.structure.nearestSupport.reason).not.toMatch(/no support level below/i);
+      }
+      if (!packet.structure.nearestResistance.available) {
+        expect(packet.structure.nearestResistance.reason).toBe(STRUCTURE_UNSEEN);
+        expect(packet.structure.nearestResistance.reason).not.toMatch(/no resistance level above/i);
+      }
+    });
+
+    it('still says "no level on that side" when the book WAS built and compared', async () => {
+      // structureReason null means the adapter got a book and a price and found
+      // nothing below — the one case where the market-structure claim is true.
+      // Losing this would replace a real finding with a shrug.
+      const packet = await svc.build(entry, { ...tick, structureReason: null }, null);
+      expect(packet.structure.nearestSupport.available).toBe(false);
+      if (!packet.structure.nearestSupport.available) {
+        expect(packet.structure.nearestSupport.reason).toMatch(/no support level below/i);
+      }
+    });
+
+    it('does not contradict the levelBook block about the same failure', async () => {
+      // The two blocks are two lines apart in the packet the agent reads. When
+      // the underlying is unresolved they must tell the same story.
+      const packet = await svc.build(
+        entry,
+        { ...tick, structureSymbol: null, structureReason: STRUCTURE_UNSEEN },
+        null,
+      );
+      expect(packet.structure.levelBook.available).toBe(false);
+      expect(packet.structure.nearestSupport.available).toBe(false);
+      if (!packet.structure.levelBook.available && !packet.structure.nearestSupport.available) {
+        expect(packet.structure.levelBook.reason).toMatch(/FAILURE TO LOOK/);
+        expect(packet.structure.nearestSupport.reason).toBe(STRUCTURE_UNSEEN);
+      }
+    });
+
+    it('lets a stated reason override even for a NaN level', async () => {
+      const packet = await svc.build(
+        entry,
+        { ...tick, nearestSupport: NaN, structureReason: STRUCTURE_UNSEEN },
+        null,
+      );
+      expect(packet.structure.nearestSupport.available).toBe(false);
+      if (!packet.structure.nearestSupport.available) {
+        expect(packet.structure.nearestSupport.reason).toBe(STRUCTURE_UNSEEN);
+      }
+    });
   });
 
   it('says there are no OI walls rather than showing empty ones', async () => {
@@ -613,8 +762,12 @@ describe('ContextPacketService — the evidence sources are keyed by the underly
       qty: 75,
       ltp: 120,
       underlyingLtp: 24010,
+      underlyingLtpAt: null,
       nearestSupport: null,
       nearestResistance: null,
+      structureReason: null,
+      structureAt: null,
+      structureSource: LEVEL_SOURCE,
       holdingHigh: null,
       holdingLow: null,
       entryTime: new Date('2026-08-14T04:00:00Z'),

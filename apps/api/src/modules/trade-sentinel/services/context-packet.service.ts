@@ -187,9 +187,55 @@ export interface TickSnapshot {
    * than fall back to `ltp` (see the SCALE HAZARD note on TripwireInput).
    */
   underlyingLtp: number | null;
+  /**
+   * When `underlyingLtp` was actually READ, as an ISO string, or null to fall
+   * back to the packet's build time.
+   *
+   * The spot may be up to `SPOT_STALENESS_MS` (60s) old and still be served, so
+   * stamping the build time on it puts a wrong `at` on a block whose whole
+   * contract is "present WITH provenance". Same rule as `oiWallsAt`. Null for
+   * cash, where the underlying IS `ltp` and there is no separate read to date.
+   */
+  underlyingLtpAt: string | null;
   /** Nearest level from the level book, on the UNDERLYING's scale. */
   nearestSupport: number | null;
   nearestResistance: number | null;
+  /**
+   * WHY the two levels above are null — or null itself when the level book was
+   * built AND compared against a real price and simply had no level on that side.
+   *
+   * The distinction is the whole point. A null level has four causes and only
+   * ONE of them is a fact about the market; the other three are failures to look
+   * (no underlying resolved, no level book built, no price to compare against).
+   * The packet used to describe all four with the single fixed sentence "no
+   * support level below this price in the level book", which asserts market
+   * structure — with provenance, persisted verbatim — in three cases where we
+   * never got as far as looking. `SentinelChartContextAdapter.structureFor`
+   * already knows which case it is in; this field is that knowledge, carried
+   * instead of discarded. See `unresolvedUnderlying`.
+   */
+  structureReason: string | null;
+  /**
+   * When the level book behind `nearestSupport`, `nearestResistance` AND
+   * `volumeRatio` was DERIVED — up to `CACHE_TTL_MS` (60s) before this packet.
+   *
+   * All three come off one `CachedBook`, the same object whose derive time
+   * `levelsFor` reports on `structure.levelBook`. Without this a single packet
+   * carried `structure.levelBook.at = T-58s` beside
+   * `structure.nearestSupport.at = T` for two readings of the SAME cached
+   * object. Null falls back to the build time.
+   */
+  structureAt: string | null;
+  /**
+   * Who produced those three, interval included — `SENTINEL_LEVEL_SOURCE`.
+   *
+   * Threaded rather than written here as a constant, for the reason
+   * `SourcedValue.source` exists: this service does not know which interval the
+   * book was built from, and a provenance string that does not identify the data
+   * is not provenance. `flow.volumeRatio` in particular used to read
+   * `'market-data'`, which names a service that never produced it.
+   */
+  structureSource: string;
   holdingHigh: number | null;
   holdingLow: number | null;
   entryTime: Date;
@@ -343,7 +389,7 @@ const PRIOR_VERDICT_LIMIT = 3;
  * absence means, so the news block does not explain itself by talking about the
  * level book.
  */
-function unresolvedUnderlying(what: string): string {
+export function unresolvedUnderlying(what: string): string {
   return (
     `the underlying behind this contract could not be resolved, so ${what} was never looked ` +
     'up. This is a FAILURE TO LOOK, not a finding — do not read it as an absence in the market.'
@@ -480,7 +526,8 @@ export class ContextPacketService {
         underlyingLtp: numberBlock(
           tick.underlyingLtp,
           'market-data (underlying spot)',
-          at,
+          // The spot's own read time — it is allowed to be up to a minute old.
+          tick.underlyingLtpAt ?? at,
           "the underlying's price could not be resolved — levels and OI walls below " +
             'are on the underlying scale and CANNOT be compared against ltp',
         ),
@@ -522,24 +569,33 @@ export class ContextPacketService {
         : absent('no thesis formed yet for this position'),
       structure: {
         levelBook,
+        // The reason is the tick's when it has one, and only falls through to
+        // the market-structure wording when the book was built AND compared —
+        // i.e. when "there is no level on that side" is actually true. All three
+        // blocks below are stamped with the level book's DERIVE time, so they
+        // cannot disagree with `structure.levelBook.at` about the age of the one
+        // cached object they all came from.
         nearestSupport: numberBlock(
           tick.nearestSupport,
-          'level book (underlying scale)',
-          at,
-          'no support level below this price in the level book',
+          `${tick.structureSource} — nearest level below, underlying scale`,
+          tick.structureAt ?? at,
+          tick.structureReason ?? 'no support level below this price in the level book',
         ),
         nearestResistance: numberBlock(
           tick.nearestResistance,
-          'level book (underlying scale)',
-          at,
-          'no resistance level above this price in the level book',
+          `${tick.structureSource} — nearest level above, underlying scale`,
+          tick.structureAt ?? at,
+          tick.structureReason ?? 'no resistance level above this price in the level book',
         ),
       },
       flow: {
         volumeRatio: numberBlock(
           tick.volumeRatio,
-          'market-data',
-          at,
+          // The REAL producer, interval included — not 'market-data', which is a
+          // service this number never passed through. The wording of the reason
+          // is left alone: "not available" claims nothing about the market.
+          tick.structureSource,
+          tick.structureAt ?? at,
           'session volume vs average not available or not a finite reading',
         ),
         oiWalls:

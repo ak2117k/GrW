@@ -5,7 +5,8 @@ import { MarketDataRepository } from '../../market-data/repositories/market-data
 import { NewsAggregatorService } from '../../news/services/news-aggregator.service';
 import type { Segment, Side } from '../charges';
 import type { TickReading, TickSource } from '../services/sentinel-cycle.service';
-import { SentinelChartContextAdapter } from './chart-context.adapter';
+import { unresolvedUnderlying } from '../services/context-packet.service';
+import { SENTINEL_LEVEL_SOURCE, SentinelChartContextAdapter } from './chart-context.adapter';
 import { normaliseSymbol } from '../symbols';
 
 /**
@@ -91,12 +92,50 @@ interface Underlying {
 
 const NO_UNDERLYING: Underlying = { name: null, token: null };
 
-/** What the level book reports when there is no symbol to ask about. */
+/** No spot, and therefore no capture time to report for one. */
+const NO_SPOT = { ltp: null, at: null } as const;
+
+/**
+ * What the level book reports when there is no symbol to ask about — the fourth
+ * way the nearest levels come back null, and the only one this file owns.
+ *
+ * The reason is the SAME sentence the packet already puts on `structure.levelBook`
+ * for this case. Without it the packet described these two nulls as "no support
+ * level below this price in the level book" — a positive claim about market
+ * structure, two lines below a block correctly saying we never resolved the
+ * underlying at all.
+ */
 const NO_STRUCTURE = {
   nearestSupport: null,
   nearestResistance: null,
   volumeRatio: null,
+  reason: unresolvedUnderlying("this instrument's level book"),
+  at: null,
+  source: SENTINEL_LEVEL_SOURCE,
 } as const;
+
+/**
+ * A Date as 'YYYY-MM-DD' IN IST — never `toISOString().slice(0, 10)`.
+ *
+ * The instrument master builds an expiry at LOCAL midnight (see
+ * `AngelOneAdapterService`/`MarketFeedService`), so on an IST host a 28-Aug
+ * contract is the instant 2025-08-27T18:30:00Z and `toISOString()` slices it to
+ * `2025-08-27`. Correct on a UTC host and wrong on every host east of UTC, which
+ * is every host this platform actually runs a market session on. It costs twice:
+ * the agent is told the contract expired yesterday ON EXPIRY DAY, and `expiry`
+ * is the OI-snapshot lineage key, so a timezone change silently orphans the
+ * series and re-bases `prev`.
+ *
+ * Same `Asia/Kolkata` Intl formatter as `istWallClock`. 'en-CA' emits ISO order.
+ */
+export function istDateOnly(date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
 
 /**
  * `TickSource` over `trade_trackers` plus the level book and the news feed.
@@ -183,7 +222,12 @@ export class SentinelTickSource implements TickSource {
     // position, and does so in a way that looks exactly like "no level was
     // touched". The cycle repairs this defensively too; it is set here so the
     // repair never has to fire.
-    const underlyingLtp = isCash ? ltp : this.spotFor(underlying.token);
+    //
+    // The `at` is the spot's own read time for a derivative, and null for cash —
+    // where the underlying IS `ltp`, which carries no timestamp of its own, so
+    // the packet's build time is the honest fallback rather than a borrowed one.
+    const spot = isCash ? { ltp, at: null } : this.spotFor(underlying.token);
+    const underlyingLtp = spot.ltp;
 
     /**
      * THE SYMBOL THE LEVEL BOOK AND THE NEWS FEED ARE KEYED BY — and for a
@@ -225,12 +269,20 @@ export class SentinelTickSource implements TickSource {
       qty: Math.abs(row.qty),
       ltp,
       underlyingLtp,
+      underlyingLtpAt: spot.at,
       // Carried so the packet builder and the thesis inference look their
       // evidence up by the SAME symbol these sensors did. Resolved once, here;
       // a second resolution downstream is how the two paths came to disagree.
       structureSymbol,
       nearestSupport: structure.nearestSupport,
       nearestResistance: structure.nearestResistance,
+      // Provenance for the three level-book-derived numbers above and below.
+      // `structureReason` is null when the book WAS built and compared — only
+      // then may the packet say "no level on that side", which is a claim about
+      // the market rather than about us.
+      structureReason: structure.reason,
+      structureAt: structure.at,
+      structureSource: structure.source,
       holdingHigh: row.holdingHigh,
       holdingLow: row.holdingLow,
       entryTime: row.entryTime,
@@ -252,14 +304,17 @@ export class SentinelTickSource implements TickSource {
    * the underlying's scale while the contract's `ltp` is a premium — comparing
    * 120 against a 24000 strike reads as a permanent breach.
    */
-  private spotFor(underlyingToken: string | null): number | null {
-    if (!underlyingToken) return null;
+  private spotFor(underlyingToken: string | null): { ltp: number | null; at: string | null } {
+    if (!underlyingToken) return NO_SPOT;
 
     const book = this.levelBooks.getLevels(underlyingToken);
-    if (!book || !Number.isFinite(book.spot) || book.spot <= 0) return null;
+    if (!book || !Number.isFinite(book.spot) || book.spot <= 0) return NO_SPOT;
     // See SPOT_STALENESS_MS — a frozen spot is worse than no spot.
-    if (Date.now() - book.lastTickAt.getTime() > SPOT_STALENESS_MS) return null;
-    return book.spot;
+    if (Date.now() - book.lastTickAt.getTime() > SPOT_STALENESS_MS) return NO_SPOT;
+    // The TICK time, not now: this reading is allowed to be up to
+    // SPOT_STALENESS_MS old, and the packet stamps `at` from it. Reporting the
+    // build time would tell the agent a minute-old spot was read this instant.
+    return { ltp: book.spot, at: book.lastTickAt.toISOString() };
   }
 
   /**
@@ -328,7 +383,7 @@ export class SentinelTickSource implements TickSource {
       const contract = await this.instruments.getInstrumentByToken(token);
       const expiry = contract?.expiry;
       if (!expiry) return null;
-      return expiry.toISOString().slice(0, 10);
+      return istDateOnly(expiry);
     } catch {
       // A missing expiry means no OI capture for this position — which the
       // snapshot service already treats as a stated absence.

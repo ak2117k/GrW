@@ -1,6 +1,9 @@
 import { Logger } from '@nestjs/common';
 import type { LevelsSnapshot } from '../../signal-generator/services/signal-generator.service';
 import {
+  LEVEL_BOOK_FAILED,
+  LEVEL_BOOK_NO_PRICE,
+  LEVEL_BOOK_UNBUILT,
   SENTINEL_LEVEL_INTERVAL,
   SENTINEL_LEVEL_SOURCE,
   SentinelChartContextAdapter,
@@ -184,22 +187,86 @@ describe('SentinelChartContextAdapter', () => {
     expect(first?.at).toBe('2026-08-14T06:00:00.000Z');
   });
 
-  it('reports the volume ratio alongside the levels', async () => {
+  it('reports the volume ratio alongside the levels, and NO reason', async () => {
     const t = make();
-    await expect(t.svc.structureFor('SUZLON-EQ', 100.5)).resolves.toEqual({
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-14T06:00:00Z'));
+    const result = await t.svc.structureFor('SUZLON-EQ', 100.5);
+    jest.useRealTimers();
+
+    expect(result).toEqual({
       nearestSupport: 100,
       nearestResistance: 106,
       volumeRatio: 2.5,
+      // The book WAS built and WAS compared, so a null on either side would be a
+      // true statement about the market and the packet's own wording stands.
+      // Anything non-null here would suppress that wording for a real finding.
+      reason: null,
+      at: '2026-08-14T06:00:00.000Z',
+      source: SENTINEL_LEVEL_SOURCE,
     });
   });
 
-  it('stays silent on levels without a price, but still reports the volume ratio', async () => {
+  it('stamps the level book DERIVE time, not the moment it was asked', async () => {
+    // The same cached object serves `levelsFor` and `structureFor`, so the two
+    // must never report different ages for it — one packet carrying
+    // `levelBook.at = T-30s` beside `nearestSupport.at = T` is provenance that
+    // contradicts itself about a single read.
     const t = make();
-    await expect(t.svc.structureFor('SUZLON-EQ', null)).resolves.toEqual({
-      nearestSupport: null,
-      nearestResistance: null,
-      volumeRatio: 2.5,
-    });
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-14T06:00:00Z'));
+    const book = await t.svc.levelsFor('SUZLON-EQ');
+
+    jest.setSystemTime(new Date('2026-08-14T06:00:30Z'));
+    const structure = await t.svc.structureFor('SUZLON-EQ', 100.5);
+    jest.useRealTimers();
+
+    expect(t.analyze).toHaveBeenCalledTimes(1); // proves it is the SAME book
+    expect(structure.at).toBe('2026-08-14T06:00:00.000Z');
+    expect(structure.at).toBe(book?.at);
+  });
+
+  it('names the reason as a FAILURE TO LOOK when there is no price to compare', async () => {
+    const t = make();
+    const result = await t.svc.structureFor('SUZLON-EQ', null);
+
+    expect(result.nearestSupport).toBeNull();
+    expect(result.nearestResistance).toBeNull();
+    // The volume ratio does not need a price, so it survives.
+    expect(result.volumeRatio).toBe(2.5);
+    expect(result.reason).toBe(LEVEL_BOOK_NO_PRICE);
+    // The distinction the packet depends on: this must not be reported as the
+    // market having no level on either side.
+    expect(result.reason).not.toBeNull();
+    expect(result.reason).toMatch(/FAILURE TO LOOK/);
+  });
+
+  it('names a NaN price as a failure to look, exactly as it does a null one', async () => {
+    const t = make();
+    await expect((await t.svc.structureFor('SUZLON-EQ', Number.NaN)).reason).toBe(
+      LEVEL_BOOK_NO_PRICE,
+    );
+  });
+
+  it('distinguishes an UNBUILT level book from one whose lookup FAILED', async () => {
+    // Three causes, three different sentences — the adapter is the only place
+    // that can tell them apart, and it used to discard the distinction.
+    const unbuilt = make();
+    unbuilt.getInstrumentBySymbol.mockResolvedValue(null);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const noInstrument = await unbuilt.svc.structureFor('NOPE', 100.5);
+    expect(noInstrument.reason).toBe(LEVEL_BOOK_UNBUILT);
+
+    const nonSetup = make();
+    nonSetup.analyze.mockResolvedValue({ kind: 'no-setup' });
+    expect((await nonSetup.svc.structureFor('SUZLON-EQ', 100.5)).reason).toBe(LEVEL_BOOK_UNBUILT);
+
+    const threw = make();
+    threw.analyze.mockRejectedValue(new Error('candles unavailable'));
+    const failed = await threw.svc.structureFor('SUZLON-EQ', 100.5);
+    expect(failed.reason).toBe(LEVEL_BOOK_FAILED);
+    // No book at all, so there is no derive time to claim — and null makes the
+    // packet fall back to its build time rather than invent one.
+    expect(failed.at).toBeNull();
+    expect(failed.reason).not.toBe(LEVEL_BOOK_UNBUILT);
   });
 
   it('drops a non-finite volume ratio rather than passing NaN to a sensor', async () => {

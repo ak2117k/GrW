@@ -2,11 +2,13 @@
  * Charge model for Indian equity/F&O round trips, and the "green floor" derived
  * from it.
  *
- * The floor is the price at which the trade's NET P&L (after every statutory and
- * broker charge) equals the charges plus a safety margin. Once unrealised net
- * P&L clears that bar the floor ARMS: from then on the trade must not be allowed
- * back into the red. This is deliberately arithmetic, not judgment — the agent
- * decides when to take MORE than the floor, never whether the floor applies.
+ * The floor is the exit price at which the trade's NET P&L — gross minus every
+ * statutory and broker charge — equals the safety margin. Equivalently, and this
+ * is the form the solver below actually uses: GROSS P&L at that price equals the
+ * charges incurred there PLUS the margin. Once unrealised net P&L clears the
+ * margin the floor ARMS: from then on the trade must not be allowed back into the
+ * red. This is deliberately arithmetic, not judgment — the agent decides when to
+ * take MORE than the floor, never whether the floor applies.
  *
  * Rates are Angel One / NSE published values as of 2026-08. Exchange transaction
  * rates are NSE's; BSE differs and is not modelled. These are approximations for
@@ -26,7 +28,29 @@ export type Side = 'LONG' | 'SHORT';
 export const GREEN_FLOOR_MARGIN_RUPEES = 150;
 
 const BROKERAGE_FLAT = 20; // Rs per executed order, capped
-const BROKERAGE_PCT = 0.0025; // Angel One: Rs 20 or 0.25% per order, whichever is lower
+
+/**
+ * Percentage brokerage per executed order, charged as the LOWER of this and
+ * {@link BROKERAGE_FLAT}. PER SEGMENT, because Angel One's slabs differ:
+ * delivery is "Rs 20 or 0.1%", intraday and futures are "Rs 20 or 0.25%", and
+ * options are a flat Rs 20 with no percentage arm at all (hence 0 here, and the
+ * early return in {@link legBrokerage} that never reads it).
+ *
+ * A single 0.25% applied to delivery — which is what this was — overstates
+ * delivery brokerage, and it only BINDS below roughly Rs 8,000 of leg turnover
+ * (above that the flat Rs 20 is the lower of the two and the rate is irrelevant).
+ * The error was therefore small and in the conservative direction: it moves the
+ * floor UP, so the floor arms later rather than sooner. Stated because a rate
+ * that is wrong in a safe direction is still wrong, and the next reader must not
+ * have to rediscover which.
+ */
+const BROKERAGE_PCT: Record<Segment, number> = {
+  EQ_DELIVERY: 0.001,
+  EQ_INTRADAY: 0.0025,
+  FUT: 0.0025,
+  OPT: 0,
+};
+
 const GST = 0.18;
 
 /**
@@ -71,7 +95,7 @@ export interface ChargeInput {
 /** Brokerage on one executed order: flat for options, else the lower of flat vs %. */
 function legBrokerage(segment: Segment, legTurnover: number): number {
   if (segment === 'OPT') return BROKERAGE_FLAT;
-  return Math.min(BROKERAGE_FLAT, legTurnover * BROKERAGE_PCT);
+  return Math.min(BROKERAGE_FLAT, legTurnover * BROKERAGE_PCT[segment]);
 }
 
 /** Total round-trip charges in rupees. Always >= 0. */
@@ -111,7 +135,16 @@ export interface GreenFloor {
   armed: boolean;
   /**
    * The exit price at which net P&L is at least the margin, rounded to the next
-   * tick in the conservative direction. Null if qty is zero.
+   * tick in the conservative direction.
+   *
+   * NULL when there is no such PRICE. Two ways that happens: qty is zero, so the
+   * solve is meaningless; or the solved price is zero or negative, which means
+   * the margin is simply unreachable at this notional. A short OPT at entry Rs 2
+   * on 75 lots solves to -0.64 — arithmetically correct and not a price. Reported
+   * as null rather than as the number, because the packet hands an UNARMED floor
+   * to the agent as "a target", and a target of minus sixty-four paise is a
+   * target no market can print. Null is read as "no floor could be solved", which
+   * is the truth.
    */
   floorPrice: number | null;
   netPnl: number;
@@ -158,9 +191,14 @@ export function computeGreenFloor({ segment, entryPrice, ltp, qty, side }: Green
     if (converged) break;
   }
 
+  // Only a POSITIVE price is a price. `> 0` rather than `<= 0` so a NaN that
+  // escaped the solve becomes null too, rather than reaching the packet as a
+  // reading. See `GreenFloor.floorPrice`.
+  const rounded = roundToTickConservative(floorPrice, dir);
+
   return {
     armed: netPnl >= GREEN_FLOOR_MARGIN_RUPEES,
-    floorPrice: roundToTickConservative(floorPrice, dir),
+    floorPrice: rounded > 0 ? rounded : null,
     netPnl,
     charges,
     marginRupees: GREEN_FLOOR_MARGIN_RUPEES,

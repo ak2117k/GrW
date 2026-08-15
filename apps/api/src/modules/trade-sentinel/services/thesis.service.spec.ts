@@ -33,6 +33,8 @@ const ENTRY_TIME = new Date('2026-08-13T04:15:00.000Z');
 const tick: TickSnapshot = {
   segment: 'EQ_DELIVERY',
   side: 'LONG',
+  // Cash: the tradingsymbol IS the level book's key, so it matches entry.symbol.
+  structureSymbol: 'INFY',
   entryPrice: 1455,
   qty: 10,
   ltp: 1470,
@@ -272,7 +274,48 @@ describe('ThesisService', () => {
         source: 'chart-context.service (1d)',
         at: '2026-08-14T04:00:00.000Z',
       });
+      // Cash: `structureSymbol` and the tradingsymbol are the same string.
       expect(levelsFor).toHaveBeenCalledWith('INFY');
+    });
+
+    it('looks the structure up by structureSymbol, NOT by the roster symbol', async () => {
+      // A derivative: the roster keeps the broker's tradingsymbol, but the
+      // level book is keyed by the underlying. The thesis is what every later
+      // "has it turned?" judgement is measured against, so inferring it from a
+      // structure block that silently never loaded is the worst place in the
+      // module for this to go wrong.
+      levelsFor.mockResolvedValue({ value: [1], source: 'chart-context.service (15m)' });
+      create.mockResolvedValue(reply(goodDraft));
+
+      await svc.ensureFor(
+        { ...entry, symbol: 'NIFTY28AUG2524000CE' },
+        { ...tick, structureSymbol: 'NIFTY' },
+      );
+
+      expect(levelsFor).toHaveBeenCalledWith('NIFTY');
+      expect(levelsFor).not.toHaveBeenCalledWith('NIFTY28AUG2524000CE');
+      // The model is still told which CONTRACT it is reading — only the
+      // structure lookup uses the underlying.
+      const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
+      expect(payload.symbol).toBe('NIFTY28AUG2524000CE');
+    });
+
+    it('asks nothing at all when the underlying is unresolved, and says why', async () => {
+      create.mockResolvedValue(reply(goodDraft));
+
+      await svc.ensureFor(
+        { ...entry, symbol: 'NIFTY28AUG2524000CE' },
+        { ...tick, structureSymbol: null },
+      );
+
+      // No fallback to the tradingsymbol: that call is guaranteed to miss, and
+      // the miss would be reported as "no level book for this symbol" — a claim
+      // about the instrument, not about us.
+      expect(levelsFor).not.toHaveBeenCalled();
+      const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
+      expect(payload.structure.available).toBe(false);
+      expect(payload.structure.reason).toMatch(/could not be resolved/i);
+      expect(payload.structure.reason).toMatch(/failure to look/i);
     });
 
     it('still infers when the level book source throws', async () => {

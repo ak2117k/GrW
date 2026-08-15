@@ -225,6 +225,10 @@ export class SentinelTickSource implements TickSource {
       qty: Math.abs(row.qty),
       ltp,
       underlyingLtp,
+      // Carried so the packet builder and the thesis inference look their
+      // evidence up by the SAME symbol these sensors did. Resolved once, here;
+      // a second resolution downstream is how the two paths came to disagree.
+      structureSymbol,
       nearestSupport: structure.nearestSupport,
       nearestResistance: structure.nearestResistance,
       holdingHigh: row.holdingHigh,

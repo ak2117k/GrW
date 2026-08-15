@@ -127,6 +127,8 @@ describe('ContextPacketService', () => {
   const tick: TickSnapshot = {
     segment: 'EQ_INTRADAY',
     side: 'LONG',
+    // Cash: the tradingsymbol IS the level book's key.
+    structureSymbol: 'INFY',
     entryPrice: 100,
     qty: 100,
     ltp: 120,
@@ -559,5 +561,148 @@ describe('ContextPacketService', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+/**
+ * WHICH SYMBOL REACHES EACH EVIDENCE SOURCE.
+ *
+ * The packet's other blocks are keyed by the broker's tradingsymbol, correctly —
+ * `position.symbol` has to stay joinable to the tracker the verdict came from.
+ * These two are not: the level book is looked up in the instrument master
+ * (cash equities) and the headlines in `relatedSymbols` (base symbols), so a
+ * derivative tradingsymbol matches NEITHER and both blocks go permanently
+ * absent — in the packet the agent actually reads.
+ *
+ * The absence of exactly this assertion is why that survived a review round.
+ */
+describe('ContextPacketService — the evidence sources are keyed by the underlying', () => {
+  const OPTION_TRADINGSYMBOL = 'NIFTY28AUG2524000CE';
+
+  function make() {
+    const levelsFor = jest.fn().mockResolvedValue({ value: [1], source: 'chart' });
+    const recentFor = jest.fn().mockResolvedValue({ value: [1], source: 'news' });
+    const recentForTracker = jest.fn().mockResolvedValue([]);
+    const svc = new ContextPacketService(
+      { recentForTracker } as never,
+      { levelsFor } as never,
+      { recentFor } as never,
+    );
+    jest.spyOn((svc as never as { logger: { warn: () => void } }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    return { svc, levelsFor, recentFor };
+  }
+
+  const entryFor = (symbol: string) =>
+    ({
+      userId: 'u1',
+      trackerId: 't1',
+      symbol,
+      kind: 'POSITION' as const,
+      ownership: 'SENTINEL' as const,
+      watched: true,
+      reason: '',
+    }) as never;
+
+  const tickFor = (structureSymbol: string | null, over: Partial<TickSnapshot> = {}) =>
+    ({
+      segment: 'OPT',
+      side: 'LONG',
+      structureSymbol,
+      entryPrice: 100,
+      qty: 75,
+      ltp: 120,
+      underlyingLtp: 24010,
+      nearestSupport: null,
+      nearestResistance: null,
+      holdingHigh: null,
+      holdingLow: null,
+      entryTime: new Date('2026-08-14T04:00:00Z'),
+      expiry: '2026-08-28',
+      volumeRatio: null,
+      freshNewsCount: null,
+      factorValues: {},
+      oiWallNow: null,
+      oiWallPrev: null,
+      oiWallsAt: null,
+      greenFloorArmedLatched: false,
+      ...over,
+    }) as TickSnapshot;
+
+  it('asks BOTH sources for the UNDERLYING on a derivative, never the tradingsymbol', async () => {
+    const t = make();
+
+    await t.svc.build(entryFor(OPTION_TRADINGSYMBOL), tickFor('NIFTY'), null, []);
+
+    expect(t.levelsFor).toHaveBeenCalledWith('NIFTY');
+    expect(t.recentFor).toHaveBeenCalledWith('NIFTY');
+    expect(t.levelsFor).not.toHaveBeenCalledWith(OPTION_TRADINGSYMBOL);
+    expect(t.recentFor).not.toHaveBeenCalledWith(OPTION_TRADINGSYMBOL);
+  });
+
+  it('still reports the position under the BROKER symbol, so the verdict stays joinable', async () => {
+    const t = make();
+
+    const packet = await t.svc.build(entryFor(OPTION_TRADINGSYMBOL), tickFor('NIFTY'), null, []);
+
+    // The lookup key and the identity are different questions. Rewriting
+    // `position.symbol` to the underlying would make the row unjoinable against
+    // the tracker it came from — and would tell the agent it is holding NIFTY
+    // rather than one specific 24000 call.
+    expect(packet.position.symbol).toBe(OPTION_TRADINGSYMBOL);
+  });
+
+  it('CASH is unchanged — the tradingsymbol is the key', async () => {
+    const t = make();
+
+    await t.svc.build(
+      entryFor('SUZLON-EQ'),
+      tickFor('SUZLON-EQ', { segment: 'EQ_INTRADAY', expiry: null, underlyingLtp: 120 }),
+      null,
+      [],
+    );
+
+    expect(t.levelsFor).toHaveBeenCalledWith('SUZLON-EQ');
+    expect(t.recentFor).toHaveBeenCalledWith('SUZLON-EQ');
+  });
+
+  describe('when the underlying could not be resolved', () => {
+    it('calls NEITHER source rather than falling back to the tradingsymbol', async () => {
+      const t = make();
+
+      await t.svc.build(entryFor(OPTION_TRADINGSYMBOL), tickFor(null), null, []);
+
+      // That call is guaranteed to miss, and a miss would be recorded as a
+      // finding about the market rather than as a failure to look.
+      expect(t.levelsFor).not.toHaveBeenCalled();
+      expect(t.recentFor).not.toHaveBeenCalled();
+    });
+
+    it('states the REAL reason on both blocks', async () => {
+      const t = make();
+
+      const packet = await t.svc.build(entryFor(OPTION_TRADINGSYMBOL), tickFor(null), null, []);
+
+      for (const block of [packet.structure.levelBook, packet.news.headlines]) {
+        expect(block.available).toBe(false);
+        const reason = (block as { reason: string }).reason;
+        // Not "no level book for this symbol" — that reads as a fact about the
+        // instrument. An LLM told the first reasons confidently about a symbol
+        // with no structure, which is a different trade entirely.
+        expect(reason).toMatch(/could not be resolved/i);
+        expect(reason).toMatch(/failure to look|never looked up/i);
+        expect(reason).not.toMatch(/^level book unavailable for this symbol$/);
+      }
+    });
+
+    it('builds the rest of the packet normally — one absent source is not an outage', async () => {
+      const t = make();
+
+      const packet = await t.svc.build(entryFor(OPTION_TRADINGSYMBOL), tickFor(null), null, []);
+
+      expect(packet.position.symbol).toBe(OPTION_TRADINGSYMBOL);
+      expect(packet.money.netPnl).toEqual(expect.any(Number));
+      expect(packet.session.nowIst).toEqual(expect.any(String));
+    });
   });
 });

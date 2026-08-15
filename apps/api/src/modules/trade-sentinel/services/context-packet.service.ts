@@ -152,6 +152,31 @@ export function minutesToSessionClose(now: Date): Block<number> {
 export interface TickSnapshot {
   segment: Segment;
   side: Side;
+  /**
+   * The symbol the LEVEL BOOK and the NEWS FEED are keyed by — which for a
+   * derivative is NOT the tradingsymbol, and null when it cannot be resolved.
+   *
+   * Carried on the tick rather than derived here, and that placement is the
+   * point. `entry.symbol` is the broker's tradingsymbol and deliberately stays
+   * that way, because a verdict row spelling a symbol the broker never used
+   * would be unjoinable against the tracker it came from. But
+   * `NIFTY28AUG2524000CE` matches nothing in the instrument master (which holds
+   * cash equities) and nothing in `relatedSymbols` (which holds base symbols),
+   * so using it here makes the level-book and headline blocks permanently
+   * absent for every derivative — silently, and in the packet the agent
+   * actually reads.
+   *
+   * The tick source resolves the underlying once per contract and puts the
+   * answer here. Resolving it a second time in this service would duplicate the
+   * derivative logic and let the two paths drift apart — which is exactly how
+   * the tripwire path came to be fixed while this one was not.
+   *
+   * NULL MEANS DO NOT ASK. It is never a licence to fall back to the
+   * tradingsymbol: that call is guaranteed to miss, and a miss is reported as
+   * "no level book for this symbol", which reads as a fact about the market
+   * rather than a failure to look.
+   */
+  structureSymbol: string | null;
   entryPrice: number;
   qty: number;
   ltp: number;
@@ -305,6 +330,21 @@ export function packetAsJson(packet: ContextPacket): Prisma.InputJsonValue {
 /** How many of this trade's own prior verdicts the agent is shown. */
 const PRIOR_VERDICT_LIMIT = 3;
 
+/**
+ * Why the level book and the headlines are missing when the underlying could
+ * not be resolved.
+ *
+ * Deliberately NOT the wording used when a source was asked and came back with
+ * nothing. "No level book for this symbol" is a claim about the market; this is
+ * a claim about us. An LLM told the first will reason confidently about an
+ * instrument with no structure — which is a completely different trade from one
+ * whose structure we simply failed to fetch.
+ */
+const UNRESOLVED_UNDERLYING_REASON =
+  'the underlying behind this contract could not be resolved, so the level book and the ' +
+  'headlines were never looked up. This is a FAILURE TO LOOK, not a finding: do not read it ' +
+  'as an instrument with no structure or no news.';
+
 const STUB_REASON =
   'context-scoring factor is a stub (returns isStub: true) — no real data behind it';
 
@@ -375,19 +415,44 @@ export class ContextPacketService {
     const dir = tick.side === 'LONG' ? 1 : -1;
     const grossPnl = (tick.ltp - tick.entryPrice) * tick.qty * dir;
 
-    const levelBook = await this.safely(
-      () => this.chartContext.levelsFor(entry.symbol),
-      'chart-context.service',
-      at,
-      'level book unavailable for this symbol',
-    );
+    /**
+     * THE EVIDENCE SOURCES ARE KEYED BY THE UNDERLYING, NOT BY THE CONTRACT.
+     *
+     * `entry.symbol` is the broker's tradingsymbol and is used everywhere else
+     * in this packet, correctly — `position.symbol` has to stay joinable to the
+     * tracker the verdict came from. But the level book is looked up in the
+     * instrument master (cash equities) and the headlines in `relatedSymbols`
+     * (base symbols), so `NIFTY28AUG2524000CE` matches NEITHER. Passing it here
+     * makes both blocks permanently absent for every derivative — in the packet
+     * the agent actually reads, which is the corpus Task 13 scores.
+     *
+     * `tick.structureSymbol` is the tick source's single resolution of that
+     * question, carried through rather than recomputed. See its doc comment.
+     */
+    const structureSymbol = tick.structureSymbol;
 
-    const headlines = await this.safely(
-      () => this.news.recentFor(entry.symbol),
-      'news-aggregator.service',
-      at,
-      'news aggregator returned nothing for this symbol',
-    );
+    const [levelBook, headlines] = structureSymbol
+      ? await Promise.all([
+          this.safely(
+            () => this.chartContext.levelsFor(structureSymbol),
+            'chart-context.service',
+            at,
+            'level book unavailable for this symbol',
+          ),
+          this.safely(
+            () => this.news.recentFor(structureSymbol),
+            'news-aggregator.service',
+            at,
+            'news aggregator returned nothing for this symbol',
+          ),
+        ])
+      : // NO FALLBACK TO THE TRADINGSYMBOL. That call is guaranteed to miss, and
+        // `safely` would report the miss as "level book unavailable for this
+        // symbol" — which reads as a FACT ABOUT THE MARKET (this instrument has
+        // no levels) when the truth is that we never managed to look. The
+        // distinction is the whole discipline of this packet: absent WITH a
+        // reason, and the reason has to be the real one.
+        [absent(UNRESOLVED_UNDERLYING_REASON), absent(UNRESOLVED_UNDERLYING_REASON)];
 
     const priorVerdicts = await this.verdicts.recentForTracker(
       entry.trackerId,

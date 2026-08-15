@@ -40,6 +40,7 @@ const tick = (over: Partial<TickReading> = {}): TickReading => ({
   qty: 10,
   ltp: 100,
   underlyingLtp: 100,
+  structureSymbol: 'T1',
   nearestSupport: null,
   nearestResistance: null,
   holdingHigh: null,

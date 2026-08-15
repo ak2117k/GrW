@@ -52,6 +52,19 @@ export interface ReplayReport {
   promptVersion: string;
   /** Every prompt version that produced a row in this corpus, first-seen order. */
   storedPromptVersions: string[];
+  /**
+   * How many rows were produced by the version doing the judging NOW.
+   *
+   * Those rows are not a measurement of anything: same prompt, same packet, so
+   * they agree except where the model itself is non-deterministic, and they drag
+   * the headline agreement rate toward 100% while looking like evidence the new
+   * prompt is safe. Read the report as `agreed` out of
+   * `total - sameVersionRows` when this is non-zero. It is stated rather than
+   * filtered out because a same-version DISAGREEMENT is worth seeing — it is
+   * model non-determinism, and it sets the noise floor every other number in
+   * this report has to clear.
+   */
+  sameVersionRows: number;
   diffs: ReplayDiff[];
   failures: ReplayFailure[];
 }
@@ -84,6 +97,7 @@ export async function replayVerdicts(
     failed: 0,
     promptVersion: agent.promptVersion,
     storedPromptVersions: [],
+    sameVersionRows: 0,
     diffs: [],
     failures: [],
   };
@@ -92,6 +106,7 @@ export async function replayVerdicts(
     if (!report.storedPromptVersions.includes(row.promptVersion)) {
       report.storedPromptVersions.push(row.promptVersion);
     }
+    if (row.promptVersion === agent.promptVersion) report.sameVersionRows += 1;
     try {
       // The cast is the point of contact between a `Json` column and the typed
       // packet. It is a cast and not a parse ON PURPOSE: parsing would rebuild.

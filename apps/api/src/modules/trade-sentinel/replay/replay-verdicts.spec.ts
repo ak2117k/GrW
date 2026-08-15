@@ -87,9 +87,25 @@ describe('replayVerdicts', () => {
     );
 
     expect(report.promptVersion).toBe('v2/t1');
+    // `storedPromptVersions` accumulates BEFORE the judge call, so without this
+    // the test would still pass if every replay had thrown.
+    expect(report.failed).toBe(0);
+    expect(report.agreed).toBe(3);
     // Deduplicated, and in first-seen order — a report read six months later has
     // to say what it was comparing against.
     expect(report.storedPromptVersions).toEqual(['v1/t1', 'v2/t1']);
+    // Row `b` was already judged by the version running now: it agrees for free
+    // and inflates the headline rate. Counted so the reader can discount it.
+    expect(report.sameVersionRows).toBe(1);
+  });
+
+  it('counts no same-version rows when the whole corpus predates the current prompt', async () => {
+    const report = await replayVerdicts(
+      [row('a', 'HOLD', 'v1/t1'), row('b', 'HOLD', 'v2/t0')],
+      agentThatSays('HOLD', 'HOLD'),
+    );
+
+    expect(report.sameVersionRows).toBe(0);
   });
 
   it('reports an empty corpus as empty rather than failing', async () => {
@@ -103,6 +119,7 @@ describe('replayVerdicts', () => {
       failed: 0,
       promptVersion: 'v2/t1',
       storedPromptVersions: [],
+      sameVersionRows: 0,
       diffs: [],
       failures: [],
     });
@@ -121,6 +138,10 @@ describe('replayVerdictsForUser', () => {
     expect(report.agreed).toBe(1);
     // Replay is a measurement. A verdict written by a replay run would enter the
     // corpus as if the agent had seen a live position, and poison the next run.
+    //
+    // Weaker than it looks TODAY: `Pick<…, 'listForUser'>` means a `record` call
+    // would not compile, so the compiler is what actually enforces this. Kept as
+    // cheap insurance for the day someone widens that Pick.
     expect(repo.record).not.toHaveBeenCalled();
   });
 });

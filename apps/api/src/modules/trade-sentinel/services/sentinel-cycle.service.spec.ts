@@ -370,10 +370,17 @@ describe('SentinelCycleService — shadow mode is structural', () => {
    * one hop from every tick — would satisfy this test while defeating it
    * entirely. It costs one array element to keep the property attached to the
    * thing that runs.
+   *
+   * The replay harness is the third anchor. It has no runtime imports today, so
+   * this is free — but it is the module's natural place to grow a CLI or an
+   * endpoint (nothing invokes it yet), and by the same argument as above a
+   * production entry point outside the walk defeats the walk. Anchoring it now
+   * costs nothing and cannot be forgotten later.
    */
   const ENTRIES = [
     join(__dirname, 'sentinel-cycle.service.ts'),
     join(__dirname, 'sentinel-runner.service.ts'),
+    join(__dirname, '..', 'replay', 'replay-verdicts.ts'),
   ];
 
   /**
@@ -448,6 +455,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     const files = graph.map((n) => n.file);
     expect(files).toContain(join(__dirname, 'sentinel-cycle.service.ts'));
     expect(files).toContain(join(__dirname, 'sentinel-runner.service.ts'));
+    expect(files).toContain(join(__dirname, '..', 'replay', 'replay-verdicts.ts'));
 
     const offenders = graph
       .filter((n) => FORBIDDEN.test(n.file))

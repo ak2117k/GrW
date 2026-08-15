@@ -1,9 +1,23 @@
+import { THESIS_PROMPT_VERSION } from './thesis-prompt';
+
 /**
  * Bump this whenever the prompt text or the schema changes. Every verdict stores
  * it, because the replay harness cannot attribute a behaviour change to a prompt
  * change without it.
  */
 export const SENTINEL_PROMPT_VERSION = 'v2';
+
+/**
+ * What actually goes on the verdict row.
+ *
+ * TWO prompts decide a verdict: this one, and the thesis prompt that wrote the
+ * `thesis` block INSIDE the packet. Stamping only this one leaves a whole class
+ * of behaviour change invisible — edit the thesis prompt and every verdict may
+ * move while the stamp says nothing happened, and the replay diff then blames
+ * the verdict prompt. Composing them keeps that honest without changing the
+ * contract: still one string on one column, now `v2/t1`.
+ */
+export const SENTINEL_COMPOSITE_PROMPT_VERSION = `${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`;
 
 /** Exact model id. No date suffix — see docs/claude-api model table. */
 export const SENTINEL_MODEL = 'claude-opus-5';

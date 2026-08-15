@@ -10,6 +10,7 @@ import {
 } from '../repositories/sentinel-thesis.repository';
 import { ANTHROPIC_CLIENT } from './sentinel-agent.service';
 import { SENTINEL_MODEL } from '../prompts/sentinel-system-prompt';
+import { THESIS_PROMPT } from '../prompts/thesis-prompt';
 import {
   CHART_CONTEXT_SHIM,
   absent,
@@ -65,18 +66,6 @@ export const THESIS_MAX_TOKENS = 8000;
  * "is this right?" prompt) keys off it, so it must not drift into the cause text.
  */
 const UNKNOWN_REASON_PREFIX = 'thesis could not be inferred';
-
-const THESIS_PROMPT = `You are reading a trade someone has already placed, to work out what they were most plausibly trading.
-
-You receive one JSON object: the instrument, the side, the entry price, the entry time, the quantity, and the market structure around that instrument. The structure field is a block: either {available: true, value, source, at} or {available: false, reason}. When it is unavailable you CANNOT see the levels — say so and return nulls rather than inventing a level book.
-
-State what the entry appears to have been: a level reclaim, a breakout, a pullback buy, a mean reversion, a fade of supply. Then give the price it hinges on, the target it implies, and the price that would prove it wrong.
-
-Rules:
-- "reason" is one sentence a trader would recognise, in their own terms ("bought the retest of the 1450 shelf"), not a description of the data you were given.
-- "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
-- If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
-- Do not hedge across both directions. One thesis, the most plausible one.`;
 
 /**
  * A thesis plus the one thing about forming it that the row cannot hold.

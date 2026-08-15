@@ -3,8 +3,8 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk';
 import type { ContextPacket } from './context-packet.service';
 import {
+  SENTINEL_COMPOSITE_PROMPT_VERSION,
   SENTINEL_MODEL,
-  SENTINEL_PROMPT_VERSION,
   SENTINEL_SYSTEM_PROMPT,
 } from '../prompts/sentinel-system-prompt';
 
@@ -142,8 +142,12 @@ export class SentinelAgentService {
 
   constructor(@Inject(ANTHROPIC_CLIENT) private readonly client: Anthropic) {}
 
+  /**
+   * Composite on purpose — the verdict prompt AND the thesis prompt that filled
+   * the packet's `thesis` block. See `SENTINEL_COMPOSITE_PROMPT_VERSION`.
+   */
   get promptVersion(): string {
-    return SENTINEL_PROMPT_VERSION;
+    return SENTINEL_COMPOSITE_PROMPT_VERSION;
   }
 
   async judge(packet: ContextPacket): Promise<Verdict> {

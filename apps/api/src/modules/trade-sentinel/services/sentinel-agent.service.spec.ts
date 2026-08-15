@@ -2,7 +2,11 @@ import { Logger } from '@nestjs/common';
 import { APIConnectionError, RateLimitError } from '@anthropic-ai/sdk';
 import { SentinelAgentService, type Verdict } from './sentinel-agent.service';
 import { absent, present, type ContextPacket } from './context-packet.service';
-import { SENTINEL_SYSTEM_PROMPT } from '../prompts/sentinel-system-prompt';
+import {
+  SENTINEL_PROMPT_VERSION,
+  SENTINEL_SYSTEM_PROMPT,
+} from '../prompts/sentinel-system-prompt';
+import { THESIS_PROMPT_VERSION } from '../prompts/thesis-prompt';
 
 const AT = '2026-08-14T04:30:00.000Z';
 
@@ -113,6 +117,21 @@ describe('SentinelAgentService', () => {
   const svc = new SentinelAgentService(client);
 
   beforeEach(() => jest.clearAllMocks());
+
+  /**
+   * The stamp has to move when EITHER prompt moves. The thesis prompt writes the
+   * packet's `thesis` block, so editing it shifts verdicts — and a stamp that
+   * only tracked the verdict prompt would leave the replay diff blaming the
+   * wrong prompt for the change.
+   */
+  it('stamps both the verdict prompt and the thesis prompt that filled the packet', () => {
+    // The literal, not only the composition — an expectation built purely from
+    // the constants under test would still pass if both were empty strings.
+    expect(svc.promptVersion).toBe('v2/t1');
+    expect(svc.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
+    expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
+    expect(THESIS_PROMPT_VERSION).not.toContain('/');
+  });
 
   it('returns the parsed verdict on a well-formed reply', async () => {
     create.mockResolvedValue(reply(validVerdict));

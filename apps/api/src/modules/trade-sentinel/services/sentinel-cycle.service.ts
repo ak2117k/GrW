@@ -563,6 +563,21 @@ export class SentinelCycleService {
    * would make `oiWallShift` see the walls appear and disappear, and the packet
    * would report "no options chain for this symbol" on a symbol that plainly has
    * one. The sensors see a slightly older reading; they never see a hole.
+   *
+   * KEYED BY `tick.structureSymbol`, NOT BY `entry.symbol`. The chain is looked
+   * up by UNDERLYING — `OptionsChainService.getExpiries` matches
+   * `optionChainSnapshot.underlying` exactly and `instrument.symbol CONTAINS
+   * underlying` — so a tradingsymbol like `NIFTY28AUG2524000CE` matches neither
+   * and `walls()` returns `[]`.
+   *
+   * This is the worst of the four sites that had it wrong, because of the guard
+   * on the line below: `wallsFor` runs ONLY when there is an expiry, i.e. only
+   * for derivatives. So the mistake did not affect a subset of positions, it
+   * affected ONE HUNDRED PERCENT of the positions this method is ever invoked
+   * for. And the failure was actively misleading rather than merely silent —
+   * `OiWallSnapshotService` warns that an empty result is indistinguishable
+   * between "cash stock with no chain", "chain fetch failed" and "service not
+   * wired", so a reader would conclude the first of those about an option.
    */
   private async wallsFor(
     entry: RosterEntry,
@@ -570,6 +585,10 @@ export class SentinelCycleService {
     now: Date,
   ): Promise<{ walls: { now: WallPair | null; prev: WallPair | null }; at: string | null }> {
     if (!tick.expiry) return { walls: { now: null, prev: null }, at: null };
+    // Same no-fallback rule as the packet and the thesis: calling with the
+    // tradingsymbol is a guaranteed miss, and the miss is reported as an
+    // ambiguous "no walls" that reads as a fact about the instrument.
+    if (!tick.structureSymbol) return { walls: { now: null, prev: null }, at: null };
 
     const state = this.stateFor(entry);
     const cached = state.oi;
@@ -580,7 +599,11 @@ export class SentinelCycleService {
     }
 
     const walls = await this.oiWalls.captureAndCompare(
-      entry.symbol,
+      // The UNDERLYING — see the note above. This also changes the spelling of
+      // the snapshot table's `symbol` key for derivatives; lineage is already
+      // segregated by `expiry`, so the only effect is that any rows written
+      // under the old tradingsymbol key are orphaned rather than mis-compared.
+      tick.structureSymbol,
       tick.expiry,
       tick.underlyingLtp,
     );

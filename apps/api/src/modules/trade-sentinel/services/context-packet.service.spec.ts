@@ -686,13 +686,27 @@ describe('ContextPacketService — the evidence sources are keyed by the underly
       for (const block of [packet.structure.levelBook, packet.news.headlines]) {
         expect(block.available).toBe(false);
         const reason = (block as { reason: string }).reason;
-        // Not "no level book for this symbol" — that reads as a fact about the
-        // instrument. An LLM told the first reasons confidently about a symbol
-        // with no structure, which is a different trade entirely.
+        // The load-bearing half: it must say the absence is OURS. Reported as
+        // "no level book for this symbol" it reads as a fact about the market,
+        // and an LLM told that reasons confidently about an instrument with no
+        // structure — a different trade entirely.
         expect(reason).toMatch(/could not be resolved/i);
-        expect(reason).toMatch(/failure to look|never looked up/i);
-        expect(reason).not.toMatch(/^level book unavailable for this symbol$/);
+        expect(reason).toMatch(/failure to look/i);
       }
+    });
+
+    it('gives each block its OWN reason rather than one shared string', async () => {
+      const t = make();
+
+      const packet = await t.svc.build(entryFor(OPTION_TRADINGSYMBOL), tickFor(null), null, []);
+
+      const levels = (packet.structure.levelBook as { reason: string }).reason;
+      const news = (packet.news.headlines as { reason: string }).reason;
+      // A news block explaining itself by talking about the level book is the
+      // kind of near-miss provenance this packet's whole design is against.
+      expect(levels).toMatch(/level book/i);
+      expect(news).toMatch(/news/i);
+      expect(news).not.toMatch(/level book/i);
     });
 
     it('builds the rest of the packet normally — one absent source is not an outage', async () => {

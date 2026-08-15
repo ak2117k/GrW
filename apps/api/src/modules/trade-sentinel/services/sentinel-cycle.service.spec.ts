@@ -1531,3 +1531,94 @@ describe('SentinelCycleService — a rejected verdict is never a quiet outage', 
     expect(logged).toContain('T1');
   });
 });
+
+/**
+ * WHICH SYMBOL REACHES THE OI WALL CAPTURE.
+ *
+ * The fourth and worst of the four sites that passed the broker tradingsymbol
+ * into a lookup keyed by the UNDERLYING. `OptionsChainService.getExpiries`
+ * matches `optionChainSnapshot.underlying` exactly and
+ * `instrument.symbol CONTAINS underlying`, so `NIFTY28AUG2524000CE` matches
+ * neither and `walls()` returns `[]`.
+ *
+ * Worse than the other three because `wallsFor` early-returns without an
+ * expiry — so it runs ONLY for derivatives, and the mistake therefore affected
+ * 100% of the positions it was ever invoked for rather than a subset. And the
+ * empty result is reported with an explicitly ambiguous cause ("cash stock, no
+ * chain / fetch failed / service not wired"), so it read as a fact about the
+ * instrument rather than as a bug.
+ *
+ * All four survived earlier review because nothing pinned the ARGUMENT.
+ */
+describe('SentinelCycleService — the OI capture is keyed by the underlying', () => {
+  const OPTION = 'NIFTY28AUG2524000CE';
+
+  const optionEntry = () => watched('t1', { symbol: OPTION });
+  const optionTick = (over = {}) =>
+    tick({
+      segment: 'OPT',
+      ltp: 120,
+      underlyingLtp: 24000,
+      expiry: '2026-08-27',
+      structureSymbol: 'NIFTY',
+      ...over,
+    });
+
+  it('captures under the UNDERLYING, never under the tradingsymbol', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([optionEntry()]);
+    t.tickFor.mockResolvedValue(optionTick());
+
+    await t.svc.runForUser(USER);
+
+    expect(t.captureAndCompare).toHaveBeenCalledWith('NIFTY', '2026-08-27', 24000);
+    expect(t.captureAndCompare).not.toHaveBeenCalledWith(
+      OPTION,
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('does not capture at all when the underlying is unresolvable', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([optionEntry()]);
+    t.tickFor.mockResolvedValue(optionTick({ structureSymbol: null }));
+
+    await t.svc.runForUser(USER);
+
+    // No fallback: the call would miss, and the miss is reported with an
+    // ambiguous cause that reads as "this instrument has no chain".
+    expect(t.captureAndCompare).not.toHaveBeenCalled();
+  });
+
+  it('still evaluates the position with the walls stated as absent', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([optionEntry()]);
+    t.tickFor.mockResolvedValue(optionTick({ structureSymbol: null }));
+
+    const report = await t.svc.runForUser(USER);
+
+    // An unavailable OI chain must not cost the position its whole evaluation —
+    // the packet reports the walls absent and the agent judges on the rest.
+    expect(report.evaluated).toBe(1);
+    expect(report.failed).toBe(0);
+    const packetTick = t.buildPacket.mock.calls[0][1];
+    expect(packetTick.oiWallNow).toBeNull();
+    expect(packetTick.oiWallPrev).toBeNull();
+    expect(packetTick.oiWallsAt).toBeNull();
+  });
+
+  it('still skips the capture entirely for a cash position', async () => {
+    // The expiry guard, unchanged: cash has none, so nothing is captured
+    // regardless of how good the symbol is.
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1', { symbol: 'SUZLON-EQ' })]);
+    t.tickFor.mockResolvedValue(
+      tick({ segment: 'EQ_INTRADAY', expiry: null, structureSymbol: 'SUZLON-EQ' }),
+    );
+
+    await t.svc.runForUser(USER);
+
+    expect(t.captureAndCompare).not.toHaveBeenCalled();
+  });
+});

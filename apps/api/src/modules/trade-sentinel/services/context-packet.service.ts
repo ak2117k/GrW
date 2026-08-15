@@ -331,19 +331,24 @@ export function packetAsJson(packet: ContextPacket): Prisma.InputJsonValue {
 const PRIOR_VERDICT_LIMIT = 3;
 
 /**
- * Why the level book and the headlines are missing when the underlying could
- * not be resolved.
+ * Why a source is missing when the underlying could not be resolved.
  *
  * Deliberately NOT the wording used when a source was asked and came back with
  * nothing. "No level book for this symbol" is a claim about the market; this is
  * a claim about us. An LLM told the first will reason confidently about an
  * instrument with no structure — which is a completely different trade from one
  * whose structure we simply failed to fetch.
+ *
+ * Per-block rather than one shared string: each block states what ITS OWN
+ * absence means, so the news block does not explain itself by talking about the
+ * level book.
  */
-const UNRESOLVED_UNDERLYING_REASON =
-  'the underlying behind this contract could not be resolved, so the level book and the ' +
-  'headlines were never looked up. This is a FAILURE TO LOOK, not a finding: do not read it ' +
-  'as an instrument with no structure or no news.';
+function unresolvedUnderlying(what: string): string {
+  return (
+    `the underlying behind this contract could not be resolved, so ${what} was never looked ` +
+    'up. This is a FAILURE TO LOOK, not a finding — do not read it as an absence in the market.'
+  );
+}
 
 const STUB_REASON =
   'context-scoring factor is a stub (returns isStub: true) — no real data behind it';
@@ -452,7 +457,10 @@ export class ContextPacketService {
         // no levels) when the truth is that we never managed to look. The
         // distinction is the whole discipline of this packet: absent WITH a
         // reason, and the reason has to be the real one.
-        [absent(UNRESOLVED_UNDERLYING_REASON), absent(UNRESOLVED_UNDERLYING_REASON)];
+        [
+          absent(unresolvedUnderlying("this instrument's level book")),
+          absent(unresolvedUnderlying('any news for this instrument')),
+        ];
 
     const priorVerdicts = await this.verdicts.recentForTracker(
       entry.trackerId,

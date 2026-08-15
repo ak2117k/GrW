@@ -22,6 +22,11 @@ export const oiWallShift: Tripwire = {
       const { callWall } = oiWallNow;
       const prev = oiWallPrev.callWall;
       if (callWall === null || prev === null) return null;
+      // A strike is a positive price. `=== null` alone lets a NaN through, and a
+      // zero or negative `prev` makes the ratio Infinity — both clear the 0.2%
+      // threshold and fire, handing the agent "call wall fell 0 -> NaN". Same
+      // `Number.isFinite` defence as volumeAnomaly and newsHit.
+      if (!Number.isFinite(callWall) || !(prev > 0)) return null;
       const moved = (prev - callWall) / prev;
       if (moved < OI_WALL_SHIFT_PCT) return null;
       return {
@@ -33,6 +38,9 @@ export const oiWallShift: Tripwire = {
     const { putWall } = oiWallNow;
     const prev = oiWallPrev.putWall;
     if (putWall === null || prev === null) return null;
+    // See the LONG arm above: NaN passes `=== null`, and a non-positive `prev`
+    // divides to Infinity, which clears the threshold.
+    if (!Number.isFinite(putWall) || !(prev > 0)) return null;
     const moved = (putWall - prev) / prev;
     if (moved < OI_WALL_SHIFT_PCT) return null;
     return {

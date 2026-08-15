@@ -15,15 +15,21 @@ export const levelBreak: Tripwire = {
     // is the premium (~120) while a level is a strike (~24000) — comparing them
     // breaches permanently and fires every tick. Compare against `underlyingLtp`,
     // and when it is null stay silent rather than falling back to `ltp`.
-    if (underlyingLtp === null) return null;
+    //
+    // Absent data is not a signal, and `=== null` alone is not enough: a NaN
+    // passes it, and every comparison below is false against NaN, so the sensor
+    // fires with "lost nearest support 95 (now NaN)". Same `Number.isFinite`
+    // defence as volumeAnomaly and newsHit — the level book is exactly the
+    // producer chain that is not trusted here.
+    if (underlyingLtp === null || !Number.isFinite(underlyingLtp)) return null;
 
     if (side === 'LONG') {
-      if (nearestSupport === null) return null;
+      if (nearestSupport === null || !Number.isFinite(nearestSupport)) return null;
       if (underlyingLtp >= nearestSupport) return null;
       return { name: 'level-break', detail: `lost nearest support ${nearestSupport} (now ${underlyingLtp})` };
     }
 
-    if (nearestResistance === null) return null;
+    if (nearestResistance === null || !Number.isFinite(nearestResistance)) return null;
     if (underlyingLtp <= nearestResistance) return null;
     return { name: 'level-break', detail: `lost nearest resistance ${nearestResistance} (now ${underlyingLtp})` };
   },

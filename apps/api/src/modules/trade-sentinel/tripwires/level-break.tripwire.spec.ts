@@ -55,4 +55,26 @@ describe('levelBreak', () => {
   it('stays silent when the underlying price cannot be resolved', () => {
     expect(levelBreak.check({ ...base, underlyingLtp: null, nearestSupport: 95, ltp: 1 })).toBeNull();
   });
+
+  it('stays silent on a NaN underlying rather than reporting "lost support 95 (now NaN)"', () => {
+    // NaN passes `=== null`, and `NaN >= 95` is false, so the sensor fires and
+    // hands the agent a breach that never happened, quoting a price nothing
+    // traded at. Same `Number.isFinite` defence as volumeAnomaly and newsHit.
+    expect(levelBreak.check({ ...base, underlyingLtp: NaN, nearestSupport: 95 })).toBeNull();
+    expect(
+      levelBreak.check({ ...base, side: 'SHORT', underlyingLtp: NaN, nearestResistance: 110 }),
+    ).toBeNull();
+  });
+
+  it('stays silent on a NaN level, which is a broken book and not a broken level', () => {
+    expect(levelBreak.check({ ...base, underlyingLtp: 94, nearestSupport: NaN })).toBeNull();
+    expect(
+      levelBreak.check({ ...base, side: 'SHORT', underlyingLtp: 112, nearestResistance: NaN }),
+    ).toBeNull();
+  });
+
+  it('stays silent on an undefined underlying price', () => {
+    const missing = undefined as unknown as number;
+    expect(levelBreak.check({ ...base, underlyingLtp: missing, nearestSupport: 95 })).toBeNull();
+  });
 });

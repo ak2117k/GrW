@@ -18,7 +18,15 @@ export const givebackOffPeak: Tripwire = {
   check(input: TripwireInput): TripwireFire | null {
     const { side, entryPrice, ltp, holdingHigh, holdingLow } = input;
     const peak = side === 'LONG' ? holdingHigh : holdingLow;
-    if (peak === null) return null;
+    // Absent data is not a signal. `=== null` alone is not enough: a NaN peak
+    // makes `peakGain` NaN, and `NaN <= 0` is false, so the guard below waves it
+    // through and the agent is handed "gave back NaN% of peak excursion (peak
+    // NaN, now 108, entry 100)" as evidence. A NaN ltp or entry does the same to
+    // `givenBack`, which then fails `givenBack < threshold` and fires. Same
+    // `Number.isFinite` defence as volumeAnomaly and newsHit — the point of
+    // hardening a sensor is that the producer chain is not trusted.
+    if (peak === null || !Number.isFinite(peak)) return null;
+    if (!Number.isFinite(ltp) || !Number.isFinite(entryPrice)) return null;
 
     const dir = side === 'LONG' ? 1 : -1;
     const peakGain = (peak - entryPrice) * dir;

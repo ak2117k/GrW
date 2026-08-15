@@ -120,4 +120,53 @@ describe('oiWallShift', () => {
       oiWallShift.check({ ...base, oiWallNow: { callWall: 24200, putWall: movedPut } }),
     ).toBeNull();
   });
+
+  it('stays silent on a NaN wall rather than reporting a wall that fell to NaN', () => {
+    // NaN passes `=== null`; `(prev - NaN) / prev` is NaN and `NaN < 0.002` is
+    // false, so the sensor fires with "call wall fell 24200 -> NaN".
+    expect(
+      oiWallShift.check({ ...base, oiWallNow: { callWall: NaN, putWall: 24000 } }),
+    ).toBeNull();
+    expect(
+      oiWallShift.check({
+        ...base,
+        side: 'SHORT',
+        oiWallNow: { callWall: 24200, putWall: NaN },
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent on a zero previous strike, which divides past the threshold', () => {
+    // The sharper half of the same gap, and each side reaches it differently —
+    // asserting the two symmetrically would make one half vacuous.
+    //
+    // SHORT: `(24000 - 0) / 0` is +Infinity, which clears 0.2% outright, so a
+    // single zero baseline row wakes the agent every tick until it rolls off.
+    expect(
+      oiWallShift.check({ ...base, side: 'SHORT', oiWallPrev: { callWall: 0, putWall: 0 } }),
+    ).toBeNull();
+    // LONG: `(0 - 24200) / 0` is -INFINITY, which is below the threshold and
+    // stays quiet by accident. `0 / 0` is the one that bites — NaN fails the
+    // `< 0.002` test and fires with "call wall fell 0 -> 0".
+    expect(
+      oiWallShift.check({
+        ...base,
+        oiWallNow: { callWall: 0, putWall: 24000 },
+        oiWallPrev: { callWall: 0, putWall: 24000 },
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent on a NaN previous strike', () => {
+    expect(
+      oiWallShift.check({ ...base, oiWallPrev: { callWall: NaN, putWall: NaN } }),
+    ).toBeNull();
+  });
+
+  it('stays silent on undefined walls', () => {
+    const missing = undefined as unknown as number;
+    expect(
+      oiWallShift.check({ ...base, oiWallNow: { callWall: missing, putWall: 24000 } }),
+    ).toBeNull();
+  });
 });

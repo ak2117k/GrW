@@ -67,4 +67,30 @@ describe('givebackOffPeak', () => {
       givebackOffPeak.check({ ...base, side: 'SHORT', holdingLow: null, ltp: 92 }),
     ).toBeNull();
   });
+
+  it('stays silent on a NaN peak rather than reporting "gave back NaN% of peak"', () => {
+    // `=== null` alone lets NaN through: `peakGain` becomes NaN, `NaN <= 0` is
+    // false, and `givenBack < threshold` is false too — so every guard waves it
+    // past and the detail string reads "gave back NaN% of peak excursion (peak
+    // NaN, now 108, entry 100)". The producer chain is not trusted; that is the
+    // entire point of hardening a sensor. Same defence as volumeAnomaly.
+    expect(givebackOffPeak.check({ ...base, holdingHigh: NaN, ltp: 108 })).toBeNull();
+    expect(
+      givebackOffPeak.check({ ...base, side: 'SHORT', holdingLow: NaN, ltp: 92 }),
+    ).toBeNull();
+  });
+
+  it('stays silent on an undefined peak', () => {
+    const missing = undefined as unknown as number;
+    expect(givebackOffPeak.check({ ...base, holdingHigh: missing, ltp: 108 })).toBeNull();
+  });
+
+  it('stays silent when the price or the entry is not a finite number', () => {
+    // These make `givenBack` NaN instead, which fails the threshold test the
+    // same way and fires with a fabricated percentage.
+    expect(givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: NaN })).toBeNull();
+    expect(
+      givebackOffPeak.check({ ...base, holdingHigh: 120, ltp: 108, entryPrice: NaN }),
+    ).toBeNull();
+  });
 });

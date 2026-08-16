@@ -25,6 +25,8 @@ import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.ser
 import { SentinelRunnerService } from './services/sentinel-runner.service';
 import { EngineOwnershipAdapter } from './adapters/engine-ownership.adapter';
 import { SentinelChartContextAdapter } from './adapters/chart-context.adapter';
+import { ClaudeCliTransport } from './adapters/claude-cli.transport';
+import { judgeTransportFrom, type MessagesTransport } from './services/llm-transport';
 import { SentinelNewsAdapter } from './adapters/news.adapter';
 import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
 import { SentinelTickSource } from './adapters/tick-source.adapter';
@@ -70,21 +72,41 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
   ],
   controllers: [SentinelController],
   providers: [
+    ClaudeCliTransport,
     {
       provide: ANTHROPIC_CLIENT,
-      // The SDK reads ANTHROPIC_API_KEY from the environment itself; it is
-      // passed through ConfigService so the key's source is visible here.
-      //
-      // IT DOES NOT VALIDATE THE KEY. The SDK does NOT throw on construction
-      // with a missing one — it fails on the first REQUEST, as an API error the
-      // agent and thesis services already classify and degrade from. So a
-      // deploy without ANTHROPIC_API_KEY boots fine and the sentinel simply
-      // records no verdicts, which is the right behaviour for a default-off
-      // feature (crashing the whole API over it would be far worse) but is NOT
-      // a boot-time guarantee. Do not rely on one.
-      useFactory: (config: ConfigService) =>
-        new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }),
-      inject: [ConfigService],
+      /**
+       * WHICH TRANSPORT SERVES THE SENTINEL — `SENTINEL_JUDGE=api|cli`.
+       *
+       * `api` (the default) is the Anthropic API: schema-ENFORCED replies, typed
+       * errors, prompt caching, billed per token. It is the only path that works
+       * in a deployed container and the only one licensed to serve other
+       * tenants.
+       *
+       * `cli` shells out to a local `claude -p` on the operator's own Claude
+       * subscription. It exists because shadow mode produces hundreds of
+       * high-effort Opus verdicts a day, which is real money on the API and
+       * nothing on a subscription already paid for. It needs an interactive
+       * OAuth session on the host, so it is for a developer's machine — see
+       * `ClaudeCliTransport`'s class note for what it gives up.
+       *
+       * Anything other than `cli` resolves to `api`: a misspelt value must land
+       * on the transport that works from configuration alone, not on the one
+       * that works from a laptop.
+       *
+       * NEITHER CONSTRUCTION VALIDATES ITS CREDENTIALS. The SDK does not throw
+       * on a missing ANTHROPIC_API_KEY — it fails on the first REQUEST, as an
+       * API error both services already classify and degrade from; the CLI fails
+       * the same way on an expired session. So a deploy with neither boots fine
+       * and the sentinel simply records no verdicts, which is right for a
+       * default-off feature. It is NOT a boot-time guarantee — do not read it as
+       * one.
+       */
+      useFactory: (config: ConfigService, cli: ClaudeCliTransport): MessagesTransport =>
+        judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')) === 'cli'
+          ? cli
+          : new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }),
+      inject: [ConfigService, ClaudeCliTransport],
     },
 
     // Adapters — the narrow ports, bound to the real services.

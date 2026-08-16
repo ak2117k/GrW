@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import type Anthropic from '@anthropic-ai/sdk';
 import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk';
 import type { ContextPacket } from './context-packet.service';
+import type { MessagesTransport, TransportMessage } from './llm-transport';
 import {
   SENTINEL_COMPOSITE_PROMPT_VERSION,
   SENTINEL_MODEL,
@@ -140,7 +140,7 @@ function citesRealPath(citation: string, paths: PacketPaths): boolean {
 export class SentinelAgentService {
   private readonly logger = new Logger(SentinelAgentService.name);
 
-  constructor(@Inject(ANTHROPIC_CLIENT) private readonly client: Anthropic) {}
+  constructor(@Inject(ANTHROPIC_CLIENT) private readonly client: MessagesTransport) {}
 
   /**
    * Composite on purpose — the verdict prompt AND the thesis prompt that filled
@@ -151,7 +151,7 @@ export class SentinelAgentService {
   }
 
   async judge(packet: ContextPacket): Promise<Verdict> {
-    let response: Anthropic.Message;
+    let response: TransportMessage;
     try {
       // Deliberately NO server-side `fallbacks`: a refusal that quietly reran on
       // a different model would change the serving model without changing the
@@ -194,10 +194,13 @@ export class SentinelAgentService {
     if (err instanceof RateLimitError) return 'rate limited by the Anthropic API';
     if (err instanceof APIConnectionError) return 'could not reach the Anthropic API';
     if (err instanceof APIError) return `Anthropic API error (status ${String(err.status)})`;
-    return `unexpected failure calling the Anthropic API: ${String(err)}`;
+    // Transport-neutral: the CLI transport throws plain Errors that no SDK class
+    // matches, and calling those "the Anthropic API" would send an operator
+    // debugging an expired OAuth session to look at an API key.
+    return `failure calling the judge transport: ${String(err)}`;
   }
 
-  private extractJson(response: Anthropic.Message): unknown {
+  private extractJson(response: TransportMessage): unknown {
     if (response.stop_reason === 'refusal') {
       throw new Error('sentinel agent: the model refused this packet — no verdict recorded');
     }

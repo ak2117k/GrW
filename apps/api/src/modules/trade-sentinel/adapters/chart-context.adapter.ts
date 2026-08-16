@@ -1,7 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { SignalGeneratorService } from '../../signal-generator/services/signal-generator.service';
-import type { LevelsSnapshot } from '../../signal-generator/services/signal-generator.service';
+import type {
+  AnalyzeResult,
+  LevelsSnapshot,
+} from '../../signal-generator/services/signal-generator.service';
+import type { CandleSource } from '../../signal-generator/services/candle-source';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import type { ChartContextShim, SourcedValue } from '../services/context-packet.service';
 import { normaliseSymbol } from '../symbols';
 
@@ -92,6 +97,78 @@ export interface SentinelStructure extends NearestLevels {
   at: string | null;
   /** Who produced them, interval included. See {@link SENTINEL_LEVEL_SOURCE}. */
   source: string;
+  /**
+   * The REAL (non-stub) context-scoring factors behind this book, keyed by
+   * `FactorResult.name`, NORMALISED so that positive always means "supportive of
+   * a move UP" — see {@link normaliseFactors}. Empty when the engine produced
+   * none, in which case {@link factorsReason} says why.
+   */
+  factorValues: Record<string, number>;
+  /**
+   * Why {@link factorValues} is empty, or null when it is populated. The four
+   * emptiness cases are not the same fact and the packet cannot tell them apart
+   * on its own — see the FACTORS_* constants.
+   */
+  factorsReason: string | null;
+}
+
+/**
+ * The stub factors, excluded BY NAME.
+ *
+ * `FactorResult.isStub` is the runtime truth and is what we filter on, but this
+ * list is what that filter is expected to remove. If a stub is ever filled in,
+ * it starts flowing here automatically — which is correct — and this comment is
+ * the breadcrumb for whoever then has to revisit `REAL_FACTORS` in
+ * `context-factor-flip.tripwire.ts`, which hard-codes the same three names.
+ */
+export const FACTORS_NO_SETUP =
+  'the level engine returned no active setup for this symbol, and the context-scoring factors are ' +
+  'computed only as part of a setup — so no factor was evaluated. This is a FAILURE TO LOOK, not a ' +
+  'finding: do not read it as a market with no directional context.';
+
+export const FACTORS_NOT_SCORED =
+  'the level engine returned a setup but attached no context score, so no factor was evaluated. ' +
+  'This is a FAILURE TO LOOK, not a finding.';
+
+export const FACTORS_ALL_STUBBED =
+  'every context factor for this symbol came back as an unimplemented stub, so none carries a real ' +
+  'reading. This is a FAILURE TO LOOK, not a finding.';
+
+export const FACTORS_NO_BOOK =
+  'no level book could be built for this symbol, so the context-scoring engine never ran. This is ' +
+  'a FAILURE TO LOOK, not a finding.';
+
+/**
+ * Re-express factor values in ONE fixed frame: positive means "supportive of a
+ * move UP", whatever side the setup happened to take.
+ *
+ * THIS IS NOT COSMETIC. `FactorResult.value` is defined as +1.0 = supportive of
+ * `FactorInput.side`, so the SAME market read scores +0.7 under a BUY setup and
+ * −0.7 under a SELL setup. `contextFactorFlip` fires on a change of SIGN between
+ * two consecutive ticks, so without this every setup-side change would invert
+ * every factor at once and the sensor would report that the whole macro picture
+ * flipped, when all that changed was which direction the engine was proposing.
+ * That is manufactured signal — the precise failure the stub exclusion in
+ * `context-factor-flip.tripwire.ts` already guards the other end of.
+ *
+ * Anchoring to UP rather than to the POSITION's side is deliberate too: a
+ * position's side is fixed for its life, so either frame would be stable for one
+ * position, but only this one is comparable across positions in the corpus.
+ */
+export function normaliseFactors(
+  factors: ReadonlyArray<{ name: string; value: number; isStub: boolean }>,
+  side: 'BUY' | 'SELL',
+): Record<string, number> {
+  const sign = side === 'BUY' ? 1 : -1;
+  const out: Record<string, number> = {};
+  for (const f of factors) {
+    // A stub's neutral zero is not a reading, and a NaN defeats every sign
+    // comparison downstream (`Math.sign(NaN)` is NaN, which is !== every sign),
+    // so it would read as a flip that never happened.
+    if (f.isStub || !Number.isFinite(f.value)) continue;
+    out[f.name] = f.value * sign;
+  }
+  return out;
 }
 
 /**
@@ -141,6 +218,8 @@ interface CachedBook {
   at: number;
   levels: LevelsSnapshot | null;
   volumeRatio: number | null;
+  factorValues: Record<string, number>;
+  factorsReason: string | null;
 }
 
 /**
@@ -159,14 +238,25 @@ interface CachedBook {
  * one thing that whole service exists to prevent, so the sentinel takes the
  * level book straight from `analyze()` and keeps its own small cache instead.
  *
- * NOT USER-SCOPED, and this is a known limitation rather than an oversight.
- * `ChartContextShim.levelsFor(symbol)` carries no user, so `analyze()` is called
- * without a `CandleSource` and falls through to the SHARED Angel session — which
- * this platform has no feed account for (see `candle-source.ts`). Where that
- * path yields nothing, this returns null and the packet records an absent block
- * WITH a reason, which is the honest degradation. Fixing it properly means
- * threading `userId` through `ChartContextShim`, which changes an interface
- * Tasks 9 and 10 built against — reported, not smuggled in here.
+ * USER-SCOPED, and it has to be. This platform has NO shared feed account, so an
+ * `analyze()` called without a `CandleSource` falls through to the shared Angel
+ * session and `getSmartApi()` throws `Not authenticated` for every call — the
+ * level book would be empty for every symbol, permanently, and every
+ * level-comparing sensor silent with it (see `candle-source.ts`). So every read
+ * here takes the owning position's `userId` and builds a source bound to THAT
+ * user's own Angel session, exactly as `/chart-context` does.
+ *
+ * When the feed manager is unwired (tests, feed-disabled containers) or the user
+ * has no session, the source is undefined and `analyze()` degrades to the
+ * pre-existing shared-adapter path — which on this deployment yields nothing, and
+ * is then reported as an absence WITH a reason rather than as a finding.
+ *
+ * THE CACHE IS DELIBERATELY NOT KEYED BY USER. A level book is derived from
+ * candles, and candles are public market data: the 15m book for NIFTY is the same
+ * series no matter whose session paid the broker call. Which user fetched it is
+ * not a property of the answer. This is the same ruling `SrEvidenceService` makes
+ * for its own cache, and it matters that the two agree — a sentinel judging
+ * against a different book than the chart draws would be unexplainable.
  */
 @Injectable()
 export class SentinelChartContextAdapter implements ChartContextShim {
@@ -179,11 +269,46 @@ export class SentinelChartContextAdapter implements ChartContextShim {
   constructor(
     private readonly signals: SignalGeneratorService,
     private readonly instruments: MarketDataRepository,
-  ) {}
+    // Optional for the same reason `/chart-context` makes it optional: a
+    // container without the per-user feed must still construct, and must then
+    // degrade visibly rather than fail to boot. See the class note.
+    @Optional() private readonly userFeed?: UserFeedManager,
+  ) {
+    // ONCE, AT BOOT, AT WARN. Without the feed manager every level book on this
+    // deployment is empty for the life of the process, and an empty book is
+    // indistinguishable from a symbol whose levels were never touched — the
+    // sentinel would run all session, wake nothing, and look calm. `@Optional()`
+    // is what makes an unwired container boot; this is what stops it being
+    // silent about what it gave up to do so.
+    if (!this.userFeed) {
+      this.logger.warn(
+        'no UserFeedManager is wired, so every level book will be built without a per-user ' +
+          'candle source. This platform has no shared feed account, so those builds will return ' +
+          'nothing and the level, volume and context-factor sensors will stay dark for every ' +
+          'position. Import MarketDataModule to fix.',
+      );
+    }
+  }
+
+  /**
+   * A candle source bound to ONE user's Angel session, or undefined when there
+   * is no feed manager or no user — in which case `analyze()` keeps its
+   * pre-existing shared-adapter behaviour.
+   *
+   * Built per call rather than injected because the binding IS the user.
+   */
+  private candleSourceFor(userId: string | undefined): CandleSource | undefined {
+    const manager = this.userFeed;
+    if (!manager || !userId) return undefined;
+    return {
+      getCandles: (token, exchange, interval, from, to) =>
+        manager.fetchCandles(userId, token, exchange, interval, from, to),
+    };
+  }
 
   /** The level book as the packet's evidence block. Null when there is none. */
-  async levelsFor(symbol: string): Promise<SourcedValue | null> {
-    const book = await this.bookFor(symbol);
+  async levelsFor(symbol: string, userId?: string): Promise<SourcedValue | null> {
+    const book = await this.bookFor(symbol, userId);
     if (!book?.levels) return null;
     return {
       value: { ...book.levels, interval: SENTINEL_LEVEL_INTERVAL },
@@ -202,9 +327,19 @@ export class SentinelChartContextAdapter implements ChartContextShim {
    * levels around 120 for a 24000-strike book — so callers must pass the
    * underlying's price, never the contract's.
    */
-  async structureFor(symbol: string, price: number | null): Promise<SentinelStructure> {
-    const book = await this.bookFor(symbol);
+  async structureFor(
+    symbol: string,
+    price: number | null,
+    userId?: string,
+  ): Promise<SentinelStructure> {
+    const book = await this.bookFor(symbol, userId);
     const volumeRatio = book?.volumeRatio ?? null;
+    // Independent of the nearest-level reads below: a book can carry factors
+    // while having no level on one side, and can carry levels while the engine
+    // attached no context score. Sharing one reason between them would make the
+    // packet state the wrong cause for one of the two.
+    const factorValues = book?.factorValues ?? {};
+    const factorsReason = book ? book.factorsReason : FACTORS_NO_BOOK;
     // The DERIVE time of the book, never "now" — the same instant `levelsFor`
     // reports, so one packet cannot carry two ages for one cached object.
     const at = book ? new Date(book.at).toISOString() : null;
@@ -215,6 +350,8 @@ export class SentinelChartContextAdapter implements ChartContextShim {
       reason,
       at,
       source: SENTINEL_LEVEL_SOURCE,
+      factorValues,
+      factorsReason,
     });
 
     // The three distinctions this method knows and used to throw away. A null/NaN
@@ -233,6 +370,8 @@ export class SentinelChartContextAdapter implements ChartContextShim {
       reason: null,
       at,
       source: SENTINEL_LEVEL_SOURCE,
+      factorValues,
+      factorsReason,
     };
   }
 
@@ -241,7 +380,7 @@ export class SentinelChartContextAdapter implements ChartContextShim {
    * above. Never throws: a level book that cannot be built is a stated absence
    * downstream, never a failed evaluation.
    */
-  private async bookFor(symbol: string): Promise<CachedBook | null> {
+  private async bookFor(symbol: string, userId?: string): Promise<CachedBook | null> {
     const base = normaliseSymbol(symbol);
     const hit = this.cache.get(base);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit;
@@ -267,7 +406,13 @@ export class SentinelChartContextAdapter implements ChartContextShim {
             'this symbol is watched, so the level and volume sensors stay silent. For a ' +
             'derivative, callers must pass the UNDERLYING\'s name, not the tradingsymbol.',
         );
-        return this.store(base, { at: Date.now(), levels: null, volumeRatio: null });
+        return this.store(base, {
+          at: Date.now(),
+          levels: null,
+          volumeRatio: null,
+          factorValues: {},
+          factorsReason: FACTORS_NO_BOOK,
+        });
       }
 
       const result = await this.signals.analyze(
@@ -275,13 +420,24 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         instrument.exchange,
         instrument.symbol,
         SENTINEL_LEVEL_INTERVAL,
+        // The whole point of the user scoping — see the class note. Undefined
+        // here is the documented degradation, not a bug.
+        this.candleSourceFor(userId),
       );
       // `analyze` returns a discriminated union; only the 'setup' arm carries a
       // level book and a volume ratio. Anything else is a genuine "no book".
       const levels = result.kind === 'setup' ? result.levels : null;
       const volumeRatio =
         result.kind === 'setup' && Number.isFinite(result.volumeRatio) ? result.volumeRatio : null;
-      return this.store(base, { at: Date.now(), levels, volumeRatio });
+
+      // The context-scoring factors ride along on the SAME analyze() the level
+      // book comes from — they are computed as part of scoring a setup, so there
+      // is no separate call to make and no `SetupContext` to rebuild. Which of
+      // the three empty cases we are in is recorded, because "no setup" and "all
+      // stubs" would otherwise both reach the packet as a bare `{}`.
+      const { factorValues, factorsReason } = this.factorsFrom(result);
+
+      return this.store(base, { at: Date.now(), levels, volumeRatio, factorValues, factorsReason });
     } catch (err) {
       // Logged at warn, not swallowed: a permanently failing level book makes
       // `levelBreak` silent in a way that is indistinguishable from "price
@@ -290,6 +446,37 @@ export class SentinelChartContextAdapter implements ChartContextShim {
       this.logger.warn(`level book failed for ${symbol}: ${message}`);
       return null;
     }
+  }
+
+  /**
+   * The real context factors from one `analyze()`, in the UP-anchored frame,
+   * plus the reason when there are none.
+   *
+   * Exactly one of the two is meaningful at a time: a populated map has a null
+   * reason, and an empty map always names which of the three ways it got there.
+   * The packet turns that reason into a stated absence, so an empty map must
+   * never reach it unexplained — `contextFactorFlip` has already been dark once
+   * for want of this, and a silent sensor is indistinguishable from a calm one.
+   */
+  private factorsFrom(result: AnalyzeResult): {
+    factorValues: Record<string, number>;
+    factorsReason: string | null;
+  } {
+    if (result.kind !== 'setup') {
+      return { factorValues: {}, factorsReason: FACTORS_NO_SETUP };
+    }
+    const factors = result.contextFactors;
+    // Optional on the type: pre-scoring code paths and persisted-only setups
+    // legitimately carry no breakdown at all, which is not the same fact as a
+    // breakdown that turned out to be entirely stubs.
+    if (!Array.isArray(factors) || factors.length === 0) {
+      return { factorValues: {}, factorsReason: FACTORS_NOT_SCORED };
+    }
+    const factorValues = normaliseFactors(factors, result.side);
+    if (Object.keys(factorValues).length === 0) {
+      return { factorValues, factorsReason: FACTORS_ALL_STUBBED };
+    }
+    return { factorValues, factorsReason: null };
   }
 
   private warnOnce(key: string, message: string): void {

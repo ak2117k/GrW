@@ -243,6 +243,12 @@ export interface TickSnapshot {
   volumeRatio: number | null;
   freshNewsCount: number | null;
   factorValues: Record<string, number>;
+  /**
+   * Why {@link factorValues} is empty, or null when it is populated. Carried so
+   * the packet can state WHICH failure produced the absence instead of
+   * flattening three distinct causes into one sentence.
+   */
+  factorsReason: string | null;
   oiWallNow: { callWall: number | null; putWall: number | null } | null;
   oiWallPrev: { callWall: number | null; putWall: number | null } | null;
   /**
@@ -422,7 +428,14 @@ export type SourcedValue = {
  * cannot produce JSON cannot be an evidence source.
  */
 export interface ChartContextShim {
-  levelsFor(symbol: string): Promise<SourcedValue | null>;
+  /**
+   * `userId` is the OWNING position's tenant, and it is not optional in
+   * practice: this platform has no shared feed account, so an implementation
+   * given no user has no authenticated session to fetch candles with and will
+   * return null for every symbol. Typed optional only so a test double may omit
+   * it. See `SentinelChartContextAdapter`'s class note.
+   */
+  levelsFor(symbol: string, userId?: string): Promise<SourcedValue | null>;
 }
 
 export interface NewsShim {
@@ -485,7 +498,7 @@ export class ContextPacketService {
     const [levelBook, headlines] = structureSymbol
       ? await Promise.all([
           this.safely(
-            () => this.chartContext.levelsFor(structureSymbol),
+            () => this.chartContext.levelsFor(structureSymbol, entry.userId),
             'chart-context.service',
             at,
             'level book unavailable for this symbol',
@@ -615,10 +628,22 @@ export class ContextPacketService {
         ),
         sector: absent(STUB_REASON),
         globalCues: absent(`${STUB_REASON} (gold, crude-oil, nasdaq)`),
+        // The reason travels WITH the emptiness. "No setup on the underlying",
+        // "scored but every factor is a stub" and "no level book at all" are
+        // three different facts, and the agent reasons differently about each —
+        // a bare "none computed" invited it to read a quiet macro picture.
         realFactors:
           Object.keys(tick.factorValues).length > 0
-            ? present(tick.factorValues, 'context-scoring (greeks, mtfTrend, volatility only)', at)
-            : absent('no real context factors computed for this symbol'),
+            ? present(
+                tick.factorValues,
+                'context-scoring via signal-generator.analyze (real, non-stub factors only; ' +
+                  'sign is normalised so positive = supportive of a move UP, independent of ' +
+                  "the setup's own side)",
+                at,
+              )
+            : absent(
+                tick.factorsReason ?? 'no real context factors computed for this symbol',
+              ),
       },
       news: {
         headlines,

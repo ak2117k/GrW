@@ -54,6 +54,7 @@ const tick = (over: Partial<TickReading> = {}): TickReading => ({
   volumeRatio: null,
   freshNewsCount: null,
   factorValues: {},
+  factorsReason: null,
   // No OI fields: the cycle captures walls on its own cadence and owns their
   // provenance, so `TickReading` excludes them.
   ...over,

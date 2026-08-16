@@ -112,6 +112,11 @@ const NO_STRUCTURE = {
   reason: unresolvedUnderlying("this instrument's level book"),
   at: null,
   source: SENTINEL_LEVEL_SOURCE,
+  // Same cause, its own sentence. The context factors are computed by the level
+  // engine, so an unresolved underlying means they were never evaluated either —
+  // and saying so is not the same as saying the macro picture is neutral.
+  factorValues: {},
+  factorsReason: unresolvedUnderlying('the context-scoring factors'),
 } as const;
 
 /**
@@ -147,9 +152,11 @@ export function istDateOnly(date: Date): string {
  * KNOWN GAPS, stated rather than hidden, because each one makes a sensor quiet
  * and a quiet sensor is indistinguishable from a calm market:
  *
- *  - `factorValues` is always `{}`. The context-scoring engine needs a
- *    `SetupContext` this adapter does not build, so `contextFactorFlip` cannot
- *    fire and the packet's `macro.realFactors` is a stated absence.
+ *  - `factorValues` carries only the factors the level engine attaches to an
+ *    ACTIVE SETUP on the underlying. With no setup there is nothing to score, so
+ *    the map is empty and `contextFactorFlip` stays quiet — correctly, but it
+ *    means the sensor is live only while the engine has a setup on that symbol.
+ *    The packet states which of the four emptiness causes applies.
  *  - `underlyingLtp` for a derivative depends on the underlying's spot being in
  *    the live level book. When the underlying is not subscribed, it is null and
  *    `levelBreak` and the OI capture both correctly stay silent.
@@ -183,6 +190,10 @@ export class SentinelTickSource implements TickSource {
     const row = await this.prisma.tradeTracker.findUnique({
       where: { id: trackerId },
       select: {
+        // The level book is fetched over THIS user's own Angel session — the
+        // platform has no shared feed account, so without it every level read
+        // comes back empty. See `SentinelChartContextAdapter`'s class note.
+        userId: true,
         symbol: true,
         exchange: true,
         token: true,
@@ -252,7 +263,7 @@ export class SentinelTickSource implements TickSource {
 
     const [structure, freshNewsCount] = await Promise.all([
       structureSymbol
-        ? this.charts.structureFor(structureSymbol, underlyingLtp)
+        ? this.charts.structureFor(structureSymbol, underlyingLtp, row.userId)
         : Promise.resolve(NO_STRUCTURE),
       // Null, not 0 — "no reading" and "nothing published" must stay apart.
       structureSymbol ? this.freshNewsCount(structureSymbol) : Promise.resolve(null),
@@ -289,10 +300,11 @@ export class SentinelTickSource implements TickSource {
       expiry: await this.expiryFor(row.token, segment),
       volumeRatio: structure.volumeRatio,
       freshNewsCount,
-      // See the class note: the context-scoring engine is not wired here, so
-      // this is empty and the packet records `macro.realFactors` as absent with
-      // a reason rather than as an empty reading.
-      factorValues: {},
+      // Both come off the SAME `analyze()` the levels above did — the factors
+      // are computed as part of scoring a setup, so there is no second call and
+      // no window in which the levels and the factors describe different bars.
+      factorValues: structure.factorValues,
+      factorsReason: structure.factorsReason,
     };
   }
 

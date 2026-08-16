@@ -28,6 +28,12 @@ export interface BrokerOverview {
     netQty: number;
     ltp: number;
     pnl: number;
+    /** The traded instrument's own token — for a derivative, the CONTRACT's. */
+    token: string;
+    /** The underlying's base symbol (`BDL` for `BDL25AUG261400CE`), or null. */
+    underlyingSymbol: string | null;
+    /** The underlying's NSE cash token, or null when it could not be resolved. */
+    underlyingToken: string | null;
   }>;
   holdings: Holding[];
   holdingSummary: {

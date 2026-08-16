@@ -1,4 +1,4 @@
-import { useState, type MouseEvent } from 'react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { LineChart, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
@@ -14,6 +14,16 @@ interface SymbolChartLinkProps {
   exchange?: string | null;
   /** Extra classes (the parent cell keeps its own font styling). */
   className?: string;
+  /**
+   * What the link READS AS, when that is not the symbol itself. The dashboard's
+   * positions table links the P&L figure to the traded contract's own chart
+   * while the symbol cell links to the underlying, so one row offers both
+   * without repeating the tradingsymbol twice.
+   *
+   * `symbol` still decides WHERE it goes and what the tooltip names, so a
+   * relabelled link cannot quietly point somewhere other than it claims.
+   */
+  label?: ReactNode;
 }
 
 /**
@@ -28,7 +38,7 @@ interface SymbolChartLinkProps {
  * token because a token-less /charts URL loses a race with the chart's URL↔store
  * sync and falls back to the default symbol.
  */
-export function SymbolChartLink({ symbol, token, exchange, className }: SymbolChartLinkProps) {
+export function SymbolChartLink({ symbol, token, exchange, className, label }: SymbolChartLinkProps) {
   const navigate = useNavigate();
   const [resolving, setResolving] = useState(false);
 
@@ -50,7 +60,7 @@ export function SymbolChartLink({ symbol, token, exchange, className }: SymbolCh
         title={`Open ${symbol} chart`}
         className={cls}
       >
-        {symbol}
+        {label ?? symbol}
         {icon}
       </Link>
     );
@@ -83,7 +93,7 @@ export function SymbolChartLink({ symbol, token, exchange, className }: SymbolCh
 
   return (
     <button type="button" onClick={handleClick} title={`Open ${symbol} chart`} className={cls} disabled={resolving}>
-      {symbol}
+      {label ?? symbol}
       {resolving ? (
         <Loader2 size={11} className="shrink-0 animate-spin opacity-70" />
       ) : (

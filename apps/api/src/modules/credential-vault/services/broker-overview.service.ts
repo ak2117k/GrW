@@ -6,6 +6,7 @@ import {
 } from '../execution/credential-decryptor';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
+import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 
 /**
  * Sanitized, secret-free account overview returned by GET /api/broker/overview.
@@ -49,6 +50,32 @@ export interface BrokerOverview {
     netQty: number;
     ltp: number;
     pnl: number;
+    /**
+     * The traded instrument's own token — for a derivative, the CONTRACT's, not
+     * the underlying's. Empty string when the broker omitted it.
+     *
+     * Carried so the UI can deep-link to this instrument's chart. A chart link
+     * without a token is not a weaker link, it is a BROKEN one: /charts ignores
+     * a URL with no token and silently leaves whatever chart was open, so the
+     * click looks like it worked and shows the wrong instrument.
+     */
+    token: string;
+    /**
+     * The UNDERLYING's base symbol for a derivative (`BDL` for
+     * `BDL25AUG261400CE`), taken from Angel's own `symbolname`. Equal to the
+     * traded symbol for cash. Null when the broker omitted it.
+     *
+     * Not parsed out of the tradingsymbol: the broker already knows the answer,
+     * and a regex over `<NAME><DDMMMYY><STRIKE><CE|PE>` guesses wrong on names
+     * that contain digits.
+     */
+    underlyingSymbol: string | null;
+    /**
+     * The underlying's NSE CASH token, resolved from the instrument master.
+     * Null when it could not be resolved — see the token note above for why the
+     * UI must then render plain text rather than a link.
+     */
+    underlyingToken: string | null;
   }>;
   holdings: Holding[];
   holdingSummary: {
@@ -113,6 +140,12 @@ function mapPositions(positions: any): BrokerOverview['positions'] {
     netQty: toNum(p?.netqty),
     ltp: toNum(p?.ltp),
     pnl: toNum(p?.pnl),
+    token: p?.symboltoken ? String(p.symboltoken) : '',
+    underlyingSymbol: p?.symbolname ? String(p.symbolname).trim().toUpperCase() : null,
+    // Left null here ON PURPOSE: resolving it needs the instrument master, and
+    // this function is pure so it stays testable without a database. The
+    // service fills it in — see `attachUnderlyingTokens`.
+    underlyingToken: null as string | null,
   }));
 }
 
@@ -227,6 +260,9 @@ export class BrokerOverviewService {
     // The persistent market-data feed session. When the caller IS the feed
     // account, reads reuse this session instead of a fresh login (see getOverview).
     private readonly authService: AngelOneAuthService,
+    // The instrument master, for resolving a derivative's underlying to its NSE
+    // cash token. Read-only and never on the credential path.
+    private readonly instruments: MarketDataRepository,
   ) {}
 
   /**
@@ -254,12 +290,14 @@ export class BrokerOverviewService {
     if (user?.isFeedAccount && this.authService.isAuthenticated()) {
       try {
         const api = this.authService.getSmartApi();
-        return sanitizeOverview({
-          funds: (await api.getRMS())?.data ?? null,
-          profile: (await api.getProfile())?.data ?? null,
-          positions: (await api.getPosition())?.data ?? null,
-          holdings: (await api.getAllHolding())?.data ?? null,
-        });
+        return await this.attachUnderlyingTokens(
+          sanitizeOverview({
+            funds: (await api.getRMS())?.data ?? null,
+            profile: (await api.getProfile())?.data ?? null,
+            positions: (await api.getPosition())?.data ?? null,
+            holdings: (await api.getAllHolding())?.data ?? null,
+          }),
+        );
       } catch (err) {
         this.logger.warn(
           `Feed-session overview read failed; falling back to ephemeral login: ${err instanceof Error ? err.message : err}`,
@@ -279,7 +317,63 @@ export class BrokerOverviewService {
         })),
     );
 
-    return sanitizeOverview(raw);
+    return this.attachUnderlyingTokens(sanitizeOverview(raw));
+  }
+
+  /**
+   * Fills in each position's `underlyingToken` from the instrument master.
+   *
+   * WHY THE UI NEEDS IT: the dashboard links a position's symbol to the
+   * UNDERLYING's chart, because that is where the S/R levels, zones and trend
+   * live — all of them are computed for cash equities. The contract's own
+   * premium chart hangs off the row's other end and needs only `token`, which
+   * the broker already gave us.
+   *
+   * NEVER THROWS, and a failure leaves `underlyingToken` null rather than
+   * guessing. The UI renders an unresolved underlying as plain text: a chart
+   * link with no token navigates and silently shows whatever was open before,
+   * so a wrong token — or a link that pretends to have one — is materially
+   * worse than no link.
+   *
+   * One lookup per DISTINCT underlying, not per position: five NIFTY contracts
+   * are one query, and the whole overview is one broker refresh.
+   */
+  private async attachUnderlyingTokens(overview: BrokerOverview): Promise<BrokerOverview> {
+    const names = [
+      ...new Set(overview.positions.map((p) => p.underlyingSymbol).filter((n): n is string => !!n)),
+    ];
+    if (names.length === 0) return overview;
+
+    const tokens = new Map<string, string>();
+    await Promise.all(
+      names.map(async (name) => {
+        try {
+          // `-EQ` FIRST: the NSE master stores cash equities with their series
+          // suffix (`BDL-EQ`), while indices (`NIFTY`) carry none. Trying the
+          // bare name first would match an unrelated derivative row on a
+          // deployment whose master holds more than cash.
+          const row =
+            (await this.instruments.getInstrumentBySymbol(`${name}-EQ`, 'NSE')) ??
+            (await this.instruments.getInstrumentBySymbol(name, 'NSE'));
+          if (row?.token) tokens.set(name, String(row.token));
+        } catch (err) {
+          // Debug, not warn: an unresolvable underlying costs one link on one
+          // row, degrades to plain text, and says nothing about the position's
+          // own data. Warning per refresh would drown the log.
+          this.logger.debug(
+            `could not resolve underlying ${name} to an NSE token: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }),
+    );
+
+    return {
+      ...overview,
+      positions: overview.positions.map((p) => ({
+        ...p,
+        underlyingToken: p.underlyingSymbol ? (tokens.get(p.underlyingSymbol) ?? null) : null,
+      })),
+    };
   }
 
   /**

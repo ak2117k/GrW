@@ -10,6 +10,8 @@ import { useBrokerOverview } from '@/hooks/useBrokerOverview';
 import { useAutoExec, type AutoExecSegment, type AutoExecState } from '@/hooks/useAutoExec';
 import { formatMoney } from '@/hooks/formatMoney';
 import { useAuthStore } from '@/stores/auth-store';
+import { SymbolChartLink } from '@/components/common/SymbolChartLink';
+import { isDerivative } from './positionRow';
 
 const inr = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
 const fmtRs = (n: number) => `${n > 0 ? '+' : n < 0 ? '−' : ''}₹${inr.format(Math.abs(Math.round(n)))}`;
@@ -178,11 +180,40 @@ function BrokerOverviewSections() {
                   <tbody>
                     {data.positions.map((p, i) => (
                       <tr key={`${p.symbol}-${p.exchange}-${i}`} className="border-t border-[var(--color-border-subtle)]">
-                        <td className="py-1.5 pr-3 text-[var(--color-text-primary)]">{p.symbol}</td>
+                        {/* LEFT: the UNDERLYING's chart. That is where the S/R
+                            levels, zones and trend live — all of them are
+                            computed for cash equities, so an option's own chart
+                            comes up with bare overlays. Falls back to the traded
+                            symbol for cash, where the two are the same thing. */}
+                        <td className="py-1.5 pr-3 text-[var(--color-text-primary)]">
+                          <SymbolChartLink
+                            symbol={p.underlyingSymbol || p.symbol}
+                            token={p.underlyingToken}
+                            exchange="NSE"
+                          />
+                        </td>
                         <td className="py-1.5 pr-3 text-[var(--color-text-muted)]">{p.exchange}</td>
                         <td className="py-1.5 pr-3 text-right tabular-nums text-[var(--color-text-secondary)]">{p.netQty}</td>
                         <td className="py-1.5 pr-3 text-right tabular-nums text-[var(--color-text-secondary)]">{formatMoney(p.ltp)}</td>
-                        <td className={clsx('py-1.5 text-right tabular-nums font-medium', moneyColor(p.pnl ?? 0))}>{fmtRs(p.pnl ?? 0)}</td>
+                        {/* RIGHT: the traded CONTRACT's own chart — the premium
+                            line this P&L is actually made of. Only for a real
+                            derivative: on cash it would be the same destination
+                            as the symbol cell, and a second link to one place
+                            teaches the reader that the two ends differ when they
+                            do not. */}
+                        <td className={clsx('py-1.5 text-right tabular-nums font-medium', moneyColor(p.pnl ?? 0))}>
+                          {isDerivative(p) ? (
+                            <SymbolChartLink
+                              symbol={p.symbol}
+                              token={p.token}
+                              exchange={p.exchange}
+                              label={fmtRs(p.pnl ?? 0)}
+                              className="justify-end"
+                            />
+                          ) : (
+                            fmtRs(p.pnl ?? 0)
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

@@ -10,6 +10,9 @@ import {
 const NOW = new Date('2026-08-14T06:00:00Z');
 
 const row = (over: Record<string, unknown> = {}) => ({
+  // The level book is fetched over THIS user's own Angel session — there is no
+  // shared feed account, so a tick that loses the userId gets an empty book.
+  userId: 'u1',
   symbol: 'SUZLON-EQ',
   exchange: 'NSE',
   token: '12345',
@@ -196,7 +199,7 @@ describe('SentinelTickSource', () => {
     await t.svc.tickFor('t1');
     // For cash the tradingsymbol IS the level book's key — the instrument
     // master holds cash equities under exactly this spelling.
-    expect(t.structureFor).toHaveBeenCalledWith('SUZLON-EQ', 105);
+    expect(t.structureFor).toHaveBeenCalledWith('SUZLON-EQ', 105, 'u1');
   });
 
   it('carries the level book’s answer straight through', async () => {
@@ -323,7 +326,7 @@ describe('SentinelTickSource', () => {
       // `getInstrumentBySymbol` filters {symbol, exchange} EXACTLY, and only
       // cash equities are in that table — so an NFO tradingsymbol matches
       // nothing, permanently, however good the spot is.
-      expect(t.structureFor).toHaveBeenCalledWith('NIFTY', 24010);
+      expect(t.structureFor).toHaveBeenCalledWith('NIFTY', 24010, 'u1');
       expect(t.structureFor).not.toHaveBeenCalledWith(
         'NIFTY28AUG2524000CE',
         expect.anything(),
@@ -373,7 +376,7 @@ describe('SentinelTickSource', () => {
       // Only the spot needs the token. Collapsing the two would take the level
       // book and the news down with it for no reason.
       expect(tick.underlyingLtp).toBeNull();
-      expect(t.structureFor).toHaveBeenCalledWith('NIFTY', null);
+      expect(t.structureFor).toHaveBeenCalledWith('NIFTY', null, 'u1');
       expect(t.getNewsForSymbol).toHaveBeenCalledWith('NIFTY');
     });
 

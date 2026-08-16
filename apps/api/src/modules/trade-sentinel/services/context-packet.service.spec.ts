@@ -155,6 +155,7 @@ describe('ContextPacketService', () => {
     volumeRatio: null,
     freshNewsCount: null,
     factorValues: {},
+    factorsReason: null,
   oiWallNow: null,
   oiWallPrev: null,
   oiWallsAt: null,
@@ -787,7 +788,7 @@ describe('ContextPacketService — the evidence sources are keyed by the underly
 
     await t.svc.build(entryFor(OPTION_TRADINGSYMBOL), tickFor('NIFTY'), null, []);
 
-    expect(t.levelsFor).toHaveBeenCalledWith('NIFTY');
+    expect(t.levelsFor).toHaveBeenCalledWith('NIFTY', 'u1');
     expect(t.recentFor).toHaveBeenCalledWith('NIFTY');
     expect(t.levelsFor).not.toHaveBeenCalledWith(OPTION_TRADINGSYMBOL);
     expect(t.recentFor).not.toHaveBeenCalledWith(OPTION_TRADINGSYMBOL);
@@ -815,7 +816,7 @@ describe('ContextPacketService — the evidence sources are keyed by the underly
       [],
     );
 
-    expect(t.levelsFor).toHaveBeenCalledWith('SUZLON-EQ');
+    expect(t.levelsFor).toHaveBeenCalledWith('SUZLON-EQ', 'u1');
     expect(t.recentFor).toHaveBeenCalledWith('SUZLON-EQ');
   });
 

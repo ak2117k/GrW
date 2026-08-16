@@ -52,6 +52,7 @@ const tick: TickSnapshot = {
   volumeRatio: 1.4,
   freshNewsCount: 0,
   factorValues: {},
+  factorsReason: null,
   oiWallNow: null,
   oiWallPrev: null,
   oiWallsAt: null,

@@ -1,6 +1,10 @@
 import { Logger } from '@nestjs/common';
 import type { LevelsSnapshot } from '../../signal-generator/services/signal-generator.service';
 import {
+  FACTORS_ALL_STUBBED,
+  FACTORS_NOT_SCORED,
+  FACTORS_NO_BOOK,
+  FACTORS_NO_SETUP,
   LEVEL_BOOK_FAILED,
   LEVEL_BOOK_NO_PRICE,
   LEVEL_BOOK_UNBUILT,
@@ -25,19 +29,41 @@ const levels = (over: Partial<LevelsSnapshot> = {}): LevelsSnapshot => ({
   ...over,
 });
 
-function make() {
+/** The three real factors, as `ContextFactorBreakdown` spells them. */
+const factors = (
+  over: Array<{ name: string; value: number; isStub: boolean }> = [],
+): Array<{ name: string; value: number; isStub: boolean }> =>
+  over.length > 0
+    ? over
+    : [
+        { name: 'greeks', value: 0.5, isStub: false },
+        { name: 'mtfTrend', value: -0.4, isStub: false },
+        // Excluded by `isStub`, not by name — a stub's neutral zero is not a
+        // reading, and feeding it to `contextFactorFlip` manufactures signal.
+        { name: 'fii', value: 0, isStub: true },
+      ];
+
+function make(opts: { withFeed?: boolean } = { withFeed: true }) {
   const analyze = jest.fn();
   const getInstrumentBySymbol = jest.fn().mockResolvedValue({
     token: '12345',
     exchange: 'NSE',
     symbol: 'SUZLON-EQ',
   });
+  const fetchCandles = jest.fn().mockResolvedValue([]);
   const svc = new SentinelChartContextAdapter(
     { analyze } as never,
     { getInstrumentBySymbol } as never,
+    opts.withFeed ? ({ fetchCandles } as never) : undefined,
   );
-  analyze.mockResolvedValue({ kind: 'setup', levels: levels(), volumeRatio: 2.5 });
-  return { svc, analyze, getInstrumentBySymbol };
+  analyze.mockResolvedValue({
+    kind: 'setup',
+    side: 'BUY',
+    levels: levels(),
+    volumeRatio: 2.5,
+    contextFactors: factors(),
+  });
+  return { svc, analyze, getInstrumentBySymbol, fetchCandles };
 }
 
 describe('levelCandidates', () => {
@@ -102,8 +128,54 @@ describe('SentinelChartContextAdapter', () => {
 
   it('builds the level book at the chosen interval and nothing else', async () => {
     const t = make();
-    await t.svc.levelsFor('SUZLON-EQ');
-    expect(t.analyze).toHaveBeenCalledWith('12345', 'NSE', 'SUZLON-EQ', SENTINEL_LEVEL_INTERVAL);
+    await t.svc.levelsFor('SUZLON-EQ', 'u1');
+    expect(t.analyze).toHaveBeenCalledWith(
+      '12345',
+      'NSE',
+      'SUZLON-EQ',
+      SENTINEL_LEVEL_INTERVAL,
+      expect.anything(),
+    );
+  });
+
+  it("fetches candles over the OWNING USER's own session, not the shared adapter", async () => {
+    // This platform has NO shared feed account: an analyze() without a
+    // CandleSource reaches `AngelOneAdapterService`, which throws
+    // `Not authenticated` for every call. Before this the level book was empty
+    // for every symbol, permanently — and a permanently empty book is
+    // indistinguishable from a symbol whose levels were never touched.
+    const t = make();
+    await t.svc.levelsFor('SUZLON-EQ', 'u1');
+
+    const source = t.analyze.mock.calls[0][4] as {
+      getCandles: (...a: unknown[]) => Promise<unknown>;
+    };
+    expect(source).toBeDefined();
+
+    const from = new Date('2026-08-14T03:45:00Z');
+    const to = new Date('2026-08-14T06:00:00Z');
+    await source.getCandles('12345', 'NSE', '5m', from, to);
+    // The userId must be the FIRST argument to fetchCandles — bound to the
+    // position's owner, not to whoever happened to warm the cache.
+    expect(t.fetchCandles).toHaveBeenCalledWith('u1', '12345', 'NSE', '5m', from, to);
+  });
+
+  it('passes NO source when there is no feed manager or no user, rather than inventing one', async () => {
+    // The documented degradation: analyze() falls back to the shared-adapter
+    // path. On this deployment that yields nothing, and the emptiness is then
+    // reported WITH a reason rather than as a finding.
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const noFeed = make({ withFeed: false });
+    await noFeed.svc.levelsFor('SUZLON-EQ', 'u1');
+    expect(noFeed.analyze.mock.calls[0][4]).toBeUndefined();
+
+    // AT BOOT, AT WARN. A missing feed manager makes every sensor dark for the
+    // life of the process; the one thing it must not also be is quiet.
+    expect(warn.mock.calls.map((c) => String(c[0])).join('')).toMatch(/UserFeedManager/);
+
+    const noUser = make();
+    await noUser.svc.levelsFor('SUZLON-EQ', undefined);
+    expect(noUser.analyze.mock.calls[0][4]).toBeUndefined();
   });
 
   it('returns null when the instrument cannot be resolved, and says so at WARN', async () => {
@@ -203,6 +275,124 @@ describe('SentinelChartContextAdapter', () => {
       reason: null,
       at: '2026-08-14T06:00:00.000Z',
       source: SENTINEL_LEVEL_SOURCE,
+      // Off the SAME analyze() the levels came from — stubs dropped, and a
+      // populated map carries no reason.
+      factorValues: { greeks: 0.5, mtfTrend: -0.4 },
+      factorsReason: null,
+    });
+  });
+
+  describe('context factors', () => {
+    it('anchors the sign to UP, so the SETUP flipping side does not flip every factor', async () => {
+      // THE BUG THIS EXISTS FOR. `FactorResult.value` is defined as +1 =
+      // supportive of `FactorInput.side`, so one unchanged market read scores
+      // +0.5 under a BUY setup and -0.5 under a SELL setup. `contextFactorFlip`
+      // fires on a change of SIGN between consecutive ticks — so without this
+      // normalisation, the engine merely proposing the other direction would
+      // report that every factor flipped at once. That is manufactured signal.
+      const same = [
+        { name: 'greeks', value: 0.5, isStub: false },
+        { name: 'mtfTrend', value: -0.4, isStub: false },
+      ];
+
+      const buy = make();
+      buy.analyze.mockResolvedValue({
+        kind: 'setup',
+        side: 'BUY',
+        levels: levels(),
+        volumeRatio: 2.5,
+        contextFactors: same,
+      });
+
+      const sell = make();
+      // The SELL engine reporting the mirror-image raw values IS the same read
+      // of the market: supportive-of-SELL +0.5 means bearish, i.e. -0.5 up.
+      sell.analyze.mockResolvedValue({
+        kind: 'setup',
+        side: 'SELL',
+        levels: levels(),
+        volumeRatio: 2.5,
+        contextFactors: same.map((f) => ({ ...f, value: -f.value })),
+      });
+
+      const fromBuy = (await buy.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorValues;
+      const fromSell = (await sell.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorValues;
+
+      expect(fromBuy).toEqual({ greeks: 0.5, mtfTrend: -0.4 });
+      // Same numbers, not mirrored ones — no sign flip for the sensor to find.
+      expect(fromSell).toEqual(fromBuy);
+    });
+
+    it('drops stubs and non-finite values rather than passing them on', async () => {
+      const t = make();
+      t.analyze.mockResolvedValue({
+        kind: 'setup',
+        side: 'BUY',
+        levels: levels(),
+        volumeRatio: 2.5,
+        contextFactors: [
+          { name: 'greeks', value: 0.5, isStub: false },
+          { name: 'fii', value: 0, isStub: true },
+          // Math.sign(NaN) is NaN, which is !== every sign — it would read as a
+          // flip that never happened. `greeks` can produce one from a malformed
+          // option-chain delta.
+          { name: 'volatility', value: Number.NaN, isStub: false },
+        ],
+      });
+
+      const out = await t.svc.structureFor('SUZLON-EQ', 100.5, 'u1');
+      expect(out.factorValues).toEqual({ greeks: 0.5 });
+      expect(out.factorsReason).toBeNull();
+    });
+
+    it('names WHICH emptiness it is, so the packet cannot flatten four causes into one', async () => {
+      // A bare `{}` told the agent the macro picture was quiet. These are four
+      // different facts and only one of them is about the market.
+      const noSetup = make();
+      noSetup.analyze.mockResolvedValue({ kind: 'no-setup', levels: null });
+      expect((await noSetup.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorsReason).toBe(
+        FACTORS_NO_SETUP,
+      );
+
+      const notScored = make();
+      notScored.analyze.mockResolvedValue({
+        kind: 'setup',
+        side: 'BUY',
+        levels: levels(),
+        volumeRatio: 2.5,
+      });
+      expect((await notScored.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorsReason).toBe(
+        FACTORS_NOT_SCORED,
+      );
+
+      const allStubs = make();
+      allStubs.analyze.mockResolvedValue({
+        kind: 'setup',
+        side: 'BUY',
+        levels: levels(),
+        volumeRatio: 2.5,
+        contextFactors: [{ name: 'fii', value: 0, isStub: true }],
+      });
+      expect((await allStubs.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorsReason).toBe(
+        FACTORS_ALL_STUBBED,
+      );
+
+      const noBook = make();
+      noBook.getInstrumentBySymbol.mockResolvedValue(null);
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      expect((await noBook.svc.structureFor('NOPE', 100.5, 'u1')).factorsReason).toBe(
+        FACTORS_NO_BOOK,
+      );
+    });
+
+    it('reports factors even when the price cannot be placed against the levels', async () => {
+      // The two are independent readings off one book. Sharing a reason between
+      // them would tell the packet the wrong cause for one of the two.
+      const t = make();
+      const out = await t.svc.structureFor('SUZLON-EQ', null, 'u1');
+      expect(out.reason).toBe(LEVEL_BOOK_NO_PRICE);
+      expect(out.factorValues).toEqual({ greeks: 0.5, mtfTrend: -0.4 });
+      expect(out.factorsReason).toBeNull();
     });
   });
 

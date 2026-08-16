@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import type Anthropic from '@anthropic-ai/sdk';
+import type { MessagesTransport, TransportMessage } from './llm-transport';
 import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk';
 import {
   SentinelThesisRepository,
@@ -119,7 +119,7 @@ export class ThesisService {
 
   constructor(
     private readonly repo: SentinelThesisRepository,
-    @Inject(ANTHROPIC_CLIENT) private readonly client: Anthropic,
+    @Inject(ANTHROPIC_CLIENT) private readonly client: MessagesTransport,
     @Inject(CHART_CONTEXT_SHIM) private readonly chartContext: ChartContextShim,
   ) {}
 
@@ -292,7 +292,7 @@ export class ThesisService {
    * because a truncated reply otherwise surfaces as "not JSON", which reads as a
    * prompt regression when it is a budget problem.
    */
-  private parseReply(response: Anthropic.Message): {
+  private parseReply(response: TransportMessage): {
     direction: Side;
     reason: string;
     levelPrice: number | null;

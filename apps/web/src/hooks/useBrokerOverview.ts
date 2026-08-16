@@ -15,6 +15,8 @@ export interface Holding {
   pnl: number;
   pnlPercent: number;
   dayChangePercent: number;
+  /** The instrument's token, for deep-linking to its chart. */
+  token: string;
   product: string;
   holdingType: 'NORMAL' | 'MTF' | 'PLEDGED';
 }

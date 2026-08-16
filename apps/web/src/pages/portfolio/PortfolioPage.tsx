@@ -10,6 +10,8 @@ import { exportTrackersXlsx, exportTrackersPdf } from '@/utils/exportTrackers';
 import { exportOhlcXlsx, exportOhlcPdf, type DailyOhlc } from '@/utils/exportOhlc';
 import api from '@/services/api';
 import { LoadingSkeleton } from '@/components/common';
+import { SymbolChartLink } from '@/components/common/SymbolChartLink';
+import { isDerivative } from '@/utils/positionRow';
 
 /** How often to re-pull Angel One's live holdings/positions during market hours. */
 const AUTO_REFRESH_MS = 20_000;
@@ -667,8 +669,15 @@ export default function PortfolioPage() {
                   <tbody>
                     {data.holdings.map((h, i) => (
                       <tr key={`${h.symbol}-${i}`} className="border-b border-[var(--color-border-subtle)] last:border-0">
+                        {/* A holding is cash equity, so the thing held IS the
+                            thing charted — one link, unlike a position. */}
                         <td className="px-3 py-1.5">
-                          <span className="font-medium text-[var(--color-text-primary)]">{h.symbol}</span>
+                          <SymbolChartLink
+                            symbol={h.symbol}
+                            token={h.token}
+                            exchange={h.exchange}
+                            className="font-medium text-[var(--color-text-primary)]"
+                          />
                           <span className="ml-1.5 text-[10px] text-[var(--color-text-muted)]">{h.exchange}</span>
                         </td>
                         <td className="px-3 py-1.5"><HoldingTypeBadge type={h.holdingType} /></td>
@@ -709,13 +718,35 @@ export default function PortfolioPage() {
                   <tbody>
                     {data.positions.map((p, i) => (
                       <tr key={`${p.symbol}-${i}`} className="border-b border-[var(--color-border-subtle)] last:border-0">
+                        {/* Same split as the dashboard's positions table, and
+                            deliberately identical: symbol → the underlying's
+                            chart, P&L → the traded contract's own. Two tables
+                            of the same data behaving differently is worse than
+                            either behaviour on its own. */}
                         <td className="px-3 py-1.5">
-                          <span className="font-medium text-[var(--color-text-primary)]">{p.symbol}</span>
+                          <SymbolChartLink
+                            symbol={p.underlyingSymbol || p.symbol}
+                            token={p.underlyingToken}
+                            exchange="NSE"
+                            className="font-medium text-[var(--color-text-primary)]"
+                          />
                           <span className="ml-1.5 text-[10px] text-[var(--color-text-muted)]">{p.exchange}</span>
                         </td>
                         <td className={TDR}>{p.netQty}</td>
                         <td className={TDR}>{formatMoney(p.ltp)}</td>
-                        <td className={`${TDR} ${pnlColor(p.pnl)}`}>{formatMoney(p.pnl)}</td>
+                        <td className={`${TDR} ${pnlColor(p.pnl)}`}>
+                          {isDerivative(p) ? (
+                            <SymbolChartLink
+                              symbol={p.symbol}
+                              token={p.token}
+                              exchange={p.exchange}
+                              label={formatMoney(p.pnl)}
+                              className="justify-end"
+                            />
+                          ) : (
+                            formatMoney(p.pnl)
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

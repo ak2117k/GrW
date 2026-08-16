@@ -25,6 +25,15 @@ export interface Holding {
   pnl: number;
   pnlPercent: number;
   dayChangePercent: number;
+  /**
+   * The instrument's token, for deep-linking to its chart. Empty when the
+   * broker omitted it — see the note on a position's `token` for why the UI
+   * must then not pretend to have one.
+   *
+   * No underlying pair here, unlike a position: a holding is cash equity, so
+   * the thing held IS the thing charted.
+   */
+  token: string;
   /** Raw Angel One product code (e.g. DELIVERY / MTF). */
   product: string;
   /** Derived holding classification for the UI badge. */
@@ -172,6 +181,7 @@ function mapHoldings(data: any): Holding[] {
       pnl: toNum(h?.profitandloss),
       pnlPercent: toNum(h?.pnlpercentage),
       dayChangePercent: close > 0 ? ((ltp - close) / close) * 100 : 0,
+      token: h?.symboltoken ? String(h.symboltoken) : '',
       product: h?.product ? String(h.product) : '',
       holdingType: classifyHolding(h),
     };

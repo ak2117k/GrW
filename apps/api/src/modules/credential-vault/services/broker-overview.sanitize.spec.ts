@@ -62,6 +62,26 @@ describe('sanitizeOverview — positions carry what a chart link needs', () => {
     expect(positionsFrom({})).toEqual([]);
   });
 
+  it('keeps a HOLDING token too, so the portfolio table can link its chart', () => {
+    // A holding needs no underlying pair: it is cash equity, so the thing held
+    // IS the thing charted.
+    const overview = sanitizeOverview({
+      funds: null,
+      profile: null,
+      positions: null,
+      holdings: {
+        holdings: [
+          { tradingsymbol: 'SUZLON-EQ', symboltoken: '12018', exchange: 'NSE', quantity: '100' },
+          { tradingsymbol: 'NOTOKEN-EQ', exchange: 'NSE', quantity: '5' },
+        ],
+      },
+    });
+    expect(overview.holdings[0].token).toBe('12018');
+    // Empty, not undefined: the UI branches on falsiness to decide whether it
+    // can link straight through or must resolve the token first.
+    expect(overview.holdings[1].token).toBe('');
+  });
+
   it('maps a cash position with its series suffix intact', () => {
     // `BDL-EQ` vs underlying `BDL` is how the UI tells cash from a derivative,
     // so the suffix must survive sanitisation.

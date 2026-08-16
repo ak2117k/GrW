@@ -11,7 +11,7 @@ import { useAutoExec, type AutoExecSegment, type AutoExecState } from '@/hooks/u
 import { formatMoney } from '@/hooks/formatMoney';
 import { useAuthStore } from '@/stores/auth-store';
 import { SymbolChartLink } from '@/components/common/SymbolChartLink';
-import { isDerivative } from './positionRow';
+import { isDerivative } from '@/utils/positionRow';
 
 const inr = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
 const fmtRs = (n: number) => `${n > 0 ? '+' : n < 0 ? '−' : ''}₹${inr.format(Math.abs(Math.round(n)))}`;

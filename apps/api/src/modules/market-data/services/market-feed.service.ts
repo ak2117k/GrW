@@ -1,3 +1,4 @@
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import {
   Injectable,
   Logger,
@@ -155,7 +156,15 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
 
     // Auto-start: wait for auth service to finish initialising, then seed
     // quotes and optionally start the WebSocket feed.
-    this.autoStart();
+    //
+    // Processes that need this module's SERVICES but not a live feed otherwise
+    // pay a quote-seeding round trip to Angel, open a WebSocket nobody reads,
+    // and require a Redis they have no reason to run.
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+    } else {
+      this.autoStart();
+    }
   }
 
   async onModuleDestroy(): Promise<void> {

@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 
 interface BackfillTarget {
   symbol: string;
@@ -78,6 +79,10 @@ export class DailyBackfillWorker implements OnModuleInit {
    * cost in the common case is just the inter-target sleeps.
    */
   async onModuleInit(): Promise<void> {
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+      return;
+    }
     this.backfillUniverseAtBoot().catch((err) => {
       this.logger.warn(
         `Boot-time candle backfill failed: ${err instanceof Error ? err.message : err}`,

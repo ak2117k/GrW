@@ -724,11 +724,14 @@ export default function PortfolioPage() {
                             of the same data behaving differently is worse than
                             either behaviour on its own. */}
                         <td className="px-3 py-1.5">
+                          {/* Underlying destination, tradingsymbol label — see
+                              the dashboard's positions table for why. */}
                           <SymbolChartLink
                             symbol={p.underlyingSymbol || p.symbol}
                             token={p.underlyingToken}
                             exchange="NSE"
                             className="font-medium text-[var(--color-text-primary)]"
+                            label={p.symbol}
                           />
                           <span className="ml-1.5 text-[10px] text-[var(--color-text-muted)]">{p.exchange}</span>
                         </td>

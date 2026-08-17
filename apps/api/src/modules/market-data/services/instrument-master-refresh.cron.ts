@@ -1,3 +1,4 @@
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InstrumentService } from './instrument.service';
@@ -30,6 +31,16 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
+    // This refresh upserts the WHOLE master one row at a time, and it is
+    // AWAITED — so boot blocks on tens of thousands of round trips. Against a
+    // local database that is slow; against a remote one (Neon) it is minutes,
+    // and it exhausts the connection pool while it runs, which is what then
+    // failed the NEXT worker's first query. A process that only needs to READ a
+    // few instruments should never pay for it.
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+      return;
+    }
     await this.refresh('boot');
   }
 

@@ -101,6 +101,17 @@ export function schemaInstruction(schema: Record<string, unknown>): string {
 }
 
 /**
+ * Wrap one argument for a shell command line, so an EMPTY one survives.
+ *
+ * `--tools ""` is the CLI's documented way to disable every built-in tool, and
+ * an unquoted empty argument vanishes into the join — taking the next flag's
+ * value with it. Exported for the test that pins exactly that.
+ */
+export function quoteArg(arg: string): string {
+  return `"${arg.replace(/(["\\])/g, '\\$1')}"`;
+}
+
+/**
  * Serves the sentinel from a local `claude -p` subprocess on the operator's own
  * Claude subscription, instead of from the Anthropic API.
  *
@@ -223,10 +234,22 @@ export class ClaudeCliTransport implements MessagesTransport {
   /** Spawns the CLI and resolves its stdout. Rejects on spawn failure or timeout. */
   private run(args: string[], input: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      const child = spawn('claude', args, {
+      // ONE PRE-QUOTED COMMAND STRING, not an argv array.
+      //
+      // The CLI is a `.cmd` shim on Windows, so `spawn` needs a shell to run it
+      // at all — and with `shell: true` Node joins the argv array into a command
+      // line ITSELF, which silently DROPS empty-string arguments. `--tools ""`
+      // is the documented way to disable every tool, so the empty string is not
+      // an edge case here, it is the value: the flag arrived bare and the CLI
+      // exited with `option '--setting-sources <sources>' argument missing`.
+      //
+      // Quoting every argument ourselves makes `""` survive on both platforms.
+      // Safe because every input is ours — a constant model name and a path from
+      // `mkdtemp` — never user or model text, which rides on stdin.
+      const commandLine = ['claude', ...args].map(quoteArg).join(' ');
+      const child = spawn(commandLine, {
         env: this.childEnv(),
-        // The CLI is a .cmd shim on Windows, which `spawn` cannot exec directly.
-        shell: process.platform === 'win32',
+        shell: true,
         windowsHide: true,
       });
 

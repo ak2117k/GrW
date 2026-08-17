@@ -2,6 +2,7 @@ import { Process, Processor, OnQueueActive, OnQueueFailed, InjectQueue } from '@
 import { Logger, OnModuleInit } from '@nestjs/common';
 import { Queue, Job } from 'bull';
 import { WatchMonitorService } from '../services/watch-monitor.service';
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 
 export const WATCH_RESCORE_QUEUE = 'watch-rescore';
 const RESCORE_JOB_NAME = 'tick';
@@ -17,6 +18,10 @@ export class WatchRescoreWorker implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+      return;
+    }
     // Redis may be briefly unreachable at boot (e.g. a cold DNS resolver on a
     // fresh container). These queue ops await Redis; if they reject and escape
     // onModuleInit, NestJS aborts the ENTIRE app bootstrap → crash loop. Guard

@@ -51,10 +51,32 @@ describe('RosterService', () => {
     expect(unwatched[0].reason).toMatch(/over capacity/i);
   });
 
-  it('gives holdings observe-only ownership and never close authority', async () => {
-    list.mockResolvedValue([tracker('h1', 'HOLDING')]);
+  it('leaves holdings out of the roster entirely — not observed, not listed', async () => {
+    // THE POLICY THIS ENFORCES. A real book is a handful of positions and
+    // DOZENS of holdings, and once the cap binds, holdings would fill the five
+    // watch slots with long-term equity while the option positions opened that
+    // morning went unwatched. Spending the cap on the wrong five is worse than
+    // spending it on none.
+    list.mockResolvedValue([tracker('h1', 'HOLDING'), tracker('t1', 'POSITION')]);
     const roster = await svc.build('u1');
-    expect(roster[0].ownership).toBe('OBSERVE_ONLY');
+    expect(roster.map((r) => r.trackerId)).toEqual(['t1']);
+  });
+
+  it('never lets a holding take a watch slot from a position', async () => {
+    // Holdings come FIRST out of the tracker store, and there are more of them
+    // than the cap. A roster that merely REORDERED would still be correct here;
+    // one that counted them at all would not.
+    list.mockResolvedValue([
+      ...Array.from({ length: 20 }, (_, i) => tracker(`h${i}`, 'HOLDING')),
+      tracker('p1', 'POSITION'),
+      tracker('p2', 'POSITION'),
+    ]);
+    const roster = await svc.build('u1');
+
+    expect(roster.filter((r) => r.watched).map((r) => r.trackerId)).toEqual(['p1', 'p2']);
+    // And nothing is reported as unwatched: 2 positions is under the cap, so
+    // the over-capacity path must not fire on an ordinary book.
+    expect(roster.filter((r) => !r.watched)).toHaveLength(0);
   });
 
   it('marks a position already managed by another engine as observe-only', async () => {
@@ -80,12 +102,12 @@ describe('RosterService', () => {
   });
 
   it('carries the tracker id, symbol and kind onto the roster entry', async () => {
-    list.mockResolvedValue([tracker('trk-9', 'HOLDING', 'RELIANCE')]);
+    list.mockResolvedValue([tracker('trk-9', 'POSITION', 'RELIANCE')]);
     const roster = await svc.build('u1');
     expect(roster[0]).toMatchObject({
       trackerId: 'trk-9',
       symbol: 'RELIANCE',
-      kind: 'HOLDING',
+      kind: 'POSITION',
       watched: true,
     });
   });
@@ -98,42 +120,18 @@ describe('RosterService', () => {
     list.mockResolvedValue([
       tracker('t1', 'POSITION'), // sentinel-claimed
       tracker('t2', 'POSITION', 'NIFTY24800CE'), // owned elsewhere
-      tracker('h1', 'HOLDING'), // holding
     ]);
     ownedElsewhere.mockResolvedValue(new Set(['NIFTY24800CE']));
 
     const roster = await svc.build('u42');
 
-    expect(roster.map((r) => r.userId)).toEqual(['u42', 'u42', 'u42']);
-    // Guard against the guard: the fixture must really have exercised all three.
+    expect(roster.map((r) => r.userId)).toEqual(['u42', 'u42']);
+    // Guard against the guard: the fixture must really have exercised both
+    // surviving branches. The holding branch is unreachable now — holdings are
+    // filtered before construction — so there is no third label to assert.
     expect(roster.map((r) => `${r.kind}/${r.ownership}`).sort()).toEqual([
-      'HOLDING/OBSERVE_ONLY',
       'POSITION/OBSERVE_ONLY',
       'POSITION/SENTINEL',
-    ]);
-  });
-
-  it('gives positions first claim on the watch slots ahead of holdings', async () => {
-    // Holdings come FIRST out of the tracker store, so a roster that did not
-    // reorder would spend three of the five slots on instruments that can never
-    // gain close authority and leave two live positions unwatched.
-    list.mockResolvedValue([
-      tracker('h1', 'HOLDING'),
-      tracker('h2', 'HOLDING'),
-      tracker('h3', 'HOLDING'),
-      tracker('p1', 'POSITION'),
-      tracker('p2', 'POSITION'),
-      tracker('p3', 'POSITION'),
-      tracker('p4', 'POSITION'),
-    ]);
-    const roster = await svc.build('u1');
-
-    const watched = roster.filter((r) => r.watched).map((r) => r.trackerId);
-    expect(watched).toHaveLength(SENTINEL_MAX_WATCHED);
-    expect(watched).toEqual(expect.arrayContaining(['p1', 'p2', 'p3', 'p4']));
-    expect(roster.filter((r) => !r.watched).map((r) => r.trackerId)).toEqual([
-      'h2',
-      'h3',
     ]);
   });
 
@@ -146,16 +144,18 @@ describe('RosterService', () => {
     expect(overflow.ownership).toBe('SENTINEL');
   });
 
-  it('reports over-capacity holdings as unwatched observe-only, not dropped', async () => {
+  it('reports over-capacity POSITIONS as unwatched, not dropped', async () => {
+    // Over capacity is now only reachable with more than five real positions —
+    // an unusual book, and one the user should be told about rather than have
+    // silently trimmed.
     list.mockResolvedValue(
-      Array.from({ length: 7 }, (_, i) => tracker(`h${i}`, 'HOLDING')),
+      Array.from({ length: 7 }, (_, i) => tracker(`t${i}`, 'POSITION', `S${i}`)),
     );
     const roster = await svc.build('u1');
     expect(roster).toHaveLength(7);
     const unwatched = roster.filter((r) => !r.watched);
     expect(unwatched).toHaveLength(2);
     for (const entry of unwatched) {
-      expect(entry.ownership).toBe('OBSERVE_ONLY');
       expect(entry.reason).toMatch(/over capacity/i);
     }
   });
@@ -214,7 +214,10 @@ describe('RosterService', () => {
       ]);
     });
 
-    it('applies oldest-first within holdings too, after every position', async () => {
+    it('drops holdings from the ordering rather than ranking them last', async () => {
+      // The old rule ranked holdings after positions. That was not enough: with
+      // enough holdings they still reached the cap. They are now removed before
+      // the sort runs, so the ordering only ever decides between positions.
       list.mockResolvedValue([
         tracker('h-newest', 'HOLDING', 'A', at(8)),
         tracker('p-new', 'POSITION', 'B', at(6)),
@@ -225,29 +228,17 @@ describe('RosterService', () => {
       ]);
       const roster = await svc.build('u1');
 
-      // Positions first regardless of age, then holdings oldest-first.
-      expect(roster.map((r) => r.trackerId)).toEqual([
-        'p-old',
-        'p-new',
-        'h-oldest',
-        'h-mid',
-        'h-2nd-newest',
-        'h-newest',
-      ]);
-      expect(roster.filter((r) => !r.watched).map((r) => r.trackerId)).toEqual([
-        'h-newest',
-      ]);
+      expect(roster.map((r) => r.trackerId)).toEqual(['p-old', 'p-new']);
+      expect(roster.every((r) => r.watched)).toBe(true);
     });
 
-    it('keeps a younger position ahead of every older holding', async () => {
-      // The kind rank must dominate the age tie-break: a position opened today
-      // outranks a holding held for a year, because only it is ever closable.
+    it('keeps a position opened today, however old the holdings beside it', async () => {
       list.mockResolvedValue([
         tracker('h-ancient', 'HOLDING', 'A', at(1)),
         tracker('p-today', 'POSITION', 'B', at(28)),
       ]);
       const roster = await svc.build('u1');
-      expect(roster.map((r) => r.trackerId)).toEqual(['p-today', 'h-ancient']);
+      expect(roster.map((r) => r.trackerId)).toEqual(['p-today']);
     });
 
     it('preserves store order for same-kind rows with no usable entryTime', async () => {

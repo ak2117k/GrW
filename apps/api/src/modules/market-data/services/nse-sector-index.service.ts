@@ -3,6 +3,7 @@ import { HttpService } from '@nestjs/axios';
 import { Cron } from '@nestjs/schedule';
 import { firstValueFrom } from 'rxjs';
 import { YahooFinanceService } from './yahoo-finance.service';
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import {
   StockSectorRepository,
   StockSectorRow,
@@ -231,6 +232,10 @@ export class NseSectorIndexService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+      return;
+    }
     // Don't block startup — fetch async, fall back to static if it takes time.
     this.refresh().catch((err) => {
       this.logger.warn(

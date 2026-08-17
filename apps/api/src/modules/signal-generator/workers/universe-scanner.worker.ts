@@ -11,6 +11,7 @@ import { AnandSniperV25CombinedStrategy } from '../strategies/anand-sniper-v25-c
 import { LevelsContextStrategy } from '../strategies/levels-context.strategy';
 import { LevelBookService } from '../services/level-book.service';
 import { computeExpiry } from '../utils/compute-expiry';
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import {
   CandleData,
   MarketSnapshot,
@@ -76,6 +77,10 @@ export class UniverseScannerWorker implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+      return;
+    }
     // Resolve underlying instrument IDs once at boot. The candle backfill
     // script seeds these rows; if either is missing, the scan will skip
     // that symbol with a warning.

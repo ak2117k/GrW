@@ -1,6 +1,11 @@
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
-import { ClaudeCliTransport, schemaInstruction, stripFences } from './claude-cli.transport';
+import {
+  ClaudeCliTransport,
+  quoteArg,
+  schemaInstruction,
+  stripFences,
+} from './claude-cli.transport';
 import { judgeTransportFrom } from '../services/llm-transport';
 import type { TransportRequest } from '../services/llm-transport';
 
@@ -106,7 +111,7 @@ describe('ClaudeCliTransport', () => {
       spawnMock.mockReturnValue(fakeChild(ok('{"verdict":"HOLD"}')));
       await svc.messages.create(request());
 
-      const env = spawnMock.mock.calls[0][2].env as NodeJS.ProcessEnv;
+      const env = spawnMock.mock.calls[0][1].env as NodeJS.ProcessEnv;
       expect('ANTHROPIC_API_KEY' in env).toBe(false);
       expect('ANTHROPIC_AUTH_TOKEN' in env).toBe(false);
       // The rest of the environment must survive — PATH among it, or `claude`
@@ -127,11 +132,29 @@ describe('ClaudeCliTransport', () => {
     spawnMock.mockReturnValue(fakeChild(ok('{"verdict":"HOLD"}')));
     await svc.messages.create(request());
 
-    const args = spawnMock.mock.calls[0][1] as string[];
-    expect(args).toEqual(expect.arrayContaining(['--strict-mcp-config', '--tools', '-p']));
-    expect(args).not.toContain('--bare');
-    expect(args).toContain('--model');
-    expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-5');
+    const cmd = spawnMock.mock.calls[0][0] as string;
+    expect(cmd).toContain('--strict-mcp-config');
+    expect(cmd).toContain('"-p"');
+    expect(cmd).not.toContain('--bare');
+    expect(cmd).toContain('"--model" "claude-opus-5"');
+  });
+
+  it('QUOTES every argument, so an empty one survives the shell', async () => {
+    // THE BUG THIS EXISTS FOR. With `shell: true` Node joins argv itself and
+    // DROPS empty strings, so `--tools ""` reached the CLI bare and it died with
+    // `option '--setting-sources <sources>' argument missing` — the NEXT flag's
+    // value had been swallowed. `""` is the documented way to disable all tools,
+    // so an empty argument is the value here, not an edge case.
+    expect(quoteArg('')).toBe('""');
+    expect(quoteArg('-p')).toBe('"-p"');
+
+    spawnMock.mockReturnValue(fakeChild(ok('{"verdict":"HOLD"}')));
+    await svc.messages.create(request());
+
+    const cmd = spawnMock.mock.calls[0][0] as string;
+    expect(typeof cmd).toBe('string');
+    expect(cmd).toContain('"--tools" ""');
+    expect(cmd).toContain('"--setting-sources" ""');
   });
 
   it('passes the system prompt as a FILE and the packet on stdin', async () => {
@@ -142,9 +165,11 @@ describe('ClaudeCliTransport', () => {
     spawnMock.mockReturnValue(child);
     await svc.messages.create(request());
 
-    const args = spawnMock.mock.calls[0][1] as string[];
-    expect(args).toContain('--system-prompt-file');
-    expect(args).not.toContain('--system-prompt');
+    const cmd = spawnMock.mock.calls[0][0] as string;
+    expect(cmd).toContain('--system-prompt-file');
+    // The inline form would blow the ~32k Windows command-line cap on a real
+    // system prompt.
+    expect(cmd).not.toContain('"--system-prompt"');
     expect(child.stdin.end).toHaveBeenCalledWith('{"packet":1}');
   });
 

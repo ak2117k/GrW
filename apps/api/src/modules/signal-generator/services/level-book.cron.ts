@@ -4,6 +4,7 @@ import { LevelBookService, getTodayMidnightIstAsUtc } from './level-book.service
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { TIMEFRAMES } from '@td/shared/constants';
 import { DailyBackfillWorker } from '../../market-data/workers/daily-backfill.worker';
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 
 /**
  * Index tokens are stable (NIFTY = 99926000 forever) so we hardcode them.
@@ -53,6 +54,10 @@ export class LevelBookCron implements OnModuleInit {
    * commodities across 1d/1h/15m/5m.
    */
   async onModuleInit(): Promise<void> {
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+      return;
+    }
     if (this.dailyBackfill) {
       try {
         await this.dailyBackfill.backfillUniverseAtBoot();

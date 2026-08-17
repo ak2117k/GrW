@@ -118,15 +118,37 @@ export class RosterService {
       [...(await this.ownership.symbolsOwnedByOtherEngines(userId))].map(normaliseSymbol),
     );
 
+    // POSITIONS ONLY. Holdings are not watched at all — not observed, not
+    // counted, not listed.
+    //
+    // The original design had them OBSERVE_ONLY: watched and explained but
+    // never closed. In practice that inverted the feature. A real book carries
+    // a handful of positions and DOZENS of holdings (52 open trades here: 4
+    // positions, 48 holdings), and since holdings sort no differently once the
+    // cap binds, the five watch slots filled with long-term equity the user was
+    // not asking about while the option positions they actually opened today
+    // went UNWATCHED. The cap is 5 because five is what the agent can reason
+    // about well; spending it on the wrong five is worse than spending it on
+    // none.
+    //
+    // Positions alone also fit: four against a cap of five means nothing is
+    // dropped and the "over capacity" path stops firing on a normal book.
+    const positions = open.filter((t) => t.kind !== 'HOLDING');
+
     // Slot allocation is decided HERE, not by listOpen's orderBy — see
     // byWatchPriority for the policy and why it is stated in this module.
-    const ordered = [...open].sort(byWatchPriority);
+    const ordered = [...positions].sort(byWatchPriority);
 
     let watchedCount = 0;
     const roster = ordered.map((t): RosterEntry => {
       const watched = watchedCount < SENTINEL_MAX_WATCHED;
       if (watched) watchedCount += 1;
 
+      // Holdings were filtered out above and cannot reach here. The guard stays
+      // anyway: if that filter is ever loosened, the fall-through below would
+      // classify a holding as a claimable POSITION and hand the sentinel exit
+      // authority over long-term equity. That failure is silent and it fails
+      // OPEN, which is the one direction this module never permits.
       if (t.kind === 'HOLDING') {
         return {
           userId,
@@ -134,10 +156,8 @@ export class RosterService {
           symbol: t.symbol,
           kind: 'HOLDING',
           ownership: 'OBSERVE_ONLY',
-          watched,
-          reason: watched
-            ? 'holding — observed, never closed'
-            : OVER_CAPACITY_REASON,
+          watched: false,
+          reason: 'holding — outside the sentinel’s remit, never watched',
         };
       }
 

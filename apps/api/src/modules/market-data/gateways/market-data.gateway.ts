@@ -252,7 +252,12 @@ export class MarketDataGateway
    * Broadcast connection status to ALL connected clients.
    */
   emitConnectionStatus(status: ConnectionStatusPayload): void {
-    this.server.emit('connection-status', status);
+    // `@WebSocketServer()` is only populated when an HTTP server is attached.
+    // A headless boot — `NestFactory.createApplicationContext`, used by workers
+    // and one-shot scripts — has none, so this is null and the unguarded emit
+    // took the whole process down from inside the feed's auto-start. Nobody is
+    // listening in that mode, so dropping the broadcast is the correct no-op.
+    this.server?.emit('connection-status', status);
   }
 
   /**

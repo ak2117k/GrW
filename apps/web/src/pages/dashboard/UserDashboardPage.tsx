@@ -186,10 +186,16 @@ function BrokerOverviewSections() {
                             comes up with bare overlays. Falls back to the traded
                             symbol for cash, where the two are the same thing. */}
                         <td className="py-1.5 pr-3 text-[var(--color-text-primary)]">
+                          {/* Destination is the underlying; the LABEL stays the
+                              tradingsymbol. Showing `BDL` in place of
+                              `BDL25AUG261400CE` throws away the strike, the
+                              expiry and the side — the three things that
+                              identify WHICH contract this row is. */}
                           <SymbolChartLink
                             symbol={p.underlyingSymbol || p.symbol}
                             token={p.underlyingToken}
                             exchange="NSE"
+                            label={p.symbol}
                           />
                         </td>
                         <td className="py-1.5 pr-3 text-[var(--color-text-muted)]">{p.exchange}</td>

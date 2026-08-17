@@ -1,4 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { extractSymbols } from './extract-symbols';
+import { NewsSymbolIndexService } from './news-symbol-index.service';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 
@@ -22,23 +24,15 @@ const BEARISH_KEYWORDS = [
   'recession', 'downturn', 'concern', 'risk', 'fear', 'warning',
 ];
 
-const KNOWN_SYMBOLS = [
-  'RELIANCE', 'TCS', 'HDFC', 'HDFCBANK', 'INFY', 'INFOSYS', 'ICICIBANK',
-  'KOTAKBANK', 'BHARTIARTL', 'AIRTEL', 'ITC', 'HINDUNILVR', 'HUL',
-  'SBIN', 'SBI', 'BAJFINANCE', 'LT', 'MARUTI', 'TATAMOTORS', 'TATA',
-  'SUNPHARMA', 'AXISBANK', 'WIPRO', 'HCLTECH', 'ADANIENT', 'ADANI',
-  'TECHM', 'ULTRACEMCO', 'TITAN', 'NESTLEIND', 'ASIANPAINT',
-  'POWERGRID', 'NTPC', 'ONGC', 'COALINDIA', 'JSWSTEEL', 'TATASTEEL',
-  'BAJAJFINSV', 'INDUSINDBK', 'HINDALCO', 'GRASIM', 'CIPLA',
-  'DRREDDY', 'DIVISLAB', 'BRITANNIA', 'HEROMOTOCO', 'EICHERMOT',
-  'NIFTY', 'SENSEX', 'BANKNIFTY',
-];
 
 @Injectable()
 export class NewsSentimentService {
   private readonly logger = new Logger(NewsSentimentService.name);
 
-  constructor(private readonly httpService: HttpService) {}
+  constructor(
+    private readonly httpService: HttpService,
+    private readonly symbolIndex: NewsSymbolIndexService,
+  ) {}
 
   async analyzeSentiment(
     title: string,
@@ -74,11 +68,11 @@ export class NewsSentimentService {
       score: typeof data.score === 'number' ? data.score : 0,
       relatedSymbols: Array.isArray(data.relatedSymbols)
         ? data.relatedSymbols
-        : this.extractSymbols(title, summary),
+        : await this.symbolsFor(title, summary),
     };
   }
 
-  private keywordFallback(title: string, summary: string): SentimentResult {
+  private async keywordFallback(title: string, summary: string): Promise<SentimentResult> {
     const text = `${title} ${summary ?? ''}`.toLowerCase();
 
     let bullishScore = 0;
@@ -109,38 +103,25 @@ export class NewsSentimentService {
     return {
       sentiment,
       score,
-      relatedSymbols: this.extractSymbols(title, summary),
+      relatedSymbols: await this.symbolsFor(title, summary),
     };
   }
 
-  private extractSymbols(title: string, summary: string): string[] {
-    const text = `${title} ${summary ?? ''}`.toUpperCase();
-    const found: string[] = [];
-
-    for (const symbol of KNOWN_SYMBOLS) {
-      // Match as whole word (bounded by non-letter characters)
-      const regex = new RegExp(`\\b${symbol}\\b`);
-      if (regex.test(text)) {
-        // Normalize common aliases
-        const normalized = this.normalizeSymbol(symbol);
-        if (!found.includes(normalized)) {
-          found.push(normalized);
-        }
-      }
-    }
-
-    return found;
+  /**
+   * The listed symbols this article mentions.
+   *
+   * This was a hardcoded list of 49 large-caps, which is why 82% of stored
+   * articles carried no symbol at all and the sentinel's news sensor could
+   * never fire for a mid-cap — KEI, MOTHERSON, HAL and BDL were all absent from
+   * the list and all present in the instrument table.
+   *
+   * Now matched against that table's 18,949 listed symbols. See
+   * `extract-symbols.ts` for the tokenise-and-intersect rule, and for why a
+   * handful of ordinary English words that are also tickers are excluded.
+   */
+  private async symbolsFor(title: string, summary: string): Promise<string[]> {
+    const known = await this.symbolIndex.symbols();
+    return extractSymbols(title, summary, known);
   }
 
-  private normalizeSymbol(symbol: string): string {
-    const aliases: Record<string, string> = {
-      INFOSYS: 'INFY',
-      SBI: 'SBIN',
-      AIRTEL: 'BHARTIARTL',
-      HUL: 'HINDUNILVR',
-      TATA: 'TATAMOTORS',
-      ADANI: 'ADANIENT',
-    };
-    return aliases[symbol] ?? symbol;
-  }
 }

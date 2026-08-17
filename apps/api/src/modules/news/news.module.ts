@@ -6,6 +6,7 @@ import { PrismaModule } from '../../common/prisma/prisma.module';
 import { NewsController } from './controllers/news.controller';
 import { NewsAggregatorService } from './services/news-aggregator.service';
 import { NewsSentimentService } from './services/news-sentiment.service';
+import { NewsSymbolIndexService } from './services/news-symbol-index.service';
 import { NewsFetchProcessor } from './workers/news-fetch.processor';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
@@ -49,6 +50,7 @@ class NewsFetchScheduler {
   providers: [
     NewsAggregatorService,
     NewsSentimentService,
+    NewsSymbolIndexService,
     NewsFetchProcessor,
     NewsFetchScheduler,
   ],

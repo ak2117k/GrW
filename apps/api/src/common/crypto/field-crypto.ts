@@ -46,11 +46,27 @@ export function decryptField(cipher: string): string {
   const tag = Buffer.from(tagB64, 'base64');
   const ciphertext = Buffer.from(ctB64, 'base64');
 
-  const decipher = createDecipheriv(ALGORITHM, getKey(), iv);
-  decipher.setAuthTag(tag);
-  const plain = Buffer.concat([
-    decipher.update(ciphertext),
-    decipher.final(),
-  ]);
-  return plain.toString('utf8');
+  try {
+    const decipher = createDecipheriv(ALGORITHM, getKey(), iv);
+    decipher.setAuthTag(tag);
+    const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return plain.toString('utf8');
+  } catch (err) {
+    // See the long note in credential-vault/crypto/field-cipher.ts. Node's GCM
+    // failure — "Unsupported state or unable to authenticate data" — names a
+    // crypto fault but reaches callers through a broker session, so it reads as
+    // the exchange rejecting a login. A day was spent on a broker problem that
+    // did not exist while this process simply held a different ENCRYPTION_KEY
+    // than the one the field was sealed with.
+    const message = err instanceof Error ? err.message : String(err);
+    if (/unsupported state or unable to authenticate data/i.test(message)) {
+      throw new Error(
+        'FIELD DECRYPTION FAILED — this is a local key problem, NOT a broker or ' +
+          'credential rejection. ENCRYPTION_KEY in this process does not match the key ' +
+          'this value was encrypted with (typically: running locally against a database ' +
+          'written by the deployed app).',
+      );
+    }
+    throw err;
+  }
 }

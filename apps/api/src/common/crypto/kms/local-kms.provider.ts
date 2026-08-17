@@ -25,11 +25,50 @@ export class LocalKmsProvider implements KmsProvider {
     return { wrapped: this.wrap(plaintext), keyVersion: this.keyVersion() };
   }
 
+  /**
+   * Unwrap a per-user data key with the master key.
+   *
+   * THIS IS THE FIRST DOOR, and its error message matters more than any other
+   * in the vault. Every broker read — quote, candles, option chain, positions —
+   * begins by unwrapping this key. When the master key is wrong, Node's AES-GCM
+   * throws "Unsupported state or unable to authenticate data", which names a
+   * crypto fault but arrives at the caller through a BROKER session. It reads,
+   * convincingly, as the exchange rejecting a login.
+   *
+   * A full day was spent on that reading: every market-data call failed with it,
+   * the conclusion drawn was "the Angel session is broken", and the hunt went
+   * looking for a broker fault that did not exist. The credentials were intact
+   * the whole time; the process simply held a different `ENCRYPTION_KEY` than
+   * the one that sealed them — the ordinary consequence of running locally
+   * against a database written by the deployed app.
+   *
+   * A wrong key and a tampered blob are genuinely indistinguishable to GCM, so
+   * this claims no more than it knows: the failure is local, it concerns keys,
+   * and no broker was contacted.
+   */
   async unwrapKey(wrapped: string): Promise<Buffer> {
     const [v, ivB64, tagB64, ctB64] = wrapped.split(':');
     if (v !== 'v1') throw new Error(`Unsupported wrapped-key version: ${v}`);
-    const decipher = createDecipheriv('aes-256-gcm', getEncryptionKey(), Buffer.from(ivB64, 'base64'));
-    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
-    return Buffer.concat([decipher.update(Buffer.from(ctB64, 'base64')), decipher.final()]);
+    try {
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        getEncryptionKey(),
+        Buffer.from(ivB64, 'base64'),
+      );
+      decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+      return Buffer.concat([decipher.update(Buffer.from(ctB64, 'base64')), decipher.final()]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/unsupported state or unable to authenticate data/i.test(message)) {
+        throw new Error(
+          'MASTER KEY MISMATCH — could not unwrap this user’s data key. This is a LOCAL ' +
+            'key problem, NOT a broker rejection and NOT bad credentials: ENCRYPTION_KEY in ' +
+            'this process differs from the one used when the credential was saved (typically ' +
+            'running locally against a database written by the deployed app). No broker was ' +
+            'contacted. Every market-data read for this user will fail until the keys match.',
+        );
+      }
+      throw err;
+    }
   }
 }

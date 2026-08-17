@@ -54,7 +54,22 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
       this.logger.log(BOOT_JOBS_DISABLED);
       return;
     }
-    await this.refresh('boot');
+
+    // DELIBERATELY NOT AWAITED. Nest awaits every `onModuleInit` before
+    // `app.listen()` runs, so awaiting this put a multi-minute instrument
+    // refresh directly in front of the port bind — and Render, which waits for
+    // an open port to consider a deploy healthy, timed the deploy out and
+    // failed it. The application was fine; it simply never got to listen.
+    //
+    // Detached, the server binds immediately and the master fills in behind it.
+    // The only cost is a window after boot in which newly-listed symbols are
+    // not yet resolvable, which is the state the process was in anyway for the
+    // whole duration of the blocking refresh.
+    void this.refresh('boot').catch((err) => {
+      this.logger.warn(
+        `Boot instrument refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
   }
 
   // 08:00 IST Mon-Fri — before the 09:15 cash open, so freshly-listed symbols

@@ -171,4 +171,4 @@ this change carries.
 |---|---|
 | Table grows several-fold; boot cache grows with it | Bound by live expiries; measure and record the count |
 | An NFO row shadows a cash symbol | Impossible for symbol lookups (exchange-filtered); token lookups are unique |
-| A long refresh blocks boot | The boot refresh is already awaited and already slow — it is gated behind `BOOT_JOBS` and should move to fire-and-forget in a follow-up |
+| A long refresh blocks boot | REALISED ON DEPLOY, 2026-08-17. Nest awaits every `onModuleInit` before `app.listen()`, so the refresh sat in front of the port bind and Render failed the deploy on its port-scan timeout. The boot refresh is now DETACHED (`void … .catch`); the server binds immediately and the master fills in behind it. Batch concurrency also cut 100 -> 25, because the old value saturated the connection pool and killed the Angel auto-login with a 5s transaction timeout. |

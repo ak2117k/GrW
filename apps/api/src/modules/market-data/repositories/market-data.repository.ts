@@ -346,9 +346,21 @@ export class MarketDataRepository {
    * Bulk upsert instruments (used during master refresh).
    * Processes in batches to avoid overwhelming the database.
    */
+  /**
+   * Upsert the instrument master.
+   *
+   * BATCH SIZE IS A CONNECTION-POOL DECISION, not a throughput one. At 100 it
+   * fired 100 concurrent writes per batch; against a serverless Postgres pooler
+   * and a master that now carries derivative contracts, that saturated the pool
+   * for the length of the refresh — and the casualty was elsewhere in boot,
+   * where the Angel One auto-login died with "Transaction already closed: the
+   * timeout for this transaction was 5000 ms, however 8478 ms passed". A refresh
+   * that starves the rest of the application is slower overall than one that
+   * takes longer and leaves room.
+   */
   async bulkUpsertInstruments(instruments: UpsertInstrumentInput[]): Promise<number> {
     let count = 0;
-    const batchSize = 100;
+    const batchSize = 25;
 
     for (let i = 0; i < instruments.length; i += batchSize) {
       const batch = instruments.slice(i, i + batchSize);

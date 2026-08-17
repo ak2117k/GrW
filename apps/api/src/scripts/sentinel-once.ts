@@ -31,10 +31,44 @@ import { AppModule } from '../app.module';
 import { SentinelCycleService } from '../modules/trade-sentinel/services/sentinel-cycle.service';
 import { PrismaService } from '../common/prisma/prisma.service';
 
+/**
+ * Wake the database before Nest boots, and don't proceed until it answers.
+ *
+ * Neon AUTOSUSPENDS its compute when idle. The first connection after a pause
+ * wakes it, which takes longer than Prisma's connect timeout — so that first
+ * query fails and the next one succeeds. Booting straight into Nest turns that
+ * into a lottery: a dozen services query in their `onModuleInit`, and whichever
+ * one draws the cold connection aborts the entire bootstrap. Observed failing in
+ * three different services on three different runs, each looking like a
+ * different bug.
+ *
+ * One retried ping up front makes the wake explicit and the boot deterministic.
+ */
+async function wakeDatabase(attempts = 5): Promise<void> {
+  const { PrismaClient } = await import('@prisma/client');
+  const client = new PrismaClient();
+  try {
+    for (let i = 1; i <= attempts; i += 1) {
+      try {
+        await client.$queryRawUnsafe('SELECT 1');
+        if (i > 1) console.log(`database awake after ${i} attempts`);
+        return;
+      } catch (err) {
+        if (i === attempts) throw err;
+        console.log(`database cold (attempt ${i}/${attempts}) — retrying…`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+  } finally {
+    await client.$disconnect();
+  }
+}
+
 async function main(): Promise<void> {
   const explicitUser = process.argv[2];
 
   console.log('transport :', process.env.SENTINEL_JUDGE === 'cli' ? 'claude CLI (subscription)' : 'Anthropic API');
+  await wakeDatabase();
   console.log('booting the application context…\n');
 
   const app = await NestFactory.createApplicationContext(AppModule, {

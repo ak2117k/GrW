@@ -298,6 +298,30 @@ export class TradeTrackerService implements OnModuleDestroy {
    * the book close theirs; unchanged instruments are left untouched (ticks, not
    * reconcile, move their prices).
    */
+  /**
+   * Which halves of the book the broker actually ANSWERED for.
+   *
+   * `UserBrokerSession.read` returns `response?.data ?? null`, so a failed or
+   * unauthenticated call yields **null** — it does not throw and it does not
+   * return `[]`. `normalizePositions(null)` then produces `[]`, which is
+   * byte-identical to "the broker says you hold nothing".
+   *
+   * Those are opposite facts and collapsing them destroyed real data: one bad
+   * fetch closed every open tracker, and the next good fetch re-created them
+   * with new ids — orphaning the sentinel's verdicts and theses, and resetting
+   * `holdingHigh`/`holdingLow` (the best and worst excursion the agent reasons
+   * from) and `entryTime`. The positions themselves were never touched, which
+   * is what made it silent.
+   *
+   * An array — even an empty one — is an answer. Anything else is not.
+   */
+  private static fetchedKinds(positions: unknown, holdings: unknown): Set<string> {
+    const kinds = new Set<string>();
+    if (Array.isArray(positions)) kinds.add('POSITION');
+    if (Array.isArray(holdings)) kinds.add('HOLDING');
+    return kinds;
+  }
+
   async reconcile(
     userId: string,
     positions: unknown[],
@@ -347,9 +371,29 @@ export class TradeTrackerService implements OnModuleDestroy {
       });
     }
 
-    // Close every OPEN tracker whose instrument left the book.
+    // Close every OPEN tracker whose instrument left the book — but ONLY for
+    // the kinds the broker actually answered for. See `fetchedKinds`: a failed
+    // read is indistinguishable from an empty book by the time it reaches here,
+    // and closing on a failure is destructive and silent.
+    //
+    // Scoped by KIND rather than all-or-nothing so a broken positions read does
+    // not also freeze holdings reconciliation, and vice versa.
+    const fetched = TradeTrackerService.fetchedKinds(positions, holdings);
+    const unanswered = ['POSITION', 'HOLDING'].filter((k) => !fetched.has(k));
+    if (unanswered.length > 0) {
+      // WARN, not debug. This is the state in which the tracker knowingly stops
+      // reconciling part of the book; if it were quiet, a broker session that
+      // stayed broken all session would look exactly like a calm one.
+      this.logger.warn(
+        `[trade-tracker] broker returned no answer for ${unanswered.join(' and ')} — ` +
+          'skipping closes for those kinds this pass. Open trackers are LEFT OPEN rather ' +
+          'than closed on an unanswered read.',
+      );
+    }
+
     for (const [key, tracker] of openByKey) {
       if (bookByKey.has(key)) continue;
+      if (!fetched.has(tracker.kind)) continue;
       const exitPrice = tracker.lastLtp ?? tracker.entryPrice;
       const { pnl, pnlPercent } = computePnl(
         tracker.entryPrice,

@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
-import { ScheduleModule } from '@nestjs/schedule';
+import { schedulingImports } from './common/utils/scheduling-imports';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ClsModule } from 'nestjs-cls';
 import configuration from './config/configuration';
@@ -70,8 +70,10 @@ import { HealthModule } from './modules/health/health.module';
       }),
     }),
 
-    // Cron / interval scheduling
-    ScheduleModule.forRoot(),
+    // Cron / interval scheduling — REGISTERED ONLY WHEN BOOT JOBS ARE ON.
+    // See `schedulingImports` for why this is a whole-module switch rather
+    // than a guard inside each @Cron method.
+    ...schedulingImports(),
 
     // Central global rate limiter (TDA-004 Task 6). ONE app-wide throttler
     // ('default'), config-driven from rateLimit.* (GLOBAL_RATE_TTL/LIMIT). The

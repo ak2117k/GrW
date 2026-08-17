@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { TradeTracker } from '@prisma/client';
@@ -304,6 +305,83 @@ describe('TradeTrackerService', () => {
         pnl: 2000, // (1200-1000)*10
       });
       expect(call.data.exitTime).toBeInstanceOf(Date);
+    });
+
+    describe('an UNANSWERED broker read must never close a position', () => {
+      // THE BUG THIS EXISTS FOR, and it destroyed real data.
+      //
+      // `UserBrokerSession.read` returns `response?.data ?? null`, so a failed or
+      // unauthenticated broker call yields NULL — it does not throw. By the time
+      // it reaches the close loop, `normalizePositions(null)` has turned it into
+      // `[]`, which is byte-identical to "the broker says you hold nothing".
+      //
+      // The tracker then closed every open row and the next good fetch recreated
+      // them with NEW IDS — orphaning the sentinel's verdicts and theses, and
+      // resetting holdingHigh/holdingLow and entryTime. The broker positions
+      // were never touched, which is exactly why nobody noticed.
+
+      it('leaves POSITION trackers OPEN when the positions read returned null', async () => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'live_pos', token: '111', kind: 'POSITION' }),
+        ]);
+
+        await service.reconcile('user_1', null as never, []);
+
+        expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('leaves HOLDING trackers OPEN when the holdings read returned null', async () => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'live_hold', token: '1594', kind: 'HOLDING' }),
+        ]);
+
+        await service.reconcile('user_1', [], null as never);
+
+        expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('still closes the kind that WAS answered — one broken read does not freeze the other', async () => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'pos_unanswered', token: '111', kind: 'POSITION' }),
+          tracker({ id: 'hold_answered', token: '1594', kind: 'HOLDING', lastLtp: 1200, entryPrice: 1000, qty: 10 }),
+        ]);
+
+        // Positions unanswered, holdings genuinely empty.
+        await service.reconcile('user_1', null as never, []);
+
+        expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+        expect(prisma.tradeTracker.updateMany.mock.calls[0][0].where).toEqual({
+          id: 'hold_answered',
+          userId: 'user_1',
+        });
+      });
+
+      it('DOES close on a genuinely empty answer — [] is an answer, null is not', async () => {
+        // The other half of the distinction: without this, "never close" would
+        // be a safe-looking fix that silently stops tracking exits entirely.
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'really_gone', token: '111', kind: 'POSITION' }),
+        ]);
+
+        await service.reconcile('user_1', [], []);
+
+        expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+        expect(prisma.tradeTracker.updateMany.mock.calls[0][0].data).toMatchObject({
+          status: 'CLOSED',
+        });
+      });
+
+      it('says so at WARN, so a session broken all day cannot look like a calm one', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        prisma.tradeTracker.findMany.mockResolvedValue([]);
+
+        await service.reconcile('user_1', null as never, []);
+
+        const logged = warn.mock.calls.map((c) => String(c[0])).join('');
+        expect(logged).toMatch(/POSITION/);
+        expect(logged).toMatch(/no answer/i);
+        warn.mockRestore();
+      });
     });
 
     it('is idempotent — a re-run with the same book neither opens nor closes', async () => {

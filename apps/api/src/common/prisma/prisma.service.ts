@@ -3,6 +3,58 @@ import { PrismaClient } from '@prisma/client';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { TENANT_MODELS } from '../tenant/tenant.constants';
 
+/**
+ * How many times boot will try to reach the database before giving up.
+ *
+ * SERVERLESS POSTGRES SUSPENDS WHEN IDLE. Neon parks its compute after a quiet
+ * period, and the first connection after that has to wake it — which takes
+ * longer than the driver's connect timeout, so attempt one fails and attempt
+ * two succeeds. Nothing is wrong; the database was asleep.
+ *
+ * Without a retry that is a coin toss on every cold boot, and it does not fail
+ * as "the database was asleep". It surfaces as whichever service happened to
+ * query first — a scanner worker, a paper-account service, Prisma itself — so
+ * one cause presented as three unrelated bugs across three runs, each with its
+ * own plausible-looking stack trace.
+ *
+ * Five attempts with a 3s gap covers a normal wake with room to spare. A
+ * genuinely unreachable database still fails, ~15s later, and says so once.
+ */
+const CONNECT_ATTEMPTS = 5;
+const CONNECT_BACKOFF_MS = 3000;
+
+/**
+ * `$connect`, retried while the failure still looks like a sleeping database.
+ *
+ * Exported for its own test: this runs once at boot, so a regression here is
+ * invisible until the next cold start in production.
+ */
+export async function connectWithRetry(
+  connect: () => Promise<void>,
+  logger: { log: (m: string) => void; warn: (m: string) => void },
+  attempts: number = CONNECT_ATTEMPTS,
+  backoffMs: number = CONNECT_BACKOFF_MS,
+): Promise<void> {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await connect();
+      if (attempt > 1) logger.log(`Database reached on attempt ${attempt}`);
+      return;
+    } catch (err) {
+      // The LAST failure is rethrown untouched, so a genuinely misconfigured
+      // connection string still surfaces as exactly the error Prisma raised.
+      if (attempt === attempts) throw err;
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn(
+        `Database unreachable on attempt ${attempt}/${attempts} — retrying in ` +
+          `${backoffMs}ms. This is normal for a suspended serverless database. ` +
+          `(${message.split('\n')[0]})`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+}
+
 /** Operations whose `where` is a unique input (extendedWhereUnique applies). */
 const UNIQUE_WHERE_OPS = new Set([
   'findUnique',
@@ -65,6 +117,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
    */
   declare onModuleInit: () => Promise<void>;
 
+  static readonly CONNECT_ATTEMPTS = CONNECT_ATTEMPTS;
+
   constructor(private readonly tenantContext: TenantContextService) {
     super();
 
@@ -76,7 +130,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
     // The extended client has its own (non-PrismaService) prototype, so it lacks
     // our lifecycle method. Re-attach it so Nest's OnModuleInit still connects.
     extended.onModuleInit = async (): Promise<void> => {
-      await extended.$connect();
+      await connectWithRetry(() => extended.$connect(), logger);
       logger.log('Connected to PostgreSQL via Prisma (tenant scoping active)');
     };
 

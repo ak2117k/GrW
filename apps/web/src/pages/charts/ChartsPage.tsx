@@ -12,6 +12,10 @@ import { tradePlanLines } from '@/components/charts/tradePlanView';
 import { deriveProjectionZonesView } from '@/components/charts/projectionBoxView';
 import ProjectionBoxOverlay from '@/components/charts/ProjectionBoxOverlay';
 import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
+import SentinelOverlay from '@/components/charts/SentinelOverlay';
+import SentinelPanel from '@/components/charts/SentinelPanel';
+import { useSentinelPositions } from '@/hooks/useSentinelPositions';
+import { positionsForChart } from '@/utils/matchPositionToChart';
 import TrendLineOverlay from '@/components/charts/TrendLineOverlay';
 import { useChartContext } from '@/hooks/useChartContext';
 import { usePatterns } from '@/hooks/usePatterns';
@@ -114,6 +118,16 @@ export default function ChartsPage() {
   );
   const zones = chartContext?.zones ?? EMPTY_ZONES;
   const evidence = chartContext?.evidence ?? EMPTY_EVIDENCE;
+
+  // The sentinel's open positions, narrowed to the charted instrument. Polled
+  // independently of the chart context: the agent judges on its own cadence and
+  // tying its read to the 60s composite would make a fresh verdict wait for a
+  // level-book refresh it has nothing to do with.
+  const { positions: sentinelPositions } = useSentinelPositions();
+  const sentinelHere = useMemo(
+    () => positionsForChart(sentinelPositions, selectedSymbol.symbol),
+    [sentinelPositions, selectedSymbol.symbol],
+  );
   const analysis = chartContext?.analysis ?? null;
   // No response yet for the current symbol/timeframe.
   const analysisLoading = chartContext === null;
@@ -607,6 +621,16 @@ export default function ChartsPage() {
               view={projectionView}
             />
           )}
+          {/* The sentinel's read on any OPEN POSITION in this instrument.
+              Always on, unlike the setup overlays: a position you are actually
+              holding is not clutter, and hiding the agent's invalidation level
+              behind a toggle defeats the point of drawing it. Renders nothing
+              when you hold nothing here. */}
+          <SentinelOverlay
+            series={chartRef.current?.candleSeries ?? null}
+            positions={sentinelHere}
+            chartSymbol={selectedSymbol.symbol}
+          />
           {/* Zone + evidence overlays are now SIGNAL-MODE ONLY. That view is a
               deliberate "show me everything about this one setup"; the default
               chart is not, and these were most of its clutter. */}
@@ -676,6 +700,12 @@ export default function ChartsPage() {
           </div>
         </div>
       </div>
+
+      {/* The agent's read, directly under the chart and ABOVE the overview —
+          if you are holding this instrument, what the sentinel thinks about
+          your position outranks the general analysis of the symbol. Renders
+          nothing when you hold none of it. */}
+      {!isFullscreen && <SentinelPanel positions={sentinelHere} />}
 
       {/* Scrollable info panel below the chart. Hidden in fullscreen so the
           chart truly fills the viewport. */}

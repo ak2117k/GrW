@@ -1,6 +1,10 @@
 import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { CurrentUser } from '../../../common/decorators';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
+import {
+  WatchedPositionRepository,
+  type WatchedPosition,
+} from '../repositories/watched-position.repository';
 import { ThesisService } from '../services/thesis.service';
 import type { StoredThesis } from '../services/context-packet.service';
 import {
@@ -34,7 +38,22 @@ export class SentinelController {
   constructor(
     private readonly verdicts: SentinelVerdictRepository,
     private readonly thesis: ThesisService,
+    private readonly watched: WatchedPositionRepository,
   ) {}
+
+  /**
+   * GET /api/trade-sentinel/positions — the caller's OPEN positions, each with
+   * the sentinel's latest verdict and its thesis.
+   *
+   * This is the CHART's read. One call returns everything an overlay draws, so
+   * a page showing five positions does not make eleven requests, and the entry,
+   * the green floor and the verdict a user reads together cannot come from
+   * three different instants.
+   */
+  @Get('positions')
+  async positions(@CurrentUser('userId') userId: string): Promise<WatchedPosition[]> {
+    return this.watched.listForUser(userId);
+  }
 
   /**
    * GET /api/trade-sentinel/verdicts — the caller's own recorded verdicts,

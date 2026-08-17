@@ -27,8 +27,13 @@ const row = (over: Record<string, unknown> = {}) =>
 function make() {
   const listForUser = jest.fn().mockResolvedValue([]);
   const correct = jest.fn().mockResolvedValue({ source: 'USER' });
-  const ctrl = new SentinelController({ listForUser } as never, { correct } as never);
-  return { ctrl, listForUser, correct };
+  const listWatched = jest.fn().mockResolvedValue([]);
+  const ctrl = new SentinelController(
+    { listForUser } as never,
+    { correct } as never,
+    { listForUser: listWatched } as never,
+  );
+  return { ctrl, listForUser, correct, listWatched };
 }
 
 describe('SentinelController — verdicts', () => {
@@ -158,7 +163,14 @@ describe('SentinelController — shadow mode', () => {
         'design:paramtypes',
         SentinelController,
       ) ?? [];
-    expect(injected).toHaveLength(2);
+    // The COUNT is asserted on purpose: it fails whenever a dependency is
+    // added, forcing whoever added it to justify the new reach rather than
+    // letting an executor arrive unnoticed behind a plausible name.
+    //
+    // Three, as of the chart overlay: the verdict repository, the thesis
+    // service, and WatchedPositionRepository — which holds only a
+    // PrismaService and issues three findMany reads. No writes, no broker.
+    expect(injected).toHaveLength(3);
     for (const dep of injected) {
       const name = (dep as { name: string }).name;
       expect(name).not.toMatch(/execution|order|broker|trade-?engine|auto-?trade/i);

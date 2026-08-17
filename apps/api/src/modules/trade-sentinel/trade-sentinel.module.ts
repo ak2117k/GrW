@@ -9,6 +9,7 @@ import { NewsModule } from '../news/news.module';
 import { SentinelController } from './controllers/sentinel.controller';
 import { OpenPositionsRepository } from './repositories/open-positions.repository';
 import { SentinelVerdictRepository } from './repositories/sentinel-verdict.repository';
+import { WatchedPositionRepository } from './repositories/watched-position.repository';
 import { SentinelThesisRepository } from './repositories/sentinel-thesis.repository';
 import { OPEN_POSITIONS, OI_WALL_SOURCE } from './ports/open-positions.port';
 import { ENGINE_OWNERSHIP_PROBE, RosterService } from './services/roster.service';
@@ -121,6 +122,7 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
     { provide: TICK_SOURCE, useClass: SentinelTickSource },
 
     SentinelVerdictRepository,
+    WatchedPositionRepository,
     SentinelThesisRepository,
     RosterService,
     TripwireService,

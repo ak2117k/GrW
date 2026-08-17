@@ -122,7 +122,11 @@ interface Services {
  */
 async function bootServices(): Promise<Services> {
   await wakeDatabase(5, (m) => process.stderr.write(`${m}\n`));
-  const app = await NestFactory.createApplicationContext(AppModule, { logger: false });
+  // Warn-level only, and NestJS logs to stderr — stdout is the MCP protocol
+  // channel and any stray byte on it corrupts the session.
+  const app = await NestFactory.createApplicationContext(AppModule, {
+    logger: ['error', 'warn'],
+  });
 
   const feed = app.get(UserFeedManager);
   return {

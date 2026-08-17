@@ -4,6 +4,7 @@ import { Cron } from '@nestjs/schedule';
 import { InstrumentService } from './instrument.service';
 import { AngelOneAdapterService } from './angel-one-adapter.service';
 import { UpsertInstrumentInput } from '../repositories/market-data.repository';
+import { toDerivativeInput } from './master-contract';
 
 /**
  * Reconciles the local `instruments` allowlist with Angel One's listed universe.
@@ -15,11 +16,23 @@ import { UpsertInstrumentInput } from '../repositories/market-data.repository';
  * UNTRACKABLE even though Angel's master carries them. This cron wires the
  * refresh to run once at boot and daily pre-open.
  *
- * Scope: only cash-equity rows (NSE/BSE, blank `instrumenttype`) are persisted.
- * F&O and commodity contracts carry strike/expiry/optionType that this flat
- * upsert shape cannot represent; they are resolved on demand straight from the
- * in-memory master (searchInMaster / getOptionContracts), so persisting them
- * here would only pollute the table with null strike/expiry rows.
+ * Scope: cash equities (NSE/BSE, blank `instrumenttype`) AND live derivative
+ * contracts (NFO/MCX/BFO/CDS, expiry today or later).
+ *
+ * Derivatives were excluded until 2026-08-17 on the grounds that they "carry
+ * strike/expiry/optionType that this flat upsert shape cannot represent" — no
+ * longer true, since both the model and `UpsertInstrumentInput` carry all
+ * three. That omission was silently breaking three things: the sentinel could
+ * not map an option token to its underlying (12 of 24 packet fields blind on
+ * every derivative position), `OptionsChainService.getExpiries` had no expiry
+ * source so OI walls never worked, and with no expiry the agent could not
+ * reason about theta at all.
+ *
+ * Adding them is safe for the allowlist: `getInstrumentBySymbol` always filters
+ * by exchange, so no NSE/BSE lookup can match an NFO row, and token lookups are
+ * unique per row so a new token can only make a previously-unresolvable token
+ * resolve. Expired contracts are never written — the master carries every
+ * strike of every past expiry, and the row count is boot-cache memory.
  */
 @Injectable()
 export class InstrumentMasterRefreshCron implements OnModuleInit {
@@ -55,9 +68,15 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
     try {
       const master = await this.adapter.getInstrumentMaster();
       const rows = this.toUpsertInputs(master);
+      // Counted separately: the derivative total is the one number that tells
+      // an operator whether the sentinel and the options chain will have
+      // anything to resolve against today.
+      const derivatives = rows.filter((r) => r.expiry).length;
       const count = await this.instruments.refreshMaster(rows);
       this.logger.log(
-        `Instrument master refreshed (${trigger}): ${count} cash-equity rows upserted from ${master.length} master records`,
+        `Instrument master refreshed (${trigger}): ${count} rows upserted ` +
+          `(${rows.length - derivatives} cash, ${derivatives} live derivative contracts) ` +
+          `from ${master.length} master records`,
       );
     } catch (err) {
       this.logger.warn(
@@ -73,9 +92,22 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
    */
   private toUpsertInputs(master: any[]): UpsertInstrumentInput[] {
     const out: UpsertInstrumentInput[] = [];
+    const today = new Date();
     for (const row of master ?? []) {
       const exch = String(row?.exch_seg ?? '');
-      if (exch !== 'NSE' && exch !== 'BSE') continue;
+
+      // DERIVATIVES, bounded to live expiries. Previously skipped entirely on
+      // the grounds that this shape "cannot represent" strike/expiry/optionType
+      // — which stopped being true once the model and the upsert input gained
+      // all three. The omission left the sentinel unable to map an option token
+      // to its underlying (12 of 24 packet fields blind on every derivative
+      // position) and left `getExpiries` with no expiry source, so OI walls
+      // never worked. See the 2026-08-17 derivative-instrument-master spec.
+      if (exch !== 'NSE' && exch !== 'BSE') {
+        const derivative = toDerivativeInput(row, today);
+        if (derivative) out.push(derivative);
+        continue;
+      }
       // Cash equities carry a blank instrumenttype; anything else is a
       // derivative/index contract we deliberately skip.
       if (String(row?.instrumenttype ?? '').trim()) continue;

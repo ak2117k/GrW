@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import {
   FRESH_NEWS_WINDOW_MS,
+  LTP_STALENESS_MS,
   SPOT_STALENESS_MS,
   SentinelTickSource,
   segmentFor,
@@ -23,6 +24,10 @@ const row = (over: Record<string, unknown> = {}) => ({
   holdingHigh: 110,
   holdingLow: 98,
   lastLtp: 105,
+  // The freshness of `lastLtp`. Fresh by default so every OTHER test in this
+  // file keeps testing what it was written to test; the staleness guard has its
+  // own block below and overrides this explicitly.
+  updatedAt: NOW,
   ...over,
 });
 
@@ -650,5 +655,64 @@ describe('SentinelTickSource', () => {
 
       expect(t.getInstrumentBySymbol.mock.calls.length).toBe(after);
     });
+  });
+});
+
+/**
+ * A price that is PRESENT but OLD — the more dangerous of the two failures,
+ * because nothing about it looks wrong.
+ *
+ * Found live on `KEI29SEP265800CE`: `lastLtp` 269.95 stamped 14:10 the previous
+ * day, twenty-one hours cold, while the cash trackers beside it updated that
+ * morning. The feed's primary slot pool (30) is exhausted by the default
+ * universe before the tracker poller subscribes any open position, so the one
+ * F&O contract in the book got no ticks at all. The number was finite and
+ * positive, so gross P&L, the charges, the green floor and every tripwire would
+ * have been computed from it and reported as the market NOW.
+ */
+describe('SentinelTickSource — a stale price is refused, not judged', () => {
+  // The guard compares against `Date.now()`, so these ages are only meaningful
+  // with the clock pinned to NOW — the same fixture the rest of the file uses.
+  beforeEach(() => jest.useFakeTimers().setSystemTime(NOW));
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('refuses a price older than the bound', async () => {
+    const t = make();
+    t.findUnique.mockResolvedValue(
+      row({ updatedAt: new Date(NOW.getTime() - LTP_STALENESS_MS - 1) }),
+    );
+    await expect(t.svc.tickFor('t1')).rejects.toThrow(/REFUSING to judge/i);
+  });
+
+  it('names the symbol and the age, so the log identifies the unfed token', async () => {
+    const t = make();
+    t.findUnique.mockResolvedValue(
+      row({ symbol: 'KEI29SEP265800CE', updatedAt: new Date(NOW.getTime() - 21 * 3600_000) }),
+    );
+    // The cycle catches per position and logs the cause; a bare "stale" would
+    // not tell anyone WHICH contract stopped being fed, which is the one fact
+    // needed to act on it.
+    await expect(t.svc.tickFor('t1')).rejects.toThrow(/KEI29SEP265800CE/);
+    await expect(t.svc.tickFor('t1')).rejects.toThrow(/1260 minutes old/);
+  });
+
+  it('accepts a price right at the bound', async () => {
+    // Strictly greater-than, so an exactly-at-bound tick is still judged. The
+    // sweep is 4s and applyTick debounces; refusing on equality would drop a
+    // healthy tracker on a rounding edge.
+    const t = make();
+    t.findUnique.mockResolvedValue(row({ updatedAt: new Date(NOW.getTime() - LTP_STALENESS_MS) }));
+    await expect(t.svc.tickFor('t1')).resolves.toMatchObject({ ltp: 105 });
+  });
+
+  it('still refuses a MISSING price with its own distinct wording', async () => {
+    // Absent and stale are different faults with different remedies — "never
+    // ticked" points at reconcile, "stale" points at the subscription pool.
+    const t = make();
+    t.findUnique.mockResolvedValue(row({ lastLtp: null }));
+    await expect(t.svc.tickFor('t1')).rejects.toThrow(/no live price/i);
   });
 });

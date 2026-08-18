@@ -36,6 +36,39 @@ export const FRESH_NEWS_WINDOW_MS = 30 * 60 * 1000;
 export const SPOT_STALENESS_MS = 60_000;
 
 /**
+ * How old the CONTRACT's own price may be before this refuses to judge at all.
+ *
+ * THE GAP THIS CLOSES. `spotFor` has bounded the underlying's staleness since
+ * day one, while `ltp` — the more important number by far — had only a null
+ * check. That asymmetry was not a decision: the spot arrives from a cache whose
+ * `lastTickAt` sits right there in the same object, so its age was impossible to
+ * ignore; `ltp` arrives from a database column that looks authoritative and
+ * carries its freshness in a NEIGHBOURING column nobody read.
+ *
+ * It was found live. `KEI29SEP265800CE` sat at `lastLtp` 269.95 with an
+ * `updatedAt` of 14:10 the previous day — twenty-one hours cold, while the cash
+ * trackers beside it updated that morning — because the feed's primary slots
+ * (30) are exhausted by the default universe before the tracker poller gets to
+ * subscribe any open position. Nothing was broken loudly: the price was present,
+ * finite and positive, so gross P&L, the charges, the green floor, every
+ * excursion and every tripwire would have been computed from it and reported
+ * with full provenance as the state of the market NOW.
+ *
+ * Refusing is the right failure. `ltp` is not a `Block` and cannot be a stated
+ * absence — the money arithmetic is unconditional and there is no honest way to
+ * price a position without a price. So a stale tick throws, the cycle counts the
+ * position `failed` and logs the symbol and the age, and the agent is not asked
+ * a question it would answer confidently from yesterday.
+ *
+ * Five minutes: the quote sweep runs every 4s and `applyTick` debounces, so a
+ * healthy in-session tracker is seconds old and anything past a few minutes
+ * means the token is not being fed. Out of session everything is legitimately
+ * stale, which costs nothing — `SentinelRunnerService` only ticks inside
+ * 09:15–15:30 IST, so this bound only ever bites when a price SHOULD be moving.
+ */
+export const LTP_STALENESS_MS = 5 * 60_000;
+
+/**
  * Re-exported from `charges.ts`, where it now lives beside the `Segment` it
  * returns and the rate tables it selects. Moved so the ROSTER can classify a
  * trade without importing this file, which reaches `UserFeedManager` and
@@ -234,6 +267,13 @@ export class SentinelTickSource implements TickSource {
         holdingHigh: true,
         holdingLow: true,
         lastLtp: true,
+        // The freshness of `lastLtp`. There is no dedicated `lastLtpAt` column,
+        // and `updatedAt` is the honest proxy: `computeTickPatch` is what writes
+        // this row in-session, so its age IS the price's age. It can only ever
+        // be NEWER than the price (any other write also touches it), which
+        // makes the guard below conservative in the safe direction — it will
+        // never call a fresh price stale.
+        updatedAt: true,
       },
     });
     if (!row) throw new TickUnavailable(`tracker ${trackerId} no longer exists`);
@@ -247,6 +287,20 @@ export class SentinelTickSource implements TickSource {
       throw new TickUnavailable(
         `no live price on tracker ${trackerId} (${row.symbol}) — the tracker poller has not ` +
           'ticked it yet, or the feed is down',
+      );
+    }
+
+    // A price that is present but OLD is the more dangerous of the two, because
+    // nothing about it looks wrong. See LTP_STALENESS_MS.
+    const ageMs = Date.now() - row.updatedAt.getTime();
+    if (ageMs > LTP_STALENESS_MS) {
+      throw new TickUnavailable(
+        `the price on tracker ${trackerId} (${row.symbol}) is ${Math.round(ageMs / 60_000)} ` +
+          `minutes old (last ${ltp} at ${row.updatedAt.toISOString()}), past the ` +
+          `${LTP_STALENESS_MS / 60_000}-minute bound. Its token is almost certainly not ` +
+          'subscribed to the feed — the primary slot pool is small and the default universe ' +
+          'claims it at boot. REFUSING to judge: P&L, the green floor and every tripwire ' +
+          'would be computed from a stale price and reported as the market now.',
       );
     }
 

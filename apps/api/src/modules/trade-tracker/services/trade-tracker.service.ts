@@ -89,6 +89,33 @@ export function computeOhlcWindow(
   return { from, to };
 }
 
+/**
+ * Which open trades get the scarce feed slots. See {@link
+ * TradeTrackerService.distinctOpenTokens} for why this is a queue and not a
+ * list, and what it cost to leave it unordered.
+ *
+ * Exported and pure so the policy is testable without a database or a socket.
+ * Deliberately does NOT reuse the sentinel's `segmentFor`: this module must not
+ * depend on the sentinel, and the question here is coarser — "does this decay?"
+ * rather than "which charge schedule applies?".
+ */
+export function byFeedPriority(
+  a: { symbol: string; exchange: string; kind: string },
+  b: { symbol: string; exchange: string; kind: string },
+): number {
+  const rank = (t: { symbol: string; exchange: string; kind: string }) => {
+    const ex = String(t.exchange ?? '').toUpperCase();
+    const sym = String(t.symbol ?? '').toUpperCase();
+    const derivative =
+      ex === 'NFO' || ex === 'BFO' || ex === 'MCX' || /(CE|PE|FUT)$/.test(sym);
+    // 0 is served first. A derivative POSITION is the only thing here that can
+    // expire worthless while nobody is looking at it.
+    if (derivative) return t.kind === 'HOLDING' ? 1 : 0;
+    return t.kind === 'HOLDING' ? 3 : 2;
+  };
+  return rank(a) - rank(b);
+}
+
 /** Fields updated on every applied tick. */
 export interface TickPatch {
   holdingHigh: number;
@@ -475,17 +502,46 @@ export class TradeTrackerService implements OnModuleDestroy {
   }
 
   /**
-   * Distinct tokens across ALL users' OPEN trackers. Used by the poller to
-   * decide which tokens to subscribe to the feed and to sweep for quotes. This
-   * is a deliberate system-level (cross-tenant) read from the cron.
+   * Distinct tokens across ALL users' OPEN trackers, MOST IMPORTANT FIRST. Used
+   * by the poller to decide which tokens to subscribe to the feed and to sweep
+   * for quotes. This is a deliberate system-level (cross-tenant) read from the
+   * cron.
+   *
+   * THE ORDER IS THE POINT, and it used to be Prisma's arbitrary one.
+   *
+   * `MarketFeedService.subscribe` has only `PRIMARY_SLOT_MAX` (30) slots, and
+   * `startFeed` fills most of them with the default universe — indices, sector
+   * indices, five major stocks, five commodities — before this list is ever
+   * offered. The subscribe loop then BREAKS at the cap. So this is not a list of
+   * tokens to subscribe; it is a QUEUE, and everything past the first few free
+   * slots silently gets no ticks at all.
+   *
+   * With ~50 open trades that queue was 46 holdings, 3 cash positions and one
+   * NFO option in whatever order the database returned. The option lost. Its
+   * `lastLtp` sat twenty-one hours cold while the trade was live, and every
+   * consumer — P&L, the day's high/low, the sentinel's whole packet — read that
+   * frozen number as the market.
+   *
+   * The ordering is the same policy the sentinel's roster states, for the same
+   * reason: a derivative decays and expires, so a stale price on one is worth
+   * strictly more harm than a stale price on long-term equity.
+   *
+   *   1. F&O before cash — it has an expiry and a premium that can go to zero.
+   *   2. Positions before holdings — a position is what gets closed today.
+   *   3. Otherwise the store's own order, so this is stable across passes.
+   *
+   * This does NOT create enough slots; it decides who gets the few that exist.
+   * The real repair is to stop routing open-tracker prices through the WS pool
+   * at all and sweep them with batched quotes (`fetchQuotes`), which has no
+   * 30-token ceiling.
    */
   async distinctOpenTokens(): Promise<string[]> {
     const rows = await this.prisma.tradeTracker.findMany({
       where: { status: 'OPEN' },
-      select: { token: true },
+      select: { token: true, symbol: true, exchange: true, kind: true },
       distinct: ['token'],
     });
-    return rows.map((r) => r.token);
+    return [...rows].sort(byFeedPriority).map((r) => r.token);
   }
 
   /**

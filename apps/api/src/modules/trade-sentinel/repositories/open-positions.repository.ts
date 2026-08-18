@@ -12,7 +12,7 @@ import type { OpenPosition, OpenPositionsPort } from '../ports/open-positions.po
  * right move is to push that logic into a shared query helper that holds no
  * broker, not to re-point this at the service.
  *
- * `select` rather than a bare `findMany`: the sentinel needs four columns, and
+ * `select` rather than a bare `findMany`: the sentinel needs five columns, and
  * a narrow projection means a new column on `TradeTracker` cannot silently
  * start flowing into a context packet that is persisted verbatim and replayed.
  */
@@ -24,7 +24,10 @@ export class OpenPositionsRepository implements OpenPositionsPort {
     return this.prisma.tradeTracker.findMany({
       where: { userId, status: 'OPEN' },
       orderBy: { entryTime: 'asc' },
-      select: { id: true, symbol: true, kind: true, entryTime: true },
+      // `exchange` is what makes the roster's F&O-only remit decidable — see
+      // OpenPosition.exchange. Without it every trade classifies off its
+      // tradingsymbol alone, which mis-sorts exactly the contracts that matter.
+      select: { id: true, symbol: true, exchange: true, kind: true, entryTime: true },
     });
   }
 }

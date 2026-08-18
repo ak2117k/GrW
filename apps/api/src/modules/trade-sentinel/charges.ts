@@ -24,6 +24,61 @@
 export type Segment = 'EQ_DELIVERY' | 'EQ_INTRADAY' | 'FUT' | 'OPT';
 export type Side = 'LONG' | 'SHORT';
 
+/** Derivative tradingsymbols end in the contract type. */
+const OPTION_SUFFIX = /(CE|PE)$/;
+const FUTURE_SUFFIX = /FUT$/;
+
+/**
+ * Which charge schedule applies. Pure — this picks the STT and stamp-duty rates
+ * the green floor is solved from, so getting it wrong moves the floor rather
+ * than failing loudly.
+ *
+ * A HOLDING is delivery by definition (it settled into the demat account). A
+ * cash POSITION is treated as intraday: the tracker cannot know whether the user
+ * intends to carry it, and intraday is the LOWER charge schedule, so this
+ * under-states charges for a position that is later delivered. Deliberate — the
+ * floor is a target the agent may exceed, and a floor that is too HIGH would
+ * refuse to arm on a trade that is genuinely in profit, which is the worse error.
+ *
+ * IT LIVES IN THIS FILE, beside the `Segment` it returns and the rate tables it
+ * selects, rather than beside the tick source that first needed it. The roster
+ * needs it too — to decide which trades the sentinel watches at all — and
+ * `tick-source.adapter.ts` imports `UserFeedManager`, which reaches the broker.
+ * Importing it from there would make the roster, and through it the cycle,
+ * broker-reachable by import graph and break the Stage-0 isolation property that
+ * `sentinel-cycle.service.spec.ts` walks the graph to assert. This module
+ * imports nothing.
+ */
+export function segmentFor(input: { exchange: string; symbol: string; kind: string }): Segment {
+  const exchange = input.exchange.toUpperCase();
+  const symbol = input.symbol.toUpperCase();
+  const derivativeExchange = exchange === 'NFO' || exchange === 'BFO' || exchange === 'MCX';
+  if (derivativeExchange || OPTION_SUFFIX.test(symbol) || FUTURE_SUFFIX.test(symbol)) {
+    // Order matters: `NIFTY28AUG2524000CE` must not be read as a future by a
+    // looser test, and a future never ends in CE/PE.
+    if (OPTION_SUFFIX.test(symbol)) return 'OPT';
+    if (FUTURE_SUFFIX.test(symbol)) return 'FUT';
+    // On a derivative exchange with an unrecognisable suffix, OPT is the
+    // conservative read: it carries the highest STT and exchange-txn rates, so
+    // the floor sits higher and arms later rather than sooner.
+    return 'OPT';
+  }
+  return input.kind === 'HOLDING' ? 'EQ_DELIVERY' : 'EQ_INTRADAY';
+}
+
+/**
+ * Whether this is an F&O contract rather than cash equity.
+ *
+ * The sentinel's remit. Stated as its own predicate rather than inlined as
+ * `segment === 'OPT' || segment === 'FUT'` at each call site, because it is a
+ * SCOPE DECISION that appears in more than one place — the roster uses it to
+ * choose what to watch, and a future stage will use it to choose what may be
+ * closed. Two hand-written comparisons drift; one predicate does not.
+ */
+export function isDerivativeSegment(segment: Segment): boolean {
+  return segment === 'OPT' || segment === 'FUT';
+}
+
 /** Cushion above breakeven before the floor arms, so noise can't un-arm it. */
 export const GREEN_FLOOR_MARGIN_RUPEES = 150;
 

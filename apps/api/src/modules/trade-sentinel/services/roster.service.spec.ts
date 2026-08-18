@@ -1,15 +1,26 @@
 import { RosterService, SENTINEL_MAX_WATCHED } from './roster.service';
 
+/**
+ * DEFAULTS TO A DERIVATIVE, because the roster's remit is F&O only and a cash
+ * fixture is now filtered out before any of the policy below runs. `NFO` with an
+ * unparsed suffix classifies as OPT (the conservative read in `segmentFor`),
+ * which is what these tests want: a watchable contract whose SYMBOL is then free
+ * to exercise the ownership-normalisation rules without also having to be a
+ * plausible tradingsymbol.
+ *
+ * `exchange` is passed explicitly by the tests that care about scope.
+ */
 const tracker = (
   id: string,
   kind: 'POSITION' | 'HOLDING',
   symbol = id,
   entryTime?: Date,
+  exchange = 'NFO',
 ) => ({
   id,
   kind,
   symbol,
-  exchange: 'NSE',
+  exchange,
   token: '1',
   entryPrice: 100,
   qty: 10,
@@ -355,5 +366,80 @@ describe('RosterService — ownership across two symbol spellings', () => {
 
     const [entry] = await svc.build('u1');
     expect(entry.ownership).toBe('SENTINEL');
+  });
+});
+
+/**
+ * THE SENTINEL'S REMIT: F&O ONLY.
+ *
+ * A deliberate scope decision, and the one the instrument justifies. An option
+ * decays, expires on a fixed date and can lose its whole premium in a session,
+ * so "should I still be holding this?" has a deadline attached. A cash equity has
+ * no expiry and no theta; the same question is a portfolio decision on a horizon
+ * of weeks, which a 30-second poll is the wrong shape for.
+ */
+describe('RosterService — F&O only', () => {
+  const list = jest.fn();
+  const ownedElsewhere = jest.fn().mockResolvedValue(new Set<string>());
+  const svc = new RosterService({ listOpen: list } as any, {
+    symbolsOwnedByOtherEngines: ownedElsewhere,
+  } as any);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    ownedElsewhere.mockResolvedValue(new Set<string>());
+  });
+
+  it('watches an NFO option and leaves the cash position out', async () => {
+    list.mockResolvedValue([
+      tracker('opt', 'POSITION', 'KEI29SEP265800CE', undefined, 'NFO'),
+      tracker('eq', 'POSITION', 'MOTHERSON-EQ', undefined, 'NSE'),
+    ]);
+    const roster = await svc.build('u1');
+    expect(roster.map((r) => r.trackerId)).toEqual(['opt']);
+  });
+
+  it('watches an MCX commodity option', async () => {
+    // The remit is the SEGMENT, not the exchange — MCX derivatives count.
+    list.mockResolvedValue([
+      tracker('c', 'POSITION', 'CRUDEOIL17AUG267800CE', undefined, 'MCX'),
+    ]);
+    expect((await svc.build('u1')).map((r) => r.trackerId)).toEqual(['c']);
+  });
+
+  it('classifies a future by suffix even off a cash exchange', async () => {
+    // `segmentFor` reads the exchange first and the suffix second, so a
+    // mislabelled row still lands in the right bucket rather than being dropped.
+    list.mockResolvedValue([
+      tracker('f', 'POSITION', 'RELIANCE28AUG25FUT', undefined, 'NSE'),
+    ]);
+    expect((await svc.build('u1')).map((r) => r.trackerId)).toEqual(['f']);
+  });
+
+  it('returns an EMPTY roster for a book of nothing but equities', async () => {
+    // Stated behaviour, not a silent failure. The cycle reports having watched
+    // nothing, which is correct — the alternative is spending agent calls and
+    // the user's money judging trades the sentinel has no remit over.
+    list.mockResolvedValue([
+      tracker('a', 'POSITION', 'MOTHERSON-EQ', undefined, 'NSE'),
+      tracker('b', 'POSITION', 'LTF-EQ', undefined, 'NSE'),
+      tracker('c', 'HOLDING', 'SUZLON-EQ', undefined, 'NSE'),
+    ]);
+    expect(await svc.build('u1')).toEqual([]);
+  });
+
+  it('does not let cash positions consume the watch cap', async () => {
+    // The failure this prevents: eight equities ahead of one option in store
+    // order would have taken all five slots and left the option UNWATCHED —
+    // the same inversion holdings caused before they were excluded.
+    list.mockResolvedValue([
+      ...Array.from({ length: 8 }, (_, i) =>
+        tracker(`eq${i}`, 'POSITION', `EQ${i}-EQ`, undefined, 'NSE'),
+      ),
+      tracker('opt', 'POSITION', 'KEI29SEP265800CE', undefined, 'NFO'),
+    ]);
+    const roster = await svc.build('u1');
+    expect(roster.map((r) => r.trackerId)).toEqual(['opt']);
+    expect(roster[0].watched).toBe(true);
   });
 });

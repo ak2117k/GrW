@@ -4,6 +4,7 @@ import { LevelBookService } from '../../signal-generator/services/level-book.ser
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { NewsAggregatorService } from '../../news/services/news-aggregator.service';
+import { segmentFor } from '../charges';
 import type { Segment, Side } from '../charges';
 import type { TickReading, TickSource } from '../services/sentinel-cycle.service';
 import {
@@ -34,38 +35,14 @@ export const FRESH_NEWS_WINDOW_MS = 30 * 60 * 1000;
  */
 export const SPOT_STALENESS_MS = 60_000;
 
-/** Derivative tradingsymbols end in the contract type. */
-const OPTION_SUFFIX = /(CE|PE)$/;
-const FUTURE_SUFFIX = /FUT$/;
-
 /**
- * Which charge schedule applies. Exported and pure — this picks the STT and
- * stamp-duty rates the green floor is solved from, so getting it wrong moves
- * the floor rather than failing loudly.
- *
- * A HOLDING is delivery by definition (it settled into the demat account). A
- * cash POSITION is treated as intraday: the tracker cannot know whether the user
- * intends to carry it, and intraday is the LOWER charge schedule, so this
- * under-states charges for a position that is later delivered. Deliberate — the
- * floor is a target the agent may exceed, and a floor that is too HIGH would
- * refuse to arm on a trade that is genuinely in profit, which is the worse error.
+ * Re-exported from `charges.ts`, where it now lives beside the `Segment` it
+ * returns and the rate tables it selects. Moved so the ROSTER can classify a
+ * trade without importing this file, which reaches `UserFeedManager` and
+ * through it the broker — that import would break the Stage-0 isolation
+ * property the cycle spec walks the import graph to assert.
  */
-export function segmentFor(input: { exchange: string; symbol: string; kind: string }): Segment {
-  const exchange = input.exchange.toUpperCase();
-  const symbol = input.symbol.toUpperCase();
-  const derivativeExchange = exchange === 'NFO' || exchange === 'BFO' || exchange === 'MCX';
-  if (derivativeExchange || OPTION_SUFFIX.test(symbol) || FUTURE_SUFFIX.test(symbol)) {
-    // Order matters: `NIFTY28AUG2524000CE` must not be read as a future by a
-    // looser test, and a future never ends in CE/PE.
-    if (OPTION_SUFFIX.test(symbol)) return 'OPT';
-    if (FUTURE_SUFFIX.test(symbol)) return 'FUT';
-    // On a derivative exchange with an unrecognisable suffix, OPT is the
-    // conservative read: it carries the highest STT and exchange-txn rates, so
-    // the floor sits higher and arms later rather than sooner.
-    return 'OPT';
-  }
-  return input.kind === 'HOLDING' ? 'EQ_DELIVERY' : 'EQ_INTRADAY';
-}
+export { segmentFor };
 
 /**
  * The broker reports a short position as a NEGATIVE net quantity. Reading side

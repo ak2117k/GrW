@@ -21,6 +21,16 @@
 export interface OpenPosition {
   id: string;
   symbol: string;
+  /**
+   * The trade's exchange — 'NSE', 'NFO', 'MCX', 'BFO'.
+   *
+   * Needed because the roster's remit is F&O ONLY, and `segmentFor` decides that
+   * from the exchange first and the tradingsymbol's suffix second. Reading it off
+   * the symbol alone is not enough: an NFO contract whose suffix does not parse
+   * still belongs to the sentinel, and a cash symbol that happens to end in the
+   * letters FUT would not.
+   */
+  exchange: string;
   /** 'POSITION' or 'HOLDING'. Left as `string`: the roster branches on it and owns that policy. */
   kind: string;
   entryTime: Date | null;

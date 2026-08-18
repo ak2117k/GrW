@@ -15,16 +15,23 @@ describe('OpenPositionsRepository', () => {
     expect(findMany).toHaveBeenCalledWith({
       where: { userId: 'u1', status: 'OPEN' },
       orderBy: { entryTime: 'asc' },
-      select: { id: true, symbol: true, kind: true, entryTime: true },
+      select: { id: true, symbol: true, exchange: true, kind: true, entryTime: true },
     });
   });
 
-  it('projects four columns, so a new TradeTracker column cannot leak into a packet', async () => {
+  it('projects five columns, so a new TradeTracker column cannot leak into a packet', async () => {
     await repo.listOpen('u1');
     const arg = findMany.mock.calls[0][0];
     // A bare findMany would return every column, and the roster's rows feed a
     // context packet that is persisted verbatim and replayed forever.
-    expect(Object.keys(arg.select)).toEqual(['id', 'symbol', 'kind', 'entryTime']);
+    expect(Object.keys(arg.select)).toEqual([
+      'id',
+      'symbol',
+      // The roster's F&O-only remit is decided from this — see OpenPosition.
+      'exchange',
+      'kind',
+      'entryTime',
+    ]);
   });
 
   it('returns whatever Prisma returns, unmapped', async () => {

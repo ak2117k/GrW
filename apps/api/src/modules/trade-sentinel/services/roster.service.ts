@@ -1,5 +1,9 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { OPEN_POSITIONS, type OpenPositionsPort } from '../ports/open-positions.port';
+// From `charges.ts`, NOT from the tick source that also exports `segmentFor`:
+// that adapter imports `UserFeedManager` and reaches the broker, and the cycle
+// imports this file. See the note on `segmentFor` for why it was moved.
+import { isDerivativeSegment, segmentFor } from '../charges';
 import { normaliseSymbol } from '../symbols';
 
 /** Hard cap on concurrently watched positions (spec §2). */
@@ -118,22 +122,36 @@ export class RosterService {
       [...(await this.ownership.symbolsOwnedByOtherEngines(userId))].map(normaliseSymbol),
     );
 
-    // POSITIONS ONLY. Holdings are not watched at all — not observed, not
-    // counted, not listed.
+    // F&O POSITIONS ONLY. Two filters, and they exclude different things for
+    // different reasons — neither subsumes the other.
     //
-    // The original design had them OBSERVE_ONLY: watched and explained but
-    // never closed. In practice that inverted the feature. A real book carries
-    // a handful of positions and DOZENS of holdings (52 open trades here: 4
-    // positions, 48 holdings), and since holdings sort no differently once the
-    // cap binds, the five watch slots filled with long-term equity the user was
-    // not asking about while the option positions they actually opened today
-    // went UNWATCHED. The cap is 5 because five is what the agent can reason
-    // about well; spending it on the wrong five is worse than spending it on
-    // none.
+    // (1) NOT HOLDINGS. The original design had them OBSERVE_ONLY: watched and
+    // explained but never closed. In practice that inverted the feature. A real
+    // book carries a handful of positions and DOZENS of holdings (52 open trades
+    // here: 4 positions, 48 holdings), and since holdings sort no differently
+    // once the cap binds, the five watch slots filled with long-term equity the
+    // user was not asking about while the option positions they actually opened
+    // today went UNWATCHED. The cap is 5 because five is what the agent can
+    // reason about well; spending it on the wrong five is worse than spending it
+    // on none.
     //
-    // Positions alone also fit: four against a cap of five means nothing is
-    // dropped and the "over capacity" path stops firing on a normal book.
-    const positions = open.filter((t) => t.kind !== 'HOLDING');
+    // (2) NOT CASH EQUITY. The sentinel's remit is derivatives — OPT and FUT.
+    // This is a deliberate scope decision, not an optimisation, and it is the
+    // one the instrument actually justifies: an option decays, expires on a
+    // fixed date, and can lose its entire premium in a session, so "should I
+    // still be holding this?" is a question with a deadline attached. A cash
+    // equity has no expiry and no theta; the same question there is a portfolio
+    // decision on a horizon of weeks, which a 30-second poll is the wrong shape
+    // for and which the user has not asked the agent to make.
+    //
+    // The consequence is stated rather than hidden: a book of nothing but cash
+    // positions produces an EMPTY roster, and the cycle correctly reports having
+    // watched nothing. That is the intended behaviour, not a silent failure —
+    // the alternative is spending agent calls and the user's money judging
+    // trades the sentinel was never meant to have an opinion about.
+    const positions = open.filter(
+      (t) => t.kind !== 'HOLDING' && isDerivativeSegment(segmentFor(t)),
+    );
 
     // Slot allocation is decided HERE, not by listOpen's orderBy — see
     // byWatchPriority for the policy and why it is stated in this module.

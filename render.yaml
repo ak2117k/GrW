@@ -31,6 +31,41 @@ services:
       - key: LIVE_BILLING_ENABLED
         value: "false"
 
+      # --- Trade sentinel (Stage 0: SHADOW MODE) ---
+      # The per-trade exit monitor. SHADOW means it judges and records and can
+      # close NOTHING: no executor is reachable from the cycle by import graph,
+      # and sentinel-cycle.service.spec.ts walks that graph to prove it. Turning
+      # this on cannot place, modify or cancel an order.
+      #
+      # It defaults OFF in code (see SENTINEL_ENABLED_KEY) because every tick can
+      # spend money — the thesis inference and the verdict are both model calls —
+      # and a paid polling loop that switches itself on at first deploy is not a
+      # safe default. Setting it here is that explicit act.
+      #
+      # Cadence is self-limiting: 30s ticks, weekdays 09:15-15:30 IST only, at
+      # most 5 watched positions, and the AGENT is called only when a tripwire
+      # fires or on a 15-minute heartbeat — not every tick. Scope is F&O only, so
+      # a book of cash positions costs nothing at all.
+      - key: SENTINEL_SHADOW_ENABLED
+        value: "true"
+      # api | cli. MUST be `api` here. `cli` shells out to the local `claude`
+      # binary to use a Max subscription instead of metered API credit — that
+      # works on a developer laptop and cannot work in this container, which has
+      # no CLI and no browser to authenticate one.
+      - key: SENTINEL_JUDGE
+        value: api
+      # REQUIRED once SENTINEL_SHADOW_ENABLED is true, and NOT interchangeable
+      # with a Claude subscription — this is metered API billing.
+      #
+      # The client is constructed eagerly at boot but does NOT fail on a missing
+      # key; it fails on the first REQUEST. So with this unset the sentinel looks
+      # perfectly healthy, ticks all session, and records every position with a
+      # thesis of "could not be inferred" — a running loop that learns nothing,
+      # which is the failure mode this whole module is built to avoid.
+      # Create at https://console.anthropic.com/settings/keys
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
       # --- Secrets (entered in the Render dashboard; never committed) ---
       # 32+ char random string. node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
       - key: JWT_SECRET

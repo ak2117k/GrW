@@ -3,6 +3,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { schedulingImports } from './common/utils/scheduling-imports';
+import { CronLeaseModule } from './common/cron-lease';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ClsModule } from 'nestjs-cls';
 import configuration from './config/configuration';
@@ -74,6 +75,12 @@ import { HealthModule } from './modules/health/health.module';
     // See `schedulingImports` for why this is a whole-module switch rather
     // than a guard inside each @Cron method.
     ...schedulingImports(),
+
+    // Distributed lease for scheduled work. @Global, so no feature module has
+    // to import it — the ~47 @Cron/@Interval jobs are spread across most of
+    // them, and requiring each to remember an import is how an unleased job
+    // ships. Inert unless CRON_LEASE_ENABLED=true, and it says so at boot.
+    CronLeaseModule,
 
     // Central global rate limiter (TDA-004 Task 6). ONE app-wide throttler
     // ('default'), config-driven from rateLimit.* (GLOBAL_RATE_TTL/LIMIT). The

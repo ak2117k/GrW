@@ -149,6 +149,26 @@ export function minutesToSessionClose(now: Date): Block<number> {
   );
 }
 
+/**
+ * The three ways `underlyingLtp` can be sourced, spelled out because the packet
+ * carries this string verbatim as provenance and the agent is taught to read it.
+ * "A live tick" and "a REST quote" are not the same evidence — the first is the
+ * market's last print, the second a snapshot the broker composed for us — and an
+ * operator reading a stored packet must be able to tell which they are seeing.
+ *
+ * THEY LIVE HERE, not beside the tick source that produces them, and that
+ * placement is load-bearing. `sentinel-cycle.service.ts` needs
+ * {@link SPOT_SOURCE_CASH} for its cash repair, and the Stage-0 isolation
+ * property is that no order-placing service is reachable BY FOLLOWING IMPORTS
+ * from the cycle. `tick-source.adapter.ts` imports `UserFeedManager`, which
+ * reaches the broker — so importing the constant from there would quietly make
+ * the cycle broker-reachable and break the property the module spec asserts.
+ * This service is already imported by both and reaches nothing.
+ */
+export const SPOT_SOURCE_CASH = 'market-data (underlying spot — the contract IS the underlying)';
+export const SPOT_SOURCE_LIVE = 'market-data (underlying spot — live feed tick)';
+export const SPOT_SOURCE_QUOTE = 'market-data (underlying spot — broker FULL-mode quote)';
+
 export interface TickSnapshot {
   segment: Segment;
   side: Side;
@@ -197,6 +217,29 @@ export interface TickSnapshot {
    * cash, where the underlying IS `ltp` and there is no separate read to date.
    */
   underlyingLtpAt: string | null;
+  /**
+   * WHICH SOURCE produced `underlyingLtp` — a live feed tick, a broker quote, or
+   * (for cash) the contract's own price. See the `SPOT_SOURCE_*` constants.
+   *
+   * Carried rather than written here as a constant, for the reason
+   * `structureSource` exists: this service cannot know whether it is holding the
+   * market's last print or a REST snapshot the broker composed a moment ago, and
+   * the two are not the same evidence. The block used to read
+   * `'market-data (underlying spot)'` for every case, which named a module
+   * rather than a source.
+   */
+  underlyingLtpSource: string;
+  /**
+   * WHY `underlyingLtp` is null — naming the tiers that were tried — or null
+   * itself when a price was resolved.
+   *
+   * The fixed sentence this replaces described every absence as "could not be
+   * resolved", which flattens two different facts: an underlying we never
+   * managed to NAME (so nothing was ever asked) and one we named but could not
+   * PRICE (live feed missed it, broker quote declined). Same discipline as
+   * `structureReason`: the absence has to say which failure it was.
+   */
+  underlyingLtpReason: string | null;
   /** Nearest level from the level book, on the UNDERLYING's scale. */
   nearestSupport: number | null;
   nearestResistance: number | null;
@@ -538,11 +581,15 @@ export class ContextPacketService {
         ltp: tick.ltp,
         underlyingLtp: numberBlock(
           tick.underlyingLtp,
-          'market-data (underlying spot)',
+          // The tier that produced it, not the module it passed through.
+          tick.underlyingLtpSource,
           // The spot's own read time — it is allowed to be up to a minute old.
           tick.underlyingLtpAt ?? at,
-          "the underlying's price could not be resolved — levels and OI walls below " +
-            'are on the underlying scale and CANNOT be compared against ltp',
+          // The tick's reason names WHICH tiers were tried. The fallback stands
+          // only for a caller that supplied none.
+          tick.underlyingLtpReason ??
+            "the underlying's price could not be resolved — levels and OI walls below " +
+              'are on the underlying scale and CANNOT be compared against ltp',
         ),
         entryTime: tick.entryTime.toISOString(),
         expiry: tick.expiry,

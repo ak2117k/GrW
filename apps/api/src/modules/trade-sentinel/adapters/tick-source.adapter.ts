@@ -1,11 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { NewsAggregatorService } from '../../news/services/news-aggregator.service';
 import type { Segment, Side } from '../charges';
 import type { TickReading, TickSource } from '../services/sentinel-cycle.service';
-import { unresolvedUnderlying } from '../services/context-packet.service';
+import {
+  SPOT_SOURCE_CASH,
+  SPOT_SOURCE_LIVE,
+  SPOT_SOURCE_QUOTE,
+  unresolvedUnderlying,
+} from '../services/context-packet.service';
 import { SENTINEL_LEVEL_SOURCE, SentinelChartContextAdapter } from './chart-context.adapter';
 import { normaliseSymbol } from '../symbols';
 
@@ -92,8 +98,36 @@ interface Underlying {
 
 const NO_UNDERLYING: Underlying = { name: null, token: null };
 
+/**
+ * How long a broker quote for one underlying is reused.
+ *
+ * Under the sentinel's 30-second tick (`SENTINEL_TICK_CRON`) this is deliberately
+ * BELOW the tick, so each tick fetches its own quote and no packet is ever
+ * stamped with a price from the previous cycle. What it does collapse is the
+ * within-tick case: several contracts on one underlying — two strikes, a
+ * straddle, a hedge — resolve to one broker call instead of one per position.
+ */
+export const SPOT_QUOTE_TTL_MS = 20_000;
+
+/** A resolved underlying price, or a stated absence naming what was tried. */
+interface SpotReading {
+  ltp: number | null;
+  at: string | null;
+  source: string;
+  /** Null when `ltp` is present. Otherwise names the tiers that were attempted. */
+  reason: string | null;
+}
+
 /** No spot, and therefore no capture time to report for one. */
-const NO_SPOT = { ltp: null, at: null } as const;
+const NO_SPOT: SpotReading = {
+  ltp: null,
+  at: null,
+  source: SPOT_SOURCE_LIVE,
+  reason:
+    'no underlying could be resolved for this contract, so no spot was ever requested — ' +
+    'neither the live feed nor a broker quote was asked. This is a FAILURE TO LOOK, not a ' +
+    'finding: the underlying is trading, we simply could not name it.',
+};
 
 /**
  * What the level book reports when there is no symbol to ask about — the fourth
@@ -178,13 +212,32 @@ export class SentinelTickSource implements TickSource {
   /** Derivatives already warned about having no resolvable underlying. */
   private readonly warnedNoUnderlying = new Set<string>();
 
+  /** Recent broker quotes per underlying token — see {@link SPOT_QUOTE_TTL_MS}. */
+  private readonly quotes = new Map<string, { at: number; ltp: number; capturedAt: string }>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly instruments: MarketDataRepository,
     private readonly levelBooks: LevelBookService,
     private readonly news: NewsAggregatorService,
     private readonly charts: SentinelChartContextAdapter,
-  ) {}
+    // Optional for the same reason `SentinelChartContextAdapter` makes it
+    // optional: a container without the per-user feed must still construct and
+    // must degrade visibly rather than fail to boot. Without it the spot has
+    // only its live-feed tier, which is the state that made every derivative
+    // position blind — so its absence is warned about at boot, below.
+    @Optional() private readonly userFeed?: UserFeedManager,
+  ) {
+    if (!this.userFeed) {
+      this.logger.warn(
+        'no UserFeedManager is wired, so the underlying spot has only its live-feed tier. The ' +
+          'live feed seeds a fixed universe (indices, five major stocks, five commodities), so ' +
+          'for any position outside it the spot will be permanently unavailable — and with it ' +
+          'the nearest levels, the levelBreak sensor and the OI walls. Import MarketDataModule ' +
+          'to restore the broker-quote tier.',
+      );
+    }
+  }
 
   async tickFor(trackerId: string): Promise<TickReading> {
     const row = await this.prisma.tradeTracker.findUnique({
@@ -237,7 +290,9 @@ export class SentinelTickSource implements TickSource {
     // The `at` is the spot's own read time for a derivative, and null for cash —
     // where the underlying IS `ltp`, which carries no timestamp of its own, so
     // the packet's build time is the honest fallback rather than a borrowed one.
-    const spot = isCash ? { ltp, at: null } : this.spotFor(underlying.token);
+    const spot: SpotReading = isCash
+      ? { ltp, at: null, source: SPOT_SOURCE_CASH, reason: null }
+      : await this.spotFor(underlying.token, row.userId, row.symbol);
     const underlyingLtp = spot.ltp;
 
     /**
@@ -281,6 +336,13 @@ export class SentinelTickSource implements TickSource {
       ltp,
       underlyingLtp,
       underlyingLtpAt: spot.at,
+      // WHICH TIER produced it, and — when it produced nothing — which tiers
+      // were tried. Threaded rather than written as a constant downstream for
+      // the same reason `structureSource` is: the packet builder does not know
+      // whether it is holding a live print or a REST snapshot, and provenance
+      // that cannot tell them apart is not provenance.
+      underlyingLtpSource: spot.source,
+      underlyingLtpReason: spot.reason,
       // Carried so the packet builder and the thesis inference look their
       // evidence up by the SAME symbol these sensors did. Resolved once, here;
       // a second resolution downstream is how the two paths came to disagree.
@@ -309,24 +371,138 @@ export class SentinelTickSource implements TickSource {
   }
 
   /**
-   * The UNDERLYING's spot for a derivative, or null.
+   * The UNDERLYING's spot for a derivative — TIERED, because one tier was never
+   * enough and its emptiness was the single most damaging blind spot here.
    *
-   * Null is a first-class answer: `levelBreak` and the OI capture are both
-   * required to stay silent without a spot, because a level or a strike is on
-   * the underlying's scale while the contract's `ltp` is a premium — comparing
-   * 120 against a 24000 strike reads as a permanent breach.
+   * WHAT WENT WRONG. This used to be `levelBooks.getLevels(token)` and nothing
+   * else. `getLevels` is a SYNCHRONOUS PEEK into an in-memory map: it answers
+   * only for tokens something has already seeded AND is actively ticking, and
+   * the live feed seeds a fixed universe — the indices, five major stocks, five
+   * commodities (`MAJOR_STOCKS` in packages/shared). Nothing the user actually
+   * trades is in it. So for every real position this returned null permanently —
+   * not overnight, not on a quiet symbol, but at 11:00 on a live trading day.
+   * Every other consumer in this repo (`analyze`, `sr-evidence`, `chartink`, the
+   * scanner) reaches for `lazyLoad`, which BUILDS a book; the sentinel alone
+   * peeked at one it never asked anybody to create.
+   *
+   * The damage was disproportionate because ONE null gated FOUR blocks. With no
+   * price, `structureFor` returns `LEVEL_BOOK_NO_PRICE` and suppresses both
+   * nearest levels even though the book behind them was fine; `levelBreak` has
+   * nothing to compare; and the OI capture, which keys off the underlying's
+   * scale, never runs. The packet said so honestly every tick — which is the only
+   * reason this was diagnosable — but honest blindness is still blindness.
+   *
+   * THE TIERS, best evidence first:
+   *   1. a live feed tick, at most `SPOT_STALENESS_MS` old — the market's own
+   *      last print, sub-second when the symbol happens to be subscribed;
+   *   2. a FULL-mode broker quote over the position owner's own Angel session —
+   *      one call, works for any token in the master, and the tier that actually
+   *      rescues the ordinary case.
+   *
+   * Deliberately NOT a third tier reading the book's replayed 5-minute close.
+   * That number exists and is tempting, but it is a bar close wearing a spot's
+   * name: it would satisfy every consumer while being minutes stale at exactly
+   * the moment a level breaks. A stated absence is worth more than a plausible
+   * wrong number — the packet is persisted verbatim and replays forever.
+   *
+   * Null remains a first-class answer, and `reason` now names which tiers were
+   * tried, because "we never asked" and "we asked and the broker declined" are
+   * different facts about a position with money on it.
    */
-  private spotFor(underlyingToken: string | null): { ltp: number | null; at: string | null } {
+  private async spotFor(
+    underlyingToken: string | null,
+    userId: string,
+    symbol: string,
+  ): Promise<SpotReading> {
     if (!underlyingToken) return NO_SPOT;
 
+    // Tier 1 — a live tick. See SPOT_STALENESS_MS: a frozen spot is worse than
+    // no spot, so a stale book falls THROUGH to the quote rather than returning.
     const book = this.levelBooks.getLevels(underlyingToken);
-    if (!book || !Number.isFinite(book.spot) || book.spot <= 0) return NO_SPOT;
-    // See SPOT_STALENESS_MS — a frozen spot is worse than no spot.
-    if (Date.now() - book.lastTickAt.getTime() > SPOT_STALENESS_MS) return NO_SPOT;
-    // The TICK time, not now: this reading is allowed to be up to
-    // SPOT_STALENESS_MS old, and the packet stamps `at` from it. Reporting the
-    // build time would tell the agent a minute-old spot was read this instant.
-    return { ltp: book.spot, at: book.lastTickAt.toISOString() };
+    if (
+      book &&
+      Number.isFinite(book.spot) &&
+      book.spot > 0 &&
+      Date.now() - book.lastTickAt.getTime() <= SPOT_STALENESS_MS
+    ) {
+      // The TICK time, not now: this reading is allowed to be up to
+      // SPOT_STALENESS_MS old, and the packet stamps `at` from it. Reporting the
+      // build time would tell the agent a minute-old spot was read this instant.
+      return {
+        ltp: book.spot,
+        at: book.lastTickAt.toISOString(),
+        source: SPOT_SOURCE_LIVE,
+        reason: null,
+      };
+    }
+
+    // Tier 2 — a broker quote over the OWNING user's session. There is no shared
+    // feed account on this platform, so the tenant is not optional here.
+    const quoted = await this.quoteFor(underlyingToken, userId, symbol);
+    if (quoted) return quoted;
+
+    return {
+      ltp: null,
+      at: null,
+      source: SPOT_SOURCE_QUOTE,
+      reason:
+        "the underlying's price could not be resolved: it is not on the live feed (which " +
+        'carries only a fixed universe of indices and major stocks) and a broker quote for it ' +
+        `${this.userFeed ? 'failed or returned nothing' : 'was not attempted — no per-user feed is wired'}. ` +
+        'This is a FAILURE TO LOOK, not a finding. Levels and OI walls below are on the ' +
+        'underlying scale and CANNOT be compared against ltp.',
+    };
+  }
+
+  /**
+   * Tier 2: one FULL-mode quote, memoised for {@link SPOT_QUOTE_TTL_MS}.
+   *
+   * Never throws — a broker that declines a quote must become a stated absence,
+   * exactly like every other evidence source here. Returns null so the caller
+   * owns the wording of the absence in one place.
+   */
+  private async quoteFor(
+    token: string,
+    userId: string,
+    symbol: string,
+  ): Promise<SpotReading | null> {
+    if (!this.userFeed) return null;
+
+    const cached = this.quotes.get(token);
+    if (cached && Date.now() - cached.at < SPOT_QUOTE_TTL_MS) {
+      // The CAPTURE time of the original quote, not this cache hit — the packet
+      // contracts for when the data was read, and a cache must not refresh a
+      // timestamp it did not refresh the price behind.
+      return {
+        ltp: cached.ltp,
+        at: cached.capturedAt,
+        source: SPOT_SOURCE_QUOTE,
+        reason: null,
+      };
+    }
+
+    try {
+      // 'NSE' because `resolveUnderlying` looks the cash row up on NSE and takes
+      // its token from there — the exchange has to be the one that token belongs
+      // to, not the derivative's (NFO/MCX), or the broker resolves nothing.
+      const tick = await this.userFeed.fetchQuote(userId, token, 'NSE');
+      const ltp = tick?.ltp;
+      if (!Number.isFinite(ltp as number) || (ltp as number) <= 0) return null;
+
+      const capturedAt = new Date().toISOString();
+      this.quotes.set(token, { at: Date.now(), ltp: ltp as number, capturedAt });
+      return { ltp: ltp as number, at: capturedAt, source: SPOT_SOURCE_QUOTE, reason: null };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Warn, not debug: a permanently failing quote puts this position back in
+      // exactly the blind state this method exists to end, and at production log
+      // levels a debug is silence.
+      this.logger.warn(
+        `underlying quote failed for ${symbol} (token ${token}): ${message} — the spot, the ` +
+          'nearest levels and the OI walls will all be absent for this tick',
+      );
+      return null;
+    }
   }
 
   /**

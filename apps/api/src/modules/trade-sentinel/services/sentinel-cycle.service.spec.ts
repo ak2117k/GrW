@@ -41,6 +41,8 @@ const tick = (over: Partial<TickReading> = {}): TickReading => ({
   ltp: 100,
   underlyingLtp: 100,
   underlyingLtpAt: null,
+  underlyingLtpSource: 'market-data (underlying spot — live feed tick)',
+  underlyingLtpReason: null,
   structureSymbol: 'T1',
   nearestSupport: null,
   nearestResistance: null,

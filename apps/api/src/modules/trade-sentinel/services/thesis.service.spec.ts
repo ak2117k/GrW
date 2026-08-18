@@ -40,6 +40,8 @@ const tick: TickSnapshot = {
   ltp: 1470,
   underlyingLtp: 1470,
   underlyingLtpAt: null,
+  underlyingLtpSource: 'market-data (underlying spot — live feed tick)',
+  underlyingLtpReason: null,
   nearestSupport: 1450,
   nearestResistance: 1500,
   structureReason: null,

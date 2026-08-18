@@ -4,6 +4,7 @@ import { RosterService, type RosterEntry } from './roster.service';
 import { TripwireService, type TripwireResult } from './tripwire.service';
 import {
   ContextPacketService,
+  SPOT_SOURCE_CASH,
   packetAsJson,
   type ContextPacket,
   type TickSnapshot,
@@ -693,9 +694,27 @@ export function agentBackoffMs(consecutiveFailures: number): number {
  * Only cash is repaired. For OPT/FUT the spot genuinely is a separate number and
  * a missing one must stay missing — substituting the premium there would compare
  * 120 against a 24000 level and read as a permanent breach.
+ *
+ * THE PROVENANCE IS REPAIRED WITH THE VALUE, and it has to be. A tick that
+ * reached here with no `underlyingLtp` carries the source and reason of whatever
+ * FAILED to produce one — "broker FULL-mode quote", "could not be resolved".
+ * Substituting the price while leaving those behind would put a present value
+ * under a failed source: the packet would report an equity's spot as having come
+ * from a broker quote that was never made, with `at` stamped and the whole thing
+ * persisted verbatim for replay. A block that is present but wrong is worse than
+ * one that is missing, precisely because it arrives with provenance attached.
  */
 export function withCashUnderlying(tick: TickReading): TickReading {
   const isCash = tick.segment === 'EQ_DELIVERY' || tick.segment === 'EQ_INTRADAY';
   if (!isCash || Number.isFinite(tick.underlyingLtp as number)) return tick;
-  return { ...tick, underlyingLtp: tick.ltp };
+  return {
+    ...tick,
+    underlyingLtp: tick.ltp,
+    underlyingLtpSource: SPOT_SOURCE_CASH,
+    // The read time of `ltp` itself, which this tick does not carry — so null,
+    // and the packet falls back to its own build time. Keeping a stale `at` from
+    // a failed lookup would date the price to a reading that never happened.
+    underlyingLtpAt: null,
+    underlyingLtpReason: null,
+  };
 }

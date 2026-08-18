@@ -26,7 +26,16 @@ const row = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function make() {
+/**
+ * `withFeed: false` builds the adapter with NO `UserFeedManager`, which is the
+ * pre-fix shape: the spot then has only its live-feed tier. Kept as an explicit
+ * option rather than the default so a test that wants the blind case has to ask
+ * for it — the blind case is what shipped, and it should never be what a new
+ * test gets by accident.
+ */
+function make(opts: { withFeed?: boolean } = {}) {
+  const fetchQuote = jest.fn().mockResolvedValue(null);
+  const userFeed = opts.withFeed === false ? undefined : ({ fetchQuote } as never);
   const findUnique = jest.fn().mockResolvedValue(row());
   const getInstrumentByToken = jest.fn().mockResolvedValue(null);
   const getInstrumentBySymbol = jest.fn().mockResolvedValue(null);
@@ -49,6 +58,7 @@ function make() {
     { getLevels } as never,
     { getNewsForSymbol } as never,
     { structureFor } as never,
+    userFeed,
   );
   return {
     svc,
@@ -58,6 +68,7 @@ function make() {
     getLevels,
     getNewsForSymbol,
     structureFor,
+    fetchQuote,
   };
 }
 
@@ -408,7 +419,14 @@ describe('SentinelTickSource', () => {
       await t.svc.tickFor('t1');
       await t.svc.tickFor('t1');
 
-      const hits = warn.mock.calls.filter((c) => /underlying/i.test(String(c[0])));
+      // Filtered by the CONTRACT, not by the word "underlying". The constructor
+      // also warns about the missing feed manager and that line is about the
+      // process, not this position — a filter loose enough to catch both counts
+      // a once-per-boot line as a once-per-poll one and would fail on a warning
+      // that is behaving correctly.
+      const hits = warn.mock.calls.filter((c) =>
+        String(c[0]).includes('NIFTY28AUG2524000CE'),
+      );
       expect(hits).toHaveLength(1);
       // And it must say what goes dark, or the line cannot be acted on.
       expect(String(hits[0][0])).toMatch(/level book/i);
@@ -445,10 +463,147 @@ describe('SentinelTickSource', () => {
         lastTickAt: new Date(NOW.getTime() - SPOT_STALENESS_MS - 1),
       });
 
+      // The quote tier is wired but returns nothing here, so the stale book has
+      // nowhere to fall through TO — which is what makes this assert about the
+      // staleness rule rather than about the quote.
       const tick = await t.svc.tickFor('t1');
       expect(tick.underlyingLtp).toBeNull();
       // No reading, so no read time to claim for one.
       expect(tick.underlyingLtpAt).toBeNull();
+    });
+
+    /**
+     * THE BUG THIS BLOCK EXISTS FOR, and it is the one that made the sentinel
+     * useless on every position the user actually held.
+     *
+     * `spotFor` was a synchronous peek at `levelBooks.getLevels(token)` — a map
+     * populated only for tokens the live feed has seeded. That universe is fixed
+     * (indices, five major stocks, five commodities), so for a real position the
+     * spot was null PERMANENTLY: not overnight, not on a quiet symbol, but at
+     * 11:00 on a live trading day. One null then gated four blocks — both nearest
+     * levels, `levelBreak` and the OI walls — because each is on the underlying's
+     * scale and correctly refuses to compare against a premium.
+     */
+    describe('the broker-quote tier', () => {
+      it('quotes the underlying when it is not on the live feed', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+        t.getLevels.mockReturnValue(null); // never seeded — the ordinary case
+        t.fetchQuote.mockResolvedValue({ ltp: 24010 });
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.underlyingLtp).toBe(24010);
+        // The CASH token on NSE — not the derivative's own token or exchange,
+        // which the broker would resolve to nothing.
+        expect(t.fetchQuote).toHaveBeenCalledWith('u1', '26000', 'NSE');
+        // Provenance must say which tier, because a REST snapshot and a live
+        // print are not the same evidence.
+        expect(tick.underlyingLtpSource).toMatch(/quote/i);
+        expect(tick.underlyingLtpReason).toBeNull();
+      });
+
+      it('falls through to a quote when the live book is STALE', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+        // A frozen book must not be served, but it must not end the search
+        // either — a fresh quote is strictly better than the absence.
+        t.getLevels.mockReturnValue({
+          spot: 23000,
+          lastTickAt: new Date(NOW.getTime() - SPOT_STALENESS_MS - 1),
+        });
+        t.fetchQuote.mockResolvedValue({ ltp: 24010 });
+
+        const tick = await t.svc.tickFor('t1');
+        expect(tick.underlyingLtp).toBe(24010);
+        expect(tick.underlyingLtpSource).toMatch(/quote/i);
+      });
+
+      it('prefers a FRESH live tick over a quote, and spends no broker call', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+        t.getLevels.mockReturnValue({ spot: 24010, lastTickAt: new Date(NOW.getTime() - 1000) });
+
+        const tick = await t.svc.tickFor('t1');
+        expect(tick.underlyingLtp).toBe(24010);
+        expect(tick.underlyingLtpSource).toMatch(/live feed/i);
+        expect(t.fetchQuote).not.toHaveBeenCalled();
+      });
+
+      it('states that BOTH tiers were tried when neither produces a price', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const t = make();
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+        t.getLevels.mockReturnValue(null);
+        t.fetchQuote.mockRejectedValue(new Error('broker said no'));
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.underlyingLtp).toBeNull();
+        // "We never asked" and "we asked and were refused" are different facts
+        // about a position with money on it, and the packet persists this
+        // sentence verbatim for replay.
+        expect(tick.underlyingLtpReason).toMatch(/live feed/i);
+        expect(tick.underlyingLtpReason).toMatch(/quote/i);
+        expect(tick.underlyingLtpReason).toMatch(/FAILURE TO LOOK/i);
+      });
+
+      it('says the quote was NOT ATTEMPTED when no feed manager is wired', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const t = make({ withFeed: false });
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+        t.getLevels.mockReturnValue(null);
+
+        const tick = await t.svc.tickFor('t1');
+        expect(tick.underlyingLtp).toBeNull();
+        // An unwired dependency is OUR failure and must not be reported in
+        // wording that suggests the broker declined.
+        expect(tick.underlyingLtpReason).toMatch(/not attempted/i);
+      });
+
+      it('reuses one quote across contracts sharing an underlying', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+        t.getLevels.mockReturnValue(null);
+        t.fetchQuote.mockResolvedValue({ ltp: 24010 });
+
+        const first = await t.svc.tickFor('t1');
+        const second = await t.svc.tickFor('t1');
+
+        // A straddle is two positions on one spot; it must not be two calls.
+        expect(t.fetchQuote).toHaveBeenCalledTimes(1);
+        // And the cached reading keeps the ORIGINAL capture time — a cache that
+        // refreshes the timestamp without refreshing the price is claiming a
+        // read that never happened.
+        expect(second.underlyingLtpAt).toBe(first.underlyingLtpAt);
+      });
+
+      it('ignores a non-positive quote rather than treating 0 as a price', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const t = make();
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
+        t.getLevels.mockReturnValue(null);
+        // Angel returns 0 for an unentitled or halted instrument. A zero spot
+        // would put every support "above" price and read as a total collapse.
+        t.fetchQuote.mockResolvedValue({ ltp: 0 });
+
+        const tick = await t.svc.tickFor('t1');
+        expect(tick.underlyingLtp).toBeNull();
+      });
     });
 
     it('reports no spot rather than falling back to the premium', async () => {

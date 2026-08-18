@@ -12,6 +12,7 @@ import {
   SENTINEL_LEVEL_SOURCE,
   SentinelChartContextAdapter,
   levelCandidates,
+  masterSymbolCandidates,
   nearestLevels,
 } from './chart-context.adapter';
 
@@ -464,5 +465,89 @@ describe('SentinelChartContextAdapter', () => {
     t.analyze.mockResolvedValue({ kind: 'setup', levels: levels(), volumeRatio: Number.NaN });
     const result = await t.svc.structureFor('SUZLON-EQ', 100.5);
     expect(result.volumeRatio).toBeNull();
+  });
+});
+
+/**
+ * THE TWO BUGS THIS BLOCK EXISTS FOR. Together they made the level book empty
+ * for every position this platform has ever watched — one for derivatives, one
+ * for everything else — and both were invisible, because an empty book is
+ * indistinguishable from a symbol whose levels were simply never touched.
+ */
+describe('the level book actually resolving', () => {
+  describe('masterSymbolCandidates', () => {
+    it('restores the -EQ series suffix the master stores cash under', () => {
+      // Verified against production: `KEI` -> no match, `KEI-EQ` -> token 13310.
+      // A derivative's underlying arrives as the BASE name off the contract's
+      // `name` column, so without this rung every stock option missed forever.
+      expect(masterSymbolCandidates('KEI')).toEqual(['KEI', 'KEI-EQ']);
+    });
+
+    it('keeps the broker spelling first and does not duplicate it', () => {
+      // A cash tracker arrives already suffixed; re-deriving it would spend a
+      // query to ask the same question twice.
+      // The third rung rebuilds to 'SUZLON-EQ', which the Set collapses.
+      expect(masterSymbolCandidates('SUZLON-EQ')).toEqual(['SUZLON-EQ', 'SUZLON']);
+    });
+
+    it('leaves a derivative tradingsymbol alone', () => {
+      // It carries no `-` suffix, so it normalises to itself — two rungs, not
+      // three, and neither invents a contract that does not exist.
+      const out = masterSymbolCandidates('NIFTY28AUG2524000CE');
+      expect(out[0]).toBe('NIFTY28AUG2524000CE');
+      expect(out).not.toContain('NIFTY28AUG25');
+    });
+  });
+
+  it('finds the underlying by trying the -EQ spelling', async () => {
+    const t = make();
+    // The master holds KEI-EQ and nothing under the bare base name.
+    t.getInstrumentBySymbol.mockImplementation(async (symbol: string) =>
+      symbol === 'KEI-EQ' ? { token: '13310', exchange: 'NSE', symbol: 'KEI-EQ' } : null,
+    );
+
+    const result = await t.svc.structureFor('KEI', 100.5);
+
+    expect(t.getInstrumentBySymbol).toHaveBeenCalledWith('KEI-EQ', 'NSE');
+    // It got as far as the engine — which is the whole point. Before the ladder
+    // it returned LEVEL_BOOK_UNBUILT without ever calling analyze().
+    expect(t.analyze).toHaveBeenCalled();
+    expect(result.reason).toBeNull();
+  });
+
+  it('keeps the levels the engine built when there is NO SETUP', async () => {
+    const t = make();
+    // `AnalyzeResult`'s no-setup arm declares `levels: LevelsSnapshot | null`
+    // and populates it whenever a book exists. This used to be discarded by a
+    // `kind === 'setup'` ternary — so on any symbol the strategy had no opinion
+    // about (most symbols, most of the time) the sentinel was told there was no
+    // structure at all, and `levelBreak` had nothing to fire on.
+    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels() });
+
+    const result = await t.svc.structureFor('SUZLON-EQ', 100.5);
+
+    // PDH/PDL/VWAP are facts about market structure, not about the setup.
+    expect(result.nearestSupport).toBe(100);
+    expect(result.nearestResistance).toBe(106);
+    // A real comparison was made, so no failure-to-look reason is attached.
+    expect(result.reason).toBeNull();
+  });
+
+  it('still reports UNBUILT when the engine genuinely had no book', async () => {
+    const t = make();
+    // The one no-setup branch that means it: "no level book available — symbol
+    // has no historical data". Widening the harvest must not swallow this.
+    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: null });
+    const result = await t.svc.structureFor('SUZLON-EQ', 100.5);
+    expect(result.reason).toBe(LEVEL_BOOK_UNBUILT);
+    expect(result.nearestSupport).toBeNull();
+  });
+
+  it('does not lend a no-setup book a volume ratio it never computed', async () => {
+    const t = make();
+    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels() });
+    // volumeRatio is computed while SCORING a setup, so it is genuinely absent
+    // here — and an absent reading must not be inferred from a present book.
+    expect((await t.svc.structureFor('SUZLON-EQ', 100.5)).volumeRatio).toBeNull();
   });
 });

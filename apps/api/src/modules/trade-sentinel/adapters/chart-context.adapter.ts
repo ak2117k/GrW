@@ -64,9 +64,10 @@ export interface NearestLevels {
  * `unresolvedUnderlying`: the absence has to name itself as a failure to look.
  */
 export const LEVEL_BOOK_UNBUILT =
-  'no level book could be built for this symbol — either no NSE instrument matched it or the ' +
-  'level engine returned no setup — so no support or resistance was ever computed. This is a ' +
-  'FAILURE TO LOOK, not a finding: do not read it as an instrument with no structure.';
+  'no level book could be built for this symbol — either no NSE instrument matched it, or the ' +
+  'level engine had no price history to build one from — so no support or resistance was ever ' +
+  'computed. This is a FAILURE TO LOOK, not a finding: do not read it as an instrument with no ' +
+  'structure.';
 
 export const LEVEL_BOOK_FAILED =
   'the level-book lookup FAILED for this symbol, so no support or resistance was ever computed. ' +
@@ -212,6 +213,42 @@ export function nearestLevels(levels: LevelsSnapshot, price: number): NearestLev
     nearestSupport: below.length > 0 ? Math.max(...below) : null,
     nearestResistance: above.length > 0 ? Math.min(...above) : null,
   };
+}
+
+/**
+ * Every spelling of `symbol` worth trying against the NSE instrument master, in
+ * order, deduplicated.
+ *
+ * THE `-EQ` RUNG IS THE WHOLE REASON THIS EXISTS, and its absence made the level
+ * book permanently empty for every stock option this platform has ever watched.
+ *
+ * The master stores NSE cash equities WITH their series suffix — `KEI-EQ`,
+ * `HAL-EQ`, `BDL-EQ` — and `getInstrumentBySymbol` filters `{ symbol, exchange }`
+ * exactly. But a derivative's underlying arrives here as the BASE name off the
+ * contract's `name` column (`KEI`), because that is what `resolveUnderlying`
+ * resolves and what the news index is keyed by. So the two lookups this used to
+ * make — `symbol`, then `normaliseSymbol(symbol)` — were THE SAME STRING for
+ * every such underlying, and both missed. Verified against production:
+ * `KEI` → no match, `KEI-EQ` → token 13310.
+ *
+ * The miss was invisible because it is indistinguishable from a symbol that
+ * genuinely has no levels: `bookFor` returned before ever reaching `analyze()`,
+ * and the packet recorded the structure as absent every single tick for the life
+ * of the position. The tick source's own `resolveUnderlying` already climbed
+ * this exact ladder, which is how the SPOT resolved while the BOOK did not —
+ * two paths, one rung apart, drifting silently.
+ *
+ * Order matters: the broker's own spelling first (a cash tracker arrives as
+ * `SUZLON-EQ` and must not be re-derived), then the base, then the base with the
+ * suffix restored. A derivative tradingsymbol normalises to itself and carries no
+ * `-` suffix, so for those this is two lookups, not three.
+ */
+export function masterSymbolCandidates(symbol: string): string[] {
+  const raw = String(symbol ?? '').trim().toUpperCase();
+  const base = normaliseSymbol(raw);
+  // A Set preserves insertion order and collapses the common case where the
+  // caller already passed the exact spelling the master holds.
+  return [...new Set([raw, base, `${base}-EQ`])].filter((s) => s.length > 0);
 }
 
 interface CachedBook {
@@ -386,12 +423,16 @@ export class SentinelChartContextAdapter implements ChartContextShim {
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit;
 
     try {
-      // The broker's tradingsymbol first (the NSE instrument master stores
-      // `SUZLON-EQ` under `symbol`), then the base — a derivative tradingsymbol
-      // normalises to itself, so this is one lookup for those.
-      const instrument =
-        (await this.instruments.getInstrumentBySymbol(symbol, 'NSE')) ??
-        (await this.instruments.getInstrumentBySymbol(base, 'NSE'));
+      // See `masterSymbolCandidates` — the `-EQ` rung is what makes a
+      // derivative's underlying resolvable at all. Sequential and short-circuit:
+      // the first spelling that hits wins, and the common case costs one query.
+      let instrument = null as Awaited<
+        ReturnType<MarketDataRepository['getInstrumentBySymbol']>
+      >;
+      for (const candidate of masterSymbolCandidates(symbol)) {
+        instrument = await this.instruments.getInstrumentBySymbol(candidate, 'NSE');
+        if (instrument) break;
+      }
       if (!instrument) {
         // WARN, not debug. An unresolvable symbol here means an EMPTY LEVEL BOOK
         // FOR THE LIFE OF THE POSITION — `levelBreak` never fires and the packet
@@ -402,9 +443,10 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         // anything passed an NFO tradingsymbol. Once per symbol, not per tick.
         this.warnOnce(
           base,
-          `no NSE instrument matches "${symbol}" — its level book will be empty for as long as ` +
-            'this symbol is watched, so the level and volume sensors stay silent. For a ' +
-            'derivative, callers must pass the UNDERLYING\'s name, not the tradingsymbol.',
+          `no NSE instrument matches "${symbol}" (tried ${masterSymbolCandidates(symbol).join(', ')}) ` +
+            '— its level book will be empty for as long as this symbol is watched, so the level ' +
+            'and volume sensors stay silent. For a derivative, callers must pass the ' +
+            "UNDERLYING's name, not the tradingsymbol.",
         );
         return this.store(base, {
           at: Date.now(),
@@ -424,9 +466,29 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         // here is the documented degradation, not a bug.
         this.candleSourceFor(userId),
       );
-      // `analyze` returns a discriminated union; only the 'setup' arm carries a
-      // level book and a volume ratio. Anything else is a genuine "no book".
-      const levels = result.kind === 'setup' ? result.levels : null;
+      /**
+       * BOTH ARMS CARRY LEVELS. This line used to read
+       * `result.kind === 'setup' ? result.levels : null`, and that ternary was
+       * throwing away a level book the engine had already built.
+       *
+       * `AnalyzeResult`'s `no-setup` arm declares `levels: LevelsSnapshot | null`
+       * and populates it via `snapshotFromBook(book)` whenever a book exists; it
+       * is null ONLY in the one branch that genuinely has no book ("no level book
+       * available — symbol has no historical data"). So `?? null` is not a
+       * loosening — it is the union's own contract, read correctly.
+       *
+       * The distinction is the point: PDH, PDL, ORH, ORL, VWAP and today's
+       * high/low are facts about MARKET STRUCTURE. They do not depend on the
+       * engine liking the trade. Gating them on a setup meant that on any symbol
+       * the strategy had no opinion about — which is most symbols, most of the
+       * time — the sentinel was told there was no structure at all, and
+       * `levelBreak` had nothing to fire on. That is a failure to look reported
+       * as a finding, on the one block the whole thesis is judged against.
+       *
+       * `volumeRatio` below stays setup-only, and that is correct: it is computed
+       * as part of SCORING a setup, not as part of the book.
+       */
+      const levels = result.levels ?? null;
       const volumeRatio =
         result.kind === 'setup' && Number.isFinite(result.volumeRatio) ? result.volumeRatio : null;
 

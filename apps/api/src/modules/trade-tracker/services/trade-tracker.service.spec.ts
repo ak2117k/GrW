@@ -592,6 +592,78 @@ describe('TradeTrackerService', () => {
     });
   });
 
+  describe('openTrackerRefsByUser', () => {
+    // The batched-quote sweep needs the owner and the exchange, neither of which
+    // distinctOpenTokens carries — there is no shared feed account, so a token
+    // without its user is unquotable.
+    const rows = [
+      { userId: 'u1', token: '1594', symbol: 'INFY', exchange: 'NSE', kind: 'HOLDING' },
+      { userId: 'u1', token: '111', symbol: 'NIFTY24AUG24000CE', exchange: 'NFO', kind: 'POSITION' },
+      { userId: 'u2', token: '2885', symbol: 'TCS', exchange: 'NSE', kind: 'POSITION' },
+    ];
+
+    it('groups every OPEN tracker under its owning user, with the exchange', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+
+      const byUser = await service.openTrackerRefsByUser();
+
+      expect([...byUser.keys()].sort()).toEqual(['u1', 'u2']);
+      expect(byUser.get('u1')).toEqual([
+        { token: '111', exchange: 'NFO' }, // derivative first
+        { token: '1594', exchange: 'NSE' },
+      ]);
+      expect(byUser.get('u2')).toEqual([{ token: '2885', exchange: 'NSE' }]);
+    });
+
+    it('does not ask the broker twice for one token the user holds two ways', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        { userId: 'u1', token: '111', symbol: 'TCS', exchange: 'NSE', kind: 'POSITION' },
+        { userId: 'u1', token: '111', symbol: 'TCS', exchange: 'NSE', kind: 'HOLDING' },
+      ]);
+
+      expect((await service.openTrackerRefsByUser()).get('u1')).toEqual([
+        { token: '111', exchange: 'NSE' },
+      ]);
+    });
+
+    it('serves a second call inside the TTL WITHOUT touching the database', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+
+      await service.openTrackerRefsByUser();
+      await service.openTrackerRefsByUser();
+
+      expect(prisma.tradeTracker.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('hands out copies, so a caller filtering its group cannot shrink the next sweep', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+
+      const first = await service.openTrackerRefsByUser();
+      first.get('u1')!.length = 0;
+      first.delete('u2');
+
+      const second = await service.openTrackerRefsByUser();
+      expect(second.get('u1')).toHaveLength(2);
+      expect(second.has('u2')).toBe(true);
+    });
+
+    it('is invalidated with the token queue when a reconcile opens a tracker', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+      await service.openTrackerRefsByUser();
+
+      prisma.tradeTracker.findMany.mockResolvedValue([]);
+      await service.reconcile(
+        'user_1',
+        [{ symboltoken: '999', tradingsymbol: 'NIFTY', exchange: 'NFO', netqty: '50', avgnetprice: '100', ltp: '120' }],
+        [],
+      );
+
+      const calls = prisma.tradeTracker.findMany.mock.calls.length;
+      await service.openTrackerRefsByUser();
+      expect(prisma.tradeTracker.findMany.mock.calls.length).toBe(calls + 1);
+    });
+  });
+
   describe('list → DTO mapping', () => {
     it('maps rows to the §5 DTO with ISO dates and explicit nulls', async () => {
       const entryTime = new Date('2026-07-11T04:00:00.000Z');

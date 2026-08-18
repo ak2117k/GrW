@@ -14,6 +14,7 @@ import {
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import type { TokenRef } from '../../market-data/services/user-feed.types';
 import {
   DailyOhlcDto,
   SoldTradeDto,
@@ -274,6 +275,17 @@ export class TradeTrackerService implements OnModuleDestroy {
    * from the database on every 4-second tick.
    */
   private openTokensCache: { tokens: string[]; at: number } | null = null;
+
+  /**
+   * The last computed per-user quote roster, with the wall-clock time it was
+   * computed. Same rationale and same lifetime as {@link openTokensCache}: the
+   * sweep asks for it on every pass and the OPEN set only moves when a position
+   * opens or closes. See {@link openTrackerRefsByUser}.
+   */
+  private openRefsCache: {
+    byUser: Map<string, TokenRef[]>;
+    at: number;
+  } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -599,6 +611,67 @@ export class TradeTrackerService implements OnModuleDestroy {
   }
 
   /**
+   * Every OPEN tracker's instrument, GROUPED BY THE USER WHO OWNS IT, for the
+   * poller's batched-quote sweep.
+   *
+   * This exists because {@link distinctOpenTokens} cannot answer the question the
+   * REST sweep actually has to ask. That method is deliberately cross-tenant and
+   * returns bare tokens, which is all the shared WebSocket pool needed — and the
+   * pool is exactly what starved the KEI option for twenty-one hours, because it
+   * has 30 slots and the default universe eats most of them before an open trade
+   * is ever offered one.
+   *
+   * Batched quotes have no such ceiling, but they are not anonymous: this
+   * platform has NO shared feed account, so every broker read goes over the
+   * OWNING user's own Angel session. A token without its owner is unquotable, and
+   * a token without its exchange cannot be put in Angel's per-exchange
+   * `exchangeTokens` payload at all. Hence userId -> TokenRef[], one group per
+   * broker call.
+   *
+   * Each group is ordered by {@link byFeedPriority} for the same reason the
+   * queue is: if a broker response ever comes back short, the thing that decays
+   * to zero while nobody is looking should already have been answered.
+   *
+   * CACHED and invalidated on the same open/close edges as
+   * {@link distinctOpenTokens} — see {@link invalidateOpenTokens}.
+   */
+  async openTrackerRefsByUser(): Promise<Map<string, TokenRef[]>> {
+    const cached = this.openRefsCache;
+    if (cached && Date.now() - cached.at < OPEN_TOKENS_TTL_MS) {
+      // Copy down to the arrays: a caller that filters its group in place would
+      // silently shrink which of a user's positions get priced on every later
+      // sweep, and a position that stops being priced does not look broken.
+      return new Map([...cached.byUser].map(([u, refs]) => [u, [...refs]]));
+    }
+
+    const rows = await this.prisma.tradeTracker.findMany({
+      where: { status: 'OPEN' },
+      select: {
+        userId: true,
+        token: true,
+        symbol: true,
+        exchange: true,
+        kind: true,
+      },
+    });
+
+    const byUser = new Map<string, TokenRef[]>();
+    for (const row of [...rows].sort(byFeedPriority)) {
+      if (!row.userId || !row.token || !row.exchange) continue;
+      const refs = byUser.get(row.userId) ?? [];
+      // One user can hold the same token as both a POSITION and a HOLDING;
+      // asking the broker for it twice in one payload buys nothing.
+      if (!refs.some((r) => r.token === row.token)) {
+        refs.push({ token: row.token, exchange: row.exchange });
+      }
+      byUser.set(row.userId, refs);
+    }
+
+    this.openRefsCache = { byUser, at: Date.now() };
+    return new Map([...byUser].map(([u, refs]) => [u, [...refs]]));
+  }
+
+  /**
    * Drop the cached feed queue so the next {@link distinctOpenTokens} re-reads
    * the database.
    *
@@ -611,6 +684,11 @@ export class TradeTrackerService implements OnModuleDestroy {
    */
   private invalidateOpenTokens(): void {
     this.openTokensCache = null;
+    // Both views of the OPEN set expire together. Dropping one and keeping the
+    // other is the worst outcome available: the sweep would keep pricing a book
+    // that no longer matches the queue, so a freshly-opened trade would carry a
+    // seed price that every consumer reads as the market.
+    this.openRefsCache = null;
   }
 
   /**

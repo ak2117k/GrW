@@ -14,7 +14,11 @@ import { SoldTradesController } from './controllers/sold-trades.controller';
  * day high/low, latest LTP and P&L, filled from periodic broker snapshots and
  * live socket ticks.
  *
- * - MarketDataModule supplies {@link MarketFeedService} (subscribe + getQuote).
+ * - MarketDataModule supplies {@link MarketFeedService} (subscribe + getQuote)
+ *   AND {@link UserFeedManager}, whose batched `fetchQuotes` prices open
+ *   trackers over the OWNING user's Angel session. The socket pool has 30 slots
+ *   and ~50 open tokens, so it can only ever be the fast path — the batched
+ *   call is what guarantees every open trade gets a price at all.
  * - CredentialDecryptorModule supplies the isolated CREDENTIAL_DECRYPTOR lease.
  * - PerUserBrokerSessionFactory is provided locally (it has only an @Optional
  *   USER_SMARTAPI_FACTORY dep), mirroring CredentialVaultModule — this keeps the

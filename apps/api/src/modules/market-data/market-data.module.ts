@@ -23,6 +23,7 @@ import { MarketContextService } from './services/market-context.service';
 import { CommodityRollService } from './services/commodity-roll.service';
 import { CommodityRollCron } from './services/commodity-roll.cron';
 import { InstrumentMasterRefreshCron } from './services/instrument-master-refresh.cron';
+import { DailyCandleBackfillCron } from './services/daily-candle-backfill.cron';
 import { PremarketSessionCron } from './services/premarket-session.cron';
 import { GapDetectorService } from './services/gap-detector.service';
 import { NseSectorIndexService } from './services/nse-sector-index.service';
@@ -109,6 +110,13 @@ import type { UserFeedSessionFactory } from './services/user-feed.types';
     // allowlist with Angel One's listed cash-equity universe so newly-listed
     // symbols resolve (symbol→token) instead of rejecting as "not in local DB".
     InstrumentMasterRefreshCron,
+
+    // Boot-time (circuit-broken) + daily 23:45 IST cron — persists the DAILY
+    // candle series for open-tracker underlyings and the default universe. The
+    // `candles` table had no `1d` rows at all, so LevelBookService.lazyLoad hit
+    // the broker on every call for every symbol, out of the one globally
+    // serialised 350ms historical lane every other consumer shares.
+    DailyCandleBackfillCron,
 
     // Boot-time + on-demand: scans tracked instruments for stale daily
     // candles (cron didn't fire / API was offline overnight) and

@@ -24,9 +24,26 @@
 export type Segment = 'EQ_DELIVERY' | 'EQ_INTRADAY' | 'FUT' | 'OPT';
 export type Side = 'LONG' | 'SHORT';
 
-/** Derivative tradingsymbols end in the contract type. */
-const OPTION_SUFFIX = /(CE|PE)$/;
-const FUTURE_SUFFIX = /FUT$/;
+/**
+ * Derivative tradingsymbols end in the contract type, PRECEDED BY A DIGIT.
+ *
+ * The digit is not decoration and leaving it out is a real misclassification:
+ * `/(CE|PE)$/` matches `RELIANCE`, `NUVOCO` matches nothing but `GLAXO` would
+ * under a looser rule, and any cash symbol ending in those two letters is then
+ * charged on the OPTION schedule and — since the sentinel's remit is F&O — gets
+ * watched as a derivative it is not. An option's suffix always follows its
+ * STRIKE (`KEI29SEP265800CE`) and a future's follows its expiry year
+ * (`RELIANCE28AUG25FUT`), so a digit immediately before the suffix is exactly
+ * what separates a contract from a company whose name happens to end in CE.
+ *
+ * Currently masked in production because Angel's cash tradingsymbols carry a
+ * series suffix (`RELIANCE-EQ`), which ends in neither. That is luck, not
+ * design — BSE rows and any future caller passing a base symbol would not have
+ * it. Found by a test fixture that used `RELIANCE` as its cash control and
+ * failed.
+ */
+const OPTION_SUFFIX = /\d(CE|PE)$/;
+const FUTURE_SUFFIX = /\dFUT$/;
 
 /**
  * Which charge schedule applies. Pure — this picks the STT and stamp-duty rates

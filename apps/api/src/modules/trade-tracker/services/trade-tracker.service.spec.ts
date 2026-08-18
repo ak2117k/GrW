@@ -489,6 +489,109 @@ describe('TradeTrackerService', () => {
     });
   });
 
+  describe('distinctOpenTokens caching', () => {
+    // The poller sweeps every 4s — ~900 queries an hour to a remote serverless
+    // Postgres for a set that changes every 10 minutes at most. The cache exists
+    // to delete that load; these tests exist because the failure mode of getting
+    // it wrong is a live position that silently stops being priced.
+    const rows = [
+      { token: '1594', symbol: 'INFY', exchange: 'NSE', kind: 'HOLDING' },
+      { token: '111', symbol: 'NIFTY24AUG24000CE', exchange: 'NFO', kind: 'POSITION' },
+      // NOT 'RELIANCE': byFeedPriority's derivative test is a /(CE|PE|FUT)$/
+      // suffix match, which RELIANCE trips on its trailing "CE".
+      { token: '2885', symbol: 'TCS', exchange: 'NSE', kind: 'POSITION' },
+      { token: '222', symbol: 'BANKNIFTYFUT', exchange: 'NFO', kind: 'HOLDING' },
+    ];
+
+    it('serves a second call inside the TTL WITHOUT touching the database', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+
+      const first = await service.distinctOpenTokens();
+      const second = await service.distinctOpenTokens();
+
+      expect(prisma.tradeTracker.findMany).toHaveBeenCalledTimes(1);
+      expect(second).toEqual(first);
+    });
+
+    it('keeps the byFeedPriority order — F&O before cash, positions before holdings', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+
+      // Derivative position, derivative holding, cash position, cash holding.
+      expect(await service.distinctOpenTokens()).toEqual(['111', '222', '2885', '1594']);
+      // ...and the cached read must return the SAME queue, not the store order.
+      expect(await service.distinctOpenTokens()).toEqual(['111', '222', '2885', '1594']);
+    });
+
+    it('hands out a copy, so a caller sorting the result cannot reorder the feed queue', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+
+      const first = await service.distinctOpenTokens();
+      first.sort(); // a caller doing something reasonable to its own array
+      expect(await service.distinctOpenTokens()).toEqual(['111', '222', '2885', '1594']);
+    });
+
+    it('refetches after a reconcile OPENS a tracker — a new position must reach the feed', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+      await service.distinctOpenTokens();
+      expect(prisma.tradeTracker.findMany).toHaveBeenCalledTimes(1);
+
+      // Nothing tracked yet → the position below is first-seen and gets created.
+      prisma.tradeTracker.findMany.mockResolvedValue([]);
+      await service.reconcile(
+        'user_1',
+        [{ symboltoken: '999', tradingsymbol: 'NIFTY', exchange: 'NFO', netqty: '50', avgnetprice: '100', ltp: '120' }],
+        [],
+      );
+      expect(prisma.tradeTracker.create).toHaveBeenCalledTimes(1);
+
+      const findManyCalls = prisma.tradeTracker.findMany.mock.calls.length;
+      await service.distinctOpenTokens();
+      expect(prisma.tradeTracker.findMany.mock.calls.length).toBe(findManyCalls + 1);
+    });
+
+    it('refetches after a reconcile CLOSES a tracker — an exited leg must free its slot', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+      await service.distinctOpenTokens();
+
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        tracker({ id: 'gone_1', token: '1594', kind: 'HOLDING' }),
+      ]);
+      await service.reconcile('user_1', [], []); // empty answer → closes it
+      expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+
+      const findManyCalls = prisma.tradeTracker.findMany.mock.calls.length;
+      await service.distinctOpenTokens();
+      expect(prisma.tradeTracker.findMany.mock.calls.length).toBe(findManyCalls + 1);
+    });
+
+    it('does NOT refetch after a reconcile that changed nothing', async () => {
+      // The whole point of the cache: the common case is a no-op reconcile.
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+      await service.distinctOpenTokens();
+
+      prisma.tradeTracker.findMany.mockResolvedValue([]);
+      await service.reconcile('user_1', [], []); // nothing to open, nothing to close
+
+      const findManyCalls = prisma.tradeTracker.findMany.mock.calls.length;
+      await service.distinctOpenTokens();
+      expect(prisma.tradeTracker.findMany.mock.calls.length).toBe(findManyCalls);
+    });
+
+    it('self-heals past the TTL, so a MISSED invalidation cannot freeze the queue forever', async () => {
+      jest.useFakeTimers();
+      prisma.tradeTracker.findMany.mockResolvedValue(rows);
+
+      await service.distinctOpenTokens();
+      jest.advanceTimersByTime(59_000);
+      await service.distinctOpenTokens();
+      expect(prisma.tradeTracker.findMany).toHaveBeenCalledTimes(1); // still fresh
+
+      jest.advanceTimersByTime(2_000); // past the 60s backstop
+      await service.distinctOpenTokens();
+      expect(prisma.tradeTracker.findMany).toHaveBeenCalledTimes(2);
+    });
+  });
+
   describe('list → DTO mapping', () => {
     it('maps rows to the §5 DTO with ISO dates and explicit nulls', async () => {
       const entryTime = new Date('2026-07-11T04:00:00.000Z');

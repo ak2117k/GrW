@@ -106,8 +106,15 @@ export function byFeedPriority(
   const rank = (t: { symbol: string; exchange: string; kind: string }) => {
     const ex = String(t.exchange ?? '').toUpperCase();
     const sym = String(t.symbol ?? '').toUpperCase();
+    // The `\d` is load-bearing: `/(CE|PE|FUT)$/` matches `RELIANCE`, which would
+    // jump a cash equity ahead of real contracts in a queue whose whole purpose
+    // is deciding which positions get the 30 scarce feed slots. An option's
+    // suffix always follows its STRIKE and a future's its expiry year, so a
+    // digit immediately before the suffix is what separates a contract from a
+    // company whose name happens to end in those letters. Same rule as
+    // `segmentFor` in the sentinel's charges.ts.
     const derivative =
-      ex === 'NFO' || ex === 'BFO' || ex === 'MCX' || /(CE|PE|FUT)$/.test(sym);
+      ex === 'NFO' || ex === 'BFO' || ex === 'MCX' || /\d(CE|PE|FUT)$/.test(sym);
     // 0 is served first. A derivative POSITION is the only thing here that can
     // expire worthless while nobody is looking at it.
     if (derivative) return t.kind === 'HOLDING' ? 1 : 0;
@@ -228,6 +235,22 @@ function bookKey(token: string, kind: string): string {
 const TICK_DEBOUNCE_MS = 3_000;
 
 /**
+ * Backstop expiry for the cached open-token queue.
+ *
+ * This is NOT how the cache stays correct — explicit invalidation on every
+ * open/close is. This is the blast radius of a MISSED invalidation: if someone
+ * later adds a code path that closes a tracker and forgets to invalidate, the
+ * feed queue goes stale for at most a minute instead of for the lifetime of the
+ * process. A frozen token list means a live position stops being priced while
+ * every consumer keeps reading its last LTP as if it were the market, so the
+ * failure mode has to be self-healing, not permanent.
+ *
+ * 60s is well under the 10-minute reconcile cadence that is the only *scheduled*
+ * source of change, so it costs at most one extra query per minute per process.
+ */
+const OPEN_TOKENS_TTL_MS = 60_000;
+
+/**
  * Per-trade tracker reconciler + tick updater (design §4).
  *
  * Owns the DB lifecycle of `trade_trackers`: it opens a tracker the first time a
@@ -244,6 +267,13 @@ export class TradeTrackerService implements OnModuleDestroy {
   /** Latest pending LTP per token, coalesced between debounced flushes. */
   private readonly pendingTicks = new Map<string, number>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The last computed feed queue, with the wall-clock time it was computed.
+   * See {@link distinctOpenTokens} for why the poller must not recompute this
+   * from the database on every 4-second tick.
+   */
+  private openTokensCache: { tokens: string[]; at: number } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -396,6 +426,9 @@ export class TradeTrackerService implements OnModuleDestroy {
           pnlPercent,
         },
       });
+      // A brand-new tracker that is not in the feed queue gets no ticks at all,
+      // and a position's first minutes are exactly when it is being watched.
+      this.invalidateOpenTokens();
     }
 
     // Close every OPEN tracker whose instrument left the book — but ONLY for
@@ -438,6 +471,9 @@ export class TradeTrackerService implements OnModuleDestroy {
           pnlPercent,
         },
       });
+      // A closed instrument holds a feed slot it can no longer use, and there
+      // are only 30 — leaving it queued starves a live position behind it.
+      this.invalidateOpenTokens();
     }
   }
 
@@ -534,14 +570,47 @@ export class TradeTrackerService implements OnModuleDestroy {
    * The real repair is to stop routing open-tracker prices through the WS pool
    * at all and sweep them with batched quotes (`fetchQuotes`), which has no
    * 30-token ceiling.
+   *
+   * CACHED, because the poller's `sweepQuotes` asks for this every 4 seconds —
+   * ~900 times an hour — against a remote serverless Postgres (Neon) that
+   * autosuspends and caps connections, for a set that only changes when a
+   * position opens or closes: at most once per 10-minute reconcile. Every one of
+   * those round trips returned the identical list. The cache is invalidated by
+   * {@link invalidateOpenTokens} at each of those change points, with
+   * {@link OPEN_TOKENS_TTL_MS} as the backstop for a missed one.
    */
   async distinctOpenTokens(): Promise<string[]> {
+    const cached = this.openTokensCache;
+    if (cached && Date.now() - cached.at < OPEN_TOKENS_TTL_MS) {
+      // Copy: the queue's ORDER is the whole contract above, and handing a
+      // caller the live array lets an in-place sort/splice silently reorder who
+      // gets the 30 feed slots on every subsequent sweep.
+      return [...cached.tokens];
+    }
+
     const rows = await this.prisma.tradeTracker.findMany({
       where: { status: 'OPEN' },
       select: { token: true, symbol: true, exchange: true, kind: true },
       distinct: ['token'],
     });
-    return [...rows].sort(byFeedPriority).map((r) => r.token);
+    const tokens = [...rows].sort(byFeedPriority).map((r) => r.token);
+    this.openTokensCache = { tokens, at: Date.now() };
+    return [...tokens];
+  }
+
+  /**
+   * Drop the cached feed queue so the next {@link distinctOpenTokens} re-reads
+   * the database.
+   *
+   * MUST be called from every path that can change the OPEN set. A stale queue
+   * does not look broken: a newly-opened position simply never reaches the feed
+   * and its `lastLtp` stays at its seed price, which P&L, the day extremes and
+   * the sentinel's packet all read as a real quote. Prefer invalidating
+   * needlessly over reasoning about whether a given write "really" changed the
+   * set — a spurious refetch costs one query, a missed one costs a blind trade.
+   */
+  private invalidateOpenTokens(): void {
+    this.openTokensCache = null;
   }
 
   /**

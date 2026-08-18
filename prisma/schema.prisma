@@ -60,6 +60,10 @@ model Candle {
 
   @@unique([instrumentId, timeframe, timestamp])
   @@index([instrumentId, timeframe, timestamp])
+  // MAX(timestamp) for the health probe. The composite above is led by
+  // instrumentId, which that query does not mention, so it cannot serve it —
+  // and this is the highest-volume table in the schema.
+  @@index([timestamp])
   @@map("candles")
 }
 
@@ -1578,6 +1582,13 @@ model TradeTracker {
   // A partial unique index enforcing one OPEN row per (userId, token, kind) is
   // added in the migration SQL (Prisma can't express a filtered unique index).
   @@index([userId, status])
+  // The two highest-frequency reads in the system are CROSS-TENANT and filter on
+  // status alone: the poller's open-token sweep and the tick flush. A composite
+  // index led by userId cannot serve a predicate that never mentions userId, so
+  // both fall back to a seq scan over every row this table will ever hold —
+  // and CLOSED trackers are never deleted, so that scan grows with the account's
+  // whole trading history while the OPEN set it is looking for stays tiny.
+  @@index([status])
   @@map("trade_trackers")
 }
 
@@ -1620,6 +1631,10 @@ model SentinelVerdict {
 
   @@index([userId, createdAt])
   @@index([trackerId, createdAt])
+  // MAX(createdAt) for the health probe's "has the sentinel produced anything?"
+  // signal. Both composites above are led by a column that query does not
+  // mention, so neither can serve it.
+  @@index([createdAt])
   @@map("sentinel_verdicts")
 }
 

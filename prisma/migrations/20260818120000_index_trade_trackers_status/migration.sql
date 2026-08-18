@@ -1,0 +1,21 @@
+-- Index the two highest-frequency reads in the system.
+--
+-- `TradeTrackerService.distinctOpenTokens()` (WHERE status = 'OPEN') and
+-- `flushTicks()` (WHERE status = 'OPEN' AND token IN (...)) are CROSS-TENANT:
+-- they deliberately never mention "userId". The existing
+-- trade_trackers_userId_status_idx is led by "userId", and Postgres cannot use a
+-- composite B-tree for a predicate that does not constrain its leading column —
+-- so both queries seq-scan the whole table.
+--
+-- Today that is ~50 rows and free. It stays free only until the table grows,
+-- and it grows monotonically: a tracker is CLOSED, never deleted, so every trade
+-- ever taken is scanned forever to find the handful that are still OPEN. That
+-- degradation is silent — no error, just a poller that gets slower each month.
+--
+-- NOT CONCURRENTLY: Prisma wraps each migration file in a single transaction and
+-- CREATE INDEX CONCURRENTLY cannot run inside one. The plain form takes an
+-- ACCESS SHARE-blocking lock for the duration of the build, which is acceptable
+-- at this table's size; if trade_trackers ever grows large enough for that lock
+-- to matter, build the index by hand outside the migration runner and leave this
+-- statement to no-op on the IF NOT EXISTS.
+CREATE INDEX IF NOT EXISTS "trade_trackers_status_idx" ON "trade_trackers"("status");

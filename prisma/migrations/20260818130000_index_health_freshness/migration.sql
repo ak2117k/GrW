@@ -1,0 +1,26 @@
+-- Health-probe freshness reads: MAX(timestamp) and MAX(createdAt).
+--
+-- WHY. /healthz now reports how long ago the feed last wrote a candle and when
+-- the sentinel last produced a verdict, because a probe that answers only "can I
+-- serve HTTP" reported `ok` continuously through an out-of-memory restart loop,
+-- a position whose price had been frozen for 21 hours, and a monitor that had
+-- never executed once. Those aggregates are the whole point of the new payload.
+--
+-- Neither table could serve them from an index. `candles` has only
+-- (instrumentId, timeframe, timestamp) and `sentinel_verdicts` only
+-- (userId, createdAt) / (trackerId, createdAt) — all led by a column the health
+-- query does not mention, so a bare MAX() over either degrades to a full scan.
+-- `candles` is the highest-volume table in the schema and the probe runs on a
+-- fixed interval forever, so this is a slow query that would arrive quietly,
+-- months from now, as "the health check started timing out".
+--
+-- DESC matches the access pattern (MAX = first row of a descending scan) and
+-- costs nothing extra; Postgres can read either direction, but stating it keeps
+-- the intent legible next to the query it exists for.
+--
+-- NOT CONCURRENTLY: Prisma wraps each migration file in a single transaction and
+-- CREATE INDEX CONCURRENTLY cannot run inside one. On the current row counts the
+-- brief write lock is immaterial; if `candles` ever grows to where it is not,
+-- build these by hand outside a migration and mark this one applied.
+CREATE INDEX IF NOT EXISTS "candles_timestamp_idx" ON "candles"("timestamp" DESC);
+CREATE INDEX IF NOT EXISTS "sentinel_verdicts_createdAt_idx" ON "sentinel_verdicts"("createdAt" DESC);

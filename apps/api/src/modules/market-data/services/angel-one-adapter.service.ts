@@ -1441,6 +1441,33 @@ export class AngelOneAdapterService implements BrokerAdapter {
   private static readonly MASTER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
   private masterCacheLoading: Promise<any[]> | null = null;
 
+  /**
+   * The exchange segments this platform actually trades or resolves against.
+   *
+   * EVERYTHING ELSE IS DROPPED BEFORE THE CACHE IS RETAINED, and that is a
+   * memory decision with a production incident behind it. Angel's scrip master
+   * is 34.6 MB of JSON and 155,093 rows; parsed and held it costs ~32 MB of heap
+   * for the full 24-hour TTL, and downloading plus parsing it peaks far higher
+   * because the response body, the decoded string and the parsed array are all
+   * live at once (measured: 143 MB RSS in an otherwise empty process).
+   *
+   * On Render's 512 MB container, on top of a running Nest app, Prisma, the
+   * socket feed and the level books, that is what "exhausted its memory limit"
+   * was. The container OOMed, restarted, ran the boot refresh again, and OOMed
+   * again — a loop, which is why the service kept coming back with a two-figure
+   * uptime.
+   *
+   * More than HALF the file is segments nothing here has ever read: BFO 41,048,
+   * NCO 28,129, CDS 9,896, NCDEX 1,579 — 80,652 of 155,093 rows. They were
+   * retained purely because the cache was assigned before anything was filtered.
+   * Keeping the four we use costs ~15 MB instead of ~32 MB and, more
+   * importantly, halves the live set during the refresh that follows.
+   *
+   * If a segment is ever traded here, add it — the failure mode is a symbol that
+   * will not resolve, which is loud, not a wrong price, which is not.
+   */
+  private static readonly MASTER_SEGMENTS = new Set(['NSE', 'BSE', 'NFO', 'MCX']);
+
   private async ensureMasterCache(): Promise<any[]> {
     const fresh =
       this.masterCache &&
@@ -1456,11 +1483,24 @@ export class AngelOneAdapterService implements BrokerAdapter {
       if (!response.ok) {
         throw new Error(`Failed to download instrument master: HTTP ${response.status}`);
       }
-      const all: any[] = await response.json();
-      this.logger.log(`Downloaded ${all.length} total instruments from Angel One`);
-      this.masterCache = all;
+      let all: any[] | null = await response.json();
+      const total = all!.length;
+      // Filtered into a NEW array, then the full one is dropped on the spot so
+      // the parse peak is transient rather than the resting cost. `all = null`
+      // is not decoration: without it the whole 155k-row array stays reachable
+      // from this closure's scope for as long as the promise is retained.
+      const kept = all!.filter((i: any) =>
+        AngelOneAdapterService.MASTER_SEGMENTS.has(String(i?.exch_seg ?? '')),
+      );
+      all = null;
+      this.logger.log(
+        `Downloaded ${total} instruments from Angel One; retained ${kept.length} across ` +
+          `${[...AngelOneAdapterService.MASTER_SEGMENTS].join('/')} and dropped ` +
+          `${total - kept.length} in unused segments`,
+      );
+      this.masterCache = kept;
       this.masterCacheLoadedAt = Date.now();
-      return all;
+      return kept;
     })();
 
     try {

@@ -34,6 +34,13 @@ import { toDerivativeInput } from './master-contract';
  * resolve. Expired contracts are never written — the master carries every
  * strike of every past expiry, and the row count is boot-cache memory.
  */
+/**
+ * How recently the master must have been refreshed for boot to skip its own.
+ * A day, matching the 08:00 cron's cadence — anything inside that window has
+ * nothing new to add.
+ */
+export const BOOT_REFRESH_SKIP_MS = 24 * 60 * 60 * 1000;
+
 @Injectable()
 export class InstrumentMasterRefreshCron implements OnModuleInit {
   private readonly logger = new Logger(InstrumentMasterRefreshCron.name);
@@ -65,11 +72,52 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
     // The only cost is a window after boot in which newly-listed symbols are
     // not yet resolvable, which is the state the process was in anyway for the
     // whole duration of the blocking refresh.
-    void this.refresh('boot').catch((err) => {
+    void this.refreshOnBoot().catch((err) => {
       this.logger.warn(
         `Boot instrument refresh failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     });
+  }
+
+  /**
+   * The boot refresh, SKIPPED when the table is already current.
+   *
+   * THIS IS AN OOM CIRCUIT BREAKER, not an optimisation. Loading the master
+   * costs a large transient — the 34.6 MB response body, its decoded string and
+   * the parsed 155k-row array are briefly live together — and on a 512 MB
+   * container that is enough to be killed. The failure then REPEATS ITSELF: the
+   * container OOMs, Render restarts it, `onModuleInit` runs the refresh again,
+   * and it OOMs again. A crash loop whose engine is the recovery path is the
+   * worst shape a boot job can have, because every restart makes it more likely
+   * rather than less.
+   *
+   * The refresh exists so newly-listed symbols become resolvable. That is a
+   * once-a-day concern and the 08:00 cron already owns it — so if a refresh has
+   * landed within the last day, boot has nothing to add and simply declines to
+   * spend the memory. A genuinely empty or stale table still refreshes, which is
+   * the case the boot hook was added for.
+   */
+  private async refreshOnBoot(): Promise<void> {
+    try {
+      const recent = await this.instruments.lastMasterRefreshAt();
+      if (recent && Date.now() - recent.getTime() < BOOT_REFRESH_SKIP_MS) {
+        this.logger.log(
+          `Skipping boot instrument refresh — the master was last refreshed at ` +
+            `${recent.toISOString()}, inside the ${BOOT_REFRESH_SKIP_MS / 3600_000}h window. ` +
+            'The 08:00 IST cron owns the daily refresh; loading the 155k-row scrip master at ' +
+            'every boot is what OOMed a 512MB container into a restart loop.',
+        );
+        return;
+      }
+    } catch (err) {
+      // A failed freshness check must not SKIP the refresh — an empty table is
+      // the state this hook exists for. Fall through and refresh.
+      this.logger.warn(
+        `Could not read the last master refresh time, refreshing anyway: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    await this.refresh('boot');
   }
 
   // 08:00 IST Mon-Fri — before the 09:15 cash open, so freshly-listed symbols

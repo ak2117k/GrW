@@ -208,6 +208,16 @@ export class InstrumentService implements OnModuleInit {
    * The actual API call is delegated to the broker adapter;
    * if unavailable, the existing DB data is preserved.
    */
+  /**
+   * When the master was last written, read from the DATABASE rather than from
+   * `this.lastRefreshedAt` — that field is in-memory and resets on every process
+   * start, which is precisely when the boot refresh asks. See
+   * `MarketDataRepository.lastInstrumentUpdateAt`.
+   */
+  async lastMasterRefreshAt(): Promise<Date | null> {
+    return this.repository.lastInstrumentUpdateAt();
+  }
+
   async refreshMaster(rawInstruments?: UpsertInstrumentInput[]): Promise<number> {
     this.logger.log('Starting instrument master refresh');
 

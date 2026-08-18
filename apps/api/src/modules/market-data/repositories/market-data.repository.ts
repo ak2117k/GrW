@@ -343,6 +343,23 @@ export class MarketDataRepository {
   }
 
   /**
+   * When the instrument master was last written, or null for an empty table.
+   *
+   * DB-backed on purpose. `InstrumentService.lastRefreshedAt` is an in-memory
+   * field and therefore resets to undefined on every process start — which is
+   * exactly the moment the boot refresh needs to ask the question. Reading it
+   * there would answer "never refreshed" after every restart and defeat the
+   * whole circuit breaker.
+   */
+  async lastInstrumentUpdateAt(): Promise<Date | null> {
+    const row = await this.prisma.instrument.findFirst({
+      orderBy: { updatedAt: 'desc' },
+      select: { updatedAt: true },
+    });
+    return row?.updatedAt ?? null;
+  }
+
+  /**
    * Bulk upsert instruments (used during master refresh).
    * Processes in batches to avoid overwhelming the database.
    */

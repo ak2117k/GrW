@@ -119,6 +119,31 @@ async function bootstrap(): Promise<void> {
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, document);
 
+  /**
+   * WITHOUT THIS, NO `onModuleDestroy` IN THE APPLICATION EVER RUNS.
+   *
+   * Nest does not listen for process signals unless asked. Render stops a
+   * container with SIGTERM on every deploy, restart and scale event, so the
+   * process was exiting straight through a shutdown path that several services
+   * already implement and rely on: `AngelOneWebSocketService`, the market-data
+   * gateway and `AngelOneAuthService` all declare `OnModuleDestroy`, and none of
+   * them had ever been called in production. They were dead code that looked
+   * live.
+   *
+   * What was actually lost on every single deploy: the candle aggregator's
+   * in-progress bars (`stopFeed` flushes them, and nothing invoked it), the
+   * trade tracker's debounced tick batch — up to a full window of price updates
+   * that had been coalesced but not yet written — the broker socket closed
+   * abruptly rather than unsubscribed, and Prisma's pool dropped mid-flight
+   * instead of drained. None of it errored. It simply vanished, which is why it
+   * survived this long.
+   *
+   * Placed BEFORE `listen` so the hooks are armed before the port opens: a
+   * container can be told to stop between binding and readiness, and that window
+   * is exactly when a deploy rollback happens.
+   */
+  app.enableShutdownHooks();
+
   await app.listen(port, '0.0.0.0');
   logger.log(`GrW API running on http://0.0.0.0:${port}`);
   logger.log(`Swagger docs available at http://localhost:${port}/api/docs`);

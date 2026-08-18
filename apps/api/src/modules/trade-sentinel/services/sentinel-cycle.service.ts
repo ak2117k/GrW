@@ -1,7 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { computeGreenFloor } from '../charges';
 import { RosterService, type RosterEntry } from './roster.service';
-import { TripwireService, type TripwireResult } from './tripwire.service';
+import {
+  TripwireService,
+  type LastJudged,
+  type TripwireResult,
+} from './tripwire.service';
 import {
   ContextPacketService,
   SPOT_SOURCE_CASH,
@@ -165,6 +169,32 @@ export function previousFactorValues(
     if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
   }
   return out;
+}
+
+/**
+ * What the agent actually saw the last time it judged this position, for the
+ * material-change gate. Null when there is no prior verdict, or when the stored
+ * packet does not carry the three fields — both of which correctly mean "no
+ * usable baseline", and `materiallyChanged` treats that as material.
+ *
+ * Read from the STORED PACKET rather than from cycle state on purpose: the
+ * packet is what the agent genuinely saw, it is already persisted, and it
+ * survives a restart. An in-memory baseline would reset on every deploy and
+ * silently degrade the gate to "always evaluate" — which is the spend it exists
+ * to remove, disappearing exactly when nobody is watching for it.
+ */
+export function previousJudged(
+  last: { packet?: unknown } | undefined | null,
+): LastJudged | null {
+  const packet = last?.packet as
+    | { position?: { ltp?: unknown; qty?: unknown }; money?: { greenFloorArmed?: unknown } }
+    | undefined;
+  const ltp = packet?.position?.ltp;
+  const qty = packet?.position?.qty;
+  const armed = packet?.money?.greenFloorArmed;
+  if (typeof ltp !== 'number' || !Number.isFinite(ltp)) return null;
+  if (typeof qty !== 'number' || !Number.isFinite(qty)) return null;
+  return { ltp, qty, greenFloorArmed: armed === true };
 }
 
 /**
@@ -367,6 +397,17 @@ export class SentinelCycleService {
       },
       last ? last.createdAt : null,
       now,
+      {
+        // The LATCHED value, not `computeGreenFloor`'s per-tick snapshot — a
+        // cadence that read the snapshot would oscillate with the market.
+        greenFloorArmed: greenFloorArmedLatched,
+        lastJudged: previousJudged(last),
+        current: {
+          ltp: tick.ltp,
+          qty: tick.qty,
+          greenFloorArmed: greenFloorArmedLatched,
+        },
+      },
     );
 
     const state = this.stateFor(entry);
@@ -413,7 +454,10 @@ export class SentinelCycleService {
 
     let verdict;
     try {
-      verdict = await this.agent.judge(packet);
+      // The trigger picks the model tier. `?? 'FIRE'` keeps the expensive tier
+      // as the fallback: a decision that somehow reached here without saying why
+      // it woke the agent must not be quietly downgraded — see `judge`.
+      verdict = await this.agent.judge(packet, decision.trigger ?? 'FIRE');
     } catch (err) {
       state.agentFailures += 1;
       const wait = agentBackoffMs(state.agentFailures);

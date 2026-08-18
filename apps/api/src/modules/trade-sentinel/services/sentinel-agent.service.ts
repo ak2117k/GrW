@@ -1,12 +1,30 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk';
 import type { ContextPacket } from './context-packet.service';
 import type { MessagesTransport, TransportMessage } from './llm-transport';
 import {
   SENTINEL_COMPOSITE_PROMPT_VERSION,
+  SENTINEL_EFFORT_ROUTINE,
+  SENTINEL_EFFORT_TRIGGERED,
   SENTINEL_MODEL,
+  SENTINEL_MODEL_ROUTINE,
   SENTINEL_SYSTEM_PROMPT,
 } from '../prompts/sentinel-system-prompt';
+import type { WakeTrigger } from './tripwire.service';
+
+/**
+ * The effort values the API accepts. Narrowed here rather than left as `string`
+ * because these are env-overridable: an operator typo would otherwise reach the
+ * API as an invalid enum and fail every judgement at request time. `effortOr`
+ * falls back to the compiled default instead.
+ */
+type Effort = 'low' | 'medium' | 'high';
+const EFFORTS: readonly string[] = ['low', 'medium', 'high'];
+function effortOr(raw: string | undefined, fallback: Effort): Effort {
+  const value = raw?.trim().toLowerCase();
+  return EFFORTS.includes(value ?? '') ? (value as Effort) : fallback;
+}
 
 export const ANTHROPIC_CLIENT = 'ANTHROPIC_CLIENT';
 
@@ -140,7 +158,13 @@ function citesRealPath(citation: string, paths: PacketPaths): boolean {
 export class SentinelAgentService {
   private readonly logger = new Logger(SentinelAgentService.name);
 
-  constructor(@Inject(ANTHROPIC_CLIENT) private readonly client: MessagesTransport) {}
+  constructor(
+    @Inject(ANTHROPIC_CLIENT) private readonly client: MessagesTransport,
+    // Optional so every existing test double that constructs this with one
+    // argument keeps working, and so a container without ConfigModule still
+    // boots — the compiled defaults are then used, which are the correct tiers.
+    @Optional() private readonly config?: ConfigService,
+  ) {}
 
   /**
    * Composite on purpose — the verdict prompt AND the thesis prompt that filled
@@ -150,7 +174,40 @@ export class SentinelAgentService {
     return SENTINEL_COMPOSITE_PROMPT_VERSION;
   }
 
-  async judge(packet: ContextPacket): Promise<Verdict> {
+  /**
+   * The model and effort for this wake, chosen by WHY the agent was woken.
+   *
+   * Env-overridable so cost can be retuned from the dashboard without a deploy.
+   * A blank or unset variable falls back to the compiled default rather than to
+   * an empty model id, which the API would reject at request time — a
+   * misconfiguration must not turn into a silent outage of the judge.
+   *
+   * See `SENTINEL_MODEL_ROUTINE` for why the split is by difficulty, not
+   * importance, and why a FIRE never gets the cheaper tier.
+   */
+  private tierFor(trigger: WakeTrigger): { model: string; effort: Effort } {
+    const raw = (key: string) => this.config?.get<string>(key);
+    const pick = (key: string, fallback: string) => raw(key)?.trim() || fallback;
+    return trigger === 'FIRE'
+      ? {
+          model: pick('SENTINEL_MODEL_TRIGGERED', SENTINEL_MODEL),
+          effort: effortOr(raw('SENTINEL_EFFORT_TRIGGERED'), SENTINEL_EFFORT_TRIGGERED),
+        }
+      : {
+          model: pick('SENTINEL_MODEL_ROUTINE', SENTINEL_MODEL_ROUTINE),
+          effort: effortOr(raw('SENTINEL_EFFORT_ROUTINE'), SENTINEL_EFFORT_ROUTINE),
+        };
+  }
+
+  /**
+   * `trigger` defaults to 'FIRE' — the EXPENSIVE tier. A caller that forgets to
+   * say why it woke the agent gets the better model and the higher bill, never
+   * the cheaper model on a decision that might have mattered. Cost control is
+   * allowed to fail towards spending money; it is not allowed to fail towards a
+   * worse judgement on a live trade.
+   */
+  async judge(packet: ContextPacket, trigger: WakeTrigger = 'FIRE'): Promise<Verdict> {
+    const tier = this.tierFor(trigger);
     let response: TransportMessage;
     try {
       // Deliberately NO server-side `fallbacks`: a refusal that quietly reran on
@@ -158,10 +215,10 @@ export class SentinelAgentService {
       // packet, and Task 13's replay diff would attribute the behaviour change
       // to the prompt. A refusal must surface as a refusal.
       response = await this.client.messages.create({
-        model: SENTINEL_MODEL,
+        model: tier.model,
         max_tokens: MAX_TOKENS,
         output_config: {
-          effort: 'high',
+          effort: tier.effort,
           format: {
             type: 'json_schema',
             schema: VERDICT_SCHEMA as unknown as Record<string, unknown>,

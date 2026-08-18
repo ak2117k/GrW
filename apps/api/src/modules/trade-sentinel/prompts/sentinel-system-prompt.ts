@@ -23,6 +23,43 @@ export const SENTINEL_COMPOSITE_PROMPT_VERSION = `${SENTINEL_PROMPT_VERSION}/${T
 export const SENTINEL_MODEL = 'claude-opus-5';
 
 /**
+ * The model and effort used for a ROUTINE heartbeat — nothing fired, the agent
+ * is confirming that nothing has happened.
+ *
+ * NOT A DOWNGRADE OF THE FEATURE, a downgrade of one case. Roughly 25 of every
+ * 30 daily calls per position were heartbeats on a calm trade, and paying Opus
+ * with `effort: 'high'` to conclude "nothing changed" is where nearly all the
+ * cost went — around ₹8,000 a month to watch a single option, against trades
+ * whose downside is a fraction of that.
+ *
+ * The split is by DIFFICULTY, not by importance. A heartbeat asks "is this still
+ * the same trade?" over a packet in which, by construction, no sensor detected
+ * anything; the arithmetic that matters (charges, the green floor, P&L, the
+ * excursions) is computed in code before the model sees it, the evidence arrives
+ * pre-digested into nine labelled blocks, and the answer is a four-value enum
+ * under a JSON schema. That is a constrained reading task.
+ *
+ * A FIRE is the opposite: a sensor is making a specific claim — a level broke,
+ * an OI wall moved, news landed — and the model must weigh it against the thesis
+ * and decide whether the trade is over. That keeps {@link SENTINEL_MODEL} and
+ * `effort: 'high'`, because it is the judgement the whole module exists for and
+ * it is the minority of calls.
+ *
+ * Both tiers are overridable from the environment so this can be retuned without
+ * a deploy, and both are validated identically: `SentinelAgentService.validate`
+ * rejects a verdict citing evidence absent from the packet or claiming unearned
+ * certainty. That check is model-independent, which is what makes running a
+ * cheaper model on the routine path a measurable risk rather than a hopeful one —
+ * and `replay/replay-verdicts.ts` can re-judge a stored corpus under either tier
+ * and diff the results.
+ */
+export const SENTINEL_MODEL_ROUTINE = 'claude-sonnet-5';
+
+/** Reasoning effort per tier. See {@link SENTINEL_MODEL_ROUTINE}. */
+export const SENTINEL_EFFORT_TRIGGERED = 'high' as const;
+export const SENTINEL_EFFORT_ROUTINE = 'medium' as const;
+
+/**
  * The prompt describes the packet AS IT IS, field path by field path.
  *
  * That precision is the whole point: `evidence` must cite real packet paths, and

@@ -66,6 +66,38 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
 
+      # --- Sentinel model tiers (cost control, no deploy needed to retune) ---
+      # The agent is woken two ways and they are not equally hard.
+      #
+      # A FIRE means a sensor made a specific claim — a level broke, an OI wall
+      # moved, news landed — and the model must weigh it against the thesis and
+      # decide whether the trade is over. That is the judgement this module
+      # exists for, and it is the MINORITY of calls. It gets the best model.
+      #
+      # A HEARTBEAT means nothing detected anything and the agent is looking
+      # anyway. The arithmetic that matters (charges, green floor, P&L) is
+      # already computed in code, the evidence arrives pre-digested into nine
+      # labelled blocks, and the answer is a four-value enum under a JSON
+      # schema. That is a constrained reading task, and it was ~25 of every ~30
+      # daily calls — i.e. nearly the entire bill was spent concluding that
+      # nothing had happened.
+      #
+      # Both tiers are validated identically (a verdict citing evidence absent
+      # from the packet is rejected regardless of model), and
+      # replay/replay-verdicts.ts can re-judge a stored corpus under either and
+      # diff the results — so this is a measurable choice, not a hopeful one.
+      #
+      # To run everything on the best model while judging quality, set
+      # SENTINEL_MODEL_ROUTINE=claude-opus-5 and SENTINEL_EFFORT_ROUTINE=high.
+      - key: SENTINEL_MODEL_TRIGGERED
+        value: claude-opus-5
+      - key: SENTINEL_EFFORT_TRIGGERED
+        value: high
+      - key: SENTINEL_MODEL_ROUTINE
+        value: claude-sonnet-5
+      - key: SENTINEL_EFFORT_ROUTINE
+        value: medium
+
       # --- Secrets (entered in the Render dashboard; never committed) ---
       # 32+ char random string. node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
       - key: JWT_SECRET

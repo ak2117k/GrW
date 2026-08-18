@@ -18,7 +18,7 @@ import {
 } from './sentinel-cycle.service';
 import type { RosterEntry } from './roster.service';
 import type { StoredThesis } from './context-packet.service';
-import { HEARTBEAT_INTERVAL_MS } from './tripwire.service';
+import { HEARTBEAT_INTERVAL_MS, type TripwireResult } from './tripwire.service';
 
 const USER = 'u1';
 
@@ -93,7 +93,7 @@ const verdictRow = (over: Record<string, unknown> = {}) => ({
 
 function makeSvc() {
   const build = jest.fn().mockResolvedValue([]);
-  const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true });
+  const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
   const buildPacket = jest.fn();
   const ensureFor = jest.fn().mockResolvedValue(inferredThesis());
   const judge = jest.fn();
@@ -170,7 +170,7 @@ describe('SentinelCycleService — roster gating', () => {
   it('skips a watched entry when no sensor fired and no heartbeat is due', async () => {
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
-    t.evaluate.mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false });
+    t.evaluate.mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false, trigger: null });
 
     const report = await t.svc.runForUser(USER);
 
@@ -184,7 +184,7 @@ describe('SentinelCycleService — roster gating', () => {
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
     t.tickFor.mockResolvedValue(tick({ segment: 'OPT', expiry: '2026-08-27', underlyingLtp: 24000 }));
-    t.evaluate.mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false });
+    t.evaluate.mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false, trigger: null });
 
     await t.svc.runForUser(USER);
 
@@ -230,9 +230,9 @@ describe('SentinelCycleService — roster gating', () => {
       watched('t4'),
     ]);
     t.evaluate
-      .mockReturnValueOnce({ fires: [], heartbeat: true, shouldEvaluate: true })
-      .mockReturnValueOnce({ fires: [], heartbeat: false, shouldEvaluate: false })
-      .mockReturnValueOnce({ fires: [], heartbeat: true, shouldEvaluate: true });
+      .mockReturnValueOnce({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const })
+      .mockReturnValueOnce({ fires: [], heartbeat: false, shouldEvaluate: false, trigger: null })
+      .mockReturnValueOnce({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
     t.judge.mockRejectedValueOnce(new Error('agent refused'));
 
     const report = await t.svc.runForUser(USER);
@@ -300,7 +300,7 @@ describe('SentinelCycleService — recording a verdict', () => {
   it('attributes a sensorless wake to the heartbeat', async () => {
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
-    t.evaluate.mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true });
+    t.evaluate.mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
 
     await t.svc.runForUser(USER);
 
@@ -670,13 +670,13 @@ describe('SentinelCycleService — the green-floor latch', () => {
 
     // Tick 1: armed, but every sensor quiet and the heartbeat not due — no verdict
     // row exists to carry the latch, so only the in-process ratchet can hold it.
-    t.evaluate.mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false });
+    t.evaluate.mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false, trigger: null });
     t.tickFor.mockResolvedValue(tick({ ltp: ARMED_LTP }));
     await t.svc.runForUser(USER);
     expect(t.buildPacket).not.toHaveBeenCalled();
 
     // Tick 2: pulled back below the margin, heartbeat due.
-    t.evaluate.mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true });
+    t.evaluate.mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
     t.tickFor.mockResolvedValue(tick({ ltp: 101 }));
     await t.svc.runForUser(USER);
 
@@ -1025,10 +1025,13 @@ describe('SentinelCycleService — OI walls', () => {
 
 describe('wallKey / suppressRepeatWallShift', () => {
   const pair = (c: number | null, p: number | null) => ({ callWall: c, putWall: p });
-  const decision = (names: string[], heartbeat = false) => ({
+  const decision = (names: string[], heartbeat = false): TripwireResult => ({
     fires: names.map((name) => ({ name, detail: 'd' })),
     heartbeat,
     shouldEvaluate: names.length > 0 || heartbeat,
+    // Mirrors the service: a fire outranks the heartbeat, and the trigger is
+    // null only when nothing wakes the agent at all.
+    trigger: names.length > 0 ? 'FIRE' : heartbeat ? 'HEARTBEAT' : null,
   });
 
   it('distinguishes a moved wall from an unmoved one', () => {
@@ -1225,7 +1228,7 @@ describe('SentinelCycleService — thesis', () => {
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
     const fires = [{ name: 'news-hit', detail: '3 headlines' }];
-    t.evaluate.mockReturnValue({ fires, heartbeat: false, shouldEvaluate: true });
+    t.evaluate.mockReturnValue({ fires, heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' as const });
 
     await t.svc.runForUser(USER);
 

@@ -1,5 +1,14 @@
 import { Logger } from '@nestjs/common';
-import { TripwireService, HEARTBEAT_INTERVAL_MS } from './tripwire.service';
+import {
+  TripwireService,
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_MAX_MS,
+  HEARTBEAT_QUIET_MS,
+  heartbeatIntervalMs,
+  materiallyChanged,
+  type HeartbeatContext,
+  type LastJudged,
+} from './tripwire.service';
 import { volumeAnomaly } from '../tripwires/volume-anomaly.tripwire';
 import type { TripwireInput } from '../tripwires/types';
 
@@ -158,5 +167,145 @@ describe('TripwireService', () => {
     expect(() => svc.evaluate(blank, null, now)).not.toThrow();
     // Absent data is not a signal: nothing may fire off nulls alone.
     expect(svc.evaluate(blank, null, now).fires).toEqual([]);
+  });
+});
+
+/**
+ * THE COST LAYERS. At a flat 15-minute heartbeat, ~25 of every ~30 daily model
+ * calls per position were the agent being paid to conclude that nothing had
+ * happened — roughly ₹8,000 a month to watch one option, against trades whose
+ * whole downside is a fraction of that. A monitor that costs more than the
+ * losses it prevents is a subscription, not a monitor.
+ *
+ * These tests pin the two properties that make the saving safe: a FIRE is never
+ * suppressed, and no position is ever left unexamined past the ceiling.
+ */
+describe('cost controls', () => {
+  const near = (over: Partial<Record<string, unknown>> = {}) =>
+    ({ underlyingLtp: 100, nearestSupport: 99.5, nearestResistance: 120, ...over }) as never;
+  const far = { underlyingLtp: 100, nearestSupport: 80, nearestResistance: 120 } as never;
+  const judged = (over: Partial<LastJudged> = {}): LastJudged => ({
+    ltp: 100,
+    qty: 75,
+    greenFloorArmed: false,
+    ...over,
+  });
+
+  describe('heartbeatIntervalMs', () => {
+    it('keeps the tight cadence when price sits on a level', () => {
+      expect(heartbeatIntervalMs(near(), false)).toBe(HEARTBEAT_INTERVAL_MS);
+    });
+
+    it('keeps the tight cadence when the floor is armed', () => {
+      // Armed means there is realised profit to protect. Cadence follows risk,
+      // and a position with something to lose is the risky one.
+      expect(heartbeatIntervalMs(far, true)).toBe(HEARTBEAT_INTERVAL_MS);
+    });
+
+    it('relaxes to the quiet cadence far from everything', () => {
+      expect(heartbeatIntervalMs(far, false)).toBe(HEARTBEAT_QUIET_MS);
+    });
+
+    it('assumes the TIGHT cadence when there is no price to measure with', () => {
+      // Not knowing where you are relative to a level is not the same as being
+      // far from one. A blind packet must not buy itself a cheaper cadence.
+      expect(
+        heartbeatIntervalMs(
+          { underlyingLtp: null, nearestSupport: 80, nearestResistance: 120 },
+          false,
+        ),
+      ).toBe(HEARTBEAT_INTERVAL_MS);
+    });
+  });
+
+  describe('materiallyChanged', () => {
+    it('treats a first look as material', () => {
+      expect(materiallyChanged(null, judged())).toBe(true);
+    });
+
+    it('ignores a move inside the noise band', () => {
+      expect(materiallyChanged(judged({ ltp: 100 }), judged({ ltp: 100.5 }))).toBe(false);
+    });
+
+    it('catches a move past the band, in either direction', () => {
+      expect(materiallyChanged(judged({ ltp: 100 }), judged({ ltp: 101.2 }))).toBe(true);
+      expect(materiallyChanged(judged({ ltp: 100 }), judged({ ltp: 98.8 }))).toBe(true);
+    });
+
+    it('catches the floor arming at an unchanged price', () => {
+      // A position that has just cleared its charges is a different decision
+      // from one that has not, even at an identical price.
+      expect(
+        materiallyChanged(judged({ greenFloorArmed: false }), judged({ greenFloorArmed: true })),
+      ).toBe(true);
+    });
+
+    it('catches a part-close, which no price test would notice', () => {
+      expect(materiallyChanged(judged({ qty: 75 }), judged({ qty: 25 }))).toBe(true);
+    });
+  });
+
+  describe('evaluate', () => {
+    const svc = new TripwireService();
+    const input = {
+      underlyingLtp: 100,
+      nearestSupport: 80,
+      nearestResistance: 120,
+      trackerId: 't1',
+      symbol: 'KEI29SEP265800CE',
+    } as never;
+    const ctx = (over: Partial<HeartbeatContext> = {}): HeartbeatContext => ({
+      greenFloorArmed: false,
+      lastJudged: judged(),
+      current: judged(),
+      ...over,
+    });
+    const now = new Date('2026-08-18T06:00:00Z');
+    const ago = (ms: number) => new Date(now.getTime() - ms);
+
+    it('skips a due heartbeat when nothing material changed', () => {
+      // The whole saving: quiet position, nothing moved, no call spent.
+      const out = svc.evaluate(input, ago(HEARTBEAT_QUIET_MS + 1), now, ctx());
+      expect(out.shouldEvaluate).toBe(false);
+      expect(out.trigger).toBeNull();
+    });
+
+    it('takes the heartbeat when something material DID change', () => {
+      const out = svc.evaluate(
+        input,
+        ago(HEARTBEAT_QUIET_MS + 1),
+        now,
+        ctx({ current: judged({ ltp: 110 }) }),
+      );
+      expect(out.shouldEvaluate).toBe(true);
+      expect(out.trigger).toBe('HEARTBEAT');
+    });
+
+    it('ALWAYS looks past the ceiling, however unchanged', () => {
+      // The gate reasons only from prices. An approaching expiry, a weakening
+      // thesis, a market gone still around a position in trouble — none of them
+      // move a price, and all of them deserve a look.
+      const out = svc.evaluate(input, ago(HEARTBEAT_MAX_MS + 1), now, ctx());
+      expect(out.shouldEvaluate).toBe(true);
+      expect(out.trigger).toBe('HEARTBEAT');
+    });
+
+    it('does not wake before the quiet interval even on a material move', () => {
+      const out = svc.evaluate(
+        input,
+        ago(HEARTBEAT_INTERVAL_MS + 1),
+        now,
+        ctx({ current: judged({ ltp: 110 }) }),
+      );
+      // Far from levels, unarmed: the cadence is hourly, and a price move alone
+      // does not shorten it — that is what the tripwires are for.
+      expect(out.shouldEvaluate).toBe(false);
+    });
+
+    it('preserves the old behaviour when no context is supplied', () => {
+      const out = svc.evaluate(input, ago(HEARTBEAT_INTERVAL_MS + 1), now);
+      expect(out.shouldEvaluate).toBe(true);
+      expect(out.trigger).toBe('HEARTBEAT');
+    });
   });
 });

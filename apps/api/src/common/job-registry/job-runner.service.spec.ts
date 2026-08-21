@@ -10,6 +10,7 @@ function makeDeps(leaseAcquired = true) {
     recordStart: jest.fn().mockResolvedValue('row-1'),
     recordEnd: jest.fn().mockResolvedValue(undefined),
     recordSkipped: jest.fn().mockResolvedValue(undefined),
+    maybePrune: jest.fn().mockResolvedValue(0),
   };
   return { lease, repo };
 }
@@ -77,6 +78,40 @@ describe('JobRunnerService', () => {
     expect(fn).toHaveBeenCalled();
     expect(result).toBe(42);
     expect(repo.recordEnd).toHaveBeenCalledWith(null, 'SUCCESS', undefined);
+  });
+
+  /**
+   * Retention has no cron of its own — deliberately, since a cron that stops
+   * firing is the failure this whole table exists to expose. It rides the write
+   * path instead, so the write path must actually call it.
+   */
+  it('sweeps retention after recording a successful end', async () => {
+    const { lease, repo } = makeDeps();
+    const runner = new JobRunnerService(lease as never, repo as never);
+    await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
+    expect(repo.maybePrune).toHaveBeenCalledTimes(1);
+    expect(repo.maybePrune).toHaveBeenCalledWith(expect.any(Date));
+  });
+
+  it('does not sweep when the lease was held elsewhere and the job never ran', async () => {
+    const { lease, repo } = makeDeps(false);
+    const runner = new JobRunnerService(lease as never, repo as never);
+    await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
+    expect(repo.maybePrune).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The sweep is fire-and-forget. A never-settling prune — Neon mid-wake-up,
+   * a hung connection — must not hold the job's result hostage. If an `await`
+   * is ever added in front of `maybePrune`, this test hangs and fails, which is
+   * precisely the production symptom it stands in for.
+   */
+  it('returns without waiting for the prune to settle', async () => {
+    const { lease, repo } = makeDeps();
+    repo.maybePrune.mockReturnValue(new Promise<number>(() => undefined));
+    const runner = new JobRunnerService(lease as never, repo as never);
+    const result = await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
+    expect(result).toBe(42);
   });
 
   it('passes the caller-chosen failure mode straight through to the lease', async () => {

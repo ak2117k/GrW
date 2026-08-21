@@ -40,6 +40,9 @@ export class JobRunnerService {
         try {
           const value = await fn();
           await this.runs.recordEnd(id, 'SUCCESS', undefined);
+          // Retention rides on write traffic — see PRUNE_INTERVAL_MS. Deliberately not
+          // awaited: a prune must never add latency to, or fail, a scheduled job.
+          void this.runs.maybePrune(new Date());
           return value;
         } catch (err) {
           // Recorded, then rethrown. Swallowing here would convert a failing job

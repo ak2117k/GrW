@@ -2,6 +2,17 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { retentionCutoff, type JobOutcome, type JobRunRecord } from './job-run.types';
 
+/**
+ * Minimum gap between prune sweeps.
+ *
+ * Retention is LAZY on purpose. This program's whole thesis is that a job which
+ * silently fails to fire is the dominant failure mode here — so adding a cron
+ * to clean up the table that proves jobs fired would be self-defeating. Piggy-
+ * backing on write traffic means the pruner runs exactly when the table is
+ * growing, and stops when it is not.
+ */
+const PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 /** Error strings are capped and whitespace-collapsed — same rule as `/healthz`. */
 function describe(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
@@ -26,6 +37,17 @@ function describe(err: unknown): string {
 @Injectable()
 export class JobRunRepository {
   private readonly logger = new Logger(JobRunRepository.name);
+
+  /**
+   * Epoch-ms of the last prune sweep. Zero means "never", which is why the
+   * first `maybePrune` of a process always sweeps: any real `now` is more than
+   * one interval past 0.
+   *
+   * Per-instance, not shared. On a multi-instance deploy each container sweeps
+   * once a day independently — deleting rows already deleted is a no-op, so the
+   * duplication costs a cheap query, never correctness.
+   */
+  private lastPruneAt = 0;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -151,5 +173,27 @@ export class JobRunRepository {
   /** Convenience for the lazy pruner in Task 9. */
   async pruneExpired(now: Date): Promise<number> {
     return this.pruneOlderThan(retentionCutoff(now));
+  }
+
+  /**
+   * Prune expired rows at most once per {@link PRUNE_INTERVAL_MS}.
+   *
+   * MUST NOT REJECT. Its caller fire-and-forgets it (`void`), so a rejection
+   * here surfaces as an unhandled promise rejection rather than as a handled
+   * error — on Node that is a process-level event, i.e. the pruner taking down
+   * the app it was meant to keep tidy. The swallow lives in `pruneOlderThan`,
+   * which is why this method can delegate and stay this small; do not add a
+   * throwing step above that delegation.
+   *
+   * `lastPruneAt` advances BEFORE the sweep, not after. A prune that fails
+   * (Neon asleep, statement timeout) therefore waits out the full interval
+   * instead of being retried on every subsequent job completion — on a platform
+   * with 41 job writers, retry-on-every-write would turn one sick database into
+   * a storm of failing deleteMany calls against it.
+   */
+  async maybePrune(now: Date): Promise<number> {
+    if (now.getTime() - this.lastPruneAt < PRUNE_INTERVAL_MS) return 0;
+    this.lastPruneAt = now.getTime();
+    return this.pruneExpired(now);
   }
 }

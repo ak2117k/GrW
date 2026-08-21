@@ -26,6 +26,9 @@ const watched = (id: string, over: Partial<RosterEntry> = {}): RosterEntry => ({
   userId: USER,
   trackerId: id,
   symbol: id.toUpperCase(),
+  // NSE keeps the 15:30 session these assertions were written against; an MCX
+  // fixture would change what `session.minutesToClose` reports.
+  exchange: 'NSE',
   kind: 'POSITION',
   ownership: 'SENTINEL',
   watched: true,

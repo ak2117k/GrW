@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SentinelCycleService, type CycleReport } from './sentinel-cycle.service';
+import { isAnyExchangeOpen, isAnyMarketOpen, isExchangeOpen } from '../market-sessions';
 
 /**
  * THE TICK CADENCE. Every-30-seconds, weekdays, 09:15–15:29 IST.
@@ -61,18 +62,18 @@ export const OI_SNAPSHOT_CLEANUP_CRON = '0 30 2 * * *';
  */
 export const SENTINEL_ENABLED_KEY = 'SENTINEL_SHADOW_ENABLED';
 
-/** IST is UTC + 5:30. Same convention as `common/utils/market-hours.ts`. */
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-const SESSION_OPEN_MIN = 9 * 60 + 15;
-const SESSION_CLOSE_MIN = 15 * 60 + 30;
-
-/** Weekday, and inside the regular session. NSE holidays are NOT modelled. */
+/**
+ * Weekday, and inside the EQUITY session. NSE holidays are NOT modelled.
+ *
+ * KEPT AND DEPRECATED FOR CALLERS THAT MEAN "is the equity market open" — it is
+ * no longer what gates the tick. The runner now asks per user whether any
+ * exchange THEY hold is trading, because 15:30 is the NSE close and MCX runs
+ * until 23:30: gating everything on the equity window left every commodity
+ * position unwatched for eight hours of its own trading day, silently. See
+ * `market-sessions.ts`.
+ */
 export function isWithinSession(now: Date = new Date()): boolean {
-  const ist = new Date(now.getTime() + IST_OFFSET_MS);
-  const day = ist.getUTCDay();
-  if (day === 0 || day === 6) return false;
-  const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  return minutes >= SESSION_OPEN_MIN && minutes < SESSION_CLOSE_MIN;
+  return isExchangeOpen('NSE', now);
 }
 
 /**
@@ -114,20 +115,46 @@ export class SentinelRunnerService {
 
   @Cron(SENTINEL_TICK_CRON, { timeZone: 'Asia/Kolkata' })
   async tick(): Promise<void> {
-    if (!this.enabled || !isWithinSession()) return;
+    // A CHEAP CLOCK-ONLY PRE-GATE, BEFORE ANY QUERY. Gating per user needs to
+    // know what each user holds, which needs a database round trip — so a naive
+    // per-user gate would put one on every 30-second tick at 03:00, forever.
+    // That is exactly the constant background load just removed from the
+    // tracker's quote sweep, reintroduced one module over. Outside the widest
+    // window any venue keeps, nothing can be open and there is nothing to ask.
+    if (!this.enabled || !isAnyMarketOpen()) return;
 
-    let userIds: string[];
+    let book: Array<{ userId: string; exchange: string }>;
     try {
-      userIds = await this.usersWithOpenTrades();
+      book = await this.openTradeVenues();
     } catch (err) {
       this.logger.error(`sentinel tick could not list users: ${describe(err)}`);
       return;
     }
 
+    // THE SESSION GATE IS PER USER, AND IT IS KEYED ON WHAT THEY HOLD.
+    //
+    // It used to be one global `isWithinSession()` — 09:15 to 15:30 — applied to
+    // every position on the platform. Correct for NSE, wrong for MCX, which
+    // trades until 23:30, so a commodity position was unwatched for eight hours
+    // of its own trading day while the runner returned early on every tick.
+    //
+    // Per user rather than globally, because the alternative fails the other
+    // way: one tenant holding a commodity would keep every other tenant's equity
+    // positions being polled all evening, spending real money to re-read prices
+    // that stopped moving at 15:30.
+    const now = new Date();
+    const venuesByUser = new Map<string, string[]>();
+    for (const row of book) {
+      const list = venuesByUser.get(row.userId);
+      if (list) list.push(row.exchange);
+      else venuesByUser.set(row.userId, [row.exchange]);
+    }
+
     // Sequential, not `Promise.all`: five positions per user against one
     // Anthropic account, and a fan-out across every user would turn the rate
     // limiter into the thing that decides which positions get watched.
-    for (const userId of userIds) {
+    for (const [userId, exchanges] of venuesByUser) {
+      if (!isAnyExchangeOpen(exchanges, now)) continue;
       await this.runForUser(userId);
     }
   }
@@ -170,14 +197,21 @@ export class SentinelRunnerService {
     }
   }
 
-  /** Tenants with something to watch. Nobody else costs a roster query. */
-  private async usersWithOpenTrades(): Promise<string[]> {
-    const rows = await this.prisma.tradeTracker.findMany({
+  /**
+   * Tenants with something to watch, AND the exchanges they hold it on. Nobody
+   * else costs a roster query.
+   *
+   * `exchange` is what makes the session gate decidable per user — see `tick`.
+   * `distinct` on the PAIR, not on userId alone: a user holding both an NFO
+   * option and an MCX future must yield both venues, or the evening half of
+   * their book silently stops being watched at 15:30.
+   */
+  private async openTradeVenues(): Promise<Array<{ userId: string; exchange: string }>> {
+    return this.prisma.tradeTracker.findMany({
       where: { status: 'OPEN' },
-      select: { userId: true },
-      distinct: ['userId'],
+      select: { userId: true, exchange: true },
+      distinct: ['userId', 'exchange'],
     });
-    return rows.map((r) => r.userId);
   }
 
   /** See {@link OI_SNAPSHOT_RETENTION_DAYS}. Runs regardless of the enable flag. */

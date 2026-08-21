@@ -7,6 +7,7 @@ import { computeGreenFloor, type Segment, type Side } from '../charges';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import type { TripwireFire } from '../tripwires/types';
 import type { Ownership, RosterEntry } from './roster.service';
+import { minutesToClose, sessionFor } from '../market-sessions';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -126,25 +127,48 @@ export function istWallClock(now: Date): string {
 }
 
 /**
- * Minutes remaining in the IST session, as a block.
+ * Minutes remaining in this position's OWN session, as a block.
  *
  * Derived here rather than left to the agent: "how long have I got" is the
  * quantity every prompt actually wants, and computing it from a timestamp is
  * timezone arithmetic an LLM should never be asked to perform.
+ *
+ * IT IS KEYED ON THE POSITION'S EXCHANGE, and that is the fix. This used to
+ * count down to a hardcoded 15:30 for everything, so an MCX position — which
+ * trades until 23:30 — was told at 16:00 that "the session has already closed,
+ * nothing left to run today". The agent reads this block to decide how much time
+ * a trade has to recover, so on a commodity contract it was being handed a
+ * false deadline with provenance attached, at exactly the hours when crude and
+ * gold are most active. `exchange` defaults to NSE so an omitted argument keeps
+ * the prior behaviour rather than silently widening someone's session.
  */
-export function minutesToSessionClose(now: Date): Block<number> {
+export function minutesToSessionClose(now: Date, exchange = 'NSE'): Block<number> {
   const ist = new Date(now.getTime() + IST_OFFSET_MS);
   const day = ist.getUTCDay();
   if (day === 0 || day === 6) {
     return absent('not a trading day (IST weekend) — no session close to count down to');
   }
-  const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  if (minutes >= SESSION_CLOSE_MIN) {
-    return absent('the IST session has already closed (15:30) — nothing left to run today');
+  const remaining = minutesToClose(exchange, now);
+  const { openMin, closeMin } = sessionFor(exchange);
+  const hhmm = (m: number) =>
+    `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  if (remaining === null) {
+    // BEFORE-OPEN and AFTER-CLOSE are different facts and the agent reasons
+    // differently about each: one means the trade has a full session ahead of
+    // it, the other that nothing more can happen today. Collapsing both into
+    // "not open" would tell a pre-market position it had run out of time.
+    const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    return absent(
+      minutes < openMin
+        ? `the ${exchange} session has not opened yet (it opens ${hhmm(openMin)} IST) — the ` +
+            'full session is still ahead of this position'
+        : `the ${exchange} session has already closed (${hhmm(closeMin)} IST) — nothing left ` +
+            'to run there today',
+    );
   }
   return present(
-    SESSION_CLOSE_MIN - minutes,
-    'derived from IST wall clock (15:30 close; NSE trading holidays are NOT modelled)',
+    remaining,
+    `derived from IST wall clock (${exchange} closes ${hhmm(closeMin)}; trading holidays are NOT modelled)`,
     now.toISOString(),
   );
 }
@@ -704,7 +728,7 @@ export class ContextPacketService {
       session: {
         nowIst: istWallClock(now),
         nowUtc: at,
-        minutesToClose: minutesToSessionClose(now),
+        minutesToClose: minutesToSessionClose(now, entry.exchange),
         expiry: tick.expiry,
       },
       // Re-built as plain object literals rather than passed through: `TripwireFire`

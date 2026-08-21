@@ -22,6 +22,7 @@ const entry: RosterEntry = {
   userId: 'u1',
   trackerId: 't1',
   symbol: 'INFY',
+  exchange: 'NSE',
   kind: 'POSITION',
   ownership: 'SENTINEL',
   watched: true,

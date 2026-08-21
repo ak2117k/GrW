@@ -124,6 +124,9 @@ describe('ContextPacketService', () => {
   });
 
   const entry = {
+    // The packet counts down to THIS venue's close; NSE keeps the 15:30
+    // behaviour these assertions were written against.
+    exchange: 'NSE',
     userId: 'u1',
     trackerId: 't1',
     symbol: 'INFY',

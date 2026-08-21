@@ -13,7 +13,7 @@ const REPORT = { evaluated: 1, skipped: 0, failed: 0, unwatched: 0 };
 
 function make(enabled = true) {
   const runForUser = jest.fn().mockResolvedValue(REPORT);
-  const findMany = jest.fn().mockResolvedValue([{ userId: 'u1' }]);
+  const findMany = jest.fn().mockResolvedValue([{ userId: 'u1', exchange: 'NSE' }]);
   const deleteMany = jest.fn().mockResolvedValue({ count: 0 });
   const prisma = {
     tradeTracker: { findMany },
@@ -118,7 +118,7 @@ describe('SentinelRunnerService — a roster failure must not escape', () => {
   it('a tick keeps going to the next user after one tenant fails', async () => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     const t = make();
-    t.findMany.mockResolvedValue([{ userId: 'u1' }, { userId: 'u2' }]);
+    t.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'NSE' }, { userId: 'u2', exchange: 'NSE' }]);
     t.runForUser.mockRejectedValueOnce(new Error('boom'));
     jest.spyOn(Date, 'now'); // no-op, keeps the session gate on the real clock
 
@@ -151,15 +151,21 @@ describe('SentinelRunnerService — the tick is gated', () => {
 
   it('runs every tenant with an open trade when enabled and in session', async () => {
     const t = make(true);
-    t.findMany.mockResolvedValue([{ userId: 'u1' }, { userId: 'u2' }]);
+    t.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'NSE' }, { userId: 'u2', exchange: 'NSE' }]);
     // Friday 14 Aug 2026, 10:00 IST.
     jest.useFakeTimers().setSystemTime(new Date('2026-08-14T04:30:00Z'));
     await t.svc.tick();
     jest.useRealTimers();
 
     expect(t.runForUser).toHaveBeenCalledTimes(2);
+    // Distinct on the PAIR, not on userId alone: a user holding both an NFO
+    // option and an MCX future must yield both venues, or the evening half of
+    // their book silently stops being watched at 15:30.
     expect(t.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { status: 'OPEN' }, distinct: ['userId'] }),
+      expect.objectContaining({
+        where: { status: 'OPEN' },
+        distinct: ['userId', 'exchange'],
+      }),
     );
   });
 

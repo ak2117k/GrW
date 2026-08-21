@@ -23,6 +23,16 @@ export interface RosterEntry {
   userId: string;
   trackerId: string;
   symbol: string;
+  /**
+   * Where this trade actually trades — 'NSE', 'NFO', 'MCX', 'BFO'.
+   *
+   * Carried so the packet counts down to THIS position's own session close
+   * rather than a hardcoded 15:30. MCX runs to 23:30, and a commodity contract
+   * told at 16:00 that "the session has already closed, nothing left to run
+   * today" was being handed a false deadline — with provenance attached, at
+   * exactly the hours when crude and gold move most.
+   */
+  exchange: string;
   kind: 'POSITION' | 'HOLDING';
   ownership: Ownership;
   watched: boolean;
@@ -172,6 +182,7 @@ export class RosterService {
           userId,
           trackerId: t.id,
           symbol: t.symbol,
+          exchange: t.exchange,
           kind: 'HOLDING',
           ownership: 'OBSERVE_ONLY',
           watched: false,
@@ -188,6 +199,7 @@ export class RosterService {
           userId,
           trackerId: t.id,
           symbol: t.symbol,
+          exchange: t.exchange,
           kind: 'POSITION',
           ownership: 'OBSERVE_ONLY',
           watched,
@@ -201,6 +213,7 @@ export class RosterService {
         userId,
         trackerId: t.id,
         symbol: t.symbol,
+        exchange: t.exchange,
         kind: 'POSITION',
         ownership: 'SENTINEL',
         watched,

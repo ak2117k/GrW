@@ -312,6 +312,21 @@ pass.
 This is included precisely because "we already follow most of it" is the same class of claim
 that the five never-invoked shutdown hooks also satisfied.
 
+**Named item, found during Phase 0 (2026-08-21): truncation is not redaction.**
+`health.service.ts:100` renders errors through a `describe()` that whitespace-collapses and
+caps at 200 characters, justified in its own comment by the fact that Prisma connection
+errors carry the full `DATABASE_URL`. `JobRunRepository` adopted the same helper. But a
+length cap only removes a credential that appears *after* the first 200 characters, and a
+connection error puts the URL near the front. The strings reach two surfaces that matter:
+the `job_runs.error` column, readable via `/healthz/detail`, and `logger.warn` — which
+CLAUDE.md §9 says credentials must never reach.
+
+Deferred here rather than fixed inline because at least two `describe()` implementations
+share the flaw and they deserve one consistent redaction pass, not a local patch that leaves
+the other lying. The verification pass should establish whether Prisma error messages in
+this version actually embed credentials before deciding the shape of the fix — the existing
+comment asserts they do, and that assertion has not itself been verified.
+
 ### B-Phase 2. Tick-poller consolidation
 
 Last, and alone. It touches six modules that manage real money.

@@ -6,13 +6,24 @@ function makeDeps(leaseAcquired = true) {
       leaseAcquired ? await fn() : null,
     ),
   };
+  // `order` records the sequence of repository calls, so the specs can pin that
+  // the retention sweep happens AFTER the outcome is recorded rather than merely
+  // that both happened.
+  const order: string[] = [];
   const repo = {
     recordStart: jest.fn().mockResolvedValue('row-1'),
-    recordEnd: jest.fn().mockResolvedValue(undefined),
-    recordSkipped: jest.fn().mockResolvedValue(undefined),
-    maybePrune: jest.fn().mockResolvedValue(0),
+    recordEnd: jest.fn(async () => {
+      order.push('recordEnd');
+    }),
+    recordSkipped: jest.fn(async () => {
+      order.push('recordSkipped');
+    }),
+    maybePrune: jest.fn(async () => {
+      order.push('maybePrune');
+      return 0;
+    }),
   };
-  return { lease, repo };
+  return { lease, repo, order };
 }
 
 describe('JobRunnerService', () => {
@@ -86,18 +97,38 @@ describe('JobRunnerService', () => {
    * path instead, so the write path must actually call it.
    */
   it('sweeps retention after recording a successful end', async () => {
-    const { lease, repo } = makeDeps();
+    const { lease, repo, order } = makeDeps();
     const runner = new JobRunnerService(lease as never, repo as never);
     await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
     expect(repo.maybePrune).toHaveBeenCalledTimes(1);
     expect(repo.maybePrune).toHaveBeenCalledWith(expect.any(Date));
+    expect(order).toEqual(['recordEnd', 'maybePrune']);
   });
 
-  it('does not sweep when the lease was held elsewhere and the job never ran', async () => {
-    const { lease, repo } = makeDeps(false);
+  /**
+   * The sweep must NOT be success-only. A deployment where every tick fails
+   * still writes a RUNNING row and a FAILED row per tick, so a success-only
+   * sweep would stop pruning in precisely the state that grows the table
+   * fastest — and one that is likely to persist unnoticed.
+   */
+  it('sweeps retention after recording a failed end, and rethrows unchanged', async () => {
+    const { lease, repo, order } = makeDeps();
+    const runner = new JobRunnerService(lease as never, repo as never);
+    const boom = new Error('boom');
+    await expect(
+      runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
+    expect(order).toEqual(['recordEnd', 'maybePrune']);
+  });
+
+  it('sweeps retention after recording a lease skip', async () => {
+    const { lease, repo, order } = makeDeps(false);
     const runner = new JobRunnerService(lease as never, repo as never);
     await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
-    expect(repo.maybePrune).not.toHaveBeenCalled();
+    expect(repo.maybePrune).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['recordSkipped', 'maybePrune']);
   });
 
   /**
@@ -112,6 +143,61 @@ describe('JobRunnerService', () => {
     const runner = new JobRunnerService(lease as never, repo as never);
     const result = await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
     expect(result).toBe(42);
+  });
+
+  it('rethrows the job error without waiting for the prune to settle', async () => {
+    const { lease, repo } = makeDeps();
+    repo.maybePrune.mockReturnValue(new Promise<number>(() => undefined));
+    const runner = new JobRunnerService(lease as never, repo as never);
+    const boom = new Error('boom');
+    await expect(
+      runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
+  });
+
+  /**
+   * A `void`ed rejection terminates the Node process by default, so the sweep
+   * carries a rejection handler at the call site IN ADDITION to `maybePrune`'s
+   * own internal no-reject guarantee. The two are not duplication: the guarantee
+   * holds today (pinned in job-run.retention.spec.ts), the handler bounds the
+   * blast radius if a later edit breaks it.
+   *
+   * Asserted structurally — that a handler is attached — because the
+   * behavioural alternative is to actually emit an unhandled rejection and
+   * assert the process did not die, which is neither expressible nor safe
+   * inside the test runner's own process.
+   */
+  it('attaches a rejection handler to the fire-and-forget sweep', async () => {
+    const { lease, repo } = makeDeps();
+    const sweep = Promise.resolve(0);
+    const onRejected = jest.spyOn(sweep, 'catch');
+    repo.maybePrune.mockReturnValue(sweep);
+    const runner = new JobRunnerService(lease as never, repo as never);
+    await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
+    expect(onRejected).toHaveBeenCalledWith(expect.any(Function));
+  });
+
+  it('survives a sweep that rejects, returning the job result unchanged', async () => {
+    const { lease, repo } = makeDeps();
+    repo.maybePrune.mockRejectedValue(new Error('prune boom'));
+    const runner = new JobRunnerService(lease as never, repo as never);
+    const result = await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => 42);
+    expect(result).toBe(42);
+  });
+
+  /** A rejecting sweep must not replace the job's own error. */
+  it('rethrows the job error, not the sweep error, when both fail', async () => {
+    const { lease, repo } = makeDeps();
+    repo.maybePrune.mockRejectedValue(new Error('prune boom'));
+    const runner = new JobRunnerService(lease as never, repo as never);
+    const boom = new Error('boom');
+    await expect(
+      runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
   });
 
   it('passes the caller-chosen failure mode straight through to the lease', async () => {

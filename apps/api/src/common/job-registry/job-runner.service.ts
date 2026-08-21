@@ -31,37 +31,58 @@ export class JobRunnerService {
   async run<T>(jobName: string, opts: JobRunOptions, fn: () => Promise<T>): Promise<T | null> {
     let entered = false;
 
-    const result = await this.lease.runExclusive(
-      jobName,
-      opts.ttlMs,
-      async () => {
-        entered = true;
-        const id = await this.runs.recordStart(jobName);
-        try {
-          const value = await fn();
-          await this.runs.recordEnd(id, 'SUCCESS', undefined);
-          // Retention rides on write traffic — see PRUNE_INTERVAL_MS. Deliberately not
-          // awaited: a prune must never add latency to, or fail, a scheduled job.
-          void this.runs.maybePrune(new Date());
-          return value;
-        } catch (err) {
-          // Recorded, then rethrown. Swallowing here would convert a failing job
-          // into a silently-succeeding one, which is the failure this codebase
-          // already specialises in.
-          await this.runs.recordEnd(id, 'FAILED', err);
-          throw err;
-        }
-      },
-      opts.onRedisError,
-    );
+    try {
+      const result = await this.lease.runExclusive(
+        jobName,
+        opts.ttlMs,
+        async () => {
+          entered = true;
+          const id = await this.runs.recordStart(jobName);
+          try {
+            const value = await fn();
+            await this.runs.recordEnd(id, 'SUCCESS', undefined);
+            return value;
+          } catch (err) {
+            // Recorded, then rethrown. Swallowing here would convert a failing job
+            // into a silently-succeeding one, which is the failure this codebase
+            // already specialises in.
+            await this.runs.recordEnd(id, 'FAILED', err);
+            throw err;
+          }
+        },
+        opts.onRedisError,
+      );
 
-    // `entered` distinguishes the two ways runExclusive returns null: the lease
-    // was held elsewhere (never entered), or the job itself legitimately
-    // returned null. Only the former is a skip.
-    if (!entered) {
-      await this.runs.recordSkipped(jobName);
-      return null;
+      // `entered` distinguishes the two ways runExclusive returns null: the lease
+      // was held elsewhere (never entered), or the job itself legitimately
+      // returned null. Only the former is a skip.
+      if (!entered) {
+        await this.runs.recordSkipped(jobName);
+        return null;
+      }
+      return result;
+    } finally {
+      // Retention rides on write traffic — see PRUNE_INTERVAL_MS. It sweeps after
+      // EVERY completed run, not just successful ones: a deployment where every
+      // tick fails still writes a RUNNING row and a FAILED row per tick, so the
+      // table grows fastest in exactly the state a success-only sweep would never
+      // fire in — and "everything is failing" is the condition most likely to
+      // persist unnoticed. `finally` also puts the sweep after the outcome has
+      // been recorded on all three paths, and adds no `return`/`throw`, so a
+      // failing job still rethrows its own error unchanged.
+      //
+      // Two guards, not one, and NEITHER is redundant with the other:
+      //   - `void` … not awaited. A prune must never add latency to, or fail, a
+      //     scheduled job.
+      //   - `.catch()` … `maybePrune` already guarantees it never rejects, and
+      //     job-run.retention.spec.ts pins that. But a `void`ed rejection
+      //     TERMINATES the Node process by default, so if a future edit breaks
+      //     that guarantee the failure mode is not "a prune was missed", it is
+      //     "retention killed the API" — the observer destroying the thing it
+      //     observes. The spec guarantees the invariant today; this bounds the
+      //     blast radius if someone breaks it later. Do not delete either as
+      //     duplication.
+      void this.runs.maybePrune(new Date()).catch(() => undefined);
     }
-    return result;
   }
 }

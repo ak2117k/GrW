@@ -205,6 +205,48 @@ Safety-critical paths therefore use **tick-driven primary + a rare cron backstop
 evidence on both**. `watch-monitor/services/watch-backstop-poller.service.ts` is already
 named for this idea; the concept is kept and the redundancy removed.
 
+#### B2.1 The backstop is load-bearing, not prudence (traced 2026-08-21)
+
+An investigation into five failing `hard loss-cut` specs established the following, and it
+constrains Phase 2 directly.
+
+The stop is **two-strike**: `watch.service.ts:783-799` requires two consecutive breaching
+ticks before exiting, incrementing a persisted `slBreachCount` on the first. The same guard
+exists in `adaptive-stop-track`, `sell-futures-track` and `ungated-track`. The stop therefore
+does not fire on a price fact — it fires on **two ticks**, which makes tick continuity part
+of the stop's correctness.
+
+Today nothing is exposed, because every track has a REST path that advances the counter
+without the WebSocket:
+
+- `watch-monitor` is WS-driven, and `watch-backstop-poller.service.ts` re-drives WS-starved
+  TRADED entries through the same `watch.onTick` every 30 s.
+- `ungated`, `sell-futures` and `adaptive-stop` are REST pollers already — they resolve
+  prices via `ExitPriceService` and never consult the feed.
+
+**Three of the six pollers Phase 2 proposes to eliminate are the sole reason the stop
+survives a feed stall.** Consolidating them onto the tick stream without an equivalent REST
+backstop would convert a feed outage — a documented recurring event — into an uncut loss.
+The backstop is not a nicety attached to "safety-critical paths"; it is the mechanism that
+makes a two-strike stop safe. Phase 2 must deliver the backstop **before** removing any
+poller, not alongside it.
+
+#### B2.2 A stop that was not evaluated must be evidence, not a log line
+
+Both the backstop (`watch-backstop-poller.service.ts:62-66`) and the pollers
+(`ungated-tick-poller.service.ts:69-71`) skip an entry when the resolved price is not fresh:
+
+```
+this.logger.warn(`... unmonitored — no fresh price, onTick skipped`);
+continue;
+```
+
+A stop that was **not evaluated** produces a warning and nothing else — no counter, no
+health signal, no record. This is the platform's signature failure sitting on the stop path.
+Phase 0 gains a counter for it, and it is read as part of the Phase 2 baseline: a
+consolidation cannot be judged safe against a baseline that does not count the ticks it
+never evaluated.
+
 **Wrapping.** Surviving jobs get lease and `JobRun` recording from **one wrapper in one
 pass** — `apps/api/src/common/cron-lease/` already exists, and the lease boundary and the
 recording boundary are the same seam. Two passes would guarantee drift: some jobs leased but
@@ -374,7 +416,9 @@ slips, say so immediately rather than proceeding onto unverifiable ground.
 
 | Risk | Mitigation |
 |---|---|
+| **Consolidation makes a two-strike stop feed-dependent** (§B2.1) — three of the six pollers are today the only thing advancing `slBreachCount` without the WebSocket | REST backstop ships **before** any poller is removed, never alongside; per-module gate in Phase 2 |
 | Tick-driven monitoring makes the feed a single point of failure | Cron backstop retained for safety-critical paths; spine alarms on tick staleness |
+| A stop skipped for want of a fresh price is invisible (§B2.2) | Counter in Phase 0; read as part of the Phase 2 baseline |
 | Candle persistence grows the database | Retention window in the same change; disk with expiry, never RAM |
 | TanStack migration touches 36 files | Incremental; existing loops keep working until each site is migrated |
 | Session orchestrator centralises timing logic | Per-venue hours unit-tested against known holiday and DST edges before any module subscribes |

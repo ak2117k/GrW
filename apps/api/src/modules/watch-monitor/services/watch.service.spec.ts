@@ -884,10 +884,23 @@ describe('WatchService.onTick — hard loss-cut', () => {
     // The tick (1985) computes a -₹1,500 loss, but the broker's fresh quote
     // says the real price is 2001 — no loss. A single bad feed tick must not
     // trigger a real exit, so the cut is aborted on re-confirmation.
-    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+    //
+    // The breach must be driven to the SECOND tick: the two-strike stop-hunt
+    // guard swallows the first one, and a single-tick version of this test
+    // would pass vacuously — never entering transitionLossCut at all, and so
+    // passing even if the re-confirmation logic were deleted.
     brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 2001 });
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
 
     await svc.onTick('11536', 1985, new Date());
+
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 1 })]);
+
+    await svc.onTick('11536', 1985, new Date());
+
+    // transitionLossCut was genuinely entered — this assertion is what makes
+    // the test non-vacuous: the re-confirmation ran, and IT aborted the cut.
+    expect(brokerAdapter.getLiveQuote).toHaveBeenCalled();
 
     const lossCutUpdate = (repo.update.mock.calls as any[]).find(
       (call: any[]) => call[1]?.closedReason === 'loss-cut',

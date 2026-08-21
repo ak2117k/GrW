@@ -159,10 +159,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
    *      `$executeRawUnsafe`. These bypass the model layer entirely; any raw SQL
    *      against a tenant table must include its own `WHERE "userId" = …` guard.
    *
-   * No such usage exists today (grep-verified across the API), but new code must
-   * honour these limits or it reopens the cross-tenant hole this interceptor
-   * closes. The extension still **fails safe** for the operations it does see: a
-   * tenant-model op it cannot confidently scope throws rather than run unscoped.
+   * One raw query exists today: `JobRunRepository.lastRunPerJob` runs a
+   * `$queryRaw` `DISTINCT ON` against `job_runs`. It needs no `userId` guard
+   * because `JobRun` is not a tenant model — it is absent from `TENANT_MODELS`,
+   * has no `userId` column, and records infrastructure-level scheduled runs that
+   * belong to the instance rather than to any user. No nested-write usage exists
+   * (grep-verified across the API). New code must honour these limits or it
+   * reopens the cross-tenant hole this interceptor closes. The extension still
+   * **fails safe** for the operations it does see: a tenant-model op it cannot
+   * confidently scope throws rather than run unscoped.
    * =========================================================================
    */
   private buildTenantScopingExtension() {

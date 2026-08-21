@@ -11,10 +11,17 @@ function describe(err: unknown): string {
 /**
  * Persists scheduled-run evidence.
  *
- * EVERY method swallows its own failure. Recording is observation, and an
+ * EVERY WRITE swallows its own failure. Recording is observation, and an
  * observer that can break the thing it observes is worse than no observer: a
  * `job_runs` insert failing during a Neon wake-up must not abort a broker
  * reconcile. A lost row costs one blank cell on a dashboard.
+ *
+ * The READ (`lastRunPerJob`) deliberately does NOT swallow — see its own
+ * docblock. Do not "make it consistent" with the writes; that reintroduces the
+ * silent absence this table exists to detect.
+ *
+ * All timestamps this class writes come from the Node process clock, never the
+ * schema's `@default(now())` database clock — see `recordStart`.
  */
 @Injectable()
 export class JobRunRepository {
@@ -35,11 +42,18 @@ export class JobRunRepository {
    * RUNNING stays diagnosable after a crash, too: the row keeps its startedAt
    * and never advances, so a stale RUNNING is visibly a death rather than a
    * job that is merely busy.
+   *
+   * `startedAt` is set explicitly rather than left to the schema's
+   * `@default(now())`. One clock, not two: `recordEnd` subtracts `startedAt`
+   * from a `finishedAt` taken on the Node process clock, so a database-clock
+   * `startedAt` would make every duration carry the Render-to-Neon skew and
+   * could record a fast job as negative. The same skew would also perturb
+   * `ORDER BY "startedAt"`, which is how `lastRunPerJob` picks the newest row.
    */
   async recordStart(jobName: string): Promise<string | null> {
     try {
       const row = await this.prisma.jobRun.create({
-        data: { jobName, outcome: 'RUNNING' },
+        data: { jobName, startedAt: new Date(), outcome: 'RUNNING' },
         select: { id: true },
       });
       return row.id;
@@ -49,6 +63,16 @@ export class JobRunRepository {
     }
   }
 
+  /**
+   * Closes an open row. A `null` id (its start was never recorded) is a no-op.
+   *
+   * The `row ? … : null` duration fallback below is defensive only and cannot
+   * actually be observed: if `findUnique` returns null the row does not exist,
+   * so the `update` on that same id throws P2025 and is swallowed below. A
+   * missing row therefore loses the ENTIRE end-record — outcome, finishedAt and
+   * error alike — not merely the duration. The run stays visible as a stale
+   * RUNNING, which is the correct reading of a row nobody could close.
+   */
   async recordEnd(id: string | null, outcome: JobOutcome, error?: unknown): Promise<void> {
     if (!id) return;
     try {
@@ -83,7 +107,25 @@ export class JobRunRepository {
     }
   }
 
-  /** Newest row per jobName, for the health surface. */
+  /**
+   * Newest row per jobName, for the health surface.
+   *
+   * THIS METHOD MUST THROW. It is the one place in this class that does not
+   * swallow, and that is deliberate: a swallowed read returns `[]`, which
+   * renders as "no jobs have ever run" — indistinguishable from the exact
+   * condition this table exists to detect. It must throw so the caller can
+   * state the absence WITH a reason. `HealthDetailService.checkJobs` (Task 7)
+   * catches it and emits `unavailable(reason)`. Do not add a
+   * `catch { return []; }` here.
+   *
+   * The raw SQL depends on the Prisma model's `@@map("job_runs")` and on its
+   * quoted camelCase column names. `tsc` cannot see either, so renaming the
+   * mapping or a field compiles green and fails only in production — update
+   * this query alongside any such change. `DISTINCT ON` is also Postgres-only,
+   * and is chosen over Prisma's `distinct` because the latter de-duplicates in
+   * the query engine AFTER fetching every matching row, which on a 30-day
+   * table means pulling the whole table into a 512 MB instance.
+   */
   async lastRunPerJob(): Promise<JobRunRecord[]> {
     const rows = await this.prisma.$queryRaw<JobRunRecord[]>`
       SELECT DISTINCT ON ("jobName")

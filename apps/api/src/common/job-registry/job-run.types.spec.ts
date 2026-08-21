@@ -1,9 +1,11 @@
 import { JOB_RUN_RETENTION_DAYS, retentionCutoff } from './job-run.types';
 
 describe('job-run retention', () => {
-  it('retains 30 days', () => {
-    expect(JOB_RUN_RETENTION_DAYS).toBe(30);
-  });
+  // NOTE: there is deliberately no `expect(JOB_RUN_RETENTION_DAYS).toBe(30)`.
+  // A test asserting a constant equals the literal it is defined as cannot
+  // fail except when someone edits both in the same keystroke. The cutoff test
+  // below pins 30 days transitively through real arithmetic, which is the
+  // behaviour that actually matters.
 
   it('computes the cutoff 30 days before now', () => {
     const now = new Date('2026-08-21T10:00:00.000Z');

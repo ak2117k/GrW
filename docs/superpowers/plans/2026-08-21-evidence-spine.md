@@ -1684,6 +1684,199 @@ git commit -m "feat(job-registry): lazy 30-day retention, no new cron"
 
 ---
 
+## Task 10: Count stops that were never evaluated
+
+**Files:**
+- Create: `apps/api/src/common/stop-evidence/unevaluated-stops.ts`
+- Create: `apps/api/src/common/stop-evidence/stop-evidence.module.ts`
+- Test: `apps/api/src/common/stop-evidence/unevaluated-stops.spec.ts`
+- Modify: `apps/api/src/modules/watch-monitor/services/watch-backstop-poller.service.ts:62-66`
+- Modify: `apps/api/src/modules/ungated-track/services/ungated-tick-poller.service.ts:69-71`
+- Modify: `apps/api/src/modules/sell-futures-track/services/sell-futures-tick-poller.service.ts`
+- Modify: `apps/api/src/modules/adaptive-stop-track/services/adaptive-stop-tick-poller.service.ts`
+- Modify: `apps/api/src/modules/health/health-detail.service.ts`
+
+**Why:** spec §B2.2. Four sites skip a position's stop evaluation when the resolved price is
+not fresh, and each records that fact as a `logger.warn` and nothing else. A stop that did
+not run is exactly the evidence this spine exists to surface, and Phase 2's baseline is not
+trustworthy without it — a consolidation cannot be judged safe against a baseline that does
+not count the ticks it never evaluated.
+
+**Interfaces:**
+- Consumes: `Signal<T>`, `present`, `unavailable` from `health.types.ts`.
+- Produces: `interface UnevaluatedStops { total: number; byTrack: Record<string, number>; lastAt: string | null }`, injectable `UnevaluatedStopsTracker` with `record(track: string): void` and `snapshot(): UnevaluatedStops`.
+
+Requires Task 7 (extends its payload).
+
+- [ ] **Step 1: Write the failing test**
+
+Create `apps/api/src/common/stop-evidence/unevaluated-stops.spec.ts`:
+
+```typescript
+import { UnevaluatedStopsTracker } from './unevaluated-stops';
+
+describe('UnevaluatedStopsTracker', () => {
+  it('starts empty with a null lastAt, not a zero timestamp', () => {
+    expect(new UnevaluatedStopsTracker().snapshot()).toEqual({
+      total: 0,
+      byTrack: {},
+      lastAt: null,
+    });
+  });
+
+  it('counts per track and in total', () => {
+    const t = new UnevaluatedStopsTracker();
+    t.record('watch-backstop', new Date('2026-08-21T10:00:00.000Z'));
+    t.record('ungated', new Date('2026-08-21T10:00:30.000Z'));
+    t.record('ungated', new Date('2026-08-21T10:01:00.000Z'));
+    const s = t.snapshot();
+    expect(s.total).toBe(3);
+    expect(s.byTrack).toEqual({ 'watch-backstop': 1, ungated: 2 });
+  });
+
+  it('reports the most recent occurrence', () => {
+    const t = new UnevaluatedStopsTracker();
+    t.record('ungated', new Date('2026-08-21T10:00:00.000Z'));
+    t.record('ungated', new Date('2026-08-21T10:05:00.000Z'));
+    expect(t.snapshot().lastAt).toBe('2026-08-21T10:05:00.000Z');
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd apps/api && npx jest src/common/stop-evidence/unevaluated-stops.spec.ts`
+Expected: FAIL — `Cannot find module './unevaluated-stops'`
+
+- [ ] **Step 3: Write the tracker**
+
+Create `apps/api/src/common/stop-evidence/unevaluated-stops.ts`:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+
+/** How often a position's stop could not be evaluated, and for which track. */
+export interface UnevaluatedStops {
+  total: number;
+  byTrack: Record<string, number>;
+  /** ISO instant of the most recent skip, or null if it has never happened. */
+  lastAt: string | null;
+}
+
+/**
+ * Counts stop evaluations that did not happen.
+ *
+ * Four poller sites `continue` past a position when `ExitPriceService` cannot
+ * return a fresh price, leaving a `logger.warn` as the only trace. A stop that
+ * was NOT evaluated is not a quiet non-event — it is a position that went
+ * unwatched for that cycle, and it reads identically to a healthy cycle in
+ * every dashboard the platform has.
+ *
+ * In-memory and per-process, like SlotPressureTracker: the question is "is this
+ * happening, and to which track", answered by reading the counter while the
+ * container lives. Persisting each occurrence would be a write on the hot path
+ * of the thing that is already struggling to get a price.
+ */
+@Injectable()
+export class UnevaluatedStopsTracker {
+  private total = 0;
+  private readonly byTrack = new Map<string, number>();
+  private lastAt: Date | null = null;
+
+  record(track: string, at: Date = new Date()): void {
+    this.total++;
+    this.byTrack.set(track, (this.byTrack.get(track) ?? 0) + 1);
+    if (!this.lastAt || at > this.lastAt) this.lastAt = at;
+  }
+
+  snapshot(): UnevaluatedStops {
+    return {
+      total: this.total,
+      byTrack: Object.fromEntries(this.byTrack),
+      lastAt: this.lastAt ? this.lastAt.toISOString() : null,
+    };
+  }
+}
+```
+
+Create `apps/api/src/common/stop-evidence/stop-evidence.module.ts`:
+
+```typescript
+import { Global, Module } from '@nestjs/common';
+import { UnevaluatedStopsTracker } from './unevaluated-stops';
+
+/** Global: four feature modules record into one process-wide counter. */
+@Global()
+@Module({
+  providers: [UnevaluatedStopsTracker],
+  exports: [UnevaluatedStopsTracker],
+})
+export class StopEvidenceModule {}
+```
+
+Register `StopEvidenceModule` in `apps/api/src/app.module.ts` imports.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd apps/api && npx jest src/common/stop-evidence/unevaluated-stops.spec.ts`
+Expected: PASS, 3 tests.
+
+- [ ] **Step 5: Record at all four skip sites**
+
+At each site, inject `UnevaluatedStopsTracker` into the constructor and add a `record()` call
+immediately before the existing `continue`. Keep the existing `logger.warn` — the log is
+still useful when someone is already reading logs; the counter is for when nobody is.
+
+`watch-backstop-poller.service.ts:62-66` becomes:
+
+```typescript
+        if (!r || !r.fresh) {
+          this.unevaluatedStops.record('watch-backstop');
+          this.logger.warn(
+            `[watch-backstop] ${e.symbol} unmonitored — no fresh price, stop not evaluated`,
+          );
+          continue;
+        }
+```
+
+`ungated-tick-poller.service.ts:69-71` becomes:
+
+```typescript
+        if (!r.fresh) {
+          this.unevaluatedStops.record('ungated');
+          this.logger.warn(`[ungated-poll] ${token} unmonitored — no fresh price, onTick skipped`);
+          continue;
+        }
+```
+
+Apply the same shape in `sell-futures-tick-poller.service.ts` (track name `'sell-futures'`)
+and `adaptive-stop-tick-poller.service.ts` (track name `'adaptive-stop'`), at their
+equivalent not-fresh guards. If a track's guard is shaped differently, record at whichever
+branch causes the position to be skipped for that cycle — the criterion is "the stop was not
+evaluated", not the specific condition text.
+
+- [ ] **Step 6: Surface in /healthz/detail**
+
+In `health-detail.service.ts`, inject `UnevaluatedStopsTracker`, add
+`unevaluatedStops: Signal<UnevaluatedStops>` to `HealthDetailPayload`, and collect it in
+`check()` alongside the others with the same try/catch-to-`unavailable` shape used by
+`checkSlots()`.
+
+- [ ] **Step 7: Run the affected suites**
+
+Run: `cd apps/api && npx jest src/common/stop-evidence src/modules/health src/modules/watch-monitor src/modules/ungated-track src/modules/sell-futures-track src/modules/adaptive-stop-track`
+Expected: PASS. A DI failure in a track's existing spec means that spec constructs the
+poller directly and needs the new constructor argument — pass a `new UnevaluatedStopsTracker()`.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/api/src/common/stop-evidence apps/api/src/app.module.ts apps/api/src/modules/health apps/api/src/modules/watch-monitor/services/watch-backstop-poller.service.ts apps/api/src/modules/ungated-track/services/ungated-tick-poller.service.ts apps/api/src/modules/sell-futures-track/services/sell-futures-tick-poller.service.ts apps/api/src/modules/adaptive-stop-track/services/adaptive-stop-tick-poller.service.ts
+git commit -m "feat(stop-evidence): count stops that were never evaluated"
+```
+
+---
+
 ## Verification Gate
 
 **This plan is not complete when the tests pass.** It is complete when production answers a question it previously could not.

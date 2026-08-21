@@ -253,6 +253,29 @@ recording boundary are the same seam. Two passes would guarantee drift: some job
 unrecorded, others the reverse. Each TTL is chosen against that job's measured runtime; a TTL
 shorter than the job lets a second instance start it, which is worse than no lease.
 
+#### B2.3 The exit path sleeps 800 ms exactly when the feed is starved
+
+`transitionLossCut` re-confirms the loss with an independent quote before exiting
+(`watch.service.ts:955`), which is correct — a glitch tick must not trigger a real exit, and
+the abort logic was verified working. But that confirmation runs through `fetchLivePrice`,
+which tries the WS cache first and otherwise retries REST `QUOTE_FETCH_ATTEMPTS = 3` times
+with `QUOTE_RETRY_MS = 400` between attempts. When no quote resolves, that is **800 ms of
+real sleep**, and `transitionLossCut` is awaited inside `applyTick`, which `onTick` awaits
+per entry in a serial loop (`watch.service.ts:719-722`). The backstop poller likewise loops
+its starved positions serially.
+
+On the WS-driven path this rarely bites: the tick that triggered the breach is usually still
+fresh in the cache, so `fetchLivePrice` returns without a round-trip. It bites on the
+**REST-driven paths** — the backstop and the three track pollers — which have no WS cache to
+hit. Those are exactly the feed-starved conditions the backstop exists to cover, so the
+latency arrives precisely when the system is already degraded, and it compounds with the
+30 feed slots and the 350 ms historical gate already recorded as scarce-resource ceilings.
+
+Consequence for Phase 2: the consolidation's baseline must record **exit latency**, not only
+how often positions are priced. A design that prices positions more often but serialises
+800 ms per exit during a broad market drop — when many positions breach at once — is not an
+improvement. Not fixed here; recorded so the consolidation is judged against it.
+
 ### B3. Memory ceiling
 
 `toUpsertInputs` materialises roughly 52,000 derivative objects in one array, and
@@ -419,6 +442,7 @@ slips, say so immediately rather than proceeding onto unverifiable ground.
 | **Consolidation makes a two-strike stop feed-dependent** (§B2.1) — three of the six pollers are today the only thing advancing `slBreachCount` without the WebSocket | REST backstop ships **before** any poller is removed, never alongside; per-module gate in Phase 2 |
 | Tick-driven monitoring makes the feed a single point of failure | Cron backstop retained for safety-critical paths; spine alarms on tick staleness |
 | A stop skipped for want of a fresh price is invisible (§B2.2) | Counter in Phase 0; read as part of the Phase 2 baseline |
+| The exit path sleeps up to 800 ms per position, serially, on the REST paths (§B2.3) — worst during a broad drop, when many positions breach at once | Phase 2's baseline records exit latency, not only pricing frequency; not fixed in this program |
 | Candle persistence grows the database | Retention window in the same change; disk with expiry, never RAM |
 | TanStack migration touches 36 files | Incremental; existing loops keep working until each site is migrated |
 | Session orchestrator centralises timing logic | Per-venue hours unit-tested against known holiday and DST edges before any module subscribes |

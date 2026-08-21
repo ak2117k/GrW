@@ -312,6 +312,40 @@ pass.
 This is included precisely because "we already follow most of it" is the same class of claim
 that the five never-invoked shutdown hooks also satisfied.
 
+**Named item, found during Phase 0 (2026-08-21): seven tenant-owned models are not enrolled
+in tenant scoping.**
+
+`apps/api/src/common/tenant/tenant.constants.ts` defines `TENANT_MODELS`, the set the Prisma
+scoping extension auto-scopes by `userId`, and its own docblock states: *"Keep verbatim in
+sync with the schema; a missing name here is a silent isolation hole."* Twenty models carry
+a `userId` scalar. Thirteen are listed. **Seven are not:** `TradeTracker`, `StockMonitor`,
+`SentinelThesis`, `SentinelVerdict`, `Payment`, `AuditLog`, `ExecutionClaim`.
+
+**This is not currently a data leak, and the verification pass should not report it as one.**
+Every user-facing read was checked: `TradeTrackerService.listOpen/list/listSold/listSoldOhlc`
+each scope by `userId` explicitly, with `listSoldOhlc` throwing `NotFoundException` on a
+miss; `StockMonitor`'s call sites pass `userId` on every read, update and delete. The only
+unscoped `TradeTracker` reads are the two documented cross-tenant engine paths
+(`distinctOpenTokens`, and the per-user grouping that allocates feed slots).
+
+What is missing is enforcement. Correctness rests on every author remembering, in perpetuity,
+to write `where: { userId }`. An endpoint added next month that forgets it would serve one
+user another's open positions, and would pass every test in the suite — the same silent-
+absence shape as everything else in this program, with a tenancy boundary instead of a cron.
+
+Two things the pass must establish, neither of which can be read off the file:
+
+1. **Which absences are deliberate.** `AuditLog` (admin-read, hash-chained) and
+   `ExecutionClaim` (engine-internal idempotency) are plausibly intentional. Plausibly
+   intentional and recorded as intentional are different states, and the file cannot
+   currently distinguish them. Whatever the answer, it belongs in that docblock.
+2. **Whether enrolling the rest is safe.** Likely yes — the extension scopes only when a
+   tenant context is active, and engine/cron code runs with none, which is precisely what the
+   `SYSTEM_USER_ID` docblock describes. That must be verified against the cross-tenant engine
+   paths before any name is added, not assumed.
+
+Found by a subagent working on the job registry, which had no reason to be looking at tenancy.
+
 **Named item, found during Phase 0 (2026-08-21): truncation is not redaction.**
 `health.service.ts:100` renders errors through a `describe()` that whitespace-collapses and
 caps at 200 characters, justified in its own comment by the fact that Prisma connection

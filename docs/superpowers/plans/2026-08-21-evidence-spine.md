@@ -41,6 +41,14 @@
 | `apps/web/src/services/feed-health.ts` | Pure stall-classification + report shape |
 | `apps/web/src/services/websocket.ts` | Replace temp diagnostics with the structured reporter |
 
+**Retention ordering constraint (review finding, Task 1).** `job_runs` has 41 potential
+writers and its pruner does not exist until Task 9. **Task 9 must land before the migration
+is applied to any production database** — otherwise the table grows unbounded for the window
+between them, which violates this plan's own "retention in the same change" constraint in
+spirit if not in letter. Execution order is therefore 1 → 2 → 3 → **9** → 4 → 5 → 6 → 7 → 10.
+The local database is down and no migration has been generated, so no such window currently
+exists; this constraint keeps it that way.
+
 **Parallelisation for agents.** Tasks 1 → 2 → 3 are strictly sequential (schema, then repository, then wrapper). Once Task 2 lands: **Task 5** (jobs signal) can start. **Task 4** (memory), **Task 6** (slot pressure) and **Task 8** (client report) are independent of 1–3 entirely and may run from the start. **Task 7** needs 4, 5 and 6. **Task 9** needs 1 and 2.
 
 ---
@@ -64,9 +72,11 @@ Create `apps/api/src/common/job-registry/job-run.types.spec.ts`:
 import { JOB_RUN_RETENTION_DAYS, retentionCutoff } from './job-run.types';
 
 describe('job-run retention', () => {
-  it('retains 30 days', () => {
-    expect(JOB_RUN_RETENTION_DAYS).toBe(30);
-  });
+  // NOTE: there is deliberately no `expect(JOB_RUN_RETENTION_DAYS).toBe(30)`.
+  // A test asserting a constant equals the literal it is defined as cannot
+  // fail except when someone edits both in the same keystroke. The cutoff test
+  // below pins 30 days transitively through real arithmetic, which is the
+  // behaviour that actually matters.
 
   it('computes the cutoff 30 days before now', () => {
     const now = new Date('2026-08-21T10:00:00.000Z');
@@ -92,7 +102,16 @@ Create `apps/api/src/common/job-registry/job-run.types.ts`:
 
 ```typescript
 /**
- * How a scheduled run ended.
+ * How a scheduled run ended — or that it has not ended.
+ *
+ * `RUNNING` exists because `outcome` is written at INSERT, before the job's
+ * fate is known. Without it the opening row must claim an outcome it cannot
+ * have: `SUCCESS` would make an OOM-killed job (a live risk on a 512 MB
+ * instance) leave a permanent row reading "succeeded", and `FAILED` would
+ * report every long-running job as failed for as long as it works correctly.
+ * `RUNNING` is the only honest thing to write at that moment, and it stays
+ * diagnosable afterwards: a crashed job leaves `RUNNING` whose `startedAt`
+ * keeps aging, which is visibly different from a job that is merely busy.
  *
  * `SKIPPED_LEASE` is not a failure and must never be silently dropped: a job
  * correctly deferring to another instance and a job that is dead both write
@@ -100,7 +119,7 @@ Create `apps/api/src/common/job-registry/job-run.types.ts`:
  * tell them apart — which is the same silent-absence trap this whole spine
  * exists to close.
  */
-export type JobOutcome = 'SUCCESS' | 'FAILED' | 'SKIPPED_LEASE';
+export type JobOutcome = 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED_LEASE';
 
 /** One recorded execution, as read back by the health surface. */
 export interface JobRunRecord {
@@ -137,6 +156,7 @@ Append to `prisma/schema.prisma`:
 
 ```prisma
 enum JobOutcome {
+  RUNNING
   SUCCESS
   FAILED
   SKIPPED_LEASE
@@ -144,6 +164,8 @@ enum JobOutcome {
 
 /// One execution of a scheduled job. The absence of rows for a jobName is the
 /// signal that matters: it means the job has never run in this environment.
+/// A row stuck at RUNNING with an ageing startedAt means the process died
+/// mid-job — distinguishable from a job that is simply still working.
 model JobRun {
   id         String     @id @default(cuid())
   jobName    String
@@ -153,14 +175,20 @@ model JobRun {
   error      String?
   durationMs Int?
 
-  /// Serves the per-job "when did this last run" lookup.
+  // Serves the per-job "when did this last run" lookup.
   @@index([jobName, startedAt])
-  /// Serves retention pruning, which filters on startedAt alone and cannot use
-  /// the composite above.
+  // Serves retention pruning, which filters on startedAt alone. The composite
+  // above leads with jobName, so a btree cannot range-scan it for a bare
+  // startedAt predicate — the prune would degrade to a seq scan without this.
   @@index([startedAt])
   @@map("job_runs")
 }
 ```
+
+Use `//` for the index rationale, not `///`. `///` is Prisma *documentation* syntax
+that flows into generated client artifacts; the neighbouring models
+(`SentinelVerdict:1634`, `OiWallSnapshot:1652`) deliberately use `//` for this
+rationale-comment role.
 
 - [ ] **Step 6: Generate the migration**
 
@@ -221,7 +249,7 @@ describe('JobRunRepository', () => {
     const repo = new JobRunRepository(prisma as never);
     await expect(repo.recordStart('nightly-sweep')).resolves.toBe('row-1');
     expect(prisma.jobRun.create).toHaveBeenCalledWith({
-      data: { jobName: 'nightly-sweep', outcome: 'FAILED' },
+      data: { jobName: 'nightly-sweep', outcome: 'RUNNING' },
       select: { id: true },
     });
   });
@@ -288,17 +316,23 @@ export class JobRunRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Opens a row, pessimistically marked FAILED.
+   * Opens a row marked RUNNING.
    *
-   * A process OOM-killed mid-job never reaches `recordEnd`, so the row it
-   * leaves behind must already say something true. Defaulting to SUCCESS would
-   * make every hard kill look like a clean run — precisely the lie this table
-   * exists to prevent.
+   * The outcome column is written at INSERT, before the job's fate is known,
+   * so the opening value must be one that is TRUE at that instant. `SUCCESS`
+   * would make a process OOM-killed mid-job (a live risk at 512 MB) leave a
+   * permanent row reading "succeeded" — the exact lie this table exists to
+   * prevent. `FAILED` would be the opposite lie: every long-running job would
+   * read as failed for the whole time it is working correctly.
+   *
+   * RUNNING stays diagnosable after a crash, too: the row keeps its startedAt
+   * and never advances, so a stale RUNNING is visibly a death rather than a
+   * job that is merely busy.
    */
   async recordStart(jobName: string): Promise<string | null> {
     try {
       const row = await this.prisma.jobRun.create({
-        data: { jobName, outcome: 'FAILED' },
+        data: { jobName, outcome: 'RUNNING' },
         select: { id: true },
       });
       return row.id;
@@ -723,6 +757,29 @@ import { toJobFreshness } from './health.jobs';
 const NOW = new Date('2026-08-21T10:00:00.000Z');
 
 describe('toJobFreshness', () => {
+  it('carries RUNNING through, so a stale in-flight row is diagnosable', () => {
+    // A crashed process leaves outcome=RUNNING with a startedAt that keeps
+    // ageing. Consumers distinguish "busy" from "died" by reading ageSec
+    // alongside the outcome, so the outcome must survive this mapping intact.
+    const out = toJobFreshness(
+      [
+        {
+          jobName: 'instrument-refresh',
+          startedAt: new Date('2026-08-21T08:00:00.000Z'),
+          finishedAt: null,
+          outcome: 'RUNNING',
+          error: null,
+          durationMs: null,
+        },
+      ],
+      ['instrument-refresh'],
+      NOW,
+    );
+    expect(out['instrument-refresh'].outcome).toBe('RUNNING');
+    expect(out['instrument-refresh'].ageSec).toBe(7200);
+    expect(out['instrument-refresh'].at).toBe('2026-08-21T08:00:00.000Z');
+  });
+
   it('reports a job that has never run as at:null, NOT ageSec:0', () => {
     const out = toJobFreshness([], ['sentinel-tick'], NOW);
     expect(out['sentinel-tick']).toEqual({

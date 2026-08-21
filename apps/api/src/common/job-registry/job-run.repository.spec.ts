@@ -20,17 +20,31 @@ function makePrisma() {
   };
 }
 
+/** Pins `new Date()` inside the method under test to FROZEN_NOW. */
+function freezeClock(): void {
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(FROZEN_NOW);
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+}
+
 describe('JobRunRepository', () => {
   describe('recordStart', () => {
+    freezeClock();
+
     it('records a start and returns the row id', async () => {
       const prisma = makePrisma();
       const repo = new JobRunRepository(prisma as never);
       await expect(repo.recordStart('nightly-sweep')).resolves.toBe('row-1');
       expect(prisma.jobRun.create).toHaveBeenCalledWith({
-        // startedAt is set explicitly (Node clock), NOT left to the schema's
-        // @default(now()) database clock — recordEnd subtracts it from a
-        // Node-clock finishedAt, and mixing the two imports Render/Neon skew.
-        data: { jobName: 'nightly-sweep', startedAt: expect.any(Date), outcome: 'RUNNING' },
+        // startedAt is asserted against the frozen instant, not expect.any(Date):
+        // the property Fix 7 establishes is that it comes from the NODE clock,
+        // and expect.any(Date) would accept new Date(0) or a database-clock
+        // value just as happily. recordEnd subtracts this from a Node-clock
+        // finishedAt, so mixing the two imports Render/Neon skew.
+        data: { jobName: 'nightly-sweep', startedAt: FROZEN_NOW, outcome: 'RUNNING' },
         select: { id: true },
       });
     });
@@ -46,12 +60,7 @@ describe('JobRunRepository', () => {
   describe('recordEnd', () => {
     // finishedAt comes from `new Date()` inside the method; freezing the clock
     // makes the 60s duration exact rather than merely positive.
-    beforeEach(() => {
-      jest.useFakeTimers().setSystemTime(FROZEN_NOW);
-    });
-    afterEach(() => {
-      jest.useRealTimers();
-    });
+    freezeClock();
 
     it('closes the identified row with its outcome, finish time and duration', async () => {
       const prisma = makePrisma();
@@ -100,6 +109,8 @@ describe('JobRunRepository', () => {
   });
 
   describe('recordSkipped', () => {
+    freezeClock();
+
     it('records a lease deferral as a closed SKIPPED_LEASE row', async () => {
       const prisma = makePrisma();
       const repo = new JobRunRepository(prisma as never);
@@ -108,8 +119,12 @@ describe('JobRunRepository', () => {
       expect(arg.data.jobName).toBe('nightly-sweep');
       expect(arg.data.outcome).toBe('SKIPPED_LEASE');
       expect(arg.data.durationMs).toBe(0);
-      // Closed on write: a deferral has no in-flight period to observe.
-      expect(arg.data.finishedAt).toEqual(arg.data.startedAt);
+      // Closed on write: a deferral has no in-flight period to observe. Both
+      // timestamps are asserted against the frozen instant rather than against
+      // each other — `finishedAt === startedAt` also holds when a mutant drops
+      // BOTH fields and compares undefined to undefined.
+      expect(arg.data.startedAt).toEqual(FROZEN_NOW);
+      expect(arg.data.finishedAt).toEqual(FROZEN_NOW);
     });
 
     it('never throws when the database write fails', async () => {

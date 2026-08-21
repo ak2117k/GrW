@@ -60,6 +60,25 @@ describe('JobRunnerService', () => {
     expect(repo.recordEnd).toHaveBeenCalledWith('row-1', 'SUCCESS', undefined);
   });
 
+  /**
+   * Recording must never gate execution. `recordStart` returns null when its
+   * own insert failed (it swallows, by design), and a null id must mean only
+   * "this run will not be recorded" — never "this run does not happen". An
+   * early return on a missing id would let a Neon wake-up stop every scheduled
+   * job on the platform while CI stayed green: the observability layer becoming
+   * the thing that halts the system it observes.
+   */
+  it('runs the job anyway when the start row could not be recorded', async () => {
+    const { lease, repo } = makeDeps();
+    repo.recordStart.mockResolvedValue(null);
+    const runner = new JobRunnerService(lease as never, repo as never);
+    const fn = jest.fn(async () => 42);
+    const result = await runner.run('reconcile', { ttlMs: 60_000, onRedisError: 'skip' }, fn);
+    expect(fn).toHaveBeenCalled();
+    expect(result).toBe(42);
+    expect(repo.recordEnd).toHaveBeenCalledWith(null, 'SUCCESS', undefined);
+  });
+
   it('passes the caller-chosen failure mode straight through to the lease', async () => {
     const { lease, repo } = makeDeps();
     const runner = new JobRunnerService(lease as never, repo as never);

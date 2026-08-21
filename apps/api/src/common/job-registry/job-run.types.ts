@@ -15,6 +15,15 @@
  * nothing to their own tables, so without this outcome the registry cannot
  * tell them apart — which is the same silent-absence trap this whole spine
  * exists to close.
+ *
+ * READ IT AS "DEFERRED", NOT AS "ANOTHER INSTANCE IS LIVE". It covers two
+ * causes: another instance genuinely holds the lease, AND Redis being
+ * unreachable while the caller chose fail-closed (`onRedisError: 'skip'`) — in
+ * which case the job stood down rather than risk a double-run. So a wall of
+ * `SKIPPED_LEASE` during a Redis incident is a single-instance app declining to
+ * gamble, not evidence of a second container. Both readings are honest about
+ * the fact that matters — the job did not run — and one recorded row beats an
+ * absence, which is why this stays a single outcome rather than splitting.
  */
 export type JobOutcome = 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED_LEASE';
 

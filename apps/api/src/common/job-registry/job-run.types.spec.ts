@@ -1,4 +1,4 @@
-import { JOB_RUN_RETENTION_DAYS, retentionCutoff } from './job-run.types';
+import { retentionCutoff } from './job-run.types';
 
 describe('job-run retention', () => {
   // NOTE: there is deliberately no `expect(JOB_RUN_RETENTION_DAYS).toBe(30)`.

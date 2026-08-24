@@ -2,50 +2,9 @@ import { useEffect } from 'react';
 import { wsService } from '@/services/websocket';
 import api from '@/services/api';
 import { useMarketStore } from '@/stores/market-store';
-import { type Quote, type MarketStatus } from '@/types';
+import { type Quote } from '@/types';
 import type { FeedHealth } from '@/services/feed-health';
-
-/**
- * Compute current Indian market status using IST time.
- * Uses Intl to get the correct IST hour/minute regardless of the local timezone.
- */
-function computeMarketStatus(): MarketStatus {
-  const now = new Date();
-
-  // Use Intl formatter to get IST hour and minute — no manual offset math needed
-  const istParts = new Intl.DateTimeFormat('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    hour: 'numeric',
-    minute: 'numeric',
-    weekday: 'short',
-    hour12: false,
-  }).formatToParts(now);
-
-  const hour = Number(istParts.find((p) => p.type === 'hour')?.value ?? 0);
-  const minute = Number(istParts.find((p) => p.type === 'minute')?.value ?? 0);
-  const weekday = istParts.find((p) => p.type === 'weekday')?.value ?? '';
-
-  // Weekend check (Sat/Sun in en-IN locale)
-  if (weekday === 'Sat' || weekday === 'Sun') return 'closed';
-
-  const totalMinutes = hour * 60 + minute;
-
-  // NSE/BSE hours
-  const preMarketOpen = 9 * 60;       // 09:00
-  const marketOpen = 9 * 60 + 15;     // 09:15
-  const marketClose = 15 * 60 + 30;   // 15:30
-
-  // MCX hours (9:00 AM – 11:30 PM IST)
-  const mcxOpen = 9 * 60;             // 09:00
-  const mcxClose = 23 * 60 + 30;      // 23:30
-
-  const nseOpen = totalMinutes >= marketOpen && totalMinutes <= marketClose;
-  const mcxOpen_ = totalMinutes >= mcxOpen && totalMinutes <= mcxClose;
-
-  if (nseOpen || mcxOpen_) return 'open';
-  if (totalMinutes >= preMarketOpen && totalMinutes < marketOpen) return 'pre-market';
-  return 'closed';
-}
+import { marketPhase } from '@/services/refresh-policy';
 
 export function useMarketData(): void {
   const updateQuote = useMarketStore((s) => s.updateQuote);
@@ -55,8 +14,8 @@ export function useMarketData(): void {
 
   // Compute market status on mount and refresh every 30 seconds
   useEffect(() => {
-    setMarketStatus(computeMarketStatus());
-    const id = setInterval(() => setMarketStatus(computeMarketStatus()), 30_000);
+    setMarketStatus(marketPhase());
+    const id = setInterval(() => setMarketStatus(marketPhase()), 30_000);
     return () => clearInterval(id);
   }, [setMarketStatus]);
 

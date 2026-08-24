@@ -1,8 +1,9 @@
 import { Controller, Get, HttpCode, HttpStatus, Logger } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Public } from '../../common/decorators';
+import { AdminOnly, Public } from '../../common/decorators';
 import { HealthService, sessionContext } from './health.service';
 import { unavailable, type HealthPayload } from './health.types';
+import { HealthDetailService, type HealthDetailPayload } from './health-detail.service';
 
 /**
  * Liveness + keep-warm + freshness endpoint (`GET /healthz`).
@@ -34,18 +35,24 @@ import { unavailable, type HealthPayload } from './health.types';
  * them, and leaves the verdict to alerting, which can be silenced overnight and
  * cannot restart anything.
  *
- * Unauthenticated and scraped by external monitors, so the body carries no
- * credentials, no connection strings and no user data — counts and clocks only.
+ * `GET /healthz` is unauthenticated and scraped by external monitors, so its
+ * body carries no credentials, no connection strings and no user data — counts
+ * and clocks only. Its sibling `GET /healthz/detail` is admin-only precisely
+ * because its body DOES describe internals — job names and capacity numbers.
+ * See {@link HealthDetailService}.
  */
 @ApiTags('Health')
-@Public()
 @Controller('healthz')
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
-  constructor(private readonly health: HealthService) {}
+  constructor(
+    private readonly health: HealthService,
+    private readonly healthDetail: HealthDetailService,
+  ) {}
 
   @Get()
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Liveness + keep-warm + platform freshness signals' })
   async check(): Promise<HealthPayload> {
@@ -73,5 +80,19 @@ export class HealthController {
         openPositions: unavailable(reason),
       };
     }
+  }
+
+  /**
+   * Admin-only detail: per-job last-run, process memory, feed slot pressure.
+   *
+   * Behind a role check because job names describe internals and slot counts
+   * describe capacity. `/healthz` stays public precisely so this can be private.
+   */
+  @Get('detail')
+  @AdminOnly()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Admin-only platform execution evidence' })
+  async detail(): Promise<HealthDetailPayload> {
+    return this.healthDetail.check();
   }
 }

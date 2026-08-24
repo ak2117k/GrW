@@ -15,6 +15,7 @@
     "clean": "rm -rf dist node_modules"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.102.3",
     "@td/shared": "workspace:*",
     "axios": "^1.7.0",
     "clsx": "^2.1.0",

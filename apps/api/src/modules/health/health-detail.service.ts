@@ -1,5 +1,7 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { JobRunRepository } from '../../common/job-registry';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import type { ClientFeedReportDto } from './dto/client-feed-report.dto';
 import { toProcessMemory, type ProcessMemory } from './health.memory';
 import { toJobFreshness, type JobFreshness } from './health.jobs';
 import type { SlotPressure } from '../market-data/services/slot-pressure';
@@ -46,6 +48,7 @@ function describe(err: unknown): string {
 @Injectable()
 export class HealthDetailService {
   constructor(
+    private readonly prisma: PrismaService,
     private readonly runs: JobRunRepository,
     @Optional()
     @Inject(FEED_STATUS_SOURCE)
@@ -85,6 +88,37 @@ export class HealthDetailService {
       return present(this.feed.getSlotPressure(), 'MarketFeedService.getSlotPressure');
     } catch (err) {
       return unavailable(describe(err));
+    }
+  }
+
+  /**
+   * Store one client stall report.
+   *
+   * Returns `{ accepted: false }` instead of throwing. The caller is a browser
+   * whose feed is ALREADY degraded; answering its diagnostic with a 500 would
+   * add a visible error to a session that is merely stale, and could start a
+   * retry loop against an endpoint that is failing.
+   */
+  async recordClientReport(
+    userId: string | null,
+    dto: ClientFeedReportDto,
+  ): Promise<{ accepted: boolean }> {
+    try {
+      await this.prisma.clientFeedReport.create({
+        data: {
+          userId,
+          health: dto.health,
+          tickSocketUp: dto.tickSocketUp,
+          secondsSinceLastTick: dto.secondsSinceLastTick ?? null,
+          transport: dto.transport ?? null,
+          subscribedTokens: dto.subscribedTokens,
+          namespaces: dto.namespaces,
+          recoveredWithoutReload: dto.recoveredWithoutReload ?? false,
+        },
+      });
+      return { accepted: true };
+    } catch {
+      return { accepted: false };
     }
   }
 }

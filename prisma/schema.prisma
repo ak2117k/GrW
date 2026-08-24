@@ -2023,3 +2023,22 @@ model JobRun {
   @@index([startedAt])
   @@map("job_runs")
 }
+
+/// A browser's own account of a stalled feed. The client is the only party that
+/// can see "the badge said Live while ticks were dead", and that observation
+/// previously existed only in a console.warn nobody read.
+model ClientFeedReport {
+  id                     String   @id @default(cuid())
+  userId                 String?
+  health                 String   // 'stale' | 'offline'
+  tickSocketUp           Boolean
+  secondsSinceLastTick   Int?
+  transport              String?
+  subscribedTokens       Int
+  namespaces             Json
+  recoveredWithoutReload Boolean  @default(false)
+  createdAt              DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("client_feed_reports")
+}

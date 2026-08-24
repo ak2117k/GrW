@@ -1,9 +1,11 @@
-import { Controller, Get, HttpCode, HttpStatus, Logger } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Logger, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AdminOnly, Public } from '../../common/decorators';
+import { AdminOnly, CurrentUser, Public } from '../../common/decorators';
+import type { AuthenticatedUser } from '../../common/decorators';
 import { HealthService, sessionContext } from './health.service';
 import { unavailable, type HealthPayload } from './health.types';
 import { HealthDetailService, type HealthDetailPayload } from './health-detail.service';
+import { ClientFeedReportDto } from './dto/client-feed-report.dto';
 
 /**
  * Liveness + keep-warm + freshness endpoint (`GET /healthz`).
@@ -94,5 +96,28 @@ export class HealthController {
   @ApiOperation({ summary: 'Admin-only platform execution evidence' })
   async detail(): Promise<HealthDetailPayload> {
     return this.healthDetail.check();
+  }
+
+  /**
+   * Ingest a browser stall report.
+   *
+   * Authenticated but role-free -- any signed-in user. A JWT is required so
+   * reports carry a user id and cannot be spammed anonymously; ADMIN is not,
+   * because the users who SEE stalls are ordinary users.
+   *
+   * Returns 202 and never fails the caller: a rejected diagnostic must not
+   * surface as an error in a UI that is already degraded.
+   */
+  @Post('client-report')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Record a client-observed feed stall' })
+  async clientReport(
+    @CurrentUser() user: AuthenticatedUser | undefined,
+    @Body() body: ClientFeedReportDto,
+  ): Promise<{ accepted: boolean }> {
+    // `userId`, not `id` -- that is the field JwtStrategy.validate attaches.
+    // Reading `.id` here type-checks against a loose annotation and silently
+    // files every report as anonymous.
+    return this.healthDetail.recordClientReport(user?.userId ?? null, body);
   }
 }

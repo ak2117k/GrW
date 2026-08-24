@@ -62,4 +62,35 @@ describe('HealthController', () => {
       ).toEqual(['ADMIN']);
     });
   });
+
+  describe('clientReport', () => {
+    it('files the report under the authenticated user id', async () => {
+      // JwtStrategy attaches { userId, role, email }. Reading user.id here
+      // would compile fine against a loose annotation and file every report as
+      // anonymous -- a silent absence, which is the thing this branch exists to
+      // stamp out.
+      const record = jest.fn().mockResolvedValue({ accepted: true });
+      const controller = new HealthController(
+        { check: jest.fn() } as unknown as HealthService,
+        { recordClientReport: record } as unknown as HealthDetailService,
+      );
+      const body = { health: 'stale', tickSocketUp: true, subscribedTokens: 0, namespaces: {} } as never;
+
+      await controller.clientReport({ userId: 'u-1', role: 'USER', email: 'a@b.c' }, body);
+
+      expect(record).toHaveBeenCalledWith('u-1', body);
+    });
+
+    it('accepts an unauthenticated principal as a null user rather than throwing', async () => {
+      const record = jest.fn().mockResolvedValue({ accepted: true });
+      const controller = new HealthController(
+        { check: jest.fn() } as unknown as HealthService,
+        { recordClientReport: record } as unknown as HealthDetailService,
+      );
+
+      await controller.clientReport(undefined, {} as never);
+
+      expect(record).toHaveBeenCalledWith(null, {});
+    });
+  });
 });

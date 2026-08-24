@@ -149,7 +149,22 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this.initRedis();
+    // DELIBERATELY NOT AWAITED. Nest awaits every `onModuleInit` before
+    // `app.listen()` runs, so anything slow here sits in front of the port bind
+    // and Render fails the deploy with "no open ports detected" — the same trap
+    // the boot instrument refresh above had to be detached from.
+    //
+    // Redis here carries cross-process tick distribution. That is an
+    // optimisation: this process serves its own ticks from memory without it.
+    // Trading an unavailable optimisation for an unbootable API is never the
+    // right trade, so the server binds and Redis attaches behind it.
+    void this.initRedis().catch((err) => {
+      this.logger.error(
+        `Redis init failed — cross-process tick distribution is off: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
 
     // Per-user migration: closed candles are no longer pushed to the gateway
     // from the shared feed. The chart builds forming candles from per-user
@@ -727,7 +742,27 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       // Force IPv4 to avoid AAAA-lookup ENOTFOUND on container networks.
       const redisFamily = this.configService.get<number>('redis.family');
 
-      const redisOptions = { host: redisHost, port: redisPort, password: redisPassword, tls: redisTls, family: redisFamily };
+      const redisOptions = {
+        host: redisHost,
+        port: redisPort,
+        password: redisPassword,
+        tls: redisTls,
+        family: redisFamily,
+        // WITHOUT THESE THREE, AN UNREACHABLE REDIS HANGS THE PROCESS FOREVER.
+        //
+        // ioredis defaults are built for a long-lived client that should ride
+        // out a blip: `enableOfflineQueue` queues commands issued while
+        // disconnected, and the default retry strategy never gives up. So
+        // `await subscribe()` below neither resolved nor rejected when Redis
+        // was gone — the try/catch caught nothing because nothing was thrown,
+        // and boot stopped dead in front of the port bind.
+        //
+        // Same bounds as cron-lease.redis.ts and auth.module.ts, for the same
+        // reason: a missing Redis must present as an error, not as silence.
+        maxRetriesPerRequest: 1,
+        enableOfflineQueue: false,
+        connectTimeout: 3000,
+      };
 
       this.redisPub = new Redis(redisOptions);
       this.redisSub = new Redis(redisOptions);

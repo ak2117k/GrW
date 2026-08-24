@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { OctagonX, Wifi, WifiOff, LogOut, Menu } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useMarketStore } from '@/stores/market-store';
+import { feedBadge } from '@/services/feed-health';
 import { useAuthStore } from '@/stores/auth-store';
 import { ThemeToggle } from '@/components/common';
 
@@ -34,9 +35,17 @@ function useIST() {
   return time;
 }
 
+/** Health tone -> colour token. Stale gets its own colour; it is its own state. */
+const FEED_TONE: Record<'positive' | 'warning' | 'negative', string> = {
+  positive: 'text-[var(--color-accent-green)]',
+  warning: 'text-[var(--color-accent-yellow)]',
+  negative: 'text-[var(--color-accent-red)]',
+};
+
 export default function Header({ onMenuClick }: HeaderProps) {
   const time = useIST();
-  const isConnected = useMarketStore((s) => s.isConnected);
+  const feedHealth = useMarketStore((s) => s.feedHealth);
+  const feed = feedBadge(feedHealth);
   const marketStatus = useMarketStore((s) => s.marketStatus);
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
@@ -89,10 +98,8 @@ export default function Header({ onMenuClick }: HeaderProps) {
 
         {/* Live/Disconnected indicator — hidden on the smallest screens. */}
         <div className="hidden items-center gap-1.5 text-[var(--color-text-muted)] sm:flex">
-          {isConnected ? <Wifi size={14} /> : <WifiOff size={14} />}
-          <span className="text-xs">
-            {isConnected ? 'Live' : 'Disconnected'}
-          </span>
+          {feed.wifi ? <Wifi size={14} /> : <WifiOff size={14} />}
+          <span className={clsx('text-xs', FEED_TONE[feed.tone])}>{feed.label}</span>
         </div>
       </div>
 

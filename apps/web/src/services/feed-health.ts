@@ -33,3 +33,33 @@ export function classifyFeed(input: FeedClassifierInput): FeedHealth {
   if (input.msSinceLastTick === null) return 'stale';
   return input.msSinceLastTick > STALE_TICK_THRESHOLD_MS ? 'stale' : 'live';
 }
+
+/** How the feed's health should be presented. Pure, so it can be asserted on. */
+export interface FeedBadge {
+  label: 'Live' | 'Stale' | 'Offline';
+  /**
+   * Whether to show a connected wifi glyph. True for `stale` on purpose: the
+   * socket IS up, and a struck-through icon would trade one false claim for
+   * another.
+   */
+  wifi: boolean;
+  tone: 'positive' | 'warning' | 'negative';
+}
+
+const BADGES: Record<FeedHealth, FeedBadge> = {
+  live: { label: 'Live', wifi: true, tone: 'positive' },
+  stale: { label: 'Stale', wifi: true, tone: 'warning' },
+  offline: { label: 'Offline', wifi: false, tone: 'negative' },
+};
+
+/**
+ * Three distinct states, because the middle one is the whole point.
+ *
+ * The badge this replaces had two: connected or not, decided by
+ * `connectedCount > 0` across four namespaces. A stalled tick feed is neither
+ * — the socket is up and no prices are arriving — and it was being rendered as
+ * "Live". Collapsing `stale` back into either neighbour reintroduces the bug.
+ */
+export function feedBadge(health: FeedHealth): FeedBadge {
+  return BADGES[health];
+}

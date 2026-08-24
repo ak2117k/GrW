@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Search, Globe, Wifi, WifiOff, Loader2 } from 'lucide-react';
 import { useMarketStore } from '@/stores/market-store';
+import { feedBadge } from '@/services/feed-health';
 import { useWatchlist } from '@/hooks/useWatchlist';
 import { useInstrumentSearch } from '@/hooks/useInstrumentSearch';
 import { useCommodities } from '@/hooks/useCommodities';
@@ -23,6 +24,13 @@ const TABS: { key: Tab; label: string }[] = [
   { key: 'watchlist', label: 'My Watchlist' },
 ];
 
+/** Health tone -> colour token. Stale gets its own colour; it is its own state. */
+const FEED_TONE: Record<'positive' | 'warning' | 'negative', string> = {
+  positive: 'text-[var(--color-accent-green)]',
+  warning: 'text-[var(--color-accent-yellow)]',
+  negative: 'text-[var(--color-accent-red)]',
+};
+
 export default function MarketPage() {
   const [activeTab, setActiveTab] = useState<Tab>('all');
 
@@ -32,7 +40,8 @@ export default function MarketPage() {
   const [searchText, setSearchText] = useState('');
   const [exchangeFilter, setExchangeFilter] = useState('ALL');
   const [showDropdown, setShowDropdown] = useState(false);
-  const isConnected = useMarketStore((s) => s.isConnected);
+  const feedHealth = useMarketStore((s) => s.feedHealth);
+  const feed = feedBadge(feedHealth);
   const { watchlist } = useWatchlist();
   const navigate = useNavigate();
   const { results: searchResults, isLoading: searchLoading, search: doSearch, clear: clearSearch } = useInstrumentSearch();
@@ -89,17 +98,10 @@ export default function MarketPage() {
           <h1 className="text-xl font-bold text-[var(--color-text-primary)]">Market Overview</h1>
         </div>
         <div className="flex items-center gap-2">
-          {isConnected ? (
-            <span className="flex items-center gap-1.5 text-xs text-[var(--color-accent-green)]">
-              <Wifi size={12} />
-              Live
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5 text-xs text-[var(--color-accent-red)]">
-              <WifiOff size={12} />
-              Disconnected
-            </span>
-          )}
+          <span className={`flex items-center gap-1.5 text-xs ${FEED_TONE[feed.tone]}`}>
+            {feed.wifi ? <Wifi size={12} /> : <WifiOff size={12} />}
+            {feed.label}
+          </span>
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import { wsService } from '@/services/websocket';
 import api from '@/services/api';
 import { useMarketStore } from '@/stores/market-store';
 import { type Quote, type MarketStatus } from '@/types';
+import type { FeedHealth } from '@/services/feed-health';
 
 /**
  * Compute current Indian market status using IST time.
@@ -49,6 +50,7 @@ function computeMarketStatus(): MarketStatus {
 export function useMarketData(): void {
   const updateQuote = useMarketStore((s) => s.updateQuote);
   const setConnected = useMarketStore((s) => s.setConnected);
+  const setFeedHealth = useMarketStore((s) => s.setFeedHealth);
   const setMarketStatus = useMarketStore((s) => s.setMarketStatus);
 
   // Compute market status on mount and refresh every 30 seconds
@@ -113,9 +115,15 @@ export function useMarketData(): void {
       setConnected(connected);
     });
 
+    const unsubHealth = wsService.subscribe('feed-health', (data) => {
+      const { health } = data as { health: FeedHealth };
+      setFeedHealth(health);
+    });
+
     return () => {
       unsubTick();
       unsubConn();
+      unsubHealth();
     };
-  }, [updateQuote, setConnected]);
+  }, [updateQuote, setConnected, setFeedHealth]);
 }

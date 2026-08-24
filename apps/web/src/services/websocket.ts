@@ -64,7 +64,9 @@ export type WSEventName =
   | 'auto-trade:scan-complete'
   | 'auto-trade:error'
   // synthetic
-  | 'connection-status';
+  | 'connection-status'
+  // The honest feed verdict — tick-socket freshness, not namespace count.
+  | 'feed-health';
 
 type EventCallback = (data: unknown) => void;
 
@@ -299,6 +301,13 @@ class WebSocketService {
     if (this.healthTimer) return;
     this.healthTimer = setInterval(() => {
       const health = this.getFeedHealth();
+
+      // Published every poll, not only on a transition. The badge has to be
+      // right for a tab that LOADS into an already-healthy feed, which never
+      // transitions — subscribers hold a primitive, so an unchanged value is
+      // a no-op re-render.
+      this.emit('feed-health', { health });
+
       if (health === this.lastHealth) return;
 
       const previous = this.lastHealth;

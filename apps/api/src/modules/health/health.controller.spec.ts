@@ -93,4 +93,34 @@ describe('HealthController', () => {
       expect(record).toHaveBeenCalledWith(null, {});
     });
   });
+  describe('GET /healthz/live', () => {
+    // The keep-warm pinger hits this every ~10 minutes. Its whole purpose is to
+    // hold the Render dyno awake WITHOUT touching Postgres: /healthz runs a
+    // SELECT 1 that deliberately wakes the autosuspended Neon compute, and
+    // pinging that on a 10-minute cycle for 14 hours a day is what exhausted
+    // the free compute allowance. Warmth for the dyno, sleep for the database.
+
+    it('does not touch the health collector, and therefore not the database', async () => {
+      const check = jest.fn();
+      const controller = new HealthController(
+        { check } as unknown as HealthService,
+        { check: jest.fn() } as unknown as HealthDetailService,
+      );
+
+      const body = controller.live();
+
+      expect(check).not.toHaveBeenCalled();
+      expect(body.status).toBe('ok');
+      expect(typeof body.uptimeSec).toBe('number');
+    });
+
+    it('is public — the pinger is anonymous', () => {
+      expect(
+        new Reflector().getAllAndOverride(IS_PUBLIC_KEY, [
+          HealthController.prototype.live,
+          HealthController,
+        ]),
+      ).toBe(true);
+    });
+  });
 });

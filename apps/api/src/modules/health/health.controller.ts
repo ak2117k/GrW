@@ -85,6 +85,33 @@ export class HealthController {
   }
 
   /**
+   * Dyno-warmth ping. Touches NOTHING — no database, no collector, no feed.
+   *
+   * Split from `GET /healthz` for one reason: cost. /healthz runs a `SELECT 1`
+   * as a deliberate side effect, to wake the autosuspended Neon compute so the
+   * first login does not pay the DB wake-up. Pinging that every 10 minutes for
+   * 14 hours a day means Neon can never suspend, which burned roughly 420
+   * compute-hours a month against a free allowance near 192.
+   *
+   * The two kinds of warmth are separable, and only one of them is expensive.
+   * Render's cold start is 30-90s of Node boot; Neon's wake is about a second.
+   * So the pinger keeps the dyno up by hitting this route, and the database is
+   * allowed to sleep until somebody actually needs it. The first request after
+   * an idle period pays ~1s of Neon wake, which is why the client timeout was
+   * raised — see {@link HealthController.check} for the cold-start history.
+   *
+   * Synchronous and allocation-light on purpose: this is the cheapest possible
+   * 200 the service can produce.
+   */
+  @Get('live')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Liveness only — no database, for keep-warm pings' })
+  live(): { status: 'ok'; uptimeSec: number } {
+    return { status: 'ok', uptimeSec: Math.round(process.uptime()) };
+  }
+
+  /**
    * Admin-only detail: per-job last-run, process memory, feed slot pressure.
    *
    * Behind a role check because job names describe internals and slot counts

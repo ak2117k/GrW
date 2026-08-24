@@ -127,3 +127,10 @@ export interface HealthPayload {
   lastVerdictAt: Signal<Freshness>;
   openPositions: Signal<number>;
 }
+
+/**
+ * Re-exported here so the health payload's vocabulary lives in one file; the
+ * conversion itself stays in `health.memory.ts` where it can be unit-tested
+ * without provoking real memory pressure.
+ */
+export type { ProcessMemory } from './health.memory';

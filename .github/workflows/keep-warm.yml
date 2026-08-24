@@ -1,29 +1,51 @@
-# Keep-warm — prevents the Render free-tier API from cold-starting.
+# Keep-warm — DISABLED ON PURPOSE. Do not re-enable the schedule without reading this.
 #
-# WHY: Render's free web service sleeps after ~15 min idle. The first request
-# then cold-starts in 30-90s (Node boot + Neon DB waking). The frontend aborts
-# well before that, so users saw a bogus "Unable to sign in. Please try again."
-# Pinging /healthz more often than the ~15-min sleep timer keeps the dyno awake,
-# and /healthz runs a `SELECT 1` so Neon stays warm too — logins stay fast.
+# WHAT THIS DID: pinged the API every 10 min, 14h/day, 7 days/week, so Render's
+# free web service never hit its ~15-min sleep timer. That fixed a real bug —
+# a cold start takes 30-90s (Node boot + Neon waking), the frontend aborted long
+# before that, and users saw a bogus "Unable to sign in. Please try again."
 #
-# SCHEDULE: every 10 min across ~06:00-19:30 IST (00:00-13:59 UTC), 7 days/week.
-# The 10-min gap is deliberately under Render's ~15-min sleep timer. The existing
-# telegram-heartbeat covers market hours; this covers the rest of the day/week.
+# WHY IT IS OFF: it worked, and the bill came due on two tiers at once.
 #
-# GITHUB ACTIONS MINUTES: each run bills ~1 min (rounded up). This schedule is
-# ~84 runs/day ≈ ~2.5k min/month.
-#   • PUBLIC repo  → Actions minutes are FREE/unlimited. Nothing to do.
-#   • PRIVATE repo → free plan is 2000 min/month. This can exceed it. If so,
-#     either narrow the `cron` window / widen the interval to `*/14`, or move
-#     the ping to a free external pinger (UptimeRobot / cron-job.org) hitting
-#     https://grw-api.onrender.com/healthz every 10 min and DISABLE this file.
+#   GitHub Actions — each run bills 1 minute (rounded up), so ~84 runs/day was
+#   ~2,520 min/month on its own, against a 2,000-min private-repo allowance.
+#   Together with ml-heartbeat and telegram-heartbeat (~616 min each) that is
+#   ~3,750 min/month. Those two are NOT pings — they sweep signal outcomes and
+#   capture ML labels — so this file is the only one that can be dropped, and
+#   dropping it brings the total to ~1,230 min/month, comfortably under the cap.
+#
+#   Neon compute — the ping hit /healthz, which runs a `SELECT 1` specifically
+#   to wake the autosuspended Postgres compute. Doing that every 10 minutes for
+#   14 hours a day means Neon can never suspend: roughly 420 compute-hours per
+#   month against a free allowance near 192. This cron, working exactly as
+#   designed, was the single largest consumer of the database budget.
+#
+# WHAT REPLACES IT: an external pinger, hitting the new DB-free route.
+#
+#   URL:      https://grw-api.onrender.com/healthz/live
+#   Interval: every 10 minutes (must stay under Render's ~15-min sleep timer)
+#   Where:    UptimeRobot (free, 50 monitors @ 5-min) or cron-job.org (free,
+#             1-min resolution). Both are free and neither consumes CI minutes.
+#
+#   Point it at /healthz/live, NOT /healthz. That is the whole fix: /healthz/live
+#   touches no database, so the Render dyno stays warm while Neon is allowed to
+#   sleep until a real user needs it. Neon's wake is ~1s versus Render's 30-90s
+#   cold start, so the login bug stays fixed either way.
+#
+# TO RE-ENABLE (only if the external pinger is not an option, and only on a
+# public repo where Actions minutes are free): uncomment the `schedule:` block.
+# The ping target below is already correct.
 
 name: keep-warm
 
 on:
-  schedule:
-    - cron: '*/10 0-13 * * *' # every 10 min, ~06:00-19:30 IST, 7 days/week
-  workflow_dispatch: {} # manual run for testing
+  # DISABLED — see the header. Re-enabling this on a private repo will exhaust
+  # the Actions allowance again, and pointing it back at /healthz will exhaust
+  # the Neon compute allowance again.
+  #
+  # schedule:
+  #   - cron: '*/10 0-13 * * *' # every 10 min, ~06:00-19:30 IST, 7 days/week
+  workflow_dispatch: {} # manual run, for testing the endpoint by hand
 
 concurrency:
   group: keep-warm
@@ -35,11 +57,11 @@ jobs:
     env:
       API: https://grw-api.onrender.com
     steps:
-      - name: Warm the API + DB
+      - name: Warm the dyno (no database touched)
         run: |
           # -m 120 tolerates a cold start in progress; --retry rides out the
           # boot window so a single sleeping dyno doesn't fail the run.
-          code=$(curl -sS -m 120 --retry 3 --retry-all-errors -o /tmp/health.json -w "%{http_code}" \
-            "$API/healthz")
-          echo "healthz HTTP $code"; cat /tmp/health.json 2>/dev/null; echo
-          case "$code" in 2*) : ;; *) echo "::error::healthz returned $code"; exit 1 ;; esac
+          code=$(curl -sS -m 120 --retry 3 --retry-all-errors -o /tmp/live.json -w "%{http_code}" \
+            "$API/healthz/live")
+          echo "healthz/live HTTP $code"; cat /tmp/live.json 2>/dev/null; echo
+          case "$code" in 2*) : ;; *) echo "::error::healthz/live returned $code"; exit 1 ;; esac

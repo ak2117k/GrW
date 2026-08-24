@@ -205,11 +205,76 @@ Safety-critical paths therefore use **tick-driven primary + a rare cron backstop
 evidence on both**. `watch-monitor/services/watch-backstop-poller.service.ts` is already
 named for this idea; the concept is kept and the redundancy removed.
 
+#### B2.1 The backstop is load-bearing, not prudence (traced 2026-08-21)
+
+An investigation into five failing `hard loss-cut` specs established the following, and it
+constrains Phase 2 directly.
+
+The stop is **two-strike**: `watch.service.ts:783-799` requires two consecutive breaching
+ticks before exiting, incrementing a persisted `slBreachCount` on the first. The same guard
+exists in `adaptive-stop-track`, `sell-futures-track` and `ungated-track`. The stop therefore
+does not fire on a price fact — it fires on **two ticks**, which makes tick continuity part
+of the stop's correctness.
+
+Today nothing is exposed, because every track has a REST path that advances the counter
+without the WebSocket:
+
+- `watch-monitor` is WS-driven, and `watch-backstop-poller.service.ts` re-drives WS-starved
+  TRADED entries through the same `watch.onTick` every 30 s.
+- `ungated`, `sell-futures` and `adaptive-stop` are REST pollers already — they resolve
+  prices via `ExitPriceService` and never consult the feed.
+
+**Three of the six pollers Phase 2 proposes to eliminate are the sole reason the stop
+survives a feed stall.** Consolidating them onto the tick stream without an equivalent REST
+backstop would convert a feed outage — a documented recurring event — into an uncut loss.
+The backstop is not a nicety attached to "safety-critical paths"; it is the mechanism that
+makes a two-strike stop safe. Phase 2 must deliver the backstop **before** removing any
+poller, not alongside it.
+
+#### B2.2 A stop that was not evaluated must be evidence, not a log line
+
+Both the backstop (`watch-backstop-poller.service.ts:62-66`) and the pollers
+(`ungated-tick-poller.service.ts:69-71`) skip an entry when the resolved price is not fresh:
+
+```
+this.logger.warn(`... unmonitored — no fresh price, onTick skipped`);
+continue;
+```
+
+A stop that was **not evaluated** produces a warning and nothing else — no counter, no
+health signal, no record. This is the platform's signature failure sitting on the stop path.
+Phase 0 gains a counter for it, and it is read as part of the Phase 2 baseline: a
+consolidation cannot be judged safe against a baseline that does not count the ticks it
+never evaluated.
+
 **Wrapping.** Surviving jobs get lease and `JobRun` recording from **one wrapper in one
 pass** — `apps/api/src/common/cron-lease/` already exists, and the lease boundary and the
 recording boundary are the same seam. Two passes would guarantee drift: some jobs leased but
 unrecorded, others the reverse. Each TTL is chosen against that job's measured runtime; a TTL
 shorter than the job lets a second instance start it, which is worse than no lease.
+
+#### B2.3 The exit path sleeps 800 ms exactly when the feed is starved
+
+`transitionLossCut` re-confirms the loss with an independent quote before exiting
+(`watch.service.ts:955`), which is correct — a glitch tick must not trigger a real exit, and
+the abort logic was verified working. But that confirmation runs through `fetchLivePrice`,
+which tries the WS cache first and otherwise retries REST `QUOTE_FETCH_ATTEMPTS = 3` times
+with `QUOTE_RETRY_MS = 400` between attempts. When no quote resolves, that is **800 ms of
+real sleep**, and `transitionLossCut` is awaited inside `applyTick`, which `onTick` awaits
+per entry in a serial loop (`watch.service.ts:719-722`). The backstop poller likewise loops
+its starved positions serially.
+
+On the WS-driven path this rarely bites: the tick that triggered the breach is usually still
+fresh in the cache, so `fetchLivePrice` returns without a round-trip. It bites on the
+**REST-driven paths** — the backstop and the three track pollers — which have no WS cache to
+hit. Those are exactly the feed-starved conditions the backstop exists to cover, so the
+latency arrives precisely when the system is already degraded, and it compounds with the
+30 feed slots and the 350 ms historical gate already recorded as scarce-resource ceilings.
+
+Consequence for Phase 2: the consolidation's baseline must record **exit latency**, not only
+how often positions are priced. A design that prices positions more often but serialises
+800 ms per exit during a broad market drop — when many positions breach at once — is not an
+improvement. Not fixed here; recorded so the consolidation is judged against it.
 
 ### B3. Memory ceiling
 
@@ -246,6 +311,55 @@ pass.
 
 This is included precisely because "we already follow most of it" is the same class of claim
 that the five never-invoked shutdown hooks also satisfied.
+
+**Named item, found during Phase 0 (2026-08-21): seven tenant-owned models are not enrolled
+in tenant scoping.**
+
+`apps/api/src/common/tenant/tenant.constants.ts` defines `TENANT_MODELS`, the set the Prisma
+scoping extension auto-scopes by `userId`, and its own docblock states: *"Keep verbatim in
+sync with the schema; a missing name here is a silent isolation hole."* Twenty models carry
+a `userId` scalar. Thirteen are listed. **Seven are not:** `TradeTracker`, `StockMonitor`,
+`SentinelThesis`, `SentinelVerdict`, `Payment`, `AuditLog`, `ExecutionClaim`.
+
+**This is not currently a data leak, and the verification pass should not report it as one.**
+Every user-facing read was checked: `TradeTrackerService.listOpen/list/listSold/listSoldOhlc`
+each scope by `userId` explicitly, with `listSoldOhlc` throwing `NotFoundException` on a
+miss; `StockMonitor`'s call sites pass `userId` on every read, update and delete. The only
+unscoped `TradeTracker` reads are the two documented cross-tenant engine paths
+(`distinctOpenTokens`, and the per-user grouping that allocates feed slots).
+
+What is missing is enforcement. Correctness rests on every author remembering, in perpetuity,
+to write `where: { userId }`. An endpoint added next month that forgets it would serve one
+user another's open positions, and would pass every test in the suite — the same silent-
+absence shape as everything else in this program, with a tenancy boundary instead of a cron.
+
+Two things the pass must establish, neither of which can be read off the file:
+
+1. **Which absences are deliberate.** `AuditLog` (admin-read, hash-chained) and
+   `ExecutionClaim` (engine-internal idempotency) are plausibly intentional. Plausibly
+   intentional and recorded as intentional are different states, and the file cannot
+   currently distinguish them. Whatever the answer, it belongs in that docblock.
+2. **Whether enrolling the rest is safe.** Likely yes — the extension scopes only when a
+   tenant context is active, and engine/cron code runs with none, which is precisely what the
+   `SYSTEM_USER_ID` docblock describes. That must be verified against the cross-tenant engine
+   paths before any name is added, not assumed.
+
+Found by a subagent working on the job registry, which had no reason to be looking at tenancy.
+
+**Named item, found during Phase 0 (2026-08-21): truncation is not redaction.**
+`health.service.ts:100` renders errors through a `describe()` that whitespace-collapses and
+caps at 200 characters, justified in its own comment by the fact that Prisma connection
+errors carry the full `DATABASE_URL`. `JobRunRepository` adopted the same helper. But a
+length cap only removes a credential that appears *after* the first 200 characters, and a
+connection error puts the URL near the front. The strings reach two surfaces that matter:
+the `job_runs.error` column, readable via `/healthz/detail`, and `logger.warn` — which
+CLAUDE.md §9 says credentials must never reach.
+
+Deferred here rather than fixed inline because at least two `describe()` implementations
+share the flaw and they deserve one consistent redaction pass, not a local patch that leaves
+the other lying. The verification pass should establish whether Prisma error messages in
+this version actually embed credentials before deciding the shape of the fix — the existing
+comment asserts they do, and that assertion has not itself been verified.
 
 ### B-Phase 2. Tick-poller consolidation
 
@@ -374,7 +488,10 @@ slips, say so immediately rather than proceeding onto unverifiable ground.
 
 | Risk | Mitigation |
 |---|---|
+| **Consolidation makes a two-strike stop feed-dependent** (§B2.1) — three of the six pollers are today the only thing advancing `slBreachCount` without the WebSocket | REST backstop ships **before** any poller is removed, never alongside; per-module gate in Phase 2 |
 | Tick-driven monitoring makes the feed a single point of failure | Cron backstop retained for safety-critical paths; spine alarms on tick staleness |
+| A stop skipped for want of a fresh price is invisible (§B2.2) | Counter in Phase 0; read as part of the Phase 2 baseline |
+| The exit path sleeps up to 800 ms per position, serially, on the REST paths (§B2.3) — worst during a broad drop, when many positions breach at once | Phase 2's baseline records exit latency, not only pricing frequency; not fixed in this program |
 | Candle persistence grows the database | Retention window in the same change; disk with expiry, never RAM |
 | TanStack migration touches 36 files | Incremental; existing loops keep working until each site is migrated |
 | Session orchestrator centralises timing logic | Per-venue hours unit-tested against known holiday and DST edges before any module subscribes |

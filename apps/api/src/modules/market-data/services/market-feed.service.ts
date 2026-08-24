@@ -36,6 +36,7 @@ import { CandleAggregatorService } from './candle-aggregator.service';
 import { InstrumentService } from './instrument.service';
 import { MarketDataGateway } from '../gateways/market-data.gateway';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { SlotPressureTracker, type SlotPressure } from './slot-pressure';
 
 /** Redis pub/sub channel for tick distribution across services. */
 const REDIS_TICKS_CHANNEL = 'market:ticks';
@@ -74,6 +75,9 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
 
   /** Tokens currently subscribed as primary watchlist. */
   private readonly primaryTokens = new Set<string>();
+
+  /** Subscription pressure since boot. See slot-pressure.ts for why a point reading is not enough. */
+  private readonly slotPressure = new SlotPressureTracker(PRIMARY_SLOT_MAX);
 
   /** Tokens currently subscribed for scan rotation. */
   private readonly scanTokens = new Set<string>();
@@ -292,12 +296,14 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
         continue; // Already subscribed
       }
       if (this.primaryTokens.size >= PRIMARY_SLOT_MAX) {
+        this.slotPressure.reject();
         this.logger.warn(
           `Primary slot limit (${PRIMARY_SLOT_MAX}) reached — cannot subscribe ${token}`,
         );
         break;
       }
       this.primaryTokens.add(token);
+      this.slotPressure.observe(this.primaryTokens.size);
       toSubscribe.push(token);
     }
 
@@ -474,6 +480,11 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
    */
   getAllQuotes(): Quote[] {
     return Array.from(this.quoteCache.values());
+  }
+
+  /** Subscription pressure since boot. Read by the admin health surface. */
+  getSlotPressure(): SlotPressure {
+    return this.slotPressure.snapshot();
   }
 
   /**
@@ -1006,6 +1017,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       // Deduplicate (some sector tokens overlap with INDICES) and skip unresolved ('0')
       for (const token of new Set(defaultTokens)) {
         if (token !== '0') this.primaryTokens.add(token);
+        this.slotPressure.observe(this.primaryTokens.size);
       }
     }
 

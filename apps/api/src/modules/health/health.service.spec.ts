@@ -67,7 +67,12 @@ describe('HealthService', () => {
   beforeEach(() => {
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(NOW);
   });
-  afterEach(() => jest.useRealTimers());
+  afterEach(() => {
+    jest.useRealTimers();
+    // Without this a spy on a global (process.uptime) survives into every
+    // later test in the file, since jest is not configured with restoreMocks.
+    jest.restoreAllMocks();
+  });
 
   describe('the happy path reports every signal', () => {
     let payload: HealthPayload;
@@ -289,13 +294,19 @@ describe('HealthService', () => {
     it('still reports uptime exactly on a cached probe', async () => {
       // The OOM crash loop was only ever visible as uptime resetting to ~0.
       // Caching that number would have erased the single clue anyone had.
+      //
+      // BOTH readings are pinned. Leaving the first one as the real
+      // process.uptime() -- which jest's fake timers do not control -- made
+      // this test fail whenever the suite happened to boot ~7s before it ran,
+      // because the real value collided with the mocked one.
+      const uptime = jest.spyOn(process, 'uptime').mockReturnValue(3);
       const service = build(makePrisma());
       const first = await service.check();
-      jest.spyOn(process, 'uptime').mockReturnValue(7);
+      uptime.mockReturnValue(7);
       const second = await service.check();
 
+      expect(first.uptimeSec).toBe(3);
       expect(second.uptimeSec).toBe(7);
-      expect(second.uptimeSec).not.toBe(first.uptimeSec);
     });
 
     it('collapses overlapping probes into a single collection', async () => {

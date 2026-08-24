@@ -5,6 +5,7 @@ import {
   shouldResetRetries,
   shouldRetryServerDisconnect,
 } from './ws-retry';
+import { classifyFeed, type FeedHealth } from './feed-health';
 
 /**
  * Shape the socket.io handshake `auth` payload from a JWT access token.
@@ -116,13 +117,10 @@ class WebSocketService {
   /** Number of currently-connected namespace sockets. */
   private connectedCount = 0;
 
-  // ---- TEMP DIAGNOSTIC (remove once tick-feed stall is confirmed) ----
   /** Wall-clock of the last 'tick' frame received on /ws. */
   private lastTickAt = 0;
-  /** Per-namespace connected state, for distinguishing a /ws-only outage. */
+  /** Per-namespace connected state. Only /ws is allowed to decide feed health. */
   private nsConnected = new Map<string, boolean>();
-  private diagTimer: ReturnType<typeof setInterval> | null = null;
-  // -------------------------------------------------------------------
 
   /** Negotiated transport for the /ws socket ('polling' | 'websocket'), or null. */
   private transport: string | null = null;
@@ -179,7 +177,7 @@ class WebSocketService {
       sock.on('connect', () => {
         connectedAt = Date.now();
         this.connectedCount++;
-        this.nsConnected.set(ns.path, true); // DIAG
+        this.nsConnected.set(ns.path, true);
         console.log(`[WS] Connected: ${ns.path}`);
         if (ns.path === '/ws') {
           // DIAG
@@ -217,7 +215,7 @@ class WebSocketService {
 
       sock.on('disconnect', (reason) => {
         this.connectedCount = Math.max(0, this.connectedCount - 1);
-        this.nsConnected.set(ns.path, false); // DIAG
+        this.nsConnected.set(ns.path, false);
         console.log(`[WS] Disconnected ${ns.path}:`, reason);
         if (ns.path === '/ws') {
           // DIAG — the tick socket went down; show why the badge still says "Live"
@@ -262,7 +260,7 @@ class WebSocketService {
 
       for (const event of ns.events) {
         sock.on(event, (data: unknown) => {
-          if (event === 'tick') this.lastTickAt = Date.now(); // DIAG
+          if (event === 'tick') this.lastTickAt = Date.now();
           this.emit(event, data);
         });
       }
@@ -270,44 +268,70 @@ class WebSocketService {
       this.sockets.set(ns.path, sock);
     }
 
-    this.startDiagnostics(); // DIAG
+    this.startHealthWatch();
   }
 
-  // ---- TEMP DIAGNOSTIC (remove once tick-feed stall is confirmed) ----
-  /**
-   * Polls every 3s and warns when the "Live" badge is on but the tick feed
-   * is actually dead — i.e. /ws is down, or no tick has arrived in >6s.
-   * Also exposes `window.__wsDiag()` for an on-demand snapshot.
-   */
-  private startDiagnostics(): void {
-    if (this.diagTimer) return;
-
-    (window as unknown as { __wsDiag?: () => unknown }).__wsDiag = () => ({
-      indicatorSaysLive: this.connectedCount > 0,
-      perNamespace: Object.fromEntries(this.nsConnected),
+  /** Current feed health, decided by the tick socket alone. */
+  getFeedHealth(): FeedHealth {
+    return classifyFeed({
       tickSocketUp: this.nsConnected.get('/ws') ?? false,
-      transport: this.transport,
-      subscribedTokens: [...this.subscribedTokens],
-      secondsSinceLastTick: this.lastTickAt
-        ? Math.round((Date.now() - this.lastTickAt) / 1000)
-        : null,
+      msSinceLastTick: this.lastTickAt ? Date.now() - this.lastTickAt : null,
+      otherNamespacesUp: [...this.nsConnected.entries()].filter(
+        ([path, up]) => path !== '/ws' && up,
+      ).length,
     });
+  }
 
-    this.diagTimer = setInterval(() => {
-      const tickSockUp = this.nsConnected.get('/ws') ?? false;
-      const ageMs = this.lastTickAt ? Date.now() - this.lastTickAt : Infinity;
-      const stalled = !tickSockUp || ageMs > 6000;
-      if (this.connectedCount > 0 && stalled) {
-        console.warn(
-          `[WS-DIAG] ⚠️ Badge shows "Live" but tick feed STALLED — ` +
-            `/ws up=${tickSockUp}, last tick ${
-              this.lastTickAt ? Math.round(ageMs / 1000) + 's ago' : 'NEVER'
-            }. Per-ns: ${JSON.stringify(Object.fromEntries(this.nsConnected))}`,
-        );
-      }
+  /** Health at the last poll, so we report TRANSITIONS rather than every poll. */
+  private lastHealth: FeedHealth = 'live';
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Watch feed health and report each stall EPISODE once.
+   *
+   * Episode-based, not poll-based: the diagnostic this replaces warned every 3
+   * seconds for as long as a stall lasted, which is why nobody read it. One row
+   * on the way into a stall and one on the way out gives the two facts actually
+   * in question — how often stalls happen, and whether they self-recover
+   * without a reload.
+   */
+  private startHealthWatch(): void {
+    if (this.healthTimer) return;
+    this.healthTimer = setInterval(() => {
+      const health = this.getFeedHealth();
+      if (health === this.lastHealth) return;
+
+      const previous = this.lastHealth;
+      this.lastHealth = health;
+
+      const entering = health !== 'live';
+      const recovering = health === 'live' && previous !== 'live';
+      if (!entering && !recovering) return;
+
+      // Imported lazily and only when a stall is actually reported. A static
+      // import would pull axios and react-hot-toast — which touches `document`
+      // at module scope — into this file's load graph, breaking every
+      // node-environment consumer for the sake of a diagnostic.
+      void import('./api')
+        .then(({ default: api }) =>
+          api.post('/healthz/client-report', {
+            // On recovery, report the state we recovered FROM — 'live' is not a
+            // valid health value for a report and the DTO would reject it.
+            health: entering ? health : previous,
+            tickSocketUp: this.nsConnected.get('/ws') ?? false,
+            secondsSinceLastTick: this.lastTickAt
+              ? Math.round((Date.now() - this.lastTickAt) / 1000)
+              : undefined,
+            transport: this.transport ?? undefined,
+            subscribedTokens: this.subscribedTokens.size,
+            namespaces: Object.fromEntries(this.nsConnected),
+            recoveredWithoutReload: recovering,
+          }),
+        )
+        // A failed diagnostic must never surface in a UI that is already degraded.
+        .catch(() => undefined);
     }, 3000);
   }
-  // -------------------------------------------------------------------
 
   disconnect(): void {
     for (const sock of this.sockets.values()) {
@@ -315,6 +339,11 @@ class WebSocketService {
     }
     this.sockets.clear();
     this.connectedCount = 0;
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
+    this.lastHealth = 'live';
   }
 
   subscribe(event: string, callback: EventCallback): () => void {

@@ -733,9 +733,24 @@ describe('WatchService.onTick — hard loss-cut', () => {
     };
   }
 
-  it('cuts a TRADED entry whose open loss reaches ₹1,000', async () => {
+  it('cuts a TRADED entry whose open loss reaches ₹1,000 — on the SECOND consecutive breach', async () => {
     // ref=2000, qty=100. ltp=1990 → loss = -10 * 100 = -₹1,000 (exactly at threshold).
+    //
+    // The two-strike stop-hunt guard means the FIRST breaching tick only
+    // records the breach; it takes a second consecutive breach to exit.
     repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+
+    await svc.onTick('11536', 1990, new Date());
+
+    // First strike: counter incremented, position still open.
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      slBreachCount: 1,
+    }));
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
+
+    // Second strike: repo.update is a mock, so the entry row is not really
+    // mutated — re-mock the read so the next tick sees the persisted count.
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 1 })]);
 
     await svc.onTick('11536', 1990, new Date());
 
@@ -783,7 +798,19 @@ describe('WatchService.onTick — hard loss-cut', () => {
       tradedEntry({ executedAt: new Date() }),
     ]);
 
-    await svc.onTick('11536', 1985, new Date()); // loss = -15 * 100 = -₹1,500
+    // loss = -15 * 100 = -₹1,500. First strike only records the breach.
+    await svc.onTick('11536', 1985, new Date());
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      slBreachCount: 1,
+    }));
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
+
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ executedAt: new Date(), slBreachCount: 1 }),
+    ]);
+
+    await svc.onTick('11536', 1985, new Date());
 
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
       status: 'STOPPED', closedReason: 'loss-cut',
@@ -796,6 +823,19 @@ describe('WatchService.onTick — hard loss-cut', () => {
       tradedEntry({ side: 'SELL', profitTarget: 1800 }),
     ]);
 
+    // First strike: the adverse move is recorded, not acted on.
+    await svc.onTick('11536', 2010, new Date());
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      slBreachCount: 1,
+    }));
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
+
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ side: 'SELL', profitTarget: 1800, slBreachCount: 1 }),
+    ]);
+
+    // Second consecutive adverse tick confirms the breakdown → cut.
     await svc.onTick('11536', 2010, new Date());
 
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
@@ -805,9 +845,22 @@ describe('WatchService.onTick — hard loss-cut', () => {
 
   it('hard-cuts at 0.4% of deployed capital (quantity x executedPrice) (R5)', async () => {
     // quantity 100, executedPrice 2000 -> deployed 200,000 -> SL = 0.4% = 800.
-    // BUY: at ltp 1992 the loss is (1992-2000)*100 = -800 -> at threshold -> cut.
+    // BUY: at ltp 1992 the loss is (1992-2000)*100 = -800 -> at threshold.
     repo.findActiveByToken.mockResolvedValue([tradedEntry({ quantity: 100 })]);
 
+    // At-threshold tick #1 registers a breach against the 0.4% level.
+    await svc.onTick('11536', 1992, new Date());
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      slBreachCount: 1,
+    }));
+    expect(mockTrade.closeTrade).not.toHaveBeenCalled();
+
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ quantity: 100, slBreachCount: 1 }),
+    ]);
+
+    // At-threshold tick #2 → confirmed → cut at the 0.4%-of-capital level.
     await svc.onTick('11536', 1992, new Date());
 
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
@@ -831,10 +884,23 @@ describe('WatchService.onTick — hard loss-cut', () => {
     // The tick (1985) computes a -₹1,500 loss, but the broker's fresh quote
     // says the real price is 2001 — no loss. A single bad feed tick must not
     // trigger a real exit, so the cut is aborted on re-confirmation.
-    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
+    //
+    // The breach must be driven to the SECOND tick: the two-strike stop-hunt
+    // guard swallows the first one, and a single-tick version of this test
+    // would pass vacuously — never entering transitionLossCut at all, and so
+    // passing even if the re-confirmation logic were deleted.
     brokerAdapter.getLiveQuote.mockResolvedValue({ ltp: 2001 });
+    repo.findActiveByToken.mockResolvedValue([tradedEntry()]);
 
     await svc.onTick('11536', 1985, new Date());
+
+    repo.findActiveByToken.mockResolvedValue([tradedEntry({ slBreachCount: 1 })]);
+
+    await svc.onTick('11536', 1985, new Date());
+
+    // transitionLossCut was genuinely entered — this assertion is what makes
+    // the test non-vacuous: the re-confirmation ran, and IT aborted the cut.
+    expect(brokerAdapter.getLiveQuote).toHaveBeenCalled();
 
     const lossCutUpdate = (repo.update.mock.calls as any[]).find(
       (call: any[]) => call[1]?.closedReason === 'loss-cut',
@@ -856,6 +922,18 @@ describe('WatchService.onTick — hard loss-cut', () => {
     ]);
 
     // New tick also carries the stale timestamp; ltp=1985 → loss -₹1,500.
+    // Strike one: applyTick must still run (the guard must not drop the tick).
+    await svc.onTick('11536', 1985, staleTs);
+
+    expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({
+      slBreachCount: 1,
+    }));
+
+    repo.findActiveByToken.mockResolvedValue([
+      tradedEntry({ lastTickAt: staleTs, slBreachCount: 1 }),
+    ]);
+
+    // Strike two, still stamped with the same stale timestamp → must cut.
     await svc.onTick('11536', 1985, staleTs);
 
     expect(repo.update).toHaveBeenCalledWith('w1', expect.objectContaining({

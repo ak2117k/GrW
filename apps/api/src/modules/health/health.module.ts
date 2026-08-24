@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { HealthController } from './health.controller';
 import { HealthService } from './health.service';
+import { HealthDetailService } from './health-detail.service';
 import { FEED_STATUS_SOURCE } from './health.types';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { MarketFeedService } from '../market-data/services/market-feed.service';
@@ -23,6 +24,10 @@ import { MarketFeedService } from '../market-data/services/market-feed.service';
 @Module({
   imports: [MarketDataModule],
   controllers: [HealthController],
-  providers: [HealthService, { provide: FEED_STATUS_SOURCE, useExisting: MarketFeedService }],
+  providers: [
+    HealthService,
+    HealthDetailService,
+    { provide: FEED_STATUS_SOURCE, useExisting: MarketFeedService },
+  ],
 })
 export class HealthModule {}

@@ -41,6 +41,14 @@
 | `apps/web/src/services/feed-health.ts` | Pure stall-classification + report shape |
 | `apps/web/src/services/websocket.ts` | Replace temp diagnostics with the structured reporter |
 
+**Retention ordering constraint (review finding, Task 1).** `job_runs` has 41 potential
+writers and its pruner does not exist until Task 9. **Task 9 must land before the migration
+is applied to any production database** — otherwise the table grows unbounded for the window
+between them, which violates this plan's own "retention in the same change" constraint in
+spirit if not in letter. Execution order is therefore 1 → 2 → 3 → **9** → 4 → 5 → 6 → 7 → 10.
+The local database is down and no migration has been generated, so no such window currently
+exists; this constraint keeps it that way.
+
 **Parallelisation for agents.** Tasks 1 → 2 → 3 are strictly sequential (schema, then repository, then wrapper). Once Task 2 lands: **Task 5** (jobs signal) can start. **Task 4** (memory), **Task 6** (slot pressure) and **Task 8** (client report) are independent of 1–3 entirely and may run from the start. **Task 7** needs 4, 5 and 6. **Task 9** needs 1 and 2.
 
 ---
@@ -61,12 +69,14 @@
 Create `apps/api/src/common/job-registry/job-run.types.spec.ts`:
 
 ```typescript
-import { JOB_RUN_RETENTION_DAYS, retentionCutoff } from './job-run.types';
+import { retentionCutoff } from './job-run.types';
 
 describe('job-run retention', () => {
-  it('retains 30 days', () => {
-    expect(JOB_RUN_RETENTION_DAYS).toBe(30);
-  });
+  // NOTE: there is deliberately no `expect(JOB_RUN_RETENTION_DAYS).toBe(30)`.
+  // A test asserting a constant equals the literal it is defined as cannot
+  // fail except when someone edits both in the same keystroke. The cutoff test
+  // below pins 30 days transitively through real arithmetic, which is the
+  // behaviour that actually matters.
 
   it('computes the cutoff 30 days before now', () => {
     const now = new Date('2026-08-21T10:00:00.000Z');
@@ -92,7 +102,16 @@ Create `apps/api/src/common/job-registry/job-run.types.ts`:
 
 ```typescript
 /**
- * How a scheduled run ended.
+ * How a scheduled run ended — or that it has not ended.
+ *
+ * `RUNNING` exists because `outcome` is written at INSERT, before the job's
+ * fate is known. Without it the opening row must claim an outcome it cannot
+ * have: `SUCCESS` would make an OOM-killed job (a live risk on a 512 MB
+ * instance) leave a permanent row reading "succeeded", and `FAILED` would
+ * report every long-running job as failed for as long as it works correctly.
+ * `RUNNING` is the only honest thing to write at that moment, and it stays
+ * diagnosable afterwards: a crashed job leaves `RUNNING` whose `startedAt`
+ * keeps aging, which is visibly different from a job that is merely busy.
  *
  * `SKIPPED_LEASE` is not a failure and must never be silently dropped: a job
  * correctly deferring to another instance and a job that is dead both write
@@ -100,7 +119,7 @@ Create `apps/api/src/common/job-registry/job-run.types.ts`:
  * tell them apart — which is the same silent-absence trap this whole spine
  * exists to close.
  */
-export type JobOutcome = 'SUCCESS' | 'FAILED' | 'SKIPPED_LEASE';
+export type JobOutcome = 'RUNNING' | 'SUCCESS' | 'FAILED' | 'SKIPPED_LEASE';
 
 /** One recorded execution, as read back by the health surface. */
 export interface JobRunRecord {
@@ -137,6 +156,7 @@ Append to `prisma/schema.prisma`:
 
 ```prisma
 enum JobOutcome {
+  RUNNING
   SUCCESS
   FAILED
   SKIPPED_LEASE
@@ -144,6 +164,8 @@ enum JobOutcome {
 
 /// One execution of a scheduled job. The absence of rows for a jobName is the
 /// signal that matters: it means the job has never run in this environment.
+/// A row stuck at RUNNING with an ageing startedAt means the process died
+/// mid-job — distinguishable from a job that is simply still working.
 model JobRun {
   id         String     @id @default(cuid())
   jobName    String
@@ -153,14 +175,20 @@ model JobRun {
   error      String?
   durationMs Int?
 
-  /// Serves the per-job "when did this last run" lookup.
+  // Serves the per-job "when did this last run" lookup.
   @@index([jobName, startedAt])
-  /// Serves retention pruning, which filters on startedAt alone and cannot use
-  /// the composite above.
+  // Serves retention pruning, which filters on startedAt alone. The composite
+  // above leads with jobName, so a btree cannot range-scan it for a bare
+  // startedAt predicate — the prune would degrade to a seq scan without this.
   @@index([startedAt])
   @@map("job_runs")
 }
 ```
+
+Use `//` for the index rationale, not `///`. `///` is Prisma *documentation* syntax
+that flows into generated client artifacts; the neighbouring models
+(`SentinelVerdict:1634`, `OiWallSnapshot:1652`) deliberately use `//` for this
+rationale-comment role.
 
 - [ ] **Step 6: Generate the migration**
 
@@ -221,7 +249,7 @@ describe('JobRunRepository', () => {
     const repo = new JobRunRepository(prisma as never);
     await expect(repo.recordStart('nightly-sweep')).resolves.toBe('row-1');
     expect(prisma.jobRun.create).toHaveBeenCalledWith({
-      data: { jobName: 'nightly-sweep', outcome: 'FAILED' },
+      data: { jobName: 'nightly-sweep', outcome: 'RUNNING' },
       select: { id: true },
     });
   });
@@ -288,17 +316,23 @@ export class JobRunRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Opens a row, pessimistically marked FAILED.
+   * Opens a row marked RUNNING.
    *
-   * A process OOM-killed mid-job never reaches `recordEnd`, so the row it
-   * leaves behind must already say something true. Defaulting to SUCCESS would
-   * make every hard kill look like a clean run — precisely the lie this table
-   * exists to prevent.
+   * The outcome column is written at INSERT, before the job's fate is known,
+   * so the opening value must be one that is TRUE at that instant. `SUCCESS`
+   * would make a process OOM-killed mid-job (a live risk at 512 MB) leave a
+   * permanent row reading "succeeded" — the exact lie this table exists to
+   * prevent. `FAILED` would be the opposite lie: every long-running job would
+   * read as failed for the whole time it is working correctly.
+   *
+   * RUNNING stays diagnosable after a crash, too: the row keeps its startedAt
+   * and never advances, so a stale RUNNING is visibly a death rather than a
+   * job that is merely busy.
    */
   async recordStart(jobName: string): Promise<string | null> {
     try {
       const row = await this.prisma.jobRun.create({
-        data: { jobName, outcome: 'FAILED' },
+        data: { jobName, outcome: 'RUNNING' },
         select: { id: true },
       });
       return row.id;
@@ -723,6 +757,29 @@ import { toJobFreshness } from './health.jobs';
 const NOW = new Date('2026-08-21T10:00:00.000Z');
 
 describe('toJobFreshness', () => {
+  it('carries RUNNING through, so a stale in-flight row is diagnosable', () => {
+    // A crashed process leaves outcome=RUNNING with a startedAt that keeps
+    // ageing. Consumers distinguish "busy" from "died" by reading ageSec
+    // alongside the outcome, so the outcome must survive this mapping intact.
+    const out = toJobFreshness(
+      [
+        {
+          jobName: 'instrument-refresh',
+          startedAt: new Date('2026-08-21T08:00:00.000Z'),
+          finishedAt: null,
+          outcome: 'RUNNING',
+          error: null,
+          durationMs: null,
+        },
+      ],
+      ['instrument-refresh'],
+      NOW,
+    );
+    expect(out['instrument-refresh'].outcome).toBe('RUNNING');
+    expect(out['instrument-refresh'].ageSec).toBe(7200);
+    expect(out['instrument-refresh'].at).toBe('2026-08-21T08:00:00.000Z');
+  });
+
   it('reports a job that has never run as at:null, NOT ageSec:0', () => {
     const out = toJobFreshness([], ['sentinel-tick'], NOW);
     expect(out['sentinel-tick']).toEqual({
@@ -1680,6 +1737,199 @@ Expected: PASS, all job-registry specs green.
 ```bash
 git add apps/api/src/common/job-registry
 git commit -m "feat(job-registry): lazy 30-day retention, no new cron"
+```
+
+---
+
+## Task 10: Count stops that were never evaluated
+
+**Files:**
+- Create: `apps/api/src/common/stop-evidence/unevaluated-stops.ts`
+- Create: `apps/api/src/common/stop-evidence/stop-evidence.module.ts`
+- Test: `apps/api/src/common/stop-evidence/unevaluated-stops.spec.ts`
+- Modify: `apps/api/src/modules/watch-monitor/services/watch-backstop-poller.service.ts:62-66`
+- Modify: `apps/api/src/modules/ungated-track/services/ungated-tick-poller.service.ts:69-71`
+- Modify: `apps/api/src/modules/sell-futures-track/services/sell-futures-tick-poller.service.ts`
+- Modify: `apps/api/src/modules/adaptive-stop-track/services/adaptive-stop-tick-poller.service.ts`
+- Modify: `apps/api/src/modules/health/health-detail.service.ts`
+
+**Why:** spec §B2.2. Four sites skip a position's stop evaluation when the resolved price is
+not fresh, and each records that fact as a `logger.warn` and nothing else. A stop that did
+not run is exactly the evidence this spine exists to surface, and Phase 2's baseline is not
+trustworthy without it — a consolidation cannot be judged safe against a baseline that does
+not count the ticks it never evaluated.
+
+**Interfaces:**
+- Consumes: `Signal<T>`, `present`, `unavailable` from `health.types.ts`.
+- Produces: `interface UnevaluatedStops { total: number; byTrack: Record<string, number>; lastAt: string | null }`, injectable `UnevaluatedStopsTracker` with `record(track: string): void` and `snapshot(): UnevaluatedStops`.
+
+Requires Task 7 (extends its payload).
+
+- [ ] **Step 1: Write the failing test**
+
+Create `apps/api/src/common/stop-evidence/unevaluated-stops.spec.ts`:
+
+```typescript
+import { UnevaluatedStopsTracker } from './unevaluated-stops';
+
+describe('UnevaluatedStopsTracker', () => {
+  it('starts empty with a null lastAt, not a zero timestamp', () => {
+    expect(new UnevaluatedStopsTracker().snapshot()).toEqual({
+      total: 0,
+      byTrack: {},
+      lastAt: null,
+    });
+  });
+
+  it('counts per track and in total', () => {
+    const t = new UnevaluatedStopsTracker();
+    t.record('watch-backstop', new Date('2026-08-21T10:00:00.000Z'));
+    t.record('ungated', new Date('2026-08-21T10:00:30.000Z'));
+    t.record('ungated', new Date('2026-08-21T10:01:00.000Z'));
+    const s = t.snapshot();
+    expect(s.total).toBe(3);
+    expect(s.byTrack).toEqual({ 'watch-backstop': 1, ungated: 2 });
+  });
+
+  it('reports the most recent occurrence', () => {
+    const t = new UnevaluatedStopsTracker();
+    t.record('ungated', new Date('2026-08-21T10:00:00.000Z'));
+    t.record('ungated', new Date('2026-08-21T10:05:00.000Z'));
+    expect(t.snapshot().lastAt).toBe('2026-08-21T10:05:00.000Z');
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd apps/api && npx jest src/common/stop-evidence/unevaluated-stops.spec.ts`
+Expected: FAIL — `Cannot find module './unevaluated-stops'`
+
+- [ ] **Step 3: Write the tracker**
+
+Create `apps/api/src/common/stop-evidence/unevaluated-stops.ts`:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+
+/** How often a position's stop could not be evaluated, and for which track. */
+export interface UnevaluatedStops {
+  total: number;
+  byTrack: Record<string, number>;
+  /** ISO instant of the most recent skip, or null if it has never happened. */
+  lastAt: string | null;
+}
+
+/**
+ * Counts stop evaluations that did not happen.
+ *
+ * Four poller sites `continue` past a position when `ExitPriceService` cannot
+ * return a fresh price, leaving a `logger.warn` as the only trace. A stop that
+ * was NOT evaluated is not a quiet non-event — it is a position that went
+ * unwatched for that cycle, and it reads identically to a healthy cycle in
+ * every dashboard the platform has.
+ *
+ * In-memory and per-process, like SlotPressureTracker: the question is "is this
+ * happening, and to which track", answered by reading the counter while the
+ * container lives. Persisting each occurrence would be a write on the hot path
+ * of the thing that is already struggling to get a price.
+ */
+@Injectable()
+export class UnevaluatedStopsTracker {
+  private total = 0;
+  private readonly byTrack = new Map<string, number>();
+  private lastAt: Date | null = null;
+
+  record(track: string, at: Date = new Date()): void {
+    this.total++;
+    this.byTrack.set(track, (this.byTrack.get(track) ?? 0) + 1);
+    if (!this.lastAt || at > this.lastAt) this.lastAt = at;
+  }
+
+  snapshot(): UnevaluatedStops {
+    return {
+      total: this.total,
+      byTrack: Object.fromEntries(this.byTrack),
+      lastAt: this.lastAt ? this.lastAt.toISOString() : null,
+    };
+  }
+}
+```
+
+Create `apps/api/src/common/stop-evidence/stop-evidence.module.ts`:
+
+```typescript
+import { Global, Module } from '@nestjs/common';
+import { UnevaluatedStopsTracker } from './unevaluated-stops';
+
+/** Global: four feature modules record into one process-wide counter. */
+@Global()
+@Module({
+  providers: [UnevaluatedStopsTracker],
+  exports: [UnevaluatedStopsTracker],
+})
+export class StopEvidenceModule {}
+```
+
+Register `StopEvidenceModule` in `apps/api/src/app.module.ts` imports.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd apps/api && npx jest src/common/stop-evidence/unevaluated-stops.spec.ts`
+Expected: PASS, 3 tests.
+
+- [ ] **Step 5: Record at all four skip sites**
+
+At each site, inject `UnevaluatedStopsTracker` into the constructor and add a `record()` call
+immediately before the existing `continue`. Keep the existing `logger.warn` — the log is
+still useful when someone is already reading logs; the counter is for when nobody is.
+
+`watch-backstop-poller.service.ts:62-66` becomes:
+
+```typescript
+        if (!r || !r.fresh) {
+          this.unevaluatedStops.record('watch-backstop');
+          this.logger.warn(
+            `[watch-backstop] ${e.symbol} unmonitored — no fresh price, stop not evaluated`,
+          );
+          continue;
+        }
+```
+
+`ungated-tick-poller.service.ts:69-71` becomes:
+
+```typescript
+        if (!r.fresh) {
+          this.unevaluatedStops.record('ungated');
+          this.logger.warn(`[ungated-poll] ${token} unmonitored — no fresh price, onTick skipped`);
+          continue;
+        }
+```
+
+Apply the same shape in `sell-futures-tick-poller.service.ts` (track name `'sell-futures'`)
+and `adaptive-stop-tick-poller.service.ts` (track name `'adaptive-stop'`), at their
+equivalent not-fresh guards. If a track's guard is shaped differently, record at whichever
+branch causes the position to be skipped for that cycle — the criterion is "the stop was not
+evaluated", not the specific condition text.
+
+- [ ] **Step 6: Surface in /healthz/detail**
+
+In `health-detail.service.ts`, inject `UnevaluatedStopsTracker`, add
+`unevaluatedStops: Signal<UnevaluatedStops>` to `HealthDetailPayload`, and collect it in
+`check()` alongside the others with the same try/catch-to-`unavailable` shape used by
+`checkSlots()`.
+
+- [ ] **Step 7: Run the affected suites**
+
+Run: `cd apps/api && npx jest src/common/stop-evidence src/modules/health src/modules/watch-monitor src/modules/ungated-track src/modules/sell-futures-track src/modules/adaptive-stop-track`
+Expected: PASS. A DI failure in a track's existing spec means that spec constructs the
+poller directly and needs the new constructor argument — pass a `new UnevaluatedStopsTracker()`.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/api/src/common/stop-evidence apps/api/src/app.module.ts apps/api/src/modules/health apps/api/src/modules/watch-monitor/services/watch-backstop-poller.service.ts apps/api/src/modules/ungated-track/services/ungated-tick-poller.service.ts apps/api/src/modules/sell-futures-track/services/sell-futures-tick-poller.service.ts apps/api/src/modules/adaptive-stop-track/services/adaptive-stop-tick-poller.service.ts
+git commit -m "feat(stop-evidence): count stops that were never evaluated"
 ```
 
 ---

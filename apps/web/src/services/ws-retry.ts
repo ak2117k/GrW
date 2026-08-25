@@ -45,3 +45,30 @@ export function shouldRetryServerDisconnect(opts: {
 export function nextRetryDelayMs(retries: number): number {
   return Math.min(MAX_RETRY_DELAY_MS, 1_000 * Math.max(1, retries));
 }
+
+/**
+ * Shortest gap between recovery attempts.
+ *
+ * `visibilitychange` fires on every tab flick and `online` can flap on a poor
+ * connection. Without a floor, re-arming on each one would rebuild exactly the
+ * hot loop {@link SERVER_DROP_MAX_RETRIES} exists to prevent.
+ */
+export const RECOVERY_COOLDOWN_MS = 10_000;
+
+/**
+ * Should a tab-return or `online` event re-arm a socket that has given up?
+ *
+ * The retry cap makes a rejected namespace go quiet, which is right — but it
+ * also means a socket that exhausted the cap stays dead for the remainder of
+ * the session, and the user's only recovery is a page refresh. Returning to the
+ * tab, or the network coming back, is NEW information: the reason the retries
+ * failed may no longer hold. So the budget is refreshed, but only behind a
+ * token check (no token means logged out, and staying down is correct) and a
+ * cooldown (so a burst of events cannot spin).
+ */
+export function shouldAttemptRecovery(opts: {
+  hasToken: boolean;
+  msSinceLastAttempt: number;
+}): boolean {
+  return opts.hasToken && opts.msSinceLastAttempt >= RECOVERY_COOLDOWN_MS;
+}

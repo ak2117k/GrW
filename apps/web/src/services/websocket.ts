@@ -2,6 +2,7 @@ import { io, Socket } from 'socket.io-client';
 import { getStoredAccessToken } from './auth-storage';
 import {
   nextRetryDelayMs,
+  shouldAttemptRecovery,
   shouldResetRetries,
   shouldRetryServerDisconnect,
 } from './ws-retry';
@@ -118,6 +119,14 @@ class WebSocketService {
   private listeners = new Map<string, Set<EventCallback>>();
   /** Number of currently-connected namespace sockets. */
   private connectedCount = 0;
+
+  /**
+   * One re-arm closure per namespace, so a recovery trigger can clear that
+   * namespace's retry budget — the counter lives in the per-socket closure.
+   */
+  private recoverFns: Array<() => void> = [];
+  private lastRecoveryAt = 0;
+  private removeRecoveryTriggers: (() => void) | null = null;
 
   /** Wall-clock of the last 'tick' frame received on /ws. */
   private lastTickAt = 0;
@@ -268,9 +277,70 @@ class WebSocketService {
       }
 
       this.sockets.set(ns.path, sock);
+
+      // Re-arm for this namespace: give back the retry budget and try again.
+      // Registered per socket because `serverDropRetries` is closure state.
+      this.recoverFns.push(() => {
+        if (sock.connected) return;
+        serverDropRetries = 0;
+        sock.connect();
+      });
     }
 
     this.startHealthWatch();
+    this.startRecoveryTriggers();
+  }
+
+  /**
+   * Wake a socket that has given up, when the world changes around it.
+   *
+   * socket.io never retries an "io server disconnect", and our own retry is
+   * capped so a rejected namespace goes quiet rather than hot-looping. The gap
+   * that leaves: a socket which exhausted the cap stays dead for the rest of
+   * the session, and the user's only cure is a page refresh. That is the
+   * "sometimes a reload fixes it" complaint, exactly.
+   *
+   * A tab-return or an `online` event is new information — the reason the
+   * retries failed may have gone away — so both re-arm the budget. The guard
+   * keeps the cap meaningful: no token means logged out and staying down is
+   * correct, and a cooldown stops a burst of tab flicks from spinning.
+   */
+  private startRecoveryTriggers(): void {
+    if (this.removeRecoveryTriggers) return;
+    // Browser-only. `connect()` is exercised in a node test environment, and a
+    // bare `document` reference there throws before a single socket opens.
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+
+    const onVisible = (): void => {
+      if (document.visibilityState === 'visible') this.attemptRecovery();
+    };
+    const onOnline = (): void => this.attemptRecovery();
+
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', onOnline);
+
+    this.removeRecoveryTriggers = () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', onOnline);
+    };
+  }
+
+  private attemptRecovery(): void {
+    const msSinceLastAttempt = this.lastRecoveryAt
+      ? Date.now() - this.lastRecoveryAt
+      : Number.POSITIVE_INFINITY;
+
+    if (
+      !shouldAttemptRecovery({
+        hasToken: Boolean(getAccessToken()),
+        msSinceLastAttempt,
+      })
+    ) {
+      return;
+    }
+
+    this.lastRecoveryAt = Date.now();
+    for (const recover of this.recoverFns) recover();
   }
 
   /** Current feed health, decided by the tick socket alone. */
@@ -348,6 +418,10 @@ class WebSocketService {
     }
     this.sockets.clear();
     this.connectedCount = 0;
+    this.recoverFns = [];
+    this.removeRecoveryTriggers?.();
+    this.removeRecoveryTriggers = null;
+    this.lastRecoveryAt = 0;
     if (this.healthTimer) {
       clearInterval(this.healthTimer);
       this.healthTimer = null;

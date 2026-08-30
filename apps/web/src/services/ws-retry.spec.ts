@@ -4,6 +4,7 @@ import {
   STABLE_CONNECTION_MS,
   nextRetryDelayMs,
   shouldResetRetries,
+  shouldAttemptRecovery,
   shouldRetryServerDisconnect,
 } from './ws-retry';
 
@@ -74,5 +75,40 @@ describe('nextRetryDelayMs', () => {
 
   it('never returns a zero/negative delay', () => {
     expect(nextRetryDelayMs(0)).toBeGreaterThan(0);
+  });
+});
+
+describe('shouldAttemptRecovery', () => {
+  // socket.io gives up permanently on "io server disconnect", and our own
+  // retry is capped so a rejected namespace goes quiet. Correct, but it means
+  // a socket that exhausted the cap stays dead for the WHOLE session — the
+  // user's only recovery is F5. Tab-return and `online` are precisely the
+  // moments a previously hopeless retry starts working, so they re-arm it.
+
+  it('retries when the tab returns and we still hold a token', () => {
+    expect(
+      shouldAttemptRecovery({ hasToken: true, msSinceLastAttempt: 60_000 }),
+    ).toBe(true);
+  });
+
+  it('stays down with no token — the user is logged out', () => {
+    expect(
+      shouldAttemptRecovery({ hasToken: false, msSinceLastAttempt: 60_000 }),
+    ).toBe(false);
+  });
+
+  it('ignores a burst of triggers inside the cooldown', () => {
+    // visibilitychange can fire repeatedly while a user flicks between tabs,
+    // and `online` can flap. Re-arming on every one of those would rebuild the
+    // hot loop the retry cap exists to prevent.
+    expect(
+      shouldAttemptRecovery({ hasToken: true, msSinceLastAttempt: 500 }),
+    ).toBe(false);
+  });
+
+  it('allows the very first attempt', () => {
+    expect(
+      shouldAttemptRecovery({ hasToken: true, msSinceLastAttempt: Number.POSITIVE_INFINITY }),
+    ).toBe(true);
   });
 });

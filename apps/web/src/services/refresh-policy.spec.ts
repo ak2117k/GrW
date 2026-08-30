@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { marketAwareInterval, marketPhase, pollIntervalMs, retryDelayMs } from './refresh-policy';
+import {
+  marketAwareInterval,
+  marketPhase,
+  pollIntervalMs,
+  retryDelayMs,
+  shouldRefreshOnReturn,
+} from './refresh-policy';
 
 /** A fixed instant expressed in IST, built from a UTC offset of +05:30. */
 function ist(dateIso: string): Date {
@@ -82,5 +88,40 @@ describe('marketAwareInterval', () => {
 
     clock = new Date('2026-08-24T23:45:00+05:30'); // shut
     expect(interval()).toBe(false);
+  });
+});
+
+describe('shouldRefreshOnReturn', () => {
+  // The catch-up that does not exist anywhere in the app today. A hidden tab's
+  // timers are throttled by the browser (Chrome drops them to ~1/min and can
+  // freeze them), and useChartData additionally skips its fetch outright while
+  // hidden — so on return the chart shows the bar it had when you left until an
+  // interval happens to fire. That is the reported "graph doesn't update".
+
+  it('refreshes when the tab returns during an open market', () => {
+    expect(shouldRefreshOnReturn({ msSinceLastRefresh: 30_000, phase: 'open' })).toBe(true);
+  });
+
+  it('refreshes on the first return, when nothing has been fetched yet', () => {
+    expect(
+      shouldRefreshOnReturn({ msSinceLastRefresh: Number.POSITIVE_INFINITY, phase: 'open' }),
+    ).toBe(true);
+  });
+
+  it('does not wake a closed market', () => {
+    // Returning to a tab at 03:00 must not fire a request. The whole point of
+    // the market gate is that a shut market is not worth a round trip -- and on
+    // serverless Postgres it is not free either.
+    expect(shouldRefreshOnReturn({ msSinceLastRefresh: 60_000, phase: 'closed' })).toBe(false);
+  });
+
+  it('refreshes during pre-market, where prices already move', () => {
+    expect(shouldRefreshOnReturn({ msSinceLastRefresh: 60_000, phase: 'pre-market' })).toBe(true);
+  });
+
+  it('ignores a burst of returns inside the cooldown', () => {
+    // visibilitychange fires on every tab flick. Without a floor, flicking
+    // between two tabs would hammer the API for data it just fetched.
+    expect(shouldRefreshOnReturn({ msSinceLastRefresh: 200, phase: 'open' })).toBe(false);
   });
 });

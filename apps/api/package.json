@@ -15,6 +15,7 @@
     "clean": "rm -rf dist node_modules"
   },
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.33.1",
     "@anthropic-ai/sdk": "^0.117.1",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/bull": "^11.0.0",

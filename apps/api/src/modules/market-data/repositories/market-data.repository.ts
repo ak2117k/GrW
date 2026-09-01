@@ -334,6 +334,51 @@ export class MarketDataRepository {
   }
 
   /**
+   * ONE BOUNDED PAGE of active instruments, for the in-memory cache warm.
+   *
+   * `getAllActiveInstruments` above returns the whole table in a single result
+   * set. That was fine while `instruments` held a few thousand cash equities.
+   * It stopped being fine when the master refresh began storing every live
+   * derivative contract — each strike of each unexpired NFO/MCX/BFO/CDS expiry
+   * — because the row count grew by orders of magnitude and the client, the
+   * driver and the database all hold that result at once. On a free-tier
+   * compute that exhausts memory, and the cache warm runs at boot, so the
+   * failure repeats on every restart.
+   *
+   * Three deliberate choices:
+   *
+   * - `select` rather than the whole row: `createdAt`/`updatedAt`/`isActive` are
+   *   never read by the cache, and at this row count they are not free.
+   * - `orderBy: id` rather than `symbol`: the walk needs a stable total order,
+   *   and the primary key gives one from an index the table already has. Order
+   *   is meaningless to the caller either way — it builds hash maps.
+   * - keyset paging via `cursor`, not `skip`/`offset`: an offset walk re-reads
+   *   and discards every earlier row, so the last page costs the most. A cursor
+   *   resumes at the id and each page costs the same.
+   */
+  async getActiveInstrumentPage(take: number, cursorId?: string) {
+    return this.prisma.instrument.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        symbol: true,
+        token: true,
+        name: true,
+        exchange: true,
+        segment: true,
+        lotSize: true,
+        tickSize: true,
+        expiry: true,
+        strike: true,
+        optionType: true,
+      },
+      orderBy: { id: 'asc' },
+      take,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
+    });
+  }
+
+  /**
    * Get instruments by a list of tokens.
    */
   async getInstrumentsByTokens(tokens: string[]) {

@@ -50,17 +50,34 @@ export class InstrumentService implements OnModuleInit {
     private readonly candleAggregator: CandleAggregatorService,
   ) {}
 
-  async onModuleInit(): Promise<void> {
-    try {
-      await this.loadFromDatabase();
-      this.logger.log(
-        `Instrument cache initialized with ${this.instrumentsByToken.size} instruments`,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Failed to initialize instrument cache: ${error instanceof Error ? error.message : error}`,
-      );
-    }
+  /**
+   * Rows per round trip when warming the cache.
+   *
+   * Sized to bound the transient, not to minimise round trips. The whole point
+   * is that no single result set can be large enough to exhaust memory however
+   * far the table grows, so this stays a constant rather than a fraction of the
+   * row count.
+   */
+  static readonly LOAD_PAGE_SIZE = 5_000;
+
+  /**
+   * DELIBERATELY NOT AWAITED — the port bind depends on it.
+   *
+   * Nest awaits every `onModuleInit` in the tree before `app.listen()` runs, so
+   * awaiting this put a full-table read of `instruments` directly in front of
+   * the port. Render's health check then had nothing to answer it, and the
+   * deploy failed. The application was fine; it never got to listen. This is the
+   * same hazard, and the same fix, as the boot instrument-master refresh next
+   * door in `instrument-master-refresh.cron.ts`.
+   *
+   * Detaching is safe because every read path already tolerates a cold cache:
+   * `getByToken` falls back to a single-row database read and memoises it, and
+   * `search` falls back to a query when the map is empty. The only cost is a
+   * window after boot in which candle aggregation has not yet been seeded for
+   * every token — strictly better than the alternative, which was not serving.
+   */
+  onModuleInit(): void {
+    void this.loadCacheFromDatabase();
   }
 
   /**
@@ -233,7 +250,7 @@ export class InstrumentService implements OnModuleInit {
     this.logger.log(`Upserted ${count} instruments into database`);
 
     // Reload the in-memory cache
-    await this.loadFromDatabase();
+    await this.loadCacheFromDatabase();
     this.lastRefreshedAt = new Date();
     this.logger.log(
       `Instrument cache refreshed with ${this.instrumentsByToken.size} instruments`,
@@ -257,44 +274,72 @@ export class InstrumentService implements OnModuleInit {
   }
 
   /**
-   * Load all active instruments from the database into the in-memory cache
-   * AND proactively seed the candle-aggregator's token→instrumentId map.
+   * Warm the in-memory cache by WALKING the table in bounded pages, seeding the
+   * candle-aggregator's token→instrumentId map in lockstep.
    *
-   * This is critical for live-tick ingestion across all exchanges (NSE, NFO,
-   * BSE, MCX). Previously this used searchInstruments('') which is capped at
-   * `take: 50` — that silently dropped every instrument beyond the first 50
-   * rows alphabetically, so tokens for MCX commodities (CRUDEOIL/COPPER) and
-   * most NFO options never got a cache entry and their ticks were discarded
-   * by CandleAggregator.processTick (which bails when tokenInstrumentMap has
-   * no match for the tick's token).
+   * Both maps must cover the FULL active set, which is why this pages rather
+   * than simply capping the read. An earlier version used `searchInstruments('')`,
+   * capped at `take: 50`, and silently dropped every instrument past the first
+   * 50 rows alphabetically — so MCX commodities (CRUDEOIL/COPPER) and most NFO
+   * options had no cache entry and their ticks were discarded by
+   * `CandleAggregator.processTick`, which bails when the map has no match for a
+   * tick's token. Paging keeps that coverage while bounding the cost of getting it.
    *
-   * We now pull the full active set via the dedicated repository method and
-   * seed BOTH maps in lockstep so every tradable token has a mapping ready
-   * before the first tick arrives.
+   * Replacing the cap with one unbounded `findMany` is what then exhausted
+   * memory: the row count went from thousands to a scale where the database, the
+   * driver and the client each hold the entire result at once — once the master
+   * began carrying live derivative contracts. Paging caps that transient at
+   * `LOAD_PAGE_SIZE` rows regardless of how large the table grows.
+   *
+   * The maps are populated INCREMENTALLY rather than built aside and swapped in.
+   * A swap would double peak memory at exactly the moment memory is the
+   * constraint — and since this now runs detached, behind an already-listening
+   * server, a half-filled cache is a state readers must tolerate anyway. They
+   * do: a miss falls back to a single-row read.
+   *
+   * Never throws. A failed page leaves the pages already read in place, which
+   * still serves lookups; the alternative — an empty cache — is strictly worse.
    */
-  private async loadFromDatabase(): Promise<void> {
+  async loadCacheFromDatabase(): Promise<void> {
+    const startedAt = Date.now();
+    this.instrumentsByToken.clear();
+    this.instrumentsByExchangeToken.clear();
+    let seeded = 0;
+    let cursorId: string | undefined;
+
     try {
-      const instruments = await this.repository.getAllActiveInstruments();
-      this.instrumentsByToken.clear();
-      this.instrumentsByExchangeToken.clear();
-      let seeded = 0;
-      for (const inst of instruments) {
-        const record = inst as InstrumentRecord;
-        this.instrumentsByToken.set(record.token, record);
-        this.instrumentsByExchangeToken.set(`${record.exchange}:${record.token}`, record);
-        // Push into the candle-aggregator so live ticks for this token
-        // are aggregated into candles and persisted. Without this, MCX
-        // commodity ticks (and any instrument outside the first 50 rows)
-        // hit processTick with instrumentId=undefined and get dropped.
-        this.candleAggregator.setTokenInstrumentId(record.token, record.id);
-        seeded++;
+      for (;;) {
+        const page = await this.repository.getActiveInstrumentPage(
+          InstrumentService.LOAD_PAGE_SIZE,
+          cursorId,
+        );
+        for (const inst of page) {
+          const record = inst as InstrumentRecord;
+          this.instrumentsByToken.set(record.token, record);
+          this.instrumentsByExchangeToken.set(`${record.exchange}:${record.token}`, record);
+          // Push into the candle-aggregator so live ticks for this token
+          // are aggregated into candles and persisted. Without this, MCX
+          // commodity ticks (and any instrument outside the first 50 rows)
+          // hit processTick with instrumentId=undefined and get dropped.
+          this.candleAggregator.setTokenInstrumentId(record.token, record.id);
+          seeded++;
+        }
+        // A short page is the last page — asking again only to be told the walk
+        // is over costs a round trip on every boot.
+        if (page.length < InstrumentService.LOAD_PAGE_SIZE) break;
+        cursorId = (page[page.length - 1] as InstrumentRecord).id;
       }
       this.logger.log(
-        `Seeded candle-aggregator tokenInstrumentMap with ${seeded} instruments across all exchanges (NSE, NFO, BSE, MCX).`,
+        `Instrument cache warmed with ${seeded} instruments across all exchanges ` +
+          `(NSE, NFO, BSE, MCX) in ${Date.now() - startedAt}ms, ` +
+          `${InstrumentService.LOAD_PAGE_SIZE} rows per page.`,
       );
     } catch (error) {
+      // Logged with the count so a partial warm is legible as partial rather
+      // than reading as a total failure.
       this.logger.error(
-        `Failed to load instruments from DB: ${error instanceof Error ? error.message : error}`,
+        `Instrument cache warm stopped after ${seeded} instruments: ` +
+          `${error instanceof Error ? error.message : error}`,
       );
     }
   }

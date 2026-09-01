@@ -52,12 +52,36 @@ export class LevelBookCron implements OnModuleInit {
    * intraday queries return 0 candles ("got 0, need 25") until
    * tomorrow's cron firings. Covers both NSE indices and MCX
    * commodities across 1d/1h/15m/5m.
+   *
+   * DELIBERATELY NOT AWAITED — the port bind depends on it.
+   *
+   * Nest awaits every `onModuleInit` in the tree before `app.listen()`, so
+   * awaiting this sequence held the port shut for its whole duration: a
+   * rate-limited walk of the NSE+MCX universe across four timeframes, then two
+   * seeding passes. That is minutes, and it is what made the first request of
+   * the day — the login — appear to hang.
+   *
+   * `DailyBackfillWorker` already reached this conclusion about the very same
+   * `backfillUniverseAtBoot()` call and runs it fire-and-forget, saying "we
+   * don't want to block API readiness behind it". Awaiting it here undid that
+   * and ran the universe pass a second time.
+   *
+   * The sequence itself is unchanged and still ordered — the backfill must
+   * finish before `seedSession` reads candles, for every reason given above. It
+   * simply runs behind an already-listening server now. Nothing here serves a
+   * request: level books feed the analyze endpoint, which reads them when asked,
+   * and an empty book was the status quo for the entire duration of the
+   * blocking version anyway.
    */
-  async onModuleInit(): Promise<void> {
+  onModuleInit(): void {
     if (!bootJobsEnabled()) {
       this.logger.log(BOOT_JOBS_DISABLED);
       return;
     }
+    void this.seedAtBoot();
+  }
+
+  private async seedAtBoot(): Promise<void> {
     if (this.dailyBackfill) {
       try {
         await this.dailyBackfill.backfillUniverseAtBoot();
@@ -69,8 +93,16 @@ export class LevelBookCron implements OnModuleInit {
       }
     }
     this.logger.log('Boot-seeding level books');
-    await this.seedSession();
-    await this.lockOpeningRange();
+    try {
+      await this.seedSession();
+      await this.lockOpeningRange();
+    } catch (err) {
+      // Detached work has no caller to catch for it, and an unhandled rejection
+      // here would reach the process-level handler as an anonymous failure.
+      this.logger.error(
+        `Boot level-book seeding failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   /** 09:15 IST Mon-Fri — seed PDH/PDL/ATR for the day's universe. */

@@ -1,3 +1,4 @@
+import { surviveBootWork } from '../../../common/utils/survive-boot-work';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SellFuturesTradeRepository } from '../repositories/sell-futures-trade.repository';
@@ -47,7 +48,21 @@ export class SellFuturesPaperAccountService implements OnModuleInit {
     private readonly trades: SellFuturesTradeRepository,
   ) {}
 
+  /**
+   * Guarded: an unreachable database must not stop the API from serving. Nest
+   * runs module hooks concurrently under Promise.all inside `app.listen()`, so
+   * an unguarded rejection here aborts init and the port is never bound. This
+   * reconcile is a self-healing balance check that the next boot redoes.
+   */
   async onModuleInit(): Promise<void> {
+    await surviveBootWork(
+      'reconcile the sell-futures paper account',
+      () => this.reconcileAtBoot(),
+      this.logger,
+    );
+  }
+
+  private async reconcileAtBoot(): Promise<void> {
     const existing = await this.prisma.sellFuturesPaperAccount.findFirst();
     if (!existing) {
       await this.prisma.sellFuturesPaperAccount.create({

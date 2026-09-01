@@ -1,3 +1,4 @@
+import { surviveBootWork } from '../../../common/utils/survive-boot-work';
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
@@ -84,6 +85,21 @@ export class UniverseScannerWorker implements OnModuleInit {
     // Resolve underlying instrument IDs once at boot. The candle backfill
     // script seeds these rows; if either is missing, the scan will skip
     // that symbol with a warning.
+    //
+    // Guarded because this rejection took the whole API down. Nest runs module
+    // hooks concurrently under Promise.all inside app.listen(), so with Neon
+    // unreachable this bare findFirst aborted init and the port was never
+    // bound — reported by the platform as "no open ports detected". Resolving
+    // an instrument id is a warm-up: unresolved symbols are already handled
+    // below by skipping them with a warning.
+    await surviveBootWork(
+      'resolve scanner universe instrument ids',
+      () => this.resolveUniverseInstruments(),
+      this.logger,
+    );
+  }
+
+  private async resolveUniverseInstruments(): Promise<void> {
     for (const w of WATCHED) {
       // Match either 'INDEX' or 'INDICES' segment label — different parts of
       // the codebase have used both historically (the backfill script writes

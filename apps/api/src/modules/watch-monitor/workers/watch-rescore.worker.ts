@@ -17,16 +17,34 @@ export class WatchRescoreWorker implements OnModuleInit {
     private readonly monitor: WatchMonitorService,
   ) {}
 
-  async onModuleInit() {
+  /**
+   * DELIBERATELY NOT AWAITED — the port bind depends on it.
+   *
+   * The guard below handles Redis REJECTING. It does not help when Redis HANGS,
+   * which is what an unreachable host usually produces: ioredis retries and the
+   * promise never settles. Nest awaits every `onModuleInit` before
+   * `app.listen()`, so an awaited hang here holds the port shut for good and
+   * Render fails the deploy with "no open ports detected" — the same hazard
+   * already fixed once in the market feed.
+   *
+   * Registering a repeatable job is background work by definition, so it runs
+   * behind an already-listening server.
+   */
+  onModuleInit(): void {
     if (!bootJobsEnabled()) {
       this.logger.log(BOOT_JOBS_DISABLED);
       return;
     }
+    void this.registerRepeatable();
+  }
+
+  private async registerRepeatable(): Promise<void> {
     // Redis may be briefly unreachable at boot (e.g. a cold DNS resolver on a
     // fresh container). These queue ops await Redis; if they reject and escape
-    // onModuleInit, NestJS aborts the ENTIRE app bootstrap → crash loop. Guard
-    // them so a transient Redis hiccup only skips repeatable-job registration
-    // (the app still starts and serves); the job re-registers on the next boot.
+    // this method, the rejection is unhandled and surfaces at the process
+    // handler with no attribution. Guard them so a transient Redis hiccup only
+    // skips repeatable-job registration (the app still starts and serves); the
+    // job re-registers on the next boot.
     try {
       const repeatables = await this.queue.getRepeatableJobs();
       for (const r of repeatables) {

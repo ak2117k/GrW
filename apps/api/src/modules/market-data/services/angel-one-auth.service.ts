@@ -35,7 +35,26 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   // FeedCredentialProvider; this service only owns the session lifecycle.
   constructor(private readonly feedCredentials: FeedCredentialProvider) {}
 
-  async onModuleInit(): Promise<void> {
+  /**
+   * DELIBERATELY NOT AWAITED — the port bind depends on it.
+   *
+   * Nest awaits every `onModuleInit` before `app.listen()`, so awaiting the
+   * broker login put a network round trip in front of the port: three attempts
+   * with 6s of backoff between them, and no timeout on the SmartAPI call
+   * itself. A broker that is slow, rate-limiting this IP, or simply not
+   * answering therefore did not degrade the feed — it stopped the API from
+   * opening a port at all, and Render failed the deploy with "no open ports
+   * detected".
+   *
+   * That is the wrong dependency direction. The catch below already states the
+   * policy — live market data is non-critical to boot and degrades to demo/REST
+   * data — so it must not be able to gate the port either.
+   */
+  onModuleInit(): void {
+    void this.autoLogin();
+  }
+
+  private async autoLogin(): Promise<void> {
     // Only attempt auto-login when a feed account is resolvable (env creds set,
     // or a designated vault account with connected credentials). Otherwise skip
     // gracefully — the feed serves demo/REST data until one is configured.

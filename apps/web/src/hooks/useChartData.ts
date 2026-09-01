@@ -1,4 +1,5 @@
 import { useReducer, useMemo, useState, useEffect, useCallback, useRef } from 'react';
+import { useLiveRefresh } from './useLiveRefresh';
 import api from '@/services/api';
 import { wsService } from '@/services/websocket';
 import { useChartStore } from '@/stores/chart-store';
@@ -452,11 +453,14 @@ export function useChartData(): UseChartDataReturn {
     }
   }, [selectedSymbol.token, selectedSymbol.exchange, timeframe]);
 
-  useEffect(() => {
-    if (!selectedSymbol.token || selectedSymbol.token === '0') return;
-    const id = setInterval(liveEdgeRefresh, 20_000);
-    return () => clearInterval(id);
-  }, [selectedSymbol.token, liveEdgeRefresh]);
+  // Was a bare 20s setInterval. It kept firing while the tab was hidden, where
+  // liveEdgeRefresh returns immediately without fetching (see its document.hidden
+  // guard) -- and nothing caught up on return, so the chart held the bar it had
+  // when the user left until a browser-throttled timer happened to fire. That is
+  // the "graph doesn't update / shows old data" report. useLiveRefresh keeps the
+  // cadence, stops it when every venue is shut, and refetches the moment the tab
+  // or the network comes back.
+  useLiveRefresh(liveEdgeRefresh, 20_000);
 
   // -------------------------------------------------------------------------
   // Feed plumbing

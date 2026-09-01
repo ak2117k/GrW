@@ -92,3 +92,36 @@ export function marketAwareInterval(
 ): () => number | false {
   return () => pollIntervalMs(baseMs, marketPhase(now()));
 }
+
+/**
+ * Shortest gap between catch-up refreshes triggered by a tab or network return.
+ *
+ * Short on purpose. This is not the socket's re-arm cooldown — nothing is being
+ * retried here, we are simply refetching data that may have gone stale while the
+ * tab was hidden. A long floor would leave a returning user staring at an old
+ * chart for no reason; this only exists so that flicking between two tabs cannot
+ * hammer the API for data it fetched a moment ago.
+ */
+export const RETURN_REFRESH_COOLDOWN_MS = 2_000;
+
+/**
+ * Should a tab-return or `online` event trigger an immediate refresh?
+ *
+ * There is no catch-up anywhere in this app today, and that absence is the
+ * reported "shows old data / graph doesn't update". A hidden tab's timers are
+ * throttled by the browser — Chrome drops them to roughly one a minute and may
+ * freeze them entirely — and `useChartData` additionally refuses to fetch while
+ * `document.hidden`. So on return the chart holds whatever bar it had when the
+ * user left, until an interval happens to fire. Sometimes that is soon, which is
+ * why the bug looked intermittent.
+ *
+ * Gated on the market being open for the same reason polling is: returning to a
+ * tab at 03:00 should cost nothing.
+ */
+export function shouldRefreshOnReturn(opts: {
+  msSinceLastRefresh: number;
+  phase: MarketStatus;
+}): boolean {
+  if (opts.phase === 'closed') return false;
+  return opts.msSinceLastRefresh >= RETURN_REFRESH_COOLDOWN_MS;
+}

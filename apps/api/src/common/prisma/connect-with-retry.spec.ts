@@ -1,4 +1,4 @@
-import { connectWithRetry } from './prisma.service';
+import { connectWithRetry, connectAtBoot } from './prisma.service';
 
 const silentLogger = { log: () => undefined, warn: () => undefined };
 
@@ -42,5 +42,37 @@ describe('connectWithRetry', () => {
 
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0][0])).toMatch(/attempt 1\/5/);
+  });
+});
+
+describe('connectAtBoot', () => {
+  const makeLogger = () => ({ log: jest.fn(), warn: jest.fn(), error: jest.fn() });
+
+  it('never rejects when the database is unreachable, so the port can still bind', async () => {
+    const boom = new Error("Can't reach database server");
+    const logger = makeLogger();
+
+    // The API must come up and serve /healthz/live with the database down.
+    // Rethrowing here escaped `onModuleInit`, and because bootstrap() had no
+    // catch, that became an unhandled rejection the process handler merely
+    // LOGGED -- leaving a live process that never called listen(). Render then
+    // reported "no open ports detected", which is a symptom four layers removed
+    // from an unreachable database.
+    await expect(
+      connectAtBoot(jest.fn().mockRejectedValue(boom), logger, 2, 0),
+    ).resolves.toBeUndefined();
+
+    // Silence is what made this class of failure survive. Say it once, loudly.
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error.mock.calls[0][0]).toContain("Can't reach database server");
+  });
+
+  it('logs the connection once on success', async () => {
+    const logger = makeLogger();
+
+    await connectAtBoot(jest.fn().mockResolvedValue(undefined), logger, 5, 0);
+
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.log).toHaveBeenCalledTimes(1);
   });
 });

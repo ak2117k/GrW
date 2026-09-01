@@ -12,6 +12,7 @@ import { LoggingInterceptor } from './common/interceptors';
 import { isBenignWsHeartbeatError } from './common/utils/ws-heartbeat-error';
 import { EnforceHttpsMiddleware } from './common/http/enforce-https.middleware';
 import { validateBootConfig } from './common/config/validate-boot-config';
+import { exitOnBootFailure } from './boot-failure';
 
 /**
  * Transport-layer hardening (TDA-004), exported so tests exercise the real code.
@@ -151,6 +152,11 @@ async function bootstrap(): Promise<void> {
 
 // Only boot when run as the entry point. Importing this module (e.g. tests
 // exercising the exported applyHttpHardening) must NOT spin up the real server.
+//
+// The `.catch` is load-bearing, not defensive tidiness. The unhandledRejection
+// handler above suppresses Node's default "terminate on unhandled rejection",
+// so without this a rejection from bootstrap was merely LOGGED and the process
+// stayed alive without ever calling listen() — see `exitOnBootFailure`.
 if (require.main === module) {
-  bootstrap();
+  bootstrap().catch((err) => exitOnBootFailure(err));
 }

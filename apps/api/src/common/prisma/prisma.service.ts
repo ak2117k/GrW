@@ -55,6 +55,46 @@ export async function connectWithRetry(
   }
 }
 
+/**
+ * The boot-time connect: retried, then SURVIVED rather than rethrown.
+ *
+ * `connectWithRetry` rethrows on exhaustion, which is right for its own callers
+ * — a script that cannot reach the database should stop. At boot it is wrong.
+ * That rejection escaped `onModuleInit`, and since `bootstrap()` had no catch
+ * and the process registers an `unhandledRejection` handler that only logs, the
+ * API became a live process that never called `listen()`. The platform saw no
+ * open port and reported a port problem; the cause was an unreachable database.
+ *
+ * So an unreachable database now degrades the API instead of hiding it. The
+ * server binds, `/healthz/live` answers, and `/healthz` reports the database as
+ * unreachable — which is the entire point of a health endpoint that always
+ * returns 200. Prisma connects lazily anyway, so a database that comes back
+ * later is picked up by the next query with no restart.
+ *
+ * The tradeoff is real and deliberate: a genuinely misconfigured DATABASE_URL
+ * no longer stops the boot, it produces a running API whose every query fails.
+ * That is strictly more debuggable than the alternative we actually lived
+ * through, because the health endpoint can be asked what is wrong — a process
+ * with no open port cannot be asked anything.
+ */
+export async function connectAtBoot(
+  connect: () => Promise<void>,
+  logger: { log: (m: string) => void; warn: (m: string) => void; error: (m: string) => void },
+  attempts?: number,
+  backoffMs?: number,
+): Promise<void> {
+  try {
+    await connectWithRetry(connect, logger, attempts, backoffMs);
+    logger.log('Connected to PostgreSQL via Prisma (tenant scoping active)');
+  } catch (err) {
+    logger.error(
+      `Database unreachable at boot — the API is starting anyway and will serve ` +
+        `degraded. Every query will fail until it recovers; /healthz reports the ` +
+        `live state. (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+}
+
 /** Operations whose `where` is a unique input (extendedWhereUnique applies). */
 const UNIQUE_WHERE_OPS = new Set([
   'findUnique',
@@ -130,8 +170,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
     // The extended client has its own (non-PrismaService) prototype, so it lacks
     // our lifecycle method. Re-attach it so Nest's OnModuleInit still connects.
     extended.onModuleInit = async (): Promise<void> => {
-      await connectWithRetry(() => extended.$connect(), logger);
-      logger.log('Connected to PostgreSQL via Prisma (tenant scoping active)');
+      await connectAtBoot(() => extended.$connect(), logger);
     };
 
     return extended;

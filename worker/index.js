@@ -1,8 +1,8 @@
 // Cloudflare Worker for the GrW frontend.
 //
 // It does two jobs:
-//   1. Proxy /api/*, /auth/*, and /socket.io/* to the Render backend,
-//      server-side. The browser only ever talks to this Worker's origin, so
+//   1. Proxy /api/*, /auth/*, and /socket.io/* to the API host
+//      (vars.API_ORIGIN), server-side. The browser only ever talks to this Worker's origin, so
 //      these are SAME-ORIGIN calls — no CORS preflight, and the React client
 //      keeps its relative axios baseURL ('/api', '/auth/refresh') and relative
 //      socket.io connection (io('/ws', { path: '/socket.io' })) with zero code
@@ -15,9 +15,14 @@
 //      directly by the asset store and this Worker isn't even invoked for them;
 //      the env.ASSETS.fetch fallback below only matters if that scoping changes.
 //
-// The Render origin is fixed (the API's public URL). If it ever changes, update
-// it here and redeploy.
-const API_ORIGIN = 'https://grw-api.onrender.com';
+// The API origin comes from wrangler.jsonc `vars.API_ORIGIN` (the Oracle host's
+// tunnel hostname). The Render URL remains only as a fallback so a missing var
+// fails over to the old host instead of to nothing.
+const FALLBACK_API_ORIGIN = 'https://grw-api.onrender.com';
+
+export function apiOrigin(env) {
+  return env.API_ORIGIN || FALLBACK_API_ORIGIN;
+}
 
 export default {
   async fetch(request, env) {
@@ -28,10 +33,10 @@ export default {
       url.pathname.startsWith('/auth/') ||
       url.pathname.startsWith('/socket.io/')
     ) {
-      // Forward method, headers, and body unchanged to Render. Passing the
+      // Forward method, headers, and body unchanged to the API host. Passing the
       // original request as init preserves everything; the runtime sets the
       // Host header from the target URL.
-      return fetch(API_ORIGIN + url.pathname + url.search, request);
+      return fetch(apiOrigin(env) + url.pathname + url.search, request);
     }
 
     return env.ASSETS.fetch(request);

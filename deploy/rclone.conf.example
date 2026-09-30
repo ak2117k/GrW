@@ -1,0 +1,17 @@
+# Oracle Object Storage via its S3-compatible API.
+# Keys: OCI Console → Profile → Customer secret keys. Namespace: Tenancy details.
+[oci]
+type = s3
+provider = Other
+access_key_id =
+secret_access_key =
+endpoint = https://<namespace>.compat.objectstorage.ap-mumbai-1.oraclecloud.com
+region = ap-mumbai-1
+
+# Cloudflare R2 (10 GB free). Keys: R2 → Manage API tokens.
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id =
+secret_access_key =
+endpoint = https://<account-id>.r2.cloudflarestorage.com

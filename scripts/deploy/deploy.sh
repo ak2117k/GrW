@@ -25,6 +25,14 @@ notify() {
     --data-urlencode "text=GrW deploy: $*" >/dev/null || true
 }
 
+# Alert at most once an hour per key, for conditions that persist across timer
+# runs (e.g. git fetch failing), where notify() every 2 minutes would be spam.
+notify_once() {
+  local stamp="$STATE_DIR/notified-$1"
+  mkdir -p "$STATE_DIR"
+  if [[ -z "$(find "$stamp" -mmin -60 2>/dev/null)" ]]; then touch "$stamp"; notify "$2"; fi
+}
+
 # NSE session guard. Args are optional (day-of-week 1-7, HHMM) so tests need no clock.
 in_market_hours() {
   local dow="${1:-$(TZ=Asia/Kolkata date +%u)}" hm="${2:-$(TZ=Asia/Kolkata date +%H%M)}"
@@ -36,10 +44,16 @@ current_sha() { cat "$STATE_DIR/current_sha" 2>/dev/null || true; }
 failed_sha()  { cat "$STATE_DIR/failed_sha" 2>/dev/null || true; }
 mark_failed() { mkdir -p "$STATE_DIR"; echo "$1" > "$STATE_DIR/failed_sha"; }
 remote_sha()  { git -C "$APP_DIR" fetch -q origin main && git -C "$APP_DIR" rev-parse origin/main; }
-checkout()    { git -C "$APP_DIR" checkout -q --detach "$1"; }
+# Refuses a dirty tree: a checkout that half-applies would build the wrong code.
+checkout() {
+  [[ -z "$(git -C "$APP_DIR" status --porcelain)" ]] || { log "working tree is dirty; refusing"; return 1; }
+  git -C "$APP_DIR" checkout -q --detach "$1"
+}
 
+# `|| return 1` is load-bearing: this runs inside `if !`, where errexit is off, so a
+# failed checkout would otherwise build the OLD tree and tag it as the new sha.
 build_image() {
-  checkout "$1"
+  checkout "$1" || return 1
   docker build -q -f "$APP_DIR/apps/api/Dockerfile" -t "grw-api:$1" "$APP_DIR" >/dev/null
 }
 
@@ -52,11 +66,13 @@ swap_to() { GRW_API_TAG="$1" "${COMPOSE[@]}" up -d --no-deps api; }
 
 # Healthy means: the running container IS the new image AND it answers. Checking
 # only the URL would pass against the old container during a failed swap.
+# X-Forwarded-Proto: EnforceHttpsMiddleware answers 426 to any request without it
+# when NODE_ENV=production. Through the tunnel Cloudflare sets it; here we must.
 wait_healthy() {
   local tag="$1" deadline=$((SECONDS + HEALTH_TIMEOUT_S))
   while (( SECONDS < deadline )); do
     if [[ "$(docker inspect -f '{{.Config.Image}}' grw-api 2>/dev/null)" == "grw-api:$tag" ]] \
-      && curl -fsS -m 5 "$HEALTH_URL" >/dev/null 2>&1; then
+      && curl -fsS -m 5 -H 'X-Forwarded-Proto: https' "$HEALTH_URL" >/dev/null 2>&1; then
       return 0
     fi
     sleep 5
@@ -76,7 +92,11 @@ record_success() {
 main() {
   local cur new
   cur="$(current_sha)"
-  new="$(remote_sha)"
+  if ! new="$(remote_sha)"; then
+    log "git fetch failed"
+    notify_once fetch "git fetch of main is FAILING on the server (deploy key? network?); no deploys until it works"
+    return 0
+  fi
 
   if [[ "$new" == "$cur" ]]; then log "up to date (${cur:0:7})"; return 0; fi
   if [[ "$new" == "$(failed_sha)" ]]; then log "${new:0:7} failed before; waiting for a new commit"; return 0; fi
@@ -86,18 +106,23 @@ main() {
   if ! build_image "$new"; then
     mark_failed "$new"; notify "build FAILED for ${new:0:7}; still on ${cur:0:7}"; return 1
   fi
+  # Re-check: a long build can start before 09:00 and finish inside the session.
+  if [[ "${FORCE:-0}" != 1 ]] && in_market_hours; then
+    log "built ${new:0:7}, but the session has opened; migrate and swap deferred"; return 0
+  fi
   if ! run_migrations "$new"; then
     mark_failed "$new"; notify "migration FAILED for ${new:0:7}; still on ${cur:0:7}"; return 1
   fi
-  swap_to "$new"
-  if wait_healthy "$new"; then
+  # A failed swap takes the rollback path too; under bare `set -e` it would exit
+  # with the old container possibly stopped, no rollback and no alert.
+  if swap_to "$new" && wait_healthy "$new"; then
     record_success "$new"; notify "deployed ${new:0:7}"; return 0
   fi
 
-  log "${new:0:7} unhealthy; rolling back to ${cur:0:7}"
+  log "${new:0:7} failed to start or is unhealthy; rolling back to ${cur:0:7}"
   if [[ -n "$cur" ]]; then swap_to "$cur"; checkout "$cur"; fi
   mark_failed "$new"
-  notify "deploy of ${new:0:7} UNHEALTHY; rolled back to ${cur:-nothing}"
+  notify "deploy of ${new:0:7} FAILED to start or UNHEALTHY; rolled back to ${cur:-nothing}"
   return 1
 }
 

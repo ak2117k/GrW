@@ -1046,7 +1046,7 @@ Expected: the dump is listed.
 
 ```bash
 cd /opt/grw/app && FORCE=1 bash scripts/deploy/deploy.sh
-curl -s http://127.0.0.1:3001/healthz | head -c 600; echo
+curl -s -H 'X-Forwarded-Proto: https' http://127.0.0.1:3001/healthz | head -c 600; echo
 curl -s https://api.<domain>/healthz/live
 ```
 Expected: deploy log ends `deployed <sha>`; `/healthz` JSON shows the database and Redis reachable; the public tunnel URL answers.

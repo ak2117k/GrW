@@ -23,6 +23,15 @@ RUN apt-get update \
 # Pin pnpm via corepack to match packageManager in package.json.
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
+# Claude Code CLI for the sentinel's `cli` judge transport (SENTINEL_JUDGE=cli).
+# Pinned: an unpinned CLI can change its JSON envelope or flags under a running
+# system. Authenticates headlessly via CLAUDE_CODE_OAUTH_TOKEN (from
+# `claude setup-token`); the transport strips ANTHROPIC_API_KEY so it can never
+# silently bill the API instead.
+ARG CLAUDE_CODE_VERSION=2.1.285
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+  && npm cache clean --force
+
 WORKDIR /app
 
 # Copy the entire workspace (see .dockerignore for what is excluded).

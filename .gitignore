@@ -48,6 +48,8 @@ __pycache__/
 .Python
 env/
 !deploy/env/
+deploy/env/*
+!deploy/env/*.example
 venv/
 .venv/
 *.egg-info/

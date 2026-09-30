@@ -5,10 +5,21 @@
 # health check; the internet reaches it through cloudflared.
 name: grw
 
+# Every service rotates its json logs; unbounded logs eventually fill the 100 GB disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   postgres:
+    logging: *logging
     image: timescale/timescaledb:latest-pg17
     container_name: grw-postgres
+    # Docker's default 64 MB /dev/shm is too small for parallel queries with
+    # shared_buffers=2GB ("could not resize shared memory segment").
+    shm_size: 1g
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${PG_USER}
@@ -32,6 +43,7 @@ services:
       retries: 10
 
   redis:
+    logging: *logging
     image: redis:7-alpine
     container_name: grw-redis
     restart: unless-stopped
@@ -55,6 +67,7 @@ services:
       retries: 10
 
   api:
+    logging: *logging
     image: grw-api:${GRW_API_TAG:-current}
     container_name: grw-api
     restart: unless-stopped
@@ -79,6 +92,7 @@ services:
         condition: service_healthy
 
   cloudflared:
+    logging: *logging
     image: cloudflare/cloudflared:latest
     container_name: grw-cloudflared
     restart: unless-stopped

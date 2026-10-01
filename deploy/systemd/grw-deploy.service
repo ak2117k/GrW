@@ -1,0 +1,14 @@
+[Unit]
+Description=GrW pull-and-deploy
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=grw
+EnvironmentFile=/opt/grw/env/ops.env
+# Copy first: deploy.sh checks out new commits, which rewrites the file bash is reading.
+ExecStart=/bin/bash -c 'cp /opt/grw/app/scripts/deploy/deploy.sh /tmp/grw-deploy.sh && exec /bin/bash /tmp/grw-deploy.sh'
+# deploy.sh alerts on every failure it anticipates; this catches the ones it doesn't
+# (an unexpected set -e abort), so no failed run is silent.
+ExecStopPost=/bin/bash -c '[ "$SERVICE_RESULT" = success ] || curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_ALERT_CHAT_ID}" --data-urlencode "text=GrW deploy unit FAILED ($EXIT_STATUS); see journalctl -u grw-deploy" >/dev/null || true'

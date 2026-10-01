@@ -32,7 +32,7 @@ jobs:
   heartbeat:
     runs-on: ubuntu-latest
     env:
-      API: https://grw-api.onrender.com
+      API: ${{ vars.API_BASE_URL || 'https://grw-api.onrender.com' }}
       SECRET: ${{ secrets.TELEGRAM_INGEST_SECRET }}
     steps:
       - name: Guard — secret configured

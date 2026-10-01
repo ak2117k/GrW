@@ -1,0 +1,10 @@
+[Unit]
+Description=GrW nightly Postgres backup
+After=docker.service
+
+[Service]
+Type=oneshot
+User=grw
+EnvironmentFile=/opt/grw/env/ops.env
+ExecStart=/bin/bash /opt/grw/app/scripts/ops/backup.sh
+ExecStopPost=/bin/bash -c '[ "$SERVICE_RESULT" = success ] || curl -sS -m 10 "https://api.telegram.org/bot${TELEGRAM_ALERT_BOT_TOKEN}/sendMessage" --data-urlencode "chat_id=${TELEGRAM_ALERT_CHAT_ID}" --data-urlencode "text=GrW BACKUP FAILED ($EXIT_STATUS)" >/dev/null || true'

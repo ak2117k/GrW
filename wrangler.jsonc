@@ -11,6 +11,9 @@
   "name": "grw",
   "compatibility_date": "2025-06-01",
   "main": "worker/index.js",
+  // API host the Worker proxies to. Set to the Oracle tunnel hostname at cutover
+  // (SP0 Task 9); until then it points at Render.
+  "vars": { "API_ORIGIN": "https://grw-api.onrender.com" },
   "assets": {
     "directory": "apps/web/dist",
     "binding": "ASSETS",

@@ -1,0 +1,9 @@
+[Unit]
+Description=GrW nightly backup at 00:15 IST
+
+[Timer]
+OnCalendar=*-*-* 18:45:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,105 @@
+# GrW production stack — one Oracle A1 host (see docs/deploy/ORACLE-RUNBOOK.md).
+# Run from the repo root on the server:
+#   docker compose -f deploy/docker-compose.prod.yml --env-file /opt/grw/env/compose.env up -d
+# No service publishes a public port. The API binds 127.0.0.1 only, for the deploy
+# health check; the internet reaches it through cloudflared.
+name: grw
+
+# Every service rotates its json logs; unbounded logs eventually fill the 100 GB disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  postgres:
+    logging: *logging
+    image: timescale/timescaledb:latest-pg17
+    container_name: grw-postgres
+    # Docker's default 64 MB /dev/shm is too small for parallel queries with
+    # shared_buffers=2GB ("could not resize shared memory segment").
+    shm_size: 1g
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER}
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+      POSTGRES_DB: ${PG_DB}
+    # Sized for a 12 GB host that also runs the API and Redis (~3 GB for Postgres).
+    command: >
+      postgres
+      -c shared_buffers=2GB
+      -c effective_cache_size=6GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=256MB
+      -c max_connections=100
+      -c timescaledb.telemetry_level=off
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER} -d ${PG_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    logging: *logging
+    image: redis:7-alpine
+    container_name: grw-redis
+    restart: unless-stopped
+    # noeviction: Bull queues must never have keys evicted under memory pressure.
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    logging: *logging
+    image: grw-api:${GRW_API_TAG:-current}
+    container_name: grw-api
+    restart: unless-stopped
+    env_file:
+      # Overridable only so the file can be validated off-server (docker compose config).
+      - ${API_ENV_FILE:-/opt/grw/env/api.env}
+    environment:
+      PORT: "3001"
+      DATABASE_URL: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_DB}?connection_limit=20
+      DIRECT_URL: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_DB}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_TLS: "false"
+      REDIS_ALLOW_PLAINTEXT: "true"
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  cloudflared:
+    logging: *logging
+    image: cloudflare/cloudflared:latest
+    container_name: grw-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+
+volumes:
+  pgdata: {}
+  redisdata: {}

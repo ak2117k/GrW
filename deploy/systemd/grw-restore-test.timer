@@ -1,0 +1,9 @@
+[Unit]
+Description=GrW restore test on the 1st of each month
+
+[Timer]
+OnCalendar=*-*-01 19:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -34,7 +34,7 @@ jobs:
   heartbeat:
     runs-on: ubuntu-latest
     env:
-      API: https://grw-api.onrender.com
+      API: ${{ vars.API_BASE_URL || 'https://grw-api.onrender.com' }}
       SECRET: ${{ secrets.ML_TRIGGER_SECRET }}
     steps:
       - name: Guard — secret configured

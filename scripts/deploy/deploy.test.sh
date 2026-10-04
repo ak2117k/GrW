@@ -21,7 +21,9 @@ stub() {
   failed_sha() { echo ""; }
   in_market_hours() { return 1; }
   mark_failed() { CALLS+=("mark_failed:$1"); }
-  build_image() { CALLS+=("build:$1"); }
+  fetch_image() { CALLS+=("fetch:$1"); }
+  image_published() { return 0; }
+  note_waiting() { CALLS+=("waiting:$1"); }
   run_migrations() { CALLS+=("migrate:$1"); }
   swap_to() { CALLS+=("swap:$1"); }
   wait_healthy() { CALLS+=("health:$1"); }
@@ -35,40 +37,66 @@ check() { # name want_exit want_calls got_exit — runs in a subshell, so it RET
   echo "FAIL $1: exit $4 (want $2), calls [$got] (want [$3])"; return 1
 }
 
-( stub; main; check "happy path" 0 "build:new migrate:new swap:new health:new record:new" $? ) || failures=$((failures + 1))
+( stub; main; check "happy path" 0 "fetch:new migrate:new swap:new health:new record:new" $? ) || failures=$((failures + 1))
 ( stub; run_migrations() { CALLS+=("migrate:$1"); return 1; }
-  main; check "migration fails: no swap" 1 "build:new migrate:new mark_failed:new" $? ) || failures=$((failures + 1))
-( stub; build_image() { CALLS+=("build:$1"); return 1; }
-  main; check "build fails: no migrate, no swap" 1 "build:new mark_failed:new" $? ) || failures=$((failures + 1))
+  main; check "migration fails: no swap" 1 "fetch:new migrate:new mark_failed:new" $? ) || failures=$((failures + 1))
+( stub; fetch_image() { CALLS+=("fetch:$1"); return 1; }
+  main; check "image pull fails: no migrate, no swap" 1 "fetch:new mark_failed:new" $? ) || failures=$((failures + 1))
 ( stub; wait_healthy() { CALLS+=("health:$1"); return 1; }
-  main; check "unhealthy rolls back" 1 "build:new migrate:new swap:new health:new swap:old checkout:old mark_failed:new" $? ) || failures=$((failures + 1))
+  main; check "unhealthy rolls back" 1 "fetch:new migrate:new swap:new health:new swap:old checkout:old mark_failed:new" $? ) || failures=$((failures + 1))
 ( stub; current_sha() { echo ""; }; wait_healthy() { CALLS+=("health:$1"); return 1; }
-  main; check "first deploy unhealthy: nothing to roll back to" 1 "build:new migrate:new swap:new health:new mark_failed:new" $? ) || failures=$((failures + 1))
+  main; check "first deploy unhealthy: nothing to roll back to" 1 "fetch:new migrate:new swap:new health:new mark_failed:new" $? ) || failures=$((failures + 1))
 ( stub; in_market_hours() { return 0; }
   main; check "market hours defers" 0 "" $? ) || failures=$((failures + 1))
 ( stub; in_market_hours() { return 0; }; FORCE=1
-  main; check "FORCE=1 overrides market hours" 0 "build:new migrate:new swap:new health:new record:new" $? ) || failures=$((failures + 1))
+  main; check "FORCE=1 overrides market hours" 0 "fetch:new migrate:new swap:new health:new record:new" $? ) || failures=$((failures + 1))
 ( stub; remote_sha() { echo old; }
   main; check "up to date does nothing" 0 "" $? ) || failures=$((failures + 1))
 ( stub; failed_sha() { echo new; }
   main; check "known-bad sha is not retried" 0 "" $? ) || failures=$((failures + 1))
 
-# Review I2: the window can open during a long build — re-check before migrate/swap.
+# Review I2: the window can open during a slow pull; re-check before migrate/swap.
 ( stub; n=0; in_market_hours() { n=$((n + 1)); (( n > 1 )); }
-  main; check "window opens mid-build: built, not migrated, not failed" 0 "build:new" $? ) || failures=$((failures + 1))
+  main; check "window opens mid-pull: fetched, not migrated, not failed" 0 "fetch:new" $? ) || failures=$((failures + 1))
 # Review I3: a failed swap must roll back and be remembered, not abort silently.
 ( stub; swap_to() { CALLS+=("swap:$1"); [[ "$1" != new ]]; }
-  main; check "swap fails: roll back" 1 "build:new migrate:new swap:new swap:old checkout:old mark_failed:new" $? ) || failures=$((failures + 1))
+  main; check "swap fails: roll back" 1 "fetch:new migrate:new swap:new swap:old checkout:old mark_failed:new" $? ) || failures=$((failures + 1))
 # Review I3: a fetch failure alerts (rate-limited) instead of killing the unit silently.
 ( stub; remote_sha() { return 1; }; notify_once() { CALLS+=("notify_once:$1"); }
   main; check "fetch fails: alert once, no deploy" 0 "notify_once:fetch" $? ) || failures=$((failures + 1))
 
-# Review I1: build_image must not build when checkout fails (would tag OLD code as new).
+# CI publishes the image a few minutes after the push: until then, wait quietly.
+( stub; image_published() { return 1; }
+  main; check "image not published yet: wait, not failed" 0 "waiting:new" $? ) || failures=$((failures + 1))
+
+# note_waiting alerts only once the image has been missing for 30+ minutes.
+( source "$here/deploy.sh"; set +e
+  STATE_DIR="$(mktemp -d)"; log() { :; }; alerts=""
+  notify_once() { alerts="$alerts $1"; }
+  note_waiting abc; first="$alerts"
+  touch -d '40 minutes ago' "$STATE_DIR/waiting-abc"
+  note_waiting abc
+  if [[ -z "$first" && "$alerts" == " image" ]]; then echo "ok   note_waiting is silent at first, alerts after 30 min"
+  else echo "FAIL note_waiting is silent at first, alerts after 30 min: first=[$first] then=[$alerts]"; exit 1; fi
+) || failures=$((failures + 1))
+
+# fetch_image pulls the CI-built image and tags it grw-api:<sha>, the name compose
+# and wait_healthy use.
+( source "$here/deploy.sh"; set +e
+  IMAGE_REPO=ghcr.io/x/grw-api; checkout() { :; }
+  tmpcalls="$(mktemp)"; docker() { echo "$*" >> "$tmpcalls"; }
+  fetch_image abc; rc=$?
+  if [[ $rc -eq 0 ]] && grep -q "^pull -q ghcr.io/x/grw-api:abc" "$tmpcalls" \
+     && grep -q "^tag ghcr.io/x/grw-api:abc grw-api:abc" "$tmpcalls"; then echo "ok   fetch_image pulls and tags grw-api:<sha>"
+  else echo "FAIL fetch_image pulls and tags grw-api:<sha>: rc=$rc calls: $(tr '\n' ';' < "$tmpcalls")"; exit 1; fi
+) || failures=$((failures + 1))
+
+# Review I1: fetch_image must not pull when checkout fails (would tag OLD scripts with a new sha).
 ( source "$here/deploy.sh"; set +e
   checkout() { return 1; }; docker() { echo "docker $*" >> "$tmpcalls"; }
-  tmpcalls="$(mktemp)"; build_image new; rc=$?
-  if [[ $rc -ne 0 && ! -s "$tmpcalls" ]]; then echo "ok   build_image stops when checkout fails"
-  else echo "FAIL build_image stops when checkout fails: rc=$rc, docker calls: $(cat "$tmpcalls")"; exit 1; fi
+  tmpcalls="$(mktemp)"; fetch_image new; rc=$?
+  if [[ $rc -ne 0 && ! -s "$tmpcalls" ]]; then echo "ok   fetch_image stops when checkout fails"
+  else echo "FAIL fetch_image stops when checkout fails: rc=$rc, docker calls: $(cat "$tmpcalls")"; exit 1; fi
 ) || failures=$((failures + 1))
 
 # Review C1: the API answers 426 to any request without X-Forwarded-Proto: https

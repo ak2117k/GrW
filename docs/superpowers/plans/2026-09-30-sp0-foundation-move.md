@@ -10,6 +10,29 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-30-ai-trading-core-architecture-design.md` (§10 Infrastructure, §11 SP0 row, §13 Regulatory constraints)
 
+
+## Amendment 2026-10-04 — hosting Plan B (supersedes Oracle-specific steps)
+
+Oracle blocked the move at signup (fraud check), capacity (A1 out of capacity in Mumbai) and
+Pay-As-You-Go upgrade (Indian card declined a 138 SGD authorization hold). The owner chose a
+**2 GB, monthly-billed KVM VPS in Mumbai** (Vyom Cloud, ~₹360/month + GST) and a **₹0 address**
+instead of a domain. Oracle remains the fallback (spec §10). What changed:
+
+| Plan item | Was | Now |
+|---|---|---|
+| Host (Task 6) | Oracle A1, 2 OCPU / 12 GB, `ubuntu` user, reserved IP | 2 GB KVM VPS, `root` login; IP is already static (skip the reservation step) |
+| Public entry (Task 7) | Cloudflare Tunnel on a bought domain | **Caddy** on ports 80/443 with Let's Encrypt for `<ip-with-dashes>.sslip.io` (`deploy/Caddyfile`); no domain |
+| Image build (Task 3) | `deploy.sh` builds on the host | **GitHub Actions** (`.github/workflows/api-image.yml`) builds and pushes `ghcr.io/ak2117k/grw-api:<sha>`; `deploy.sh` waits for it, pulls, retags `grw-api:<sha>` |
+| Memory | Postgres 2 GB, Redis 512 MB | Postgres 256 MB shared_buffers, Redis 128 MB, `connection_limit=10`, 2 GB swap |
+| Server prerequisite | — | one-time `docker login ghcr.io` with a GitHub token (read:packages) |
+| Worker origin (Task 9) | `https://api.<domain>` | `https://<ip-with-dashes>.sslip.io` |
+
+Tests: `deploy/compose.test.sh` (stack shape + real Caddy in front of a stand-in API that
+enforces X-Forwarded-Proto), `scripts/deploy/deploy.test.sh` (24 cases incl. wait-for-image).
+The ~2 GB AI engine (SP3) will not fit on a 2 GB host — revisit hosting before SP3.
+
+---
+
 ## Global Constraints
 
 - Server: Oracle Always Free **A1, 2 OCPU / 12 GB**, home region **India West (Mumbai) `ap-mumbai-1`**, fallback **India South (Hyderabad) `ap-hyderabad-1`**. The home region cannot be changed after signup.

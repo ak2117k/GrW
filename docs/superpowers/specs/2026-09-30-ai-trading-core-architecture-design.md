@@ -350,6 +350,11 @@ for the owner's own trades only. The headless server authenticates with a one-ye
 
 ## 10. Infrastructure
 
+> **Amendment 2026-10-04:** Oracle signup, capacity and card authorization all failed. The MVP
+> runs on a 2 GB monthly Mumbai KVM VPS with Caddy + sslip.io (no domain) and images built by
+> GitHub Actions — see the SP0 plan's amendment. Oracle (below) remains the target if it becomes
+> available; the stack moves with the backup/restore scripts unchanged.
+
 ```
 ORACLE A1 (2 OCPU · 12 GB · Mumbai/Hyderabad · static IP registered with Angel One)
 └─ docker compose

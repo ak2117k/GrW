@@ -12,6 +12,7 @@ set -euo pipefail
 GRW_ROOT="${GRW_ROOT:-/opt/grw}"
 APP_DIR="$GRW_ROOT/app"
 STATE_DIR="$GRW_ROOT/state"
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/ak2117k/grw-api}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:3001/healthz/live}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-180}"
 COMPOSE=(docker compose -f "$APP_DIR/deploy/docker-compose.prod.yml" --env-file "$GRW_ROOT/env/compose.env")
@@ -50,11 +51,30 @@ checkout() {
   git -C "$APP_DIR" checkout -q --detach "$1"
 }
 
+# The image is built by GitHub Actions (.github/workflows/api-image.yml) and pushed
+# to GHCR as $IMAGE_REPO:<sha>. The host only pulls: a 2 GB VPS cannot run the
+# pnpm install + nest build without swapping itself to a standstill.
+image_published() { docker manifest inspect "$IMAGE_REPO:$1" >/dev/null 2>&1; }
+
+# CI takes a few minutes after a push, so "not published yet" is normal and quiet.
+# Still missing after IMAGE_WAIT_ALERT_MIN means the CI build probably failed.
+note_waiting() {
+  local marker="$STATE_DIR/waiting-$1" limit="${IMAGE_WAIT_ALERT_MIN:-30}"
+  mkdir -p "$STATE_DIR"
+  [[ -e "$marker" ]] || touch "$marker"
+  log "image for ${1:0:7} not published yet (CI still building?)"
+  if [[ -n "$(find "$marker" -mmin +"$limit" 2>/dev/null)" ]]; then
+    notify_once image "image for ${1:0:7} still not published after ${limit} min; did the GitHub build fail?"
+  fi
+}
+
 # `|| return 1` is load-bearing: this runs inside `if !`, where errexit is off, so a
-# failed checkout would otherwise build the OLD tree and tag it as the new sha.
-build_image() {
+# failed checkout would otherwise leave the OLD compose file and scripts in place
+# under the new sha. The pulled image is retagged grw-api:<sha>, the name compose
+# and wait_healthy use.
+fetch_image() {
   checkout "$1" || return 1
-  docker build -q -f "$APP_DIR/apps/api/Dockerfile" -t "grw-api:$1" "$APP_DIR" >/dev/null
+  docker pull -q "$IMAGE_REPO:$1" >/dev/null && docker tag "$IMAGE_REPO:$1" "grw-api:$1"
 }
 
 run_migrations() {
@@ -83,7 +103,7 @@ wait_healthy() {
 record_success() {
   mkdir -p "$STATE_DIR"
   echo "$1" > "$STATE_DIR/current_sha"
-  rm -f "$STATE_DIR/failed_sha"
+  rm -f "$STATE_DIR/failed_sha" "$STATE_DIR"/waiting-*
   # Keep the three newest images (current + two rollback targets).
   docker image ls grw-api --format '{{.CreatedAt}}\t{{.Tag}}' | sort -r | tail -n +4 | cut -f2 \
     | xargs -r -I{} docker image rm "grw-api:{}" >/dev/null 2>&1 || true
@@ -102,13 +122,15 @@ main() {
   if [[ "$new" == "$(failed_sha)" ]]; then log "${new:0:7} failed before; waiting for a new commit"; return 0; fi
   if in_market_hours && [[ "${FORCE:-0}" != 1 ]]; then log "market hours: deferring ${new:0:7}"; return 0; fi
 
+  if ! image_published "$new"; then note_waiting "$new"; return 0; fi
+
   log "deploying ${new:0:7} (current: ${cur:0:7})"
-  if ! build_image "$new"; then
-    mark_failed "$new"; notify "build FAILED for ${new:0:7}; still on ${cur:0:7}"; return 1
+  if ! fetch_image "$new"; then
+    mark_failed "$new"; notify "image pull FAILED for ${new:0:7}; still on ${cur:0:7}"; return 1
   fi
-  # Re-check: a long build can start before 09:00 and finish inside the session.
+  # Re-check: a slow pull can start before 09:00 and finish inside the session.
   if [[ "${FORCE:-0}" != 1 ]] && in_market_hours; then
-    log "built ${new:0:7}, but the session has opened; migrate and swap deferred"; return 0
+    log "fetched ${new:0:7}, but the session has opened; migrate and swap deferred"; return 0
   fi
   if ! run_migrations "$new"; then
     mark_failed "$new"; notify "migration FAILED for ${new:0:7}; still on ${cur:0:7}"; return 1

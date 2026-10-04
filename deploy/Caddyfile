@@ -1,0 +1,11 @@
+# Public HTTPS entry for the API. API_HOST is the server's free sslip.io name,
+# e.g. 203-0-113-7.sslip.io (the IP with dashes), set in /opt/grw/env/compose.env.
+# Caddy obtains and renews the Let's Encrypt certificate itself (needs ports 80+443).
+#
+# reverse_proxy sets X-Forwarded-Proto: https on requests it terminated over TLS,
+# which is what the API's EnforceHttpsMiddleware requires. WebSocket upgrades
+# (socket.io) are proxied transparently.
+{$API_HOST} {
+	encode gzip
+	reverse_proxy api:3001
+}

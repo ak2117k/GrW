@@ -20,6 +20,8 @@ export interface TickData {
   close: number;
   volume: number;
   oi?: number;
+  /** Exchange of this tick ('NSE' | 'NFO' | 'BSE' | 'BFO' | 'MCX') when the feed reports it. */
+  exchange?: string;
   timestamp: Date;
 }
 

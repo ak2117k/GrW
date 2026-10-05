@@ -5,7 +5,14 @@ import type { ClientFeedReportDto } from './dto/client-feed-report.dto';
 import { toProcessMemory, type ProcessMemory } from './health.memory';
 import { toJobFreshness, type JobFreshness } from './health.jobs';
 import type { SlotPressure } from '../market-data/services/slot-pressure';
-import { FEED_STATUS_SOURCE, present, unavailable, type Signal } from './health.types';
+import type { HubStatus } from '../market-hub/hub-engine';
+import { FEED_STATUS_SOURCE, HUB_STATUS_SOURCE, present, unavailable, type Signal } from './health.types';
+
+/** The narrow slice of MarketHubService this surface reads. */
+export interface HubStatusSource {
+  status(): HubStatus | null;
+  disabledReason(): string | null;
+}
 
 /**
  * Jobs we EXPECT to exist in this environment.
@@ -27,6 +34,7 @@ export interface HealthDetailPayload {
   memory: Signal<ProcessMemory>;
   jobs: Signal<Record<string, JobFreshness>>;
   slots: Signal<SlotPressure>;
+  hub: Signal<HubStatus>;
 }
 
 function describe(err: unknown): string {
@@ -53,16 +61,31 @@ export class HealthDetailService {
     @Optional()
     @Inject(FEED_STATUS_SOURCE)
     private readonly feed: SlotPressureSource | null = null,
+    @Optional()
+    @Inject(HUB_STATUS_SOURCE)
+    private readonly hub: HubStatusSource | null = null,
   ) {}
 
   async check(): Promise<HealthDetailPayload> {
     const now = new Date();
-    const [memory, jobs, slots] = await Promise.all([
+    const [memory, jobs, slots, hub] = await Promise.all([
       Promise.resolve(this.checkMemory()),
       this.checkJobs(now),
       Promise.resolve(this.checkSlots()),
+      Promise.resolve(this.checkHub()),
     ]);
-    return { checkedAt: now.toISOString(), memory, jobs, slots };
+    return { checkedAt: now.toISOString(), memory, jobs, slots, hub };
+  }
+
+  private checkHub(): Signal<HubStatus> {
+    if (!this.hub) return unavailable('market hub not resolvable from this container');
+    try {
+      const s = this.hub.status();
+      if (s) return present(s, 'MarketHubService.status');
+      return unavailable(this.hub.disabledReason() ?? 'market hub not started');
+    } catch (err) {
+      return unavailable(describe(err));
+    }
   }
 
   private checkMemory(): Signal<ProcessMemory> {

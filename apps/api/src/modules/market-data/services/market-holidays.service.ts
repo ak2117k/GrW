@@ -72,6 +72,15 @@ const HOLIDAYS_2026: MarketHoliday[] = [
 ];
 
 /**
+ * Holiday lists by calendar year. The market hub's SessionClock reads this;
+ * a year missing here is reported by `SessionClock.calendarGap` (and alerted
+ * every December) instead of silently treating every day as a trading day.
+ */
+export const MARKET_HOLIDAYS: Readonly<Record<number, readonly MarketHoliday[]>> = {
+  2026: HOLIDAYS_2026,
+};
+
+/**
  * Important trading days — expiry days, budget, RBI policy, results season, etc.
  * These recur on specific patterns.
  */

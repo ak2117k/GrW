@@ -333,10 +333,19 @@ export class UserFeedSession implements UserFeedSessionLike {
       mode: 'FULL',
       exchangeTokens: groupTokensByExchange(refs),
     });
+    // smartapi-javascript RESOLVES HTTP errors as `{ status, message }` (no
+    // `data`). Angel signals a rate limit with HTTP 403 or an "exceeding access
+    // rate" message; anything else (401 expired session, 5xx) is a real error
+    // and must not be disguised as a throttle (it would only trigger back-off).
     if (opts.throwOnThrottle && response?.data == null) {
-      throw new AngelThrottleError(
-        `Angel One returned data:null for marketData (${refs.length} token(s)) — throttled or rejected`,
-      );
+      const status = Number(response?.status);
+      const message = String(response?.message ?? '');
+      if (status === 403 || /exceed/i.test(message) || !response?.status) {
+        throw new AngelThrottleError(
+          `Angel One marketData throttled (${refs.length} token(s)): ${message || 'data:null'}`,
+        );
+      }
+      throw new Error(`Angel One marketData failed: status ${status} ${message}`.trim());
     }
 
     // `data.unfetched` is the ONLY place the broker says WHY a token was

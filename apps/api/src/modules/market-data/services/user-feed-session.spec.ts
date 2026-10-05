@@ -348,6 +348,29 @@ it('stamps each tick with its exchange from exchange_type', async () => {
   expect(ticks[0]).toMatchObject({ token: '35001', exchange: 'NFO', ltp: 250.5 });
 });
 
+// smartapi-javascript resolves (never rejects) HTTP errors as { status, message }
+// with no `data`; Angel One signals rate limits with HTTP 403.
+it('getQuotes treats an SDK-resolved HTTP 403 as a throttle', async () => {
+  const d = makeDeps();
+  d.smartApi.marketData.mockResolvedValue({ status: 403, message: 'Forbidden' });
+  const { s } = makeSession(d);
+  await expect(
+    s.getQuotes([{ token: '1', exchange: 'NSE' }], { throwOnThrottle: true }),
+  ).rejects.toBeInstanceOf(AngelThrottleError);
+});
+
+it('getQuotes reports other broker failures as errors, not throttles', async () => {
+  const d = makeDeps();
+  d.smartApi.marketData.mockResolvedValue({ status: 401, message: 'Unauthorized' });
+  const { s } = makeSession(d);
+  const err = await s
+    .getQuotes([{ token: '1', exchange: 'NSE' }], { throwOnThrottle: true })
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(AngelThrottleError);
+  expect(String(err.message)).toMatch(/401/);
+});
+
 it('getQuotes throws AngelThrottleError on data:null only when asked to', async () => {
   const d = makeDeps();
   d.smartApi.marketData.mockResolvedValue({ data: null, message: 'Access denied because of exceeding access rate' });

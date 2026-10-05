@@ -3229,12 +3229,12 @@ M1 is complete when this is observed in production, not when the tests pass (par
 
 ## Verified broker facts
 
-Seeded 2026-10-05 from search results; Task 13 confirms or corrects each line.
+Seeded 2026-10-05 from search results; verified in Task 13 (2026-10-05).
 
 | Fact | Value | Source | Verified on |
 |---|---|---|---|
-| WebSocketV2 tokens per connection | 1000 (per token+mode; duplicates ignored) | https://smartapi.angelone.in/smartapi/forum/topic/676/how-many-tokens-can-be-subscribed-at-a-time-in-websocket | pending Task 13 |
-| WebSocketV2 connections per client code | 3 | https://smartapi.angelone.in/smartapi/forum/topic/4391/websocket-streaming-size-and-max-connections | pending Task 13 |
-| REST limits | quote 10/s (≤ 50 symbols), candles 3/s, search 1/s, greeks 1/s, per client code | https://smartapi.angelone.in/smartapi/forum/topic/4387/changes-in-api-rate-limit | pending Task 13 |
-| Candle throttle shape | `data: null` + "Access denied because of exceeding access rate" | `apps/api/src/modules/market-data/services/angel-throttle.ts` (empirical) | pending Task 13 |
-| Quote throttle shape | assumed `data: null` | — | pending Task 13 |
+| WebSocketV2 tokens per connection | **1000** per connection (moderator, topic 4391). Topic 676: admin says "no limitation", but a user saw only time-feed beyond ~700 tokens — treat ~700 as the practical ceiling. M1 cap 50 is far below both. Duplicate/mode counting is undocumented. | https://smartapi.angelone.in/smartapi/forum/topic/4391/websocket-streaming-size-and-max-connections · https://smartapi.angelone.in/smartapi/forum/topic/676/how-many-tokens-can-be-subscribed-at-a-time-in-websocket | 2026-10-05 |
+| WebSocketV2 connections per client code | **3** ("Max three Websocket connection is allowed per client") | topic 4391 (above) | 2026-10-05 |
+| REST limits | quote **10/s** (also 500/min, 5000/h; ≤ 50 symbols per call), candles **3/s**, search **1/s**; per client code. `optionGreek` is **not** in topic 4387's table — 1/s comes from secondary sources; hub budget 0.8/s stays conservative. | https://smartapi.angelone.in/smartapi/forum/topic/4387/changes-in-api-rate-limit · https://smartapi.angelone.in/smartapi/forum/topic/4056/live-market-data-api-quote-endpoint-enhanced-with-50-symbol-bulk-fetch-and-1-request-per-second-rate-limit | 2026-10-05 |
+| Candle throttle shape | HTTP 200 body with `data: null` + "Access denied because of exceeding access rate" (empirical, existing `angel-throttle.ts`) | `apps/api/src/modules/market-data/services/angel-throttle.ts`; https://smartapi.angelone.in/smartapi/forum/topic/3475/access-denied-because-of-exceeding-access-rate | 2026-10-05 |
+| Quote throttle shape | **HTTP 403** "Access denied because of exceeding access rate". `smartapi-javascript@1.0.27` (`lib/smartapi-connect.js` response interceptor) **resolves** HTTP errors as `{ status, message: statusText }` with no `data` — so it reaches `getQuotes` as `data == null`. `getQuotes(…, { throwOnThrottle })` therefore maps 403 / "exceed" / no-status → `AngelThrottleError`, and any other status (401, 5xx) → plain `Error` (tests added in Task 13). | topic 4056 (above); https://smartapi.angelone.in/smartapi/forum/topic/4386/how-the-access-blocked-because-of-exceeding-the-rate-limit | 2026-10-05 |

@@ -134,6 +134,17 @@ describe('Governor', () => {
     expect(gov.metrics().endpoints.search.backoffMs).toBe(0);
   });
 
+  it('prunes call timestamps older than an hour even if metrics() is never read', async () => {
+    const gov = new Governor(opts());
+    const run = async () => 1;
+    await gov.submit({ endpoint: 'quote', lane: LANE.ROUTINE, run });
+    jest.setSystemTime(60 * 60 * 1000 + 1);
+    await gov.submit({ endpoint: 'quote', lane: LANE.ROUTINE, run });
+    // White-box on purpose: the leak is internal and invisible through metrics().
+    const calls = (gov as any).endpoints.get('quote').calls as number[];
+    expect(calls).toEqual([60 * 60 * 1000 + 1]);
+  });
+
   it('reports lane depth, waits and endpoint counters', async () => {
     const gov = new Governor(opts());
     const run = async () => 1;

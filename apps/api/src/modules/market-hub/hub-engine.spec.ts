@@ -55,6 +55,34 @@ describe('HubEngine', () => {
     e.stop();
   });
 
+  it('keeps running when the broker is down at start, and subscribes once it recovers', async () => {
+    const broker = new FakeBroker();
+    let down = true;
+    broker.connect = async () => {
+      if (down) throw new Error('login failed');
+      broker.connected = true;
+    };
+    const realSubscribe = broker.subscribe.bind(broker);
+    broker.subscribe = async (refs) => {
+      if (down) throw new Error('not connected');
+      return realSubscribe(refs);
+    };
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    const { e } = engine(broker);
+    await expect(e.start()).resolves.toBeUndefined();
+    expect(e.status().watched).toBe(1); // the context set is registered regardless
+    expect(e.status().lastError).toMatch(/not connected|login failed/);
+    down = false;
+    await jest.advanceTimersByTimeAsync(30_000); // maintenance tick retries
+    expect(broker.subscribed.has('NSE:99926000')).toBe(true);
+    expect(e.status().lastError).toBeNull();
+    await Promise.resolve();
+    expect(unhandled).not.toHaveBeenCalled();
+    process.off('unhandledRejection', unhandled);
+    e.stop();
+  });
+
   it('reports a status snapshot with the oldest P0 price age and unpriced P0 count', async () => {
     const { e, broker } = engine();
     await e.start();

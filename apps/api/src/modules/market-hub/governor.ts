@@ -59,6 +59,13 @@ interface EndpointState {
 const WAIT_SAMPLES = 200;
 const HOUR_MS = 60 * 60 * 1000;
 
+/** Drop leading timestamps at or before `cutoff` (arrays are append-only, ascending). */
+function pruneOlderThan(times: number[], cutoff: number): void {
+  let i = 0;
+  while (i < times.length && times[i] <= cutoff) i++;
+  if (i > 0) times.splice(0, i);
+}
+
 function percentile(values: number[], p: number): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -185,6 +192,7 @@ export class Governor {
     const ep = this.endpoints.get(p.req.endpoint) as EndpointState;
     ep.nextAt = now + 1000 / this.opts.ratesPerSec[p.req.endpoint];
     ep.calls.push(now);
+    pruneOlderThan(ep.calls, now - HOUR_MS); // bounded even if metrics() is never read
     const w = this.waits[lane];
     w.push(now - p.enqueuedAt);
     if (w.length > WAIT_SAMPLES) w.shift();
@@ -205,6 +213,7 @@ export class Governor {
               : Math.min(1000, this.opts.maxBackoffMs);
             ep.backoffUntil = t + ep.backoffMs;
             ep.throttles.push(t);
+            pruneOlderThan(ep.throttles, t - HOUR_MS);
             p.resolve({ kind: 'throttled', retryAfterMs: ep.backoffMs });
           } else {
             p.resolve({ kind: 'error', error });

@@ -31,6 +31,8 @@ export interface HubStatus {
   };
   governor: GovernorMetrics;
   calendar: { missingYear: number | null };
+  /** Last broker connect/subscribe failure; null once a reconcile succeeds. */
+  lastError: string | null;
 }
 
 const POSITIONS = 'hub:positions';
@@ -45,7 +47,8 @@ export class HubEngine {
   readonly feed: LiveFeed;
   private readonly poller: QuotePoller;
   private positions = new Map<string, InstrumentRef>();
-  private expiryTimer: ReturnType<typeof setInterval> | null = null;
+  private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+  private lastError: string | null = null;
 
   constructor(private readonly d: HubEngineDeps) {
     this.governor = new Governor({
@@ -68,23 +71,45 @@ export class HubEngine {
     });
   }
 
+  /**
+   * Never fails: a broker that is down at boot (Angel outage, expired creds)
+   * must not leave the hub half-started. The context set, the poller and the
+   * maintenance timer always start; the timer re-reconciles every 30 s, so
+   * subscriptions land as soon as the broker answers, and status().lastError
+   * says why they have not yet.
+   */
   async start(): Promise<void> {
-    await this.d.broker.connect();
     const now = Date.now();
     for (const ref of this.d.defaults) this.registry.watch(ref, 2, CONTEXT, now);
-    await this.feed.reconcile();
     this.poller.start();
-    this.expiryTimer = setInterval(() => {
-      if (this.registry.expire(Date.now())) void this.feed.reconcile();
+    this.maintenanceTimer = setInterval(() => {
+      this.registry.expire(Date.now());
+      void this.reconcileSafely();
     }, 30_000);
-    this.expiryTimer.unref?.();
+    this.maintenanceTimer.unref?.();
+    try {
+      await this.d.broker.connect();
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
+    }
+    await this.reconcileSafely();
   }
 
   stop(): void {
     this.poller.stop();
-    if (this.expiryTimer) clearInterval(this.expiryTimer);
-    this.expiryTimer = null;
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
+    this.maintenanceTimer = null;
     this.governor.dispose();
+  }
+
+  /** Reconcile without ever rejecting (callers are timers): record the failure instead. */
+  private async reconcileSafely(): Promise<void> {
+    try {
+      await this.feed.reconcile();
+      this.lastError = null;
+    } catch (err) {
+      this.lastError = err instanceof Error ? err.message : String(err);
+    }
   }
 
   async watch(ref: InstrumentRef, priority: Priority, owner: string, ttlMs?: number): Promise<void> {
@@ -150,6 +175,7 @@ export class HubEngine {
       prices: { ...counts, oldestP0AgeMs, unpricedP0 },
       governor: this.governor.metrics(now),
       calendar: { missingYear: this.d.clock.calendarGap(new Date(now)) },
+      lastError: this.lastError,
     };
   }
 }

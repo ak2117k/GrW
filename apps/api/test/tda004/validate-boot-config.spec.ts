@@ -29,4 +29,14 @@ describe('validateBootConfig', () => {
     expect(() => validateBootConfig({ ...base, ENCRYPTION_KEY: 'td-automation-default-key-change-me', NODE_ENV: 'development' } as any))
       .toThrow(/default/i);
   });
+  it('in production accepts a plaintext DATABASE_URL only with DATABASE_ALLOW_PLAINTEXT=true', () => {
+    // The VPS compose stack reaches Postgres over its private Docker network (no TLS listener).
+    const prod = {
+      ...base, NODE_ENV: 'production', WEB_ORIGIN: 'https://app.example.com',
+      DATABASE_URL: 'postgresql://grw@postgres:5432/grw?connection_limit=10', AI_ENGINE_URL: 'https://ai.example.com',
+      REDIS_TLS: 'false', REDIS_ALLOW_PLAINTEXT: 'true', REDIS_THROTTLER: 'true', TELEGRAM_INGEST_SECRET: 'sekret',
+    };
+    expect(() => validateBootConfig(prod as any)).toThrow(/sslmode/);
+    expect(() => validateBootConfig({ ...prod, DATABASE_ALLOW_PLAINTEXT: 'true' } as any)).not.toThrow();
+  });
 });

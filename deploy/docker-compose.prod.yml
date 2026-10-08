@@ -80,6 +80,8 @@ services:
       PORT: "3001"
       DATABASE_URL: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_DB}?connection_limit=10
       DIRECT_URL: postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_DB}
+      # Postgres is reached over this stack's private network (no TLS listener).
+      DATABASE_ALLOW_PLAINTEXT: "true"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD}

@@ -25,8 +25,16 @@ export function validateBootConfig(env: NodeJS.ProcessEnv = process.env): void {
   if (env.NODE_ENV === 'production') {
     if (env.ENCRYPTION_KEY && env.ENCRYPTION_KEY.length < 32) fail.push('ENCRYPTION_KEY must be >= 32 chars in production');
     if (!env.WEB_ORIGIN) fail.push('WEB_ORIGIN is required in production (no localhost/wildcard CORS fallback)');
-    if (env.DATABASE_URL && !/sslmode=(require|verify-full|verify-ca)/.test(env.DATABASE_URL))
-      fail.push('DATABASE_URL must enforce TLS (sslmode=require) in production');
+    // Same shape as the Redis opt-out below: a managed/remote database must use
+    // TLS; a database on a trusted PRIVATE network (the VPS compose stack reaches
+    // Postgres over its internal Docker network, which has no TLS listener) opts
+    // out explicitly with DATABASE_ALLOW_PLAINTEXT=true.
+    if (
+      env.DATABASE_URL &&
+      !/sslmode=(require|verify-full|verify-ca)/.test(env.DATABASE_URL) &&
+      env.DATABASE_ALLOW_PLAINTEXT !== 'true'
+    )
+      fail.push('DATABASE_URL must enforce TLS (sslmode=require) in production, or set DATABASE_ALLOW_PLAINTEXT=true for a trusted private-network database (e.g. the VPS compose stack)');
     if (!/^https:\/\//.test(env.AI_ENGINE_URL ?? '')) fail.push('AI_ENGINE_URL must be https in production');
     // Require in-transit encryption for external managed Redis (Upstash/
     // ElastiCache). Explicit opt-out for a trusted PRIVATE-network Redis whose

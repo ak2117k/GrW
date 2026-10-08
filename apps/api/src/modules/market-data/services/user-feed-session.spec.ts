@@ -415,3 +415,12 @@ it('getCandleWindow reports an SDK-resolved 401 as an error, and [] as genuinely
   d.smartApi.getCandleData.mockResolvedValueOnce({ data: [] });
   await expect(s.getCandleWindow('111', 'NSE', 'ONE_DAY', new Date(0), new Date(1))).resolves.toEqual([]);
 });
+
+it('getCandleWindow reports a body-level errorcode (AG8001) as an error, not a throttle', async () => {
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValue({ status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null });
+  const { s } = makeSession(d);
+  const err = await s.getCandleWindow('111', 'NSE', 'ONE_MINUTE', new Date(0), new Date(60_000)).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(AngelThrottleError);
+});

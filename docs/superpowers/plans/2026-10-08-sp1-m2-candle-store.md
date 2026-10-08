@@ -2869,4 +2869,4 @@ M2 is complete when this is observed in production, not when the tests pass (par
 
 | Date | Whole suite | Integration suite | Notes |
 |---|---|---|---|
-| | | | |
+| 2026-10-08 | PASS: 239/239 suites, 2906/2906 tests (M1 baseline 234 / 2846) | PASS: 9/9 tests, fresh `grw_m2_test`, all migrations applied | The integration suite ran in a throw-away `timescale/timescaledb:latest-pg16` container on port 5433, not in the local `td-postgres` (plain pg16, other credentials, owner data). The container was removed afterwards. 9 tests, not 8: Task 3's fix round added the duplicate-ts case. tsc: 166 errors repo-wide, all from before this branch. In touched files there are 15: 14 in `market-data.controller.ts` (TS2307 `@td/shared/constants`, 12× TS18046, TS2339) and the TS2307 in `market-hub.service.ts`. git blame puts all 15 on lines unchanged since merge base `38cce2a`, so there are no new errors. |

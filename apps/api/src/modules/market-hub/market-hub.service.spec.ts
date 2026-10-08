@@ -15,11 +15,13 @@ function manager(pin: jest.Mock = jest.fn(() => new Promise<void>(() => undefine
 }
 const tracker = { openTrackerRefsByUser: jest.fn().mockResolvedValue(new Map()) };
 const prisma = { $queryRaw: jest.fn().mockResolvedValue([]), $executeRaw: jest.fn().mockResolvedValue(0) };
+/** JobRunnerService double: runs the job inline (lease held, run recorded). */
+const runner = { run: jest.fn((_name: string, _opts: unknown, fn: () => Promise<unknown>) => fn()) };
 
 describe('MarketHubService', () => {
   it('does nothing when disabled and says why', () => {
     const m = manager();
-    const svc = new MarketHubService(config({ 'hub.enabled': false }) as any, m as any, tracker as any, prisma as any);
+    const svc = new MarketHubService(config({ 'hub.enabled': false }) as any, m as any, tracker as any, prisma as any, runner as any);
     svc.onModuleInit();
     expect(m.pin).not.toHaveBeenCalled();
     expect(svc.status()).toBeNull();
@@ -37,6 +39,7 @@ describe('MarketHubService', () => {
       m as any,
       tracker as any,
       prisma as any,
+      runner as any,
     );
     svc.onModuleInit();
     expect(m.pin).not.toHaveBeenCalled();
@@ -50,6 +53,7 @@ describe('MarketHubService', () => {
       m as any,
       tracker as any,
       prisma as any,
+      runner as any,
     );
     const result = svc.onModuleInit();
     expect(result).toBeUndefined();
@@ -62,7 +66,7 @@ describe('MarketHubService', () => {
     config({ 'hub.enabled': true, 'hub.ownerUserId': 'owner', 'hub.slotCap': 50, 'hub.mcxLateClose': '', ...extra });
 
   it('runs no candle store unless HUB_CANDLES_ENABLED, and never serves charts then', () => {
-    const svc = new MarketHubService(enabled({ 'hub.candlesEnabled': false, 'hub.servesCharts': true }) as any, manager() as any, tracker as any, prisma as any);
+    const svc = new MarketHubService(enabled({ 'hub.candlesEnabled': false, 'hub.servesCharts': true }) as any, manager() as any, tracker as any, prisma as any, runner as any);
     svc.onModuleInit();
     expect(svc.status()?.candles).toBeNull();
     expect(svc.servesCharts()).toBe(false);
@@ -70,12 +74,12 @@ describe('MarketHubService', () => {
   });
 
   it('serves charts only when both candle flags are on', () => {
-    const on = new MarketHubService(enabled({ 'hub.candlesEnabled': true, 'hub.servesCharts': true }) as any, manager() as any, tracker as any, prisma as any);
+    const on = new MarketHubService(enabled({ 'hub.candlesEnabled': true, 'hub.servesCharts': true }) as any, manager() as any, tracker as any, prisma as any, runner as any);
     on.onModuleInit();
     expect(on.status()?.candles).not.toBeNull();
     expect(on.servesCharts()).toBe(true);
     on.onModuleDestroy();
-    const storeOnly = new MarketHubService(enabled({ 'hub.candlesEnabled': true, 'hub.servesCharts': false }) as any, manager() as any, tracker as any, prisma as any);
+    const storeOnly = new MarketHubService(enabled({ 'hub.candlesEnabled': true, 'hub.servesCharts': false }) as any, manager() as any, tracker as any, prisma as any, runner as any);
     storeOnly.onModuleInit();
     expect(storeOnly.servesCharts()).toBe(false);
     storeOnly.onModuleDestroy();
@@ -85,12 +89,12 @@ describe('MarketHubService', () => {
     jest.useFakeTimers();
     jest.setSystemTime(Date.parse('2026-10-08T00:15:00+05:30'));
     const spy = jest.spyOn(HubEngine.prototype, 'runFixup').mockResolvedValue({ day: '2026-10-07', at: 0, instruments: 0, calls: 0, failures: 0 });
-    const off = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any);
+    const off = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any, runner as any);
     off.onModuleInit();
     await off.nightlyCandleFixup();
     expect(spy).not.toHaveBeenCalled();
     off.onModuleDestroy();
-    const on = new MarketHubService(enabled({ 'hub.candlesEnabled': true }) as any, manager() as any, tracker as any, prisma as any);
+    const on = new MarketHubService(enabled({ 'hub.candlesEnabled': true }) as any, manager() as any, tracker as any, prisma as any, runner as any);
     on.onModuleInit();
     await on.nightlyCandleFixup();
     expect(spy).toHaveBeenCalledWith('2026-10-07');
@@ -99,8 +103,48 @@ describe('MarketHubService', () => {
     jest.useRealTimers();
   });
 
+  it('the nightly cron goes through the job runner as hub-candle-fixup (leased and recorded)', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(Date.parse('2026-10-08T00:15:00+05:30'));
+    const spy = jest.spyOn(HubEngine.prototype, 'runFixup').mockResolvedValue({ day: '2026-10-07', at: 0, instruments: 1, calls: 3, failures: 0 });
+    const order: string[] = [];
+    const jobs = {
+      run: jest.fn(async (_name: string, _opts: unknown, fn: () => Promise<unknown>) => {
+        order.push('lease');
+        const v = await fn();
+        order.push('recorded');
+        return v;
+      }),
+    };
+    spy.mockImplementation(async () => {
+      order.push('fixup');
+      return { day: '2026-10-07', at: 0, instruments: 1, calls: 3, failures: 0 };
+    });
+    const svc = new MarketHubService(enabled({ 'hub.candlesEnabled': true }) as any, manager() as any, tracker as any, prisma as any, jobs as any);
+    svc.onModuleInit();
+    await svc.nightlyCandleFixup();
+    expect(jobs.run).toHaveBeenCalledWith('hub-candle-fixup', expect.objectContaining({ ttlMs: expect.any(Number) }), expect.any(Function));
+    expect(order).toEqual(['lease', 'fixup', 'recorded']);
+    // A failed fix-up reaches the runner (recorded FAILED) and is still never thrown at the scheduler.
+    spy.mockRejectedValueOnce(new Error('db down'));
+    let seen: unknown = null;
+    jobs.run.mockImplementationOnce(async (_n, _o, fn) => {
+      try {
+        return await fn();
+      } catch (err) {
+        seen = err;
+        throw err;
+      }
+    });
+    await expect(svc.nightlyCandleFixup()).resolves.toBeUndefined();
+    expect((seen as Error)?.message).toBe('db down');
+    svc.onModuleDestroy();
+    spy.mockRestore();
+    jest.useRealTimers();
+  });
+
   it('candles() rejects when the hub is not running', async () => {
-    const svc = new MarketHubService(config({ 'hub.enabled': false }) as any, manager() as any, tracker as any, prisma as any);
+    const svc = new MarketHubService(config({ 'hub.enabled': false }) as any, manager() as any, tracker as any, prisma as any, runner as any);
     svc.onModuleInit();
     await expect(svc.candles({ exchange: 'NSE', token: '1', symbol: 'A' }, '1m', new Date(0), new Date(1))).rejects.toThrow(/not running/);
   });

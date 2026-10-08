@@ -22,7 +22,11 @@ export interface HubStatusSource {
  * executed appear in the payload at all. Plan 2 adds each surviving job's name
  * here as it is routed through JobRunnerService.
  */
-export const EXPECTED_JOBS: string[] = [];
+export const EXPECTED_JOBS: string[] = [
+  // SP1 M2 nightly candle fix-up (MarketHubService). Recorded every scheduled night, as a
+  // no-op success when candles are off, so a disabled hub never shows it as "never ran".
+  'hub-candle-fixup',
+];
 
 /** The narrow slice of MarketFeedService this surface reads. */
 export interface SlotPressureSource {

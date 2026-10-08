@@ -2,6 +2,7 @@ import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@ne
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { INDICES } from '@td/shared/constants';
+import { JobRunnerService } from '../../common/job-registry';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
@@ -18,6 +19,10 @@ import { SessionClock, type DateRange } from './session-clock';
 const POSITION_REFRESH_MS = 60_000;
 const CALENDAR_ALERT_MS = 24 * 60 * 60 * 1000;
 const HUB_EXCHANGES = new Set<HubExchange>(['NSE', 'BSE', 'NFO', 'BFO', 'MCX']);
+/** Job name in job_runs and /healthz/detail (health-detail.service.ts EXPECTED_JOBS). */
+export const CANDLE_FIXUP_JOB = 'hub-candle-fixup';
+/** Well above a full fix-up (3 Background-lane calls per instrument), well under the daily cadence. */
+const CANDLE_FIXUP_LEASE_MS = 2 * 60 * 60 * 1000;
 
 /** "2026-11-02:2027-03-08,2027-11-01:2028-03-13" → ranges. */
 export function parseLateClose(raw: string | undefined): DateRange[] {
@@ -51,6 +56,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     private readonly manager: UserFeedManager,
     private readonly tracker: TradeTrackerService,
     private readonly prisma: PrismaService,
+    private readonly jobs: JobRunnerService,
   ) {
     this.session = new SessionClock({
       holidays: MARKET_HOLIDAYS,
@@ -141,14 +147,20 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
    * broker's official 1m/1h/1d (spec §6.4). After the latest close (MCX 23:55),
    * with every exchange shut, so the Background lane runs at full budget.
    */
-  @Cron('0 15 0 * * 2-6', { name: 'hub-candle-fixup', timeZone: 'Asia/Kolkata' })
+  @Cron('0 15 0 * * 2-6', { name: CANDLE_FIXUP_JOB, timeZone: 'Asia/Kolkata' })
   async nightlyCandleFixup(): Promise<void> {
-    if (!this.engine?.candlesEnabled) return;
     const day = istDay(Date.now() - 24 * 60 * 60 * 1000);
     try {
-      const r = await this.engine.runFixup(day);
-      const log = r.failures > 0 ? this.logger.warn.bind(this.logger) : this.logger.log.bind(this.logger);
-      log(`Candle fix-up ${day}: ${r.instruments} instrument(s), ${r.calls} call(s), ${r.failures} failure(s)`);
+      // Through the job runner: leased (one instance) and recorded in job_runs, so a fix-up that
+      // stops running shows in /healthz/detail. With candles off the run is recorded as a no-op
+      // success, so the expected job never reads as "never ran" on a hub that has nothing to fix.
+      await this.jobs.run(CANDLE_FIXUP_JOB, { ttlMs: CANDLE_FIXUP_LEASE_MS, onRedisError: 'run-anyway' }, async () => {
+        const engine = this.engine;
+        if (!engine?.candlesEnabled) return;
+        const r = await engine.runFixup(day);
+        const log = r.failures > 0 ? this.logger.warn.bind(this.logger) : this.logger.log.bind(this.logger);
+        log(`Candle fix-up ${day}: ${r.instruments} instrument(s), ${r.calls} call(s), ${r.failures} failure(s)`);
+      });
     } catch (err) {
       this.logger.error(`Candle fix-up ${day} failed: ${(err as Error)?.message ?? err}`);
     }

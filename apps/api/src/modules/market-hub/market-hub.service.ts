@@ -38,10 +38,12 @@ export function parseLateClose(raw: string | undefined): DateRange[] {
 }
 
 /**
- * SP1 market hub, M1: SHADOW. It prices a default context set and the owner's
+ * SP1 market hub. M1 (shadow): prices a default context set and the owner's
  * open positions on the owner's shared session and reports metrics; no
- * existing consumer reads from it yet. Start is fire-and-forget: boot must
- * never wait on the broker.
+ * consumer reads those prices yet. M2: the CandleStore (tick-built 1m bars,
+ * gap fill, nightly fix-up) runs behind HUB_CANDLES_ENABLED, and /candles is
+ * answered from it behind HUB_SERVES_CHARTS. Start is fire-and-forget: boot
+ * must never wait on the broker.
  */
 @Injectable()
 export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandleSource {

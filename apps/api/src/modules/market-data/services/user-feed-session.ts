@@ -358,9 +358,10 @@ export class UserFeedSession implements UserFeedSessionLike {
       exchangeTokens: groupTokensByExchange(refs),
     });
     // smartapi-javascript RESOLVES HTTP errors as `{ status, message }` (no
-    // `data`). Angel signals a rate limit with HTTP 403 or an "exceeding access
-    // rate" message; anything else (401 expired session, 5xx) is a real error
-    // and must not be disguised as a throttle (it would only trigger back-off).
+    // `data`). throwForMissingData's rule, in order: 403 / "exceeding access
+    // rate" -> throttle; a body `errorcode` -> real error; bare `data: null`
+    // (no status, no errorcode) -> throttle; anything else (401, 5xx) -> real
+    // error, never disguised as a throttle (that would only trigger back-off).
     if (opts.throwOnThrottle && response?.data == null) {
       throwForMissingData(response, `marketData (${refs.length} token(s))`);
     }

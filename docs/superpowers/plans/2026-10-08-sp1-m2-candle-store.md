@@ -451,8 +451,9 @@ describe('CandleBuilder', () => {
     const b = new CandleBuilder();
     b.onPrice(p('2026-10-07T15:29:10', 100, 9_000));
     b.onPrice(p('2026-10-07T15:29:40', 100, 9_500));
-    b.onPrice(p('2026-10-08T09:15:05', 100, 40)); // lower: next day's running total
-    const [yesterday, today] = b.closeDue(ist('2026-10-08T09:16:05'));
+    // Lower: next day's running total. This tick also closes yesterday's last bar.
+    const [yesterday] = b.onPrice(p('2026-10-08T09:15:05', 100, 40));
+    const [today] = b.closeDue(ist('2026-10-08T09:16:05'));
     expect(yesterday.candle.volume).toBe(500);
     expect(today.candle.volume).toBe(0);
   });

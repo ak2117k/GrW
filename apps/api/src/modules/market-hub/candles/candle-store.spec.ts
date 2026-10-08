@@ -4,7 +4,7 @@ import { SessionClock } from '../session-clock';
 import { MemoryCandleRepo } from '../testing/memory-candle-repo';
 import type { BrokerInterval, HubCandle } from './candle.types';
 import { CandleStore } from './candle-store';
-import { istMidnight } from './trading-calendar';
+import { addDays, istMidnight } from './trading-calendar';
 
 const ist = (s: string) => Date.parse(`${s}+05:30`);
 const REF: InstrumentRef = { exchange: 'NSE', token: '2885', symbol: 'RELIANCE' };
@@ -27,6 +27,8 @@ function setup(
     result?: (req: GovRequest<HubCandle[]>) => GovResult<HubCandle[]> | null;
     /** Hold Background-lane calls until release() so a test can read before they land. */
     holdBackground?: boolean;
+    /** Coalesce identical keys while in flight, like the real Governor (regardless of lane). */
+    coalesce?: boolean;
   } = {},
 ) {
   let now = ist('2026-10-07T16:00:00');
@@ -36,17 +38,30 @@ function setup(
   let release!: () => void;
   const held = new Promise<void>((r) => (release = r));
   let respond: (interval: BrokerInterval, from: Date, to: Date) => HubCandle[] = () => [];
+  let fetchGate: Promise<void> | null = null;
   const fetch = async (_ref: InstrumentRef, interval: BrokerInterval, from: Date, to: Date) => {
     calls.push({ interval, from, to });
+    if (fetchGate) await fetchGate;
     return respond(interval, from, to);
   };
+  const inflight = new Map<string, Promise<unknown>>();
+  const submit = async <T>(req: GovRequest<T>): Promise<GovResult<T>> => {
+    lanes.push(req.lane);
+    if (opts.holdBackground && req.lane === LANE.BACKGROUND) await held;
+    const forced = opts.result?.(req as unknown as GovRequest<HubCandle[]>);
+    if (forced) return forced as unknown as GovResult<T>;
+    return { kind: 'ok', value: await req.run() };
+  };
   const governor = {
-    submit: async <T>(req: GovRequest<T>): Promise<GovResult<T>> => {
-      lanes.push(req.lane);
-      if (opts.holdBackground && req.lane === LANE.BACKGROUND) await held;
-      const forced = opts.result?.(req as unknown as GovRequest<HubCandle[]>);
-      if (forced) return forced as unknown as GovResult<T>;
-      return { kind: 'ok', value: await req.run() };
+    submit: <T>(req: GovRequest<T>): Promise<GovResult<T>> => {
+      if (!opts.coalesce || !req.key) return submit(req);
+      const key = req.key;
+      const existing = inflight.get(key);
+      if (existing) return existing as Promise<GovResult<T>>;
+      const p = submit(req);
+      inflight.set(key, p);
+      void p.then(() => inflight.delete(key));
+      return p;
     },
   };
   const store = new CandleStore({ repo, governor, clock, fetch, interactiveCallBudget: opts.budget ?? 6, now: () => now });
@@ -54,6 +69,12 @@ function setup(
     store, repo, calls, lanes, release,
     setNow: (t: number) => { now = t; },
     respond: (fn: typeof respond) => { respond = fn; },
+    /** Make broker fetches wait until the returned function is called. */
+    gateFetch: () => {
+      let open!: () => void;
+      fetchGate = new Promise<void>((r) => (open = r));
+      return () => { fetchGate = null; open(); };
+    },
   };
 }
 const DAY = 86_400_000;
@@ -119,6 +140,67 @@ describe('CandleStore', () => {
     expect(after.incomplete).toEqual([]);
     expect(after.candles.length).toBe(5 * 13);
     expect(t.calls).toHaveLength(5); // nothing re-fetched
+  });
+
+  it('an interactive reload does not wait on a deferred background fill', async () => {
+    const t = setup({ budget: 1, holdBackground: true });
+    t.setNow(ist('2026-10-10T12:00:00')); // Saturday: Mon 5 .. Fri 9 Oct are all complete
+    t.respond((_i, from) => minutes(new Date(from.getTime() + 19_800_000).toISOString().slice(0, 10)));
+    const range = [istMidnight('2026-10-05'), istMidnight('2026-10-10')] as const;
+    await t.store.candles(REF, '30m', ...range, { lane: LANE.INTERACTIVE });
+    expect(t.calls).toHaveLength(1); // Oct 9 filled; Oct 5..8 deferred and held
+    const deferred = ['2026-10-08', '2026-10-07', '2026-10-06', '2026-10-05'].map((d) => ({
+      from: istMidnight(d), to: istMidnight(addDays(d, 1)), reason: 'deferred' as const,
+    }));
+    // The background fills are still held: the reload must resolve without waiting on them.
+    const second = await Promise.race([
+      t.store.candles(REF, '30m', ...range, { lane: LANE.INTERACTIVE }),
+      settle().then(() => 'still waiting' as const),
+    ]);
+    expect(second).not.toBe('still waiting');
+    if (second === 'still waiting') return;
+    expect(second.incomplete).toEqual(deferred);
+    expect(second.candles.length).toBe(13);
+    expect(t.lanes).toHaveLength(5); // nothing new submitted for the deferred windows
+    expect(t.calls).toHaveLength(1);
+    expect(t.store.metrics().deferredFills).toBe(4); // the reload started no new fill
+    t.release();
+    await settle();
+    expect(t.calls).toHaveLength(5);
+    const after = await t.store.candles(REF, '30m', ...range, { lane: LANE.INTERACTIVE });
+    expect(after.incomplete).toEqual([]);
+  });
+
+  it('coalesced today reads keep the broker’s cut-off', async () => {
+    const t = setup({ coalesce: true });
+    t.setNow(ist('2026-10-07T10:00:30'));
+    t.respond(() => minutes('2026-10-07', 555, 601)); // includes the 10:00 bar, forming at 10:00:30
+    const open = t.gateFetch();
+    const first = t.store.candles(REF, '1m', ...day('2026-10-07'), { lane: LANE.INTERACTIVE });
+    await settle(); // the broker has been asked at 10:00:30
+    expect(t.calls).toHaveLength(1);
+    t.setNow(ist('2026-10-07T10:01:05')); // the 10:00 bar is complete by now, but not by the broker's answer
+    const second = t.store.candles(REF, '1m', ...day('2026-10-07'), { lane: LANE.INTERACTIVE });
+    await settle();
+    open();
+    const [a, b] = await Promise.all([first, second]);
+    expect(t.calls).toHaveLength(1); // coalesced onto the one broker call
+    expect(await t.repo.read('1m', REF, ist('2026-10-07T10:00:00'), ist('2026-10-07T10:01:00'))).toEqual([]);
+    expect(a.candles).toHaveLength(45);
+    expect(b.candles).toHaveLength(45);
+  });
+
+  it('today-coverage is pruned when the IST day changes', async () => {
+    const t = setup();
+    // White-box: the private today-coverage map, to check the daily prune (bounded memory).
+    const coverage = () => (t.store as unknown as { todayCoverage: Map<string, { day: string }> }).todayCoverage;
+    t.setNow(ist('2026-10-07T10:00:30'));
+    await t.store.candles(REF, '1m', ...day('2026-10-07'), { lane: LANE.INTERACTIVE });
+    expect([...coverage().values()].map((v) => v.day)).toEqual(['2026-10-07']);
+    t.setNow(ist('2026-10-08T10:00:30'));
+    const OTHER: InstrumentRef = { exchange: 'NSE', token: '11536', symbol: 'TCS' };
+    await t.store.candles(OTHER, '1m', ...day('2026-10-08'), { lane: LANE.INTERACTIVE });
+    expect([...coverage().values()].map((v) => v.day)).toEqual(['2026-10-08']);
   });
 
   it('today: drops the forming bar and re-fetches only after a new bar completes', async () => {

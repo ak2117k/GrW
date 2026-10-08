@@ -83,6 +83,14 @@ function p95(values: number[]): number {
  */
 export class CandleStore {
   private readonly todayCoverage = new Map<string, { day: string; until: number }>();
+  /** IST day the today-coverage map was last pruned for. */
+  private todayPrunedFor: string | null = null;
+  /**
+   * Background fills started for a deferred window, by window key. A later read of the same
+   * window reports it as deferred instead of awaiting it: the Governor coalesces identical keys
+   * across lanes, so an interactive submit would otherwise wait on the Background queue.
+   */
+  private readonly deferredInFlight = new Map<string, Promise<IncompleteReason | null>>();
   private readonly readMs: number[] = [];
   private readonly dbMs: number[] = [];
   private reads = 0;
@@ -156,11 +164,19 @@ export class CandleStore {
     const windows: FetchWindow[] = [];
     for (const p of parts) windows.push(...(await this.gapWindows(ref, p)));
     windows.sort((a, b) => b.from - a.from); // newest first: the live edge matters most
-    const background = lane === LANE.BACKGROUND;
-    const now = background ? windows : windows.slice(0, this.d.interactiveCallBudget);
-    const later = background ? [] : windows.slice(this.d.interactiveCallBudget);
-
     const incomplete: IncompleteRange[] = [];
+    const background = lane === LANE.BACKGROUND;
+    // A window already being filled in the background stays deferred: never wait on it.
+    const fresh = background
+      ? windows
+      : windows.filter((w) => {
+          if (!this.deferredInFlight.has(this.windowKey(ref, w))) return true;
+          incomplete.push({ from: w.from, to: w.to, reason: 'deferred' });
+          return false;
+        });
+    const now = background ? fresh : fresh.slice(0, this.d.interactiveCallBudget);
+    const later = background ? [] : fresh.slice(this.d.interactiveCallBudget);
+
     const reasons = await Promise.all(now.map((w) => this.fetchWindow(ref, w, lane)));
     reasons.forEach((reason, i) => {
       if (reason) incomplete.push({ from: now[i].from, to: now[i].to, reason });
@@ -168,8 +184,18 @@ export class CandleStore {
     for (const w of later) {
       incomplete.push({ from: w.from, to: w.to, reason: 'deferred' });
       this.deferredFills++;
-      void this.fetchWindow(ref, w, LANE.BACKGROUND);
+      const key = this.windowKey(ref, w);
+      const p: Promise<IncompleteReason | null> = this.fetchWindow(ref, w, LANE.BACKGROUND)
+        .catch((err: unknown) => {
+          this.noteError(err); // defence in depth: the Governor resolves, never rejects
+          return 'error' as const;
+        })
+        .finally(() => {
+          if (this.deferredInFlight.get(key) === p) this.deferredInFlight.delete(key);
+        });
+      this.deferredInFlight.set(key, p);
     }
+    incomplete.sort((a, b) => b.from - a.from);
     return incomplete;
   }
 
@@ -201,7 +227,10 @@ export class CandleStore {
     return byFetch >= byNow;
   }
 
-  /** 1m: one call per day. 1h/1d: consecutive needed days merged up to the per-call limit. */
+  /**
+   * 1m: one call per day. 1h/1d: needed days merged into one window while the window stays within
+   * the per-call span; present days that fall between needed ones are re-fetched (harmless upsert).
+   */
   private toWindows(table: CandleTable, days: string[]): FetchWindow[] {
     if (table === '1m') {
       return days.map((day) => ({ table, from: istMidnight(day), to: istMidnight(addDays(day, 1)), days: [day] }));
@@ -222,23 +251,33 @@ export class CandleStore {
     return out;
   }
 
+  private windowKey(ref: InstrumentRef, w: Part): string {
+    return `candles:${refKey(ref)}:${TABLE_INTERVAL[w.table]}:${w.from}:${w.to}`;
+  }
+
   /** One broker call through the Governor. Returns null on success, else why it failed. */
   private async fetchWindow(ref: InstrumentRef, w: FetchWindow, lane: Lane): Promise<IncompleteReason | null> {
     const interval = TABLE_INTERVAL[w.table];
-    const asked = this.now();
+    // The cut-off is taken inside run, when the broker is actually asked, so callers coalesced
+    // onto the same governed call share one cut-off (never a later caller's own clock).
     const result = await this.d.governor.submit({
       endpoint: 'candles',
       lane,
-      key: `candles:${refKey(ref)}:${interval}:${w.from}:${w.to}`,
-      run: () => this.d.fetch(ref, interval, new Date(w.from), new Date(Math.min(w.to, asked))),
+      key: this.windowKey(ref, w),
+      run: async () => {
+        const obtainedAt = this.now();
+        const candles = await this.d.fetch(ref, interval, new Date(w.from), new Date(Math.min(w.to, obtainedAt)));
+        return { candles, obtainedAt };
+      },
     });
     if (result.kind !== 'ok') {
       if (result.kind === 'error') this.noteError(result.error);
       return result.kind;
     }
     try {
+      const { candles, obtainedAt: asked } = result.value;
       const todayStart = istMidnight(istDay(asked));
-      const complete = result.value.filter(
+      const complete = candles.filter(
         (c) =>
           c.ts >= w.from &&
           c.ts < w.to &&
@@ -257,8 +296,16 @@ export class CandleStore {
   }
 
   private rememberToday(key: string, day: string, until: number): void {
-    if (this.todayCoverage.size >= MAX_TODAY_KEYS) {
+    if (this.todayPrunedFor !== day) {
+      // A new IST day: yesterday's coverage is meaningless, drop it all.
       for (const [k, v] of this.todayCoverage) if (v.day !== day) this.todayCoverage.delete(k);
+      this.todayPrunedFor = day;
+    }
+    // Safety net: a hard cap. Forgetting an entry only costs one harmless re-fetch.
+    this.todayCoverage.delete(key); // re-insert so insertion order tracks recency
+    if (this.todayCoverage.size >= MAX_TODAY_KEYS) {
+      const oldest = this.todayCoverage.keys().next().value;
+      if (oldest !== undefined) this.todayCoverage.delete(oldest);
     }
     this.todayCoverage.set(key, { day, until });
   }

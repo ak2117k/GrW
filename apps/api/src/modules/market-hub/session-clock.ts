@@ -88,6 +88,11 @@ export class SessionClock {
     return this.phase(exchange, at) === 'open';
   }
 
+  /** The trading window (IST minutes) on `at`'s IST date, or null when the exchange does not trade that day. */
+  tradingWindow(exchange: string, at: Date = new Date()): SessionWindow | null {
+    return this.isTradingDay(exchange, at) ? this.window(exchange, at) : null;
+  }
+
   minutesToClose(exchange: string, at: Date = new Date()): number | null {
     if (!this.isOpen(exchange, at)) return null;
     return this.window(exchange, at).closeMin - istParts(at).minutes;

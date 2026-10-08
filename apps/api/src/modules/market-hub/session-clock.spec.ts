@@ -62,4 +62,15 @@ describe('SessionClock', () => {
     expect(clock.calendarGap(ist('2026-12-02T10:00:00'))).toBe(2027);
     expect(clock.calendarGap(ist('2027-01-05T10:00:00'))).toBe(2027);
   });
+
+  it('exposes the trading window for a trading day and null otherwise', () => {
+    const at = (s: string) => new Date(Date.parse(`${s}+05:30`));
+    expect(clock.tradingWindow('NSE', at('2026-10-07T12:00:00'))).toEqual({ openMin: 555, closeMin: 930 });
+    expect(clock.tradingWindow('NSE', at('2026-10-10T12:00:00'))).toBeNull(); // Saturday
+    const late = new SessionClock({
+      holidays: MARKET_HOLIDAYS,
+      mcxLateClose: [{ from: '2026-11-02', to: '2027-03-08' }],
+    });
+    expect(late.tradingWindow('MCX', at('2026-11-04T12:00:00'))).toEqual({ openMin: 540, closeMin: 1435 });
+  });
 });

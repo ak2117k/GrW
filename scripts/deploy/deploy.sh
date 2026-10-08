@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GrW pull-and-deploy (run by grw-deploy.timer every 2 min).
 #
-#   fetch main → build image → migrate → swap → health-check → record
+#   fetch main → build image → migrate → timescale setup → swap → health-check → record
 #   any failure before the swap leaves the running API untouched;
 #   an unhealthy swap rolls back to the previous image.
 #
@@ -82,6 +82,16 @@ run_migrations() {
     npx prisma migrate deploy --schema prisma/schema.prisma
 }
 
+# TimescaleDB setup for candles_1m (hypertable, compression, retention). Idempotent and
+# applied on EVERY deploy, never by a migration: a pg_restore cutover carries
+# _prisma_migrations, so a one-shot migration step would never reach the restored DB.
+# The SQL is from the new checkout; it runs inside the postgres container as its own
+# superuser/DB (POSTGRES_USER/POSTGRES_DB), so this script needs no DB credentials.
+apply_timescale() {
+  "${COMPOSE[@]}" exec -T postgres sh -c 'psql -v ON_ERROR_STOP=0 -q -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$APP_DIR/deploy/sql/candles-timescale.sql"
+}
+
 swap_to() { GRW_API_TAG="$1" "${COMPOSE[@]}" up -d --no-deps api; }
 
 # Healthy means: the running container IS the new image AND it answers. Checking
@@ -134,6 +144,12 @@ main() {
   fi
   if ! run_migrations "$new"; then
     mark_failed "$new"; notify "migration FAILED for ${new:0:7}; still on ${cur:0:7}"; return 1
+  fi
+  # Non-fatal by design: candles_1m works as a plain table, so a failed Timescale step
+  # must never block a deploy. Warn and alert; the next deploy retries it.
+  if ! apply_timescale "$new"; then
+    log "WARNING: TimescaleDB setup for candles_1m failed for ${new:0:7}; deploying anyway"
+    notify "WARNING: TimescaleDB setup (deploy/sql/candles-timescale.sql) failed for ${new:0:7}; deploy continues"
   fi
   # A failed swap takes the rollback path too; under bare `set -e` it would exit
   # with the old container possibly stopped, no rollback and no alert.

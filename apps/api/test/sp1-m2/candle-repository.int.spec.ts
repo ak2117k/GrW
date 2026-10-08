@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { PrismaClient } from '@prisma/client';
 import { PrismaCandleRepo } from '../../src/modules/market-hub/candles/candle-repository';
 import type { InstrumentRef } from '../../src/modules/market-hub/hub.types';
@@ -92,12 +94,31 @@ describe('PrismaCandleRepo (real database)', () => {
     expect(await repo.read('1m', REF, ist('2026-10-01T00:00:00'), ist('2026-10-03T00:00:00'))).toHaveLength(1500);
   });
 
-  it('candles_1m is a hypertable when TimescaleDB is installed', async () => {
-    const ext = await db.$queryRawUnsafe<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM pg_extension WHERE extname = 'timescaledb'`);
-    if (ext[0].n === 0) return; // plain Postgres: covered by Step 9
-    const ht = await db.$queryRawUnsafe<Array<{ n: number }>>(
-      `SELECT count(*)::int AS n FROM timescaledb_information.hypertables WHERE hypertable_name = 'candles_1m'`,
+  it('groups a whole IST day into one 1440-minute bucket at IST midnight (today’s 1d bar)', async () => {
+    await repo.upsert('1m', REF, [bar('2026-10-07T09:15:00', 1, 5), bar('2026-10-07T15:29:00', 9, 7)], 'tick');
+    const out = await repo.readBucketed(REF, 1440, 0, ist('2026-10-07T00:00:00'), ist('2026-10-08T00:00:00'));
+    expect(out).toEqual([{ ts: ist('2026-10-07T00:00:00'), open: 1, high: 10, low: 0, close: 9, volume: 12 }]);
+  });
+
+  it('candles_1m is a hypertable when TimescaleDB is installed (deploy/sql/candles-timescale.sql, run twice)', async () => {
+    const avail = await db.$queryRawUnsafe<Array<{ n: number }>>(
+      `SELECT count(*)::int AS n FROM pg_available_extensions WHERE name = 'timescaledb'`,
     );
-    expect(ht[0].n).toBe(1);
+    if (avail[0].n === 0) return; // plain Postgres: the deploy step does nothing there
+    // The migration no longer touches TimescaleDB: the deploy step applies it, on every deploy.
+    const sql = readFileSync(join(__dirname, '../../../../deploy/sql/candles-timescale.sql'), 'utf8');
+    await db.$executeRawUnsafe(sql);
+    await db.$executeRawUnsafe(sql); // idempotent: a second deploy changes nothing and raises nothing
+    const ht = await db.$queryRawUnsafe<Array<{ n: number; compression: boolean }>>(
+      `SELECT count(*)::int AS n, bool_and(compression_enabled) AS compression
+       FROM timescaledb_information.hypertables WHERE hypertable_name = 'candles_1m'`,
+    );
+    expect(ht[0]).toEqual({ n: 1, compression: true });
+    const jobs = await db.$queryRawUnsafe<Array<{ proc_name: string }>>(
+      `SELECT proc_name::text AS proc_name FROM timescaledb_information.jobs
+       WHERE hypertable_name = 'candles_1m' AND proc_name IN ('policy_compression', 'policy_retention')
+       ORDER BY proc_name`,
+    );
+    expect(jobs.map((j) => j.proc_name)).toEqual(['policy_compression', 'policy_retention']);
   });
 });

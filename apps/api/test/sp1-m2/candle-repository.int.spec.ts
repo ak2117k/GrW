@@ -73,6 +73,19 @@ describe('PrismaCandleRepo (real database)', () => {
     expect(await repo.tickInstruments(ist('2026-10-07T00:00:00'))).toEqual([{ exchange: 'NSE', token: '2885' }]);
   });
 
+  it('a duplicate ts inside one upsert succeeds and the last occurrence wins', async () => {
+    const t = '2026-10-07T10:00:00';
+    await repo.upsert('1m', REF, [bar(t, 1), bar(t, 2)], 'broker');
+    const m = await repo.read('1m', REF, ist(t), ist(t) + 60_000);
+    expect(m).toHaveLength(1);
+    expect(m[0].close).toBe(2);
+    const d = '2026-10-07T00:00:00';
+    await repo.upsert('1d', REF, [bar(d, 1), bar(d, 2)], 'broker');
+    const day = await repo.read('1d', REF, ist(d), ist('2026-10-08T00:00:00'));
+    expect(day).toHaveLength(1);
+    expect(day[0].close).toBe(2);
+  });
+
   it('writes more than one batch', async () => {
     const bars = Array.from({ length: 1500 }, (_, i) => ({ ts: ist('2026-10-01T09:15:00') + i * 60_000, open: 1, high: 1, low: 1, close: 1, volume: 1 }));
     await repo.upsert('1m', REF, bars, 'broker');

@@ -102,7 +102,12 @@ export class PrismaCandleRepo implements CandleRepo {
     return new Map(rows.map((r) => [r.day, Number(r.n)] as const));
   }
 
-  async upsert(table: CandleTable, ref: InstrumentRef, candles: readonly HubCandle[], source: 'tick' | 'broker'): Promise<void> {
+  async upsert(table: CandleTable, ref: InstrumentRef, input: readonly HubCandle[], source: 'tick' | 'broker'): Promise<void> {
+    // Postgres rejects ON CONFLICT DO UPDATE when two VALUES rows share a key
+    // ("cannot affect row a second time"), which would abort the whole chunk.
+    // Dedupe by ts first (last occurrence wins, like MemoryCandleRepo) so a
+    // repeated broker timestamp can neither sit inside nor straddle a chunk.
+    const candles = [...new Map(input.map((c) => [c.ts, c] as const)).values()];
     for (let i = 0; i < candles.length; i += BATCH) {
       const chunk = candles.slice(i, i + BATCH);
       if (table === '1m') {

@@ -11,9 +11,9 @@
   "name": "grw",
   "compatibility_date": "2025-06-01",
   "main": "worker/index.js",
-  // API host the Worker proxies to. Set to the Oracle tunnel hostname at cutover
-  // (SP0 Task 9); until then it points at Render.
-  "vars": { "API_ORIGIN": "https://grw-api.onrender.com" },
+  // API host the Worker proxies to: the Mumbai/Noida VPS behind Caddy (SP0 cutover 2026-10-09).
+  // Render stays suspended as the 14-day fallback (FALLBACK_API_ORIGIN in worker/index.js).
+  "vars": { "API_ORIGIN": "https://157-10-98-70.sslip.io" },
   "assets": {
     "directory": "apps/web/dist",
     "binding": "ASSETS",

@@ -1,3 +1,4 @@
+import { CandleBuilder } from './candles/candle-builder';
 import { HubEngine } from './hub-engine';
 import { SessionClock } from './session-clock';
 import { FakeBroker } from './testing/fake-broker';
@@ -152,6 +153,20 @@ describe('HubEngine', () => {
     expect((await stopAt('2026-10-07T10:01:01')).map((b) => b.ts)).toEqual([IST('2026-10-07T10:00:00')]);
     // 10:00 is still forming: never stored.
     expect(await stopAt('2026-10-07T10:00:50')).toEqual([]);
+  });
+
+  it('flushBars never rejects, even when closing due bars throws; it counts a write failure', async () => {
+    const { e } = engineWithCandles();
+    await e.start();
+    const spy = jest.spyOn(CandleBuilder.prototype, 'closeDue').mockImplementation(() => {
+      throw new Error('builder broke');
+    });
+    // White-box: flushBars is private and runs from a timer as `void`, where a rejection is unhandled.
+    const flush = (e as unknown as { flushBars(now: number): Promise<void> }).flushBars.bind(e);
+    await expect(flush(Date.now())).resolves.toBeUndefined();
+    expect(e.status().candles).toMatchObject({ tickWriteFailures: 1 });
+    spy.mockRestore();
+    e.stop();
   });
 
   it('counts a failed tick-bar write instead of throwing', async () => {

@@ -252,29 +252,38 @@ export class HubEngine {
     }
   }
 
-  /** Close due bars and write everything pending as tick bars. Never throws (timer). */
+  /**
+   * Close due bars and write everything pending as tick bars. Never rejects: it runs from a
+   * timer and stop() as `void`, where a rejection would be unhandled. Anything that throws
+   * (closeDue included) counts as a tick write failure; the nightly fix-up rewrites the day.
+   */
   private async flushBars(now: number): Promise<void> {
-    if (!this.builder || !this.d.candles) return;
-    this.queueBars(this.builder.closeDue(now));
-    if (this.pendingBars.length === 0) return;
-    const batch = this.pendingBars;
-    this.pendingBars = [];
-    const byRef = new Map<string, ClosedBar[]>();
-    for (const b of batch) {
-      const k = refKey(b.ref);
-      const list = byRef.get(k);
-      if (list) list.push(b);
-      else byRef.set(k, [b]);
-    }
-    for (const bars of byRef.values()) {
-      try {
-        await this.d.candles.repo.upsert('1m', bars[0].ref, bars.map((b) => b.candle), 'tick');
-        this.tickBarsWritten += bars.length;
-        this.lastTickWriteAt = Date.now();
-      } catch {
-        // The nightly fix-up rewrites the day from the broker; count, don't retry.
-        this.tickWriteFailures++;
+    try {
+      const candles = this.d.candles;
+      if (!this.builder || !candles) return;
+      this.queueBars(this.builder.closeDue(now));
+      if (this.pendingBars.length === 0) return;
+      const batch = this.pendingBars;
+      this.pendingBars = [];
+      const byRef = new Map<string, ClosedBar[]>();
+      for (const b of batch) {
+        const k = refKey(b.ref);
+        const list = byRef.get(k);
+        if (list) list.push(b);
+        else byRef.set(k, [b]);
       }
+      for (const bars of byRef.values()) {
+        try {
+          await candles.repo.upsert('1m', bars[0].ref, bars.map((b) => b.candle), 'tick');
+          this.tickBarsWritten += bars.length;
+          this.lastTickWriteAt = Date.now();
+        } catch {
+          // The nightly fix-up rewrites the day from the broker; count, don't retry.
+          this.tickWriteFailures++;
+        }
+      }
+    } catch {
+      this.tickWriteFailures++;
     }
   }
 

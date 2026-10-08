@@ -2842,15 +2842,31 @@ git commit -m "docs(plans): SP1 M2 verification results" -- docs/superpowers/pla
 ## M2 production gate (after deploy, owner-run)
 
 Works on Neon (plain tables) or the VPS (hypertable). Apply the migration first
-(`prisma migrate deploy`, out-of-band on Render; automatic in `deploy.sh` on the VPS). Then set
+(`prisma migrate deploy`, out-of-band on Render; automatic in `deploy.sh` on the VPS). The
+migration creates plain tables only; on the VPS `deploy.sh` then applies
+`deploy/sql/candles-timescale.sql` on every deploy (idempotent, non-fatal; a no-op on Neon). After
+the first VPS deploy, check it took:
+
+```sql
+SELECT hypertable_name, compression_enabled FROM timescaledb_information.hypertables WHERE hypertable_name = 'candles_1m';
+SELECT proc_name, schedule_interval FROM timescaledb_information.jobs WHERE hypertable_name = 'candles_1m';
+-- want: one hypertable row with compression_enabled = t; jobs policy_compression and policy_retention
+```
+
+Then set
 `MARKET_HUB_ENABLED=true`, `HUB_OWNER_USER_ID=<your users.id>`, `HUB_CANDLES_ENABLED=true`,
 `HUB_SERVES_CHARTS=true` and, during one NSE session, use the charts normally and read
 `/healthz/detail` → `hub.candles`:
 
-- `dbReadP95Ms` < 300 (the spec's chart cold-load target is the database read)
+- `dbReadP95Ms` < 300: the database read alone (repo read/bucketing after any fill), which is the
+  spec's chart cold-load target
+- `readP95Ms`: the whole `candles()` call including any broker gap fill it waited for; expect it
+  well above `dbReadP95Ms` only while new symbols/days are being filled
 - `tickBarsWritten` rising during the session; `tickWriteFailures: 0`; `tickBarsDropped: 0`
 - `fillErrors` ≈ 0 and `governor.endpoints.candles.throttlesLastHour` ≈ 0
-- the next morning: `lastFixup` shows the previous day with `failures: 0`
+- the next morning: `lastFixup` shows the previous day with `failures: 0`, and `/healthz/detail` →
+  `jobs` lists `hub-candle-fixup` with `outcome: SUCCESS` from 00:15 IST (a "never ran" row there
+  means the cron is not firing)
 - charts show no holes after a reload; a chart opened for a new symbol fills within two reloads
 
 Revert path: `HUB_SERVES_CHARTS=false` puts charts back on the legacy path without a deploy.

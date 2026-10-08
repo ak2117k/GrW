@@ -14,6 +14,7 @@ import {
   Inject,
   forwardRef,
 } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { ApiTags, ApiOperation, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { MarketFeedService } from '../services/market-feed.service';
 import { InstrumentService } from '../services/instrument.service';
@@ -46,6 +47,8 @@ import { CommoditiesSnapshotService } from '../services/commodities-snapshot.ser
 import { BreadthSectorService } from '../services/breadth-sector.service';
 import { BatchQuotesService } from '../services/batch-quotes.service';
 import { CurrentUser } from '../../../common/decorators';
+import { HUB_CANDLE_SOURCE, type HubCandleSource } from '../../market-hub/hub-candle-source';
+import { serveChartFromHub } from '../../market-hub/candles/serve-chart';
 
 /**
  * Look up a symbol and exchange for a token from the known constant maps.
@@ -116,7 +119,17 @@ export class MarketDataController {
     @Optional()
     @Inject(forwardRef(() => LevelBookService))
     private readonly levelBookService: LevelBookService | null,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  /** The hub's candle source, if this container has the market hub (resolved lazily: no module cycle). */
+  private hubCandleSource(): HubCandleSource | null {
+    try {
+      return this.moduleRef.get<HubCandleSource>(HUB_CANDLE_SOURCE, { strict: false });
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * GET /api/market-data/instruments
@@ -332,6 +345,15 @@ export class MarketDataController {
     const exchange =
       query.exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
     const symbol = instrument?.symbol ?? constantEntry?.symbol ?? token;
+
+    // SP1 M2: the market hub's CandleStore answers when HUB_SERVES_CHARTS is on.
+    // Database first, so the per-user promise cache below is not needed on this path.
+    const fromHub = await serveChartFromHub(
+      this.hubCandleSource(),
+      { token, exchange, symbol, timeframe: query.timeframe, from, to },
+      (msg) => this.logger.warn(msg),
+    );
+    if (fromHub) return fromHub;
 
     // Coalesce concurrent identical requests onto a single broker call.
     //

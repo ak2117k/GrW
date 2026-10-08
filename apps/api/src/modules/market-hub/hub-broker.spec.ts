@@ -50,3 +50,18 @@ describe('ManagerHubBroker', () => {
     expect(states).toEqual(['live']);
   });
 });
+
+it('candles() fetches one window on the owner’s session and maps to hub candles', async () => {
+  const manager = {
+    pin: jest.fn(), unpin: jest.fn(), fetchQuotes: jest.fn(), addTickListener: jest.fn(), addStateListener: jest.fn(),
+    fetchCandleWindow: jest.fn().mockResolvedValue([
+      { timestamp: new Date('2026-10-07T03:45:00.000Z'), open: 1, high: 2, low: 0.5, close: 1.5, volume: 42 },
+    ]),
+  };
+  const b = new ManagerHubBroker(manager as any, 'owner');
+  const from = new Date('2026-10-06T18:30:00.000Z');
+  const to = new Date('2026-10-07T18:30:00.000Z');
+  const out = await b.candles({ exchange: 'NFO', token: '35001', symbol: 'X' }, 'ONE_MINUTE', from, to);
+  expect(manager.fetchCandleWindow).toHaveBeenCalledWith('owner', { token: '35001', exchange: 'NFO' }, 'ONE_MINUTE', from, to);
+  expect(out).toEqual([{ ts: Date.parse('2026-10-07T03:45:00.000Z'), open: 1, high: 2, low: 0.5, close: 1.5, volume: 42 }]);
+});

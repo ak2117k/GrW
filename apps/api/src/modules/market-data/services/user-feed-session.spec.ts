@@ -380,3 +380,47 @@ it('getQuotes throws AngelThrottleError on data:null only when asked to', async 
     s.getQuotes([{ token: '1', exchange: 'NSE' }], { throwOnThrottle: true }),
   ).rejects.toBeInstanceOf(AngelThrottleError);
 });
+
+it('getCandleWindow makes exactly ONE getCandleData call for the window', async () => {
+  const { s, d } = makeSession();
+  const from = new Date('2026-05-15T03:45:00.000Z'); // 09:15 IST
+  const to = new Date('2026-05-15T10:00:00.000Z'); // 15:30 IST
+  const candles = await s.getCandleWindow('111', 'NSE', 'ONE_MINUTE', from, to);
+  expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(1);
+  expect(d.smartApi.getCandleData).toHaveBeenCalledWith({
+    exchange: 'NSE',
+    symboltoken: '111',
+    interval: 'ONE_MINUTE',
+    fromdate: '2026-05-15 09:15',
+    todate: '2026-05-15 15:30',
+  });
+  expect(candles).toHaveLength(2);
+});
+
+it('getCandleWindow rejects a throttle with AngelThrottleError and never retries', async () => {
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValue({ data: null, message: 'Access denied because of exceeding access rate' });
+  const { s } = makeSession(d);
+  await expect(s.getCandleWindow('111', 'NSE', 'ONE_MINUTE', new Date(0), new Date(60_000))).rejects.toBeInstanceOf(AngelThrottleError);
+  expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(1);
+});
+
+it('getCandleWindow reports an SDK-resolved 401 as an error, and [] as genuinely empty', async () => {
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValueOnce({ status: 401, message: 'Unauthorized' });
+  const { s } = makeSession(d);
+  const err = await s.getCandleWindow('111', 'NSE', 'ONE_DAY', new Date(0), new Date(1)).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(AngelThrottleError);
+  d.smartApi.getCandleData.mockResolvedValueOnce({ data: [] });
+  await expect(s.getCandleWindow('111', 'NSE', 'ONE_DAY', new Date(0), new Date(1))).resolves.toEqual([]);
+});
+
+it('getCandleWindow reports a body-level errorcode (AG8001) as an error, not a throttle', async () => {
+  const d = makeDeps();
+  d.smartApi.getCandleData.mockResolvedValue({ status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null });
+  const { s } = makeSession(d);
+  const err = await s.getCandleWindow('111', 'NSE', 'ONE_MINUTE', new Date(0), new Date(60_000)).catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(AngelThrottleError);
+});

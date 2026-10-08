@@ -25,6 +25,7 @@ stub() {
   image_published() { return 0; }
   note_waiting() { CALLS+=("waiting:$1"); }
   run_migrations() { CALLS+=("migrate:$1"); }
+  apply_timescale() { :; }   # its own cases below record it
   swap_to() { CALLS+=("swap:$1"); }
   wait_healthy() { CALLS+=("health:$1"); }
   checkout() { CALLS+=("checkout:$1"); }
@@ -64,6 +65,27 @@ check() { # name want_exit want_calls got_exit — runs in a subshell, so it RET
 # Review I3: a fetch failure alerts (rate-limited) instead of killing the unit silently.
 ( stub; remote_sha() { return 1; }; notify_once() { CALLS+=("notify_once:$1"); }
   main; check "fetch fails: alert once, no deploy" 0 "notify_once:fetch" $? ) || failures=$((failures + 1))
+
+# SP1 M2 F1: TimescaleDB setup runs on every deploy, after migrations and before the swap,
+# and never blocks a deploy.
+( stub; apply_timescale() { CALLS+=("timescale:$1"); }
+  main; check "timescale setup runs after migrate, before swap" 0 "fetch:new migrate:new timescale:new swap:new health:new record:new" $? ) || failures=$((failures + 1))
+( stub; apply_timescale() { CALLS+=("timescale:$1"); return 1; }
+  notify() { [[ "$*" == WARNING* ]] && CALLS+=("warn"); return 0; }
+  main; check "timescale setup fails: warn and deploy anyway" 0 "fetch:new migrate:new timescale:new warn swap:new health:new record:new" $? ) || failures=$((failures + 1))
+( stub; apply_timescale() { CALLS+=("timescale:$1"); }; run_migrations() { CALLS+=("migrate:$1"); return 1; }
+  main; check "migration fails: no timescale setup" 1 "fetch:new migrate:new mark_failed:new" $? ) || failures=$((failures + 1))
+
+# apply_timescale feeds the checked-out SQL file to psql inside the postgres service.
+( source "$here/deploy.sh"; set +e
+  APP_DIR="$here/../.."; COMPOSE=(docker compose -f x.yml)
+  tmpcalls="$(mktemp)"; tmpin="$(mktemp)"
+  docker() { echo "$*" >> "$tmpcalls"; cat > "$tmpin"; }
+  apply_timescale new; rc=$?
+  if [[ $rc -eq 0 ]] && grep -q "^compose -f x.yml exec -T postgres sh -c psql -v ON_ERROR_STOP=0" "$tmpcalls" \
+     && cmp -s "$tmpin" "$APP_DIR/deploy/sql/candles-timescale.sql"; then echo "ok   apply_timescale pipes deploy/sql/candles-timescale.sql into the postgres service"
+  else echo "FAIL apply_timescale pipes deploy/sql/candles-timescale.sql into the postgres service: rc=$rc calls: $(tr '\n' ';' < "$tmpcalls")"; exit 1; fi
+) || failures=$((failures + 1))
 
 # CI publishes the image a few minutes after the push: until then, wait quietly.
 ( stub; image_published() { return 1; }

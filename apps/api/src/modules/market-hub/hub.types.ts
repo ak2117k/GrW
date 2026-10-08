@@ -37,3 +37,9 @@ export type PriceResult =
   | { kind: 'market-closed'; price: Price }
   | { kind: 'stale'; price: Price; ageMs: number }
   | { kind: 'unavailable'; reason: UnavailableReason };
+
+const HUB_EXCHANGES: ReadonlySet<string> = new Set<HubExchange>(['NSE', 'BSE', 'NFO', 'BFO', 'MCX']);
+
+export function isHubExchange(x: string): x is HubExchange {
+  return HUB_EXCHANGES.has(x);
+}

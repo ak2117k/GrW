@@ -2,6 +2,7 @@ import type { TickData } from '../../common/interfaces/broker-adapter.interface'
 import type { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import type { FeedState, TokenRef } from '../market-data/services/user-feed.types';
 import type { InstrumentRef } from './hub.types';
+import type { BrokerInterval, HubCandle } from './candles/candle.types';
 
 /** Everything the hub needs from a broker session — and nothing else. */
 export interface HubBroker {
@@ -10,6 +11,8 @@ export interface HubBroker {
   unsubscribe(refs: InstrumentRef[]): Promise<void>;
   /** One FULL-quote call, keyed by token. Rejects with AngelThrottleError when throttled. */
   quotes(refs: InstrumentRef[]): Promise<Map<string, TickData>>;
+  /** ONE getCandleData window. Rejects with AngelThrottleError when throttled; [] means no bars. */
+  candles(ref: InstrumentRef, interval: BrokerInterval, from: Date, to: Date): Promise<HubCandle[]>;
   onTick(fn: (tick: TickData) => void): void;
   onState(fn: (state: FeedState) => void): void;
 }
@@ -25,7 +28,7 @@ export class ManagerHubBroker implements HubBroker {
   constructor(
     private readonly manager: Pick<
       UserFeedManager,
-      'pin' | 'unpin' | 'fetchQuotes' | 'addTickListener' | 'addStateListener'
+      'pin' | 'unpin' | 'fetchQuotes' | 'fetchCandleWindow' | 'addTickListener' | 'addStateListener'
     >,
     private readonly ownerUserId: string,
   ) {}
@@ -46,6 +49,18 @@ export class ManagerHubBroker implements HubBroker {
     return this.manager.fetchQuotes(this.ownerUserId, refs.map(toTokenRef), {
       throwOnThrottle: true,
     });
+  }
+
+  async candles(ref: InstrumentRef, interval: BrokerInterval, from: Date, to: Date): Promise<HubCandle[]> {
+    const rows = await this.manager.fetchCandleWindow(this.ownerUserId, toTokenRef(ref), interval, from, to);
+    return rows.map((c) => ({
+      ts: c.timestamp.getTime(),
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: Number(c.volume),
+    }));
   }
 
   onTick(fn: (tick: TickData) => void): void {

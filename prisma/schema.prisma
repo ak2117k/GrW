@@ -2042,3 +2042,69 @@ model ClientFeedReport {
   @@index([createdAt])
   @@map("client_feed_reports")
 }
+
+// ─── SP1 M2: market hub CandleStore ──────────────────────────────────────────
+// Written and read through raw SQL in apps/api/src/modules/market-hub/candles/
+// candle-repository.ts. candles_1m becomes a TimescaleDB hypertable (compressed
+// after 7 days, kept 180 days) where the server has TimescaleDB; see the
+// 20261008120000_sp1_m2_candle_store migration.
+
+/// 1-minute bars: `tick` (built live) or `broker` (gap fill, nightly fix-up). broker beats tick.
+model HubCandle1m {
+  exchange String
+  token    String
+  ts       DateTime @db.Timestamptz(3)
+  open     Float
+  high     Float
+  low      Float
+  close    Float
+  volume   BigInt   @default(0)
+  oi       BigInt?
+  source   String
+
+  @@id([exchange, token, ts])
+  @@map("candles_1m")
+}
+
+/// Angel One's native hourly bars (09:15, 10:15 … for NSE).
+model HubCandle1h {
+  exchange String
+  token    String
+  ts       DateTime @db.Timestamptz(3)
+  open     Float
+  high     Float
+  low      Float
+  close    Float
+  volume   BigInt   @default(0)
+
+  @@id([exchange, token, ts])
+  @@map("candles_1h")
+}
+
+/// Official daily bars; ts = IST midnight.
+model HubCandle1d {
+  exchange String
+  token    String
+  ts       DateTime @db.Timestamptz(3)
+  open     Float
+  high     Float
+  low      Float
+  close    Float
+  volume   BigInt   @default(0)
+
+  @@id([exchange, token, ts])
+  @@map("candles_1d")
+}
+
+/// Past IST days the broker has already been asked for, per series. A covered day
+/// with fewer bars than the calendar expects is genuinely sparse (no trades).
+model CandleCoverage {
+  exchange  String
+  token     String
+  tf        String
+  day       DateTime @db.Date
+  fetchedAt DateTime @default(now()) @map("fetched_at") @db.Timestamptz(3)
+
+  @@id([exchange, token, tf, day])
+  @@map("candle_coverage")
+}

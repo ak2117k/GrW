@@ -17,6 +17,7 @@ function fakeSession() {
     dispose: jest.fn().mockResolvedValue(undefined),
     getCandles: jest.fn().mockResolvedValue([{ timestamp: new Date(), open: 1, high: 2, low: 0, close: 1, volume: 10 }]),
     getQuote: jest.fn().mockResolvedValue({ token: '1', ltp: 100 }),
+    getCandleWindow: jest.fn().mockResolvedValue([]),
     __listeners: listeners,
   };
 }
@@ -156,4 +157,13 @@ describe('pins (the market hub shares the owner session)', () => {
     s.__listeners.tick({ token: '1', ltp: 6 });
     expect(hub).toHaveBeenCalledTimes(1);
   });
+});
+
+it('fetchCandleWindow runs one window on the user’s own session', async () => {
+  const s = fakeSession();
+  const mgr = new UserFeedManager((() => s) as any, { idleMs: 120000, maxSessions: 40 });
+  const from = new Date(0);
+  const to = new Date(60_000);
+  await mgr.fetchCandleWindow('u1', { token: '26000', exchange: 'NSE' }, 'ONE_HOUR', from, to);
+  expect(s.getCandleWindow).toHaveBeenCalledWith('26000', 'NSE', 'ONE_HOUR', from, to);
 });

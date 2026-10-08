@@ -4,6 +4,7 @@ import {
   HISTORICAL_THROTTLE_RETRY_DELAYS_MS,
   rowsOrThrottle,
   fetchChunksResilient,
+  throwForMissingData,
 } from './angel-throttle';
 
 /** Collects sleeps instead of performing them, so the suite runs instantly. */
@@ -167,5 +168,49 @@ describe('isNotAuthenticatedError', () => {
     expect(isNotAuthenticatedError(new Error('ECONNRESET'))).toBe(false);
     expect(isNotAuthenticatedError(null)).toBe(false);
     expect(isNotAuthenticatedError(undefined)).toBe(false);
+  });
+});
+
+describe('throwForMissingData', () => {
+  const run = (r: unknown) => {
+    try {
+      throwForMissingData(r, 'test');
+    } catch (e) {
+      return e as Error;
+    }
+    throw new Error('did not throw');
+  };
+
+  it('treats an SDK-resolved HTTP 403 as a throttle', () => {
+    expect(run({ status: 403, message: 'Forbidden' })).toBeInstanceOf(AngelThrottleError);
+  });
+
+  it('treats an "exceeding access rate" message as a throttle', () => {
+    expect(run({ data: null, message: 'Access denied because of exceeding access rate' })).toBeInstanceOf(
+      AngelThrottleError,
+    );
+  });
+
+  it('lets the rate-limit message win even when an errorcode is present', () => {
+    expect(
+      run({ status: false, message: 'Access denied because of exceeding access rate', errorcode: 'AB1019' }),
+    ).toBeInstanceOf(AngelThrottleError);
+  });
+
+  it('reports a body-level errorcode (AG8001 Invalid Token) as a real error, not a throttle', () => {
+    const err = run({ status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null });
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(AngelThrottleError);
+    expect(err.message).toContain('AG8001');
+  });
+
+  it('reports an HTTP 500 as a real error, not a throttle', () => {
+    const err = run({ status: 500, message: 'Internal Server Error' });
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(AngelThrottleError);
+  });
+
+  it('treats a bare data:null (no status, no errorcode) as a throttle', () => {
+    expect(run({ data: null })).toBeInstanceOf(AngelThrottleError);
   });
 });

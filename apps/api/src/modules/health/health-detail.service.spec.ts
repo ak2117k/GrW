@@ -22,6 +22,16 @@ describe('HealthDetailService', () => {
     expect(out.jobs.available).toBe(true);
   });
 
+  it('lists the hub candle fix-up as an expected job even before it has ever run', async () => {
+    const runs = { lastRunPerJob: jest.fn().mockResolvedValue([]) };
+    const svc = new HealthDetailService(makePrisma() as never, runs as never, null);
+
+    const out = await svc.check();
+
+    expect(out.jobs.available).toBe(true);
+    if (out.jobs.available) expect(out.jobs.value['hub-candle-fixup']).toMatchObject({ at: null, outcome: null });
+  });
+
   it('degrades the jobs signal alone when the query fails', async () => {
     const runs = { lastRunPerJob: jest.fn().mockRejectedValue(new Error('db down')) };
     const feed = { getSlotPressure: jest.fn().mockReturnValue({}) };

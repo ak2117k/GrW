@@ -150,3 +150,33 @@ export async function fetchChunksResilient<T>(
 
   return { items, dropped, attempted };
 }
+
+/**
+ * smartapi-javascript RESOLVES HTTP errors as `{ status, message }` with no
+ * `data`, and Angel also reports API-level errors as HTTP 200 bodies such as
+ * `{ status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null }`.
+ * Classification, in order:
+ *  1. HTTP 403 or an "exceeding access rate" message -> throttle (the rate
+ *     limit wins even when the body also carries an errorcode);
+ *  2. a non-empty body-level `errorcode` -> a real broker error (an expired
+ *     session reported as a throttle would only make the caller back off
+ *     forever);
+ *  3. no truthy status and no errorcode (the SDK's bare `data: null`) ->
+ *     throttle;
+ *  4. anything else (401 expired session, 5xx) -> a real error.
+ * Both messages include `errorcode=<code>` when present. Call only when
+ * `response.data == null`.
+ */
+export function throwForMissingData(response: unknown, what: string): never {
+  const r = response as { status?: unknown; message?: unknown; errorcode?: unknown } | null | undefined;
+  const status = Number(r?.status);
+  const message = String(r?.message ?? '');
+  const errorcode = r?.errorcode == null ? '' : String(r.errorcode).trim();
+  const code = errorcode ? ` errorcode=${errorcode}` : '';
+  const throttled = () => new AngelThrottleError(`Angel One ${what} throttled: ${message || 'data:null'}${code}`);
+  if (status === 403 || /exceed/i.test(message)) throw throttled();
+  if (errorcode || r?.status) {
+    throw new Error(`Angel One ${what} failed: status ${String(r?.status)} ${message}${code}`.trim());
+  }
+  throw throttled();
+}

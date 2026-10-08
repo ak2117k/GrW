@@ -2,11 +2,14 @@ import type { TickData } from '../../../common/interfaces/broker-adapter.interfa
 import type { FeedState } from '../../market-data/services/user-feed.types';
 import type { HubBroker } from '../hub-broker';
 import { refKey, type InstrumentRef } from '../hub.types';
+import type { BrokerInterval, HubCandle } from '../candles/candle.types';
 
 /** In-memory broker for hub tests: records calls, emits ticks/states on demand. */
 export class FakeBroker implements HubBroker {
   readonly subscribed = new Set<string>();
   readonly quoteCalls: InstrumentRef[][] = [];
+  readonly candleCalls: Array<{ ref: InstrumentRef; interval: BrokerInterval; from: Date; to: Date }> = [];
+  candlesImpl: (ref: InstrumentRef, interval: BrokerInterval, from: Date, to: Date) => Promise<HubCandle[]> = async () => [];
   connected = false;
   quoteImpl: (refs: InstrumentRef[]) => Promise<Map<string, TickData>> = async (refs) =>
     new Map(refs.map((r) => [r.token, FakeBroker.tick(r.token, 100)]));
@@ -29,6 +32,10 @@ export class FakeBroker implements HubBroker {
   quotes(refs: InstrumentRef[]): Promise<Map<string, TickData>> {
     this.quoteCalls.push(refs);
     return this.quoteImpl(refs);
+  }
+  candles(ref: InstrumentRef, interval: BrokerInterval, from: Date, to: Date): Promise<HubCandle[]> {
+    this.candleCalls.push({ ref, interval, from, to });
+    return this.candlesImpl(ref, interval, from, to);
   }
   onTick(fn: (t: TickData) => void): void {
     this.tickFns.push(fn);

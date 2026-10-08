@@ -1,6 +1,19 @@
+import { CandleBuilder, type ClosedBar } from './candles/candle-builder';
+import type { CandleRepo } from './candles/candle-repository';
+import { CandleStore, type FixupReport } from './candles/candle-store';
+import type { CandlesResult, Timeframe } from './candles/candle.types';
+import { istMidnight } from './candles/trading-calendar';
 import { DEFAULT_RATES, Governor, type GovernorMetrics } from './governor';
 import type { HubBroker } from './hub-broker';
-import { refKey, type InstrumentRef, type Price, type PriceResult, type Priority } from './hub.types';
+import {
+  LANE,
+  refKey,
+  type InstrumentRef,
+  type Lane,
+  type Price,
+  type PriceResult,
+  type Priority,
+} from './hub.types';
 import { LiveFeed } from './live-feed';
 import { PriceBook } from './price-book';
 import { QuoteBatcher } from './quote-batcher';
@@ -15,6 +28,24 @@ export interface HubEngineDeps {
   cap: number;
   /** Market-context instruments watched at priority 2 for as long as the hub runs. */
   defaults: readonly InstrumentRef[];
+  /** M2 CandleStore. Absent ⇒ no tick bars, no candle reads (M1 behaviour). */
+  candles?: { repo: CandleRepo; interactiveCallBudget?: number };
+}
+
+export interface CandleStatus {
+  building: number;
+  lateTicks: number;
+  tickBarsWritten: number;
+  tickBarsDropped: number;
+  tickWriteFailures: number;
+  lastTickWriteAt: number | null;
+  reads: number;
+  readP95Ms: number;
+  dbReadP95Ms: number;
+  deferredFills: number;
+  fillErrors: number;
+  lastError: string | null;
+  lastFixup: FixupReport | null;
 }
 
 export interface HubStatus {
@@ -33,11 +64,17 @@ export interface HubStatus {
   calendar: { missingYear: number | null };
   /** Last broker connect/subscribe failure; null once a reconcile succeeds. */
   lastError: string | null;
+  /** M2 candle store; null when candles are not enabled. */
+  candles: CandleStatus | null;
 }
 
 const POSITIONS = 'hub:positions';
 const CONTEXT = 'hub:context';
 const STATUS_MAX_AGE_MS = 5000;
+const TICK_FLUSH_MS = 5000;
+const MAX_PENDING_BARS = 20_000;
+/** CandleBuilder's close grace (its default), named so stop() can close exactly the ended minutes. */
+const TICK_GRACE_MS = 2000;
 
 /** Wires the hub's parts. No NestJS, no config — testable with a FakeBroker. */
 export class HubEngine {
@@ -49,6 +86,15 @@ export class HubEngine {
   private positions = new Map<string, InstrumentRef>();
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private lastError: string | null = null;
+  private readonly builder: CandleBuilder | null;
+  private readonly store: CandleStore | null;
+  private pendingBars: ClosedBar[] = [];
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private tickBarsWritten = 0;
+  private tickBarsDropped = 0;
+  private tickWriteFailures = 0;
+  private lastTickWriteAt: number | null = null;
+  private lastFixup: FixupReport | null = null;
 
   constructor(private readonly d: HubEngineDeps) {
     this.governor = new Governor({
@@ -69,6 +115,21 @@ export class HubEngine {
       nearLiveTargetMs: 5000,
       criticalTargetMs: 2000,
     });
+    if (d.candles) {
+      const builder = new CandleBuilder(TICK_GRACE_MS);
+      this.builder = builder;
+      this.store = new CandleStore({
+        repo: d.candles.repo,
+        governor: this.governor,
+        clock: d.clock,
+        fetch: (ref, interval, from, to) => d.broker.candles(ref, interval, from, to),
+        interactiveCallBudget: d.candles.interactiveCallBudget ?? 6,
+      });
+      this.feed.onPrice((p) => this.queueBars(builder.onPrice(p)));
+    } else {
+      this.builder = null;
+      this.store = null;
+    }
   }
 
   /**
@@ -87,6 +148,10 @@ export class HubEngine {
       void this.reconcileSafely();
     }, 30_000);
     this.maintenanceTimer.unref?.();
+    if (this.builder) {
+      this.flushTimer = setInterval(() => void this.flushBars(Date.now()), TICK_FLUSH_MS);
+      this.flushTimer.unref?.();
+    }
     try {
       await this.d.broker.connect();
     } catch (err) {
@@ -99,6 +164,11 @@ export class HubEngine {
     this.poller.stop();
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = null;
+    if (this.flushTimer) clearInterval(this.flushTimer);
+    this.flushTimer = null;
+    // Best effort: write every bar whose minute has ended (grace waived). The forming minute is
+    // dropped, never stored (no forming bars in the database); the nightly fix-up fills it.
+    if (this.builder) void this.flushBars(Date.now() + TICK_GRACE_MS);
     this.governor.dispose();
   }
 
@@ -150,6 +220,79 @@ export class HubEngine {
     return this.feed.onPrice(fn);
   }
 
+  get candlesEnabled(): boolean {
+    return this.store !== null;
+  }
+
+  candles(ref: InstrumentRef, timeframe: Timeframe, from: number, to: number, lane: Lane = LANE.INTERACTIVE): Promise<CandlesResult> {
+    if (!this.store) return Promise.reject(new Error('candle store is not enabled (HUB_CANDLES_ENABLED)'));
+    return this.store.candles(ref, timeframe, from, to, { lane });
+  }
+
+  /** Nightly fix-up for `day` (IST YYYY-MM-DD): instruments with tick bars that day + everything watched. */
+  async runFixup(day: string): Promise<FixupReport> {
+    if (!this.store || !this.d.candles) throw new Error('candle store is not enabled (HUB_CANDLES_ENABLED)');
+    const refs = new Map<string, InstrumentRef>();
+    for (const t of await this.d.candles.repo.tickInstruments(istMidnight(day))) {
+      refs.set(refKey(t), { exchange: t.exchange, token: t.token, symbol: t.token });
+    }
+    for (const e of this.registry.entries()) refs.set(refKey(e.ref), e.ref);
+    const report = await this.store.fixup(day, [...refs.values()]);
+    this.lastFixup = report;
+    return report;
+  }
+
+  private queueBars(bars: ClosedBar[]): void {
+    if (bars.length === 0) return;
+    this.pendingBars.push(...bars);
+    const over = this.pendingBars.length - MAX_PENDING_BARS;
+    if (over > 0) {
+      this.pendingBars.splice(0, over);
+      this.tickBarsDropped += over;
+    }
+  }
+
+  /** Close due bars and write everything pending as tick bars. Never throws (timer). */
+  private async flushBars(now: number): Promise<void> {
+    if (!this.builder || !this.d.candles) return;
+    this.queueBars(this.builder.closeDue(now));
+    if (this.pendingBars.length === 0) return;
+    const batch = this.pendingBars;
+    this.pendingBars = [];
+    const byRef = new Map<string, ClosedBar[]>();
+    for (const b of batch) {
+      const k = refKey(b.ref);
+      const list = byRef.get(k);
+      if (list) list.push(b);
+      else byRef.set(k, [b]);
+    }
+    for (const bars of byRef.values()) {
+      try {
+        await this.d.candles.repo.upsert('1m', bars[0].ref, bars.map((b) => b.candle), 'tick');
+        this.tickBarsWritten += bars.length;
+        this.lastTickWriteAt = Date.now();
+      } catch {
+        // The nightly fix-up rewrites the day from the broker; count, don't retry.
+        this.tickWriteFailures++;
+      }
+    }
+  }
+
+  private candleStatus(): CandleStatus | null {
+    if (!this.builder || !this.store) return null;
+    const b = this.builder.stats();
+    return {
+      building: b.building,
+      lateTicks: b.lateTicks,
+      tickBarsWritten: this.tickBarsWritten,
+      tickBarsDropped: this.tickBarsDropped,
+      tickWriteFailures: this.tickWriteFailures,
+      lastTickWriteAt: this.lastTickWriteAt,
+      ...this.store.metrics(),
+      lastFixup: this.lastFixup,
+    };
+  }
+
   status(): HubStatus {
     const now = Date.now();
     const counts = { fresh: 0, stale: 0, marketClosed: 0, unavailable: 0 };
@@ -176,6 +319,7 @@ export class HubEngine {
       governor: this.governor.metrics(now),
       calendar: { missingYear: this.d.clock.calendarGap(new Date(now)) },
       lastError: this.lastError,
+      candles: this.candleStatus(),
     };
   }
 }

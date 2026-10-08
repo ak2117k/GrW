@@ -72,6 +72,16 @@ export default () => ({
     // Max concurrent per-user sessions before the LRU idle one is evicted.
     maxSessions: +(process.env.USER_FEED_MAX_SESSIONS || 40),
   },
+  hub: {
+    // SP1 market data hub (shadow in M1). Off unless explicitly enabled.
+    enabled: process.env.MARKET_HUB_ENABLED === 'true',
+    // The user whose own Angel One session the hub shares (personal MVP: the owner).
+    ownerUserId: process.env.HUB_OWNER_USER_ID || '',
+    // WebSocket live-slot cap. Angel allows 1000 per connection; 50 keeps M1 conservative.
+    slotCap: +(process.env.HUB_SLOT_CAP || 50),
+    // MCX 23:55 close windows, "YYYY-MM-DD:YYYY-MM-DD" comma-separated (US-DST-linked).
+    mcxLateClose: process.env.HUB_MCX_LATE_CLOSE || '',
+  },
   telegram: {
     // Min parser confidence for a message to be promoted to a tracked signal.
     minConfidence: parseFloat(process.env.TELEGRAM_MIN_CONFIDENCE || '0.55'),

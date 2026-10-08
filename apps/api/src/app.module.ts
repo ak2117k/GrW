@@ -43,6 +43,7 @@ import { BillingModule } from './modules/billing/billing.module';
 import { SignalFanoutModule } from './modules/signal-fanout/signal-fanout.module';
 import { AutoExecutionModule } from './modules/auto-execution/auto-execution.module';
 import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module';
+import { MarketHubModule } from './modules/market-hub/market-hub.module';
 import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
@@ -224,6 +225,7 @@ import { HealthModule } from './modules/health/health.module';
     // position/holding with entry/exit, holding + day high/low, LTP and P&L,
     // filled from periodic broker snapshots + live socket ticks.
     TradeTrackerModule,
+    MarketHubModule,
 
     // Trade Sentinel — Stage 0 (shadow). Watches the open positions the tracker
     // maintains and RECORDS the exits it would have taken; it places no orders

@@ -92,3 +92,68 @@ it('routes ticks through the global handler tagged by userId', async () => {
   s.__listeners.tick({ token: '1', ltp: 100 });
   expect(seen).toEqual([['u1', { token: '1', ltp: 100 }]]);
 });
+
+describe('pins (the market hub shares the owner session)', () => {
+  it('pin on an existing user reuses the one session', async () => {
+    const factory = jest.fn(() => fakeSession());
+    const mgr = new UserFeedManager(factory as any, { idleMs: 1000, maxSessions: 40 });
+    await mgr.subscribe('owner', [{ token: '1', exchange: 'NSE' }]); // browser
+    await mgr.pin('owner', [{ token: '2', exchange: 'NSE' }]); // hub
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it('pins survive releaseUser and block idle teardown', async () => {
+    jest.useFakeTimers();
+    const s = fakeSession();
+    const mgr = new UserFeedManager((() => s) as any, { idleMs: 1000, maxSessions: 40 });
+    await mgr.pin('owner', [{ token: '2', exchange: 'NSE' }]);
+    await mgr.subscribe('owner', [{ token: '1', exchange: 'NSE' }]);
+    mgr.releaseUser('owner'); // browser tab closed
+    jest.advanceTimersByTime(5000);
+    await Promise.resolve();
+    expect(s.dispose).not.toHaveBeenCalled();
+    jest.useRealTimers();
+  });
+
+  it('subscribes a token once whether the browser, the hub or both hold it', async () => {
+    const s = fakeSession();
+    const mgr = new UserFeedManager((() => s) as any, { idleMs: 1000, maxSessions: 40 });
+    const t = { token: '1', exchange: 'NSE' };
+    await mgr.pin('owner', [t]);
+    await mgr.subscribe('owner', [t]);
+    expect(s.subscribe).toHaveBeenCalledTimes(1);
+    await mgr.unsubscribe('owner', [t]); // browser leaves; hub still pins
+    expect(s.unsubscribe).not.toHaveBeenCalled();
+    await mgr.unpin('owner', [t]); // last holder
+    expect(s.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('releaseUser unsubscribes browser-only tokens when pins keep the session alive', async () => {
+    // Without pins, teardown cleaned these up; pins block teardown, so release must.
+    const s = fakeSession();
+    const mgr = new UserFeedManager((() => s) as any, { idleMs: 1000, maxSessions: 40 });
+    const pinned = { token: '2', exchange: 'NSE' };
+    const browserOnly = { token: '1', exchange: 'NSE' };
+    await mgr.pin('owner', [pinned]);
+    await mgr.subscribe('owner', [browserOnly, pinned]);
+    mgr.releaseUser('owner');
+    await Promise.resolve();
+    expect(s.unsubscribe).toHaveBeenCalledWith([browserOnly]);
+  });
+
+  it('delivers ticks to extra listeners alongside the gateway handler', async () => {
+    const s = fakeSession();
+    const mgr = new UserFeedManager((() => s) as any, { idleMs: 1000, maxSessions: 40 });
+    const gateway = jest.fn();
+    const hub = jest.fn();
+    mgr.setHandlers(gateway, jest.fn());
+    const off = mgr.addTickListener(hub);
+    await mgr.pin('owner', []);
+    s.__listeners.tick({ token: '1', ltp: 5 });
+    expect(gateway).toHaveBeenCalledWith('owner', { token: '1', ltp: 5 });
+    expect(hub).toHaveBeenCalledWith('owner', { token: '1', ltp: 5 });
+    off();
+    s.__listeners.tick({ token: '1', ltp: 6 });
+    expect(hub).toHaveBeenCalledTimes(1);
+  });
+});

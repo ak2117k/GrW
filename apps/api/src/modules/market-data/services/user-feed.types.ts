@@ -40,9 +40,11 @@ export interface UserFeedSessionLike {
   getQuote(token: string, exchange: string): Promise<TickData | null>;
   /**
    * Batched FULL-mode quotes in ONE broker call, keyed by token. Tokens the
-   * account can't quote are absent from the map rather than throwing.
+   * account can't quote are absent from the map rather than throwing. With
+   * `throwOnThrottle`, Angel's throttle shape (`data: null`) rejects with
+   * AngelThrottleError instead of returning an empty map.
    */
-  getQuotes(refs: TokenRef[]): Promise<Map<string, TickData>>;
+  getQuotes(refs: TokenRef[], opts?: { throwOnThrottle?: boolean }): Promise<Map<string, TickData>>;
 }
 
 /** Builds a session for one user. Overridable in tests via the DI token below. */

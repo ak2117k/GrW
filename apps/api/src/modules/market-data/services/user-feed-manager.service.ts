@@ -26,6 +26,8 @@ interface UserFeedEntry {
   refs: Map<string, number>;
   /** The TokenRef behind each key, for (un)subscribe calls to the session. */
   tokenRefs: Map<string, TokenRef>;
+  /** Tokens held by a long-lived in-process consumer (the market hub). */
+  pins: Map<string, TokenRef>;
   idleTimer: ReturnType<typeof setTimeout> | null;
   lastActive: number;
 }
@@ -50,6 +52,8 @@ export class UserFeedManager {
 
   private onTickHandler: ManagerTickHandler | null = null;
   private onStateHandler: ManagerStateHandler | null = null;
+  private readonly tickListeners = new Set<ManagerTickHandler>();
+  private readonly stateListeners = new Set<ManagerStateHandler>();
 
   constructor(
     private readonly factory: UserFeedSessionFactory,
@@ -60,6 +64,17 @@ export class UserFeedManager {
   setHandlers(onTick: ManagerTickHandler, onState: ManagerStateHandler): void {
     this.onTickHandler = onTick;
     this.onStateHandler = onState;
+  }
+
+  /** Extra tick consumers (the market hub) alongside the gateway's setHandlers. */
+  addTickListener(fn: ManagerTickHandler): () => void {
+    this.tickListeners.add(fn);
+    return () => this.tickListeners.delete(fn);
+  }
+
+  addStateListener(fn: ManagerStateHandler): () => void {
+    this.stateListeners.add(fn);
+    return () => this.stateListeners.delete(fn);
   }
 
   /**
@@ -80,7 +95,7 @@ export class UserFeedManager {
       const key = tokenKey(t);
       const prev = entry.refs.get(key) ?? 0;
       entry.refs.set(key, prev + 1);
-      if (prev === 0) {
+      if (prev === 0 && !entry.pins.has(key)) {
         entry.tokenRefs.set(key, t);
         fresh.push(t);
       }
@@ -111,7 +126,7 @@ export class UserFeedManager {
         entry.refs.delete(key);
         const ref = entry.tokenRefs.get(key) ?? t;
         entry.tokenRefs.delete(key);
-        dead.push(ref);
+        if (!entry.pins.has(key)) dead.push(ref); // still pinned: the hub keeps it
       } else {
         entry.refs.set(key, next);
       }
@@ -134,10 +149,63 @@ export class UserFeedManager {
   releaseUser(userId: string): void {
     const entry = this.registry.get(userId);
     if (!entry) return;
+    // Pins keep the session alive (no teardown), so browser-only tokens must
+    // be unsubscribed here or they would stay subscribed forever.
+    const browserOnly: TokenRef[] = [];
+    if (entry.pins.size > 0) {
+      for (const [key, ref] of entry.tokenRefs) {
+        if (!entry.pins.has(key)) browserOnly.push(ref);
+      }
+    }
     entry.refs.clear();
     entry.tokenRefs.clear();
     entry.lastActive = Date.now();
-    this.startIdleTimer(userId, entry);
+    if (browserOnly.length > 0) {
+      void Promise.resolve(entry.session.unsubscribe(browserOnly)).catch((err) =>
+        this.logger.warn(
+          `Failed to unsubscribe released tokens for ${userId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        ),
+      );
+    }
+    if (this.totalRefs(entry) === 0) this.startIdleTimer(userId, entry);
+  }
+
+  /**
+   * Hold tokens for a long-lived in-process consumer (the market hub). Pins
+   * share the user's ONE session — a second Angel login on the same client
+   * code would kill this session's stream — and they survive releaseUser()
+   * (a closed browser tab) and block idle teardown.
+   */
+  async pin(userId: string, tokens: TokenRef[]): Promise<void> {
+    const entry = this.getOrCreateEntry(userId);
+    this.clearIdleTimer(entry);
+    entry.lastActive = Date.now();
+    await entry.session.ensureConnected();
+    const fresh: TokenRef[] = [];
+    for (const t of tokens) {
+      const key = tokenKey(t);
+      if (entry.pins.has(key)) continue;
+      entry.pins.set(key, t);
+      if ((entry.refs.get(key) ?? 0) === 0) fresh.push(t);
+    }
+    if (fresh.length > 0) await entry.session.subscribe(fresh);
+  }
+
+  async unpin(userId: string, tokens: TokenRef[]): Promise<void> {
+    const entry = this.registry.get(userId);
+    if (!entry) return;
+    const dead: TokenRef[] = [];
+    for (const t of tokens) {
+      const key = tokenKey(t);
+      const pinned = entry.pins.get(key);
+      if (!pinned) continue;
+      entry.pins.delete(key);
+      if ((entry.refs.get(key) ?? 0) === 0) dead.push(pinned);
+    }
+    if (dead.length > 0) await entry.session.unsubscribe(dead);
+    if (this.totalRefs(entry) === 0) this.startIdleTimer(userId, entry);
   }
 
   /**
@@ -169,9 +237,9 @@ export class UserFeedManager {
    * call for all tokens. Used by the indices snapshot, which is polled every 5s
    * and must not spend the whole Angel rate-limit budget per refresh.
    */
-  async fetchQuotes(userId: string, refs: TokenRef[]) {
+  async fetchQuotes(userId: string, refs: TokenRef[], opts?: { throwOnThrottle?: boolean }) {
     const entry = this.getOrCreateEntry(userId);
-    return entry.session.getQuotes(refs);
+    return entry.session.getQuotes(refs, opts);
   }
 
   // ──────────────────────────────────────────────
@@ -188,13 +256,20 @@ export class UserFeedManager {
     // Wire the session's listeners to the global handlers, tagging userId. The
     // arrow reads `this.onTickHandler` lazily so handler-registration order
     // relative to subscribe() does not matter.
-    session.onTick((tick) => this.onTickHandler?.(userId, tick));
-    session.onState((state) => this.onStateHandler?.(userId, state));
+    session.onTick((tick) => {
+      this.onTickHandler?.(userId, tick);
+      for (const l of this.tickListeners) l(userId, tick);
+    });
+    session.onState((state) => {
+      this.onStateHandler?.(userId, state);
+      for (const l of this.stateListeners) l(userId, state);
+    });
 
     const entry: UserFeedEntry = {
       session,
       refs: new Map(),
       tokenRefs: new Map(),
+      pins: new Map(),
       idleTimer: null,
       lastActive: Date.now(),
     };
@@ -230,7 +305,7 @@ export class UserFeedManager {
   }
 
   private totalRefs(entry: UserFeedEntry): number {
-    let sum = 0;
+    let sum = entry.pins.size;
     for (const n of entry.refs.values()) sum += n;
     return sum;
   }

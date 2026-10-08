@@ -1,4 +1,5 @@
 import { UserFeedSession } from './user-feed-session';
+import { AngelThrottleError } from './angel-throttle';
 import type { FeedState } from './user-feed.types';
 
 function makeDeps() {
@@ -305,4 +306,77 @@ it('dispose closes the socket and logs out', async () => {
   await s.dispose();
   expect(d.ws.close).toHaveBeenCalled();
   expect(d.smartApi.logout).toHaveBeenCalled();
+});
+
+
+function makeSession(d = makeDeps()) {
+  const s = new UserFeedSession('u1', {
+    withDecryptedCreds: d.withCreds,
+    smartApiFactory: () => d.smartApi as any,
+    wsFactory: d.wsFactory as any,
+  });
+  return { s, d };
+}
+
+it('subscribes NFO and BFO tokens on their own exchange types', async () => {
+  const { s, d } = makeSession();
+  await s.subscribe([
+    { token: '35001', exchange: 'NFO' },
+    { token: '850001', exchange: 'BFO' },
+  ]);
+  const types = d.ws.fetchData.mock.calls.map((c: any[]) => c[0].exchangeType).sort();
+  expect(types).toEqual([2, 4]);
+});
+
+it('treats the same token on two exchanges as two subscriptions', async () => {
+  const { s } = makeSession();
+  await s.subscribe([
+    { token: '1', exchange: 'NSE' },
+    { token: '1', exchange: 'MCX' },
+  ]);
+  expect(s.activeTokenCount()).toBe(2);
+  await s.unsubscribe([{ token: '1', exchange: 'MCX' }]);
+  expect(s.activeTokenCount()).toBe(1);
+});
+
+it('stamps each tick with its exchange from exchange_type', async () => {
+  const { s, d } = makeSession();
+  const ticks: any[] = [];
+  s.onTick((t) => ticks.push(t));
+  await s.ensureConnected();
+  d.ws.handlers.tick({ token: '"35001"', exchange_type: 2, last_traded_price: 25050 });
+  expect(ticks[0]).toMatchObject({ token: '35001', exchange: 'NFO', ltp: 250.5 });
+});
+
+// smartapi-javascript resolves (never rejects) HTTP errors as { status, message }
+// with no `data`; Angel One signals rate limits with HTTP 403.
+it('getQuotes treats an SDK-resolved HTTP 403 as a throttle', async () => {
+  const d = makeDeps();
+  d.smartApi.marketData.mockResolvedValue({ status: 403, message: 'Forbidden' });
+  const { s } = makeSession(d);
+  await expect(
+    s.getQuotes([{ token: '1', exchange: 'NSE' }], { throwOnThrottle: true }),
+  ).rejects.toBeInstanceOf(AngelThrottleError);
+});
+
+it('getQuotes reports other broker failures as errors, not throttles', async () => {
+  const d = makeDeps();
+  d.smartApi.marketData.mockResolvedValue({ status: 401, message: 'Unauthorized' });
+  const { s } = makeSession(d);
+  const err = await s
+    .getQuotes([{ token: '1', exchange: 'NSE' }], { throwOnThrottle: true })
+    .catch((e) => e);
+  expect(err).toBeInstanceOf(Error);
+  expect(err).not.toBeInstanceOf(AngelThrottleError);
+  expect(String(err.message)).toMatch(/401/);
+});
+
+it('getQuotes throws AngelThrottleError on data:null only when asked to', async () => {
+  const d = makeDeps();
+  d.smartApi.marketData.mockResolvedValue({ data: null, message: 'Access denied because of exceeding access rate' });
+  const { s } = makeSession(d);
+  await expect(s.getQuotes([{ token: '1', exchange: 'NSE' }])).resolves.toEqual(new Map());
+  await expect(
+    s.getQuotes([{ token: '1', exchange: 'NSE' }], { throwOnThrottle: true }),
+  ).rejects.toBeInstanceOf(AngelThrottleError);
 });

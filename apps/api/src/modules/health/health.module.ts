@@ -2,9 +2,11 @@ import { Module } from '@nestjs/common';
 import { HealthController } from './health.controller';
 import { HealthService } from './health.service';
 import { HealthDetailService } from './health-detail.service';
-import { FEED_STATUS_SOURCE } from './health.types';
+import { FEED_STATUS_SOURCE, HUB_STATUS_SOURCE } from './health.types';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { MarketFeedService } from '../market-data/services/market-feed.service';
+import { MarketHubModule } from '../market-hub/market-hub.module';
+import { MarketHubService } from '../market-hub/market-hub.service';
 
 /**
  * Liveness + keep-warm + freshness endpoint. PrismaService is provided by the
@@ -22,12 +24,13 @@ import { MarketFeedService } from '../market-data/services/market-feed.service';
  * cycle-free.
  */
 @Module({
-  imports: [MarketDataModule],
+  imports: [MarketDataModule, MarketHubModule],
   controllers: [HealthController],
   providers: [
     HealthService,
     HealthDetailService,
     { provide: FEED_STATUS_SOURCE, useExisting: MarketFeedService },
+    { provide: HUB_STATUS_SOURCE, useExisting: MarketHubService },
   ],
 })
 export class HealthModule {}

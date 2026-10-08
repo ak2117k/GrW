@@ -23,7 +23,7 @@ import {
 } from './user-historical.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
 import { describeUnfetched } from '../utils/quote-from-candles';
-import { fetchChunksResilient, rowsOrThrottle } from './angel-throttle';
+import { AngelThrottleError, fetchChunksResilient, rowsOrThrottle } from './angel-throttle';
 
 /**
  * Angel One WebSocket feed mode. Mirrors `WsFeedMode` in
@@ -41,8 +41,24 @@ const enum WsFeedMode {
  */
 const enum ExchangeType {
   NSE_CM = 1,
+  NSE_FO = 2,
   BSE_CM = 3,
+  BSE_FO = 4,
   MCX_FO = 5,
+}
+
+/** WebSocketV2 `exchange_type` → the REST exchange name used everywhere else. */
+const EXCHANGE_NAME_BY_TYPE: Record<number, string> = {
+  1: 'NSE',
+  2: 'NFO',
+  3: 'BSE',
+  4: 'BFO',
+  5: 'MCX',
+};
+
+/** Tokens collide across exchanges; every local map keys on both. */
+function tokenKey(t: TokenRef): string {
+  return `${t.exchange.toUpperCase()}:${t.token}`;
 }
 
 /** Reconnect settings (capped exponential backoff), mirroring the singleton. */
@@ -159,22 +175,22 @@ export class UserFeedSession implements UserFeedSessionLike {
     if (this.disposed) throw new Error('UserFeedSession is disposed');
     await this.ensureConnected();
 
-    const fresh = tokens.filter((t) => !this.activeTokens.has(t.token));
+    const fresh = tokens.filter((t) => !this.activeTokens.has(tokenKey(t)));
     if (fresh.length === 0) return;
 
     this.issueFetch(fresh, 1); // action 1 = subscribe
-    for (const t of fresh) this.activeTokens.set(t.token, t);
+    for (const t of fresh) this.activeTokens.set(tokenKey(t), t);
   }
 
   async unsubscribe(tokens: TokenRef[]): Promise<void> {
-    const existing = tokens.filter((t) => this.activeTokens.has(t.token));
+    const existing = tokens.filter((t) => this.activeTokens.has(tokenKey(t)));
     if (existing.length === 0) return;
 
     // Best-effort while connected; always drop from local tracking.
     if (this.connected && this.ws) {
       this.issueFetch(existing, 0); // action 0 = unsubscribe
     }
-    for (const t of existing) this.activeTokens.delete(t.token);
+    for (const t of existing) this.activeTokens.delete(tokenKey(t));
   }
 
   activeTokenCount(): number {
@@ -303,7 +319,10 @@ export class UserFeedSession implements UserFeedSessionLike {
    * Returns a token -> tick map; tokens the account can't quote are simply
    * absent rather than throwing, so one unentitled index can't blank the page.
    */
-  async getQuotes(refs: TokenRef[]): Promise<Map<string, TickData>> {
+  async getQuotes(
+    refs: TokenRef[],
+    opts: { throwOnThrottle?: boolean } = {},
+  ): Promise<Map<string, TickData>> {
     if (refs.length === 0) return new Map();
     await this.ensureConnected();
     if (!this.smartApi) {
@@ -314,6 +333,20 @@ export class UserFeedSession implements UserFeedSessionLike {
       mode: 'FULL',
       exchangeTokens: groupTokensByExchange(refs),
     });
+    // smartapi-javascript RESOLVES HTTP errors as `{ status, message }` (no
+    // `data`). Angel signals a rate limit with HTTP 403 or an "exceeding access
+    // rate" message; anything else (401 expired session, 5xx) is a real error
+    // and must not be disguised as a throttle (it would only trigger back-off).
+    if (opts.throwOnThrottle && response?.data == null) {
+      const status = Number(response?.status);
+      const message = String(response?.message ?? '');
+      if (status === 403 || /exceed/i.test(message) || !response?.status) {
+        throw new AngelThrottleError(
+          `Angel One marketData throttled (${refs.length} token(s)): ${message || 'data:null'}`,
+        );
+      }
+      throw new Error(`Angel One marketData failed: status ${status} ${message}`.trim());
+    }
 
     // `data.unfetched` is the ONLY place the broker says WHY a token was
     // refused. Angel declines NSE index tokens (999260xx) for most API keys,
@@ -477,6 +510,10 @@ export class UserFeedSession implements UserFeedSessionLike {
         return ExchangeType.BSE_CM; // 3
       case 'MCX':
         return ExchangeType.MCX_FO; // 5
+      case 'NFO':
+        return ExchangeType.NSE_FO; // 2
+      case 'BFO':
+        return ExchangeType.BSE_FO; // 4
       default:
         return ExchangeType.NSE_CM;
     }
@@ -541,6 +578,7 @@ export class UserFeedSession implements UserFeedSessionLike {
     return {
       token,
       symbol: String(tick.symbol ?? tick.tradingSymbol ?? tick.name ?? ''),
+      exchange: EXCHANGE_NAME_BY_TYPE[Number(tick.exchange_type ?? tick.exchangeType)],
       ltp: this.toNumber(tick.last_traded_price ?? tick.ltp ?? tick.lp ?? 0) / PAISE_DIVISOR,
       open:
         this.toNumber(

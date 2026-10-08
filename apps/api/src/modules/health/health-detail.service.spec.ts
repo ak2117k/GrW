@@ -99,4 +99,21 @@ describe('HealthDetailService', () => {
       await expect(svc.recordClientReport(null, report)).resolves.toEqual({ accepted: false });
     });
   });
+
+  it('reports the market hub status when it is running', async () => {
+    const runs = { lastRunPerJob: jest.fn().mockResolvedValue([]) };
+    const hub = { status: () => ({ socketUp: true, watched: 5 }), disabledReason: () => null };
+    const svc = new HealthDetailService(makePrisma() as never, runs as never, null, hub as never);
+    const out = await svc.check();
+    expect(out.hub.available).toBe(true);
+    if (out.hub.available) expect(out.hub.value.watched).toBe(5);
+  });
+
+  it('says why the hub is idle instead of hiding it', async () => {
+    const runs = { lastRunPerJob: jest.fn().mockResolvedValue([]) };
+    const hub = { status: () => null, disabledReason: () => 'enabled but HUB_OWNER_USER_ID is not set' };
+    const svc = new HealthDetailService(makePrisma() as never, runs as never, null, hub as never);
+    const out = await svc.check();
+    expect(out.hub).toEqual({ available: false, reason: 'enabled but HUB_OWNER_USER_ID is not set' });
+  });
 });

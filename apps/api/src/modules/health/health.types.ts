@@ -94,6 +94,7 @@ export interface FeedSignal {
  * Bound to the real service in `health.module.ts` via `useExisting`.
  */
 export const FEED_STATUS_SOURCE = 'HEALTH_FEED_STATUS_SOURCE';
+export const HUB_STATUS_SOURCE = 'HEALTH_HUB_STATUS_SOURCE';
 
 /** The already-public slice of MarketFeedService that the probe reads. */
 export interface FeedStatusSource {

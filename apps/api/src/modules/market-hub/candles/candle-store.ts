@@ -10,6 +10,8 @@ import type { SessionClock } from '../session-clock';
 import type { CandleRepo } from './candle-repository';
 import {
   BASE_TABLE,
+  MAX_DEFERRED_PER_READ,
+  ONE_MINUTE_HORIZON_DAYS,
   STEP_MIN,
   TABLE_INTERVAL,
   TABLE_MAX_DAYS,
@@ -63,6 +65,9 @@ interface FetchWindow extends Part {
 }
 
 const DAY_MS = 86_400_000;
+/** Timeframes whose history is candles_1d and whose today is one bar grouped from 1m. */
+const DAILY: ReadonlySet<Timeframe> = new Set<Timeframe>(['1d', '1w', '1mo']);
+const DAY_MIN = 1440;
 const SAMPLES = 200;
 const MAX_TODAY_KEYS = 5000;
 
@@ -112,12 +117,16 @@ export class CandleStore {
     }
     const today = istMidnight(istDay(started));
     const parts: Part[] = [];
-    if (timeframe === '1h' && to > today) {
-      if (lo < today) parts.push({ table: '1h', from: lo, to: today });
+    if ((timeframe === '1h' || DAILY.has(timeframe)) && to > today) {
+      // History from the stored series; today (not complete until the close) grouped from 1m.
+      if (lo < today) parts.push({ table: timeframe === '1h' ? '1h' : '1d', from: lo, to: today });
       parts.push({ table: '1m', from: Math.max(lo, today), to });
     } else {
       parts.push({ table: BASE_TABLE[timeframe], from: lo, to });
     }
+    // candles_1m keeps ONE_MINUTE_HORIZON_DAYS: never reach (or fill) past it.
+    const horizon = this.oneMinuteHorizon(started);
+    for (const p of parts) if (p.table === '1m') p.from = Math.max(p.from, horizon);
 
     const incomplete = await this.fill(ref, parts, opts.lane);
     const dbStarted = this.now();
@@ -149,6 +158,11 @@ export class CandleStore {
     return report;
   }
 
+  /** First IST midnight inside the 1m retention horizon (a partial edge day would be pruned under us). */
+  private oneMinuteHorizon(now: number): number {
+    return istMidnight(addDays(istDay(now - ONE_MINUTE_HORIZON_DAYS * DAY_MS), 1));
+  }
+
   metrics(): CandleStoreMetrics {
     return {
       reads: this.reads,
@@ -175,7 +189,11 @@ export class CandleStore {
           return false;
         });
     const now = background ? fresh : fresh.slice(0, this.d.interactiveCallBudget);
-    const later = background ? [] : fresh.slice(this.d.interactiveCallBudget);
+    const rest = background ? [] : fresh.slice(this.d.interactiveCallBudget);
+    // Bounded: one wide read must not flood the Background lane. Windows past the cap are
+    // still reported as deferred and are picked up by a later read.
+    const later = rest.slice(0, MAX_DEFERRED_PER_READ);
+    for (const w of rest.slice(MAX_DEFERRED_PER_READ)) incomplete.push({ from: w.from, to: w.to, reason: 'deferred' });
 
     const reasons = await Promise.all(now.map((w) => this.fetchWindow(ref, w, lane)));
     reasons.forEach((reason, i) => {
@@ -206,8 +224,11 @@ export class CandleStore {
     if (expected.size === 0) return [];
     const have = await this.d.repo.dayCounts(p.table, ref, p.from, p.to);
     const today = istDay(now);
+    // 1m: a past day counts only once the broker has answered for it. A full day of tick-built
+    // bars is still replaced on first read, so a missed nightly fix-up heals itself.
+    // 1h/1d are only ever written by the broker: their counts are the truth.
     const short = [...expected]
-      .filter(([day, n]) => (have.get(day) ?? 0) < n)
+      .filter(([day, n]) => (have.get(day) ?? 0) < n || (p.table === '1m' && day !== today))
       .map(([day]) => day)
       .filter((day) => day !== today || !this.todayCovered(ref, p, now));
     const past = short.filter((day) => day !== today);
@@ -312,11 +333,13 @@ export class CandleStore {
 
   private async readParts(ref: InstrumentRef, timeframe: Timeframe, parts: Part[]): Promise<HubCandle[]> {
     const out: HubCandle[] = [];
-    const origin = sessionFor(ref.exchange).openMin;
     for (const p of parts) {
       if (p.to <= p.from) continue;
       if (p.table === '1m' && timeframe !== '1m') {
-        const step = STEP_MIN[timeframe as keyof typeof STEP_MIN];
+        // Daily timeframes: today's single bar, bucketed from IST midnight like candles_1d.
+        const daily = DAILY.has(timeframe);
+        const step = daily ? DAY_MIN : STEP_MIN[timeframe as keyof typeof STEP_MIN];
+        const origin = daily ? 0 : this.bucketOrigin(ref, p.from);
         out.push(...(await this.d.repo.readBucketed(ref, step, origin, p.from, p.to)));
       } else {
         out.push(...(await this.d.repo.read(p.table, ref, p.from, p.to)));
@@ -329,6 +352,12 @@ export class CandleStore {
     return aggregateCandles(daily, timeframe === '1w' ? 'week' : 'month').map((c) => ({
       ts: c.timestamp.getTime(), open: c.open, high: c.high, low: c.low, close: c.close, volume: Number(c.volume),
     }));
+  }
+
+  /** Session-open minute for buckets: the SessionClock's window (same truth as the calendar), else the static session. */
+  private bucketOrigin(ref: InstrumentRef, at: number): number {
+    const dayMidnight = istMidnight(istDay(at));
+    return this.d.clock.tradingWindow(ref.exchange, new Date(dayMidnight))?.openMin ?? sessionFor(ref.exchange).openMin;
   }
 
   private record(totalMs: number, dbMs: number): void {

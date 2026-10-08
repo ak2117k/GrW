@@ -28,6 +28,13 @@ describe('MemoryCandleRepo', () => {
     ]);
   });
 
+  it('groups a whole IST day into one 1440-minute bucket at IST midnight (origin 0)', async () => {
+    const r = new MemoryCandleRepo();
+    await r.upsert('1m', REF, [bar('2026-10-07T09:15:00', 1, 5), bar('2026-10-07T15:29:00', 9, 7)], 'tick');
+    const out = await r.readBucketed(REF, 1440, 0, ist('2026-10-07T00:00:00'), ist('2026-10-08T00:00:00'));
+    expect(out).toEqual([{ ts: ist('2026-10-07T00:00:00'), open: 1, high: 10, low: 0, close: 9, volume: 12 }]);
+  });
+
   it('a duplicate ts inside one upsert keeps the last occurrence', async () => {
     const r = new MemoryCandleRepo();
     const t = '2026-10-07T10:00:00';

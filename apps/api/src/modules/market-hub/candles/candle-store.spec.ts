@@ -88,6 +88,8 @@ describe('CandleStore', () => {
   it('serves from the database without calling the broker when every bar is there', async () => {
     const t = setup();
     await t.repo.upsert('1m', REF, minutes('2026-10-06'), 'broker');
+    // A past 1m day is "there" once the broker has answered for it (F3: a full but uncovered day is re-fetched).
+    await t.repo.markCovered('1m', REF, ['2026-10-06']);
     const r = await t.store.candles(REF, '1m', ...day('2026-10-06'), { lane: LANE.INTERACTIVE });
     expect(r.candles).toHaveLength(375);
     expect(r.incomplete).toEqual([]);
@@ -243,6 +245,93 @@ describe('CandleStore', () => {
     expect(Math.min(...t.calls.map((c) => c.from.getTime()))).toBeLessThanOrEqual(to - 1820 * DAY);
     expect(t.calls.length).toBe(2); // 1825 days > one 1800-day window
     expect(t.calls.every((c) => c.interval === 'ONE_DAY')).toBe(true);
+  });
+
+  it('1d during market hours includes today’s forming bar built from 1m', async () => {
+    const t = setup();
+    t.setNow(ist('2026-10-07T10:15:30'));
+    await t.repo.upsert('1d', REF, [{ ts: istMidnight('2026-10-06'), open: 1, high: 1, low: 1, close: 1, volume: 375 }], 'broker');
+    await t.repo.markCovered('1d', REF, ['2026-10-06']);
+    await t.repo.upsert('1m', REF, minutes('2026-10-07', 555, 615), 'tick'); // 09:15 .. 10:14
+    const r = await t.store.candles(REF, '1d', istMidnight('2026-10-06'), ist('2026-10-07T10:15:30'), { lane: LANE.INTERACTIVE });
+    expect(t.calls).toHaveLength(0);
+    expect(r.incomplete).toEqual([]);
+    expect(r.candles).toHaveLength(2);
+    expect(r.candles[1]).toEqual({ ts: istMidnight('2026-10-07'), open: 100, high: 101, low: 99, close: 100, volume: 60 });
+  });
+
+  it('1d during market hours fills today’s missing minutes on the 1m table', async () => {
+    const t = setup();
+    t.setNow(ist('2026-10-07T10:15:30'));
+    t.respond((interval) => (interval === 'ONE_MINUTE' ? minutes('2026-10-07', 555, 616) : []));
+    const r = await t.store.candles(REF, '1d', istMidnight('2026-10-07'), ist('2026-10-07T10:15:30'), { lane: LANE.INTERACTIVE });
+    expect(t.calls.map((c) => c.interval)).toEqual(['ONE_MINUTE']);
+    expect(r.candles).toEqual([{ ts: istMidnight('2026-10-07'), open: 100, high: 101, low: 99, close: 100, volume: 60 }]); // forming 10:15 dropped
+  });
+
+  it('1w during market hours includes today', async () => {
+    const t = setup();
+    t.setNow(ist('2026-10-07T10:15:30')); // Wednesday
+    t.respond(() => []);
+    await t.repo.upsert('1d', REF, ['2026-10-05', '2026-10-06'].map((d) => ({ ts: istMidnight(d), open: 1, high: 1, low: 1, close: 1, volume: 1 })), 'broker');
+    await t.repo.upsert('1m', REF, minutes('2026-10-07', 555, 615), 'tick');
+    const r = await t.store.candles(REF, '1w', istMidnight('2026-10-05'), ist('2026-10-07T10:15:30'), { lane: LANE.BACKGROUND });
+    const last = r.candles[r.candles.length - 1];
+    expect(last.ts).toBe(istMidnight('2026-10-05')); // the week of Mon 5 Oct
+    expect(last.volume).toBe(1 + 1 + 60); // Mon + Tue daily bars + today's partial day
+    expect(last.close).toBe(100); // today's last minute
+  });
+
+  it('a full but uncovered past 1m day (tick-built) is re-fetched once from the broker and then covered', async () => {
+    const t = setup(); // now: 2026-10-07 16:00
+    await t.repo.upsert('1m', REF, minutes('2026-10-06').map((c) => ({ ...c, volume: 7 })), 'tick'); // 375/375 bars
+    t.respond(() => minutes('2026-10-06'));
+    const first = await t.store.candles(REF, '1m', ...day('2026-10-06'), { lane: LANE.INTERACTIVE });
+    expect(t.calls).toHaveLength(1);
+    expect(first.candles.every((c) => c.volume === 1)).toBe(true); // the broker's bars replaced the tick bars
+    expect(await t.repo.coveredDays('1m', REF, ['2026-10-06'])).toEqual(new Set(['2026-10-06']));
+    await t.store.candles(REF, '1m', ...day('2026-10-06'), { lane: LANE.INTERACTIVE });
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it('a full but uncovered past 1h day keeps the count rule (no re-fetch)', async () => {
+    const t = setup();
+    const hourly = [555, 615, 675, 735, 795, 855, 915].map((m) => ({ ts: istMidnight('2026-10-06') + m * 60_000, open: 1, high: 1, low: 1, close: 1, volume: 60 }));
+    await t.repo.upsert('1h', REF, hourly, 'broker');
+    await t.store.candles(REF, '1h', ...day('2026-10-06'), { lane: LANE.INTERACTIVE });
+    expect(t.calls).toHaveLength(0);
+  });
+
+  it('a 1m read years back is clamped to 180 days', async () => {
+    const t = setup(); // now: 2026-10-07 16:00
+    const now = ist('2026-10-07T16:00:00');
+    const long = await t.store.candles(REF, '1m', ist('2023-01-01T00:00:00'), now, { lane: LANE.BACKGROUND });
+    expect(t.calls.length).toBeGreaterThan(100); // ~6 months of trading days, one call each
+    expect(Math.min(...t.calls.map((c) => c.from.getTime()))).toBeGreaterThanOrEqual(now - 180 * DAY);
+    expect(long.incomplete).toEqual([]);
+    const before = t.calls.length;
+    const old = await t.store.candles(REF, '5m', ist('2024-01-01T00:00:00'), ist('2024-01-10T00:00:00'), { lane: LANE.INTERACTIVE });
+    expect(old).toEqual({ candles: [], incomplete: [] });
+    expect(t.calls).toHaveLength(before);
+  });
+
+  it('no more than 30 windows are queued per read', async () => {
+    const t = setup({ budget: 2, holdBackground: true });
+    t.setNow(ist('2026-10-10T12:00:00')); // Saturday
+    const r = await t.store.candles(REF, '1m', istMidnight('2026-08-01'), istMidnight('2026-10-10'), { lane: LANE.INTERACTIVE });
+    const interactive = t.lanes.filter((l) => l === LANE.INTERACTIVE).length;
+    const queued = t.lanes.filter((l) => l === LANE.BACKGROUND).length;
+    expect(interactive).toBe(2);
+    expect(queued).toBe(30);
+    expect(t.store.metrics().deferredFills).toBe(30);
+    // Every window not fetched now is still reported, queued or not.
+    expect(r.incomplete.length).toBeGreaterThan(30);
+    expect(r.incomplete.every((w) => w.reason === 'deferred')).toBe(true);
+    t.release();
+    await settle();
+    // The next read queues the next batch (at most 30 again).
+    await t.store.candles(REF, '1m', istMidnight('2026-08-01'), istMidnight('2026-10-10'), { lane: LANE.INTERACTIVE });
+    expect(t.lanes.filter((l) => l === LANE.BACKGROUND).length - queued).toBeLessThanOrEqual(30);
   });
 
   it('ignores broker bars outside the window (Angel’s todate is inclusive)', async () => {

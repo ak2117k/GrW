@@ -23,7 +23,7 @@ import {
 } from './user-historical.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
 import { describeUnfetched } from '../utils/quote-from-candles';
-import { AngelThrottleError, fetchChunksResilient, rowsOrThrottle } from './angel-throttle';
+import { fetchChunksResilient, rowsOrThrottle, throwForMissingData } from './angel-throttle';
 
 /**
  * Angel One WebSocket feed mode. Mirrors `WsFeedMode` in
@@ -293,6 +293,30 @@ export class UserFeedSession implements UserFeedSessionLike {
   }
 
   /**
+   * ONE getCandleData call for one window, for the market hub's CandleStore:
+   * the store sizes windows itself and sends each call through its Governor,
+   * so there is no chunking, retry or pacing here. A throttle rejects with
+   * AngelThrottleError (never []); a genuine "no bars" answer resolves [].
+   */
+  async getCandleWindow(token: string, exchange: string, interval: string, from: Date, to: Date): Promise<Candle[]> {
+    await this.ensureConnected();
+    if (!this.smartApi) {
+      throw new Error('UserFeedSession has no SmartAPI client after connect');
+    }
+    const response: any = await this.smartApi.getCandleData({
+      exchange,
+      symboltoken: token,
+      interval,
+      fromdate: formatAngelDateTime(from),
+      todate: formatAngelDateTime(to),
+    });
+    if (response?.data == null) {
+      throwForMissingData(response, `getCandleData token=${token} interval=${interval}`);
+    }
+    return mapCandleRows(response.data);
+  }
+
+  /**
    * Fetch a single FULL-mode quote using THIS user's own authenticated Angel
    * session. Returns null when the account can't quote the token (nothing
    * fetched) — the caller decides the not-found contract.
@@ -338,14 +362,7 @@ export class UserFeedSession implements UserFeedSessionLike {
     // rate" message; anything else (401 expired session, 5xx) is a real error
     // and must not be disguised as a throttle (it would only trigger back-off).
     if (opts.throwOnThrottle && response?.data == null) {
-      const status = Number(response?.status);
-      const message = String(response?.message ?? '');
-      if (status === 403 || /exceed/i.test(message) || !response?.status) {
-        throw new AngelThrottleError(
-          `Angel One marketData throttled (${refs.length} token(s)): ${message || 'data:null'}`,
-        );
-      }
-      throw new Error(`Angel One marketData failed: status ${status} ${message}`.trim());
+      throwForMissingData(response, `marketData (${refs.length} token(s))`);
     }
 
     // `data.unfetched` is the ONLY place the broker says WHY a token was

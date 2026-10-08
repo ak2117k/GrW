@@ -226,6 +226,12 @@ export class UserFeedManager {
     return entry.session.getCandles(token, exchange, timeframe, from, to);
   }
 
+  /** ONE getCandleData window over the user's OWN session (the market hub's CandleStore). */
+  async fetchCandleWindow(userId: string, ref: TokenRef, interval: string, from: Date, to: Date) {
+    const entry = this.getOrCreateEntry(userId);
+    return entry.session.getCandleWindow(ref.token, ref.exchange, interval, from, to);
+  }
+
   /** One-shot FULL-mode quote over the user's OWN Angel session (null if unquotable). */
   async fetchQuote(userId: string, token: string, exchange: string) {
     const entry = this.getOrCreateEntry(userId);

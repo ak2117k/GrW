@@ -150,3 +150,20 @@ export async function fetchChunksResilient<T>(
 
   return { items, dropped, attempted };
 }
+
+/**
+ * smartapi-javascript RESOLVES HTTP errors as `{ status, message }` with no
+ * `data`. Angel signals a rate limit with HTTP 403, an "exceeding access rate"
+ * message, or a body without a truthy status; anything else (401 expired
+ * session, 5xx) is a real error and must not be disguised as a throttle (it
+ * would only trigger back-off). Call only when `response.data == null`.
+ */
+export function throwForMissingData(response: unknown, what: string): never {
+  const r = response as { status?: unknown; message?: unknown } | null | undefined;
+  const status = Number(r?.status);
+  const message = String(r?.message ?? '');
+  if (status === 403 || /exceed/i.test(message) || !r?.status) {
+    throw new AngelThrottleError(`Angel One ${what} throttled: ${message || 'data:null'}`);
+  }
+  throw new Error(`Angel One ${what} failed: status ${status} ${message}`.trim());
+}

@@ -36,6 +36,11 @@ export interface UserFeedSessionLike {
     from: Date,
     to: Date,
   ): Promise<Candle[]>;
+  /**
+   * ONE getCandleData window (no chunking, retry or pacing). Rejects with
+   * AngelThrottleError when throttled; [] means genuinely no bars.
+   */
+  getCandleWindow(token: string, exchange: string, interval: string, from: Date, to: Date): Promise<Candle[]>;
   /** One-shot FULL-mode quote over the user's own Angel session (null if unquotable). */
   getQuote(token: string, exchange: string): Promise<TickData | null>;
   /**

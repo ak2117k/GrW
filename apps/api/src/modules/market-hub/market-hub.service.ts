@@ -1,12 +1,18 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
 import { INDICES } from '@td/shared/constants';
+import { PrismaService } from '../../common/prisma/prisma.service';
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { TradeTrackerService } from '../trade-tracker/services/trade-tracker.service';
+import { PrismaCandleRepo } from './candles/candle-repository';
+import type { CandlesResult, Timeframe } from './candles/candle.types';
+import { istDay } from './candles/trading-calendar';
 import { ManagerHubBroker } from './hub-broker';
+import type { HubCandleSource } from './hub-candle-source';
 import { HubEngine, type HubStatus } from './hub-engine';
-import { refKey, type HubExchange, type InstrumentRef, type PriceResult, type Priority } from './hub.types';
+import { LANE, refKey, type HubExchange, type InstrumentRef, type PriceResult, type Priority } from './hub.types';
 import { SessionClock, type DateRange } from './session-clock';
 
 const POSITION_REFRESH_MS = 60_000;
@@ -33,7 +39,7 @@ export function parseLateClose(raw: string | undefined): DateRange[] {
  * never wait on the broker.
  */
 @Injectable()
-export class MarketHubService implements OnModuleInit, OnModuleDestroy {
+export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandleSource {
   private readonly logger = new Logger(MarketHubService.name);
   readonly session: SessionClock;
   private engine: HubEngine | null = null;
@@ -44,6 +50,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService,
     private readonly manager: UserFeedManager,
     private readonly tracker: TradeTrackerService,
+    private readonly prisma: PrismaService,
   ) {
     this.session = new SessionClock({
       holidays: MARKET_HOLIDAYS,
@@ -73,6 +80,9 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy {
       clock: this.session,
       cap: this.config.get<number>('hub.slotCap') ?? 50,
       defaults,
+      candles: this.config.get<boolean>('hub.candlesEnabled')
+        ? { repo: new PrismaCandleRepo(this.prisma) }
+        : undefined,
     });
     this.engine = engine;
     void engine
@@ -115,6 +125,33 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy {
 
   unwatch(ref: InstrumentRef, owner: string): Promise<void> {
     return this.engine ? this.engine.unwatch(ref, owner) : Promise.resolve();
+  }
+
+  servesCharts(): boolean {
+    return !!this.engine?.candlesEnabled && this.config.get<boolean>('hub.servesCharts') === true;
+  }
+
+  candles(ref: InstrumentRef, timeframe: Timeframe, from: Date, to: Date): Promise<CandlesResult> {
+    if (!this.engine) return Promise.reject(new Error(`market hub is not running: ${this.reason ?? 'not started'}`));
+    return this.engine.candles(ref, timeframe, from.getTime(), to.getTime(), LANE.INTERACTIVE);
+  }
+
+  /**
+   * 00:15 IST Tue–Sat: replace the previous IST day's tick-built bars with the
+   * broker's official 1m/1h/1d (spec §6.4). After the latest close (MCX 23:55),
+   * with every exchange shut, so the Background lane runs at full budget.
+   */
+  @Cron('0 15 0 * * 2-6', { name: 'hub-candle-fixup', timeZone: 'Asia/Kolkata' })
+  async nightlyCandleFixup(): Promise<void> {
+    if (!this.engine?.candlesEnabled) return;
+    const day = istDay(Date.now() - 24 * 60 * 60 * 1000);
+    try {
+      const r = await this.engine.runFixup(day);
+      const log = r.failures > 0 ? this.logger.warn.bind(this.logger) : this.logger.log.bind(this.logger);
+      log(`Candle fix-up ${day}: ${r.instruments} instrument(s), ${r.calls} call(s), ${r.failures} failure(s)`);
+    } catch (err) {
+      this.logger.error(`Candle fix-up ${day} failed: ${(err as Error)?.message ?? err}`);
+    }
   }
 
   private async refreshPositions(owner: string): Promise<void> {

@@ -79,6 +79,10 @@ export default () => ({
     ownerUserId: process.env.HUB_OWNER_USER_ID || '',
     // WebSocket live-slot cap. Angel allows 1000 per connection; 50 keeps M1 conservative.
     slotCap: +(process.env.HUB_SLOT_CAP || 50),
+    // M2: run the CandleStore (tick-built 1m bars, gap fill, nightly fix-up). Needs MARKET_HUB_ENABLED.
+    candlesEnabled: process.env.HUB_CANDLES_ENABLED === 'true',
+    // M2 consumer switch: /candles answered by the hub. Turn off to put charts back on the legacy path.
+    servesCharts: process.env.HUB_SERVES_CHARTS === 'true',
     // MCX 23:55 close windows, "YYYY-MM-DD:YYYY-MM-DD" comma-separated (US-DST-linked).
     mcxLateClose: process.env.HUB_MCX_LATE_CLOSE || '',
   },

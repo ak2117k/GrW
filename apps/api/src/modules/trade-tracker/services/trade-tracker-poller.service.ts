@@ -182,10 +182,17 @@ export class TradeTrackerPoller {
         for (const ref of refs) {
           const key = tickRefKey(ref);
           if (unpriced.has(key)) continue;
-          // The shared socket cache is keyed by token alone: a token held on two
-          // exchanges cannot be read from it without guessing the instrument.
+          // The socket cache is read by token alone (NSE → BSE → MCX), so a hit
+          // counts only when the quote's own exchange is the ref's: an NFO option
+          // must never take the price of an NSE equity that shares its token. A
+          // token held on two exchanges skips the cache outright.
           const quote = shared.has(ref.token) ? null : this.feed.getQuote(ref.token);
-          if (quote && quote.ltp > 0 && this.isFresh(quote.timestamp)) {
+          if (
+            quote &&
+            quote.ltp > 0 &&
+            String(quote.exchange ?? '').toUpperCase() === exchangeOf(ref) &&
+            this.isFresh(quote.timestamp)
+          ) {
             this.service.applyTick(ref, quote.ltp);
             fromSocket++;
           } else {
@@ -259,7 +266,12 @@ export class TradeTrackerPoller {
 
 /** EXCHANGE:token — the tracker's instrument key (tokens collide across exchanges). */
 function tickRefKey(ref: TokenRef): string {
-  return `${String(ref.exchange ?? '').toUpperCase()}:${ref.token}`;
+  return `${exchangeOf(ref)}:${ref.token}`;
+}
+
+/** The ref's exchange, upper-cased (rows may store `nfo`). */
+function exchangeOf(ref: TokenRef): string {
+  return String(ref.exchange ?? '').toUpperCase();
 }
 
 /** Tokens that open trackers hold on more than one exchange (unsafe for token-keyed caches). */

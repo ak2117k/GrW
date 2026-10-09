@@ -6,13 +6,13 @@ import { TradeTrackerService } from './trade-tracker.service';
 import { TradeTrackerPoller } from './trade-tracker-poller.service';
 
 /** A socket quote the sweep should treat as live (stamped now). */
-function liveQuote(ltp: number) {
-  return { ltp, timestamp: new Date() };
+function liveQuote(ltp: number, exchange = 'NSE') {
+  return { ltp, exchange, timestamp: new Date() };
 }
 
 /** A socket quote as stale as the KEI option's was — hours old, never evicted. */
-function staleQuote(ltp: number) {
-  return { ltp, timestamp: new Date(Date.now() - 21 * 60 * 60 * 1000) };
+function staleQuote(ltp: number, exchange = 'NSE') {
+  return { ltp, exchange, timestamp: new Date(Date.now() - 21 * 60 * 60 * 1000) };
 }
 
 describe('TradeTrackerPoller', () => {
@@ -103,9 +103,34 @@ describe('TradeTrackerPoller', () => {
       expect(userFeeds.fetchQuotes).not.toHaveBeenCalled();
     });
 
+    it('does not stamp a socket quote from another exchange onto the ref (NSE equity vs NFO option)', async () => {
+      // The socket cache is read by token and resolves NSE → BSE → MCX: an NFO
+      // option sharing its token with a streamed NSE equity must not take its price.
+      service.openTrackerRefsByUser.mockResolvedValue(new Map([['u1', [{ token: '35001', exchange: 'NFO' }]]]));
+      feed.getQuote.mockReturnValue(liveQuote(2500, 'NSE'));
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['35001', { ltp: 120 }]]));
+
+      await poller.sweepQuotes();
+
+      expect(service.applyTick).not.toHaveBeenCalledWith(expect.anything(), 2500);
+      expect(userFeeds.fetchQuotes).toHaveBeenCalledWith('u1', [{ token: '35001', exchange: 'NFO' }]);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '35001', exchange: 'NFO' }, 120);
+      expect(service.applyTick).toHaveBeenCalledTimes(1);
+    });
+
+    it('applies a socket quote whose exchange matches the ref (case-insensitive)', async () => {
+      service.openTrackerRefsByUser.mockResolvedValue(new Map([['u1', [{ token: '777', exchange: 'mcx' }]]]));
+      feed.getQuote.mockReturnValue(liveQuote(7010, 'MCX'));
+
+      await poller.sweepQuotes();
+
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '777', exchange: 'mcx' }, 7010);
+      expect(userFeeds.fetchQuotes).not.toHaveBeenCalled();
+    });
+
     it('REST-fetches a token whose socket quote is hours old (the KEI failure)', async () => {
       service.openTrackerRefsByUser.mockResolvedValue(new Map([['u1', [{ token: 'KEI', exchange: 'NFO' }]]]));
-      feed.getQuote.mockReturnValue(staleQuote(3.5));
+      feed.getQuote.mockReturnValue(staleQuote(3.5, 'NFO'));
       userFeeds.fetchQuotes.mockResolvedValue(new Map([['KEI', { ltp: 41.2 }]]));
 
       await poller.sweepQuotes();

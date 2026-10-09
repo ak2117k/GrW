@@ -2,11 +2,14 @@ import { useReducer, useMemo, useState, useEffect, useCallback, useRef } from 'r
 import { useLiveRefresh } from './useLiveRefresh';
 import api from '@/services/api';
 import { wsService } from '@/services/websocket';
+import { feedKey, tickMatches, type FeedRef, type WireTick } from '@/services/browser-feed';
+import { useLivePollMs } from './useLivePollMs';
 import { useChartStore } from '@/stores/chart-store';
 import {
   emptySeries,
   buildSeries,
   applyTick,
+  tickOpensGap,
   applyRealBars,
   prependBars,
   findRealGaps,
@@ -26,40 +29,15 @@ import type { Candle, OIData } from '@/types';
 export type FeedState = 'connecting' | 'live' | 'reconnecting' | 'closed' | 'error';
 
 /**
- * The per-user tick payload emitted on the `'tick'` socket event. Mirrors
- * the backend `TickData` (apps/api/.../broker-adapter.interface.ts) — prices
- * are in RUPEES and `timestamp` arrives as an ISO string over socket.io (it
- * is a `Date` on the server). This is NOT a `Quote`: there is no
- * `change`/`changePercent`/`exchange`/`vwap`; the day-change baseline comes
- * from the separate `/quote` REST call in this hook.
- *
- * `volume` is the broker's `volume_trade_for_the_day` — CUMULATIVE, not
- * per-tick. `applyTick` turns it into per-bar volume via the bar's anchor.
- */
-interface TickData {
-  token: string;
-  symbol: string;
-  ltp: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  oi?: number;
-  timestamp: string;
-}
-
-/**
- * Pure diff of the chart's single-token subscription across a symbol switch.
- * Returns the tokens to `subscribe` (add) and `unsubscribe` (remove) so the
- * hook can drive the per-user server feed with exactly one add + one remove.
- * A null token means "nothing subscribed" (empty/`'0'` guarded by the caller).
+ * Pure diff of the chart's single-instrument subscription across a symbol
+ * switch, compared by EXCHANGE:token (the same token on another exchange is a
+ * different instrument). One add + one remove per switch; null means none.
  */
 export function computeSubscriptionDelta(
-  prev: string | null,
-  next: string | null,
-): { add: string[]; remove: string[] } {
-  if (prev === next) return { add: [], remove: [] };
+  prev: FeedRef | null,
+  next: FeedRef | null,
+): { add: FeedRef[]; remove: FeedRef[] } {
+  if ((prev ? feedKey(prev) : null) === (next ? feedKey(next) : null)) return { add: [], remove: [] };
   return {
     add: next ? [next] : [],
     remove: prev ? [prev] : [],
@@ -140,6 +118,11 @@ export function getHistoryRangeDays(timeframe: string): number {
   return map[timeframe] ?? 3;
 }
 
+/** The live-edge REST cadence when ticks are not driving the chart (legacy feed, or not Live). */
+const LIVE_EDGE_POLL_MS = 20_000;
+/** At most one gap-triggered live-edge refresh per this window. */
+const GAP_FILL_COOLDOWN_MS = 15_000;
+
 /** API candle payload -> the broker-bar shape the series model consumes. */
 function toRealBars(raw: Candle[]): RealBar[] {
   if (!Array.isArray(raw)) return [];
@@ -192,7 +175,7 @@ function logGapDiagnostic(
 // ---------------------------------------------------------------------------
 // Series state: ONE reducer owns the bars.
 //
-// Every writer (initial fetch, WS tick, 20s REST poll, reconnect gap-fill,
+// Every writer (initial fetch, WS tick, 20s REST poll or gap-triggered refresh, reconnect gap-fill,
 // infinite-history prepend) goes through this reducer, and every action
 // carries the `epoch` it was issued under. A response that arrives after the
 // user switched symbol or timeframe has a stale epoch and is dropped — which
@@ -258,6 +241,14 @@ export function useChartData(): UseChartDataReturn {
     prependSeq: 0,
   }));
   const { series, prependSeq } = state;
+  // Latest series for the tick handler, which subscribes once per symbol, not per render.
+  const seriesRef = useRef(series);
+  seriesRef.current = series;
+  // false while the hub feeds this browser and the feed is Live: ticks drive the live edge then.
+  const livePoll = useLivePollMs(LIVE_EDGE_POLL_MS);
+  const livePollRef = useRef(livePoll);
+  livePollRef.current = livePoll;
+  const lastGapFillRef = useRef(0);
 
   const [oiData, setOiData] = useState<ChartOIData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -275,8 +266,8 @@ export function useChartData(): UseChartDataReturn {
   const epochRef = useRef(0);
   // Previous feed-state, so a reconnecting -> live transition gap-fills once.
   const prevFeedStateRef = useRef<FeedState | null>(null);
-  // The token currently subscribed on the per-user server feed.
-  const subscribedTokenRef = useRef<string | null>(null);
+  // The instrument currently subscribed on the server feed (exchange-aware).
+  const subscribedRef = useRef<FeedRef | null>(null);
   const loadingMoreRef = useRef(false);
   const hasMoreRef = useRef(true);
 
@@ -460,7 +451,10 @@ export function useChartData(): UseChartDataReturn {
   // the "graph doesn't update / shows old data" report. useLiveRefresh keeps the
   // cadence, stops it when every venue is shut, and refetches the moment the tab
   // or the network comes back.
-  useLiveRefresh(liveEdgeRefresh, 20_000);
+  // SP1 M4 (spec §6.3): while the hub feeds this browser and the feed is Live,
+  // ticks advance the live edge and this poll is paused; a tick that opens a gap
+  // asks for one refresh instead (see the tick handler). Otherwise: today's 20 s.
+  useLiveRefresh(liveEdgeRefresh, LIVE_EDGE_POLL_MS, { paused: livePoll === false });
 
   // -------------------------------------------------------------------------
   // Feed plumbing
@@ -485,25 +479,27 @@ export function useChartData(): UseChartDataReturn {
       });
   }, [selectedSymbol.token, selectedSymbol.exchange]);
 
-  // Drive the per-user server feed: exactly one unsubscribe (old) + one
-  // subscribe (new) per symbol switch.
+  // Drive the server feed: exactly one unsubscribe (old) + one subscribe (new)
+  // per symbol switch, with the exchange, as a viewed chart (hub priority 4).
   useEffect(() => {
-    const token = selectedSymbol.token;
-    const next = token && token !== '0' ? token : null;
-    const delta = computeSubscriptionDelta(subscribedTokenRef.current, next);
+    const { token, exchange, symbol } = selectedSymbol;
+    const next: FeedRef | null = token && token !== '0' && exchange ? { token, exchange, symbol } : null;
+    const delta = computeSubscriptionDelta(subscribedRef.current, next);
     if (delta.remove.length > 0) wsService.emitUnsubscribe(delta.remove);
-    if (delta.add.length > 0) wsService.emitSubscribe(delta.add);
-    subscribedTokenRef.current = next;
-  }, [selectedSymbol.token]);
+    if (delta.add.length > 0) wsService.emitSubscribe(delta.add, 'chart');
+    subscribedRef.current = next;
+  }, [selectedSymbol.token, selectedSymbol.exchange, selectedSymbol.symbol]);
 
-  // Unmount cleanup: release the token so the per-user subscription pool
-  // doesn't leak. Separate empty-deps effect so it fires ONLY on unmount (a
-  // symbol switch is handled by the delta effect above, which must not
-  // unsubscribe the new token). Reads the live ref, not a closed-over token.
+  // Unmount cleanup: release the instrument so the subscription does not leak.
+  // Separate empty-deps effect so it fires ONLY on unmount (a symbol switch is
+  // handled by the delta effect above). Reads the live ref.
   useEffect(() => {
     return () => {
-      if (subscribedTokenRef.current) {
-        wsService.emitUnsubscribe([subscribedTokenRef.current]);
+      if (subscribedRef.current) {
+        wsService.emitUnsubscribe([subscribedRef.current]);
+        // Forget it, so a re-mount (StrictMode's mount/unmount/mount) sees
+        // "nothing held" and subscribes again instead of computing an empty delta.
+        subscribedRef.current = null;
       }
     };
   }, []);
@@ -530,19 +526,31 @@ export function useChartData(): UseChartDataReturn {
   // all series logic lives in the pure `applyTick`.
   useEffect(() => {
     const unsubTick = wsService.subscribe('tick', (data) => {
-      const tick = data as TickData;
-      if (tick.token !== selectedSymbol.token) return;
+      if (!tickMatches(data, selectedSymbol.token, selectedSymbol.exchange)) return;
+      const tick: WireTick = data;
       if (!(typeof tick.ltp === 'number' && tick.ltp > 0)) return;
+      const time = new Date(tick.timestamp).getTime() / 1000;
       setCurrentPrice(tick.ltp);
+      // Hub ticks carry the change vs the previous close; legacy ticks do not.
+      if (typeof tick.change === 'number' && typeof tick.changePercent === 'number') {
+        setPriceChange(tick.change);
+        setPriceChangePercent(tick.changePercent);
+      }
       dispatch({
         type: 'tick',
         epoch: epochRef.current,
-        tick: {
-          time: new Date(tick.timestamp).getTime() / 1000,
-          price: tick.ltp,
-          volume: tick.volume,
-        },
+        tick: { time, price: tick.ltp, volume: tick.volume },
       });
+      // Ticks drive the live edge (poll paused): a tick past a gap means bars the
+      // broker must supply — the first bar of a session, or bars missed while away.
+      if (
+        livePollRef.current === false &&
+        tickOpensGap(seriesRef.current, time) &&
+        Date.now() - lastGapFillRef.current >= GAP_FILL_COOLDOWN_MS
+      ) {
+        lastGapFillRef.current = Date.now();
+        void liveEdgeRefresh();
+      }
     });
 
     // Server-side closed-candle events (CandleAggregator). Same merge path as
@@ -582,7 +590,7 @@ export function useChartData(): UseChartDataReturn {
       unsubTick();
       unsubCandle();
     };
-  }, [selectedSymbol.token, timeframe]);
+  }, [selectedSymbol.token, selectedSymbol.exchange, timeframe, liveEdgeRefresh]);
 
   return {
     candles: series.bars,

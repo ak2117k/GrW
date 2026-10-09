@@ -90,6 +90,7 @@ function hubWith(answers: Record<string, PriceResult>, owner = 'u1') {
     ),
     prices: jest.fn(),
     watch: jest.fn().mockResolvedValue(undefined),
+    unwatch: jest.fn().mockResolvedValue(undefined),
     onPrice: jest.fn(() => () => undefined),
   };
   const source: HubPriceSource = { hubFor: jest.fn((userId: string | null) => (userId === owner ? hub : null)), record };

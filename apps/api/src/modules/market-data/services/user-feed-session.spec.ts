@@ -348,6 +348,37 @@ it('stamps each tick with its exchange from exchange_type', async () => {
   expect(ticks[0]).toMatchObject({ token: '35001', exchange: 'NFO', ltp: 250.5 });
 });
 
+it('carries SNAP_QUOTE best-five depth on the tick, in rupees', async () => {
+  const { s, d } = makeSession();
+  const ticks: any[] = [];
+  s.onTick((t) => ticks.push(t));
+  await s.ensureConnected();
+  d.ws.handlers.tick({
+    token: '"2885"',
+    exchange_type: 1,
+    last_traded_price: 150050,
+    close_price: 149000,
+    best_5_buy_data: [{ flag: 1, quantity: 10, price: 150040, no_of_orders: 2 }],
+    best_5_sell_data: [{ flag: 0, quantity: 4, price: 150060, no_of_orders: 1 }],
+  });
+  expect(ticks[0]).toMatchObject({
+    token: '2885',
+    exchange: 'NSE',
+    ltp: 1500.5,
+    close: 1490,
+    depth: { bids: [{ price: 1500.4, qty: 10, orders: 2 }], asks: [{ price: 1500.6, qty: 4, orders: 1 }] },
+  });
+});
+
+it('a tick with no best-five data has no depth field', async () => {
+  const { s, d } = makeSession();
+  const ticks: any[] = [];
+  s.onTick((t) => ticks.push(t));
+  await s.ensureConnected();
+  d.ws.handlers.tick({ token: '"99926000"', exchange_type: 1, last_traded_price: 2500000 });
+  expect(ticks[0]).not.toHaveProperty('depth');
+});
+
 // smartapi-javascript resolves (never rejects) HTTP errors as { status, message }
 // with no `data`; Angel One signals rate limits with HTTP 403.
 it('getQuotes treats an SDK-resolved HTTP 403 as a throttle', async () => {

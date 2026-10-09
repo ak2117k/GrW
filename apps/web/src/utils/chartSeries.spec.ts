@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildSeries,
   applyTick,
+  tickOpensGap,
   applyRealBars,
   prependBars,
   planRender,
@@ -363,5 +364,28 @@ describe('planRender', () => {
 
   it('RESETS when the series shrank', () => {
     expect(planRender(s0.bars, s0.bars.slice(0, 1)).kind).toBe('reset');
+  });
+});
+
+describe('tickOpensGap', () => {
+  const base = () => buildSeries([real(1000), real(1060)], TF);
+
+  it('is true only for a tick two or more bars past the last bar', () => {
+    expect(tickOpensGap(base(), 1075)).toBe(false); // the forming bar
+    expect(tickOpensGap(base(), 1125)).toBe(false); // the next bar: applyTick opens it
+    expect(tickOpensGap(base(), 1180)).toBe(true); // two bars past: applyTick refuses, REST must fill
+    expect(tickOpensGap(base(), 1000)).toBe(false); // a late tick
+  });
+
+  it('is false for an empty series (cold start belongs to the initial load) and a non-finite time', () => {
+    expect(tickOpensGap(emptySeries(TF), 5000)).toBe(false);
+    expect(tickOpensGap(base(), Number.NaN)).toBe(false);
+  });
+
+  it('agrees with applyTick: whenever it is true, applyTick leaves the series unchanged', () => {
+    const s = base();
+    for (const t of [1075, 1125, 1180, 1300]) {
+      if (tickOpensGap(s, t)) expect(applyTick(s, { time: t, price: 9 })).toBe(s);
+    }
   });
 });

@@ -89,6 +89,9 @@ export default () => ({
     // M3 consumer switch: ExitPriceService (track pollers, breakout-swing, EOD square-offs)
     // reads the hub's prices. Needs MARKET_HUB_ENABLED. Off = legacy path.
     pricesTracks: process.env.HUB_PRICES_TRACKS === 'true',
+    // M4 consumer switch: the owner's browser is fed by the hub (/ws ticks + quote, depth,
+    // indices and watchlist endpoints) and stops polling while Live. Off = legacy path.
+    servesBrowser: process.env.HUB_SERVES_BROWSER === 'true',
     // MCX 23:55 close windows, "YYYY-MM-DD:YYYY-MM-DD" comma-separated (US-DST-linked).
     mcxLateClose: process.env.HUB_MCX_LATE_CLOSE || '',
   },

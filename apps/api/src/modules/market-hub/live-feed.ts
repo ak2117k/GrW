@@ -4,6 +4,7 @@ import { refKey, type InstrumentRef, type Price } from './hub.types';
 import type { PriceBook } from './price-book';
 import { allocateSlots, type Allocation } from './slot-allocator';
 import type { WatchRegistry } from './watch-registry';
+import { tickExtras } from './tick-extras';
 
 export interface LiveFeedDeps {
   broker: HubBroker;
@@ -122,6 +123,7 @@ export class LiveFeed {
       source: 'ws',
       volume: t.volume,
       oi: t.oi,
+      ...tickExtras(t),
     };
     this.d.book.set(price);
     for (const fn of this.priceListeners) fn(price);

@@ -1,4 +1,5 @@
 import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
+import { depthFromFullQuote } from '../utils/depth-levels';
 
 /**
  * Pure helpers for fetching per-user historical candles + quotes from a user's
@@ -196,6 +197,7 @@ export function aggregateCandles(daily: Candle[], bucket: AggregateBucket): Cand
 export function mapFullQuote(fetched: any, token: string): TickData | null {
   if (!Array.isArray(fetched) || fetched.length === 0) return null;
   const d = fetched[0];
+  const depth = depthFromFullQuote(d);
   return {
     token: String(d.symbolToken ?? d.symboltoken ?? token),
     symbol: d.tradingSymbol ?? d.tradingsymbol ?? '',
@@ -207,6 +209,7 @@ export function mapFullQuote(fetched: any, token: string): TickData | null {
     volume: Number(d.tradeVolume ?? d.volume),
     oi: d.opnInterest != null ? Number(d.opnInterest) : undefined,
     timestamp: new Date(),
+    ...(depth ? { depth } : {}),
   };
 }
 

@@ -49,6 +49,8 @@ import { BatchQuotesService } from '../services/batch-quotes.service';
 import { CurrentUser } from '../../../common/decorators';
 import { HUB_CANDLE_SOURCE, type HubCandleSource } from '../../market-hub/hub-candle-source';
 import { serveChartFromHub } from '../../market-hub/candles/serve-chart';
+import { lookupHubPrices, type HubPriceSource } from '../../market-hub/hub-prices';
+import { REST_OWNER, hubQuoteKey, serveDepthFromHub, serveQuotesFromHub } from '../../market-hub/serve-browser';
 
 /**
  * Look up a symbol and exchange for a token from the known constant maps.
@@ -129,6 +131,11 @@ export class MarketDataController {
     } catch {
       return null;
     }
+  }
+
+  /** SP1 M4: the hub's price source, if this container has the market hub (lazy: no module cycle). */
+  private hubPriceSource(): HubPriceSource | null {
+    return lookupHubPrices(this.moduleRef);
   }
 
   /**
@@ -493,6 +500,18 @@ export class MarketDataController {
       exchange ?? instrument?.exchange ?? constantEntry?.exchange ?? 'NSE';
     const resolvedSymbol = instrument?.symbol ?? constantEntry?.symbol ?? '';
 
+    // SP1 M4 (HUB_SERVES_BROWSER): the owner's quote comes from the hub's PriceBook
+    // (fresh ≤ 15 s only: a closed-market PriceBook price can be hours old, so a
+    // closed exchange goes to the per-user fetch below, which gives the true close).
+    const fromHub = serveQuotesFromHub(
+      this.hubPriceSource(),
+      userId,
+      [{ token, exchange: resolvedExchange, symbol: resolvedSymbol || undefined }],
+      { priority: 4, owner: REST_OWNER.quote },
+    );
+    const hubQuote = fromHub.quotes.get(hubQuoteKey(token, resolvedExchange));
+    if (hubQuote) return { token, quote: hubQuote, source: 'hub' as const };
+
     // Primary: the LOGGED-IN user's OWN Angel session (FULL-mode REST quote).
     // If the per-user feed is disabled or the user has no broker creds, the
     // manager/session throws — caught here so we fall through to the level-book
@@ -592,8 +611,7 @@ export class MarketDataController {
   /**
    * GET /api/market-data/instruments/:token/depth
    * Get 5-level market depth (bids/asks) for an instrument. Backs the
-   * StockOverviewPanel's MarketDepthCard (polled every 2s on the
-   * frontend; adapter caches at 1.5s so we don't hammer SmartAPI).
+   * StockOverviewPanel's MarketDepthCard (hub-first for the owner; the browser polls it only when its feed is not hub-served and Live).
    *
    * Returns `{ depth: null }` (200, not 404) when the broker can't supply
    * depth — typical for indices and unentitled tokens — so the frontend
@@ -606,10 +624,18 @@ export class MarketDataController {
   async getDepth(
     @Param('token') token: string,
     @Query('exchange') exchange: string,
+    @CurrentUser('userId') userId: string,
   ) {
     if (!exchange) {
       throw new BadRequestException('exchange query parameter is required');
     }
+    // SP1 M4: the owner's book comes from the hub (SNAP_QUOTE ticks / FULL quotes), fresh only.
+    const fromHub = serveDepthFromHub(this.hubPriceSource(), userId, {
+      token,
+      exchange,
+      symbol: resolveTokenFromConstants(token)?.symbol,
+    });
+    if (fromHub) return { depth: fromHub, source: 'hub' as const };
     const depth = await this.angelOneAdapter.getMarketDepth(token, exchange);
     return { depth };
   }
@@ -673,18 +699,19 @@ export class MarketDataController {
   @ApiOperation({ summary: 'Get major market indices with live data' })
   async getIndices(@CurrentUser('userId') userId: string) {
     const indices = this.instrumentService.getIndices();
+    const refs = indices.map((idx) => ({ token: idx.token, exchange: idx.exchange, symbol: idx.symbol }));
 
-    // One resolver call: batched broker quotes, with a daily-candle fallback for
-    // the NSE index tokens Angel refuses to quote. Replaces the shared-feed
-    // cache read that left every tile blank.
-    const resolved = await this.marketQuoteResolver.resolveQuotes(
-      userId,
-      indices.map((idx) => ({
-        token: idx.token,
-        exchange: idx.exchange,
-        symbol: idx.symbol,
-      })),
-    );
+    // SP1 M4: the hub answers what it has (market context is watched at priority 2);
+    // only the misses go to the resolver (batched broker quotes + daily-candle fallback
+    // for the NSE index tokens Angel refuses to quote).
+    const fromHub = serveQuotesFromHub(this.hubPriceSource(), userId, refs, {
+      priority: 2,
+      owner: REST_OWNER.indices,
+    });
+    const resolved =
+      fromHub.missing.length > 0
+        ? await this.marketQuoteResolver.resolveQuotes(userId, fromHub.missing)
+        : new Map();
 
     return {
       indices: indices.map((idx) => ({
@@ -692,7 +719,7 @@ export class MarketDataController {
         symbol: idx.symbol,
         token: idx.token,
         exchange: idx.exchange,
-        quote: resolved.get(idx.token) ?? null,
+        quote: fromHub.quotes.get(hubQuoteKey(idx.token, idx.exchange)) ?? resolved.get(idx.token) ?? null,
       })),
     };
   }
@@ -1114,7 +1141,10 @@ export class MarketDataController {
     @CurrentUser('userId') userId: string,
     @Body() body: { items?: { token: string; exchange: string }[] },
   ) {
-    return this.batchQuotes.getQuotes(userId, body?.items);
+    // SP1 M4: hub first (watchlist rows watched at priority 3); the resolver prices the rest.
+    return this.batchQuotes.getQuotes(userId, body?.items, (refs) =>
+      serveQuotesFromHub(this.hubPriceSource(), userId, refs, { priority: 3, owner: REST_OWNER.watchlist }),
+    );
   }
 
   /**

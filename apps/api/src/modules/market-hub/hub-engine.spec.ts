@@ -263,8 +263,9 @@ describe('HubEngine', () => {
     expect(e.status().consumers).toEqual({
       positions: { hub: 3, legacy: 1, unpriced: 0, lastHubAt: Date.now(), lastUnpricedAt: null },
       tracks: { hub: 0, legacy: 0, unpriced: 2, lastHubAt: null, lastUnpricedAt: Date.now() },
+      browser: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
       listenerErrors: 0,
-      flags: { positions: false, tracks: false }, // no consumerFlags dep: both switches read as off
+      flags: { positions: false, tracks: false, browser: false }, // no consumerFlags dep: every switch reads as off
     });
     e.stop();
   });
@@ -306,6 +307,44 @@ describe('HubEngine', () => {
     expect(after.get('NSE:99926000')).toBe(2); // back to context only
     expect(after.has('NSE:2885')).toBe(false);
     expect(after.has('NFO:35001')).toBe(false);
+    e.stop();
+  });
+
+  it('unwatchMany drops one owner’s watches and reconciles once; another owner keeps the instrument live', async () => {
+    const { e, broker } = engine();
+    await e.start();
+    const A: InstrumentRef = { exchange: 'NSE', token: '2885', symbol: 'RELIANCE' };
+    await e.watchMany([A], 4, 'browser:s1', 120_000);
+    await e.watchMany([A], 3, 'browser:s2', 120_000);
+    await e.unwatchMany([A], 'browser:s1');
+    expect(broker.subscribed.has('NSE:2885')).toBe(true);
+    await e.unwatchMany([A], 'browser:s2');
+    expect(broker.subscribed.has('NSE:2885')).toBe(false);
+    expect(e.price(A, { maxAgeMs: 15_000 })).toEqual({ kind: 'unavailable', reason: 'not-watched' });
+    e.stop();
+  });
+
+  it('unwatchMany never rejects when the broker is down', async () => {
+    const broker = new FakeBroker();
+    const { e } = engine(broker);
+    await e.start();
+    const A: InstrumentRef = { exchange: 'NSE', token: '2885', symbol: 'RELIANCE' };
+    await e.watchMany([A], 4, 'browser:s1');
+    broker.unsubscribe = async () => {
+      throw new Error('socket closed');
+    };
+    await expect(e.unwatchMany([A], 'browser:s1')).resolves.toBeUndefined();
+    expect(e.status().lastError).toMatch(/socket closed/);
+    e.stop();
+  });
+
+  it('counts browser outcomes apart from positions and tracks', async () => {
+    const { e } = engine();
+    await e.start();
+    e.recordConsumer('browser', 'hub', 4);
+    e.recordConsumer('browser', 'legacy');
+    expect(e.status().consumers.browser).toEqual({ hub: 4, legacy: 1, unpriced: 0, lastHubAt: Date.now(), lastUnpricedAt: null });
+    expect(e.status().consumers.positions.hub).toBe(0);
     e.stop();
   });
 });

@@ -23,6 +23,7 @@ import {
 } from './user-historical.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
 import { describeUnfetched } from '../utils/quote-from-candles';
+import { depthFromSnapQuote } from '../utils/depth-levels';
 import { HISTORICAL_MIN_GAP_MS, fetchChunksResilient, rowsOrThrottle, throwForMissingData } from './angel-throttle';
 
 /**
@@ -620,6 +621,8 @@ export class UserFeedSession implements UserFeedSessionLike {
     // Token can arrive with extra quotes: "\"99926013\"" → strip them.
     const rawToken = String(tick.token ?? tick.symbolToken ?? tick.tk ?? '');
     const token = rawToken.replace(/"/g, '');
+    // SNAP_QUOTE carries the best five levels a side; absent in other modes and for indices.
+    const depth = depthFromSnapQuote(tick, PAISE_DIVISOR);
 
     return {
       token,
@@ -648,6 +651,7 @@ export class UserFeedSession implements UserFeedSessionLike {
       timestamp: tick.exchange_timestamp
         ? new Date(Number(tick.exchange_timestamp))
         : new Date(),
+      ...(depth ? { depth } : {}),
     };
   }
 

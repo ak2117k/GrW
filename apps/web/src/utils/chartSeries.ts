@@ -262,6 +262,18 @@ export function applyTick(series: ChartSeries, tick: LiveTick): ChartSeries {
 }
 
 /**
+ * True when a tick lands two or more bars past the last bar — the case
+ * `applyTick` refuses (a session boundary, or bars missed while away), because
+ * only the broker's REST bars carry authoritative timestamps. With the live edge
+ * driven by ticks (SP1 M4), this is the one moment the chart must ask REST.
+ */
+export function tickOpensGap(series: ChartSeries, tickTimeSec: number): boolean {
+  const last = series.bars[series.bars.length - 1];
+  if (!last || !Number.isFinite(tickTimeSec)) return false;
+  return tickTimeSec - last.realTime >= series.tfSec * 2;
+}
+
+/**
  * A closed bar is whatever the broker says it is. The bar still forming keeps
  * its live `close` (ticks are fresher than a <=30s-stale REST bar) but adopts
  * the broker's `open` — a tick-opened bar's `open` is merely the first LTP we

@@ -190,4 +190,25 @@ describe('QuotePoller', () => {
     await jest.advanceTimersByTimeAsync(200);
     expect(seen).toEqual([]);
   });
+
+  it('carries the quote’s day bar and depth onto the polled price', async () => {
+    const seen: Price[] = [];
+    const { broker, registry, feed, poller } = await setup(0, (p) => seen.push(p));
+    broker.quoteImpl = async (refs) =>
+      new Map(
+        refs.map((r) => [
+          r.token,
+          { ...FakeBroker.tick(r.token, 100), open: 98, high: 101, low: 97, close: 99, depth: { bids: [], asks: [{ price: 100.05, qty: 5, orders: 1 }] } },
+        ]),
+      );
+    registry.watch(ref('1'), 3, 'w', 0);
+    await feed.reconcile();
+    poller.pollNearLive();
+    await jest.advanceTimersByTimeAsync(200);
+    expect(seen[0]).toMatchObject({
+      source: 'quote',
+      day: { open: 98, high: 101, low: 97, close: 99 },
+      depth: { bids: [], asks: [{ price: 100.05, qty: 5, orders: 1 }] },
+    });
+  });
 });

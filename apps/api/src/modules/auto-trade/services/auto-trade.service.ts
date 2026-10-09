@@ -55,7 +55,7 @@ export class AutoTradeService {
   // Cron: periodic signal scan every 2 minutes during market hours (Mon-Fri)
   // ---------------------------------------------------------------------------
 
-  @Cron('*/2 9-15 * * 1-5')
+  @Cron('*/2 9-15 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async periodicSignalScan(): Promise<void> {
     try {
       const settings = await this.settingsService.getSettings();

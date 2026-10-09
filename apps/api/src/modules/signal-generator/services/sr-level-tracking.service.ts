@@ -44,7 +44,7 @@ export class SrLevelTrackingService {
   /** Drive evaluate() periodically so reaction verdicts (and hold-rates) accrue.
    *  Capped per pass (repo `take`) so it can't starve the shared historical-
    *  fetch budget the trading/chart path depends on. */
-  @Cron('0 */30 * * * *')
+  @Cron('0 */30 * * * *', { timeZone: 'Asia/Kolkata' })
   async evaluateCron(): Promise<void> {
     if (this.evaluating) {
       this.logger.debug('evaluate cron skipped — previous pass still running');

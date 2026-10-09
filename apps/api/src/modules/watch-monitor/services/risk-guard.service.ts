@@ -71,15 +71,15 @@ export class RiskGuardService {
   }
 
   /**
-   * Cron: every weekday at 15:25 IST. Cron expression uses server time;
-   * if server is in IST (which it is on Aryan's Windows machine), the
-   * literal '25 15 * * 1-5' fires at 15:25 IST. If server were in UTC we'd
-   * need '55 9 * * 1-5' (15:25 IST = 09:55 UTC).
+   * Cron: every weekday at 15:25 IST. Pinned to Asia/Kolkata because the
+   * host clock is UTC: without timeZone the literal '25 15 * * 1-5' fires
+   * at 15:25 UTC = 20:55 IST, after the market has closed with positions
+   * still open.
    *
    * 15:25 not 15:30 to give the broker 5 minutes to acknowledge close
    * orders before the actual market close at 15:30.
    */
-  @Cron('25 15 * * 1-5', { name: 'eod-square-off' })
+  @Cron('25 15 * * 1-5', { name: 'eod-square-off', timeZone: 'Asia/Kolkata' })
   async eodSquareOff(): Promise<void> {
     this.logger.warn('EOD square-off cron fired (15:25 IST) — closing all positions');
     await this.watch.squareOffAll('eod-square-off');

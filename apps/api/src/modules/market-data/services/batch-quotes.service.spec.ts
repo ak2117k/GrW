@@ -285,4 +285,32 @@ describe('BatchQuotesService', () => {
       expect(calls.map((c) => c.userId)).toEqual(['user-a', 'user-b']);
     });
   });
+
+  it('the hub tier answers first and only the misses reach the resolver', async () => {
+    const { resolver, calls } = fakeResolver({ '1333': quote({ token: '1333', ltp: 1600 }) });
+    const svc = new BatchQuotesService(resolver);
+    const hubTier = jest.fn((refs: QuoteRequestRef[]) => ({
+      quotes: new Map([['NSE:2885', quote({ token: '2885', ltp: 1500, change: 5, changePercent: 0.3344 })]]),
+      missing: refs.filter((r) => r.token !== '2885'),
+    }));
+    const out = await svc.getQuotes('owner', [{ token: '2885', exchange: 'nse' }, { token: '1333', exchange: 'NSE' }], hubTier);
+    expect(hubTier).toHaveBeenCalledWith([{ token: '2885', exchange: 'NSE' }, { token: '1333', exchange: 'NSE' }]);
+    expect(calls).toEqual([{ userId: 'owner', refs: [{ token: '1333', exchange: 'NSE' }] }]);
+    expect(out.quotes.map((q) => [q.token, q.ltp, q.change])).toEqual([['2885', 1500, 5], ['1333', 1600, 5]]);
+  });
+
+  it('calls no resolver when the hub tier answered everything, and survives a throwing tier', async () => {
+    const { resolver, calls } = fakeResolver({ '2885': quote({ token: '2885', ltp: 1490 }) });
+    const svc = new BatchQuotesService(resolver);
+    const all = await svc.getQuotes('owner', [{ token: '2885', exchange: 'NSE' }], () => ({
+      quotes: new Map([['NSE:2885', quote({ token: '2885', ltp: 1500 })]]),
+      missing: [],
+    }));
+    expect(calls).toEqual([]);
+    expect(all.quotes[0].ltp).toBe(1500);
+    const thrown = await svc.getQuotes('owner', [{ token: '2885', exchange: 'NSE' }], () => {
+      throw new Error('hub down');
+    });
+    expect(thrown.quotes[0].ltp).toBe(1490);
+  });
 });

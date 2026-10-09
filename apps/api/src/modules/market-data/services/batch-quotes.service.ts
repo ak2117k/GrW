@@ -29,6 +29,12 @@ export interface QuoteResolverLike {
   resolveQuotes(userId: string, refs: QuoteRequestRef[]): Promise<Map<string, QuoteResponse>>;
 }
 
+/** SP1 M4: what the hub answered (keyed EXCHANGE:token) and what is left for the resolver. */
+export interface HubTierAnswer {
+  quotes: Map<string, QuoteResponse>;
+  missing: QuoteRequestRef[];
+}
+
 /**
  * One row of `POST /api/market-data/quotes`.
  *
@@ -83,6 +89,7 @@ export class BatchQuotesService {
   /**
    * @param userId  owner of the Angel session the quotes are fetched over
    * @param items   instruments to quote; malformed entries are dropped
+   * @param hubTier SP1 M4: answers what the hub has first; only its misses reach the resolver
    * @returns `{ quotes, count }` — `count` is `quotes.length`, kept because the
    *          old handler returned it (harmless for the frontend, which reads
    *          only `quotes`).
@@ -90,16 +97,28 @@ export class BatchQuotesService {
   async getQuotes(
     userId: string,
     items?: { token: string; exchange: string }[] | null,
+    hubTier?: (refs: QuoteRequestRef[]) => HubTierAnswer,
   ): Promise<{ quotes: QuoteRow[]; count: number }> {
     const refs = normalizeRefs(items);
     // Short-circuit: an empty watchlist must never reach the broker.
     if (refs.length === 0) return { quotes: [], count: 0 };
 
-    const resolved = await this.resolver.resolveQuotes(userId, refs);
+    let tier: HubTierAnswer = { quotes: new Map(), missing: refs };
+    if (hubTier) {
+      try {
+        tier = hubTier(refs);
+      } catch {
+        // A failing hub tier is the legacy path, never an empty watchlist.
+      }
+    }
+    const resolved =
+      tier.missing.length > 0
+        ? await this.resolver.resolveQuotes(userId, tier.missing)
+        : new Map<string, QuoteResponse>();
     const quotes: QuoteRow[] = [];
 
     for (const ref of refs) {
-      const q = resolved?.get(ref.token);
+      const q = tier.quotes.get(`${ref.exchange.toUpperCase()}:${ref.token}`) ?? resolved?.get(ref.token);
       if (!q) continue; // unquotable token — omit the row, per the contract
       quotes.push({
         token: ref.token,

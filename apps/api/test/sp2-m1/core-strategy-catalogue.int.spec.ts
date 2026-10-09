@@ -59,7 +59,13 @@ describe('core strategy catalogue (real database)', () => {
       db.$executeRawUnsafe(`UPDATE "core_strategy_versions" SET "status" = 'DRAFT' WHERE "id" = $1`, id),
     ).rejects.toThrow(/cannot return to DRAFT/);
     await expect(db.$executeRawUnsafe(`DELETE FROM "core_strategy_versions" WHERE "id" = $1`, id)).rejects.toThrow(/cannot be deleted/);
+    await expect(
+      db.$executeRawUnsafe(`UPDATE "core_strategy_versions" SET "id" = $1 || '_renamed' WHERE "id" = $1`, id),
+    ).rejects.toThrow(/immutable/);
     await db.$executeRawUnsafe(`UPDATE "core_strategy_versions" SET "status" = 'RETIRED' WHERE "id" = $1`, id);
+    await expect(
+      db.$executeRawUnsafe(`UPDATE "core_strategy_versions" SET "status" = 'PAPER' WHERE "id" = $1`, id),
+    ).rejects.toThrow(/cannot leave RETIRED/);
   });
 
   it('refuses an unknown status, an unknown creator and an unknown vehicle', async () => {
@@ -69,5 +75,19 @@ describe('core strategy catalogue (real database)', () => {
     await expect(
       db.$executeRawUnsafe(`INSERT INTO "core_strategies" ("id","key","name","description","allowedVehicles") VALUES ($1, $1, 'x', 'x', ARRAY['FUTURES']::TEXT[])`, `cs_${run}_bad`),
     ).rejects.toThrow(/allowedVehicles_check/);
+    await expect(
+      db.$executeRawUnsafe(`INSERT INTO "core_strategies" ("id","key","name","description","allowedVehicles") VALUES ($1, $1, 'x', 'x', NULL)`, `cs_${run}_null`),
+    ).rejects.toThrow(/allowedVehicles_check/);
+  });
+
+  it('refuses a NaN or infinite capital allocation', async () => {
+    for (const bad of ['NaN', 'Infinity']) {
+      await expect(
+        db.$executeRawUnsafe(
+          `INSERT INTO "core_strategy_selections" ("id","userId","strategyId","strategyVersionId","capitalAllocation","updatedAt") VALUES ($1, 'usr_it', 'cs_it', 'csv_it', $2::float8, CURRENT_TIMESTAMP)`,
+          `sel_${run}_${bad}`, bad,
+        ),
+      ).rejects.toThrow(/capitalAllocation_check/);
+    }
   });
 });

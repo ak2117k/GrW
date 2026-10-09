@@ -6,7 +6,7 @@ const path = require('path');
  * config (rootDir: src) never discovers these.
  *
  * Run from apps/api:
- *   DATABASE_URL_TEST=postgresql://postgres:password@127.0.0.1:5432/grw_sp2m1_test \
+ *   DATABASE_URL_TEST=postgresql://postgres:password@127.0.0.1:55432/grw_sp2m1_test \
  *     npx jest --config test/sp2-m1/jest.config.js -i
  */
 module.exports = {

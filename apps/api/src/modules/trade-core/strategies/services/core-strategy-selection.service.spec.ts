@@ -1,5 +1,5 @@
 import { ConflictException, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
-import type { CoreStrategySelection, Prisma } from '@prisma/client';
+import { Prisma, type CoreStrategySelection } from '@prisma/client';
 import type { AuditService } from '../../../../common/audit/audit.service';
 import type { CoreStrategyRepository, VersionWithStrategy } from '../repositories/core-strategy.repository';
 import type { CoreStrategySelectionRepository } from '../repositories/core-strategy-selection.repository';
@@ -104,5 +104,17 @@ describe('CoreStrategySelectionService', () => {
     }
     await service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: false, capitalAllocation: 0 });
     expect(selections.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('a concurrent first write for the same strategy is a 409 to retry, and nothing is audited', async () => {
+    const { selections, audit, service } = setup();
+    selections.upsert.mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'test' }));
+    const err = await service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 100000 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).message).toBe('selection changed at the same time; retry');
+    const other = new Error('db down');
+    selections.upsert.mockRejectedValueOnce(other);
+    await expect(service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 100000 })).rejects.toBe(other);
+    expect(audit.append).not.toHaveBeenCalled();
   });
 });

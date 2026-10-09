@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
-import type { CoreStrategySelection } from '@prisma/client';
+import { Prisma, type CoreStrategySelection } from '@prisma/client';
 import { AuditService } from '../../../../common/audit/audit.service';
 import { AUDIT_ACTIONS } from '../../../../common/audit/audit-actions';
 import { isSelectable } from '../version-status';
@@ -18,6 +18,9 @@ const snapshot = (s: CoreStrategySelection) => ({
   enabled: s.enabled,
   capitalAllocation: s.capitalAllocation,
 });
+
+const isUniqueViolation = (err: unknown): boolean =>
+  err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 
 /**
  * A user's dropdown choice per strategy (spec §4.3). The user is always the
@@ -56,11 +59,19 @@ export class CoreStrategySelectionService {
       throw new UnprocessableEntityException('an enabled strategy needs a capital allocation above ₹0');
     }
 
-    const row = await this.selections.upsert(userId, strategyId, {
-      strategyVersionId: version.id,
-      enabled: input.enabled,
-      capitalAllocation: input.capitalAllocation,
-    });
+    // Two concurrent first PUTs for one (user, strategy) both try to create the row;
+    // the loser hits the unique index. Nothing is audited for it: the caller retries.
+    let row: CoreStrategySelection;
+    try {
+      row = await this.selections.upsert(userId, strategyId, {
+        strategyVersionId: version.id,
+        enabled: input.enabled,
+        capitalAllocation: input.capitalAllocation,
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) throw new ConflictException('selection changed at the same time; retry');
+      throw err;
+    }
     await this.audit.append({
       action: AUDIT_ACTIONS.strategy.CORE_STRATEGY_SELECTION_CHANGED,
       userId,

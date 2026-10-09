@@ -59,7 +59,7 @@ ALTER TABLE "core_strategy_selections" ADD CONSTRAINT "core_strategy_selections_
 
 -- String enums are pinned here (Prisma models them as String; its diff ignores CHECKs).
 ALTER TABLE "core_strategies" ADD CONSTRAINT "core_strategies_allowedVehicles_check"
-    CHECK (cardinality("allowedVehicles") > 0 AND "allowedVehicles" <@ ARRAY['CASH_INTRADAY', 'MTF', 'OPTIONS_BUY']::TEXT[]);
+    CHECK ("allowedVehicles" IS NOT NULL AND cardinality("allowedVehicles") > 0 AND "allowedVehicles" <@ ARRAY['CASH_INTRADAY', 'MTF', 'OPTIONS_BUY']::TEXT[]);
 ALTER TABLE "core_strategy_versions" ADD CONSTRAINT "core_strategy_versions_status_check"
     CHECK ("status" IN ('DRAFT', 'PAPER', 'LIVE', 'RETIRED'));
 ALTER TABLE "core_strategy_versions" ADD CONSTRAINT "core_strategy_versions_createdBy_check"
@@ -67,10 +67,11 @@ ALTER TABLE "core_strategy_versions" ADD CONSTRAINT "core_strategy_versions_crea
 ALTER TABLE "core_strategy_versions" ADD CONSTRAINT "core_strategy_versions_version_check"
     CHECK ("version" >= 1);
 ALTER TABLE "core_strategy_selections" ADD CONSTRAINT "core_strategy_selections_capitalAllocation_check"
-    CHECK ("capitalAllocation" >= 0);
+    CHECK ("capitalAllocation" >= 0 AND "capitalAllocation" < 'Infinity'::float8);
 
 -- Immutable once approved (plan decision 8). A version that has left DRAFT keeps its
--- content forever; only its status may move on (PAPER → RETIRED). It is never
+-- content and id forever; only its status may move on (PAPER → RETIRED), and
+-- RETIRED is final. It is never
 -- deleted, because positions reference the version they entered under (M4).
 CREATE OR REPLACE FUNCTION core_strategy_versions_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -82,7 +83,8 @@ BEGIN
     RETURN OLD;
   END IF;
   IF OLD."status" <> 'DRAFT' THEN
-    IF NEW."blocks" IS DISTINCT FROM OLD."blocks"
+    IF NEW."id" IS DISTINCT FROM OLD."id"
+       OR NEW."blocks" IS DISTINCT FROM OLD."blocks"
        OR NEW."strategyId" IS DISTINCT FROM OLD."strategyId"
        OR NEW."version" IS DISTINCT FROM OLD."version"
        OR NEW."createdBy" IS DISTINCT FROM OLD."createdBy"
@@ -94,6 +96,9 @@ BEGIN
     END IF;
     IF NEW."status" = 'DRAFT' THEN
       RAISE EXCEPTION 'core_strategy_versions %: an approved version cannot return to DRAFT', OLD."id";
+    END IF;
+    IF OLD."status" = 'RETIRED' AND NEW."status" <> 'RETIRED' THEN
+      RAISE EXCEPTION 'core_strategy_versions %: a retired version cannot leave RETIRED; create version n+1', OLD."id";
     END IF;
   END IF;
   RETURN NEW;

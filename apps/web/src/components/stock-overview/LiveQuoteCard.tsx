@@ -36,7 +36,9 @@ export default function LiveQuoteCard({ token, exchange, symbol }: Props) {
   const wsQuote = useMarketStore((s) => {
     const bySymbol = s.quotes.get(symbol);
     if (bySymbol && bySymbol.token === token) return bySymbol;
-    for (const q of s.quotes.values()) if (q.token === token) return q;
+    // Tokens collide across exchanges: the fallback must agree on both.
+    const ex = exchange.toUpperCase();
+    for (const q of s.quotes.values()) if (q.token === token && String(q.exchange ?? '').toUpperCase() === ex) return q;
     return undefined;
   });
   const [restQuote, setRestQuote] = useState<Quote | null>(null);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { depthFromTick, feedKey, indexRefs, isFeedSource, livePollMs, moreUrgent, quoteForItem, quoteFromTick, tickMatches, type WireTick } from './browser-feed';
+import { depthFromTick, feedKey, indexRefs, isFeedSource, livePollMs, moreUrgent, quoteForItem, quoteForRefs, quoteFromTick, tickMatches, type WireTick } from './browser-feed';
 
 describe('feedKey', () => {
   it('is EXCHANGE:token, upper-cased, never the token alone', () => {
@@ -123,6 +123,37 @@ describe('quoteForItem', () => {
     expect(quoteForItem(item, T({ exchange: 'MCX' }))).toBeNull();
     expect(quoteForItem(item, T({ change: undefined }))).toBeNull();
     expect(quoteForItem(item, T({ ltp: 0 }))).toBeNull();
+  });
+});
+
+describe('quoteForRefs', () => {
+  const refs = [
+    { token: '99926000', exchange: 'NSE', symbol: 'NIFTY' },
+    { token: '99919000', exchange: 'BSE', symbol: 'SENSEX' },
+  ];
+  const idx = (over: Partial<WireTick> = {}) => T({ token: '99926000', symbol: 'Nifty 50', exchange: 'NSE', ...over });
+
+  it('builds the store Quote under the matching index ref’s own symbol', () => {
+    expect(quoteForRefs(refs, idx())).toMatchObject({ symbol: 'NIFTY', token: '99926000', exchange: 'NSE', ltp: 1500, change: 20 });
+  });
+
+  it('is null for the same token on another exchange', () => {
+    expect(quoteForRefs(refs, idx({ exchange: 'MCX' }))).toBeNull();
+  });
+
+  it('is null for a token no ref holds (a position, track or REST-only watch on the owner’s room)', () => {
+    expect(quoteForRefs(refs, T())).toBeNull();
+  });
+
+  it('is null for a tick without a change, a non-positive LTP, or junk', () => {
+    expect(quoteForRefs(refs, idx({ change: undefined }))).toBeNull();
+    expect(quoteForRefs(refs, idx({ ltp: 0 }))).toBeNull();
+    expect(quoteForRefs(refs, null)).toBeNull();
+    expect(quoteForRefs([], idx())).toBeNull();
+  });
+
+  it('skips a ref without a symbol', () => {
+    expect(quoteForRefs([{ token: '99926000', exchange: 'NSE' }], idx())).toBeNull();
   });
 });
 

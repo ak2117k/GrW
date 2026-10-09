@@ -5,7 +5,7 @@ import { useMarketStore } from '@/stores/market-store';
 import { type Quote } from '@/types';
 import type { FeedHealth } from '@/services/feed-health';
 import { marketPhase } from '@/services/refresh-policy';
-import { indexRefs, isFeedSource, type FeedRef } from '@/services/browser-feed';
+import { indexRefs, isFeedSource, quoteForRefs, type FeedRef } from '@/services/browser-feed';
 import { useLivePollMs } from './useLivePollMs';
 
 /** Fallback cadence for the index snapshot: used only while the feed is not hub-served and Live. */
@@ -79,14 +79,16 @@ export function useMarketData(): void {
     setFeedSource(wsService.getFeedSource());
 
     const unsubTick = wsService.subscribe('tick', (data) => {
-      // Only a payload that is a full quote — a numeric `change` plus a
-      // non-empty `symbol` — may enter the store. Hub ticks carry both when the
-      // broker reported the previous close (SP1 M4); a raw per-user TickData
-      // (no change, `symbol` may be blank in SNAP_QUOTE) would clobber the
-      // REST-fetched quote with a partial one, so it is ignored here.
-      const q = data as Quote;
-      if (!q?.symbol || typeof q.change !== 'number') return;
-      updateQuote(q);
+      // Only the index tiles' own ticks enter the store here, matched by
+      // exchange + token and written under the tile's symbol. The owner's room
+      // receives EVERY hub price (positions, underlyings, tracks; symbols may
+      // be token-named), so a generic "has symbol + change" test would flood
+      // the symbol-keyed store. Watchlist rows enter through their own
+      // `quoteForItem` path (useWatchlistQuotes); the order ticket and depth
+      // card fold ticks locally. A legacy tick carries no change and never
+      // entered the store, so nothing that worked before is lost.
+      const q = quoteForRefs(indexRefsRef.current ?? [], data);
+      if (q) updateQuote(q);
     });
 
     const unsubConn = wsService.subscribe('connection-status', (data) => {

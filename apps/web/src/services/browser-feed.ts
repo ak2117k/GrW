@@ -169,6 +169,21 @@ export function quoteForItem(item: { symbol: string; token: string; exchange: st
   } as unknown as Quote;
 }
 
+/**
+ * The store Quote for the first ref this tick is for (exchange + token), under
+ * the REF's symbol — `quoteForItem` semantics. Null when no ref matches, the
+ * tick carries no change, or its LTP is not positive. A ref without a symbol
+ * is skipped: the store is symbol-keyed, and the hub's symbol may be a token.
+ */
+export function quoteForRefs(refs: FeedRef[], tick: unknown): Quote | null {
+  for (const ref of refs) {
+    if (!ref.symbol) continue;
+    const q = quoteForItem({ symbol: ref.symbol, token: ref.token, exchange: ref.exchange }, tick as WireTick);
+    if (q) return q;
+  }
+  return null;
+}
+
 /** The index tiles' refs from the `/indices` response rows. */
 export function indexRefs(indices: unknown): FeedRef[] {
   if (!Array.isArray(indices)) return [];

@@ -263,6 +263,10 @@ class WebSocketService {
               `Indicator still shows "Live" because these are up: ${stillUp.join(', ') || 'none'}`,
             'color:#dc2626;font-weight:bold',
           );
+          // The server re-announces the feed-source on every connect; until
+          // then we do not know it, so screens fall back to polling.
+          this.feedSource = null;
+          this.emit('feed-source', { source: null });
         }
         this.emit('connection-status', {
           connected: this.connectedCount > 0,

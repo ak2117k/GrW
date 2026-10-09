@@ -59,7 +59,11 @@ export default function OptionsChainPreviewCard({ symbol, token, exchange }: Pro
     const bySymbol = s.quotes.get(symbol);
     if (!token) return bySymbol;
     if (bySymbol && bySymbol.token === token) return bySymbol;
-    for (const q of s.quotes.values()) if (q.token === token) return q;
+    // Tokens collide across exchanges: the fallback must agree on both, so it
+    // is skipped when the caller gave no exchange.
+    if (!exchange) return undefined;
+    const ex = exchange.toUpperCase();
+    for (const q of s.quotes.values()) if (q.token === token && String(q.exchange ?? '').toUpperCase() === ex) return q;
     return undefined;
   });
   const [data, setData] = useState<ChainResponse | null>(null);

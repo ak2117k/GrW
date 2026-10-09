@@ -497,6 +497,9 @@ export function useChartData(): UseChartDataReturn {
     return () => {
       if (subscribedRef.current) {
         wsService.emitUnsubscribe([subscribedRef.current]);
+        // Forget it, so a re-mount (StrictMode's mount/unmount/mount) sees
+        // "nothing held" and subscribes again instead of computing an empty delta.
+        subscribedRef.current = null;
       }
     };
   }, []);

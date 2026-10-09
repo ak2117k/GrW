@@ -158,4 +158,18 @@ describe('wsService subscriptions', () => {
     expect(wsService.getFeedSource()).toBe('hub');
     expect(seen).toEqual([{ source: 'hub' }, { source: 'bogus' }]);
   });
+
+  it('forgets the feed-source when /ws disconnects and tells subscribers (null)', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    wsService.connect();
+    const ws = sockets[0];
+    const seen: unknown[] = [];
+    wsService.subscribe('feed-source', (d) => seen.push(d));
+    fire(ws, 'connect');
+    fire(ws, 'feed-source', { source: 'hub' });
+    expect(wsService.getFeedSource()).toBe('hub');
+    fire(ws, 'disconnect', 'transport close');
+    expect(wsService.getFeedSource()).toBeNull();
+    expect(seen).toEqual([{ source: 'hub' }, { source: null }]);
+  });
 });

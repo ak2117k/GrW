@@ -31,14 +31,15 @@ export interface HubEngineDeps {
   defaults: readonly InstrumentRef[];
   /** M2 CandleStore. Absent ⇒ no tick bars, no candle reads (M1 behaviour). */
   candles?: { repo: CandleRepo; interactiveCallBudget?: number };
-  /** The HUB_PRICES_POSITIONS / HUB_PRICES_TRACKS switches, read at status time. Absent ⇒ both off. */
+  /** The consumer switches, read at status time. Absent ⇒ all off. */
   consumerFlags?: () => ConsumerFlags;
 }
 
-/** The two consumer switches, so /healthz/detail tells "hub served 0" apart from "switch off". */
+/** The consumer switches, so /healthz/detail tells "hub served 0" apart from "switch off". */
 export interface ConsumerFlags {
   positions: boolean;
   tracks: boolean;
+  browser: boolean;
 }
 
 export interface CandleStatus {
@@ -84,8 +85,14 @@ export interface HubStatus {
   lastError: string | null;
   /** M2 candle store; null when candles are not enabled. */
   candles: CandleStatus | null;
-  /** M3: per consumer, how often the hub served, the legacy path served, or nothing did. */
-  consumers: { positions: ConsumerCounters; tracks: ConsumerCounters; listenerErrors: number; flags: ConsumerFlags };
+  /** M3/M4: per consumer, how often the hub served, the legacy path served, or nothing did. */
+  consumers: {
+    positions: ConsumerCounters;
+    tracks: ConsumerCounters;
+    browser: ConsumerCounters;
+    listenerErrors: number;
+    flags: ConsumerFlags;
+  };
 }
 
 const POSITIONS = 'hub:positions';
@@ -120,6 +127,7 @@ export class HubEngine {
   private readonly consumerCounts: Record<HubConsumer, ConsumerCounters> = {
     positions: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
     tracks: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
+    browser: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
   };
 
   constructor(private readonly d: HubEngineDeps) {
@@ -277,6 +285,12 @@ export class HubEngine {
     await this.reconcileSafely();
   }
 
+  /** Drop one owner's watches, then reconcile once. Never rejects (the failure is in status().lastError). */
+  async unwatchMany(refs: readonly InstrumentRef[], owner: string): Promise<void> {
+    for (const r of refs) this.registry.unwatch(r, owner);
+    await this.reconcileSafely();
+  }
+
   recordConsumer(consumer: HubConsumer, outcome: HubOutcome, count = 1): void {
     if (!(count > 0)) return;
     const c = this.consumerCounts[consumer];
@@ -397,8 +411,9 @@ export class HubEngine {
       consumers: {
         positions: { ...this.consumerCounts.positions },
         tracks: { ...this.consumerCounts.tracks },
+        browser: { ...this.consumerCounts.browser },
         listenerErrors: this.listenerErrors,
-        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false },
+        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false, browser: false },
       },
     };
   }

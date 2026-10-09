@@ -71,6 +71,41 @@ describe('MarketHubService', () => {
   const enabled = (extra: Record<string, unknown> = {}) =>
     config({ 'hub.enabled': true, 'hub.ownerUserId': 'owner', 'hub.slotCap': 50, 'hub.mcxLateClose': '', ...extra });
 
+  it('hubFor(…, "browser") serves only the owner, only with HUB_SERVES_BROWSER on, and never a null user', () => {
+    const on = new MarketHubService(enabled({ 'hub.servesBrowser': true }) as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+    on.onModuleInit();
+    expect(on.hubFor('owner', 'browser')).not.toBeNull();
+    // Never another user's browser from the owner's session.
+    expect(on.hubFor('someone-else', 'browser')).toBeNull();
+    // A browser always has a user: null is a bug, and gets the legacy path.
+    expect(on.hubFor(null, 'browser')).toBeNull();
+    // The other consumers keep their own switches.
+    expect(on.hubFor('owner', 'positions')).toBeNull();
+    on.onModuleDestroy();
+
+    const off = new MarketHubService(enabled({ 'hub.pricesPositions': true }) as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+    off.onModuleInit();
+    expect(off.hubFor('owner', 'browser')).toBeNull();
+    off.onModuleDestroy();
+  });
+
+  it('the browser hub can unwatch, and its outcomes land in status().consumers.browser', async () => {
+    // A pin that settles: the default manager() never connects, so every reconcile would queue behind it.
+    const m = manager(jest.fn().mockResolvedValue(undefined));
+    const svc = new MarketHubService(enabled({ 'hub.servesBrowser': true }) as any, m as any, tracker as any, prisma as any, runner as any, instruments as any);
+    svc.onModuleInit();
+    const hub = svc.hubFor('owner', 'browser')!;
+    const ref = { exchange: 'NFO' as const, token: '35001', symbol: 'NIFTY26OCT25000CE' };
+    void hub.watch([ref], 4, 'browser:s1', 120_000);
+    expect(hub.price(ref, { maxAgeMs: 15_000 })).toEqual({ kind: 'unavailable', reason: 'never-priced' });
+    await expect(hub.unwatch([ref], 'browser:s1')).resolves.toBeUndefined();
+    expect(hub.price(ref, { maxAgeMs: 15_000 })).toEqual({ kind: 'unavailable', reason: 'not-watched' });
+    svc.record('browser', 'hub', 2);
+    expect(svc.status()?.consumers.browser.hub).toBe(2);
+    expect(svc.status()?.consumers.flags.browser).toBe(true);
+    svc.onModuleDestroy();
+  });
+
   it('hubFor serves only the owner (or system-wide null) and only for a consumer whose flag is on', () => {
     const svc = new MarketHubService(
       enabled({ 'hub.pricesPositions': true, 'hub.pricesTracks': false }) as any,
@@ -136,7 +171,7 @@ describe('MarketHubService', () => {
       instruments as any,
     );
     svc.onModuleInit();
-    expect(svc.status()?.consumers.flags).toEqual({ positions: true, tracks: false });
+    expect(svc.status()?.consumers.flags).toEqual({ positions: true, tracks: false, browser: false });
     svc.onModuleDestroy();
 
     const other = new MarketHubService(
@@ -148,7 +183,7 @@ describe('MarketHubService', () => {
       instruments as any,
     );
     other.onModuleInit();
-    expect(other.status()?.consumers.flags).toEqual({ positions: false, tracks: true });
+    expect(other.status()?.consumers.flags).toEqual({ positions: false, tracks: true, browser: false });
     other.onModuleDestroy();
   });
 

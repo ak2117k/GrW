@@ -22,6 +22,12 @@ import { isDerivative, resolveUnderlying } from './underlying';
 const POSITION_REFRESH_MS = 60_000;
 const CALENDAR_ALERT_MS = 24 * 60 * 60 * 1000;
 const MAX_UNDERLYING_CACHE = 1000;
+/** The config key behind each consumer switch. */
+const CONSUMER_FLAG: Record<HubConsumer, string> = {
+  positions: 'hub.pricesPositions',
+  tracks: 'hub.pricesTracks',
+  browser: 'hub.servesBrowser',
+};
 /** Job name in job_runs and /healthz/detail (health-detail.service.ts EXPECTED_JOBS). */
 export const CANDLE_FIXUP_JOB = 'hub-candle-fixup';
 /** Well above a full fix-up (3 Background-lane calls per instrument), well under the daily cadence. */
@@ -48,6 +54,8 @@ export function parseLateClose(raw: string | undefined): DateRange[] {
  * answered from it behind HUB_SERVES_CHARTS. M3: prices the owner's positions
  * and the system-wide strategy tracks for consumers behind HUB_PRICES_POSITIONS /
  * HUB_PRICES_TRACKS through the HUB_PRICE_SOURCE token (see hub-prices.ts).
+ * M4: feeds the owner's browser (the /ws gateway and the quote, depth, indices
+ * and watchlist endpoints) behind HUB_SERVES_BROWSER.
  * Start is fire-and-forget: boot must never wait on the broker.
  */
 @Injectable()
@@ -103,6 +111,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       consumerFlags: () => ({
         positions: this.consumerEnabled('positions'),
         tracks: this.consumerEnabled('tracks'),
+        browser: this.consumerEnabled('browser'),
       }),
     });
     this.engine = engine;
@@ -150,10 +159,15 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     return this.engine ? this.engine.unwatch(ref, owner) : Promise.resolve();
   }
 
-  /** See HubPriceSource.hubFor. Personal MVP: only the owner's hub exists. */
+  /**
+   * See HubPriceSource.hubFor. Personal MVP: only the owner's hub exists.
+   * `null` means the system-wide paper tracks; a browser always has a user, so
+   * 'browser' never serves null.
+   */
   hubFor(userId: string | null, consumer: HubConsumer): HubPrices | null {
     if (!this.engine || !this.ownerHub || !this.ownerUserId) return null;
     if (!this.consumerEnabled(consumer)) return null;
+    if (userId === null && consumer === 'browser') return null;
     if (userId !== null && userId !== this.ownerUserId) return null;
     return this.ownerHub;
   }
@@ -163,8 +177,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
   }
 
   private consumerEnabled(consumer: HubConsumer): boolean {
-    const key = consumer === 'positions' ? 'hub.pricesPositions' : 'hub.pricesTracks';
-    return this.config.get<boolean>(key) === true;
+    return this.config.get<boolean>(CONSUMER_FLAG[consumer]) === true;
   }
 
   servesCharts(): boolean {

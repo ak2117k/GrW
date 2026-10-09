@@ -6,6 +6,7 @@ import {
   type LastJudged,
   type TripwireResult,
 } from './tripwire.service';
+import type { TripwireFire } from '../tripwires/types';
 import {
   ContextPacketService,
   SPOT_SOURCE_CASH,
@@ -285,6 +286,40 @@ interface TrackerState {
    * cadence change; without it the fix trades a flapping cost for a sticking one.
    */
   oiEvaluatedKey: string | null;
+  /**
+   * Sensor fires that were never put in front of the agent: they fired while
+   * this position's judgement was already in flight (and were not part of it),
+   * or while the concurrency cap was full. Merged into the NEXT judgement this
+   * position gets — and they make it want one — so a fire is delayed, never lost.
+   * Written only by the sensor pass, which is also where judgements are dispatched.
+   */
+  carriedFires: TripwireFire[];
+  /**
+   * Epoch ms of the cycle `now` at which this position first wanted a judgement
+   * and was refused a slot; null when it is not waiting. The fairness tie-break
+   * after "last judged" — see {@link SentinelCycleService.startForUser}.
+   */
+  wantedSince: number | null;
+}
+
+/** A position the sensor pass decided to judge, waiting for the dispatch phase. */
+interface JudgeCandidate {
+  index: number;
+  entry: RosterEntry;
+  state: TrackerState;
+  tick: TickReading;
+  walls: { now: WallPair | null; prev: WallPair | null };
+  wallsAt: string | null;
+  greenFloorArmedLatched: boolean;
+  decision: TripwireResult;
+  /** When the agent last judged it (its latest verdict row), or null if never. */
+  lastJudgedAt: number | null;
+}
+
+/** One judgement in flight: its promise, and the fire names it was asked about. */
+interface InFlight {
+  job: Promise<JudgeOutcome>;
+  fires: Set<string>;
 }
 
 /**
@@ -326,7 +361,7 @@ export class SentinelCycleService {
    * and `oiEvaluatedKey`, and merely READS `agentRetryAt`. The two never write the
    * same field, and one-in-flight-per-position means two jobs never do either.
    */
-  private readonly judging = new Map<string, Promise<JudgeOutcome>>();
+  private readonly judging = new Map<string, InFlight>();
 
   /** When the concurrency cap was last reported, so a full cap logs once a minute, not per tick. */
   private capReportedAt = 0;
@@ -370,8 +405,9 @@ export class SentinelCycleService {
     const entries = await this.roster.build(userId);
     const report: CycleReport = { evaluated: 0, skipped: 0, failed: 0, unwatched: 0 };
     const jobs: Array<Promise<JudgeOutcome>> = [];
+    const candidates: JudgeCandidate[] = [];
 
-    for (const entry of entries) {
+    for (const [index, entry] of entries.entries()) {
       if (!entry.watched) {
         report.unwatched += 1;
         this.logger.warn(`UNWATCHED: ${entry.symbol} (${entry.reason})`);
@@ -382,10 +418,8 @@ export class SentinelCycleService {
       // runner's per-sensor isolation is the inner layer of this; the whole of a
       // position's work — tick, walls, packet, agent, write — is the outer one.
       try {
-        // Boxed: an async function that RETURNS a promise adopts it, so returning
-        // the job bare would make this await the judgement — the very bug.
-        const dispatched = await this.evaluateOne(entry, now, report);
-        if (dispatched) jobs.push(dispatched.job);
+        const candidate = await this.evaluateOne(entry, index, now, report);
+        if (candidate) candidates.push(candidate);
       } catch (err) {
         report.failed += 1;
         const message = err instanceof Error ? err.message : String(err);
@@ -402,6 +436,32 @@ export class SentinelCycleService {
       new Set([userId, ...entries.map((e) => e.userId)]),
       new Set(entries.map((e) => e.trackerId)),
     );
+
+    // DISPATCH, LONGEST-WAITING FIRST. Slots are scarce (JUDGE_CONCURRENCY) and
+    // skipped rather than queued, so whoever is offered a free slot first wins
+    // it. Offered in roster order, the first rows would take every slot freed
+    // and a later position could wait indefinitely. So: never judged first,
+    // then the oldest last verdict, then whoever has been refused a slot the
+    // longest; roster order only breaks a full tie.
+    candidates.sort(
+      (a, b) =>
+        (a.lastJudgedAt ?? -Infinity) - (b.lastJudgedAt ?? -Infinity) ||
+        (a.state.wantedSince ?? now.getTime()) - (b.state.wantedSince ?? now.getTime()) ||
+        a.index - b.index,
+    );
+    for (const c of candidates) {
+      if (this.judging.size >= JUDGE_CONCURRENCY) {
+        // Skipped, not queued: see JUDGE_CONCURRENCY. `oiEvaluatedKey` is NOT
+        // recorded — the agent was not woken, so an unseen wall shift can still
+        // wake it — and the fires are carried so the next judgement includes them.
+        report.skipped += 1;
+        c.state.carriedFires = mergeFires(c.state.carriedFires, c.decision.fires);
+        c.state.wantedSince ??= now.getTime();
+        this.reportCapFull(c.entry);
+        continue;
+      }
+      jobs.push(this.dispatch(c, now));
+    }
 
     const sensed: CycleReport = { ...report };
     const settled = Promise.all(jobs).then((outcomes) => {
@@ -429,9 +489,10 @@ export class SentinelCycleService {
    */
   private async evaluateOne(
     entry: RosterEntry,
+    index: number,
     now: Date,
     report: CycleReport,
-  ): Promise<{ job: Promise<JudgeOutcome> } | null> {
+  ): Promise<JudgeCandidate | null> {
     const raw = await this.ticks.tickFor(entry.trackerId);
     const tick = withCashUnderlying(raw);
     // Identity, not value: `withCashUnderlying` returns the same object when it
@@ -491,7 +552,10 @@ export class SentinelCycleService {
     );
 
     const state = this.stateFor(entry);
-    const decision = suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey);
+    const decision = withCarriedFires(
+      suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey),
+      state.carriedFires,
+    );
 
     if (!decision.shouldEvaluate) {
       report.skipped += 1;
@@ -515,34 +579,60 @@ export class SentinelCycleService {
     // position already; a second beside it would judge an overlapping packet,
     // write a second verdict row and race the first for the backoff counters.
     // Its verdict lands when it lands, and the next tick re-reads it as `last`.
-    if (this.judging.has(entry.trackerId)) {
+    // A fire the running judgement was NOT asked about is carried, not dropped.
+    const inFlight = this.judging.get(entry.trackerId);
+    if (inFlight) {
       report.skipped += 1;
+      state.carriedFires = mergeFires(
+        state.carriedFires,
+        decision.fires.filter((f) => !inFlight.fires.has(f.name)),
+      );
       return null;
     }
 
-    // THE GLOBAL CAP. Skipped, not queued: see JUDGE_CONCURRENCY. Note that
-    // `oiEvaluatedKey` is NOT recorded on this path — the agent was not woken, so
-    // a wall shift it has not seen must still be able to wake it next tick.
-    if (this.judging.size >= JUDGE_CONCURRENCY) {
-      report.skipped += 1;
-      this.reportCapFull(entry);
-      return null;
-    }
+    return {
+      index,
+      entry,
+      state,
+      tick,
+      walls,
+      wallsAt: capture.at,
+      greenFloorArmedLatched,
+      decision,
+      lastJudgedAt: last ? new Date(last.createdAt).getTime() : null,
+    };
+  }
 
+  /** Start one candidate's judgement detached, and register it as in flight. */
+  private dispatch(c: JudgeCandidate, now: Date): Promise<JudgeOutcome> {
+    const { entry, state } = c;
     // Committed to looking at this wall pair. Recorded BEFORE the work rather
     // than after it, so a transient packet or agent failure does not re-wake on
     // the identical unchanged transition — the backoff owns retries, and the
     // heartbeat still guarantees a look within HEARTBEAT_INTERVAL_MS.
-    state.oiEvaluatedKey = wallKey(walls);
+    state.oiEvaluatedKey = wallKey(c.walls);
+    // Whatever was carried is in `c.decision.fires` now; it has been delivered.
+    state.carriedFires = [];
+    state.wantedSince = null;
 
-    const job = this.judgeDetached(entry, state, tick, walls, capture.at, greenFloorArmedLatched, decision, now);
-    this.judging.set(entry.trackerId, job);
+    const job = this.judgeDetached(
+      entry,
+      state,
+      c.tick,
+      c.walls,
+      c.wallsAt,
+      c.greenFloorArmedLatched,
+      c.decision,
+      now,
+    );
+    const inFlight: InFlight = { job, fires: new Set(c.decision.fires.map((f) => f.name)) };
+    this.judging.set(entry.trackerId, inFlight);
     // `job` never rejects (see judgeDetached), so this cannot leave an
     // unhandled rejection behind; the entry is freed only by ITS OWN job.
     void job.then(() => {
-      if (this.judging.get(entry.trackerId) === job) this.judging.delete(entry.trackerId);
+      if (this.judging.get(entry.trackerId) === inFlight) this.judging.delete(entry.trackerId);
     });
-    return { job };
+    return job;
   }
 
   /**
@@ -565,8 +655,10 @@ export class SentinelCycleService {
     decision: TripwireResult,
     now: Date,
   ): Promise<JudgeOutcome> {
+    // The wall clock at dispatch, so a failure can be dated by when it HAPPENED.
+    const dispatchedWall = Date.now();
     try {
-      await this.judgeAndRecord(entry, state, tick, walls, wallsAt, greenFloorArmedLatched, decision, now);
+      await this.judgeAndRecord(entry, state, tick, walls, wallsAt, greenFloorArmedLatched, decision, now, dispatchedWall);
       return 'evaluated';
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -584,6 +676,7 @@ export class SentinelCycleService {
     greenFloorArmedLatched: boolean,
     decision: TripwireResult,
     now: Date,
+    dispatchedWall: number,
   ): Promise<void> {
     const thesis = await this.thesisFor(entry, state, tick, now);
 
@@ -609,9 +702,16 @@ export class SentinelCycleService {
     } catch (err) {
       state.agentFailures += 1;
       const wait = agentBackoffMs(state.agentFailures);
-      // From the DISPATCHING tick's `now`, exactly as when this ran inline (the
-      // cycle's `now` was its start, not the judge's return).
-      state.agentRetryAt = now.getTime() + wait;
+      // FROM THE FAILURE, NOT THE DISPATCH. A judge call can take minutes (the
+      // CLI's timeout is 180 s per attempt); measured from dispatch, a 30 s or 1 m
+      // backoff has already elapsed when the failure lands, so a broken CLI or an
+      // expired token turns into back-to-back multi-minute calls on every
+      // position, forever. The failure instant is the dispatching tick's `now`
+      // advanced by the wall-clock time the call took — kept on the cycle's clock
+      // so it compares with the `now` later ticks gate on — in whole seconds, which
+      // is all a 30 s tick can resolve.
+      const tookMs = Math.max(0, Math.floor((Date.now() - dispatchedWall) / 1000) * 1000);
+      state.agentRetryAt = now.getTime() + tookMs + wait;
       // Once per window, here — not once per suppressed tick at the gate above.
       this.logger.warn(
         `sentinel agent failed on ${entry.symbol} (${entry.trackerId}), ` +
@@ -754,6 +854,8 @@ export class SentinelCycleService {
         agentRetryAt: 0,
         oi: null,
         oiEvaluatedKey: null,
+        carriedFires: [],
+        wantedSince: null,
       };
       this.state.set(entry.trackerId, state);
     }
@@ -839,6 +941,23 @@ export class SentinelCycleService {
 
 /** How one detached judgement ended, as the report bucket it lands in. */
 type JudgeOutcome = 'evaluated' | 'failed';
+
+/** `a` plus whichever of `b` it does not already name, first occurrence kept. */
+function mergeFires(a: TripwireFire[], b: TripwireFire[]): TripwireFire[] {
+  if (b.length === 0) return a;
+  const seen = new Set(a.map((f) => f.name));
+  return [...a, ...b.filter((f) => !seen.has(f.name) && (seen.add(f.name), true))];
+}
+
+/**
+ * Fold fires carried from earlier ticks (see `TrackerState.carriedFires`) into
+ * this tick's decision. A carried fire is a fire the agent has not yet seen, so
+ * it wakes the agent at the FIRE tier exactly as a fresh one would.
+ */
+export function withCarriedFires(decision: TripwireResult, carried: TripwireFire[]): TripwireResult {
+  if (carried.length === 0) return decision;
+  return { ...decision, fires: mergeFires(decision.fires, carried), shouldEvaluate: true, trigger: 'FIRE' };
+}
 
 /** The sensor whose fire depends only on the wall pair, and so can repeat. */
 export const OI_WALL_SHIFT = 'oi-wall-shift';

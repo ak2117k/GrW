@@ -1767,6 +1767,8 @@ describe('SentinelCycleService — judgements are detached from the per-tick pas
 
     expect(JUDGE_CONCURRENCY).toBe(2);
     expect(pass.pending).toBe(2);
+    // Dispatched jobs reach `judge` after their thesis read; let them get there.
+    await new Promise((r) => setImmediate(r));
     expect(t.judge).toHaveBeenCalledTimes(2);
     expect(pass.report.skipped).toBe(1);
     // The skipped position still had its tick and sensors.
@@ -1817,5 +1819,124 @@ describe('SentinelCycleService — judgements are detached from the per-tick pas
 
     slow.resolve(HOLD);
     await first.settled;
+  });
+});
+
+describe('SentinelCycleService — fix round: failure-time backoff, fair slots, carried fires', () => {
+  const HOLD = {
+    verdict: 'HOLD',
+    confidence: 'high',
+    thesisStatus: 'INTACT',
+    recoveryAvailable: true,
+    reason: 'ok',
+    evidence: ['money.netPnl'],
+    invalidationPoint: 'x',
+    reviewIn: 300,
+  };
+  function held() {
+    let resolve!: (v: typeof HOLD) => void;
+    let reject!: (e: Error) => void;
+    const promise = new Promise<typeof HOLD>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+  const T0 = new Date('2026-10-09T16:24:30.000Z');
+  const at = (sec: number) => new Date(T0.getTime() + sec * 1000);
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('measures the backoff from when the judge FAILED, not from when it was dispatched', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    let wall = 5_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => wall);
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const slow = held();
+    t.judge.mockReturnValueOnce(slow.promise);
+
+    const pass = await t.svc.startForUser(USER, at(0));
+    // The CLI call runs three minutes, then fails.
+    wall += 180_000;
+    slow.reject(new Error('claude CLI timed out'));
+    await pass.settled;
+
+    // Dispatch-relative backoff would have reopened at 0:30 — straight back into
+    // another three-minute call. Failure-relative: closed until 3:00 + 30 s.
+    await t.svc.runForUser(USER, at(30));
+    await t.svc.runForUser(USER, at(180 + 29));
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    await t.svc.runForUser(USER, at(180 + 30));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives a freed slot to the position that has waited longest, not to roster order', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1'), watched('t2'), watched('t3')]);
+    const judgedAt = new Map<string, Date>();
+    t.recentForTracker.mockImplementation(async (id: string) =>
+      judgedAt.has(id) ? [verdictRow({ createdAt: judgedAt.get(id) })] : [],
+    );
+    t.record.mockImplementation(async (row: { trackerId: string }) => {
+      judgedAt.set(row.trackerId, at(0));
+      return {};
+    });
+    t.buildPacket.mockImplementation((entry: RosterEntry, tk: { greenFloorArmedLatched: boolean }) =>
+      Promise.resolve({ _id: entry.trackerId, position: {}, money: { netPnl: 1, greenFloorPrice: 1, greenFloorArmed: tk.greenFloorArmedLatched } }),
+    );
+    const slowT1 = held();
+    t.judge.mockImplementation((packet: { _id: string }) =>
+      packet._id === 't1' ? slowT1.promise : Promise.resolve(HOLD),
+    );
+
+    // Tick 0: all three due, cap 2 — t1 and t2 go, t3 waits.
+    const first = await t.svc.startForUser(USER, at(0));
+    expect(first.pending).toBe(2);
+    await flush();
+    expect(judgedAt.has('t2')).toBe(true);
+
+    // Tick 1: t1 still out, ONE slot free. t2 was just judged; t3 never was.
+    await t.svc.startForUser(USER, at(30));
+    await flush();
+    const ids = t.judge.mock.calls.map((c) => (c[0] as { _id: string })._id);
+    expect(ids).toEqual(['t1', 't2', 't3']);
+
+    slowT1.resolve(HOLD);
+    await first.settled;
+    warn.mockRestore();
+  });
+
+  it('carries a fire dropped while the position’s judge was in flight into its next judgement', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const slow = held();
+    t.judge.mockReturnValueOnce(slow.promise);
+    const A = { name: 'level-break', detail: 'lost 100' };
+    const B = { name: 'news-hit', detail: '2 fresh headlines' };
+    t.evaluate
+      .mockReturnValueOnce({ fires: [A], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' })
+      .mockReturnValueOnce({ fires: [A, B], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' })
+      .mockReturnValue({ fires: [], heartbeat: false, shouldEvaluate: false, trigger: null });
+
+    const first = await t.svc.startForUser(USER, at(0));
+    // B fires while A's judgement is still out: dropped for now, not lost.
+    await t.svc.startForUser(USER, at(30));
+    slow.resolve(HOLD);
+    await first.settled;
+
+    // Sensors are quiet now, but B was never judged — so it is judged next.
+    const report = await t.svc.runForUser(USER, at(60));
+    expect(report.evaluated).toBe(1);
+    expect(t.judge).toHaveBeenCalledTimes(2);
+    expect(t.buildPacket.mock.calls[1][3]).toEqual([B]);
+    expect(t.record.mock.calls[1][0].triggeredBy).toEqual(['news-hit']);
+
+    // Once judged, it is not carried again.
+    await t.svc.runForUser(USER, at(90));
+    expect(t.judge).toHaveBeenCalledTimes(2);
   });
 });

@@ -232,6 +232,23 @@ describe('SentinelChartContextAdapter', () => {
       expect(t.analyze.mock.calls[0][0]).toBe('472789');
     });
 
+    it('uses the instrument the tick source resolved, and keys its cache by that contract', async () => {
+      const t = make();
+      const oct = { exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' };
+      const nov = { exchange: 'MCX', token: '488001', symbol: 'CRUDEOIL18NOV26FUT' };
+
+      await t.svc.structureFor('CRUDEOIL', 100.5, 'u1', nov);
+      await t.svc.levelsFor('CRUDEOIL', 'u1', nov); // cache hit: same contract
+      await t.svc.structureFor('CRUDEOIL', 100.5, 'u1', oct); // a different month is a different book
+
+      expect(t.getInstrumentBySymbol).not.toHaveBeenCalled();
+      expect(t.getNearestFuture).not.toHaveBeenCalled();
+      expect(t.analyze.mock.calls.map((c) => c.slice(0, 3))).toEqual([
+        ['488001', 'MCX', 'CRUDEOIL18NOV26FUT'],
+        ['472789', 'MCX', 'CRUDEOIL19OCT26FUT'],
+      ]);
+    });
+
     it('never reaches for a future when the NSE ladder matches', async () => {
       const t = make();
       await t.svc.structureFor('SUZLON-EQ', 100.5);

@@ -222,6 +222,13 @@ export interface TickSnapshot {
    * rather than a failure to look.
    */
   structureSymbol: string | null;
+  /**
+   * The exact contract whose candles the level book must be built from, when a
+   * name alone is ambiguous — today only an MCX underlying, where `CRUDEOIL`
+   * names a future per month and a far-month option's book is ITS month's.
+   * Absent/null for every NSE/BSE underlying, which resolve by name as before.
+   */
+  structureInstrument?: StructureInstrument | null;
   entryPrice: number;
   qty: number;
   ltp: number;
@@ -495,6 +502,13 @@ export type SourcedValue = {
  * whatever comes back is copied verbatim into a `jsonb` column, so a source that
  * cannot produce JSON cannot be an evidence source.
  */
+/** A specific contract to chart: see `TickSnapshot.structureInstrument`. */
+export interface StructureInstrument {
+  exchange: string;
+  token: string;
+  symbol: string;
+}
+
 export interface ChartContextShim {
   /**
    * `userId` is the OWNING position's tenant, and it is not optional in
@@ -503,7 +517,7 @@ export interface ChartContextShim {
    * return null for every symbol. Typed optional only so a test double may omit
    * it. See `SentinelChartContextAdapter`'s class note.
    */
-  levelsFor(symbol: string, userId?: string): Promise<SourcedValue | null>;
+  levelsFor(symbol: string, userId?: string, instrument?: StructureInstrument): Promise<SourcedValue | null>;
 }
 
 export interface NewsShim {
@@ -562,11 +576,15 @@ export class ContextPacketService {
      * question, carried through rather than recomputed. See its doc comment.
      */
     const structureSymbol = tick.structureSymbol;
+    const structureInstrument = tick.structureInstrument ?? null;
 
     const [levelBook, headlines] = structureSymbol
       ? await Promise.all([
           this.safely(
-            () => this.chartContext.levelsFor(structureSymbol, entry.userId),
+            () =>
+              structureInstrument
+                ? this.chartContext.levelsFor(structureSymbol, entry.userId, structureInstrument)
+                : this.chartContext.levelsFor(structureSymbol, entry.userId),
             'chart-context.service',
             at,
             'level book unavailable for this symbol',

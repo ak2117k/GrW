@@ -103,8 +103,20 @@ describe('resolveUnderlying', () => {
     );
     expect(r).toEqual({ name: 'CRUDEOIL', ref: { exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' } });
     // The option's own master NAME, never the mini (CRUDEOILM) and never a cash row.
-    expect(future).toHaveBeenCalledWith('CRUDEOIL', 'MCX');
+    expect(future).toHaveBeenCalledWith('CRUDEOIL', 'MCX', null);
     expect(l.cash).not.toHaveBeenCalled();
+  });
+
+  it('hands the future lookup the OPTION’S OWN expiry, so a far-month option can get its month', async () => {
+    const expiry = new Date(2026, 10, 16);
+    const l = {
+      contract: jest.fn(async () => ({ name: 'CRUDEOIL', expiry })),
+      cash: jest.fn(async () => null),
+    };
+    const future = jest.fn(async () => ({ token: '488001', symbol: 'CRUDEOIL18NOV26FUT' }));
+    const r = await resolveUnderlying({ exchange: 'MCX', token: '6001', symbol: 'CRUDEOIL16NOV269000CE' }, { ...l, future });
+    expect(future).toHaveBeenCalledWith('CRUDEOIL', 'MCX', expiry);
+    expect(r.ref).toEqual({ exchange: 'MCX', token: '488001', symbol: 'CRUDEOIL18NOV26FUT' });
   });
 
   it('keeps the MCX name with no ref when no future matches', async () => {

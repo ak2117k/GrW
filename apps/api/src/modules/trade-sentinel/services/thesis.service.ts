@@ -17,6 +17,7 @@ import {
   present,
   type Block,
   type ChartContextShim,
+  type StructureInstrument,
   type StoredThesis,
   type TickSnapshot,
 } from './context-packet.service';
@@ -188,7 +189,7 @@ export class ThesisService {
         // is what every later "has it turned?" judgement is measured against,
         // so inferring it from a structure block that silently never loaded is
         // the worst place in the module for this to go wrong.
-        structure: await this.structureFor(tick.structureSymbol),
+        structure: await this.structureFor(tick.structureSymbol, tick.structureInstrument ?? null),
       };
 
       const response = await this.client.messages.create({
@@ -255,7 +256,10 @@ export class ThesisService {
    * reasons fluently from the prices alone and sounds exactly as confident.
    * Same discipline as the context packet.
    */
-  private async structureFor(symbol: string | null): Promise<Block<unknown>> {
+  private async structureFor(
+    symbol: string | null,
+    instrument: StructureInstrument | null = null,
+  ): Promise<Block<unknown>> {
     // Null means the underlying was never resolved, so there is nothing to ask.
     // Same no-fallback rule as everywhere else: calling with the tradingsymbol
     // would miss and report the miss as "no level book for this symbol", which
@@ -267,7 +271,11 @@ export class ThesisService {
       );
     }
     try {
-      const sourced = await this.chartContext.levelsFor(symbol);
+      // The MCX contract when the tick source pinned one (see
+      // `TickSnapshot.structureInstrument`); otherwise by name, exactly as before.
+      const sourced = instrument
+        ? await this.chartContext.levelsFor(symbol, undefined, instrument)
+        : await this.chartContext.levelsFor(symbol);
       if (!sourced || sourced.value === null || sourced.value === undefined) {
         return absent('no level book for this symbol — the structure at entry cannot be read');
       }

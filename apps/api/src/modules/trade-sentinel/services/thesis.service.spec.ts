@@ -302,6 +302,14 @@ describe('ThesisService', () => {
 
       expect(levelsFor).toHaveBeenCalledWith('NIFTY');
       expect(levelsFor).not.toHaveBeenCalledWith('NIFTY28AUG2524000CE');
+      // An MCX option carries its own month's future; the thesis must read that book.
+      const instrument = { exchange: 'MCX', token: '488001', symbol: 'CRUDEOIL18NOV26FUT' };
+      levelsFor.mockClear();
+      await svc.ensureFor(
+        { ...entry, trackerId: 'mcx-1', symbol: 'CRUDEOIL16NOV269000CE' },
+        { ...tick, structureSymbol: 'CRUDEOIL', structureInstrument: instrument },
+      );
+      expect(levelsFor).toHaveBeenCalledWith('CRUDEOIL', undefined, instrument);
       // The model is still told which CONTRACT it is reading — only the
       // structure lookup uses the underlying.
       const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);

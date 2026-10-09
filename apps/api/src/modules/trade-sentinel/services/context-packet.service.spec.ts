@@ -801,6 +801,16 @@ describe('ContextPacketService — the evidence sources are keyed by the underly
     expect(t.recentFor).not.toHaveBeenCalledWith(OPTION_TRADINGSYMBOL);
   });
 
+  it('passes the tick source’s resolved MCX future to the level book, so a far-month option gets ITS month', async () => {
+    const t = make();
+    const instrument = { exchange: 'MCX', token: '488001', symbol: 'CRUDEOIL18NOV26FUT' };
+
+    await t.svc.build(entryFor('CRUDEOIL16NOV269000CE'), tickFor('CRUDEOIL', { structureInstrument: instrument }), null, []);
+
+    expect(t.levelsFor).toHaveBeenCalledWith('CRUDEOIL', 'u1', instrument);
+    expect(t.recentFor).toHaveBeenCalledWith('CRUDEOIL');
+  });
+
   it('still reports the position under the BROKER symbol, so the verdict stays joinable', async () => {
     const t = make();
 

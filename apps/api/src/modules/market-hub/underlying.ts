@@ -33,16 +33,21 @@ export function isDerivative(c: { exchange: string; symbol: string }): boolean {
 /** The two instrument-master reads the resolver needs. */
 export interface UnderlyingLookup {
   /** The contract's own master row, filtered by exchange. */
-  contract(exchange: string, token: string): Promise<{ name: string | null } | null>;
+  contract(exchange: string, token: string): Promise<{ name: string | null; expiry?: Date | null } | null>;
   /** A cash instrument by exact symbol on one exchange. */
   cash(symbol: string, exchange: string): Promise<{ token: string; symbol?: string | null } | null>;
   /**
-   * Optional: the nearest-expiry future of exactly this master name on this
-   * exchange. When given, an MCX contract resolves to that future (a commodity
-   * option has no cash underlying; it is priced off the future). When omitted,
+   * Optional: the future of exactly this master name on this exchange that
+   * underlies a contract expiring `contractExpiry` (null when unknown). When
+   * given, an MCX contract resolves to that future (a commodity option is an
+   * option ON that month's future; it has no cash underlying). When omitted,
    * MCX keeps resolving to no ref — the hub's behaviour before this existed.
    */
-  future?(name: string, exchange: string): Promise<{ token: string; symbol?: string | null } | null>;
+  future?(
+    name: string,
+    exchange: string,
+    contractExpiry: Date | null,
+  ): Promise<{ token: string; symbol?: string | null } | null>;
 }
 
 export interface ResolvedUnderlying {
@@ -70,7 +75,7 @@ export async function resolveUnderlying(
   if (!name) return { name: null, ref: null };
   if (exchange === 'MCX') {
     if (!lookup.future) return { name, ref: null };
-    const fut = await lookup.future(name, 'MCX');
+    const fut = await lookup.future(name, 'MCX', row?.expiry ?? null);
     if (!fut?.token) return { name, ref: null };
     return { name, ref: { exchange: 'MCX', token: fut.token, symbol: fut.symbol || name } };
   }

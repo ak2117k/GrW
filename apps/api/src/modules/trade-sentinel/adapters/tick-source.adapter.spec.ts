@@ -738,6 +738,11 @@ describe('SentinelTickSource', () => {
     });
 
     describe('MCX commodity options (underlying = nearest future on MCX)', () => {
+      /** Host-local midnight N days from today, like the master stores expiries — relative so the test never ages. */
+      const daysAhead = (n: number) => {
+        const d = new Date();
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+      };
       const crudeOption = () =>
         row({ symbol: 'CRUDEOIL15OCT268850PE', exchange: 'MCX', token: '5001', lastLtp: 210 });
 
@@ -757,8 +762,10 @@ describe('SentinelTickSource', () => {
         expect(tick.underlyingLtp).toBe(8875);
         // The level book and news are keyed by the underlying NAME; the chart
         // adapter maps it to the same future.
-        expect(t.structureFor).toHaveBeenCalledWith('CRUDEOIL', 8875, 'u1');
+        const future = { exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' };
+        expect(t.structureFor).toHaveBeenCalledWith('CRUDEOIL', 8875, 'u1', future);
         expect(tick.structureSymbol).toBe('CRUDEOIL');
+        expect(tick.structureInstrument).toEqual(future);
         // The production warning is gone.
         expect(warn.mock.calls.filter((c) => String(c[0]).includes('CRUDEOIL15OCT268850PE'))).toHaveLength(0);
       });
@@ -776,14 +783,55 @@ describe('SentinelTickSource', () => {
         expect(t.fetchQuote).not.toHaveBeenCalled();
       });
 
+      it('gives a FAR-MONTH option the future of its own month, not the near month', async () => {
+        const t = make();
+        const optionExpiry = daysAhead(37); // a far month
+        t.findUnique.mockResolvedValue(
+          row({ symbol: 'CRUDEOIL16NOV269000CE', exchange: 'MCX', token: '6001', lastLtp: 150 }),
+        );
+        t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: optionExpiry });
+        const oct = { token: '472789', symbol: 'CRUDEOIL19OCT26FUT', exchange: 'MCX', expiry: daysAhead(9) };
+        const nov = { token: '488001', symbol: 'CRUDEOIL18NOV26FUT', exchange: 'MCX', expiry: daysAhead(39) };
+        t.getNearestFuture.mockImplementation(async (_n: string, _e: string, cutoff: Date) =>
+          [oct, nov].find((f) => f.expiry >= cutoff) ?? null,
+        );
+        t.fetchQuote.mockResolvedValue({ ltp: 9010 });
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(t.getNearestFuture.mock.calls[0][2].getTime()).toBe(optionExpiry.getTime());
+        expect(t.fetchQuote).toHaveBeenCalledWith('u1', '488001', 'MCX');
+        expect(tick.structureInstrument).toEqual({ exchange: 'MCX', token: '488001', symbol: 'CRUDEOIL18NOV26FUT' });
+      });
+
+      it('falls back to the nearest future on or after today when none expires after the option', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(
+          row({ symbol: 'CRUDEOIL16NOV269000CE', exchange: 'MCX', token: '6001', lastLtp: 150 }),
+        );
+        t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: daysAhead(37) });
+        const oct = { token: '472789', symbol: 'CRUDEOIL19OCT26FUT', exchange: 'MCX', expiry: daysAhead(9) };
+        t.getNearestFuture.mockImplementation(async (_n: string, _e: string, cutoff: Date) =>
+          oct.expiry >= cutoff ? oct : null,
+        );
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(t.getNearestFuture).toHaveBeenCalledTimes(2);
+        expect(tick.structureInstrument).toEqual({ exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' });
+      });
+
       it('never asks for a nearest future on an NFO option', async () => {
         const t = make();
         t.findUnique.mockResolvedValue(option());
         t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
 
-        await t.svc.tickFor('t1');
+        const tick = await t.svc.tickFor('t1');
 
         expect(t.getNearestFuture).not.toHaveBeenCalled();
+        // NFO: no instrument hint, and the level book is asked exactly as before.
+        expect(tick.structureInstrument ?? null).toBeNull();
+        expect(t.structureFor.mock.calls[0]).toHaveLength(3);
       });
 
       it('still warns once when no MCX future is found', async () => {

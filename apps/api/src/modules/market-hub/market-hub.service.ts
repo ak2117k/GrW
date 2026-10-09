@@ -4,6 +4,7 @@ import { Cron } from '@nestjs/schedule';
 import { INDICES } from '@td/shared/constants';
 import { JobRunnerService } from '../../common/job-registry';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { MarketDataRepository } from '../market-data/repositories/market-data.repository';
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { TradeTrackerService } from '../trade-tracker/services/trade-tracker.service';
@@ -14,12 +15,13 @@ import { ManagerHubBroker } from './hub-broker';
 import type { HubCandleSource } from './hub-candle-source';
 import { HubEngine, type HubStatus } from './hub-engine';
 import { engineHubPrices, type HubConsumer, type HubOutcome, type HubPriceSource, type HubPrices } from './hub-prices';
-import { LANE, refKey, type HubExchange, type InstrumentRef, type PriceResult, type Priority } from './hub.types';
+import { LANE, isHubExchange, refKey, type HubExchange, type InstrumentRef, type PriceResult, type Priority } from './hub.types';
 import { SessionClock, type DateRange } from './session-clock';
+import { isDerivative, resolveUnderlying } from './underlying';
 
 const POSITION_REFRESH_MS = 60_000;
 const CALENDAR_ALERT_MS = 24 * 60 * 60 * 1000;
-const HUB_EXCHANGES = new Set<HubExchange>(['NSE', 'BSE', 'NFO', 'BFO', 'MCX']);
+const MAX_UNDERLYING_CACHE = 1000;
 /** Job name in job_runs and /healthz/detail (health-detail.service.ts EXPECTED_JOBS). */
 export const CANDLE_FIXUP_JOB = 'hub-candle-fixup';
 /** Well above a full fix-up (3 Background-lane calls per instrument), well under the daily cadence. */
@@ -57,6 +59,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
   private timers: ReturnType<typeof setInterval>[] = [];
   private ownerUserId: string | null = null;
   private ownerHub: HubPrices | null = null;
+  private readonly underlyings = new Map<string, InstrumentRef | null>();
 
   constructor(
     private readonly config: ConfigService,
@@ -64,6 +67,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     private readonly tracker: TradeTrackerService,
     private readonly prisma: PrismaService,
     private readonly jobs: JobRunnerService,
+    private readonly instruments: MarketDataRepository,
   ) {
     this.session = new SessionClock({
       holidays: MARKET_HOLIDAYS,
@@ -192,20 +196,48 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     }
   }
 
+  /**
+   * The owner's open positions at priority 0 with their real tradingsymbols,
+   * and each derivative's underlying at priority 1 (spec §5.1). A failed
+   * underlying lookup never drops the position itself.
+   */
   private async refreshPositions(owner: string): Promise<void> {
     if (!this.engine) return;
     try {
-      const byUser = await this.tracker.openTrackerRefsByUser();
-      const refs = (byUser.get(owner) ?? [])
-        .filter((t) => HUB_EXCHANGES.has(t.exchange.toUpperCase() as HubExchange))
-        .map((t) => ({
-          exchange: t.exchange.toUpperCase() as HubExchange,
-          token: t.token,
-          symbol: t.token,
-        }));
-      await this.engine.setPositions(refs);
+      const byUser = await this.tracker.openPositionRefsByUser();
+      const refs: InstrumentRef[] = [];
+      for (const p of byUser.get(owner) ?? []) {
+        const exchange = p.exchange.toUpperCase();
+        if (!isHubExchange(exchange)) continue;
+        refs.push({ exchange, token: p.token, symbol: p.symbol });
+      }
+      const underlyings: InstrumentRef[] = [];
+      for (const r of refs) {
+        if (!isDerivative(r)) continue;
+        const u = await this.underlyingOf(r);
+        if (u) underlyings.push(u);
+      }
+      await this.engine.setPositions(refs, underlyings);
     } catch (err) {
       this.logger.warn(`Market hub position refresh failed: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
+  /** Memoised per contract (the master does not change intraday); a failure is not cached. */
+  private async underlyingOf(ref: InstrumentRef): Promise<InstrumentRef | null> {
+    const key = refKey(ref);
+    if (this.underlyings.has(key)) return this.underlyings.get(key) ?? null;
+    try {
+      const { ref: underlying } = await resolveUnderlying(ref, {
+        contract: (exchange, token) => this.instruments.getInstrumentByToken(token, exchange),
+        cash: (symbol, exchange) => this.instruments.getInstrumentBySymbol(symbol, exchange),
+      });
+      if (this.underlyings.size >= MAX_UNDERLYING_CACHE) this.underlyings.clear();
+      this.underlyings.set(key, underlying);
+      return underlying;
+    } catch (err) {
+      this.logger.warn(`Underlying lookup failed for ${ref.symbol} (${key}): ${(err as Error)?.message ?? err}`);
+      return null;
     }
   }
 

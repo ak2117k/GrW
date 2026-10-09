@@ -4,7 +4,7 @@ import { SessionClock } from './session-clock';
 import { FakeBroker } from './testing/fake-broker';
 import { MemoryCandleRepo } from './testing/memory-candle-repo';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
-import type { InstrumentRef } from './hub.types';
+import { refKey, type InstrumentRef } from './hub.types';
 
 const IST = (local: string) => new Date(new Date(`${local}Z`).getTime() - 5.5 * 3600_000).getTime();
 const NIFTY: InstrumentRef = { exchange: 'NSE', token: '99926000', symbol: 'NIFTY' };
@@ -285,6 +285,26 @@ describe('HubEngine', () => {
     broker.emitState('live');
     broker.emitTick(FakeBroker.tick('35001', 251, 'NFO'));
     expect(e.status().candles).toMatchObject({ building: 1 });
+    e.stop();
+  });
+
+  it('watches underlyings at priority 1 under the positions owner; a held contract stays priority 0', async () => {
+    const { e, broker } = engine();
+    await e.start();
+    const RELIANCE: InstrumentRef = { exchange: 'NSE', token: '2885', symbol: 'RELIANCE-EQ' };
+    const RELFUT: InstrumentRef = { exchange: 'NFO', token: '57001', symbol: 'RELIANCE28OCT26FUT' };
+    await e.setPositions([POS, RELFUT, RELIANCE], [NIFTY, RELIANCE]);
+    const pri = new Map(e.registry.entries().map((x) => [refKey(x.ref), x.priority]));
+    expect(pri.get('NFO:35001')).toBe(0);
+    expect(pri.get('NFO:57001')).toBe(0);
+    expect(pri.get('NSE:99926000')).toBe(1); // context (P2) + underlying (P1): served as P1
+    expect(pri.get('NSE:2885')).toBe(0); // held in cash AND an underlying: the position wins
+    expect(broker.subscribed.has('NSE:2885')).toBe(true);
+    await e.setPositions([], []);
+    const after = new Map(e.registry.entries().map((x) => [refKey(x.ref), x.priority]));
+    expect(after.get('NSE:99926000')).toBe(2); // back to context only
+    expect(after.has('NSE:2885')).toBe(false);
+    expect(after.has('NFO:35001')).toBe(false);
     e.stop();
   });
 });

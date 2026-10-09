@@ -95,7 +95,7 @@ export class HubEngine {
   readonly governor: Governor;
   readonly feed: LiveFeed;
   private readonly poller: QuotePoller;
-  private positions = new Map<string, InstrumentRef>();
+  private positions = new Map<string, { ref: InstrumentRef; priority: Priority }>();
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private lastError: string | null = null;
   private readonly builder: CandleBuilder | null;
@@ -212,12 +212,19 @@ export class HubEngine {
     await this.feed.reconcile();
   }
 
-  /** Replace the set of open-position instruments (priority 0). */
-  async setPositions(refs: readonly InstrumentRef[]): Promise<void> {
-    const next = new Map(refs.map((r) => [refKey(r), r] as const));
+  /**
+   * Replace the open-position set: contracts at priority 0 and their underlyings
+   * at priority 1, all under one owner, so neither is ever demoted (spec §5.1).
+   * An instrument that is both (a cash holding that is also an option's
+   * underlying) stays priority 0.
+   */
+  async setPositions(refs: readonly InstrumentRef[], underlyings: readonly InstrumentRef[] = []): Promise<void> {
+    const next = new Map<string, { ref: InstrumentRef; priority: Priority }>();
+    for (const r of underlyings) next.set(refKey(r), { ref: r, priority: 1 });
+    for (const r of refs) next.set(refKey(r), { ref: r, priority: 0 });
     const now = Date.now();
-    for (const [k, r] of this.positions) if (!next.has(k)) this.registry.unwatch(r, POSITIONS);
-    for (const r of next.values()) this.registry.watch(r, 0, POSITIONS, now);
+    for (const [k, e] of this.positions) if (!next.has(k)) this.registry.unwatch(e.ref, POSITIONS);
+    for (const e of next.values()) this.registry.watch(e.ref, e.priority, POSITIONS, now);
     this.positions = next;
     await this.feed.reconcile();
   }

@@ -664,6 +664,36 @@ describe('TradeTrackerService', () => {
     });
   });
 
+  describe('openPositionRefsByUser', () => {
+    it('carries each instrument’s symbol, keeps one token on two exchanges as two instruments, and shares the cache', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        { userId: 'owner', token: '35001', symbol: 'NIFTY26OCT25000CE', exchange: 'NFO', kind: 'POSITION' },
+        { userId: 'owner', token: '35001', symbol: 'CRUDEOIL26OCTFUT', exchange: 'MCX', kind: 'POSITION' },
+        { userId: 'owner', token: '2885', symbol: 'RELIANCE-EQ', exchange: 'NSE', kind: 'HOLDING' },
+      ]);
+
+      expect((await service.openPositionRefsByUser()).get('owner')).toEqual([
+        { exchange: 'NFO', token: '35001', symbol: 'NIFTY26OCT25000CE' },
+        { exchange: 'MCX', token: '35001', symbol: 'CRUDEOIL26OCTFUT' },
+        { exchange: 'NSE', token: '2885', symbol: 'RELIANCE-EQ' },
+      ]);
+      expect((await service.openTrackerRefsByUser()).get('owner')).toEqual([
+        { token: '35001', exchange: 'NFO' },
+        { token: '35001', exchange: 'MCX' },
+        { token: '2885', exchange: 'NSE' },
+      ]);
+      // One database read serves both views.
+      expect(prisma.tradeTracker.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to the token when the broker gave no tradingsymbol', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        { userId: 'owner', token: '35001', symbol: '', exchange: 'NFO', kind: 'POSITION' },
+      ]);
+      expect((await service.openPositionRefsByUser()).get('owner')).toEqual([{ exchange: 'NFO', token: '35001', symbol: '35001' }]);
+    });
+  });
+
   describe('list → DTO mapping', () => {
     it('maps rows to the §5 DTO with ISO dates and explicit nulls', async () => {
       const entryTime = new Date('2026-07-11T04:00:00.000Z');

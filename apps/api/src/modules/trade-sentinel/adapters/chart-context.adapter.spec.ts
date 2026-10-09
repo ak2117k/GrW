@@ -51,10 +51,11 @@ function make(opts: { withFeed?: boolean } = { withFeed: true }) {
     exchange: 'NSE',
     symbol: 'SUZLON-EQ',
   });
+  const getNearestFuture = jest.fn().mockResolvedValue(null);
   const fetchCandles = jest.fn().mockResolvedValue([]);
   const svc = new SentinelChartContextAdapter(
     { analyze } as never,
-    { getInstrumentBySymbol } as never,
+    { getInstrumentBySymbol, getNearestFuture } as never,
     opts.withFeed ? ({ fetchCandles } as never) : undefined,
   );
   analyze.mockResolvedValue({
@@ -64,7 +65,7 @@ function make(opts: { withFeed?: boolean } = { withFeed: true }) {
     volumeRatio: 2.5,
     contextFactors: factors(),
   });
-  return { svc, analyze, getInstrumentBySymbol, fetchCandles };
+  return { svc, analyze, getInstrumentBySymbol, getNearestFuture, fetchCandles };
 }
 
 describe('levelCandidates', () => {
@@ -203,6 +204,68 @@ describe('SentinelChartContextAdapter', () => {
     await t.svc.levelsFor('NOSUCH');
 
     expect(warn.mock.calls.filter((c) => /NOSUCH/.test(String(c[0])))).toHaveLength(1);
+  });
+
+  describe('MCX commodity underlyings', () => {
+    it('builds the level book from the nearest MCX FUTURE when no NSE instrument matches', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const t = make();
+      t.getInstrumentBySymbol.mockResolvedValue(null);
+      t.getNearestFuture.mockResolvedValue({ token: '472789', exchange: 'MCX', symbol: 'CRUDEOIL19OCT26FUT' });
+
+      const result = await t.svc.structureFor('CRUDEOIL', 100.5, 'u1');
+
+      expect(t.getNearestFuture).toHaveBeenCalledWith('CRUDEOIL', 'MCX', expect.any(Date));
+      // That future's candles, over the user's own session.
+      expect(t.analyze.mock.calls[0].slice(0, 4)).toEqual(['472789', 'MCX', 'CRUDEOIL19OCT26FUT', '15m']);
+      expect(result.reason).toBeNull();
+      expect(result.nearestSupport).toBe(100);
+      expect(warn.mock.calls.filter((c) => /CRUDEOIL/.test(String(c[0])))).toHaveLength(0);
+    });
+
+    it('serves levelsFor (the packet and thesis path) from the same future', async () => {
+      const t = make();
+      t.getInstrumentBySymbol.mockResolvedValue(null);
+      t.getNearestFuture.mockResolvedValue({ token: '472789', exchange: 'MCX', symbol: 'CRUDEOIL19OCT26FUT' });
+
+      await expect(t.svc.levelsFor('CRUDEOIL')).resolves.not.toBeNull();
+      expect(t.analyze.mock.calls[0][0]).toBe('472789');
+    });
+
+    it('uses the instrument the tick source resolved, and keys its cache by that contract', async () => {
+      const t = make();
+      const oct = { exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' };
+      const nov = { exchange: 'MCX', token: '488001', symbol: 'CRUDEOIL18NOV26FUT' };
+
+      await t.svc.structureFor('CRUDEOIL', 100.5, 'u1', nov);
+      await t.svc.levelsFor('CRUDEOIL', 'u1', nov); // cache hit: same contract
+      await t.svc.structureFor('CRUDEOIL', 100.5, 'u1', oct); // a different month is a different book
+
+      expect(t.getInstrumentBySymbol).not.toHaveBeenCalled();
+      expect(t.getNearestFuture).not.toHaveBeenCalled();
+      expect(t.analyze.mock.calls.map((c) => c.slice(0, 3))).toEqual([
+        ['488001', 'MCX', 'CRUDEOIL18NOV26FUT'],
+        ['472789', 'MCX', 'CRUDEOIL19OCT26FUT'],
+      ]);
+    });
+
+    it('never reaches for a future when the NSE ladder matches', async () => {
+      const t = make();
+      await t.svc.structureFor('SUZLON-EQ', 100.5);
+      expect(t.getNearestFuture).not.toHaveBeenCalled();
+      expect(t.analyze.mock.calls[0][1]).toBe('NSE');
+    });
+
+    it('names both lookups in the once-per-symbol warning when neither matches', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const t = make();
+      t.getInstrumentBySymbol.mockResolvedValue(null);
+      await t.svc.levelsFor('CRUDEOIL');
+      await t.svc.levelsFor('CRUDEOIL');
+      const hits = warn.mock.calls.filter((c) => /CRUDEOIL/.test(String(c[0])));
+      expect(hits).toHaveLength(1);
+      expect(String(hits[0][0])).toMatch(/MCX future/);
+    });
   });
 
   it('returns null when analyze produced no level book', async () => {

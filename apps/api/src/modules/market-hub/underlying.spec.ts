@@ -94,6 +94,48 @@ describe('resolveUnderlying', () => {
     expect(l.cash).not.toHaveBeenCalled();
   });
 
+  it('resolves an MCX option to the nearest FUTURE of the same name on MCX when a future lookup is given', async () => {
+    const l = lookup('CRUDEOIL');
+    const future = jest.fn(async (_name: string, _exchange: string) => ({ token: '472789', symbol: 'CRUDEOIL19OCT26FUT' }));
+    const r = await resolveUnderlying(
+      { exchange: 'MCX', token: '5001', symbol: 'CRUDEOIL15OCT268850PE' },
+      { ...l, future },
+    );
+    expect(r).toEqual({ name: 'CRUDEOIL', ref: { exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' } });
+    // The option's own master NAME, never the mini (CRUDEOILM) and never a cash row.
+    expect(future).toHaveBeenCalledWith('CRUDEOIL', 'MCX', null);
+    expect(l.cash).not.toHaveBeenCalled();
+  });
+
+  it('hands the future lookup the OPTION’S OWN expiry, so a far-month option can get its month', async () => {
+    const expiry = new Date(2026, 10, 16);
+    const l = {
+      contract: jest.fn(async () => ({ name: 'CRUDEOIL', expiry })),
+      cash: jest.fn(async () => null),
+    };
+    const future = jest.fn(async () => ({ token: '488001', symbol: 'CRUDEOIL18NOV26FUT' }));
+    const r = await resolveUnderlying({ exchange: 'MCX', token: '6001', symbol: 'CRUDEOIL16NOV269000CE' }, { ...l, future });
+    expect(future).toHaveBeenCalledWith('CRUDEOIL', 'MCX', expiry);
+    expect(r.ref).toEqual({ exchange: 'MCX', token: '488001', symbol: 'CRUDEOIL18NOV26FUT' });
+  });
+
+  it('keeps the MCX name with no ref when no future matches', async () => {
+    const l = lookup('CRUDEOIL');
+    const future = jest.fn(async () => null);
+    expect(await resolveUnderlying({ exchange: 'MCX', token: '5001', symbol: 'CRUDEOIL15OCT268850PE' }, { ...l, future })).toEqual({
+      name: 'CRUDEOIL',
+      ref: null,
+    });
+  });
+
+  it('never asks the future lookup about an NFO or BFO contract', async () => {
+    const future = jest.fn(async () => ({ token: 'x', symbol: 'x' }));
+    await resolveUnderlying({ exchange: 'NFO', token: '35001', symbol: 'NIFTY26OCT25000CE' }, { ...lookup('NIFTY'), future });
+    await resolveUnderlying({ exchange: 'NFO', token: '77', symbol: 'KEI29SEP265800CE' }, { ...lookup('KEI', { 'NSE:KEI-EQ': '13310' }), future });
+    await resolveUnderlying({ exchange: 'BFO', token: '1', symbol: 'SENSEX26OCT81000CE' }, { ...lookup('SENSEX'), future });
+    expect(future).not.toHaveBeenCalled();
+  });
+
   it('a contract missing from the master resolves to nothing', async () => {
     expect(await resolveUnderlying({ exchange: 'NFO', token: '9', symbol: 'X26OCT1CE' }, lookup(null))).toEqual({ name: null, ref: null });
   });

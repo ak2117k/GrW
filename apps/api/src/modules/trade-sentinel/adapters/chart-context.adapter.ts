@@ -7,7 +7,8 @@ import type {
 import type { CandleSource } from '../../signal-generator/services/candle-source';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
-import type { ChartContextShim, SourcedValue } from '../services/context-packet.service';
+import type { ChartContextShim, SourcedValue, StructureInstrument } from '../services/context-packet.service';
+import { startOfLocalDay } from '../../market-data/services/master-contract';
 import { normaliseSymbol } from '../symbols';
 
 /**
@@ -64,7 +65,7 @@ export interface NearestLevels {
  * `unresolvedUnderlying`: the absence has to name itself as a failure to look.
  */
 export const LEVEL_BOOK_UNBUILT =
-  'no level book could be built for this symbol — either no NSE instrument matched it, or the ' +
+  'no level book could be built for this symbol — either no NSE instrument (or MCX future) matched it, or the ' +
   'level engine had no price history to build one from — so no support or resistance was ever ' +
   'computed. This is a FAILURE TO LOOK, not a finding: do not read it as an instrument with no ' +
   'structure.';
@@ -344,8 +345,12 @@ export class SentinelChartContextAdapter implements ChartContextShim {
   }
 
   /** The level book as the packet's evidence block. Null when there is none. */
-  async levelsFor(symbol: string, userId?: string): Promise<SourcedValue | null> {
-    const book = await this.bookFor(symbol, userId);
+  async levelsFor(
+    symbol: string,
+    userId?: string,
+    instrument?: StructureInstrument,
+  ): Promise<SourcedValue | null> {
+    const book = await this.bookFor(symbol, userId, instrument);
     if (!book?.levels) return null;
     return {
       value: { ...book.levels, interval: SENTINEL_LEVEL_INTERVAL },
@@ -368,8 +373,9 @@ export class SentinelChartContextAdapter implements ChartContextShim {
     symbol: string,
     price: number | null,
     userId?: string,
+    instrument?: StructureInstrument,
   ): Promise<SentinelStructure> {
-    const book = await this.bookFor(symbol, userId);
+    const book = await this.bookFor(symbol, userId, instrument);
     const volumeRatio = book?.volumeRatio ?? null;
     // Independent of the nearest-level reads below: a book can carry factors
     // while having no level on one side, and can carry levels while the engine
@@ -417,10 +423,20 @@ export class SentinelChartContextAdapter implements ChartContextShim {
    * above. Never throws: a level book that cannot be built is a stated absence
    * downstream, never a failed evaluation.
    */
-  private async bookFor(symbol: string, userId?: string): Promise<CachedBook | null> {
+  private async bookFor(
+    symbol: string,
+    userId?: string,
+    pinned?: StructureInstrument,
+  ): Promise<CachedBook | null> {
     const base = normaliseSymbol(symbol);
-    const hit = this.cache.get(base);
+    // A PINNED contract (an MCX month's future) is cached under the contract, not
+    // the name: two options on one commodity in different months have different
+    // books, and keying both by `CRUDEOIL` would serve one month's levels to the other.
+    const key = pinned ? `${pinned.exchange}:${pinned.token}` : base;
+    const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit;
+
+    if (pinned) return this.build(key, pinned, symbol, userId);
 
     try {
       // See `masterSymbolCandidates` — the `-EQ` rung is what makes a
@@ -433,6 +449,14 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         instrument = await this.instruments.getInstrumentBySymbol(candidate, 'NSE');
         if (instrument) break;
       }
+      // A COMMODITY underlying (an MCX option's `name`, e.g. CRUDEOIL) has no NSE
+      // row at all; its price series is the nearest-expiry future of exactly that
+      // name on MCX — the same contract the tick source quotes as the spot, so
+      // the levels and the spot share one scale. Asked only after the NSE ladder
+      // misses, so every NSE/NFO/BFO underlying resolves exactly as before.
+      if (!instrument) {
+        instrument = await this.instruments.getNearestFuture(base, 'MCX', startOfLocalDay());
+      }
       if (!instrument) {
         // WARN, not debug. An unresolvable symbol here means an EMPTY LEVEL BOOK
         // FOR THE LIFE OF THE POSITION — `levelBreak` never fires and the packet
@@ -443,7 +467,8 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         // anything passed an NFO tradingsymbol. Once per symbol, not per tick.
         this.warnOnce(
           base,
-          `no NSE instrument matches "${symbol}" (tried ${masterSymbolCandidates(symbol).join(', ')}) ` +
+          `no NSE instrument matches "${symbol}" (tried ${masterSymbolCandidates(symbol).join(', ')}), ` +
+            `nor any live MCX future named ${base} ` +
             '— its level book will be empty for as long as this symbol is watched, so the level ' +
             'and volume sensors stay silent. For a derivative, callers must pass the ' +
             "UNDERLYING's name, not the tradingsymbol.",
@@ -457,6 +482,22 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         });
       }
 
+      return await this.build(base, instrument, symbol, userId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`level book failed for ${symbol}: ${message}`);
+      return null;
+    }
+  }
+
+  /** `analyze()` on one resolved instrument, stored under `key`. Never throws. */
+  private async build(
+    key: string,
+    instrument: { token: string; exchange: string; symbol: string },
+    symbol: string,
+    userId?: string,
+  ): Promise<CachedBook | null> {
+    try {
       const result = await this.signals.analyze(
         instrument.token,
         instrument.exchange,
@@ -499,7 +540,7 @@ export class SentinelChartContextAdapter implements ChartContextShim {
       // stubs" would otherwise both reach the packet as a bare `{}`.
       const { factorValues, factorsReason } = this.factorsFrom(result);
 
-      return this.store(base, { at: Date.now(), levels, volumeRatio, factorValues, factorsReason });
+      return this.store(key, { at: Date.now(), levels, volumeRatio, factorValues, factorsReason });
     } catch (err) {
       // Logged at warn, not swallowed: a permanently failing level book makes
       // `levelBreak` silent in a way that is indistinguishable from "price

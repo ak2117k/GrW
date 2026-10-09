@@ -33,23 +33,37 @@ export function isDerivative(c: { exchange: string; symbol: string }): boolean {
 /** The two instrument-master reads the resolver needs. */
 export interface UnderlyingLookup {
   /** The contract's own master row, filtered by exchange. */
-  contract(exchange: string, token: string): Promise<{ name: string | null } | null>;
+  contract(exchange: string, token: string): Promise<{ name: string | null; expiry?: Date | null } | null>;
   /** A cash instrument by exact symbol on one exchange. */
   cash(symbol: string, exchange: string): Promise<{ token: string; symbol?: string | null } | null>;
+  /**
+   * Optional: the future of exactly this master name on this exchange that
+   * underlies a contract expiring `contractExpiry` (null when unknown). When
+   * given, an MCX contract resolves to that future (a commodity option is an
+   * option ON that month's future; it has no cash underlying). When omitted,
+   * MCX keeps resolving to no ref — the hub's behaviour before this existed.
+   */
+  future?(
+    name: string,
+    exchange: string,
+    contractExpiry: Date | null,
+  ): Promise<{ token: string; symbol?: string | null } | null>;
 }
 
 export interface ResolvedUnderlying {
   /** The master's underlying name ('NIFTY', 'KEI'); null when the contract is not in the master. */
   name: string | null;
-  /** Where the underlying's price lives; null for MCX (no cash underlying) or when nothing matches. */
+  /** Where the underlying's price lives; null when nothing matches (and always for MCX without a `future` lookup). */
   ref: InstrumentRef | null;
 }
 
 /**
  * A derivative's underlying: index names from {@link INDEX_UNDERLYINGS}; stocks
  * from the NSE cash row by the master's name (`NAME-EQ`, then `NAME`); MCX
- * contracts have none. Lookup failures are thrown, never cached here: the
- * caller decides (a cached failure would blind a position for the process's life).
+ * contracts from the nearest future of the SAME name on MCX when the caller
+ * supplies `lookup.future`, otherwise none. Lookup failures are thrown, never
+ * cached here: the caller decides (a cached failure would blind a position for
+ * the process's life).
  */
 export async function resolveUnderlying(
   contract: { exchange: string; token: string; symbol: string },
@@ -59,7 +73,12 @@ export async function resolveUnderlying(
   const row = await lookup.contract(exchange, contract.token);
   const name = row?.name ? row.name.trim().toUpperCase() : null;
   if (!name) return { name: null, ref: null };
-  if (exchange === 'MCX') return { name, ref: null };
+  if (exchange === 'MCX') {
+    if (!lookup.future) return { name, ref: null };
+    const fut = await lookup.future(name, 'MCX', row?.expiry ?? null);
+    if (!fut?.token) return { name, ref: null };
+    return { name, ref: { exchange: 'MCX', token: fut.token, symbol: fut.symbol || name } };
+  }
   const index = INDEX_UNDERLYINGS[name];
   if (index) return { name, ref: { ...index } };
   const cashExchange: HubExchange = 'NSE';

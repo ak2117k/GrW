@@ -12,7 +12,14 @@ import {
 const REPORT = { evaluated: 1, skipped: 0, failed: 0, unwatched: 0 };
 
 function make(enabled = true) {
+  // `runForUser` stands for the SENSOR PASS the runner awaits; `settled` is the
+  // detached judgements, which resolve on their own (immediately unless a test
+  // overrides `startForUser`).
   const runForUser = jest.fn().mockResolvedValue(REPORT);
+  const startForUser = jest.fn(async (userId: string) => {
+    const report = await runForUser(userId);
+    return { report, pending: 0, settled: Promise.resolve(report) };
+  });
   const findMany = jest.fn().mockResolvedValue([{ userId: 'u1', exchange: 'NSE' }]);
   const deleteMany = jest.fn().mockResolvedValue({ count: 0 });
   const prisma = {
@@ -21,11 +28,11 @@ function make(enabled = true) {
   };
   const config = { get: jest.fn().mockReturnValue(enabled ? 'true' : 'false') };
   const svc = new SentinelRunnerService(
-    { runForUser } as never,
+    { startForUser } as never,
     prisma as never,
     config as never,
   );
-  return { svc, runForUser, findMany, deleteMany, config };
+  return { svc, runForUser, startForUser, findMany, deleteMany, config };
 }
 
 /** A deferred promise, so a cycle can be held mid-flight. */
@@ -86,6 +93,36 @@ describe('SentinelRunnerService — overlap guard', () => {
 
     held.resolve(REPORT);
     await slow;
+  });
+});
+
+describe('SentinelRunnerService — a slow judgement never holds the next tick', () => {
+  it('releases the guard after the SENSOR PASS, while that pass’s judgements are still running', async () => {
+    const t = make();
+    const judging = pending<typeof REPORT>();
+    t.startForUser.mockImplementation(async () => ({ report: REPORT, pending: 1, settled: judging.promise }));
+
+    await expect(t.svc.runForUser('u1')).resolves.toEqual(REPORT);
+    // The 2026-10-09 failure: a judge held the user in flight for 12+ minutes
+    // and every tick in between was skipped. Now the next tick runs.
+    await expect(t.svc.runForUser('u1')).resolves.toEqual(REPORT);
+    expect(t.startForUser).toHaveBeenCalledTimes(2);
+
+    judging.resolve(REPORT);
+  });
+
+  it('a whole tick returns without waiting for any judgement', async () => {
+    const t = make(true);
+    const never = new Promise<typeof REPORT>(() => undefined);
+    t.startForUser.mockImplementation(async () => ({ report: REPORT, pending: 1, settled: never }));
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-14T04:30:00Z'));
+    try {
+      await t.svc.tick();
+      await t.svc.tick();
+    } finally {
+      jest.useRealTimers();
+    }
+    expect(t.startForUser).toHaveBeenCalledTimes(2);
   });
 });
 

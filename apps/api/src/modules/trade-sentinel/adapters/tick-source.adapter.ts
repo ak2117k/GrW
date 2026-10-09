@@ -8,6 +8,7 @@ import { LevelBookService } from '../../signal-generator/services/level-book.ser
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { NewsAggregatorService } from '../../news/services/news-aggregator.service';
+import { startOfLocalDay } from '../../market-data/services/master-contract';
 import { segmentFor } from '../charges';
 import type { Segment, Side } from '../charges';
 import type { TickReading, TickSource } from '../services/sentinel-cycle.service';
@@ -107,9 +108,10 @@ class TickUnavailable extends Error {}
  * BOTH HALVES ARE NEEDED AND THEY FAIL INDEPENDENTLY. `name` is what the level
  * book and the news feed are keyed by ('NIFTY'); `token` is what the live level
  * book's spot is keyed by ('99926000'). The name comes off the derivative's own
- * instrument row; the token comes from the index map for an index, or a second
- * lookup of the NSE CASH row for a stock — so a missing cash row leaves the
- * name usable and only the spot unavailable.
+ * instrument row; the token comes from the index map for an index, a second
+ * lookup of the NSE CASH row for a stock, or the nearest-expiry FUTURE of the
+ * same name for an MCX contract — so a missing row leaves the name usable and
+ * only the spot unavailable.
  * Collapsing them into one nullable value would take the level book and the
  * news down with the spot.
  */
@@ -118,9 +120,15 @@ interface Underlying {
   token: string | null;
   /** The exchange `token` belongs to (NSE for NIFTY and stocks, BSE for SENSEX). */
   exchange: string | null;
+  /**
+   * The contract's tradingsymbol behind `token` — set only for an MCX future,
+   * where it is handed to the level book as the instrument to chart. Null for
+   * NSE/BSE underlyings, which the level book resolves by name as before.
+   */
+  contract: string | null;
 }
 
-const NO_UNDERLYING: Underlying = { name: null, token: null, exchange: null };
+const NO_UNDERLYING: Underlying = { name: null, token: null, exchange: null, contract: null };
 
 /**
  * How long a broker quote for one underlying is reused.
@@ -369,9 +377,19 @@ export class SentinelTickSource implements TickSource {
      */
     const structureSymbol = isCash ? row.symbol : underlying.name;
 
+    // MCX only: the exact future the spot came from. A NAME alone ('CRUDEOIL')
+    // cannot say which month, and a far-month option's book must be its own
+    // month's future — so the level book is told the contract, not left to guess.
+    const structureInstrument =
+      !isCash && underlying.contract && underlying.token && underlying.exchange
+        ? { exchange: underlying.exchange, token: underlying.token, symbol: underlying.contract }
+        : null;
+
     const [structure, freshNewsCount] = await Promise.all([
       structureSymbol
-        ? this.charts.structureFor(structureSymbol, underlyingLtp, row.userId)
+        ? structureInstrument
+          ? this.charts.structureFor(structureSymbol, underlyingLtp, row.userId, structureInstrument)
+          : this.charts.structureFor(structureSymbol, underlyingLtp, row.userId)
         : Promise.resolve(NO_STRUCTURE),
       // Null, not 0 — "no reading" and "nothing published" must stay apart.
       structureSymbol ? this.freshNewsCount(structureSymbol) : Promise.resolve(null),
@@ -400,6 +418,7 @@ export class SentinelTickSource implements TickSource {
       // evidence up by the SAME symbol these sensors did. Resolved once, here;
       // a second resolution downstream is how the two paths came to disagree.
       structureSymbol,
+      structureInstrument,
       nearestSupport: structure.nearestSupport,
       nearestResistance: structure.nearestResistance,
       // Provenance for the three level-book-derived numbers above and below.
@@ -584,8 +603,8 @@ export class SentinelTickSource implements TickSource {
     }
 
     try {
-      // The UNDERLYING's own exchange (NSE for NIFTY and stocks, BSE for SENSEX),
-      // never the derivative's (NFO/BFO/MCX), or the broker resolves nothing.
+      // The UNDERLYING's own exchange (NSE for NIFTY and stocks, BSE for SENSEX,
+      // MCX for a commodity's future), never NFO/BFO, or the broker resolves nothing.
       const tick = await this.userFeed.fetchQuote(userId, token, exchange);
       const ltp = tick?.ltp;
       if (!Number.isFinite(ltp as number) || (ltp as number) <= 0) return null;
@@ -626,10 +645,21 @@ export class SentinelTickSource implements TickSource {
         {
           contract: (ex, tok) => this.instruments.getInstrumentByToken(tok, ex || undefined),
           cash: (sym, ex) => this.instruments.getInstrumentBySymbol(sym, ex),
+          // MCX: a commodity option has no cash row; its underlying is the
+          // nearest future of the SAME master name (CRUDEOIL, never CRUDEOILM).
+          // The chart adapter resolves the level book's instrument by the same
+          // rule, so the spot and the levels are on one contract's scale.
+          future: (name, ex, contractExpiry) => this.nearestFutureFor(name, ex, contractExpiry),
         },
       );
       if (r.name) {
-        resolved = { name: normaliseSymbol(r.name), token: r.ref?.token ?? null, exchange: r.ref?.exchange ?? null };
+        const ex = r.ref?.exchange ?? null;
+        resolved = {
+          name: normaliseSymbol(r.name),
+          token: r.ref?.token ?? null,
+          exchange: ex,
+          contract: ex === 'MCX' ? (r.ref?.symbol ?? null) : null,
+        };
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -647,13 +677,30 @@ export class SentinelTickSource implements TickSource {
     } else if (resolved.token === null) {
       this.warnOnce(
         key,
-        `resolved ${symbol} to underlying ${resolved.name}, but no cash/index instrument for it ` +
+        `resolved ${symbol} to underlying ${resolved.name}, but no cash/index instrument ` +
+          `${String(exchange ?? '').toUpperCase() === 'MCX' ? 'or live MCX future ' : ''}for it ` +
           '— the level book and news still work, the underlying SPOT does not, so the level ' +
           'and OI sensors stay silent',
       );
     }
     this.underlyings.set(key, resolved);
     return resolved;
+  }
+
+  /**
+   * The future underlying an MCX contract: on MCX an option is an option ON one
+   * month's future, so the right contract is the nearest future (exact master
+   * name — CRUDEOIL, never CRUDEOILM) expiring on or after the OPTION'S OWN
+   * expiry. Only when no such future exists (or the option's expiry is unknown)
+   * does it fall back to the nearest future on or after today.
+   */
+  private async nearestFutureFor(name: string, exchange: string, contractExpiry: Date | null) {
+    const today = startOfLocalDay();
+    if (contractExpiry && contractExpiry.getTime() > today.getTime()) {
+      const own = await this.instruments.getNearestFuture(name, exchange, contractExpiry);
+      if (own) return own;
+    }
+    return this.instruments.getNearestFuture(name, exchange, today);
   }
 
   /** One line per contract, not one per tick — this is polled every 30 seconds. */

@@ -88,6 +88,15 @@ export function parseOptionType(symbol: string, instrumentType: string): string 
 }
 
 /**
+ * Today's host-local midnight — the instant an expiry stored by
+ * {@link toDerivativeInput} for today compares equal to. Use it as the cut-off
+ * for "expires on or after today" so a contract on its expiry day still counts.
+ */
+export function startOfLocalDay(now: Date = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+}
+
+/**
  * One master row → an instrument row, or null to skip it.
  *
  * Skips anything that is not a live derivative: wrong segment, no expiry, an
@@ -112,8 +121,7 @@ export function toDerivativeInput(
   // every past expiry; without this bound the table would grow without limit
   // and the boot cache with it. Compared at local midnight so a contract
   // expiring TODAY is still live — it trades until the close.
-  const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  if (expiry < midnight) return null;
+  if (expiry < startOfLocalDay(today)) return null;
 
   const instrumentType = String(row?.instrumenttype ?? '').trim();
 

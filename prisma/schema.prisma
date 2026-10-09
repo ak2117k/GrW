@@ -1519,6 +1519,7 @@ model User {
   payments          Payment[]
   tradeTrackers      TradeTracker[]
   stockMonitors      StockMonitor[]
+  coreStrategySelections CoreStrategySelection[]
   @@index([status])
   @@map("users")
 }
@@ -2107,4 +2108,65 @@ model CandleCoverage {
 
   @@id([exchange, token, tf, day])
   @@map("candle_coverage")
+}
+
+// ─── SP2 M1: trade-core strategy catalogue ───────────────────────────────────
+// docs/superpowers/specs/2026-10-09-sp2-core-trade-lifecycle-design.md §4.2.
+// The catalogue (strategies + versions) is global and owner-curated; selections
+// are per user. A trigger in the 20261009120000 migration makes a version
+// immutable once it leaves DRAFT; CHECK constraints pin the string enums.
+
+/// One strategy in the catalogue (the dropdown's top level).
+model CoreStrategy {
+  id              String                  @id @default(cuid())
+  key             String                  @unique
+  name            String
+  description     String
+  allowedVehicles String[]
+  createdAt       DateTime                @default(now())
+  versions        CoreStrategyVersion[]
+  selections      CoreStrategySelection[]
+
+  @@map("core_strategies")
+}
+
+/// A block configuration. Immutable once approved: an edit creates version n+1.
+model CoreStrategyVersion {
+  id          String                  @id @default(cuid())
+  strategyId  String
+  strategy    CoreStrategy            @relation(fields: [strategyId], references: [id])
+  version     Int
+  blocks      Json
+  status      String                  @default("DRAFT") // DRAFT | PAPER | LIVE (SP7) | RETIRED
+  createdBy   String // OWNER | AI
+  approvedBy  String?
+  approvedAt  DateTime?
+  sourceDocId String? // core_strategy_docs.id from M6 (FK added then)
+  notes       String?
+  createdAt   DateTime                @default(now())
+  updatedAt   DateTime                @updatedAt
+  selections  CoreStrategySelection[]
+
+  @@unique([strategyId, version])
+  @@index([strategyId, status])
+  @@map("core_strategy_versions")
+}
+
+/// A user's choice for one strategy: which version, on or off, and its capital (₹).
+model CoreStrategySelection {
+  id                String              @id @default(cuid())
+  userId            String
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  strategyId        String
+  strategy          CoreStrategy        @relation(fields: [strategyId], references: [id])
+  strategyVersionId String
+  strategyVersion   CoreStrategyVersion @relation(fields: [strategyVersionId], references: [id])
+  enabled           Boolean             @default(false)
+  capitalAllocation Float
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@unique([userId, strategyId])
+  @@index([strategyVersionId])
+  @@map("core_strategy_selections")
 }

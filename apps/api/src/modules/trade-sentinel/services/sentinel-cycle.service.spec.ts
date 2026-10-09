@@ -1521,17 +1521,23 @@ describe('SentinelCycleService — the agent-failure backoff', () => {
     }
   });
 
-  it('does not back off the agent for a database write failure', async () => {
+  it('backs a position off after a database write failure too', async () => {
+    // Reversed deliberately. Once judgements were detached and slots became
+    // scarce, a write failure that opened no backoff left the position with no
+    // verdict row — so it sorted as "never judged", won a slot every tick and
+    // starved every other position. Any failed judgement now backs off.
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
     t.record.mockRejectedValueOnce(new Error('connection terminated'));
     const now = new Date('2026-08-14T06:00:00.000Z');
 
     await t.svc.runForUser(USER, now);
-    // The agent did its job; punishing it for a Postgres problem would back off
-    // the wrong component and hide a healthy agent behind a broken write path.
     await t.svc.runForUser(USER, new Date(now.getTime() + 5_000));
+    expect(t.judge).toHaveBeenCalledTimes(1);
 
+    await t.svc.runForUser(USER, new Date(now.getTime() + AGENT_RETRY_BASE_MS));
     expect(t.judge).toHaveBeenCalledTimes(2);
   });
 
@@ -1938,5 +1944,129 @@ describe('SentinelCycleService — fix round: failure-time backoff, fair slots, 
     // Once judged, it is not carried again.
     await t.svc.runForUser(USER, at(90));
     expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('SentinelCycleService — final round: every job failure backs off, FIREs first, release paths', () => {
+  const HOLD = {
+    verdict: 'HOLD',
+    confidence: 'high',
+    thesisStatus: 'INTACT',
+    recoveryAvailable: true,
+    reason: 'ok',
+    evidence: ['money.netPnl'],
+    invalidationPoint: 'x',
+    reviewIn: 300,
+  };
+  function held() {
+    let resolve!: (v: typeof HOLD) => void;
+    const promise = new Promise<typeof HOLD>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+  const T0 = new Date('2026-10-09T16:24:30.000Z');
+  const at = (sec: number) => new Date(T0.getTime() + sec * 1000);
+  const flush = () => new Promise((r) => setImmediate(r));
+  const idOf = (c: unknown[]) => (c[0] as { _id: string })._id;
+
+  function withIds(t: ReturnType<typeof makeSvc>) {
+    t.buildPacket.mockImplementation((entry: RosterEntry, tk: { greenFloorArmedLatched: boolean }) =>
+      Promise.resolve({ _id: entry.trackerId, position: {}, money: { netPnl: 1, greenFloorPrice: 1, greenFloorArmed: tk.greenFloorArmedLatched } }),
+    );
+  }
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a job whose verdict write throws is not re-dispatched before its backoff ends, and the slot goes to another due position', async () => {
+    const t = makeSvc();
+    withIds(t);
+    t.build.mockResolvedValue([watched('t1'), watched('t2'), watched('t3')]);
+    const slowT2 = held();
+    t.judge.mockImplementation((p: { _id: string }) => (p._id === 't2' ? slowT2.promise : Promise.resolve(HOLD)));
+    t.record.mockImplementation(async (row: { trackerId: string }) => {
+      if (row.trackerId === 't1') throw new Error('connection terminated');
+      return {};
+    });
+
+    const first = await t.svc.startForUser(USER, at(0));
+    await flush();
+    // t1 failed its write (no verdict row) — it must NOT win the free slot as "never judged".
+    await t.svc.startForUser(USER, at(5));
+    await flush();
+    expect(t.judge.mock.calls.map(idOf)).toEqual(['t1', 't2', 't3']);
+
+    await t.svc.startForUser(USER, at(29));
+    await flush();
+    expect(t.judge.mock.calls.map(idOf).filter((id) => id === 't1')).toHaveLength(1);
+
+    slowT2.resolve(HOLD);
+    await first.settled;
+    await t.svc.runForUser(USER, at(30));
+    expect(t.judge.mock.calls.map(idOf).filter((id) => id === 't1')).toHaveLength(2);
+  });
+
+  it('a FIRE judged 5 minutes ago beats two heartbeat-only positions with older verdicts', async () => {
+    const t = makeSvc();
+    withIds(t);
+    t.build.mockResolvedValue([watched('hb1'), watched('hb2'), watched('fire')]);
+    const judgedAgo: Record<string, number> = { hb1: 20 * 60, hb2: 10 * 60, fire: 5 * 60 };
+    t.recentForTracker.mockImplementation(async (id: string) => [verdictRow({ createdAt: at(-judgedAgo[id]) })]);
+    t.evaluate.mockImplementation((input: { trackerId: string }) =>
+      input.trackerId === 'fire'
+        ? { fires: [{ name: 'level-break', detail: 'lost 100' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' }
+        : { fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' },
+    );
+    const holds = [held(), held()];
+    t.judge.mockReturnValueOnce(holds[0].promise).mockReturnValueOnce(holds[1].promise);
+
+    const pass = await t.svc.startForUser(USER, at(0));
+    await flush();
+
+    // FIRE group first; inside the heartbeat group, the oldest verdict.
+    expect(t.judge.mock.calls.map(idOf)).toEqual(['fire', 'hb1']);
+    holds.forEach((h) => h.resolve(HOLD));
+    await pass.settled;
+  });
+
+  it('a packet build that throws releases the slot, counts as failed and backs off', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.buildPacket.mockRejectedValueOnce(new Error('packet exploded'));
+
+    await expect(t.svc.runForUser(USER, at(0))).resolves.toEqual({ evaluated: 0, skipped: 0, failed: 1, unwatched: 0 });
+    await t.svc.runForUser(USER, at(5)); // backed off
+    expect(t.buildPacket).toHaveBeenCalledTimes(1);
+    // The slot was released: after the backoff it is dispatched again and succeeds.
+    await expect(t.svc.runForUser(USER, at(30))).resolves.toEqual({ evaluated: 1, skipped: 0, failed: 0, unwatched: 0 });
+  });
+
+  it('a position pruned while its judge is in flight still records that verdict and frees its slot', async () => {
+    // INTENDED: the packet was built while the position was open, so the verdict
+    // is a true record of what the agent saw then — Task 13 scores it like any
+    // other, and in shadow mode nothing acts on it. What must NOT happen is the
+    // slot leaking: the next positions are dispatched as soon as the job settles.
+    const t = makeSvc();
+    withIds(t);
+    t.build.mockResolvedValue([watched('t1')]);
+    const slow = held();
+    t.judge.mockReturnValueOnce(slow.promise);
+
+    const first = await t.svc.startForUser(USER, at(0));
+    t.build.mockResolvedValue([]); // t1 closed
+    await t.svc.startForUser(USER, at(30));
+
+    slow.resolve(HOLD);
+    await expect(first.settled).resolves.toMatchObject({ evaluated: 1 });
+    expect(t.record).toHaveBeenCalledTimes(1);
+
+    t.build.mockResolvedValue([watched('t2'), watched('t3')]);
+    const pass = await t.svc.startForUser(USER, at(60));
+    expect(pass.pending).toBe(2); // both slots free again
+    await pass.settled;
   });
 });

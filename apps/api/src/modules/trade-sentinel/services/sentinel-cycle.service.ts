@@ -437,14 +437,18 @@ export class SentinelCycleService {
       new Set(entries.map((e) => e.trackerId)),
     );
 
-    // DISPATCH, LONGEST-WAITING FIRST. Slots are scarce (JUDGE_CONCURRENCY) and
-    // skipped rather than queued, so whoever is offered a free slot first wins
-    // it. Offered in roster order, the first rows would take every slot freed
-    // and a later position could wait indefinitely. So: never judged first,
-    // then the oldest last verdict, then whoever has been refused a slot the
-    // longest; roster order only breaks a full tie.
+    // DISPATCH, MOST URGENT AND LONGEST-WAITING FIRST. Slots are scarce
+    // (JUDGE_CONCURRENCY) and skipped rather than queued, so whoever is offered a
+    // free slot first wins it. Offered in roster order, the first rows would take
+    // every slot freed and a later position could wait indefinitely. So: a
+    // position with a FIRE (fresh or carried) ahead of heartbeat-only ones — a
+    // broken level outranks a routine look — and within each group never judged
+    // first, then the oldest last verdict, then whoever has been refused a slot
+    // the longest; roster order only breaks a full tie.
+    const fired = (c: JudgeCandidate) => (c.decision.fires.length > 0 ? 0 : 1);
     candidates.sort(
       (a, b) =>
+        fired(a) - fired(b) ||
         (a.lastJudgedAt ?? -Infinity) - (b.lastJudgedAt ?? -Infinity) ||
         (a.state.wantedSince ?? now.getTime()) - (b.state.wantedSince ?? now.getTime()) ||
         a.index - b.index,
@@ -657,12 +661,36 @@ export class SentinelCycleService {
   ): Promise<JudgeOutcome> {
     // The wall clock at dispatch, so a failure can be dated by when it HAPPENED.
     const dispatchedWall = Date.now();
+    const progress = { stage: 'thesis' };
     try {
-      await this.judgeAndRecord(entry, state, tick, walls, wallsAt, greenFloorArmedLatched, decision, now, dispatchedWall);
+      await this.judgeAndRecord(entry, state, tick, walls, wallsAt, greenFloorArmedLatched, decision, now, progress);
       return 'evaluated';
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`sentinel cycle failed for ${entry.symbol}: ${message}`);
+      // ANY FAILED JUDGEMENT BACKS THE POSITION OFF — the thesis, the packet,
+      // `judge` or the verdict write. Backing off only on `judge` used to be
+      // right ("do not punish the agent for a Postgres problem"), but with
+      // detached judgements and scarce slots a failure that writes no verdict
+      // and opens no backoff leaves the position looking NEVER JUDGED, so it
+      // wins a slot every tick and two of them starve every other position.
+      state.agentFailures += 1;
+      const wait = agentBackoffMs(state.agentFailures);
+      // FROM THE FAILURE, NOT THE DISPATCH. A judge call can take minutes (the
+      // CLI's timeout is 180 s per attempt); measured from dispatch, a 30 s or 1 m
+      // backoff has already elapsed when the failure lands, so a broken CLI or an
+      // expired token turns into back-to-back multi-minute calls on every
+      // position, forever. The failure instant is the dispatching tick's `now`
+      // advanced by the wall-clock time the call took — kept on the cycle's clock
+      // so it compares with the `now` later ticks gate on — in whole seconds, which
+      // is all a 30 s tick can resolve.
+      const tookMs = Math.max(0, Math.floor((Date.now() - dispatchedWall) / 1000) * 1000);
+      state.agentRetryAt = now.getTime() + tookMs + wait;
+      // Once per window, here — not once per suppressed tick at the gate.
+      this.logger.warn(
+        `sentinel judgement failed at ${progress.stage} on ${entry.symbol} (${entry.trackerId}), ` +
+          `${state.agentFailures} consecutive; backing off ${Math.round(wait / 1000)}s`,
+      );
       return 'failed';
     }
   }
@@ -676,9 +704,10 @@ export class SentinelCycleService {
     greenFloorArmedLatched: boolean,
     decision: TripwireResult,
     now: Date,
-    dispatchedWall: number,
+    progress: { stage: string },
   ): Promise<void> {
     const thesis = await this.thesisFor(entry, state, tick, now);
+    progress.stage = 'packet';
 
     const packet: ContextPacket = await this.packets.build(
       entry,
@@ -693,35 +722,15 @@ export class SentinelCycleService {
       decision.fires,
     );
 
-    let verdict;
-    try {
-      // The trigger picks the model tier. `?? 'FIRE'` keeps the expensive tier
-      // as the fallback: a decision that somehow reached here without saying why
-      // it woke the agent must not be quietly downgraded — see `judge`.
-      verdict = await this.agent.judge(packet, decision.trigger ?? 'FIRE');
-    } catch (err) {
-      state.agentFailures += 1;
-      const wait = agentBackoffMs(state.agentFailures);
-      // FROM THE FAILURE, NOT THE DISPATCH. A judge call can take minutes (the
-      // CLI's timeout is 180 s per attempt); measured from dispatch, a 30 s or 1 m
-      // backoff has already elapsed when the failure lands, so a broken CLI or an
-      // expired token turns into back-to-back multi-minute calls on every
-      // position, forever. The failure instant is the dispatching tick's `now`
-      // advanced by the wall-clock time the call took — kept on the cycle's clock
-      // so it compares with the `now` later ticks gate on — in whole seconds, which
-      // is all a 30 s tick can resolve.
-      const tookMs = Math.max(0, Math.floor((Date.now() - dispatchedWall) / 1000) * 1000);
-      state.agentRetryAt = now.getTime() + tookMs + wait;
-      // Once per window, here — not once per suppressed tick at the gate above.
-      this.logger.warn(
-        `sentinel agent failed on ${entry.symbol} (${entry.trackerId}), ` +
-          `${state.agentFailures} consecutive; backing off ${Math.round(wait / 1000)}s`,
-      );
-      throw err;
-    }
+    progress.stage = 'judge';
+    // The trigger picks the model tier. `?? 'FIRE'` keeps the expensive tier
+    // as the fallback: a decision that somehow reached here without saying why
+    // it woke the agent must not be quietly downgraded — see `judge`. A throw
+    // here (or anywhere in this method) is backed off in `judgeDetached`.
+    const verdict = await this.agent.judge(packet, decision.trigger ?? 'FIRE');
     // A verdict came back and passed validation, so whatever was wrong has
-    // cleared. Reset before the write: the write failing is a database problem,
-    // and punishing the agent for it would back off the wrong component.
+    // cleared. Reset before the write; if the write then fails, `judgeDetached`
+    // counts that as one fresh failure and backs off from 30 s.
     // Resetting the COUNTER is what matters, and it is why the backoff is over
     // consecutive failures rather than lifetime ones: without it, an occasional
     // bad reply spread over a long session would eventually silence a perfectly
@@ -733,6 +742,7 @@ export class SentinelCycleService {
     // representable rather than merely unreachable.
     state.agentRetryAt = 0;
 
+    progress.stage = 'verdict write';
     await this.verdicts.record({
       // Taken from the entry, not from the argument: the roster carries the
       // tenant precisely so it cannot be paired with the wrong trade here.

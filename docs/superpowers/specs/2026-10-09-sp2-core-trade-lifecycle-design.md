@@ -54,7 +54,10 @@ uses the `Core` prefix (`CorePosition`, `CoreLifecycleService`, …) and `core_*
 StrategyVersions the user has selected and enabled. Code evaluators (existing `TradingStrategy`
 classes) are a second entry source through the same `CoreEntryIntent` type.
 
-**Tenant scoping:** every `core_*` row carries `userId`; every query filters by it.
+**Tenant scoping:** the strategy catalogue (`core_strategies`) and its versions
+(`core_strategy_versions`) are one global catalogue, managed by the admin (owner). Every other `core_*`
+row carries `userId` and every query on it filters by it: selections, limits, kill switch, positions,
+orders, fills, cash ledger, journal and trade summaries (owner decision 2026-10-09).
 
 **Flow (one direction only):**
 `alert/evaluator → CoreEntryIntent → RiskWall.check → ExecutionAdapter.placeOrder → fills → CoreLifecycle → exit intent → ExecutionAdapter → Journal`
@@ -64,26 +67,34 @@ classes) are a second entry source through the same `CoreEntryIntent` type.
 ### 4.1 Building blocks
 
 A strategy is a combination of typed blocks; a StrategyVersion is the block parameters. Each block
-has a schema (class-validator DTOs) and is validated on save.
+has a schema and is validated on save by one pure `validateBlocks` (unknown fields are rejected).
+Percent fields are percent of price (1.5 = 1.5 %).
 
 | Block | Variants |
 |---|---|
-| `entry` | `chartink` { scanName } · `evaluator` { evaluatorKey, params } |
+| `entry` | `chartink` { scanName (null = any), match ANY/EXACT/CONTAINS, side BUY/SELL/BOTH, minScore (null, or { base, windows[{ fromHhmm, toHhmm, score }] }: the alert's Chartink score must reach `base`, or a window's score inside that IST window) } · `evaluator` { evaluatorKey, params, side } |
+| `filters` | { staleEntry: null or { maxMovePct } (skip when price is already more than X % past the alert price) · cooldown: null or { minutes } (per symbol, after this strategy's last entry) · lastLoss: null or { window: SAME_IST_DAY } (skip when today's last closed trade on the symbol lost) · gates: [{ kind: evaluator, evaluatorKey, params }] (each must pass) } |
 | `stop` | `fixedPct` { pct } · `atr` { period, timeframe, multiple, minPct, maxPct } |
 | `target` | `fixedPct` { pct } · `rr` { ratio } |
-| `trail` | `none` · `breakeven` { atPct } · `atr` { multiple } |
+| `trail` | `none` · `breakeven` { atPct } · `atr` { multiple, minPct, maxPct, startsAfter ENTRY/PARTIAL } (uses the ATR the stop measured at entry) |
 | `timeExit` | `clock` { hhmm IST } · `holdDays` { n } (MTF/swing) |
-| `partial` | `none` · `atTarget1` { fraction } |
-| `sizing` | `riskRupees` { amount } (always capped by the Risk Wall) |
+| `partial` | `none` · `atTarget1` { fraction, atPct } |
+| `sizing` | `riskRupees` { amount } · `notionalRupees` { amount } (both always capped by the Risk Wall) |
 | `vehicle` | `CASH_INTRADAY` · `MTF` · `OPTIONS_BUY` { strike: ATM/ITMn/OTMn, expiry: nearest with ≥ N days, premiumStopPct, thetaStop { minMovePct, withinMinutes }, expiryDayExitHhmm } |
 
 Adaptive-Stop and Ungated become two configurations of these blocks:
-- **Adaptive-Stop v1:** entry chartink; stop `atr` 14 / 5m × 1.2, clamp 0.8–2.5 %; target 2 %;
-  sizing ₹800 risk; timeExit 15:15; CASH_INTRADAY.
-- **Ungated v1:** entry chartink; stop `fixedPct` 1.5 %; target 3 %; timeExit 15:25; CASH_INTRADAY.
+- **Adaptive-Stop v1:** entry chartink, any scan, BUY, minScore 47 (75 in 11:45–14:00 IST); filters
+  stale-entry 1 %, cooldown 45 min, same-day last-loss, gate `adaptive-stop-decision-gate`; stop `atr`
+  14 / 5m × 1.2, clamp 0.8–2.5 %; target 2 %; partial 50 % at +1 %; then trail `atr` × 1.0, clamp
+  0.6–1.5 %, after the partial; sizing ₹800 risk; timeExit 15:15; CASH_INTRADAY.
+- **Ungated v1:** entry chartink, Hull scanners only (scan name contains "hull"), BUY, no minScore;
+  filters stale-entry 1 %, cooldown 45 min, same-day last-loss, no gates; stop `fixedPct` 1.5 %;
+  target 3 %; no trail, no partial; sizing ₹2,00,000 notional; timeExit 15:25; CASH_INTRADAY.
 
-These are seed data (a migration seed), not code constants. Values are copied from the silo code at
-implementation time, and the plan must cite the source lines.
+These are seed data (a migration seed, inserted as `DRAFT` for the owner to approve), not code
+constants. Values are copied from the silo code at implementation time, and the plan must cite the
+source lines. The silos' two-strike stop confirmation and 2-minute stop grace (artifacts of 30-second
+polling) are deliberately not carried into the core (owner decision 2026-10-09).
 
 ### 4.2 Tables
 

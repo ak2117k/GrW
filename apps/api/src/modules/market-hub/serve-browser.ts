@@ -38,9 +38,12 @@ function toRef(req: BrowserQuoteRef): InstrumentRef | null {
 /**
  * SP1 M4 hub tier for /quote, /indices and /quotes (the M2 serveChartFromHub
  * pattern). Only when hubFor(userId, 'browser') serves this user: watch every
- * ref (not awaited), then answer the ones the PriceBook has fresh within 15 s
- * or market-closed (last price, labelled by its timestamp). Everything else is
- * `missing`, for the caller's legacy path. Synchronous; never throws.
+ * ref (not awaited), then answer ONLY the ones the PriceBook has fresh within
+ * 15 s. A market-closed answer is `missing` too: the PriceBook returns
+ * market-closed for a price of any age once the exchange shuts (a lapsed watch
+ * can leave it hours old, and QuoteRow carries no timestamp label), while the
+ * legacy fetch gives the true close. Everything not fresh is `missing`, for the
+ * caller's legacy path. Synchronous; never throws.
  */
 export function serveQuotesFromHub<R extends BrowserQuoteRef>(
   source: HubPriceSource | null,
@@ -65,7 +68,7 @@ export function serveQuotesFromHub<R extends BrowserQuoteRef>(
     const quotes = new Map<string, QuoteResponse>();
     for (const { req, ref } of valid) {
       const r = hub.price(ref, { maxAgeMs: SCREEN_MAX_AGE_MS });
-      if (r.kind === 'fresh' || r.kind === 'market-closed') quotes.set(refKey(ref), priceToQuote(r.price, req.symbol));
+      if (r.kind === 'fresh') quotes.set(refKey(ref), priceToQuote(r.price, req.symbol));
       else missing.push(req);
     }
     source.record('browser', 'hub', quotes.size);

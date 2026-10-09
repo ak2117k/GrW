@@ -39,7 +39,7 @@ describe('serveQuotesFromHub', () => {
     expect(source.record).toHaveBeenCalledWith('browser', 'legacy', 0);
   });
 
-  it('a never-priced or stale instrument is missing (legacy), and a market-closed one is served with its own timestamp', () => {
+  it('a never-priced, stale or market-closed instrument is missing (legacy): a closed-market price can be hours old', () => {
     const { source } = sourceWith({
       'NSE:1': { kind: 'stale', price: price('NSE', '1', 10), ageMs: 60_000 },
       'MCX:3': { kind: 'market-closed', price: price('MCX', '3', 30) },
@@ -50,9 +50,10 @@ describe('serveQuotesFromHub', () => {
       { token: '3', exchange: 'MCX' },
     ];
     const out = serveQuotesFromHub(source, 'owner', refs, { priority: 4, owner: REST_OWNER.quote });
-    expect(out.missing).toEqual([refs[0], refs[1]]);
-    expect(out.quotes.get('MCX:3')).toMatchObject({ ltp: 30, timestamp: new Date(AT) });
-    expect(source.record).toHaveBeenCalledWith('browser', 'legacy', 2);
+    expect(out.missing).toEqual([refs[0], refs[1], refs[2]]);
+    expect(out.quotes.size).toBe(0);
+    expect(source.record).toHaveBeenCalledWith('browser', 'hub', 0);
+    expect(source.record).toHaveBeenCalledWith('browser', 'legacy', 3);
   });
 
   it('keys answers by EXCHANGE:token, so the same token on two exchanges is priced separately', () => {

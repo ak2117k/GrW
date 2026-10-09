@@ -501,7 +501,8 @@ export class MarketDataController {
     const resolvedSymbol = instrument?.symbol ?? constantEntry?.symbol ?? '';
 
     // SP1 M4 (HUB_SERVES_BROWSER): the owner's quote comes from the hub's PriceBook
-    // (fresh ≤ 15 s, or the labelled last price when the exchange is closed).
+    // (fresh ≤ 15 s only: a closed-market PriceBook price can be hours old, so a
+    // closed exchange goes to the per-user fetch below, which gives the true close).
     const fromHub = serveQuotesFromHub(
       this.hubPriceSource(),
       userId,

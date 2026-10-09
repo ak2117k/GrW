@@ -297,11 +297,13 @@ export class MarketDataRepository {
   }
 
   /**
-   * Get a single instrument by its token.
+   * Get a single instrument by its token, optionally on one exchange. Pass the
+   * exchange whenever it is known: tokens collide across segments (an NSE cash
+   * token can equal an NFO or MCX contract token).
    */
-  async getInstrumentByToken(token: string) {
+  async getInstrumentByToken(token: string, exchange?: string) {
     return this.prisma.instrument.findFirst({
-      where: { token, isActive: true },
+      where: exchange ? { token, exchange, isActive: true } : { token, isActive: true },
     });
   }
 

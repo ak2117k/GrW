@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { SCHEDULE_CRON_OPTIONS } from '@nestjs/schedule/dist/schedule.constants';
 import { RiskGuardService } from './risk-guard.service';
 import { WatchRepository } from '../repositories/watch.repository';
 import { WatchService } from './watch.service';
@@ -73,5 +74,18 @@ describe('RiskGuardService', () => {
     ]);
     expect(await svc.checkAndTrip()).toBe(true);
     expect(watch.squareOffAll).toHaveBeenCalledWith('daily-loss-breaker');
+  });
+});
+
+describe('RiskGuardService — EOD square-off schedule', () => {
+  const meta = Reflect.getMetadata(
+    SCHEDULE_CRON_OPTIONS,
+    RiskGuardService.prototype.eodSquareOff,
+  ) as { cronTime?: string; timeZone?: string; name?: string } | undefined;
+
+  it('fires at 15:25 on weekdays, pinned to IST (the host clock is UTC)', () => {
+    expect(meta?.cronTime).toBe('25 15 * * 1-5');
+    expect(meta?.timeZone).toBe('Asia/Kolkata');
+    expect(meta?.name).toBe('eod-square-off');
   });
 });

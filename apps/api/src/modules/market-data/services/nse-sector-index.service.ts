@@ -244,8 +244,8 @@ export class NseSectorIndexService implements OnModuleInit {
     });
   }
 
-  /** Cron at 06:00 IST daily (00:30 UTC) — well before market open. */
-  @Cron('30 0 * * 1-5')
+  /** Cron at 06:00 IST on weekdays — well before market open. */
+  @Cron('0 6 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async dailyRefresh() {
     this.logger.log('Daily NSE sector-index refresh triggered');
     await this.refresh();

@@ -65,22 +65,61 @@ describe('wsService subscriptions', () => {
     vi.restoreAllMocks();
   });
 
-  it('ref-counts subscriptions: one emit per new ref, one unsubscribe when the last holder releases', () => {
+  it('ref-counts subscriptions: a more urgent second holder re-subscribes, one unsubscribe when the last holder releases', () => {
     wsService.connect();
     const ws = sockets[0]; // '/ws' is the first namespace
     wsService.emitSubscribe([{ token: '35001', exchange: 'nfo', symbol: 'NIFTY26OCT25000CE' }], 'chart');
-    wsService.emitSubscribe([{ token: '35001', exchange: 'NFO' }], 'watchlist'); // a second holder: no emit
+    // A second holder with a MORE urgent purpose (watchlist 3 < chart 4): the
+    // held ref (the first holder's, with its symbol) is re-sent at the raised purpose.
+    wsService.emitSubscribe([{ token: '35001', exchange: 'NFO' }], 'watchlist');
     expect(ws.emit.mock.calls).toEqual([
       ['subscribe', { tokens: ['35001'], refs: [{ token: '35001', exchange: 'NFO', symbol: 'NIFTY26OCT25000CE' }], purpose: 'chart' }],
+      ['subscribe', { tokens: ['35001'], refs: [{ token: '35001', exchange: 'NFO', symbol: 'NIFTY26OCT25000CE' }], purpose: 'watchlist' }],
     ]);
     wsService.emitUnsubscribe([{ token: '35001', exchange: 'NFO' }]);
-    expect(ws.emit).toHaveBeenCalledTimes(1); // still held by the other hook
+    expect(ws.emit).toHaveBeenCalledTimes(2); // still held by the other hook
     wsService.emitUnsubscribe([{ token: '35001', exchange: 'NFO' }]);
     expect(ws.emit).toHaveBeenLastCalledWith('unsubscribe', {
       tokens: ['35001'],
       refs: [{ token: '35001', exchange: 'NFO', symbol: 'NIFTY26OCT25000CE' }],
     });
     wsService.emitUnsubscribe([{ token: '35001', exchange: 'NFO' }]); // over-release is a no-op
+    expect(ws.emit).toHaveBeenCalledTimes(3);
+  });
+
+  it('a same-or-less urgent second holder only bumps the count (no emit)', () => {
+    wsService.connect();
+    const ws = sockets[0];
+    wsService.emitSubscribe([{ token: '35001', exchange: 'NFO' }], 'watchlist');
+    wsService.emitSubscribe([{ token: '35001', exchange: 'NFO' }], 'chart');
+    wsService.emitSubscribe([{ token: '35001', exchange: 'NFO' }], 'watchlist');
+    expect(ws.emit.mock.calls).toEqual([
+      ['subscribe', { tokens: ['35001'], refs: [{ token: '35001', exchange: 'NFO' }], purpose: 'watchlist' }],
+    ]);
+  });
+
+  it('a raised purpose is kept (never downgraded on release) and replayed on reconnect', () => {
+    wsService.emitSubscribe([{ token: '35001', exchange: 'NFO' }], 'chart');
+    wsService.emitSubscribe([{ token: '35001', exchange: 'NFO' }], 'watchlist');
+    wsService.emitUnsubscribe([{ token: '35001', exchange: 'NFO' }]); // one holder left
+    wsService.connect();
+    const ws = sockets[0];
+    fire(ws, 'connect');
+    expect(ws.emit.mock.calls).toEqual([
+      ['subscribe', { tokens: ['35001'], refs: [{ token: '35001', exchange: 'NFO' }], purpose: 'watchlist' }],
+    ]);
+  });
+
+  it('one call mixing fresh and raised refs sends them in one payload', () => {
+    wsService.connect();
+    const ws = sockets[0];
+    wsService.emitSubscribe([{ token: '1', exchange: 'NSE' }], 'chart');
+    wsService.emitSubscribe([{ token: '1', exchange: 'NSE' }, { token: '2', exchange: 'NSE' }], 'context');
+    expect(ws.emit).toHaveBeenLastCalledWith('subscribe', {
+      tokens: ['1', '2'],
+      refs: [{ token: '1', exchange: 'NSE' }, { token: '2', exchange: 'NSE' }],
+      purpose: 'context',
+    });
     expect(ws.emit).toHaveBeenCalledTimes(2);
   });
 

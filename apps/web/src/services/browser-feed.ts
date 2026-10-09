@@ -19,6 +19,14 @@ export interface FeedRef {
   symbol?: string;
 }
 
+/** Hub priority per purpose: lower is more urgent (mirrors the server mapping). */
+const PURPOSE_RANK: Record<FeedPurpose, number> = { context: 2, watchlist: 3, chart: 4 };
+
+/** Is purpose `a` strictly more urgent than `b`? (context > watchlist > chart) */
+export function moreUrgent(a: FeedPurpose, b: FeedPurpose): boolean {
+  return PURPOSE_RANK[a] < PURPOSE_RANK[b];
+}
+
 export function feedKey(r: Pick<FeedRef, 'token' | 'exchange'>): string {
   return `${r.exchange.toUpperCase()}:${r.token}`;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedKey, isFeedSource, livePollMs, tickMatches } from './browser-feed';
+import { feedKey, isFeedSource, livePollMs, moreUrgent, tickMatches } from './browser-feed';
 
 describe('feedKey', () => {
   it('is EXCHANGE:token, upper-cased, never the token alone', () => {
@@ -45,5 +45,16 @@ describe('isFeedSource', () => {
     expect(isFeedSource('legacy')).toBe(true);
     expect(isFeedSource('HUB')).toBe(false);
     expect(isFeedSource(undefined)).toBe(false);
+  });
+});
+
+describe('moreUrgent', () => {
+  it('ranks context over watchlist over chart (lower hub priority is more urgent), strictly', () => {
+    expect(moreUrgent('context', 'watchlist')).toBe(true);
+    expect(moreUrgent('watchlist', 'chart')).toBe(true);
+    expect(moreUrgent('context', 'chart')).toBe(true);
+    expect(moreUrgent('chart', 'watchlist')).toBe(false);
+    expect(moreUrgent('watchlist', 'context')).toBe(false);
+    expect(moreUrgent('watchlist', 'watchlist')).toBe(false);
   });
 });

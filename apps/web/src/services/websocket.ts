@@ -7,7 +7,7 @@ import {
   shouldRetryServerDisconnect,
 } from './ws-retry';
 import { classifyFeed, type FeedHealth } from './feed-health';
-import { feedKey, isFeedSource, type FeedPurpose, type FeedRef, type FeedSource } from './browser-feed';
+import { feedKey, isFeedSource, moreUrgent, type FeedPurpose, type FeedRef, type FeedSource } from './browser-feed';
 
 /**
  * Shape the socket.io handshake `auth` payload from a JWT access token.
@@ -484,23 +484,29 @@ class WebSocketService {
   }
 
   /**
-   * Ask the server to stream `refs` on /ws for `purpose`. Ref-counted: only a
-   * ref no other caller holds is sent. Remembered for reconnect replay. Safe to
-   * call before connect() — they are sent once /ws comes up.
+   * Ask the server to stream `refs` on /ws for `purpose`. Ref-counted: a ref no
+   * other caller holds is sent, and so is a held ref whose purpose this call
+   * makes MORE urgent (the gateway re-watches it at the higher hub priority).
+   * The held purpose only ever rises; a release never downgrades it. Remembered
+   * for reconnect replay. Safe to call before connect() — sent once /ws is up.
    */
   emitSubscribe(refs: FeedRef[], purpose: FeedPurpose = 'chart'): void {
-    const fresh: FeedRef[] = [];
+    const send: FeedRef[] = [];
     for (const ref of refs) {
       const key = feedKey(ref);
       const held = this.subscriptions.get(key);
       if (held) {
         held.count++;
+        if (moreUrgent(purpose, held.purpose)) {
+          held.purpose = purpose;
+          send.push(held.ref);
+        }
         continue;
       }
       this.subscriptions.set(key, { ref, purpose, count: 1 });
-      fresh.push(ref);
+      send.push(ref);
     }
-    if (fresh.length > 0) this.sockets.get('/ws')?.emit('subscribe', toSubscribePayload(fresh, purpose));
+    if (send.length > 0) this.sockets.get('/ws')?.emit('subscribe', toSubscribePayload(send, purpose));
   }
 
   /** Release `refs`; the server is told only when the last holder lets go. */

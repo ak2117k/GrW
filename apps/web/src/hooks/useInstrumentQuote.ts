@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '@/services/api';
+import { wsService } from '@/services/websocket';
+import { quoteFromTick, tickMatches } from '@/services/browser-feed';
+import { useLivePollMs } from './useLivePollMs';
 
 interface QuoteState {
   ltp: number;
@@ -23,6 +26,7 @@ export interface InstrumentQuote extends QuoteState {
   refetch: () => void;
 }
 
+/** Fallback cadence: used only while the feed is not hub-served and Live. */
 const POLL_INTERVAL_MS = 3_000;
 
 const DEFAULT_QUOTE: QuoteState = {
@@ -38,16 +42,11 @@ const DEFAULT_QUOTE: QuoteState = {
 };
 
 /**
- * Polls `GET /market-data/instruments/:token/quote` every 3s while both token
- * and exchange are set, returning the latest single-symbol quote for the order
- * ticket header. Chosen over wiring the Angel WS feed (50-token subscription
- * limit) — the ticket only needs one symbol live.
- *
- * Mirrors the useZones / useSrEvidence pattern: fetch helper memoised via
- * useCallback, an effect drives the initial + interval calls, and an
- * AbortController drops a stale in-flight response when the token changes or
- * the component unmounts. State is reset to defaults when token is null, and we
- * never write state after the active controller has been superseded.
+ * The order ticket header's single-symbol quote. One fetch of
+ * `GET /market-data/instruments/:token/quote` on open, then live ticks for
+ * (token, exchange) over /ws (subscribed as a viewed chart). The 3 s poll runs
+ * only as the fallback: off while the hub feeds this browser and the feed is
+ * Live (SP1 M4), on otherwise.
  *
  * The backend wraps the payload as `{ token, quote: { ltp, open, high, low,
  * close, change, changePercent } }` — we unwrap `data.quote` and map
@@ -60,6 +59,7 @@ export function useInstrumentQuote(
 ): InstrumentQuote {
   const [quote, setQuote] = useState<QuoteState>(DEFAULT_QUOTE);
   const abortRef = useRef<AbortController | null>(null);
+  const pollMs = useLivePollMs(POLL_INTERVAL_MS);
 
   const fetchQuote = useCallback(async () => {
     // Bail early when we don't have both inputs — nothing to fetch.
@@ -109,6 +109,7 @@ export function useInstrumentQuote(
     }
   }, [token, exchange]);
 
+  // Open: one fetch, the live subscription, and tick updates for this instrument.
   useEffect(() => {
     // Reset immediately when inputs clear so the header doesn't show a stale
     // price for the previous symbol during the next fetch.
@@ -118,14 +119,30 @@ export function useInstrumentQuote(
     }
 
     fetchQuote();
-    const intervalId = window.setInterval(fetchQuote, POLL_INTERVAL_MS);
+    const ref = { token, exchange };
+    wsService.emitSubscribe([ref], 'chart');
+    const unsubTick = wsService.subscribe('tick', (data) => {
+      if (!tickMatches(data, token, exchange)) return;
+      setQuote((prev) => {
+        const next = quoteFromTick(prev, data);
+        return next === prev ? prev : { ...next, isStale: false, loading: false };
+      });
+    });
 
     return () => {
-      window.clearInterval(intervalId);
+      unsubTick();
+      wsService.emitUnsubscribe([ref]);
       abortRef.current?.abort();
       abortRef.current = null;
     };
   }, [fetchQuote, token, exchange]);
+
+  // Fallback poll: off while the feed is hub-served and Live.
+  useEffect(() => {
+    if (!token || !exchange || pollMs === false) return;
+    const intervalId = window.setInterval(fetchQuote, pollMs);
+    return () => window.clearInterval(intervalId);
+  }, [fetchQuote, token, exchange, pollMs]);
 
   return { ...quote, refetch: fetchQuote };
 }

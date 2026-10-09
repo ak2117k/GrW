@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { feedKey, isFeedSource, livePollMs, moreUrgent, tickMatches } from './browser-feed';
+import { depthFromTick, feedKey, indexRefs, isFeedSource, livePollMs, moreUrgent, quoteForItem, quoteFromTick, tickMatches, type WireTick } from './browser-feed';
 
 describe('feedKey', () => {
   it('is EXCHANGE:token, upper-cased, never the token alone', () => {
@@ -56,5 +56,88 @@ describe('moreUrgent', () => {
     expect(moreUrgent('chart', 'watchlist')).toBe(false);
     expect(moreUrgent('watchlist', 'context')).toBe(false);
     expect(moreUrgent('watchlist', 'watchlist')).toBe(false);
+  });
+});
+
+const T = (over: Partial<WireTick> = {}): WireTick => ({
+  token: '2885',
+  symbol: 'RELIANCE',
+  exchange: 'NSE',
+  ltp: 1500,
+  open: 1490,
+  high: 1505,
+  low: 1488,
+  close: 1480,
+  volume: 1000,
+  timestamp: '2026-10-12T04:00:00.000Z',
+  at: Date.parse('2026-10-12T04:00:00.000Z'),
+  change: 20,
+  changePercent: 1.3514,
+  ...over,
+});
+const PREV = { ltp: 1, open: 2, high: 3, low: 0.5, close: 1.5, change: -0.5, changePct: -33, isStale: true, loading: false };
+
+describe('quoteFromTick', () => {
+  it('takes the tick’s LTP, day bar and change', () => {
+    expect(quoteFromTick(PREV, T())).toEqual({ ...PREV, ltp: 1500, open: 1490, high: 1505, low: 1488, close: 1480, change: 20, changePct: 1.3514 });
+  });
+
+  it('keeps the previous field where the tick reports 0, and derives change from the close when the tick has none', () => {
+    const next = quoteFromTick({ ...PREV, close: 1480 }, T({ open: 0, high: 0, low: 0, close: 0, change: undefined, changePercent: undefined }));
+    expect(next).toMatchObject({ ltp: 1500, open: 2, high: 3, low: 0.5, close: 1480, change: 20 });
+    expect(next.changePct).toBeCloseTo((20 / 1480) * 100, 6);
+  });
+
+  it('returns the same reference for a tick without a usable LTP', () => {
+    expect(quoteFromTick(PREV, T({ ltp: 0 }))).toBe(PREV);
+  });
+});
+
+describe('depthFromTick', () => {
+  it('builds the MarketDepth the card renders, with totals and the tick’s receipt time', () => {
+    const d = depthFromTick(T({ depth: { bids: [{ price: 1499.9, qty: 10, orders: 2 }], asks: [{ price: 1500.1, qty: 4, orders: 1 }, { price: 1500.2, qty: 6, orders: 1 }] } }));
+    expect(d).toEqual({
+      token: '2885',
+      exchange: 'NSE',
+      bids: [{ price: 1499.9, qty: 10, orders: 2 }],
+      asks: [{ price: 1500.1, qty: 4, orders: 1 }, { price: 1500.2, qty: 6, orders: 1 }],
+      totalBidQty: 10,
+      totalAskQty: 10,
+      ts: Date.parse('2026-10-12T04:00:00.000Z'),
+    });
+  });
+
+  it('is undefined for a tick with no book, so the last ladder stays', () => {
+    expect(depthFromTick(T())).toBeUndefined();
+  });
+});
+
+describe('quoteForItem', () => {
+  const item = { symbol: 'RELIANCE', token: '2885', exchange: 'NSE' };
+
+  it('builds the store Quote under the watchlist item’s own symbol', () => {
+    expect(quoteForItem(item, T({ symbol: 'RELIANCE-EQ' }))).toMatchObject({ symbol: 'RELIANCE', token: '2885', exchange: 'NSE', ltp: 1500, change: 20, changePercent: 1.3514 });
+  });
+
+  it('is null for another exchange’s same token, or a tick without a change (it would clobber the row’s change)', () => {
+    expect(quoteForItem(item, T({ exchange: 'MCX' }))).toBeNull();
+    expect(quoteForItem(item, T({ change: undefined }))).toBeNull();
+    expect(quoteForItem(item, T({ ltp: 0 }))).toBeNull();
+  });
+});
+
+describe('indexRefs', () => {
+  it('reads token, exchange and symbol from the /indices rows and skips malformed ones', () => {
+    expect(
+      indexRefs([
+        { key: 'NIFTY_50', symbol: 'NIFTY', token: '99926000', exchange: 'NSE', quote: null },
+        { key: 'SENSEX', symbol: 'SENSEX', token: '99919000', exchange: 'BSE' },
+        { key: 'BAD', symbol: 'X' },
+      ]),
+    ).toEqual([
+      { token: '99926000', exchange: 'NSE', symbol: 'NIFTY' },
+      { token: '99919000', exchange: 'BSE', symbol: 'SENSEX' },
+    ]);
+    expect(indexRefs(undefined)).toEqual([]);
   });
 });

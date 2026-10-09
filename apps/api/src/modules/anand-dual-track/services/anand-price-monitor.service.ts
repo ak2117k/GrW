@@ -4,7 +4,7 @@ import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repos
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { supertrend } from '../../signal-generator/strategies/indicators';
 import { ReinvestmentService } from './reinvestment.service';
-import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
+import { ExitPriceService, type ExitPrice } from '../../signal-generator/services/exit-price.service';
 
 @Injectable()
 export class AnandPriceMonitorService {
@@ -44,14 +44,16 @@ export class AnandPriceMonitorService {
     }
 
     const tokens = [...new Set(entries.map((e) => e.token).filter((t): t is string => !!t))];
-    const ltpMap = tokens.length
-      ? await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>())
-      : new Map<string, number>();
+    // Through ExitPriceService (hub first behind HUB_PRICES_TRACKS); only a FRESH price is used.
+    const prices = tokens.length
+      ? await this.exitPrice.resolveExitPrices('NSE', tokens).catch(() => new Map<string, ExitPrice>())
+      : new Map<string, ExitPrice>();
 
     const now = new Date();
     let count = 0;
     for (const entry of entries) {
-      const ltp = entry.token ? ltpMap.get(entry.token) : undefined;
+      const live = entry.token ? prices.get(entry.token) : undefined;
+      const ltp = live?.fresh ? live.price : undefined;
       // Mark to market at the close LTP. Fall back to entryPrice (breakeven,
       // 0% — neither win nor loss) when no price is available, so the trade is
       // still closed and counted instead of being dropped from P&L.

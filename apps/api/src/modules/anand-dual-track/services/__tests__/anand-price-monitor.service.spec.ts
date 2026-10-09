@@ -264,4 +264,24 @@ describe('AnandPriceMonitorService', () => {
 
     expect(repo.recordIntradayPartial).not.toHaveBeenCalled();
   });
+
+  it('expireIntradayAtClose prices through ExitPriceService, never the shared adapter directly', async () => {
+    repo.listWatchingIntraday.mockResolvedValue([makeEntry({ id: 'i3', token: '2885', entryPrice: 2500 })]);
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['2885', { price: 2561, fresh: true, source: 'hub' as const }]]));
+
+    await service.expireIntradayAtClose();
+
+    expect(exitPrice.resolveExitPrices).toHaveBeenCalledWith('NSE', ['2885']);
+    expect(adapter.getLtpsBatch).not.toHaveBeenCalled();
+    expect(repo.updateIntradayStatus).toHaveBeenCalledWith('i3', expect.objectContaining({ status: 'EXPIRED', exitPrice: 2561 }));
+  });
+
+  it('expireIntradayAtClose marks a not-fresh price as breakeven, never as 0', async () => {
+    repo.listWatchingIntraday.mockResolvedValue([makeEntry({ id: 'i4', token: '2885', entryPrice: 2500 })]);
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['2885', { price: 0, fresh: false, source: 'none' as const }]]));
+
+    await service.expireIntradayAtClose();
+
+    expect(repo.updateIntradayStatus).toHaveBeenCalledWith('i4', expect.objectContaining({ status: 'EXPIRED', exitPrice: 2500 }));
+  });
 });

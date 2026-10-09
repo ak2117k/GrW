@@ -52,6 +52,7 @@ export class ExitPriceService {
   private hubSourceRef: HubPriceSource | null = null;
   private hubZeroRun = 0;
   private hubZeroWarnedAt: number | null = null;
+  private hubFailureWarnedAt: number | null = null;
 
   constructor(
     private readonly adapter: AngelOneAdapterService,
@@ -66,7 +67,7 @@ export class ExitPriceService {
    *  0. The hub (HUB_PRICES_TRACKS), a price ≤ 10 s old -> fresh, source 'hub'.
    *  1. REST batch (getLtpsBatch) -> fresh.
    *  2. For tokens the batch dropped: per-token getLiveQuote (REST) -> fresh if ltp>0.
-   *  3. Still missing: level-book `spot` ONLY if the book's lastTickAt is within
+   *  3. Still missing, NSE only (the book is keyed by token alone): level-book `spot` ONLY if the book's lastTickAt is within
    *     FRESH_WINDOW_MS and spot>0 (NEVER a vwap/prevClose-only seed) -> fresh.
    *  4. Otherwise { price: 0, fresh: false, source: 'none' } — caller must
    *     SURFACE, not fire a stop.
@@ -117,6 +118,23 @@ export class ExitPriceService {
     symbolByToken: Map<string, string> | undefined,
     resolved: Map<string, ExitPrice>,
   ): { legacy: string[]; hubOn: boolean } {
+    try {
+      return this.hubTier(source, exchange, tokens, symbolByToken, resolved);
+    } catch (err) {
+      // H2: a throwing hub is a hub that served nothing; every token goes to the legacy tiers.
+      resolved.clear();
+      this.warnHubFailure(err);
+      return { legacy: tokens, hubOn: true };
+    }
+  }
+
+  private hubTier(
+    source: HubPriceSource | null,
+    exchange: string,
+    tokens: string[],
+    symbolByToken: Map<string, string> | undefined,
+    resolved: Map<string, ExitPrice>,
+  ): { legacy: string[]; hubOn: boolean } {
     const hub = source?.hubFor(null, 'tracks') ?? null;
     const ex = exchange.toUpperCase();
     if (!hub || !isHubExchange(ex)) return { legacy: tokens, hubOn: false };
@@ -149,10 +167,23 @@ export class ExitPriceService {
       else if (r.source === 'hub') hub++;
       else legacy++;
     }
-    source.record('tracks', 'hub', hub);
-    source.record('tracks', 'legacy', legacy);
-    source.record('tracks', 'unpriced', unpriced);
     if (hubOn) this.watchHubZero(hub, legacy);
+    try {
+      source.record('tracks', 'hub', hub);
+      source.record('tracks', 'legacy', legacy);
+      source.record('tracks', 'unpriced', unpriced);
+    } catch (err) {
+      // H2: the counters are diagnostics; they must never cost an exit price.
+      this.warnHubFailure(err);
+    }
+  }
+
+  /** H2: a throwing hub tier, rate-limited to one warn per {@link HUB_WARN_EVERY_MS}. */
+  private warnHubFailure(err: unknown): void {
+    const now = Date.now();
+    if (this.hubFailureWarnedAt !== null && now - this.hubFailureWarnedAt < ExitPriceService.HUB_WARN_EVERY_MS) return;
+    this.hubFailureWarnedAt = now;
+    this.logger.warn(`[exit-price] hub tier failed, legacy tiers pricing instead: ${err instanceof Error ? err.message : err}`);
   }
 
   /**
@@ -199,7 +230,10 @@ export class ExitPriceService {
       );
     }
 
-    // Tier 3: cached level-book spot, fresh ONLY if last tick is recent.
+    // Tier 3: cached level-book spot, fresh ONLY if last tick is recent. NSE only:
+    // the book is keyed by token alone, so for NFO/BSE/MCX a hit could be an NSE
+    // instrument that shares the token (H1).
+    if (exchange.toUpperCase() !== 'NSE') return { price: 0, fresh: false, source: 'none' };
     const book = this.levelBook.getLevels(token);
     if (book && book.spot > 0) {
       const age = Date.now() - new Date(book.lastTickAt).getTime();

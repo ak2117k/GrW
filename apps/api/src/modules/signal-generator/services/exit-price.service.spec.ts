@@ -99,6 +99,28 @@ describe('ExitPriceService', () => {
     expect(out.get('T4')).toEqual({ price: 0, fresh: false, source: 'none' });
   });
 
+  it('tier 3 is NSE-only (H1): an NFO token is never priced from the token-only level book', async () => {
+    adapter.getLtpsBatch.mockResolvedValue(new Map());
+    adapter.getLiveQuote.mockRejectedValue(new Error('no quote'));
+    // The book is keyed by token alone: this is some NSE instrument that shares the token.
+    levelBook.getLevels.mockReturnValue(makeBook({ spot: 305.75, lastTickAt: new Date() }));
+
+    const out = await service.resolveExitPrices('NFO', ['T6']);
+
+    expect(out.get('T6')).toEqual({ price: 0, fresh: false, source: 'none' });
+    expect(levelBook.getLevels).not.toHaveBeenCalled();
+  });
+
+  it('tier 3 still serves an NSE token whatever the exchange string’s case', async () => {
+    adapter.getLtpsBatch.mockResolvedValue(new Map());
+    adapter.getLiveQuote.mockRejectedValue(new Error('no quote'));
+    levelBook.getLevels.mockReturnValue(makeBook({ spot: 305.75, lastTickAt: new Date() }));
+
+    const out = await service.resolveExitPrices('nse', ['T7']);
+
+    expect(out.get('T7')).toEqual({ price: 305.75, fresh: true, source: 'levelbook' });
+  });
+
   it('all tiers miss: no batch, getLiveQuote throws, no level book is none', async () => {
     adapter.getLtpsBatch.mockResolvedValue(new Map());
     adapter.getLiveQuote.mockRejectedValue(new Error('no quote'));
@@ -296,6 +318,38 @@ describe('ExitPriceService — hub tier (HUB_PRICES_TRACKS)', () => {
       for (let i = 0; i < 20; i++) await svc.resolveExitPrices('NSE', ['2885']);
 
       expect(hubZeroWarns(warn)).toHaveLength(0);
+    });
+  });
+
+  describe('a throwing hub tier never costs the legacy price (H2)', () => {
+    it('hub.prices throws → legacy still prices, no rejection, one rate-limited warn', async () => {
+      adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2501]]));
+      jest.spyOn(engine, 'prices').mockImplementation(() => {
+        throw new Error('hub exploded');
+      });
+      const svc = make();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      await expect(svc.resolveExitPrices('NSE', ['2885'])).resolves.toEqual(
+        new Map([['2885', { price: 2501, fresh: true, source: 'rest-batch' }]]),
+      );
+      await expect(svc.resolveExitPrices('NSE', ['2885'])).resolves.toBeDefined();
+
+      expect(adapter.getLtpsBatch).toHaveBeenCalledWith('NSE', ['2885']);
+      expect(warn.mock.calls.filter((c) => /hub tier failed/.test(String(c[0])))).toHaveLength(1);
+    });
+
+    it('a throwing record() never rejects the exit price either', async () => {
+      adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2501]]));
+      record.mockImplementation(() => {
+        throw new Error('counter exploded');
+      });
+      const svc = make();
+      jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      const out = await svc.resolveExitPrices('NSE', ['2885']);
+
+      expect(out.get('2885')).toEqual({ price: 2501, fresh: true, source: 'rest-batch' });
     });
   });
 

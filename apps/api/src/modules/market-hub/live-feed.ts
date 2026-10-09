@@ -48,9 +48,12 @@ export class LiveFeed {
 
   /**
    * Single-flight and coalescing. Two overlapping runs would plan their add and
-   * remove sets from the same `live` map and send duplicate subscribe/unsubscribe
-   * calls, which unbalances the feed manager's pin/unpin reference counts and
-   * leaks live slots. So a call made while a run is in flight waits for a
+   * remove sets from the same `live` map, and whichever settled last would
+   * overwrite `live` (and `current`) with its own plan: a run that started
+   * before a registry change could land after a newer run and leave `live`
+   * stale, and onTick drops ticks for any subscribed instrument `live` does
+   * not list. (Pin/unpin ref counts are not the risk: pins are idempotent per
+   * key.) So a call made while a run is in flight waits for a
    * trailing run, which starts after the current run settles and so sees every
    * registry change made meanwhile. All callers waiting together share that one
    * trailing run. A failed run rejects only its own callers; the next run still

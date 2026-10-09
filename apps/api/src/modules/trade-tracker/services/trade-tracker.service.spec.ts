@@ -440,33 +440,37 @@ describe('TradeTrackerService', () => {
 
   describe('applyTick / flushTicks', () => {
     beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    const NSE_111 = { exchange: 'NSE', token: '111' };
 
     it('debounces: many calls within the window schedule ONE flush', async () => {
       const flushSpy = jest.spyOn(service, 'flushTicks').mockResolvedValue(undefined);
 
-      service.applyTick('111', 100);
-      service.applyTick('111', 101);
-      service.applyTick('222', 200);
+      service.applyTick(NSE_111, 100);
+      service.applyTick(NSE_111, 101);
+      service.applyTick({ exchange: 'NSE', token: '222' }, 200);
       expect(flushSpy).not.toHaveBeenCalled(); // still debouncing
 
       jest.advanceTimersByTime(3_000);
       expect(flushSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('ignores empty tokens and non-positive ltp', async () => {
+    it('ignores empty tokens, a missing exchange and non-positive ltp', async () => {
       const flushSpy = jest.spyOn(service, 'flushTicks').mockResolvedValue(undefined);
-      service.applyTick('', 100);
-      service.applyTick('111', 0);
-      service.applyTick('111', -5);
+      service.applyTick({ exchange: 'NSE', token: '' }, 100);
+      service.applyTick({ exchange: '', token: '111' }, 100);
+      service.applyTick(NSE_111, 0);
+      service.applyTick(NSE_111, -5);
       jest.advanceTimersByTime(3_000);
       expect(flushSpy).not.toHaveBeenCalled();
     });
 
-    it('flushTicks writes the computed patch for every OPEN tracker on the token', async () => {
+    it('flushTicks writes the computed patch for every OPEN tracker on the exchange + token', async () => {
       prisma.tradeTracker.findMany.mockResolvedValue([
-        tracker({ id: 'a', token: '111', entryPrice: 100, qty: 10, holdingHigh: 100, holdingLow: 100 }),
+        tracker({ id: 'a', token: '111', exchange: 'NSE', entryPrice: 100, qty: 10, holdingHigh: 100, holdingLow: 100 }),
       ]);
-      service.applyTick('111', 130);
+      service.applyTick(NSE_111, 130);
 
       await service.flushTicks();
 
@@ -481,6 +485,51 @@ describe('TradeTrackerService', () => {
         pnl: 300, // (130-100)*10
         pnlPercent: 30,
       });
+    });
+
+    it('keeps the same token on two exchanges apart', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        tracker({ id: 'cash', token: '500', exchange: 'NSE', entryPrice: 100, qty: 1 }),
+        tracker({ id: 'commodity', token: '500', exchange: 'MCX', entryPrice: 7000, qty: 1 }),
+      ]);
+      service.applyTick({ exchange: 'NSE', token: '500' }, 130);
+      await service.flushTicks();
+      expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.tradeTracker.updateMany.mock.calls[0][0].where).toEqual({ id: 'cash', userId: 'user_1' });
+      expect(prisma.tradeTracker.updateMany.mock.calls[0][0].data).toMatchObject({ lastLtp: 130 });
+
+      prisma.tradeTracker.updateMany.mockClear();
+      service.applyTick({ exchange: 'MCX', token: '500' }, 7010);
+      await service.flushTicks();
+      expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.tradeTracker.updateMany.mock.calls[0][0].where).toEqual({ id: 'commodity', userId: 'user_1' });
+    });
+
+    it('matches a lower-case exchange on the row', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([tracker({ id: 'opt', token: '35001', exchange: 'nfo' })]);
+      service.applyTick({ exchange: 'NFO', token: '35001' }, 120);
+      await service.flushTicks();
+      expect(prisma.tradeTracker.updateMany.mock.calls[0][0].where).toEqual({ id: 'opt', userId: 'user_1' });
+    });
+
+    it('a user-scoped (hub) tick prices only that user; a market-wide (legacy) tick prices every holder; the scoped one wins for its user', async () => {
+      prisma.tradeTracker.findMany.mockResolvedValue([
+        tracker({ id: 'mine', userId: 'owner', token: '35001', exchange: 'NFO', entryPrice: 100, qty: 1 }),
+        tracker({ id: 'theirs', userId: 'u2', token: '35001', exchange: 'NFO', entryPrice: 100, qty: 1 }),
+      ]);
+      service.applyTick({ exchange: 'NFO', token: '35001' }, 120, { userId: 'owner' });
+      await service.flushTicks();
+      expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+      expect(prisma.tradeTracker.updateMany.mock.calls[0][0].where).toEqual({ id: 'mine', userId: 'owner' });
+
+      prisma.tradeTracker.updateMany.mockClear();
+      service.applyTick({ exchange: 'NFO', token: '35001' }, 118);
+      service.applyTick({ exchange: 'NFO', token: '35001' }, 121, { userId: 'owner' });
+      await service.flushTicks();
+      const byId = new Map(
+        prisma.tradeTracker.updateMany.mock.calls.map((c) => [c[0].where.id, c[0].data.lastLtp] as const),
+      );
+      expect(byId).toEqual(new Map([['mine', 121], ['theirs', 118]]));
     });
 
     it('flushTicks is a no-op when nothing is pending', async () => {

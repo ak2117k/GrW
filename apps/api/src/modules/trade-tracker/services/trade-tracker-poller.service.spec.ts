@@ -57,10 +57,7 @@ describe('TradeTrackerPoller', () => {
 
   describe('reconcileAll', () => {
     it('backfills every credentialed user then subscribes all OPEN tokens', async () => {
-      prisma.brokerCredential.findMany.mockResolvedValue([
-        { userId: 'u1' },
-        { userId: 'u2' },
-      ]);
+      prisma.brokerCredential.findMany.mockResolvedValue([{ userId: 'u1' }, { userId: 'u2' }]);
       service.distinctOpenTokens.mockResolvedValue(['111', '222']);
 
       await poller.reconcileAll();
@@ -71,10 +68,7 @@ describe('TradeTrackerPoller', () => {
     });
 
     it('one user failing does not abort the batch', async () => {
-      prisma.brokerCredential.findMany.mockResolvedValue([
-        { userId: 'u1' },
-        { userId: 'u2' },
-      ]);
+      prisma.brokerCredential.findMany.mockResolvedValue([{ userId: 'u1' }, { userId: 'u2' }]);
       service.backfill.mockRejectedValueOnce(new Error('broker down'));
 
       await poller.reconcileAll();
@@ -90,7 +84,7 @@ describe('TradeTrackerPoller', () => {
     });
   });
 
-  describe('sweepQuotes', () => {
+  describe('sweepQuotes (legacy tiers)', () => {
     it('is idle when the market is closed', async () => {
       feed.isMarketOpen.mockReturnValue(false);
       await poller.sweepQuotes();
@@ -100,43 +94,34 @@ describe('TradeTrackerPoller', () => {
     });
 
     it('applies a fresh socket quote without spending a broker call', async () => {
-      service.openTrackerRefsByUser.mockResolvedValue(
-        new Map([['u1', [{ token: '111', exchange: 'NSE' }]]]),
-      );
+      service.openTrackerRefsByUser.mockResolvedValue(new Map([['u1', [{ token: '111', exchange: 'NSE' }]]]));
       feed.getQuote.mockReturnValue(liveQuote(105));
 
       await poller.sweepQuotes();
 
-      expect(service.applyTick).toHaveBeenCalledWith('111', 105);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '111', exchange: 'NSE' }, 105);
       expect(userFeeds.fetchQuotes).not.toHaveBeenCalled();
     });
 
     it('REST-fetches a token whose socket quote is hours old (the KEI failure)', async () => {
-      service.openTrackerRefsByUser.mockResolvedValue(
-        new Map([['u1', [{ token: 'KEI', exchange: 'NFO' }]]]),
-      );
+      service.openTrackerRefsByUser.mockResolvedValue(new Map([['u1', [{ token: 'KEI', exchange: 'NFO' }]]]));
       feed.getQuote.mockReturnValue(staleQuote(3.5));
       userFeeds.fetchQuotes.mockResolvedValue(new Map([['KEI', { ltp: 41.2 }]]));
 
       await poller.sweepQuotes();
 
-      expect(userFeeds.fetchQuotes).toHaveBeenCalledWith('u1', [
-        { token: 'KEI', exchange: 'NFO' },
-      ]);
-      expect(service.applyTick).toHaveBeenCalledWith('KEI', 41.2);
-      expect(service.applyTick).not.toHaveBeenCalledWith('KEI', 3.5);
+      expect(userFeeds.fetchQuotes).toHaveBeenCalledWith('u1', [{ token: 'KEI', exchange: 'NFO' }]);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: 'KEI', exchange: 'NFO' }, 41.2);
+      expect(service.applyTick).not.toHaveBeenCalledWith(expect.anything(), 3.5);
     });
 
     it('REST-fetches a token the socket pool never served at all', async () => {
-      service.openTrackerRefsByUser.mockResolvedValue(
-        new Map([['u1', [{ token: '999', exchange: 'NFO' }]]]),
-      );
-      feed.getQuote.mockReturnValue(null);
+      service.openTrackerRefsByUser.mockResolvedValue(new Map([['u1', [{ token: '999', exchange: 'NFO' }]]]));
       userFeeds.fetchQuotes.mockResolvedValue(new Map([['999', { ltp: 12 }]]));
 
       await poller.sweepQuotes();
 
-      expect(service.applyTick).toHaveBeenCalledWith('999', 12);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '999', exchange: 'NFO' }, 12);
     });
 
     it('issues exactly ONE batched call per user, carrying all that user’s tokens', async () => {
@@ -153,11 +138,8 @@ describe('TradeTrackerPoller', () => {
           ['u2', [{ token: '444', exchange: 'NSE' }]],
         ]),
       );
-      userFeeds.fetchQuotes.mockImplementation(
-        (_userId: string, refs: Array<{ token: string }>) =>
-          Promise.resolve(
-            new Map(refs.map((r) => [r.token, { ltp: Number(r.token) }])),
-          ),
+      userFeeds.fetchQuotes.mockImplementation((_userId: string, refs: Array<{ token: string }>) =>
+        Promise.resolve(new Map(refs.map((r) => [r.token, { ltp: Number(r.token) }]))),
       );
 
       await poller.sweepQuotes();
@@ -168,21 +150,15 @@ describe('TradeTrackerPoller', () => {
         { token: '222', exchange: 'NSE' },
         { token: '333', exchange: 'MCX' },
       ]);
-      expect(userFeeds.fetchQuotes).toHaveBeenCalledWith('u2', [
-        { token: '444', exchange: 'NSE' },
-      ]);
+      expect(userFeeds.fetchQuotes).toHaveBeenCalledWith('u2', [{ token: '444', exchange: 'NSE' }]);
       expect(service.applyTick).toHaveBeenCalledTimes(4);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '333', exchange: 'MCX' }, 333);
     });
 
     it('prices far more tokens than the 30-slot socket pool could carry', async () => {
-      const refs = Array.from({ length: 50 }, (_, i) => ({
-        token: `t${i}`,
-        exchange: 'NSE',
-      }));
+      const refs = Array.from({ length: 50 }, (_, i) => ({ token: `t${i}`, exchange: 'NSE' }));
       service.openTrackerRefsByUser.mockResolvedValue(new Map([['u1', refs]]));
-      userFeeds.fetchQuotes.mockResolvedValue(
-        new Map(refs.map((r) => [r.token, { ltp: 7 }])),
-      );
+      userFeeds.fetchQuotes.mockResolvedValue(new Map(refs.map((r) => [r.token, { ltp: 7 }])));
 
       await poller.sweepQuotes();
 
@@ -198,19 +174,17 @@ describe('TradeTrackerPoller', () => {
         ]),
       );
       userFeeds.fetchQuotes.mockImplementation((userId: string) =>
-        userId === 'u1'
-          ? Promise.reject(new Error('Invalid session'))
-          : Promise.resolve(new Map([['222', { ltp: 99 }]])),
+        userId === 'u1' ? Promise.reject(new Error('Invalid session')) : Promise.resolve(new Map([['222', { ltp: 99 }]])),
       );
 
       await poller.sweepQuotes();
 
       expect(userFeeds.fetchQuotes).toHaveBeenCalledTimes(2);
       expect(service.applyTick).toHaveBeenCalledTimes(1);
-      expect(service.applyTick).toHaveBeenCalledWith('222', 99);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '222', exchange: 'NSE' }, 99);
     });
 
-    it('a shared token is quoted once, and a second holder can cover a failed session', async () => {
+    it('a shared instrument is quoted once, and a second holder can cover a failed session', async () => {
       service.openTrackerRefsByUser.mockResolvedValue(
         new Map([
           ['u1', [{ token: 'SHARED', exchange: 'NSE' }]],
@@ -219,17 +193,48 @@ describe('TradeTrackerPoller', () => {
         ]),
       );
       userFeeds.fetchQuotes.mockImplementation((userId: string) =>
-        userId === 'u1'
-          ? Promise.reject(new Error('Invalid session'))
-          : Promise.resolve(new Map([['SHARED', { ltp: 55 }]])),
+        userId === 'u1' ? Promise.reject(new Error('Invalid session')) : Promise.resolve(new Map([['SHARED', { ltp: 55 }]])),
       );
 
       await poller.sweepQuotes();
 
-      // u1 failed, u2 answered, u3 was never asked — the price is market-wide.
+      // u1 failed, u2 answered, u3 was never asked — the legacy price is market-wide.
       expect(userFeeds.fetchQuotes).toHaveBeenCalledTimes(2);
       expect(service.applyTick).toHaveBeenCalledTimes(1);
-      expect(service.applyTick).toHaveBeenCalledWith('SHARED', 55);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: 'SHARED', exchange: 'NSE' }, 55);
+    });
+
+    it('legacy: keeps the same token on two exchanges apart', async () => {
+      // The socket cache and Angel's REST answer are both keyed by token alone.
+      feed.getQuote.mockReturnValue(liveQuote(1));
+      service.openTrackerRefsByUser.mockResolvedValue(
+        new Map([
+          ['u1', [{ token: '500', exchange: 'NSE' }]],
+          ['u2', [{ token: '500', exchange: 'MCX' }]],
+        ]),
+      );
+      userFeeds.fetchQuotes.mockImplementation((userId: string) =>
+        Promise.resolve(new Map([['500', { ltp: userId === 'u1' ? 9 : 7000 }]])),
+      );
+
+      await poller.sweepQuotes();
+
+      // The token-only socket cache cannot tell the two apart, so it is not read for them.
+      expect(feed.getQuote).not.toHaveBeenCalled();
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '500', exchange: 'NSE' }, 9);
+      expect(service.applyTick).toHaveBeenCalledWith({ token: '500', exchange: 'MCX' }, 7000);
+      expect(service.applyTick).toHaveBeenCalledTimes(2);
+    });
+
+    it('legacy: a token-keyed REST answer is not guessed onto one of two exchanges', async () => {
+      service.openTrackerRefsByUser.mockResolvedValue(
+        new Map([['u1', [{ token: '500', exchange: 'NSE' }, { token: '500', exchange: 'MCX' }]]]),
+      );
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['500', { ltp: 9 }]]));
+
+      await poller.sweepQuotes();
+
+      expect(service.applyTick).not.toHaveBeenCalled();
     });
 
     it('ignores non-positive quotes from either tier', async () => {
@@ -244,9 +249,7 @@ describe('TradeTrackerPoller', () => {
           ],
         ]),
       );
-      feed.getQuote.mockImplementation((token: string) =>
-        token === '111' ? liveQuote(0) : null,
-      );
+      feed.getQuote.mockImplementation((token: string) => (token === '111' ? liveQuote(0) : null));
       userFeeds.fetchQuotes.mockResolvedValue(
         new Map([
           ['111', { ltp: 0 }],

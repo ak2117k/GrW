@@ -3,6 +3,7 @@ import { Cron, Interval } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
+import type { TokenRef } from '../../market-data/services/user-feed.types';
 import { TradeTrackerService } from './trade-tracker.service';
 
 /**
@@ -149,9 +150,10 @@ export class TradeTrackerPoller {
    *
    * Tier 2 is per-USER because this platform has no shared feed account — every
    * broker read goes over the owning user's own Angel session. The PRICE it
-   * returns, though, is market-wide: `applyTick` deliberately updates every
-   * user's trackers on that token, so one tenant's session answering for a token
-   * two tenants hold is correct, not a leak, and saves the second call.
+   * returns, though, is market-wide: an unscoped `applyTick` deliberately updates
+   * every user's trackers on that exchange + token, so one tenant's session
+   * answering for an instrument two tenants hold is correct, not a leak, and
+   * saves the second call.
    *
    * Each user is tried in its own try/catch: one expired Angel session must cost
    * that user's prices, not everyone's.
@@ -171,19 +173,23 @@ export class TradeTrackerPoller {
       const byUser = await this.service.openTrackerRefsByUser();
       if (byUser.size === 0) return;
 
-      // Tokens still needing a price, deduped across tenants: two users holding
-      // the same instrument need one quote between them.
+      // Instruments still needing a price, keyed EXCHANGE:token (tokens collide
+      // across exchanges) and deduped across tenants.
       const unpriced = new Set<string>();
+      const shared = tokensOnSeveralExchanges(byUser);
       let fromSocket = 0;
       for (const refs of byUser.values()) {
         for (const ref of refs) {
-          if (unpriced.has(ref.token)) continue;
-          const quote = this.feed.getQuote(ref.token);
+          const key = tickRefKey(ref);
+          if (unpriced.has(key)) continue;
+          // The shared socket cache is keyed by token alone: a token held on two
+          // exchanges cannot be read from it without guessing the instrument.
+          const quote = shared.has(ref.token) ? null : this.feed.getQuote(ref.token);
           if (quote && quote.ltp > 0 && this.isFresh(quote.timestamp)) {
-            this.service.applyTick(ref.token, quote.ltp);
+            this.service.applyTick(ref, quote.ltp);
             fromSocket++;
           } else {
-            unpriced.add(ref.token);
+            unpriced.add(key);
           }
         }
       }
@@ -191,35 +197,34 @@ export class TradeTrackerPoller {
       let fromRest = 0;
       let failedUsers = 0;
       for (const [userId, refs] of byUser) {
-        const wanted = refs.filter((r) => unpriced.has(r.token));
+        const wanted = refs.filter((r) => unpriced.has(tickRefKey(r)));
         if (wanted.length === 0) continue;
 
         try {
           const quotes = await this.userFeeds.fetchQuotes(userId, wanted);
           for (const [token, tick] of quotes) {
             if (!tick || !(tick.ltp > 0)) continue;
-            this.service.applyTick(token, tick.ltp);
+            // Angel answers keyed by token alone: attribute it only when this user
+            // asked for that token on exactly one exchange.
+            const asked = wanted.filter((r) => r.token === token);
+            if (asked.length !== 1) continue;
+            this.service.applyTick(asked[0], tick.ltp);
             // Priced — no later user is asked for it again this pass.
-            unpriced.delete(token);
+            unpriced.delete(tickRefKey(asked[0]));
             fromRest++;
           }
         } catch (err) {
           failedUsers++;
-          // Leave this user's tokens in `unpriced`: another tenant holding the
-          // same instrument later in the loop can still answer for it, and the
-          // ones only this user holds simply wait for the next sweep.
+          // Leave this user's instruments in `unpriced`: another tenant holding the
+          // same instrument later in the loop can still answer for it.
           this.logger.warn(
-            `[trade-tracker] batched quote fetch failed for a user: ${
-              err instanceof Error ? err.message : err
-            }`,
+            `[trade-tracker] batched quote fetch failed for a user: ${err instanceof Error ? err.message : err}`,
           );
         }
       }
 
       if (unpriced.size > 0) {
-        // Not noise: a token nobody could quote is a tracker whose LTP is now
-        // ageing, which is the exact shape of the failure this sweep exists to
-        // prevent. Name the count so it is visible before it becomes hours old.
+        // Not noise: an instrument nobody could quote is a tracker whose LTP is now ageing.
         this.logger.warn(
           `[trade-tracker] ${unpriced.size} open token(s) went unpriced this sweep ` +
             `(socket=${fromSocket}, rest=${fromRest}, failed users=${failedUsers})`,
@@ -250,4 +255,22 @@ export class TradeTrackerPoller {
     if (!Number.isFinite(at)) return false;
     return Date.now() - at < TradeTrackerPoller.WS_FRESH_MS;
   }
+}
+
+/** EXCHANGE:token — the tracker's instrument key (tokens collide across exchanges). */
+function tickRefKey(ref: TokenRef): string {
+  return `${String(ref.exchange ?? '').toUpperCase()}:${ref.token}`;
+}
+
+/** Tokens that open trackers hold on more than one exchange (unsafe for token-keyed caches). */
+function tokensOnSeveralExchanges(byUser: Map<string, TokenRef[]>): Set<string> {
+  const exchanges = new Map<string, Set<string>>();
+  for (const refs of byUser.values()) {
+    for (const r of refs) {
+      const set = exchanges.get(r.token) ?? new Set<string>();
+      set.add(String(r.exchange ?? '').toUpperCase());
+      exchanges.set(r.token, set);
+    }
+  }
+  return new Set([...exchanges].filter(([, set]) => set.size > 1).map(([token]) => token));
 }

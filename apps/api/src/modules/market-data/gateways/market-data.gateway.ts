@@ -117,6 +117,15 @@ export class MarketDataGateway
   private readonly hubListeners = new Map<string, { off: () => void; sockets: number }>();
   private renewTimer: NodeJS.Timeout | null = null;
 
+  /**
+   * Legacy path: the refs (EXCHANGE:token) each socket holds on the
+   * UserFeedManager. The manager ref-counts per token, so a repeat subscribe
+   * from the same socket (e.g. a client raising a ref's purpose) must not reach
+   * it again, or the socket's single unsubscribe would leave a leaked broker
+   * subscription. Bounded by MAX_BROWSER_REFS_PER_SOCKET per socket.
+   */
+  private readonly legacyRefs = new Map<string, Set<string>>();
+
   constructor(
     private readonly userFeedManager: UserFeedManager,
     // Resolves HUB_PRICE_SOURCE lazily: MarketHubModule imports MarketDataModule, so injecting it would cycle.
@@ -152,6 +161,7 @@ export class MarketDataGateway
     for (const l of this.hubListeners.values()) l.off();
     this.hubListeners.clear();
     this.hubSockets.clear();
+    this.legacyRefs.clear();
     this.flushPendingTicks();
   }
 
@@ -175,6 +185,7 @@ export class MarketDataGateway
   handleDisconnect(client: Socket): void {
     this.connectedClients.delete(client.id);
     this.detachHub(client.id);
+    this.legacyRefs.delete(client.id);
     const userId = client.data?.userId as string | undefined;
     this.logger.log(`Client disconnected: ${client.id} (user ${userId ?? '?'})`);
     if (userId) {
@@ -201,15 +212,18 @@ export class MarketDataGateway
       if (hubSocket) {
         this.watchOnHub(client.id, hubSocket, refs, browserPriority(data?.purpose));
       } else {
+        const fresh = this.holdLegacy(client.id, refs);
         // Floated: the ack returns immediately. subscribe() can reject (e.g. the
         // per-user feed flag is disabled → factory throws) — swallow it here so a
         // rejected promise never becomes an unhandledRejection / process crash.
         // No secrets in the message.
-        this.userFeedManager.subscribe(userId, refs.map(toTokenRef)).catch((err) => {
-          this.logger.debug(
-            `subscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
-          );
-        });
+        if (fresh.length > 0) {
+          this.userFeedManager.subscribe(userId, fresh.map(toTokenRef)).catch((err) => {
+            this.logger.debug(
+              `subscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
+            );
+          });
+        }
       }
     }
     if (bareTokens > 0) {
@@ -243,13 +257,19 @@ export class MarketDataGateway
         const gone = refs.filter((r) => hubSocket.watches.delete(refKey(r)));
         if (gone.length > 0) quietly(hubSocket.hub.unwatch(gone, browserOwner(client.id)));
       } else {
+        // Only refs this socket holds: the manager ref-counts per token, so
+        // releasing one it never forwarded would steal another socket's count.
+        const held = this.legacyRefs.get(client.id);
+        const gone = held ? refs.filter((r) => held.delete(refKey(r))) : [];
         // Floated + guarded like handleSubscribe: a rejection must not surface as
         // an unhandledRejection.
-        this.userFeedManager.unsubscribe(userId, refs.map(toTokenRef)).catch((err) => {
-          this.logger.debug(
-            `unsubscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
-          );
-        });
+        if (gone.length > 0) {
+          this.userFeedManager.unsubscribe(userId, gone.map(toTokenRef)).catch((err) => {
+            this.logger.debug(
+              `unsubscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
+            );
+          });
+        }
       }
     }
 
@@ -384,16 +404,52 @@ export class MarketDataGateway
     }
   }
 
+  /**
+   * Legacy path: record `refs` as held by this socket and return only the ones
+   * it did not hold yet (the ones to forward to the manager). Bounded per socket
+   * like the hub watches; refs over the cap are not forwarded.
+   */
+  private holdLegacy(socketId: string, refs: InstrumentRef[]): InstrumentRef[] {
+    let held = this.legacyRefs.get(socketId);
+    if (!held) {
+      held = new Set<string>();
+      this.legacyRefs.set(socketId, held);
+    }
+    const fresh: InstrumentRef[] = [];
+    let skipped = 0;
+    for (const ref of refs) {
+      const key = refKey(ref);
+      if (held.has(key)) continue;
+      if (held.size >= MAX_BROWSER_REFS_PER_SOCKET) {
+        skipped++;
+        continue;
+      }
+      held.add(key);
+      fresh.push(ref);
+    }
+    if (skipped > 0) {
+      this.logger.debug(`Socket ${socketId}: ${skipped} legacy ref(s) over the ${MAX_BROWSER_REFS_PER_SOCKET} cap not subscribed`);
+    }
+    return fresh;
+  }
+
   /** New refs, and refs whose priority this subscribe raises; bounded per socket. */
   private watchOnHub(socketId: string, s: HubSocket, refs: InstrumentRef[], priority: Priority): void {
     const fresh: InstrumentRef[] = [];
+    let skipped = 0;
     for (const ref of refs) {
       const key = refKey(ref);
       const had = s.watches.get(key);
       if (had && had.priority <= priority) continue; // already watched at least this urgently
-      if (!had && s.watches.size >= MAX_BROWSER_REFS_PER_SOCKET) continue;
+      if (!had && s.watches.size >= MAX_BROWSER_REFS_PER_SOCKET) {
+        skipped++;
+        continue;
+      }
       s.watches.set(key, { ref, priority });
       fresh.push(ref);
+    }
+    if (skipped > 0) {
+      this.logger.debug(`Socket ${socketId}: ${skipped} hub ref(s) over the ${MAX_BROWSER_REFS_PER_SOCKET} cap not watched`);
     }
     if (fresh.length > 0) quietly(s.hub.watch(fresh, priority, browserOwner(socketId), BROWSER_WATCH_TTL_MS));
   }

@@ -138,6 +138,7 @@ describe('MarketDataGateway', () => {
     const { gw, manager } = makeGateway();
     const sock = fakeSocket(signToken('u1'));
     gw.handleConnection(sock as any);
+    gw.handleSubscribe(sock as any, { tokens: ['111'] }); // only a held ref is released
     gw.handleUnsubscribe(sock as any, { tokens: ['111'] });
     expect(manager.unsubscribe).toHaveBeenCalledWith('u1', [
       { token: '111', exchange: 'NSE' },
@@ -236,8 +237,83 @@ describe('MarketDataGateway', () => {
     const { gw, manager } = makeGateway();
     const sock = fakeSocket(signToken('u1'));
     gw.handleConnection(sock as any);
+    gw.handleSubscribe(sock as any, { refs: [{ token: '35001', exchange: 'NFO' }] }); // only a held ref is released
     gw.handleUnsubscribe(sock as any, { refs: [{ token: '35001', exchange: 'NFO' }] });
     expect(manager.unsubscribe).toHaveBeenCalledWith('u1', [{ token: '35001', exchange: 'NFO' }]);
+  });
+
+  describe('legacy path: per-socket dedupe so the manager ref-count stays balanced', () => {
+    it('the same ref subscribed twice (chart then watchlist) reaches the manager once; one unsubscribe releases it once', () => {
+      const { gw, manager } = makeGateway();
+      const sock = fakeSocket(signToken('u1'));
+      gw.handleConnection(sock as any);
+      const ref = { token: '35001', exchange: 'NFO' };
+      gw.handleSubscribe(sock as any, { refs: [ref], purpose: 'chart' });
+      const ack = gw.handleSubscribe(sock as any, { refs: [ref], purpose: 'watchlist' });
+      expect(manager.subscribe).toHaveBeenCalledTimes(1);
+      expect(manager.subscribe).toHaveBeenCalledWith('u1', [{ token: '35001', exchange: 'NFO' }]);
+      expect(ack).toEqual({ event: 'subscribed', data: { subscribed: ['35001'] } }); // ack unchanged
+      gw.handleUnsubscribe(sock as any, { refs: [ref] });
+      expect(manager.unsubscribe).toHaveBeenCalledTimes(1);
+      expect(manager.unsubscribe).toHaveBeenCalledWith('u1', [{ token: '35001', exchange: 'NFO' }]);
+      gw.handleUnsubscribe(sock as any, { refs: [ref] }); // no longer held
+      expect(manager.unsubscribe).toHaveBeenCalledTimes(1);
+    });
+
+    it('forwards only the new refs of a mixed subscribe', () => {
+      const { gw, manager } = makeGateway();
+      const sock = fakeSocket(signToken('u1'));
+      gw.handleConnection(sock as any);
+      gw.handleSubscribe(sock as any, { refs: [{ token: '1', exchange: 'NSE' }] });
+      gw.handleSubscribe(sock as any, { refs: [{ token: '1', exchange: 'NSE' }, { token: '1', exchange: 'MCX' }] });
+      expect(manager.subscribe).toHaveBeenLastCalledWith('u1', [{ token: '1', exchange: 'MCX' }]);
+    });
+
+    it('unsubscribing a ref the socket never subscribed does not call the manager', () => {
+      const { gw, manager } = makeGateway();
+      const sock = fakeSocket(signToken('u1'));
+      gw.handleConnection(sock as any);
+      gw.handleUnsubscribe(sock as any, { refs: [{ token: '35001', exchange: 'NFO' }] });
+      expect(manager.unsubscribe).not.toHaveBeenCalled();
+    });
+
+    it('two legacy sockets of one user each forward their own subscribe and unsubscribe (multi-tab stays balanced)', () => {
+      const { gw, manager } = makeGateway();
+      const a = fakeSocket(signToken('u1'), 'a');
+      const b = fakeSocket(signToken('u1'), 'b');
+      gw.handleConnection(a as any);
+      gw.handleConnection(b as any);
+      const ref = { token: '35001', exchange: 'NFO' };
+      gw.handleSubscribe(a as any, { refs: [ref] });
+      gw.handleSubscribe(b as any, { refs: [ref] });
+      expect(manager.subscribe).toHaveBeenCalledTimes(2);
+      gw.handleUnsubscribe(a as any, { refs: [ref] });
+      gw.handleUnsubscribe(b as any, { refs: [ref] });
+      expect(manager.unsubscribe).toHaveBeenCalledTimes(2);
+    });
+
+    it('a disconnect forgets the socket’s refs: a reconnecting socket with the same id forwards again', () => {
+      const { gw, manager } = makeGateway();
+      const sock = fakeSocket(signToken('u1'));
+      gw.handleConnection(sock as any);
+      gw.handleSubscribe(sock as any, { refs: [{ token: '1', exchange: 'NSE' }] });
+      gw.handleDisconnect(sock as any);
+      expect(manager.releaseUser).toHaveBeenCalledWith('u1');
+      gw.handleConnection(sock as any);
+      gw.handleSubscribe(sock as any, { refs: [{ token: '1', exchange: 'NSE' }] });
+      expect(manager.subscribe).toHaveBeenCalledTimes(2);
+    });
+
+    it('a legacy socket forwards at most 100 refs', () => {
+      const { gw, manager } = makeGateway();
+      const sock = fakeSocket(signToken('u1'));
+      gw.handleConnection(sock as any);
+      const refs = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ token: String(from + i), exchange: 'NSE' }));
+      gw.handleSubscribe(sock as any, { refs: refs(1, 90) });
+      gw.handleSubscribe(sock as any, { refs: refs(1001, 30) });
+      const forwarded = manager.subscribe.mock.calls.reduce((n, c) => n + (c[1] as unknown[]).length, 0);
+      expect(forwarded).toBe(100);
+    });
   });
 
   it('coalesces per EXCHANGE:token: the same token on two exchanges is two ticks', () => {

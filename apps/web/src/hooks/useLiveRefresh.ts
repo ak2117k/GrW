@@ -24,8 +24,15 @@ import {
  *
  * `fn` is called with no arguments and its result ignored; it must handle its own
  * errors, exactly as the interval it replaces did.
+ *
+ * `opts.paused` stops the interval but keeps the return catch-up (SP1 M4: the chart's live edge comes from ticks while the feed is hub-served and Live).
  */
-export function useLiveRefresh(fn: () => void | Promise<void>, baseMs: number): void {
+export function useLiveRefresh(
+  fn: () => void | Promise<void>,
+  baseMs: number,
+  opts: { paused?: boolean } = {},
+): void {
+  const paused = opts.paused === true;
   // Held in a ref so a caller that re-creates `fn` every render (the common case
   // with useCallback dependencies) does not tear down and rebuild the timer and
   // the listeners on each one.
@@ -63,7 +70,9 @@ export function useLiveRefresh(fn: () => void | Promise<void>, baseMs: number): 
       }, delay);
     };
 
-    schedule();
+    // Paused: no timer (live ticks drive the data); the tab/network catch-up
+    // below still runs, so a returning tab refreshes once.
+    if (!paused) schedule();
 
     // Browser-only. These hooks are exercised in a node test environment, where
     // a bare `document` reference throws before anything is scheduled.
@@ -94,5 +103,5 @@ export function useLiveRefresh(fn: () => void | Promise<void>, baseMs: number): 
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', catchUp);
     };
-  }, [baseMs]);
+  }, [baseMs, paused]);
 }

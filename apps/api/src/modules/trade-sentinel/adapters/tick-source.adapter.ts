@@ -309,18 +309,21 @@ export class SentinelTickSource implements TickSource {
     const source = this.hubSource();
     const hub = source?.hubFor(row.userId, 'positions') ?? null;
     const hubLtp = this.hubContractPrice(hub, row);
+    // M1: consumers.positions counts only users the hub serves (hub !== null), so the
+    // production gate reads the hub's own share and other tenants never confound it.
+    const counted = hub ? source : null;
     let ltp: number;
     if (hubLtp !== null) {
       ltp = hubLtp;
-      source?.record('positions', 'hub');
+      counted?.record('positions', 'hub');
     } else {
       try {
         ltp = this.storedPrice(trackerId, row);
       } catch (err) {
-        source?.record('positions', 'unpriced');
+        counted?.record('positions', 'unpriced');
         throw err;
       }
-      source?.record('positions', 'legacy');
+      counted?.record('positions', 'legacy');
     }
 
     const segment = segmentFor(row);

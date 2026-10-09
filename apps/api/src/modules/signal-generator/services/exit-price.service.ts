@@ -44,7 +44,14 @@ export class ExitPriceService {
   /** A level-book price counts as fresh only if its last tick is within this window. */
   private static readonly FRESH_WINDOW_MS = 120_000; // 2 min
 
+  /** I2: consecutive hub-on calls the legacy tiers had to answer alone before warning. */
+  private static readonly HUB_ZERO_RUN = 10;
+  /** I2: at most one such warning per 10 minutes. */
+  private static readonly HUB_WARN_EVERY_MS = 10 * 60_000;
+
   private hubSourceRef: HubPriceSource | null = null;
+  private hubZeroRun = 0;
+  private hubZeroWarnedAt: number | null = null;
 
   constructor(
     private readonly adapter: AngelOneAdapterService,
@@ -78,7 +85,7 @@ export class ExitPriceService {
 
     const source = this.hubSource();
     const resolved = new Map<string, ExitPrice>();
-    const legacy = this.fromHub(source, exchange, uniq, symbolByToken, resolved);
+    const { legacy, hubOn } = this.fromHub(source, exchange, uniq, symbolByToken, resolved);
 
     if (legacy.length > 0) {
       // Tier 1: REST batch.
@@ -94,21 +101,25 @@ export class ExitPriceService {
     }
 
     for (const token of uniq) out.set(token, resolved.get(token) as ExitPrice);
-    this.count(source, out);
+    this.count(source, out, hubOn);
     return out;
   }
 
-  /** Tier 0. Fills `resolved` with fresh hub prices and returns the tokens left for the legacy tiers. */
+  /**
+   * Tier 0. Fills `resolved` with fresh hub prices and returns the tokens left
+   * for the legacy tiers, and whether the hub tier ran at all (flag on, hub up,
+   * an exchange it speaks).
+   */
   private fromHub(
     source: HubPriceSource | null,
     exchange: string,
     tokens: string[],
     symbolByToken: Map<string, string> | undefined,
     resolved: Map<string, ExitPrice>,
-  ): string[] {
+  ): { legacy: string[]; hubOn: boolean } {
     const hub = source?.hubFor(null, 'tracks') ?? null;
     const ex = exchange.toUpperCase();
-    if (!hub || !isHubExchange(ex)) return tokens;
+    if (!hub || !isHubExchange(ex)) return { legacy: tokens, hubOn: false };
 
     const refs: InstrumentRef[] = tokens.map((token) => ({ exchange: ex, token, symbol: symbolByToken?.get(token) ?? token }));
     // Register or renew, fire-and-forget: a slow broker subscribe must never hold an exit decision.
@@ -124,11 +135,11 @@ export class ExitPriceService {
         legacy.push(ref.token);
       }
     }
-    return legacy;
+    return { legacy, hubOn: true };
   }
 
-  /** /healthz/detail → hub.consumers.tracks. */
-  private count(source: HubPriceSource | null, out: Map<string, ExitPrice>): void {
+  /** /healthz/detail → hub.consumers.tracks, and the I2 silent-hub watch. */
+  private count(source: HubPriceSource | null, out: Map<string, ExitPrice>, hubOn: boolean): void {
     if (!source) return;
     let hub = 0;
     let legacy = 0;
@@ -141,6 +152,31 @@ export class ExitPriceService {
     source.record('tracks', 'hub', hub);
     source.record('tracks', 'legacy', legacy);
     source.record('tracks', 'unpriced', unpriced);
+    if (hubOn) this.watchHubZero(hub, legacy);
+  }
+
+  /**
+   * I2: with the hub on, legacy silently covers a hub that has stopped serving.
+   * {@link HUB_ZERO_RUN} calls in a row where the hub served 0 and legacy served
+   * some warn, at most once per {@link HUB_WARN_EVERY_MS}. Any hub-served call
+   * restarts the run; a call nothing priced neither extends nor restarts it
+   * (consumers.tracks.unpriced already shows that).
+   */
+  private watchHubZero(hub: number, legacy: number): void {
+    if (hub > 0) {
+      this.hubZeroRun = 0;
+      return;
+    }
+    if (legacy === 0) return;
+    this.hubZeroRun++;
+    if (this.hubZeroRun < ExitPriceService.HUB_ZERO_RUN) return;
+    const now = Date.now();
+    if (this.hubZeroWarnedAt !== null && now - this.hubZeroWarnedAt < ExitPriceService.HUB_WARN_EVERY_MS) return;
+    this.hubZeroWarnedAt = now;
+    this.logger.warn(
+      `[exit-price] hub served 0 track exit price(s) for ${this.hubZeroRun} consecutive calls with HUB_PRICES_TRACKS on; ` +
+        `the legacy tiers are covering (check /healthz/detail hub.consumers and hub.socketUp)`,
+    );
   }
 
   /** Resolved lazily; a miss (no hub in this container) is retried on the next call. */

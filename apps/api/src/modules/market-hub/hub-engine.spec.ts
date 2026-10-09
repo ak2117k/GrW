@@ -264,6 +264,7 @@ describe('HubEngine', () => {
       positions: { hub: 3, legacy: 1, unpriced: 0, lastHubAt: Date.now(), lastUnpricedAt: null },
       tracks: { hub: 0, legacy: 0, unpriced: 2, lastHubAt: null, lastUnpricedAt: Date.now() },
       listenerErrors: 0,
+      flags: { positions: false, tracks: false }, // no consumerFlags dep: both switches read as off
     });
     e.stop();
   });

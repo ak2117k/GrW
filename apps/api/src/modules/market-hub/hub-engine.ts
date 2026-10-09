@@ -31,6 +31,14 @@ export interface HubEngineDeps {
   defaults: readonly InstrumentRef[];
   /** M2 CandleStore. Absent ⇒ no tick bars, no candle reads (M1 behaviour). */
   candles?: { repo: CandleRepo; interactiveCallBudget?: number };
+  /** The HUB_PRICES_POSITIONS / HUB_PRICES_TRACKS switches, read at status time. Absent ⇒ both off. */
+  consumerFlags?: () => ConsumerFlags;
+}
+
+/** The two consumer switches, so /healthz/detail tells "hub served 0" apart from "switch off". */
+export interface ConsumerFlags {
+  positions: boolean;
+  tracks: boolean;
 }
 
 export interface CandleStatus {
@@ -77,7 +85,7 @@ export interface HubStatus {
   /** M2 candle store; null when candles are not enabled. */
   candles: CandleStatus | null;
   /** M3: per consumer, how often the hub served, the legacy path served, or nothing did. */
-  consumers: { positions: ConsumerCounters; tracks: ConsumerCounters; listenerErrors: number };
+  consumers: { positions: ConsumerCounters; tracks: ConsumerCounters; listenerErrors: number; flags: ConsumerFlags };
 }
 
 const POSITIONS = 'hub:positions';
@@ -390,6 +398,7 @@ export class HubEngine {
         positions: { ...this.consumerCounts.positions },
         tracks: { ...this.consumerCounts.tracks },
         listenerErrors: this.listenerErrors,
+        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false },
       },
     };
   }

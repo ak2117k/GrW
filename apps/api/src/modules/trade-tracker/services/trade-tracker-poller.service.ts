@@ -5,8 +5,10 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import type { TokenRef } from '../../market-data/services/user-feed.types';
-import { lookupHubPrices, type HubPriceSource } from '../../market-hub/hub-prices';
-import { isHubExchange, refKey, type InstrumentRef, type Price } from '../../market-hub/hub.types';
+import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
+import { isHubExchange, refKey, type InstrumentRef, type Price, type PriceResult } from '../../market-hub/hub.types';
+import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
+import { SessionClock } from '../../market-hub/session-clock';
 import { TradeTrackerService, type TickTarget } from './trade-tracker.service';
 
 /**
@@ -72,6 +74,17 @@ export class TradeTrackerPoller implements OnModuleDestroy {
   private hubUserId: string | null = null;
   private unsubscribeHub: (() => void) | null = null;
   private hubSourceRef: HubPriceSource | null = null;
+
+  /** I2: consecutive hub=0 sweeps before a served user's silent hub is reported. */
+  private static readonly HUB_ZERO_RUN = 5;
+  /** I2/H2: at most one such warning per 10 minutes. */
+  private static readonly HUB_WARN_EVERY_MS = 10 * 60_000;
+  /** Per hub-served user (today only the owner): the current hub=0 run, and when it last warned. */
+  private readonly hubZeroRuns = new Map<string, number>();
+  private readonly hubZeroWarnedAt = new Map<string, number>();
+  private hubFailureWarnedAt: number | null = null;
+  /** Per-exchange session hours (the hub's own calendar), so I2 counts only open instruments. */
+  private readonly session = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
   /** Guards against overlapping reconcile passes (a slow broker cycle). */
   private reconciling = false;
@@ -197,7 +210,8 @@ export class TradeTrackerPoller implements OnModuleDestroy {
       const source = this.hubSource();
       // Tier 0 first, and always: it also rebuilds (or empties) the set the hub
       // tick listener prices between sweeps.
-      const served = this.priceFromHub(byUser, source);
+      const { served, hubUsers } = this.priceFromHub(byUser, source);
+      this.watchHubZero(hubUsers);
       if (byUser.size === 0) return;
 
       // Instruments still needing a price, keyed EXCHANGE:token (tokens collide
@@ -263,9 +277,24 @@ export class TradeTrackerPoller implements OnModuleDestroy {
         }
       }
 
-      source?.record('positions', 'hub', served.size);
-      source?.record('positions', 'legacy', fromSocket + fromRest);
-      source?.record('positions', 'unpriced', unpriced.size);
+      // M1: consumers.positions counts only the users the hub serves, so the
+      // production gate reads the hub's own share; other tenants are legacy by
+      // design and would only confound it.
+      if (source && hubUsers.size > 0) {
+        let legacy = 0;
+        let notPriced = 0;
+        for (const userId of hubUsers.keys()) {
+          for (const ref of byUser.get(userId) ?? []) {
+            const key = tickRefKey(ref);
+            if (served.has(`${userId}|${key}`)) continue;
+            if (unpriced.has(key)) notPriced++;
+            else legacy++;
+          }
+        }
+        source.record('positions', 'hub', served.size);
+        source.record('positions', 'legacy', legacy);
+        source.record('positions', 'unpriced', notPriced);
+      }
 
       if (unpriced.size > 0) {
         // Not noise: an instrument nobody could quote is a tracker whose LTP is now ageing.
@@ -290,30 +319,102 @@ export class TradeTrackerPoller implements OnModuleDestroy {
    * scoped to that user; anything else falls through to the legacy tiers.
    * Returns `${userId}|EXCHANGE:token` for every instrument served here.
    */
-  private priceFromHub(byUser: Map<string, TokenRef[]>, source: HubPriceSource | null): Set<string> {
+  private priceFromHub(
+    byUser: Map<string, TokenRef[]>,
+    source: HubPriceSource | null,
+  ): { served: Set<string>; hubUsers: Map<string, { asked: number; hit: number }> } {
     const served = new Set<string>();
+    const hubUsers = new Map<string, { asked: number; hit: number }>();
     const owned = new Map<string, TickTarget>();
     let owner: string | null = null;
     for (const [userId, refs] of byUser) {
-      const hub = source?.hubFor(userId, 'positions') ?? null;
-      if (!hub) continue;
-      if (!this.unsubscribeHub) this.unsubscribeHub = hub.onPrice((p) => this.onHubPrice(p));
+      let hub: HubPrices | null = null;
+      try {
+        hub = source?.hubFor(userId, 'positions') ?? null;
+        if (!hub) continue;
+        if (!this.unsubscribeHub) this.unsubscribeHub = hub.onPrice((p) => this.onHubPrice(p));
+      } catch (err) {
+        // A hub that cannot even say whether it serves this user serves nobody this sweep.
+        this.warnHubFailure(err);
+        continue;
+      }
       owner = userId;
       const hubRefs = refs.map(toHubRef).filter((r): r is InstrumentRef => r !== null);
-      const results = hub.prices(hubRefs, { maxAgeMs: TradeTrackerPoller.HUB_MAX_AGE_MS });
+      const tally = { asked: hubRefs.length, hit: 0 };
+      hubUsers.set(userId, tally);
+      for (const ref of hubRefs) owned.set(refKey(ref), { exchange: ref.exchange, token: ref.token });
+      let results: Map<string, PriceResult>;
+      try {
+        results = hub.prices(hubRefs, { maxAgeMs: TradeTrackerPoller.HUB_MAX_AGE_MS });
+      } catch (err) {
+        // H2: a throwing hub is a hub that served nothing; the legacy tiers price this user.
+        this.warnHubFailure(err);
+        continue;
+      }
+      // N counts only instruments whose own exchange is open: the sweep's gate is
+      // "any market open" (MCX runs to 23:30), and a shut NFO is not a hub that
+      // stopped serving.
+      const at = new Date();
+      tally.asked = hubRefs.filter((r) => this.session.isOpen(r.exchange, at)).length;
       for (const ref of hubRefs) {
         const key = refKey(ref);
-        const target: TickTarget = { exchange: ref.exchange, token: ref.token };
-        owned.set(key, target);
         const r = results.get(key);
         if (r?.kind !== 'fresh') continue;
-        this.service.applyTick(target, r.price.ltp, { userId });
+        this.service.applyTick({ exchange: ref.exchange, token: ref.token }, r.price.ltp, { userId });
         served.add(`${userId}|${key}`);
+        tally.hit++;
       }
     }
     this.hubOwned = owned;
     this.hubUserId = owner;
-    return served;
+    return { served, hubUsers };
+  }
+
+  /**
+   * I2: legacy silently covers a hub that has stopped serving, so the sweep says
+   * so. A served user whose hub tier priced 0 of N (N > 0) open instruments for
+   * {@link HUB_ZERO_RUN} sweeps in a row (every sweep that runs is market-open)
+   * warns, at most once per {@link HUB_WARN_EVERY_MS} per user. Any hub-served
+   * sweep restarts the run. Names counts only, never the user.
+   */
+  private watchHubZero(hubUsers: Map<string, { asked: number; hit: number }>): void {
+    for (const userId of [...this.hubZeroRuns.keys()]) {
+      if (!hubUsers.has(userId)) this.hubZeroRuns.delete(userId);
+    }
+    const now = Date.now();
+    let users = 0;
+    let instruments = 0;
+    for (const [userId, { asked, hit }] of hubUsers) {
+      if (asked === 0 || hit > 0) {
+        this.hubZeroRuns.delete(userId);
+        continue;
+      }
+      const run = (this.hubZeroRuns.get(userId) ?? 0) + 1;
+      this.hubZeroRuns.set(userId, run);
+      if (run < TradeTrackerPoller.HUB_ZERO_RUN) continue;
+      const last = this.hubZeroWarnedAt.get(userId);
+      if (last !== undefined && now - last < TradeTrackerPoller.HUB_WARN_EVERY_MS) continue;
+      this.hubZeroWarnedAt.set(userId, now);
+      users++;
+      instruments += asked;
+    }
+    if (users > 0) {
+      this.logger.warn(
+        `[trade-tracker] hub served 0 of ${instruments} open instrument(s) for ${users} hub-served user(s) ` +
+          `for ${TradeTrackerPoller.HUB_ZERO_RUN}+ consecutive sweeps; the legacy tiers are covering ` +
+          `(check /healthz/detail hub.consumers and hub.socketUp)`,
+      );
+    }
+  }
+
+  /** H2: a throwing hub tier, rate-limited to one warn per {@link HUB_WARN_EVERY_MS}. */
+  private warnHubFailure(err: unknown): void {
+    const now = Date.now();
+    if (this.hubFailureWarnedAt !== null && now - this.hubFailureWarnedAt < TradeTrackerPoller.HUB_WARN_EVERY_MS) return;
+    this.hubFailureWarnedAt = now;
+    this.logger.warn(
+      `[trade-tracker] hub tier failed, legacy tiers pricing instead: ${err instanceof Error ? err.message : err}`,
+    );
   }
 
   /** Every hub price (tick or polled quote) for an instrument the served user holds, as it arrives. */

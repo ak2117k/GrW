@@ -126,6 +126,32 @@ describe('MarketHubService', () => {
     svc.onModuleDestroy();
   });
 
+  it('status().consumers.flags reflects the two consumer switches, so hub=0 reads apart from switch-off', () => {
+    const svc = new MarketHubService(
+      enabled({ 'hub.pricesPositions': true, 'hub.pricesTracks': false }) as any,
+      manager() as any,
+      tracker as any,
+      prisma as any,
+      runner as any,
+      instruments as any,
+    );
+    svc.onModuleInit();
+    expect(svc.status()?.consumers.flags).toEqual({ positions: true, tracks: false });
+    svc.onModuleDestroy();
+
+    const other = new MarketHubService(
+      enabled({ 'hub.pricesTracks': true }) as any, // HUB_PRICES_POSITIONS unset: off
+      manager() as any,
+      tracker as any,
+      prisma as any,
+      runner as any,
+      instruments as any,
+    );
+    other.onModuleInit();
+    expect(other.status()?.consumers.flags).toEqual({ positions: false, tracks: true });
+    other.onModuleDestroy();
+  });
+
   it('runs no candle store unless HUB_CANDLES_ENABLED, and never serves charts then', () => {
     const svc = new MarketHubService(enabled({ 'hub.candlesEnabled': false, 'hub.servesCharts': true }) as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
     svc.onModuleInit();

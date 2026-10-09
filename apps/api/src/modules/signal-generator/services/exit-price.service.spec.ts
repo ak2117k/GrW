@@ -251,6 +251,54 @@ describe('ExitPriceService — hub tier (HUB_PRICES_TRACKS)', () => {
     expect(engine.registry.size()).toBe(0); // nothing was watched
   });
 
+  describe('a hub that silently stops serving is visible (I2)', () => {
+    const hubZeroWarns = (warn: jest.SpyInstance) => warn.mock.calls.filter((c) => /hub served 0/.test(String(c[0])));
+
+    it('10 consecutive legacy-only calls with the flag on → one warn, at most once per 10 min', async () => {
+      adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2501]]));
+      const svc = make();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      for (let i = 0; i < 9; i++) await svc.resolveExitPrices('NSE', ['2885']);
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+      await svc.resolveExitPrices('NSE', ['2885']); // the 10th in a row
+      expect(hubZeroWarns(warn)).toHaveLength(1);
+
+      for (let i = 0; i < 20; i++) await svc.resolveExitPrices('NSE', ['2885']);
+      expect(hubZeroWarns(warn)).toHaveLength(1);
+      jest.setSystemTime(Date.now() + 10 * 60_000);
+      await svc.resolveExitPrices('NSE', ['2885']);
+      expect(hubZeroWarns(warn)).toHaveLength(2);
+    });
+
+    it('a hub-served call resets the run', async () => {
+      adapter.getLtpsBatch.mockResolvedValue(new Map([['1594', 1490]]));
+      const svc = make();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      for (let i = 0; i < 9; i++) await svc.resolveExitPrices('NSE', ['1594']);
+      await svc.resolveExitPrices('NSE', ['2885']);
+      await jest.advanceTimersByTimeAsync(0);
+      broker.emitTick(FakeBroker.tick('2885', 2510, 'NSE'));
+      await svc.resolveExitPrices('NSE', ['2885']); // hub-served
+      for (let i = 0; i < 9; i++) await svc.resolveExitPrices('NSE', ['1594']);
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+      await svc.resolveExitPrices('NSE', ['1594']); // the 10th since the reset
+      expect(hubZeroWarns(warn)).toHaveLength(1);
+    });
+
+    it('never warns with the tracks flag off', async () => {
+      adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2501]]));
+      tracksOn = false;
+      const svc = make();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      for (let i = 0; i < 20; i++) await svc.resolveExitPrices('NSE', ['2885']);
+
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+    });
+  });
+
   it('an exchange the hub does not speak (CDS) stays on the legacy path', async () => {
     adapter.getLtpsBatch.mockResolvedValue(new Map([['1', 83.2]]));
 

@@ -782,6 +782,19 @@ describe('SentinelTickSource', () => {
         expect(hub.price).not.toHaveBeenCalled();
       });
 
+      it('M1: a non-served user’s legacy or unpriced outcome never lands in consumers.positions', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const { source, record } = hubWith({}, 'owner');
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue(option()); // userId 'u1': legacy-priced from the row
+
+        await t.svc.tickFor('t1');
+        t.findUnique.mockResolvedValue({ ...option(), updatedAt: new Date(NOW.getTime() - LTP_STALENESS_MS - 1) });
+        await expect(t.svc.tickFor('t1')).rejects.toThrow(/REFUSING to judge/i); // unpriced
+
+        expect(record).not.toHaveBeenCalled();
+      });
+
       it('takes an index option’s spot from the hub at priority 1', async () => {
         const { source } = hubWith({
           'NFO:99': freshAt('NFO', '99', 121, NOW.getTime()),

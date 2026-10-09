@@ -494,4 +494,119 @@ describe('TradeTrackerPoller — hub tier (HUB_PRICES_POSITIONS)', () => {
     expect(record).toHaveBeenCalledWith('positions', 'hub', 1);
     expect(record).toHaveBeenCalledWith('positions', 'legacy', 1);
   });
+
+  describe('a hub that silently stops serving is visible (I2)', () => {
+    const hubZeroWarns = (warn: jest.SpyInstance) =>
+      warn.mock.calls.filter((c) => /hub served 0 of/.test(String(c[0])));
+
+    it('5 sweeps with a served user and hub-unpriceable refs → one warn, at most once per 10 min', async () => {
+      const warn = jest.spyOn((poller as any).logger, 'warn').mockImplementation(() => undefined);
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['35001', { ltp: 41.2 }]])); // legacy covers it
+
+      for (let i = 0; i < 4; i++) await poller.sweepQuotes();
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+      await poller.sweepQuotes(); // the 5th consecutive hub=0 sweep
+      expect(hubZeroWarns(warn)).toHaveLength(1);
+      expect(String(hubZeroWarns(warn)[0][0])).toMatch(/hub served 0 of 1 open instrument\(s\) for 1 hub-served user\(s\)/);
+      expect(String(hubZeroWarns(warn)[0][0])).not.toMatch(/owner/);
+
+      for (let i = 0; i < 10; i++) await poller.sweepQuotes(); // still within 10 minutes
+      expect(hubZeroWarns(warn)).toHaveLength(1);
+
+      jest.setSystemTime(Date.now() + 10 * 60_000);
+      for (let i = 0; i < 5; i++) await poller.sweepQuotes();
+      expect(hubZeroWarns(warn)).toHaveLength(2);
+    });
+
+    it('a hub-served sweep resets the run', async () => {
+      const warn = jest.spyOn((poller as any).logger, 'warn').mockImplementation(() => undefined);
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['35001', { ltp: 41.2 }]]));
+
+      for (let i = 0; i < 4; i++) await poller.sweepQuotes();
+      broker.emitTick(FakeBroker.tick('35001', 250.5, 'NFO'));
+      await poller.sweepQuotes(); // hub-served: the run starts over
+      jest.setSystemTime(Date.now() + 6000); // the hub price is now older than 5 s
+      for (let i = 0; i < 4; i++) await poller.sweepQuotes();
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+      await poller.sweepQuotes();
+      expect(hubZeroWarns(warn)).toHaveLength(1);
+    });
+
+    it('no warn while the instruments’ own exchange is shut (NFO at 18:00, the sweep runs for MCX)', async () => {
+      const warn = jest.spyOn((poller as any).logger, 'warn').mockImplementation(() => undefined);
+      jest.setSystemTime(IST('2026-10-07T18:00:00')); // the sweep's gate is open (MCX), NFO is closed
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['35001', { ltp: 41.2 }]]));
+
+      for (let i = 0; i < 10; i++) await poller.sweepQuotes();
+
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+    });
+
+    it('no warn when hubFor is null (flag off or a non-served user)', async () => {
+      const warn = jest.spyOn((poller as any).logger, 'warn').mockImplementation(() => undefined);
+      serves.clear();
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['35001', { ltp: 41.2 }]]));
+
+      for (let i = 0; i < 10; i++) await poller.sweepQuotes();
+
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+    });
+  });
+
+  describe('position counters count only hub-served users (M1)', () => {
+    it('a non-served user’s legacy and unpriced instruments never land in consumers.positions', async () => {
+      const CASH = { token: '2885', exchange: 'NSE' };
+      const BANK = { token: '1333', exchange: 'NSE' };
+      service.openTrackerRefsByUser.mockResolvedValue(new Map([['owner', [OPT]], ['u2', [CASH, BANK]]]));
+      // u2: CASH priced from the socket (legacy), BANK answered by nobody (unpriced).
+      feed.getQuote.mockImplementation((token: string) => (token === '2885' ? liveQuote(1300, 'NSE') : null));
+      broker.emitTick(FakeBroker.tick('35001', 250.5, 'NFO'));
+
+      await poller.sweepQuotes();
+
+      expect(service.applyTick).toHaveBeenCalledWith(CASH, 1300); // u2 is still priced, just not counted
+      expect(record).toHaveBeenCalledWith('positions', 'hub', 1);
+      expect(record).toHaveBeenCalledWith('positions', 'legacy', 0);
+      expect(record).toHaveBeenCalledWith('positions', 'unpriced', 0);
+    });
+
+    it('a served user’s own legacy and unpriced instruments are still counted', async () => {
+      const CASH = { token: '2885', exchange: 'NSE' };
+      const BANK = { token: '1333', exchange: 'NSE' };
+      service.openTrackerRefsByUser.mockResolvedValue(new Map([['owner', [OPT, CASH, BANK]]]));
+      feed.getQuote.mockImplementation((token: string) => (token === '2885' ? liveQuote(1300, 'NSE') : null));
+      broker.emitTick(FakeBroker.tick('35001', 250.5, 'NFO'));
+
+      await poller.sweepQuotes();
+
+      expect(record).toHaveBeenCalledWith('positions', 'hub', 1);
+      expect(record).toHaveBeenCalledWith('positions', 'legacy', 1);
+      expect(record).toHaveBeenCalledWith('positions', 'unpriced', 1);
+    });
+
+    it('with no hub-served user the sweep records nothing for positions', async () => {
+      serves.clear();
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['35001', { ltp: 41.2 }]]));
+
+      await poller.sweepQuotes();
+
+      expect(record).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a throwing hub tier never costs the legacy price (H2)', () => {
+    it('hub.prices throws → legacy still prices, no rejection, one rate-limited warn', async () => {
+      const warn = jest.spyOn((poller as any).logger, 'warn').mockImplementation(() => undefined);
+      jest.spyOn(engine, 'prices').mockImplementation(() => {
+        throw new Error('hub exploded');
+      });
+      userFeeds.fetchQuotes.mockResolvedValue(new Map([['35001', { ltp: 41.2 }]]));
+
+      await expect(poller.sweepQuotes()).resolves.toBeUndefined();
+      await expect(poller.sweepQuotes()).resolves.toBeUndefined();
+
+      expect(service.applyTick).toHaveBeenCalledWith(OPT, 41.2);
+      expect(warn.mock.calls.filter((c) => /hub tier failed/.test(String(c[0])))).toHaveLength(1);
+    });
+  });
 });

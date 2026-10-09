@@ -100,6 +100,10 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       candles: this.config.get<boolean>('hub.candlesEnabled')
         ? { repo: new PrismaCandleRepo(this.prisma) }
         : undefined,
+      consumerFlags: () => ({
+        positions: this.consumerEnabled('positions'),
+        tracks: this.consumerEnabled('tracks'),
+      }),
     });
     this.engine = engine;
     this.ownerUserId = owner;

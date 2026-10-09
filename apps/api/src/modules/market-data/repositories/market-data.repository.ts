@@ -319,6 +319,37 @@ export class MarketDataRepository {
   }
 
   /**
+   * The nearest-expiry FUTURE whose master `name` is exactly `name`, expiring on
+   * or after `onOrAfter`. This is a commodity option's underlying: an MCX option
+   * has no cash instrument, it is priced off the future.
+   *
+   * EXACT `name`, deliberately. Angel names the mini contract separately
+   * (`CRUDEOILM`, `GOLDM`), so a prefix or `contains` match — which is what the
+   * feed's broker-search resolution does, and how it came to pick CRUDEOILM for
+   * CRUDEOIL — would hand a CRUDEOIL option the mini future's chart. Same rule
+   * as `CommodityRollService.pickFrontMonth` (exact name, FUTCOM, nearest
+   * expiry >= today), read from the persisted master instead of the 30 MB file.
+   *
+   * A future row is told apart from an option of the same name by having no
+   * option type and a `FUT` tradingsymbol. `expiry` is stored at host-local
+   * midnight (see `master-contract.ts`), so callers pass a local-midnight cut-off
+   * and a contract expiring today still counts.
+   */
+  async getNearestFuture(name: string, exchange: string, onOrAfter: Date) {
+    return this.prisma.instrument.findFirst({
+      where: {
+        name,
+        exchange,
+        isActive: true,
+        optionType: null,
+        symbol: { endsWith: 'FUT' },
+        expiry: { gte: onOrAfter },
+      },
+      orderBy: { expiry: 'asc' },
+    });
+  }
+
+  /**
    * Load every active instrument in the DB. Used by InstrumentService at
    * boot to prime the in-memory token→instrumentId cache so the candle
    * aggregator has mappings for all tradable segments (NSE indices, NFO

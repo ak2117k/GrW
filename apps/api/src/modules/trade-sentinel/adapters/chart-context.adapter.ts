@@ -8,6 +8,7 @@ import type { CandleSource } from '../../signal-generator/services/candle-source
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import type { ChartContextShim, SourcedValue } from '../services/context-packet.service';
+import { startOfLocalDay } from '../../market-data/services/master-contract';
 import { normaliseSymbol } from '../symbols';
 
 /**
@@ -64,7 +65,7 @@ export interface NearestLevels {
  * `unresolvedUnderlying`: the absence has to name itself as a failure to look.
  */
 export const LEVEL_BOOK_UNBUILT =
-  'no level book could be built for this symbol — either no NSE instrument matched it, or the ' +
+  'no level book could be built for this symbol — either no NSE instrument (or MCX future) matched it, or the ' +
   'level engine had no price history to build one from — so no support or resistance was ever ' +
   'computed. This is a FAILURE TO LOOK, not a finding: do not read it as an instrument with no ' +
   'structure.';
@@ -433,6 +434,14 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         instrument = await this.instruments.getInstrumentBySymbol(candidate, 'NSE');
         if (instrument) break;
       }
+      // A COMMODITY underlying (an MCX option's `name`, e.g. CRUDEOIL) has no NSE
+      // row at all; its price series is the nearest-expiry future of exactly that
+      // name on MCX — the same contract the tick source quotes as the spot, so
+      // the levels and the spot share one scale. Asked only after the NSE ladder
+      // misses, so every NSE/NFO/BFO underlying resolves exactly as before.
+      if (!instrument) {
+        instrument = await this.instruments.getNearestFuture(base, 'MCX', startOfLocalDay());
+      }
       if (!instrument) {
         // WARN, not debug. An unresolvable symbol here means an EMPTY LEVEL BOOK
         // FOR THE LIFE OF THE POSITION — `levelBreak` never fires and the packet
@@ -443,7 +452,8 @@ export class SentinelChartContextAdapter implements ChartContextShim {
         // anything passed an NFO tradingsymbol. Once per symbol, not per tick.
         this.warnOnce(
           base,
-          `no NSE instrument matches "${symbol}" (tried ${masterSymbolCandidates(symbol).join(', ')}) ` +
+          `no NSE instrument matches "${symbol}" (tried ${masterSymbolCandidates(symbol).join(', ')}), ` +
+            `nor any live MCX future named ${base} ` +
             '— its level book will be empty for as long as this symbol is watched, so the level ' +
             'and volume sensors stay silent. For a derivative, callers must pass the ' +
             "UNDERLYING's name, not the tradingsymbol.",

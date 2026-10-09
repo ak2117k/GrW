@@ -8,6 +8,7 @@ import { LevelBookService } from '../../signal-generator/services/level-book.ser
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { NewsAggregatorService } from '../../news/services/news-aggregator.service';
+import { startOfLocalDay } from '../../market-data/services/master-contract';
 import { segmentFor } from '../charges';
 import type { Segment, Side } from '../charges';
 import type { TickReading, TickSource } from '../services/sentinel-cycle.service';
@@ -107,9 +108,10 @@ class TickUnavailable extends Error {}
  * BOTH HALVES ARE NEEDED AND THEY FAIL INDEPENDENTLY. `name` is what the level
  * book and the news feed are keyed by ('NIFTY'); `token` is what the live level
  * book's spot is keyed by ('99926000'). The name comes off the derivative's own
- * instrument row; the token comes from the index map for an index, or a second
- * lookup of the NSE CASH row for a stock — so a missing cash row leaves the
- * name usable and only the spot unavailable.
+ * instrument row; the token comes from the index map for an index, a second
+ * lookup of the NSE CASH row for a stock, or the nearest-expiry FUTURE of the
+ * same name for an MCX contract — so a missing row leaves the name usable and
+ * only the spot unavailable.
  * Collapsing them into one nullable value would take the level book and the
  * news down with the spot.
  */
@@ -584,8 +586,8 @@ export class SentinelTickSource implements TickSource {
     }
 
     try {
-      // The UNDERLYING's own exchange (NSE for NIFTY and stocks, BSE for SENSEX),
-      // never the derivative's (NFO/BFO/MCX), or the broker resolves nothing.
+      // The UNDERLYING's own exchange (NSE for NIFTY and stocks, BSE for SENSEX,
+      // MCX for a commodity's future), never NFO/BFO, or the broker resolves nothing.
       const tick = await this.userFeed.fetchQuote(userId, token, exchange);
       const ltp = tick?.ltp;
       if (!Number.isFinite(ltp as number) || (ltp as number) <= 0) return null;
@@ -626,6 +628,11 @@ export class SentinelTickSource implements TickSource {
         {
           contract: (ex, tok) => this.instruments.getInstrumentByToken(tok, ex || undefined),
           cash: (sym, ex) => this.instruments.getInstrumentBySymbol(sym, ex),
+          // MCX: a commodity option has no cash row; its underlying is the
+          // nearest future of the SAME master name (CRUDEOIL, never CRUDEOILM).
+          // The chart adapter resolves the level book's instrument by the same
+          // rule, so the spot and the levels are on one contract's scale.
+          future: (name, ex) => this.instruments.getNearestFuture(name, ex, startOfLocalDay()),
         },
       );
       if (r.name) {
@@ -647,7 +654,8 @@ export class SentinelTickSource implements TickSource {
     } else if (resolved.token === null) {
       this.warnOnce(
         key,
-        `resolved ${symbol} to underlying ${resolved.name}, but no cash/index instrument for it ` +
+        `resolved ${symbol} to underlying ${resolved.name}, but no cash/index instrument ` +
+          `${String(exchange ?? '').toUpperCase() === 'MCX' ? 'or live MCX future ' : ''}for it ` +
           '— the level book and news still work, the underlying SPOT does not, so the level ' +
           'and OI sensors stay silent',
       );

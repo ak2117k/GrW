@@ -47,6 +47,7 @@ function make(opts: { withFeed?: boolean; hub?: HubPriceSource } = {}) {
   const findUnique = jest.fn().mockResolvedValue(row());
   const getInstrumentByToken = jest.fn().mockResolvedValue(null);
   const getInstrumentBySymbol = jest.fn().mockResolvedValue(null);
+  const getNearestFuture = jest.fn().mockResolvedValue(null);
   const getLevels = jest.fn().mockReturnValue(null);
   const getNewsForSymbol = jest.fn().mockResolvedValue([]);
   const structureFor = jest.fn().mockResolvedValue({
@@ -62,7 +63,7 @@ function make(opts: { withFeed?: boolean; hub?: HubPriceSource } = {}) {
 
   const svc = new SentinelTickSource(
     { tradeTracker: { findUnique } } as never,
-    { getInstrumentByToken, getInstrumentBySymbol } as never,
+    { getInstrumentByToken, getInstrumentBySymbol, getNearestFuture } as never,
     { getLevels } as never,
     { getNewsForSymbol } as never,
     { structureFor } as never,
@@ -74,6 +75,7 @@ function make(opts: { withFeed?: boolean; hub?: HubPriceSource } = {}) {
     findUnique,
     getInstrumentByToken,
     getInstrumentBySymbol,
+    getNearestFuture,
     getLevels,
     getNewsForSymbol,
     structureFor,
@@ -733,6 +735,70 @@ describe('SentinelTickSource', () => {
 
       expect(t.fetchQuote).toHaveBeenCalledWith('u1', '13310', 'NSE');
       expect(tick.underlyingLtp).toBe(4100);
+    });
+
+    describe('MCX commodity options (underlying = nearest future on MCX)', () => {
+      const crudeOption = () =>
+        row({ symbol: 'CRUDEOIL15OCT268850PE', exchange: 'MCX', token: '5001', lastLtp: 210 });
+
+      it('quotes the CRUDEOIL FUTURE on MCX as the spot — not a cash row, not CRUDEOILM', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const t = make();
+        t.findUnique.mockResolvedValue(crudeOption());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: null });
+        t.getNearestFuture.mockResolvedValue({ token: '472789', symbol: 'CRUDEOIL19OCT26FUT', exchange: 'MCX' });
+        t.fetchQuote.mockResolvedValue({ ltp: 8875 });
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(t.getNearestFuture).toHaveBeenCalledWith('CRUDEOIL', 'MCX', expect.any(Date));
+        expect(t.getInstrumentBySymbol).not.toHaveBeenCalled();
+        expect(t.fetchQuote).toHaveBeenCalledWith('u1', '472789', 'MCX');
+        expect(tick.underlyingLtp).toBe(8875);
+        // The level book and news are keyed by the underlying NAME; the chart
+        // adapter maps it to the same future.
+        expect(t.structureFor).toHaveBeenCalledWith('CRUDEOIL', 8875, 'u1');
+        expect(tick.structureSymbol).toBe('CRUDEOIL');
+        // The production warning is gone.
+        expect(warn.mock.calls.filter((c) => String(c[0]).includes('CRUDEOIL15OCT268850PE'))).toHaveLength(0);
+      });
+
+      it('uses the future from the live feed when it is ticking', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(crudeOption());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: null });
+        t.getNearestFuture.mockResolvedValue({ token: '472789', symbol: 'CRUDEOIL19OCT26FUT', exchange: 'MCX' });
+        t.getLevels.mockImplementation((tok: string) => (tok === '472789' ? { spot: 8870, lastTickAt: new Date() } : null));
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.underlyingLtp).toBe(8870);
+        expect(t.fetchQuote).not.toHaveBeenCalled();
+      });
+
+      it('never asks for a nearest future on an NFO option', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+
+        await t.svc.tickFor('t1');
+
+        expect(t.getNearestFuture).not.toHaveBeenCalled();
+      });
+
+      it('still warns once when no MCX future is found', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const t = make();
+        t.findUnique.mockResolvedValue(crudeOption());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: null });
+
+        await t.svc.tickFor('t1');
+        await t.svc.tickFor('t1');
+
+        const hits = warn.mock.calls.filter((c) => String(c[0]).includes('CRUDEOIL15OCT268850PE'));
+        expect(hits).toHaveLength(1);
+        expect(String(hits[0][0])).toMatch(/future/i);
+      });
     });
 
     describe('the hub tier (HUB_PRICES_POSITIONS)', () => {

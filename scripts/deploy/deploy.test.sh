@@ -76,16 +76,44 @@ check() { # name want_exit want_calls got_exit — runs in a subshell, so it RET
 ( stub; apply_timescale() { CALLS+=("timescale:$1"); }; run_migrations() { CALLS+=("migrate:$1"); return 1; }
   main; check "migration fails: no timescale setup" 1 "fetch:new migrate:new mark_failed:new" $? ) || failures=$((failures + 1))
 
-# apply_timescale feeds the checked-out SQL file to psql inside the postgres service.
+# run_timescale_sql feeds the checked-out SQL file to psql inside the postgres service.
 ( source "$here/deploy.sh"; set +e
   APP_DIR="$here/../.."; COMPOSE=(docker compose -f x.yml)
   tmpcalls="$(mktemp)"; tmpin="$(mktemp)"
   docker() { echo "$*" >> "$tmpcalls"; cat > "$tmpin"; }
-  apply_timescale new; rc=$?
+  run_timescale_sql; rc=$?
   if [[ $rc -eq 0 ]] && grep -q "^compose -f x.yml exec -T postgres sh -c psql -v ON_ERROR_STOP=0" "$tmpcalls" \
-     && cmp -s "$tmpin" "$APP_DIR/deploy/sql/candles-timescale.sql"; then echo "ok   apply_timescale pipes deploy/sql/candles-timescale.sql into the postgres service"
-  else echo "FAIL apply_timescale pipes deploy/sql/candles-timescale.sql into the postgres service: rc=$rc calls: $(tr '\n' ';' < "$tmpcalls")"; exit 1; fi
+     && cmp -s "$tmpin" "$APP_DIR/deploy/sql/candles-timescale.sql"; then echo "ok   run_timescale_sql pipes deploy/sql/candles-timescale.sql into the postgres service"
+  else echo "FAIL run_timescale_sql pipes deploy/sql/candles-timescale.sql into the postgres service: rc=$rc calls: $(tr '\n' ';' < "$tmpcalls")"; exit 1; fi
 ) || failures=$((failures + 1))
+
+# timescale_state asks a FRESH psql session (separate from the setup run) via the check SQL.
+( source "$here/deploy.sh"; set +e
+  APP_DIR="$here/../.."; COMPOSE=(docker compose -f x.yml)
+  tmpin="$(mktemp)"; docker() { cat > "$tmpin"; printf ' ok\n'; }
+  got="$(timescale_state)"
+  if [[ "$got" == ok ]] && cmp -s "$tmpin" "$APP_DIR/deploy/sql/candles-timescale-check.sql"; then echo "ok   timescale_state reads the check SQL's verdict"
+  else echo "FAIL timescale_state reads the check SQL's verdict: got [$got]"; exit 1; fi
+) || failures=$((failures + 1))
+
+# apply_timescale verifies the result and retries once: a freshly created database needs
+# a second session (CREATE EXTENSION, then the hypertable) — the 2026-10-09 VPS case.
+ts_case() { # name want_rc want_runs states...
+  local name="$1" want_rc="$2" want_runs="$3"; shift 3
+  ( source "$here/deploy.sh"; set +e; log() { :; }
+    runs=0; states=("$@"); seen="$(mktemp)"
+    run_timescale_sql() { runs=$((runs + 1)); }
+    # Called via $(...) — a subshell — so the call count lives in a file, not a variable.
+    timescale_state() { local i; i=$(wc -l < "$seen"); echo x >> "$seen"; echo "${states[$i]}"; }
+    apply_timescale new; rc=$?
+    if [[ $rc -eq $want_rc && $runs -eq $want_runs ]]; then echo "ok   apply_timescale: $name"
+    else echo "FAIL apply_timescale: $name: rc=$rc (want $want_rc), runs=$runs (want $want_runs)"; exit 1; fi )
+}
+ts_case "complete after one run" 0 1 ok || failures=$((failures + 1))
+ts_case "not applicable here (plain Postgres / Apache) after one run" 0 1 skip || failures=$((failures + 1))
+ts_case "fresh database: incomplete, then complete on the retry" 0 2 missing ok || failures=$((failures + 1))
+ts_case "still incomplete after the retry fails loudly" 1 2 missing missing || failures=$((failures + 1))
+ts_case "unreadable state counts as incomplete" 1 2 "" "" || failures=$((failures + 1))
 
 # CI publishes the image a few minutes after the push: until then, wait quietly.
 ( stub; image_published() { return 1; }
@@ -111,6 +139,16 @@ check() { # name want_exit want_calls got_exit — runs in a subshell, so it RET
   if [[ $rc -eq 0 ]] && grep -q "^pull -q ghcr.io/x/grw-api:abc" "$tmpcalls" \
      && grep -q "^tag ghcr.io/x/grw-api:abc grw-api:abc" "$tmpcalls"; then echo "ok   fetch_image pulls and tags grw-api:<sha>"
   else echo "FAIL fetch_image pulls and tags grw-api:<sha>: rc=$rc calls: $(tr '\n' ';' < "$tmpcalls")"; exit 1; fi
+) || failures=$((failures + 1))
+
+# Storage: the registry tag is dropped after the retag (the grw-api:<sha> tag keeps the
+# image, so record_success's keep-3 pruning really frees space). Untag failure is harmless.
+( source "$here/deploy.sh"; set +e
+  IMAGE_REPO=ghcr.io/x/grw-api; checkout() { :; }
+  tmpcalls="$(mktemp)"; docker() { echo "$*" >> "$tmpcalls"; [[ "$1" == image ]] && return 1; return 0; }
+  fetch_image abc; rc=$?
+  if [[ $rc -eq 0 ]] && [[ "$(tail -1 "$tmpcalls")" == "image rm ghcr.io/x/grw-api:abc" ]]; then echo "ok   fetch_image drops the registry tag after retagging, and its failure is harmless"
+  else echo "FAIL fetch_image drops the registry tag after retagging: rc=$rc calls: $(tr '\n' ';' < "$tmpcalls")"; exit 1; fi
 ) || failures=$((failures + 1))
 
 # Review I1: fetch_image must not pull when checkout fails (would tag OLD scripts with a new sha).

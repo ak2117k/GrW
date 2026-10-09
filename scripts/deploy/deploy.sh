@@ -74,7 +74,10 @@ note_waiting() {
 # and wait_healthy use.
 fetch_image() {
   checkout "$1" || return 1
-  docker pull -q "$IMAGE_REPO:$1" >/dev/null && docker tag "$IMAGE_REPO:$1" "grw-api:$1"
+  docker pull -q "$IMAGE_REPO:$1" >/dev/null && docker tag "$IMAGE_REPO:$1" "grw-api:$1" || return 1
+  # Drop the registry tag: grw-api:<sha> keeps the image, so record_success's keep-3
+  # pruning actually frees disk (each version is ~2 GB on a 20 GB host).
+  docker image rm "$IMAGE_REPO:$1" >/dev/null 2>&1 || true
 }
 
 run_migrations() {
@@ -87,9 +90,30 @@ run_migrations() {
 # _prisma_migrations, so a one-shot migration step would never reach the restored DB.
 # The SQL is from the new checkout; it runs inside the postgres container as its own
 # superuser/DB (POSTGRES_USER/POSTGRES_DB), so this script needs no DB credentials.
-apply_timescale() {
+run_timescale_sql() {
   "${COMPOSE[@]}" exec -T postgres sh -c 'psql -v ON_ERROR_STOP=0 -q -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
     < "$APP_DIR/deploy/sql/candles-timescale.sql"
+}
+
+# skip | ok | missing (see the SQL file), asked in a new psql session.
+timescale_state() {
+  "${COMPOSE[@]}" exec -T postgres sh -c 'psql -qtAX -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$APP_DIR/deploy/sql/candles-timescale-check.sql" 2>/dev/null | tr -d '[:space:]'
+}
+
+# The setup SQL turns its own errors into WARNINGs, so its exit code says nothing:
+# verify the RESULT instead. A freshly created database needs two sessions (CREATE
+# EXTENSION, then the hypertable) — the 2026-10-09 VPS cutover hit exactly that — so
+# one retry, then a non-zero return for main() to alert on.
+apply_timescale() {
+  local state="" attempt
+  for attempt in 1 2; do
+    run_timescale_sql || true
+    state="$(timescale_state)"
+    if [[ "$state" == ok || "$state" == skip ]]; then return 0; fi
+  done
+  log "candles_1m TimescaleDB setup incomplete after $attempt runs (state: ${state:-unreadable})"
+  return 1
 }
 
 swap_to() { GRW_API_TAG="$1" "${COMPOSE[@]}" up -d --no-deps api; }

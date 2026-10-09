@@ -81,7 +81,9 @@ Deviations from the brief or the spec text, with reasons:
    The new `openPositionRefsByUser` (with real symbols) feeds the hub's watch set. Both share one
    database read and one cache, and the existing poller tests keep their mocks.
 10. **Counters.** `hub.consumers.positions` counts the tracker sweep's outcomes and the sentinel's
-    reads, for every user's trackers: a non-owner's are always `legacy`. `hub.consumers.tracks`
+    reads, for the users `hubFor(userId, 'positions')` serves only (final-review M1: other tenants'
+    outcomes are legacy by design and would confound the gate). `hub.consumers.flags` carries the two
+    switch values, so "hub = 0" reads apart from "switch off". `hub.consumers.tracks`
     counts `ExitPriceService`'s outcomes. Counts are cumulative since boot, with `lastHubAt` and
     `lastUnpricedAt` stamps. A short-lived burst (the first call on a new instrument is never priced
     yet) is told apart from a steady failure by how recent `lastUnpricedAt` is.
@@ -149,7 +151,7 @@ Deviations from the brief or the spec text, with reasons:
    (Task 1 test "hubFor is null when the hub is not running, whatever the flags say"; Task 5 test
    "with no hub for the user (flag off or hub not running) the sweep is exactly the legacy path";
    Task 7 tests "a never-priced ref
-   is watched at priority 0 and falls back to the legacy tiers — never a hub price of 0" and "takes
+   is watched at priority 3 and falls back to the legacy tiers — never a hub price of 0" and "takes
    the legacy path untouched when the tracks flag is off, the hub is absent, or the lookup throws".)
 5. **The EOD square-off at 15:25 with no fresh price.** It must close at the last known price
    (`currentPrice ?? executedPrice`), never at 0 and never skip silently. (Task 8 test "EOD at 15:25
@@ -172,7 +174,7 @@ Deviations from the brief or the spec text, with reasons:
 | Modify `trade-tracker/services/trade-tracker-poller.service.ts` | hub tier (≤ 5 s), hub tick listener, counters; legacy tiers keyed by exchange + token |
 | Modify `trade-sentinel/adapters/tick-source.adapter.ts` | contract price + underlying spot from the hub; shared underlying helper; resolved exchange instead of the hard-coded `NSE` |
 | Modify `trade-sentinel/services/context-packet.service.ts` | `SPOT_SOURCE_HUB` |
-| Modify `signal-generator/services/exit-price.service.ts` | hub tier: watch at P0 with TTL, ≤ 10 s, `source: 'hub'` |
+| Modify `signal-generator/services/exit-price.service.ts` | hub tier: watch at P3 with TTL, ≤ 10 s, `source: 'hub'` |
 | Modify `adaptive-stop-track/services/adaptive-stop-tick-poller.service.ts`, `ungated-track/services/ungated-tick-poller.service.ts`, `anand-dual-track/services/anand-price-monitor.service.ts`, `sell-futures-track/services/sell-futures.service.ts`, `breakout-swing-track/services/breakout-swing-poller.service.ts` | EOD / breakout-swing prices through `ExitPriceService` |
 | Modify `config/configuration.ts`, `deploy/env/api.env.example` | `HUB_PRICES_POSITIONS`, `HUB_PRICES_TRACKS` |
 
@@ -3785,6 +3787,8 @@ position, sample `/healthz/detail` every few minutes and watch the following.
   unpriced.
 
 **Other `hub.value` fields:**
+- `consumers.flags` = `{ positions: true, tracks: true }`. If a consumer's `hub` count is flat, check
+  this first: `false` means the switch is off (config), not a hub that stopped serving.
 - `consumers.listenerErrors` = 0.
 - `slots.criticalOverflow` = 0.
 - `governor.endpoints.quote.throttlesLastHour` ≈ 0.
@@ -3799,6 +3803,11 @@ FROM trade_trackers WHERE status = 'OPEN' AND "userId" = '<your users.id>';
 
 **Logs:**
 - After the first few minutes, no `[trade-tracker] N open token(s) went unpriced` line.
+- No `[trade-tracker] hub served 0 of N open instrument(s) …` warning (the hub priced none of a
+  served user's open instruments on an open exchange for 5 sweeps in a row) and no `[exit-price] hub
+  served 0 track exit price(s) …` warning (10 calls in a row answered by the legacy tiers alone).
+  Either means legacy is silently covering a hub that has stopped serving. Both are rate-limited to
+  one per 10 minutes. Also no `hub tier failed, legacy tiers pricing instead` line.
 - No `[adaptive-stop-poll] / [ungated-poll] / [sell-futures-poll] / [breakout-swing] … no fresh price`
   line.
 - No sentinel `REFUSING to judge` for the owner's positions.
@@ -3810,8 +3819,15 @@ FROM trade_trackers WHERE status = 'OPEN' AND "userId" = '<your users.id>';
 - Anand's `expired with no LTP` warning does not appear for entries the hub watched.
 
 **Revert path:** `HUB_PRICES_POSITIONS=false` and/or `HUB_PRICES_TRACKS=false` puts that consumer back
-on its legacy path without a deploy. M3 is complete when this gate is observed in production, not when
-the tests pass (parent spec rule).
+on its legacy path without a deploy. Three M3 changes are NOT behind the switches, and only a code
+revert undoes them:
+- Task 4: the tracker's legacy socket fast path is exchange-matched, and a token held on two
+  exchanges skips the token-keyed socket cache (the ambiguous-token skip).
+- Task 6: the sentinel resolves an index option's underlying from the index map, and SENSEX on BSE.
+- Task 8: the EOD square-offs and breakout-swing price through `ExitPriceService`'s legacy tiers
+  instead of the dead shared feed.
+
+M3 is complete when this gate is observed in production, not when the tests pass (parent spec rule).
 
 ## Notes for later milestones (not in this plan)
 

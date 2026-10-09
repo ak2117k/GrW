@@ -1,10 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { Cron, Interval } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import type { TokenRef } from '../../market-data/services/user-feed.types';
-import { TradeTrackerService } from './trade-tracker.service';
+import { lookupHubPrices, type HubPriceSource } from '../../market-hub/hub-prices';
+import { isHubExchange, refKey, type InstrumentRef, type Price } from '../../market-hub/hub.types';
+import { TradeTrackerService, type TickTarget } from './trade-tracker.service';
 
 /**
  * Drives the per-trade tracker (design §4.2 / §4.3).
@@ -26,7 +29,7 @@ import { TradeTrackerService } from './trade-tracker.service';
  * failure never aborts the batch.
  */
 @Injectable()
-export class TradeTrackerPoller {
+export class TradeTrackerPoller implements OnModuleDestroy {
   private readonly logger = new Logger(TradeTrackerPoller.name);
 
   /**
@@ -61,6 +64,15 @@ export class TradeTrackerPoller {
    */
   private static readonly WS_FRESH_MS = 30_000;
 
+  /** Spec §2 / §5.3: an open position's price is at most 5 s old (Position Manager maxAge). */
+  private static readonly HUB_MAX_AGE_MS = 5000;
+
+  /** The hub-served user's open instruments (EXCHANGE:token), rebuilt every sweep; read by the tick listener. */
+  private hubOwned = new Map<string, TickTarget>();
+  private hubUserId: string | null = null;
+  private unsubscribeHub: (() => void) | null = null;
+  private hubSourceRef: HubPriceSource | null = null;
+
   /** Guards against overlapping reconcile passes (a slow broker cycle). */
   private reconciling = false;
 
@@ -72,7 +84,13 @@ export class TradeTrackerPoller {
     private readonly feed: MarketFeedService,
     private readonly userFeeds: UserFeedManager,
     private readonly service: TradeTrackerService,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  onModuleDestroy(): void {
+    this.unsubscribeHub?.();
+    this.unsubscribeHub = null;
+  }
 
   /**
    * Reconcile every credentialed user's book, then (re)subscribe all OPEN
@@ -139,8 +157,13 @@ export class TradeTrackerPoller {
    * — and P&L, the day extremes and the entire sentinel context packet read that
    * frozen number as the market. Prioritising the queue only decided who starved.
    *
-   * Two tiers, in this order:
+   * Tiers, in this order:
    *
+   *  0. HUB (HUB_PRICES_POSITIONS) — for the user the hub serves (the owner), a
+   *     price ≤ 5 s old, scoped to that user. Between sweeps the hub tick
+   *     listener applies every new price as it arrives; this sweep is the
+   *     safety net. A hub-served instrument then takes no unscoped legacy tick
+   *     for that user this sweep; one the hub could not price falls through.
    *  1. FAST PATH — the socket cache, when its tick is fresher than
    *     {@link WS_FRESH_MS}. Sub-second, already paid for, no broker call.
    *  2. BATCHED REST — everything the pool could not serve, via
@@ -171,6 +194,10 @@ export class TradeTrackerPoller {
     this.sweeping = true;
     try {
       const byUser = await this.service.openTrackerRefsByUser();
+      const source = this.hubSource();
+      // Tier 0 first, and always: it also rebuilds (or empties) the set the hub
+      // tick listener prices between sweeps.
+      const served = this.priceFromHub(byUser, source);
       if (byUser.size === 0) return;
 
       // Instruments still needing a price, keyed EXCHANGE:token (tokens collide
@@ -178,10 +205,13 @@ export class TradeTrackerPoller {
       const unpriced = new Set<string>();
       const shared = tokensOnSeveralExchanges(byUser);
       let fromSocket = 0;
-      for (const refs of byUser.values()) {
+      for (const [userId, refs] of byUser) {
         for (const ref of refs) {
           const key = tickRefKey(ref);
-          if (unpriced.has(key)) continue;
+          // A hub-served instrument takes NO unscoped legacy tick for its user: an
+          // unscoped price would overwrite the hub's in any flush window holding no
+          // scoped tick, and the user's rows would flip-flop between the sources.
+          if (served.has(`${userId}|${key}`) || unpriced.has(key)) continue;
           // The socket cache is read by token alone (NSE → BSE → MCX), so a hit
           // counts only when the quote's own exchange is the ref's: an NFO option
           // must never take the price of an NSE equity that shares its token. A
@@ -204,7 +234,10 @@ export class TradeTrackerPoller {
       let fromRest = 0;
       let failedUsers = 0;
       for (const [userId, refs] of byUser) {
-        const wanted = refs.filter((r) => unpriced.has(tickRefKey(r)));
+        const wanted = refs.filter((r) => {
+          const key = tickRefKey(r);
+          return unpriced.has(key) && !served.has(`${userId}|${key}`);
+        });
         if (wanted.length === 0) continue;
 
         try {
@@ -230,20 +263,76 @@ export class TradeTrackerPoller {
         }
       }
 
+      source?.record('positions', 'hub', served.size);
+      source?.record('positions', 'legacy', fromSocket + fromRest);
+      source?.record('positions', 'unpriced', unpriced.size);
+
       if (unpriced.size > 0) {
         // Not noise: an instrument nobody could quote is a tracker whose LTP is now ageing.
         this.logger.warn(
           `[trade-tracker] ${unpriced.size} open token(s) went unpriced this sweep ` +
-            `(socket=${fromSocket}, rest=${fromRest}, failed users=${failedUsers})`,
+            `(hub=${served.size}, socket=${fromSocket}, rest=${fromRest}, failed users=${failedUsers})`,
         );
       } else {
         this.logger.debug(
-          `[trade-tracker] swept ${fromSocket + fromRest} token(s) (socket=${fromSocket}, rest=${fromRest})`,
+          `[trade-tracker] swept ${served.size + fromSocket + fromRest} token(s) ` +
+            `(hub=${served.size}, socket=${fromSocket}, rest=${fromRest})`,
         );
       }
     } finally {
       this.sweeping = false;
     }
+  }
+
+  /**
+   * Tier 0 (HUB_PRICES_POSITIONS): the hub, for the users it serves (today the
+   * owner only, see HubPriceSource.hubFor). A fresh (≤ 5 s) price is applied
+   * scoped to that user; anything else falls through to the legacy tiers.
+   * Returns `${userId}|EXCHANGE:token` for every instrument served here.
+   */
+  private priceFromHub(byUser: Map<string, TokenRef[]>, source: HubPriceSource | null): Set<string> {
+    const served = new Set<string>();
+    const owned = new Map<string, TickTarget>();
+    let owner: string | null = null;
+    for (const [userId, refs] of byUser) {
+      const hub = source?.hubFor(userId, 'positions') ?? null;
+      if (!hub) continue;
+      if (!this.unsubscribeHub) this.unsubscribeHub = hub.onPrice((p) => this.onHubPrice(p));
+      owner = userId;
+      const hubRefs = refs.map(toHubRef).filter((r): r is InstrumentRef => r !== null);
+      const results = hub.prices(hubRefs, { maxAgeMs: TradeTrackerPoller.HUB_MAX_AGE_MS });
+      for (const ref of hubRefs) {
+        const key = refKey(ref);
+        const target: TickTarget = { exchange: ref.exchange, token: ref.token };
+        owned.set(key, target);
+        const r = results.get(key);
+        if (r?.kind !== 'fresh') continue;
+        this.service.applyTick(target, r.price.ltp, { userId });
+        served.add(`${userId}|${key}`);
+      }
+    }
+    this.hubOwned = owned;
+    this.hubUserId = owner;
+    return served;
+  }
+
+  /** Every hub price (tick or polled quote) for an instrument the served user holds, as it arrives. */
+  private onHubPrice(p: Price): void {
+    try {
+      const userId = this.hubUserId;
+      const target = this.hubOwned.get(refKey(p.ref));
+      if (!userId || !target || !(p.ltp > 0)) return;
+      this.service.applyTick(target, p.ltp, { userId });
+    } catch (err) {
+      // Never throw into the hub's emit loop: it feeds every other consumer too.
+      this.logger.warn(`[trade-tracker] hub price apply failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /** Resolved lazily (MarketHubModule imports this module); a miss is retried next sweep. */
+  private hubSource(): HubPriceSource | null {
+    if (!this.hubSourceRef) this.hubSourceRef = lookupHubPrices(this.moduleRef);
+    return this.hubSourceRef;
   }
 
   /**
@@ -285,4 +374,10 @@ function tokensOnSeveralExchanges(byUser: Map<string, TokenRef[]>): Set<string> 
     }
   }
   return new Set([...exchanges].filter(([, set]) => set.size > 1).map(([token]) => token));
+}
+
+/** The hub's ref for a tracker instrument, or null for an exchange the hub does not speak. */
+function toHubRef(ref: TokenRef): InstrumentRef | null {
+  const exchange = String(ref.exchange ?? '').toUpperCase();
+  return isHubExchange(exchange) && ref.token ? { exchange, token: ref.token, symbol: ref.token } : null;
 }

@@ -23,7 +23,7 @@ import {
 } from './user-historical.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
 import { describeUnfetched } from '../utils/quote-from-candles';
-import { fetchChunksResilient, rowsOrThrottle, throwForMissingData } from './angel-throttle';
+import { HISTORICAL_MIN_GAP_MS, fetchChunksResilient, rowsOrThrottle, throwForMissingData } from './angel-throttle';
 
 /**
  * Angel One WebSocket feed mode. Mirrors `WsFeedMode` in
@@ -118,6 +118,10 @@ export class UserFeedSession implements UserFeedSessionLike {
   private connected = false;
   private disposed = false;
   private state: FeedState = 'connecting';
+
+  /** Session-wide pacing for getCandleData (see paceHistorical). */
+  private historicalQueue: Promise<void> = Promise.resolve();
+  private lastHistoricalAt = 0;
 
   /** Shared login/connect promise so concurrent ensureConnected() share ONE login. */
   private connectPromise: Promise<void> | null = null;
@@ -255,19 +259,22 @@ export class UserFeedSession implements UserFeedSessionLike {
     const { items, dropped, attempted } = await fetchChunksResilient<Candle>(
       windows,
       async (start, end) => {
-        const response: any = await smartApi.getCandleData({
-          exchange,
-          symboltoken: token,
-          interval,
-          fromdate: formatAngelDateTime(new Date(start)),
-          todate: formatAngelDateTime(new Date(end)),
-        });
+        const response: any = await this.paceHistorical(() =>
+          smartApi.getCandleData({
+            exchange,
+            symboltoken: token,
+            interval,
+            fromdate: formatAngelDateTime(new Date(start)),
+            todate: formatAngelDateTime(new Date(end)),
+          }),
+        );
         const context = `token=${token} interval=${interval} ${formatAngelDateTime(
           new Date(start),
         )} → ${formatAngelDateTime(new Date(end))}`;
         return mapCandleRows(rowsOrThrottle(response?.data, context));
       },
-      { sleep: (ms) => this.delay(ms), onWarn: (m) => this.logger.warn(m) },
+      // gapMs 0: paceHistorical already spaces every call on this session.
+      { gapMs: 0, sleep: (ms) => this.delay(ms), onWarn: (m) => this.logger.warn(m) },
     );
 
     if (dropped > 0) {
@@ -295,7 +302,7 @@ export class UserFeedSession implements UserFeedSessionLike {
   /**
    * ONE getCandleData call for one window, for the market hub's CandleStore:
    * the store sizes windows itself and sends each call through its Governor,
-   * so there is no chunking, retry or pacing here. A throttle rejects with
+   * so there is no chunking or retry here; only the session-wide pacing. A throttle rejects with
    * AngelThrottleError (never []); a genuine "no bars" answer resolves [].
    */
   async getCandleWindow(token: string, exchange: string, interval: string, from: Date, to: Date): Promise<Candle[]> {
@@ -303,13 +310,16 @@ export class UserFeedSession implements UserFeedSessionLike {
     if (!this.smartApi) {
       throw new Error('UserFeedSession has no SmartAPI client after connect');
     }
-    const response: any = await this.smartApi.getCandleData({
-      exchange,
-      symboltoken: token,
-      interval,
-      fromdate: formatAngelDateTime(from),
-      todate: formatAngelDateTime(to),
-    });
+    const smartApi = this.smartApi;
+    const response: any = await this.paceHistorical(() =>
+      smartApi.getCandleData({
+        exchange,
+        symboltoken: token,
+        interval,
+        fromdate: formatAngelDateTime(from),
+        todate: formatAngelDateTime(to),
+      }),
+    );
     if (response?.data == null) {
       throwForMissingData(response, `getCandleData token=${token} interval=${interval}`);
     }
@@ -380,6 +390,24 @@ export class UserFeedSession implements UserFeedSessionLike {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Run one getCandleData call through this session's single pacing queue: call
+   * STARTS are spaced ≥ HISTORICAL_MIN_GAP_MS (≈2.85/s, under Angel's 3 req/s
+   * historical limit) across EVERY caller sharing the session — chart, chart-context,
+   * sentinel, scoring, the market hub. Without it concurrent callers burst past the
+   * limit and the 403 → retry → dropped-chunk cascade turned seconds into minutes
+   * (production, 2026-10-09). A failed call never stalls the calls behind it.
+   */
+  private paceHistorical<T>(call: () => Promise<T>): Promise<T> {
+    const slot = this.historicalQueue.then(async () => {
+      const wait = this.lastHistoricalAt + HISTORICAL_MIN_GAP_MS - Date.now();
+      if (wait > 0) await this.delay(wait);
+      this.lastHistoricalAt = Date.now();
+    });
+    this.historicalQueue = slot;
+    return slot.then(call);
   }
 
   onTick(listener: TickListener): void {

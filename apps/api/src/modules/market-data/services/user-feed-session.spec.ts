@@ -424,3 +424,59 @@ it('getCandleWindow reports a body-level errorcode (AG8001) as an error, not a t
   expect(err).toBeInstanceOf(Error);
   expect(err).not.toBeInstanceOf(AngelThrottleError);
 });
+
+// Production 2026-10-09: chart, chart-context (several timeframes), sentinel and scoring all
+// fetched history on the owner's ONE session at once. The 350 ms gap only spaced chunks
+// WITHIN one getCandles call, so concurrent calls burst past Angel's 3 req/s historical
+// limit → 403 → 1 s/2 s retries → dropped chunks → 5–85 s chart loads.
+describe('session-wide historical pacing', () => {
+  function timedSession() {
+    const d = makeDeps();
+    const at: number[] = [];
+    d.smartApi.getCandleData.mockImplementation(async () => {
+      at.push(Date.now());
+      return { data: [['2026-05-15T09:15:00+05:30', 1, 1, 1, 1, 1]] };
+    });
+    return { ...makeSession(d), at };
+  }
+  const from = new Date('2026-05-15T03:45:00.000Z');
+  const to = new Date('2026-05-15T05:45:00.000Z');
+
+  it('spaces concurrent getCandles calls at least 350 ms apart across the whole session', async () => {
+    const { s, at } = timedSession();
+    await s.ensureConnected();
+    await Promise.all([
+      s.getCandles('111', 'NSE', '1m', from, to),
+      s.getCandles('222', 'NSE', '1m', from, to),
+      s.getCandles('333', 'NSE', '1m', from, to),
+    ]);
+    expect(at).toHaveLength(3);
+    for (let i = 1; i < at.length; i++) expect(at[i] - at[i - 1]).toBeGreaterThanOrEqual(340);
+  });
+
+  it('getCandleWindow (the market hub) shares the same pacing as getCandles', async () => {
+    const { s, at } = timedSession();
+    await s.ensureConnected();
+    await Promise.all([
+      s.getCandles('111', 'NSE', '1m', from, to),
+      s.getCandleWindow('222', 'NSE', 'ONE_MINUTE', from, to),
+    ]);
+    expect(at).toHaveLength(2);
+    expect(at[1] - at[0]).toBeGreaterThanOrEqual(340);
+  });
+
+  it('a failing call does not stall the calls queued behind it', async () => {
+    const { s, at, d } = timedSession();
+    await s.ensureConnected();
+    d.smartApi.getCandleData.mockImplementationOnce(async () => {
+      at.push(Date.now());
+      return { status: 401, message: 'Unauthorized' };
+    });
+    const results = await Promise.allSettled([
+      s.getCandleWindow('111', 'NSE', 'ONE_MINUTE', from, to),
+      s.getCandleWindow('222', 'NSE', 'ONE_MINUTE', from, to),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(['rejected', 'fulfilled']);
+    expect(at).toHaveLength(2);
+  });
+});

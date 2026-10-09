@@ -48,6 +48,7 @@ import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.mod
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
+import { TradeCoreModule } from './modules/trade-core/trade-core.module';
 
 @Module({
   imports: [
@@ -245,6 +246,10 @@ import { HealthModule } from './modules/health/health.module';
     // each outcome against market data, and serves an admin-only win-rate
     // scorecard. Read-only: never imports trade-engine (no order placement).
     TelegramModule,
+
+    // SP2 trade core — M1: strategy catalogue, immutable versions, per-user
+    // selections (the dropdown). Paper only; nothing trades until M5.
+    TradeCoreModule,
 
     // Liveness + keep-warm probe (/healthz) — pinged by the keep-warm cron so
     // the free-tier stack rarely cold-starts and logins stay fast.

@@ -1,8 +1,10 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
 import { lookupHubPrices, type HubPriceSource } from '../../market-hub/hub-prices';
 import { isHubExchange, refKey, type InstrumentRef } from '../../market-hub/hub.types';
+import { SessionClock } from '../../market-hub/session-clock';
 import { LevelBookService } from './level-book.service';
 
 export type ExitPriceSource = 'hub' | 'rest-batch' | 'rest-single' | 'levelbook';
@@ -49,6 +51,8 @@ export class ExitPriceService {
   /** I2: at most one such warning per 10 minutes. */
   private static readonly HUB_WARN_EVERY_MS = 10 * 60_000;
 
+  /** The hub's own trading-hours clock: a shut exchange is not a hub that stopped serving. */
+  private readonly session = new SessionClock({ holidays: MARKET_HOLIDAYS });
   private hubSourceRef: HubPriceSource | null = null;
   private hubZeroRun = 0;
   private hubZeroWarnedAt: number | null = null;
@@ -102,7 +106,7 @@ export class ExitPriceService {
     }
 
     for (const token of uniq) out.set(token, resolved.get(token) as ExitPrice);
-    this.count(source, out, hubOn);
+    this.count(source, exchange, out, hubOn);
     return out;
   }
 
@@ -157,7 +161,7 @@ export class ExitPriceService {
   }
 
   /** /healthz/detail → hub.consumers.tracks, and the I2 silent-hub watch. */
-  private count(source: HubPriceSource | null, out: Map<string, ExitPrice>, hubOn: boolean): void {
+  private count(source: HubPriceSource | null, exchange: string, out: Map<string, ExitPrice>, hubOn: boolean): void {
     if (!source) return;
     let hub = 0;
     let legacy = 0;
@@ -167,7 +171,7 @@ export class ExitPriceService {
       else if (r.source === 'hub') hub++;
       else legacy++;
     }
-    if (hubOn) this.watchHubZero(hub, legacy);
+    if (hubOn) this.watchHubZero(hub, legacy, this.session.isOpen(exchange.toUpperCase()));
     try {
       source.record('tracks', 'hub', hub);
       source.record('tracks', 'legacy', legacy);
@@ -191,14 +195,16 @@ export class ExitPriceService {
    * {@link HUB_ZERO_RUN} calls in a row where the hub served 0 and legacy served
    * some warn, at most once per {@link HUB_WARN_EVERY_MS}. Any hub-served call
    * restarts the run; a call nothing priced neither extends nor restarts it
-   * (consumers.tracks.unpriced already shows that).
+   * (consumers.tracks.unpriced already shows that), and neither does a call
+   * made while its exchange is shut: the hub rightly answers market-closed (or
+   * never-priced after a restart) then, while legacy REST still returns the last LTP.
    */
-  private watchHubZero(hub: number, legacy: number): void {
+  private watchHubZero(hub: number, legacy: number, exchangeOpen: boolean): void {
     if (hub > 0) {
       this.hubZeroRun = 0;
       return;
     }
-    if (legacy === 0) return;
+    if (legacy === 0 || !exchangeOpen) return;
     this.hubZeroRun++;
     if (this.hubZeroRun < ExitPriceService.HUB_ZERO_RUN) return;
     const now = Date.now();

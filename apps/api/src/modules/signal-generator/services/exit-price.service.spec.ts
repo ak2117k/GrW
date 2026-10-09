@@ -309,6 +309,55 @@ describe('ExitPriceService — hub tier (HUB_PRICES_TRACKS)', () => {
       expect(hubZeroWarns(warn)).toHaveLength(1);
     });
 
+    it('a closed exchange is not a silent hub: market-closed answers for every token → no warn', async () => {
+      adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2501]]));
+      jest.setSystemTime(IST('2026-10-07T15:25:00'));
+      const svc = make();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+      await svc.resolveExitPrices('NSE', ['2885']);
+      await jest.advanceTimersByTimeAsync(0);
+      broker.emitTick(FakeBroker.tick('2885', 2510, 'NSE'));
+      await svc.resolveExitPrices('NSE', ['2885']); // hub-served: run starts at 0
+      jest.setSystemTime(IST('2026-10-07T15:45:00')); // NSE shut
+
+      for (let i = 0; i < 15; i++) {
+        const out = await svc.resolveExitPrices('NSE', ['2885']);
+        expect(out.get('2885')).toEqual({ price: 2501, fresh: true, source: 'rest-batch' });
+      }
+
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+    });
+
+    it('a closed exchange with a never-priced token (overnight, after a restart) → no warn', async () => {
+      adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2501]]));
+      jest.setSystemTime(IST('2026-10-07T23:50:00'));
+      const svc = make();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      for (let i = 0; i < 15; i++) await svc.resolveExitPrices('NSE', ['2885']);
+
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+    });
+
+    it('closed-exchange calls neither extend nor reset the run: it warns after 10 OPEN hub=0 calls', async () => {
+      // 15:45: NSE is shut, MCX trades until 23:30.
+      jest.setSystemTime(IST('2026-10-07T15:45:00'));
+      adapter.getLtpsBatch.mockImplementation(async (ex: string) =>
+        ex === 'MCX' ? new Map([['445003', 6100]]) : new Map([['2885', 2501]]),
+      );
+      const svc = make();
+      const warn = jest.spyOn((svc as any).logger, 'warn').mockImplementation(() => undefined);
+
+      for (let i = 0; i < 9; i++) {
+        await svc.resolveExitPrices('MCX', ['445003']); // open, hub served 0
+        await svc.resolveExitPrices('NSE', ['2885']); // closed: neutral
+        await svc.resolveExitPrices('NSE', ['2885']);
+      }
+      expect(hubZeroWarns(warn)).toHaveLength(0);
+      await svc.resolveExitPrices('MCX', ['445003']); // the 10th open hub=0 call
+      expect(hubZeroWarns(warn)).toHaveLength(1);
+    });
+
     it('never warns with the tracks flag off', async () => {
       adapter.getLtpsBatch.mockResolvedValue(new Map([['2885', 2501]]));
       tracksOn = false;

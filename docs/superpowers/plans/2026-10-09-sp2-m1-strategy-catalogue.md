@@ -164,7 +164,9 @@ row). Parent: `docs/superpowers/specs/2026-09-30-ai-trading-core-architecture-de
     is switching **off** a selection that already points at a now-retired version. Retiring a version
     does not rewrite other users' selections; the picker flags a stale selection, and M5's fan-out must
     treat any selection whose version is not `PAPER` as disabled (Notes for later milestones).
-    `capitalAllocation` is rupees; capping it against funds is the Risk Wall's job (M2/M3).
+    `capitalAllocation` is rupees, stored exactly as `DECIMAL(14,2)` (≥ 0, at most 2 dp, below 10^12;
+    the API returns it as a JSON number with ≤ 2 dp, the audit log as the 2-dp string); capping it
+    against funds is the Risk Wall's job (M2/M3).
 12. **`createdBy` never comes from the request.** REST drafts are `OWNER`; the service takes `createdBy`
     as a parameter so M6's AI path passes `AI`. The request DTOs have no `createdBy`, `status` or
     `userId` field, so the global `ValidationPipe({ whitelist: true })` strips them.
@@ -3887,18 +3889,29 @@ git commit -m "docs(plans): SP2 M1 verification results" -m "Co-Authored-By: Cla
 
 ## M1 production gate (after deploy, owner-run)
 
-The deploy's existing `prisma migrate deploy` applies `20261009120000_sp2_m1_strategy_catalogue`
-(expand-only: three new tables, no existing table touched). No env var is added. After the deploy:
+Production is the Vyom VPS: Postgres runs in the `grw-postgres` container (deploy/docker-compose.prod.yml).
+The API deploy's existing `prisma migrate deploy` against that database applies
+`20261009120000_sp2_m1_strategy_catalogue` (expand-only: three new tables, no existing table touched).
+No env var is added. After the deploy:
 
-**Database (Neon):**
+**Database (Vyom VPS, `grw-postgres`):** run on the server. User and database are `grw`/`grw`
+(`PG_USER`/`PG_DB` in deploy/env/ops.env.example; use `/opt/grw/env/ops.env` if it differs). The SQL
+goes in through a quoted heredoc so the shell leaves the double-quoted identifiers alone; psql reads no
+password inside the container (local socket).
 
-```sql
+```bash
+docker exec -i grw-postgres psql -U grw -d grw <<'SQL'
 SELECT "key", "name", "allowedVehicles" FROM core_strategies ORDER BY "key";
 -- want: adaptive-stop | Adaptive-Stop | {CASH_INTRADAY}   and   ungated | Ungated | {CASH_INTRADAY}
 SELECT s."key", v."version", v."status", v."createdBy" FROM core_strategy_versions v JOIN core_strategies s ON s."id" = v."strategyId" ORDER BY s."key";
 -- want: both v1, DRAFT, OWNER
 SELECT tgname FROM pg_trigger WHERE tgname = 'core_strategy_versions_guard';
 -- want: one row
+SELECT format_type(a.atttypid, a.atttypmod) AS capital_type FROM pg_attribute a WHERE a.attrelid = 'core_strategy_selections'::regclass AND a.attname = 'capitalAllocation';
+-- want: numeric(14,2)
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'core_strategy_selections_capitalAllocation_check';
+-- want: CHECK ((("capitalAllocation" >= (0)::numeric) AND ("capitalAllocation" <> 'NaN'::numeric)))
+SQL
 ```
 
 **Browser (your ADMIN account), `/core-strategies`:**
@@ -3912,11 +3925,16 @@ SELECT tgname FROM pg_trigger WHERE tgname = 'core_strategy_versions_guard';
 - Try **Save** with Enabled on and capital `0`: the toast says an enabled strategy needs capital above ₹0
   and nothing is sent.
 
-**Audit:**
+**Audit** (same container, on the server):
 
-```sql
+```bash
+docker exec -i grw-postgres psql -U grw -d grw <<'SQL'
 SELECT action, target, meta FROM audit_logs WHERE action LIKE 'CORE_STRATEGY_%' ORDER BY seq;
 -- want: two CORE_STRATEGY_VERSION_APPROVED, then CORE_STRATEGY_SELECTION_CHANGED with before: null
+-- and after.capitalAllocation the exact 2-dp string you saved (e.g. "200000.00")
+SELECT "capitalAllocation"::text FROM core_strategy_selections;
+-- want: the same amount, 2 dp (DECIMAL(14,2))
+SQL
 ```
 
 **Another account, if one exists:** `GET /api/trade-core/strategy-selections` returns only its own rows

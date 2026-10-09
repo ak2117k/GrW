@@ -39,7 +39,7 @@ CREATE TABLE "core_strategy_selections" (
     "strategyId" TEXT NOT NULL,
     "strategyVersionId" TEXT NOT NULL,
     "enabled" BOOLEAN NOT NULL DEFAULT false,
-    "capitalAllocation" DOUBLE PRECISION NOT NULL,
+    "capitalAllocation" DECIMAL(14,2) NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -66,8 +66,11 @@ ALTER TABLE "core_strategy_versions" ADD CONSTRAINT "core_strategy_versions_crea
     CHECK ("createdBy" IN ('OWNER', 'AI'));
 ALTER TABLE "core_strategy_versions" ADD CONSTRAINT "core_strategy_versions_version_check"
     CHECK ("version" >= 1);
+-- Capital is DECIMAL(14,2): the typmod already refuses ±Infinity, but NUMERIC(14,2) still
+-- stores 'NaN', and 'NaN' >= 0 is TRUE in Postgres (NaN sorts above every number), so it
+-- is excluded explicitly. Enabled-needs-above-0 is the service's rule, not the column's.
 ALTER TABLE "core_strategy_selections" ADD CONSTRAINT "core_strategy_selections_capitalAllocation_check"
-    CHECK ("capitalAllocation" >= 0 AND "capitalAllocation" < 'Infinity'::float8);
+    CHECK ("capitalAllocation" >= 0 AND "capitalAllocation" <> 'NaN'::numeric);
 
 -- Immutable once approved (plan decision 8). A version that has left DRAFT keeps its
 -- content and id forever; only its status may move on (PAPER → RETIRED), and

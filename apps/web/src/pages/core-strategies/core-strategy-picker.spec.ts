@@ -82,11 +82,14 @@ describe('capital and payload', () => {
   it('parses rupee amounts with Indian grouping, ₹ and spaces', () => {
     expect(parseCapital('2,00,000')).toEqual({ ok: true, value: 200000 });
     expect(parseCapital(' ₹ 50000.50 ')).toEqual({ ok: true, value: 50000.5 });
+    expect(parseCapital('9,99,99,99,99,999.99')).toEqual({ ok: true, value: 999999999999.99 });
+    expect(parseCapital('1234.56')).toEqual({ ok: true, value: 1234.56 });
     expect(parseCapital('0')).toEqual({ ok: true, value: 0 });
   });
 
-  it('refuses empty, negative, non-numeric and over-precise amounts', () => {
-    for (const bad of ['', '   ', '-100', 'abc', '1e5', '10.123']) expect(parseCapital(bad).ok).toBe(false);
+  it('refuses empty, negative, non-numeric, over-precise and too-large (≥ ₹10^12, the DECIMAL(14,2) limit of the API) amounts', () => {
+    for (const bad of ['', '   ', '-100', 'abc', '1e5', '10.123', '1000000000000', '10,00,00,00,00,000.00', '99999999999999']) expect(parseCapital(bad).ok).toBe(false);
+    expect(parseCapital('1000000000000')).toEqual({ ok: false, error: 'Capital must be below ₹10,00,00,00,00,000' });
   });
 
   it('builds the PUT body, and refuses enabling with ₹0 or without a version', () => {
@@ -96,6 +99,7 @@ describe('capital and payload', () => {
     expect(selectionPayload({ versionId: 'v1', enabled: false, capitalText: '0' }).ok).toBe(true);
     expect(selectionPayload({ versionId: 'v1', enabled: true, capitalText: '0' })).toEqual({ ok: false, error: 'An enabled strategy needs capital above ₹0' });
     expect(selectionPayload({ versionId: null, enabled: false, capitalText: '10' })).toEqual({ ok: false, error: 'No approved version to select yet' });
+    expect(selectionPayload({ versionId: 'v1', enabled: true, capitalText: '10,00,00,00,00,000' })).toEqual({ ok: false, error: 'Capital must be below ₹10,00,00,00,00,000' });
   });
 
   it('stale selection with no approved version left: one Save switches the saved version off', () => {

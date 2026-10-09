@@ -5,7 +5,7 @@ import { AUDIT_ACTIONS } from '../../../../common/audit/audit-actions';
 import { isSelectable } from '../version-status';
 import { CoreStrategyRepository } from '../repositories/core-strategy.repository';
 import { CoreStrategySelectionRepository } from '../repositories/core-strategy-selection.repository';
-import { toSelectionDto, type CoreSelectionDto } from '../dto/core-strategy.dto';
+import { toCapitalDecimal, toSelectionDto, type CoreSelectionDto } from '../dto/core-strategy.dto';
 
 export interface SelectionInput {
   strategyVersionId: string;
@@ -13,10 +13,11 @@ export interface SelectionInput {
   capitalAllocation: number;
 }
 
+/** Audit meta keeps capital as its exact 2-dp string ("1234.56"), never a float. */
 const snapshot = (s: CoreStrategySelection) => ({
   strategyVersionId: s.strategyVersionId,
   enabled: s.enabled,
-  capitalAllocation: s.capitalAllocation,
+  capitalAllocation: s.capitalAllocation.toFixed(2),
 });
 
 const isUniqueViolation = (err: unknown): boolean =>
@@ -44,8 +45,11 @@ export class CoreStrategySelectionService {
     if (!version || version.strategyId !== strategyId) {
       throw new NotFoundException(`version ${input.strategyVersionId} is not a version of strategy ${strategyId}`);
     }
-    if (!Number.isFinite(input.capitalAllocation) || input.capitalAllocation < 0) {
-      throw new UnprocessableEntityException('capitalAllocation must be a number of rupees, 0 or more');
+    const capital = toCapitalDecimal(input.capitalAllocation);
+    if (capital === null) {
+      throw new UnprocessableEntityException(
+        'capitalAllocation must be a number of rupees, 0 or more, with at most 2 decimal places and below 10^12',
+      );
     }
 
     const before = await this.selections.findForUser(userId, strategyId);
@@ -55,7 +59,7 @@ export class CoreStrategySelectionService {
         `${version.strategy.name} v${version.version} is ${version.status}; only an approved (PAPER) version can be selected`,
       );
     }
-    if (input.enabled && !(input.capitalAllocation > 0)) {
+    if (input.enabled && !capital.gt(0)) {
       throw new UnprocessableEntityException('an enabled strategy needs a capital allocation above ₹0');
     }
 
@@ -66,7 +70,7 @@ export class CoreStrategySelectionService {
       row = await this.selections.upsert(userId, strategyId, {
         strategyVersionId: version.id,
         enabled: input.enabled,
-        capitalAllocation: input.capitalAllocation,
+        capitalAllocation: capital,
       });
     } catch (err) {
       if (isUniqueViolation(err)) throw new ConflictException('selection changed at the same time; retry');

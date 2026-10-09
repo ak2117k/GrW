@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 
 const url = process.env.DATABASE_URL_TEST;
 if (!url) throw new Error('DATABASE_URL_TEST must point at a throw-away database with all migrations applied');
@@ -80,14 +80,38 @@ describe('core strategy catalogue (real database)', () => {
     ).rejects.toThrow(/allowedVehicles_check/);
   });
 
-  it('refuses a NaN or infinite capital allocation', async () => {
-    for (const bad of ['NaN', 'Infinity']) {
-      await expect(
-        db.$executeRawUnsafe(
-          `INSERT INTO "core_strategy_selections" ("id","userId","strategyId","strategyVersionId","capitalAllocation","updatedAt") VALUES ($1, 'usr_it', 'cs_it', 'csv_it', $2::float8, CURRENT_TIMESTAMP)`,
-          `sel_${run}_${bad}`, bad,
-        ),
-      ).rejects.toThrow(/capitalAllocation_check/);
+  const insertCapital = (id: string, literal: string) =>
+    db.$executeRawUnsafe(
+      `INSERT INTO "core_strategy_selections" ("id","userId","strategyId","strategyVersionId","capitalAllocation","updatedAt") VALUES ($1, 'usr_it', 'cs_it', 'csv_it', $2::numeric, CURRENT_TIMESTAMP)`,
+      id, literal,
+    );
+
+  it('capital is DECIMAL(14,2) and 1234.56 round-trips exactly through Prisma', async () => {
+    const versionId = await draftVersion();
+    const strategyId = versionId.replace(/_v1$/, '');
+    const user = await db.user.create({ data: { email: `${run}@it.invalid`, passwordHash: 'x' } });
+    const created = await db.coreStrategySelection.create({
+      data: { userId: user.id, strategyId, strategyVersionId: versionId, capitalAllocation: new Prisma.Decimal('1234.56') },
+    });
+    const read = await db.coreStrategySelection.findUniqueOrThrow({ where: { id: created.id } });
+    expect(read.capitalAllocation).toBeInstanceOf(Prisma.Decimal);
+    expect(read.capitalAllocation.toFixed(2)).toBe('1234.56');
+    expect(Number(read.capitalAllocation.toFixed(2))).toBe(1234.56);
+    const raw = await db.$queryRawUnsafe<Array<{ t: string; ty: string }>>(
+      `SELECT "capitalAllocation"::text AS t, format_type(a.atttypid, a.atttypmod) AS ty
+         FROM "core_strategy_selections" s, pg_attribute a
+        WHERE s."id" = $1 AND a.attrelid = '"core_strategy_selections"'::regclass AND a.attname = 'capitalAllocation'`,
+      created.id,
+    );
+    expect(raw).toEqual([{ t: '1234.56', ty: 'numeric(14,2)' }]);
+  });
+
+  it('refuses a negative or NaN capital (CHECK) and an infinite or ≥ 10^12 one (the type)', async () => {
+    for (const bad of ['-0.01', 'NaN']) {
+      await expect(insertCapital(`sel_${run}_${bad}`, bad)).rejects.toThrow(/capitalAllocation_check/);
+    }
+    for (const bad of ['Infinity', '-Infinity', '1000000000000']) {
+      await expect(insertCapital(`sel_${run}_${bad}`, bad)).rejects.toThrow(/numeric field overflow/);
     }
   });
 });

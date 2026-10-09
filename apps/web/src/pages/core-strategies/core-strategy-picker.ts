@@ -62,11 +62,17 @@ export function staleSelectionWarning(row: Pick<PickerRow, 'staleSelection' | 'o
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
 
-/** Rupees: digits with optional Indian/Western grouping, ₹ and spaces, up to 2 decimals. */
+/**
+ * Rupees: digits with optional Indian/Western grouping, ₹ and spaces, up to 2 decimals,
+ * below ₹10^12. Mirrors the API, which stores DECIMAL(14,2) and refuses anything else.
+ */
 export function parseCapital(text: string): Parsed<number> {
   const cleaned = text.replace(/[₹,\s]/g, '');
   if (cleaned === '') return { ok: false, error: 'Enter a capital allocation in ₹' };
-  if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) return { ok: false, error: 'Capital must be a rupee amount like 200000 or 2,00,000' };
+  const m = /^(\d+)(\.\d{1,2})?$/.exec(cleaned);
+  if (!m) return { ok: false, error: 'Capital must be a rupee amount like 200000 or 2,00,000' };
+  // Count whole-rupee digits on the text, not the float: at most 12 (leading zeros aside).
+  if (m[1].replace(/^0+(?=\d)/, '').length > 12) return { ok: false, error: 'Capital must be below ₹10,00,00,00,00,000' };
   return { ok: true, value: Number(cleaned) };
 }
 

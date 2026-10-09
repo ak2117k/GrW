@@ -2152,7 +2152,7 @@ model CoreStrategyVersion {
   @@map("core_strategy_versions")
 }
 
-/// A user's choice for one strategy: which version, on or off, and its capital (₹).
+/// A user's choice for one strategy: which version, on or off, and its capital (₹, exact to the paisa).
 model CoreStrategySelection {
   id                String              @id @default(cuid())
   userId            String
@@ -2162,7 +2162,7 @@ model CoreStrategySelection {
   strategyVersionId String
   strategyVersion   CoreStrategyVersion @relation(fields: [strategyVersionId], references: [id])
   enabled           Boolean             @default(false)
-  capitalAllocation Float
+  capitalAllocation Decimal             @db.Decimal(14, 2)
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
 

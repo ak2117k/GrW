@@ -18,7 +18,7 @@ function version(over: Partial<VersionWithStrategy> = {}): VersionWithStrategy {
 }
 
 function selection(over: Partial<CoreStrategySelection> = {}): CoreStrategySelection {
-  return { id: 'sel_1', userId: 'user_A', strategyId: 's1', strategyVersionId: 'v1', enabled: true, capitalAllocation: 100000, createdAt: T0, updatedAt: T0, ...over };
+  return { id: 'sel_1', userId: 'user_A', strategyId: 's1', strategyVersionId: 'v1', enabled: true, capitalAllocation: new Prisma.Decimal('100000'), createdAt: T0, updatedAt: T0, ...over };
 }
 
 function setup() {
@@ -48,11 +48,12 @@ describe('CoreStrategySelectionService', () => {
 
   it('writes only the caller’s own selection, whatever the input carries, and audits before/after', async () => {
     const { selections, audit, service } = setup();
-    selections.findForUser.mockResolvedValueOnce(selection({ enabled: false, capitalAllocation: 0 }));
+    selections.findForUser.mockResolvedValueOnce(selection({ enabled: false, capitalAllocation: new Prisma.Decimal(0) }));
     const smuggled = { strategyVersionId: 'v1', enabled: true, capitalAllocation: 250000, userId: 'user_B' } as never;
     const out = await service.set('user_A', 's1', smuggled);
     expect(selections.findForUser).toHaveBeenCalledWith('user_A', 's1');
-    expect(selections.upsert).toHaveBeenCalledWith('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 250000 });
+    expect(selections.upsert).toHaveBeenCalledWith('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: new Prisma.Decimal('250000') });
+    expect(selections.upsert.mock.calls[0][2].capitalAllocation).toBeInstanceOf(Prisma.Decimal);
     expect(out).toMatchObject({ strategyVersionId: 'v1', enabled: true, capitalAllocation: 250000 });
     expect(audit.append).toHaveBeenCalledWith({
       action: 'CORE_STRATEGY_SELECTION_CHANGED',
@@ -61,8 +62,9 @@ describe('CoreStrategySelectionService', () => {
       meta: {
         strategyKey: 'ungated',
         version: 1,
-        before: { strategyVersionId: 'v1', enabled: false, capitalAllocation: 0 },
-        after: { strategyVersionId: 'v1', enabled: true, capitalAllocation: 250000 },
+        // Audit meta records the exact 2-dp string, never a float.
+        before: { strategyVersionId: 'v1', enabled: false, capitalAllocation: '0.00' },
+        after: { strategyVersionId: 'v1', enabled: true, capitalAllocation: '250000.00' },
       },
     });
   });
@@ -93,17 +95,34 @@ describe('CoreStrategySelectionService', () => {
     catalogue.findVersion.mockResolvedValueOnce(version({ status: 'RETIRED' }));
     selections.findForUser.mockResolvedValueOnce(selection({ strategyVersionId: 'v1', enabled: true }));
     await service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: false, capitalAllocation: 100000 });
-    expect(selections.upsert).toHaveBeenCalledWith('user_A', 's1', { strategyVersionId: 'v1', enabled: false, capitalAllocation: 100000 });
+    expect(selections.upsert).toHaveBeenCalledWith('user_A', 's1', { strategyVersionId: 'v1', enabled: false, capitalAllocation: new Prisma.Decimal('100000') });
   });
 
-  it('enabling needs a capital allocation above 0; any capital must be a finite number ≥ 0', async () => {
+  it('enabling needs a capital allocation above 0; any capital must be a finite number ≥ 0, ≤ 2 dp, below 10^12', async () => {
     const { selections, service } = setup();
     await expect(service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 0 })).rejects.toBeInstanceOf(UnprocessableEntityException);
-    for (const bad of [-1, NaN, Infinity]) {
+    for (const bad of [-1, NaN, Infinity, 1.234, 0.001, 1e-7, 1e12, 1e21]) {
       await expect(service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: false, capitalAllocation: bad })).rejects.toBeInstanceOf(UnprocessableEntityException);
     }
     await service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: false, capitalAllocation: 0 });
     expect(selections.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores 1234.56 exactly and returns it as a 2-dp JSON number; audit gets the exact string', async () => {
+    const { selections, audit, service } = setup();
+    const out = await service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 1234.56 });
+    const written = selections.upsert.mock.calls[0][2].capitalAllocation as Prisma.Decimal;
+    expect(written).toBeInstanceOf(Prisma.Decimal);
+    expect(written.toFixed(2)).toBe('1234.56');
+    expect(out.capitalAllocation).toBe(1234.56);
+    expect(audit.append.mock.calls[0][0].meta.after.capitalAllocation).toBe('1234.56');
+    await service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 999999999999.99 });
+    expect((selections.upsert.mock.calls[1][2].capitalAllocation as Prisma.Decimal).toFixed(2)).toBe('999999999999.99');
+  });
+
+  it('the enabled-needs-capital rule compares exact Decimals: ₹0.01 is enough', async () => {
+    const { service } = setup();
+    await expect(service.set('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 0.01 })).resolves.toMatchObject({ capitalAllocation: 0.01 });
   });
 
   it('a concurrent first write for the same strategy is a 409 to retry, and nothing is audited', async () => {

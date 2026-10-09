@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import type { PrismaService } from '../../../../common/prisma/prisma.service';
 import { TENANT_MODELS } from '../../../../common/tenant/tenant.constants';
 import { CoreStrategyRepository } from './core-strategy.repository';
@@ -90,12 +91,17 @@ describe('CoreStrategySelectionRepository', () => {
     expect(prisma.coreStrategySelection.findMany).toHaveBeenCalledWith({ where: { userId: 'user_A' }, orderBy: { createdAt: 'asc' } });
     await repo.findForUser('user_A', 's1');
     expect(prisma.coreStrategySelection.findUnique).toHaveBeenCalledWith({ where: { userId_strategyId: { userId: 'user_A', strategyId: 's1' } } });
-    await repo.upsert('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: 100000 });
+    const capital = new Prisma.Decimal('1234.56');
+    await repo.upsert('user_A', 's1', { strategyVersionId: 'v1', enabled: true, capitalAllocation: capital });
     expect(prisma.coreStrategySelection.upsert).toHaveBeenCalledWith({
       where: { userId_strategyId: { userId: 'user_A', strategyId: 's1' } },
-      create: { userId: 'user_A', strategyId: 's1', strategyVersionId: 'v1', enabled: true, capitalAllocation: 100000 },
-      update: { strategyVersionId: 'v1', enabled: true, capitalAllocation: 100000 },
+      create: { userId: 'user_A', strategyId: 's1', strategyVersionId: 'v1', enabled: true, capitalAllocation: capital },
+      update: { strategyVersionId: 'v1', enabled: true, capitalAllocation: capital },
     });
+    // The Decimal reaches Prisma as-is: no float conversion on the way to the column.
+    const sent = prisma.coreStrategySelection.upsert.mock.calls[0][0];
+    expect(sent.create.capitalAllocation).toBe(capital);
+    expect(sent.update.capitalAllocation).toBe(capital);
   });
 
   it('CoreStrategySelection is a tenant model; the global catalogue is not', () => {

@@ -4,7 +4,8 @@ import { validate } from 'class-validator';
 import { ROLES_KEY, type AuthenticatedUser } from '../../../../common/decorators';
 import type { CoreStrategyCatalogueService } from '../services/core-strategy-catalogue.service';
 import type { CoreStrategySelectionService } from '../services/core-strategy-selection.service';
-import { CreateDraftDto, SetSelectionDto, SetVersionStatusDto } from '../dto/core-strategy.dto';
+import { Prisma } from '@prisma/client';
+import { CreateDraftDto, SetSelectionDto, SetVersionStatusDto, toSelectionDto } from '../dto/core-strategy.dto';
 import { CoreStrategiesController } from './core-strategies.controller';
 
 const OWNER: AuthenticatedUser = { userId: 'usr_owner', role: 'ADMIN', email: 'o@x' };
@@ -64,11 +65,14 @@ describe('CoreStrategiesController', () => {
 });
 
 describe('request DTOs', () => {
-  it('SetSelectionDto strips a smuggled userId and refuses strings, NaN and negatives for capital', async () => {
+  it('SetSelectionDto strips a smuggled userId and refuses strings, NaN, negatives, > 2 dp and ≥ 10^12 for capital', async () => {
     const dto = plainToInstance(SetSelectionDto, { strategyVersionId: 'v1', enabled: true, capitalAllocation: 1000, userId: 'user_B' });
     expect(await validate(dto, { whitelist: true })).toEqual([]);
     expect((dto as unknown as Record<string, unknown>).userId).toBeUndefined();
-    for (const bad of ['1000', NaN, -1]) {
+    for (const good of [0, 0.01, 1234.56, 999999999999.99]) {
+      expect(await validate(plainToInstance(SetSelectionDto, { strategyVersionId: 'v1', enabled: true, capitalAllocation: good }))).toEqual([]);
+    }
+    for (const bad of ['1000', NaN, -1, Infinity, 1.234, 0.001, 1e-7, 1e12, 1e21, null, undefined]) {
       const errs = await validate(plainToInstance(SetSelectionDto, { strategyVersionId: 'v1', enabled: true, capitalAllocation: bad }));
       expect(errs.map((e) => e.property)).toEqual(['capitalAllocation']);
     }
@@ -83,5 +87,18 @@ describe('request DTOs', () => {
   it('SetVersionStatusDto accepts only the four statuses', async () => {
     expect(await validate(plainToInstance(SetVersionStatusDto, { status: 'RETIRED' }))).toEqual([]);
     expect(await validate(plainToInstance(SetVersionStatusDto, { status: 'ARCHIVED' }))).toHaveLength(1);
+  });
+});
+
+describe('toSelectionDto', () => {
+  it('returns the Decimal(14,2) capital as a JSON number with 2 dp', () => {
+    const T = new Date('2026-10-09T04:00:00.000Z');
+    const row = { id: 'sel', userId: 'u', strategyId: 's1', strategyVersionId: 'v1', enabled: true, createdAt: T, updatedAt: T };
+    for (const [stored, wire] of [['1234.56', 1234.56], ['0', 0], ['0.10', 0.1], ['999999999999.99', 999999999999.99]] as const) {
+      const out = toSelectionDto({ ...row, capitalAllocation: new Prisma.Decimal(stored) });
+      expect(typeof out.capitalAllocation).toBe('number');
+      expect(out.capitalAllocation).toBe(wire);
+      expect(out.capitalAllocation.toFixed(2)).toBe(new Prisma.Decimal(stored).toFixed(2));
+    }
   });
 });

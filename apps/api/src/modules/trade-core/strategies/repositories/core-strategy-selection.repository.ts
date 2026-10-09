@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import type { CoreStrategySelection } from '@prisma/client';
+import type { CoreStrategySelection, Prisma } from '@prisma/client';
 import { PrismaService } from '../../../../common/prisma/prisma.service';
 
 export interface SelectionWrite {
   strategyVersionId: string;
   enabled: boolean;
-  capitalAllocation: number;
+  /** Exact rupees for the DECIMAL(14,2) column; handed to Prisma as-is, never via a float. */
+  capitalAllocation: Prisma.Decimal;
 }
 
 /**

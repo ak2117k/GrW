@@ -148,4 +148,60 @@ describe('MarketDataGateway', () => {
     expect(to).toHaveBeenCalledWith('user:u1');
     expect(emit).toHaveBeenCalledWith('candle', { token: '1' });
   });
+
+  it('subscribe uses the exchange the client sends, so an NFO option is not subscribed as NSE', () => {
+    const { gw, manager } = makeGateway();
+    const sock = fakeSocket(signToken('u1'));
+    gw.handleConnection(sock as any);
+    const ack = gw.handleSubscribe(sock as any, {
+      refs: [
+        { token: '35001', exchange: 'NFO', symbol: 'NIFTY26OCT25000CE' },
+        { token: '2885', exchange: 'nse' },
+      ],
+    });
+    expect(manager.subscribe).toHaveBeenCalledWith('u1', [
+      { token: '35001', exchange: 'NFO' },
+      { token: '2885', exchange: 'NSE' },
+    ]);
+    expect(ack).toEqual({ event: 'subscribed', data: { subscribed: ['35001', '2885'] } });
+  });
+
+  it('accepts EXCHANGE:token strings and drops unknown exchanges and junk tokens', () => {
+    const { gw, manager } = makeGateway();
+    const sock = fakeSocket(signToken('u1'));
+    gw.handleConnection(sock as any);
+    gw.handleSubscribe(sock as any, { tokens: ['MCX:4321', 'CDS:1', 'abc', '0'] });
+    expect(manager.subscribe).toHaveBeenCalledWith('u1', [{ token: '4321', exchange: 'MCX' }]);
+  });
+
+  it('does not call the manager when nothing valid was sent', () => {
+    const { gw, manager } = makeGateway();
+    const sock = fakeSocket(signToken('u1'));
+    gw.handleConnection(sock as any);
+    gw.handleSubscribe(sock as any, { refs: [{ token: '1', exchange: 'XYZ' }] });
+    expect(manager.subscribe).not.toHaveBeenCalled();
+  });
+
+  it('unsubscribe uses the same exchange-aware refs', () => {
+    const { gw, manager } = makeGateway();
+    const sock = fakeSocket(signToken('u1'));
+    gw.handleConnection(sock as any);
+    gw.handleUnsubscribe(sock as any, { refs: [{ token: '35001', exchange: 'NFO' }] });
+    expect(manager.unsubscribe).toHaveBeenCalledWith('u1', [{ token: '35001', exchange: 'NFO' }]);
+  });
+
+  it('coalesces per EXCHANGE:token: the same token on two exchanges is two ticks', () => {
+    const emit = jest.fn();
+    const to = jest.fn().mockReturnValue({ emit });
+    const { gw } = makeGateway();
+    (gw as any).server = { to };
+    gw.emitTickToUser('u1', { token: '1594', exchange: 'NSE', ltp: 1 } as any);
+    gw.emitTickToUser('u1', { token: '1594', exchange: 'MCX', ltp: 2 } as any);
+    gw.emitTickToUser('u1', { token: '1594', exchange: 'NSE', ltp: 3 } as any); // newest NSE wins
+    gw.flushForTest();
+    expect(emit.mock.calls).toEqual([
+      ['tick', { token: '1594', exchange: 'NSE', ltp: 3 }],
+      ['tick', { token: '1594', exchange: 'MCX', ltp: 2 }],
+    ]);
+  });
 });

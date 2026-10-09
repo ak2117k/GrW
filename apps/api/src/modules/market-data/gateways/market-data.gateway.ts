@@ -16,6 +16,8 @@ import type { TickData } from '../../../common/interfaces/broker-adapter.interfa
 import { getUserIdFromSocket } from '../../../common/ws/authenticate-user-socket';
 import { UserFeedManager } from '../services/user-feed-manager.service';
 import type { FeedState, TokenRef } from '../services/user-feed.types';
+import { parseFeedRefs, type SubscribeBody } from '../../market-hub/browser-feed';
+import type { InstrumentRef } from '../../market-hub/hub.types';
 
 export interface CandlePayload {
   token: string;
@@ -43,12 +45,14 @@ const TICK_FLUSH_INTERVAL_MS = 100;
 
 const CORS_ORIGIN = process.env.WEB_ORIGIN ?? 'http://localhost:4000';
 
-/** Default exchange for a bare numeric token from the client. */
-const DEFAULT_EXCHANGE = 'NSE';
+/** The manager's TokenRef for a parsed browser ref: the client's own exchange, never a hard-coded NSE. */
+function toTokenRef(ref: InstrumentRef): TokenRef {
+  return { token: ref.token, exchange: ref.exchange };
+}
 
-/** Map a client-supplied token string to the broker TokenRef the manager wants. */
-function toTokenRef(token: string): TokenRef {
-  return { token, exchange: DEFAULT_EXCHANGE };
+/** Coalescing key: EXCHANGE:token. Tokens collide across exchanges (NSE cash vs NFO vs MCX). */
+function tickKey(tick: TickData): string {
+  return `${tick.exchange ?? ''}:${tick.token}`;
 }
 
 @WebSocketGateway({
@@ -72,7 +76,7 @@ export class MarketDataGateway
 
   /**
    * Latest pending quote per token, per user, awaiting the next flush tick.
-   * Outer key: userId; inner key: token. Writes overwrite — stale prices are
+   * Outer key: userId; inner key: EXCHANGE:token. Writes overwrite — stale prices are
    * discarded in favor of the newest before the next flush.
    */
   private readonly pendingTicks = new Map<string, Map<string, TickData>>();
@@ -126,54 +130,58 @@ export class MarketDataGateway
   }
 
   /**
-   * Client subscribes to specific tokens for live updates. Interest is tracked
-   * per-user by the UserFeedManager, which owns the broker feed session.
+   * Client subscribes to instruments for live updates. Each ref carries its
+   * exchange (parseFeedRefs); interest is tracked per user by the
+   * UserFeedManager, which owns the broker feed session.
    */
   @SubscribeMessage('subscribe')
   handleSubscribe(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tokens: string[] },
+    @MessageBody() data: SubscribeBody,
   ): { event: string; data: { subscribed: string[] } } {
-    const tokens = data?.tokens ?? [];
+    const { refs, bareTokens } = parseFeedRefs(data);
     const userId = client.data?.userId as string | undefined;
 
-    if (userId && tokens.length > 0) {
+    if (userId && refs.length > 0) {
       // Floated: the ack returns immediately. subscribe() can reject (e.g. the
       // per-user feed flag is disabled → factory throws) — swallow it here so a
       // rejected promise never becomes an unhandledRejection / process crash.
       // No secrets in the message.
-      this.userFeedManager.subscribe(userId, tokens.map(toTokenRef)).catch((err) => {
+      this.userFeedManager.subscribe(userId, refs.map(toTokenRef)).catch((err) => {
         this.logger.debug(
           `subscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
         );
       });
     }
+    if (bareTokens > 0) {
+      this.logger.debug(`Client ${client.id} sent ${bareTokens} token(s) without an exchange; taken as NSE (old client)`);
+    }
 
     this.logger.debug(
-      `Client ${client.id} (user ${userId ?? '?'}) subscribed to ${tokens.length} tokens`,
+      `Client ${client.id} (user ${userId ?? '?'}) subscribed to ${refs.length} instrument(s)`,
     );
 
     return {
       event: 'subscribed',
-      data: { subscribed: tokens },
+      data: { subscribed: refs.map((r) => r.token) },
     };
   }
 
   /**
-   * Client unsubscribes from specific tokens.
+   * Client unsubscribes from instruments (same exchange-aware refs).
    */
   @SubscribeMessage('unsubscribe')
   handleUnsubscribe(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tokens: string[] },
+    @MessageBody() data: SubscribeBody,
   ): { event: string; data: { unsubscribed: string[] } } {
-    const tokens = data?.tokens ?? [];
+    const { refs } = parseFeedRefs(data);
     const userId = client.data?.userId as string | undefined;
 
-    if (userId && tokens.length > 0) {
+    if (userId && refs.length > 0) {
       // Floated + guarded like handleSubscribe: a rejection must not surface as
       // an unhandledRejection.
-      this.userFeedManager.unsubscribe(userId, tokens.map(toTokenRef)).catch((err) => {
+      this.userFeedManager.unsubscribe(userId, refs.map(toTokenRef)).catch((err) => {
         this.logger.debug(
           `unsubscribe failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
         );
@@ -181,12 +189,12 @@ export class MarketDataGateway
     }
 
     this.logger.debug(
-      `Client ${client.id} (user ${userId ?? '?'}) unsubscribed from ${tokens.length} tokens`,
+      `Client ${client.id} (user ${userId ?? '?'}) unsubscribed from ${refs.length} instrument(s)`,
     );
 
     return {
       event: 'unsubscribed',
-      data: { unsubscribed: tokens },
+      data: { unsubscribed: refs.map((r) => r.token) },
     };
   }
 
@@ -206,7 +214,7 @@ export class MarketDataGateway
       userPending = new Map<string, TickData>();
       this.pendingTicks.set(userId, userPending);
     }
-    userPending.set(tick.token, tick);
+    userPending.set(tickKey(tick), tick);
   }
 
   private flushPendingTicks(): void {

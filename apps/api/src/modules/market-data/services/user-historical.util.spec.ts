@@ -311,5 +311,14 @@ describe('user-historical.util', () => {
       expect(mapFullQuote(null, '1')).toBeNull();
       expect(mapFullQuote(undefined, '1')).toBeNull();
     });
+    it('carries the FULL depth when the broker sends one, and has no depth field otherwise', () => {
+      const withDepth = mapFullQuote(
+        [{ symbolToken: '2885', ltp: 1500.5, close: 1495, depth: { buy: [{ price: 1500.4, quantity: 3, orders: 1 }], sell: [] } }],
+        '2885',
+      );
+      expect(withDepth!.depth).toEqual({ bids: [{ price: 1500.4, qty: 3, orders: 1 }], asks: [] });
+      const without = mapFullQuote([{ symbolToken: '2885', ltp: 1500.5 }], '2885');
+      expect(without).not.toHaveProperty('depth');
+    });
   });
 });

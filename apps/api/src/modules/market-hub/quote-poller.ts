@@ -4,6 +4,7 @@ import type { PriceBook } from './price-book';
 import type { QuoteBatcher, QuoteOutcome } from './quote-batcher';
 import type { SessionClock } from './session-clock';
 import type { WatchEntry } from './watch-registry';
+import { tickExtras } from './tick-extras';
 
 export interface QuotePollerDeps {
   feed: LiveFeed;
@@ -97,6 +98,7 @@ export class QuotePoller {
         source: 'quote',
         volume: o.tick.volume,
         oi: o.tick.oi,
+        ...tickExtras(o.tick),
       };
       this.d.book.set(price);
       this.d.onPrice?.(price);

@@ -10,6 +10,19 @@ export interface FeedCallback {
   (data: TickData): void;
 }
 
+/** One level of the order book, in rupees. */
+export interface TickDepthLevel {
+  price: number;
+  qty: number;
+  orders: number;
+}
+
+/** Up to five levels a side, best first. */
+export interface TickDepth {
+  bids: TickDepthLevel[];
+  asks: TickDepthLevel[];
+}
+
 export interface TickData {
   token: string;
   symbol: string;
@@ -22,6 +35,8 @@ export interface TickData {
   oi?: number;
   /** Exchange of this tick ('NSE' | 'NFO' | 'BSE' | 'BFO' | 'MCX') when the feed reports it. */
   exchange?: string;
+  /** Best-five order book (SNAP_QUOTE ticks, FULL quotes). Absent when the broker reported no level. */
+  depth?: TickDepth;
   timestamp: Date;
 }
 

@@ -2,7 +2,7 @@ import { LiveFeed } from './live-feed';
 import { WatchRegistry } from './watch-registry';
 import { PriceBook } from './price-book';
 import { FakeBroker } from './testing/fake-broker';
-import { refKey, type InstrumentRef } from './hub.types';
+import { refKey, type InstrumentRef, type Price } from './hub.types';
 
 const ref = (token: string, exchange: InstrumentRef['exchange'] = 'NSE'): InstrumentRef => ({
   exchange,
@@ -184,5 +184,26 @@ describe('LiveFeed', () => {
       expect([...broker.subscribed].sort()).toEqual(['NSE:a', 'NSE:b']);
       expect(broker.maxInFlight).toBe(1);
     });
+  });
+
+  it('carries a tick’s day bar and depth onto the price; a tick that reports neither carries neither', async () => {
+    const { broker, registry, feed } = setup();
+    registry.watch(ref('2885'), 4, 'browser:s1', 0);
+    await feed.reconcile();
+    const seen: Price[] = [];
+    feed.onPrice((p) => seen.push(p));
+    broker.emitTick({
+      ...FakeBroker.tick('2885', 1500.5, 'NSE'),
+      open: 1490,
+      high: 1502,
+      low: 1488,
+      close: 1495,
+      depth: { bids: [{ price: 1500.4, qty: 3, orders: 1 }], asks: [] },
+    });
+    broker.emitTick(FakeBroker.tick('2885', 1501, 'NSE'));
+    expect(seen[0].day).toEqual({ open: 1490, high: 1502, low: 1488, close: 1495 });
+    expect(seen[0].depth).toEqual({ bids: [{ price: 1500.4, qty: 3, orders: 1 }], asks: [] });
+    expect(seen[1]).not.toHaveProperty('day');
+    expect(seen[1]).not.toHaveProperty('depth');
   });
 });

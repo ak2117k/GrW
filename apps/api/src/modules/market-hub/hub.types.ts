@@ -20,6 +20,26 @@ export type Lane = (typeof LANE)[keyof typeof LANE];
 
 export type Endpoint = 'quote' | 'candles' | 'search' | 'greek';
 
+/** The session's day bar as the broker reports it. `close` is the PREVIOUS session's close. */
+export interface DayBar {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface DepthLevel {
+  price: number;
+  qty: number;
+  orders: number;
+}
+
+/** Up to five levels a side, best first, in rupees. */
+export interface PriceDepth {
+  bids: DepthLevel[];
+  asks: DepthLevel[];
+}
+
 export interface Price {
   ref: InstrumentRef;
   ltp: number;
@@ -28,6 +48,10 @@ export interface Price {
   source: 'ws' | 'quote' | 'db';
   volume?: number;
   oi?: number;
+  /** M4: day bar (for change vs the previous close). Absent when the broker reported none. */
+  day?: DayBar;
+  /** M4: best-five book. Absent when the broker reported no level. */
+  depth?: PriceDepth;
 }
 
 export type UnavailableReason = 'not-watched' | 'never-priced' | 'throttled' | 'no-session';

@@ -164,7 +164,9 @@ row). Parent: `docs/superpowers/specs/2026-09-30-ai-trading-core-architecture-de
     is switching **off** a selection that already points at a now-retired version. Retiring a version
     does not rewrite other users' selections; the picker flags a stale selection, and M5's fan-out must
     treat any selection whose version is not `PAPER` as disabled (Notes for later milestones).
-    `capitalAllocation` is rupees; capping it against funds is the Risk Wall's job (M2/M3).
+    `capitalAllocation` is rupees, stored exactly as `DECIMAL(14,2)` (≥ 0, at most 2 dp, below 10^12;
+    the API returns it as a JSON number with ≤ 2 dp, the audit log as the 2-dp string); capping it
+    against funds is the Risk Wall's job (M2/M3).
 12. **`createdBy` never comes from the request.** REST drafts are `OWNER`; the service takes `createdBy`
     as a parameter so M6's AI path passes `AI`. The request DTOs have no `createdBy`, `status` or
     `userId` field, so the global `ValidationPipe({ whitelist: true })` strips them.
@@ -3887,18 +3889,29 @@ git commit -m "docs(plans): SP2 M1 verification results" -m "Co-Authored-By: Cla
 
 ## M1 production gate (after deploy, owner-run)
 
-The deploy's existing `prisma migrate deploy` applies `20261009120000_sp2_m1_strategy_catalogue`
-(expand-only: three new tables, no existing table touched). No env var is added. After the deploy:
+Production is the Vyom VPS: Postgres runs in the `grw-postgres` container (deploy/docker-compose.prod.yml).
+The API deploy's existing `prisma migrate deploy` against that database applies
+`20261009120000_sp2_m1_strategy_catalogue` (expand-only: three new tables, no existing table touched).
+No env var is added. After the deploy:
 
-**Database (Neon):**
+**Database (Vyom VPS, `grw-postgres`):** run on the server. User and database are `grw`/`grw`
+(`PG_USER`/`PG_DB` in deploy/env/ops.env.example; use `/opt/grw/env/ops.env` if it differs). The SQL
+goes in through a quoted heredoc so the shell leaves the double-quoted identifiers alone; psql reads no
+password inside the container (local socket).
 
-```sql
+```bash
+docker exec -i grw-postgres psql -U grw -d grw <<'SQL'
 SELECT "key", "name", "allowedVehicles" FROM core_strategies ORDER BY "key";
 -- want: adaptive-stop | Adaptive-Stop | {CASH_INTRADAY}   and   ungated | Ungated | {CASH_INTRADAY}
 SELECT s."key", v."version", v."status", v."createdBy" FROM core_strategy_versions v JOIN core_strategies s ON s."id" = v."strategyId" ORDER BY s."key";
 -- want: both v1, DRAFT, OWNER
 SELECT tgname FROM pg_trigger WHERE tgname = 'core_strategy_versions_guard';
 -- want: one row
+SELECT format_type(a.atttypid, a.atttypmod) AS capital_type FROM pg_attribute a WHERE a.attrelid = 'core_strategy_selections'::regclass AND a.attname = 'capitalAllocation';
+-- want: numeric(14,2)
+SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'core_strategy_selections_capitalAllocation_check';
+-- want: CHECK ((("capitalAllocation" >= (0)::numeric) AND ("capitalAllocation" <> 'NaN'::numeric)))
+SQL
 ```
 
 **Browser (your ADMIN account), `/core-strategies`:**
@@ -3912,11 +3925,16 @@ SELECT tgname FROM pg_trigger WHERE tgname = 'core_strategy_versions_guard';
 - Try **Save** with Enabled on and capital `0`: the toast says an enabled strategy needs capital above ₹0
   and nothing is sent.
 
-**Audit:**
+**Audit** (same container, on the server):
 
-```sql
+```bash
+docker exec -i grw-postgres psql -U grw -d grw <<'SQL'
 SELECT action, target, meta FROM audit_logs WHERE action LIKE 'CORE_STRATEGY_%' ORDER BY seq;
 -- want: two CORE_STRATEGY_VERSION_APPROVED, then CORE_STRATEGY_SELECTION_CHANGED with before: null
+-- and after.capitalAllocation the exact 2-dp string you saved (e.g. "200000.00")
+SELECT "capitalAllocation"::text FROM core_strategy_selections;
+-- want: the same amount, 2 dp (DECIMAL(14,2))
+SQL
 ```
 
 **Another account, if one exists:** `GET /api/trade-core/strategy-selections` returns only its own rows
@@ -3983,4 +4001,4 @@ M1 is complete when this gate is observed in production, not when the tests pass
 
 | Date | Whole suite (API / web) | Typecheck (M1 files) | Opt-in DB test + drift | Notes |
 |---|---|---|---|---|
-| | | | | |
+| 2026-10-10 (branch `feature/sp2-m1-strategy-catalogue` @ 03dbd59, base 13ddd52) | API: `Test Suites: 1 failed, 252 passed, 253 total` / `Tests: 1 failed, 3159 passed, 3160 total` (M4's 245/3081 plus the 8 M1 suites `validate-blocks.spec`, `version-status.spec`, `core-strategy-seeds.spec`, `core-strategy.repository.spec`, `core-strategy-catalogue.service.spec`, `core-strategy-selection.service.spec`, `core-strategies.controller.spec`, `trade-core.module.spec`, all PASS). The one failure is pre-existing and depends on the time of day: `adaptive-stop-watch.service.spec.ts:168` ("decision gate REJECTS an extended / no-support entry") builds 16 15m candles ending 15 min before the real now; `evaluateDecisionGate` skips (fails open) when fewer than 3 of them are on today's IST date (`adaptive-stop-decision-gate.ts:157`), which is true from 00:00 to about 00:45 IST. The whole run reached it at about 00:39 IST; rerun alone at 00:45 IST: 1 suite / 17 tests PASS. Silo file, untouched by M1 (approach A). Web: `Test Files 66 passed (66)` / `Tests 605 passed (605)` (incl. `coreStrategies.spec` 2 tests and `core-strategy-picker.spec` 12 tests; vitest exited 1 only on the ENOTDIR results-cache write into the `apps/web/node_modules` junction, ruling P1). Old paths: `git diff 13ddd52 --stat` on adaptive-stop-track / ungated-track / chartink / settings is empty; the `cron-timezone.spec.ts` diff is empty; no `@Cron`/`@Interval` decorator in trade-core (the only grep hits are `core-strategy-seeds.spec.ts:50,52`, a comment and a regex that read silo source); the `LIVE_TRADING_ENABLED`/`@td/shared` grep in trade-core is clean. | API: no error in trade-core / audit-actions / tenant.constants / app.module. The sorted `error TS` list has 169 lines, the same as the baseline's 169; the only line difference is `setup-tracker.service.ts(572,7)` TS2367, the same error with the same six union members printed in a different order (not an M1 file; signal-generator untouched). `asymmetric-scanner.service.ts(316,13)` is identical. Web: `tsc --noEmit` clean (exit 0). | Run in Task 3 against a throwaway local container (127.0.0.1:55432, ruling P12): opt-in DB test 3/3 PASS. `migrate diff` exited 2 only because of two pre-existing DESC indexes from migration 20260818130000 (`candles_timestamp_idx`, `sentinel_verdicts_createdAt_idx`), identical without the M1 migration; M1 objects have zero drift. Not re-run. | ESLint has no flat config in the repo (pre-existing), so it was not run. Spec §4.3 corrected in this commit (ruling P4): a new version starts in `DRAFT` and only the owner's approval moves it to `PAPER`. The production gate above is owner-run and still outstanding. |

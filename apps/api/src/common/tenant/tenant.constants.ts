@@ -23,6 +23,9 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'ConsentRecord',
   'RefreshToken',
   'VerificationToken',
+  // SP2 M1: per-user strategy selections. The catalogue (CoreStrategy,
+  // CoreStrategyVersion) is global and deliberately absent.
+  'CoreStrategySelection',
 ]);
 
 /**

@@ -112,8 +112,8 @@ polling) are deliberately not carried into the core (owner decision 2026-10-09).
 ### 4.3 Dropdown
 
 A strategy picker lists every strategy with its approved versions. Enabling a version creates or
-updates a selection in paper mode. A new version always starts in `PAPER`, and only the owner
-changes mode. This replaces, for the core only, the `VALID_STRATEGY_NAMES` whitelist in
+updates a selection in paper mode. A new version always starts in `DRAFT`, and only the owner's
+approval moves it to `PAPER`; only the owner changes mode. This replaces, for the core only, the `VALID_STRATEGY_NAMES` whitelist in
 `settings/services/settings.service.ts`, which silently discards choices. The old settings path is
 not modified.
 

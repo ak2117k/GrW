@@ -27,6 +27,7 @@ import {
   CreditCard,
   PieChart,
   Target,
+  Layers,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -59,6 +60,7 @@ export const navItems: NavItem[] = [
   { path: '/backtest', label: 'Backtest', icon: FlaskConical },
   { path: '/strategy-builder', label: 'Strategy Builder', icon: Code2 },
   { path: '/strategy-review', label: 'Strategy Review', icon: ClipboardList },
+  { path: '/core-strategies', label: 'Core Strategies', icon: Layers, badge: 'SP2' },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 

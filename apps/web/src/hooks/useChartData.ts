@@ -2,6 +2,7 @@ import { useReducer, useMemo, useState, useEffect, useCallback, useRef } from 'r
 import { useLiveRefresh } from './useLiveRefresh';
 import api from '@/services/api';
 import { wsService } from '@/services/websocket';
+import { feedKey, type FeedRef } from '@/services/browser-feed';
 import { useChartStore } from '@/stores/chart-store';
 import {
   emptySeries,
@@ -50,16 +51,15 @@ interface TickData {
 }
 
 /**
- * Pure diff of the chart's single-token subscription across a symbol switch.
- * Returns the tokens to `subscribe` (add) and `unsubscribe` (remove) so the
- * hook can drive the per-user server feed with exactly one add + one remove.
- * A null token means "nothing subscribed" (empty/`'0'` guarded by the caller).
+ * Pure diff of the chart's single-instrument subscription across a symbol
+ * switch, compared by EXCHANGE:token (the same token on another exchange is a
+ * different instrument). One add + one remove per switch; null means none.
  */
 export function computeSubscriptionDelta(
-  prev: string | null,
-  next: string | null,
-): { add: string[]; remove: string[] } {
-  if (prev === next) return { add: [], remove: [] };
+  prev: FeedRef | null,
+  next: FeedRef | null,
+): { add: FeedRef[]; remove: FeedRef[] } {
+  if ((prev ? feedKey(prev) : null) === (next ? feedKey(next) : null)) return { add: [], remove: [] };
   return {
     add: next ? [next] : [],
     remove: prev ? [prev] : [],
@@ -275,8 +275,8 @@ export function useChartData(): UseChartDataReturn {
   const epochRef = useRef(0);
   // Previous feed-state, so a reconnecting -> live transition gap-fills once.
   const prevFeedStateRef = useRef<FeedState | null>(null);
-  // The token currently subscribed on the per-user server feed.
-  const subscribedTokenRef = useRef<string | null>(null);
+  // The instrument currently subscribed on the server feed (exchange-aware).
+  const subscribedRef = useRef<FeedRef | null>(null);
   const loadingMoreRef = useRef(false);
   const hasMoreRef = useRef(true);
 
@@ -485,25 +485,24 @@ export function useChartData(): UseChartDataReturn {
       });
   }, [selectedSymbol.token, selectedSymbol.exchange]);
 
-  // Drive the per-user server feed: exactly one unsubscribe (old) + one
-  // subscribe (new) per symbol switch.
+  // Drive the server feed: exactly one unsubscribe (old) + one subscribe (new)
+  // per symbol switch, with the exchange, as a viewed chart (hub priority 4).
   useEffect(() => {
-    const token = selectedSymbol.token;
-    const next = token && token !== '0' ? token : null;
-    const delta = computeSubscriptionDelta(subscribedTokenRef.current, next);
+    const { token, exchange, symbol } = selectedSymbol;
+    const next: FeedRef | null = token && token !== '0' && exchange ? { token, exchange, symbol } : null;
+    const delta = computeSubscriptionDelta(subscribedRef.current, next);
     if (delta.remove.length > 0) wsService.emitUnsubscribe(delta.remove);
-    if (delta.add.length > 0) wsService.emitSubscribe(delta.add);
-    subscribedTokenRef.current = next;
-  }, [selectedSymbol.token]);
+    if (delta.add.length > 0) wsService.emitSubscribe(delta.add, 'chart');
+    subscribedRef.current = next;
+  }, [selectedSymbol.token, selectedSymbol.exchange, selectedSymbol.symbol]);
 
-  // Unmount cleanup: release the token so the per-user subscription pool
-  // doesn't leak. Separate empty-deps effect so it fires ONLY on unmount (a
-  // symbol switch is handled by the delta effect above, which must not
-  // unsubscribe the new token). Reads the live ref, not a closed-over token.
+  // Unmount cleanup: release the instrument so the subscription does not leak.
+  // Separate empty-deps effect so it fires ONLY on unmount (a symbol switch is
+  // handled by the delta effect above). Reads the live ref.
   useEffect(() => {
     return () => {
-      if (subscribedTokenRef.current) {
-        wsService.emitUnsubscribe([subscribedTokenRef.current]);
+      if (subscribedRef.current) {
+        wsService.emitUnsubscribe([subscribedRef.current]);
       }
     };
   }, []);

@@ -7,6 +7,7 @@ import {
   shouldRetryServerDisconnect,
 } from './ws-retry';
 import { classifyFeed, type FeedHealth } from './feed-health';
+import { feedKey, isFeedSource, type FeedPurpose, type FeedRef, type FeedSource } from './browser-feed';
 
 /**
  * Shape the socket.io handshake `auth` payload from a JWT access token.
@@ -18,11 +19,33 @@ export function buildHandshakeAuth(token: string): { token: string } {
 }
 
 /**
- * Shape the outbound `subscribe`/`unsubscribe` message body. The server
- * drives a per-user Angel feed from these token lists. Pure by design.
+ * Shape the outbound `subscribe`/`unsubscribe` message body. `refs` carry the
+ * exchange (the server no longer guesses NSE); bare `tokens` stay for an older
+ * server. `purpose` decides the hub priority server-side. Pure by design.
  */
-export function toSubscribePayload(tokens: string[]): { tokens: string[] } {
-  return { tokens };
+export function toSubscribePayload(
+  refs: FeedRef[],
+  purpose?: FeedPurpose,
+): { tokens: string[]; refs: FeedRef[]; purpose?: FeedPurpose } {
+  const clean = refs.map((r) => ({
+    token: r.token,
+    exchange: r.exchange.toUpperCase(),
+    ...(r.symbol ? { symbol: r.symbol } : {}),
+  }));
+  return { tokens: clean.map((r) => r.token), refs: clean, ...(purpose ? { purpose } : {}) };
+}
+
+/** Every held subscription as one `subscribe` payload per purpose (reconnect replay). Pure. */
+export function replayPayloads(
+  entries: Iterable<{ ref: FeedRef; purpose: FeedPurpose }>,
+): Array<ReturnType<typeof toSubscribePayload>> {
+  const byPurpose = new Map<FeedPurpose, FeedRef[]>();
+  for (const { ref, purpose } of entries) {
+    const list = byPurpose.get(purpose);
+    if (list) list.push(ref);
+    else byPurpose.set(purpose, [ref]);
+  }
+  return [...byPurpose].map(([purpose, refs]) => toSubscribePayload(refs, purpose));
 }
 
 /**
@@ -52,6 +75,7 @@ export type WSEventName =
   | 'alert'
   | 'candle'
   | 'feed-state'
+  | 'feed-source'
   // /ws/trades
   | 'trade-update'
   | 'position-update'
@@ -86,7 +110,7 @@ interface NamespaceConfig {
 const NAMESPACES: readonly NamespaceConfig[] = [
   {
     path: '/ws',
-    events: ['tick', 'signal', 'alert', 'candle', 'feed-state'],
+    events: ['tick', 'signal', 'alert', 'candle', 'feed-state', 'feed-source'],
   },
   {
     path: '/ws/trades',
@@ -136,10 +160,14 @@ class WebSocketService {
   /** Negotiated transport for the /ws socket ('polling' | 'websocket'), or null. */
   private transport: string | null = null;
   /**
-   * Tokens the app has asked the server to stream on /ws. Held so we can
-   * re-emit `subscribe` after a reconnect (the server forgets on disconnect).
+   * Instruments the app asked the server to stream on /ws, ref-counted per
+   * EXCHANGE:token so one hook's release never drops another hook's symbol.
+   * Held so we can re-emit `subscribe` after a reconnect (the server forgets on
+   * disconnect). Bounded by the distinct refs the open screens asked for.
    */
-  private subscribedTokens = new Set<string>();
+  private subscriptions = new Map<string, { ref: FeedRef; purpose: FeedPurpose; count: number }>();
+  /** What the /ws gateway said feeds this browser; null until it says. */
+  private feedSource: FeedSource | null = null;
 
   connect(): void {
     if (this.sockets.size > 0) return;
@@ -207,11 +235,8 @@ class WebSocketService {
           });
           // Replay any active subscriptions — the server forgets our token
           // list when the socket drops, so a reconnect must re-request them.
-          if (this.subscribedTokens.size > 0) {
-            sock.emit(
-              'subscribe',
-              toSubscribePayload([...this.subscribedTokens]),
-            );
+          for (const payload of replayPayloads(this.subscriptions.values())) {
+            sock.emit('subscribe', payload);
           }
         }
         // Emit on the FIRST namespace going up so connection-aware UI
@@ -272,6 +297,10 @@ class WebSocketService {
       for (const event of ns.events) {
         sock.on(event, (data: unknown) => {
           if (event === 'tick') this.lastTickAt = Date.now();
+          if (event === 'feed-source') {
+            const source = (data as { source?: unknown } | null)?.source;
+            if (isFeedSource(source)) this.feedSource = source;
+          }
           this.emit(event, data);
         });
       }
@@ -402,7 +431,7 @@ class WebSocketService {
               ? Math.round((Date.now() - this.lastTickAt) / 1000)
               : undefined,
             transport: this.transport ?? undefined,
-            subscribedTokens: this.subscribedTokens.size,
+            subscribedTokens: this.subscriptions.size,
             namespaces: Object.fromEntries(this.nsConnected),
             recoveredWithoutReload: recovering,
           }),
@@ -427,6 +456,7 @@ class WebSocketService {
       this.healthTimer = null;
     }
     this.lastHealth = 'live';
+    this.feedSource = null;
   }
 
   subscribe(event: string, callback: EventCallback): () => void {
@@ -454,20 +484,42 @@ class WebSocketService {
   }
 
   /**
-   * Ask the server to start streaming ticks for `tokens` on /ws. The server
-   * drives a per-user Angel feed from these. Tokens are remembered so they can
-   * be replayed after a reconnect. Safe to call before connect() — they'll be
-   * sent once /ws comes up.
+   * Ask the server to stream `refs` on /ws for `purpose`. Ref-counted: only a
+   * ref no other caller holds is sent. Remembered for reconnect replay. Safe to
+   * call before connect() — they are sent once /ws comes up.
    */
-  emitSubscribe(tokens: string[]): void {
-    for (const t of tokens) this.subscribedTokens.add(t);
-    this.sockets.get('/ws')?.emit('subscribe', toSubscribePayload(tokens));
+  emitSubscribe(refs: FeedRef[], purpose: FeedPurpose = 'chart'): void {
+    const fresh: FeedRef[] = [];
+    for (const ref of refs) {
+      const key = feedKey(ref);
+      const held = this.subscriptions.get(key);
+      if (held) {
+        held.count++;
+        continue;
+      }
+      this.subscriptions.set(key, { ref, purpose, count: 1 });
+      fresh.push(ref);
+    }
+    if (fresh.length > 0) this.sockets.get('/ws')?.emit('subscribe', toSubscribePayload(fresh, purpose));
   }
 
-  /** Stop streaming ticks for `tokens` on /ws and forget them locally. */
-  emitUnsubscribe(tokens: string[]): void {
-    for (const t of tokens) this.subscribedTokens.delete(t);
-    this.sockets.get('/ws')?.emit('unsubscribe', toSubscribePayload(tokens));
+  /** Release `refs`; the server is told only when the last holder lets go. */
+  emitUnsubscribe(refs: FeedRef[]): void {
+    const gone: FeedRef[] = [];
+    for (const ref of refs) {
+      const key = feedKey(ref);
+      const held = this.subscriptions.get(key);
+      if (!held) continue;
+      if (--held.count > 0) continue;
+      this.subscriptions.delete(key);
+      gone.push(held.ref);
+    }
+    if (gone.length > 0) this.sockets.get('/ws')?.emit('unsubscribe', toSubscribePayload(gone));
+  }
+
+  /** 'hub' when the server feeds this browser from the market hub; null until it says. */
+  getFeedSource(): FeedSource | null {
+    return this.feedSource;
   }
 
   /** Negotiated /ws transport ('websocket' | 'polling'), or null if unknown. */

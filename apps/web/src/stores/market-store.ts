@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { Quote } from '@/types';
 import type { MarketStatus } from '@/types';
 import type { FeedHealth } from '@/services/feed-health';
+import type { FeedSource } from '@/services/browser-feed';
 
 interface MarketState {
   quotes: Map<string, Quote>;
@@ -12,10 +13,13 @@ interface MarketState {
    * whether prices were arriving, and the badge said "Live" anyway.
    */
   feedHealth: FeedHealth;
+  /** Which path feeds this browser ('hub' lets screens stop polling while Live); null until the server says. */
+  feedSource: FeedSource | null;
   marketStatus: MarketStatus;
   updateQuote: (quote: Quote) => void;
   setConnected: (connected: boolean) => void;
   setFeedHealth: (health: FeedHealth) => void;
+  setFeedSource: (source: FeedSource | null) => void;
   setMarketStatus: (status: MarketStatus) => void;
 }
 
@@ -25,6 +29,7 @@ export const useMarketStore = create<MarketState>((set) => ({
   // Starts offline: before a tick has arrived we have no evidence of a feed,
   // and absence of evidence must not render as health.
   feedHealth: 'offline',
+  feedSource: null,
   marketStatus: 'closed',
 
   updateQuote: (quote) =>
@@ -37,6 +42,8 @@ export const useMarketStore = create<MarketState>((set) => ({
   setConnected: (connected) => set({ isConnected: connected }),
 
   setFeedHealth: (health) => set({ feedHealth: health }),
+
+  setFeedSource: (source) => set({ feedSource: source }),
 
   setMarketStatus: (status) => set({ marketStatus: status }),
 }));

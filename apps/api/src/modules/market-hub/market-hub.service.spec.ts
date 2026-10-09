@@ -65,6 +65,59 @@ describe('MarketHubService', () => {
   const enabled = (extra: Record<string, unknown> = {}) =>
     config({ 'hub.enabled': true, 'hub.ownerUserId': 'owner', 'hub.slotCap': 50, 'hub.mcxLateClose': '', ...extra });
 
+  it('hubFor serves only the owner (or system-wide null) and only for a consumer whose flag is on', () => {
+    const svc = new MarketHubService(
+      enabled({ 'hub.pricesPositions': true, 'hub.pricesTracks': false }) as any,
+      manager() as any,
+      tracker as any,
+      prisma as any,
+      runner as any,
+    );
+    svc.onModuleInit();
+    expect(svc.hubFor('owner', 'positions')).not.toBeNull();
+    expect(svc.hubFor(null, 'positions')).not.toBeNull();
+    // Never another user's positions from the owner's session.
+    expect(svc.hubFor('someone-else', 'positions')).toBeNull();
+    // HUB_PRICES_TRACKS is off: that consumer keeps its legacy path.
+    expect(svc.hubFor('owner', 'tracks')).toBeNull();
+    expect(svc.hubFor(null, 'tracks')).toBeNull();
+    svc.onModuleDestroy();
+  });
+
+  it('hubFor is null when the hub is not running, whatever the flags say', () => {
+    const flags = { 'hub.pricesPositions': true, 'hub.pricesTracks': true };
+    const disabled = new MarketHubService(config({ 'hub.enabled': false, ...flags }) as any, manager() as any, tracker as any, prisma as any, runner as any);
+    disabled.onModuleInit();
+    expect(disabled.hubFor('owner', 'positions')).toBeNull();
+    expect(disabled.hubFor(null, 'tracks')).toBeNull();
+    const noOwner = new MarketHubService(config({ 'hub.enabled': true, 'hub.ownerUserId': '', ...flags }) as any, manager() as any, tracker as any, prisma as any, runner as any);
+    noOwner.onModuleInit();
+    expect(noOwner.hubFor(null, 'tracks')).toBeNull();
+    // record() without a running hub is a no-op, never a throw.
+    expect(() => disabled.record('tracks', 'hub', 1)).not.toThrow();
+  });
+
+  it('the owner hub reads the engine, and record() lands in status().consumers', () => {
+    const svc = new MarketHubService(
+      enabled({ 'hub.pricesPositions': true, 'hub.pricesTracks': true }) as any,
+      manager() as any,
+      tracker as any,
+      prisma as any,
+      runner as any,
+    );
+    svc.onModuleInit();
+    const hub = svc.hubFor(null, 'tracks')!;
+    const ref = { exchange: 'NSE' as const, token: '2885', symbol: 'RELIANCE' };
+    expect(hub.price(ref, { maxAgeMs: 10_000 })).toEqual({ kind: 'unavailable', reason: 'not-watched' });
+    void hub.watch([ref], 3, 'track:exit', 120_000);
+    expect(hub.price(ref, { maxAgeMs: 10_000 })).toEqual({ kind: 'unavailable', reason: 'never-priced' });
+    svc.record('tracks', 'hub', 2);
+    svc.record('positions', 'unpriced');
+    expect(svc.status()?.consumers.tracks.hub).toBe(2);
+    expect(svc.status()?.consumers.positions.unpriced).toBe(1);
+    svc.onModuleDestroy();
+  });
+
   it('runs no candle store unless HUB_CANDLES_ENABLED, and never serves charts then', () => {
     const svc = new MarketHubService(enabled({ 'hub.candlesEnabled': false, 'hub.servesCharts': true }) as any, manager() as any, tracker as any, prisma as any, runner as any);
     svc.onModuleInit();

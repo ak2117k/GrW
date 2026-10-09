@@ -83,6 +83,12 @@ export default () => ({
     candlesEnabled: process.env.HUB_CANDLES_ENABLED === 'true',
     // M2 consumer switch: /candles answered by the hub. Turn off to put charts back on the legacy path.
     servesCharts: process.env.HUB_SERVES_CHARTS === 'true',
+    // M3 consumer switch: trade-tracker sweep + hub tick listener + sentinel tick source read
+    // the hub's prices for the owner's positions. Needs MARKET_HUB_ENABLED. Off = legacy path.
+    pricesPositions: process.env.HUB_PRICES_POSITIONS === 'true',
+    // M3 consumer switch: ExitPriceService (track pollers, breakout-swing, EOD square-offs)
+    // reads the hub's prices. Needs MARKET_HUB_ENABLED. Off = legacy path.
+    pricesTracks: process.env.HUB_PRICES_TRACKS === 'true',
     // MCX 23:55 close windows, "YYYY-MM-DD:YYYY-MM-DD" comma-separated (US-DST-linked).
     mcxLateClose: process.env.HUB_MCX_LATE_CLOSE || '',
   },

@@ -8,7 +8,7 @@ import { SessionClock } from './session-clock';
 import { FakeBroker } from './testing/fake-broker';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { AngelThrottleError } from '../market-data/services/angel-throttle';
-import type { InstrumentRef } from './hub.types';
+import type { InstrumentRef, Price } from './hub.types';
 
 const IST = (local: string) => new Date(new Date(`${local}Z`).getTime() - 5.5 * 3600_000).getTime();
 const ref = (token: string, exchange: InstrumentRef['exchange'] = 'NSE'): InstrumentRef => ({
@@ -17,7 +17,7 @@ const ref = (token: string, exchange: InstrumentRef['exchange'] = 'NSE'): Instru
   symbol: token,
 });
 
-async function setup(cap: number) {
+async function setup(cap: number, onPrice?: (p: Price) => void) {
   const broker = new FakeBroker();
   const registry = new WatchRegistry();
   const book = new PriceBook();
@@ -32,7 +32,7 @@ async function setup(cap: number) {
   });
   const batcher = new QuoteBatcher(gov, (refs) => broker.quotes(refs));
   const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
-  const poller = new QuotePoller({ feed, book, batcher, clock, nearLiveTargetMs: 5000, criticalTargetMs: 2000 });
+  const poller = new QuotePoller({ feed, book, batcher, clock, nearLiveTargetMs: 5000, criticalTargetMs: 2000, onPrice });
   return { broker, registry, book, feed, poller };
 }
 
@@ -95,5 +95,29 @@ describe('QuotePoller', () => {
     expect(
       book.get(ref('1'), { maxAgeMs: 1, now: Date.now(), isOpen: () => true, watched: () => true }),
     ).toEqual({ kind: 'unavailable', reason: 'throttled' });
+  });
+
+  it('hands every polled price to onPrice, stamped as a quote at receipt', async () => {
+    const seen: Price[] = [];
+    const { registry, feed, poller } = await setup(0, (p) => seen.push(p));
+    registry.watch(ref('1'), 3, 'w', 0);
+    await feed.reconcile();
+    poller.pollNearLive();
+    await jest.advanceTimersByTimeAsync(200);
+    // Received when the 150 ms batch fired (t+150), so 50 ms old at t+200.
+    expect(seen).toEqual([{ ref: ref('1'), ltp: 100, at: Date.now() - 50, source: 'quote', volume: 0, oi: undefined }]);
+  });
+
+  it('does not call onPrice for a throttled quote', async () => {
+    const seen: Price[] = [];
+    const { broker, registry, feed, poller } = await setup(0, (p) => seen.push(p));
+    broker.quoteImpl = async () => {
+      throw new AngelThrottleError('rate');
+    };
+    registry.watch(ref('1'), 3, 'w', 0);
+    await feed.reconcile();
+    poller.pollNearLive();
+    await jest.advanceTimersByTimeAsync(200);
+    expect(seen).toEqual([]);
   });
 });

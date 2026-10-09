@@ -13,6 +13,7 @@ import { istDay } from './candles/trading-calendar';
 import { ManagerHubBroker } from './hub-broker';
 import type { HubCandleSource } from './hub-candle-source';
 import { HubEngine, type HubStatus } from './hub-engine';
+import { engineHubPrices, type HubConsumer, type HubOutcome, type HubPriceSource, type HubPrices } from './hub-prices';
 import { LANE, refKey, type HubExchange, type InstrumentRef, type PriceResult, type Priority } from './hub.types';
 import { SessionClock, type DateRange } from './session-clock';
 
@@ -42,16 +43,20 @@ export function parseLateClose(raw: string | undefined): DateRange[] {
  * open positions on the owner's shared session and reports metrics; no
  * consumer reads those prices yet. M2: the CandleStore (tick-built 1m bars,
  * gap fill, nightly fix-up) runs behind HUB_CANDLES_ENABLED, and /candles is
- * answered from it behind HUB_SERVES_CHARTS. Start is fire-and-forget: boot
- * must never wait on the broker.
+ * answered from it behind HUB_SERVES_CHARTS. M3: prices the owner's positions
+ * and the system-wide strategy tracks for consumers behind HUB_PRICES_POSITIONS /
+ * HUB_PRICES_TRACKS through the HUB_PRICE_SOURCE token (see hub-prices.ts).
+ * Start is fire-and-forget: boot must never wait on the broker.
  */
 @Injectable()
-export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandleSource {
+export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandleSource, HubPriceSource {
   private readonly logger = new Logger(MarketHubService.name);
   readonly session: SessionClock;
   private engine: HubEngine | null = null;
   private reason: string | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
+  private ownerUserId: string | null = null;
+  private ownerHub: HubPrices | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -93,6 +98,8 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         : undefined,
     });
     this.engine = engine;
+    this.ownerUserId = owner;
+    this.ownerHub = engineHubPrices(engine);
     void engine
       .start()
       .then(() => this.refreshPositions(owner))
@@ -133,6 +140,23 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
 
   unwatch(ref: InstrumentRef, owner: string): Promise<void> {
     return this.engine ? this.engine.unwatch(ref, owner) : Promise.resolve();
+  }
+
+  /** See HubPriceSource.hubFor. Personal MVP: only the owner's hub exists. */
+  hubFor(userId: string | null, consumer: HubConsumer): HubPrices | null {
+    if (!this.engine || !this.ownerHub || !this.ownerUserId) return null;
+    if (!this.consumerEnabled(consumer)) return null;
+    if (userId !== null && userId !== this.ownerUserId) return null;
+    return this.ownerHub;
+  }
+
+  record(consumer: HubConsumer, outcome: HubOutcome, count = 1): void {
+    this.engine?.recordConsumer(consumer, outcome, count);
+  }
+
+  private consumerEnabled(consumer: HubConsumer): boolean {
+    const key = consumer === 'positions' ? 'hub.pricesPositions' : 'hub.pricesTracks';
+    return this.config.get<boolean>(key) === true;
   }
 
   servesCharts(): boolean {

@@ -1,4 +1,4 @@
-import { LANE, refKey, type InstrumentRef, type Lane } from './hub.types';
+import { LANE, refKey, type InstrumentRef, type Lane, type Price } from './hub.types';
 import type { LiveFeed } from './live-feed';
 import type { PriceBook } from './price-book';
 import type { QuoteBatcher, QuoteOutcome } from './quote-batcher';
@@ -12,6 +12,8 @@ export interface QuotePollerDeps {
   clock: SessionClock;
   nearLiveTargetMs: number;
   criticalTargetMs: number;
+  /** Called with every price this poller stores (the engine fans it out to consumers). */
+  onPrice?: (p: Price) => void;
 }
 
 /**
@@ -65,14 +67,16 @@ export class QuotePoller {
 
   private apply(ref: InstrumentRef, o: QuoteOutcome): void {
     if (o.kind === 'ok') {
-      this.d.book.set({
+      const price: Price = {
         ref,
         ltp: o.tick.ltp,
         at: Date.now(),
         source: 'quote',
         volume: o.tick.volume,
         oi: o.tick.oi,
-      });
+      };
+      this.d.book.set(price);
+      this.d.onPrice?.(price);
     } else if (o.kind === 'throttled') {
       this.d.book.markFailure(refKey(ref), 'throttled');
     }

@@ -38,7 +38,8 @@ export interface HubPriceSource {
    * THE seam: which hub prices this user's instruments for this consumer.
    * Today: the owner's hub when the hub runs, the consumer's flag is on, and
    * `userId` is HUB_OWNER_USER_ID or null (system-wide paper tracks, which
-   * have no user). Otherwise null, and the caller keeps its legacy path.
+   * have no user) — except that 'browser' never serves null: a browser always
+   * has a user. Otherwise null, and the caller keeps its legacy path.
    * Never another user's session. Multi-tenant: return that user's own hub.
    */
   hubFor(userId: string | null, consumer: HubConsumer): HubPrices | null;

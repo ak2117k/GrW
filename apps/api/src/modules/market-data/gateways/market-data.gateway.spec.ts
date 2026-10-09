@@ -292,6 +292,46 @@ describe('MarketDataGateway', () => {
       expect(manager.unsubscribe).toHaveBeenCalledTimes(2);
     });
 
+    it('closing one of a user’s two legacy tabs releases only that tab’s refs; the other tab keeps its own', () => {
+      const { gw, manager } = makeGateway();
+      const a = fakeSocket(signToken('u1'), 'a');
+      const b = fakeSocket(signToken('u1'), 'b');
+      gw.handleConnection(a as any);
+      gw.handleConnection(b as any);
+      gw.handleSubscribe(a as any, { refs: [{ token: '1', exchange: 'NSE' }, { token: '35001', exchange: 'NFO' }] });
+      gw.handleSubscribe(b as any, { refs: [{ token: '1', exchange: 'NSE' }, { token: '2885', exchange: 'NSE' }] });
+
+      gw.handleDisconnect(a as any);
+      expect(manager.unsubscribe).toHaveBeenCalledTimes(1);
+      expect(manager.unsubscribe).toHaveBeenCalledWith('u1', [
+        { token: '1', exchange: 'NSE' },
+        { token: '35001', exchange: 'NFO' },
+      ]);
+      expect(manager.releaseUser).not.toHaveBeenCalled(); // would zero tab B's refs too
+
+      // B still holds its refs: its own unsubscribe is forwarded.
+      gw.handleUnsubscribe(b as any, { refs: [{ token: '2885', exchange: 'NSE' }] });
+      expect(manager.unsubscribe).toHaveBeenLastCalledWith('u1', [{ token: '2885', exchange: 'NSE' }]);
+
+      // The user's last socket: its remaining refs go, then the user is released (idle timer).
+      gw.handleDisconnect(b as any);
+      expect(manager.unsubscribe).toHaveBeenLastCalledWith('u1', [{ token: '1', exchange: 'NSE' }]);
+      expect(manager.releaseUser).toHaveBeenCalledTimes(1);
+      expect(manager.releaseUser).toHaveBeenCalledWith('u1');
+    });
+
+    it('a rejected manager unsubscribe on disconnect is swallowed (no unhandledRejection)', async () => {
+      const manager = fakeManager();
+      (manager.unsubscribe as jest.Mock).mockRejectedValue(new Error('boom'));
+      const { gw } = makeGateway(manager);
+      const sock = fakeSocket(signToken('u1'));
+      gw.handleConnection(sock as any);
+      gw.handleSubscribe(sock as any, { refs: [{ token: '1', exchange: 'NSE' }] });
+      expect(() => gw.handleDisconnect(sock as any)).not.toThrow();
+      await new Promise((r) => setImmediate(r));
+      expect(manager.unsubscribe).toHaveBeenCalledWith('u1', [{ token: '1', exchange: 'NSE' }]);
+    });
+
     it('a disconnect forgets the socket’s refs: a reconnecting socket with the same id forwards again', () => {
       const { gw, manager } = makeGateway();
       const sock = fakeSocket(signToken('u1'));

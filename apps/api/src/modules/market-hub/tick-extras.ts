@@ -6,10 +6,11 @@ function finite(n: number | undefined): number {
 }
 
 /**
- * What a hub price carries beyond the LTP: the day bar and the book. A field the
- * broker did not report is LEFT OFF (an all-zero day bar, an empty book), so a
- * consumer can never mistake "not reported" for a previous close of 0, which
- * would read as a -100 % day.
+ * What a hub price carries beyond the LTP: the day bar and the book. An all-zero
+ * day bar and an empty book are LEFT OFF. The day bar is kept when EITHER open or
+ * close is positive, so `day.close` can still be 0 ("not reported") when only the
+ * open was: a consumer must guard `day.close > 0` before deriving a change from
+ * it (as priceToBrowserTick and tickToQuote do), or it reads as a -100 % day.
  */
 export function tickExtras(t: TickData): Pick<Price, 'day' | 'depth'> {
   const out: Pick<Price, 'day' | 'depth'> = {};

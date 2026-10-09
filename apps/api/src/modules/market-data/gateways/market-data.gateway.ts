@@ -61,6 +61,12 @@ function toTokenRef(ref: InstrumentRef): TokenRef {
   return { token: ref.token, exchange: ref.exchange };
 }
 
+/** The manager's TokenRef back from a held refKey (EXCHANGE:token; exchanges never contain ':'). */
+function tokenRefFromKey(key: string): TokenRef {
+  const i = key.indexOf(':');
+  return { exchange: key.slice(0, i), token: key.slice(i + 1) };
+}
+
 /** Coalescing key: EXCHANGE:token. Tokens collide across exchanges (NSE cash vs NFO vs MCX). */
 function tickKey(tick: TickData): string {
   return `${tick.exchange ?? ''}:${tick.token}`;
@@ -126,6 +132,15 @@ export class MarketDataGateway
    */
   private readonly legacyRefs = new Map<string, Set<string>>();
 
+  /**
+   * Connected /ws sockets per user. The user's LAST socket going also calls
+   * UserFeedManager.releaseUser, which starts the idle teardown even for a
+   * session created only by REST fetches (those add no ref, so no unsubscribe
+   * ever reaches zero for them). An earlier tab closing must not call it: it
+   * zeroes every ref the user holds, including the other tabs'.
+   */
+  private readonly userSockets = new Map<string, number>();
+
   constructor(
     private readonly userFeedManager: UserFeedManager,
     // Resolves HUB_PRICE_SOURCE lazily: MarketHubModule imports MarketDataModule, so injecting it would cycle.
@@ -162,6 +177,7 @@ export class MarketDataGateway
     this.hubListeners.clear();
     this.hubSockets.clear();
     this.legacyRefs.clear();
+    this.userSockets.clear();
     this.flushPendingTicks();
   }
 
@@ -174,6 +190,9 @@ export class MarketDataGateway
     }
     client.data.userId = userId;
     client.join(`user:${userId}`);
+    if (!this.connectedClients.has(client.id)) {
+      this.userSockets.set(userId, (this.userSockets.get(userId) ?? 0) + 1);
+    }
     this.connectedClients.add(client.id);
     const hub = this.hubFor(userId);
     if (hub) this.attachHub(client.id, userId, hub);
@@ -183,14 +202,38 @@ export class MarketDataGateway
   }
 
   handleDisconnect(client: Socket): void {
-    this.connectedClients.delete(client.id);
+    const wasConnected = this.connectedClients.delete(client.id);
     this.detachHub(client.id);
+    const held = this.legacyRefs.get(client.id);
     this.legacyRefs.delete(client.id);
     const userId = client.data?.userId as string | undefined;
     this.logger.log(`Client disconnected: ${client.id} (user ${userId ?? '?'})`);
-    if (userId) {
-      this.userFeedManager.releaseUser(userId);
+    if (!userId) return;
+
+    // Release only THIS socket's legacy refs: the manager ref-counts per token,
+    // so another tab of the same user keeps its own. Floated + guarded like
+    // handleUnsubscribe.
+    if (held && held.size > 0) {
+      this.userFeedManager.unsubscribe(userId, [...held].map(tokenRefFromKey)).catch((err) => {
+        this.logger.debug(
+          `unsubscribe on disconnect failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
+        );
+      });
     }
+
+    // The user's last socket: release them, which starts the idle teardown
+    // (see userSockets).
+    if (wasConnected) {
+      const left = (this.userSockets.get(userId) ?? 1) - 1;
+      if (left > 0) {
+        this.userSockets.set(userId, left);
+        return;
+      }
+      this.userSockets.delete(userId);
+    } else if (this.userSockets.has(userId)) {
+      return; // a socket we never counted; the user still has counted sockets
+    }
+    this.userFeedManager.releaseUser(userId);
   }
 
   /**

@@ -103,6 +103,27 @@ export const AGENT_RETRY_MAX_MS = 15 * 60 * 1000;
 export const OI_CAPTURE_INTERVAL_MS = 60 * 1000;
 
 /**
+ * How many judgements (thesis + packet + `judge` + verdict write) may be in
+ * flight at once, across every user and position this process watches.
+ *
+ * WHY JUDGEMENTS ARE DETACHED AT ALL. They used to be awaited inside the
+ * per-position loop, so one `judge` call bounded the whole user's cycle. Under
+ * `SENTINEL_JUDGE=cli` a call spawns the `claude` CLI and routinely takes
+ * minutes (its timeout is 180 s, per attempt); on 2026-10-09 one user's cycle
+ * ran from 21:54:30 to past 22:07 IST, and for all of it the runner's overlap
+ * guard skipped every 30-second tick — so every OTHER watched position lost
+ * even its cheap sensor pass, the green-floor latch and the OI capture, while
+ * one position waited on a model.
+ *
+ * Small on purpose: two CLI processes is what a local subscription tolerates,
+ * and with the API transport it still beats the old effective rate of one at a
+ * time per user. A position that wants a judgement while the cap is full is
+ * SKIPPED, not queued — its packet would be stale by the time a slot freed, and
+ * the next tick re-reads the market and asks again.
+ */
+export const JUDGE_CONCURRENCY = 2;
+
+/**
  * DI token for {@link TickSource}. It is an interface, so `design:paramtypes`
  * emits `Object` for it and Nest cannot resolve the parameter by type — without
  * an explicit token, Task 12 could not register the adapter without editing this
@@ -290,6 +311,26 @@ export class SentinelCycleService {
   /** Trackers already warned about a missing cash underlying — warn once, not per tick. */
   private readonly warnedMissingUnderlying = new Set<string>();
 
+  /**
+   * Judgements in flight, keyed by trackerId — AT MOST ONE PER POSITION.
+   *
+   * Deliberately NOT part of `TrackerState`: `prune` drops a tracker's state when
+   * it leaves the roster, and a position that left and came back while its old
+   * judgement was still running must not get a second one beside it. An entry
+   * is removed only when its own job settles. Its size is the global count
+   * {@link JUDGE_CONCURRENCY} caps.
+   *
+   * THE STATE-OWNERSHIP SPLIT that makes detaching safe. While a job is in flight
+   * it is the ONLY writer of its position's `thesis`, `agentFailures` and
+   * `agentRetryAt`; the per-tick sensor pass writes only `greenFloorArmed`, `oi`
+   * and `oiEvaluatedKey`, and merely READS `agentRetryAt`. The two never write the
+   * same field, and one-in-flight-per-position means two jobs never do either.
+   */
+  private readonly judging = new Map<string, Promise<JudgeOutcome>>();
+
+  /** When the concurrency cap was last reported, so a full cap logs once a minute, not per tick. */
+  private capReportedAt = 0;
+
   constructor(
     private readonly roster: RosterService,
     private readonly tripwires: TripwireService,
@@ -301,9 +342,34 @@ export class SentinelCycleService {
     @Inject(TICK_SOURCE) private readonly ticks: TickSource,
   ) {}
 
+  /**
+   * One full cycle, judgements included: resolves only once every judgement this
+   * pass started has been recorded (or has failed), with them counted in the
+   * report. Kept for callers that want a finished cycle — tests, a manual run.
+   * The scheduler uses {@link startForUser} so a slow judgement cannot hold up
+   * the next tick.
+   */
   async runForUser(userId: string, now: Date = new Date()): Promise<CycleReport> {
+    return (await this.startForUser(userId, now)).settled;
+  }
+
+  /**
+   * The cheap per-tick pass — roster, tick, latch, OI capture, sensors — with
+   * every judgement it decides on DISPATCHED rather than awaited.
+   *
+   * Resolves as soon as the sensor pass is done. `report` counts what that pass
+   * settled (skipped, unwatched, failed ticks); `pending` judgements were started
+   * and are counted into `settled`'s report — evaluated or failed — when they
+   * finish. `settled` never rejects. Rejects only when the roster cannot be read,
+   * exactly like {@link runForUser}.
+   */
+  async startForUser(
+    userId: string,
+    now: Date = new Date(),
+  ): Promise<{ report: CycleReport; pending: number; settled: Promise<CycleReport> }> {
     const entries = await this.roster.build(userId);
     const report: CycleReport = { evaluated: 0, skipped: 0, failed: 0, unwatched: 0 };
+    const jobs: Array<Promise<JudgeOutcome>> = [];
 
     for (const entry of entries) {
       if (!entry.watched) {
@@ -316,7 +382,10 @@ export class SentinelCycleService {
       // runner's per-sensor isolation is the inner layer of this; the whole of a
       // position's work — tick, walls, packet, agent, write — is the outer one.
       try {
-        await this.evaluateOne(entry, now, report);
+        // Boxed: an async function that RETURNS a promise adopts it, so returning
+        // the job bare would make this await the judgement — the very bug.
+        const dispatched = await this.evaluateOne(entry, now, report);
+        if (dispatched) jobs.push(dispatched.job);
       } catch (err) {
         report.failed += 1;
         const message = err instanceof Error ? err.message : String(err);
@@ -333,7 +402,14 @@ export class SentinelCycleService {
       new Set([userId, ...entries.map((e) => e.userId)]),
       new Set(entries.map((e) => e.trackerId)),
     );
-    return report;
+
+    const sensed: CycleReport = { ...report };
+    const settled = Promise.all(jobs).then((outcomes) => {
+      const final: CycleReport = { ...sensed };
+      for (const outcome of outcomes) final[outcome] += 1;
+      return final;
+    });
+    return { report, pending: jobs.length, settled };
   }
 
   /**
@@ -351,7 +427,11 @@ export class SentinelCycleService {
    * verdicts separately, and STAGE 1 MUST KEY ITS EXECUTOR OFF `ownership`, NOT
    * OFF `watched` — watched means "worth looking at", never "ours to close".
    */
-  private async evaluateOne(entry: RosterEntry, now: Date, report: CycleReport): Promise<void> {
+  private async evaluateOne(
+    entry: RosterEntry,
+    now: Date,
+    report: CycleReport,
+  ): Promise<{ job: Promise<JudgeOutcome> } | null> {
     const raw = await this.ticks.tickFor(entry.trackerId);
     const tick = withCashUnderlying(raw);
     // Identity, not value: `withCashUnderlying` returns the same object when it
@@ -415,7 +495,7 @@ export class SentinelCycleService {
 
     if (!decision.shouldEvaluate) {
       report.skipped += 1;
-      return;
+      return null;
     }
 
     // Placed AFTER the sensors and the OI capture, not before: those are free (or
@@ -428,7 +508,25 @@ export class SentinelCycleService {
     // outage, which buries the one line that says what actually broke.
     if (now.getTime() < state.agentRetryAt) {
       report.skipped += 1;
-      return;
+      return null;
+    }
+
+    // ONE JUDGEMENT PER POSITION. The one in flight was asked about this
+    // position already; a second beside it would judge an overlapping packet,
+    // write a second verdict row and race the first for the backoff counters.
+    // Its verdict lands when it lands, and the next tick re-reads it as `last`.
+    if (this.judging.has(entry.trackerId)) {
+      report.skipped += 1;
+      return null;
+    }
+
+    // THE GLOBAL CAP. Skipped, not queued: see JUDGE_CONCURRENCY. Note that
+    // `oiEvaluatedKey` is NOT recorded on this path — the agent was not woken, so
+    // a wall shift it has not seen must still be able to wake it next tick.
+    if (this.judging.size >= JUDGE_CONCURRENCY) {
+      report.skipped += 1;
+      this.reportCapFull(entry);
+      return null;
     }
 
     // Committed to looking at this wall pair. Recorded BEFORE the work rather
@@ -437,7 +535,57 @@ export class SentinelCycleService {
     // heartbeat still guarantees a look within HEARTBEAT_INTERVAL_MS.
     state.oiEvaluatedKey = wallKey(walls);
 
-    const thesis = await this.thesisFor(entry, tick, now);
+    const job = this.judgeDetached(entry, state, tick, walls, capture.at, greenFloorArmedLatched, decision, now);
+    this.judging.set(entry.trackerId, job);
+    // `job` never rejects (see judgeDetached), so this cannot leave an
+    // unhandled rejection behind; the entry is freed only by ITS OWN job.
+    void job.then(() => {
+      if (this.judging.get(entry.trackerId) === job) this.judging.delete(entry.trackerId);
+    });
+    return { job };
+  }
+
+  /**
+   * The expensive tail — thesis, packet, `judge`, verdict write — for one
+   * position, run DETACHED from the per-tick pass. Never rejects: the outcome is
+   * returned for the report, and a failure is logged with the symbol exactly as
+   * the cycle's own per-position catch did when this ran inline.
+   *
+   * `state` is the object captured at dispatch, never re-looked-up: if the
+   * position is pruned meanwhile, this writes into an orphan rather than
+   * resurrecting a map entry for a closed trade.
+   */
+  private async judgeDetached(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    walls: { now: WallPair | null; prev: WallPair | null },
+    wallsAt: string | null,
+    greenFloorArmedLatched: boolean,
+    decision: TripwireResult,
+    now: Date,
+  ): Promise<JudgeOutcome> {
+    try {
+      await this.judgeAndRecord(entry, state, tick, walls, wallsAt, greenFloorArmedLatched, decision, now);
+      return 'evaluated';
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(`sentinel cycle failed for ${entry.symbol}: ${message}`);
+      return 'failed';
+    }
+  }
+
+  private async judgeAndRecord(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    walls: { now: WallPair | null; prev: WallPair | null },
+    wallsAt: string | null,
+    greenFloorArmedLatched: boolean,
+    decision: TripwireResult,
+    now: Date,
+  ): Promise<void> {
+    const thesis = await this.thesisFor(entry, state, tick, now);
 
     const packet: ContextPacket = await this.packets.build(
       entry,
@@ -445,7 +593,7 @@ export class SentinelCycleService {
         ...tick,
         oiWallNow: walls.now,
         oiWallPrev: walls.prev,
-        oiWallsAt: capture.at,
+        oiWallsAt: wallsAt,
         greenFloorArmedLatched,
       },
       thesis,
@@ -461,6 +609,8 @@ export class SentinelCycleService {
     } catch (err) {
       state.agentFailures += 1;
       const wait = agentBackoffMs(state.agentFailures);
+      // From the DISPATCHING tick's `now`, exactly as when this ran inline (the
+      // cycle's `now` was its start, not the judge's return).
       state.agentRetryAt = now.getTime() + wait;
       // Once per window, here — not once per suppressed tick at the gate above.
       this.logger.warn(
@@ -507,8 +657,18 @@ export class SentinelCycleService {
       netPnl: packet.money.netPnl,
       greenFloor: packet.money.greenFloorPrice,
     });
+  }
 
-    report.evaluated += 1;
+  /** A full cap is expected under a slow judge; said once a minute, not once per skipped position per tick. */
+  private reportCapFull(entry: RosterEntry): void {
+    const nowMs = Date.now();
+    if (nowMs - this.capReportedAt < OI_CAPTURE_INTERVAL_MS) return;
+    this.capReportedAt = nowMs;
+    this.logger.warn(
+      `${this.judging.size} sentinel judgements already in flight (cap ${JUDGE_CONCURRENCY}); ` +
+        `${entry.symbol} (${entry.trackerId}) and any others wanting one wait for a later tick — ` +
+        'their sensors, latch and OI capture keep running meanwhile',
+    );
   }
 
   /**
@@ -551,10 +711,10 @@ export class SentinelCycleService {
    */
   private async thesisFor(
     entry: RosterEntry,
+    state: TrackerState,
     tick: TickReading,
     now: Date,
   ): Promise<EnsuredThesis> {
-    const state = this.stateFor(entry);
     const cached = state.thesis;
     if (
       cached &&
@@ -676,6 +836,9 @@ export class SentinelCycleService {
     }
   }
 }
+
+/** How one detached judgement ended, as the report bucket it lands in. */
+type JudgeOutcome = 'evaluated' | 'failed';
 
 /** The sensor whose fire depends only on the wall pair, and so can repeat. */
 export const OI_WALL_SHIFT = 'oi-wall-shift';

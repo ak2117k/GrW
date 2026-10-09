@@ -4,6 +4,7 @@ import { Logger } from '@nestjs/common';
 import {
   AGENT_RETRY_BASE_MS,
   AGENT_RETRY_MAX_MS,
+  JUDGE_CONCURRENCY,
   OI_CAPTURE_INTERVAL_MS,
   SentinelCycleService,
   THESIS_RETRY_COOLDOWN_MS,
@@ -1665,5 +1666,156 @@ describe('SentinelCycleService — the OI capture is keyed by the underlying', (
     await t.svc.runForUser(USER);
 
     expect(t.captureAndCompare).not.toHaveBeenCalled();
+  });
+});
+
+describe('SentinelCycleService — judgements are detached from the per-tick pass', () => {
+  const HOLD = {
+    verdict: 'HOLD',
+    confidence: 'high',
+    thesisStatus: 'INTACT',
+    recoveryAvailable: true,
+    reason: 'ok',
+    evidence: ['money.netPnl'],
+    invalidationPoint: 'x',
+    reviewIn: 300,
+  };
+
+  /** A judge call held open until the test releases it — a `claude` CLI run taking minutes. */
+  function held() {
+    let resolve!: (v: typeof HOLD) => void;
+    let reject!: (e: Error) => void;
+    const promise = new Promise<typeof HOLD>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  const T0 = new Date('2026-10-09T16:24:30.000Z'); // 21:54:30 IST
+  const at = (sec: number) => new Date(T0.getTime() + sec * 1000);
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a slow judge on one position does not stop the next tick’s sensor pass for the others', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1'), watched('t2')]);
+    const slow = held();
+    // t1's judge hangs; t2's returns at once.
+    t.judge.mockImplementation((packet: { _id?: string }) =>
+      packet?._id === 't1' ? slow.promise : Promise.resolve(HOLD),
+    );
+    t.buildPacket.mockImplementation((entry: RosterEntry, tk: { greenFloorArmedLatched: boolean }) =>
+      Promise.resolve({ _id: entry.trackerId, position: {}, money: { netPnl: 1, greenFloorPrice: 1, greenFloorArmed: tk.greenFloorArmedLatched } }),
+    );
+
+    const first = await t.svc.startForUser(USER, at(0));
+    // The sensor pass is done although t1's judgement is still running.
+    expect(first.pending).toBe(2);
+    expect(t.tickFor).toHaveBeenCalledTimes(2);
+
+    // Twelve more ticks while t1's judge is still out: every one of them reads
+    // both positions and runs the sensors — the 2026-10-09 cycle did none.
+    for (let i = 1; i <= 12; i += 1) {
+      const pass = await t.svc.startForUser(USER, at(30 * i));
+      await pass.settled.catch(() => undefined);
+    }
+    expect(t.tickFor).toHaveBeenCalledTimes(26);
+    expect(t.evaluate).toHaveBeenCalledTimes(26);
+    // t2 kept being judged; t1 was never asked twice.
+    const judgedIds = t.judge.mock.calls.map((c) => (c[0] as { _id: string })._id);
+    expect(judgedIds.filter((id) => id === 't1')).toHaveLength(1);
+    expect(judgedIds.filter((id) => id === 't2').length).toBeGreaterThan(1);
+
+    // The slow verdict is recorded when it arrives, and counted in its own pass.
+    slow.resolve(HOLD);
+    await expect(first.settled).resolves.toEqual({ evaluated: 2, skipped: 0, failed: 0, unwatched: 0 });
+    expect(t.record.mock.calls.filter((c) => c[0].trackerId === 't1')).toHaveLength(1);
+  });
+
+  it('never has more than one judge in flight for a position, and asks again once it lands', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const slow = held();
+    t.judge.mockReturnValueOnce(slow.promise);
+
+    const first = await t.svc.startForUser(USER, at(0));
+    const second = await t.svc.startForUser(USER, at(30));
+    const third = await t.svc.startForUser(USER, at(60));
+
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    expect(t.buildPacket).toHaveBeenCalledTimes(1);
+    expect(second.report).toEqual({ evaluated: 0, skipped: 1, failed: 0, unwatched: 0 });
+    expect(third.pending).toBe(0);
+
+    slow.resolve(HOLD);
+    await first.settled;
+    expect(t.record).toHaveBeenCalledTimes(1);
+
+    await t.svc.runForUser(USER, at(90));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps judgements in flight across positions at JUDGE_CONCURRENCY, skipping (not queueing) the rest', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1'), watched('t2'), watched('t3')]);
+    const holds = [held(), held()];
+    t.judge.mockReturnValueOnce(holds[0].promise).mockReturnValueOnce(holds[1].promise);
+
+    const pass = await t.svc.startForUser(USER, at(0));
+
+    expect(JUDGE_CONCURRENCY).toBe(2);
+    expect(pass.pending).toBe(2);
+    expect(t.judge).toHaveBeenCalledTimes(2);
+    expect(pass.report.skipped).toBe(1);
+    // The skipped position still had its tick and sensors.
+    expect(t.tickFor).toHaveBeenCalledTimes(3);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/cap 2/);
+
+    holds.forEach((h) => h.resolve(HOLD));
+    await pass.settled;
+    // A freed slot lets the skipped position be judged on the next tick.
+    await t.svc.runForUser(USER, at(30));
+    expect(t.judge.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('a detached judge failure still opens the backoff from the dispatching tick, and counts as failed', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const slow = held();
+    t.judge.mockReturnValueOnce(slow.promise);
+
+    const pass = await t.svc.startForUser(USER, at(0));
+    slow.reject(new Error('claude CLI timed out'));
+    await expect(pass.settled).resolves.toEqual({ evaluated: 0, skipped: 0, failed: 1, unwatched: 0 });
+    expect(t.record).not.toHaveBeenCalled();
+
+    // Inside the 30s window opened at the DISPATCH tick: gated.
+    await t.svc.runForUser(USER, at(29));
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    // At the window's end: asked again.
+    await t.svc.runForUser(USER, new Date(at(0).getTime() + AGENT_RETRY_BASE_MS));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('the sensor pass keeps the green-floor latch moving while a judgement is out', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const slow = held();
+    t.judge.mockReturnValueOnce(slow.promise);
+    t.tickFor.mockResolvedValueOnce(tick({ ltp: 100 })).mockResolvedValue(tick({ ltp: 200 }));
+
+    const first = await t.svc.startForUser(USER, at(0));
+    await t.svc.startForUser(USER, at(30));
+
+    // The second tick's sensors were handed the LATCHED floor (armed by ltp 200).
+    const lastCall = t.evaluate.mock.calls[t.evaluate.mock.calls.length - 1];
+    expect(lastCall[3].greenFloorArmed).toBe(true);
+
+    slow.resolve(HOLD);
+    await first.settled;
   });
 });

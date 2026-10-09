@@ -98,8 +98,19 @@ export class SentinelRunnerService {
    * so the second run's `prev` is the first run's `now` and the shift sensor
    * compares a reading against itself.
    *
-   * A slow cycle is the normal cause — an Anthropic call taking longer than the
-   * 30s tick is unremarkable — so this is an expected condition, not an error.
+   * WHAT THE GUARD NOW SPANS: THE SENSOR PASS ONLY. It used to span the whole
+   * cycle, judgements included, and judgements were awaited one by one inside
+   * it — so under `SENTINEL_JUDGE=cli`, where one `claude` CLI call takes
+   * minutes, a single user's cycle ran 21:54:30 → past 22:07 IST on 2026-10-09
+   * and this guard skipped every tick in between: no sensor pass, no latch, no
+   * OI capture for ANY of that user's positions. The cycle now dispatches
+   * judgements detached ({@link SentinelCycleService.startForUser}) and itself
+   * owns the invariants the judgements need — at most one in flight per
+   * position, a global cap, and a split of the carry-over fields so the sensor
+   * pass and a judgement never write the same one. What this guard still
+   * prevents is two SENSOR PASSES for one user interleaving (two OI captures in
+   * one window, two latch updates), and a pass is seconds, so a skip here is now
+   * rare and genuinely worth the warning.
    */
   private readonly inFlight = new Set<string>();
 
@@ -171,9 +182,10 @@ export class SentinelRunnerService {
    * HERE, logged at `error` with the tenant, and explicitly NOT counted as a
    * completed run.
    *
-   * Returns the report, or null when the run was skipped or failed — so a
-   * caller can tell "did not run" from "ran and found nothing", which is the
-   * same distinction one layer up.
+   * Returns the SENSOR PASS's report (judgements it dispatched are still
+   * running and are not counted in it), or null when the run was skipped or
+   * failed — so a caller can tell "did not run" from "ran and found nothing",
+   * which is the same distinction one layer up.
    */
   async runForUser(userId: string): Promise<CycleReport | null> {
     if (this.inFlight.has(userId)) {
@@ -186,7 +198,18 @@ export class SentinelRunnerService {
 
     this.inFlight.add(userId);
     try {
-      return await this.cycle.runForUser(userId);
+      const { report, settled } = await this.cycle.startForUser(userId);
+      // Judgements finish on their own; `settled` never rejects. Watched only so
+      // a failure count is visible at the moment it is known, not swallowed.
+      void settled.then((final) => {
+        if (final.failed > report.failed) {
+          this.logger.warn(
+            `sentinel: ${final.failed - report.failed} judgement(s) for user ${userId} failed ` +
+              '(see the per-position errors above)',
+          );
+        }
+      });
+      return report;
     } catch (err) {
       this.logger.error(`sentinel cycle aborted for user ${userId}: ${describe(err)}`);
       return null;

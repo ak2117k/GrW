@@ -2,7 +2,7 @@ import { LiveFeed } from './live-feed';
 import { WatchRegistry } from './watch-registry';
 import { PriceBook } from './price-book';
 import { FakeBroker } from './testing/fake-broker';
-import type { InstrumentRef } from './hub.types';
+import { refKey, type InstrumentRef } from './hub.types';
 
 const ref = (token: string, exchange: InstrumentRef['exchange'] = 'NSE'): InstrumentRef => ({
   exchange,
@@ -10,13 +10,45 @@ const ref = (token: string, exchange: InstrumentRef['exchange'] = 'NSE'): Instru
   symbol: token,
 });
 
-function setup(cap = 2) {
-  const broker = new FakeBroker();
+function setup(cap = 2, broker: FakeBroker = new FakeBroker()) {
   const registry = new WatchRegistry();
   const book = new PriceBook();
   const feed = new LiveFeed({ broker, registry, book, cap });
   return { broker, registry, book, feed };
 }
+
+/** A broker whose subscribe() parks until the test releases (or fails) it; records overlap. */
+class GatedBroker extends FakeBroker {
+  readonly subscribeCalls: string[][] = [];
+  inFlight = 0;
+  maxInFlight = 0;
+  private readonly gates: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+
+  override async subscribe(refs: InstrumentRef[]): Promise<void> {
+    this.subscribeCalls.push(refs.map(refKey).sort());
+    this.inFlight++;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    try {
+      await new Promise<void>((resolve, reject) => this.gates.push({ resolve, reject }));
+      await super.subscribe(refs);
+    } finally {
+      this.inFlight--;
+    }
+  }
+
+  get pending(): number {
+    return this.gates.length;
+  }
+  release(): void {
+    this.gates.shift()!.resolve();
+  }
+  fail(err: Error): void {
+    this.gates.shift()!.reject(err);
+  }
+}
+
+/** Let every queued promise callback run. */
+const settle = () => new Promise((r) => setImmediate(r));
 
 describe('LiveFeed', () => {
   it('subscribes the highest-priority watches up to the cap', async () => {
@@ -72,5 +104,85 @@ describe('LiveFeed', () => {
     expect(feed.wsHealthy).toBe(true);
     broker.emitState('reconnecting');
     expect(feed.wsHealthy).toBe(false);
+  });
+
+  describe('reconcile is single-flight', () => {
+    it('never overlaps broker calls: concurrent callers wait for the run in flight and share ONE trailing run', async () => {
+      const broker = new GatedBroker();
+      const { registry, feed } = setup(10, broker);
+      registry.watch(ref('a'), 0, 'positions', 0);
+      const first = feed.reconcile();
+      await settle();
+      registry.watch(ref('b'), 0, 'positions', 1);
+      const second = feed.reconcile();
+      const third = feed.reconcile();
+      await settle();
+      // Only the first run has reached the broker.
+      expect(broker.subscribeCalls).toEqual([['NSE:a']]);
+      broker.release();
+      await first;
+      await settle();
+      // One trailing run serves both waiting callers, and it starts only after the first finished.
+      expect(broker.subscribeCalls).toEqual([['NSE:a'], ['NSE:b']]);
+      broker.release();
+      const [s2, s3] = await Promise.all([second, third]);
+      expect(s2).toBe(s3);
+      expect(broker.maxInFlight).toBe(1);
+      expect(broker.subscribeCalls).toHaveLength(2);
+      expect([...broker.subscribed].sort()).toEqual(['NSE:a', 'NSE:b']);
+      expect(feed.metrics().live).toBe(2);
+    });
+
+    it('a registry change made during a run is subscribed by the trailing run', async () => {
+      const broker = new GatedBroker();
+      const { registry, feed } = setup(10, broker);
+      registry.watch(ref('a'), 0, 'positions', 0);
+      const first = feed.reconcile();
+      await settle();
+      // Changed mid-run: the in-flight run computed its plan without it.
+      registry.watch(ref('late', 'NFO'), 1, 'positions', 1);
+      registry.unwatch(ref('a'), 'positions');
+      const trailing = feed.reconcile();
+      broker.release();
+      const firstAlloc = await first;
+      expect(firstAlloc.live.map((e) => refKey(e.ref))).toEqual(['NSE:a']);
+      await settle();
+      broker.release();
+      const alloc = await trailing;
+      expect(alloc.live.map((e) => refKey(e.ref))).toEqual(['NFO:late']);
+      expect([...broker.subscribed]).toEqual(['NFO:late']);
+      expect(broker.subscribeCalls).toEqual([['NSE:a'], ['NFO:late']]);
+    });
+
+    it('a rejected run rejects only its own callers and does not wedge later runs', async () => {
+      const broker = new GatedBroker();
+      const { registry, feed } = setup(10, broker);
+      registry.watch(ref('a'), 0, 'positions', 0);
+      const failing = feed.reconcile();
+      const failed = failing.then(
+        () => 'resolved',
+        (e: Error) => e.message,
+      );
+      await settle();
+      const waiting = feed.reconcile();
+      expect(broker.pending).toBe(1);
+      broker.fail(new Error('subscribe refused'));
+      expect(await failed).toBe('subscribe refused');
+      // Live is unchanged by the failure, so the trailing run retries the subscribe.
+      expect(feed.metrics().live).toBe(0);
+      await settle();
+      expect(broker.subscribeCalls).toEqual([['NSE:a'], ['NSE:a']]);
+      broker.release();
+      await expect(waiting).resolves.toBeDefined();
+      expect(feed.metrics().live).toBe(1);
+      // And the feed keeps reconciling after that.
+      registry.watch(ref('b'), 0, 'positions', 1);
+      const later = feed.reconcile();
+      await settle();
+      broker.release();
+      await later;
+      expect([...broker.subscribed].sort()).toEqual(['NSE:a', 'NSE:b']);
+      expect(broker.maxInFlight).toBe(1);
+    });
   });
 });

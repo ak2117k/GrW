@@ -21,6 +21,10 @@ export class LiveFeed {
   private socketUp = false;
   private demotionsTotal = 0;
   private readonly priceListeners = new Set<(p: Price) => void>();
+  /** The run in flight, as a promise that never rejects; null when idle. */
+  private inFlight: Promise<void> | null = null;
+  /** The one run queued behind `inFlight`, shared by every caller that arrived during it. */
+  private trailing: Promise<Allocation> | null = null;
 
   constructor(private readonly d: LiveFeedDeps) {
     d.broker.onTick((t) => this.onTick(t));
@@ -42,7 +46,46 @@ export class LiveFeed {
     return () => this.priceListeners.delete(fn);
   }
 
-  async reconcile(): Promise<Allocation> {
+  /**
+   * Single-flight and coalescing. Two overlapping runs would plan their add and
+   * remove sets from the same `live` map and send duplicate subscribe/unsubscribe
+   * calls, which unbalances the feed manager's pin/unpin reference counts and
+   * leaks live slots. So a call made while a run is in flight waits for a
+   * trailing run, which starts after the current run settles and so sees every
+   * registry change made meanwhile. All callers waiting together share that one
+   * trailing run. A failed run rejects only its own callers; the next run still
+   * happens.
+   */
+  reconcile(): Promise<Allocation> {
+    if (!this.inFlight) return this.launch();
+    if (!this.trailing) {
+      this.trailing = this.inFlight.then(() => {
+        this.trailing = null;
+        return this.launch();
+      });
+    }
+    return this.trailing;
+  }
+
+  /** Start one run now and mark it in flight until it settles (resolved or rejected). */
+  private launch(): Promise<Allocation> {
+    const run = this.reconcileOnce();
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inFlight = settled;
+    void settled.then(() => {
+      if (this.inFlight === settled) this.inFlight = null;
+    });
+    return run;
+  }
+
+  /**
+   * One plan-and-apply pass. If subscribe throws, `live` is unchanged, so the
+   * next run retries the same subscriptions.
+   */
+  private async reconcileOnce(): Promise<Allocation> {
     const alloc = allocateSlots(this.d.registry.entries(), this.d.cap);
     const want = new Map(alloc.live.map((e) => [refKey(e.ref), e.ref] as const));
     const add = [...want].filter(([k]) => !this.live.has(k)).map(([, r]) => r);

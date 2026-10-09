@@ -11,7 +11,15 @@ import {
   setCoreSelection,
   type SetCoreSelectionBody,
 } from '@/services/coreStrategies';
-import { apiErrorMessage, describeBlocks, pickerRow, selectionPayload, versionLabel } from './core-strategy-picker';
+import {
+  apiErrorMessage,
+  canSave,
+  describeBlocks,
+  pickerRow,
+  selectionPayload,
+  staleSelectionWarning,
+  versionLabel,
+} from './core-strategy-picker';
 
 const STRATEGIES_KEY = ['trade-core', 'strategies'] as const;
 const SELECTIONS_KEY = ['trade-core', 'strategy-selections'] as const;
@@ -84,10 +92,11 @@ export default function CoreStrategiesPage() {
     form && form.key === rowKey
       ? form
       : { key: rowKey, versionId: row.versionId, enabled: row.enabled, capitalText: row.capitalText };
+  const staleWarning = staleSelectionWarning(row);
   const shown = strategy.versions.find((v) => v.id === (viewId ?? current.versionId)) ?? strategy.versions[0];
 
   const onSave = () => {
-    const payload = selectionPayload(current);
+    const payload = selectionPayload(current, row);
     if (!payload.ok) {
       toast.error(payload.error);
       return;
@@ -141,11 +150,7 @@ export default function CoreStrategiesPage() {
             ))}
           </select>
         </label>
-        {row.staleSelection && (
-          <p className="text-xs text-[var(--color-accent-yellow)]">
-            Your saved version is no longer approved, so the core will not trade it. Pick a version and save, or switch it off.
-          </p>
-        )}
+        {staleWarning && <p className="text-xs text-[var(--color-accent-yellow)]">{staleWarning}</p>}
 
         <div className="flex flex-wrap items-end gap-4">
           <Toggle checked={current.enabled} onChange={(on) => setForm({ ...current, enabled: on })} label="Enabled (paper)" />
@@ -159,7 +164,7 @@ export default function CoreStrategiesPage() {
               onChange={(e) => setForm({ ...current, capitalText: e.target.value })}
             />
           </label>
-          <button type="button" className={BUTTON} disabled={save.isPending || !current.versionId} onClick={onSave}>
+          <button type="button" className={BUTTON} disabled={save.isPending || !canSave(current, row)} onClick={onSave}>
             {save.isPending ? 'Saving…' : 'Save'}
           </button>
         </div>

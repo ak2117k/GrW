@@ -24,23 +24,40 @@ export interface PickerRow {
   options: { value: string; label: string }[];
   /** The version the form starts on: the saved one if still selectable, else the newest approved. */
   versionId: string | null;
+  /**
+   * The saved enabled flag, except for a stale selection, which starts OFF: one Save
+   * switches it off, and pointing it at a new version needs an explicit enable.
+   */
   enabled: boolean;
   capitalText: string;
   /** A saved selection points at a version that can no longer trade (retired or hidden). */
   staleSelection: boolean;
+  /** The version the saved selection points at (null when nothing is saved). */
+  savedVersionId: string | null;
 }
 
 export function pickerRow(s: CoreStrategyView, selection: CoreSelectionView | undefined): PickerRow {
   const selectable = selectableVersions(s);
   const chosen = selection ? selectable.find((v) => v.id === selection.strategyVersionId) : undefined;
+  const staleSelection = selection !== undefined && chosen === undefined;
   return {
     strategyId: s.id,
     options: selectable.map((v) => ({ value: v.id, label: versionLabel(v) })),
     versionId: chosen?.id ?? selectable[0]?.id ?? null,
-    enabled: selection?.enabled ?? false,
+    enabled: staleSelection ? false : (selection?.enabled ?? false),
     capitalText: selection ? String(selection.capitalAllocation) : '',
-    staleSelection: selection !== undefined && chosen === undefined,
+    staleSelection,
+    savedVersionId: selection?.strategyVersionId ?? null,
   };
+}
+
+/** The warning for a stale saved selection, worded for whether an approved version exists. */
+export function staleSelectionWarning(row: Pick<PickerRow, 'staleSelection' | 'options'>): string | null {
+  if (!row.staleSelection) return null;
+  const head = 'Your saved version is no longer approved, so the core will not trade it.';
+  return row.options.length > 0
+    ? `${head} Save to switch it off, or pick an approved version, enable it and save.`
+    : `${head} No other version is approved yet: save to switch it off.`;
 }
 
 export type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -53,12 +70,37 @@ export function parseCapital(text: string): Parsed<number> {
   return { ok: true, value: Number(cleaned) };
 }
 
-export function selectionPayload(form: { versionId: string | null; enabled: boolean; capitalText: string }): Parsed<SetCoreSelectionBody> {
-  if (!form.versionId) return { ok: false, error: 'No approved version to select yet' };
+export interface SelectionForm {
+  versionId: string | null;
+  enabled: boolean;
+  capitalText: string;
+}
+
+type StaleInfo = Pick<PickerRow, 'staleSelection' | 'savedVersionId'>;
+
+/**
+ * The version a Save writes: the picked one, or, to switch OFF a stale selection
+ * when no version is picked, the saved one (the API lets a selection on a retired
+ * version be switched off, never on).
+ */
+function saveVersionId(form: SelectionForm, row?: StaleInfo): string | null {
+  if (form.versionId) return form.versionId;
+  if (row?.staleSelection && !form.enabled) return row.savedVersionId;
+  return null;
+}
+
+/** Whether Save can be pressed (the payload may still refuse the capital text). */
+export function canSave(form: SelectionForm, row?: StaleInfo): boolean {
+  return saveVersionId(form, row) !== null;
+}
+
+export function selectionPayload(form: SelectionForm, row?: StaleInfo): Parsed<SetCoreSelectionBody> {
+  const versionId = saveVersionId(form, row);
+  if (!versionId) return { ok: false, error: 'No approved version to select yet' };
   const capital = parseCapital(form.capitalText);
   if (!capital.ok) return capital;
   if (form.enabled && capital.value <= 0) return { ok: false, error: 'An enabled strategy needs capital above ₹0' };
-  return { ok: true, value: { strategyVersionId: form.versionId, enabled: form.enabled, capitalAllocation: capital.value } };
+  return { ok: true, value: { strategyVersionId: versionId, enabled: form.enabled, capitalAllocation: capital.value } };
 }
 
 export interface BlockLine {

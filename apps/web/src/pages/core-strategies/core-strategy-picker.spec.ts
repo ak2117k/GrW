@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { CoreSelectionView, CoreStrategyVersionView, CoreStrategyView } from '@/services/coreStrategies';
 import {
   apiErrorMessage,
+  canSave,
   describeBlocks,
   parseCapital,
   pickerRow,
   selectableVersions,
   selectionPayload,
+  staleSelectionWarning,
   versionLabel,
 } from './core-strategy-picker';
 
@@ -42,7 +44,7 @@ describe('pickerRow', () => {
     expect(row).toEqual({
       strategyId: 's1',
       options: [{ value: 'v2', label: 'v2 · paper' }, { value: 'v1', label: 'v1 · paper' }],
-      versionId: 'v2', enabled: false, capitalText: '', staleSelection: false,
+      versionId: 'v2', enabled: false, capitalText: '', staleSelection: false, savedVersionId: null,
     });
   });
 
@@ -53,9 +55,22 @@ describe('pickerRow', () => {
 
   it('pickerRow flags a saved selection whose version is no longer selectable', () => {
     const retired = pickerRow(strategy([v('v1', 1, 'RETIRED'), v('v2', 2, 'PAPER')]), sel({ strategyVersionId: 'v1' }));
-    expect(retired).toMatchObject({ versionId: 'v2', staleSelection: true, enabled: true });
+    expect(retired).toMatchObject({ versionId: 'v2', staleSelection: true, enabled: false, savedVersionId: 'v1' });
     const hidden = pickerRow(strategy([v('v2', 2, 'PAPER')]), sel({ strategyVersionId: 'v1' }));
     expect(hidden.staleSelection).toBe(true);
+    expect(hidden.enabled).toBe(false);
+  });
+
+  it('words the stale warning for whether an approved version exists', () => {
+    const withOptions = pickerRow(strategy([v('v1', 1, 'RETIRED'), v('v2', 2, 'PAPER')]), sel({ strategyVersionId: 'v1' }));
+    expect(staleSelectionWarning(withOptions)).toBe(
+      'Your saved version is no longer approved, so the core will not trade it. Save to switch it off, or pick an approved version, enable it and save.',
+    );
+    const noOptions = pickerRow(strategy([v('v1', 1, 'RETIRED')]), sel({ strategyVersionId: 'v1' }));
+    expect(staleSelectionWarning(noOptions)).toBe(
+      'Your saved version is no longer approved, so the core will not trade it. No other version is approved yet: save to switch it off.',
+    );
+    expect(staleSelectionWarning(pickerRow(strategy([v('v1', 1, 'PAPER')]), sel()))).toBeNull();
   });
 
   it('has no version to pick while nothing is approved', () => {
@@ -81,6 +96,31 @@ describe('capital and payload', () => {
     expect(selectionPayload({ versionId: 'v1', enabled: false, capitalText: '0' }).ok).toBe(true);
     expect(selectionPayload({ versionId: 'v1', enabled: true, capitalText: '0' })).toEqual({ ok: false, error: 'An enabled strategy needs capital above ₹0' });
     expect(selectionPayload({ versionId: null, enabled: false, capitalText: '10' })).toEqual({ ok: false, error: 'No approved version to select yet' });
+  });
+
+  it('stale selection with no approved version left: one Save switches the saved version off', () => {
+    const row = pickerRow(strategy([v('v1', 1, 'RETIRED')]), sel({ strategyVersionId: 'v1', enabled: true, capitalAllocation: 200000 }));
+    expect(row).toMatchObject({ versionId: null, enabled: false, staleSelection: true });
+    expect(canSave(row, row)).toBe(true);
+    expect(selectionPayload(row, row)).toEqual({ ok: true, value: { strategyVersionId: 'v1', enabled: false, capitalAllocation: 200000 } });
+    // Turning it back on has nothing to point at.
+    const on = { ...row, enabled: true };
+    expect(canSave(on, row)).toBe(false);
+    expect(selectionPayload(on, row)).toEqual({ ok: false, error: 'No approved version to select yet' });
+  });
+
+  it('stale selection with an approved version: the new version is saved OFF unless the user enables it', () => {
+    const row = pickerRow(strategy([v('v1', 1, 'RETIRED'), v('v2', 2, 'PAPER')]), sel({ strategyVersionId: 'v1', enabled: true, capitalAllocation: 200000 }));
+    expect(canSave(row, row)).toBe(true);
+    expect(selectionPayload(row, row)).toEqual({ ok: true, value: { strategyVersionId: 'v2', enabled: false, capitalAllocation: 200000 } });
+    expect(selectionPayload({ ...row, enabled: true }, row)).toEqual({ ok: true, value: { strategyVersionId: 'v2', enabled: true, capitalAllocation: 200000 } });
+  });
+
+  it('without a stale selection, Save needs a picked version', () => {
+    expect(canSave({ versionId: null, enabled: false, capitalText: '0' })).toBe(false);
+    const fresh = pickerRow(strategy([v('v1', 1, 'DRAFT')]), undefined);
+    expect(canSave(fresh, fresh)).toBe(false);
+    expect(canSave({ versionId: 'v1', enabled: true, capitalText: '' })).toBe(true);
   });
 });
 

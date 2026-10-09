@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { BreakoutSwingRepository } from '../repositories/breakout-swing.repository';
-import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { ExitPriceService, type ExitPrice } from '../../signal-generator/services/exit-price.service';
 import {
   NOTIONAL, TARGET_PCT, INIT_STOP_PCT, TRAIL_TRIGGER_PCT, TRAIL_GIVEBACK_PCT, BIG_MOVER_GAIN_PCT,
 } from '../constants';
@@ -20,8 +20,8 @@ interface TradedEntry {
 /**
  * REST-poll the breakout-swing track every 30s during market hours.
  *
- * Mirrors AdaptiveStopTickPoller: a single batched LTP call sidesteps the
- * broker's ~50-token WebSocket cap. QUEUED entries are filled when price reaches
+ * Prices come from ExitPriceService (hub first behind HUB_PRICES_TRACKS, then the legacy
+ * tiers); only fresh prices act. QUEUED entries are filled when price reaches
  * the resting limit; TRADED entries are managed for target / stop / trail and
  * the big-day-mover EOD force-exit.
  */
@@ -31,7 +31,7 @@ export class BreakoutSwingPollerService {
 
   constructor(
     private readonly repo: BreakoutSwingRepository,
-    private readonly adapter: AngelOneAdapterService,
+    private readonly exitPrice: ExitPriceService,
   ) {}
 
   /**
@@ -107,17 +107,14 @@ export class BreakoutSwingPollerService {
     const withToken = queued.filter((e) => e.token);
     if (withToken.length === 0) return;
     const tokens = [...new Set(withToken.map((e) => e.token as string))];
-    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+    // ExitPriceService tries the hub (HUB_PRICES_TRACKS), the batch, a single quote and a
+    // fresh level book; only a FRESH price drives a fill.
+    const prices = await this.exitPrice.resolveExitPrices('NSE', tokens).catch(() => new Map<string, ExitPrice>());
     const now = new Date();
 
     for (const entry of withToken) {
-      let ltp = ltpMap.get(entry.token as string);
-      // getLtpsBatch silently drops quiet-feed tokens; fall back to a single
-      // quote so a resting order still shows a live price + dist-to-fill.
-      if (ltp === undefined) {
-        const q = await this.adapter.getLiveQuote(entry.token as string, 'NSE').catch(() => null);
-        if (q?.ltp && q.ltp > 0) ltp = q.ltp;
-      }
+      const p = prices.get(entry.token as string);
+      const ltp = p?.fresh ? p.price : undefined;
       if (ltp === undefined || !(ltp > 0)) {
         this.logger.warn(`[breakout-swing] ${entry.symbol} QUEUED — no fresh price, fill not evaluated`);
         continue;
@@ -143,11 +140,12 @@ export class BreakoutSwingPollerService {
     const withToken = traded.filter((e) => e.token && e.entryPrice != null);
     if (withToken.length === 0) return;
     const tokens = [...new Set(withToken.map((e) => e.token as string))];
-    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+    const prices = await this.exitPrice.resolveExitPrices('NSE', tokens).catch(() => new Map<string, ExitPrice>());
     const now = new Date();
 
     for (const entry of withToken) {
-      const ltp = ltpMap.get(entry.token as string);
+      const p = prices.get(entry.token as string);
+      const ltp = p?.fresh ? p.price : undefined;
       if (ltp === undefined) {
         this.logger.warn(`[breakout-swing] ${entry.symbol} TRADED — no fresh price, exits not evaluated`);
         continue;

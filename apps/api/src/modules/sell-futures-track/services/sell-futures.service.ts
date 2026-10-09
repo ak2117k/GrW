@@ -8,6 +8,7 @@ import { SellFuturesTradeRepository } from '../repositories/sell-futures-trade.r
 import { SellFuturesPaperAccountService } from './sell-futures-paper-account.service';
 import { FutureSelectorService } from './future-selector.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { ExitPriceService, type ExitPrice } from '../../signal-generator/services/exit-price.service';
 import {
   PROFIT_TARGET_PCT, HARD_STOP_PCT, TRADE_COOLDOWN_MS, MARGIN_PCT,
 } from '../constants';
@@ -81,6 +82,7 @@ export class SellFuturesService {
     private readonly account: SellFuturesPaperAccountService,
     private readonly selector: FutureSelectorService,
     private readonly adapter: AngelOneAdapterService,
+    private readonly exitPrice: ExitPriceService,
   ) {}
 
   async createFromAlert(input: SellFuturesCreateFromAlertInput) {
@@ -435,20 +437,23 @@ export class SellFuturesService {
       list.push(e.token);
       byExchange.set(e.exchange, list);
     }
-    const ltpMap = new Map<string, number>();
+    // Through ExitPriceService (hub first behind HUB_PRICES_TRACKS), keyed EXCHANGE:token:
+    // tokens collide across exchanges. Only a FRESH price is used.
+    const prices = new Map<string, ExitPrice>();
     for (const [exchange, tokens] of byExchange) {
-      const m = await this.adapter
-        .getLtpsBatch(exchange, [...new Set(tokens)])
-        .catch(() => new Map<string, number>());
-      for (const [tok, ltp] of m) ltpMap.set(tok, ltp);
+      const m = await this.exitPrice
+        .resolveExitPrices(exchange, [...new Set(tokens)])
+        .catch(() => new Map<string, ExitPrice>());
+      for (const [tok, p] of m) prices.set(`${exchange}:${tok}`, p);
     }
 
     let closed = 0;
     let errors = 0;
     for (const entry of traded) {
       try {
+        const live = prices.get(`${entry.exchange}:${entry.token}`);
         const exitPrice =
-          ltpMap.get(entry.token) ??
+          (live?.fresh ? live.price : undefined) ??
           (entry as any).currentPrice ??
           (entry as any).executedPrice ??
           0;

@@ -1,7 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { BreakoutSwingPollerService } from './breakout-swing-poller.service';
 import { BreakoutSwingRepository } from '../repositories/breakout-swing.repository';
-import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { ExitPriceService, type ExitPriceSource } from '../../signal-generator/services/exit-price.service';
 import { NOTIONAL, INIT_STOP_PCT, TRAIL_GIVEBACK_PCT } from '../constants';
 
 describe('BreakoutSwingPollerService.decideTradedTick (pure)', () => {
@@ -66,7 +66,10 @@ describe('BreakoutSwingPollerService.decideTradedTick (pure)', () => {
 describe('BreakoutSwingPollerService — poller integration', () => {
   let svc: BreakoutSwingPollerService;
   let repo: any;
-  let adapter: any;
+  let exitPrice: { resolveExitPrices: jest.Mock };
+  /** ExitPriceService's answer: every listed token fresh at its price. */
+  const fresh = (prices: Record<string, number>, source: ExitPriceSource = 'rest-batch') =>
+    new Map(Object.entries(prices).map(([token, price]) => [token, { price, fresh: true, source }]));
 
   beforeEach(async () => {
     repo = {
@@ -77,12 +80,12 @@ describe('BreakoutSwingPollerService — poller integration', () => {
       recordTick: jest.fn().mockResolvedValue(undefined),
       updateStatus: jest.fn().mockResolvedValue(undefined),
     };
-    adapter = { getLtpsBatch: jest.fn(), getLiveQuote: jest.fn() };
+    exitPrice = { resolveExitPrices: jest.fn().mockResolvedValue(new Map()) };
     const mod = await Test.createTestingModule({
       providers: [
         BreakoutSwingPollerService,
         { provide: BreakoutSwingRepository, useValue: repo },
-        { provide: AngelOneAdapterService, useValue: adapter },
+        { provide: ExitPriceService, useValue: exitPrice },
       ],
     }).compile();
     svc = mod.get(BreakoutSwingPollerService);
@@ -93,13 +96,12 @@ describe('BreakoutSwingPollerService — poller integration', () => {
   });
 
   it('fills a QUEUED entry when LTP reaches the resting limit → TRADED with qty + stop', async () => {
-    repo.listQueued.mockResolvedValue([
-      { id: 'q1', symbol: 'TCS', token: '11536', limitPrice: 101 },
-    ]);
-    adapter.getLtpsBatch.mockResolvedValue(new Map([['11536', 101.5]]));
+    repo.listQueued.mockResolvedValue([{ id: 'q1', symbol: 'TCS', token: '11536', limitPrice: 101 }]);
+    exitPrice.resolveExitPrices.mockResolvedValue(fresh({ '11536': 101.5 }));
 
     await svc.pollMarketHours();
 
+    expect(exitPrice.resolveExitPrices).toHaveBeenCalledWith('NSE', ['11536']);
     const call = repo.fill.mock.calls[0];
     expect(call[0]).toBe('q1');
     expect(call[1].entryPrice).toBe(101.5);
@@ -108,10 +110,8 @@ describe('BreakoutSwingPollerService — poller integration', () => {
   });
 
   it('does NOT fill a QUEUED entry when LTP is below the resting limit', async () => {
-    repo.listQueued.mockResolvedValue([
-      { id: 'q1', symbol: 'TCS', token: '11536', limitPrice: 101 },
-    ]);
-    adapter.getLtpsBatch.mockResolvedValue(new Map([['11536', 100.5]]));
+    repo.listQueued.mockResolvedValue([{ id: 'q1', symbol: 'TCS', token: '11536', limitPrice: 101 }]);
+    exitPrice.resolveExitPrices.mockResolvedValue(fresh({ '11536': 100.5 }));
 
     await svc.pollMarketHours();
 
@@ -121,29 +121,33 @@ describe('BreakoutSwingPollerService — poller integration', () => {
     expect(repo.recordTick).toHaveBeenCalledWith('q1', expect.objectContaining({ currentPrice: 100.5 }));
   });
 
-  it('persists a QUEUED price via single-quote fallback when the batch drops the token', async () => {
-    repo.listQueued.mockResolvedValue([
-      { id: 'q1', symbol: 'KIRLPNU', token: '15180', limitPrice: 1817.87 },
-    ]);
-    adapter.getLtpsBatch.mockResolvedValue(new Map()); // batch silently drops it
-    adapter.getLiveQuote.mockResolvedValue({ ltp: 1794.3 });
+  it('persists a QUEUED price from whichever tier ExitPriceService used (here a single quote)', async () => {
+    repo.listQueued.mockResolvedValue([{ id: 'q1', symbol: 'KIRLPNU', token: '15180', limitPrice: 1817.87 }]);
+    exitPrice.resolveExitPrices.mockResolvedValue(fresh({ '15180': 1794.3 }, 'rest-single'));
 
     await svc.pollMarketHours();
 
-    expect(adapter.getLiveQuote).toHaveBeenCalledWith('15180', 'NSE');
     expect(repo.recordTick).toHaveBeenCalledWith('q1', expect.objectContaining({ currentPrice: 1794.3 }));
     expect(repo.fill).not.toHaveBeenCalled(); // 1794.3 < 1817.87
   });
 
+  it('a QUEUED entry with no fresh price is neither recorded nor filled', async () => {
+    repo.listQueued.mockResolvedValue([{ id: 'q1', symbol: 'KIRLPNU', token: '15180', limitPrice: 1 }]);
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['15180', { price: 0, fresh: false, source: 'none' }]]));
+
+    await svc.pollMarketHours();
+
+    expect(repo.recordTick).not.toHaveBeenCalled();
+    expect(repo.fill).not.toHaveBeenCalled();
+  });
+
   it('arms the trailing stop on a TRADED entry once it is up +7%', async () => {
-    // Freeze to 11:30 IST (mid-session, before the 15:15 big-mover window) so
-    // pollMarketHours()'s real-clock isBigMoverWindow() doesn't force-exit the
-    // +13.7%-on-the-day stock before the trailing stop can arm.
+    // 11:30 IST: mid-session, before the 15:15 big-mover window.
     jest.useFakeTimers({ now: new Date('2026-06-12T06:00:00Z') });
     repo.listTraded.mockResolvedValue([
       { id: 't1', symbol: 'TCS', token: '11536', entryPrice: 100, prevDayClose: 95, stopPrice: 90, trailing: false, trailingHighWater: null },
     ]);
-    adapter.getLtpsBatch.mockResolvedValue(new Map([['11536', 108]]));
+    exitPrice.resolveExitPrices.mockResolvedValue(fresh({ '11536': 108 }));
 
     await svc.pollMarketHours();
 
@@ -156,18 +160,27 @@ describe('BreakoutSwingPollerService — poller integration', () => {
   });
 
   it('big-mover EOD: force-exits a TRADED entry as BIG_MOVER_EOD inside the 15:15 window', async () => {
-    // Freeze IST clock to 15:16 so isBigMoverWindow() is true.
     jest.useFakeTimers({ now: new Date('2026-06-12T09:46:00Z') }); // 15:16 IST
     repo.listTraded.mockResolvedValue([
       { id: 't1', symbol: 'TCS', token: '11536', entryPrice: 100, prevDayClose: 95, stopPrice: 90, trailing: false, trailingHighWater: null },
     ]);
-    adapter.getLtpsBatch.mockResolvedValue(new Map([['11536', 108]])); // +8% FROM ENTRY → locked in the window
+    exitPrice.resolveExitPrices.mockResolvedValue(fresh({ '11536': 108 }, 'hub')); // +8% FROM ENTRY → locked in the window
 
     await svc.pollMarketHours();
 
-    expect(repo.updateStatus).toHaveBeenCalledWith('t1', expect.objectContaining({
-      status: 'BIG_MOVER_EOD', exitPrice: 108,
-    }));
-    jest.useRealTimers();
+    expect(repo.updateStatus).toHaveBeenCalledWith('t1', expect.objectContaining({ status: 'BIG_MOVER_EOD', exitPrice: 108 }));
+  });
+
+  it('a TRADED entry whose price is not fresh is not exited on it, even in the EOD window', async () => {
+    jest.useFakeTimers({ now: new Date('2026-06-12T09:46:00Z') }); // 15:16 IST
+    repo.listTraded.mockResolvedValue([
+      { id: 't1', symbol: 'TCS', token: '11536', entryPrice: 100, prevDayClose: 95, stopPrice: 90, trailing: false, trailingHighWater: null },
+    ]);
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['11536', { price: 0, fresh: false, source: 'none' }]]));
+
+    await svc.pollMarketHours();
+
+    expect(repo.updateStatus).not.toHaveBeenCalled();
+    expect(repo.recordTick).not.toHaveBeenCalled();
   });
 });

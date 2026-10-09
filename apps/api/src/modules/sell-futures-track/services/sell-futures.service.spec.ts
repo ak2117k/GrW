@@ -16,6 +16,7 @@ import {
 import { FutureSelectorService } from './future-selector.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { PROFIT_TARGET_PCT, HARD_STOP_PCT } from '../constants';
+import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
 
 const RESOLVED_FUTURE = {
   token: '62802',
@@ -37,6 +38,13 @@ const baseInput = {
   initialBreakdown: { checks: [] },
   scannerName: 'some scanner',
 };
+
+/** One ExitPriceService double for every module in this file; reset before each test. */
+const exitPrice = { resolveExitPrices: jest.fn() };
+beforeEach(() => {
+  exitPrice.resolveExitPrices.mockReset();
+  exitPrice.resolveExitPrices.mockResolvedValue(new Map());
+});
 
 describe('SellFuturesService.createFromAlert', () => {
   let svc: SellFuturesService;
@@ -72,6 +80,7 @@ describe('SellFuturesService.createFromAlert', () => {
         { provide: SellFuturesPaperAccountService, useValue: account },
         { provide: FutureSelectorService, useValue: selector },
         { provide: AngelOneAdapterService, useValue: adapter },
+        { provide: ExitPriceService, useValue: exitPrice },
       ],
     }).compile();
     svc = mod.get(SellFuturesService);
@@ -189,6 +198,7 @@ describe('SellFuturesService.onTick — SHORT exits', () => {
         { provide: SellFuturesPaperAccountService, useValue: { applyExit: jest.fn() } },
         { provide: FutureSelectorService, useValue: selector },
         { provide: AngelOneAdapterService, useValue: adapter },
+        { provide: ExitPriceService, useValue: exitPrice },
       ],
     }).compile();
     svc = mod.get(SellFuturesService);
@@ -339,6 +349,7 @@ describe('SellFuturesService.onTick — SHORT realized-P&L sign (end-to-end thro
         { provide: SellFuturesPaperAccountService, useValue: account },
         { provide: FutureSelectorService, useValue: {} },
         { provide: AngelOneAdapterService, useValue: {} },
+        { provide: ExitPriceService, useValue: exitPrice },
       ],
     }).compile();
     svc = mod.get(SellFuturesService);
@@ -371,7 +382,7 @@ describe('SellFuturesService.onTick — SHORT realized-P&L sign (end-to-end thro
 
 describe('SellFuturesService.squareOffOpenPositions — EOD', () => {
   let svc: SellFuturesService;
-  let repo: any, adapter: any;
+  let repo: any, adapter: any, closeTrade: jest.Mock;
 
   beforeEach(async () => {
     repo = {
@@ -382,8 +393,8 @@ describe('SellFuturesService.squareOffOpenPositions — EOD', () => {
       update: jest.fn().mockResolvedValue({}),
       createEvent: jest.fn(),
     };
-    adapter = { getLtpsBatch: jest.fn().mockResolvedValue(new Map([['62802', 1185]])) };
-    const closeTrade = jest.fn().mockResolvedValue({});
+    adapter = { getLtpsBatch: jest.fn().mockResolvedValue(new Map([['62802', 1]])) }; // must never be asked
+    closeTrade = jest.fn().mockResolvedValue({});
     const mod = await Test.createTestingModule({
       providers: [
         SellFuturesService,
@@ -392,21 +403,45 @@ describe('SellFuturesService.squareOffOpenPositions — EOD', () => {
         { provide: SellFuturesPaperAccountService, useValue: { applyExit: jest.fn() } },
         { provide: FutureSelectorService, useValue: {} },
         { provide: AngelOneAdapterService, useValue: adapter },
+        { provide: ExitPriceService, useValue: exitPrice },
       ],
     }).compile();
     svc = mod.get(SellFuturesService);
     (svc as any).closeTrade = closeTrade;
-    (svc as any).__closeTrade = closeTrade;
   });
 
-  it('closes every TRADED entry at the live futures LTP with reason eod-square-off', async () => {
+  it('closes every TRADED entry at the fresh futures price from ExitPriceService with reason eod-square-off', async () => {
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['62802', { price: 1185, fresh: true, source: 'hub' }]]));
+
     const res = await svc.squareOffOpenPositions();
+
+    expect(exitPrice.resolveExitPrices).toHaveBeenCalledWith('NFO', ['62802']);
+    expect(adapter.getLtpsBatch).not.toHaveBeenCalled();
     expect(res.closed).toBe(1);
-    expect((svc as any).__closeTrade).toHaveBeenCalledWith('sft1', expect.objectContaining({
-      reason: 'eod-square-off', exitPrice: 1185,
-    }));
-    expect(repo.update).toHaveBeenCalledWith('sf1', expect.objectContaining({
-      status: 'EXITED', closedReason: 'eod-square-off',
-    }));
+    expect(closeTrade).toHaveBeenCalledWith('sft1', expect.objectContaining({ reason: 'eod-square-off', exitPrice: 1185 }));
+    expect(repo.update).toHaveBeenCalledWith('sf1', expect.objectContaining({ status: 'EXITED', closedReason: 'eod-square-off' }));
+  });
+
+  it('with no fresh price it closes at the last known price, never at 0', async () => {
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['62802', { price: 0, fresh: false, source: 'none' }]]));
+
+    await svc.squareOffOpenPositions();
+
+    expect(closeTrade).toHaveBeenCalledWith('sft1', expect.objectContaining({ exitPrice: 1190 }));
+  });
+
+  it('keys prices by exchange + token, so a same-token entry on another exchange is not priced by it', async () => {
+    repo.findAllActive.mockResolvedValue([
+      { id: 'sf1', token: '62802', symbol: 'RELIANCE', exchange: 'NFO', status: 'TRADED', paperTradeId: 'sft1', executedPrice: 1200, currentPrice: 1190 },
+      { id: 'sf2', token: '62802', symbol: 'GOLDM', exchange: 'MCX', status: 'TRADED', paperTradeId: 'sft2', executedPrice: 72000, currentPrice: 71950 },
+    ]);
+    exitPrice.resolveExitPrices.mockImplementation(async (exchange: string) =>
+      exchange === 'NFO' ? new Map([['62802', { price: 1185, fresh: true, source: 'hub' }]]) : new Map(),
+    );
+
+    await svc.squareOffOpenPositions();
+
+    expect(closeTrade).toHaveBeenCalledWith('sft1', expect.objectContaining({ exitPrice: 1185 }));
+    expect(closeTrade).toHaveBeenCalledWith('sft2', expect.objectContaining({ exitPrice: 71950 }));
   });
 });

@@ -174,7 +174,7 @@ export function minutesToSessionClose(now: Date, exchange = 'NSE'): Block<number
 }
 
 /**
- * The three ways `underlyingLtp` can be sourced, spelled out because the packet
+ * The four ways `underlyingLtp` can be sourced, spelled out because the packet
  * carries this string verbatim as provenance and the agent is taught to read it.
  * "A live tick" and "a REST quote" are not the same evidence — the first is the
  * market's last print, the second a snapshot the broker composed for us — and an
@@ -192,6 +192,7 @@ export function minutesToSessionClose(now: Date, exchange = 'NSE'): Block<number
 export const SPOT_SOURCE_CASH = 'market-data (underlying spot — the contract IS the underlying)';
 export const SPOT_SOURCE_LIVE = 'market-data (underlying spot — live feed tick)';
 export const SPOT_SOURCE_QUOTE = 'market-data (underlying spot — broker FULL-mode quote)';
+export const SPOT_SOURCE_HUB = 'market-hub (underlying spot — hub price: live tick or critical-lane quote, ≤ 10 s old)';
 
 export interface TickSnapshot {
   segment: Segment;

@@ -1,11 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { WatchStatus } from '@prisma/client';
-import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { AdaptiveStopWatchRepository } from '../repositories/adaptive-stop-watch.repository';
 import { AdaptiveStopWatchService } from './adaptive-stop-watch.service';
 import { AdaptiveStopTradeExecutionService } from './adaptive-stop-trade-execution.service';
-import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
+import { ExitPriceService, type ExitPrice } from '../../signal-generator/services/exit-price.service';
 
 /**
  * REST-poll adaptive-stop open positions every 30 seconds during market hours.
@@ -31,7 +30,6 @@ export class AdaptiveStopTickPoller {
   private readonly logger = new Logger(AdaptiveStopTickPoller.name);
 
   constructor(
-    private readonly adapter: AngelOneAdapterService,
     private readonly repo: AdaptiveStopWatchRepository,
     private readonly watch: AdaptiveStopWatchService,
     private readonly exec: AdaptiveStopTradeExecutionService,
@@ -106,15 +104,17 @@ export class AdaptiveStopTickPoller {
 
     // Fetch live prices for a fair exit; fall back to last known price.
     const tokens = [...new Set(traded.map((e) => e.token))];
-    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+    // Through ExitPriceService (hub first behind HUB_PRICES_TRACKS); only a FRESH price is used.
+    const prices = await this.exitPrice.resolveExitPrices('NSE', tokens).catch(() => new Map<string, ExitPrice>());
 
     let closed = 0;
     let errors = 0;
     let skipped = 0;
     for (const entry of traded) {
       try {
+        const live = prices.get(entry.token);
         const exitPrice =
-          ltpMap.get(entry.token) ??
+          (live?.fresh ? live.price : undefined) ??
           (entry as any).currentPrice ??
           (entry as any).executedPrice ??
           0;

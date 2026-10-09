@@ -96,3 +96,62 @@ describe('AdaptiveStopTickPoller.pollOpenPositions', () => {
     expect(watch.onTick).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('AdaptiveStopTickPoller.eodSquareOff', () => {
+  let poller: AdaptiveStopTickPoller;
+  let adapter: { getLtpsBatch: jest.Mock };
+  let repo: { findAllActive: jest.Mock; update: jest.Mock };
+  let exec: { closeTrade: jest.Mock };
+  let exitPrice: { resolveExitPrices: jest.Mock };
+
+  beforeEach(async () => {
+    adapter = { getLtpsBatch: jest.fn().mockResolvedValue(new Map([['2885', 1]])) }; // must never be asked
+    repo = {
+      findAllActive: jest.fn().mockResolvedValue([
+        { id: 'e1', status: 'TRADED', token: '2885', exchange: 'NSE', symbol: 'RELIANCE', paperTradeId: 'p1', currentPrice: 2490, executedPrice: 2500 },
+      ]),
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    exec = { closeTrade: jest.fn().mockResolvedValue(undefined) };
+    exitPrice = { resolveExitPrices: jest.fn() };
+    const mod = await Test.createTestingModule({
+      providers: [
+        AdaptiveStopTickPoller,
+        { provide: AngelOneAdapterService, useValue: adapter },
+        { provide: AdaptiveStopWatchRepository, useValue: repo },
+        { provide: AdaptiveStopWatchService, useValue: { onTick: jest.fn() } },
+        { provide: AdaptiveStopTradeExecutionService, useValue: exec },
+        { provide: ExitPriceService, useValue: exitPrice },
+      ],
+    }).compile();
+    poller = mod.get(AdaptiveStopTickPoller);
+  });
+
+  it('closes at the fresh price ExitPriceService resolved, never asking the shared adapter', async () => {
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['2885', { price: 2512, fresh: true, source: 'hub' }]]));
+
+    const res = await poller.eodSquareOff();
+
+    expect(exitPrice.resolveExitPrices).toHaveBeenCalledWith('NSE', ['2885']);
+    expect(adapter.getLtpsBatch).not.toHaveBeenCalled();
+    expect(exec.closeTrade).toHaveBeenCalledWith('p1', { reason: 'eod-square-off', exitPrice: 2512 });
+    expect(res).toEqual({ attempted: 1, closed: 1, skipped: 0, errors: 0 });
+  });
+
+  it('with no fresh price it closes at the last known price, not at 0', async () => {
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['2885', { price: 0, fresh: false, source: 'none' }]]));
+
+    await poller.eodSquareOff();
+
+    expect(exec.closeTrade).toHaveBeenCalledWith('p1', { reason: 'eod-square-off', exitPrice: 2490 });
+  });
+
+  it('a failing resolver still squares off at the last known price', async () => {
+    exitPrice.resolveExitPrices.mockRejectedValue(new Error('broker down'));
+
+    await poller.eodSquareOff();
+
+    expect(exec.closeTrade).toHaveBeenCalledWith('p1', { reason: 'eod-square-off', exitPrice: 2490 });
+    expect(repo.update).toHaveBeenCalledWith('e1', expect.objectContaining({ closedReason: 'eod-square-off' }));
+  });
+});

@@ -1,4 +1,4 @@
-import { LANE, refKey, type InstrumentRef, type Lane } from './hub.types';
+import { LANE, refKey, type InstrumentRef, type Lane, type Price } from './hub.types';
 import type { LiveFeed } from './live-feed';
 import type { PriceBook } from './price-book';
 import type { QuoteBatcher, QuoteOutcome } from './quote-batcher';
@@ -12,15 +12,29 @@ export interface QuotePollerDeps {
   clock: SessionClock;
   nearLiveTargetMs: number;
   criticalTargetMs: number;
+  /** Called with every price this poller stores (the engine fans it out to consumers). */
+  onPrice?: (p: Price) => void;
 }
 
 /**
+ * A live P0/P1 slot that has sent no tick is topped up with a quote so its
+ * price is never older than this when the next Critical sweep runs. A live
+ * slot's price is stamped at receipt, so a held but illiquid contract would
+ * otherwise age without bound and miss the 5 s position bound.
+ */
+export const LIVE_TOPUP_TARGET_MS = 4000;
+/** The Critical sweep cadence (start()'s default). */
+const CRITICAL_EVERY_MS = 2000;
+
+/**
  * The near-live tier (every ~5 s for watched instruments without a live slot)
- * and the safety net (every ~2 s, Critical lane, for P0/P1 when the socket is
- * down or they overflowed the cap). Never polls a closed exchange.
+ * and the safety net (every ~2 s, Critical lane): P0/P1 when the socket is
+ * down or they overflowed the cap, and quiet live P0/P1 slots (the top-up).
+ * Never polls a closed exchange.
  */
 export class QuotePoller {
   private timers: ReturnType<typeof setInterval>[] = [];
+  private criticalEveryMs = CRITICAL_EVERY_MS;
 
   constructor(private readonly d: QuotePollerDeps) {}
 
@@ -30,14 +44,25 @@ export class QuotePoller {
 
   pollCritical(now: number = Date.now()): number {
     const alloc = this.d.feed.allocation();
-    const socketDown = this.d.feed.wsHealthy
-      ? []
-      : alloc.live.filter((e) => e.priority <= 1);
-    return this.poll([...socketDown, ...alloc.criticalOverflow], this.d.criticalTargetMs, LANE.CRITICAL, now);
+    const liveCritical = alloc.live.filter((e) => e.priority <= 1);
+    if (!this.d.feed.wsHealthy) {
+      return this.poll([...liveCritical, ...alloc.criticalOverflow], this.d.criticalTargetMs, LANE.CRITICAL, now);
+    }
+    // Top-up: poll() skips anything younger than its threshold, so a ticking
+    // (liquid) contract costs nothing. The threshold is the target minus one sweep:
+    // a slot skipped now is checked again one sweep later, so a quote is asked
+    // before the price can pass LIVE_TOPUP_TARGET_MS (a bare 4 s threshold on a
+    // 2 s sweep lets a price reach ~6 s, past the 5 s bound).
+    const topUpAtMs = Math.max(0, LIVE_TOPUP_TARGET_MS - this.criticalEveryMs);
+    return (
+      this.poll(alloc.criticalOverflow, this.d.criticalTargetMs, LANE.CRITICAL, now) +
+      this.poll(liveCritical, topUpAtMs, LANE.CRITICAL, now)
+    );
   }
 
-  start(nearLiveEveryMs = 5000, criticalEveryMs = 2000): void {
+  start(nearLiveEveryMs = 5000, criticalEveryMs = CRITICAL_EVERY_MS): void {
     this.stop();
+    this.criticalEveryMs = criticalEveryMs;
     const near = setInterval(() => this.pollNearLive(), nearLiveEveryMs);
     const crit = setInterval(() => this.pollCritical(), criticalEveryMs);
     near.unref?.();
@@ -65,14 +90,16 @@ export class QuotePoller {
 
   private apply(ref: InstrumentRef, o: QuoteOutcome): void {
     if (o.kind === 'ok') {
-      this.d.book.set({
+      const price: Price = {
         ref,
         ltp: o.tick.ltp,
         at: Date.now(),
         source: 'quote',
         volume: o.tick.volume,
         oi: o.tick.oi,
-      });
+      };
+      this.d.book.set(price);
+      this.d.onPrice?.(price);
     } else if (o.kind === 'throttled') {
       this.d.book.markFailure(refKey(ref), 'throttled');
     }

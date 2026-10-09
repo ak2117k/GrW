@@ -1,4 +1,8 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
+import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
+import { isHubExchange, type InstrumentRef } from '../../market-hub/hub.types';
+import { resolveUnderlying as resolveUnderlyingRef } from '../../market-hub/underlying';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
@@ -9,6 +13,7 @@ import type { Segment, Side } from '../charges';
 import type { TickReading, TickSource } from '../services/sentinel-cycle.service';
 import {
   SPOT_SOURCE_CASH,
+  SPOT_SOURCE_HUB,
   SPOT_SOURCE_LIVE,
   SPOT_SOURCE_QUOTE,
   unresolvedUnderlying,
@@ -69,6 +74,12 @@ export const SPOT_STALENESS_MS = 60_000;
 export const LTP_STALENESS_MS = 5 * 60_000;
 
 /**
+ * SP1 M3: the hub's price is used for a judgement only if it is at most this old
+ * (spec §5.3, "trading decisions 10 s"). Older, and the existing tiers decide.
+ */
+export const HUB_DECISION_MAX_AGE_MS = 10_000;
+
+/**
  * Re-exported from `charges.ts`, where it now lives beside the `Segment` it
  * returns and the rate tables it selects. Moved so the ROSTER can classify a
  * trade without importing this file, which reaches `UserFeedManager` and
@@ -95,18 +106,21 @@ class TickUnavailable extends Error {}
  *
  * BOTH HALVES ARE NEEDED AND THEY FAIL INDEPENDENTLY. `name` is what the level
  * book and the news feed are keyed by ('NIFTY'); `token` is what the live level
- * book's spot is keyed by ('26000'). The name comes off the derivative's own
- * instrument row, the token needs a second lookup of the CASH row — so a
- * missing cash row leaves the name usable and only the spot unavailable.
+ * book's spot is keyed by ('99926000'). The name comes off the derivative's own
+ * instrument row; the token comes from the index map for an index, or a second
+ * lookup of the NSE CASH row for a stock — so a missing cash row leaves the
+ * name usable and only the spot unavailable.
  * Collapsing them into one nullable value would take the level book and the
  * news down with the spot.
  */
 interface Underlying {
   name: string | null;
   token: string | null;
+  /** The exchange `token` belongs to (NSE for NIFTY and stocks, BSE for SENSEX). */
+  exchange: string | null;
 }
 
-const NO_UNDERLYING: Underlying = { name: null, token: null };
+const NO_UNDERLYING: Underlying = { name: null, token: null, exchange: null };
 
 /**
  * How long a broker quote for one underlying is reused.
@@ -186,6 +200,12 @@ export function istDateOnly(date: Date): string {
   }).format(date);
 }
 
+/** The hub's ref for an instrument, or null for an exchange the hub does not speak. */
+function toHubRef(exchange: string | null | undefined, token: string, symbol: string): InstrumentRef | null {
+  const ex = String(exchange ?? '').toUpperCase();
+  return isHubExchange(ex) && token ? { exchange: ex, token, symbol } : null;
+}
+
 /**
  * `TickSource` over `trade_trackers` plus the level book and the news feed.
  *
@@ -201,9 +221,10 @@ export function istDateOnly(date: Date): string {
  *    the map is empty and `contextFactorFlip` stays quiet — correctly, but it
  *    means the sensor is live only while the engine has a setup on that symbol.
  *    The packet states which of the four emptiness causes applies.
- *  - `underlyingLtp` for a derivative depends on the underlying's spot being in
- *    the live level book. When the underlying is not subscribed, it is null and
- *    `levelBreak` and the OI capture both correctly stay silent.
+ *  - `underlyingLtp` for a derivative comes from the hub (when HUB_PRICES_POSITIONS
+ *    serves this user), else the live level book, else a broker quote on the
+ *    underlying's own exchange. When all three are empty it is null, and
+ *    levelBreak and the OI capture both correctly stay silent.
  *
  * SCALE AND IDENTITY ARE TWO SEPARATE CORRECTIONS. For a derivative, both the
  * PRICE handed to the level book and the SYMBOL it is looked up by have to be
@@ -225,6 +246,8 @@ export class SentinelTickSource implements TickSource {
   /** Recent broker quotes per underlying token — see {@link SPOT_QUOTE_TTL_MS}. */
   private readonly quotes = new Map<string, { at: number; ltp: number; capturedAt: string }>();
 
+  private hubSourceRef: HubPriceSource | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly instruments: MarketDataRepository,
@@ -237,6 +260,8 @@ export class SentinelTickSource implements TickSource {
     // only its live-feed tier, which is the state that made every derivative
     // position blind — so its absence is warned about at boot, below.
     @Optional() private readonly userFeed?: UserFeedManager,
+    // SP1 M3: HUB_PRICE_SOURCE, resolved lazily (MarketHubModule is not imported here). Absent ⇒ no hub tier.
+    @Optional() private readonly moduleRef?: ModuleRef,
   ) {
     if (!this.userFeed) {
       this.logger.warn(
@@ -278,30 +303,27 @@ export class SentinelTickSource implements TickSource {
     });
     if (!row) throw new TickUnavailable(`tracker ${trackerId} no longer exists`);
 
-    // No price means no judgement. Throwing is correct and is NOT a silent
-    // failure: the cycle catches per position, counts it `failed` and logs the
-    // symbol. Substituting the entry price would report a flat trade as flat
-    // while it was actually moving, which the agent would read as calm.
-    const ltp = row.lastLtp;
-    if (ltp === null || !Number.isFinite(ltp)) {
-      throw new TickUnavailable(
-        `no live price on tracker ${trackerId} (${row.symbol}) — the tracker poller has not ` +
-          'ticked it yet, or the feed is down',
-      );
-    }
-
-    // A price that is present but OLD is the more dangerous of the two, because
-    // nothing about it looks wrong. See LTP_STALENESS_MS.
-    const ageMs = Date.now() - row.updatedAt.getTime();
-    if (ageMs > LTP_STALENESS_MS) {
-      throw new TickUnavailable(
-        `the price on tracker ${trackerId} (${row.symbol}) is ${Math.round(ageMs / 60_000)} ` +
-          `minutes old (last ${ltp} at ${row.updatedAt.toISOString()}), past the ` +
-          `${LTP_STALENESS_MS / 60_000}-minute bound. Its token is almost certainly not ` +
-          'subscribed to the feed — the primary slot pool is small and the default universe ' +
-          'claims it at boot. REFUSING to judge: P&L, the green floor and every tripwire ' +
-          'would be computed from a stale price and reported as the market now.',
-      );
+    // SP1 M3 (HUB_PRICES_POSITIONS): the hub's own price for the contract when it
+    // serves this user (today: the owner only) and has one ≤ 10 s old. Otherwise
+    // the tracker row, with both of its refusals.
+    const source = this.hubSource();
+    const hub = source?.hubFor(row.userId, 'positions') ?? null;
+    const hubLtp = this.hubContractPrice(hub, row);
+    // M1: consumers.positions counts only users the hub serves (hub !== null), so the
+    // production gate reads the hub's own share and other tenants never confound it.
+    const counted = hub ? source : null;
+    let ltp: number;
+    if (hubLtp !== null) {
+      ltp = hubLtp;
+      counted?.record('positions', 'hub');
+    } else {
+      try {
+        ltp = this.storedPrice(trackerId, row);
+      } catch (err) {
+        counted?.record('positions', 'unpriced');
+        throw err;
+      }
+      counted?.record('positions', 'legacy');
     }
 
     const segment = segmentFor(row);
@@ -310,7 +332,7 @@ export class SentinelTickSource implements TickSource {
 
     // Resolved ONCE and used three times below — for the spot, for the level
     // book and for the news. They must all be talking about the same underlying.
-    const underlying = isCash ? NO_UNDERLYING : await this.resolveUnderlying(row.token, row.symbol);
+    const underlying = isCash ? NO_UNDERLYING : await this.resolveUnderlying(row.exchange, row.token, row.symbol);
 
     // For cash the contract IS the underlying, so this must be `ltp` and never
     // null — a null silences every level-comparing sensor on every equity
@@ -323,7 +345,7 @@ export class SentinelTickSource implements TickSource {
     // the packet's build time is the honest fallback rather than a borrowed one.
     const spot: SpotReading = isCash
       ? { ltp, at: null, source: SPOT_SOURCE_CASH, reason: null }
-      : await this.spotFor(underlying.token, row.userId, row.symbol);
+      : await this.spotFor(underlying, row.userId, row.symbol, hub);
     const underlyingLtp = spot.ltp;
 
     /**
@@ -390,7 +412,7 @@ export class SentinelTickSource implements TickSource {
       holdingHigh: row.holdingHigh,
       holdingLow: row.holdingLow,
       entryTime: row.entryTime,
-      expiry: await this.expiryFor(row.token, segment),
+      expiry: await this.expiryFor(row.token, row.exchange, segment),
       volumeRatio: structure.volumeRatio,
       freshNewsCount,
       // Both come off the SAME `analyze()` the levels above did — the factors
@@ -399,6 +421,46 @@ export class SentinelTickSource implements TickSource {
       factorValues: structure.factorValues,
       factorsReason: structure.factorsReason,
     };
+  }
+
+  /** The hub's fresh contract price, or null (no hub for this user, an exchange it does not speak, or not fresh). */
+  private hubContractPrice(hub: HubPrices | null, row: { exchange: string; token: string; symbol: string }): number | null {
+    const ref = hub ? toHubRef(row.exchange, row.token, row.symbol) : null;
+    if (!hub || !ref) return null;
+    const r = hub.price(ref, { maxAgeMs: HUB_DECISION_MAX_AGE_MS });
+    return r.kind === 'fresh' && r.price.ltp > 0 ? r.price.ltp : null;
+  }
+
+  /**
+   * The tracker row's price, refusing a missing or stale one (see LTP_STALENESS_MS).
+   * Substituting the entry price would report a moving trade as flat.
+   */
+  private storedPrice(trackerId: string, row: { symbol: string; lastLtp: number | null; updatedAt: Date }): number {
+    const ltp = row.lastLtp;
+    if (ltp === null || !Number.isFinite(ltp)) {
+      throw new TickUnavailable(
+        `no live price on tracker ${trackerId} (${row.symbol}) — the tracker poller has not ` +
+          'ticked it yet, or the feed is down',
+      );
+    }
+    const ageMs = Date.now() - row.updatedAt.getTime();
+    if (ageMs > LTP_STALENESS_MS) {
+      throw new TickUnavailable(
+        `the price on tracker ${trackerId} (${row.symbol}) is ${Math.round(ageMs / 60_000)} ` +
+          `minutes old (last ${ltp} at ${row.updatedAt.toISOString()}), past the ` +
+          `${LTP_STALENESS_MS / 60_000}-minute bound. Its token is almost certainly not ` +
+          'subscribed to the feed — the primary slot pool is small and the default universe ' +
+          'claims it at boot. REFUSING to judge: P&L, the green floor and every tripwire ' +
+          'would be computed from a stale price and reported as the market now.',
+      );
+    }
+    return ltp;
+  }
+
+  /** Resolved lazily; a miss (no hub in this container) is retried on the next tick. */
+  private hubSource(): HubPriceSource | null {
+    if (!this.hubSourceRef) this.hubSourceRef = lookupHubPrices(this.moduleRef);
+    return this.hubSourceRef;
   }
 
   /**
@@ -424,6 +486,9 @@ export class SentinelTickSource implements TickSource {
    * reason this was diagnosable — but honest blindness is still blindness.
    *
    * THE TIERS, best evidence first:
+   *   0. the hub (HUB_PRICES_POSITIONS): the underlying is watched at priority 1
+   *      beside the position, so its price is a live tick or a critical-lane
+   *      quote ≤ 10 s old;
    *   1. a live feed tick, at most `SPOT_STALENESS_MS` old — the market's own
    *      last print, sub-second when the symbol happens to be subscribed;
    *   2. a FULL-mode broker quote over the position owner's own Angel session —
@@ -441,11 +506,22 @@ export class SentinelTickSource implements TickSource {
    * different facts about a position with money on it.
    */
   private async spotFor(
-    underlyingToken: string | null,
+    underlying: Underlying,
     userId: string,
     symbol: string,
+    hub: HubPrices | null,
   ): Promise<SpotReading> {
+    const underlyingToken = underlying.token;
     if (!underlyingToken) return NO_SPOT;
+
+    // Tier 0 — the hub. A stale or missing hub price falls THROUGH, never returns.
+    const hubRef = hub ? toHubRef(underlying.exchange, underlyingToken, underlying.name ?? underlyingToken) : null;
+    if (hub && hubRef) {
+      const r = hub.price(hubRef, { maxAgeMs: HUB_DECISION_MAX_AGE_MS });
+      if (r.kind === 'fresh' && r.price.ltp > 0) {
+        return { ltp: r.price.ltp, at: new Date(r.price.at).toISOString(), source: SPOT_SOURCE_HUB, reason: null };
+      }
+    }
 
     // Tier 1 — a live tick. See SPOT_STALENESS_MS: a frozen spot is worse than
     // no spot, so a stale book falls THROUGH to the quote rather than returning.
@@ -469,7 +545,7 @@ export class SentinelTickSource implements TickSource {
 
     // Tier 2 — a broker quote over the OWNING user's session. There is no shared
     // feed account on this platform, so the tenant is not optional here.
-    const quoted = await this.quoteFor(underlyingToken, userId, symbol);
+    const quoted = await this.quoteFor(underlyingToken, underlying.exchange ?? 'NSE', userId, symbol);
     if (quoted) return quoted;
 
     return {
@@ -494,40 +570,31 @@ export class SentinelTickSource implements TickSource {
    */
   private async quoteFor(
     token: string,
+    exchange: string,
     userId: string,
     symbol: string,
   ): Promise<SpotReading | null> {
     if (!this.userFeed) return null;
 
-    const cached = this.quotes.get(token);
+    const key = `${exchange}:${token}`;
+    const cached = this.quotes.get(key);
     if (cached && Date.now() - cached.at < SPOT_QUOTE_TTL_MS) {
-      // The CAPTURE time of the original quote, not this cache hit — the packet
-      // contracts for when the data was read, and a cache must not refresh a
-      // timestamp it did not refresh the price behind.
-      return {
-        ltp: cached.ltp,
-        at: cached.capturedAt,
-        source: SPOT_SOURCE_QUOTE,
-        reason: null,
-      };
+      // The CAPTURE time of the original quote, not this cache hit.
+      return { ltp: cached.ltp, at: cached.capturedAt, source: SPOT_SOURCE_QUOTE, reason: null };
     }
 
     try {
-      // 'NSE' because `resolveUnderlying` looks the cash row up on NSE and takes
-      // its token from there — the exchange has to be the one that token belongs
-      // to, not the derivative's (NFO/MCX), or the broker resolves nothing.
-      const tick = await this.userFeed.fetchQuote(userId, token, 'NSE');
+      // The UNDERLYING's own exchange (NSE for NIFTY and stocks, BSE for SENSEX),
+      // never the derivative's (NFO/BFO/MCX), or the broker resolves nothing.
+      const tick = await this.userFeed.fetchQuote(userId, token, exchange);
       const ltp = tick?.ltp;
       if (!Number.isFinite(ltp as number) || (ltp as number) <= 0) return null;
 
       const capturedAt = new Date().toISOString();
-      this.quotes.set(token, { at: Date.now(), ltp: ltp as number, capturedAt });
+      this.quotes.set(key, { at: Date.now(), ltp: ltp as number, capturedAt });
       return { ltp: ltp as number, at: capturedAt, source: SPOT_SOURCE_QUOTE, reason: null };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Warn, not debug: a permanently failing quote puts this position back in
-      // exactly the blind state this method exists to end, and at production log
-      // levels a debug is silence.
       this.logger.warn(
         `underlying quote failed for ${symbol} (token ${token}): ${message} — the spot, the ` +
           'nearest levels and the OI walls will all be absent for this tick',
@@ -543,25 +610,26 @@ export class SentinelTickSource implements TickSource {
    * intraday — and so is a resolved-to-nothing answer, which is a FACT about
    * this contract. A THROW is not cached: caching it would let one bad lookup
    * silence the level sensors for the rest of the process's life.
+   *
+   * Index underlyings come from market-hub/underlying.ts's one map: index rows
+   * are not in the instrument table.
    */
-  private async resolveUnderlying(token: string, symbol: string): Promise<Underlying> {
-    const cached = this.underlyings.get(token);
+  private async resolveUnderlying(exchange: string, token: string, symbol: string): Promise<Underlying> {
+    const key = `${String(exchange ?? '').toUpperCase()}:${token}`;
+    const cached = this.underlyings.get(key);
     if (cached) return cached;
 
     let resolved: Underlying = NO_UNDERLYING;
     try {
-      const contract = await this.instruments.getInstrumentByToken(token);
-      // The instrument master stores the UNDERLYING under `name` for a
-      // derivative row ('NIFTY' for NIFTY28AUG2524000CE).
-      const name = contract?.name ? normaliseSymbol(contract.name) : null;
-      if (name) {
-        const cash =
-          (await this.instruments.getInstrumentBySymbol(name, 'NSE')) ??
-          // Cash equities carry the series suffix in the master.
-          (await this.instruments.getInstrumentBySymbol(`${name}-EQ`, 'NSE'));
-        // The name survives a missing cash row: only the SPOT needs the token,
-        // while the level book and the news only ever needed the name.
-        resolved = { name, token: cash?.token ?? null };
+      const r = await resolveUnderlyingRef(
+        { exchange: exchange ?? '', token, symbol },
+        {
+          contract: (ex, tok) => this.instruments.getInstrumentByToken(tok, ex || undefined),
+          cash: (sym, ex) => this.instruments.getInstrumentBySymbol(sym, ex),
+        },
+      );
+      if (r.name) {
+        resolved = { name: normaliseSymbol(r.name), token: r.ref?.token ?? null, exchange: r.ref?.exchange ?? null };
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -571,20 +639,20 @@ export class SentinelTickSource implements TickSource {
 
     if (resolved.name === null) {
       this.warnOnce(
-        token,
+        key,
         `no underlying name on the instrument master for ${symbol} — its level book, its news ` +
           'and its OI walls are all unavailable, so the level, volume and news sensors will ' +
           'stay silent on this position for as long as it is held',
       );
     } else if (resolved.token === null) {
       this.warnOnce(
-        token,
-        `resolved ${symbol} to underlying ${resolved.name}, but no NSE cash/index instrument ` +
-          'for it — the level book and news still work, the underlying SPOT does not, so the ' +
-          'level and OI sensors stay silent',
+        key,
+        `resolved ${symbol} to underlying ${resolved.name}, but no cash/index instrument for it ` +
+          '— the level book and news still work, the underlying SPOT does not, so the level ' +
+          'and OI sensors stay silent',
       );
     }
-    this.underlyings.set(token, resolved);
+    this.underlyings.set(key, resolved);
     return resolved;
   }
 
@@ -596,10 +664,10 @@ export class SentinelTickSource implements TickSource {
   }
 
   /** The nearest expiry as 'YYYY-MM-DD', or null for cash (the OI capture key). */
-  private async expiryFor(token: string, segment: Segment): Promise<string | null> {
+  private async expiryFor(token: string, exchange: string, segment: Segment): Promise<string | null> {
     if (segment !== 'OPT' && segment !== 'FUT') return null;
     try {
-      const contract = await this.instruments.getInstrumentByToken(token);
+      const contract = await this.instruments.getInstrumentByToken(token, String(exchange ?? '').toUpperCase() || undefined);
       const expiry = contract?.expiry;
       if (!expiry) return null;
       return istDateOnly(expiry);

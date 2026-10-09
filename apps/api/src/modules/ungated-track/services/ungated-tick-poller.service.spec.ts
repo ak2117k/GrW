@@ -121,3 +121,53 @@ describe('UngatedTickPoller.pollOpenPositions', () => {
     expect(watch.onTick).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('UngatedTickPoller.eodSquareOff (15:25 IST)', () => {
+  let poller: UngatedTickPoller;
+  let adapter: { getLtpsBatch: jest.Mock };
+  let repo: { findAllActive: jest.Mock; update: jest.Mock };
+  let exec: { closeTrade: jest.Mock };
+  let exitPrice: { resolveExitPrices: jest.Mock };
+
+  beforeEach(async () => {
+    adapter = { getLtpsBatch: jest.fn().mockResolvedValue(new Map([['1594', 1]])) }; // must never be asked
+    repo = {
+      findAllActive: jest.fn().mockResolvedValue([
+        { id: 'u1', status: 'TRADED', token: '1594', exchange: 'NSE', symbol: 'INFY', paperTradeId: 'p9', currentPrice: 1488, executedPrice: 1500 },
+      ]),
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    exec = { closeTrade: jest.fn().mockResolvedValue(undefined) };
+    exitPrice = { resolveExitPrices: jest.fn() };
+    const mod = await Test.createTestingModule({
+      providers: [
+        UngatedTickPoller,
+        { provide: AngelOneAdapterService, useValue: adapter },
+        { provide: UngatedWatchRepository, useValue: repo },
+        { provide: UngatedWatchService, useValue: { onTick: jest.fn() } },
+        { provide: UngatedTradeExecutionService, useValue: exec },
+        { provide: ExitPriceService, useValue: exitPrice },
+      ],
+    }).compile();
+    poller = mod.get(UngatedTickPoller);
+  });
+
+  it('EOD at 15:25 with no fresh price closes at the last known price, not at 0', async () => {
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['1594', { price: 0, fresh: false, source: 'none' }]]));
+
+    await poller.eodSquareOff();
+
+    expect(exec.closeTrade).toHaveBeenCalledWith('p9', { reason: 'eod-square-off', exitPrice: 1488 });
+    expect(repo.update).toHaveBeenCalledWith('u1', expect.objectContaining({ status: 'EXITED', closedReason: 'eod-square-off' }));
+  });
+
+  it('closes at the fresh price through ExitPriceService, never the shared adapter', async () => {
+    exitPrice.resolveExitPrices.mockResolvedValue(new Map([['1594', { price: 1497, fresh: true, source: 'hub' }]]));
+
+    await poller.eodSquareOff();
+
+    expect(exitPrice.resolveExitPrices).toHaveBeenCalledWith('NSE', ['1594']);
+    expect(adapter.getLtpsBatch).not.toHaveBeenCalled();
+    expect(exec.closeTrade).toHaveBeenCalledWith('p9', { reason: 'eod-square-off', exitPrice: 1497 });
+  });
+});

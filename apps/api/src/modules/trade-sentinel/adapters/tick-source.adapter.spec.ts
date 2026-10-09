@@ -7,6 +7,9 @@ import {
   segmentFor,
   sideFor,
 } from './tick-source.adapter';
+import type { HubPriceSource, HubPrices } from '../../market-hub/hub-prices';
+import type { HubExchange, InstrumentRef, PriceResult } from '../../market-hub/hub.types';
+import { SPOT_SOURCE_HUB } from '../services/context-packet.service';
 
 const NOW = new Date('2026-08-14T06:00:00Z');
 
@@ -38,7 +41,7 @@ const row = (over: Record<string, unknown> = {}) => ({
  * for it — the blind case is what shipped, and it should never be what a new
  * test gets by accident.
  */
-function make(opts: { withFeed?: boolean } = {}) {
+function make(opts: { withFeed?: boolean; hub?: HubPriceSource } = {}) {
   const fetchQuote = jest.fn().mockResolvedValue(null);
   const userFeed = opts.withFeed === false ? undefined : ({ fetchQuote } as never);
   const findUnique = jest.fn().mockResolvedValue(row());
@@ -64,6 +67,7 @@ function make(opts: { withFeed?: boolean } = {}) {
     { getNewsForSymbol } as never,
     { structureFor } as never,
     userFeed,
+    opts.hub ? ({ get: jest.fn(() => opts.hub) } as never) : undefined,
   );
   return {
     svc,
@@ -76,6 +80,26 @@ function make(opts: { withFeed?: boolean } = {}) {
     fetchQuote,
   };
 }
+
+/** A hub that serves `owner` with fixed answers per EXCHANGE:token. */
+function hubWith(answers: Record<string, PriceResult>, owner = 'u1') {
+  const record = jest.fn();
+  const hub: HubPrices = {
+    price: jest.fn(
+      (ref: InstrumentRef): PriceResult => answers[`${ref.exchange}:${ref.token}`] ?? { kind: 'unavailable', reason: 'not-watched' },
+    ),
+    prices: jest.fn(),
+    watch: jest.fn().mockResolvedValue(undefined),
+    onPrice: jest.fn(() => () => undefined),
+  };
+  const source: HubPriceSource = { hubFor: jest.fn((userId: string | null) => (userId === owner ? hub : null)), record };
+  return { hub, source, record };
+}
+
+const freshAt = (exchange: HubExchange, token: string, ltp: number, at: number): PriceResult => ({
+  kind: 'fresh',
+  price: { ref: { exchange, token, symbol: token }, ltp, at, source: 'ws' },
+});
 
 describe('segmentFor', () => {
   it('reads an option off its CE/PE suffix, never off the exchange alone', () => {
@@ -277,6 +301,7 @@ describe('SentinelTickSource', () => {
   describe('derivatives', () => {
     const option = () =>
       row({ symbol: 'NIFTY28AUG2524000CE', exchange: 'NFO', token: '99', lastLtp: 120 });
+    const stockOption = () => row({ symbol: 'KEI29SEP265800CE', exchange: 'NFO', token: '77', lastLtp: 40 });
 
     it('resolves the expiry from the instrument master as YYYY-MM-DD', async () => {
       const t = make();
@@ -374,7 +399,7 @@ describe('SentinelTickSource', () => {
 
       // All three must be talking about the same underlying, or the packet
       // describes one instrument with another's evidence.
-      expect(t.getLevels).toHaveBeenCalledWith('26000');
+      expect(t.getLevels).toHaveBeenCalledWith('99926000');
       expect(t.structureFor.mock.calls[0][0]).toBe('NIFTY');
       expect(t.getNewsForSymbol.mock.calls[0][0]).toBe('NIFTY');
     });
@@ -382,9 +407,9 @@ describe('SentinelTickSource', () => {
     it('keeps the level book and the news when only the SPOT cannot be resolved', async () => {
       jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
       const t = make();
-      t.findUnique.mockResolvedValue(option());
-      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
-      // The NAME resolved; the cash/index instrument row did not.
+      t.findUnique.mockResolvedValue(stockOption());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'KEI', expiry: null });
+      // The NAME resolved; no NSE cash row (KEI-EQ, then KEI) did.
       t.getInstrumentBySymbol.mockResolvedValue(null);
 
       const tick = await t.svc.tickFor('t1');
@@ -392,8 +417,10 @@ describe('SentinelTickSource', () => {
       // Only the spot needs the token. Collapsing the two would take the level
       // book and the news down with it for no reason.
       expect(tick.underlyingLtp).toBeNull();
-      expect(t.structureFor).toHaveBeenCalledWith('NIFTY', null, 'u1');
-      expect(t.getNewsForSymbol).toHaveBeenCalledWith('NIFTY');
+      expect(t.getInstrumentBySymbol).toHaveBeenCalledWith('KEI-EQ', 'NSE');
+      expect(t.getInstrumentBySymbol).toHaveBeenCalledWith('KEI', 'NSE');
+      expect(t.structureFor).toHaveBeenCalledWith('KEI', null, 'u1');
+      expect(t.getNewsForSymbol).toHaveBeenCalledWith('KEI');
     });
 
     it('asks NEITHER adapter anything when the underlying name is unknown', async () => {
@@ -450,7 +477,7 @@ describe('SentinelTickSource', () => {
       // The premium and the spot are on different scales, and only the spot is
       // comparable against a level or a strike.
       expect(tick.underlyingLtp).toBe(24010);
-      expect(t.getLevels).toHaveBeenCalledWith('26000');
+      expect(t.getLevels).toHaveBeenCalledWith('99926000');
       // The TICK's time, not this instant. The spot may be up to
       // SPOT_STALENESS_MS old and still be served, so stamping "now" on it tells
       // the agent a minute-old price was read at packet build.
@@ -501,9 +528,9 @@ describe('SentinelTickSource', () => {
         const tick = await t.svc.tickFor('t1');
 
         expect(tick.underlyingLtp).toBe(24010);
-        // The CASH token on NSE — not the derivative's own token or exchange,
-        // which the broker would resolve to nothing.
-        expect(t.fetchQuote).toHaveBeenCalledWith('u1', '26000', 'NSE');
+        // The INDEX token on its own exchange — not the derivative's own token
+        // or exchange, which the broker would resolve to nothing.
+        expect(t.fetchQuote).toHaveBeenCalledWith('u1', '99926000', 'NSE');
         // Provenance must say which tier, because a REST snapshot and a live
         // print are not the same evidence.
         expect(tick.underlyingLtpSource).toMatch(/quote/i);
@@ -644,16 +671,164 @@ describe('SentinelTickSource', () => {
 
     it('memoises a SUCCESSFUL resolution — the master does not change intraday', async () => {
       const t = make();
-      t.findUnique.mockResolvedValue(option());
-      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
-      t.getInstrumentBySymbol.mockResolvedValue({ token: '26000' });
-      t.getLevels.mockReturnValue({ spot: 24010, lastTickAt: NOW });
+      t.findUnique.mockResolvedValue(stockOption());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'KEI', expiry: null });
+      t.getInstrumentBySymbol.mockResolvedValue({ token: '13310', symbol: 'KEI-EQ' });
+      t.getLevels.mockReturnValue({ spot: 4100, lastTickAt: NOW });
 
       await t.svc.tickFor('t1');
       const after = t.getInstrumentBySymbol.mock.calls.length;
       await t.svc.tickFor('t1');
 
+      expect(after).toBe(1);
       expect(t.getInstrumentBySymbol.mock.calls.length).toBe(after);
+      expect(t.getLevels).toHaveBeenCalledWith('13310');
+    });
+
+    it('looks the contract up WITH its exchange — tokens collide across segments', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+
+      await t.svc.tickFor('t1');
+
+      expect(t.getInstrumentByToken).toHaveBeenCalledWith('99', 'NFO');
+      expect(t.getInstrumentByToken.mock.calls.every((c) => c[1] === 'NFO')).toBe(true);
+    });
+
+    it('resolves an index option to the index token, with no cash lookup at all', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+      t.getLevels.mockReturnValue({ spot: 24010, lastTickAt: NOW });
+
+      const tick = await t.svc.tickFor('t1');
+
+      expect(tick.underlyingLtp).toBe(24010);
+      expect(t.getLevels).toHaveBeenCalledWith('99926000');
+      expect(t.getInstrumentBySymbol).not.toHaveBeenCalled();
+    });
+
+    it('quotes a SENSEX option’s underlying on BSE, not a hard-coded NSE', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(row({ symbol: 'SENSEX26OCT81000CE', exchange: 'BFO', token: '880', lastLtp: 300 }));
+      t.getInstrumentByToken.mockResolvedValue({ name: 'SENSEX', expiry: null });
+      t.fetchQuote.mockResolvedValue({ ltp: 81050 });
+
+      const tick = await t.svc.tickFor('t1');
+
+      expect(t.fetchQuote).toHaveBeenCalledWith('u1', '99919000', 'BSE');
+      expect(tick.underlyingLtp).toBe(81050);
+    });
+
+    it('quotes a stock option’s underlying on NSE by its -EQ cash row', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(stockOption());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'KEI', expiry: null });
+      t.getInstrumentBySymbol.mockImplementation(async (symbol: string) => (symbol === 'KEI-EQ' ? { token: '13310', symbol } : null));
+      t.fetchQuote.mockResolvedValue({ ltp: 4100 });
+
+      const tick = await t.svc.tickFor('t1');
+
+      expect(t.fetchQuote).toHaveBeenCalledWith('u1', '13310', 'NSE');
+      expect(tick.underlyingLtp).toBe(4100);
+    });
+
+    describe('the hub tier (HUB_PRICES_POSITIONS)', () => {
+      it('prices the contract from a fresh hub price, even when the tracker row is stale', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const { source, record } = hubWith({ 'NFO:99': freshAt('NFO', '99', 131, NOW.getTime() - 500) });
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue({ ...option(), updatedAt: new Date(NOW.getTime() - 10 * 60_000) });
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.ltp).toBe(131);
+        expect(record).toHaveBeenCalledWith('positions', 'hub');
+      });
+
+      it('falls back to the tracker row when the hub has never priced it', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const { source, record } = hubWith({ 'NFO:99': { kind: 'unavailable', reason: 'never-priced' } });
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue(option());
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.ltp).toBe(120);
+        expect(record).toHaveBeenCalledWith('positions', 'legacy');
+      });
+
+      it('a stale hub price and a stale row still refuse to judge, and count as unpriced', async () => {
+        const { source, record } = hubWith({
+          'NFO:99': { kind: 'stale', ageMs: 60_000, price: { ref: { exchange: 'NFO', token: '99', symbol: '99' }, ltp: 118, at: NOW.getTime() - 60_000, source: 'ws' } },
+        });
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue({ ...option(), updatedAt: new Date(NOW.getTime() - LTP_STALENESS_MS - 1) });
+
+        await expect(t.svc.tickFor('t1')).rejects.toThrow(/REFUSING to judge/i);
+        expect(record).toHaveBeenCalledWith('positions', 'unpriced');
+      });
+
+      it('a non-owner’s position never reads the owner’s hub', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const { hub, source } = hubWith({ 'NFO:99': freshAt('NFO', '99', 131, NOW.getTime()) }, 'owner');
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue(option()); // userId 'u1', not the hub's owner
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.ltp).toBe(120);
+        expect(hub.price).not.toHaveBeenCalled();
+      });
+
+      it('M1: a non-served user’s legacy or unpriced outcome never lands in consumers.positions', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const { source, record } = hubWith({}, 'owner');
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue(option()); // userId 'u1': legacy-priced from the row
+
+        await t.svc.tickFor('t1');
+        t.findUnique.mockResolvedValue({ ...option(), updatedAt: new Date(NOW.getTime() - LTP_STALENESS_MS - 1) });
+        await expect(t.svc.tickFor('t1')).rejects.toThrow(/REFUSING to judge/i); // unpriced
+
+        expect(record).not.toHaveBeenCalled();
+      });
+
+      it('takes an index option’s spot from the hub at priority 1', async () => {
+        const { source } = hubWith({
+          'NFO:99': freshAt('NFO', '99', 121, NOW.getTime()),
+          'NSE:99926000': freshAt('NSE', '99926000', 24010, NOW.getTime() - 800),
+        });
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.underlyingLtp).toBe(24010);
+        expect(tick.underlyingLtpSource).toBe(SPOT_SOURCE_HUB);
+        // The hub's receipt time, not the packet's build time.
+        expect(tick.underlyingLtpAt).toBe(new Date(NOW.getTime() - 800).toISOString());
+        expect(t.getInstrumentBySymbol).not.toHaveBeenCalled();
+        expect(t.getLevels).not.toHaveBeenCalled();
+        expect(t.fetchQuote).not.toHaveBeenCalled();
+      });
+
+      it('a hub spot that is not fresh falls through to the level book and then the quote', async () => {
+        const { source } = hubWith({ 'NSE:99926000': { kind: 'unavailable', reason: 'never-priced' } });
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue(option());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+        t.fetchQuote.mockResolvedValue({ ltp: 24005 });
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(t.getLevels).toHaveBeenCalledWith('99926000');
+        expect(t.fetchQuote).toHaveBeenCalledWith('u1', '99926000', 'NSE');
+        expect(tick.underlyingLtp).toBe(24005);
+        expect(tick.underlyingLtpSource).toMatch(/quote/i);
+      });
     });
   });
 });

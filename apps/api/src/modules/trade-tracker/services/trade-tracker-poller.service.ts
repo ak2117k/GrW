@@ -1,9 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { Cron, Interval } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
-import { TradeTrackerService } from './trade-tracker.service';
+import type { TokenRef } from '../../market-data/services/user-feed.types';
+import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
+import { isHubExchange, refKey, type InstrumentRef, type Price, type PriceResult } from '../../market-hub/hub.types';
+import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
+import { SessionClock } from '../../market-hub/session-clock';
+import { TradeTrackerService, type TickTarget } from './trade-tracker.service';
 
 /**
  * Drives the per-trade tracker (design §4.2 / §4.3).
@@ -25,7 +31,7 @@ import { TradeTrackerService } from './trade-tracker.service';
  * failure never aborts the batch.
  */
 @Injectable()
-export class TradeTrackerPoller {
+export class TradeTrackerPoller implements OnModuleDestroy {
   private readonly logger = new Logger(TradeTrackerPoller.name);
 
   /**
@@ -60,6 +66,26 @@ export class TradeTrackerPoller {
    */
   private static readonly WS_FRESH_MS = 30_000;
 
+  /** Spec §2 / §5.3: an open position's price is at most 5 s old (Position Manager maxAge). */
+  private static readonly HUB_MAX_AGE_MS = 5000;
+
+  /** The hub-served user's open instruments (EXCHANGE:token), rebuilt every sweep; read by the tick listener. */
+  private hubOwned = new Map<string, TickTarget>();
+  private hubUserId: string | null = null;
+  private unsubscribeHub: (() => void) | null = null;
+  private hubSourceRef: HubPriceSource | null = null;
+
+  /** I2: consecutive hub=0 sweeps before a served user's silent hub is reported. */
+  private static readonly HUB_ZERO_RUN = 5;
+  /** I2/H2: at most one such warning per 10 minutes. */
+  private static readonly HUB_WARN_EVERY_MS = 10 * 60_000;
+  /** Per hub-served user (today only the owner): the current hub=0 run, and when it last warned. */
+  private readonly hubZeroRuns = new Map<string, number>();
+  private readonly hubZeroWarnedAt = new Map<string, number>();
+  private hubFailureWarnedAt: number | null = null;
+  /** Per-exchange session hours (the hub's own calendar), so I2 counts only open instruments. */
+  private readonly session = new SessionClock({ holidays: MARKET_HOLIDAYS });
+
   /** Guards against overlapping reconcile passes (a slow broker cycle). */
   private reconciling = false;
 
@@ -71,7 +97,13 @@ export class TradeTrackerPoller {
     private readonly feed: MarketFeedService,
     private readonly userFeeds: UserFeedManager,
     private readonly service: TradeTrackerService,
+    private readonly moduleRef: ModuleRef,
   ) {}
+
+  onModuleDestroy(): void {
+    this.unsubscribeHub?.();
+    this.unsubscribeHub = null;
+  }
 
   /**
    * Reconcile every credentialed user's book, then (re)subscribe all OPEN
@@ -138,8 +170,13 @@ export class TradeTrackerPoller {
    * — and P&L, the day extremes and the entire sentinel context packet read that
    * frozen number as the market. Prioritising the queue only decided who starved.
    *
-   * Two tiers, in this order:
+   * Tiers, in this order:
    *
+   *  0. HUB (HUB_PRICES_POSITIONS) — for the user the hub serves (the owner), a
+   *     price ≤ 5 s old, scoped to that user. Between sweeps the hub tick
+   *     listener applies every new price as it arrives; this sweep is the
+   *     safety net. A hub-served instrument then takes no unscoped legacy tick
+   *     for that user this sweep; one the hub could not price falls through.
    *  1. FAST PATH — the socket cache, when its tick is fresher than
    *     {@link WS_FRESH_MS}. Sub-second, already paid for, no broker call.
    *  2. BATCHED REST — everything the pool could not serve, via
@@ -149,9 +186,10 @@ export class TradeTrackerPoller {
    *
    * Tier 2 is per-USER because this platform has no shared feed account — every
    * broker read goes over the owning user's own Angel session. The PRICE it
-   * returns, though, is market-wide: `applyTick` deliberately updates every
-   * user's trackers on that token, so one tenant's session answering for a token
-   * two tenants hold is correct, not a leak, and saves the second call.
+   * returns, though, is market-wide: an unscoped `applyTick` deliberately updates
+   * every user's trackers on that exchange + token, so one tenant's session
+   * answering for an instrument two tenants hold is correct, not a leak, and
+   * saves the second call.
    *
    * Each user is tried in its own try/catch: one expired Angel session must cost
    * that user's prices, not everyone's.
@@ -169,21 +207,40 @@ export class TradeTrackerPoller {
     this.sweeping = true;
     try {
       const byUser = await this.service.openTrackerRefsByUser();
+      const source = this.hubSource();
+      // Tier 0 first, and always: it also rebuilds (or empties) the set the hub
+      // tick listener prices between sweeps.
+      const { served, hubUsers } = this.priceFromHub(byUser, source);
+      this.watchHubZero(hubUsers);
       if (byUser.size === 0) return;
 
-      // Tokens still needing a price, deduped across tenants: two users holding
-      // the same instrument need one quote between them.
+      // Instruments still needing a price, keyed EXCHANGE:token (tokens collide
+      // across exchanges) and deduped across tenants.
       const unpriced = new Set<string>();
+      const shared = tokensOnSeveralExchanges(byUser);
       let fromSocket = 0;
-      for (const refs of byUser.values()) {
+      for (const [userId, refs] of byUser) {
         for (const ref of refs) {
-          if (unpriced.has(ref.token)) continue;
-          const quote = this.feed.getQuote(ref.token);
-          if (quote && quote.ltp > 0 && this.isFresh(quote.timestamp)) {
-            this.service.applyTick(ref.token, quote.ltp);
+          const key = tickRefKey(ref);
+          // A hub-served instrument takes NO unscoped legacy tick for its user: an
+          // unscoped price would overwrite the hub's in any flush window holding no
+          // scoped tick, and the user's rows would flip-flop between the sources.
+          if (served.has(`${userId}|${key}`) || unpriced.has(key)) continue;
+          // The socket cache is read by token alone (NSE → BSE → MCX), so a hit
+          // counts only when the quote's own exchange is the ref's: an NFO option
+          // must never take the price of an NSE equity that shares its token. A
+          // token held on two exchanges skips the cache outright.
+          const quote = shared.has(ref.token) ? null : this.feed.getQuote(ref.token);
+          if (
+            quote &&
+            quote.ltp > 0 &&
+            String(quote.exchange ?? '').toUpperCase() === exchangeOf(ref) &&
+            this.isFresh(quote.timestamp)
+          ) {
+            this.service.applyTick(ref, quote.ltp);
             fromSocket++;
           } else {
-            unpriced.add(ref.token);
+            unpriced.add(key);
           }
         }
       }
@@ -191,47 +248,192 @@ export class TradeTrackerPoller {
       let fromRest = 0;
       let failedUsers = 0;
       for (const [userId, refs] of byUser) {
-        const wanted = refs.filter((r) => unpriced.has(r.token));
+        const wanted = refs.filter((r) => {
+          const key = tickRefKey(r);
+          return unpriced.has(key) && !served.has(`${userId}|${key}`);
+        });
         if (wanted.length === 0) continue;
 
         try {
           const quotes = await this.userFeeds.fetchQuotes(userId, wanted);
           for (const [token, tick] of quotes) {
             if (!tick || !(tick.ltp > 0)) continue;
-            this.service.applyTick(token, tick.ltp);
+            // Angel answers keyed by token alone: attribute it only when this user
+            // asked for that token on exactly one exchange.
+            const asked = wanted.filter((r) => r.token === token);
+            if (asked.length !== 1) continue;
+            this.service.applyTick(asked[0], tick.ltp);
             // Priced — no later user is asked for it again this pass.
-            unpriced.delete(token);
+            unpriced.delete(tickRefKey(asked[0]));
             fromRest++;
           }
         } catch (err) {
           failedUsers++;
-          // Leave this user's tokens in `unpriced`: another tenant holding the
-          // same instrument later in the loop can still answer for it, and the
-          // ones only this user holds simply wait for the next sweep.
+          // Leave this user's instruments in `unpriced`: another tenant holding the
+          // same instrument later in the loop can still answer for it.
           this.logger.warn(
-            `[trade-tracker] batched quote fetch failed for a user: ${
-              err instanceof Error ? err.message : err
-            }`,
+            `[trade-tracker] batched quote fetch failed for a user: ${err instanceof Error ? err.message : err}`,
           );
         }
       }
 
+      // M1: consumers.positions counts only the users the hub serves, so the
+      // production gate reads the hub's own share; other tenants are legacy by
+      // design and would only confound it.
+      if (source && hubUsers.size > 0) {
+        let legacy = 0;
+        let notPriced = 0;
+        for (const userId of hubUsers.keys()) {
+          for (const ref of byUser.get(userId) ?? []) {
+            const key = tickRefKey(ref);
+            if (served.has(`${userId}|${key}`)) continue;
+            if (unpriced.has(key)) notPriced++;
+            else legacy++;
+          }
+        }
+        source.record('positions', 'hub', served.size);
+        source.record('positions', 'legacy', legacy);
+        source.record('positions', 'unpriced', notPriced);
+      }
+
       if (unpriced.size > 0) {
-        // Not noise: a token nobody could quote is a tracker whose LTP is now
-        // ageing, which is the exact shape of the failure this sweep exists to
-        // prevent. Name the count so it is visible before it becomes hours old.
+        // Not noise: an instrument nobody could quote is a tracker whose LTP is now ageing.
         this.logger.warn(
           `[trade-tracker] ${unpriced.size} open token(s) went unpriced this sweep ` +
-            `(socket=${fromSocket}, rest=${fromRest}, failed users=${failedUsers})`,
+            `(hub=${served.size}, socket=${fromSocket}, rest=${fromRest}, failed users=${failedUsers})`,
         );
       } else {
         this.logger.debug(
-          `[trade-tracker] swept ${fromSocket + fromRest} token(s) (socket=${fromSocket}, rest=${fromRest})`,
+          `[trade-tracker] swept ${served.size + fromSocket + fromRest} token(s) ` +
+            `(hub=${served.size}, socket=${fromSocket}, rest=${fromRest})`,
         );
       }
     } finally {
       this.sweeping = false;
     }
+  }
+
+  /**
+   * Tier 0 (HUB_PRICES_POSITIONS): the hub, for the users it serves (today the
+   * owner only, see HubPriceSource.hubFor). A fresh (≤ 5 s) price is applied
+   * scoped to that user; anything else falls through to the legacy tiers.
+   * Returns `${userId}|EXCHANGE:token` for every instrument served here.
+   */
+  private priceFromHub(
+    byUser: Map<string, TokenRef[]>,
+    source: HubPriceSource | null,
+  ): { served: Set<string>; hubUsers: Map<string, { asked: number; hit: number }> } {
+    const served = new Set<string>();
+    const hubUsers = new Map<string, { asked: number; hit: number }>();
+    const owned = new Map<string, TickTarget>();
+    let owner: string | null = null;
+    for (const [userId, refs] of byUser) {
+      let hub: HubPrices | null = null;
+      try {
+        hub = source?.hubFor(userId, 'positions') ?? null;
+        if (!hub) continue;
+        if (!this.unsubscribeHub) this.unsubscribeHub = hub.onPrice((p) => this.onHubPrice(p));
+      } catch (err) {
+        // A hub that cannot even say whether it serves this user serves nobody this sweep.
+        this.warnHubFailure(err);
+        continue;
+      }
+      owner = userId;
+      const hubRefs = refs.map(toHubRef).filter((r): r is InstrumentRef => r !== null);
+      const tally = { asked: hubRefs.length, hit: 0 };
+      hubUsers.set(userId, tally);
+      for (const ref of hubRefs) owned.set(refKey(ref), { exchange: ref.exchange, token: ref.token });
+      let results: Map<string, PriceResult>;
+      try {
+        results = hub.prices(hubRefs, { maxAgeMs: TradeTrackerPoller.HUB_MAX_AGE_MS });
+      } catch (err) {
+        // H2: a throwing hub is a hub that served nothing; the legacy tiers price this user.
+        this.warnHubFailure(err);
+        continue;
+      }
+      // N counts only instruments whose own exchange is open: the sweep's gate is
+      // "any market open" (MCX runs to 23:30), and a shut NFO is not a hub that
+      // stopped serving.
+      const at = new Date();
+      tally.asked = hubRefs.filter((r) => this.session.isOpen(r.exchange, at)).length;
+      for (const ref of hubRefs) {
+        const key = refKey(ref);
+        const r = results.get(key);
+        if (r?.kind !== 'fresh') continue;
+        this.service.applyTick({ exchange: ref.exchange, token: ref.token }, r.price.ltp, { userId });
+        served.add(`${userId}|${key}`);
+        tally.hit++;
+      }
+    }
+    this.hubOwned = owned;
+    this.hubUserId = owner;
+    return { served, hubUsers };
+  }
+
+  /**
+   * I2: legacy silently covers a hub that has stopped serving, so the sweep says
+   * so. A served user whose hub tier priced 0 of N (N > 0) open instruments for
+   * {@link HUB_ZERO_RUN} sweeps in a row (every sweep that runs is market-open)
+   * warns, at most once per {@link HUB_WARN_EVERY_MS} per user. Any hub-served
+   * sweep restarts the run. Names counts only, never the user.
+   */
+  private watchHubZero(hubUsers: Map<string, { asked: number; hit: number }>): void {
+    for (const userId of [...this.hubZeroRuns.keys()]) {
+      if (!hubUsers.has(userId)) this.hubZeroRuns.delete(userId);
+    }
+    const now = Date.now();
+    let users = 0;
+    let instruments = 0;
+    for (const [userId, { asked, hit }] of hubUsers) {
+      if (asked === 0 || hit > 0) {
+        this.hubZeroRuns.delete(userId);
+        continue;
+      }
+      const run = (this.hubZeroRuns.get(userId) ?? 0) + 1;
+      this.hubZeroRuns.set(userId, run);
+      if (run < TradeTrackerPoller.HUB_ZERO_RUN) continue;
+      const last = this.hubZeroWarnedAt.get(userId);
+      if (last !== undefined && now - last < TradeTrackerPoller.HUB_WARN_EVERY_MS) continue;
+      this.hubZeroWarnedAt.set(userId, now);
+      users++;
+      instruments += asked;
+    }
+    if (users > 0) {
+      this.logger.warn(
+        `[trade-tracker] hub served 0 of ${instruments} open instrument(s) for ${users} hub-served user(s) ` +
+          `for ${TradeTrackerPoller.HUB_ZERO_RUN}+ consecutive sweeps; the legacy tiers are covering ` +
+          `(check /healthz/detail hub.consumers and hub.socketUp)`,
+      );
+    }
+  }
+
+  /** H2: a throwing hub tier, rate-limited to one warn per {@link HUB_WARN_EVERY_MS}. */
+  private warnHubFailure(err: unknown): void {
+    const now = Date.now();
+    if (this.hubFailureWarnedAt !== null && now - this.hubFailureWarnedAt < TradeTrackerPoller.HUB_WARN_EVERY_MS) return;
+    this.hubFailureWarnedAt = now;
+    this.logger.warn(
+      `[trade-tracker] hub tier failed, legacy tiers pricing instead: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+
+  /** Every hub price (tick or polled quote) for an instrument the served user holds, as it arrives. */
+  private onHubPrice(p: Price): void {
+    try {
+      const userId = this.hubUserId;
+      const target = this.hubOwned.get(refKey(p.ref));
+      if (!userId || !target || !(p.ltp > 0)) return;
+      this.service.applyTick(target, p.ltp, { userId });
+    } catch (err) {
+      // Never throw into the hub's emit loop: it feeds every other consumer too.
+      this.logger.warn(`[trade-tracker] hub price apply failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /** Resolved lazily (MarketHubModule imports this module); a miss is retried next sweep. */
+  private hubSource(): HubPriceSource | null {
+    if (!this.hubSourceRef) this.hubSourceRef = lookupHubPrices(this.moduleRef);
+    return this.hubSourceRef;
   }
 
   /**
@@ -250,4 +452,33 @@ export class TradeTrackerPoller {
     if (!Number.isFinite(at)) return false;
     return Date.now() - at < TradeTrackerPoller.WS_FRESH_MS;
   }
+}
+
+/** EXCHANGE:token — the tracker's instrument key (tokens collide across exchanges). */
+function tickRefKey(ref: TokenRef): string {
+  return `${exchangeOf(ref)}:${ref.token}`;
+}
+
+/** The ref's exchange, upper-cased (rows may store `nfo`). */
+function exchangeOf(ref: TokenRef): string {
+  return String(ref.exchange ?? '').toUpperCase();
+}
+
+/** Tokens that open trackers hold on more than one exchange (unsafe for token-keyed caches). */
+function tokensOnSeveralExchanges(byUser: Map<string, TokenRef[]>): Set<string> {
+  const exchanges = new Map<string, Set<string>>();
+  for (const refs of byUser.values()) {
+    for (const r of refs) {
+      const set = exchanges.get(r.token) ?? new Set<string>();
+      set.add(String(r.exchange ?? '').toUpperCase());
+      exchanges.set(r.token, set);
+    }
+  }
+  return new Set([...exchanges].filter(([, set]) => set.size > 1).map(([token]) => token));
+}
+
+/** The hub's ref for a tracker instrument, or null for an exchange the hub does not speak. */
+function toHubRef(ref: TokenRef): InstrumentRef | null {
+  const exchange = String(ref.exchange ?? '').toUpperCase();
+  return isHubExchange(exchange) && ref.token ? { exchange, token: ref.token, symbol: ref.token } : null;
 }

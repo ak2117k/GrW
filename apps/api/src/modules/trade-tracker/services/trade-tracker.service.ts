@@ -36,6 +36,31 @@ export interface BookItem {
   ltp: number;
 }
 
+/** An open tracker's instrument with its broker tradingsymbol (the hub's watch set). */
+export interface PositionRef {
+  exchange: string;
+  token: string;
+  symbol: string;
+}
+
+/** Which instrument a tick prices. Tokens collide across exchanges, so both are required. */
+export interface TickTarget {
+  exchange: string;
+  token: string;
+}
+
+interface PendingTick {
+  /** null = legacy, market-wide (every holder); a userId = that user's trackers only (hub). */
+  userId: string | null;
+  exchange: string;
+  token: string;
+  ltp: number;
+}
+
+function tickKey(userId: string | null, exchange: string, token: string): string {
+  return `${userId ?? '*'}|${exchange.toUpperCase()}:${token}`;
+}
+
 /** Coerce a broker numeric-string (or number/null/undefined) to a finite number. */
 function toNum(v: unknown): number {
   const n = typeof v === 'number' ? v : parseFloat(String(v ?? ''));
@@ -265,8 +290,8 @@ const OPEN_TOKENS_TTL_MS = 60_000;
 export class TradeTrackerService implements OnModuleDestroy {
   private readonly logger = new Logger(TradeTrackerService.name);
 
-  /** Latest pending LTP per token, coalesced between debounced flushes. */
-  private readonly pendingTicks = new Map<string, number>();
+  /** Latest pending LTP per (scope, EXCHANGE:token), coalesced between debounced flushes. */
+  private readonly pendingTicks = new Map<string, PendingTick>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
@@ -282,10 +307,7 @@ export class TradeTrackerService implements OnModuleDestroy {
    * sweep asks for it on every pass and the OPEN set only moves when a position
    * opens or closes. See {@link openTrackerRefsByUser}.
    */
-  private openRefsCache: {
-    byUser: Map<string, TokenRef[]>;
-    at: number;
-  } | null = null;
+  private openRefsCache: { byUser: Map<string, PositionRef[]>; at: number } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -500,13 +522,18 @@ export class TradeTrackerService implements OnModuleDestroy {
   }
 
   /**
-   * Fold a live tick into every OPEN tracker on `token`. Writes are DEBOUNCED:
-   * the latest LTP per token is coalesced and flushed in a batch every
-   * {@link TICK_DEBOUNCE_MS}, not once per call (design §4.1).
+   * Fold a price into OPEN trackers on `target` (exchange + token). Without a
+   * scope the price is market-wide and reaches every holder (the legacy sweep's
+   * contract). With `{ userId }` it reaches only that user's trackers: the hub
+   * prices a user's positions from that user's own session and never anyone
+   * else's. Writes are DEBOUNCED: the latest LTP per (scope, instrument) is
+   * flushed in a batch every {@link TICK_DEBOUNCE_MS} (design §4.1).
    */
-  applyTick(token: string, ltp: number): void {
-    if (!token || !(ltp > 0)) return;
-    this.pendingTicks.set(token, ltp);
+  applyTick(target: TickTarget, ltp: number, scope?: { userId: string }): void {
+    if (!target?.token || !target.exchange || !(ltp > 0)) return;
+    const userId = scope?.userId ?? null;
+    const exchange = target.exchange.toUpperCase();
+    this.pendingTicks.set(tickKey(userId, exchange, target.token), { userId, exchange, token: target.token, ltp });
     if (!this.flushTimer) {
       this.flushTimer = setTimeout(() => {
         this.flushTimer = null;
@@ -516,16 +543,16 @@ export class TradeTrackerService implements OnModuleDestroy {
   }
 
   /**
-   * Flush all coalesced ticks: for each pending token, update every OPEN
-   * tracker across all users (ticks are market-wide, valid for any holder).
-   * Exposed for the poller's shutdown drain and for tests.
+   * Flush all coalesced ticks. Each OPEN tracker takes the price for its own
+   * exchange + token: its user's scoped (hub) price if one is pending, else the
+   * market-wide one. Exposed for the poller's shutdown drain and for tests.
    */
   async flushTicks(): Promise<void> {
     if (this.pendingTicks.size === 0) return;
     const batch = new Map(this.pendingTicks);
     this.pendingTicks.clear();
 
-    const tokens = [...batch.keys()];
+    const tokens = [...new Set([...batch.values()].map((t) => t.token))];
     const open = await this.prisma.tradeTracker.findMany({
       where: { status: 'OPEN', token: { in: tokens } },
     });
@@ -533,9 +560,11 @@ export class TradeTrackerService implements OnModuleDestroy {
 
     const now = new Date();
     for (const tracker of open) {
-      const ltp = batch.get(tracker.token);
-      if (ltp === undefined) continue;
-      const patch = computeTickPatch(tracker, ltp, now);
+      const exchange = String(tracker.exchange ?? '').toUpperCase();
+      const tick =
+        batch.get(tickKey(tracker.userId, exchange, tracker.token)) ?? batch.get(tickKey(null, exchange, tracker.token));
+      if (!tick) continue;
+      const patch = computeTickPatch(tracker, tick.ltp, now);
       try {
         await this.prisma.tradeTracker.updateMany({
           where: { id: tracker.id, userId: tracker.userId },
@@ -634,41 +663,45 @@ export class TradeTrackerService implements OnModuleDestroy {
    *
    * CACHED and invalidated on the same open/close edges as
    * {@link distinctOpenTokens} — see {@link invalidateOpenTokens}.
+   *
+   * Derived from {@link openPositionRefsByUser}: one query and one cache serve both.
    */
   async openTrackerRefsByUser(): Promise<Map<string, TokenRef[]>> {
+    const byUser = await this.openPositionRefsByUser();
+    return new Map([...byUser].map(([u, refs]) => [u, refs.map((r) => ({ token: r.token, exchange: r.exchange }))]));
+  }
+
+  /**
+   * Every OPEN tracker's instrument WITH its tradingsymbol, grouped by owning
+   * user and ordered by {@link byFeedPriority}. The hub watches the owner's set
+   * at priority 0. One token held on two exchanges is two instruments; one
+   * instrument held as a POSITION and a HOLDING is one. Cached for
+   * {@link OPEN_TOKENS_TTL_MS} and invalidated with the token queue.
+   */
+  async openPositionRefsByUser(): Promise<Map<string, PositionRef[]>> {
     const cached = this.openRefsCache;
     if (cached && Date.now() - cached.at < OPEN_TOKENS_TTL_MS) {
-      // Copy down to the arrays: a caller that filters its group in place would
-      // silently shrink which of a user's positions get priced on every later
-      // sweep, and a position that stops being priced does not look broken.
-      return new Map([...cached.byUser].map(([u, refs]) => [u, [...refs]]));
+      return new Map([...cached.byUser].map(([u, refs]) => [u, refs.map((r) => ({ ...r }))]));
     }
 
     const rows = await this.prisma.tradeTracker.findMany({
       where: { status: 'OPEN' },
-      select: {
-        userId: true,
-        token: true,
-        symbol: true,
-        exchange: true,
-        kind: true,
-      },
+      select: { userId: true, token: true, symbol: true, exchange: true, kind: true },
     });
 
-    const byUser = new Map<string, TokenRef[]>();
+    const byUser = new Map<string, PositionRef[]>();
     for (const row of [...rows].sort(byFeedPriority)) {
       if (!row.userId || !row.token || !row.exchange) continue;
       const refs = byUser.get(row.userId) ?? [];
-      // One user can hold the same token as both a POSITION and a HOLDING;
-      // asking the broker for it twice in one payload buys nothing.
-      if (!refs.some((r) => r.token === row.token)) {
-        refs.push({ token: row.token, exchange: row.exchange });
+      const exchange = row.exchange.toUpperCase();
+      if (!refs.some((r) => r.token === row.token && r.exchange.toUpperCase() === exchange)) {
+        refs.push({ exchange: row.exchange, token: row.token, symbol: row.symbol || row.token });
       }
       byUser.set(row.userId, refs);
     }
 
     this.openRefsCache = { byUser, at: Date.now() };
-    return new Map([...byUser].map(([u, refs]) => [u, [...refs]]));
+    return new Map([...byUser].map(([u, refs]) => [u, refs.map((r) => ({ ...r }))]));
   }
 
   /**

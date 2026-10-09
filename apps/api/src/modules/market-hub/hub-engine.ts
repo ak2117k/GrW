@@ -5,6 +5,7 @@ import type { CandlesResult, Timeframe } from './candles/candle.types';
 import { istMidnight } from './candles/trading-calendar';
 import { DEFAULT_RATES, Governor, type GovernorMetrics } from './governor';
 import type { HubBroker } from './hub-broker';
+import type { HubConsumer, HubOutcome } from './hub-prices';
 import {
   LANE,
   refKey,
@@ -30,6 +31,14 @@ export interface HubEngineDeps {
   defaults: readonly InstrumentRef[];
   /** M2 CandleStore. Absent ⇒ no tick bars, no candle reads (M1 behaviour). */
   candles?: { repo: CandleRepo; interactiveCallBudget?: number };
+  /** The HUB_PRICES_POSITIONS / HUB_PRICES_TRACKS switches, read at status time. Absent ⇒ both off. */
+  consumerFlags?: () => ConsumerFlags;
+}
+
+/** The two consumer switches, so /healthz/detail tells "hub served 0" apart from "switch off". */
+export interface ConsumerFlags {
+  positions: boolean;
+  tracks: boolean;
 }
 
 export interface CandleStatus {
@@ -46,6 +55,15 @@ export interface CandleStatus {
   fillErrors: number;
   lastError: string | null;
   lastFixup: FixupReport | null;
+}
+
+/** One consumer's outcomes since boot (spec §10: unpriced positions must be visible, never silent). */
+export interface ConsumerCounters {
+  hub: number;
+  legacy: number;
+  unpriced: number;
+  lastHubAt: number | null;
+  lastUnpricedAt: number | null;
 }
 
 export interface HubStatus {
@@ -66,6 +84,8 @@ export interface HubStatus {
   lastError: string | null;
   /** M2 candle store; null when candles are not enabled. */
   candles: CandleStatus | null;
+  /** M3: per consumer, how often the hub served, the legacy path served, or nothing did. */
+  consumers: { positions: ConsumerCounters; tracks: ConsumerCounters; listenerErrors: number; flags: ConsumerFlags };
 }
 
 const POSITIONS = 'hub:positions';
@@ -83,7 +103,7 @@ export class HubEngine {
   readonly governor: Governor;
   readonly feed: LiveFeed;
   private readonly poller: QuotePoller;
-  private positions = new Map<string, InstrumentRef>();
+  private positions = new Map<string, { ref: InstrumentRef; priority: Priority }>();
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private lastError: string | null = null;
   private readonly builder: CandleBuilder | null;
@@ -95,6 +115,12 @@ export class HubEngine {
   private tickWriteFailures = 0;
   private lastTickWriteAt: number | null = null;
   private lastFixup: FixupReport | null = null;
+  private readonly priceListeners = new Set<(p: Price) => void>();
+  private listenerErrors = 0;
+  private readonly consumerCounts: Record<HubConsumer, ConsumerCounters> = {
+    positions: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
+    tracks: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
+  };
 
   constructor(private readonly d: HubEngineDeps) {
     this.governor = new Governor({
@@ -106,6 +132,7 @@ export class HubEngine {
       isThrottle: (e) => e instanceof AngelThrottleError,
     });
     this.feed = new LiveFeed({ broker: d.broker, registry: this.registry, book: this.book, cap: d.cap });
+    this.feed.onPrice((p) => this.emit(p));
     const batcher = new QuoteBatcher(this.governor, (refs) => d.broker.quotes(refs));
     this.poller = new QuotePoller({
       feed: this.feed,
@@ -114,6 +141,7 @@ export class HubEngine {
       clock: d.clock,
       nearLiveTargetMs: 5000,
       criticalTargetMs: 2000,
+      onPrice: (p) => this.emit(p),
     });
     if (d.candles) {
       const builder = new CandleBuilder(TICK_GRACE_MS);
@@ -192,12 +220,19 @@ export class HubEngine {
     await this.feed.reconcile();
   }
 
-  /** Replace the set of open-position instruments (priority 0). */
-  async setPositions(refs: readonly InstrumentRef[]): Promise<void> {
-    const next = new Map(refs.map((r) => [refKey(r), r] as const));
+  /**
+   * Replace the open-position set: contracts at priority 0 and their underlyings
+   * at priority 1, all under one owner, so neither is ever demoted (spec §5.1).
+   * An instrument that is both (a cash holding that is also an option's
+   * underlying) stays priority 0.
+   */
+  async setPositions(refs: readonly InstrumentRef[], underlyings: readonly InstrumentRef[] = []): Promise<void> {
+    const next = new Map<string, { ref: InstrumentRef; priority: Priority }>();
+    for (const r of underlyings) next.set(refKey(r), { ref: r, priority: 1 });
+    for (const r of refs) next.set(refKey(r), { ref: r, priority: 0 });
     const now = Date.now();
-    for (const [k, r] of this.positions) if (!next.has(k)) this.registry.unwatch(r, POSITIONS);
-    for (const r of next.values()) this.registry.watch(r, 0, POSITIONS, now);
+    for (const [k, e] of this.positions) if (!next.has(k)) this.registry.unwatch(e.ref, POSITIONS);
+    for (const e of next.values()) this.registry.watch(e.ref, e.priority, POSITIONS, now);
     this.positions = next;
     await this.feed.reconcile();
   }
@@ -216,8 +251,38 @@ export class HubEngine {
     return new Map(refs.map((r) => [refKey(r), this.price(r, opts)] as const));
   }
 
+  /** Every price the hub learns: live ticks AND polled quotes (WS-down P0/P1, near-live). */
   onPrice(fn: (p: Price) => void): () => void {
-    return this.feed.onPrice(fn);
+    this.priceListeners.add(fn);
+    return () => {
+      this.priceListeners.delete(fn);
+    };
+  }
+
+  /** A consumer's bug must not stop the feed, the other consumers or the candle builder. */
+  private emit(p: Price): void {
+    for (const fn of this.priceListeners) {
+      try {
+        fn(p);
+      } catch {
+        this.listenerErrors++;
+      }
+    }
+  }
+
+  /** Register several watches, then reconcile once. Never rejects (the failure is in status().lastError). */
+  async watchMany(refs: readonly InstrumentRef[], priority: Priority, owner: string, ttlMs?: number): Promise<void> {
+    const now = Date.now();
+    for (const r of refs) this.registry.watch(r, priority, owner, now, ttlMs);
+    await this.reconcileSafely();
+  }
+
+  recordConsumer(consumer: HubConsumer, outcome: HubOutcome, count = 1): void {
+    if (!(count > 0)) return;
+    const c = this.consumerCounts[consumer];
+    c[outcome] += count;
+    if (outcome === 'hub') c.lastHubAt = Date.now();
+    if (outcome === 'unpriced') c.lastUnpricedAt = Date.now();
   }
 
   get candlesEnabled(): boolean {
@@ -329,6 +394,12 @@ export class HubEngine {
       calendar: { missingYear: this.d.clock.calendarGap(new Date(now)) },
       lastError: this.lastError,
       candles: this.candleStatus(),
+      consumers: {
+        positions: { ...this.consumerCounts.positions },
+        tracks: { ...this.consumerCounts.tracks },
+        listenerErrors: this.listenerErrors,
+        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false },
+      },
     };
   }
 }

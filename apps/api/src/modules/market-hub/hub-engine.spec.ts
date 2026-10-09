@@ -4,7 +4,7 @@ import { SessionClock } from './session-clock';
 import { FakeBroker } from './testing/fake-broker';
 import { MemoryCandleRepo } from './testing/memory-candle-repo';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
-import type { InstrumentRef } from './hub.types';
+import { refKey, type InstrumentRef } from './hub.types';
 
 const IST = (local: string) => new Date(new Date(`${local}Z`).getTime() - 5.5 * 3600_000).getTime();
 const NIFTY: InstrumentRef = { exchange: 'NSE', token: '99926000', symbol: 'NIFTY' };
@@ -206,6 +206,106 @@ describe('HubEngine', () => {
     expect(report).toMatchObject({ day: '2026-10-06', instruments: 2, calls: 6 }); // NIFTY (watched) + 2885 (tick)
     expect(new Set(broker.candleCalls.map((c) => c.ref.token))).toEqual(new Set(['99926000', '2885']));
     expect(e.status().candles?.lastFixup).toEqual(report);
+    e.stop();
+  });
+
+  it('onPrice hears live ticks and polled quotes, and a throwing listener cannot break the others', async () => {
+    const { e, broker } = engine();
+    await e.start();
+    const seen: string[] = [];
+    e.onPrice(() => {
+      throw new Error('consumer bug');
+    });
+    const off = e.onPrice((p) => seen.push(`${p.source}:${p.ref.exchange}:${p.ref.token}:${p.ltp}`));
+    await e.setPositions([POS]);
+    broker.emitTick(FakeBroker.tick('35001', 250.5, 'NFO'));
+    // Socket down: P0 is polled on the Critical lane every ~2 s. That price must reach listeners too.
+    broker.emitState('reconnecting');
+    jest.setSystemTime(Date.now() + 3000);
+    await jest.advanceTimersByTimeAsync(4000);
+    expect(seen[0]).toBe('ws:NFO:35001:250.5');
+    expect(seen.some((s) => s.startsWith('quote:NFO:35001:'))).toBe(true);
+    expect(e.status().consumers.listenerErrors).toBeGreaterThanOrEqual(2);
+    off();
+    const count = seen.length;
+    broker.emitState('live');
+    broker.emitTick(FakeBroker.tick('35001', 251, 'NFO'));
+    expect(seen).toHaveLength(count);
+    e.stop();
+  });
+
+  it('watchMany registers every ref under one owner with a TTL, and never rejects when the broker is down', async () => {
+    const broker = new FakeBroker();
+    const { e } = engine(broker);
+    await e.start();
+    broker.subscribe = async () => {
+      throw new Error('not connected');
+    };
+    const A: InstrumentRef = { exchange: 'NSE', token: '2885', symbol: 'RELIANCE' };
+    const B: InstrumentRef = { exchange: 'NSE', token: '1594', symbol: 'INFY' };
+    await expect(e.watchMany([A, B], 3, 'track:exit', 120_000)).resolves.toBeUndefined();
+    expect(e.price(A, { maxAgeMs: 10_000 })).toEqual({ kind: 'unavailable', reason: 'never-priced' });
+    expect(e.price(B, { maxAgeMs: 10_000 })).toEqual({ kind: 'unavailable', reason: 'never-priced' });
+    expect(e.status().lastError).toMatch(/not connected/);
+    jest.setSystemTime(Date.now() + 120_001);
+    await jest.advanceTimersByTimeAsync(30_000); // the maintenance tick expires TTL holders
+    expect(e.price(A, { maxAgeMs: 10_000 })).toEqual({ kind: 'unavailable', reason: 'not-watched' });
+    e.stop();
+  });
+
+  it('counts consumer outcomes per consumer and stamps the last hub-served and unpriced times', async () => {
+    const { e } = engine();
+    await e.start();
+    e.recordConsumer('positions', 'hub', 3);
+    e.recordConsumer('positions', 'legacy');
+    e.recordConsumer('tracks', 'unpriced', 2);
+    e.recordConsumer('tracks', 'hub', 0); // nothing to count: no stamp either
+    expect(e.status().consumers).toEqual({
+      positions: { hub: 3, legacy: 1, unpriced: 0, lastHubAt: Date.now(), lastUnpricedAt: null },
+      tracks: { hub: 0, legacy: 0, unpriced: 2, lastHubAt: null, lastUnpricedAt: Date.now() },
+      listenerErrors: 0,
+      flags: { positions: false, tracks: false }, // no consumerFlags dep: both switches read as off
+    });
+    e.stop();
+  });
+
+  it('keeps the candle builder on live socket ticks only: polled quotes reach onPrice but never build bars', async () => {
+    const { e, broker } = engineWithCandles();
+    await e.start();
+    const sources: string[] = [];
+    e.onPrice((p) => sources.push(p.source));
+    await e.setPositions([POS]);
+    // Socket down from the start: POS is only ever priced by Critical-lane quotes.
+    broker.emitState('reconnecting');
+    jest.setSystemTime(Date.now() + 3000);
+    await jest.advanceTimersByTimeAsync(4000);
+    expect(sources.length).toBeGreaterThan(0);
+    expect(sources.every((s) => s === 'quote')).toBe(true);
+    expect(e.status().candles).toMatchObject({ building: 0 });
+    // A live tick does build.
+    broker.emitState('live');
+    broker.emitTick(FakeBroker.tick('35001', 251, 'NFO'));
+    expect(e.status().candles).toMatchObject({ building: 1 });
+    e.stop();
+  });
+
+  it('watches underlyings at priority 1 under the positions owner; a held contract stays priority 0', async () => {
+    const { e, broker } = engine();
+    await e.start();
+    const RELIANCE: InstrumentRef = { exchange: 'NSE', token: '2885', symbol: 'RELIANCE-EQ' };
+    const RELFUT: InstrumentRef = { exchange: 'NFO', token: '57001', symbol: 'RELIANCE28OCT26FUT' };
+    await e.setPositions([POS, RELFUT, RELIANCE], [NIFTY, RELIANCE]);
+    const pri = new Map(e.registry.entries().map((x) => [refKey(x.ref), x.priority]));
+    expect(pri.get('NFO:35001')).toBe(0);
+    expect(pri.get('NFO:57001')).toBe(0);
+    expect(pri.get('NSE:99926000')).toBe(1); // context (P2) + underlying (P1): served as P1
+    expect(pri.get('NSE:2885')).toBe(0); // held in cash AND an underlying: the position wins
+    expect(broker.subscribed.has('NSE:2885')).toBe(true);
+    await e.setPositions([], []);
+    const after = new Map(e.registry.entries().map((x) => [refKey(x.ref), x.priority]));
+    expect(after.get('NSE:99926000')).toBe(2); // back to context only
+    expect(after.has('NSE:2885')).toBe(false);
+    expect(after.has('NFO:35001')).toBe(false);
     e.stop();
   });
 });

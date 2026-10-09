@@ -1,11 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { WatchStatus } from '@prisma/client';
-import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { UngatedWatchRepository } from '../repositories/ungated-watch.repository';
 import { UngatedWatchService } from './ungated-watch.service';
 import { UngatedTradeExecutionService } from './ungated-trade-execution.service';
-import { ExitPriceService } from '../../signal-generator/services/exit-price.service';
+import { ExitPriceService, type ExitPrice } from '../../signal-generator/services/exit-price.service';
 
 /**
  * REST-poll ungated open positions every 30 seconds during market hours.
@@ -31,7 +30,6 @@ export class UngatedTickPoller {
   private readonly logger = new Logger(UngatedTickPoller.name);
 
   constructor(
-    private readonly adapter: AngelOneAdapterService,
     private readonly repo: UngatedWatchRepository,
     private readonly watch: UngatedWatchService,
     private readonly exec: UngatedTradeExecutionService,
@@ -105,14 +103,16 @@ export class UngatedTickPoller {
 
     // Fetch live prices for a fair exit; fall back to last known price.
     const tokens = [...new Set(traded.map((e) => e.token))];
-    const ltpMap = await this.adapter.getLtpsBatch('NSE', tokens).catch(() => new Map<string, number>());
+    // Through ExitPriceService (hub first behind HUB_PRICES_TRACKS); only a FRESH price is used.
+    const prices = await this.exitPrice.resolveExitPrices('NSE', tokens).catch(() => new Map<string, ExitPrice>());
 
     let closed = 0;
     let errors = 0;
     for (const entry of traded) {
       try {
+        const live = prices.get(entry.token);
         const exitPrice =
-          ltpMap.get(entry.token) ??
+          (live?.fresh ? live.price : undefined) ??
           (entry as any).currentPrice ??
           (entry as any).executedPrice ??
           0;

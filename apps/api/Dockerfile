@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-#
 # GrW API — single-stage image for free-tier PaaS deploys (Render, Railway, Fly).
 #
 # SINGLE-STAGE ON PURPOSE. A pnpm workspace links node_modules with symlinks and
@@ -11,7 +9,13 @@
 # BUILD CONTEXT IS THE REPO ROOT (not apps/api) so the whole workspace and the
 # root-level prisma/ schema are visible. Build from the repo root with:
 #   docker build -f apps/api/Dockerfile -t grw-api .
-FROM node:22-bookworm-slim
+#
+# BASE IMAGE FROM GOOGLE'S DOCKER HUB MIRROR. The official node image, same
+# content, but GitHub's shared runners pull Docker Hub anonymously and hit its
+# per-IP rate limit (429 Too Many Requests failed both builds on 2026-10-09).
+# No `# syntax=` directive for the same reason: it pulls docker/dockerfile from
+# Docker Hub, and this file needs nothing beyond the built-in frontend.
+FROM mirror.gcr.io/library/node:22-bookworm-slim
 
 # Prisma needs OpenSSL to pick the right native engine; ca-certificates for TLS
 # to Neon (Postgres) and Upstash (Redis). Generating the client INSIDE this

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { SessionClock } from '../market-hub/session-clock';
@@ -118,7 +118,7 @@ interface Stored<T> {
  * its own source time.
  */
 @Injectable()
-export class MarketCuesService {
+export class MarketCuesService implements OnApplicationBootstrap {
   private readonly logger = new Logger(MarketCuesService.name);
   private readonly cfg: MarketCuesConfig;
   private readonly clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
@@ -139,6 +139,37 @@ export class MarketCuesService {
 
   get enabled(): boolean {
     return this.cfg.enabled;
+  }
+
+  /** The boot warm-up's completion, once started (tests await it). Never rejects. */
+  warmUpDone?: Promise<void>;
+
+  /**
+   * WARM THE CACHE ON BOOT. The cache is in memory, so after a deploy every cue
+   * would read "not fetched yet" until its next cron — up to ~14 h away. With
+   * MARKET_CUES_ENABLED on, fetch every enabled source once, in the background,
+   * after init: the boot path itself sends nothing and waits for nothing. Same
+   * one-request-plus-one-retry rule and backoff as any fire; a failure is logged
+   * and left as an unavailable cue, never thrown.
+   */
+  onApplicationBootstrap(): void {
+    if (!this.cfg.enabled) return;
+    this.warmUpDone = new Promise<void>((resolve) => {
+      setImmediate(() => {
+        this.warmUp()
+          .catch((err) => this.logger.error(`market cues warm-up aborted: ${describeFetchError(err)}`))
+          .finally(resolve);
+      });
+    });
+  }
+
+  private async warmUp(): Promise<void> {
+    const now = new Date();
+    const groups = (Object.keys(GROUP_SWITCH) as CueGroup[]).filter((g) => this.cfg.sources[GROUP_SWITCH[g].key]);
+    await Promise.all(groups.map((g) => this.refresh(g, now)));
+    const snap = this.snapshot(now);
+    const held = [...US_CUE_KEYS.map((k) => snap.us[k]), snap.fiiDii, snap.fiiOi, snap.gift, snap.preOpen].filter((r) => r.values).length;
+    this.logger.log(`market cues warm-up: ${groups.join(', ')} fetched; ${held} of 9 cues hold a reading`);
   }
 
   // ─── Schedule ───────────────────────────────────────────────────────────────

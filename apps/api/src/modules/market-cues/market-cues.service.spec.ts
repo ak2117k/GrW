@@ -272,6 +272,47 @@ describe('pre-open book', () => {
   });
 });
 
+describe('boot warm-up', () => {
+  const ROUTES: Route[] = [
+    ...YAHOO_OK,
+    { match: has('fiidiiTradeReact'), reply: ok('nse-fiidii.json') },
+    { match: has('nseix.com'), reply: ok('nseix-market-rate.json') },
+    { match: has('nse50_fut'), reply: ok('nse-nifty-futures.json') },
+    { match: has('market-data-pre-open'), reply: ok('nse-preopen-fo.json') },
+  ];
+
+  it('with the flag on: runs after init, in the background, once per enabled source', async () => {
+    const { svc, calls } = make({ MARKET_CUES_FII_OI: 'false' }, ROUTES);
+    svc.onApplicationBootstrap();
+    expect(calls).toHaveLength(0); // nothing on the boot path itself
+    await svc.warmUpDone;
+    const snap = svc.snapshot();
+    expect(snap.us.nasdaq.values?.last).toBe(27366.17);
+    expect(snap.fiiDii.values?.fii.net).toBe(-3568.9);
+    expect(snap.gift.values?.gift.price).toBe(22575.5);
+    expect(snap.preOpen.values?.entries.APOLLOHOSP.iep).toBe(7950);
+    expect(calls.some((c) => c.url.includes('fao_participant_oi'))).toBe(false); // that source is off
+    expect(calls.filter((c) => c.url.includes('chart/%5EIXIC'))).toHaveLength(1);
+  });
+
+  it('with the flag off: nothing runs', async () => {
+    const { svc, calls } = make({ MARKET_CUES_ENABLED: 'false' }, ROUTES);
+    svc.onApplicationBootstrap();
+    await svc.warmUpDone;
+    await new Promise((r) => setImmediate(r));
+    expect(svc.warmUpDone).toBeUndefined();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('a failing source never throws out of the warm-up; it is retried once and left unavailable', async () => {
+    const { svc, calls } = make({}, [{ match: () => true, reply: () => new TypeError('fetch failed') }]);
+    expect(() => svc.onApplicationBootstrap()).not.toThrow();
+    await expect(svc.warmUpDone).resolves.toBeUndefined();
+    expect(calls.filter((c) => c.url.includes('fiidiiTradeReact'))).toHaveLength(2);
+    expect(svc.snapshot().fiiDii.status).toBe('unavailable');
+  });
+});
+
 describe('schedule', () => {
   it('the crons are the agreed IST times, weekdays only', () => {
     expect(MARKET_CUES_CRONS).toEqual({

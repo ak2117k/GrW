@@ -12,6 +12,7 @@ import { ExitPriceService, type ExitPrice } from '../../signal-generator/service
 import {
   PROFIT_TARGET_PCT, HARD_STOP_PCT, TRADE_COOLDOWN_MS, MARGIN_PCT,
 } from '../constants';
+import { assertCoreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 export class SellFuturesNoFutureError extends Error {
   constructor(public readonly symbol: string) {
@@ -86,6 +87,8 @@ export class SellFuturesService {
   ) {}
 
   async createFromAlert(input: SellFuturesCreateFromAlertInput) {
+    // SP2 M2 (owner answer 2): no new entry while the owner's core kill switch is on (fails closed).
+    await assertCoreEntryAllowed('sell-futures-track', { ref: input.symbol });
     // Gate 1 — resolve the stock future. No future ⇒ this track can't act.
     const future = await this.selector.resolve(input.symbol);
     if (!future) throw new SellFuturesNoFutureError(input.symbol);

@@ -248,7 +248,8 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     TelegramModule,
 
     // SP2 trade core — M1: strategy catalogue, immutable versions, per-user
-    // selections (the dropdown). Paper only; nothing trades until M5.
+    // selections. M2: Risk Wall, per-user limits, persistent kill switch (its
+    // "on" also calls the silos' square-off paths). Paper only; nothing trades until M5.
     TradeCoreModule,
 
     // Liveness + keep-warm probe (/healthz) — pinged by the keep-warm cron so

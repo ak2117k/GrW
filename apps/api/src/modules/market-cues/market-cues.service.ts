@@ -45,7 +45,7 @@ import { istAt, istMinutes, istYmd } from './fetchers/ist-dates';
  *               (before the 08:30 pre-open review);
  *   FII/DII     19:00, retry 20:30 — NSE publishes ~18:00–20:00;
  *   FII OI      20:00, retry 21:00 — the participant-OI archive file;
- *   pre-open    09:12 — after NSE's 09:08 pre-open match, before the 09:15 open.
+ *   pre-open    09:10 — after NSE's 09:08 pre-open match, before the 09:15 open.
  */
 export const MARKET_CUES_CRONS = {
   usGiftNight: '0 40 23 * * 1-5',
@@ -54,7 +54,7 @@ export const MARKET_CUES_CRONS = {
   fiiRetry: '0 30 20 * * 1-5',
   fiiOi: '0 0 20 * * 1-5',
   fiiOiRetry: '0 0 21 * * 1-5',
-  preOpen: '0 12 9 * * 1-5',
+  preOpen: '0 10 9 * * 1-5',
 } as const;
 
 export type CronSlot = keyof typeof MARKET_CUES_CRONS;
@@ -250,7 +250,7 @@ export class MarketCuesService implements OnApplicationBootstrap {
   /**
    * Fetch any of `groups` this process has not read yet — or whose last read
    * is not ok and is older than {@link REFETCH_AFTER_MS} (a stale pre-open book
-   * at 09:12, a stale futures quote at 15:45) — then return the snapshot.
+   * at 09:10, a stale futures quote at 15:45) — then return the snapshot.
    * Backoff and the in-flight share still apply.
    */
   async ensure(groups: CueGroup[], now: Date = new Date()): Promise<MarketCuesSnapshot> {

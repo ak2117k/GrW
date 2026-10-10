@@ -18,6 +18,8 @@ import {
 } from './sentinel-cycle.service';
 import { SENTINEL_ENABLED_KEY } from './sentinel-runner.service';
 import { isAnyExchangeOpen } from '../market-sessions';
+// The judge's own hard timeout: a job may not START unless it would end before the venue opens.
+import { CLI_TIMEOUT_MS } from '../adapters/claude-cli.transport';
 import {
   AFTER_CLOSE_EQUITY,
   AFTER_CLOSE_MCX,
@@ -80,7 +82,7 @@ export interface SectionInputs {
   news: Sourced<NewsEvidence>;
   oi: Sourced<RawOiEvidence>;
   cues: Sourced<RawCues>;
-  /** The 09:12 check's IEP for this position, or why there is none. Ignored by every other window. */
+  /** The 09:10 check's IEP for this position, or why there is none. Ignored by every other window. */
   preOpen?: PreOpenInput;
   /** The venue clock (holidays + MCX late close). Defaults to the shipped calendar. */
   clock?: SessionClock;
@@ -103,7 +105,7 @@ export interface WindowReport {
   deferred: number;
   /** Still queued for a judge slot when the venue opened — dropped, never judged against a live market. */
   droppedAtOpen: number;
-  /** 09:12 check only: positions with no pre-open input (IEP unseen) — skipped, no judge call. */
+  /** 09:10 check only: positions with no pre-open input (IEP unseen) — skipped, no judge call. */
   skippedNoInput: number;
 }
 
@@ -270,7 +272,7 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
  * ONCE PER POSITION PER WINDOW, durably: the window tag is written into the
  * row's `triggeredBy` and checked before judging (a restart finds it), and an
  * in-process claim stops two overlapping fires from judging the same position
- * twice. About two calls per position per day, plus the 09:12 pre-open check
+ * twice. About two calls per position per day, plus the 09:10 pre-open check
  * for NSE F&O positions whose underlying has a pre-open IEP, when the
  * market-cues pre-open source is on.
  */
@@ -335,7 +337,7 @@ export class SentinelOvernightService {
   }
 
   /**
-   * 09:12 (repeats 09:13, 09:14): the light pre-open CHECK on the NSE pre-open
+   * 09:10 (repeat 09:11): the light pre-open CHECK on the NSE pre-open
    * IEP. Same machinery as the reviews — idempotent per position per day,
    * through the shared judge cap, dropped if still queued at 09:15.
    */
@@ -384,7 +386,7 @@ export class SentinelOvernightService {
     const claims = this.claimed.get(tag) ?? new Set<string>();
     this.claimed.set(tag, claims);
 
-    // The 09:12 check reads today's NSE pre-open book first: it decides which
+    // The 09:10 check reads today's NSE pre-open book first: it decides which
     // options qualify, and what each position is shown.
     const preOpen = window.kind === 'PRE_OPEN_CHECK' ? await this.preOpenBook(now) : null;
     // No pre-open source in this process at all (market cues off, or not wired):
@@ -475,10 +477,22 @@ export class SentinelOvernightService {
     const current = () => (this.clockNow ? this.clockNow() : new Date(now.getTime() + (Date.now() - startedWall)));
     try {
       await this.cycle.runShared(entry.trackerId, () => this.judgeAndRecord(entry, window, tag, now, preOpen), {
-        // Re-checked every time the job is woken: once the venue opens (or the
-        // window otherwise stops applying) a queued job is dropped, never run.
-        expired: () => !reviewWindowIsClosed(window, entry.exchange, current(), this.clock),
-        reserveLive: () => isAnyExchangeOpen(heldVenues, current()),
+        // Re-checked every time the job is woken, and last of all just before it
+        // STARTS: a job is dropped unless the window still applies a full judge
+        // timeout (CLI_TIMEOUT_MS) from now — so a judgement can never still be
+        // running when the venue opens (MCX 09:00, NSE 09:15) and hold a slot the
+        // live judges and their tripwire fires need.
+        expired: () => {
+          const t = current();
+          return (
+            !reviewWindowIsClosed(window, entry.exchange, t, this.clock) ||
+            !reviewWindowIsClosed(window, entry.exchange, new Date(t.getTime() + CLI_TIMEOUT_MS), this.clock)
+          );
+        },
+        // The 09:10 check runs minutes before the NSE open: always keep a slot
+        // for live, whatever the held venues. Otherwise reserve only while a
+        // venue someone holds is trading.
+        reserveLive: () => window.kind === 'PRE_OPEN_CHECK' || isAnyExchangeOpen(heldVenues, current()),
       });
       this.failures.delete(failKey);
       report.judged += 1;
@@ -524,7 +538,7 @@ export class SentinelOvernightService {
       name: window.kind,
       detail:
         window.kind === 'PRE_OPEN_CHECK'
-          ? 'scheduled pre-open check (09:12 IST, on the NSE pre-open IEP; dropped at the 09:15 open)'
+          ? 'scheduled pre-open check (09:10 IST, on the NSE pre-open IEP; dropped at the 09:15 open)'
           : window.kind === 'PRE_OPEN_REVIEW'
             ? 'scheduled pre-open review (08:30 IST)'
             : `scheduled after-close review (${window.venue === 'MCX' ? '23:45' : '15:45'} IST)`,
@@ -594,7 +608,7 @@ export class SentinelOvernightService {
   }
 
   /**
-   * Today's pre-open book for the 09:12 check. A book that is not today's (or
+   * Today's pre-open book for the 09:10 check. A book that is not today's (or
    * a read that failed) is no book: every position is then shown "no IEP" with
    * the reason, and only futures are checked. A source that was never fetched
    * (switched off, not wired) skips the check altogether.

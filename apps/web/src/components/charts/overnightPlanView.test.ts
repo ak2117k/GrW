@@ -86,9 +86,9 @@ describe('overnightPlanCard', () => {
     expect(exit?.tone).toBe('red');
   });
 
-  it('names the 09:12 pre-open check as its own window', () => {
+  it('names the 09:10 pre-open check as its own window', () => {
     const card = overnightPlanCard(position({ overnight: { ...position().overnight!, kind: 'PRE_OPEN_CHECK' } }), NOW);
-    expect(card?.windowLabel).toBe('Pre-open check (09:12)');
+    expect(card?.windowLabel).toBe('Pre-open check (09:10)');
   });
 
   it('marks the plan superseded once a live verdict has been recorded after it', () => {

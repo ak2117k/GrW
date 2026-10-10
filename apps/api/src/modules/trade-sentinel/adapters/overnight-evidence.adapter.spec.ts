@@ -213,8 +213,8 @@ describe('SentinelOvernightEvidenceAdapter.cues — the market context', () => {
 
   it('preOpen asks the service for today’s pre-open book', async () => {
     const t = make();
-    const rec = await t.adapter.preOpen(ist('2026-10-13', '09:12'));
-    expect(t.marketCues.ensure).toHaveBeenCalledWith(['preOpen'], ist('2026-10-13', '09:12'));
+    const rec = await t.adapter.preOpen(ist('2026-10-13', '09:10'));
+    expect(t.marketCues.ensure).toHaveBeenCalledWith(['preOpen'], ist('2026-10-13', '09:10'));
     expect(rec.status).toBe('ok');
   });
 

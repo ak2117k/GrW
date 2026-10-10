@@ -1,5 +1,5 @@
 /**
- * Which positions the 09:12 PRE-OPEN CHECK judges, and what pre-open figure each
+ * Which positions the 09:10 PRE-OPEN CHECK judges, and what pre-open figure each
  * one is shown. Pure — imports only pure modules and types (see the note at the
  * top of `overnight-calendar.ts`).
  *
@@ -57,7 +57,7 @@ export function preOpenMatchFor(e: RosterEntry, book: PreOpenBook | null): PreOp
 }
 
 /**
- * The 09:12 selection: the window's own filter (NSE venues, F&O, 09:08–09:15,
+ * The 09:10 selection: the window's own filter (NSE venues, F&O, 09:08–09:15,
  * a trading day), then split by whether the position HAS its input.
  *
  * NO INPUT, NO JUDGE CALL. A position whose underlying has no IEP in today's

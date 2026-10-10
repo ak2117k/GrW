@@ -46,30 +46,30 @@ const BOOK: RosterEntry[] = [
   entry('cash', { exchange: 'NSE', symbol: 'RELIANCE-EQ' }),
 ];
 
-describe('the 09:12 pre-open check window', () => {
-  it('cron: 09:12, with repeats at 09:13 and 09:14, weekdays', () => {
-    expect(PRE_OPEN_CHECK_CRON).toBe('0 12,13,14 9 * * 1-5');
+describe('the 09:10 pre-open check window', () => {
+  it('cron: 09:10, with a repeat at 09:11, weekdays', () => {
+    expect(PRE_OPEN_CHECK_CRON).toBe('0 10,11 9 * * 1-5');
   });
 
   it('applies from 09:08 (after the pre-open match) until the 09:15 open, NSE venues only', () => {
-    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist(TUE, '09:12'))).toBe(true);
+    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist(TUE, '09:10'))).toBe(true);
     expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist(TUE, '09:05'))).toBe(false);
     expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist(TUE, '09:15'))).toBe(false);
-    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'MCX', ist(TUE, '09:12'))).toBe(false);
+    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'MCX', ist(TUE, '09:10'))).toBe(false);
   });
 
   it('skips holidays and weekends', () => {
-    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist('2026-10-20', '09:12'))).toBe(false);
-    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist('2026-10-10', '09:12'))).toBe(false);
+    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist('2026-10-20', '09:10'))).toBe(false);
+    expect(reviewWindowIsClosed(PRE_OPEN_CHECK, 'NFO', ist('2026-10-10', '09:10'))).toBe(false);
   });
 
   it('has its own idempotency tag per day', () => {
-    expect(windowTag(PRE_OPEN_CHECK, ist(TUE, '09:12'))).toBe(`window:PRE_OPEN_CHECK:EQUITY:${TUE}`);
+    expect(windowTag(PRE_OPEN_CHECK, ist(TUE, '09:10'))).toBe(`window:PRE_OPEN_CHECK:EQUITY:${TUE}`);
     expect(windowTag(PRE_OPEN_CHECK, ist(TUE, '09:14'))).toBe(`window:PRE_OPEN_CHECK:EQUITY:${TUE}`);
   });
 
   it('the window itself never picks MCX or cash', () => {
-    const ids = selectForWindow(BOOK, PRE_OPEN_CHECK, ist(TUE, '09:12')).map((e) => e.trackerId);
+    const ids = selectForWindow(BOOK, PRE_OPEN_CHECK, ist(TUE, '09:10')).map((e) => e.trackerId);
     expect(ids).not.toContain('mcx-fut');
     expect(ids).not.toContain('mcx-opt');
     expect(ids).not.toContain('cash');
@@ -89,12 +89,12 @@ describe('selectForPreOpenCheck — futures, and options whose underlying has an
   const b = book({ RELIANCE: cash('RELIANCE', 1420, 1400) });
 
   it('checks only positions whose underlying has an IEP; no MCX, no cash', () => {
-    const { checked } = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:12'));
+    const { checked } = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:10'));
     expect(checked.map((p) => p.entry.trackerId)).toEqual(['rel-fut', 'rel-opt']);
   });
 
   it('skips — with the reason — every NSE F&O position whose IEP is unseen, index futures included', () => {
-    const { skipped } = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:12'));
+    const { skipped } = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:10'));
     expect(skipped.map((s) => s.entry.trackerId)).toEqual(['nifty-opt', 'nifty-fut', 'sbin-opt']);
     expect(skipped.find((s) => s.entry.trackerId === 'nifty-fut')?.reason).toMatch(/no pre-open IEP for NIFTY/);
   });
@@ -110,7 +110,7 @@ describe('selectForPreOpenCheck — futures, and options whose underlying has an
   });
 
   it('with no book, nothing is checked and every NSE F&O position is skipped with the book’s reason', () => {
-    const r = selectForPreOpenCheck(BOOK, null, ist(TUE, '09:12'), undefined, 'the NSE pre-open book is stale');
+    const r = selectForPreOpenCheck(BOOK, null, ist(TUE, '09:10'), undefined, 'the NSE pre-open book is stale');
     expect(r.checked).toEqual([]);
     expect(r.skipped).toHaveLength(5);
     expect(r.skipped[0].reason).toMatch(/stale/);

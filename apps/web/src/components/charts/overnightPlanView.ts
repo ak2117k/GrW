@@ -72,7 +72,7 @@ export function overnightPlanCard(position: SentinelPosition, now: number = Date
   return {
     title: 'Overnight plan',
     windowLabel:
-      o.kind === 'PRE_OPEN_CHECK' ? 'Pre-open check (09:12)' : o.kind === 'PRE_OPEN_REVIEW' ? 'Pre-open review' : 'After-close review',
+      o.kind === 'PRE_OPEN_CHECK' ? 'Pre-open check (09:10)' : o.kind === 'PRE_OPEN_REVIEW' ? 'Pre-open review' : 'After-close review',
     verdictLabel: o.verdict.replace(/_/g, ' '),
     tone: TONE[o.verdict] ?? 'muted',
     risk,

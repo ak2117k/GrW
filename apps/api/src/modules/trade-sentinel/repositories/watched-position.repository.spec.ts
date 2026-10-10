@@ -50,7 +50,7 @@ describe('WatchedPositionRepository — live verdict and overnight plan side by 
     );
   });
 
-  it('a 09:12 pre-open check row is the overnight plan, never the live verdict', async () => {
+  it('a 09:10 pre-open check row is the overnight plan, never the live verdict', async () => {
     const [p] = await make([
       verdictRow({ verdict: 'EXIT_AT_OPEN', triggeredBy: ['PRE_OPEN_CHECK', 'window:PRE_OPEN_CHECK:EQUITY:2026-10-13'], createdAt: T('2026-10-13T03:42:00.000Z') }),
       verdictRow({ verdict: 'HOLD', createdAt: T('2026-10-12T09:55:00.000Z') }),

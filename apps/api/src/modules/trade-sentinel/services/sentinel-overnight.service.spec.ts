@@ -327,7 +327,7 @@ describe('assembleOvernightSection — market cues per window', () => {
     for (const k of ['nasdaq', 'nasdaqFutures', 'giftNifty', 'fiiFlows', 'fiiDerivatives'] as const) {
       expect({ k, available: s.marketCues[k].available }).toEqual({ k, available: true });
     }
-    expect(s.preOpenGap).toEqual({ available: false, reason: expect.stringMatching(/only the 09:12 pre-open check/) });
+    expect(s.preOpenGap).toEqual({ available: false, reason: expect.stringMatching(/only the 09:10 pre-open check/) });
   });
 
   it('an unavailable cue is a stated absence — never a zero', () => {
@@ -615,6 +615,67 @@ describe('SentinelOvernightService — venue clock gates (late close, open)', ()
   });
 });
 
+describe('SentinelOvernightService — no judge job starts within CLI_TIMEOUT_MS of the venue open', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+  const at = (hhmmss: string) => new Date(`2026-10-13T${hhmmss}+05:30`);
+
+  it('the 08:30 review: a job reaching its slot at 08:57:01 (MCX opens 09:00) is dropped, not started', async () => {
+    const t = makeSvc();
+    t.svc.clockNow = () => at('08:57:01');
+    const report = await t.svc.runWindow(PRE_OPEN, at('08:40:00'));
+    expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 2, judged: 0 }));
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+  });
+
+  it('the 08:30 review: at 08:56:59 there is still a full timeout before 09:00, so it starts', async () => {
+    const t = makeSvc();
+    t.svc.clockNow = () => at('08:56:59');
+    const report = await t.svc.runWindow(PRE_OPEN, at('08:40:00'));
+    expect(report).toEqual(expect.objectContaining({ judged: 2, droppedAtOpen: 0 }));
+  });
+
+  describe('the 09:10 check (open 09:15, so the last start is 09:12:00)', () => {
+    const book: CueRecord<PreOpenBook> = {
+      values: {
+        date: '2026-10-13',
+        entries: { RELIANCE: { symbol: 'RELIANCE', instrument: 'CASH', iep: 1420, previousClose: 1400, change: 20, changePercent: 1.43, at: at('09:08:00').toISOString() } },
+      },
+      sourceTime: '2026-10-13',
+      fetchedAt: at('09:10:00').toISOString(),
+      basis: 'x',
+      source: 'x',
+      status: 'ok',
+    };
+    const BOOK = [entry('rel-fut', { symbol: 'RELIANCE27OCT26FUT' })];
+
+    it('a job reaching its slot at 09:12:01 is dropped, never started', async () => {
+      const t = makeSvc({ book: BOOK, preOpen: book });
+      t.svc.clockNow = () => at('09:12:01');
+      const report = await t.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'));
+      expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 1, judged: 0 }));
+      expect(t.judgeOvernight).not.toHaveBeenCalled();
+    });
+
+    it('starts at 09:11:59', async () => {
+      const t = makeSvc({ book: BOOK, preOpen: book });
+      t.svc.clockNow = () => at('09:11:59');
+      expect(await t.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'))).toEqual(expect.objectContaining({ judged: 1 }));
+    });
+
+    it('always reserves a live slot, even when no held venue is open', async () => {
+      const t = makeSvc({ book: BOOK, preOpen: book });
+      t.svc.clockNow = () => at('09:10:00');
+      t.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'NFO' }]); // nothing held is trading at 09:10
+      await t.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'));
+      expect(t.runShared.mock.calls[0][2].reserveLive()).toBe(true);
+    });
+  });
+});
+
 describe('SentinelOvernightService — the live reservation follows the held venues', () => {
   beforeEach(() => jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined));
   afterEach(() => jest.restoreAllMocks());
@@ -642,9 +703,9 @@ describe('SentinelOvernightService — the live reservation follows the held ven
   });
 });
 
-describe('SentinelOvernightService — the 09:12 pre-open check', () => {
+describe('SentinelOvernightService — the 09:10 pre-open check', () => {
   const TUE = '2026-10-13';
-  const AT_0912 = ist(TUE, '09:12');
+  const AT_0912 = ist(TUE, '09:10');
   const TAG = `window:PRE_OPEN_CHECK:EQUITY:${TUE}`;
   const BOOK: RosterEntry[] = [
     entry('nifty-opt'),
@@ -702,7 +763,7 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
         }),
       }),
     );
-    expect(t.buildPacket.mock.calls[0][3][0]).toEqual({ name: 'PRE_OPEN_CHECK', detail: expect.stringMatching(/09:12/) });
+    expect(t.buildPacket.mock.calls[0][3][0]).toEqual({ name: 'PRE_OPEN_CHECK', detail: expect.stringMatching(/09:10/) });
   });
 
   it('an index future with no IEP costs no judge call: recorded skipped with the reason, nothing written', async () => {
@@ -734,14 +795,14 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
     expect(t.judgeOvernight).not.toHaveBeenCalled();
   });
 
-  it('once per position per day: the 09:13 repeat judges nothing, a restart finds the rows', async () => {
+  it('once per position per day: the 09:11 repeat judges nothing, a restart finds the rows', async () => {
     const done = new Set<string>();
     const t = makeSvc({ book: BOOK, preOpen: preOpenBook, done });
     await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
-    const again = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:13'));
+    const again = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
     expect(again).toEqual(expect.objectContaining({ judged: 0, alreadyDone: 2 }));
     const restarted = makeSvc({ book: BOOK, preOpen: preOpenBook, done });
-    await restarted.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:14'));
+    await restarted.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
     expect(restarted.judgeOvernight).not.toHaveBeenCalled();
     expect(t.judgeOvernight).toHaveBeenCalledTimes(2);
   });
@@ -777,7 +838,7 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
   it('does nothing outside 09:08–09:15 or on a holiday — does not even read the book', async () => {
     const t = makeSvc({ book: BOOK, preOpen: preOpenBook });
     await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:05'));
-    await t.svc.runWindow(PRE_OPEN_CHECK, ist('2026-10-20', '09:12'));
+    await t.svc.runWindow(PRE_OPEN_CHECK, ist('2026-10-20', '09:10'));
     expect(t.evidence.preOpen).not.toHaveBeenCalled();
     expect(t.findMany).not.toHaveBeenCalled();
   });

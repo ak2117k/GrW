@@ -34,7 +34,7 @@ export type OvernightSection = {
   decay: Block<OvernightDecay>;
   greeks: Block<OvernightGreeks>;
   preOpenPrice: Block<number>;
-  /** The 09:12 pre-open check's IEP read for this position (labelled by what it prices); absent in every other window. */
+  /** The 09:10 pre-open check's IEP read for this position (labelled by what it prices); absent in every other window. */
   preOpenGap: Block<Prisma.InputJsonValue>;
   news: Block<Prisma.InputJsonValue>;
   oi: Block<Prisma.InputJsonValue>;

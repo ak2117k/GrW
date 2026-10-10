@@ -8,7 +8,7 @@ import { istDateTimeToIso, nseDateToYmd, venueNumber } from './ist-dates';
  * WHAT IT ACTUALLY PRICES. The payload fetched on 2026-10-10 (Friday's session)
  * held only `series: "EQ"` rows: the CASH pre-open of the F&O securities, not
  * the F&O futures pre-open NSE has run since 8-Dec-2025 (current-month index
- * and stock futures; orders 09:00–09:08, matching 09:08–09:12). Rows are
+ * and stock futures; orders 09:00–09:08, matching 09:08–09:10). Rows are
  * therefore classified by what they are — EQ → CASH, an identifier naming a
  * future → FUTURE — and every consumer labels the IEP by that, never assuming
  * it is a futures price. MCX has no price-discovery pre-open at all.

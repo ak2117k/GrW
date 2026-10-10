@@ -66,7 +66,7 @@ const overnight: OvernightSection = {
   ),
   greeks: present({ delta: 0.52, gamma: 0.001, theta: -24, vega: 9.1, iv: 13.2 }, 'options-chain.service greeks', AT),
   preOpenPrice: absent('after-close review — the next pre-open has not happened'),
-  preOpenGap: absent('only the 09:12 pre-open check reads an NSE pre-open IEP'),
+  preOpenGap: absent('only the 09:10 pre-open check reads an NSE pre-open IEP'),
   news: present({ items: [], stale: false }, 'news-aggregator.service', AT),
   oi: present({ pcr: present(0.82, 'options-chain.service getPCR', AT) }, 'options-chain.service', AT),
   marketCues: {
@@ -214,8 +214,8 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/previous session close/);
     });
 
-    it('describes the 09:12 check, the IEP label, the futures-vs-futures GIFT gap and unpublished FII', () => {
-      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/PRE_OPEN_CHECK runs at 09:12/);
+    it('describes the 09:10 check, the IEP label, the futures-vs-futures GIFT gap and unpublished FII', () => {
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/PRE_OPEN_CHECK runs at 09:10/);
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/never the option's price/);
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/futures-vs-futures gap/);
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/not yet published/);

@@ -43,7 +43,7 @@ export const AFTER_CLOSE_EQUITY: ReviewWindow = { kind: 'OVERNIGHT_REVIEW', venu
 export const AFTER_CLOSE_MCX: ReviewWindow = { kind: 'OVERNIGHT_REVIEW', venue: 'MCX' };
 export const PRE_OPEN: ReviewWindow = { kind: 'PRE_OPEN_REVIEW', venue: 'ALL' };
 /**
- * The 09:12 pre-open CHECK: a light second look at NSE F&O positions once the
+ * The 09:10 pre-open CHECK: a light second look at NSE F&O positions once the
  * NSE pre-open has matched (09:08) and before the 09:15 open, on the pre-open
  * IEP. Equity venues only — MCX has no price-discovery pre-open.
  */
@@ -70,8 +70,12 @@ export const OVERNIGHT_CRON_EQUITY = '0 45,50,55 15 * * 1-5';
 export const OVERNIGHT_CRON_MCX = '0 45,50,55,58 23 * * 1-5';
 export const OVERNIGHT_CRON_MCX_LATE = '0 3,8 0 * * 2-6';
 export const PRE_OPEN_CRON = '0 30,35,40 8 * * 1-5';
-/** 09:12 (the market-cues pre-open snapshot's minute), repeated at 09:13 and 09:14; the window shuts at 09:15. */
-export const PRE_OPEN_CHECK_CRON = '0 12,13,14 9 * * 1-5';
+/**
+ * 09:10 (the market-cues pre-open snapshot's minute), repeated at 09:11. Not later: no
+ * judge job may START within CLI_TIMEOUT_MS (180 s) of the 09:15 open, so 09:12:00
+ * is the last possible start.
+ */
+export const PRE_OPEN_CHECK_CRON = '0 10,11 9 * * 1-5';
 
 /**
  * The default clock: the shipped holiday calendar, NO late-close season. The

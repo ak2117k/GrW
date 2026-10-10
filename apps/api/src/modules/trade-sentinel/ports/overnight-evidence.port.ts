@@ -74,7 +74,7 @@ export interface OvernightEvidenceSource {
   news(q: OvernightEvidenceQuery): Promise<NewsEvidence>;
   oi(q: OvernightEvidenceQuery): Promise<RawOiEvidence>;
   cues(q: OvernightEvidenceQuery): Promise<RawCues>;
-  /** Today's NSE pre-open book (IEP per symbol) for the 09:12 check; fetched if this process has not got today's. */
+  /** Today's NSE pre-open book (IEP per symbol) for the 09:10 check; fetched if this process has not got today's. */
   preOpen(now: Date): Promise<CueRecord<PreOpenBook>>;
 }
 

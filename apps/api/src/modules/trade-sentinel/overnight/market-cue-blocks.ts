@@ -13,7 +13,7 @@
  *                             ~18:00–20:00 IST); no GIFT gap.
  *   23:45 after-close (MCX),  US, FII/DII, FII OI and GIFT Nifty.
  *   08:30 pre-open review,
- *   09:12 pre-open check
+ *   09:10 pre-open check
  */
 import type { Prisma } from '@prisma/client';
 import { absent, present, type Block } from '../services/context-packet.service';
@@ -128,7 +128,7 @@ export function fiiDerivativesBlock(rec: CueRecord<FiiDerivatives>, window: Revi
 export function giftNiftyBlock(rec: CueRecord<GiftGap>, window: ReviewWindow, now: Date): Block<Prisma.InputJsonValue> {
   if (isAfterCloseEquity(window)) {
     return absent(
-      'GIFT Nifty is read in the 23:45 and 08:30 reviews and the 09:12 check, not at 15:45 — the NSE session ' +
+      'GIFT Nifty is read in the 23:45 and 08:30 reviews and the 09:10 check, not at 15:45 — the NSE session ' +
         'has only just closed and GIFT’s evening session has barely begun',
     );
   }
@@ -156,7 +156,7 @@ export function giftNiftyBlock(rec: CueRecord<GiftGap>, window: ReviewWindow, no
   );
 }
 
-/** The 09:12 check's pre-open figure for this position; absent in every other window. */
+/** The 09:10 check's pre-open figure for this position; absent in every other window. */
 export function preOpenGapBlock(
   window: ReviewWindow,
   match: PreOpenMatch | null,
@@ -165,7 +165,7 @@ export function preOpenGapBlock(
 ): Block<Prisma.InputJsonValue> {
   if (window.kind !== 'PRE_OPEN_CHECK') {
     return absent(
-      'only the 09:12 pre-open check reads an NSE pre-open IEP (orders 09:00–09:08, matched by 09:08); this review runs outside it',
+      'only the 09:10 pre-open check reads an NSE pre-open IEP (orders 09:00–09:08, matched by 09:08); this review runs outside it',
     );
   }
   if (!match) {

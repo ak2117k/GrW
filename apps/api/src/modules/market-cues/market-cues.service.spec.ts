@@ -255,18 +255,18 @@ describe('pre-open book', () => {
 
   it('is ok on the day it describes and stale the next', async () => {
     const { svc } = make({}, [PRE]);
-    const snap = await svc.ensure(['preOpen'], ist('2026-10-09T09:12:00'));
+    const snap = await svc.ensure(['preOpen'], ist('2026-10-09T09:10:00'));
     expect(snap.preOpen.status).toBe('ok');
     expect(snap.preOpen.values?.entries.APOLLOHOSP.iep).toBe(7950);
-    expect(svc.snapshot(ist('2026-10-12T09:12:00')).preOpen.status).toBe('stale');
+    expect(svc.snapshot(ist('2026-10-12T09:10:00')).preOpen.status).toBe('stale');
   });
 
   it('ensure refetches a stale pre-open book, and concurrent callers share ONE request', async () => {
     const { svc, calls } = make({}, [PRE]);
     await Promise.all([
-      svc.ensure(['preOpen'], ist('2026-10-09T09:12:00')),
-      svc.ensure(['preOpen'], ist('2026-10-09T09:12:00')),
-      svc.refresh('preOpen', ist('2026-10-09T09:12:00')),
+      svc.ensure(['preOpen'], ist('2026-10-09T09:10:00')),
+      svc.ensure(['preOpen'], ist('2026-10-09T09:10:00')),
+      svc.refresh('preOpen', ist('2026-10-09T09:10:00')),
     ]);
     expect(calls).toHaveLength(1);
   });
@@ -322,7 +322,7 @@ describe('schedule', () => {
       fiiRetry: '0 30 20 * * 1-5',
       fiiOi: '0 0 20 * * 1-5',
       fiiOiRetry: '0 0 21 * * 1-5',
-      preOpen: '0 12 9 * * 1-5',
+      preOpen: '0 10 9 * * 1-5',
     });
   });
 
@@ -337,10 +337,10 @@ describe('schedule', () => {
     const { svc } = make();
     const slots: CronSlot[] = ['usGiftMorning', 'usGiftNight', 'fii', 'fiiOi', 'preOpen'];
     for (const slot of slots) {
-      expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-20T09:12:00')) }).toEqual({ slot, fires: false });
-      expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-21T09:12:00')) }).toEqual({ slot, fires: true });
+      expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-20T09:10:00')) }).toEqual({ slot, fires: false });
+      expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-21T09:10:00')) }).toEqual({ slot, fires: true });
     }
-    expect(svc.shouldFire('preOpen', ist('2026-10-10T09:12:00'))).toBe(false); // Saturday
+    expect(svc.shouldFire('preOpen', ist('2026-10-10T09:10:00'))).toBe(false); // Saturday
   });
 
   it('a retry slot fires only when the first fire did not land today’s figure', async () => {
@@ -352,6 +352,6 @@ describe('schedule', () => {
 
   it('nothing fires while the master switch is off', () => {
     const { svc } = make({ MARKET_CUES_ENABLED: 'false' });
-    expect(svc.shouldFire('preOpen', ist('2026-10-21T09:12:00'))).toBe(false);
+    expect(svc.shouldFire('preOpen', ist('2026-10-21T09:10:00'))).toBe(false);
   });
 });

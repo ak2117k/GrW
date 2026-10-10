@@ -70,3 +70,70 @@ describe('SentinelVerdictRepository', () => {
     });
   });
 });
+
+describe('SentinelVerdictRepository — overnight review rows', () => {
+  const create = jest.fn();
+  const findFirst = jest.fn();
+  const prisma = { sentinelVerdict: { create, findFirst } } as any;
+  const repo = new SentinelVerdictRepository(prisma);
+
+  beforeEach(() => jest.clearAllMocks());
+
+  it('stores an overnight verdict in the same table, with the window kind and tag in triggeredBy', async () => {
+    create.mockResolvedValue({ id: 'v2' });
+    await repo.record({
+      userId: 'u1',
+      trackerId: 't1',
+      symbol: 'NIFTY13OCT2625000CE',
+      verdict: 'TIGHTEN_AT_OPEN',
+      confidence: 'medium',
+      thesisStatus: 'WEAKENING',
+      recoveryAvailable: true,
+      reason: 'OVERNIGHT RISK: theta\nOPEN PLAN: exit below 24950',
+      evidence: ['overnight.decay'],
+      invalidationPoint: 'open above 25150',
+      reviewInSec: 63000,
+      packet: { overnight: {} },
+      promptVersion: 'o1/t1',
+      triggeredBy: ['OVERNIGHT_REVIEW', 'window:OVERNIGHT_REVIEW:EQUITY:2026-10-12'],
+      netPnl: -1590,
+      greenFloor: 142.4,
+    });
+    expect(create.mock.calls[0][0].data).toEqual(
+      expect.objectContaining({
+        verdict: 'TIGHTEN_AT_OPEN',
+        triggeredBy: ['OVERNIGHT_REVIEW', 'window:OVERNIGHT_REVIEW:EQUITY:2026-10-12'],
+      }),
+    );
+  });
+
+  it('answers "already judged in this window" from the stored tag, per position', async () => {
+    findFirst.mockResolvedValueOnce({ id: 'v2' }).mockResolvedValueOnce(null);
+    await expect(repo.hasWindowVerdict('t1', 'window:OVERNIGHT_REVIEW:EQUITY:2026-10-12')).resolves.toBe(true);
+    await expect(repo.hasWindowVerdict('t2', 'window:OVERNIGHT_REVIEW:EQUITY:2026-10-12')).resolves.toBe(false);
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { trackerId: 't1', triggeredBy: { array_contains: ['window:OVERNIGHT_REVIEW:EQUITY:2026-10-12'] } },
+      select: { id: true },
+    });
+  });
+});
+
+describe('SentinelVerdictRepository — the live cycle never mistakes an overnight row for its last look', () => {
+  const findMany = jest.fn().mockResolvedValue([]);
+  const repo = new SentinelVerdictRepository({ sentinelVerdict: { findMany } } as any);
+
+  it('liveOnly excludes rows written by either overnight window', async () => {
+    await repo.recentForTracker('t1', 1, { liveOnly: true });
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        trackerId: 't1',
+        NOT: [
+          { triggeredBy: { array_contains: ['OVERNIGHT_REVIEW'] } },
+          { triggeredBy: { array_contains: ['PRE_OPEN_REVIEW'] } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 1,
+    });
+  });
+});

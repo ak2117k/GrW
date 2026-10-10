@@ -125,6 +125,27 @@ export const OI_CAPTURE_INTERVAL_MS = 60 * 1000;
 export const JUDGE_CONCURRENCY = 2;
 
 /**
+ * Slots of {@link JUDGE_CONCURRENCY} that overnight-review work may never take.
+ *
+ * LIVE ALWAYS GOES FIRST, by reservation rather than by priority. Live
+ * judgements are dispatched only on the 30-second tick, while a queued review is
+ * woken the instant a slot frees — so without a reservation a 15:45 queue of
+ * two dozen equity reviews would refill every freed slot first and keep MCX's
+ * live judgements (tripwire fires included) waiting for many minutes. A priority
+ * scheme would instead have to hold freed slots idle until the next tick;
+ * reserving is stateless and guarantees every tick finds a free slot unless LIVE
+ * work fills it. The price is that reviews run one at a time.
+ */
+export const LIVE_RESERVED_SLOTS = 1;
+
+/** Thrown by {@link SentinelCycleService.runShared} for a queued job whose moment has passed. */
+export class SharedJobExpired extends Error {
+  constructor() {
+    super('shared judgement expired before it got a slot (its venue opened) — not run');
+  }
+}
+
+/**
  * DI token for {@link TickSource}. It is an interface, so `design:paramtypes`
  * emits `Object` for it and Nest cannot resolve the parameter by type — without
  * an explicit token, Task 12 could not register the adapter without editing this
@@ -158,9 +179,18 @@ export type TickReading = Omit<
   'greenFloorArmedLatched' | 'oiWallNow' | 'oiWallPrev' | 'oiWallsAt'
 >;
 
+/**
+ * `closedSession`: the overnight review is reading a market that has CLOSED, so
+ * the live staleness refusal must not apply — the last print is returned with
+ * its time in `ltpAt`. A missing price is still refused.
+ */
+export interface TickOptions {
+  closedSession?: boolean;
+}
+
 /** Supplies the per-tick numbers a tripwire needs. Implemented over trade-tracker + market-data. */
 export interface TickSource {
-  tickFor(trackerId: string): Promise<TickReading>;
+  tickFor(trackerId: string, opts?: TickOptions): Promise<TickReading>;
 }
 
 /**
@@ -363,6 +393,9 @@ export class SentinelCycleService {
    */
   private readonly judging = new Map<string, InFlight>();
 
+  /** Overnight reviews waiting for a slot — see {@link runShared}. */
+  private readonly slotWaiters: Array<() => void> = [];
+
   /** When the concurrency cap was last reported, so a full cap logs once a minute, not per tick. */
   private capReportedAt = 0;
 
@@ -504,7 +537,8 @@ export class SentinelCycleService {
     // otherwise look permanently healthy behind the repair.
     if (tick !== raw) this.warnMissingUnderlying(entry);
 
-    const [last] = await this.verdicts.recentForTracker(entry.trackerId, 1);
+    // LIVE-ONLY: an overnight-review row is not a live look (see recentForTracker).
+    const [last] = await this.verdicts.recentForTracker(entry.trackerId, 1, { liveOnly: true });
 
     // The ratchet is updated BEFORE the skip decision, deliberately: a floor that
     // arms on a quiet tick and pulls back before the next evaluation has still
@@ -635,8 +669,67 @@ export class SentinelCycleService {
     // unhandled rejection behind; the entry is freed only by ITS OWN job.
     void job.then(() => {
       if (this.judging.get(entry.trackerId) === inFlight) this.judging.delete(entry.trackerId);
+      this.wakeSlotWaiters();
     });
     return job;
+  }
+
+  /**
+   * Run `work` — an overnight-review judgement — under the SAME cap and the SAME
+   * one-in-flight-per-position rule as the live judgements.
+   *
+   * It QUEUES rather than skips, which is the one deliberate difference. A live
+   * judgement refused a slot is asked again 30 seconds later with a fresher
+   * packet; an overnight window that skipped would lose the position's review
+   * for the night. So a review that arrives while the cap is full (or while a
+   * live judgement on that position is running) waits until a slot frees, then
+   * registers itself in `judging` — where a live tick sees it, counts it against
+   * {@link JUDGE_CONCURRENCY}, and skips that position (carrying any fire) just
+   * as it would for a live judgement in flight.
+   *
+   * Rejects with `work`'s own error; the slot is freed either way.
+   */
+  async runShared<T>(
+    trackerId: string,
+    work: () => Promise<T>,
+    opts: { expired?: () => boolean; reserveLive?: () => boolean } = {},
+  ): Promise<T> {
+    // Never the last free slot(s): see LIVE_RESERVED_SLOTS. And checked on every
+    // wake: a pre-open job still queued when its venue opens is dropped.
+    for (;;) {
+      if (opts.expired?.()) throw new SharedJobExpired();
+      // The reservation only matters while live judging can happen: when every
+      // venue the book holds is shut (08:30, after the closes) the caller says so
+      // and overnight work may use every slot. Default: reserve.
+      const reserved = (opts.reserveLive?.() ?? true) ? LIVE_RESERVED_SLOTS : 0;
+      const room = this.judging.size < JUDGE_CONCURRENCY - reserved;
+      if (room && !this.judging.has(trackerId)) break;
+      await new Promise<void>((resolve) => this.slotWaiters.push(resolve));
+    }
+    let settle!: (outcome: JudgeOutcome) => void;
+    const inFlight: InFlight = {
+      job: new Promise<JudgeOutcome>((resolve) => {
+        settle = resolve;
+      }),
+      fires: new Set(),
+    };
+    this.judging.set(trackerId, inFlight);
+    try {
+      const out = await work();
+      settle('evaluated');
+      return out;
+    } catch (err) {
+      settle('failed');
+      throw err;
+    } finally {
+      if (this.judging.get(trackerId) === inFlight) this.judging.delete(trackerId);
+      this.wakeSlotWaiters();
+    }
+  }
+
+  /** Every waiter re-checks; whoever finds room first takes the slot. */
+  private wakeSlotWaiters(): void {
+    for (const resolve of this.slotWaiters.splice(0)) resolve();
   }
 
   /**

@@ -12,6 +12,11 @@ import {
   SENTINEL_SYSTEM_PROMPT,
 } from '../prompts/sentinel-system-prompt';
 import type { WakeTrigger } from './tripwire.service';
+import {
+  SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION,
+  SENTINEL_OVERNIGHT_SYSTEM_PROMPT,
+} from '../prompts/sentinel-overnight-prompt';
+import type { OvernightPacket } from '../overnight/overnight-packet.types';
 
 /**
  * The effort values the API accepts. Narrowed here rather than left as `string`
@@ -62,6 +67,41 @@ export const VERDICT_SCHEMA = {
     'invalidationPoint',
     'reviewIn',
   ],
+  additionalProperties: false,
+} as const;
+
+/** The overnight verdict set — deliberately disjoint from the live one. */
+export const OVERNIGHT_VERDICTS = ['HOLD_OVERNIGHT', 'EXIT_AT_OPEN', 'TIGHTEN_AT_OPEN'] as const;
+export type OvernightVerdictKind = (typeof OVERNIGHT_VERDICTS)[number];
+
+/**
+ * What the overnight review returns. No `reviewIn` (the next look is the next
+ * window or the next session, not a model's choice) and no `recoveryAvailable`
+ * (a live-session concept); instead, the three things a trader needs before the
+ * bell: the risk, the level that changes the call, and the open plan.
+ */
+export interface OvernightVerdict {
+  verdict: OvernightVerdictKind;
+  confidence: 'low' | 'medium' | 'high';
+  thesisStatus: 'INTACT' | 'WEAKENING' | 'BROKEN';
+  overnightRisk: string;
+  changeMindLevel: string;
+  openPlan: string;
+  evidence: string[];
+}
+
+export const OVERNIGHT_VERDICT_SCHEMA = {
+  type: 'object',
+  properties: {
+    verdict: { type: 'string', enum: [...OVERNIGHT_VERDICTS] },
+    confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+    thesisStatus: { type: 'string', enum: ['INTACT', 'WEAKENING', 'BROKEN'] },
+    overnightRisk: { type: 'string' },
+    changeMindLevel: { type: 'string' },
+    openPlan: { type: 'string' },
+    evidence: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['verdict', 'confidence', 'thesisStatus', 'overnightRisk', 'changeMindLevel', 'openPlan', 'evidence'],
   additionalProperties: false,
 } as const;
 
@@ -174,6 +214,11 @@ export class SentinelAgentService {
     return SENTINEL_COMPOSITE_PROMPT_VERSION;
   }
 
+  /** Stamped on overnight rows — a different prompt, so a different version. */
+  get overnightPromptVersion(): string {
+    return SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION;
+  }
+
   /**
    * The model and effort for this wake, chosen by WHY the agent was woken.
    *
@@ -245,6 +290,82 @@ export class SentinelAgentService {
     }
 
     return this.validate(this.extractJson(response), packet);
+  }
+
+  /**
+   * The OVERNIGHT review: its own prompt, its own schema and its own validation,
+   * so nothing about live-session judging or parsing moves (`judge` above is
+   * untouched). Always the triggered tier — it runs about twice a day per
+   * position, and it is the one judgement the trader cannot act on until the
+   * bell.
+   */
+  async judgeOvernight(packet: OvernightPacket): Promise<OvernightVerdict> {
+    const tier = this.tierFor('FIRE');
+    let response: TransportMessage;
+    try {
+      response = await this.client.messages.create({
+        model: tier.model,
+        max_tokens: MAX_TOKENS,
+        output_config: {
+          effort: tier.effort,
+          format: {
+            type: 'json_schema',
+            schema: OVERNIGHT_VERDICT_SCHEMA as unknown as Record<string, unknown>,
+          },
+        },
+        system: [
+          {
+            type: 'text',
+            text: SENTINEL_OVERNIGHT_SYSTEM_PROMPT,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [{ role: 'user', content: JSON.stringify(packet) }],
+      });
+    } catch (err) {
+      this.logger.error(`sentinel agent (overnight): ${this.describeFailure(err)}`);
+      throw err;
+    }
+    return this.validateOvernight(this.extractJson(response), packet);
+  }
+
+  /**
+   * The overnight invariants. Same citation check as live — every path must be
+   * in THIS packet — plus: the verdict must be one of the overnight set, at
+   * least one citation must be an overnight input (the night is the point of
+   * the review), and the risk, the change-of-mind level and the open plan must
+   * all be stated.
+   */
+  private validateOvernight(raw: unknown, packet: OvernightPacket): OvernightVerdict {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('sentinel agent: overnight reply is not a verdict object — rejected');
+    }
+    const v = raw as OvernightVerdict;
+    if (!(OVERNIGHT_VERDICTS as readonly string[]).includes(v.verdict)) {
+      throw new Error(`sentinel agent: "${String(v.verdict)}" is not an overnight verdict — rejected`);
+    }
+    if (!Array.isArray(v.evidence) || v.evidence.length === 0) {
+      throw new Error('sentinel agent: overnight verdict cites no evidence — rejected');
+    }
+    const known = packetPaths(packet);
+    const invented = v.evidence.filter((c) => typeof c !== 'string' || !citesRealPath(c, known));
+    if (invented.length > 0) {
+      throw new Error(
+        `sentinel agent: overnight verdict cites evidence that is not in the packet: ${invented.join(', ')} — rejected`,
+      );
+    }
+    if (!v.evidence.some((c) => normaliseCitation(c).startsWith('overnight.'))) {
+      throw new Error('sentinel agent: overnight verdict cites no overnight input (overnight.*) — rejected');
+    }
+    for (const field of ['overnightRisk', 'changeMindLevel', 'openPlan'] as const) {
+      if (typeof v[field] !== 'string' || v[field].trim() === '') {
+        throw new Error(`sentinel agent: overnight verdict states no ${field} — rejected`);
+      }
+    }
+    if (v.verdict === 'EXIT_AT_OPEN' && v.confidence === 'low') {
+      throw new Error('sentinel agent: EXIT_AT_OPEN requires medium or high confidence — rejected');
+    }
+    return v;
   }
 
   private describeFailure(err: unknown): string {

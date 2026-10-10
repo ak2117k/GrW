@@ -11,7 +11,7 @@ import { NewsAggregatorService } from '../../news/services/news-aggregator.servi
 import { startOfLocalDay } from '../../market-data/services/master-contract';
 import { segmentFor } from '../charges';
 import type { Segment, Side } from '../charges';
-import type { TickReading, TickSource } from '../services/sentinel-cycle.service';
+import type { TickOptions, TickReading, TickSource } from '../services/sentinel-cycle.service';
 import {
   SPOT_SOURCE_CASH,
   SPOT_SOURCE_HUB,
@@ -282,7 +282,7 @@ export class SentinelTickSource implements TickSource {
     }
   }
 
-  async tickFor(trackerId: string): Promise<TickReading> {
+  async tickFor(trackerId: string, opts: TickOptions = {}): Promise<TickReading> {
     const row = await this.prisma.tradeTracker.findUnique({
       where: { id: trackerId },
       select: {
@@ -326,7 +326,7 @@ export class SentinelTickSource implements TickSource {
       counted?.record('positions', 'hub');
     } else {
       try {
-        ltp = this.storedPrice(trackerId, row);
+        ltp = this.storedPrice(trackerId, row, opts.closedSession === true);
       } catch (err) {
         counted?.record('positions', 'unpriced');
         throw err;
@@ -405,6 +405,9 @@ export class SentinelTickSource implements TickSource {
       // a loser.
       qty: Math.abs(row.qty),
       ltp,
+      // Only the overnight review asks for the print time: overnight `ltp` is the
+      // finished session's last price and the packet must say when it was printed.
+      ...(opts.closedSession ? { ltpAt: hubLtp !== null ? new Date().toISOString() : row.updatedAt.toISOString() } : {}),
       underlyingLtp,
       underlyingLtpAt: spot.at,
       // WHICH TIER produced it, and — when it produced nothing — which tiers
@@ -454,7 +457,11 @@ export class SentinelTickSource implements TickSource {
    * The tracker row's price, refusing a missing or stale one (see LTP_STALENESS_MS).
    * Substituting the entry price would report a moving trade as flat.
    */
-  private storedPrice(trackerId: string, row: { symbol: string; lastLtp: number | null; updatedAt: Date }): number {
+  private storedPrice(
+    trackerId: string,
+    row: { symbol: string; lastLtp: number | null; updatedAt: Date },
+    closedSession = false,
+  ): number {
     const ltp = row.lastLtp;
     if (ltp === null || !Number.isFinite(ltp)) {
       throw new TickUnavailable(
@@ -463,7 +470,10 @@ export class SentinelTickSource implements TickSource {
       );
     }
     const ageMs = Date.now() - row.updatedAt.getTime();
-    if (ageMs > LTP_STALENESS_MS) {
+    // The overnight review reads a CLOSED market, where every price is old by
+    // definition; it accepts the last print and dates it (see `ltpAt`). The live
+    // path keeps the refusal.
+    if (!closedSession && ageMs > LTP_STALENESS_MS) {
       throw new TickUnavailable(
         `the price on tracker ${trackerId} (${row.symbol}) is ${Math.round(ageMs / 60_000)} ` +
           `minutes old (last ${ltp} at ${row.updatedAt.toISOString()}), past the ` +

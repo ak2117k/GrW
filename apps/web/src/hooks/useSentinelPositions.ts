@@ -14,6 +14,24 @@ export interface SentinelVerdictView {
   at: string;
 }
 
+/**
+ * The latest OVERNIGHT-REVIEW verdict (after-close or pre-open). `reason` holds
+ * the risk and the open plan as two labelled lines; `invalidationPoint` is the
+ * level that would change the call. Optional on the wire: an API without the
+ * overnight review omits it.
+ */
+export interface SentinelOvernightView {
+  kind: 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | string;
+  verdict: 'HOLD_OVERNIGHT' | 'EXIT_AT_OPEN' | 'TIGHTEN_AT_OPEN' | string;
+  confidence: string;
+  thesisStatus: string;
+  reason: string;
+  invalidationPoint: string | null;
+  evidence: string[];
+  netPnl: number;
+  at: string;
+}
+
 export interface SentinelThesisView {
   direction: string;
   reason: string;
@@ -33,6 +51,7 @@ export interface SentinelPosition {
   lastLtp: number | null;
   entryTime: string;
   verdict: SentinelVerdictView | null;
+  overnight?: SentinelOvernightView | null;
   thesis: SentinelThesisView | null;
 }
 

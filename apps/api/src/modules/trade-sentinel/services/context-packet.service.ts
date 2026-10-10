@@ -349,6 +349,11 @@ export interface TickSnapshot {
    * floor makes.
    */
   greenFloorArmedLatched: boolean;
+  /**
+   * When `ltp` was printed — set ONLY on a closed-session read (the overnight
+   * review), where `ltp` is the finished session's last price, not a live one.
+   */
+  ltpAt?: string | null;
 }
 
 /**

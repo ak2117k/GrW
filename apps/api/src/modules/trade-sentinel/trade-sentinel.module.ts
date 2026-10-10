@@ -31,6 +31,9 @@ import { judgeTransportFrom, type MessagesTransport } from './services/llm-trans
 import { SentinelNewsAdapter } from './adapters/news.adapter';
 import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
 import { SentinelTickSource } from './adapters/tick-source.adapter';
+import { SentinelOvernightEvidenceAdapter } from './adapters/overnight-evidence.adapter';
+import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
+import { SentinelOvernightService } from './services/sentinel-overnight.service';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -120,6 +123,10 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
     SentinelChartContextAdapter,
     { provide: CHART_CONTEXT_SHIM, useExisting: SentinelChartContextAdapter },
     { provide: TICK_SOURCE, useClass: SentinelTickSource },
+    // News, options-chain and market-data reads for the overnight review. Reaches
+    // the broker through those services, exactly like the adapters above — so it
+    // is bound here, behind `OvernightEvidenceSource`, and nowhere else.
+    { provide: OVERNIGHT_EVIDENCE, useClass: SentinelOvernightEvidenceAdapter },
 
     SentinelVerdictRepository,
     WatchedPositionRepository,
@@ -132,6 +139,9 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
     OiWallSnapshotService,
     SentinelCycleService,
     SentinelRunnerService,
+    // After-close (15:45 NSE / 23:45 MCX) and pre-open (08:30) reviews. Shadow
+    // only; shares the cycle's judge cap. Off unless SENTINEL_SHADOW_ENABLED.
+    SentinelOvernightService,
   ],
   exports: [SentinelCycleService, SentinelRunnerService],
 })

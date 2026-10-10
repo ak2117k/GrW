@@ -1,6 +1,6 @@
 import { SentinelAgentService, type OvernightVerdict } from './sentinel-agent.service';
 import { absent, present, type ContextPacket } from './context-packet.service';
-import { SENTINEL_SYSTEM_PROMPT } from '../prompts/sentinel-system-prompt';
+import { SENTINEL_SYSTEM_PROMPT, SENTINEL_SYSTEM_PROMPT_NO_CUES } from '../prompts/sentinel-system-prompt';
 import {
   SENTINEL_OVERNIGHT_PROMPT_VERSION,
   SENTINEL_OVERNIGHT_SYSTEM_PROMPT,
@@ -124,6 +124,7 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
     const args = create.mock.calls[0][0];
     expect(args.system[0].text).toBe(SENTINEL_OVERNIGHT_SYSTEM_PROMPT);
     expect(args.system[0].text).not.toBe(SENTINEL_SYSTEM_PROMPT);
+    expect(args.system[0].text).not.toBe(SENTINEL_SYSTEM_PROMPT_NO_CUES);
     expect(args.output_config.format.schema.properties.verdict.enum).toEqual([
       'HOLD_OVERNIGHT',
       'EXIT_AT_OPEN',
@@ -181,7 +182,7 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
       }),
     );
     await expect(svc.judge(live)).resolves.toMatchObject({ verdict: 'HOLD' });
-    expect(create.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT);
+    expect(create.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT_NO_CUES);
   });
 
   describe('the overnight prompt names the overnight fields as they are', () => {

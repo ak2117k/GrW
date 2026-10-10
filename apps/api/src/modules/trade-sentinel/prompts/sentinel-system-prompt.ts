@@ -8,6 +8,14 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
 export const SENTINEL_PROMPT_VERSION = 'v3';
 
 /**
+ * The live prompt while MARKET_CUES_ENABLED is off: v2, word for word. With the
+ * cues off the packet's macro blocks are the pre-cues ones too, so a live
+ * verdict is judged exactly as before the cues existed — prompt, packet and
+ * stamp. See {@link SENTINEL_SYSTEM_PROMPT_NO_CUES}.
+ */
+export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2';
+
+/**
  * What actually goes on the verdict row.
  *
  * TWO prompts decide a verdict: this one, and the thesis prompt that wrote the
@@ -18,6 +26,7 @@ export const SENTINEL_PROMPT_VERSION = 'v3';
  * contract: still one string on one column, now `v2/t1`.
  */
 export const SENTINEL_COMPOSITE_PROMPT_VERSION = `${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`;
+export const SENTINEL_COMPOSITE_PROMPT_VERSION_NO_CUES = `${SENTINEL_PROMPT_VERSION_NO_CUES}/${THESIS_PROMPT_VERSION}`;
 
 /** Exact model id. No date suffix — see docs/claude-api model table. */
 export const SENTINEL_MODEL = 'claude-opus-5';
@@ -115,3 +124,20 @@ Rules for your answer:
 - "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
 - "reviewIn" is how many seconds until you should be asked again.
 - Keep "reason" to one sentence a trader would recognise.`;
+
+
+/** The macro lines v3 added, and the single v2 line they replaced. */
+const V3_MACRO_LINES = SENTINEL_SYSTEM_PROMPT.slice(
+  SENTINEL_SYSTEM_PROMPT.indexOf('- macro.fiiDii is the latest published'),
+  SENTINEL_SYSTEM_PROMPT.indexOf('- news.freshCount counts'),
+);
+const V2_MACRO_LINE =
+  '- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.\n';
+
+/** v2's text: v3 with the macro lines put back. Fails at load rather than drift silently. */
+export const SENTINEL_SYSTEM_PROMPT_NO_CUES = (() => {
+  if (!V3_MACRO_LINES.startsWith('- macro.fiiDii is the latest published') || !V3_MACRO_LINES.endsWith('\n')) {
+    throw new Error('sentinel-system-prompt: the v3 macro lines moved — rebuild SENTINEL_SYSTEM_PROMPT_NO_CUES');
+  }
+  return SENTINEL_SYSTEM_PROMPT.replace(V3_MACRO_LINES, V2_MACRO_LINE);
+})();

@@ -501,10 +501,13 @@ function macroBlocks(
   now: Date,
 ): { fiiDii: Block<Prisma.InputJsonValue>; globalCues: Block<Prisma.InputJsonValue> } {
   const snap = read.snapshot;
-  if (!snap) {
+  if (!snap || !snap.enabled) {
+    // Market cues off (or not wired): EXACTLY the pre-cues blocks, so the live
+    // packet — and with it every live verdict — is unchanged until the owner
+    // switches MARKET_CUES_ENABLED on. The agent sends the v2 prompt then too.
     return {
-      fiiDii: absent(`${read.reason}. Note ${FII_POST_CLOSE}.`),
-      globalCues: absent(`${read.reason} — US closes, US futures and GIFT Nifty are unseen`),
+      fiiDii: absent(`${STUB_REASON}. Note FII/DII is published post-close and can never be an intraday trigger.`),
+      globalCues: absent(`${STUB_REASON} (gold, crude-oil, nasdaq)`),
     };
   }
   const f = snap.fiiDii;

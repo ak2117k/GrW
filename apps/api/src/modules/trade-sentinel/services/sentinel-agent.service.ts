@@ -5,11 +5,13 @@ import type { ContextPacket } from './context-packet.service';
 import type { MessagesTransport, TransportMessage } from './llm-transport';
 import {
   SENTINEL_COMPOSITE_PROMPT_VERSION,
+  SENTINEL_COMPOSITE_PROMPT_VERSION_NO_CUES,
   SENTINEL_EFFORT_ROUTINE,
   SENTINEL_EFFORT_TRIGGERED,
   SENTINEL_MODEL,
   SENTINEL_MODEL_ROUTINE,
   SENTINEL_SYSTEM_PROMPT,
+  SENTINEL_SYSTEM_PROMPT_NO_CUES,
 } from '../prompts/sentinel-system-prompt';
 import type { WakeTrigger } from './tripwire.service';
 import {
@@ -211,7 +213,16 @@ export class SentinelAgentService {
    * the packet's `thesis` block. See `SENTINEL_COMPOSITE_PROMPT_VERSION`.
    */
   get promptVersion(): string {
-    return SENTINEL_COMPOSITE_PROMPT_VERSION;
+    return this.cuesOn ? SENTINEL_COMPOSITE_PROMPT_VERSION : SENTINEL_COMPOSITE_PROMPT_VERSION_NO_CUES;
+  }
+
+  /**
+   * MARKET_CUES_ENABLED, read the way MarketCuesService reads it. Off (or no
+   * config): the v2 live prompt and stamp, unchanged from before the cues — the
+   * packet's macro blocks are then the v2 ones too.
+   */
+  private get cuesOn(): boolean {
+    return String(this.config?.get<string>('MARKET_CUES_ENABLED') ?? '').trim().toLowerCase() === 'true';
   }
 
   /** Stamped on overnight rows — a different prompt, so a different version. */
@@ -272,7 +283,7 @@ export class SentinelAgentService {
         system: [
           {
             type: 'text',
-            text: SENTINEL_SYSTEM_PROMPT,
+            text: this.cuesOn ? SENTINEL_SYSTEM_PROMPT : SENTINEL_SYSTEM_PROMPT_NO_CUES,
             // Identical on every call, and the packet rides in the user turn —
             // so the whole prefix is cacheable across every position, every tick.
             cache_control: { type: 'ephemeral' },

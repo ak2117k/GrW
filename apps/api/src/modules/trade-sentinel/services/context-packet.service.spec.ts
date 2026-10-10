@@ -177,17 +177,34 @@ describe('ContextPacketService', () => {
       side: t.side,
     }).floorPrice as number;
 
-  it('without the market-cues reader, macro is unavailable with a stated reason; sector stays a stub', async () => {
+  it('marks every stubbed macro factor unavailable with a stated reason', async () => {
     const packet = await svc.build(entry, tick, null);
     for (const block of [packet.macro.fiiDii, packet.macro.sector, packet.macro.globalCues]) {
       expect(block.available).toBe(false);
+      if (!block.available) expect(block.reason).toMatch(/stub/i);
     }
-    if (!packet.macro.sector.available) expect(packet.macro.sector.reason).toMatch(/stub/i);
-    if (!packet.macro.globalCues.available) expect(packet.macro.globalCues.reason).toMatch(/market-cues/);
     // FII/DII is post-close data; the agent must never treat it as intraday.
+    expect(packet.macro.fiiDii.available).toBe(false);
     if (!packet.macro.fiiDii.available) {
       expect(packet.macro.fiiDii.reason).toMatch(/post-close/i);
     }
+  });
+
+  it('with market cues switched off, macro is EXACTLY the pre-cues (v2) packet', async () => {
+    const off = { enabled: false } as any;
+    const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => off } as any);
+    const withOff = await s.build(entry, tick, null);
+    const without = await svc.build(entry, tick, null);
+    expect(withOff.macro).toEqual(without.macro);
+    expect(without.macro.fiiDii).toEqual({
+      available: false,
+      reason:
+        'context-scoring factor is a stub (returns isStub: true) — no real data behind it. Note FII/DII is published post-close and can never be an intraday trigger.',
+    });
+    expect(without.macro.globalCues).toEqual({
+      available: false,
+      reason: 'context-scoring factor is a stub (returns isStub: true) — no real data behind it (gold, crude-oil, nasdaq)',
+    });
   });
 
   describe('macro from the market-cues cache (read only, no I/O)', () => {
@@ -240,17 +257,16 @@ describe('ContextPacketService', () => {
       expect(packet.macro.sector.available).toBe(false);
     });
 
-    it('a switched-off cache says so, never a zero', async () => {
-      const off = {
+    it('an enabled cache holding nothing says why, never a zero', async () => {
+      const empty = {
         ...snapshot,
-        enabled: false,
-        us: Object.fromEntries(Object.keys(snapshot.us).map((k) => [k, { ...none, reason: 'MARKET_CUES_ENABLED is not true' }])),
-        fiiDii: { ...none, reason: 'MARKET_CUES_ENABLED is not true' },
+        us: Object.fromEntries(Object.keys(snapshot.us).map((k) => [k, none])),
+        fiiDii: none,
       };
-      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => off } as any);
+      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => empty } as any);
       const packet = await s.build(entry, tick, null);
-      expect(packet.macro.fiiDii).toEqual({ available: false, reason: expect.stringMatching(/MARKET_CUES_ENABLED/) });
-      expect(packet.macro.globalCues).toEqual({ available: false, reason: expect.stringMatching(/MARKET_CUES_ENABLED/) });
+      expect(packet.macro.fiiDii).toEqual({ available: false, reason: expect.stringMatching(/not fetched yet/) });
+      expect(packet.macro.globalCues).toEqual({ available: false, reason: expect.stringMatching(/not fetched yet/) });
     });
   });
 

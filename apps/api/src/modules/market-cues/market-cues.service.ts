@@ -74,6 +74,13 @@ const SLOT_GROUPS: Record<CronSlot, CueGroup[]> = {
 /** A source whose last read was not ok may be re-read by `ensure` this long after the last attempt. */
 const REFETCH_AFTER_MS = 30 * 60_000;
 
+/**
+ * The pre-open book is wanted within minutes (the 09:10/09:11 check fires), so a
+ * book that is unavailable, failed or not today's is re-read by the next fire —
+ * and its backoff never outlasts the minute between fires.
+ */
+const PREOPEN_REFETCH_MS = 45_000;
+
 const GROUP_SWITCH: Record<CueGroup, { key: keyof MarketCuesConfig['sources']; env: string }> = {
   us: { key: 'us', env: 'MARKET_CUES_US' },
   fiiDii: { key: 'fii', env: 'MARKET_CUES_FII' },
@@ -271,6 +278,7 @@ export class MarketCuesService implements OnApplicationBootstrap {
   private needs(group: CueGroup, snap: MarketCuesSnapshot, now: Date): boolean {
     const last = this.attempted.get(group);
     if (last === undefined) return true;
+    if (group === 'preOpen') return snap.preOpen.status !== 'ok' && now.getTime() - last >= PREOPEN_REFETCH_MS;
     if (now.getTime() - last < REFETCH_AFTER_MS) return false;
     const records: Array<CueRecord<unknown>> =
       group === 'us' ? US_CUE_KEYS.map((k) => snap.us[k]) : [snap[group] as CueRecord<unknown>];
@@ -407,7 +415,7 @@ export class MarketCuesService implements OnApplicationBootstrap {
    * failure (after the one retry inside `cueGet`) the backoff doubles. The
    * failure is logged with its HTTP status or network cause — never headers.
    */
-  private async guarded<T>(endpoint: string, now: Date, fn: () => Promise<T>): Promise<T> {
+  private async guarded<T>(endpoint: string, now: Date, fn: () => Promise<T>, maxWaitMs = this.cfg.backoffMaxMs): Promise<T> {
     const b = this.backoff.get(endpoint);
     if (b && now.getTime() < b.until) {
       throw new Error(`${endpoint} in backoff after ${b.failures} failed fire(s) until ${new Date(b.until).toISOString()}`);
@@ -418,7 +426,7 @@ export class MarketCuesService implements OnApplicationBootstrap {
       return out;
     } catch (err) {
       const failures = (b?.failures ?? 0) + 1;
-      const wait = Math.min(this.cfg.backoffBaseMs * 2 ** (failures - 1), this.cfg.backoffMaxMs);
+      const wait = Math.min(this.cfg.backoffBaseMs * 2 ** (failures - 1), this.cfg.backoffMaxMs, maxWaitMs);
       this.backoff.set(endpoint, { failures, until: now.getTime() + wait });
       const why = describeFetchError(err);
       this.logger.warn(`market cue source ${endpoint} failed: ${why}`);
@@ -623,7 +631,12 @@ export class MarketCuesService implements OnApplicationBootstrap {
 
   private async refreshPreOpen(now: Date): Promise<void> {
     try {
-      const book = await this.guarded('NSE pre-open', now, async () => parseNsePreOpen(await cueGetJson(this.cfg.urls.nsePreOpen, this.http())));
+      const book = await this.guarded(
+        'NSE pre-open',
+        now,
+        async () => parseNsePreOpen(await cueGetJson(this.cfg.urls.nsePreOpen, this.http())),
+        PREOPEN_REFETCH_MS,
+      );
       this.put<PreOpenBook>('preOpen', {
         values: book,
         sourceTime: book.date,

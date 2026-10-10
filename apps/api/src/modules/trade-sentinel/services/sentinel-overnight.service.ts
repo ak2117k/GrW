@@ -283,6 +283,9 @@ export class SentinelOvernightService {
   /** Per window tag: positions claimed (in flight or done) in this process. */
   private readonly claimed = new Map<string, Set<string>>();
 
+  /** Per 09:10-check tag: positions already counted and logged as skipped for no input (once per window). */
+  private readonly skippedNoInput = new Map<string, Set<string>>();
+
   /** Per `trackerId|tag`: consecutive failures and when a retry is allowed. */
   private readonly failures = new Map<string, { count: number; retryAt: number }>();
 
@@ -414,8 +417,14 @@ export class SentinelOvernightService {
       let picked: Array<{ entry: RosterEntry; match: PreOpenMatch | null }>;
       if (window.kind === 'PRE_OPEN_CHECK') {
         const split = selectForPreOpenCheck(entries, preOpen?.book ?? null, now, this.clock, preOpen?.reason ?? null);
+        const seen = this.skippedNoInput.get(tag) ?? new Set<string>();
+        this.skippedNoInput.set(tag, seen);
         for (const s of split.skipped) {
-          // Recorded like a drop at the open: counted and logged, never judged.
+          // Recorded like a drop at the open: counted and logged, never judged —
+          // ONCE per position per window, not on every fire. Not claimed: a book
+          // that arrives by the next fire gets the position checked.
+          if (seen.has(s.entry.trackerId)) continue;
+          seen.add(s.entry.trackerId);
           report.picked += 1;
           report.skippedNoInput += 1;
           this.logger.warn(`pre-open check for ${s.entry.symbol} (${s.entry.trackerId}) skipped: ${s.reason} (${tag})`);
@@ -645,6 +654,9 @@ export class SentinelOvernightService {
     for (const key of [...this.failures.keys()]) {
       const keyTag = key.slice(key.indexOf('|') + 1);
       if (keyTag.startsWith(prefix) && keyTag !== tag) this.failures.delete(key);
+    }
+    for (const key of [...this.skippedNoInput.keys()]) {
+      if (key.startsWith(prefix) && key !== tag) this.skippedNoInput.delete(key);
     }
   }
 }

@@ -329,6 +329,27 @@ describe('pre-open book', () => {
     expect(svc.snapshot(ist('2026-10-12T09:10:00')).preOpen.status).toBe('stale');
   });
 
+  it('a failed 09:10 read is refetched by the 09:11 fire — backoff never outlasts the minute', async () => {
+    let up = false;
+    const { svc, calls } = make({}, [
+      { match: has('market-data-pre-open'), reply: () => (up ? { status: 200, body: raw('nse-preopen-fo.json') } : { status: 503, body: '' }) },
+    ]);
+    const first = await svc.ensure(['preOpen'], ist('2026-10-09T09:10:00'));
+    expect(first.preOpen.status).toBe('unavailable');
+    expect(calls).toHaveLength(2); // one request, one retry
+    up = true;
+    const second = await svc.ensure(['preOpen'], ist('2026-10-09T09:11:00'));
+    expect(calls).toHaveLength(3);
+    expect(second.preOpen.status).toBe('ok');
+  });
+
+  it('a cached book that is not today’s is refetched at once, not after half an hour', async () => {
+    const { svc, calls } = make({}, [{ match: has('market-data-pre-open'), reply: ok('nse-preopen-fo.json') }]);
+    await svc.ensure(['preOpen'], ist('2026-10-12T09:05:00')); // yields Friday's book — stale on Monday
+    await svc.ensure(['preOpen'], ist('2026-10-12T09:10:00'));
+    expect(calls).toHaveLength(2);
+  });
+
   it('ensure refetches a stale pre-open book, and concurrent callers share ONE request', async () => {
     const { svc, calls } = make({}, [PRE]);
     await Promise.all([

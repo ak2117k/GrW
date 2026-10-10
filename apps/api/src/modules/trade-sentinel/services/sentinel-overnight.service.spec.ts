@@ -796,6 +796,29 @@ describe('SentinelOvernightService — the 09:10 pre-open check', () => {
     expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/NIFTY27OCT26FUT.*skipped.*no pre-open IEP for NIFTY/);
   });
 
+  it('skips are counted and logged once per position per window, not on every fire', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const stale = { ...preOpenBook, status: 'stale' as const, reason: 'the pre-open book is from 2026-10-12' };
+    const t = makeSvc({ book: BOOK, preOpen: stale });
+    const first = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    const second = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
+    expect(first.skippedNoInput).toBe(5);
+    expect(second.skippedNoInput).toBe(0);
+    expect(warn.mock.calls.filter((c) => /pre-open check .* skipped/.test(String(c[0])))).toHaveLength(5);
+    // The next day is a new window.
+    const nextDay = await t.svc.runWindow(PRE_OPEN_CHECK, ist('2026-10-14', '09:10'));
+    expect(nextDay.skippedNoInput).toBe(5);
+  });
+
+  it('a book that arrives by the 09:11 fire gets the skipped positions checked', async () => {
+    const stale = { ...preOpenBook, status: 'stale' as const, reason: 'old' };
+    const t = makeSvc({ book: BOOK, preOpen: stale });
+    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    t.evidence.preOpen.mockResolvedValue(preOpenBook);
+    await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
+    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['rel-fut', 'rel-opt']);
+  });
+
   it('a stale book is no book: nothing is judged, each position skipped with the reason', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const stale = { ...preOpenBook, status: 'stale' as const, reason: 'the pre-open book is from 2026-10-12' };

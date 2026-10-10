@@ -1,0 +1,425 @@
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { NewsAggregatorService } from '../../news/services/news-aggregator.service';
+import { NewsCategory } from '../../news/dto/news.dto';
+import { MarketContextService } from '../../market-data/services/market-context.service';
+import { YahooFinanceService } from '../../market-data/services/yahoo-finance.service';
+import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
+import { CommoditiesSnapshotService } from '../../market-data/services/commodities-snapshot.service';
+import { BreadthSectorService, type SectorPerformanceEntry } from '../../market-data/services/breadth-sector.service';
+import { OptionsChainService } from '../../options-chain/services/options-chain.service';
+import type { NewsEvidence, NewsItemIn, NewsScope, RawOiAnalysis } from '../overnight/overnight-evidence';
+import type {
+  OvernightEvidenceQuery,
+  OvernightEvidenceSource,
+  RawCue,
+  RawCues,
+  RawOiEvidence,
+} from '../ports/overnight-evidence.port';
+import { normaliseSymbol } from '../symbols';
+
+/**
+ * `OvernightEvidenceSource` over the services that already exist — no new
+ * scrapers, no new feeds.
+ *
+ *   news     NewsAggregatorService — the STORED articles (it fetches on a
+ *            schedule; this reads what is there, and reports when it last
+ *            took anything in so the packet can call it stale).
+ *   OI       OptionsChainService — the chain (NSE and, through its MCX branch,
+ *            commodity options), its own getPCR / getMaxPain, and the stored
+ *            `option_chain_snapshots` for the previous session.
+ *   cues     CommoditiesSnapshotService (MCX crude, gold), MarketContextService
+ *            (India VIX), YahooFinanceService (the underlying's change vs its
+ *            previous close), NseSectorIndexService + BreadthSectorService
+ *            (sector strength). Nasdaq and FII flows have no source in this
+ *            repo (their context factors are stubs) and are stated unavailable.
+ *
+ * BROKER-REACHABLE, like every adapter here — which is why it sits behind a
+ * port and is named only in `trade-sentinel.module.ts`. See the module note.
+ *
+ * The three services MarketDataModule / OptionsChainModule do not export are
+ * resolved lazily through `ModuleRef` (non-strict), the same way the tick source
+ * reaches the hub; a container without them still boots and the affected
+ * inputs read "not wired" rather than failing the review.
+ */
+@Injectable()
+export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource {
+  private readonly logger = new Logger(SentinelOvernightEvidenceAdapter.name);
+
+  constructor(
+    private readonly articles: NewsAggregatorService,
+    private readonly marketContext: MarketContextService,
+    private readonly yahoo: YahooFinanceService,
+    private readonly sectors: NseSectorIndexService,
+    private readonly prisma: PrismaService,
+    @Optional() private readonly moduleRef?: ModuleRef,
+  ) {}
+
+  // ─── News ──────────────────────────────────────────────────────────────────
+
+  async news(q: OvernightEvidenceQuery): Promise<NewsEvidence> {
+    const since = q.since.toISOString();
+    const base = q.underlying ? normaliseSymbol(q.underlying) : null;
+    const isIndex = base !== null && INDEX_NEWS_TERM[base] !== undefined;
+    const sector = base && !isIndex && venue(q.exchange) !== 'MCX' ? await this.sectorFor(q.userId, base) : null;
+
+    const asks: Array<Promise<NewsItemIn[]>> = [];
+    // Order matters: dedupe keeps the FIRST scope that surfaced a headline.
+    if (base) {
+      asks.push(this.articles.getNewsForSymbol(base).then((rows) => rows.map((r) => item(r, 'symbol'))));
+    }
+    if (sector) {
+      asks.push(this.listed({ category: NewsCategory.SECTOR, search: sector.sector, from: since, limit: 20 }, 'sector'));
+    }
+    const indexTerm = venue(q.exchange) === 'MCX' ? null : base && isIndex ? INDEX_NEWS_TERM[base] : 'Nifty';
+    if (indexTerm) asks.push(this.listed({ search: indexTerm, from: since, limit: 20 }, 'index'));
+    asks.push(this.listed({ category: NewsCategory.INDIAN, from: since, limit: 20 }, 'macro'));
+    asks.push(this.listed({ category: NewsCategory.GLOBAL, from: since, limit: 20 }, 'macro'));
+
+    const [groups, latest] = await Promise.all([
+      Promise.all(asks),
+      this.articles.getNews({ limit: 1 } as never).catch(() => ({ data: [] as Array<{ fetchedAt?: Date }> })),
+    ]);
+    const newest = (latest as { data: Array<{ fetchedAt?: Date }> }).data[0]?.fetchedAt;
+    return {
+      items: groups.flat(),
+      lastFetchAt: newest instanceof Date ? newest.toISOString() : null,
+    };
+  }
+
+  private async listed(
+    filters: { category?: NewsCategory; search?: string; from: string; limit: number },
+    scope: NewsScope,
+  ): Promise<NewsItemIn[]> {
+    const { data } = await this.articles.getNews(filters as never);
+    return data.map((r) => item(r, scope));
+  }
+
+  // ─── OI ────────────────────────────────────────────────────────────────────
+
+  async oi(q: OvernightEvidenceQuery): Promise<RawOiEvidence> {
+    const none = (reason: string): RawOiEvidence => ({ analysis: { available: false, reason }, legGreeks: null });
+    const chainSvc = this.lazy(OptionsChainService);
+    if (!chainSvc) return none('options-chain.service is not wired into this process — OI analysis unavailable');
+    if (!q.underlying) return none('the underlying could not be resolved, so no options chain was looked up');
+    const underlying = normaliseSymbol(q.underlying);
+
+    const expiries = await chainSvc.getExpiries(underlying);
+    if (!expiries || expiries.length === 0) {
+      return none(`no option expiries for ${underlying} on ${q.exchange} — OI analysis unavailable for this underlying`);
+    }
+    const wanted = q.expiry ? expiries.find((e) => e.slice(0, 10) === q.expiry) : undefined;
+    const expiry = wanted ?? expiries[0];
+    const { chain, spotPrice } = await chainSvc.getOptionsChainWithSpot(underlying, expiry);
+    if (!chain || chain.length === 0) return none(`the options chain for ${underlying} ${expiry} came back empty`);
+
+    const at = q.now.toISOString();
+    let ceOi = 0;
+    let peOi = 0;
+    let oiChange = 0;
+    let hasOiChange = false;
+    let callWall: number | null = null;
+    let putWall: number | null = null;
+    let topCe = 0;
+    let topPe = 0;
+    for (const e of chain) {
+      const ce = e.ceData?.oi ?? 0;
+      const pe = e.peData?.oi ?? 0;
+      ceOi += ce;
+      peOi += pe;
+      for (const d of [e.ceData?.oiChange, e.peData?.oiChange]) {
+        if (Number.isFinite(d as number) && d !== 0) {
+          oiChange += d as number;
+          hasOiChange = true;
+        }
+      }
+      if (ce > topCe) {
+        topCe = ce;
+        callWall = e.strikePrice;
+      }
+      if (pe > topPe) {
+        topPe = pe;
+        putWall = e.strikePrice;
+      }
+    }
+    const oiPresent = ceOi > 0 || peOi > 0;
+    const pcr = oiPresent ? chainSvc.getPCR(chain) : 0;
+    const maxPain = oiPresent ? chainSvc.getMaxPain(chain) : 0;
+
+    // The previous session's chain: the newest snapshot captured BEFORE the
+    // session this review looks back on began (IST midnight of the last close).
+    const sessionDay = Date.parse(`${istYmd(q.since)}T00:00:00.000Z`) - IST_OFFSET_MS;
+    const prevRow = await this.prisma.optionChainSnapshot.findFirst({
+      where: { underlying, expiryDate: new Date(expiry), capturedAt: { lt: new Date(sessionDay) } },
+      orderBy: { capturedAt: 'desc' },
+    });
+    const prevChain = (prevRow?.chainJson ?? null) as unknown as typeof chain | null;
+    let prevSession: Extract<RawOiAnalysis, { available: true }>['prevSession'] = null;
+    if (prevRow && Array.isArray(prevChain)) {
+      const pc = prevChain.reduce((s, e) => s + (e.ceData?.oi ?? 0), 0);
+      const pp = prevChain.reduce((s, e) => s + (e.peData?.oi ?? 0), 0);
+      prevSession = {
+        at: prevRow.capturedAt.toISOString(),
+        pcr: pc > 0 ? Math.round((pp / pc) * 100) / 100 : null,
+        totalCeOi: pc > 0 || pp > 0 ? pc : null,
+        totalPeOi: pc > 0 || pp > 0 ? pp : null,
+        spot: Number(prevRow.spotPrice) || null,
+      };
+    }
+
+    let contract: Extract<RawOiAnalysis, { available: true }>['contract'] = null;
+    let legGreeks: RawOiEvidence['legGreeks'] = null;
+    if (q.option) {
+      const pick = (rows: typeof chain | null) => {
+        const row = rows?.find((e) => e.strikePrice === q.option?.strike);
+        return row ? (q.option?.optionType === 'CE' ? row.ceData : row.peData) : null;
+      };
+      const legNow = pick(chain);
+      const legPrev = pick(prevChain);
+      if (legNow) {
+        contract = {
+          strike: q.option.strike,
+          optionType: q.option.optionType,
+          ltp: legNow.ltp > 0 ? legNow.ltp : null,
+          oi: oiPresent ? legNow.oi : null,
+          oiChange: Number.isFinite(legNow.oiChange) && legNow.oiChange !== 0 ? legNow.oiChange : null,
+          prev: legPrev ? { ltp: legPrev.ltp > 0 ? legPrev.ltp : null, oi: legPrev.oi > 0 ? legPrev.oi : null } : null,
+        };
+        const g = (n: number) => (Number.isFinite(n) && n !== 0 ? n : null);
+        if ([legNow.delta, legNow.theta, legNow.vega].some((n) => g(n) !== null)) {
+          legGreeks = {
+            delta: g(legNow.delta),
+            gamma: g(legNow.gamma),
+            theta: g(legNow.theta),
+            vega: g(legNow.vega),
+            iv: g(legNow.iv),
+            source: `options-chain.service greeks (${underlying} ${expiry}, strike ${q.option.strike} ${q.option.optionType})`,
+            at,
+          };
+        }
+      }
+    }
+
+    const change = await this.underlyingChange(underlying, q.exchange);
+    return {
+      analysis: {
+        available: true,
+        source: `options-chain.service (${underlying} ${expiry})`,
+        at,
+        expiry,
+        spot: spotPrice > 0 ? spotPrice : q.underlyingLtp,
+        pcr: pcr > 0 ? pcr : null,
+        maxPain: maxPain > 0 ? maxPain : null,
+        callWall: oiPresent ? callWall : null,
+        putWall: oiPresent ? putWall : null,
+        totalCeOi: oiPresent ? ceOi : null,
+        totalPeOi: oiPresent ? peOi : null,
+        totalOiChange: hasOiChange ? oiChange : null,
+        underlyingPriceChange:
+          change && Number.isFinite(change.regularMarketChange) && change.regularMarketChange !== 0
+            ? { value: change.regularMarketChange, source: 'yahoo-finance.service (session change vs previous close)' }
+            : null,
+        prevSession,
+        contract,
+      },
+      legGreeks,
+    };
+  }
+
+  // ─── Market cues ───────────────────────────────────────────────────────────
+
+  async cues(q: OvernightEvidenceQuery): Promise<RawCues> {
+    const base = q.underlying ? normaliseSymbol(q.underlying) : null;
+    const [commodities, vix, change, sector] = await Promise.all([
+      this.commodityCues(q.userId),
+      this.vixCue(q.since),
+      this.underlyingChangeCue(base, q.exchange, q.now),
+      this.sectorCue(q.userId, base, q.exchange, q.now),
+    ]);
+    return {
+      nasdaq: {
+        reading: null,
+        reason:
+          'no US-close source is wired: the nasdaq context factor is a stub and yahoo-finance.service maps only ' +
+          'Indian symbols — overnight US direction is UNSEEN, not flat',
+      },
+      fiiFlows: {
+        reading: null,
+        reason: 'no FII-flow source is wired (the fii context factor is a stub) — FII positioning is UNSEEN',
+      },
+      crudeOil: commodities.crude,
+      gold: commodities.gold,
+      indiaVix: vix,
+      underlyingChange: change,
+      sectorStrength: sector,
+    };
+  }
+
+  private async commodityCues(userId: string): Promise<{ crude: RawCue; gold: RawCue }> {
+    const svc = this.lazy(CommoditiesSnapshotService);
+    if (!svc) {
+      const r: RawCue = { reading: null, reason: 'commodities-snapshot.service is not wired into this process' };
+      return { crude: r, gold: r };
+    }
+    try {
+      const { commodities } = await svc.getSnapshot(userId);
+      const at = new Date().toISOString();
+      const pick = (name: string, test: (s: string) => boolean): RawCue => {
+        const row = commodities.find((c) => test(c.symbol.toUpperCase()));
+        if (!row || row.ltp === null || !Number.isFinite(row.ltp) || row.ltp <= 0) {
+          return { reading: null, reason: `MCX ${name} front month could not be quoted over this user's session` };
+        }
+        return {
+          reading: { value: row.ltp, change: row.change, changePercent: row.changePercent, at },
+          source: `commodities-snapshot.service (MCX ${name} front-month future; change vs previous close; quoted at review time)`,
+        };
+      };
+      return { crude: pick('CRUDEOIL', (s) => s.startsWith('CRUDE')), gold: pick('GOLD', (s) => s === 'GOLD') };
+    } catch (err) {
+      const r: RawCue = { reading: null, reason: `commodities-snapshot.service failed: ${message(err)}` };
+      return { crude: r, gold: r };
+    }
+  }
+
+  private async vixCue(since: Date): Promise<RawCue> {
+    try {
+      const h = await this.marketContext.getVixHistory();
+      if (!h) return { reading: null, reason: 'market-context.service returned no India VIX history' };
+      const change = Math.round((h.today - h.yesterday) * 100) / 100;
+      return {
+        reading: {
+          value: h.today,
+          change,
+          changePercent: h.yesterday > 0 ? Math.round(((h.today - h.yesterday) / h.yesterday) * 10000) / 100 : null,
+          // Daily closes: dated to the session close they describe.
+          at: since.toISOString(),
+        },
+        source: 'market-context.service getVixHistory (latest two ^INDIAVIX daily closes)',
+      };
+    } catch (err) {
+      return { reading: null, reason: `market-context.service failed: ${message(err)}` };
+    }
+  }
+
+  private async underlyingChangeCue(base: string | null, exchange: string, now: Date): Promise<RawCue> {
+    if (!base) return { reading: null, reason: 'the underlying could not be resolved' };
+    try {
+      const q = await this.underlyingChange(base, exchange);
+      if (!q || !Number.isFinite(q.regularMarketPrice) || q.regularMarketPrice <= 0) {
+        return {
+          reading: null,
+          reason:
+            venue(exchange) === 'MCX'
+              ? 'yahoo-finance.service has no MCX mapping — the underlying’s previous-close change is unavailable'
+              : `yahoo-finance.service returned no quote for ${base}`,
+        };
+      }
+      return {
+        reading: {
+          value: q.regularMarketPrice,
+          change: q.regularMarketChange,
+          changePercent: q.regularMarketChangePercent,
+          at: now.toISOString(),
+        },
+        source: `yahoo-finance.service getQuoteChange (${base}: last price vs previous close)`,
+      };
+    } catch (err) {
+      return { reading: null, reason: `yahoo-finance.service failed: ${message(err)}` };
+    }
+  }
+
+  private async sectorCue(userId: string, base: string | null, exchange: string, now: Date): Promise<RawCues['sectorStrength']> {
+    if (!base) return { value: null, reason: 'the underlying could not be resolved' };
+    if (venue(exchange) === 'MCX') return { value: null, reason: 'a commodity has no equity sector' };
+    if (INDEX_NEWS_TERM[base] !== undefined) return { value: null, reason: 'the underlying is an index — no single sector' };
+    try {
+      const sector = await this.sectorFor(userId, base);
+      if (!sector) return { value: null, reason: `no sector index resolved or quoted for ${base}` };
+      return {
+        value: {
+          sector: sector.sector,
+          index: sector.symbol,
+          changePercent: sector.changePercent,
+          direction: Math.abs(sector.changePercent) < 0.1 ? 'FLAT' : sector.changePercent > 0 ? 'UP' : 'DOWN',
+        },
+        source: 'nse-sector-index.service + breadth-sector.service (sector index change vs previous close, over this user’s session)',
+        at: now.toISOString(),
+      };
+    } catch (err) {
+      return { value: null, reason: `sector lookup failed: ${message(err)}` };
+    }
+  }
+
+  private async sectorFor(
+    userId: string,
+    base: string,
+  ): Promise<{ sector: string; symbol: string; changePercent: number } | null> {
+    const breadth = this.lazy(BreadthSectorService);
+    if (!breadth) return null;
+    const token = await this.sectors.getSectorIndexForSymbol(base).catch(() => null);
+    if (!token) return null;
+    const rows = await breadth.getSectorPerformance(userId).catch((): SectorPerformanceEntry[] => []);
+    const row = rows.find((r) => r.token === token);
+    return row ? { sector: row.sector, symbol: row.symbol, changePercent: row.changePercent } : null;
+  }
+
+  private async underlyingChange(base: string, exchange: string) {
+    if (venue(exchange) === 'MCX') return null;
+    const token = INDEX_TOKENS[base] ?? '';
+    return this.yahoo.getQuoteChange(base, token && base === 'SENSEX' ? 'BSE' : 'NSE', token);
+  }
+
+  private lazy<T>(cls: new (...args: never[]) => T): T | null {
+    if (!this.moduleRef) return null;
+    try {
+      return this.moduleRef.get(cls, { strict: false }) ?? null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+function istYmd(at: Date): string {
+  return new Date(at.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+function venue(exchange: string): 'MCX' | 'EQUITY' {
+  return String(exchange ?? '').toUpperCase() === 'MCX' ? 'MCX' : 'EQUITY';
+}
+
+/** Index underlyings → the word headlines use for them. */
+const INDEX_NEWS_TERM: Record<string, string> = {
+  NIFTY: 'Nifty',
+  BANKNIFTY: 'Bank Nifty',
+  FINNIFTY: 'Fin Nifty',
+  MIDCPNIFTY: 'Midcap',
+  SENSEX: 'Sensex',
+};
+
+/** Index underlyings → the tokens yahoo-finance.service maps (same as market-context.service). */
+const INDEX_TOKENS: Record<string, string> = {
+  NIFTY: '99926000',
+  BANKNIFTY: '99926009',
+  FINNIFTY: '99926037',
+  SENSEX: '99919000',
+};
+
+function item(
+  r: { title: string; source: string; url?: string | null; sentiment?: string | null; publishedAt: Date },
+  scope: NewsScope,
+): NewsItemIn {
+  return {
+    title: r.title,
+    source: r.source,
+    url: r.url ?? null,
+    sentiment: r.sentiment ?? null,
+    publishedAt: r.publishedAt.toISOString(),
+    scope,
+  };
+}
+
+function message(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}

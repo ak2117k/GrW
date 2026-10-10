@@ -7,7 +7,19 @@ export interface RecordVerdictInput {
   userId: string;
   trackerId: string;
   symbol: string;
-  verdict: 'HOLD' | 'EXIT_ARMED' | 'EXIT_NOW' | 'ESCALATE';
+  /**
+   * The live set, or the OVERNIGHT set (`HOLD_OVERNIGHT | EXIT_AT_OPEN | TIGHTEN_AT_OPEN`).
+   * The column is a plain String with no DB constraint, so the overnight words
+   * need no migration; `triggeredBy` says which mode wrote the row.
+   */
+  verdict:
+    | 'HOLD'
+    | 'EXIT_ARMED'
+    | 'EXIT_NOW'
+    | 'ESCALATE'
+    | 'HOLD_OVERNIGHT'
+    | 'EXIT_AT_OPEN'
+    | 'TIGHTEN_AT_OPEN';
   confidence: 'low' | 'medium' | 'high';
   thesisStatus: 'INTACT' | 'WEAKENING' | 'BROKEN';
   recoveryAvailable: boolean;
@@ -71,11 +83,45 @@ export class SentinelVerdictRepository {
     });
   }
 
-  async recentForTracker(trackerId: string, limit: number): Promise<SentinelVerdict[]> {
+  /**
+   * `liveOnly` drops rows written by the overnight review. The live cycle reads
+   * its "last look" through it: an 08:50 pre-open verdict counted as the last
+   * judgement would push the first live heartbeat of the day 15 minutes past the
+   * open, and would hand the material-change gate yesterday's close as the
+   * baseline. The packet's `memory` block still sees overnight rows (it calls
+   * without the flag) — the live judge should know the open plan.
+   */
+  async recentForTracker(
+    trackerId: string,
+    limit: number,
+    opts: { liveOnly?: boolean } = {},
+  ): Promise<SentinelVerdict[]> {
     return this.prisma.sentinelVerdict.findMany({
-      where: { trackerId },
+      where: opts.liveOnly
+        ? {
+            trackerId,
+            NOT: [
+              { triggeredBy: { array_contains: ['OVERNIGHT_REVIEW'] } },
+              { triggeredBy: { array_contains: ['PRE_OPEN_REVIEW'] } },
+            ],
+          }
+        : { trackerId },
       orderBy: { createdAt: 'desc' },
       take: limit,
     });
+  }
+
+  /**
+   * Whether this position already has a verdict recorded under an overnight
+   * window tag (see `windowTag` in overnight-calendar.ts). The DURABLE half of
+   * the overnight review's idempotency: a cron that fires twice, or a process
+   * that restarts mid-window, finds the row and does not judge again.
+   */
+  async hasWindowVerdict(trackerId: string, tag: string): Promise<boolean> {
+    const row = await this.prisma.sentinelVerdict.findFirst({
+      where: { trackerId, triggeredBy: { array_contains: [tag] } },
+      select: { id: true },
+    });
+    return row !== null;
   }
 }

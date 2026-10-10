@@ -1,0 +1,218 @@
+import { SentinelOvernightEvidenceAdapter } from './overnight-evidence.adapter';
+import type { OvernightEvidenceQuery } from '../ports/overnight-evidence.port';
+
+const ist = (ymd: string, hhmm: string) => new Date(`${ymd}T${hhmm}:00+05:30`);
+const NOW = ist('2026-10-12', '15:45');
+const SINCE = ist('2026-10-12', '15:30');
+
+const q = (over: Partial<OvernightEvidenceQuery> = {}): OvernightEvidenceQuery => ({
+  userId: 'u1',
+  symbol: 'NIFTY13OCT2625000CE',
+  exchange: 'NFO',
+  segment: 'OPT',
+  underlying: 'NIFTY',
+  expiry: '2026-10-13',
+  option: { underlying: 'NIFTY', strike: 25000, optionType: 'CE' },
+  underlyingLtp: 25050,
+  since: SINCE,
+  now: NOW,
+  ...over,
+});
+
+const leg = (over = {}) => ({ ltp: 120, oi: 50_000, oiChange: 8_000, volume: 1, iv: 13.2, delta: 0.52, gamma: 0.001, theta: -24, vega: 9.1, bidPrice: 0, askPrice: 0, ...over });
+const chain = [
+  { strikePrice: 24800, expiryDate: '2026-10-13', ceData: leg({ oi: 10_000, oiChange: 100 }), peData: leg({ oi: 90_000, oiChange: 2_000 }) },
+  { strikePrice: 25000, expiryDate: '2026-10-13', ceData: leg(), peData: leg({ oi: 40_000, oiChange: -500 }) },
+  { strikePrice: 25200, expiryDate: '2026-10-13', ceData: leg({ oi: 120_000, oiChange: 9_000 }), peData: leg({ oi: 5_000, oiChange: 0 }) },
+];
+
+function make(opts: { chainService?: boolean; commodities?: boolean; breadth?: boolean } = {}) {
+  const article = (title: string, hhmm: string, over = {}) => ({
+    title,
+    source: 'LiveMint',
+    url: `https://x/${title}`,
+    sentiment: 'bearish',
+    publishedAt: ist('2026-10-12', hhmm),
+    fetchedAt: ist('2026-10-12', '15:40'),
+    ...over,
+  });
+  const news = {
+    getNewsForSymbol: jest.fn().mockResolvedValue([article('symbol story', '15:35')]),
+    getNews: jest.fn().mockImplementation(async (f: { category?: string; search?: string; limit?: number }) => {
+      if (f.limit === 1 && !f.category && !f.search) return { data: [article('latest', '15:39')] };
+      if (f.category === 'sector') return { data: [article('sector story', '15:36')] };
+      if (f.search) return { data: [article(`index story ${f.search}`, '15:37')] };
+      return { data: [article(`macro ${f.category}`, '15:38')] };
+    }),
+  };
+  const chainService = {
+    getExpiries: jest.fn().mockResolvedValue(['2026-10-13', '2026-10-20']),
+    getOptionsChainWithSpot: jest.fn().mockResolvedValue({ chain, spotPrice: 25050 }),
+    getPCR: jest.fn().mockReturnValue(0.82),
+    getMaxPain: jest.fn().mockReturnValue(25000),
+  };
+  const commodities = {
+    getSnapshot: jest.fn().mockResolvedValue({
+      commodities: [
+        { symbol: 'CRUDEOIL', ltp: 5600, change: -84, changePercent: -1.5 },
+        { symbol: 'GOLD', ltp: null, change: 0, changePercent: 0 },
+      ],
+    }),
+  };
+  const breadth = {
+    getSectorPerformance: jest.fn().mockResolvedValue([{ sector: 'IT', symbol: 'NIFTY IT', token: '99926013', changePercent: -1.2, ltp: 35000 }]),
+  };
+  const moduleRef = {
+    get: jest.fn().mockImplementation((cls: { name: string }) => {
+      if (cls.name === 'OptionsChainService' && opts.chainService !== false) return chainService;
+      if (cls.name === 'CommoditiesSnapshotService' && opts.commodities !== false) return commodities;
+      if (cls.name === 'BreadthSectorService' && opts.breadth !== false) return breadth;
+      throw new Error(`no provider ${cls.name}`);
+    }),
+  };
+  const marketContext = { getVixHistory: jest.fn().mockResolvedValue({ today: 13.4, yesterday: 12.8 }) };
+  const yahoo = {
+    getQuoteChange: jest.fn().mockResolvedValue({ previousClose: 25160, regularMarketPrice: 25050, regularMarketChange: -110, regularMarketChangePercent: -0.44 }),
+  };
+  const sectors = { getSectorIndexForSymbol: jest.fn().mockResolvedValue('99926013') };
+  const findFirst = jest.fn().mockResolvedValue({
+    capturedAt: ist('2026-10-09', '15:20'),
+    spotPrice: 25160,
+    chainJson: [
+      { strikePrice: 24800, ceData: leg({ oi: 9_000 }), peData: leg({ oi: 80_000 }) },
+      { strikePrice: 25000, ceData: leg({ ltp: 160, oi: 42_000 }), peData: leg({ oi: 41_000 }) },
+      { strikePrice: 25200, ceData: leg({ oi: 100_000 }), peData: leg({ oi: 6_000 }) },
+    ],
+  });
+  const adapter = new SentinelOvernightEvidenceAdapter(
+    news as never,
+    marketContext as never,
+    yahoo as never,
+    sectors as never,
+    { optionChainSnapshot: { findFirst } } as never,
+    moduleRef as never,
+  );
+  return { adapter, news, chainService, commodities, breadth, marketContext, yahoo, sectors, findFirst };
+}
+
+describe('SentinelOvernightEvidenceAdapter.news — stored news since the close, four scopes', () => {
+  it('asks for the symbol, its sector, its index and macro news, tagging each with its scope', async () => {
+    const t = make();
+    const ev = await t.adapter.news(q({ underlying: 'INFY', symbol: 'INFY27OCT261500CE' }));
+    expect(t.news.getNewsForSymbol).toHaveBeenCalledWith('INFY');
+    expect(ev.items.map((i) => i.scope)).toEqual(expect.arrayContaining(['symbol', 'sector', 'index', 'macro']));
+    expect(ev.items.find((i) => i.scope === 'symbol')).toEqual(
+      expect.objectContaining({ title: 'symbol story', source: 'LiveMint', sentiment: 'bearish', publishedAt: ist('2026-10-12', '15:35').toISOString() }),
+    );
+    // Only articles since the last close are requested from the store.
+    for (const call of t.news.getNews.mock.calls) {
+      if (call[0].limit !== 1) expect(call[0].from).toBe(SINCE.toISOString());
+    }
+  });
+
+  it('reports when the store last took an article in, so staleness can be judged', async () => {
+    const t = make();
+    const ev = await t.adapter.news(q());
+    expect(ev.lastFetchAt).toBe(ist('2026-10-12', '15:40').toISOString());
+  });
+
+  it('an index underlying has no single sector, so no sector query is made', async () => {
+    const t = make();
+    await t.adapter.news(q());
+    expect(t.news.getNews.mock.calls.some((c) => c[0].category === 'sector')).toBe(false);
+  });
+});
+
+describe('SentinelOvernightEvidenceAdapter.oi — the end-of-day chain read', () => {
+  it('reads PCR and max pain through the chain service, and the walls from OI', async () => {
+    const t = make();
+    const { analysis } = await t.adapter.oi(q());
+    expect(t.chainService.getOptionsChainWithSpot).toHaveBeenCalledWith('NIFTY', '2026-10-13');
+    expect(analysis).toEqual(
+      expect.objectContaining({ available: true, pcr: 0.82, maxPain: 25000, callWall: 25200, putWall: 24800, expiry: '2026-10-13' }),
+    );
+  });
+
+  it('pairs the position’s own strike with the previous session’s stored chain', async () => {
+    const t = make();
+    const { analysis, legGreeks } = await t.adapter.oi(q());
+    if (!analysis.available) throw new Error('expected a chain');
+    expect(analysis.contract).toEqual(
+      expect.objectContaining({ strike: 25000, optionType: 'CE', ltp: 120, oi: 50_000, oiChange: 8_000, prev: { ltp: 160, oi: 42_000 } }),
+    );
+    expect(analysis.prevSession).toEqual(expect.objectContaining({ spot: 25160, totalCeOi: 151_000, totalPeOi: 127_000 }));
+    expect(analysis.totalOiChange).toBe(100 + 2_000 + 8_000 - 500 + 9_000 + 0);
+    expect(analysis.underlyingPriceChange).toEqual({ value: -110, source: expect.stringMatching(/yahoo/) });
+    expect(legGreeks).toEqual(expect.objectContaining({ delta: 0.52, theta: -24, vega: 9.1, iv: 13.2 }));
+    // The snapshot looked up is from BEFORE the session this review looks back on.
+    expect(t.findFirst.mock.calls[0][0].where.capturedAt.lt.toISOString()).toBe(ist('2026-10-12', '00:00').toISOString());
+  });
+
+  it('uses the same chain path for an MCX underlying', async () => {
+    const t = make();
+    await t.adapter.oi(q({ exchange: 'MCX', underlying: 'CRUDEOIL', symbol: 'CRUDEOIL16OCT265600CE', expiry: '2026-10-13', option: { underlying: 'CRUDEOIL', strike: 25000, optionType: 'CE' } }));
+    expect(t.chainService.getOptionsChainWithSpot).toHaveBeenCalledWith('CRUDEOIL', '2026-10-13');
+  });
+
+  it('is unavailable, with the reason, when no chain service is wired, no underlying resolved, or the chain is empty', async () => {
+    expect((await make({ chainService: false }).adapter.oi(q())).analysis).toEqual({ available: false, reason: expect.stringMatching(/not wired/) });
+    expect((await make().adapter.oi(q({ underlying: null }))).analysis).toEqual({ available: false, reason: expect.stringMatching(/underlying/) });
+    const t = make();
+    t.chainService.getOptionsChainWithSpot.mockResolvedValue({ chain: [], spotPrice: 0 });
+    expect((await t.adapter.oi(q())).analysis).toEqual({ available: false, reason: expect.stringMatching(/empty/) });
+  });
+
+  it('never reports volume-derived walls as OI walls when the chain has no OI', async () => {
+    const t = make();
+    t.chainService.getOptionsChainWithSpot.mockResolvedValue({
+      chain: chain.map((e) => ({ ...e, ceData: leg({ oi: 0, oiChange: 0 }), peData: leg({ oi: 0, oiChange: 0 }) })),
+      spotPrice: 25050,
+    });
+    t.chainService.getPCR.mockReturnValue(0);
+    t.chainService.getMaxPain.mockReturnValue(0);
+    const { analysis } = await t.adapter.oi(q());
+    expect(analysis).toEqual(expect.objectContaining({ callWall: null, putWall: null, pcr: null, maxPain: null }));
+  });
+});
+
+describe('SentinelOvernightEvidenceAdapter.cues — the market context', () => {
+  it('states Nasdaq and FII flows as unavailable, with why', async () => {
+    const c = await make().adapter.cues(q());
+    expect(c.nasdaq).toEqual({ reading: null, reason: expect.stringMatching(/nasdaq/i) });
+    expect(c.fiiFlows).toEqual({ reading: null, reason: expect.stringMatching(/fii/i) });
+  });
+
+  it('reads crude and gold off the MCX snapshot, and an unquotable one as unavailable — not zero', async () => {
+    const c = await make().adapter.cues(q());
+    expect(c.crudeOil).toEqual({ reading: expect.objectContaining({ value: 5600, change: -84, changePercent: -1.5 }), source: expect.stringMatching(/commodities/) });
+    expect(c.gold).toEqual({ reading: null, reason: expect.stringMatching(/GOLD/) });
+  });
+
+  it('reads India VIX with its day-on-day change', async () => {
+    const c = await make().adapter.cues(q());
+    expect(c.indiaVix).toEqual({ reading: expect.objectContaining({ value: 13.4, change: 0.6 }), source: expect.stringMatching(/market-context/) });
+  });
+
+  it('reads the underlying’s change vs its previous close for an index', async () => {
+    const t = make();
+    const c = await t.adapter.cues(q());
+    expect(t.yahoo.getQuoteChange).toHaveBeenCalledWith('NIFTY', 'NSE', '99926000');
+    expect(c.underlyingChange).toEqual({ reading: expect.objectContaining({ value: 25050, change: -110, changePercent: -0.44 }), source: expect.stringMatching(/yahoo/) });
+  });
+
+  it('reads sector strength for a stock underlying, and says why there is none for an index', async () => {
+    const stock = await make().adapter.cues(q({ underlying: 'INFY', symbol: 'INFY27OCT261500CE' }));
+    expect(stock.sectorStrength).toEqual(expect.objectContaining({ value: expect.objectContaining({ sector: 'IT', changePercent: -1.2 }) }));
+    const index = await make().adapter.cues(q());
+    expect(index.sectorStrength).toEqual({ value: null, reason: expect.stringMatching(/index/) });
+  });
+
+  it('a missing or failing service degrades one cue to a stated absence, not the whole set', async () => {
+    const t = make({ commodities: false });
+    t.marketContext.getVixHistory.mockRejectedValue(new Error('yahoo 503'));
+    const c = await t.adapter.cues(q());
+    expect(c.crudeOil).toEqual({ reading: null, reason: expect.stringMatching(/not wired/) });
+    expect(c.indiaVix).toEqual({ reading: null, reason: expect.stringMatching(/yahoo 503/) });
+    expect(c.underlyingChange.reading).not.toBeNull();
+  });
+});

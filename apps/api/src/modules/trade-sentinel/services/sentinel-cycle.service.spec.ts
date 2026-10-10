@@ -416,6 +416,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     join(__dirname, 'sentinel-cycle.service.ts'),
     join(__dirname, 'sentinel-runner.service.ts'),
     join(__dirname, '..', 'replay', 'replay-verdicts.ts'),
+    // The overnight review is a second scheduler-driven entry point: it judges
+    // every open F&O position twice a day, so it is walked exactly like the runner.
+    join(__dirname, 'sentinel-overnight.service.ts'),
   ];
 
   /**
@@ -491,6 +494,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     expect(files).toContain(join(__dirname, 'sentinel-cycle.service.ts'));
     expect(files).toContain(join(__dirname, 'sentinel-runner.service.ts'));
     expect(files).toContain(join(__dirname, '..', 'replay', 'replay-verdicts.ts'));
+    expect(files).toContain(join(__dirname, 'sentinel-overnight.service.ts'));
 
     const offenders = graph
       .filter((n) => FORBIDDEN.test(n.file))

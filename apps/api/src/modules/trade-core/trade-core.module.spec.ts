@@ -1,7 +1,9 @@
 import { Global, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { ClsService } from 'nestjs-cls';
 import { AuditService } from '../../common/audit/audit.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { TenantContextService } from '../../common/tenant/tenant-context.service';
 import { SessionClock } from '../market-hub/session-clock';
 import { TradeCoreModule } from './trade-core.module';
 import { CoreStrategiesController } from './strategies/controllers/core-strategies.controller';
@@ -19,14 +21,25 @@ import {
   RISK_VERDICT_SINK,
   UnavailableRiskStateProvider,
 } from './risk-wall/ports';
+import { CoreKillSwitchReader } from './risk-wall/services/core-kill-switch.reader';
 import { CoreKillSwitchService } from './risk-wall/services/core-kill-switch.service';
 import { CoreRiskLimitService } from './risk-wall/services/core-risk-limit.service';
 import { RiskWallService } from './risk-wall/services/risk-wall.service';
 import { SiloSquareOffAdapter } from './risk-wall/services/silo-square-off.adapter';
 
-/** Stands in for the real @Global AuditModule, which AppModule provides. */
+/**
+ * Stands in for the real @Global AuditModule, @Global TenantModule and the global
+ * ClsModule.forRoot({ global: true }), which AppModule provides.
+ */
 @Global()
-@Module({ providers: [{ provide: AuditService, useValue: { append: jest.fn() } }], exports: [AuditService] })
+@Module({
+  providers: [
+    { provide: AuditService, useValue: { append: jest.fn() } },
+    { provide: TenantContextService, useValue: { runWithoutTenant: (fn: () => unknown) => fn() } },
+    { provide: ClsService, useValue: { isActive: () => false } },
+  ],
+  exports: [AuditService, TenantContextService, ClsService],
+})
 class FakeAuditModule {}
 
 async function compile() {
@@ -57,5 +70,6 @@ describe('TradeCoreModule', () => {
     expect(mod.get(CORE_SQUARE_OFF)).toBeInstanceOf(NoCorePositionsSquareOff);
     expect(mod.get(CoreRiskDefaultsController)).toBeInstanceOf(CoreRiskDefaultsController);
     expect(mod.get(CoreRiskDefaultsService)).toBeInstanceOf(CoreRiskDefaultsService);
+    expect(mod.get(CoreKillSwitchReader)).toBeInstanceOf(CoreKillSwitchReader);
   });
 });

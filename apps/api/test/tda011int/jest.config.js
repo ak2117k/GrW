@@ -32,4 +32,6 @@ module.exports = {
     ],
   },
   testEnvironment: 'node',
+  // The core kill gate: every switch reads OFF unless a spec installs its own reader.
+  setupFiles: ['<rootDir>/test/setup/core-kill-gate.ts'],
 };

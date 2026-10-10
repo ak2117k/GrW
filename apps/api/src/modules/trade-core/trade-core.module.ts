@@ -20,6 +20,7 @@ import {
 } from './risk-wall/ports';
 import { CoreKillSwitchRepository } from './risk-wall/repositories/core-kill-switch.repository';
 import { CoreRiskLimitRepository } from './risk-wall/repositories/core-risk-limit.repository';
+import { CoreKillSwitchReader } from './risk-wall/services/core-kill-switch.reader';
 import { CoreKillSwitchService } from './risk-wall/services/core-kill-switch.service';
 import { CoreRiskLimitService } from './risk-wall/services/core-risk-limit.service';
 import { RiskWallService } from './risk-wall/services/risk-wall.service';
@@ -48,6 +49,7 @@ import { SiloSquareOffAdapter } from './risk-wall/services/silo-square-off.adapt
     CoreRiskLimitService,
     CoreRiskDefaultsService,
     CoreKillSwitchService,
+    CoreKillSwitchReader,
     SiloSquareOffAdapter,
     RiskWallService,
     { provide: CORE_SESSION_CLOCK, useFactory: createCoreSessionClock },

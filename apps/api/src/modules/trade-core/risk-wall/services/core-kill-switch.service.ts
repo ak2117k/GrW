@@ -4,6 +4,7 @@ import { AuditService } from '../../../../common/audit/audit.service';
 import { AUDIT_ACTIONS } from '../../../../common/audit/audit-actions';
 import type { SessionClock } from '../../../market-hub/session-clock';
 import type { Actor } from '../../strategies/services/core-strategy-catalogue.service';
+import { invalidateCoreKillSwitchCache } from '../kill-gate';
 import { resolveAppendOnly } from '../limits/append-only';
 import { CORE_SESSION_CLOCK, CORE_SQUARE_OFF, type CoreSquareOffPort } from '../ports';
 import { CoreKillSwitchRepository } from '../repositories/core-kill-switch.repository';
@@ -100,6 +101,9 @@ export class CoreKillSwitchService {
       if (err instanceof ConcurrentRiskChangeError) throw new ConflictException('the kill switch changed at the same time; reload and retry');
       throw err;
     }
+
+    // The silo entry gate caches for ≤ 5 s; a change must be seen at once (decision 21).
+    invalidateCoreKillSwitchCache();
 
     // Persist → cascade → audit: a failing audit can never stop the square-off (plan decision 17).
     const cascade = input.active ? await this.cascade(actor, reason) : null;

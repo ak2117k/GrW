@@ -675,12 +675,12 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('checks NSE futures, and options only when their underlying has an IEP — never MCX or cash', async () => {
+  it('judges only NSE F&O positions with a pre-open IEP; the rest are recorded skipped — never MCX or cash', async () => {
     const t = makeSvc({ book: BOOK, preOpen: preOpenBook });
     const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
     expect(t.evidence.preOpen).toHaveBeenCalledWith(AT_0912);
-    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['nifty-fut', 'rel-fut', 'rel-opt']);
-    expect(report).toEqual(expect.objectContaining({ window: TAG, judged: 3 }));
+    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['rel-fut', 'rel-opt']);
+    expect(report).toEqual(expect.objectContaining({ window: TAG, judged: 2, skippedNoInput: 3, picked: 5 }));
     expect(t.record.mock.calls[0][0].triggeredBy).toEqual(['PRE_OPEN_CHECK', TAG]);
   });
 
@@ -705,25 +705,32 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
     expect(t.buildPacket.mock.calls[0][3][0]).toEqual({ name: 'PRE_OPEN_CHECK', detail: expect.stringMatching(/09:12/) });
   });
 
-  it('a future with no IEP is still checked, and its packet says why there is no gap', async () => {
+  it('an index future with no IEP costs no judge call: recorded skipped with the reason, nothing written', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const t = makeSvc({ book: [entry('nifty-fut', { symbol: 'NIFTY27OCT26FUT' })], preOpen: preOpenBook });
-    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
-    expect(t.judgeOvernight.mock.calls[0][0].overnight.preOpenGap).toEqual({ available: false, reason: expect.stringMatching(/no pre-open IEP/) });
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(t.runShared).not.toHaveBeenCalled();
+    expect(t.record).not.toHaveBeenCalled();
+    expect(report).toEqual(expect.objectContaining({ picked: 1, skippedNoInput: 1, judged: 0 }));
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/NIFTY27OCT26FUT.*skipped.*no pre-open IEP for NIFTY/);
   });
 
-  it('a stale book is no book: futures only, each told why', async () => {
+  it('a stale book is no book: nothing is judged, each position skipped with the reason', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const stale = { ...preOpenBook, status: 'stale' as const, reason: 'the pre-open book is from 2026-10-12' };
     const t = makeSvc({ book: BOOK, preOpen: stale });
-    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
-    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['nifty-fut', 'rel-fut']);
-    expect(t.judgeOvernight.mock.calls[0][0].overnight.preOpenGap.reason).toMatch(/stale/);
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(report.skippedNoInput).toBe(5);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/stale/);
   });
 
   it('anything still queued at 09:15 is dropped, never judged', async () => {
     const t = makeSvc({ book: BOOK, preOpen: preOpenBook });
     t.svc.clockNow = () => ist(TUE, '09:15');
     const report = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:14'));
-    expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 3, judged: 0 }));
+    expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 2, judged: 0 }));
     expect(t.judgeOvernight).not.toHaveBeenCalled();
   });
 
@@ -732,11 +739,11 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
     const t = makeSvc({ book: BOOK, preOpen: preOpenBook, done });
     await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
     const again = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:13'));
-    expect(again).toEqual(expect.objectContaining({ judged: 0, alreadyDone: 3 }));
+    expect(again).toEqual(expect.objectContaining({ judged: 0, alreadyDone: 2 }));
     const restarted = makeSvc({ book: BOOK, preOpen: preOpenBook, done });
     await restarted.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:14'));
     expect(restarted.judgeOvernight).not.toHaveBeenCalled();
-    expect(t.judgeOvernight).toHaveBeenCalledTimes(3);
+    expect(t.judgeOvernight).toHaveBeenCalledTimes(2);
   });
 
   it('goes through the shared judge cap, under its own tag, apart from the 08:30 review', async () => {
@@ -744,7 +751,7 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
     await t.svc.runWindow(PRE_OPEN, ist(TUE, '08:30'));
     await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
     const kinds = t.record.mock.calls.map((c) => c[0].triggeredBy[0]);
-    expect(kinds.filter((k) => k === 'PRE_OPEN_CHECK')).toHaveLength(3);
+    expect(kinds.filter((k) => k === 'PRE_OPEN_CHECK')).toHaveLength(2);
     expect(kinds.filter((k) => k === 'PRE_OPEN_REVIEW').length).toBeGreaterThan(0);
     expect(t.runShared).toHaveBeenCalledTimes(t.record.mock.calls.length);
   });
@@ -757,12 +764,14 @@ describe('SentinelOvernightService — the 09:12 pre-open check', () => {
     expect(t.findMany).not.toHaveBeenCalled();
   });
 
-  it('a fetch that FAILED still checks the futures, each told the IEP is unseen', async () => {
+  it('a fetch that FAILED judges nothing; every position is skipped naming the failure', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const failed = { ...unavailableSnapshot('x').preOpen, fetchedAt: AT_0912.toISOString(), reason: 'NSE pre-open: HTTP 503' };
     const t = makeSvc({ book: BOOK, preOpen: failed });
-    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
-    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['nifty-fut', 'rel-fut']);
-    expect(t.judgeOvernight.mock.calls[0][0].overnight.preOpenGap.reason).toMatch(/HTTP 503/);
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(report.skippedNoInput).toBe(5);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/HTTP 503/);
   });
 
   it('does nothing outside 09:08–09:15 or on a holiday — does not even read the book', async () => {

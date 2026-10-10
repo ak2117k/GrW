@@ -58,20 +58,35 @@ export function preOpenMatchFor(e: RosterEntry, book: PreOpenBook | null): PreOp
 
 /**
  * The 09:12 selection: the window's own filter (NSE venues, F&O, 09:08–09:15,
- * a trading day), then every future, and every option with an underlying IEP.
- * A future without an IEP comes back with `match: null` and is still checked.
+ * a trading day), then split by whether the position HAS its input.
+ *
+ * NO INPUT, NO JUDGE CALL. A position whose underlying has no IEP in today's
+ * book — every index future and index option on the verified source, or every
+ * position when the book is stale or failed — would cost an Opus call to repeat
+ * the 08:30 review. It is skipped, with the reason, for the caller to record.
  */
 export function selectForPreOpenCheck(
   entries: readonly RosterEntry[],
   book: PreOpenBook | null,
   now: Date,
   clock: SessionClock = SENTINEL_CLOCK,
-): Array<{ entry: RosterEntry; match: PreOpenMatch | null }> {
-  const out: Array<{ entry: RosterEntry; match: PreOpenMatch | null }> = [];
+  bookReason: string | null = null,
+): { checked: Array<{ entry: RosterEntry; match: PreOpenMatch }>; skipped: Array<{ entry: RosterEntry; reason: string }> } {
+  const checked: Array<{ entry: RosterEntry; match: PreOpenMatch }> = [];
+  const skipped: Array<{ entry: RosterEntry; reason: string }> = [];
   for (const e of selectForWindow(entries, PRE_OPEN_CHECK, now, clock)) {
     const match = preOpenMatchFor(e, book);
-    const isFuture = segmentFor({ exchange: e.exchange, symbol: e.symbol, kind: e.kind }) === 'FUT';
-    if (isFuture || match) out.push({ entry: e, match });
+    if (match) {
+      checked.push({ entry: e, match });
+      continue;
+    }
+    const underlying = derivativeUnderlying(e.symbol) ?? e.symbol;
+    skipped.push({
+      entry: e,
+      reason: book
+        ? `no pre-open IEP for ${underlying} in today's NSE pre-open book (index F&O has none on the verified source)`
+        : (bookReason ?? 'no NSE pre-open book for today'),
+    });
   }
-  return out;
+  return { checked, skipped };
 }

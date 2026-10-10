@@ -103,6 +103,8 @@ export interface WindowReport {
   deferred: number;
   /** Still queued for a judge slot when the venue opened — dropped, never judged against a live market. */
   droppedAtOpen: number;
+  /** 09:12 check only: positions with no pre-open input (IEP unseen) — skipped, no judge call. */
+  skippedNoInput: number;
 }
 
 /**
@@ -269,7 +271,7 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
  * row's `triggeredBy` and checked before judging (a restart finds it), and an
  * in-process claim stops two overlapping fires from judging the same position
  * twice. About two calls per position per day, plus the 09:12 pre-open check
- * for NSE futures (and options whose underlying has a pre-open IEP) when the
+ * for NSE F&O positions whose underlying has a pre-open IEP, when the
  * market-cues pre-open source is on.
  */
 @Injectable()
@@ -349,7 +351,8 @@ export class SentinelOvernightService {
       if (report.picked > 0) {
         this.logger.log(
           `overnight review ${report.window}: ${report.judged} judged, ${report.alreadyDone} already done, ` +
-            `${report.failed} failed, ${report.deferred} deferred, ${report.droppedAtOpen} dropped at the open (of ${report.picked})`,
+            `${report.failed} failed, ${report.deferred} deferred, ${report.droppedAtOpen} dropped at the open, ` +
+            `${report.skippedNoInput} skipped for no input (of ${report.picked})`,
         );
       }
     } catch (err) {
@@ -367,6 +370,7 @@ export class SentinelOvernightService {
       failed: 0,
       deferred: 0,
       droppedAtOpen: 0,
+      skippedNoInput: 0,
     };
     if (!this.enabled) return { ...report, disabled: true };
 
@@ -405,10 +409,19 @@ export class SentinelOvernightService {
         this.logger.error(`overnight review: roster failed for user ${userId}: ${describe(err)}`);
         continue;
       }
-      const picked =
-        window.kind === 'PRE_OPEN_CHECK'
-          ? selectForPreOpenCheck(entries, preOpen?.book ?? null, now, this.clock)
-          : selectForWindow(entries, window, now, this.clock).map((e) => ({ entry: e, match: null }));
+      let picked: Array<{ entry: RosterEntry; match: PreOpenMatch | null }>;
+      if (window.kind === 'PRE_OPEN_CHECK') {
+        const split = selectForPreOpenCheck(entries, preOpen?.book ?? null, now, this.clock, preOpen?.reason ?? null);
+        for (const s of split.skipped) {
+          // Recorded like a drop at the open: counted and logged, never judged.
+          report.picked += 1;
+          report.skippedNoInput += 1;
+          this.logger.warn(`pre-open check for ${s.entry.symbol} (${s.entry.trackerId}) skipped: ${s.reason} (${tag})`);
+        }
+        picked = split.checked;
+      } else {
+        picked = selectForWindow(entries, window, now, this.clock).map((e) => ({ entry: e, match: null }));
+      }
       for (const { entry, match } of picked) {
         report.picked += 1;
         if (claims.has(entry.trackerId)) {

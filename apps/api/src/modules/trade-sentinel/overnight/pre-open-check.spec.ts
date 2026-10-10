@@ -88,14 +88,15 @@ describe('derivativeUnderlying', () => {
 describe('selectForPreOpenCheck — futures, and options whose underlying has an IEP', () => {
   const b = book({ RELIANCE: cash('RELIANCE', 1420, 1400) });
 
-  it('every NSE future; options only when their underlying has an IEP; no MCX, no cash', () => {
-    const picked = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:12'));
-    expect(picked.map((p) => p.entry.trackerId)).toEqual(['nifty-fut', 'rel-fut', 'rel-opt']);
+  it('checks only positions whose underlying has an IEP; no MCX, no cash', () => {
+    const { checked } = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:12'));
+    expect(checked.map((p) => p.entry.trackerId)).toEqual(['rel-fut', 'rel-opt']);
   });
 
-  it('a future without an IEP is still checked, and says why it has no gap', () => {
-    const nifty = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:12')).find((p) => p.entry.trackerId === 'nifty-fut');
-    expect(nifty?.match).toBeNull();
+  it('skips — with the reason — every NSE F&O position whose IEP is unseen, index futures included', () => {
+    const { skipped } = selectForPreOpenCheck(BOOK, b, ist(TUE, '09:12'));
+    expect(skipped.map((s) => s.entry.trackerId)).toEqual(['nifty-opt', 'nifty-fut', 'sbin-opt']);
+    expect(skipped.find((s) => s.entry.trackerId === 'nifty-fut')?.reason).toMatch(/no pre-open IEP for NIFTY/);
   });
 
   it('labels an option’s figure as an underlying gap ESTIMATE, by what the IEP actually prices', () => {
@@ -108,11 +109,14 @@ describe('selectForPreOpenCheck — futures, and options whose underlying has an
     expect(preOpenMatchFor(entry('f', { symbol: 'RELIANCE27OCT26FUT' }), futBook)?.label).toMatch(/^future IEP/);
   });
 
-  it('with no book, only futures are picked', () => {
-    expect(selectForPreOpenCheck(BOOK, null, ist(TUE, '09:12')).map((p) => p.entry.trackerId)).toEqual(['nifty-fut', 'rel-fut']);
+  it('with no book, nothing is checked and every NSE F&O position is skipped with the book’s reason', () => {
+    const r = selectForPreOpenCheck(BOOK, null, ist(TUE, '09:12'), undefined, 'the NSE pre-open book is stale');
+    expect(r.checked).toEqual([]);
+    expect(r.skipped).toHaveLength(5);
+    expect(r.skipped[0].reason).toMatch(/stale/);
   });
 
   it('nothing at 09:15 or later', () => {
-    expect(selectForPreOpenCheck(BOOK, b, ist(TUE, '09:15'))).toEqual([]);
+    expect(selectForPreOpenCheck(BOOK, b, ist(TUE, '09:15'))).toEqual({ checked: [], skipped: [] });
   });
 });

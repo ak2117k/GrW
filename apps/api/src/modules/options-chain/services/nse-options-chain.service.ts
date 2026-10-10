@@ -76,6 +76,8 @@ const CHAIN_CACHE_TTL_MS = 30_000;
 const EXPIRY_CACHE_TTL_MS = 10 * 60 * 1000;
 const COOKIE_TTL_MS = 10 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 10_000;
+/** Caller-side budget for snapshot/background fetches (env NSE_OPTION_CHAIN_TIMEOUT_MS). */
+const DEFAULT_BACKGROUND_TIMEOUT_MS = 8_000;
 
 /** NSE index underlyings (v3 `type=Indices`); anything else is `type=Equity`. */
 const INDEX_SYMBOLS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50']);
@@ -125,6 +127,12 @@ export class NseOptionsChainService {
 
   private readonly infoUrl: string;
   private readonly v3Url: string;
+  /**
+   * How long a snapshot/background caller waits for `getChain`
+   * (contract-info + a ~300 KB v3 payload). Hot paths (sentinel tick, 30 s
+   * sweeps) keep a shorter budget; see OptionsChainService.
+   */
+  readonly backgroundTimeoutMs: number;
 
   private cookieHeader: string | null = null;
   private cookieSetAt = 0;
@@ -135,6 +143,9 @@ export class NseOptionsChainService {
   constructor(config: ConfigService) {
     this.infoUrl = config.get<string>('NSE_OPTION_CHAIN_INFO_URL') || DEFAULT_INFO_URL;
     this.v3Url = config.get<string>('NSE_OPTION_CHAIN_V3_URL') || DEFAULT_V3_URL;
+    const timeout = Number(config.get<string>('NSE_OPTION_CHAIN_TIMEOUT_MS'));
+    this.backgroundTimeoutMs =
+      Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_BACKGROUND_TIMEOUT_MS;
   }
 
   /**

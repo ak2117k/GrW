@@ -3895,7 +3895,7 @@ The API deploy's existing `prisma migrate deploy` against that database applies
 No env var is added. After the deploy:
 
 **Database (Vyom VPS, `grw-postgres`):** run on the server. User and database are `grw`/`grw`
-(`PG_USER`/`PG_DB` in deploy/env/ops.env.example; use `/opt/grw/env/ops.env` if it differs). The SQL
+(`PG_USER`/`PG_DB` in `/opt/grw/env/compose.env`, the file docker-compose.prod.yml creates the container from; template deploy/env/compose.env.example. Check that file if it differs). The SQL
 goes in through a quoted heredoc so the shell leaves the double-quoted identifiers alone; psql reads no
 password inside the container (local socket).
 

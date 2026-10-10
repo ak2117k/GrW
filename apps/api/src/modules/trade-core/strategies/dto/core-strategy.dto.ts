@@ -2,11 +2,6 @@ import { Prisma, type CoreStrategy, type CoreStrategySelection, type CoreStrateg
 import { IsBoolean, IsIn, IsObject, IsOptional, IsString, MaxLength, ValidateBy } from 'class-validator';
 import { VERSION_STATUSES, type VersionCreator, type VersionStatus } from '../version-status';
 
-/**
- * Request bodies. None carries createdBy, status (except SetVersionStatusDto) or
- * userId: the global ValidationPipe({ whitelist: true }) strips anything else.
- * `blocks` is checked by validateBlocks in the service (plan decision 2).
- */
 /** Exclusive upper bound for capital: DECIMAL(14,2) holds at most 999,999,999,999.99. */
 export const CAPITAL_LIMIT = new Prisma.Decimal('1e12');
 
@@ -37,6 +32,11 @@ function IsRupeeCapital(): PropertyDecorator {
   });
 }
 
+/**
+ * Request bodies. None carries createdBy, status (except SetVersionStatusDto) or
+ * userId: the global ValidationPipe({ whitelist: true }) strips anything else.
+ * `blocks` is checked by validateBlocks in the service (plan decision 2).
+ */
 export class CreateDraftDto {
   @IsObject()
   blocks!: Record<string, unknown>;

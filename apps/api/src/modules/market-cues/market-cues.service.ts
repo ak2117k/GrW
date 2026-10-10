@@ -9,6 +9,8 @@ import {
   FII_OI_PUBLISH_MIN,
   GIFT_MAX_AGE_MS,
   US_FUTURES_MAX_AGE_MS,
+  US_INTRADAY_MAX_AGE_MS,
+  usPhaseAt,
   preOpenFreshness,
   publishedFreshness,
   quoteAge,
@@ -282,7 +284,9 @@ export class MarketCuesService implements OnApplicationBootstrap {
       us[key] = this.record<UsQuote>(`us:${key}`, 'us', now, (s) =>
         US_SYMBOLS[key].future
           ? quoteAge(s.sourceTime as string, now, US_FUTURES_MAX_AGE_MS, `${US_SYMBOLS[key].label} quote`)
-          : usCloseFreshness(s.sourceTime as string, now),
+          : (s.values as UsQuote).phase === 'intraday'
+            ? quoteAge(s.sourceTime as string, now, US_INTRADAY_MAX_AGE_MS, `${US_SYMBOLS[key].label} intraday value`)
+            : usCloseFreshness(s.sourceTime as string, now),
       );
     }
     return {
@@ -438,11 +442,12 @@ export class MarketCuesService implements OnApplicationBootstrap {
         const parsed = await this.guarded(`Yahoo chart ${sym.yahoo}`, now, async () =>
           parseYahooCue(await cueGetJson(yahooChartUrl(this.cfg.urls.yahooChart, sym.yahoo), this.http()), sym.yahoo),
         );
+        const phase = sym.future ? undefined : usPhaseAt(parsed.sourceTime);
         this.put<UsQuote>(`us:${key}`, {
-          values: parsed.values,
+          values: { ...parsed.values, ...(phase ? { phase } : {}) },
           sourceTime: parsed.sourceTime,
           fetchedAt: now.toISOString(),
-          basis: usBasis(key, 'Yahoo regularMarketTime'),
+          basis: usBasis(key, `Yahoo regularMarketTime ${parsed.sourceTime}`, phase),
           source: `Yahoo Finance v8 chart ${sym.yahoo} (one-day change: last two daily closes)`,
         });
       } catch (err) {
@@ -466,11 +471,12 @@ export class MarketCuesService implements OnApplicationBootstrap {
       const sym = US_SYMBOLS[f.key];
       const hit = cnbc?.[sym.cnbc];
       if (hit) {
+        const phase = sym.future ? undefined : usPhaseAt(hit.sourceTime);
         this.put<UsQuote>(`us:${f.key}`, {
-          values: { ...hit.values, symbol: sym.yahoo },
+          values: { ...hit.values, symbol: sym.yahoo, ...(phase ? { phase } : {}) },
           sourceTime: hit.sourceTime,
           fetchedAt: now.toISOString(),
-          basis: usBasis(f.key, sym.future ? 'CNBC last_time' : 'CNBC session date'),
+          basis: usBasis(f.key, `CNBC last_time ${hit.sourceTime}`, phase),
           source: `CNBC quote JSON ${sym.cnbc} (fallback — Yahoo failed: ${f.error})`,
         });
       } else {
@@ -648,9 +654,11 @@ export class MarketCuesService implements OnApplicationBootstrap {
   }
 }
 
-function usBasis(key: UsCueKey, timeFrom: string): string {
+function usBasis(key: UsCueKey, timeFrom: string, phase?: 'intraday' | 'close'): string {
   const t = timeFrom ? ` (${timeFrom})` : '';
-  return US_SYMBOLS[key].future
-    ? `quote time${t} — the US index future overnight; change vs its previous daily close`
-    : `previous US session close${t}; change vs the session before`;
+  if (US_SYMBOLS[key].future) return `quote time${t} — the US index future overnight; change vs its previous daily close`;
+  const holidays = 'US holidays and early closes are not modelled';
+  return phase === 'intraday'
+    ? `intraday — US regular session in progress, value as of its quote time${t}; change vs the previous US close. ${holidays}`
+    : `previous US session close${t}; change vs the session before. ${holidays}`;
 }

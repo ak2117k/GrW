@@ -535,6 +535,7 @@ function macroBlocks(
             previousClose: r.values.previousClose,
             change: r.values.change,
             changePercent: r.values.changePercent,
+            ...(r.values.phase ? { session: r.values.phase } : {}),
             status: r.status === 'stale' ? 'stale' : 'ok',
             ...(r.reason ? { note: r.reason } : {}),
           },

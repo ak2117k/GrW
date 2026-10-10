@@ -154,6 +154,35 @@ describe('US cues', () => {
     expect(svc.snapshot(MON_0825).us.nasdaq.reason).toMatch(/backoff/);
   });
 
+  it('23:40 IST: the US session is open — index values are labelled intraday with their time, not "close"', async () => {
+    const mid = JSON.parse(raw('yahoo-ixic.json'));
+    const t = Date.parse('2026-10-12T18:10:00.000Z') / 1000; // Mon 14:10 EDT
+    mid.chart.result[0].meta.regularMarketTime = t;
+    mid.chart.result[0].meta.regularMarketPrice = 27400;
+    mid.chart.result[0].timestamp.push(t);
+    mid.chart.result[0].indicators.quote[0].close.push(27400);
+    const routes: Route[] = [{ match: has('chart/%5EIXIC'), reply: () => ({ status: 200, body: JSON.stringify(mid) }) }, ...YAHOO_OK.slice(1)];
+    const { svc } = make({}, routes);
+    const at2340 = ist('2026-10-12T23:40:00');
+    const snap = await svc.ensure(['us'], at2340);
+    expect(snap.us.nasdaq.values).toEqual(expect.objectContaining({ phase: 'intraday', last: 27400, previousClose: 27366.17 }));
+    expect(snap.us.nasdaq.basis).toMatch(/intraday — US regular session in progress/);
+    expect(snap.us.nasdaq.basis).toMatch(/US holidays and early closes are not modelled/);
+    expect(snap.us.nasdaq.status).toBe('ok');
+    // The same intraday reading read next morning, after the close, is stale.
+    const next = svc.snapshot(ist('2026-10-13T08:30:00'));
+    expect(next.us.nasdaq.status).toBe('stale');
+    expect(next.us.nasdaq.reason).toMatch(/intraday/);
+  });
+
+  it('08:25 IST: the same symbols read as the completed US session close', async () => {
+    const { svc } = make({}, YAHOO_OK);
+    const snap = await svc.ensure(['us'], MON_0825);
+    expect(snap.us.nasdaq.values?.phase).toBe('close');
+    expect(snap.us.nasdaq.basis).toMatch(/previous US session close/);
+    expect(snap.us.nasdaqFutures.values?.phase).toBeUndefined();
+  });
+
   it('a previous-US-session close goes stale once a later US session has closed', async () => {
     const { svc } = make({}, YAHOO_OK);
     await svc.ensure(['us'], MON_0825);

@@ -100,6 +100,32 @@ export function preOpenFreshness(date: string, now: Date): Freshness {
 }
 
 export const US_FUTURES_MAX_AGE_MS = 6 * HOUR_MS;
+/** A mid-session US index value is only current for this long. */
+export const US_INTRADAY_MAX_AGE_MS = 2 * HOUR_MS;
+
+const NY_PARTS = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  weekday: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/**
+ * Whether a US index value timed `sourceTime` is mid-session ('intraday') or a
+ * completed close: intraday when New York time is 09:30–16:00 on a weekday.
+ * US market holidays and early closes are NOT modelled. A bare session date
+ * ('YYYY-MM-DD', the CNBC fallback's index time) is a close.
+ */
+export function usPhaseAt(sourceTime: string): 'intraday' | 'close' {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(sourceTime)) return 'close';
+  const t = Date.parse(sourceTime);
+  if (!Number.isFinite(t)) return 'close';
+  const parts = Object.fromEntries(NY_PARTS.formatToParts(new Date(t)).map((p) => [p.type, p.value]));
+  if (parts.weekday === 'Sat' || parts.weekday === 'Sun') return 'close';
+  const min = Number(parts.hour) * 60 + Number(parts.minute);
+  return min >= 9 * 60 + 30 && min < 16 * 60 ? 'intraday' : 'close';
+}
 /** GIFT's night session ends ~02:45 IST; 08:25 is under six hours later. */
 export const GIFT_MAX_AGE_MS = 8 * HOUR_MS;
 /** NSE publishes FII/DII ~18:00–20:00 IST. */

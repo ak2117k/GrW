@@ -49,13 +49,16 @@ function isAfterCloseEquity(w: ReviewWindow): boolean {
 export function usCueBlock(key: UsCueKey, rec: CueRecord<UsQuote>, now: Date): Block<Cue> {
   const label = US_LABEL[key];
   if (!rec.values) return absent(`${label.name}: ${rec.reason ?? 'no reading'} — US direction is UNSEEN, not flat`);
+  // An index read while the US session is open is a MID-SESSION value at its
+  // quote time, not a close — labelled so (23:40 IST is 14:10 in New York).
+  const session = label.future ? undefined : rec.values.phase === 'intraday' ? ('intraday' as const) : ('close' as const);
   const block = cueBlock(
     {
       value: rec.values.last,
       change: rec.values.change,
       changePercent: rec.values.changePercent,
       at: rec.sourceTime,
-      basis: label.future ? 'quote time' : 'previous session close',
+      basis: label.future || session === 'intraday' ? 'quote time' : 'previous session close',
     },
     `${rec.source}; ${rec.basis}`,
     now,
@@ -66,6 +69,7 @@ export function usCueBlock(key: UsCueKey, rec: CueRecord<UsQuote>, now: Date): B
     value: {
       ...block.value,
       status: rec.status === 'stale' ? 'stale' : 'ok',
+      ...(session ? { session } : {}),
       ...(rec.reason ? { note: rec.reason } : {}),
     },
   };

@@ -338,6 +338,25 @@ describe('assembleOvernightSection — market cues per window', () => {
     }
   });
 
+  it('an intraday US index value is NOT labelled a session close', () => {
+    const intraday = { ...market.us.nasdaq, values: { ...market.us.nasdaq.values!, phase: 'intraday' as const }, sourceTime: ist('2026-10-12', '23:40').toISOString() };
+    const s = assembleOvernightSection(
+      inputs({
+        window: AFTER_CLOSE_MCX,
+        now: ist('2026-10-12', '23:45'),
+        tag: 'window:OVERNIGHT_REVIEW:MCX:2026-10-12',
+        cues: { ok: true, value: { ...cuesPresent, market: { ...market, us: { ...market.us, nasdaq: intraday } } } },
+      }),
+    );
+    expect(s.marketCues.nasdaq.available && s.marketCues.nasdaq.value).toEqual(
+      expect.objectContaining({ basis: 'quote time', session: 'intraday', ageMinutes: 5 }),
+    );
+    const close = assembleOvernightSection(inputs());
+    expect(close.marketCues.nasdaq.available && close.marketCues.nasdaq.value).toEqual(
+      expect.objectContaining({ basis: 'previous session close', session: 'close' }),
+    );
+  });
+
   it('a stale cue is shown, marked stale with the reason', () => {
     const staleUs = { ...market.us, nasdaq: { ...market.us.nasdaq, status: 'stale' as const, reason: 'the close is from the 2026-10-09 US session' } };
     const s = assembleOvernightSection(inputs({ cues: { ok: true, value: { ...cuesPresent, market: { ...market, us: staleUs } } } }));

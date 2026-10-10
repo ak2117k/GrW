@@ -494,6 +494,8 @@ export type Cue = {
   status?: 'ok' | 'stale';
   /** Why a market-cues reading is stale, or a note that still applies to it. */
   note?: string;
+  /** US indices: 'intraday' = a mid-session value at its quote time; 'close' = a completed session's close. */
+  session?: 'intraday' | 'close';
 };
 
 /** A move under this (percent) reads as FLAT. */

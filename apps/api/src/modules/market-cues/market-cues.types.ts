@@ -31,6 +31,12 @@ export interface UsQuote {
   previousClose: number;
   change: number;
   changePercent: number;
+  /**
+   * Indices only: 'intraday' when the quote time falls inside the US regular
+   * session (09:30–16:00 New York, weekdays) — a mid-session value, NOT a close;
+   * 'close' otherwise. Unset for the futures, which always carry a quote time.
+   */
+  phase?: 'intraday' | 'close';
 }
 
 export type UsCueKey = 'nasdaq' | 'sp500' | 'dow' | 'nasdaqFutures' | 'sp500Futures';

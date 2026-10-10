@@ -214,6 +214,11 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/previous session close/);
     });
 
+    it('does not call a mid-session US value a close', () => {
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/session "intraday"/);
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/at 23:45 IST the US market is open/);
+    });
+
     it('describes the 09:10 check, the IEP label, the futures-vs-futures GIFT gap and unpublished FII', () => {
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/PRE_OPEN_CHECK runs at 09:10/);
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/never the option's price/);

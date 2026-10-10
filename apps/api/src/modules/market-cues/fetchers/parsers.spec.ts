@@ -150,6 +150,21 @@ describe('GIFT Nifty', () => {
     expect(gap.expiryMatches).toBe(true);
   });
 
+  it('drops contracts that expired before the session date on both sides', () => {
+    expect(parseNseIxGift(json('nseix-market-rate.json'), '2026-10-28').expiry).toBe('2026-11-23');
+    const fut = json('nse-nifty-futures.json');
+    fut.marketStatus.marketCurrentTradingDate = 'Oct 28,2026';
+    expect(parseNseNiftyFutures(fut).expiry).toBe('2026-11-23');
+  });
+
+  it('mismatched expiries give NO gap — never a gap across two contracts', () => {
+    const gift = parseNseIxGift(json('nseix-market-rate.json'), '2026-10-28'); // Nov
+    const fut = parseNseNiftyFutures(json('nse-nifty-futures.json')); // Oct
+    const gap = computeGiftGap(gift, fut);
+    expect(gap).toEqual(expect.objectContaining({ gap: null, gapPercent: null, expiryMatches: false }));
+    expect(gap.niftyFuture?.expiry).toBe('2026-10-27');
+  });
+
   it('the gap is null — never 0 — without a future close', () => {
     const gift = parseNseIxGift(json('nseix-market-rate.json'));
     const gap = computeGiftGap(gift, null);

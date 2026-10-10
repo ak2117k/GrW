@@ -235,6 +235,26 @@ describe('ContextPacketService', () => {
       gift: none,
       preOpen: none,
     };
+    const giftRec = rec(
+      {
+        gift: { price: 22650, expiry: '2026-11-23', at: '2026-10-27T18:05:00.000Z', dayChange: null },
+        niftyFuture: { close: 22612.6, expiry: '2026-10-27', sessionDate: '2026-10-27', closedAt: null },
+        gap: null,
+        gapPercent: null,
+        expiryMatches: false,
+        comparison: 'futures-vs-futures gap',
+      },
+      { status: 'stale', reason: 'expiry mismatch (GIFT 2026-11-23 vs NSE 2026-10-27)', sourceTime: '2026-10-27T18:05:00.000Z' },
+    );
+
+    it('globalCues.giftNifty carries both expiries and expiryMatches', async () => {
+      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => ({ ...snapshot, gift: giftRec }) } as any);
+      const packet = await s.build(entry, tick, null);
+      const g = packet.macro.globalCues.available ? (packet.macro.globalCues.value as Record<string, any>).giftNifty : null;
+      expect(g.value).toEqual(
+        expect.objectContaining({ giftExpiry: '2026-11-23', niftyFutureExpiry: '2026-10-27', expiryMatches: false, gap: null, status: 'stale', note: expect.stringMatching(/expiry mismatch/) }),
+      );
+    });
 
     it('fiiDii and globalCues carry the cached readings, each with its own source time and status', async () => {
       const peek = jest.fn().mockReturnValue(snapshot);

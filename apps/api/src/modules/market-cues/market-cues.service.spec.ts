@@ -271,6 +271,45 @@ describe('GIFT Nifty', () => {
     expect(snap.gift.values?.gift.price).toBe(22575.5);
   });
 
+  /** NSE IX rows with the given expiries, priced at an IST stamp. */
+  const giftPayload = (expiries: string[], stamp: string) => {
+    const j = JSON.parse(raw('nseix-market-rate.json'));
+    j.data = expiries.map((e, i) => ({ ...j.data[0], EXPIRYDATE: e, LASTPRICE: String(22600 + i * 50), TIMESTMP: stamp }));
+    return JSON.stringify(j);
+  };
+  /** NSE NIFTY futures for a session, with the given expiries (front first). */
+  const futPayload = (session: string, expiries: string[]) => {
+    const j = JSON.parse(raw('nse-nifty-futures.json'));
+    j.marketStatus.marketCurrentTradingDate = session;
+    j.data = expiries.map((e, i) => ({ ...j.data[0], expiryDate: e, closePrice: 22612.6 + i * 100 }));
+    return JSON.stringify(j);
+  };
+
+  it('rollover morning: both sides drop the expired October contract and compare November with November', async () => {
+    const { svc } = make({}, [
+      { match: has('nseix.com'), reply: () => ({ status: 200, body: giftPayload(['27-Oct-2026', '23-Nov-2026'], '28-Oct-2026 07:55:00') }) },
+      { match: has('nse50_fut'), reply: () => ({ status: 200, body: futPayload('Oct 28,2026', ['27-Oct-2026', '23-Nov-2026', '29-Dec-2026']) }) },
+    ]);
+    const snap = await svc.ensure(['gift'], ist('2026-10-28T08:25:00'));
+    expect(snap.gift.status).toBe('ok');
+    expect(snap.gift.values).toEqual(
+      expect.objectContaining({ expiryMatches: true, gift: expect.objectContaining({ expiry: '2026-11-23', price: 22650 }), niftyFuture: expect.objectContaining({ expiry: '2026-11-23', close: 22712.6 }) }),
+    );
+    expect(snap.gift.values?.gap).toBe(-62.6);
+  });
+
+  it('expiry evening: GIFT has rolled to November, NSE’s front is still October — no gap, stale, says why', async () => {
+    const { svc } = make({}, [
+      { match: has('nseix.com'), reply: () => ({ status: 200, body: giftPayload(['23-Nov-2026', '29-Dec-2026'], '27-Oct-2026 23:35:00') }) },
+      { match: has('nse50_fut'), reply: () => ({ status: 200, body: futPayload('Oct 27,2026', ['27-Oct-2026', '23-Nov-2026']) }) },
+    ]);
+    const snap = await svc.ensure(['gift'], ist('2026-10-27T23:40:00'));
+    expect(snap.gift.values?.gap).toBeNull();
+    expect(snap.gift.values?.expiryMatches).toBe(false);
+    expect(snap.gift.status).toBe('stale');
+    expect(snap.gift.reason).toMatch(/expiry mismatch \(GIFT 2026-11-23 vs NSE 2026-10-27\)/);
+  });
+
   it('no future close: GIFT shown, gap null with the reason', async () => {
     const { svc } = make({}, [{ match: has('nseix.com'), reply: ok('nseix-market-rate.json') }]);
     const snap = await svc.ensure(['gift'], ist('2026-10-10T08:25:00'));

@@ -310,7 +310,13 @@ export class MarketCuesService implements OnApplicationBootstrap {
           'NSE archives the participant-OI file in the evening',
         ),
       ),
-      gift: this.record<GiftGap>('gift', 'gift', now, (s) => quoteAge(s.sourceTime as string, now, GIFT_MAX_AGE_MS, 'GIFT Nifty quote')),
+      gift: this.record<GiftGap>('gift', 'gift', now, (s) => {
+        const g = s.values as GiftGap;
+        if (g.expiryMatches === false && g.niftyFuture) {
+          return { status: 'stale', reason: `expiry mismatch (GIFT ${g.gift.expiry} vs NSE ${g.niftyFuture.expiry}) — no gap` };
+        }
+        return quoteAge(s.sourceTime as string, now, GIFT_MAX_AGE_MS, 'GIFT Nifty quote');
+      }),
       preOpen: this.record<PreOpenBook>('preOpen', 'preOpen', now, (s) => preOpenFreshness((s.values as PreOpenBook).date, now)),
     };
   }
@@ -573,12 +579,12 @@ export class MarketCuesService implements OnApplicationBootstrap {
     let gift;
     let source: string;
     try {
-      gift = await this.guarded('NSE IX market-rate', now, async () => parseNseIxGift(await cueGetJson(this.cfg.urls.nseIx, this.http())));
+      gift = await this.guarded('NSE IX market-rate', now, async () => parseNseIxGift(await cueGetJson(this.cfg.urls.nseIx, this.http()), istYmd(now)));
       source = 'NSE IX market-rate (GIFT Nifty, nearest-expiry NIFTY FUTIDX)';
     } catch (primary) {
       try {
         gift = await this.guarded('NSE marketStatus', now, async () =>
-          parseMarketStatusGift(await cueGetJson(this.cfg.urls.nseMarketStatus, this.http())),
+          parseMarketStatusGift(await cueGetJson(this.cfg.urls.nseMarketStatus, this.http()), istYmd(now)),
         );
         source = `NSE marketStatus giftnifty block (fallback — NSE IX failed: ${describeFetchError(primary)})`;
       } catch (fallback) {

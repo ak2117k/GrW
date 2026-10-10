@@ -549,7 +549,10 @@ function macroBlocks(
           {
             gift: r.values.gift.price,
             giftAt: r.values.gift.at,
+            giftExpiry: r.values.gift.expiry,
             niftyFutureClose: r.values.niftyFuture?.close ?? null,
+            niftyFutureExpiry: r.values.niftyFuture?.expiry ?? null,
+            expiryMatches: r.values.expiryMatches,
             gap: r.values.gap,
             gapPercent: r.values.gapPercent,
             comparison: r.values.comparison,

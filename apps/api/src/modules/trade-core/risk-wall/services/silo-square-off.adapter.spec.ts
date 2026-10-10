@@ -9,11 +9,13 @@ jest.mock('../../../ungated-track/services/ungated-tick-poller.service', () => (
 jest.mock('../../../ungated-track/repositories/ungated-watch.repository', () => ({ UngatedWatchRepository: class UngatedWatchRepository {} }));
 jest.mock('../../../sell-futures-track/services/sell-futures.service', () => ({ SellFuturesService: class SellFuturesService {} }));
 jest.mock('../../../trade-engine/services/trade-execution.service', () => ({ TradeExecutionService: class TradeExecutionService {} }));
+jest.mock('../../../trade-engine/repositories/trade.repository', () => ({ TradeRepository: class TradeRepository {} }));
 
 import type { ModuleRef } from '@nestjs/core';
 import { AdaptiveStopTickPoller } from '../../../adaptive-stop-track/services/adaptive-stop-tick-poller.service';
 import { AutoExecSettingsService } from '../../../auto-execution/services/auto-exec-settings.service';
 import { SellFuturesService } from '../../../sell-futures-track/services/sell-futures.service';
+import { TradeRepository } from '../../../trade-engine/repositories/trade.repository';
 import { TradeExecutionService } from '../../../trade-engine/services/trade-execution.service';
 import { UngatedWatchRepository } from '../../../ungated-track/repositories/ungated-watch.repository';
 import { UngatedTickPoller } from '../../../ungated-track/services/ungated-tick-poller.service';
@@ -34,6 +36,7 @@ function setup() {
   };
   const sellFutures = { squareOffOpenPositions: jest.fn(async () => { calls.push('sell-futures'); return { closed: 1, errors: 0 }; }) };
   const tradeEngine = { closeAllPositions: jest.fn(async (reason: string) => { calls.push(`trade-engine:${reason}`); return { closed: 4 }; }) };
+  const tradeRepo = { getOpenTrades: jest.fn(async (): Promise<unknown[]> => []) };
   const autoExec = { update: jest.fn(async (userId: string, segment: string) => { calls.push(`auto-exec:${userId}:${segment}`); return {}; }) };
   const services = new Map<unknown, unknown>([
     [AutoExecSettingsService, autoExec],
@@ -43,6 +46,7 @@ function setup() {
     [UngatedWatchRepository, ungatedRepo],
     [SellFuturesService, sellFutures],
     [TradeExecutionService, tradeEngine],
+    [TradeRepository, tradeRepo],
   ]);
   const moduleRef = {
     get: jest.fn((token: { name: string }) => {
@@ -51,7 +55,7 @@ function setup() {
     }),
   };
   const adapter = new SiloSquareOffAdapter(moduleRef as unknown as ModuleRef);
-  return { calls, services, moduleRef, adapter, watch, adaptive, ungatedPoller, sellFutures, tradeEngine, autoExec };
+  return { calls, services, moduleRef, adapter, watch, adaptive, ungatedPoller, sellFutures, tradeEngine, tradeRepo, autoExec };
 }
 
 describe('SiloSquareOffAdapter', () => {
@@ -69,7 +73,7 @@ describe('SiloSquareOffAdapter', () => {
     expect(watch.squareOffAll).toHaveBeenCalledWith('manual');
     expect(moduleRef.get).toHaveBeenCalledWith(WatchService, { strict: false });
     expect(results.find((r) => r.target === 'ungated-track')?.detail).toBe('closed 2 of 2; 0 still open');
-    expect(results.find((r) => r.target === 'trade-engine')?.detail).toContain('closed 4 open trades');
+    expect(results.find((r) => r.target === 'trade-engine')?.detail).toContain('closed 4 open trades; 0 still open;');
   });
 
   it('a non-owner sets only their own auto-execution kill flag and never resolves a platform silo', async () => {
@@ -107,6 +111,18 @@ describe('SiloSquareOffAdapter', () => {
     expect(byTarget['ungated-track']).toMatchObject({ status: 'FAILED', detail: 'closed 0 of 2; 2 still open' });
     expect(byTarget['sell-futures-track']).toMatchObject({ status: 'FAILED', detail: 'closed 0, 2 errors' });
     expect(byTarget['trade-engine'].status).toBe('OK');
+  });
+
+  it('trade-engine is FAILED when open trades remain after closeAllPositions', async () => {
+    const { adapter, tradeEngine, tradeRepo } = setup();
+    tradeEngine.closeAllPositions.mockResolvedValueOnce({ closed: 3 });
+    tradeRepo.getOpenTrades.mockResolvedValueOnce([{ id: 't1' }, { id: 't2' }]);
+    const results = await adapter.squareOffAll(OWNER, 'panic');
+    const te = results.find((r) => r.target === 'trade-engine');
+    expect(te?.status).toBe('FAILED');
+    expect(te?.detail).toContain('closed 3 open trades; 2 still open;');
+    expect(te?.detail).toContain('kill switch is now on');
+    expect(tradeRepo.getOpenTrades).toHaveBeenCalledWith();
   });
 
   it('a silo that is not loaded in this process is UNAVAILABLE and the rest still run', async () => {

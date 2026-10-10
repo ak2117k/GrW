@@ -4,6 +4,7 @@ import { WatchStatus } from '@prisma/client';
 import { AdaptiveStopTickPoller } from '../../../adaptive-stop-track/services/adaptive-stop-tick-poller.service';
 import { AUTO_EXEC_SEGMENTS, AutoExecSettingsService } from '../../../auto-execution/services/auto-exec-settings.service';
 import { SellFuturesService } from '../../../sell-futures-track/services/sell-futures.service';
+import { TradeRepository } from '../../../trade-engine/repositories/trade.repository';
 import { TradeExecutionService } from '../../../trade-engine/services/trade-execution.service';
 import { UngatedWatchRepository } from '../../../ungated-track/repositories/ungated-watch.repository';
 import { UngatedTickPoller } from '../../../ungated-track/services/ungated-tick-poller.service';
@@ -108,9 +109,12 @@ const STEPS: readonly SiloStep[] = [
     ownerOnly: true,
     async run(resolve, _actor, reason) {
       const r = await resolve(TradeExecutionService).closeAllPositions(`core kill switch: ${reason}`);
+      // closeAllPositions logs and swallows each trade's close failure and returns only
+      // { closed }; count what is still OPEN/PARTIALLY_FILLED so a partial close is FAILED.
+      const remaining = (await resolve(TradeRepository).getOpenTrades()).length;
       return {
-        ok: true,
-        detail: `closed ${r.closed} open trades; the trade-engine kill switch is now on in memory for every user until the API restarts, and auto-trade mode is OFF`,
+        ok: remaining === 0,
+        detail: `closed ${r.closed} open trades; ${remaining} still open; the trade-engine kill switch is now on in memory for every user until the API restarts, and auto-trade mode is OFF`,
       };
     },
   },

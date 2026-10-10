@@ -490,3 +490,30 @@ describe('SentinelOvernightService — venue clock gates (late close, open)', ()
     expect(t.record).not.toHaveBeenCalled();
   });
 });
+
+describe('SentinelOvernightService — the live reservation follows the held venues', () => {
+  beforeEach(() => jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+
+  it('at 08:30 every held venue is shut, so reviews may use every slot', async () => {
+    const t = makeSvc();
+    t.svc.clockNow = () => ist('2026-10-13', '08:30');
+    await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:30'));
+    const opts = t.runShared.mock.calls.map((c) => c[2]);
+    expect(opts.length).toBe(2);
+    for (const o of opts) expect(o.reserveLive()).toBe(false);
+  });
+
+  it('at 15:45 MCX (held) is trading, so the live slot stays reserved', async () => {
+    const t = makeSvc();
+    t.svc.clockNow = () => ist('2026-10-12', '15:45');
+    await t.svc.runWindow(AFTER_CLOSE_EQUITY, MON_CLOSE);
+    expect(t.runShared.mock.calls[0][2].reserveLive()).toBe(true);
+  });
+
+  it('the pre-open trigger names 08:30', async () => {
+    const t = makeSvc();
+    await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:30'));
+    expect(t.buildPacket.mock.calls[0][3][0].detail).toMatch(/08:30/);
+  });
+});

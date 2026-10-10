@@ -85,7 +85,7 @@ export class SentinelVerdictRepository {
 
   /**
    * `liveOnly` drops rows written by the overnight review. The live cycle reads
-   * its "last look" through it: an 08:50 pre-open verdict counted as the last
+   * its "last look" through it: an 08:30 pre-open verdict counted as the last
    * judgement would push the first live heartbeat of the day 15 minutes past the
    * open, and would hand the material-change gate yesterday's close as the
    * baseline. The packet's `memory` block still sees overnight rows (it calls

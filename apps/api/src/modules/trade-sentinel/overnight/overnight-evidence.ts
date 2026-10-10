@@ -193,7 +193,7 @@ function firstPrintMin(exchange: string): { min: number; what: string } {
  * The pre-open / indicative price, if one genuinely exists for today.
  *
  * A candidate price is used ONLY when it was printed today at or after the
- * venue's first print of the day. At 08:50 nothing qualifies — NSE's pre-open
+ * venue's first print of the day. At 08:30 nothing qualifies — NSE's pre-open
  * runs 09:00–09:08 and MCX opens at 09:00 — and the block says so, plainly,
  * rather than relabelling yesterday's close as an opening indication.
  */

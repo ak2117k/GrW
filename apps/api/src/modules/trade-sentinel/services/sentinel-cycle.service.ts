@@ -692,13 +692,17 @@ export class SentinelCycleService {
   async runShared<T>(
     trackerId: string,
     work: () => Promise<T>,
-    opts: { expired?: () => boolean } = {},
+    opts: { expired?: () => boolean; reserveLive?: () => boolean } = {},
   ): Promise<T> {
     // Never the last free slot(s): see LIVE_RESERVED_SLOTS. And checked on every
     // wake: a pre-open job still queued when its venue opens is dropped.
     for (;;) {
       if (opts.expired?.()) throw new SharedJobExpired();
-      const room = this.judging.size < JUDGE_CONCURRENCY - LIVE_RESERVED_SLOTS;
+      // The reservation only matters while live judging can happen: when every
+      // venue the book holds is shut (08:30, after the closes) the caller says so
+      // and overnight work may use every slot. Default: reserve.
+      const reserved = (opts.reserveLive?.() ?? true) ? LIVE_RESERVED_SLOTS : 0;
+      const room = this.judging.size < JUDGE_CONCURRENCY - reserved;
       if (room && !this.judging.has(trackerId)) break;
       await new Promise<void>((resolve) => this.slotWaiters.push(resolve));
     }

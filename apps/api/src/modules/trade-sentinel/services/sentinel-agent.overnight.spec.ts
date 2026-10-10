@@ -99,7 +99,7 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
   beforeEach(() => jest.clearAllMocks());
 
   it('stamps its own prompt version, distinct from the live one', () => {
-    expect(svc.overnightPromptVersion).toBe('o2/t1');
+    expect(svc.overnightPromptVersion).toBe('o3/t1');
     expect(svc.overnightPromptVersion).toBe(`${SENTINEL_OVERNIGHT_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
     expect(svc.overnightPromptVersion).not.toBe(svc.promptVersion);
   });

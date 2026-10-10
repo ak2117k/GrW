@@ -139,7 +139,7 @@ import { SentinelOvernightService } from './services/sentinel-overnight.service'
     OiWallSnapshotService,
     SentinelCycleService,
     SentinelRunnerService,
-    // After-close (15:45 NSE / 23:45 MCX) and pre-open (08:50) reviews. Shadow
+    // After-close (15:45 NSE / 23:45 MCX) and pre-open (08:30) reviews. Shadow
     // only; shares the cycle's judge cap. Off unless SENTINEL_SHADOW_ENABLED.
     SentinelOvernightService,
   ],

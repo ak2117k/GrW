@@ -248,3 +248,33 @@ describe('SentinelCycleService — an overnight verdict is not the live "last lo
     expect(recentForTracker).toHaveBeenCalledWith('a', 1, { liveOnly: true });
   });
 });
+
+describe('SentinelCycleService.runShared — the live reservation applies only while a held venue is open', () => {
+  it('with every venue closed, two overnight reviews run at once', async () => {
+    const t = makeSvc();
+    const gates = [held(), held()];
+    const started: string[] = [];
+    const runs = ['a', 'b'].map((id, i) =>
+      t.svc.runShared(id, async () => { started.push(id); await gates[i].promise; }, { reserveLive: () => false }),
+    );
+    await flush();
+    expect(started).toEqual(['a', 'b']);
+    gates.forEach((g) => g.resolve(undefined));
+    await Promise.all(runs);
+  });
+
+  it('with a held venue open (MCX), only one runs', async () => {
+    const t = makeSvc();
+    const gates = [held(), held()];
+    const started: string[] = [];
+    const runs = ['a', 'b'].map((id, i) =>
+      t.svc.runShared(id, async () => { started.push(id); await gates[i].promise; }, { reserveLive: () => true }),
+    );
+    await flush();
+    expect(started).toEqual(['a']);
+    gates[0].resolve(undefined);
+    await flush();
+    gates[1].resolve(undefined);
+    await Promise.all(runs);
+  });
+});

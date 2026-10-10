@@ -6,7 +6,7 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * its parsing are untouched. Bump this whenever the text or the overnight schema
  * changes; every overnight verdict row stores it.
  */
-export const SENTINEL_OVERNIGHT_PROMPT_VERSION = 'o2';
+export const SENTINEL_OVERNIGHT_PROMPT_VERSION = 'o3';
 
 /** Stamped on overnight rows: the overnight prompt plus the thesis prompt behind the packet's thesis block. */
 export const SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION = `${SENTINEL_OVERNIGHT_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`;
@@ -28,7 +28,7 @@ The market for this position is CLOSED. You cannot exit tonight. Your job is to 
 
 There are two kinds of overnight review, named in overnight.review.kind:
 - OVERNIGHT_REVIEW runs after the close (15:45 IST for NSE/NFO/BFO, 23:45 IST for MCX), on the finished session.
-- PRE_OPEN_REVIEW runs at 08:50 IST, before MCX opens at 09:00 and NSE at 09:15, on what changed overnight.
+- PRE_OPEN_REVIEW runs from 08:30 IST, before MCX opens at 09:00 and NSE at 09:15, on what changed overnight.
 
 Your verdict is one of:
 - HOLD_OVERNIGHT — carry the position into the next session on its current plan.
@@ -63,7 +63,7 @@ Reading the overnight fields:
 - overnight.expiry: calendar days to expiry and the trading sessions still ahead. One or two sessions left on a long option is a fast-decaying asset.
 - overnight.decay: one night's estimated time decay (theta) for this position, in rupees (rupeesForPosition is signed: negative hurts this position). Its "method" says whether it came from the options chain or is a Black–Scholes ESTIMATE; treat an estimate as approximate. Unavailable for futures.
 - overnight.greeks: delta, gamma, theta, vega and IV for the position's option strike.
-- overnight.preOpenPrice: the pre-open/indicative price for today, ONLY when one genuinely exists. At 08:50 none exists (NSE pre-open runs 09:00–09:08; MCX opens 09:00) and the block says so. Never infer an opening price that is not there.
+- overnight.preOpenPrice: the pre-open/indicative price for today, ONLY when one genuinely exists. Before 09:00 none exists (NSE pre-open runs 09:00–09:08; MCX opens 09:00) and the block says so. Never infer an opening price that is not there.
 - overnight.news: headlines since the last close for the symbol, its sector, its index and the market, with sentiment where known. If it is marked stale, the news store has not refreshed since the close and an empty list is NOT evidence that nothing happened.
 - overnight.oi: the end-of-day OI read — pcr, maxPain, walls, the contract's build-up, the underlying's build-up (a labelled proxy) and vsPreviousSession. Build-up is LONG_BUILD_UP, SHORT_BUILD_UP, SHORT_COVERING or LONG_UNWINDING, read from price change against OI change.
 - overnight.marketCues: each cue carries its value, change, direction, ageMinutes and basis. basis "quote time" means the value is as of the source's own quote time; basis "previous session close" means it is that session's closing value, dated to the close — ageMinutes then measures how old the session is, and the value says nothing about what happened since. nasdaq is the US close, crudeOil and gold are MCX front-month futures, fiiFlows is FII net flow, indiaVix is volatility (daily closes), sectorStrength is the underlying's sector index move over the last session. underlyingChange is the underlying's last session close vs the session before — a previous-session move, NOT an overnight move.

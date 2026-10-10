@@ -17,6 +17,7 @@ import {
   type TickSource,
 } from './sentinel-cycle.service';
 import { SENTINEL_ENABLED_KEY } from './sentinel-runner.service';
+import { isAnyExchangeOpen } from '../market-sessions';
 import {
   AFTER_CLOSE_EQUITY,
   AFTER_CLOSE_MCX,
@@ -348,7 +349,12 @@ export class SentinelOvernightService {
     const claims = this.claimed.get(tag) ?? new Set<string>();
     this.claimed.set(tag, claims);
 
-    const users = await this.usersWithOpenTrades();
+    const book = await this.openTradeVenues();
+    const users = [...new Set(book.map((r) => r.userId))];
+    // Live judging happens only while a venue someone holds is trading — the same
+    // rule (and helper) the runner's tick uses. Outside that, the live slot is
+    // not reserved and overnight reviews may use every slot.
+    const heldVenues = [...new Set(book.map((r) => r.exchange))];
     const jobs: Array<Promise<void>> = [];
     for (const userId of users) {
       let entries: RosterEntry[];
@@ -373,7 +379,7 @@ export class SentinelOvernightService {
         // Claimed BEFORE the durable check, synchronously, so an overlapping
         // fire in this process cannot pass the same gate in the gap.
         claims.add(entry.trackerId);
-        jobs.push(this.reviewOne(entry, window, tag, now, claims, report));
+        jobs.push(this.reviewOne(entry, window, tag, now, claims, report, heldVenues));
       }
     }
     await Promise.all(jobs);
@@ -387,6 +393,7 @@ export class SentinelOvernightService {
     now: Date,
     claims: Set<string>,
     report: WindowReport,
+    heldVenues: string[] = [],
   ): Promise<void> {
     const failKey = `${entry.trackerId}|${tag}`;
     try {
@@ -404,17 +411,13 @@ export class SentinelOvernightService {
     }
 
     const startedWall = Date.now();
+    const current = () => (this.clockNow ? this.clockNow() : new Date(now.getTime() + (Date.now() - startedWall)));
     try {
       await this.cycle.runShared(entry.trackerId, () => this.judgeAndRecord(entry, window, tag, now), {
         // Re-checked every time the job is woken: once the venue opens (or the
         // window otherwise stops applying) a queued job is dropped, never run.
-        expired: () =>
-          !reviewWindowIsClosed(
-            window,
-            entry.exchange,
-            this.clockNow ? this.clockNow() : new Date(now.getTime() + (Date.now() - startedWall)),
-            this.clock,
-          ),
+        expired: () => !reviewWindowIsClosed(window, entry.exchange, current(), this.clock),
+        reserveLive: () => isAnyExchangeOpen(heldVenues, current()),
       });
       this.failures.delete(failKey);
       report.judged += 1;
@@ -454,7 +457,7 @@ export class SentinelOvernightService {
       name: window.kind,
       detail:
         window.kind === 'PRE_OPEN_REVIEW'
-          ? 'scheduled pre-open review (08:50 IST)'
+          ? 'scheduled pre-open review (08:30 IST)'
           : `scheduled after-close review (${window.venue === 'MCX' ? '23:45' : '15:45'} IST)`,
     };
     const base = await this.packets.build(
@@ -521,14 +524,13 @@ export class SentinelOvernightService {
     });
   }
 
-  /** Users with an open trade at all; the roster then decides what is reviewable. */
-  private async usersWithOpenTrades(): Promise<string[]> {
-    const rows: Array<{ userId: string }> = await this.prisma.tradeTracker.findMany({
+  /** Every (user, exchange) with an open trade; the roster then decides what is reviewable. */
+  private async openTradeVenues(): Promise<Array<{ userId: string; exchange: string }>> {
+    return this.prisma.tradeTracker.findMany({
       where: { status: 'OPEN' },
       select: { userId: true, exchange: true },
       distinct: ['userId', 'exchange'],
     });
-    return [...new Set(rows.map((r) => r.userId))];
   }
 
   /** Drop claims and failure counts from earlier days of this same window. */

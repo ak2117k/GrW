@@ -100,7 +100,7 @@ describe('overnight review windows — weekends and exchange holidays are skippe
     expect(OVERNIGHT_CRON_MCX).toBe('0 45,50,55,58 23 * * 1-5');
     // After midnight, Tue–Sat, for the late-close season (MCX to 23:55).
     expect(OVERNIGHT_CRON_MCX_LATE).toBe('0 3,8 0 * * 2-6');
-    expect(PRE_OPEN_CRON).toBe('0 50,53,56 8 * * 1-5');
+    expect(PRE_OPEN_CRON).toBe('0 30,35,40 8 * * 1-5');
   });
 });
 
@@ -226,5 +226,16 @@ describe('MCX late close — every fire is gated on the venue having closed', ()
 
   it('an equity after-close fire before 15:30 reviews nothing', () => {
     expect(selectForWindow(BOOK, AFTER_CLOSE_EQUITY, ist('2026-10-12', '15:20'))).toEqual([]);
+  });
+});
+
+describe('the 08:30 pre-open window', () => {
+  it('picks every F&O position at 08:30 and tags it with today', () => {
+    expect(ids(selectForWindow(BOOK, PRE_OPEN, ist('2026-10-12', '08:30')))).toEqual(['nfo-opt', 'bfo-opt', 'nfo-fut', 'mcx-opt', 'mcx-fut']);
+    expect(windowTag(PRE_OPEN, ist('2026-10-12', '08:30'))).toBe('window:PRE_OPEN_REVIEW:ALL:2026-10-12');
+    expect(windowTag(PRE_OPEN, ist('2026-10-12', '08:40'))).toBe(windowTag(PRE_OPEN, ist('2026-10-12', '08:30')));
+  });
+  it('still drops at the open: nothing is picked at 09:00', () => {
+    expect(selectForWindow(BOOK, PRE_OPEN, ist('2026-10-12', '09:00'))).toEqual([]);
   });
 });

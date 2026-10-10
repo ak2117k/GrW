@@ -8,7 +8,7 @@
  *
  *   after-close  15:45 IST for NSE/NFO/BFO, 23:45 IST for MCX — every open
  *                F&O position on that venue, judged on the finished session;
- *   pre-open     08:50 IST — every open F&O position, before MCX opens at
+ *   pre-open     08:30 IST — every open F&O position, before MCX opens at
  *                09:00 and NSE at 09:15.
  *
  * Each window judges each position ONCE. The tag {@link windowTag} is what makes
@@ -57,13 +57,13 @@ export const PRE_OPEN: ReviewWindow = { kind: 'PRE_OPEN_REVIEW', venue: 'ALL' };
  * idempotent per position per window, so the second and third fires judge
  * nothing that is already recorded. They exist so that a deploy or crash at
  * 15:44 does not cost the whole night's review: whichever fire lands first after
- * the restart does the work. The pre-open repeats stop at 08:56, before MCX's
+ * the restart does the work. The pre-open repeats stop at 08:40, before MCX's
  * 09:00 open, so a pre-open verdict is never written against a live market.
  */
 export const OVERNIGHT_CRON_EQUITY = '0 45,50,55 15 * * 1-5';
 export const OVERNIGHT_CRON_MCX = '0 45,50,55,58 23 * * 1-5';
 export const OVERNIGHT_CRON_MCX_LATE = '0 3,8 0 * * 2-6';
-export const PRE_OPEN_CRON = '0 50,53,56 8 * * 1-5';
+export const PRE_OPEN_CRON = '0 30,35,40 8 * * 1-5';
 
 /**
  * The default clock: the shipped holiday calendar, NO late-close season. The

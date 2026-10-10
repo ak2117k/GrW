@@ -58,6 +58,43 @@ interface YahooCandle {
   volume: number;
 }
 
+export interface YahooDailyChange {
+  symbol: string;
+  last: number;
+  previousClose: number;
+  change: number;
+  changePercent: number;
+  /** Yahoo's own `regularMarketTime` as ISO, or null when it gave none. */
+  quoteTime: string | null;
+}
+
+/**
+ * The last close (or live price) vs the daily close before it, from a v8 chart
+ * payload with `interval=1d`. Pure; the market-cues fetcher parses the same
+ * payload with it. Null when either value is missing — never a 0 change.
+ */
+export function parseYahooDailyChange(data: any, fallbackSymbol = ''): YahooDailyChange | null {
+  const result = data?.chart?.result?.[0];
+  const meta = result?.meta;
+  const closes: unknown[] = result?.indicators?.quote?.[0]?.close ?? [];
+  if (!meta || !Array.isArray(closes) || closes.length < 2) return null;
+  const ok = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
+  const lastBar = closes[closes.length - 1];
+  const last = ok(meta.regularMarketPrice) ? meta.regularMarketPrice : ok(lastBar) ? lastBar : null;
+  const prev = closes[closes.length - 2];
+  if (last === null || !ok(prev)) return null;
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const t = Number(meta.regularMarketTime);
+  return {
+    symbol: String(meta.symbol ?? fallbackSymbol),
+    last,
+    previousClose: round2(prev),
+    change: round2(last - prev),
+    changePercent: round2(((last - prev) / prev) * 100),
+    quoteTime: Number.isFinite(t) && t > 0 ? new Date(t * 1000).toISOString() : null,
+  };
+}
+
 interface YahooQuoteData {
   previousClose: number;
   regularMarketPrice: number;
@@ -154,8 +191,11 @@ export class YahooFinanceService {
   }
 
   /**
-   * Get the previous close and daily change from Yahoo Finance.
-   * This is the authoritative daily change — directly from the exchange.
+   * Get the previous close and ONE-DAY change from Yahoo Finance: the last
+   * close (or live price) against the daily close before it. Not
+   * `chartPreviousClose` — with `range=5d` that is the close before the
+   * five-day range, which made this a ~5-day change. Null, never a 0 change,
+   * when there is no prior close.
    */
   async getQuoteChange(
     symbol: string,
@@ -165,30 +205,29 @@ export class YahooFinanceService {
     const yahooSymbol = toYahooSymbol(symbol, exchange, token);
     if (!yahooSymbol) return null;
 
+    const d = await this.getDailyChangeBySymbol(yahooSymbol);
+    if (!d) return null;
+    return {
+      previousClose: d.previousClose,
+      regularMarketPrice: d.last,
+      regularMarketChange: d.change,
+      regularMarketChangePercent: d.changePercent,
+    };
+  }
+
+  /**
+   * One-day change for a Yahoo symbol given directly (`^IXIC`, `NQ=F`) — for
+   * instruments with no Angel token, so no mapping is needed. Null on any
+   * failure, or when either close is missing.
+   */
+  async getDailyChangeBySymbol(yahooSymbol: string): Promise<YahooDailyChange | null> {
     try {
       const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=5d`;
-
       const response = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
+        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
       });
-
       if (!response.ok) return null;
-
-      const data = await response.json() as any;
-      const meta = data?.chart?.result?.[0]?.meta;
-      if (!meta) return null;
-
-      const previousClose = meta.chartPreviousClose ?? meta.previousClose ?? 0;
-      const regularMarketPrice = meta.regularMarketPrice ?? 0;
-      const change = regularMarketPrice - previousClose;
-      const changePercent = previousClose > 0 ? (change / previousClose) * 100 : 0;
-
-      return {
-        previousClose,
-        regularMarketPrice,
-        regularMarketChange: Math.round(change * 100) / 100,
-        regularMarketChangePercent: Math.round(changePercent * 100) / 100,
-      };
+      return parseYahooDailyChange(await response.json(), yahooSymbol);
     } catch {
       return null;
     }

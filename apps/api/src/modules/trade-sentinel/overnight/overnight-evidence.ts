@@ -480,28 +480,48 @@ export function oiAnalysisBlock(raw: RawOiAnalysis): Block<Prisma.InputJsonValue
 
 // ─── Market cues ─────────────────────────────────────────────────────────────
 
+/** What a cue's time means: the quote's own time, or the close of the session it describes. */
+export type CueBasis = 'quote time' | 'previous session close';
+
 export type Cue = {
   value: number;
   change: number | null;
   changePercent: number | null;
   direction: 'UP' | 'DOWN' | 'FLAT' | 'UNKNOWN';
   ageMinutes: number | null;
+  basis: CueBasis;
 };
 
 /** A move under this (percent) reads as FLAT. */
 const FLAT_PCT = 0.1;
 
-/** One market cue — value, direction and freshness — or a stated absence. */
+/**
+ * One market cue — value, direction and freshness — or a stated absence.
+ *
+ * NEVER STAMPED WITH THE REVIEW TIME. The time is the source's own (a quote
+ * time) or the close of the session the value describes; a reading with
+ * neither is refused, because a cue dated "now" reads as fresh when it may be
+ * a day old.
+ */
 export function cueBlock(
-  reading: { value: number; change: number | null; changePercent: number | null; at: string | null } | null,
+  reading: {
+    value: number;
+    change: number | null;
+    changePercent: number | null;
+    at: string | null;
+    basis: CueBasis;
+  } | null,
   source: string,
   now: Date,
   reason = 'no reading available',
 ): Block<Cue> {
   if (!reading || !finite(reading.value)) return absent(reason);
+  if (!reading.at || !Number.isFinite(Date.parse(reading.at))) {
+    return absent('the source gave no time for this reading, so its age is unknown — not used');
+  }
   const pct = finite(reading.changePercent) ? reading.changePercent : null;
   const direction = pct === null ? 'UNKNOWN' : Math.abs(pct) < FLAT_PCT ? 'FLAT' : pct > 0 ? 'UP' : 'DOWN';
-  const at = reading.at ?? now.toISOString();
+  const at = reading.at;
   const age = Date.parse(at);
   return present(
     {
@@ -510,6 +530,7 @@ export function cueBlock(
       changePercent: pct,
       direction,
       ageMinutes: Number.isFinite(age) ? Math.max(0, Math.round((now.getTime() - age) / 60_000)) : null,
+      basis: reading.basis,
     },
     source,
     at,

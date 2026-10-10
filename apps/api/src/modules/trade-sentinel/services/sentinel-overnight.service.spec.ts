@@ -11,6 +11,7 @@ import type { RosterEntry } from './roster.service';
 import type { TickReading } from './sentinel-cycle.service';
 import type { RawCues, RawOiEvidence } from '../ports/overnight-evidence.port';
 import type { NewsEvidence } from '../overnight/overnight-evidence';
+import { SharedJobExpired } from './sentinel-cycle.service';
 
 const ist = (ymd: string, hhmm: string) => new Date(`${ymd}T${hhmm}:00+05:30`);
 const MON_CLOSE = ist('2026-10-12', '15:45');
@@ -92,11 +93,11 @@ const oiPresent: RawOiEvidence = {
 
 const cuesPresent: RawCues = {
   nasdaq: { reading: null, reason: 'nasdaq.factor is a stub and no US-close source is wired' },
-  crudeOil: { reading: { value: 5600, change: -84, changePercent: -1.5, at: MON_CLOSE.toISOString() }, source: 'commodities-snapshot.service' },
-  gold: { reading: { value: 121000, change: 300, changePercent: 0.25, at: MON_CLOSE.toISOString() }, source: 'commodities-snapshot.service' },
+  crudeOil: { reading: { value: 5600, change: -84, changePercent: -1.5, at: MON_CLOSE.toISOString(), basis: 'quote time' }, source: 'market-quote-resolver' },
+  gold: { reading: { value: 121000, change: 300, changePercent: 0.25, at: MON_CLOSE.toISOString(), basis: 'quote time' }, source: 'market-quote-resolver' },
   fiiFlows: { reading: null, reason: 'fii.factor is a stub' },
-  indiaVix: { reading: { value: 13.4, change: 0.6, changePercent: 4.7, at: null }, source: 'market-context.service' },
-  underlyingChange: { reading: { value: 25050, change: -110, changePercent: -0.44, at: null }, source: 'yahoo-finance.service' },
+  indiaVix: { reading: { value: 13.4, change: 0.6, changePercent: 4.7, at: ist('2026-10-12', '15:30').toISOString(), basis: 'previous session close' }, source: 'market-context.service' },
+  underlyingChange: { reading: { value: 25050, change: -110, changePercent: -0.44, at: ist('2026-10-12', '15:30').toISOString(), basis: 'previous session close' }, source: 'yahoo-finance.service' },
   sectorStrength: { value: null, reason: 'the underlying is an index — no single sector' },
 };
 
@@ -131,6 +132,7 @@ describe('assembleOvernightSection — packet contents', () => {
         nextOpenAt: ist('2026-10-13', '09:15').toISOString(),
         hoursUntilOpen: 17.5,
         lastPriceAt: ist('2026-10-12', '15:29').toISOString(),
+        lastPriceAtBasis: expect.stringMatching(/as of tracker update/),
       }),
     );
   });
@@ -209,7 +211,7 @@ describe('assembleOvernightSection — packet contents', () => {
         inputs({
           cues: {
             ok: true,
-            value: { ...cuesPresent, gold: { reading: { value: 1, change: 0, changePercent: 0, at: ist('2026-10-12', '11:45').toISOString() }, source: 'x' } },
+            value: { ...cuesPresent, gold: { reading: { value: 1, change: 0, changePercent: 0, at: ist('2026-10-12', '11:45').toISOString(), basis: 'quote time' }, source: 'x' } },
           },
         }),
       );
@@ -225,6 +227,14 @@ describe('assembleOvernightSection — packet contents', () => {
 });
 
 describe('formatOvernightReason', () => {
+  it('collapses a multi-line plan or risk onto its own labelled line, so nothing is truncated on read-back', () => {
+    expect(
+      formatOvernightReason('theta bleeds\n  and expiry is tomorrow', 'if it gaps below 24950, exit;\nif it opens above 25150, hold;\r\nstop at 25020'),
+    ).toBe(
+      'OVERNIGHT RISK: theta bleeds and expiry is tomorrow\nOPEN PLAN: if it gaps below 24950, exit; if it opens above 25150, hold; stop at 25020',
+    );
+  });
+
   it('stores the risk and the open plan as two labelled lines', () => {
     expect(formatOvernightReason('theta bleeds 1312', 'exit below 24950')).toBe(
       'OVERNIGHT RISK: theta bleeds 1312\nOPEN PLAN: exit below 24950',
@@ -244,7 +254,7 @@ const VERDICT = {
   evidence: ['overnight.decay'],
 };
 
-function makeSvc(opts: { enabled?: boolean; done?: Set<string> } = {}) {
+function makeSvc(opts: { enabled?: boolean; done?: Set<string>; lateClose?: string } = {}) {
   const book: RosterEntry[] = [
     entry('nfo'),
     entry('mcx', { exchange: 'MCX', symbol: 'CRUDEOIL16OCT265600CE' }),
@@ -265,7 +275,11 @@ function makeSvc(opts: { enabled?: boolean; done?: Set<string> } = {}) {
   });
   const hasWindowVerdict = jest.fn().mockImplementation(async (id: string, tag: string) => done.has(`${id}|${tag}`));
   const recentForTracker = jest.fn().mockResolvedValue([]);
-  const runShared = jest.fn().mockImplementation((_id: string, work: () => Promise<unknown>) => work());
+  // Honours `expired` the way the real cycle does.
+  const runShared = jest.fn().mockImplementation(async (_id: string, work: () => Promise<unknown>, o?: { expired?: () => boolean }) => {
+    if (o?.expired?.()) throw new SharedJobExpired();
+    return work();
+  });
   const tickFor = jest.fn().mockResolvedValue(optTick());
   const evidence = {
     news: jest.fn().mockResolvedValue(freshNews),
@@ -276,7 +290,11 @@ function makeSvc(opts: { enabled?: boolean; done?: Set<string> } = {}) {
     { userId: 'u1', exchange: 'NFO' },
     { userId: 'u1', exchange: 'MCX' },
   ]);
-  const config = { get: jest.fn().mockReturnValue(opts.enabled === false ? 'false' : 'true') };
+  const config = {
+    get: jest.fn().mockImplementation((key: string) =>
+      key === 'hub.mcxLateClose' ? (opts.lateClose ?? '') : opts.enabled === false ? 'false' : 'true',
+    ),
+  };
 
   const svc = new SentinelOvernightService(
     { build } as never,
@@ -435,5 +453,40 @@ describe('SentinelOvernightService.runWindow', () => {
     t.judgeOvernight.mockRejectedValueOnce(new Error('bad reply'));
     await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:50'));
     expect(t.record).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SentinelOvernightService — venue clock gates (late close, open)', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('normal season: the 23:45 MCX fire reviews', async () => {
+    const t = makeSvc({ lateClose: '2026-11-02:2027-03-08' });
+    await t.svc.runWindow(AFTER_CLOSE_MCX, ist('2026-10-12', '23:45'));
+    expect(t.record.mock.calls.map((c) => c[0].trackerId)).toEqual(['mcx']);
+  });
+
+  it('late season (HUB_MCX_LATE_CLOSE): 23:45 reviews nothing; 23:58 reviews; 00:03 finds it done', async () => {
+    const t = makeSvc({ lateClose: '2026-11-02:2027-03-08' });
+    await t.svc.runWindow(AFTER_CLOSE_MCX, ist('2026-11-04', '23:45'));
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    await t.svc.runWindow(AFTER_CLOSE_MCX, ist('2026-11-04', '23:58'));
+    expect(t.record.mock.calls.map((c) => c[0].triggeredBy[1])).toEqual(['window:OVERNIGHT_REVIEW:MCX:2026-11-04']);
+    const after = await t.svc.runWindow(AFTER_CLOSE_MCX, ist('2026-11-05', '00:03'));
+    expect(after).toEqual(expect.objectContaining({ judged: 0, alreadyDone: 1 }));
+    expect(t.judgeOvernight).toHaveBeenCalledTimes(1);
+  });
+
+  it('a pre-open job still queued when its venue opens is dropped, recorded as skipped, and never judged', async () => {
+    const t = makeSvc();
+    // The window starts at 08:56; by the time the jobs get a slot it is 09:01.
+    t.svc.clockNow = () => ist('2026-10-13', '09:01');
+    const report = await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:56'));
+    expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 2, judged: 0, failed: 0 }));
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(t.record).not.toHaveBeenCalled();
   });
 });

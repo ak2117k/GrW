@@ -26,7 +26,7 @@
  * here is pure — `session-clock.ts` imports only `market-sessions.ts` and a type,
  * `market-holidays.service.ts` only `@nestjs/common`.
  */
-import { SessionClock } from '../../market-hub/session-clock';
+import { SessionClock, parseLateClose } from '../../market-hub/session-clock';
 import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
 import { isDerivativeSegment, segmentFor } from '../charges';
 import type { RosterEntry } from '../services/roster.service';
@@ -46,7 +46,14 @@ export const PRE_OPEN: ReviewWindow = { kind: 'PRE_OPEN_REVIEW', venue: 'ALL' };
 /**
  * The crons, six-field (seconds first), weekdays only, evaluated in IST.
  *
- * Each fires THREE times a few minutes apart. That is not a cadence — the run is
+ * EVERY FIRE IS GATED ON THE CLOCK saying the venue's session is closed (see
+ * {@link reviewWindowIsClosed}), so a fire that lands while the venue still
+ * trades reviews nothing. MCX closes at 23:30 normally and 23:55 in the US-DST
+ * season (`HUB_MCX_LATE_CLOSE`): the 23:45/23:50 fires serve the normal season,
+ * 23:55/23:58 and the after-midnight fires (Tue–Sat 00:03/00:08) serve the late
+ * season. A fire after midnight is tagged with the session that just closed.
+ *
+ * Each fires SEVERAL times a few minutes apart. That is not a cadence — the run is
  * idempotent per position per window, so the second and third fires judge
  * nothing that is already recorded. They exist so that a deploy or crash at
  * 15:44 does not cost the whole night's review: whichever fire lands first after
@@ -54,11 +61,28 @@ export const PRE_OPEN: ReviewWindow = { kind: 'PRE_OPEN_REVIEW', venue: 'ALL' };
  * 09:00 open, so a pre-open verdict is never written against a live market.
  */
 export const OVERNIGHT_CRON_EQUITY = '0 45,50,55 15 * * 1-5';
-export const OVERNIGHT_CRON_MCX = '0 45,50,55 23 * * 1-5';
+export const OVERNIGHT_CRON_MCX = '0 45,50,55,58 23 * * 1-5';
+export const OVERNIGHT_CRON_MCX_LATE = '0 3,8 0 * * 2-6';
 export const PRE_OPEN_CRON = '0 50,53,56 8 * * 1-5';
 
-/** One clock over the shipped holiday calendar. Pure; shared by every caller. */
+/**
+ * The default clock: the shipped holiday calendar, NO late-close season. The
+ * overnight service builds its own with {@link makeSentinelClock} from
+ * `hub.mcxLateClose`; this default is for pure callers and tests.
+ */
 export const SENTINEL_CLOCK = new SessionClock({ holidays: MARKET_HOLIDAYS });
+
+/** A clock over the holiday calendar AND the MCX late-close season (HUB_MCX_LATE_CLOSE syntax). */
+export function makeSentinelClock(mcxLateCloseRaw?: string): SessionClock {
+  return new SessionClock({ holidays: MARKET_HOLIDAYS, mcxLateClose: parseLateClose(mcxLateCloseRaw) });
+}
+
+/**
+ * How long after a session close an after-close review still belongs to it.
+ * Covers the after-midnight MCX fires; short enough that a holiday or a weekend
+ * (whose last close is a day or more old) reviews nothing.
+ */
+export const AFTER_CLOSE_GRACE_MS = 3 * 60 * 60 * 1000;
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -81,14 +105,15 @@ export function venueOf(exchange: string): 'EQUITY' | 'MCX' {
 /**
  * The positions `window` judges at `now`.
  *
- * Three filters, each for its own reason:
+ * Filters, each for its own reason:
  *  - a POSITION, never a holding — holdings are outside the sentinel's remit
  *    (the roster already drops them; repeated here because an overnight Opus
  *    call on long-term equity is exactly the spend that filter exists to stop);
  *  - an F&O contract (OPT/FUT) — cash has no expiry and no overnight decay;
- *  - on this window's venue, and that venue TRADES TODAY. After-close: today's
- *    session happened. Pre-open: today's session will happen. A holiday or a
- *    weekend therefore yields nothing, per exchange.
+ *  - on this window's venue, and the venue's clock agrees the window applies
+ *    ({@link reviewWindowIsClosed}): after-close only once the session has
+ *    actually closed (and closed recently), pre-open only on a trading day
+ *    before the venue's first print. A holiday or a weekend yields nothing.
  */
 export function selectForWindow(
   entries: readonly RosterEntry[],
@@ -102,17 +127,53 @@ export function selectForWindow(
       return false;
     }
     if (window.venue !== 'ALL' && venueOf(e.exchange) !== window.venue) return false;
-    return clock.isTradingDay(e.exchange, now);
+    return reviewWindowIsClosed(window, e.exchange, now, clock);
   });
 }
+
+/**
+ * Whether `window` may judge a position on `exchange` at `now`: the venue's
+ * session must be CLOSED and the window must be the right side of it.
+ *
+ *  - after-close: the clock says closed (so a 23:45 fire in the 23:55 season
+ *    is refused) and the last close is within {@link AFTER_CLOSE_GRACE_MS};
+ *  - pre-open: a trading day, before the venue's first print — 09:00 for MCX
+ *    (its open) and for NSE/BSE and their F&O (the cash pre-open begins then).
+ */
+export function reviewWindowIsClosed(
+  window: ReviewWindow,
+  exchange: string,
+  now: Date,
+  clock: SessionClock = SENTINEL_CLOCK,
+): boolean {
+  if (clock.phase(exchange, now) !== 'closed') return false;
+  if (window.kind === 'OVERNIGHT_REVIEW') {
+    const close = lastSessionClose(exchange, now, clock);
+    return close !== null && now.getTime() - close.getTime() <= AFTER_CLOSE_GRACE_MS;
+  }
+  if (!clock.isTradingDay(exchange, now)) return false;
+  const minutes = Math.floor((now.getTime() - istMidnightOf(istYmd(now))) / 60_000);
+  return minutes < PRE_OPEN_FIRST_PRINT_MIN;
+}
+
+/** 09:00 IST: MCX opens, and the NSE/BSE pre-open order collection begins. */
+const PRE_OPEN_FIRST_PRINT_MIN = 9 * 60;
 
 /**
  * The idempotency tag: one per window per IST session date. Stored in the
  * verdict row's `triggeredBy` beside the window kind, and looked up before a
  * position is judged.
+ *
+ * After-close: the date of the session that JUST CLOSED on the window's venue —
+ * so a 00:03 MCX fire carries the same tag as the 23:45 one. Pre-open: today.
  */
-export function windowTag(window: ReviewWindow, now: Date): string {
-  return `window:${window.kind}:${window.venue}:${istYmd(now)}`;
+export function windowTag(window: ReviewWindow, now: Date, clock: SessionClock = SENTINEL_CLOCK): string {
+  let ymd = istYmd(now);
+  if (window.kind === 'OVERNIGHT_REVIEW') {
+    const close = lastSessionClose(window.venue === 'MCX' ? 'MCX' : 'NSE', now, clock);
+    if (close) ymd = istYmd(close);
+  }
+  return `window:${window.kind}:${window.venue}:${ymd}`;
 }
 
 /** The most recent session close at or before `now` on `exchange`, holidays skipped. */

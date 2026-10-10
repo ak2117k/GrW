@@ -16,7 +16,7 @@ import type { HubCandleSource } from './hub-candle-source';
 import { HubEngine, type HubStatus } from './hub-engine';
 import { engineHubPrices, type HubConsumer, type HubOutcome, type HubPriceSource, type HubPrices } from './hub-prices';
 import { LANE, isHubExchange, refKey, type HubExchange, type InstrumentRef, type PriceResult, type Priority } from './hub.types';
-import { SessionClock, type DateRange } from './session-clock';
+import { SessionClock, parseLateClose } from './session-clock';
 import { isDerivative, resolveUnderlying } from './underlying';
 
 const POSITION_REFRESH_MS = 60_000;
@@ -33,18 +33,9 @@ export const CANDLE_FIXUP_JOB = 'hub-candle-fixup';
 /** Well above a full fix-up (3 Background-lane calls per instrument), well under the daily cadence. */
 const CANDLE_FIXUP_LEASE_MS = 2 * 60 * 60 * 1000;
 
-/** "2026-11-02:2027-03-08,2027-11-01:2028-03-13" → ranges. */
-export function parseLateClose(raw: string | undefined): DateRange[] {
-  return String(raw ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => {
-      const [from, to] = s.split(':');
-      return { from, to };
-    })
-    .filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.from) && /^\d{4}-\d{2}-\d{2}$/.test(r.to));
-}
+// Lives in session-clock.ts (pure) so the trade sentinel can parse the same
+// HUB_MCX_LATE_CLOSE without importing this service; re-exported here.
+export { parseLateClose };
 
 /**
  * SP1 market hub. M1 (shadow): prices a default context set and the owner's

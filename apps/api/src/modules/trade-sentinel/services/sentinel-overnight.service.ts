@@ -9,6 +9,7 @@ import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repo
 import { SentinelThesisRepository } from '../repositories/sentinel-thesis.repository';
 import {
   SentinelCycleService,
+  SharedJobExpired,
   TICK_SOURCE,
   agentBackoffMs,
   storedFloorArmed,
@@ -21,9 +22,11 @@ import {
   AFTER_CLOSE_MCX,
   OVERNIGHT_CRON_EQUITY,
   OVERNIGHT_CRON_MCX,
+  OVERNIGHT_CRON_MCX_LATE,
   PRE_OPEN,
   PRE_OPEN_CRON,
-  SENTINEL_CLOCK,
+  makeSentinelClock,
+  reviewWindowIsClosed,
   daysToExpiry,
   lastSessionClose,
   nextSessionOpen,
@@ -41,6 +44,7 @@ import {
   type NewsEvidence,
 } from '../overnight/overnight-evidence';
 import type { OvernightGreeks, OvernightPacket, OvernightSection } from '../overnight/overnight-packet.types';
+import type { SessionClock } from '../../market-hub/session-clock';
 import {
   OVERNIGHT_EVIDENCE,
   type OvernightEvidenceQuery,
@@ -70,6 +74,8 @@ export interface SectionInputs {
   news: Sourced<NewsEvidence>;
   oi: Sourced<RawOiEvidence>;
   cues: Sourced<RawCues>;
+  /** The venue clock (holidays + MCX late close). Defaults to the shipped calendar. */
+  clock?: SessionClock;
 }
 
 export interface WindowReport {
@@ -81,6 +87,8 @@ export interface WindowReport {
   failed: number;
   /** In backoff after a failure, or past the failure limit for this window. */
   deferred: number;
+  /** Still queued for a judge slot when the venue opened — dropped, never judged against a live market. */
+  droppedAtOpen: number;
 }
 
 /**
@@ -91,10 +99,21 @@ export interface WindowReport {
  * splits back apart (`apps/web/.../overnightPlanView.ts`).
  */
 export function formatOvernightReason(overnightRisk: string, openPlan: string): string {
-  return `OVERNIGHT RISK: ${overnightRisk.trim()}\nOPEN PLAN: ${openPlan.trim()}`;
+  // Each section on ONE line: a model's multi-line plan would otherwise be cut at
+  // its first newline by anything reading the row line by line.
+  const oneLine = (t: string) => String(t ?? '').replace(/\s*\r?\n\s*/g, ' ').trim();
+  return `OVERNIGHT RISK: ${oneLine(overnightRisk)}\nOPEN PLAN: ${oneLine(openPlan)}`;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * What `lastPriceAt` means. Overnight the hub's ≤10 s price is never fresh, so
+ * the closed-session tick is the tracker row's price, and the only time it has
+ * is the row's `updatedAt` — the last write to the row, which can be later than
+ * the exchange print. Said so, rather than passed off as a print time.
+ */
+export const LAST_PRICE_AT_BASIS = 'as of tracker update (the position row’s last write, not the exchange print time)';
 
 /**
  * The overnight section of the packet, from what the sources returned. Pure.
@@ -104,12 +123,13 @@ const HOUR_MS = 60 * 60 * 1000;
  */
 export function assembleOvernightSection(input: SectionInputs): OvernightSection {
   const { entry, tick, window, tag, now } = input;
+  const clock = input.clock;
   const exchange = entry.exchange;
-  const lastClose = lastSessionClose(exchange, now);
-  const nextOpen = nextSessionOpen(exchange, now);
+  const lastClose = lastSessionClose(exchange, now, clock);
+  const nextOpen = nextSessionOpen(exchange, now, clock);
   const option = tick.segment === 'OPT' ? parseOptionSymbol(entry.symbol) : null;
 
-  const exp = daysToExpiry(tick.expiry, exchange, now);
+  const exp = daysToExpiry(tick.expiry, exchange, now, clock);
   const expiry: OvernightSection['expiry'] =
     exp && tick.expiry
       ? present({ expiry: tick.expiry, ...exp }, 'derived from the contract expiry and the exchange holiday calendar', now.toISOString())
@@ -198,6 +218,7 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
       nextOpenAt: nextOpen ? nextOpen.toISOString() : null,
       hoursUntilOpen: nextOpen ? Math.round(((nextOpen.getTime() - now.getTime()) / HOUR_MS) * 100) / 100 : null,
       lastPriceAt: tick.ltpAt ?? null,
+      lastPriceAtBasis: LAST_PRICE_AT_BASIS,
     },
     expiry,
     decay,
@@ -239,6 +260,16 @@ export class SentinelOvernightService {
   /** Per `trackerId|tag`: consecutive failures and when a retry is allowed. */
   private readonly failures = new Map<string, { count: number; retryAt: number }>();
 
+  /** Holidays plus the MCX late-close season (`hub.mcxLateClose`, the hub's own setting). */
+  private readonly clock: SessionClock;
+
+  /**
+   * The instant a queued job checks its venue against. Unset: the window's own
+   * `now` advanced by the wall-clock time spent waiting (so a replayed or tested
+   * window keeps its own clock). Settable in tests.
+   */
+  clockNow?: () => Date;
+
   constructor(
     private readonly roster: RosterService,
     private readonly packets: ContextPacketService,
@@ -250,7 +281,9 @@ export class SentinelOvernightService {
     @Inject(OVERNIGHT_EVIDENCE) private readonly evidence: OvernightEvidenceSource,
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-  ) {}
+  ) {
+    this.clock = makeSentinelClock(this.config.get<string>('hub.mcxLateClose'));
+  }
 
   private get enabled(): boolean {
     return this.config.get<string>(SENTINEL_ENABLED_KEY) === 'true';
@@ -266,6 +299,12 @@ export class SentinelOvernightService {
     await this.fire(AFTER_CLOSE_MCX);
   }
 
+  /** After midnight, for the late-close season; gated like every other fire. */
+  @Cron(OVERNIGHT_CRON_MCX_LATE, { timeZone: 'Asia/Kolkata' })
+  async afterCloseMcxLate(): Promise<void> {
+    await this.fire(AFTER_CLOSE_MCX);
+  }
+
   @Cron(PRE_OPEN_CRON, { timeZone: 'Asia/Kolkata' })
   async preOpen(): Promise<void> {
     await this.fire(PRE_OPEN);
@@ -278,7 +317,7 @@ export class SentinelOvernightService {
       if (report.picked > 0) {
         this.logger.log(
           `overnight review ${report.window}: ${report.judged} judged, ${report.alreadyDone} already done, ` +
-            `${report.failed} failed, ${report.deferred} deferred (of ${report.picked})`,
+            `${report.failed} failed, ${report.deferred} deferred, ${report.droppedAtOpen} dropped at the open (of ${report.picked})`,
         );
       }
     } catch (err) {
@@ -287,14 +326,23 @@ export class SentinelOvernightService {
   }
 
   async runWindow(window: ReviewWindow, now: Date = new Date()): Promise<WindowReport> {
-    const tag = windowTag(window, now);
-    const report: WindowReport = { window: tag, picked: 0, judged: 0, alreadyDone: 0, failed: 0, deferred: 0 };
+    const tag = windowTag(window, now, this.clock);
+    const report: WindowReport = {
+      window: tag,
+      picked: 0,
+      judged: 0,
+      alreadyDone: 0,
+      failed: 0,
+      deferred: 0,
+      droppedAtOpen: 0,
+    };
     if (!this.enabled) return { ...report, disabled: true };
 
-    // Clock-only gate before any query: on a weekend or a holiday for every venue
-    // this window covers, there is nothing to ask the database about.
+    // Clock-only gate before any query: unless the venue clock says this window
+    // applies to at least one venue it covers (session closed, the right side of
+    // it, not a holiday or weekend), there is nothing to ask the database about.
     const venues = window.venue === 'MCX' ? ['MCX'] : window.venue === 'EQUITY' ? ['NSE', 'BSE'] : ['NSE', 'BSE', 'MCX'];
-    if (!venues.some((v) => SENTINEL_CLOCK.isTradingDay(v, now))) return report;
+    if (!venues.some((v) => reviewWindowIsClosed(window, v, now, this.clock))) return report;
 
     this.pruneClaims(window, tag);
     const claims = this.claimed.get(tag) ?? new Set<string>();
@@ -310,7 +358,7 @@ export class SentinelOvernightService {
         this.logger.error(`overnight review: roster failed for user ${userId}: ${describe(err)}`);
         continue;
       }
-      for (const entry of selectForWindow(entries, window, now)) {
+      for (const entry of selectForWindow(entries, window, now, this.clock)) {
         report.picked += 1;
         if (claims.has(entry.trackerId)) {
           report.alreadyDone += 1;
@@ -357,10 +405,28 @@ export class SentinelOvernightService {
 
     const startedWall = Date.now();
     try {
-      await this.cycle.runShared(entry.trackerId, () => this.judgeAndRecord(entry, window, tag, now));
+      await this.cycle.runShared(entry.trackerId, () => this.judgeAndRecord(entry, window, tag, now), {
+        // Re-checked every time the job is woken: once the venue opens (or the
+        // window otherwise stops applying) a queued job is dropped, never run.
+        expired: () =>
+          !reviewWindowIsClosed(
+            window,
+            entry.exchange,
+            this.clockNow ? this.clockNow() : new Date(now.getTime() + (Date.now() - startedWall)),
+            this.clock,
+          ),
+      });
       this.failures.delete(failKey);
       report.judged += 1;
     } catch (err) {
+      if (err instanceof SharedJobExpired) {
+        // Skipped, deliberately: the claim is kept so no later fire retries it.
+        report.droppedAtOpen += 1;
+        this.logger.warn(
+          `overnight review for ${entry.symbol} (${entry.trackerId}) dropped: still queued when ${entry.exchange} opened (${tag})`,
+        );
+        return;
+      }
       claims.delete(entry.trackerId);
       report.failed += 1;
       const prior = this.failures.get(failKey)?.count ?? 0;
@@ -413,7 +479,7 @@ export class SentinelOvernightService {
       expiry: tick.expiry,
       option: tick.segment === 'OPT' ? parseOptionSymbol(entry.symbol) : null,
       underlyingLtp: tick.underlyingLtp,
-      since: lastSessionClose(entry.exchange, now) ?? new Date(now.getTime() - 24 * HOUR_MS),
+      since: lastSessionClose(entry.exchange, now, this.clock) ?? new Date(now.getTime() - 24 * HOUR_MS),
       now,
     };
     const [news, oi, cues] = await Promise.all([
@@ -430,11 +496,11 @@ export class SentinelOvernightService {
         // in overnight.oi. Without this the packet would claim "no options chain".
         oiWalls: absent('not captured for the overnight review — see overnight.oi.walls for the end-of-day walls'),
       },
-      overnight: assembleOvernightSection({ entry, tick, window, tag, now, news, oi, cues }),
+      overnight: assembleOvernightSection({ entry, tick, window, tag, now, news, oi, cues, clock: this.clock }),
     };
 
     const verdict = await this.agent.judgeOvernight(packet);
-    const nextOpen = nextSessionOpen(entry.exchange, now);
+    const nextOpen = nextSessionOpen(entry.exchange, now, this.clock);
     await this.verdicts.record({
       userId: entry.userId,
       trackerId: entry.trackerId,

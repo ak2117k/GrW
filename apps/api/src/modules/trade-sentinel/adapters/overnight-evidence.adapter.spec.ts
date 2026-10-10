@@ -51,21 +51,27 @@ function make(opts: { chainService?: boolean; commodities?: boolean; breadth?: b
     getPCR: jest.fn().mockReturnValue(0.82),
     getMaxPain: jest.fn().mockReturnValue(25000),
   };
-  const commodities = {
-    getSnapshot: jest.fn().mockResolvedValue({
-      commodities: [
-        { symbol: 'CRUDEOIL', ltp: 5600, change: -84, changePercent: -1.5 },
-        { symbol: 'GOLD', ltp: null, change: 0, changePercent: 0 },
-      ],
-    }),
+  const roll = {
+    resolveFrontMonthTokens: jest.fn().mockResolvedValue([
+      { symbol: 'CRUDEOIL', token: 'c1', exchange: 'MCX', contractSymbol: 'CRUDEOIL19OCT26FUT', expiry: '2026-10-19' },
+      { symbol: 'GOLD', token: 'g1', exchange: 'MCX', contractSymbol: 'GOLD05DEC26FUT', expiry: '2026-12-05' },
+    ]),
   };
+  const resolver = {
+    // GOLD is not quotable over this user's session.
+    resolveQuotes: jest.fn().mockResolvedValue(
+      new Map([['c1', { token: 'c1', ltp: 5600, change: -84, changePercent: -1.5, timestamp: ist('2026-10-12', '15:44') }]]),
+    ),
+  };
+  const commodities = { roll, resolver };
   const breadth = {
     getSectorPerformance: jest.fn().mockResolvedValue([{ sector: 'IT', symbol: 'NIFTY IT', token: '99926013', changePercent: -1.2, ltp: 35000 }]),
   };
   const moduleRef = {
     get: jest.fn().mockImplementation((cls: { name: string }) => {
       if (cls.name === 'OptionsChainService' && opts.chainService !== false) return chainService;
-      if (cls.name === 'CommoditiesSnapshotService' && opts.commodities !== false) return commodities;
+      if (cls.name === 'CommodityRollService' && opts.commodities !== false) return roll;
+      if (cls.name === 'MarketQuoteResolver' && opts.commodities !== false) return resolver;
       if (cls.name === 'BreadthSectorService' && opts.breadth !== false) return breadth;
       throw new Error(`no provider ${cls.name}`);
     }),
@@ -184,7 +190,11 @@ describe('SentinelOvernightEvidenceAdapter.cues — the market context', () => {
 
   it('reads crude and gold off the MCX snapshot, and an unquotable one as unavailable — not zero', async () => {
     const c = await make().adapter.cues(q());
-    expect(c.crudeOil).toEqual({ reading: expect.objectContaining({ value: 5600, change: -84, changePercent: -1.5 }), source: expect.stringMatching(/commodities/) });
+    // MCX is OPEN at 15:45: the quote's own timestamp, never the review time.
+    expect(c.crudeOil).toEqual({
+      reading: expect.objectContaining({ value: 5600, change: -84, changePercent: -1.5, at: ist('2026-10-12', '15:44').toISOString(), basis: 'quote time' }),
+      source: expect.stringMatching(/MCX CRUDEOIL/),
+    });
     expect(c.gold).toEqual({ reading: null, reason: expect.stringMatching(/GOLD/) });
   });
 
@@ -214,5 +224,42 @@ describe('SentinelOvernightEvidenceAdapter.cues — the market context', () => {
     expect(c.crudeOil).toEqual({ reading: null, reason: expect.stringMatching(/not wired/) });
     expect(c.indiaVix).toEqual({ reading: null, reason: expect.stringMatching(/yahoo 503/) });
     expect(c.underlyingChange.reading).not.toBeNull();
+  });
+});
+
+describe('SentinelOvernightEvidenceAdapter — the position’s own expiry, or nothing', () => {
+  it('an option whose expiry has no chain gets no OI and no greeks — never another expiry’s', async () => {
+    const t = make();
+    const r = await t.adapter.oi(q({ expiry: '2026-10-27' }));
+    expect(r.analysis).toEqual({ available: false, reason: 'no chain snapshot for 2026-10-27 (NIFTY) — another expiry’s OI and greeks are not this contract’s' });
+    expect(r.legGreeks).toBeNull();
+    expect(t.chainService.getOptionsChainWithSpot).not.toHaveBeenCalled();
+  });
+
+  it('a future reads the nearest option expiry for the underlying, and says so', async () => {
+    const t = make();
+    const r = await t.adapter.oi(q({ segment: 'FUT', symbol: 'NIFTY27OCT26FUT', expiry: '2026-10-27', option: null }));
+    expect(r.analysis).toEqual(expect.objectContaining({ available: true, expiry: '2026-10-13', source: expect.stringMatching(/nearest option expiry.*future expires 2026-10-27/) }));
+  });
+});
+
+describe('SentinelOvernightEvidenceAdapter — cue ages at 08:50 come from the sources, not the review clock', () => {
+  const PRE = ist('2026-10-12', '08:50');
+  const FRI_NSE_CLOSE = ist('2026-10-09', '15:30').toISOString();
+  const FRI_MCX_CLOSE = ist('2026-10-09', '23:30').toISOString();
+
+  it('VIX, the underlying change and sector strength are dated to the previous NSE close', async () => {
+    const t = make();
+    const idx = await t.adapter.cues(q({ now: PRE, since: ist('2026-10-09', '15:30') }));
+    expect(idx.indiaVix.reading).toEqual(expect.objectContaining({ at: FRI_NSE_CLOSE, basis: 'previous session close' }));
+    expect(idx.underlyingChange.reading).toEqual(expect.objectContaining({ at: FRI_NSE_CLOSE, basis: 'previous session close' }));
+    const stock = await make().adapter.cues(q({ now: PRE, since: ist('2026-10-09', '15:30'), underlying: 'INFY', symbol: 'INFY27OCT261500CE' }));
+    expect(stock.sectorStrength).toEqual(expect.objectContaining({ at: FRI_NSE_CLOSE }));
+  });
+
+  it('MCX crude, with MCX closed at 08:50, is dated to MCX’s previous close — not the stale quote stamp, not now', async () => {
+    const t = make();
+    const c = await t.adapter.cues(q({ now: PRE, since: ist('2026-10-09', '15:30') }));
+    expect(c.crudeOil.reading).toEqual(expect.objectContaining({ at: FRI_MCX_CLOSE, basis: 'previous session close' }));
   });
 });

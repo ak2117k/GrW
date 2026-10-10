@@ -27,6 +27,8 @@ export type OvernightSection = {
     hoursUntilOpen: number | null;
     /** When `position.ltp` was last printed — it is NOT a live price overnight. */
     lastPriceAt: string | null;
+    /** What `lastPriceAt` measures — see LAST_PRICE_AT_BASIS. */
+    lastPriceAtBasis: string;
   };
   expiry: Block<{ expiry: string; calendarDays: number; tradingSessionsLeft: number }>;
   decay: Block<OvernightDecay>;

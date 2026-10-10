@@ -56,6 +56,7 @@ const overnight: OvernightSection = {
     nextOpenAt: '2026-10-13T03:45:00.000Z',
     hoursUntilOpen: 17.5,
     lastPriceAt: '2026-10-12T09:59:30.000Z',
+    lastPriceAtBasis: 'as of tracker update',
   },
   expiry: present({ expiry: '2026-10-13', calendarDays: 1, tradingSessionsLeft: 1 }, 'derived', AT),
   decay: present(
@@ -69,10 +70,10 @@ const overnight: OvernightSection = {
   oi: present({ pcr: present(0.82, 'options-chain.service getPCR', AT) }, 'options-chain.service', AT),
   marketCues: {
     nasdaq: absent('nasdaq.factor is a stub'),
-    crudeOil: present({ value: 5600, change: -84, changePercent: -1.5, direction: 'DOWN', ageMinutes: 5 }, 'commodities', AT),
+    crudeOil: present({ value: 5600, change: -84, changePercent: -1.5, direction: 'DOWN', ageMinutes: 5, basis: 'quote time' }, 'commodities', AT),
     gold: absent('no quote'),
     fiiFlows: absent('fii.factor is a stub'),
-    indiaVix: present({ value: 13.4, change: 0.6, changePercent: 4.7, direction: 'UP', ageMinutes: 0 }, 'market-context.service', AT),
+    indiaVix: present({ value: 13.4, change: 0.6, changePercent: 4.7, direction: 'UP', ageMinutes: 0, basis: 'previous session close' }, 'market-context.service', AT),
     sectorStrength: absent('underlying is an index'),
     underlyingChange: absent('no previous close'),
   },
@@ -98,7 +99,7 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
   beforeEach(() => jest.clearAllMocks());
 
   it('stamps its own prompt version, distinct from the live one', () => {
-    expect(svc.overnightPromptVersion).toBe('o1/t1');
+    expect(svc.overnightPromptVersion).toBe('o2/t1');
     expect(svc.overnightPromptVersion).toBe(`${SENTINEL_OVERNIGHT_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
     expect(svc.overnightPromptVersion).not.toBe(svc.promptVersion);
   });
@@ -198,6 +199,11 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
           .map((f) => `${g}.${f}`),
       );
       expect(missing).toEqual([]);
+    });
+
+    it('does not present underlyingChange as an overnight move, and explains cue bases', () => {
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/underlyingChange is the underlying's last session close vs the session before[^.]*NOT an overnight move/);
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/previous session close/);
     });
 
     it('tells the judge to weigh gap risk, OI build-up and theta against the open plan', () => {

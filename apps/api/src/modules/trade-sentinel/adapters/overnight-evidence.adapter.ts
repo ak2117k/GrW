@@ -6,7 +6,9 @@ import { NewsCategory } from '../../news/dto/news.dto';
 import { MarketContextService } from '../../market-data/services/market-context.service';
 import { YahooFinanceService } from '../../market-data/services/yahoo-finance.service';
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
-import { CommoditiesSnapshotService } from '../../market-data/services/commodities-snapshot.service';
+import { CommodityRollService } from '../../market-data/services/commodity-roll.service';
+import { MarketQuoteResolver } from '../../market-data/services/market-quote-resolver.service';
+import { SENTINEL_CLOCK, lastSessionClose } from '../overnight/overnight-calendar';
 import { BreadthSectorService, type SectorPerformanceEntry } from '../../market-data/services/breadth-sector.service';
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import type { NewsEvidence, NewsItemIn, NewsScope, RawOiAnalysis } from '../overnight/overnight-evidence';
@@ -29,7 +31,7 @@ import { normaliseSymbol } from '../symbols';
  *   OI       OptionsChainService — the chain (NSE and, through its MCX branch,
  *            commodity options), its own getPCR / getMaxPain, and the stored
  *            `option_chain_snapshots` for the previous session.
- *   cues     CommoditiesSnapshotService (MCX crude, gold), MarketContextService
+ *   cues     CommodityRollService + MarketQuoteResolver (MCX crude, gold), MarketContextService
  *            (India VIX), YahooFinanceService (the underlying's change vs its
  *            previous close), NseSectorIndexService + BreadthSectorService
  *            (sector strength). Nasdaq and FII flows have no source in this
@@ -109,8 +111,24 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
     if (!expiries || expiries.length === 0) {
       return none(`no option expiries for ${underlying} on ${q.exchange} — OI analysis unavailable for this underlying`);
     }
-    const wanted = q.expiry ? expiries.find((e) => e.slice(0, 10) === q.expiry) : undefined;
-    const expiry = wanted ?? expiries[0];
+    // THE POSITION'S OWN EXPIRY, OR NOTHING, for an option: another expiry's OI
+    // and greeks are not this contract's, and using them silently would put a
+    // wrong theta and a wrong build-up in front of the judge with provenance. A
+    // future has no option expiry of its own, so it reads the nearest one and
+    // the source string says so.
+    let expiry: string;
+    let expiryNote = '';
+    if (q.segment === 'FUT') {
+      expiry = expiries[0];
+      expiryNote = `; nearest option expiry — the future expires ${q.expiry ?? 'unknown'}`;
+    } else {
+      if (!q.expiry) return none('the contract expiry is unknown, so its options chain cannot be chosen');
+      const own = expiries.find((e) => e.slice(0, 10) === q.expiry);
+      if (!own) {
+        return none(`no chain snapshot for ${q.expiry} (${underlying}) — another expiry’s OI and greeks are not this contract’s`);
+      }
+      expiry = own;
+    }
     const { chain, spotPrice } = await chainSvc.getOptionsChainWithSpot(underlying, expiry);
     if (!chain || chain.length === 0) return none(`the options chain for ${underlying} ${expiry} came back empty`);
 
@@ -205,7 +223,7 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
     return {
       analysis: {
         available: true,
-        source: `options-chain.service (${underlying} ${expiry})`,
+        source: `options-chain.service (${underlying} ${expiry}${expiryNote})`,
         at,
         expiry,
         spot: spotPrice > 0 ? spotPrice : q.underlyingLtp,
@@ -232,8 +250,8 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
   async cues(q: OvernightEvidenceQuery): Promise<RawCues> {
     const base = q.underlying ? normaliseSymbol(q.underlying) : null;
     const [commodities, vix, change, sector] = await Promise.all([
-      this.commodityCues(q.userId),
-      this.vixCue(q.since),
+      this.commodityCues(q.userId, q.now),
+      this.vixCue(q.now),
       this.underlyingChangeCue(base, q.exchange, q.now),
       this.sectorCue(q.userId, base, q.exchange, q.now),
     ]);
@@ -256,33 +274,55 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
     };
   }
 
-  private async commodityCues(userId: string): Promise<{ crude: RawCue; gold: RawCue }> {
-    const svc = this.lazy(CommoditiesSnapshotService);
-    if (!svc) {
-      const r: RawCue = { reading: null, reason: 'commodities-snapshot.service is not wired into this process' };
+  /**
+   * MCX crude and gold, front month, over the user's own session. Dated by the
+   * venue: while MCX trades, the quote's own timestamp; once it has closed, the
+   * MCX session close — the price IS that close, whatever the quote says.
+   */
+  private async commodityCues(userId: string, now: Date): Promise<{ crude: RawCue; gold: RawCue }> {
+    const roll = this.lazy(CommodityRollService);
+    const resolver = this.lazy(MarketQuoteResolver);
+    if (!roll || !resolver) {
+      const r: RawCue = { reading: null, reason: 'commodity-roll / market-quote-resolver are not wired into this process' };
       return { crude: r, gold: r };
     }
     try {
-      const { commodities } = await svc.getSnapshot(userId);
-      const at = new Date().toISOString();
+      const contracts = await roll.resolveFrontMonthTokens();
+      const quotes = await resolver.resolveQuotes(
+        userId,
+        contracts.map((c) => ({ token: c.token, exchange: c.exchange || 'MCX', symbol: c.symbol })),
+      );
+      const mcxOpen = SENTINEL_CLOCK.phase('MCX', now) === 'open';
+      const close = lastSessionClose('MCX', now);
       const pick = (name: string, test: (s: string) => boolean): RawCue => {
-        const row = commodities.find((c) => test(c.symbol.toUpperCase()));
-        if (!row || row.ltp === null || !Number.isFinite(row.ltp) || row.ltp <= 0) {
+        const contract = contracts.find((c) => test(c.symbol.toUpperCase()));
+        const quote = contract ? quotes.get(contract.token) : undefined;
+        if (!contract || !quote || !Number.isFinite(quote.ltp) || quote.ltp <= 0) {
           return { reading: null, reason: `MCX ${name} front month could not be quoted over this user's session` };
         }
+        const stamp = quote.timestamp instanceof Date ? quote.timestamp : new Date(quote.timestamp);
+        const dated =
+          mcxOpen && Number.isFinite(stamp.getTime())
+            ? { at: stamp.toISOString(), basis: 'quote time' as const }
+            : close
+              ? { at: close.toISOString(), basis: 'previous session close' as const }
+              : null;
+        if (!dated) return { reading: null, reason: `MCX ${name}: no quote time and no session close to date it by` };
         return {
-          reading: { value: row.ltp, change: row.change, changePercent: row.changePercent, at },
-          source: `commodities-snapshot.service (MCX ${name} front-month future; change vs previous close; quoted at review time)`,
+          reading: { value: quote.ltp, change: quote.change, changePercent: quote.changePercent, ...dated },
+          source: `market-quote-resolver (MCX ${name} front-month future ${contract.contractSymbol}; change vs previous close)`,
         };
       };
       return { crude: pick('CRUDEOIL', (s) => s.startsWith('CRUDE')), gold: pick('GOLD', (s) => s === 'GOLD') };
     } catch (err) {
-      const r: RawCue = { reading: null, reason: `commodities-snapshot.service failed: ${message(err)}` };
+      const r: RawCue = { reading: null, reason: `MCX commodity quotes failed: ${message(err)}` };
       return { crude: r, gold: r };
     }
   }
 
-  private async vixCue(since: Date): Promise<RawCue> {
+  private async vixCue(now: Date): Promise<RawCue> {
+    const close = lastSessionClose('NSE', now);
+    if (!close) return { reading: null, reason: 'no previous NSE session close to date India VIX by' };
     try {
       const h = await this.marketContext.getVixHistory();
       if (!h) return { reading: null, reason: 'market-context.service returned no India VIX history' };
@@ -292,8 +332,9 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
           value: h.today,
           change,
           changePercent: h.yesterday > 0 ? Math.round(((h.today - h.yesterday) / h.yesterday) * 10000) / 100 : null,
-          // Daily closes: dated to the session close they describe.
-          at: since.toISOString(),
+          // Daily closes carry no time of their own: dated to the NSE close they describe.
+          at: close.toISOString(),
+          basis: 'previous session close',
         },
         source: 'market-context.service getVixHistory (latest two ^INDIAVIX daily closes)',
       };
@@ -304,6 +345,7 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
 
   private async underlyingChangeCue(base: string | null, exchange: string, now: Date): Promise<RawCue> {
     if (!base) return { reading: null, reason: 'the underlying could not be resolved' };
+    const close = lastSessionClose(base === 'SENSEX' ? 'BSE' : 'NSE', now);
     try {
       const q = await this.underlyingChange(base, exchange);
       if (!q || !Number.isFinite(q.regularMarketPrice) || q.regularMarketPrice <= 0) {
@@ -320,9 +362,12 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
           value: q.regularMarketPrice,
           change: q.regularMarketChange,
           changePercent: q.regularMarketChangePercent,
-          at: now.toISOString(),
+          // Yahoo returns no quote time here; the venue is closed, so this IS the
+          // last session's close vs the one before it — not an overnight move.
+          at: (close ?? now).toISOString(),
+          basis: 'previous session close',
         },
-        source: `yahoo-finance.service getQuoteChange (${base}: last price vs previous close)`,
+        source: `yahoo-finance.service getQuoteChange (${base}: last session's close vs the session before)`,
       };
     } catch (err) {
       return { reading: null, reason: `yahoo-finance.service failed: ${message(err)}` };
@@ -343,8 +388,10 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
           changePercent: sector.changePercent,
           direction: Math.abs(sector.changePercent) < 0.1 ? 'FLAT' : sector.changePercent > 0 ? 'UP' : 'DOWN',
         },
-        source: 'nse-sector-index.service + breadth-sector.service (sector index change vs previous close, over this user’s session)',
-        at: now.toISOString(),
+        source:
+          'nse-sector-index.service + breadth-sector.service (sector index: last session close vs the session ' +
+          'before; dated to that close — the quote carries no time of its own)',
+        at: (lastSessionClose('NSE', now) ?? now).toISOString(),
       };
     } catch (err) {
       return { value: null, reason: `sector lookup failed: ${message(err)}` };

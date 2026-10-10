@@ -20,6 +20,20 @@ export interface DateRange {
   from: string;
   to: string;
 }
+
+/** "2026-11-02:2027-03-08,2027-11-01:2028-03-13" → ranges (HUB_MCX_LATE_CLOSE). */
+export function parseLateClose(raw: string | undefined): DateRange[] {
+  return String(raw ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      const [from, to] = s.split(':');
+      return { from, to };
+    })
+    .filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.from) && /^\d{4}-\d{2}-\d{2}$/.test(r.to));
+}
+
 export interface SessionClockOptions {
   holidays: Readonly<Record<number, readonly MarketHoliday[]>>;
   mcxLateClose?: readonly DateRange[];

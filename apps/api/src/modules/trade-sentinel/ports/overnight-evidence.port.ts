@@ -18,7 +18,7 @@
  */
 import type { Prisma } from '@prisma/client';
 import type { Segment } from '../charges';
-import type { NewsEvidence, ParsedOption, RawOiAnalysis } from '../overnight/overnight-evidence';
+import type { CueBasis, NewsEvidence, ParsedOption, RawOiAnalysis } from '../overnight/overnight-evidence';
 import type { OvernightGreeks } from '../overnight/overnight-packet.types';
 
 export interface OvernightEvidenceQuery {
@@ -41,7 +41,8 @@ export interface OvernightEvidenceQuery {
 /** One cue as read from its source: a reading, or why there is none. */
 export type RawCue =
   | {
-      reading: { value: number; change: number | null; changePercent: number | null; at: string | null };
+      /** `at` is the source's own time, or the close of the session the value describes — never the review time. */
+      reading: { value: number; change: number | null; changePercent: number | null; at: string; basis: CueBasis };
       source: string;
     }
   | { reading: null; reason: string };

@@ -125,6 +125,27 @@ export const OI_CAPTURE_INTERVAL_MS = 60 * 1000;
 export const JUDGE_CONCURRENCY = 2;
 
 /**
+ * Slots of {@link JUDGE_CONCURRENCY} that overnight-review work may never take.
+ *
+ * LIVE ALWAYS GOES FIRST, by reservation rather than by priority. Live
+ * judgements are dispatched only on the 30-second tick, while a queued review is
+ * woken the instant a slot frees — so without a reservation a 15:45 queue of
+ * two dozen equity reviews would refill every freed slot first and keep MCX's
+ * live judgements (tripwire fires included) waiting for many minutes. A priority
+ * scheme would instead have to hold freed slots idle until the next tick;
+ * reserving is stateless and guarantees every tick finds a free slot unless LIVE
+ * work fills it. The price is that reviews run one at a time.
+ */
+export const LIVE_RESERVED_SLOTS = 1;
+
+/** Thrown by {@link SentinelCycleService.runShared} for a queued job whose moment has passed. */
+export class SharedJobExpired extends Error {
+  constructor() {
+    super('shared judgement expired before it got a slot (its venue opened) — not run');
+  }
+}
+
+/**
  * DI token for {@link TickSource}. It is an interface, so `design:paramtypes`
  * emits `Object` for it and Nest cannot resolve the parameter by type — without
  * an explicit token, Task 12 could not register the adapter without editing this
@@ -668,8 +689,17 @@ export class SentinelCycleService {
    *
    * Rejects with `work`'s own error; the slot is freed either way.
    */
-  async runShared<T>(trackerId: string, work: () => Promise<T>): Promise<T> {
-    while (this.judging.size >= JUDGE_CONCURRENCY || this.judging.has(trackerId)) {
+  async runShared<T>(
+    trackerId: string,
+    work: () => Promise<T>,
+    opts: { expired?: () => boolean } = {},
+  ): Promise<T> {
+    // Never the last free slot(s): see LIVE_RESERVED_SLOTS. And checked on every
+    // wake: a pre-open job still queued when its venue opens is dropped.
+    for (;;) {
+      if (opts.expired?.()) throw new SharedJobExpired();
+      const room = this.judging.size < JUDGE_CONCURRENCY - LIVE_RESERVED_SLOTS;
+      if (room && !this.judging.has(trackerId)) break;
       await new Promise<void>((resolve) => this.slotWaiters.push(resolve));
     }
     let settle!: (outcome: JudgeOutcome) => void;

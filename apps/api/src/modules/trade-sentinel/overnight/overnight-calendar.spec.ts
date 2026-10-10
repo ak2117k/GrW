@@ -4,6 +4,9 @@ import {
   AFTER_CLOSE_MCX,
   OVERNIGHT_CRON_EQUITY,
   OVERNIGHT_CRON_MCX,
+  OVERNIGHT_CRON_MCX_LATE,
+  makeSentinelClock,
+  reviewWindowIsClosed,
   PRE_OPEN,
   PRE_OPEN_CRON,
   daysToExpiry,
@@ -94,7 +97,9 @@ describe('overnight review windows — weekends and exchange holidays are skippe
     // Six-field form: sec min hour dom mon dow. Repeated minutes are deliberate
     // — a fire lost to a restart is retried, and the run itself is idempotent.
     expect(OVERNIGHT_CRON_EQUITY).toBe('0 45,50,55 15 * * 1-5');
-    expect(OVERNIGHT_CRON_MCX).toBe('0 45,50,55 23 * * 1-5');
+    expect(OVERNIGHT_CRON_MCX).toBe('0 45,50,55,58 23 * * 1-5');
+    // After midnight, Tue–Sat, for the late-close season (MCX to 23:55).
+    expect(OVERNIGHT_CRON_MCX_LATE).toBe('0 3,8 0 * * 2-6');
     expect(PRE_OPEN_CRON).toBe('0 50,53,56 8 * * 1-5');
   });
 });
@@ -173,5 +178,53 @@ describe('session arithmetic for the overnight packet', () => {
   it('days to expiry is null for a missing or unreadable expiry, never zero', () => {
     expect(daysToExpiry(null, 'NFO', ist('2026-10-12', '15:45'))).toBeNull();
     expect(daysToExpiry('soon', 'NFO', ist('2026-10-12', '15:45'))).toBeNull();
+  });
+});
+
+describe('MCX late close — every fire is gated on the venue having closed', () => {
+  const late = makeSentinelClock('2026-11-02:2027-03-08');
+  const mcxOnly = BOOK.filter((e) => e.exchange === 'MCX');
+
+  it('normal season: the 23:45 fire reviews (MCX closed 23:30), tagged with that session', () => {
+    expect(ids(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-10-12', '23:45'), late))).toEqual(['mcx-opt', 'mcx-fut']);
+    expect(windowTag(AFTER_CLOSE_MCX, ist('2026-10-12', '23:45'), late)).toBe('window:OVERNIGHT_REVIEW:MCX:2026-10-12');
+  });
+
+  it('normal season: a fire after midnight still belongs to the session that just closed', () => {
+    expect(ids(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-10-13', '00:03'), late))).toEqual(['mcx-opt', 'mcx-fut']);
+    expect(windowTag(AFTER_CLOSE_MCX, ist('2026-10-13', '00:03'), late)).toBe('window:OVERNIGHT_REVIEW:MCX:2026-10-12');
+  });
+
+  it('late season: 23:45 and 23:50 are still IN session, so nothing is reviewed', () => {
+    expect(reviewWindowIsClosed(AFTER_CLOSE_MCX, 'MCX', ist('2026-11-04', '23:45'), late)).toBe(false);
+    expect(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-11-04', '23:45'), late)).toEqual([]);
+    expect(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-11-04', '23:50'), late)).toEqual([]);
+  });
+
+  it('late season: the 23:58 and 00:03 fires review, under the same session tag', () => {
+    expect(ids(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-11-04', '23:58'), late))).toEqual(['mcx-opt', 'mcx-fut']);
+    expect(ids(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-11-05', '00:03'), late))).toEqual(['mcx-opt', 'mcx-fut']);
+    expect(windowTag(AFTER_CLOSE_MCX, ist('2026-11-05', '00:03'), late)).toBe('window:OVERNIGHT_REVIEW:MCX:2026-11-04');
+    expect(windowTag(AFTER_CLOSE_MCX, ist('2026-11-04', '23:58'), late)).toBe('window:OVERNIGHT_REVIEW:MCX:2026-11-04');
+  });
+
+  it('late season: the last close is 23:55', () => {
+    expect(lastSessionClose('MCX', ist('2026-11-05', '00:03'), late)?.toISOString()).toBe(ist('2026-11-04', '23:55').toISOString());
+  });
+
+  it('a Saturday 00:03 fire reviews Friday’s MCX session; a Sunday one finds nothing recent', () => {
+    expect(ids(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-10-10', '00:03'), late))).toEqual(['mcx-opt', 'mcx-fut']);
+    expect(windowTag(AFTER_CLOSE_MCX, ist('2026-10-10', '00:03'), late)).toBe('window:OVERNIGHT_REVIEW:MCX:2026-10-09');
+    expect(selectForWindow(mcxOnly, AFTER_CLOSE_MCX, ist('2026-10-11', '00:03'), late)).toEqual([]);
+  });
+
+  it('pre-open is gated on the venue not having opened', () => {
+    expect(reviewWindowIsClosed(PRE_OPEN, 'MCX', ist('2026-10-12', '08:56'), late)).toBe(true);
+    expect(reviewWindowIsClosed(PRE_OPEN, 'MCX', ist('2026-10-12', '09:01'), late)).toBe(false);
+    expect(reviewWindowIsClosed(PRE_OPEN, 'NFO', ist('2026-10-12', '09:01'), late)).toBe(false); // NSE pre-open has begun
+  });
+
+  it('an equity after-close fire before 15:30 reviews nothing', () => {
+    expect(selectForWindow(BOOK, AFTER_CLOSE_EQUITY, ist('2026-10-12', '15:20'))).toEqual([]);
   });
 });

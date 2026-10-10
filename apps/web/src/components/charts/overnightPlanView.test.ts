@@ -43,6 +43,15 @@ describe('parseOvernightReason', () => {
     expect(parseOvernightReason('just prose')).toEqual({ risk: 'just prose', plan: null });
   });
 
+  it('keeps every line of a three-line plan, splitting only at the first OPEN PLAN: marker', () => {
+    const reason =
+      'OVERNIGHT RISK: theta and a weak US close\nOPEN PLAN: if it gaps below 24950, exit;\nif it opens above 25150, hold;\nstop at 25020';
+    expect(parseOvernightReason(reason)).toEqual({
+      risk: 'theta and a weak US close',
+      plan: 'if it gaps below 24950, exit; if it opens above 25150, hold; stop at 25020',
+    });
+  });
+
   it('copes with CRLF and extra whitespace', () => {
     expect(parseOvernightReason('OVERNIGHT RISK:  a \r\nOPEN PLAN:  b ')).toEqual({ risk: 'a', plan: 'b' });
   });

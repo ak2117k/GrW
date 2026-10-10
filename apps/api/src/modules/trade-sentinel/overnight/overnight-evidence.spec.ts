@@ -284,20 +284,29 @@ describe('oiAnalysisBlock — build-up, PCR, walls, max pain and the change vs t
 describe('cueBlock — value, direction and freshness for each market cue', () => {
   const now = ist('2026-10-12', '15:45');
   it('reports value, change, direction and age', () => {
-    const block = cueBlock({ value: 5600, change: -84, changePercent: -1.5, at: ist('2026-10-12', '15:40').toISOString() }, 'commodities-snapshot.service (MCX CRUDEOIL front month)', now);
+    const block = cueBlock({ value: 5600, change: -84, changePercent: -1.5, at: ist('2026-10-12', '15:40').toISOString(), basis: 'quote time' }, 'commodities-snapshot.service (MCX CRUDEOIL front month)', now);
     expect(block).toEqual({
       available: true,
-      value: { value: 5600, change: -84, changePercent: -1.5, direction: 'DOWN', ageMinutes: 5 },
+      value: { value: 5600, change: -84, changePercent: -1.5, direction: 'DOWN', ageMinutes: 5, basis: 'quote time' },
       source: 'commodities-snapshot.service (MCX CRUDEOIL front month)',
       at: ist('2026-10-12', '15:40').toISOString(),
     });
   });
   it('reads a tiny move as FLAT', () => {
-    const block = cueBlock({ value: 14, change: 0.01, changePercent: 0.05, at: now.toISOString() }, 's', now);
+    const block = cueBlock({ value: 14, change: 0.01, changePercent: 0.05, at: now.toISOString(), basis: 'quote time' }, 's', now);
     expect(block.available && block.value.direction).toBe('FLAT');
   });
   it('is absent with a reason when the value is not a finite reading', () => {
-    expect(cueBlock({ value: Number.NaN, change: 0, changePercent: 0, at: now.toISOString() }, 's', now).available).toBe(false);
+    expect(cueBlock({ value: Number.NaN, change: 0, changePercent: 0, at: now.toISOString(), basis: 'quote time' }, 's', now).available).toBe(false);
     expect(cueBlock(null, 's', now, 'no quote')).toEqual({ available: false, reason: 'no quote' });
+  });
+  it('never stamps a cue with the review time: no source time means no cue', () => {
+    const block = cueBlock({ value: 13.4, change: 0.6, changePercent: 4.7, at: null, basis: 'quote time' }, 's', now);
+    expect(block).toEqual({ available: false, reason: expect.stringMatching(/no time/) });
+  });
+  it('at 08:50 a previous-close cue reports its real age', () => {
+    const pre = ist('2026-10-13', '08:50');
+    const block = cueBlock({ value: 13.4, change: 0.6, changePercent: 4.7, at: ist('2026-10-12', '15:30').toISOString(), basis: 'previous session close' }, 's', pre);
+    expect(block.available && block.value).toEqual(expect.objectContaining({ ageMinutes: 17 * 60 + 20, basis: 'previous session close' }));
   });
 });

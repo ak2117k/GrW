@@ -6,7 +6,7 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * its parsing are untouched. Bump this whenever the text or the overnight schema
  * changes; every overnight verdict row stores it.
  */
-export const SENTINEL_OVERNIGHT_PROMPT_VERSION = 'o1';
+export const SENTINEL_OVERNIGHT_PROMPT_VERSION = 'o2';
 
 /** Stamped on overnight rows: the overnight prompt plus the thesis prompt behind the packet's thesis block. */
 export const SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION = `${SENTINEL_OVERNIGHT_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`;
@@ -37,7 +37,7 @@ Your verdict is one of:
 
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so rather than inferring it. Never treat an absent block as neutral, zero, or benign. Blocks can be nested inside other blocks' values.
-- position.ltp is the LAST price of the finished session, not a live price. overnight.review.lastPriceAt says when it was printed.
+- position.ltp is the LAST price of the finished session, not a live price. overnight.review.lastPriceAt is as of the last tracker update (overnight.review.lastPriceAtBasis), not necessarily the exchange print time.
 - The "memory" block holds your own recent verdicts on this same trade, live and overnight. Stay consistent with them, or state what changed.
 
 The packet's fields, exactly:
@@ -59,14 +59,14 @@ Reading the live-session fields:
 - session.minutesToClose is not evidence that any market is open.
 
 Reading the overnight fields:
-- overnight.review: kind, the window tag, lastCloseAt, nextOpenAt, hoursUntilOpen and lastPriceAt.
+- overnight.review: kind, the window tag, lastCloseAt, nextOpenAt, hoursUntilOpen, lastPriceAt and lastPriceAtBasis.
 - overnight.expiry: calendar days to expiry and the trading sessions still ahead. One or two sessions left on a long option is a fast-decaying asset.
 - overnight.decay: one night's estimated time decay (theta) for this position, in rupees (rupeesForPosition is signed: negative hurts this position). Its "method" says whether it came from the options chain or is a Black–Scholes ESTIMATE; treat an estimate as approximate. Unavailable for futures.
 - overnight.greeks: delta, gamma, theta, vega and IV for the position's option strike.
 - overnight.preOpenPrice: the pre-open/indicative price for today, ONLY when one genuinely exists. At 08:50 none exists (NSE pre-open runs 09:00–09:08; MCX opens 09:00) and the block says so. Never infer an opening price that is not there.
 - overnight.news: headlines since the last close for the symbol, its sector, its index and the market, with sentiment where known. If it is marked stale, the news store has not refreshed since the close and an empty list is NOT evidence that nothing happened.
 - overnight.oi: the end-of-day OI read — pcr, maxPain, walls, the contract's build-up, the underlying's build-up (a labelled proxy) and vsPreviousSession. Build-up is LONG_BUILD_UP, SHORT_BUILD_UP, SHORT_COVERING or LONG_UNWINDING, read from price change against OI change.
-- overnight.marketCues: each cue carries its value, change, direction and ageMinutes. nasdaq is the US close, crudeOil and gold are MCX front-month futures, fiiFlows is FII net flow, indiaVix is volatility, sectorStrength is the underlying's sector index move, underlyingChange is the underlying's change vs its previous close.
+- overnight.marketCues: each cue carries its value, change, direction, ageMinutes and basis. basis "quote time" means the value is as of the source's own quote time; basis "previous session close" means it is that session's closing value, dated to the close — ageMinutes then measures how old the session is, and the value says nothing about what happened since. nasdaq is the US close, crudeOil and gold are MCX front-month futures, fiiFlows is FII net flow, indiaVix is volatility (daily closes), sectorStrength is the underlying's sector index move over the last session. underlyingChange is the underlying's last session close vs the session before — a previous-session move, NOT an overnight move.
 
 How to weigh the night against the open plan:
 - GAP RISK: a weak US close (nasdaq), a sharp crude move, a VIX spike, or material news since the close raise the chance of a gap against the position at the open. Say which of these you can see and which are unavailable.

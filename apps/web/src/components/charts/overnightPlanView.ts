@@ -24,10 +24,16 @@ export function agoLabel(iso: string, now: number = Date.now()): string {
 /** Split the stored reason back into the risk and the open plan. Never invents a plan. */
 export function parseOvernightReason(reason: string): { risk: string; plan: string | null } {
   const text = String(reason ?? '');
-  const risk = /OVERNIGHT RISK:\s*([^\r\n]*)/.exec(text);
-  const plan = /OPEN PLAN:\s*([^\r\n]*)/.exec(text);
-  if (!risk && !plan) return { risk: text.trim(), plan: null };
-  return { risk: (risk?.[1] ?? '').trim(), plan: plan ? plan[1].trim() || null : null };
+  const oneLine = (t: string) => t.replace(/\s*\r?\n\s*/g, ' ').trim();
+  // Split at the FIRST "OPEN PLAN:" — everything after it is the plan, however
+  // many lines it runs to; everything before it (minus the risk label) is the risk.
+  const at = text.indexOf('OPEN PLAN:');
+  const head = at >= 0 ? text.slice(0, at) : text;
+  const plan = at >= 0 ? oneLine(text.slice(at + 'OPEN PLAN:'.length)) || null : null;
+  const hasRiskLabel = head.includes('OVERNIGHT RISK:');
+  if (!hasRiskLabel && at < 0) return { risk: oneLine(text), plan: null };
+  const risk = oneLine(hasRiskLabel ? head.slice(head.indexOf('OVERNIGHT RISK:') + 'OVERNIGHT RISK:'.length) : head);
+  return { risk, plan };
 }
 
 export type OvernightTone = 'emerald' | 'amber' | 'red' | 'muted';

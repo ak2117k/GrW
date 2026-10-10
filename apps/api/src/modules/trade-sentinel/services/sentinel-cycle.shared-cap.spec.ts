@@ -1,4 +1,10 @@
-import { JUDGE_CONCURRENCY, SentinelCycleService, type TickReading } from './sentinel-cycle.service';
+import {
+  JUDGE_CONCURRENCY,
+  LIVE_RESERVED_SLOTS,
+  SentinelCycleService,
+  SharedJobExpired,
+  type TickReading,
+} from './sentinel-cycle.service';
 import type { RosterEntry } from './roster.service';
 
 /**
@@ -101,13 +107,16 @@ describe('SentinelCycleService.runShared — overnight judgements share the live
     await flush();
     expect(review).not.toHaveBeenCalled();
 
+    // One live slot freeing is not enough: the last free slot is reserved for live work.
     live[0].resolve(HOLD);
     await flush();
-    expect(review).toHaveBeenCalledTimes(1);
-    await expect(queued).resolves.toBe('reviewed');
+    expect(review).not.toHaveBeenCalled();
 
     live[1].resolve(HOLD);
     await pass.settled;
+    await flush();
+    expect(review).toHaveBeenCalledTimes(1);
+    await expect(queued).resolves.toBe('reviewed');
   });
 
   it('a review waits while a LIVE judgement is in flight on the same position, even with slots free', async () => {
@@ -147,7 +156,7 @@ describe('SentinelCycleService.runShared — overnight judgements share the live
     await pass.settled;
   });
 
-  it('two reviews on two positions queue through the cap one slot at a time', async () => {
+  it('reviews run one at a time, never taking the slot reserved for live work', async () => {
     const t = makeSvc();
     const gates = [held(), held(), held()];
     const started: string[] = [];
@@ -158,13 +167,60 @@ describe('SentinelCycleService.runShared — overnight judgements share the live
       }),
     );
     await flush();
-    expect(started).toEqual(['a', 'b']);
+    expect(LIVE_RESERVED_SLOTS).toBe(1);
+    expect(started).toEqual(['a']);
     gates[0].resolve(undefined);
     await flush();
-    expect(started).toEqual(['a', 'b', 'c']);
+    expect(started).toEqual(['a', 'b']);
     gates[1].resolve(undefined);
+    await flush();
+    expect(started).toEqual(['a', 'b', 'c']);
     gates[2].resolve(undefined);
     await Promise.all(runs);
+  });
+
+  it('under a long overnight queue, a live FIRE still gets a slot on the very next tick', async () => {
+    const t = makeSvc();
+    const gate = held();
+    const queue = ['o1', 'o2', 'o3', 'o4', 'o5', 'o6'].map((id) => t.svc.runShared(id, () => gate.promise));
+    await flush();
+
+    t.build.mockResolvedValue([entry('live1')]);
+    const pass = await t.svc.startForUser('u1', T0);
+    await flush();
+    expect(pass.pending).toBe(1);
+    expect(t.judge).toHaveBeenCalledTimes(1);
+
+    gate.resolve(undefined);
+    await pass.settled;
+    await Promise.all(queue);
+  });
+
+  it('a queued job whose venue has opened is dropped without running', async () => {
+    const t = makeSvc();
+    const gate = held();
+    const running = t.svc.runShared('a', () => gate.promise);
+    await flush();
+
+    let open = false;
+    const work = jest.fn().mockResolvedValue(undefined);
+    const queued = t.svc.runShared('b', work, { expired: () => open });
+    await flush();
+    open = true; // 09:00 — the venue opened while it waited
+    gate.resolve(undefined);
+    await running;
+    await expect(queued).rejects.toBeInstanceOf(SharedJobExpired);
+    expect(work).not.toHaveBeenCalled();
+
+    // And the slot is not leaked.
+    await expect(t.svc.runShared('c', async () => 'ok')).resolves.toBe('ok');
+  });
+
+  it('a job already expired when submitted never runs', async () => {
+    const t = makeSvc();
+    const work = jest.fn();
+    await expect(t.svc.runShared('a', work, { expired: () => true })).rejects.toBeInstanceOf(SharedJobExpired);
+    expect(work).not.toHaveBeenCalled();
   });
 
   it('a review that throws frees its slot and rejects to its caller', async () => {

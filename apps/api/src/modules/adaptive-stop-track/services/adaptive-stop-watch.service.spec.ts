@@ -152,22 +152,52 @@ describe('AdaptiveStopWatchService.createFromAlert — vol-stop + risk-first siz
     expect(exec.openTrade).not.toHaveBeenCalled();
   });
 
-  it('decision gate REJECTS an extended / no-support entry — no entry, no trade', async () => {
-    // A 15m series trending 1900→2000 ending at "now" so the live fill (2000)
-    // sits at the top: far from any support (nearest round support ~1950, 2.5%
-    // away). Anchored to real now because evaluateGate uses new Date() for the
-    // session-day filter.
-    const now = Date.now();
-    const rising = Array.from({ length: 16 }, (_, i) => {
+  // evaluateGate reads new Date() and keeps only candles from the IST session
+  // day of "now" (needs >= 3). Anchoring the synthetic series to the REAL clock
+  // made the REJECT test flaky: between 00:00 and 00:45 IST fewer than 3 of the
+  // candles fall on "today", so the gate (correctly) skipped and the entry went
+  // through. Pin the clock instead so the result never depends on run time.
+  const SESSION_NOW = new Date('2026-10-09T11:00:00+05:30'); // mid-session, IST
+  const MIDNIGHT_NOW = new Date('2026-10-09T00:10:00+05:30'); // no session candles yet today
+
+  /** 16 closed 15m candles trending ~1900 → ~2000 and ending at `now`. */
+  function risingSeriesEndingAt(now: number): any[] {
+    return Array.from({ length: 16 }, (_, i) => {
       const c = 1900 + i * 6.7; // ~1900 → ~2000
       return { timestamp: new Date(now - (16 - i) * 15 * 60_000), high: c + 1, low: c - 1, close: c, volume: 1000 };
     });
+  }
+
+  function pinClock(at: Date) {
+    jest.useFakeTimers({ now: at, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+  }
+
+  afterEach(() => jest.useRealTimers());
+
+  it('decision gate REJECTS an extended / no-support entry — no entry, no trade', async () => {
+    // The live fill (2000) sits at the top of the trend: far from any support
+    // (nearest round support ~1950, 2.5% away).
+    pinClock(SESSION_NOW);
     adapter.getLiveQuote.mockResolvedValue({ ltp: 2000 });
-    adapter.getHistoricalData.mockResolvedValue(rising);
+    adapter.getHistoricalData.mockResolvedValue(risingSeriesEndingAt(SESSION_NOW.getTime()));
 
     await expect(svc.createFromAlert(baseInput)).rejects.toBeInstanceOf(AdaptiveStopDecisionGateError);
     expect(repo.createEntry).not.toHaveBeenCalled();
     expect(exec.openTrade).not.toHaveBeenCalled();
+  });
+
+  it('decision gate SKIPS (fails open) just after IST midnight — no session candles today yet', async () => {
+    // Same extended series, but at 00:10 IST every closed candle belongs to the
+    // previous IST day, so there is no session to judge RSI/VWAP on: the gate
+    // must fail open and record the skip rather than reject.
+    pinClock(MIDNIGHT_NOW);
+    adapter.getLiveQuote.mockResolvedValue({ ltp: 2000 });
+    adapter.getHistoricalData.mockResolvedValue(risingSeriesEndingAt(MIDNIGHT_NOW.getTime()));
+
+    await svc.createFromAlert(baseInput);
+    const createCall = repo.createEntry.mock.calls[0][0];
+    expect(createCall.gateSkipped).toBe(true);
+    expect(createCall.gateReason).toMatch(/insufficient-candles/);
   });
 
   it('decision gate SKIPS (fails open) on timestampless/insufficient candles — entry proceeds', async () => {

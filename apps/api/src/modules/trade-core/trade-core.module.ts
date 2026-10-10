@@ -6,6 +6,8 @@ import { CoreStrategySelectionRepository } from './strategies/repositories/core-
 import { CoreStrategyCatalogueService } from './strategies/services/core-strategy-catalogue.service';
 import { CoreStrategySelectionService } from './strategies/services/core-strategy-selection.service';
 import { CoreRiskController } from './risk-wall/controllers/core-risk.controller';
+import { CoreRiskDefaultsController } from './risk-wall/controllers/core-risk-defaults.controller';
+import { CoreRiskDefaultsService } from './risk-wall/services/core-risk-defaults.service';
 import {
   CORE_SESSION_CLOCK,
   CORE_SQUARE_OFF,
@@ -35,7 +37,7 @@ import { SiloSquareOffAdapter } from './risk-wall/services/silo-square-off.adapt
  */
 @Module({
   imports: [PrismaModule],
-  controllers: [CoreStrategiesController, CoreRiskController],
+  controllers: [CoreStrategiesController, CoreRiskController, CoreRiskDefaultsController],
   providers: [
     CoreStrategyRepository,
     CoreStrategySelectionRepository,
@@ -44,6 +46,7 @@ import { SiloSquareOffAdapter } from './risk-wall/services/silo-square-off.adapt
     CoreRiskLimitRepository,
     CoreKillSwitchRepository,
     CoreRiskLimitService,
+    CoreRiskDefaultsService,
     CoreKillSwitchService,
     SiloSquareOffAdapter,
     RiskWallService,

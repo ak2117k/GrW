@@ -8,6 +8,8 @@ import { CoreStrategiesController } from './strategies/controllers/core-strategi
 import { CoreStrategyCatalogueService } from './strategies/services/core-strategy-catalogue.service';
 import { CoreStrategySelectionService } from './strategies/services/core-strategy-selection.service';
 import { CoreRiskController } from './risk-wall/controllers/core-risk.controller';
+import { CoreRiskDefaultsController } from './risk-wall/controllers/core-risk-defaults.controller';
+import { CoreRiskDefaultsService } from './risk-wall/services/core-risk-defaults.service';
 import {
   CORE_SESSION_CLOCK,
   CORE_SQUARE_OFF,
@@ -53,5 +55,7 @@ describe('TradeCoreModule', () => {
     expect(mod.get(RISK_STATE_PROVIDER)).toBeInstanceOf(UnavailableRiskStateProvider);
     expect(mod.get(RISK_VERDICT_SINK)).toBeInstanceOf(LoggingRiskVerdictSink);
     expect(mod.get(CORE_SQUARE_OFF)).toBeInstanceOf(NoCorePositionsSquareOff);
+    expect(mod.get(CoreRiskDefaultsController)).toBeInstanceOf(CoreRiskDefaultsController);
+    expect(mod.get(CoreRiskDefaultsService)).toBeInstanceOf(CoreRiskDefaultsService);
   });
 });

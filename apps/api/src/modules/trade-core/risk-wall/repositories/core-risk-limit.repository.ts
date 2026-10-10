@@ -74,6 +74,22 @@ export class CoreRiskLimitRepository {
     return this.prisma.coreRiskLimitDefault.findMany();
   }
 
+  /** Admin edit of one global seed default (decision 20). Touches only core_risk_limit_defaults. */
+  upsertDefault(
+    key: string,
+    scope: string,
+    value: { numValue: Prisma.Decimal | null; textValue: string | null },
+    note: string,
+    updatedBy: string,
+    now: Date,
+  ): Promise<CoreRiskLimitDefault> {
+    return this.prisma.coreRiskLimitDefault.upsert({
+      where: { key_scope: { key, scope } },
+      create: { key, scope, ...value, note, updatedBy, updatedAt: now },
+      update: { ...value, note, updatedBy, updatedAt: now },
+    });
+  }
+
   /**
    * The user's own settings row; for an ADMIN without one, the platform row stamped
    * SYSTEM_USER_ID, which is the row the Settings page edits (settings.service.ts:38-48).

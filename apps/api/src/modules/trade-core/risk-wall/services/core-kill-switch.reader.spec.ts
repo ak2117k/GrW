@@ -31,6 +31,32 @@ describe('CoreKillSwitchReader', () => {
     expect(await reader.isOn('user_B')).toBe(false);
   });
 
+  it('a per-user read is not hidden by a different tenant in the CLS store (fails closed, not open)', async () => {
+    const rows = [row('user_A', 'k1', true, new Date(T0.getTime() - 1000))];
+    // Model the tenant extension: inside a CLS store scoped to another non-ADMIN user,
+    // only runWithoutTenant lifts the scoping; a scoped query sees none of user_A's rows.
+    let bypassed = false;
+    const findMany = jest.fn(async ({ where }: { where: { userId?: string } }) => (bypassed ? rows.filter((r) => r.userId === where.userId) : []));
+    const tenant = { runWithoutTenant: jest.fn(<T>(fn: () => T): T => { bypassed = true; try { return fn(); } finally { bypassed = false; } }) };
+    const reader = new CoreKillSwitchReader(
+      { coreKillSwitch: { findMany } } as unknown as PrismaService,
+      tenant as unknown as TenantContextService,
+      { isActive: () => true } as unknown as ClsService,
+    );
+    expect(await reader.isOn('user_A')).toBe(true);
+    expect(tenant.runWithoutTenant).toHaveBeenCalledTimes(1);
+    expect(findMany).toHaveBeenCalledWith({ where: { userId: 'user_A' }, select: { id: true, userId: true, active: true, effectiveFrom: true, createdAt: true } });
+  });
+
+  it('registers with the gate as soon as it is constructed (boot window), before module init', async () => {
+    setCoreKillSwitchReader(null);
+    setup([]);
+    // Allowed: a reader is wired (with none the gate would refuse), and it reads OFF.
+    expect(await coreEntryAllowed('auto-execution', { userId: 'usr_owner' })).toBe(true);
+    setup([row('usr_owner', 'k1', true, new Date(T0.getTime() - 1000))]);
+    expect(await coreEntryAllowed('auto-execution', { userId: 'usr_owner' })).toBe(false); // the newest reader, and it reads ON
+  });
+
   it('the platform answer is any ADMIN’s switch, read without tenant scoping', async () => {
     const { findMany, tenant, reader } = setup([row('usr_owner', 'k1', true, new Date(T0.getTime() - 1000)), row('usr_admin2', 'k2', false, new Date(T0.getTime() - 1000))]);
     expect(await reader.isOnForPlatform()).toBe(true);

@@ -28,7 +28,12 @@ export class CoreKillSwitchReader implements KillSwitchReadPort, OnModuleInit, O
     private readonly prisma: PrismaService,
     private readonly tenant: TenantContextService,
     private readonly cls: ClsService,
-  ) {}
+  ) {
+    // Register at once: TradeCoreModule initialises after the Bull, fan-out and silo
+    // modules, and a boot-time auto-execution refusal is terminal. onModuleInit
+    // registers again; production still has no default reader before this one exists.
+    setCoreKillSwitchReader(this);
+  }
 
   onModuleInit(): void {
     setCoreKillSwitchReader(this);
@@ -44,10 +49,14 @@ export class CoreKillSwitchReader implements KillSwitchReadPort, OnModuleInit, O
 
   isOn(userId: string): Promise<boolean> {
     return this.cached(`user:${userId}`, async (now) => {
-      const rows = await this.prisma.coreKillSwitch.findMany({
-        where: { userId },
-        select: { id: true, userId: true, active: true, effectiveFrom: true, createdAt: true },
-      });
+      // Unscoped: a CLS store carrying another tenant must not hide this user's rows
+      // (that would fail open); `where: { userId }` pins the rows to this user.
+      const rows = await this.unscoped(() =>
+        this.prisma.coreKillSwitch.findMany({
+          where: { userId },
+          select: { id: true, userId: true, active: true, effectiveFrom: true, createdAt: true },
+        }),
+      );
       return resolveAppendOnly(rows, now).inForce?.active ?? false;
     });
   }

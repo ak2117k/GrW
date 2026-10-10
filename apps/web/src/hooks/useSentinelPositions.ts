@@ -21,7 +21,7 @@ export interface SentinelVerdictView {
  * overnight review omits it.
  */
 export interface SentinelOvernightView {
-  kind: 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | string;
+  kind: 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | 'PRE_OPEN_CHECK' | string;
   verdict: 'HOLD_OVERNIGHT' | 'EXIT_AT_OPEN' | 'TIGHTEN_AT_OPEN' | string;
   confidence: string;
   thesisStatus: string;

@@ -1,0 +1,51 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "^GSPC",
+     "exchangeName": "SNP",
+     "instrumentType": "INDEX",
+     "regularMarketTime": 1791581396,
+     "gmtoffset": -14400,
+     "timezone": "EDT",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 7811.54,
+     "shortName": "S&P 500",
+     "chartPreviousClose": 7722.72,
+     "dataGranularity": "1d",
+     "range": "5d"
+    },
+    "timestamp": [
+     1791207000,
+     1791293400,
+     1791379800,
+     1791466200,
+     1791552600
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "close": [
+        7773.9501953125,
+        7818.93017578125,
+        7801.77001953125,
+        7765.35986328125,
+        7811.5400390625
+       ],
+       "open": [
+        7730.85986328125,
+        7805.9599609375,
+        7792.97998046875,
+        7778.4501953125,
+        7786.35986328125
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

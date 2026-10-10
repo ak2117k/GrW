@@ -1,0 +1,99 @@
+{
+ "FormattedQuoteResult": {
+  "FormattedQuote": [
+   {
+    "symbol": ".IXIC",
+    "name": "NASDAQ Composite",
+    "last": "27,366.17",
+    "last_timedate": "10/09/26 EDT",
+    "last_time": "2026-10-09",
+    "type": "INDEX",
+    "subType": "Index",
+    "change": "+172.83",
+    "change_pct": "+0.64%",
+    "previous_day_closing": "27,193.34",
+    "curmktstatus": "REG_MKT",
+    "timeZone": "EDT"
+   },
+   {
+    "symbol": ".SPX",
+    "name": "S&P 500 Index",
+    "last": "7,811.54",
+    "last_timedate": "10/09/26 EDT",
+    "last_time": "2026-10-09",
+    "type": "INDEX",
+    "subType": "Index",
+    "change": "+46.18",
+    "change_pct": "+0.59%",
+    "previous_day_closing": "7,765.36",
+    "curmktstatus": "REG_MKT",
+    "timeZone": "EDT"
+   },
+   {
+    "symbol": ".DJI",
+    "name": "Dow Jones Industrial Average",
+    "last": "51,654.95",
+    "last_timedate": "10/09/26 EDT",
+    "last_time": "2026-10-09",
+    "type": "INDEX",
+    "subType": "Index",
+    "change": "+423.31",
+    "change_pct": "+0.83%",
+    "previous_day_closing": "51,231.64",
+    "curmktstatus": "REG_MKT",
+    "timeZone": "EDT"
+   },
+   {
+    "symbol": "@ND.1",
+    "name": "NASDAQ 100 Fut (Dec'26)",
+    "last": "31,123.25",
+    "last_timedate": "5:38 PM EDT",
+    "last_time": "2026-10-10T17:38:52.000-0400",
+    "type": "DERIVATIVE",
+    "subType": "Future",
+    "change": "+153.75",
+    "change_pct": "+0.50%",
+    "previous_day_closing": "30,969.50",
+    "curmktstatus": "REG_MKT",
+    "expiration_date": "2026-12-18",
+    "settlePrice": "31108.75",
+    "settleDate": "2026-10-09",
+    "timeZone": "EDT"
+   },
+   {
+    "symbol": "@SP.1",
+    "name": "S&P 500 Fut (Dec'26)",
+    "last": "7,866.00",
+    "last_timedate": "5:39 PM EDT",
+    "last_time": "2026-10-10T17:39:56.000-0400",
+    "type": "DERIVATIVE",
+    "subType": "Future",
+    "change": "+49.75",
+    "change_pct": "+0.64%",
+    "previous_day_closing": "7,816.25",
+    "curmktstatus": "REG_MKT",
+    "expiration_date": "2026-12-18",
+    "settlePrice": "7859.75",
+    "settleDate": "2026-10-09",
+    "timeZone": "EDT"
+   },
+   {
+    "symbol": "@DJ.1",
+    "name": "Dow Jones Fut (Dec'26)",
+    "last": "51,976.00",
+    "last_timedate": "5:40 PM EDT",
+    "last_time": "2026-10-10T17:40:13.000-0400",
+    "type": "DERIVATIVE",
+    "subType": "Future",
+    "change": "+483.00",
+    "change_pct": "+0.94%",
+    "previous_day_closing": "51,493.00",
+    "curmktstatus": "REG_MKT",
+    "expiration_date": "2026-12-18",
+    "settlePrice": "51926.00",
+    "settleDate": "2026-10-09",
+    "timeZone": "EDT"
+   }
+  ]
+ }
+}

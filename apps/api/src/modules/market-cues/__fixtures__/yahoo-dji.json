@@ -1,0 +1,51 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "^DJI",
+     "exchangeName": "DJI",
+     "instrumentType": "INDEX",
+     "regularMarketTime": 1791578270,
+     "gmtoffset": -14400,
+     "timezone": "EDT",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 51654.95,
+     "shortName": "Dow Jones Industrial Average",
+     "chartPreviousClose": 51176.96,
+     "dataGranularity": "1d",
+     "range": "5d"
+    },
+    "timestamp": [
+     1791207000,
+     1791293400,
+     1791379800,
+     1791466200,
+     1791552600
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "close": [
+        51267.8984375,
+        51521.28125,
+        51179.87109375,
+        51231.640625,
+        51654.94921875
+       ],
+       "open": [
+        51199.25,
+        51444.1015625,
+        51406.44140625,
+        51105.0390625,
+        51258.94921875
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

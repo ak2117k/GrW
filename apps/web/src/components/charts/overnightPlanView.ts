@@ -71,7 +71,8 @@ export function overnightPlanCard(position: SentinelPosition, now: number = Date
   const liveAt = position.verdict ? Date.parse(position.verdict.at) : Number.NaN;
   return {
     title: 'Overnight plan',
-    windowLabel: o.kind === 'PRE_OPEN_REVIEW' ? 'Pre-open review' : 'After-close review',
+    windowLabel:
+      o.kind === 'PRE_OPEN_CHECK' ? 'Pre-open check (09:10)' : o.kind === 'PRE_OPEN_REVIEW' ? 'Pre-open review' : 'After-close review',
     verdictLabel: o.verdict.replace(/_/g, ' '),
     tone: TONE[o.verdict] ?? 'muted',
     risk,

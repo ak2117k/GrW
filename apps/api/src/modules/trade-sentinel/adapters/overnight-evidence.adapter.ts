@@ -20,6 +20,9 @@ import type {
   RawOiEvidence,
 } from '../ports/overnight-evidence.port';
 import { normaliseSymbol } from '../symbols';
+import { MarketCuesService } from '../../market-cues/market-cues.service';
+import { unavailableSnapshot } from '../../market-cues/market-cues.snapshot';
+import type { CueRecord, MarketCuesSnapshot, PreOpenBook } from '../../market-cues/market-cues.types';
 
 /**
  * `OvernightEvidenceSource` over the services that already exist — no new
@@ -34,8 +37,8 @@ import { normaliseSymbol } from '../symbols';
  *   cues     CommodityRollService + MarketQuoteResolver (MCX crude, gold), MarketContextService
  *            (India VIX), YahooFinanceService (the underlying's change vs its
  *            previous close), NseSectorIndexService + BreadthSectorService
- *            (sector strength). Nasdaq and FII flows have no source in this
- *            repo (their context factors are stubs) and are stated unavailable.
+ *            (sector strength), and MarketCuesService for the US closes and
+ *            futures, FII/DII, FII index OI, GIFT Nifty and the pre-open book.
  *
  * BROKER-REACHABLE, like every adapter here — which is why it sits behind a
  * port and is named only in `trade-sentinel.module.ts`. See the module note.
@@ -249,29 +252,43 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
 
   async cues(q: OvernightEvidenceQuery): Promise<RawCues> {
     const base = q.underlying ? normaliseSymbol(q.underlying) : null;
-    const [commodities, vix, change, sector] = await Promise.all([
+    const [commodities, vix, change, sector, market] = await Promise.all([
       this.commodityCues(q.userId, q.now),
       this.vixCue(q.now),
       this.underlyingChangeCue(base, q.exchange, q.now),
       this.sectorCue(q.userId, base, q.exchange, q.now),
+      this.marketCues(q.now),
     ]);
     return {
-      nasdaq: {
-        reading: null,
-        reason:
-          'no US-close source is wired: the nasdaq context factor is a stub and yahoo-finance.service maps only ' +
-          'Indian symbols — overnight US direction is UNSEEN, not flat',
-      },
-      fiiFlows: {
-        reading: null,
-        reason: 'no FII-flow source is wired (the fii context factor is a stub) — FII positioning is UNSEEN',
-      },
+      market,
       crudeOil: commodities.crude,
       gold: commodities.gold,
       indiaVix: vix,
       underlyingChange: change,
       sectorStrength: sector,
     };
+  }
+
+  /** Today's NSE pre-open book, fetched if this process does not have today's yet. */
+  async preOpen(now: Date): Promise<CueRecord<PreOpenBook>> {
+    const svc = this.lazy(MarketCuesService);
+    if (!svc) return unavailableSnapshot('market-cues.service is not wired into this process').preOpen;
+    return (await svc.ensure(['preOpen'], now)).preOpen;
+  }
+
+  /**
+   * The market-cues snapshot (US, FII/DII, FII OI, GIFT). Mostly served from the
+   * service's cache; a group this process has never read (or whose read is not
+   * ok and is over half an hour old) is fetched once, shared by every position.
+   */
+  private async marketCues(now: Date): Promise<MarketCuesSnapshot> {
+    const svc = this.lazy(MarketCuesService);
+    if (!svc) return unavailableSnapshot('market-cues.service is not wired into this process');
+    try {
+      return await svc.ensure(['us', 'fiiDii', 'fiiOi', 'gift'], now);
+    } catch (err) {
+      return unavailableSnapshot(`market-cues.service failed: ${message(err)}`);
+    }
   }
 
   /**

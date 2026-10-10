@@ -1,0 +1,51 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "^IXIC",
+     "exchangeName": "NIM",
+     "instrumentType": "INDEX",
+     "regularMarketTime": 1791580559,
+     "gmtoffset": -14400,
+     "timezone": "EDT",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 27366.17,
+     "shortName": "NASDAQ Composite",
+     "chartPreviousClose": 27190.86,
+     "dataGranularity": "1d",
+     "range": "5d"
+    },
+    "timestamp": [
+     1791207000,
+     1791293400,
+     1791379800,
+     1791466200,
+     1791552600
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "close": [
+        27477.310546875,
+        27599.7890625,
+        27538.689453125,
+        27193.33984375,
+        27366.169921875
+       ],
+       "open": [
+        27225.9296875,
+        27641.169921875,
+        27430.5390625,
+        27416.029296875,
+        27342.26953125
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

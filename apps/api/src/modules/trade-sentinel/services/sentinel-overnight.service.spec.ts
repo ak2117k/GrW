@@ -6,7 +6,9 @@ import {
   formatOvernightReason,
   type SectionInputs,
 } from './sentinel-overnight.service';
-import { AFTER_CLOSE_EQUITY, AFTER_CLOSE_MCX, PRE_OPEN } from '../overnight/overnight-calendar';
+import { AFTER_CLOSE_EQUITY, AFTER_CLOSE_MCX, PRE_OPEN, PRE_OPEN_CHECK } from '../overnight/overnight-calendar';
+import type { CueRecord, MarketCuesSnapshot, PreOpenBook, UsQuote } from '../../market-cues/market-cues.types';
+import { unavailableSnapshot } from '../../market-cues/market-cues.snapshot';
 import type { RosterEntry } from './roster.service';
 import type { TickReading } from './sentinel-cycle.service';
 import type { RawCues, RawOiEvidence } from '../ports/overnight-evidence.port';
@@ -91,11 +93,60 @@ const oiPresent: RawOiEvidence = {
   legGreeks: { delta: 0.52, gamma: 0.001, theta: -24, vega: 9.1, iv: 13.2, source: 'options-chain.service greeks', at: MON_CLOSE.toISOString() },
 };
 
+const rec = <T>(values: T, over: Partial<CueRecord<T>> = {}): CueRecord<T> => ({
+  values,
+  sourceTime: '2026-10-09T21:15:59.000Z',
+  fetchedAt: '2026-10-12T02:55:00.000Z',
+  basis: 'previous US session close',
+  source: 'Yahoo Finance v8 chart',
+  status: 'ok',
+  ...over,
+});
+const usq = (last: number, change: number): UsQuote => ({ symbol: 'X', last, previousClose: last - change, change, changePercent: Math.round((change / (last - change)) * 10000) / 100 });
+
+/** A market-cues snapshot as the service would hand it over on Monday evening. */
+const market: MarketCuesSnapshot = {
+  enabled: true,
+  us: {
+    nasdaq: rec(usq(27366.17, 172.83)),
+    sp500: rec(usq(7811.54, 46.18)),
+    dow: rec(usq(51654.95, 423.31)),
+    nasdaqFutures: rec(usq(31108.75, -139.25), { sourceTime: ist('2026-10-12', '15:40').toISOString(), basis: 'quote time' }),
+    sp500Futures: rec(usq(7866, -10), { sourceTime: ist('2026-10-12', '15:40').toISOString(), basis: 'quote time' }),
+  },
+  fiiDii: rec(
+    { date: '2026-10-09', fii: { buy: 10373.99, sell: 13942.89, net: -3568.9 }, dii: { buy: 15626.53, sell: 10883.27, net: 4743.26 }, unit: '₹ crore' as const },
+    { sourceTime: '2026-10-09', basis: 'session date', source: 'NSE fiidiiTradeReact' },
+  ),
+  fiiOi: rec(
+    {
+      date: '2026-10-09',
+      indexFutures: { long: 34943, short: 328931 },
+      indexCalls: { long: 600034, short: 946852 },
+      indexPuts: { long: 1245164, short: 704672 },
+      unit: 'contracts' as const,
+      change: null,
+    },
+    { sourceTime: '2026-10-09', source: 'NSE participant OI' },
+  ),
+  gift: rec(
+    {
+      gift: { price: 22575.5, expiry: '2026-10-27', at: ist('2026-10-12', '23:30').toISOString(), dayChange: -27 },
+      niftyFuture: { close: 22612.6, expiry: '2026-10-27', sessionDate: '2026-10-12', closedAt: null },
+      gap: -37.1,
+      gapPercent: -0.16,
+      expiryMatches: true,
+      comparison: 'futures-vs-futures gap: GIFT Nifty near-month future minus the NSE NIFTY current-month future close',
+    },
+    { sourceTime: ist('2026-10-12', '23:30').toISOString(), source: 'NSE IX market-rate' },
+  ),
+  preOpen: unavailableSnapshot('n/a').preOpen,
+};
+
 const cuesPresent: RawCues = {
-  nasdaq: { reading: null, reason: 'nasdaq.factor is a stub and no US-close source is wired' },
+  market,
   crudeOil: { reading: { value: 5600, change: -84, changePercent: -1.5, at: MON_CLOSE.toISOString(), basis: 'quote time' }, source: 'market-quote-resolver' },
   gold: { reading: { value: 121000, change: 300, changePercent: 0.25, at: MON_CLOSE.toISOString(), basis: 'quote time' }, source: 'market-quote-resolver' },
-  fiiFlows: { reading: null, reason: 'fii.factor is a stub' },
   indiaVix: { reading: { value: 13.4, change: 0.6, changePercent: 4.7, at: ist('2026-10-12', '15:30').toISOString(), basis: 'previous session close' }, source: 'market-context.service' },
   underlyingChange: { reading: { value: 25050, change: -110, changePercent: -0.44, at: ist('2026-10-12', '15:30').toISOString(), basis: 'previous session close' }, source: 'yahoo-finance.service' },
   sectorStrength: { value: null, reason: 'the underlying is an index — no single sector' },
@@ -202,8 +253,9 @@ describe('assembleOvernightSection — packet contents', () => {
       expect(s.marketCues.crudeOil).toEqual(
         expect.objectContaining({ available: true, value: expect.objectContaining({ value: 5600, direction: 'DOWN', ageMinutes: 0 }) }),
       );
-      expect(s.marketCues.nasdaq).toEqual({ available: false, reason: expect.stringMatching(/stub/) });
-      expect(s.marketCues.fiiFlows.available).toBe(false);
+      expect(s.marketCues.nasdaq).toEqual(
+        expect.objectContaining({ available: true, at: '2026-10-09T21:15:59.000Z', value: expect.objectContaining({ value: 27366.17, basis: 'previous session close', status: 'ok' }) }),
+      );
       expect(s.marketCues.sectorStrength).toEqual({ available: false, reason: expect.stringMatching(/index/) });
     });
     it('cues: a stale cue reports its age', () => {
@@ -223,6 +275,94 @@ describe('assembleOvernightSection — packet contents', () => {
         expect(cue).toEqual({ available: false, reason: expect.stringMatching(/yahoo 503/) });
       }
     });
+  });
+});
+
+describe('assembleOvernightSection — market cues per window', () => {
+  const TUE = '2026-10-13';
+  it('15:45: previous US close and US futures; FII shown as the previous session’s, today’s not yet published; no GIFT', () => {
+    const s = assembleOvernightSection(inputs());
+    for (const k of ['nasdaq', 'sp500', 'dow', 'nasdaqFutures', 'sp500Futures'] as const) {
+      expect({ k, available: s.marketCues[k].available }).toEqual({ k, available: true });
+    }
+    expect(s.marketCues.nasdaqFutures.available && s.marketCues.nasdaqFutures.value.basis).toBe('quote time');
+    expect(s.marketCues.fiiFlows).toEqual(
+      expect.objectContaining({
+        available: true,
+        at: '2026-10-09',
+        value: expect.objectContaining({ session: '2026-10-09', todaysFigure: 'not yet published (NSE publishes ~18:00–20:00 IST)' }),
+      }),
+    );
+    expect(s.marketCues.fiiDerivatives.available && (s.marketCues.fiiDerivatives.value as { todaysFile: string }).todaysFile).toMatch(/not yet published/);
+    expect(s.marketCues.giftNifty).toEqual({ available: false, reason: expect.stringMatching(/23:45 and 08:30/) });
+  });
+
+  it('23:45 (MCX): US, FII/DII, FII OI and the GIFT futures-vs-futures gap', () => {
+    const s = assembleOvernightSection(
+      inputs({
+        window: AFTER_CLOSE_MCX,
+        now: ist('2026-10-12', '23:45'),
+        tag: 'window:OVERNIGHT_REVIEW:MCX:2026-10-12',
+        entry: entry('m', { exchange: 'MCX', symbol: 'CRUDEOIL16OCT265600CE' }),
+      }),
+    );
+    expect(s.marketCues.giftNifty).toEqual(
+      expect.objectContaining({
+        available: true,
+        value: expect.objectContaining({
+          gap: -37.1,
+          niftyFutureClose: 22612.6,
+          comparison: expect.stringMatching(/futures-vs-futures/),
+          giftAgeMinutes: 15,
+        }),
+      }),
+    );
+    expect(s.marketCues.fiiFlows.available && (s.marketCues.fiiFlows.value as Record<string, unknown>).todaysFigure).toBeUndefined();
+    expect(s.marketCues.fiiDerivatives.available).toBe(true);
+    expect(s.marketCues.sp500.available).toBe(true);
+  });
+
+  it('08:30: every cue group is read', () => {
+    const s = assembleOvernightSection(inputs({ window: PRE_OPEN, now: ist(TUE, '08:30'), tag: 'window:PRE_OPEN_REVIEW:ALL:' + TUE }));
+    for (const k of ['nasdaq', 'nasdaqFutures', 'giftNifty', 'fiiFlows', 'fiiDerivatives'] as const) {
+      expect({ k, available: s.marketCues[k].available }).toEqual({ k, available: true });
+    }
+    expect(s.preOpenGap).toEqual({ available: false, reason: expect.stringMatching(/only the 09:10 pre-open check/) });
+  });
+
+  it('an unavailable cue is a stated absence — never a zero', () => {
+    const off = unavailableSnapshot('market cues are switched off (MARKET_CUES_ENABLED is not true)');
+    const s = assembleOvernightSection(inputs({ cues: { ok: true, value: { ...cuesPresent, market: off } } }));
+    for (const k of ['nasdaq', 'sp500', 'dow', 'nasdaqFutures', 'sp500Futures', 'fiiFlows', 'fiiDerivatives'] as const) {
+      expect(s.marketCues[k]).toEqual({ available: false, reason: expect.stringMatching(/MARKET_CUES_ENABLED/) });
+    }
+  });
+
+  it('an intraday US index value is NOT labelled a session close', () => {
+    const intraday = { ...market.us.nasdaq, values: { ...market.us.nasdaq.values!, phase: 'intraday' as const }, sourceTime: ist('2026-10-12', '23:40').toISOString() };
+    const s = assembleOvernightSection(
+      inputs({
+        window: AFTER_CLOSE_MCX,
+        now: ist('2026-10-12', '23:45'),
+        tag: 'window:OVERNIGHT_REVIEW:MCX:2026-10-12',
+        cues: { ok: true, value: { ...cuesPresent, market: { ...market, us: { ...market.us, nasdaq: intraday } } } },
+      }),
+    );
+    expect(s.marketCues.nasdaq.available && s.marketCues.nasdaq.value).toEqual(
+      expect.objectContaining({ basis: 'quote time', session: 'intraday', ageMinutes: 5 }),
+    );
+    const close = assembleOvernightSection(inputs());
+    expect(close.marketCues.nasdaq.available && close.marketCues.nasdaq.value).toEqual(
+      expect.objectContaining({ basis: 'previous session close', session: 'close' }),
+    );
+  });
+
+  it('a stale cue is shown, marked stale with the reason', () => {
+    const staleUs = { ...market.us, nasdaq: { ...market.us.nasdaq, status: 'stale' as const, reason: 'the close is from the 2026-10-09 US session' } };
+    const s = assembleOvernightSection(inputs({ cues: { ok: true, value: { ...cuesPresent, market: { ...market, us: staleUs } } } }));
+    expect(s.marketCues.nasdaq.available && s.marketCues.nasdaq.value).toEqual(
+      expect.objectContaining({ status: 'stale', note: expect.stringMatching(/2026-10-09/) }),
+    );
   });
 });
 
@@ -254,8 +394,10 @@ const VERDICT = {
   evidence: ['overnight.decay'],
 };
 
-function makeSvc(opts: { enabled?: boolean; done?: Set<string>; lateClose?: string } = {}) {
-  const book: RosterEntry[] = [
+function makeSvc(
+  opts: { enabled?: boolean; done?: Set<string>; lateClose?: string; book?: RosterEntry[]; preOpen?: CueRecord<PreOpenBook> } = {},
+) {
+  const book: RosterEntry[] = opts.book ?? [
     entry('nfo'),
     entry('mcx', { exchange: 'MCX', symbol: 'CRUDEOIL16OCT265600CE' }),
     entry('cash', { exchange: 'NSE', symbol: 'RELIANCE-EQ' }),
@@ -285,6 +427,7 @@ function makeSvc(opts: { enabled?: boolean; done?: Set<string>; lateClose?: stri
     news: jest.fn().mockResolvedValue(freshNews),
     oi: jest.fn().mockResolvedValue(oiPresent),
     cues: jest.fn().mockResolvedValue(cuesPresent),
+    preOpen: jest.fn().mockResolvedValue(opts.preOpen ?? unavailableSnapshot('not fetched').preOpen),
   };
   const findMany = jest.fn().mockResolvedValue([
     { userId: 'u1', exchange: 'NFO' },
@@ -491,6 +634,67 @@ describe('SentinelOvernightService — venue clock gates (late close, open)', ()
   });
 });
 
+describe('SentinelOvernightService — no judge job starts within CLI_TIMEOUT_MS of the venue open', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+  const at = (hhmmss: string) => new Date(`2026-10-13T${hhmmss}+05:30`);
+
+  it('the 08:30 review: a job reaching its slot at 08:57:01 (MCX opens 09:00) is dropped, not started', async () => {
+    const t = makeSvc();
+    t.svc.clockNow = () => at('08:57:01');
+    const report = await t.svc.runWindow(PRE_OPEN, at('08:40:00'));
+    expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 2, judged: 0 }));
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+  });
+
+  it('the 08:30 review: at 08:56:59 there is still a full timeout before 09:00, so it starts', async () => {
+    const t = makeSvc();
+    t.svc.clockNow = () => at('08:56:59');
+    const report = await t.svc.runWindow(PRE_OPEN, at('08:40:00'));
+    expect(report).toEqual(expect.objectContaining({ judged: 2, droppedAtOpen: 0 }));
+  });
+
+  describe('the 09:10 check (open 09:15, so the last start is 09:12:00)', () => {
+    const book: CueRecord<PreOpenBook> = {
+      values: {
+        date: '2026-10-13',
+        entries: { RELIANCE: { symbol: 'RELIANCE', instrument: 'CASH', iep: 1420, previousClose: 1400, change: 20, changePercent: 1.43, at: at('09:08:00').toISOString() } },
+      },
+      sourceTime: '2026-10-13',
+      fetchedAt: at('09:10:00').toISOString(),
+      basis: 'x',
+      source: 'x',
+      status: 'ok',
+    };
+    const BOOK = [entry('rel-fut', { symbol: 'RELIANCE27OCT26FUT' })];
+
+    it('a job reaching its slot at 09:12:01 is dropped, never started', async () => {
+      const t = makeSvc({ book: BOOK, preOpen: book });
+      t.svc.clockNow = () => at('09:12:01');
+      const report = await t.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'));
+      expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 1, judged: 0 }));
+      expect(t.judgeOvernight).not.toHaveBeenCalled();
+    });
+
+    it('starts at 09:11:59', async () => {
+      const t = makeSvc({ book: BOOK, preOpen: book });
+      t.svc.clockNow = () => at('09:11:59');
+      expect(await t.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'))).toEqual(expect.objectContaining({ judged: 1 }));
+    });
+
+    it('always reserves a live slot, even when no held venue is open', async () => {
+      const t = makeSvc({ book: BOOK, preOpen: book });
+      t.svc.clockNow = () => at('09:10:00');
+      t.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'NFO' }]); // nothing held is trading at 09:10
+      await t.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'));
+      expect(t.runShared.mock.calls[0][2].reserveLive()).toBe(true);
+    });
+  });
+});
+
 describe('SentinelOvernightService — the live reservation follows the held venues', () => {
   beforeEach(() => jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined));
   afterEach(() => jest.restoreAllMocks());
@@ -515,5 +719,169 @@ describe('SentinelOvernightService — the live reservation follows the held ven
     const t = makeSvc();
     await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:30'));
     expect(t.buildPacket.mock.calls[0][3][0].detail).toMatch(/08:30/);
+  });
+});
+
+describe('SentinelOvernightService — the 09:10 pre-open check', () => {
+  const TUE = '2026-10-13';
+  const AT_0912 = ist(TUE, '09:10');
+  const TAG = `window:PRE_OPEN_CHECK:EQUITY:${TUE}`;
+  const BOOK: RosterEntry[] = [
+    entry('nifty-opt'),
+    entry('nifty-fut', { symbol: 'NIFTY27OCT26FUT' }),
+    entry('rel-fut', { symbol: 'RELIANCE27OCT26FUT' }),
+    entry('rel-opt', { symbol: 'RELIANCE27OCT261400CE' }),
+    entry('sbin-opt', { symbol: 'SBIN27OCT26800PE' }),
+    entry('mcx-fut', { exchange: 'MCX', symbol: 'GOLD05DEC26FUT' }),
+    entry('cash', { exchange: 'NSE', symbol: 'RELIANCE-EQ' }),
+  ];
+  const preOpenBook: CueRecord<PreOpenBook> = {
+    values: {
+      date: TUE,
+      entries: {
+        RELIANCE: { symbol: 'RELIANCE', instrument: 'CASH', iep: 1420, previousClose: 1400, change: 20, changePercent: 1.43, at: ist(TUE, '09:08').toISOString() },
+      },
+    },
+    sourceTime: TUE,
+    fetchedAt: AT_0912.toISOString(),
+    basis: 'pre-open session date',
+    source: 'NSE market-data-pre-open',
+    status: 'ok',
+  };
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('judges only NSE F&O positions with a pre-open IEP; the rest are recorded skipped — never MCX or cash', async () => {
+    const t = makeSvc({ book: BOOK, preOpen: preOpenBook });
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(t.evidence.preOpen).toHaveBeenCalledWith(AT_0912);
+    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['rel-fut', 'rel-opt']);
+    expect(report).toEqual(expect.objectContaining({ window: TAG, judged: 2, skippedNoInput: 3, picked: 5 }));
+    expect(t.record.mock.calls[0][0].triggeredBy).toEqual(['PRE_OPEN_CHECK', TAG]);
+  });
+
+  it('labels an option’s figure as the underlying gap estimate, not the option’s price', async () => {
+    const t = makeSvc({ book: [entry('rel-opt', { symbol: 'RELIANCE27OCT261400CE' })], preOpen: preOpenBook });
+    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    const packet = t.judgeOvernight.mock.calls[0][0];
+    expect(packet.overnight.review.kind).toBe('PRE_OPEN_CHECK');
+    expect(packet.overnight.preOpenGap).toEqual(
+      expect.objectContaining({
+        available: true,
+        at: ist(TUE, '09:08').toISOString(),
+        value: expect.objectContaining({
+          label: expect.stringMatching(/^underlying cash pre-open IEP gap estimate.*NOT the option's price/),
+          iep: 1420,
+          previousClose: 1400,
+          gap: 20,
+          gapPercent: 1.43,
+        }),
+      }),
+    );
+    expect(t.buildPacket.mock.calls[0][3][0]).toEqual({ name: 'PRE_OPEN_CHECK', detail: expect.stringMatching(/09:10/) });
+  });
+
+  it('an index future with no IEP costs no judge call: recorded skipped with the reason, nothing written', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = makeSvc({ book: [entry('nifty-fut', { symbol: 'NIFTY27OCT26FUT' })], preOpen: preOpenBook });
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(t.runShared).not.toHaveBeenCalled();
+    expect(t.record).not.toHaveBeenCalled();
+    expect(report).toEqual(expect.objectContaining({ picked: 1, skippedNoInput: 1, judged: 0 }));
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/NIFTY27OCT26FUT.*skipped.*no pre-open IEP for NIFTY/);
+  });
+
+  it('skips are counted and logged once per position per window, not on every fire', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const stale = { ...preOpenBook, status: 'stale' as const, reason: 'the pre-open book is from 2026-10-12' };
+    const t = makeSvc({ book: BOOK, preOpen: stale });
+    const first = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    const second = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
+    expect(first.skippedNoInput).toBe(5);
+    expect(second.skippedNoInput).toBe(0);
+    expect(warn.mock.calls.filter((c) => /pre-open check .* skipped/.test(String(c[0])))).toHaveLength(5);
+    // The next day is a new window.
+    const nextDay = await t.svc.runWindow(PRE_OPEN_CHECK, ist('2026-10-14', '09:10'));
+    expect(nextDay.skippedNoInput).toBe(5);
+  });
+
+  it('a book that arrives by the 09:11 fire gets the skipped positions checked', async () => {
+    const stale = { ...preOpenBook, status: 'stale' as const, reason: 'old' };
+    const t = makeSvc({ book: BOOK, preOpen: stale });
+    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    t.evidence.preOpen.mockResolvedValue(preOpenBook);
+    await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
+    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['rel-fut', 'rel-opt']);
+  });
+
+  it('a stale book is no book: nothing is judged, each position skipped with the reason', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const stale = { ...preOpenBook, status: 'stale' as const, reason: 'the pre-open book is from 2026-10-12' };
+    const t = makeSvc({ book: BOOK, preOpen: stale });
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(report.skippedNoInput).toBe(5);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/stale/);
+  });
+
+  it('anything still queued at 09:15 is dropped, never judged', async () => {
+    const t = makeSvc({ book: BOOK, preOpen: preOpenBook });
+    t.svc.clockNow = () => ist(TUE, '09:15');
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:14'));
+    expect(report).toEqual(expect.objectContaining({ droppedAtOpen: 2, judged: 0 }));
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+  });
+
+  it('once per position per day: the 09:11 repeat judges nothing, a restart finds the rows', async () => {
+    const done = new Set<string>();
+    const t = makeSvc({ book: BOOK, preOpen: preOpenBook, done });
+    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    const again = await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
+    expect(again).toEqual(expect.objectContaining({ judged: 0, alreadyDone: 2 }));
+    const restarted = makeSvc({ book: BOOK, preOpen: preOpenBook, done });
+    await restarted.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:11'));
+    expect(restarted.judgeOvernight).not.toHaveBeenCalled();
+    expect(t.judgeOvernight).toHaveBeenCalledTimes(2);
+  });
+
+  it('goes through the shared judge cap, under its own tag, apart from the 08:30 review', async () => {
+    const t = makeSvc({ book: BOOK, preOpen: preOpenBook });
+    await t.svc.runWindow(PRE_OPEN, ist(TUE, '08:30'));
+    await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    const kinds = t.record.mock.calls.map((c) => c[0].triggeredBy[0]);
+    expect(kinds.filter((k) => k === 'PRE_OPEN_CHECK')).toHaveLength(2);
+    expect(kinds.filter((k) => k === 'PRE_OPEN_REVIEW').length).toBeGreaterThan(0);
+    expect(t.runShared).toHaveBeenCalledTimes(t.record.mock.calls.length);
+  });
+
+  it('with the pre-open source switched off (never fetched), the check judges nothing — no paid call without its input', async () => {
+    const t = makeSvc({ book: BOOK, preOpen: unavailableSnapshot('market cues are switched off (MARKET_CUES_ENABLED is not true)').preOpen });
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(report).toEqual(expect.objectContaining({ picked: 0, judged: 0 }));
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(t.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a fetch that FAILED judges nothing; every position is skipped naming the failure', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const failed = { ...unavailableSnapshot('x').preOpen, fetchedAt: AT_0912.toISOString(), reason: 'NSE pre-open: HTTP 503' };
+    const t = makeSvc({ book: BOOK, preOpen: failed });
+    const report = await t.svc.runWindow(PRE_OPEN_CHECK, AT_0912);
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+    expect(report.skippedNoInput).toBe(5);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/HTTP 503/);
+  });
+
+  it('does nothing outside 09:08–09:15 or on a holiday — does not even read the book', async () => {
+    const t = makeSvc({ book: BOOK, preOpen: preOpenBook });
+    await t.svc.runWindow(PRE_OPEN_CHECK, ist(TUE, '09:05'));
+    await t.svc.runWindow(PRE_OPEN_CHECK, ist('2026-10-20', '09:10'));
+    expect(t.evidence.preOpen).not.toHaveBeenCalled();
+    expect(t.findMany).not.toHaveBeenCalled();
   });
 });

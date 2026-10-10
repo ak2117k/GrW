@@ -122,7 +122,7 @@ describe('SentinelVerdictRepository — the live cycle never mistakes an overnig
   const findMany = jest.fn().mockResolvedValue([]);
   const repo = new SentinelVerdictRepository({ sentinelVerdict: { findMany } } as any);
 
-  it('liveOnly excludes rows written by either overnight window', async () => {
+  it('liveOnly excludes rows written by any overnight window, the 09:10 pre-open check included', async () => {
     await repo.recentForTracker('t1', 1, { liveOnly: true });
     expect(findMany).toHaveBeenCalledWith({
       where: {
@@ -130,6 +130,7 @@ describe('SentinelVerdictRepository — the live cycle never mistakes an overnig
         NOT: [
           { triggeredBy: { array_contains: ['OVERNIGHT_REVIEW'] } },
           { triggeredBy: { array_contains: ['PRE_OPEN_REVIEW'] } },
+          { triggeredBy: { array_contains: ['PRE_OPEN_CHECK'] } },
         ],
       },
       orderBy: { createdAt: 'desc' },

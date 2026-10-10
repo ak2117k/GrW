@@ -190,6 +190,106 @@ describe('ContextPacketService', () => {
     }
   });
 
+  it('with market cues switched off, macro is EXACTLY the pre-cues (v2) packet', async () => {
+    const off = { enabled: false } as any;
+    const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => off } as any);
+    const withOff = await s.build(entry, tick, null);
+    const without = await svc.build(entry, tick, null);
+    expect(withOff.macro).toEqual(without.macro);
+    expect(without.macro.fiiDii).toEqual({
+      available: false,
+      reason:
+        'context-scoring factor is a stub (returns isStub: true) — no real data behind it. Note FII/DII is published post-close and can never be an intraday trigger.',
+    });
+    expect(without.macro.globalCues).toEqual({
+      available: false,
+      reason: 'context-scoring factor is a stub (returns isStub: true) — no real data behind it (gold, crude-oil, nasdaq)',
+    });
+  });
+
+  describe('macro from the market-cues cache (read only, no I/O)', () => {
+    const rec = (values: unknown, over: Record<string, unknown> = {}) => ({
+      values,
+      sourceTime: '2026-10-09T21:15:59.000Z',
+      fetchedAt: '2026-10-12T02:55:00.000Z',
+      basis: 'previous US session close',
+      source: 'Yahoo Finance v8 chart',
+      status: 'ok',
+      ...over,
+    });
+    const none = { values: null, sourceTime: null, fetchedAt: null, basis: '', source: '', status: 'unavailable', reason: 'not fetched yet in this process' };
+    const snapshot = {
+      enabled: true,
+      us: {
+        nasdaq: rec({ symbol: '^IXIC', last: 27366.17, previousClose: 27193.34, change: 172.83, changePercent: 0.64 }),
+        sp500: none,
+        dow: none,
+        nasdaqFutures: rec({ symbol: 'NQ=F', last: 31108.75, previousClose: 30969.5, change: 139.25, changePercent: 0.45 }, { status: 'stale', reason: 'quote is 600 minutes old' }),
+        sp500Futures: none,
+      },
+      fiiDii: rec(
+        { date: '2026-10-09', fii: { buy: 1, sell: 2, net: -1 }, dii: { buy: 3, sell: 1, net: 2 }, unit: '₹ crore' },
+        { sourceTime: '2026-10-09', source: 'NSE fiidiiTradeReact', basis: 'session date' },
+      ),
+      fiiOi: none,
+      gift: none,
+      preOpen: none,
+    };
+    const giftRec = rec(
+      {
+        gift: { price: 22650, expiry: '2026-11-23', at: '2026-10-27T18:05:00.000Z', dayChange: null },
+        niftyFuture: { close: 22612.6, expiry: '2026-10-27', sessionDate: '2026-10-27', closedAt: null },
+        gap: null,
+        gapPercent: null,
+        expiryMatches: false,
+        comparison: 'futures-vs-futures gap',
+      },
+      { status: 'stale', reason: 'expiry mismatch (GIFT 2026-11-23 vs NSE 2026-10-27)', sourceTime: '2026-10-27T18:05:00.000Z' },
+    );
+
+    it('globalCues.giftNifty carries both expiries and expiryMatches', async () => {
+      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => ({ ...snapshot, gift: giftRec }) } as any);
+      const packet = await s.build(entry, tick, null);
+      const g = packet.macro.globalCues.available ? (packet.macro.globalCues.value as Record<string, any>).giftNifty : null;
+      expect(g.value).toEqual(
+        expect.objectContaining({ giftExpiry: '2026-11-23', niftyFutureExpiry: '2026-10-27', expiryMatches: false, gap: null, status: 'stale', note: expect.stringMatching(/expiry mismatch/) }),
+      );
+    });
+
+    it('fiiDii and globalCues carry the cached readings, each with its own source time and status', async () => {
+      const peek = jest.fn().mockReturnValue(snapshot);
+      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek } as any);
+      const packet = await s.build(entry, tick, null);
+      expect(peek).toHaveBeenCalledTimes(1);
+      expect(packet.macro.fiiDii).toEqual(
+        expect.objectContaining({
+          available: true,
+          at: '2026-10-09',
+          value: expect.objectContaining({ session: '2026-10-09', fii: { buy: 1, sell: 2, net: -1 }, status: 'ok' }),
+        }),
+      );
+      expect(packet.macro.globalCues.available).toBe(true);
+      const g = packet.macro.globalCues.available ? (packet.macro.globalCues.value as Record<string, any>) : {};
+      expect(g.nasdaq).toEqual(expect.objectContaining({ available: true, at: '2026-10-09T21:15:59.000Z', value: expect.objectContaining({ last: 27366.17, status: 'ok' }) }));
+      expect(g.nasdaqFutures.value).toEqual(expect.objectContaining({ status: 'stale', note: expect.stringMatching(/600 minutes/) }));
+      expect(g.sp500).toEqual({ available: false, reason: expect.stringMatching(/not fetched/) });
+      expect(g.giftNifty).toEqual({ available: false, reason: expect.stringMatching(/not fetched/) });
+      expect(packet.macro.sector.available).toBe(false);
+    });
+
+    it('an enabled cache holding nothing says why, never a zero', async () => {
+      const empty = {
+        ...snapshot,
+        us: Object.fromEntries(Object.keys(snapshot.us).map((k) => [k, none])),
+        fiiDii: none,
+      };
+      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => empty } as any);
+      const packet = await s.build(entry, tick, null);
+      expect(packet.macro.fiiDii).toEqual({ available: false, reason: expect.stringMatching(/not fetched yet/) });
+      expect(packet.macro.globalCues).toEqual({ available: false, reason: expect.stringMatching(/not fetched yet/) });
+    });
+  });
+
   it('always includes the money block with net P&L and the green floor', async () => {
     const packet = await svc.build(entry, tick, null);
     expect(packet.money.grossPnl).toBe((120 - 100) * 100);

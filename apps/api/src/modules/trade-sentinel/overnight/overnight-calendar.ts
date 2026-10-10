@@ -31,7 +31,7 @@ import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.serv
 import { isDerivativeSegment, segmentFor } from '../charges';
 import type { RosterEntry } from '../services/roster.service';
 
-export type ReviewKind = 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW';
+export type ReviewKind = 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | 'PRE_OPEN_CHECK';
 export type ReviewVenue = 'EQUITY' | 'MCX' | 'ALL';
 
 export interface ReviewWindow {
@@ -42,6 +42,12 @@ export interface ReviewWindow {
 export const AFTER_CLOSE_EQUITY: ReviewWindow = { kind: 'OVERNIGHT_REVIEW', venue: 'EQUITY' };
 export const AFTER_CLOSE_MCX: ReviewWindow = { kind: 'OVERNIGHT_REVIEW', venue: 'MCX' };
 export const PRE_OPEN: ReviewWindow = { kind: 'PRE_OPEN_REVIEW', venue: 'ALL' };
+/**
+ * The 09:10 pre-open CHECK: a light second look at NSE F&O positions once the
+ * NSE pre-open has matched (09:08) and before the 09:15 open, on the pre-open
+ * IEP. Equity venues only — MCX has no price-discovery pre-open.
+ */
+export const PRE_OPEN_CHECK: ReviewWindow = { kind: 'PRE_OPEN_CHECK', venue: 'EQUITY' };
 
 /**
  * The crons, six-field (seconds first), weekdays only, evaluated in IST.
@@ -64,6 +70,12 @@ export const OVERNIGHT_CRON_EQUITY = '0 45,50,55 15 * * 1-5';
 export const OVERNIGHT_CRON_MCX = '0 45,50,55,58 23 * * 1-5';
 export const OVERNIGHT_CRON_MCX_LATE = '0 3,8 0 * * 2-6';
 export const PRE_OPEN_CRON = '0 30,35,40 8 * * 1-5';
+/**
+ * 09:10 (the market-cues pre-open snapshot's minute), repeated at 09:11. Not later: no
+ * judge job may START within CLI_TIMEOUT_MS (180 s) of the 09:15 open, so 09:12:00
+ * is the last possible start.
+ */
+export const PRE_OPEN_CHECK_CRON = '0 10,11 9 * * 1-5';
 
 /**
  * The default clock: the shipped holiday calendar, NO late-close season. The
@@ -138,7 +150,8 @@ export function selectForWindow(
  *  - after-close: the clock says closed (so a 23:45 fire in the 23:55 season
  *    is refused) and the last close is within {@link AFTER_CLOSE_GRACE_MS};
  *  - pre-open: a trading day, before the venue's first print — 09:00 for MCX
- *    (its open) and for NSE/BSE and their F&O (the cash pre-open begins then).
+ *    (its open) and for NSE/BSE and their F&O (the cash pre-open begins then);
+ *  - pre-open check: an equity venue on a trading day, 09:08–09:15.
  */
 export function reviewWindowIsClosed(
   window: ReviewWindow,
@@ -153,8 +166,16 @@ export function reviewWindowIsClosed(
   }
   if (!clock.isTradingDay(exchange, now)) return false;
   const minutes = Math.floor((now.getTime() - istMidnightOf(istYmd(now))) / 60_000);
+  if (window.kind === 'PRE_OPEN_CHECK') {
+    return venueOf(exchange) === 'EQUITY' && minutes >= PRE_OPEN_MATCHED_MIN && minutes < EQUITY_OPEN_MIN;
+  }
   return minutes < PRE_OPEN_FIRST_PRINT_MIN;
 }
+
+/** 09:08 IST: the NSE pre-open order entry has closed and the IEP is set. */
+const PRE_OPEN_MATCHED_MIN = 9 * 60 + 8;
+/** 09:15 IST: the NSE/BSE normal session opens — the pre-open check is dropped from here. */
+const EQUITY_OPEN_MIN = 9 * 60 + 15;
 
 /** 09:00 IST: MCX opens, and the NSE/BSE pre-open order collection begins. */
 const PRE_OPEN_FIRST_PRINT_MIN = 9 * 60;

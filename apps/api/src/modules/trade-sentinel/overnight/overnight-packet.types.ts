@@ -34,13 +34,26 @@ export type OvernightSection = {
   decay: Block<OvernightDecay>;
   greeks: Block<OvernightGreeks>;
   preOpenPrice: Block<number>;
+  /** The 09:10 pre-open check's IEP read for this position (labelled by what it prices); absent in every other window. */
+  preOpenGap: Block<Prisma.InputJsonValue>;
   news: Block<Prisma.InputJsonValue>;
   oi: Block<Prisma.InputJsonValue>;
   marketCues: {
+    /** US indices: the previous US session close (Nasdaq Composite, S&P 500, Dow). */
     nasdaq: Block<Cue>;
+    sp500: Block<Cue>;
+    dow: Block<Cue>;
+    /** US index futures overnight, at their own quote time. */
+    nasdaqFutures: Block<Cue>;
+    sp500Futures: Block<Cue>;
+    /** GIFT Nifty vs the NSE NIFTY current-month future close — futures-vs-futures. */
+    giftNifty: Block<Prisma.InputJsonValue>;
+    /** FII/DII cash-market flows (₹ crore) for the latest published session. */
+    fiiFlows: Block<Prisma.InputJsonValue>;
+    /** FII index futures / index call / index put positioning, and its change. */
+    fiiDerivatives: Block<Prisma.InputJsonValue>;
     crudeOil: Block<Cue>;
     gold: Block<Cue>;
-    fiiFlows: Block<Cue>;
     indiaVix: Block<Cue>;
     sectorStrength: Block<Prisma.InputJsonValue>;
     underlyingChange: Block<Cue>;

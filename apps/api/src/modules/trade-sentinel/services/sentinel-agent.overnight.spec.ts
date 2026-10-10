@@ -1,6 +1,6 @@
 import { SentinelAgentService, type OvernightVerdict } from './sentinel-agent.service';
 import { absent, present, type ContextPacket } from './context-packet.service';
-import { SENTINEL_SYSTEM_PROMPT } from '../prompts/sentinel-system-prompt';
+import { SENTINEL_SYSTEM_PROMPT, SENTINEL_SYSTEM_PROMPT_NO_CUES } from '../prompts/sentinel-system-prompt';
 import {
   SENTINEL_OVERNIGHT_PROMPT_VERSION,
   SENTINEL_OVERNIGHT_SYSTEM_PROMPT,
@@ -66,13 +66,20 @@ const overnight: OvernightSection = {
   ),
   greeks: present({ delta: 0.52, gamma: 0.001, theta: -24, vega: 9.1, iv: 13.2 }, 'options-chain.service greeks', AT),
   preOpenPrice: absent('after-close review — the next pre-open has not happened'),
+  preOpenGap: absent('only the 09:10 pre-open check reads an NSE pre-open IEP'),
   news: present({ items: [], stale: false }, 'news-aggregator.service', AT),
   oi: present({ pcr: present(0.82, 'options-chain.service getPCR', AT) }, 'options-chain.service', AT),
   marketCues: {
-    nasdaq: absent('nasdaq.factor is a stub'),
+    nasdaq: present({ value: 27366.17, change: 172.83, changePercent: 0.64, direction: 'UP', ageMinutes: 1100, basis: 'previous session close', status: 'ok' }, 'Yahoo', AT),
+    sp500: absent('not fetched yet'),
+    dow: absent('not fetched yet'),
+    nasdaqFutures: present({ value: 31108.75, change: -60, changePercent: -0.19, direction: 'DOWN', ageMinutes: 5, basis: 'quote time', status: 'ok' }, 'Yahoo', AT),
+    sp500Futures: absent('not fetched yet'),
+    giftNifty: absent('GIFT Nifty is read in the 23:45 and 08:30 reviews'),
+    fiiDerivatives: present({ session: '2026-10-09', indexFutures: { long: 1, short: 2, net: -1 } }, 'NSE participant OI', '2026-10-09'),
     crudeOil: present({ value: 5600, change: -84, changePercent: -1.5, direction: 'DOWN', ageMinutes: 5, basis: 'quote time' }, 'commodities', AT),
     gold: absent('no quote'),
-    fiiFlows: absent('fii.factor is a stub'),
+    fiiFlows: present({ session: '2026-10-09', fii: { buy: 1, sell: 2, net: -1 }, todaysFigure: 'not yet published (NSE publishes ~18:00–20:00 IST)' }, 'NSE fiidiiTradeReact', '2026-10-09'),
     indiaVix: present({ value: 13.4, change: 0.6, changePercent: 4.7, direction: 'UP', ageMinutes: 0, basis: 'previous session close' }, 'market-context.service', AT),
     sectorStrength: absent('underlying is an index'),
     underlyingChange: absent('no previous close'),
@@ -99,7 +106,7 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
   beforeEach(() => jest.clearAllMocks());
 
   it('stamps its own prompt version, distinct from the live one', () => {
-    expect(svc.overnightPromptVersion).toBe('o3/t1');
+    expect(svc.overnightPromptVersion).toBe('o4/t1');
     expect(svc.overnightPromptVersion).toBe(`${SENTINEL_OVERNIGHT_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
     expect(svc.overnightPromptVersion).not.toBe(svc.promptVersion);
   });
@@ -117,6 +124,7 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
     const args = create.mock.calls[0][0];
     expect(args.system[0].text).toBe(SENTINEL_OVERNIGHT_SYSTEM_PROMPT);
     expect(args.system[0].text).not.toBe(SENTINEL_SYSTEM_PROMPT);
+    expect(args.system[0].text).not.toBe(SENTINEL_SYSTEM_PROMPT_NO_CUES);
     expect(args.output_config.format.schema.properties.verdict.enum).toEqual([
       'HOLD_OVERNIGHT',
       'EXIT_AT_OPEN',
@@ -174,7 +182,7 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
       }),
     );
     await expect(svc.judge(live)).resolves.toMatchObject({ verdict: 'HOLD' });
-    expect(create.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT);
+    expect(create.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT_NO_CUES);
   });
 
   describe('the overnight prompt names the overnight fields as they are', () => {
@@ -204,6 +212,19 @@ describe('SentinelAgentService.judgeOvernight — the overnight verdict set', ()
     it('does not present underlyingChange as an overnight move, and explains cue bases', () => {
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/underlyingChange is the underlying's last session close vs the session before[^.]*NOT an overnight move/);
       expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/previous session close/);
+    });
+
+    it('does not call a mid-session US value a close', () => {
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/session "intraday"/);
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/at 23:45 IST the US market is open/);
+    });
+
+    it('describes the 09:10 check, the IEP label, the futures-vs-futures GIFT gap and unpublished FII', () => {
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/PRE_OPEN_CHECK runs at 09:10/);
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/never the option's price/);
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/futures-vs-futures gap/);
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).toMatch(/not yet published/);
+      expect(SENTINEL_OVERNIGHT_SYSTEM_PROMPT).not.toMatch(/stub/);
     });
 
     it('tells the judge to weigh gap risk, OI build-up and theta against the open plan', () => {

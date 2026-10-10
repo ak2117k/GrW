@@ -1,0 +1,115 @@
+{
+ "declines": 31,
+ "unchanged": 19,
+ "advances": 163,
+ "timestamp": "09-Oct-2026 09:09:49",
+ "totalTradedValue": 2060582849,
+ "totalmarketcap": 158878258933798.75,
+ "totalTradedVolume": 5764281,
+ "data": [
+  {
+   "metadata": {
+    "symbol": "APOLLOHOSP",
+    "identifier": "APOLLOHOSPEQN",
+    "series": "EQ",
+    "purpose": null,
+    "lastPrice": 7950,
+    "change": 284,
+    "pChange": 3.7,
+    "previousClose": 7666,
+    "finalQuantity": 8787,
+    "totalTurnover": 69856650,
+    "marketCap": 815939660188.54,
+    "yearHigh": 9070.5,
+    "yearLow": 6696.5,
+    "iep": 7950
+   },
+   "detail": {
+    "preOpenMarket": {
+     "IEP": 7950,
+     "finalPrice": 7950,
+     "lastUpdateTime": "09-Oct-2026 09:09:49",
+     "prevClose": 7666
+    }
+   }
+  },
+  {
+   "metadata": {
+    "symbol": "HDFCBANK",
+    "identifier": "HDFCBANKEQN",
+    "series": "EQ",
+    "purpose": null,
+    "lastPrice": 696.6,
+    "change": 4.35,
+    "pChange": 0.63,
+    "previousClose": 692.25,
+    "finalQuantity": 275873,
+    "totalTurnover": 192173131,
+    "marketCap": 10649557630137.46,
+    "yearHigh": 1020.5,
+    "yearLow": 681.9,
+    "iep": 696.6
+   },
+   "detail": {
+    "preOpenMarket": {
+     "IEP": 696.6,
+     "finalPrice": 696.6,
+     "lastUpdateTime": "09-Oct-2026 09:09:50",
+     "prevClose": 692.25
+    }
+   }
+  },
+  {
+   "metadata": {
+    "symbol": "SBIN",
+    "identifier": "SBINEQN",
+    "series": "EQ",
+    "purpose": null,
+    "lastPrice": 942,
+    "change": 2,
+    "pChange": 0.21,
+    "previousClose": 940,
+    "finalQuantity": 15588,
+    "totalTurnover": 14683896,
+    "marketCap": 3882488202491.96,
+    "yearHigh": 1234.7,
+    "yearLow": 857.25,
+    "iep": 942
+   },
+   "detail": {
+    "preOpenMarket": {
+     "IEP": 942,
+     "finalPrice": 942,
+     "lastUpdateTime": "09-Oct-2026 09:10:03",
+     "prevClose": 940
+    }
+   }
+  },
+  {
+   "metadata": {
+    "symbol": "RELIANCE",
+    "identifier": "RELIANCEEQN",
+    "series": "EQ",
+    "purpose": null,
+    "lastPrice": 1179,
+    "change": 1,
+    "pChange": 0.08,
+    "previousClose": 1178,
+    "finalQuantity": 142519,
+    "totalTurnover": 168029901,
+    "marketCap": 7861758818758.02,
+    "yearHigh": 1611.8,
+    "yearLow": 1160.2,
+    "iep": 1179
+   },
+   "detail": {
+    "preOpenMarket": {
+     "IEP": 1179,
+     "finalPrice": 1179,
+     "lastUpdateTime": "09-Oct-2026 09:09:50",
+     "prevClose": 1178
+    }
+   }
+  }
+ ]
+}

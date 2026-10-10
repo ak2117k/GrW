@@ -62,6 +62,26 @@ interface OptionContract {
 /** Cache TTL: 30 minutes */
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * NSE wait for hot-path callers (the default): the sentinel's per-tick
+ * OI-wall poll and chart S/R evidence (via OiWallService), the 30 s sweeps
+ * (open-paper-trade refresher, watch-monitor strike pick), the signal scans
+ * (index volume ratio, strike selection) and the market-context snapshot
+ * taken inline in trade execution between the broker fill and the DB write.
+ * A timed-out fetch still completes and fills the NSE service's 30 s cache,
+ * so the next call is served from it.
+ */
+const NSE_HOT_PATH_TIMEOUT_MS = 3000;
+
+export interface OptionsChainFetchOptions {
+  /**
+   * Chain-snapshot or user-request caller (the /options REST endpoints) that
+   * can afford the longer NSE wait (NseOptionsChainService.backgroundTimeoutMs,
+   * env NSE_OPTION_CHAIN_TIMEOUT_MS, default 8000 ms). Omit on hot paths.
+   */
+  background?: boolean;
+}
+
 export interface OISummary {
   totalCEOI: number;
   totalPEOI: number;
@@ -209,14 +229,16 @@ export class OptionsChainService {
   async getOptionsChain(
     underlying: string,
     expiry: string,
+    opts: OptionsChainFetchOptions = {},
   ): Promise<OptionsChainEntry[]> {
-    const { chain } = await this.getOptionsChainWithSpot(underlying, expiry);
+    const { chain } = await this.getOptionsChainWithSpot(underlying, expiry, opts);
     return chain;
   }
 
   async getOptionsChainWithSpot(
     underlying: string,
     expiry: string,
+    opts: OptionsChainFetchOptions = {},
   ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number }> {
     // MCX branch: NSE chain API does not apply to commodity options, and
     // the `instrument` DB table is populated only for NFO instruments.
@@ -240,11 +262,15 @@ export class OptionsChainService {
     }
 
     // 2. NSE public chain API — authoritative OI/volume/IV in one call.
-    // Guarded by a short timeout so a slow/blocked NSE response doesn't
-    // stall the request path for ~70 s (Akamai TLS-fingerprint block).
+    // Guarded by a timeout so a slow/blocked NSE response doesn't stall the
+    // request path for ~70 s (Akamai TLS-fingerprint block). Short on hot
+    // paths, longer (env-configurable) for snapshot/background callers.
+    const nseTimeoutMs = opts.background
+      ? this.nseChain.backgroundTimeoutMs
+      : NSE_HOT_PATH_TIMEOUT_MS;
     const nseResult = await this.withTimeout(
       this.nseChain.getChain(underlying, expiry),
-      3000,
+      nseTimeoutMs,
       'NSE direct fetch',
     );
     if (nseResult && nseResult.chain.length > 0) {

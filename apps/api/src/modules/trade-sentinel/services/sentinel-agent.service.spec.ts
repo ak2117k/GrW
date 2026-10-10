@@ -154,6 +154,16 @@ describe('SentinelAgentService', () => {
     expect(SENTINEL_SYSTEM_PROMPT).toMatch(/giftNifty/);
   });
 
+  it('the flag-off prompt IS the v2 text from main, pinned by length and SHA-256', () => {
+    // Hash of SENTINEL_SYSTEM_PROMPT as shipped at 9095047 (v2, 5562 chars).
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { createHash } = require('crypto') as typeof import('crypto');
+    expect(SENTINEL_SYSTEM_PROMPT_NO_CUES).toHaveLength(5562);
+    expect(createHash('sha256').update(SENTINEL_SYSTEM_PROMPT_NO_CUES, 'utf8').digest('hex')).toBe(
+      '084d0a1422f2bdba2f10c1d19bd70dde7c18459461fb0122b7f055c01a3c16ad',
+    );
+  });
+
   it('with market cues on, sends the v3 prompt and stamps v3', async () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const on = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'TRUE' : undefined) } as never);

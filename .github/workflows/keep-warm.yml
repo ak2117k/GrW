@@ -1,51 +1,19 @@
-# Keep-warm — DISABLED ON PURPOSE. Do not re-enable the schedule without reading this.
+# Keep-warm — RETIRED. No schedule; manual dispatch only.
 #
-# WHAT THIS DID: pinged the API every 10 min, 14h/day, 7 days/week, so Render's
-# free web service never hit its ~15-min sleep timer. That fixed a real bug —
-# a cold start takes 30-90s (Node boot + Neon waking), the frontend aborted long
-# before that, and users saw a bogus "Unable to sign in. Please try again."
+# This pinged the API every 10 min so Render's free web service never hit its
+# ~15-min sleep timer (a 30-90s cold start made the frontend show a bogus
+# "Unable to sign in"). It was switched off once to save GitHub Actions minutes
+# and Neon compute, and is now pointless: production moved off Render to the
+# Vyom VPS (https://157-10-98-70.sslip.io), and a VPS process does not sleep.
 #
-# WHY IT IS OFF: it worked, and the bill came due on two tiers at once.
-#
-#   GitHub Actions — each run bills 1 minute (rounded up), so ~84 runs/day was
-#   ~2,520 min/month on its own, against a 2,000-min private-repo allowance.
-#   Together with ml-heartbeat and telegram-heartbeat (~616 min each) that is
-#   ~3,750 min/month. Those two are NOT pings — they sweep signal outcomes and
-#   capture ML labels — so this file is the only one that can be dropped, and
-#   dropping it brings the total to ~1,230 min/month, comfortably under the cap.
-#
-#   Neon compute — the ping hit /healthz, which runs a `SELECT 1` specifically
-#   to wake the autosuspended Postgres compute. Doing that every 10 minutes for
-#   14 hours a day means Neon can never suspend: roughly 420 compute-hours per
-#   month against a free allowance near 192. This cron, working exactly as
-#   designed, was the single largest consumer of the database budget.
-#
-# WHAT REPLACES IT: an external pinger, hitting the new DB-free route.
-#
-#   URL:      https://grw-api.onrender.com/healthz/live
-#   Interval: every 10 minutes (must stay under Render's ~15-min sleep timer)
-#   Where:    UptimeRobot (free, 50 monitors @ 5-min) or cron-job.org (free,
-#             1-min resolution). Both are free and neither consumes CI minutes.
-#
-#   Point it at /healthz/live, NOT /healthz. That is the whole fix: /healthz/live
-#   touches no database, so the Render dyno stays warm while Neon is allowed to
-#   sleep until a real user needs it. Neon's wake is ~1s versus Render's 30-90s
-#   cold start, so the login bug stays fixed either way.
-#
-# TO RE-ENABLE (only if the external pinger is not an option, and only on a
-# public repo where Actions minutes are free): uncomment the `schedule:` block.
-# The ping target below is already correct.
+# The schedule trigger is removed, not commented out: do not add one back. The
+# workflow_dispatch run remains as a one-click liveness check of /healthz/live
+# (no database touched).
 
 name: keep-warm
 
 on:
-  # DISABLED — see the header. Re-enabling this on a private repo will exhaust
-  # the Actions allowance again, and pointing it back at /healthz will exhaust
-  # the Neon compute allowance again.
-  #
-  # schedule:
-  #   - cron: '*/10 0-13 * * *' # every 10 min, ~06:00-19:30 IST, 7 days/week
-  workflow_dispatch: {} # manual run, for testing the endpoint by hand
+  workflow_dispatch: {} # manual run, for checking the endpoint by hand
 
 concurrency:
   group: keep-warm
@@ -55,12 +23,11 @@ jobs:
   ping:
     runs-on: ubuntu-latest
     env:
-      API: https://grw-api.onrender.com
+      API: https://157-10-98-70.sslip.io
     steps:
-      - name: Warm the dyno (no database touched)
+      - name: Check liveness (no database touched)
         run: |
-          # -m 120 tolerates a cold start in progress; --retry rides out the
-          # boot window so a single sleeping dyno doesn't fail the run.
+          # --retry rides out a deploy restart in progress.
           code=$(curl -sS -m 120 --retry 3 --retry-all-errors -o /tmp/live.json -w "%{http_code}" \
             "$API/healthz/live")
           echo "healthz/live HTTP $code"; cat /tmp/live.json 2>/dev/null; echo

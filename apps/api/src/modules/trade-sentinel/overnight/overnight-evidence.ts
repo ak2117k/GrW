@@ -490,6 +490,10 @@ export type Cue = {
   direction: 'UP' | 'DOWN' | 'FLAT' | 'UNKNOWN';
   ageMinutes: number | null;
   basis: CueBasis;
+  /** Set for market-cues readings: 'stale' when the source has not caught up with a later session. */
+  status?: 'ok' | 'stale';
+  /** Why a market-cues reading is stale, or a note that still applies to it. */
+  note?: string;
 };
 
 /** A move under this (percent) reads as FLAT. */

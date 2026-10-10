@@ -127,7 +127,7 @@ describe('SentinelAgentService', () => {
   it('stamps both the verdict prompt and the thesis prompt that filled the packet', () => {
     // The literal, not only the composition — an expectation built purely from
     // the constants under test would still pass if both were empty strings.
-    expect(svc.promptVersion).toBe('v2/t1');
+    expect(svc.promptVersion).toBe('v3/t1');
     expect(svc.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');

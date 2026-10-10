@@ -5,7 +5,7 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * it, because the replay harness cannot attribute a behaviour change to a prompt
  * change without it.
  */
-export const SENTINEL_PROMPT_VERSION = 'v2';
+export const SENTINEL_PROMPT_VERSION = 'v3';
 
 /**
  * What actually goes on the verdict row.
@@ -101,7 +101,9 @@ Reading those fields:
 - SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
 - position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
 - thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
-- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the previous US session's close), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
 - news.freshCount counts headlines in the last 30 minutes.
 - session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
 - session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.

@@ -26,7 +26,9 @@ const chain = [
   { strikePrice: 25200, expiryDate: '2026-10-13', ceData: leg({ oi: 120_000, oiChange: 9_000 }), peData: leg({ oi: 5_000, oiChange: 0 }) },
 ];
 
-function make(opts: { chainService?: boolean; commodities?: boolean; breadth?: boolean } = {}) {
+const cueSnapshot = { enabled: true, marker: 'from-market-cues' };
+
+function make(opts: { chainService?: boolean; commodities?: boolean; breadth?: boolean; cues?: boolean } = {}) {
   const article = (title: string, hhmm: string, over = {}) => ({
     title,
     source: 'LiveMint',
@@ -73,8 +75,14 @@ function make(opts: { chainService?: boolean; commodities?: boolean; breadth?: b
       if (cls.name === 'CommodityRollService' && opts.commodities !== false) return roll;
       if (cls.name === 'MarketQuoteResolver' && opts.commodities !== false) return resolver;
       if (cls.name === 'BreadthSectorService' && opts.breadth !== false) return breadth;
+      if (cls.name === 'MarketCuesService' && opts.cues !== false) return marketCues;
       throw new Error(`no provider ${cls.name}`);
     }),
+  };
+  const marketCues = {
+    ensure: jest.fn().mockImplementation(async (groups: string[]) =>
+      groups.includes('preOpen') ? { preOpen: { status: 'ok', values: { date: '2026-10-13', entries: {} } } } : cueSnapshot,
+    ),
   };
   const marketContext = { getVixHistory: jest.fn().mockResolvedValue({ today: 13.4, yesterday: 12.8 }) };
   const yahoo = {
@@ -98,7 +106,7 @@ function make(opts: { chainService?: boolean; commodities?: boolean; breadth?: b
     { optionChainSnapshot: { findFirst } } as never,
     moduleRef as never,
   );
-  return { adapter, news, chainService, commodities, breadth, marketContext, yahoo, sectors, findFirst };
+  return { adapter, news, chainService, commodities, breadth, marketContext, yahoo, sectors, findFirst, marketCues };
 }
 
 describe('SentinelOvernightEvidenceAdapter.news — stored news since the close, four scopes', () => {
@@ -182,10 +190,32 @@ describe('SentinelOvernightEvidenceAdapter.oi — the end-of-day chain read', ()
 });
 
 describe('SentinelOvernightEvidenceAdapter.cues — the market context', () => {
-  it('states Nasdaq and FII flows as unavailable, with why', async () => {
-    const c = await make().adapter.cues(q());
-    expect(c.nasdaq).toEqual({ reading: null, reason: expect.stringMatching(/nasdaq/i) });
-    expect(c.fiiFlows).toEqual({ reading: null, reason: expect.stringMatching(/fii/i) });
+  it('takes US, FII/DII, FII OI and GIFT from the market-cues service, asking for exactly those groups', async () => {
+    const t = make();
+    const c = await t.adapter.cues(q());
+    expect(c.market).toBe(cueSnapshot);
+    expect(t.marketCues.ensure).toHaveBeenCalledWith(['us', 'fiiDii', 'fiiOi', 'gift'], NOW);
+  });
+
+  it('without the market-cues service, every cue is unavailable and says it is not wired — never zero', async () => {
+    const c = await make({ cues: false }).adapter.cues(q());
+    expect(c.market.enabled).toBe(false);
+    expect(c.market.us.nasdaq).toEqual(expect.objectContaining({ values: null, status: 'unavailable', reason: expect.stringMatching(/not wired/) }));
+    expect(c.market.fiiDii.values).toBeNull();
+  });
+
+  it('a market-cues failure is an unavailable snapshot naming the error', async () => {
+    const t = make();
+    t.marketCues.ensure.mockRejectedValueOnce(new Error('boom'));
+    const c = await t.adapter.cues(q());
+    expect(c.market.gift.reason).toMatch(/market-cues.service failed: boom/);
+  });
+
+  it('preOpen asks the service for today’s pre-open book', async () => {
+    const t = make();
+    const rec = await t.adapter.preOpen(ist('2026-10-13', '09:12'));
+    expect(t.marketCues.ensure).toHaveBeenCalledWith(['preOpen'], ist('2026-10-13', '09:12'));
+    expect(rec.status).toBe('ok');
   });
 
   it('reads crude and gold off the MCX snapshot, and an unquotable one as unavailable — not zero', async () => {

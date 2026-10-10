@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { computeGreenFloor, type Segment, type Side } from '../charges';
 // A VALUE import, deliberately. `import type` is erased, so
@@ -8,6 +8,8 @@ import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repo
 import type { TripwireFire } from '../tripwires/types';
 import type { Ownership, RosterEntry } from './roster.service';
 import { minutesToClose, sessionFor } from '../market-sessions';
+import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
+import type { CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -428,9 +430,11 @@ export type ContextPacket = {
     oiWalls: Block<Prisma.InputJsonValue>;
   };
   macro: {
-    fiiDii: Block<never>;
+    /** The latest published FII/DII cash figures from the market-cues cache — post-close data, never intraday. */
+    fiiDii: Block<Prisma.InputJsonValue>;
     sector: Block<never>;
-    globalCues: Block<never>;
+    /** US closes, US index futures and GIFT Nifty from the market-cues cache, each a nested block with its own time. */
+    globalCues: Block<Prisma.InputJsonValue>;
     realFactors: Block<Record<string, number>>;
   };
   news: {
@@ -484,6 +488,94 @@ export function unresolvedUnderlying(what: string): string {
 
 const STUB_REASON =
   'context-scoring factor is a stub (returns isStub: true) — no real data behind it';
+
+const FII_POST_CLOSE = 'FII/DII is published post-close (~18:00–20:00 IST) and can never be an intraday trigger';
+
+/**
+ * `macro.fiiDii` and `macro.globalCues` from the market-cues cache. Every
+ * reading keeps its OWN source time — never the packet's — and its status; a
+ * cue the cache does not hold is a nested absence with its reason.
+ */
+function macroBlocks(
+  read: { snapshot: MarketCuesSnapshot | null; reason: string },
+  now: Date,
+): { fiiDii: Block<Prisma.InputJsonValue>; globalCues: Block<Prisma.InputJsonValue> } {
+  const snap = read.snapshot;
+  if (!snap) {
+    return {
+      fiiDii: absent(`${read.reason}. Note ${FII_POST_CLOSE}.`),
+      globalCues: absent(`${read.reason} — US closes, US futures and GIFT Nifty are unseen`),
+    };
+  }
+  const f = snap.fiiDii;
+  const fiiDii: Block<Prisma.InputJsonValue> = f.values
+    ? present(
+        {
+          session: f.values.date,
+          unit: f.values.unit,
+          fii: { ...f.values.fii },
+          dii: f.values.dii ? { ...f.values.dii } : null,
+          status: f.status === 'stale' ? 'stale' : 'ok',
+          ...(f.reason ? { note: f.reason } : {}),
+          caution: FII_POST_CLOSE,
+        },
+        `${f.source}; ${f.basis}`,
+        f.sourceTime as string,
+      )
+    : absent(`${f.reason ?? 'no FII/DII reading'}. Note ${FII_POST_CLOSE}.`);
+
+  const us = (r: CueRecord<UsQuote>): Block<Prisma.InputJsonValue> =>
+    r.values
+      ? present(
+          {
+            last: r.values.last,
+            previousClose: r.values.previousClose,
+            change: r.values.change,
+            changePercent: r.values.changePercent,
+            status: r.status === 'stale' ? 'stale' : 'ok',
+            ...(r.reason ? { note: r.reason } : {}),
+          },
+          `${r.source}; ${r.basis}`,
+          r.sourceTime as string,
+        )
+      : absent(r.reason ?? 'no reading');
+  const gift = (r: CueRecord<GiftGap>): Block<Prisma.InputJsonValue> =>
+    r.values
+      ? present(
+          {
+            gift: r.values.gift.price,
+            giftAt: r.values.gift.at,
+            niftyFutureClose: r.values.niftyFuture?.close ?? null,
+            gap: r.values.gap,
+            gapPercent: r.values.gapPercent,
+            comparison: r.values.comparison,
+            status: r.status === 'stale' ? 'stale' : 'ok',
+            ...(r.reason ? { note: r.reason } : {}),
+          },
+          `${r.source}; ${r.basis}`,
+          r.sourceTime as string,
+        )
+      : absent(r.reason ?? 'no reading');
+
+  const parts = {
+    nasdaq: us(snap.us.nasdaq),
+    sp500: us(snap.us.sp500),
+    dow: us(snap.us.dow),
+    nasdaqFutures: us(snap.us.nasdaqFutures),
+    sp500Futures: us(snap.us.sp500Futures),
+    giftNifty: gift(snap.gift),
+  };
+  const shown = Object.values(parts).filter((b) => b.available) as Array<{ at: string }>;
+  const globalCues: Block<Prisma.InputJsonValue> =
+    shown.length === 0
+      ? absent(`no global cue is held: ${Object.values(parts).map((b) => (b.available ? '' : b.reason)).find(Boolean) ?? 'no reading'}`)
+      : present(
+          parts,
+          'market-cues cache (read, not fetched, for the live packet; each nested block carries its own source and time)',
+          shown.map((b) => b.at).sort().slice(-1)[0] ?? now.toISOString(),
+        );
+  return { fiiDii, globalCues };
+}
 
 /**
  * What an evidence shim returns: the value AND its own provenance.
@@ -545,7 +637,18 @@ export class ContextPacketService {
     private readonly verdicts: SentinelVerdictRepository,
     @Inject(CHART_CONTEXT_SHIM) private readonly chartContext: ChartContextShim,
     @Inject(NEWS_SHIM) private readonly news: NewsShim,
+    /** The market-cues cache, read without I/O. Optional: a process without it states macro unavailable. */
+    @Optional() @Inject(MACRO_CUES) private readonly macroCues?: MacroCuesReader,
   ) {}
+
+  private readMacro(now: Date): { snapshot: MarketCuesSnapshot | null; reason: string } {
+    if (!this.macroCues) return { snapshot: null, reason: 'the market-cues service is not wired into this process' };
+    try {
+      return { snapshot: this.macroCues.peek(now), reason: '' };
+    } catch (err) {
+      return { snapshot: null, reason: `the market-cues cache could not be read: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
 
   async build(
     entry: RosterEntry,
@@ -718,11 +821,8 @@ export class ContextPacketService {
               ),
       },
       macro: {
-        fiiDii: absent(
-          `${STUB_REASON}. Note FII/DII is published post-close and can never be an intraday trigger.`,
-        ),
+        ...macroBlocks(this.readMacro(now), now),
         sector: absent(STUB_REASON),
-        globalCues: absent(`${STUB_REASON} (gold, crude-oil, nasdaq)`),
         // The reason travels WITH the emptiness. "No setup on the underlying",
         // "scored but every factor is a stub" and "no level book at all" are
         // three different facts, and the agent reasons differently about each —

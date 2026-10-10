@@ -12,6 +12,7 @@ import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.ser
 import { ANTHROPIC_CLIENT } from './services/sentinel-agent.service';
 import { SentinelOvernightService } from './services/sentinel-overnight.service';
 import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
+import { MACRO_CUES } from './ports/market-cues.port';
 
 /**
  * Every parameter Nest must resolve by an explicit TOKEN rather than by type.
@@ -26,6 +27,7 @@ const TOKEN_PARAMS: Array<[string, unknown, string]> = [
   ['RosterService.ownership', RosterService, ENGINE_OWNERSHIP_PROBE],
   ['ContextPacketService.chartContext', ContextPacketService, CHART_CONTEXT_SHIM],
   ['ContextPacketService.news', ContextPacketService, NEWS_SHIM],
+  ['ContextPacketService.macroCues', ContextPacketService, MACRO_CUES],
   ['ThesisService.client', ThesisService, ANTHROPIC_CLIENT],
   ['ThesisService.chartContext', ThesisService, CHART_CONTEXT_SHIM],
   ['OiWallSnapshotService.oiWall', OiWallSnapshotService, OI_WALL_SOURCE],
@@ -110,6 +112,8 @@ describe('TradeSentinelModule — every token is actually provided', () => {
         'MarketDataModule',
         'SignalGeneratorModule',
         'NewsModule',
+        // The market-cues cache: the live packet's macro and the overnight cues.
+        'MarketCuesModule',
       ]),
     );
   });
@@ -130,6 +134,7 @@ describe('TradeSentinelModule — every interface-typed dependency has a token',
       TICK_SOURCE,
       ANTHROPIC_CLIENT,
       OVERNIGHT_EVIDENCE,
+      MACRO_CUES,
     ];
     expect(new Set(tokens).size).toBe(tokens.length);
   });

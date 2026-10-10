@@ -39,7 +39,7 @@ export interface WatchedPosition {
    * would change the call.
    */
   overnight: {
-    kind: 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW';
+    kind: 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | 'PRE_OPEN_CHECK';
     verdict: string;
     confidence: string;
     thesisStatus: string;
@@ -171,11 +171,12 @@ export class WatchedPositionRepository {
   }
 }
 
-type OvernightKind = 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW';
+type OvernightKind = 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | 'PRE_OPEN_CHECK';
 
 /** Which overnight window wrote a row, read off its `triggeredBy`; null for a live row. */
 function overnightKindOf(triggeredBy: unknown): OvernightKind | null {
   if (!Array.isArray(triggeredBy)) return null;
+  if (triggeredBy.includes('PRE_OPEN_CHECK')) return 'PRE_OPEN_CHECK';
   if (triggeredBy.includes('PRE_OPEN_REVIEW')) return 'PRE_OPEN_REVIEW';
   if (triggeredBy.includes('OVERNIGHT_REVIEW')) return 'OVERNIGHT_REVIEW';
   return null;

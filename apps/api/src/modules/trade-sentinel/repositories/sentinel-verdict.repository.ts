@@ -103,6 +103,7 @@ export class SentinelVerdictRepository {
             NOT: [
               { triggeredBy: { array_contains: ['OVERNIGHT_REVIEW'] } },
               { triggeredBy: { array_contains: ['PRE_OPEN_REVIEW'] } },
+              { triggeredBy: { array_contains: ['PRE_OPEN_CHECK'] } },
             ],
           }
         : { trackerId },

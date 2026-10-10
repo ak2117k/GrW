@@ -20,6 +20,7 @@ import type { Prisma } from '@prisma/client';
 import type { Segment } from '../charges';
 import type { CueBasis, NewsEvidence, ParsedOption, RawOiAnalysis } from '../overnight/overnight-evidence';
 import type { OvernightGreeks } from '../overnight/overnight-packet.types';
+import type { CueRecord, MarketCuesSnapshot, PreOpenBook } from '../../market-cues/market-cues.types';
 
 export interface OvernightEvidenceQuery {
   userId: string;
@@ -48,10 +49,14 @@ export type RawCue =
   | { reading: null; reason: string };
 
 export interface RawCues {
-  nasdaq: RawCue;
+  /**
+   * US closes and futures, FII/DII, FII index OI and GIFT Nifty from the
+   * market-cues service — each record with its own source time, basis and
+   * status. All 'unavailable' (with the reason) when the service is off.
+   */
+  market: MarketCuesSnapshot;
   crudeOil: RawCue;
   gold: RawCue;
-  fiiFlows: RawCue;
   indiaVix: RawCue;
   underlyingChange: RawCue;
   sectorStrength:
@@ -69,6 +74,8 @@ export interface OvernightEvidenceSource {
   news(q: OvernightEvidenceQuery): Promise<NewsEvidence>;
   oi(q: OvernightEvidenceQuery): Promise<RawOiEvidence>;
   cues(q: OvernightEvidenceQuery): Promise<RawCues>;
+  /** Today's NSE pre-open book (IEP per symbol) for the 09:12 check; fetched if this process has not got today's. */
+  preOpen(now: Date): Promise<CueRecord<PreOpenBook>>;
 }
 
 /** DI token — an interface cannot be resolved by type. */

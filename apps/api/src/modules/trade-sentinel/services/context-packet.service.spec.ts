@@ -177,17 +177,81 @@ describe('ContextPacketService', () => {
       side: t.side,
     }).floorPrice as number;
 
-  it('marks every stubbed macro factor unavailable with a stated reason', async () => {
+  it('without the market-cues reader, macro is unavailable with a stated reason; sector stays a stub', async () => {
     const packet = await svc.build(entry, tick, null);
     for (const block of [packet.macro.fiiDii, packet.macro.sector, packet.macro.globalCues]) {
       expect(block.available).toBe(false);
-      if (!block.available) expect(block.reason).toMatch(/stub/i);
     }
+    if (!packet.macro.sector.available) expect(packet.macro.sector.reason).toMatch(/stub/i);
+    if (!packet.macro.globalCues.available) expect(packet.macro.globalCues.reason).toMatch(/market-cues/);
     // FII/DII is post-close data; the agent must never treat it as intraday.
-    expect(packet.macro.fiiDii.available).toBe(false);
     if (!packet.macro.fiiDii.available) {
       expect(packet.macro.fiiDii.reason).toMatch(/post-close/i);
     }
+  });
+
+  describe('macro from the market-cues cache (read only, no I/O)', () => {
+    const rec = (values: unknown, over: Record<string, unknown> = {}) => ({
+      values,
+      sourceTime: '2026-10-09T21:15:59.000Z',
+      fetchedAt: '2026-10-12T02:55:00.000Z',
+      basis: 'previous US session close',
+      source: 'Yahoo Finance v8 chart',
+      status: 'ok',
+      ...over,
+    });
+    const none = { values: null, sourceTime: null, fetchedAt: null, basis: '', source: '', status: 'unavailable', reason: 'not fetched yet in this process' };
+    const snapshot = {
+      enabled: true,
+      us: {
+        nasdaq: rec({ symbol: '^IXIC', last: 27366.17, previousClose: 27193.34, change: 172.83, changePercent: 0.64 }),
+        sp500: none,
+        dow: none,
+        nasdaqFutures: rec({ symbol: 'NQ=F', last: 31108.75, previousClose: 30969.5, change: 139.25, changePercent: 0.45 }, { status: 'stale', reason: 'quote is 600 minutes old' }),
+        sp500Futures: none,
+      },
+      fiiDii: rec(
+        { date: '2026-10-09', fii: { buy: 1, sell: 2, net: -1 }, dii: { buy: 3, sell: 1, net: 2 }, unit: '₹ crore' },
+        { sourceTime: '2026-10-09', source: 'NSE fiidiiTradeReact', basis: 'session date' },
+      ),
+      fiiOi: none,
+      gift: none,
+      preOpen: none,
+    };
+
+    it('fiiDii and globalCues carry the cached readings, each with its own source time and status', async () => {
+      const peek = jest.fn().mockReturnValue(snapshot);
+      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek } as any);
+      const packet = await s.build(entry, tick, null);
+      expect(peek).toHaveBeenCalledTimes(1);
+      expect(packet.macro.fiiDii).toEqual(
+        expect.objectContaining({
+          available: true,
+          at: '2026-10-09',
+          value: expect.objectContaining({ session: '2026-10-09', fii: { buy: 1, sell: 2, net: -1 }, status: 'ok' }),
+        }),
+      );
+      expect(packet.macro.globalCues.available).toBe(true);
+      const g = packet.macro.globalCues.available ? (packet.macro.globalCues.value as Record<string, any>) : {};
+      expect(g.nasdaq).toEqual(expect.objectContaining({ available: true, at: '2026-10-09T21:15:59.000Z', value: expect.objectContaining({ last: 27366.17, status: 'ok' }) }));
+      expect(g.nasdaqFutures.value).toEqual(expect.objectContaining({ status: 'stale', note: expect.stringMatching(/600 minutes/) }));
+      expect(g.sp500).toEqual({ available: false, reason: expect.stringMatching(/not fetched/) });
+      expect(g.giftNifty).toEqual({ available: false, reason: expect.stringMatching(/not fetched/) });
+      expect(packet.macro.sector.available).toBe(false);
+    });
+
+    it('a switched-off cache says so, never a zero', async () => {
+      const off = {
+        ...snapshot,
+        enabled: false,
+        us: Object.fromEntries(Object.keys(snapshot.us).map((k) => [k, { ...none, reason: 'MARKET_CUES_ENABLED is not true' }])),
+        fiiDii: { ...none, reason: 'MARKET_CUES_ENABLED is not true' },
+      };
+      const s = new ContextPacketService({ recentForTracker } as any, { levelsFor } as any, { recentFor } as any, { peek: () => off } as any);
+      const packet = await s.build(entry, tick, null);
+      expect(packet.macro.fiiDii).toEqual({ available: false, reason: expect.stringMatching(/MARKET_CUES_ENABLED/) });
+      expect(packet.macro.globalCues).toEqual({ available: false, reason: expect.stringMatching(/MARKET_CUES_ENABLED/) });
+    });
   });
 
   it('always includes the money block with net P&L and the green floor', async () => {

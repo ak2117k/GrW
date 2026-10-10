@@ -25,6 +25,8 @@ import {
   OVERNIGHT_CRON_MCX,
   OVERNIGHT_CRON_MCX_LATE,
   PRE_OPEN,
+  PRE_OPEN_CHECK,
+  PRE_OPEN_CHECK_CRON,
   PRE_OPEN_CRON,
   makeSentinelClock,
   reviewWindowIsClosed,
@@ -45,6 +47,9 @@ import {
   type NewsEvidence,
 } from '../overnight/overnight-evidence';
 import type { OvernightGreeks, OvernightPacket, OvernightSection } from '../overnight/overnight-packet.types';
+import { marketCueBlocks, preOpenGapBlock } from '../overnight/market-cue-blocks';
+import { selectForPreOpenCheck, type PreOpenMatch } from '../overnight/pre-open-check';
+import type { PreOpenBook } from '../../market-cues/market-cues.types';
 import type { SessionClock } from '../../market-hub/session-clock';
 import {
   OVERNIGHT_EVIDENCE,
@@ -75,8 +80,16 @@ export interface SectionInputs {
   news: Sourced<NewsEvidence>;
   oi: Sourced<RawOiEvidence>;
   cues: Sourced<RawCues>;
+  /** The 09:12 check's IEP for this position, or why there is none. Ignored by every other window. */
+  preOpen?: PreOpenInput;
   /** The venue clock (holidays + MCX late close). Defaults to the shipped calendar. */
   clock?: SessionClock;
+}
+
+export interface PreOpenInput {
+  match: PreOpenMatch | null;
+  /** Why the book could not be used (stale, unavailable), or null. */
+  reason: string | null;
 }
 
 export interface WindowReport {
@@ -167,7 +180,7 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
   }
 
   const preOpenPrice =
-    window.kind === 'PRE_OPEN_REVIEW'
+    window.kind !== 'OVERNIGHT_REVIEW'
       ? preOpenPriceBlock(exchange, now, { price: tick.ltp, at: tick.ltpAt ?? null })
       : absent(
           'after-close review — the next session’s pre-open has not happened yet, so no pre-open or ' +
@@ -187,10 +200,9 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
   if (input.cues.ok) {
     const c = input.cues.value;
     marketCues = {
-      nasdaq: cue(c.nasdaq),
+      ...marketCueBlocks(c.market, window, now),
       crudeOil: cue(c.crudeOil),
       gold: cue(c.gold),
-      fiiFlows: cue(c.fiiFlows),
       indiaVix: cue(c.indiaVix),
       sectorStrength:
         c.sectorStrength.value !== null
@@ -202,9 +214,15 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
     const failed = absent(`market-cue sources failed: ${input.cues.error}`);
     marketCues = {
       nasdaq: failed,
+      sp500: failed,
+      dow: failed,
+      nasdaqFutures: failed,
+      sp500Futures: failed,
+      giftNifty: failed,
+      fiiFlows: failed,
+      fiiDerivatives: failed,
       crudeOil: failed,
       gold: failed,
-      fiiFlows: failed,
       indiaVix: failed,
       sectorStrength: failed,
       underlyingChange: failed,
@@ -225,6 +243,7 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
     decay,
     greeks,
     preOpenPrice,
+    preOpenGap: preOpenGapBlock(window, input.preOpen?.match ?? null, input.preOpen?.reason ?? null),
     news,
     oi,
     marketCues,
@@ -249,7 +268,9 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
  * ONCE PER POSITION PER WINDOW, durably: the window tag is written into the
  * row's `triggeredBy` and checked before judging (a restart finds it), and an
  * in-process claim stops two overlapping fires from judging the same position
- * twice. About two calls per position per day.
+ * twice. About two calls per position per day, plus the 09:12 pre-open check
+ * for NSE futures (and options whose underlying has a pre-open IEP) when the
+ * market-cues pre-open source is on.
  */
 @Injectable()
 export class SentinelOvernightService {
@@ -311,6 +332,16 @@ export class SentinelOvernightService {
     await this.fire(PRE_OPEN);
   }
 
+  /**
+   * 09:12 (repeats 09:13, 09:14): the light pre-open CHECK on the NSE pre-open
+   * IEP. Same machinery as the reviews — idempotent per position per day,
+   * through the shared judge cap, dropped if still queued at 09:15.
+   */
+  @Cron(PRE_OPEN_CHECK_CRON, { timeZone: 'Asia/Kolkata' })
+  async preOpenCheck(): Promise<void> {
+    await this.fire(PRE_OPEN_CHECK);
+  }
+
   /** A scheduled fire never throws into the scheduler. */
   private async fire(window: ReviewWindow): Promise<void> {
     try {
@@ -349,6 +380,16 @@ export class SentinelOvernightService {
     const claims = this.claimed.get(tag) ?? new Set<string>();
     this.claimed.set(tag, claims);
 
+    // The 09:12 check reads today's NSE pre-open book first: it decides which
+    // options qualify, and what each position is shown.
+    const preOpen = window.kind === 'PRE_OPEN_CHECK' ? await this.preOpenBook(now) : null;
+    // No pre-open source in this process at all (market cues off, or not wired):
+    // the check would have nothing the 08:30 review did not — no paid call.
+    if (preOpen?.sourceOff) {
+      this.logger.log(`pre-open check ${tag} skipped: ${preOpen.reason}`);
+      return report;
+    }
+
     const book = await this.openTradeVenues();
     const users = [...new Set(book.map((r) => r.userId))];
     // Live judging happens only while a venue someone holds is trading — the same
@@ -364,7 +405,11 @@ export class SentinelOvernightService {
         this.logger.error(`overnight review: roster failed for user ${userId}: ${describe(err)}`);
         continue;
       }
-      for (const entry of selectForWindow(entries, window, now, this.clock)) {
+      const picked =
+        window.kind === 'PRE_OPEN_CHECK'
+          ? selectForPreOpenCheck(entries, preOpen?.book ?? null, now, this.clock)
+          : selectForWindow(entries, window, now, this.clock).map((e) => ({ entry: e, match: null }));
+      for (const { entry, match } of picked) {
         report.picked += 1;
         if (claims.has(entry.trackerId)) {
           report.alreadyDone += 1;
@@ -379,7 +424,9 @@ export class SentinelOvernightService {
         // Claimed BEFORE the durable check, synchronously, so an overlapping
         // fire in this process cannot pass the same gate in the gap.
         claims.add(entry.trackerId);
-        jobs.push(this.reviewOne(entry, window, tag, now, claims, report, heldVenues));
+        const pre: PreOpenInput | undefined =
+          window.kind === 'PRE_OPEN_CHECK' ? { match, reason: preOpen?.reason ?? null } : undefined;
+        jobs.push(this.reviewOne(entry, window, tag, now, claims, report, heldVenues, pre));
       }
     }
     await Promise.all(jobs);
@@ -394,6 +441,7 @@ export class SentinelOvernightService {
     claims: Set<string>,
     report: WindowReport,
     heldVenues: string[] = [],
+    preOpen?: PreOpenInput,
   ): Promise<void> {
     const failKey = `${entry.trackerId}|${tag}`;
     try {
@@ -413,7 +461,7 @@ export class SentinelOvernightService {
     const startedWall = Date.now();
     const current = () => (this.clockNow ? this.clockNow() : new Date(now.getTime() + (Date.now() - startedWall)));
     try {
-      await this.cycle.runShared(entry.trackerId, () => this.judgeAndRecord(entry, window, tag, now), {
+      await this.cycle.runShared(entry.trackerId, () => this.judgeAndRecord(entry, window, tag, now, preOpen), {
         // Re-checked every time the job is woken: once the venue opens (or the
         // window otherwise stops applying) a queued job is dropped, never run.
         expired: () => !reviewWindowIsClosed(window, entry.exchange, current(), this.clock),
@@ -446,7 +494,13 @@ export class SentinelOvernightService {
     }
   }
 
-  private async judgeAndRecord(entry: RosterEntry, window: ReviewWindow, tag: string, now: Date): Promise<void> {
+  private async judgeAndRecord(
+    entry: RosterEntry,
+    window: ReviewWindow,
+    tag: string,
+    now: Date,
+    preOpen?: PreOpenInput,
+  ): Promise<void> {
     const tick = await this.ticks.tickFor(entry.trackerId, { closedSession: true });
     const [thesis, last] = await Promise.all([
       this.theses.find(entry.trackerId),
@@ -456,9 +510,11 @@ export class SentinelOvernightService {
     const fire = {
       name: window.kind,
       detail:
-        window.kind === 'PRE_OPEN_REVIEW'
-          ? 'scheduled pre-open review (08:30 IST)'
-          : `scheduled after-close review (${window.venue === 'MCX' ? '23:45' : '15:45'} IST)`,
+        window.kind === 'PRE_OPEN_CHECK'
+          ? 'scheduled pre-open check (09:12 IST, on the NSE pre-open IEP; dropped at the 09:15 open)'
+          : window.kind === 'PRE_OPEN_REVIEW'
+            ? 'scheduled pre-open review (08:30 IST)'
+            : `scheduled after-close review (${window.venue === 'MCX' ? '23:45' : '15:45'} IST)`,
     };
     const base = await this.packets.build(
       entry,
@@ -499,7 +555,7 @@ export class SentinelOvernightService {
         // in overnight.oi. Without this the packet would claim "no options chain".
         oiWalls: absent('not captured for the overnight review — see overnight.oi.walls for the end-of-day walls'),
       },
-      overnight: assembleOvernightSection({ entry, tick, window, tag, now, news, oi, cues, clock: this.clock }),
+      overnight: assembleOvernightSection({ entry, tick, window, tag, now, news, oi, cues, preOpen, clock: this.clock }),
     };
 
     const verdict = await this.agent.judgeOvernight(packet);
@@ -522,6 +578,26 @@ export class SentinelOvernightService {
       netPnl: packet.money.netPnl,
       greenFloor: packet.money.greenFloorPrice,
     });
+  }
+
+  /**
+   * Today's pre-open book for the 09:12 check. A book that is not today's (or
+   * a read that failed) is no book: every position is then shown "no IEP" with
+   * the reason, and only futures are checked. A source that was never fetched
+   * (switched off, not wired) skips the check altogether.
+   */
+  private async preOpenBook(
+    now: Date,
+  ): Promise<{ book: PreOpenBook | null; reason: string | null; sourceOff?: true }> {
+    try {
+      const rec = await this.evidence.preOpen(now);
+      if (rec.values && rec.status === 'ok') return { book: rec.values, reason: null };
+      const reason = `the NSE pre-open book is ${rec.status}: ${rec.reason ?? 'no reason given'}`;
+      // Never fetched = the source is switched off or not wired, not a failed read.
+      return rec.values === null && rec.fetchedAt === null ? { book: null, reason, sourceOff: true } : { book: null, reason };
+    } catch (err) {
+      return { book: null, reason: `the NSE pre-open book could not be read: ${describe(err)}` };
+    }
   }
 
   /** Every (user, exchange) with an open trade; the roster then decides what is reviewable. */

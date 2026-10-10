@@ -113,7 +113,8 @@ export function limitRows(views: readonly CoreRiskLimitView[]): LimitRow[] {
   }));
 }
 
-export function editText(view: CoreRiskLimitView): string {
+/** The starting text of an edit box for a user's limit or a seed default row. */
+export function editText(view: { value: number | string | null }): string {
   return view.value === null ? '' : String(view.value);
 }
 

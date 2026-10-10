@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { changeCoreRiskDefault, listCoreRiskDefaults } from '@/services/coreRiskDefaults';
 import { apiErrorMessage } from '@/pages/core-strategies/core-strategy-picker';
-import { DAILY_LOSS_ACTION_OPTIONS } from './core-risk';
+import { DAILY_LOSS_ACTION_OPTIONS, editText } from './core-risk';
 import { defaultChangePayload, defaultRows, defaultSavedMessage } from './core-risk-defaults';
 import { BUTTON, CARD, FIELD, LABEL } from './core-risk-styles';
 
@@ -63,7 +63,7 @@ export default function RiskDefaultsSection() {
                     <button
                       type="button"
                       className="text-[var(--color-accent-blue)] underline"
-                      onClick={() => setEdit(editing ? null : { id: row.id, text: row.valueText === 'not set' ? '' : String(q.data.find((d) => `${d.key}@${d.scope}` === row.id)?.value ?? ''), reason: '' })}
+                      onClick={() => setEdit(editing ? null : { id: row.id, text: editText(row), reason: '' })}
                     >
                       {editing ? 'Close' : 'Change'}
                     </button>

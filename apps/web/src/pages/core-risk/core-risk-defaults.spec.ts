@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CoreRiskLimitView } from '@/services/coreRisk';
 import type { CoreRiskDefaultView } from '@/services/coreRiskDefaults';
-import { limitRows } from './core-risk';
+import { editText, limitRows } from './core-risk';
 import { defaultChangePayload, defaultRows, defaultSavedMessage } from './core-risk-defaults';
 
 const KEYS: Array<[string, CoreRiskLimitView['scope'], CoreRiskLimitView['kind']]> = [
@@ -49,6 +49,13 @@ describe('seed defaults', () => {
     expect(defaultChangePayload('count', '12', ' fewer trades ')).toEqual({ ok: true, value: { value: 12, reason: 'fewer trades' } });
     expect(defaultChangePayload('hhmm', '3:25', 'later').ok).toBe(false);
     expect(defaultChangePayload('count', '12', 'no').ok).toBe(false);
+  });
+
+  it('starts the edit box at the raw default, empty when there is none', () => {
+    const [set, unset] = defaultRows([dv({ value: 12 }), dv({ key: 'mtfMaxLeverage', scope: 'MTF', kind: 'ratio', value: null })]);
+    expect(editText(set)).toBe('12');
+    expect(editText(unset)).toBe('');
+    expect(editText(defaultRows([dv({ key: 'squareOffTime', scope: 'MTF', kind: 'hhmm', value: '15:25' })])[0])).toBe('15:25');
   });
 
   it('says the change applies to future seeds only', () => {

@@ -7,6 +7,8 @@ export interface DefaultRow {
   key: string;
   scope: string;
   kind: CoreLimitKind;
+  /** The raw default, for the edit box (`editText`). */
+  value: number | string | null;
   label: string;
   scopeLabel: string;
   valueText: string;
@@ -20,6 +22,7 @@ export function defaultRows(views: readonly CoreRiskDefaultView[]): DefaultRow[]
     key: v.key,
     scope: v.scope,
     kind: v.kind,
+    value: v.value,
     label: limitLabel(v.key),
     scopeLabel: scopeLabel(v.scope),
     valueText: formatLimitValue(v.kind, v.value),

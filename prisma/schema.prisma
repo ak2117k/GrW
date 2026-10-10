@@ -63,7 +63,7 @@ model Candle {
   // MAX(timestamp) for the health probe. The composite above is led by
   // instrumentId, which that query does not mention, so it cannot serve it —
   // and this is the highest-volume table in the schema.
-  @@index([timestamp])
+  @@index([timestamp(sort: Desc)]) // DESC, as migration 20260818130000 created it
   @@map("candles")
 }
 
@@ -1635,7 +1635,7 @@ model SentinelVerdict {
   // MAX(createdAt) for the health probe's "has the sentinel produced anything?"
   // signal. Both composites above are led by a column that query does not
   // mention, so neither can serve it.
-  @@index([createdAt])
+  @@index([createdAt(sort: Desc)]) // DESC, as migration 20260818130000 created it
   @@map("sentinel_verdicts")
 }
 

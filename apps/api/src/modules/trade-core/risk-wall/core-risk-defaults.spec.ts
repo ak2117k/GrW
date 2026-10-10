@@ -74,4 +74,19 @@ describe('M2 seed defaults (core_risk_limit_defaults)', () => {
     const pairs = [...check.matchAll(/\('([A-Za-z]+)', '([A-Z_]+)'\)/g)].map((m) => `${m[1]}@${m[2]}`);
     expect(pairs).toEqual(LIMIT_PAIRS.map(pairId));
   });
+
+  /** The body of `ADD CONSTRAINT "<name>" CHECK …` up to its `;`, whitespace-normalised. */
+  function checkBody(name: string): string {
+    const marker = `ADD CONSTRAINT "${name}" CHECK`;
+    const start = sql.indexOf(marker);
+    if (start < 0) throw new Error(`${name} not found in the migration`);
+    const from = start + marker.length;
+    return sql.slice(from, sql.indexOf(';', from)).replace(/\s+/g, ' ').trim();
+  }
+
+  it('the defaults table repeats the limits table pair and value CHECKs exactly', () => {
+    expect(checkBody('core_risk_limit_defaults_pair_check')).toBe(checkBody('core_risk_limits_pair_check'));
+    expect(checkBody('core_risk_limit_defaults_value_check')).toBe(checkBody('core_risk_limits_value_check'));
+    expect(checkBody('core_risk_limits_value_check')).toMatch(/^\( CASE .* END\)$/);
+  });
 });

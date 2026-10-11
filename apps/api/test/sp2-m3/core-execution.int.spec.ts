@@ -133,14 +133,14 @@ describe('core execution tables (real database)', () => {
     await insertOrder(u, { type: 'LIMIT', limitPrice: '499.50' });
   });
 
-  it('persists triggered_at, a nullable timestamptz an order starts without (ruling P10)', async () => {
+  it('persists triggered_at, a nullable timestamp an order starts without (rulings P10/P10a)', async () => {
     const u = await newUser();
     const o = await insertOrder(u);
-    const read = async () =>
-      (await db.$queryRawUnsafe<Array<{ t: Date | null }>>(`SELECT "triggered_at" AS t FROM "core_orders" WHERE "id" = $1`, o))[0].t;
+    const read = async () => (await db.coreOrder.findUniqueOrThrow({ where: { id: o }, select: { triggeredAt: true } })).triggeredAt;
     expect(await read()).toBeNull();
-    await db.$executeRawUnsafe(`UPDATE "core_orders" SET "triggered_at" = '2026-10-12T04:00:00.123Z'::timestamptz WHERE "id" = $1`, o);
-    expect((await read())?.toISOString()).toBe('2026-10-12T04:00:00.123Z');
+    const at = new Date('2026-10-12T04:00:00.123Z');
+    await db.coreOrder.update({ where: { id: o }, data: { triggeredAt: at } });
+    expect((await read())?.toISOString()).toBe(at.toISOString());
   });
 
   it('pins the default shapes; the owner may add a cap for a new underlying', async () => {

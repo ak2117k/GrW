@@ -29,7 +29,7 @@ CREATE TABLE "core_orders" (
     "rejectReason" TEXT,
     "submittedAt" TIMESTAMP(3) NOT NULL,
     -- Ruling P10: set once when an SL_MARKET order's trigger is reached; never cleared.
-    "triggered_at" TIMESTAMPTZ(3),
+    "triggered_at" TIMESTAMP(3),
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "core_orders_pkey" PRIMARY KEY ("id")

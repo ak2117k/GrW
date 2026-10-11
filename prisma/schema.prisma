@@ -2262,7 +2262,7 @@ model CoreOrder {
   rejectReason      String?
   submittedAt       DateTime
   /// When an SL_MARKET order's trigger was first reached; a stop never un-triggers (ruling P10).
-  triggeredAt       DateTime?        @map("triggered_at") @db.Timestamptz(3)
+  triggeredAt       DateTime?        @map("triggered_at")
   updatedAt         DateTime         @updatedAt
   fills             CoreFill[]
   ledger            CoreCashLedger[]

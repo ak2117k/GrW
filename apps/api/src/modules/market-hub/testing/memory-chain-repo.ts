@@ -17,9 +17,10 @@ export class MemoryChainRepo implements ChainRepo {
   contractCalls = 0;
 
   addContracts(name: string, expiry: string, contracts: ChainContract[]): void {
-    const byExpiry = this.contractsRows.get(name) ?? new Map<string, ChainContract[]>();
+    const key = name.toUpperCase();
+    const byExpiry = this.contractsRows.get(key) ?? new Map<string, ChainContract[]>();
     byExpiry.set(expiry, contracts);
-    this.contractsRows.set(name, byExpiry);
+    this.contractsRows.set(key, byExpiry);
   }
 
   async contracts(name: string, expiry: string): Promise<ChainContract[]> {
@@ -60,9 +61,10 @@ export class MemoryChainRepo implements ChainRepo {
   }
 
   async latestChainSnapshot(underlying: string, expiry: string, exchange: HubExchange): Promise<HubChain | null> {
-    const rows = this.chainSnapshots.filter((s) => s.underlying === underlying.toUpperCase() && s.expiry === expiry);
+    const u = underlying.toUpperCase();
+    const rows = this.chainSnapshots.filter((s) => s.underlying.toUpperCase() === u && s.expiry === expiry);
     const last = rows.sort((a, b) => b.at - a.at)[0];
-    return last ? { ...last, exchange } : null;
+    return last ? { ...last, underlying: u, exchange } : null;
   }
 
   async pruneOi(before: Date): Promise<number> {

@@ -9,6 +9,15 @@ import { localMidnight, nextYmd, ymdLocal } from './chain-dates';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const BASELINE_LOOKBACK_MS = 10 * DAY_MS;
 
+/**
+ * A stored chain carries no Greeks provenance, so derive it: 'broker' when any leg has an IV
+ * (it had Greeks from somewhere), else 'none'. Local vs broker cannot be told apart after the fact.
+ */
+function storedGreeksSource(entries: readonly OptionsChainEntry[]): 'broker' | 'none' {
+  const hasIv = entries.some((e) => (e?.ceData?.iv ?? 0) > 0 || (e?.peData?.iv ?? 0) > 0);
+  return hasIv ? 'broker' : 'none';
+}
+
 export interface ChainRepo {
   /** Active CE/PE contracts of exactly `name` expiring on `expiry` (YYYY-MM-DD), NFO or MCX. */
   contracts(name: string, expiry: string): Promise<ChainContract[]>;
@@ -153,14 +162,15 @@ export class PrismaChainRepo implements ChainRepo {
     });
     if (!row) return null;
     const spot = Number(row.spotPrice);
+    const entries = (Array.isArray(row.chainJson) ? row.chainJson : []) as unknown as OptionsChainEntry[];
     return {
       underlying: u,
       expiry,
       exchange,
       spot: spot > 0 ? spot : null,
       at: row.capturedAt.getTime(),
-      greeks: 'broker',
-      entries: row.chainJson as unknown as OptionsChainEntry[],
+      greeks: storedGreeksSource(entries),
+      entries,
     };
   }
 

@@ -88,8 +88,28 @@ describe('PrismaChainRepo', () => {
     });
     prisma.optionChainSnapshot.findFirst.mockResolvedValue({ spotPrice: '0', capturedAt: new Date('2026-10-13T10:00:00Z'), chainJson: entries });
     await expect(repo.latestChainSnapshot('NIFTY', '2026-10-13', 'NFO')).resolves.toEqual({
-      underlying: 'NIFTY', expiry: '2026-10-13', exchange: 'NFO', spot: null, at: Date.parse('2026-10-13T10:00:00Z'), greeks: 'broker', entries,
+      underlying: 'NIFTY', expiry: '2026-10-13', exchange: 'NFO', spot: null, at: Date.parse('2026-10-13T10:00:00Z'), greeks: 'none', entries,
     });
+  });
+
+  it('a stored chain is labelled broker Greeks only when some leg carries an IV, else none', async () => {
+    const prisma = prismaMock();
+    const repo = new PrismaChainRepo(prisma as any);
+    const at = new Date('2026-10-13T10:00:00Z');
+    const leg = (iv: number) => ({ ltp: 100, oi: 1000, oiChange: null, volume: 1, iv, delta: 0.5, gamma: 0, theta: 0, vega: 0, bidPrice: 0, askPrice: 0 });
+    prisma.optionChainSnapshot.findFirst.mockResolvedValueOnce({
+      spotPrice: '25000', capturedAt: at,
+      chainJson: [{ strikePrice: 25000, expiryDate: '2026-10-13', ceData: null, peData: null }],
+    });
+    await expect(repo.latestChainSnapshot('NIFTY', '2026-10-13', 'NFO')).resolves.toEqual(expect.objectContaining({ greeks: 'none' }));
+    prisma.optionChainSnapshot.findFirst.mockResolvedValueOnce({
+      spotPrice: '25000', capturedAt: at,
+      chainJson: [
+        { strikePrice: 25000, expiryDate: '2026-10-13', ceData: leg(0), peData: null },
+        { strikePrice: 25050, expiryDate: '2026-10-13', ceData: null, peData: leg(13) },
+      ],
+    });
+    await expect(repo.latestChainSnapshot('NIFTY', '2026-10-13', 'NFO')).resolves.toEqual(expect.objectContaining({ greeks: 'broker' }));
   });
 
   it('baseline asks for the last row per instrument before the cut-off, as numbers', async () => {

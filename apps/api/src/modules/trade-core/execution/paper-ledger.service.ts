@@ -1,10 +1,11 @@
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { chargesForLeg, type Segment } from '../../trade-sentinel/charges';
 import { VEHICLES, type Vehicle } from '../strategies/blocks/block-types';
-import type { CoreFunds, CoreOrder, CoreOrderRequest, OrderSide } from './execution.types';
-import { validateOrder } from './fill-model';
+import type { CoreFunds, CoreOrder, CoreOrderPatch, CoreOrderRequest, CorePositionView, FillCharges, OrderSide } from './execution.types';
+import { isWholeLots, maxLotsProblem, priceShapeProblem, validateOrder } from './fill-model';
 import { applyPositionFill, balances, FLAT, istDate, money, ZERO, type PositionState } from './ledger-math';
-import { marginFor, marginRefPrice } from './margin';
+import { marginFor, marginRefPrice, proportionalRelease } from './margin';
 import { isOpenState, nextState, transition } from './order-state';
 import type { PaperSettings, PaperSettingsResult } from './paper-settings';
 import { CoreCashLedgerRepository, type LedgerEntry, type NewLedgerRow } from './repositories/core-cash-ledger.repository';
@@ -57,6 +58,42 @@ export function pendingMargin(rows: readonly LedgerEntry[], orderId: string): De
 }
 
 export const positionKey = (o: Pick<CoreOrder, 'vehicle' | 'instrument'>): string => `${o.vehicle}:${o.instrument.token}`;
+
+/** The charges schedule per vehicle (spec §4.4): MTF is delivery plus the pledge fee. */
+export const SEGMENT_BY_VEHICLE: Readonly<Record<Vehicle, Segment>> = {
+  CASH_INTRADAY: 'EQ_INTRADAY',
+  MTF: 'EQ_DELIVERY',
+  OPTIONS_BUY: 'OPT',
+};
+
+/**
+ * One fill's charges: the fill priced as one executed leg (plan ruling 5), plus the MTF
+ * pledge fee on the first buy fill of an MTF order. `total` includes the fee.
+ */
+export function fillCharges(
+  order: Pick<CoreOrder, 'vehicle' | 'side' | 'filledQty'>,
+  qty: number,
+  price: Dec,
+  settings: Pick<PaperSettings, 'mtfPledgeFee'>,
+): FillCharges {
+  const segment = SEGMENT_BY_VEHICLE[order.vehicle];
+  const leg = chargesForLeg({ segment, leg: order.side, price: price.toNumber(), qty });
+  const pledgeFee = order.vehicle === 'MTF' && order.side === 'BUY' && order.filledQty === 0 ? settings.mtfPledgeFee.toNumber() : 0;
+  return { ...leg, segment, leg: order.side, pledgeFee, total: leg.total + pledgeFee };
+}
+
+export interface FillInput {
+  qty: number;
+  price: Dec;
+  /** The market time of the price the fill came from. */
+  priceAt: Date;
+  /**
+   * Ruling P10: the fill decision carried `triggered: true` (the price that first reached an
+   * SL_MARKET trigger). triggeredAt is then set to priceAt in the same write as the fill,
+   * unless the order already has one.
+   */
+  triggered?: boolean;
+}
 
 /**
  * Ruling P12: a P2002 unique violation on core_orders.idempotencyKey. Prisma names the
@@ -223,6 +260,214 @@ export class PaperLedgerService {
       }
       return updated;
     });
+  }
+
+  /**
+   * One fill (spec §4.4), guarded by the filledQty the caller decided on: null when the
+   * order moved on (another fill, a cancel), is gone, or the settings are incomplete —
+   * nothing is written then (a settings read that throws propagates). A fill that does not
+   * fit the order, or an exit fill beyond the open position, is a programming error and
+   * throws; the transaction rolls back. The order update comes first (with triggeredAt
+   * when the decision was `triggered`, ruling P10), then the fill, then the rows: CHARGES;
+   * for an ENTRY the pending margin for this qty is released (no fillId, so close()
+   * releases exactly the rest) and margin at the fill price is blocked against the
+   * position (with the fillId); for an EXIT the gross realised P&L is booked and the
+   * position's margin released in proportion (all of it on the last fill).
+   */
+  async applyFill(userId: string, orderId: string, expectFilledQty: number, fill: FillInput, now: Date = new Date()): Promise<CoreOrder | null> {
+    const loaded = await this.defaults.settings(now.getTime());
+    if (!loaded.ok) return null;
+    const settings = loaded.settings;
+    return this.tx.run(userId, async (db) => {
+      const order = await this.orders.findForUser(userId, orderId, db);
+      if (!order || !isOpenState(order.state) || order.filledQty !== expectFilledQty) return null;
+      const remaining = order.qty - order.filledQty;
+      const lot = order.instrument.lotSize;
+      if (fill.qty <= 0 || fill.qty > remaining || !isWholeLots(fill.qty, lot) || !fill.price.isFinite() || fill.price.lte(0)) {
+        throw new Error(`fill of ${fill.qty} at ${fill.price.toString()} does not fit order ${orderId} (${remaining} left, lot ${lot})`);
+      }
+      // Fill and average prices are Decimal(14,4): round once, here, and use the stored value throughout.
+      const price = fill.price.toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
+      const rows = await this.ledger.listForUser(userId, db);
+      const pos = order.purpose === 'EXIT' ? await this.positionContext(userId, order.vehicle, order.instrument.token, rows, db) : null;
+      if (pos) {
+        const net = pos.state.netQty;
+        const reduces = (net > 0 && order.side === 'SELL') || (net < 0 && order.side === 'BUY');
+        if (!reduces || fill.qty > Math.abs(net)) {
+          throw new Error(`exit fill of ${order.side} ${fill.qty} on order ${orderId} exceeds the open position of ${net}`);
+        }
+      }
+
+      const newFilled = order.filledQty + fill.qty;
+      const avg = order.avgFillPrice === null ? price : new Prisma.Decimal(order.avgFillPrice).mul(order.filledQty).plus(price.mul(fill.qty)).div(newFilled);
+      const updated = await this.orders.update(
+        userId,
+        orderId,
+        { state: order.state, filledQty: order.filledQty },
+        {
+          state: transition(order.state, newFilled === order.qty ? 'FILL' : 'PARTIAL_FILL'),
+          filledQty: newFilled,
+          avgFillPrice: avg.toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP),
+          ...(fill.triggered && order.triggeredAt === null ? { triggeredAt: fill.priceAt } : {}),
+        },
+        db,
+      );
+      if (!updated) return null;
+
+      const charges = fillCharges(order, fill.qty, price, settings);
+      const created = await this.fills.create({ orderId, userId, price, qty: fill.qty, charges, chargesTotal: money(charges.total), priceAt: fill.priceAt }, db);
+      const base = { userId, orderId, token: order.instrument.token };
+      const what = `${order.side} ${fill.qty} ${order.instrument.symbol} at ₹${price.toFixed(2)}`;
+      const entries: NewLedgerRow[] = [];
+      if (created.chargesTotal.gt(0)) entries.push({ ...base, type: 'CHARGES', amount: ZERO.minus(created.chargesTotal), fillId: created.id, note: `charges on ${what}` });
+      if (!pos) {
+        const freed = proportionalRelease(pendingMargin(rows, orderId), fill.qty, remaining);
+        if (freed.gt(0)) entries.push({ ...base, type: 'MARGIN_RELEASE', amount: freed, note: `pending margin for the ${fill.qty} filled units` });
+        const block = marginFor(order.vehicle, price.mul(fill.qty), settings);
+        if (block.gt(0)) entries.push({ ...base, type: 'MARGIN_BLOCK', amount: ZERO.minus(block), fillId: created.id, note: `margin at the fill price for ${what}` });
+      } else {
+        const { realised } = applyPositionFill(pos.state, { side: order.side, qty: fill.qty, price, at: fill.priceAt });
+        entries.push({ ...base, type: 'REALISED_PNL', amount: realised ?? ZERO, fillId: created.id, note: `realised on ${what}` });
+        const release = proportionalRelease(pos.blocked, fill.qty, Math.abs(pos.state.netQty));
+        if (release.gt(0)) entries.push({ ...base, type: 'MARGIN_RELEASE', amount: release, fillId: created.id, note: `margin released in proportion to ${what}` });
+      }
+      await this.ledger.append(entries, db);
+      return updated;
+    });
+  }
+
+  /**
+   * Ruling P10, for a NONE decision that carries `triggered: true`: the price at `at` first
+   * reached this SL_MARKET order's trigger but nothing filled. Persists triggeredAt so the
+   * stop fills as MARKET on the next fresh price. Null when the order is gone, closed, not
+   * a stop, or moved on from `expectFilledQty`; an already-triggered stop is returned
+   * unchanged (a stop never un-triggers and keeps its first trigger time). A FILL decision
+   * with `triggered: true` goes through applyFill with `fill.triggered` instead.
+   */
+  async markTriggered(userId: string, orderId: string, expectFilledQty: number, at: Date): Promise<CoreOrder | null> {
+    return this.tx.run(userId, async (db) => {
+      const order = await this.orders.findForUser(userId, orderId, db);
+      if (!order || !isOpenState(order.state) || order.type !== 'SL_MARKET' || order.filledQty !== expectFilledQty) return null;
+      if (order.triggeredAt !== null) return order;
+      return this.orders.update(userId, orderId, { state: order.state, filledQty: order.filledQty }, { triggeredAt: at }, db);
+    });
+  }
+
+  /**
+   * Change qty, limit or trigger of an open order; its pending margin follows (blocked more
+   * only if funded). 404 unknown; 409 closed, or an SL_MARKET already executing (triggered
+   * or partly filled, ruling P11); 422 a change the order cannot take.
+   */
+  async modify(userId: string, orderId: string, patch: CoreOrderPatch, now: Date = new Date()): Promise<CoreOrder> {
+    const loaded = await this.defaults.settings(now.getTime());
+    if (!loaded.ok) throw new UnprocessableEntityException(`paper settings are incomplete: ${loaded.missing.join(', ')}`);
+    const settings = loaded.settings;
+    return this.tx.run(userId, async (db) => {
+      const order = await this.orders.findForUser(userId, orderId, db);
+      if (!order) throw new NotFoundException(`core order ${orderId} not found`);
+      if (!isOpenState(order.state)) throw new ConflictException(`core order ${orderId} is ${order.state}; it cannot be modified`);
+      if (order.type === 'SL_MARKET' && (order.triggeredAt !== null || order.filledQty > 0)) {
+        throw new ConflictException(`core order ${orderId} is a triggered stop; it is executing and cannot be modified`);
+      }
+      const next = {
+        ...order,
+        qty: patch.qty ?? order.qty,
+        limitPrice: patch.limitPrice ?? order.limitPrice,
+        triggerPrice: patch.triggerPrice ?? order.triggerPrice,
+      };
+      const rows = await this.ledger.listForUser(userId, db);
+      const problem = await this.modifyProblem(order, patch, settings, rows, db);
+      if (problem) throw new UnprocessableEntityException(problem);
+
+      const entries: NewLedgerRow[] = [];
+      if (order.purpose === 'ENTRY') {
+        const target = marginFor(order.vehicle, marginRefPrice(next).mul(next.qty - next.filledQty), settings);
+        const delta = target.minus(pendingMargin(rows, orderId));
+        const base = { userId, orderId, token: order.instrument.token };
+        if (delta.gt(0)) {
+          const free = balances(rows).freeCash;
+          if (free.lt(delta)) throw new UnprocessableEntityException(`insufficient free cash: the change blocks ₹${delta.toFixed(2)} more, ₹${free.toFixed(2)} is free`);
+          entries.push({ ...base, type: 'MARGIN_BLOCK', amount: ZERO.minus(delta), note: 'margin for the modified order' });
+        } else if (delta.lt(0)) {
+          entries.push({ ...base, type: 'MARGIN_RELEASE', amount: ZERO.minus(delta), note: 'margin freed by the modified order' });
+        }
+      }
+      const updated = await this.orders.update(
+        userId,
+        orderId,
+        { state: order.state, filledQty: order.filledQty },
+        { qty: next.qty, limitPrice: next.limitPrice, triggerPrice: next.triggerPrice },
+        db,
+      );
+      if (!updated) throw new ConflictException(`core order ${orderId} changed while modifying; retry`);
+      await this.ledger.append(entries, db);
+      return updated;
+    });
+  }
+
+  /** Every non-flat position of the user, from fills; margin from the ledger (rows with a fillId). */
+  async positions(userId: string): Promise<CorePositionView[]> {
+    const [orders, fills, rows] = await Promise.all([this.orders.listForUser(userId), this.fills.listForUser(userId), this.ledger.listForUser(userId)]);
+    const byId = new Map(orders.map((o) => [o.id, o]));
+    const groups = new Map<string, { latest: CoreOrder; ids: Set<string>; state: PositionState }>();
+    for (const o of orders) {
+      const key = positionKey(o);
+      const g = groups.get(key) ?? { latest: o, ids: new Set<string>(), state: FLAT };
+      g.latest = o;
+      g.ids.add(o.id);
+      groups.set(key, g);
+    }
+    for (const f of fills) {
+      const o = byId.get(f.orderId);
+      if (!o) continue;
+      const g = groups.get(positionKey(o));
+      if (!g) continue;
+      g.state = applyPositionFill(g.state, { side: o.side, qty: f.qty, price: f.price, at: f.priceAt }).state;
+    }
+    const out: CorePositionView[] = [];
+    for (const [key, g] of groups) {
+      if (g.state.netQty === 0 || !g.state.avgPrice || !g.state.openedAt) continue;
+      out.push({
+        key,
+        vehicle: g.latest.vehicle,
+        instrument: g.latest.instrument,
+        netQty: g.state.netQty,
+        direction: g.state.netQty > 0 ? 'LONG' : 'SHORT',
+        avgPrice: g.state.avgPrice.toFixed(4),
+        realisedPnl: g.state.realised.toFixed(2),
+        blockedMargin: heldMargin(rows, (r) => r.orderId !== null && g.ids.has(r.orderId) && r.fillId !== null).toFixed(2),
+        openedAt: g.state.openedAt,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Why `patch` cannot apply to `order`; null when it can. The lot-multiple, max-lots and
+   * price-shape rules are fill-model's (ruling P7), not restated here.
+   */
+  private async modifyProblem(order: CoreOrder, patch: CoreOrderPatch, settings: PaperSettings, rows: readonly LedgerEntry[], db: PaperDb): Promise<string | null> {
+    if (patch.qty === undefined && patch.limitPrice === undefined && patch.triggerPrice === undefined) return 'nothing to modify';
+    if (patch.limitPrice !== undefined && order.type !== 'LIMIT') return 'only a LIMIT order has a limit price';
+    if (patch.triggerPrice !== undefined && order.type !== 'SL_MARKET') return 'only an SL_MARKET order has a trigger price';
+    for (const [name, v] of [['limitPrice', patch.limitPrice], ['triggerPrice', patch.triggerPrice]] as const) {
+      const problem = v === undefined ? null : priceShapeProblem(v, name);
+      if (problem) return problem;
+    }
+    if (patch.qty === undefined) return null;
+    const lot = order.instrument.lotSize;
+    if (!isWholeLots(patch.qty, lot)) return `qty must be a whole multiple of the lot size ${lot}`;
+    if (patch.qty <= order.filledQty) return `qty must stay above the ${order.filledQty} units already filled`;
+    if (order.vehicle === 'OPTIONS_BUY') {
+      const problem = maxLotsProblem(patch.qty, lot, order.instrument.underlying, settings.maxLotsPerOrder);
+      if (problem) return problem;
+    }
+    if (order.purpose === 'EXIT') {
+      const pos = await this.positionContext(order.userId, order.vehicle, order.instrument.token, rows, db);
+      const others = pos.pendingExitQty - (order.qty - order.filledQty);
+      if (patch.qty - order.filledQty > Math.abs(pos.state.netQty) - others) return 'the exit would exceed the open position';
+    }
+    return null;
   }
 
   async getOrder(userId: string, orderId: string): Promise<CoreOrder> {

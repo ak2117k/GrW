@@ -4,8 +4,8 @@ import { chargesForLeg, type Segment } from '../../trade-sentinel/charges';
 import { VEHICLES, type Vehicle } from '../strategies/blocks/block-types';
 import type { CoreFunds, CoreOrder, CoreOrderPatch, CoreOrderRequest, CorePositionView, FillCharges, OrderSide } from './execution.types';
 import { isWholeLots, maxLotsProblem, priceShapeProblem, validateOrder } from './fill-model';
-import { applyPositionFill, balances, FLAT, istDate, money, ZERO, type PositionState } from './ledger-math';
-import { marginFor, marginRefPrice, proportionalRelease } from './margin';
+import { applyPositionFill, balances, dailyMtfInterest, FLAT, istDate, money, mtfInterestDays, ZERO, type PositionState } from './ledger-math';
+import { marginFor, marginRefPrice, mtfFunded, proportionalRelease } from './margin';
 import { isOpenState, nextState, transition } from './order-state';
 import type { PaperSettings, PaperSettingsResult } from './paper-settings';
 import { CoreCashLedgerRepository, type LedgerEntry, type NewLedgerRow } from './repositories/core-cash-ledger.repository';
@@ -475,6 +475,42 @@ export class PaperLedgerService {
       });
     }
     return out;
+  }
+
+  /**
+   * Nightly MTF interest (spec §4.4, plan ruling 10): for every open MTF holding, one
+   * MTF_INTEREST row per IST calendar day from the day after the last posting (or the
+   * opening day) through `today`, each funded amount × mtfAnnualRatePct ÷ 365. The
+   * unique (userId, token, interestDate) index makes a rerun post nothing; a missed night
+   * or a weekend is caught up. A holding closed before the run is not charged for that
+   * day (it is flat when scanned). Fails loudly (the job run is recorded FAILED) without
+   * settings. listMtfHolders is the permitted cross-user scan; each holding is then read
+   * and written under its own user.
+   */
+  async postMtfInterest(today: string): Promise<{ holdings: number; posted: number }> {
+    const loaded = await this.defaults.settings();
+    if (!loaded.ok) throw new Error(`paper settings are incomplete: ${loaded.missing.join(', ')}`);
+    const settings = loaded.settings;
+    let holdings = 0;
+    let posted = 0;
+    for (const { userId, token } of await this.orders.listMtfHolders()) {
+      const r = await this.tx.run(userId, async (db) => {
+        const { netQty, avgPrice, openedAt } = (await this.positionContext(userId, 'MTF', token, [], db)).state;
+        if (netQty <= 0 || !avgPrice || !openedAt) return { held: 0, n: 0 };
+        const days = mtfInterestDays(istDate(openedAt), await this.ledger.lastInterestDate(userId, token, db), today);
+        const funded = mtfFunded(avgPrice.mul(netQty), settings);
+        const amount = ZERO.minus(dailyMtfInterest(funded, settings.mtfAnnualRatePct));
+        const note = `MTF interest on ₹${funded.toFixed(2)} funded at ${settings.mtfAnnualRatePct.toFixed(2)} percent a year`;
+        const n = await this.ledger.appendInterest(
+          days.map((interestDate) => ({ userId, type: 'MTF_INTEREST' as const, amount, token, interestDate, note })),
+          db,
+        );
+        return { held: 1, n };
+      });
+      holdings += r.held;
+      posted += r.n;
+    }
+    return { holdings, posted };
   }
 
   /**

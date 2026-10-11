@@ -244,4 +244,26 @@ describe('ChainService', () => {
     await svc.refreshTick(now());
     expect(builds.map((b) => `${b.u}:${b.lane}`)).toEqual(['NIFTY:1', 'NIFTY:2']);
   });
+
+  it('snapshot targets are the core list (nearest expiry), held chains and screen-viewed chains', async () => {
+    const { svc, repo, now } = service('2026-10-12T10:00:00', { snapshots: { core: ['NIFTY'] } });
+    await svc.chain('CRUDEOIL', E, { screen: true });
+    repo.heldInfo.set('NFO:H', { name: 'NIFTY', expiry: E });
+    await svc.setHeld([{ exchange: 'NFO', token: 'H', symbol: 'x' }]);
+    const t = await svc.snapshotTargets(now());
+    expect(t.map((x) => `${x.underlying}:${x.expiry}`).sort()).toEqual([`CRUDEOIL:${E}`, `NIFTY:${E}`]);
+    expect(svc.status().snapshot.enabled).toBe(true);
+  });
+
+  it('held chains are snapshot targets even while their 10 s refresh is off (baselines build before the switch)', async () => {
+    const { svc, repo, now } = service('2026-10-12T10:00:00', { snapshots: { core: [] }, refreshHeld: () => false });
+    repo.heldInfo.set('NFO:H', { name: 'NIFTY', expiry: E });
+    await svc.setHeld([{ exchange: 'NFO', token: 'H', symbol: 'x' }]);
+    expect((await svc.snapshotTargets(now())).map((x) => `${x.underlying}:${x.expiry}`)).toEqual([`NIFTY:${E}`]);
+  });
+
+  it('without snapshots deps the job is off and reported disabled', () => {
+    const { svc } = service('2026-10-12T10:00:00');
+    expect(svc.status().snapshot).toEqual({ enabled: false, rowsToday: 0, failures: 0, lastAt: {} });
+  });
 });

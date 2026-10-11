@@ -5,6 +5,7 @@ import type { QuoteOutcome } from '../quote-batcher';
 import type { BuildOutcome, ChainBuilder } from './chain-builder';
 import type { ChainRepo } from './chain-repository';
 import type { ChainRequest, ChainResult, ChainStatus, ChainUnavailable, HubChain, HubChains, OptionSide } from './chain.types';
+import { OiSnapshotJob, type SnapshotTarget } from './oi-snapshot-job';
 
 export const CHAIN_FRESH_MS = 15_000;
 export const CHAIN_REFRESH_MS = 10_000;
@@ -18,6 +19,8 @@ export const CHAIN_AWAIT_DEADLINE_MS = 5_000;
 export const CLOSED_FAILURE_MEMO_MS = 5 * 60_000;
 const MAX_CACHE = 100;
 const BUILD_SAMPLES = 200;
+/** The OI snapshot job's tick; the job itself runs each target every 3 minutes (OI_SNAPSHOT_EVERY_MS). */
+const SNAPSHOT_TICK_MS = 30_000;
 const REASONS: ChainUnavailable[] = ['no-contracts', 'throttled', 'busy', 'no-session', 'error'];
 
 export interface ChainServiceDeps {
@@ -30,6 +33,11 @@ export interface ChainServiceDeps {
   quoteNow(refs: readonly InstrumentRef[], lane: Lane): Promise<Map<string, QuoteOutcome>>;
   /** Whether held chains get the 10 s refresh (only while a consumer reads them: HUB_SERVES_CHAIN). Default true. */
   refreshHeld?: () => boolean;
+  /**
+   * OI snapshots for these always-on underlyings (+ held + viewed today). Absent ⇒ the job is off.
+   * Held chains are targets whatever refreshHeld() says: snapshots run with HUB_SERVES_CHAIN off.
+   */
+  snapshots?: { core: readonly string[] };
   /** Cache capacity (LRU); default 100. */
   maxCache?: number;
   log?: (message: string) => void;
@@ -62,22 +70,42 @@ export class ChainService implements HubChains {
   private greeksLocal = 0;
   private readonly unavailable = Object.fromEntries(REASONS.map((r) => [r, 0])) as Record<ChainUnavailable, number>;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly job: OiSnapshotJob | null;
+  private jobTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly d: ChainServiceDeps) {}
+  constructor(private readonly d: ChainServiceDeps) {
+    this.job = d.snapshots
+      ? new OiSnapshotJob({
+          targets: (now) => this.snapshotTargets(now),
+          contracts: (u, e) => this.d.builder.contracts(u, e),
+          freshChain: (u, e) => this.freshChain(u, e),
+          repo: d.repo,
+          clock: d.clock,
+          log: d.log,
+        })
+      : null;
+  }
 
   private now(): number {
     return this.d.now?.() ?? Date.now();
   }
 
   start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => void this.refreshTick(this.now()), CHAIN_REFRESH_MS);
-    this.timer.unref?.();
+    if (!this.timer) {
+      this.timer = setInterval(() => void this.refreshTick(this.now()), CHAIN_REFRESH_MS);
+      this.timer.unref?.();
+    }
+    if (this.job && !this.jobTimer) {
+      this.jobTimer = setInterval(() => void this.job?.tick(this.now()), SNAPSHOT_TICK_MS);
+      this.jobTimer.unref?.();
+    }
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.jobTimer) clearInterval(this.jobTimer);
+    this.jobTimer = null;
   }
 
   async chain(underlying: string, expiry: string, opts: ChainRequest = {}): Promise<ChainResult> {
@@ -187,6 +215,19 @@ export class ChainService implements HubChains {
     return out.kind === 'ok' ? out.chain : null;
   }
 
+  /** Core list (nearest expiry) ∪ held chains ∪ chains a screen opened today. */
+  async snapshotTargets(now: number): Promise<SnapshotTarget[]> {
+    const keys = new Set<string>([...this.held, ...this.viewedKeys(now)]);
+    for (const name of this.d.snapshots?.core ?? []) {
+      const nearest = (await this.expiries(name))[0];
+      if (nearest) keys.add(keyOf(name, nearest));
+    }
+    return [...keys].map((k) => {
+      const [underlying, expiry] = splitKey(k);
+      return { underlying, expiry };
+    });
+  }
+
   pruneOi(before: Date): Promise<number> {
     return this.d.repo.pruneOi(before);
   }
@@ -203,7 +244,9 @@ export class ChainService implements HubChains {
       watched: this.screenWatch.size,
       held: this.held.size,
       viewedToday: this.viewedKeys().length,
-      snapshot: { enabled: false, rowsToday: 0, failures: 0, lastAt: {} },
+      snapshot: this.job
+        ? { enabled: true, ...this.job.status(this.now()) }
+        : { enabled: false, rowsToday: 0, failures: 0, lastAt: {} },
     };
   }
 

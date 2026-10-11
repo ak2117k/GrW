@@ -378,4 +378,17 @@ describe('MarketHubService', () => {
     start.mockRestore();
     setPositions.mockRestore();
   });
+
+  it('prunes OI snapshots older than 30 days through the job runner, as a no-op without a hub', async () => {
+    const svc = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+    svc.onModuleInit();
+    const prune = jest.fn().mockResolvedValue(12);
+    (svc as any).engine.chains.pruneOi = prune;
+    await svc.pruneOiSnapshots();
+    expect(runner.run).toHaveBeenCalledWith('hub-oi-prune', expect.anything(), expect.any(Function));
+    expect(prune).toHaveBeenCalledWith(expect.any(Date));
+    const cutoff = prune.mock.calls[0][0] as Date;
+    expect(Date.now() - cutoff.getTime()).toBeGreaterThanOrEqual(30 * 24 * 3600_000 - 1000);
+    svc.onModuleDestroy();
+  });
 });

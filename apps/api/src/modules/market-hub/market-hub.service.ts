@@ -8,7 +8,9 @@ import { MarketDataRepository } from '../market-data/repositories/market-data.re
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { TradeTrackerService } from '../trade-tracker/services/trade-tracker.service';
+import { GreeksCalculatorService } from '../options-chain/services/greeks-calculator.service';
 import { PrismaCandleRepo } from './candles/candle-repository';
+import { PrismaChainRepo } from './chain/chain-repository';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
 import { istDay } from './candles/trading-calendar';
 import { ManagerHubBroker } from './hub-broker';
@@ -38,6 +40,14 @@ const CANDLE_FIXUP_LEASE_MS = 2 * 60 * 60 * 1000;
 // HUB_MCX_LATE_CLOSE without importing this service; re-exported here.
 export { parseLateClose };
 
+const DEFAULT_CHAIN_STRIKES_AROUND = 20;
+
+/** HUB_CHAIN_STRIKES_AROUND read defensively: a non-finite or < 1 value falls back to 20; else rounded down. */
+export function chainStrikesAround(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_CHAIN_STRIKES_AROUND;
+}
+
 /**
  * SP1 market hub. M1 (shadow): prices a default context set and the owner's
  * open positions on the owner's shared session and reports metrics; no
@@ -48,6 +58,8 @@ export { parseLateClose };
  * HUB_PRICES_TRACKS through the HUB_PRICE_SOURCE token (see hub-prices.ts).
  * M4: feeds the owner's browser (the /ws gateway and the quote, depth, indices
  * and watchlist endpoints) behind HUB_SERVES_BROWSER.
+ * M5: option chains (HubChains, through `hubFor(…, 'chain')`) behind HUB_SERVES_CHAIN, and 3-minute OI
+ * snapshots behind HUB_OI_SNAPSHOT_ENABLED.
  * Start is fire-and-forget: boot must never wait on the broker.
  */
 @Injectable()
@@ -106,6 +118,17 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         browser: this.consumerEnabled('browser'),
         chain: this.consumerEnabled('chain'),
       }),
+      chain: {
+        repo: new PrismaChainRepo(this.prisma),
+        math: new GreeksCalculatorService(),
+        strikesAround: chainStrikesAround(this.config.get<unknown>('hub.chainStrikesAround')),
+        coreUnderlyings: (this.config.get<string>('hub.oiCoreUnderlyings') ?? '')
+          .split(',')
+          .map((s) => s.trim().toUpperCase())
+          .filter(Boolean),
+        snapshots: this.config.get<boolean>('hub.oiSnapshotEnabled') !== false,
+        log: (m) => this.logger.warn(m),
+      },
     });
     this.engine = engine;
     this.ownerUserId = owner;

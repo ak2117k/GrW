@@ -1,5 +1,5 @@
 import { HubEngine } from './hub-engine';
-import { MarketHubService } from './market-hub.service';
+import { MarketHubService, chainStrikesAround } from './market-hub.service';
 
 function config(values: Record<string, unknown>) {
   return { get: jest.fn((k: string) => values[k]) };
@@ -108,6 +108,28 @@ describe('MarketHubService', () => {
     expect(off.hubFor(null, 'chain')).toBeNull();
     expect(off.status()?.consumers.flags.chain).toBe(false);
     off.onModuleDestroy();
+  });
+
+  it('the chain hub carries the engine chains, and status().chain reports them', () => {
+    const svc = new MarketHubService(enabled({ 'hub.servesChain': true }) as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+    svc.onModuleInit();
+    expect(svc.hubFor(null, 'chain')?.chains).toBeDefined();
+    expect(svc.status()?.chain).toEqual(expect.objectContaining({ builds: 0, held: 0 }));
+    svc.onModuleDestroy();
+  });
+
+  it('chainStrikesAround: a non-finite or < 1 HUB_CHAIN_STRIKES_AROUND falls back to 20, else rounds down', () => {
+    expect(chainStrikesAround(undefined)).toBe(20);
+    expect(chainStrikesAround(null)).toBe(20);
+    expect(chainStrikesAround(Number.NaN)).toBe(20);
+    expect(chainStrikesAround(Number.POSITIVE_INFINITY)).toBe(20);
+    expect(chainStrikesAround(0)).toBe(20);
+    expect(chainStrikesAround(0.5)).toBe(20);
+    expect(chainStrikesAround(-3)).toBe(20);
+    expect(chainStrikesAround('abc')).toBe(20);
+    expect(chainStrikesAround(1)).toBe(1);
+    expect(chainStrikesAround(12.9)).toBe(12);
+    expect(chainStrikesAround('15')).toBe(15);
   });
 
   it('the browser hub can unwatch, and its outcomes land in status().consumers.browser', async () => {

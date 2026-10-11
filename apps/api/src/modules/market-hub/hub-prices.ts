@@ -1,4 +1,5 @@
 import type { ModuleRef } from '@nestjs/core';
+import type { HubChains } from './chain/chain.types';
 import type { HubEngine } from './hub-engine';
 import type { InstrumentRef, Price, PriceResult, Priority } from './hub.types';
 
@@ -31,6 +32,8 @@ export interface HubPrices {
   unwatch(refs: readonly InstrumentRef[], owner: string): Promise<void>;
   /** Every price the hub learns (live tick or polled quote). Returns the unsubscribe. */
   onPrice(fn: (p: Price) => void): () => void;
+  /** M5: this session's option chains. Absent when the hub was built without chain deps. */
+  chains?: HubChains;
 }
 
 export interface HubPriceSource {
@@ -60,7 +63,7 @@ export function lookupHubPrices(moduleRef: Pick<ModuleRef, 'get'> | null | undef
 
 /** One engine's prices, as the HubPrices a consumer sees. */
 export function engineHubPrices(
-  engine: Pick<HubEngine, 'price' | 'prices' | 'watchMany' | 'unwatchMany' | 'onPrice'>,
+  engine: Pick<HubEngine, 'price' | 'prices' | 'watchMany' | 'unwatchMany' | 'onPrice' | 'chains'>,
 ): HubPrices {
   return {
     price: (ref, opts) => engine.price(ref, opts),
@@ -68,5 +71,6 @@ export function engineHubPrices(
     watch: (refs, priority, owner, ttlMs) => engine.watchMany(refs, priority, owner, ttlMs),
     unwatch: (refs, owner) => engine.unwatchMany(refs, owner),
     onPrice: (fn) => engine.onPrice(fn),
+    ...(engine.chains ? { chains: engine.chains } : {}),
   };
 }

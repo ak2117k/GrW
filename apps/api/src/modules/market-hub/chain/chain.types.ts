@@ -51,3 +51,33 @@ export interface OiRow {
 
 /** Why a chain could not be built (REST 503 reason). */
 export type ChainUnavailable = 'no-contracts' | 'throttled' | 'busy' | 'no-session' | 'error';
+
+export type ChainResult =
+  | { kind: 'fresh'; chain: HubChain }
+  | { kind: 'stale'; chain: HubChain; ageMs: number }
+  | { kind: 'market-closed'; chain: HubChain }
+  | { kind: 'unavailable'; reason: ChainUnavailable };
+
+export interface ChainRequest {
+  /** A screen (GET /api/options/chain): renews the 2-min refresh watch and marks the underlying viewed today. */
+  screen?: boolean;
+}
+
+export interface HubChains {
+  chain(underlying: string, expiry: string, opts?: ChainRequest): Promise<ChainResult>;
+  expiries(underlying: string): Promise<string[]>;
+  optionLtp(underlying: string, expiry: string, strike: number, type: OptionSide): Promise<number | null>;
+}
+
+export interface ChainStatus {
+  builds: number;
+  buildP95Ms: number;
+  cacheHits: number;
+  greeksLocal: number;
+  unavailable: Record<ChainUnavailable, number>;
+  baselineFailures: number;
+  watched: number;
+  held: number;
+  viewedToday: number;
+  snapshot: { enabled: boolean; rowsToday: number; failures: number; lastAt: Record<string, number> };
+}

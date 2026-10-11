@@ -381,4 +381,31 @@ describe('HubEngine', () => {
     expect((await pending).kind).toBe('throttled');
     e.stop();
   });
+
+  it('with chain deps the engine exposes chains, reports chain status, and marks held positions', async () => {
+    const { MemoryChainRepo } = await import('./testing/memory-chain-repo');
+    const { GreeksCalculatorService } = await import('../options-chain/services/greeks-calculator.service');
+    const repo = new MemoryChainRepo();
+    repo.heldInfo.set('NFO:35001', { name: 'NIFTY', expiry: '2026-10-27' });
+    const e = new HubEngine({
+      broker: new FakeBroker(),
+      clock: new SessionClock({ holidays: MARKET_HOLIDAYS }),
+      cap: 50,
+      defaults: [NIFTY],
+      chain: { repo, math: new GreeksCalculatorService(), strikesAround: 20, coreUnderlyings: [], snapshots: false },
+    });
+    await e.start();
+    await e.setPositions([POS]);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(e.chains).not.toBeNull();
+    expect(e.status().chain).toEqual(expect.objectContaining({ builds: 0, held: 1 }));
+    await expect(e.chains!.chain('NOSUCH', '2026-10-13')).resolves.toEqual({ kind: 'unavailable', reason: 'no-contracts' });
+    e.stop();
+  });
+
+  it('without chain deps there are no chains and status().chain is null', async () => {
+    const { e } = engine();
+    expect(e.chains).toBeNull();
+    expect(e.status().chain).toBeNull();
+  });
 });

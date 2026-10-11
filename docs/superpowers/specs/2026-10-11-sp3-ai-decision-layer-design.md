@@ -200,8 +200,10 @@ enter a request object, and the CLI env scrub is unchanged.
 nHoldout, metrics (JSON), gate (`GO`/`NO_GO` + reasons), artifactPath, active (bool, at most one
 per kind).
 
-DB role `grw_ai`: `SELECT` on `ai_calls`, `sentinel_*`, journal/silo/candle tables, `INSERT/UPDATE` on
-`ai_decision_records` and `ai_models` only. Created by deploy SQL, not by Prisma.
+DB role `grw_ai`: `SELECT` on `ai_calls`, `sentinel_*`, journal/silo/candle tables, `SELECT/INSERT/UPDATE` on
+`ai_decision_records` and `ai_models` only. Created by deploy SQL (`deploy/sql/grw-ai-role.sql`), not
+by Prisma; the script's header carries the exact allow-list and the explicit exclusions (users,
+credentials, tokens, billing).
 
 ### 5.2 Writers
 
@@ -370,4 +372,5 @@ branched from it and add no further migrations, so they merge back in either ord
 - SSH tunnel window for the GrW-production import (owner).
 - Whether `sell_futures_*` P&L is repairable (lot-size check) — until then excluded.
 - When to enable an API fallback for the sentinel — owner, after the shadow comparison.
-- `grw_ai` can read every table (incl. users); narrow before SaaS.
+- `grw_ai` is allow-listed (§5.1), but the legacy silo and candle tables it reads are not
+  tenant-scoped: it sees every user's trades. Add row-level scoping before SaaS.

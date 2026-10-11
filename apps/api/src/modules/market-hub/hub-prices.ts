@@ -11,8 +11,8 @@ import type { InstrumentRef, Price, PriceResult, Priority } from './hub.types';
  */
 export const HUB_PRICE_SOURCE = 'HUB_PRICE_SOURCE';
 
-/** Which consumer switch a caller sits behind: HUB_PRICES_POSITIONS, HUB_PRICES_TRACKS or HUB_SERVES_BROWSER. */
-export type HubConsumer = 'positions' | 'tracks' | 'browser';
+/** Which consumer switch a caller sits behind: HUB_PRICES_POSITIONS, HUB_PRICES_TRACKS, HUB_SERVES_BROWSER or HUB_SERVES_CHAIN. */
+export type HubConsumer = 'positions' | 'tracks' | 'browser' | 'chain';
 
 /** What a consumer did with one instrument: served by the hub, fell back to its legacy tiers, or got nothing. */
 export type HubOutcome = 'hub' | 'legacy' | 'unpriced';
@@ -39,7 +39,8 @@ export interface HubPriceSource {
    * Today: the owner's hub when the hub runs, the consumer's flag is on, and
    * `userId` is HUB_OWNER_USER_ID or null (system-wide paper tracks, which
    * have no user) — except that 'browser' never serves null: a browser always
-   * has a user. Otherwise null, and the caller keeps its legacy path.
+   * has a user. ('chain' does serve null: chain data is market-wide and its
+   * consumers are system jobs.) Otherwise null, and the caller keeps its legacy path.
    * Never another user's session. Multi-tenant: return that user's own hub.
    */
   hubFor(userId: string | null, consumer: HubConsumer): HubPrices | null;

@@ -89,6 +89,27 @@ describe('MarketHubService', () => {
     off.onModuleDestroy();
   });
 
+  it('hubFor(…, "chain") serves the owner and system work (null), only with HUB_SERVES_CHAIN on', () => {
+    const on = new MarketHubService(enabled({ 'hub.servesChain': true }) as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+    on.onModuleInit();
+    // Scanners, sentinel walls and trade-entry PCR have no user: chain data is market-wide.
+    expect(on.hubFor(null, 'chain')).not.toBeNull();
+    expect(on.hubFor('owner', 'chain')).not.toBeNull();
+    expect(on.hubFor('someone-else', 'chain')).toBeNull();
+    // 'browser' keeps its never-null rule.
+    expect(on.hubFor(null, 'browser')).toBeNull();
+    on.record('chain', 'hub', 3);
+    expect(on.status()?.consumers.chain.hub).toBe(3);
+    expect(on.status()?.consumers.flags.chain).toBe(true);
+    on.onModuleDestroy();
+
+    const off = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+    off.onModuleInit();
+    expect(off.hubFor(null, 'chain')).toBeNull();
+    expect(off.status()?.consumers.flags.chain).toBe(false);
+    off.onModuleDestroy();
+  });
+
   it('the browser hub can unwatch, and its outcomes land in status().consumers.browser', async () => {
     // A pin that settles: the default manager() never connects, so every reconcile would queue behind it.
     const m = manager(jest.fn().mockResolvedValue(undefined));
@@ -171,7 +192,7 @@ describe('MarketHubService', () => {
       instruments as any,
     );
     svc.onModuleInit();
-    expect(svc.status()?.consumers.flags).toEqual({ positions: true, tracks: false, browser: false });
+    expect(svc.status()?.consumers.flags).toEqual({ positions: true, tracks: false, browser: false, chain: false });
     svc.onModuleDestroy();
 
     const other = new MarketHubService(
@@ -183,7 +204,7 @@ describe('MarketHubService', () => {
       instruments as any,
     );
     other.onModuleInit();
-    expect(other.status()?.consumers.flags).toEqual({ positions: false, tracks: true, browser: false });
+    expect(other.status()?.consumers.flags).toEqual({ positions: false, tracks: true, browser: false, chain: false });
     other.onModuleDestroy();
   });
 

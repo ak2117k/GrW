@@ -40,6 +40,7 @@ export interface ConsumerFlags {
   positions: boolean;
   tracks: boolean;
   browser: boolean;
+  chain: boolean;
 }
 
 export interface CandleStatus {
@@ -90,6 +91,7 @@ export interface HubStatus {
     positions: ConsumerCounters;
     tracks: ConsumerCounters;
     browser: ConsumerCounters;
+    chain: ConsumerCounters;
     listenerErrors: number;
     flags: ConsumerFlags;
   };
@@ -128,6 +130,7 @@ export class HubEngine {
     positions: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
     tracks: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
     browser: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
+    chain: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
   };
 
   constructor(private readonly d: HubEngineDeps) {
@@ -412,8 +415,9 @@ export class HubEngine {
         positions: { ...this.consumerCounts.positions },
         tracks: { ...this.consumerCounts.tracks },
         browser: { ...this.consumerCounts.browser },
+        chain: { ...this.consumerCounts.chain },
         listenerErrors: this.listenerErrors,
-        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false, browser: false },
+        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false, browser: false, chain: false },
       },
     };
   }

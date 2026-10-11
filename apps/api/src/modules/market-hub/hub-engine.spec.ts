@@ -264,8 +264,9 @@ describe('HubEngine', () => {
       positions: { hub: 3, legacy: 1, unpriced: 0, lastHubAt: Date.now(), lastUnpricedAt: null },
       tracks: { hub: 0, legacy: 0, unpriced: 2, lastHubAt: null, lastUnpricedAt: Date.now() },
       browser: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
+      chain: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
       listenerErrors: 0,
-      flags: { positions: false, tracks: false, browser: false }, // no consumerFlags dep: every switch reads as off
+      flags: { positions: false, tracks: false, browser: false, chain: false }, // no consumerFlags dep: every switch reads as off
     });
     e.stop();
   });

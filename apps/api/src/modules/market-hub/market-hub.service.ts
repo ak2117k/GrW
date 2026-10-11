@@ -27,6 +27,7 @@ const CONSUMER_FLAG: Record<HubConsumer, string> = {
   positions: 'hub.pricesPositions',
   tracks: 'hub.pricesTracks',
   browser: 'hub.servesBrowser',
+  chain: 'hub.servesChain',
 };
 /** Job name in job_runs and /healthz/detail (health-detail.service.ts EXPECTED_JOBS). */
 export const CANDLE_FIXUP_JOB = 'hub-candle-fixup';
@@ -103,6 +104,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         positions: this.consumerEnabled('positions'),
         tracks: this.consumerEnabled('tracks'),
         browser: this.consumerEnabled('browser'),
+        chain: this.consumerEnabled('chain'),
       }),
     });
     this.engine = engine;

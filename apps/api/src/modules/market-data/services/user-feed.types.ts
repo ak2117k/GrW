@@ -1,5 +1,6 @@
 import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import type { Candle } from './user-historical.util';
+import type { OptionGreekRow } from '../../market-hub/chain/chain.types';
 
 /** A single instrument to subscribe on the broker feed. */
 export interface TokenRef {
@@ -50,6 +51,11 @@ export interface UserFeedSessionLike {
    * AngelThrottleError instead of returning an empty map.
    */
   getQuotes(refs: TokenRef[], opts?: { throwOnThrottle?: boolean }): Promise<Map<string, TickData>>;
+  /**
+   * ONE optionGreek call: Greeks + IV for every contract of `name` expiring
+   * `expiryYmd` (YYYY-MM-DD). Rejects with AngelThrottleError when throttled.
+   */
+  getOptionGreeks(name: string, expiryYmd: string): Promise<OptionGreekRow[]>;
 }
 
 /** Builds a session for one user. Overridable in tests via the DI token below. */

@@ -65,3 +65,15 @@ it('candles() fetches one window on the owner’s session and maps to hub candle
   expect(manager.fetchCandleWindow).toHaveBeenCalledWith('owner', { token: '35001', exchange: 'NFO' }, 'ONE_MINUTE', from, to);
   expect(out).toEqual([{ ts: Date.parse('2026-10-07T03:45:00.000Z'), open: 1, high: 2, low: 0.5, close: 1.5, volume: 42 }]);
 });
+
+it('optionGreeks goes to the owner session through the manager', async () => {
+  const rows = [{ strike: 25000, optionType: 'CE', iv: 13, delta: 0.5, gamma: 0.001, theta: -10, vega: 9 }];
+  const manager = {
+    pin: jest.fn(), unpin: jest.fn(), fetchQuotes: jest.fn(), fetchCandleWindow: jest.fn(),
+    addTickListener: jest.fn(), addStateListener: jest.fn(),
+    fetchOptionGreeks: jest.fn().mockResolvedValue(rows),
+  };
+  const broker = new ManagerHubBroker(manager as any, 'owner');
+  await expect(broker.optionGreeks('NIFTY', '2026-10-13')).resolves.toEqual(rows);
+  expect(manager.fetchOptionGreeks).toHaveBeenCalledWith('owner', 'NIFTY', '2026-10-13');
+});

@@ -248,6 +248,12 @@ export class UserFeedManager {
     return entry.session.getQuotes(refs, opts);
   }
 
+  /** Greeks for one underlying + expiry over the user's OWN Angel session (the market hub's chains). */
+  async fetchOptionGreeks(userId: string, name: string, expiryYmd: string) {
+    const entry = this.getOrCreateEntry(userId);
+    return entry.session.getOptionGreeks(name, expiryYmd);
+  }
+
   // ──────────────────────────────────────────────
   // Private
   // ──────────────────────────────────────────────

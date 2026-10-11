@@ -13,7 +13,8 @@ export type GuardedEntry =
   | 'breakout-swing-track'
   | 'anand-dual-track'
   | 'auto-execution'
-  | 'auto-trade';
+  | 'auto-trade'
+  | 'universe-scanner';
 
 export interface KillSwitchReadPort {
   /** This user's core kill switch is in force on. */

@@ -6,6 +6,7 @@ import { BreakoutSwingPollerService } from '../../breakout-swing-track/services/
 import { BreakoutSwingService } from '../../breakout-swing-track/services/breakout-swing.service';
 import { SellFuturesService } from '../../sell-futures-track/services/sell-futures.service';
 import { UngatedWatchService } from '../../ungated-track/services/ungated-watch.service';
+import { UniverseScannerWorker } from '../../signal-generator/workers/universe-scanner.worker';
 import { WatchService } from '../../watch-monitor/services/watch.service';
 import { CoreKillSwitchEntryBlockedError, setCoreKillSwitchReader, type KillSwitchReadPort } from './kill-gate';
 
@@ -205,5 +206,51 @@ describe('auto-trade: AutoTradeService (auto-trade.service.ts:157, :269, :347)',
     OFF();
     const stats = await svc().processActiveSignals();
     expect(stats).toMatchObject({ executed: 0, errors: 1 }); // tradeExecutionService tripwire, caught by the scan loop
+  });
+});
+
+describe('signal-generator: UniverseScannerWorker.scanSymbol, before executeTrade (universe-scanner.worker.ts:399)', () => {
+  function worker() {
+    const now = Date.now();
+    const candles = Array.from({ length: 60 }, (_, i) => ({
+      timestamp: new Date(now - (60 - i) * 15 * 60000), open: 100, high: 101, low: 99, close: 100, volume: 10,
+    }));
+    const signal = { side: 'BUY', entryPrice: 100, stoplossPrice: 95, targetPrice: 110, confidence: 80, reason: 'r', metadata: {} };
+    const strike = { strikePrice: 25000, side: 'CE', ltp: 50, delta: 0.5, score: 1, reason: 'r' };
+    const executeTrade = jest.fn(async () => { throw new Error('tripwire: tradeExecutionService.executeTrade touched'); });
+    const w = construct(UniverseScannerWorker, [
+      tripwire('prisma', { instrument: { upsert: jest.fn(async () => ({})) } }),
+      tripwire('marketDataRepo', { getCandles: jest.fn(async () => candles) }),
+      tripwire('optionsChainService', { getExpiries: jest.fn(async () => ['2026-10-13']) }),
+      tripwire('strikeSelector', { selectBestStrike: jest.fn(async () => strike) }),
+      tripwire('strategy', { name: 'x', evaluateConditions: jest.fn(() => ({})), analyze: jest.fn(() => signal) }),
+      tripwire('tradeExecutionService', { executeTrade }),
+      tripwire('levelBookService'),
+      tripwire('reviewQueue'),
+    ]);
+    const scan = () => (w as unknown as { scanSymbol(x: unknown): Promise<{ tradeId: string | null; reason: string }> })
+      .scanSymbol({ underlying: 'NIFTY', exchange: 'NSE', lotSize: 65, instrumentId: 'i1' });
+    return { scan, executeTrade };
+  }
+  it('refuses while the owner switch is on: no trade, executeTrade never called', async () => {
+    const r = ON();
+    const { scan, executeTrade } = worker();
+    const out = await scan();
+    expect(out.tradeId).toBeNull();
+    expect(executeTrade).not.toHaveBeenCalled();
+    expect(r.isOnForPlatform).toHaveBeenCalled();
+  });
+  it('fails closed when the switch cannot be read', async () => {
+    BROKEN();
+    const { scan, executeTrade } = worker();
+    expect((await scan()).tradeId).toBeNull();
+    expect(executeTrade).not.toHaveBeenCalled();
+  });
+  it('passes through when off (reaches the trade engine)', async () => {
+    OFF();
+    const { scan, executeTrade } = worker();
+    const out = await scan();
+    expect(executeTrade).toHaveBeenCalledTimes(1);
+    expect(out.reason).toContain('tripwire: tradeExecutionService.executeTrade touched');
   });
 });

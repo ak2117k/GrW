@@ -108,6 +108,18 @@ describe('replayVerdicts', () => {
     expect(report.sameVersionRows).toBe(0);
   });
 
+  it('leaves overnight-review rows out — they are judged by a different prompt and verdict set', async () => {
+    const agent = agentThatSays('HOLD');
+    const report = await replayVerdicts(
+      [row('a', 'HOLD', 'v2/t1'), row('n', 'TIGHTEN_AT_OPEN', 'o1/t1')],
+      agent,
+    );
+    expect(report.total).toBe(1);
+    expect(report.agreed).toBe(1);
+    expect(report.storedPromptVersions).toEqual(['v2/t1']);
+    expect((agent as unknown as { judge: jest.Mock }).judge).toHaveBeenCalledTimes(1);
+  });
+
   it('reports an empty corpus as empty rather than failing', async () => {
     const agent = agentThatSays();
     const report = await replayVerdicts([], agent);

@@ -5,6 +5,7 @@ import { absent, present, type ContextPacket } from './context-packet.service';
 import {
   SENTINEL_PROMPT_VERSION,
   SENTINEL_SYSTEM_PROMPT,
+  SENTINEL_SYSTEM_PROMPT_NO_CUES,
 } from '../prompts/sentinel-system-prompt';
 import { THESIS_PROMPT_VERSION } from '../prompts/thesis-prompt';
 
@@ -127,8 +128,11 @@ describe('SentinelAgentService', () => {
   it('stamps both the verdict prompt and the thesis prompt that filled the packet', () => {
     // The literal, not only the composition — an expectation built purely from
     // the constants under test would still pass if both were empty strings.
+    // No config here = market cues off = the pre-cues live prompt, unchanged.
     expect(svc.promptVersion).toBe('v2/t1');
-    expect(svc.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
+    const on = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'true' : undefined) } as never);
+    expect(on.promptVersion).toBe('v3/t1');
+    expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');
   });
@@ -142,13 +146,40 @@ describe('SentinelAgentService', () => {
     });
   });
 
+  it('with market cues off, the live prompt is the v2 text: the old macro line, none of the cue lines', () => {
+    expect(SENTINEL_SYSTEM_PROMPT_NO_CUES).toContain(
+      '- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.',
+    );
+    expect(SENTINEL_SYSTEM_PROMPT_NO_CUES).not.toMatch(/nasdaqFutures|giftNifty/);
+    expect(SENTINEL_SYSTEM_PROMPT).toMatch(/giftNifty/);
+  });
+
+  it('the flag-off prompt IS the v2 text from main, pinned by length and SHA-256', () => {
+    // Hash of SENTINEL_SYSTEM_PROMPT as shipped at 9095047 (v2, 5562 chars).
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { createHash } = require('crypto') as typeof import('crypto');
+    expect(SENTINEL_SYSTEM_PROMPT_NO_CUES).toHaveLength(5562);
+    expect(createHash('sha256').update(SENTINEL_SYSTEM_PROMPT_NO_CUES, 'utf8').digest('hex')).toBe(
+      '084d0a1422f2bdba2f10c1d19bd70dde7c18459461fb0122b7f055c01a3c16ad',
+    );
+  });
+
+  it('with market cues on, sends the v3 prompt and stamps v3', async () => {
+    const c = jest.fn().mockResolvedValue(reply(validVerdict));
+    const on = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'TRUE' : undefined) } as never);
+    await on.judge(packet());
+    expect(c.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT);
+    expect(on.promptVersion).toBe('v3/t1');
+  });
+
   it('sends the packet as the user turn and caches the system prompt', async () => {
     create.mockResolvedValue(reply(validVerdict));
     await svc.judge(packet());
     const args = create.mock.calls[0][0];
     expect(args.model).toBe('claude-opus-5');
     expect(args.system[0].cache_control).toEqual({ type: 'ephemeral' });
-    expect(args.system[0].text).toBe(SENTINEL_SYSTEM_PROMPT);
+    // Market cues off (no config): the pre-cues v2 prompt, word for word.
+    expect(args.system[0].text).toBe(SENTINEL_SYSTEM_PROMPT_NO_CUES);
     expect(args.messages[0].role).toBe('user');
     expect(args.messages[0].content).toContain('INFY');
     // The packet must ride in the USER turn, or the cached prefix changes on

@@ -1,6 +1,9 @@
-import { Eye, AlertTriangle, ShieldCheck, HelpCircle } from 'lucide-react';
+import { Eye, AlertTriangle, ShieldCheck, HelpCircle, Moon } from 'lucide-react';
 import clsx from 'clsx';
 import type { SentinelPosition } from '@/hooks/useSentinelPositions';
+import { agoLabel, overnightPlanCard, type OvernightPlanCard, type OvernightTone } from './overnightPlanView';
+
+export { agoLabel };
 
 /**
  * Colour and icon per verdict.
@@ -27,16 +30,58 @@ const THESIS_CLS: Record<string, string> = {
 const rs = (n: number) =>
   `${n > 0 ? '+' : n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
-/** "4 min ago" — how stale the agent's read is, which the user must be able to see. */
-export function agoLabel(iso: string, now: number = Date.now()): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return 'unknown';
-  const mins = Math.floor((now - then) / 60_000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins} min ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+const TONE_CLS: Record<OvernightTone, string> = {
+  emerald: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+  amber: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+  red: 'bg-red-500/15 text-red-400 border-red-500/30',
+  muted: 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-muted)] border-[var(--color-border-subtle)]',
+};
+
+/**
+ * The latest after-close or pre-open verdict: what the sentinel would do at the
+ * next open, and the plan for the first minutes. Shown BESIDE the live verdict,
+ * never in place of it — and marked when a newer live read has superseded it.
+ */
+function OvernightPlan({ card }: { card: OvernightPlanCard }) {
+  return (
+    <div
+      className={clsx(
+        'rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-tertiary)]/40 p-2 text-[11px]',
+        (card.superseded || card.stale) && 'opacity-70',
+      )}
+    >
+      <div className="mb-1.5 flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-1 font-medium text-[var(--color-text-secondary)]">
+          <Moon size={11} />
+          {card.title}
+        </span>
+        <span className={clsx('rounded border px-1.5 py-0.5 font-semibold', TONE_CLS[card.tone])}>{card.verdictLabel}</span>
+        <span className="text-[var(--color-text-muted)]">
+          {card.windowLabel} · {card.ago} · confidence {card.confidence}
+        </span>
+      </div>
+      {card.plan && (
+        <p className="text-[var(--color-text-secondary)]">
+          <span className="font-medium">At the open:</span> {card.plan}
+        </p>
+      )}
+      {card.risk && (
+        <p className="mt-1 text-[var(--color-text-muted)]">
+          <span className="font-medium text-[var(--color-text-secondary)]">Overnight risk:</span> {card.risk}
+        </p>
+      )}
+      {card.changeMind && (
+        <p className="mt-1 text-[var(--color-text-muted)]">
+          <span className="font-medium text-[var(--color-text-secondary)]">Changes its mind:</span> {card.changeMind}
+        </p>
+      )}
+      {(card.superseded || card.stale) && (
+        <p className="mt-1 italic text-[var(--color-text-muted)]">
+          {card.superseded ? 'Superseded by the live read above.' : 'From an earlier session.'}
+        </p>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -59,6 +104,7 @@ export default function SentinelPanel({ positions }: { positions: SentinelPositi
         };
         const { Icon } = style;
         const side = p.qty < 0 ? 'SHORT' : 'LONG';
+        const overnight = overnightPlanCard(p);
 
         return (
           <div
@@ -106,6 +152,12 @@ export default function SentinelPanel({ positions }: { positions: SentinelPositi
               <p className="text-[var(--color-text-muted)]">
                 No verdict recorded yet for this position — the sentinel has not judged it.
               </p>
+            )}
+
+            {overnight && (
+              <div className="mt-2">
+                <OvernightPlan card={overnight} />
+              </div>
             )}
 
             {p.thesis && (

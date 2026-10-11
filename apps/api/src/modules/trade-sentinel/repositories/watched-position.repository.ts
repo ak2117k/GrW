@@ -31,6 +31,24 @@ export interface WatchedPosition {
     triggeredBy: string[];
     at: Date;
   } | null;
+  /**
+   * The latest OVERNIGHT-REVIEW verdict (after-close or pre-open), shown beside
+   * the live one as the "Overnight plan". Kept apart from `verdict` so the live
+   * read never silently turns into last night's plan. `reason` holds the risk and
+   * the open plan as two labelled lines; `invalidationPoint` is the level that
+   * would change the call.
+   */
+  overnight: {
+    kind: 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | 'PRE_OPEN_CHECK';
+    verdict: string;
+    confidence: string;
+    thesisStatus: string;
+    reason: string;
+    invalidationPoint: string | null;
+    evidence: string[];
+    netPnl: number;
+    at: Date;
+  } | null;
   thesis: {
     direction: string;
     reason: string;
@@ -84,14 +102,24 @@ export class WatchedPositionRepository {
     });
 
     const latestVerdict = new Map<string, (typeof verdicts)[number]>();
+    const latestOvernight = new Map<string, { row: (typeof verdicts)[number]; kind: OvernightKind }>();
     // `verdicts` is newest-first, so the FIRST one seen per tracker is the
-    // latest — do not overwrite on subsequent hits.
-    for (const v of verdicts) if (!latestVerdict.has(v.trackerId)) latestVerdict.set(v.trackerId, v);
+    // latest — do not overwrite on subsequent hits. Live and overnight rows are
+    // tracked separately.
+    for (const v of verdicts) {
+      const kind = overnightKindOf(v.triggeredBy);
+      if (kind) {
+        if (!latestOvernight.has(v.trackerId)) latestOvernight.set(v.trackerId, { row: v, kind });
+      } else if (!latestVerdict.has(v.trackerId)) {
+        latestVerdict.set(v.trackerId, v);
+      }
+    }
     const thesisFor = new Map(theses.map((t) => [t.trackerId, t]));
 
     return trackers.map((t) => {
       const v = latestVerdict.get(t.id);
       const th = thesisFor.get(t.id);
+      const o = latestOvernight.get(t.id);
       return {
         trackerId: t.id,
         symbol: t.symbol,
@@ -115,6 +143,19 @@ export class WatchedPositionRepository {
               at: v.createdAt,
             }
           : null,
+        overnight: o
+          ? {
+              kind: o.kind,
+              verdict: o.row.verdict,
+              confidence: o.row.confidence,
+              thesisStatus: o.row.thesisStatus,
+              reason: o.row.reason,
+              invalidationPoint: o.row.invalidationPoint,
+              evidence: Array.isArray(o.row.evidence) ? (o.row.evidence as string[]) : [],
+              netPnl: o.row.netPnl,
+              at: o.row.createdAt,
+            }
+          : null,
         thesis: th
           ? {
               direction: th.direction,
@@ -128,4 +169,15 @@ export class WatchedPositionRepository {
       };
     });
   }
+}
+
+type OvernightKind = 'OVERNIGHT_REVIEW' | 'PRE_OPEN_REVIEW' | 'PRE_OPEN_CHECK';
+
+/** Which overnight window wrote a row, read off its `triggeredBy`; null for a live row. */
+function overnightKindOf(triggeredBy: unknown): OvernightKind | null {
+  if (!Array.isArray(triggeredBy)) return null;
+  if (triggeredBy.includes('PRE_OPEN_CHECK')) return 'PRE_OPEN_CHECK';
+  if (triggeredBy.includes('PRE_OPEN_REVIEW')) return 'PRE_OPEN_REVIEW';
+  if (triggeredBy.includes('OVERNIGHT_REVIEW')) return 'OVERNIGHT_REVIEW';
+  return null;
 }

@@ -5,6 +5,8 @@ import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { SignalGeneratorModule } from '../signal-generator/signal-generator.module';
 import { NewsModule } from '../news/news.module';
+import { MarketCuesModule } from '../market-cues/market-cues.module';
+import { MarketCuesService } from '../market-cues/market-cues.service';
 
 import { SentinelController } from './controllers/sentinel.controller';
 import { OpenPositionsRepository } from './repositories/open-positions.repository';
@@ -31,6 +33,10 @@ import { judgeTransportFrom, type MessagesTransport } from './services/llm-trans
 import { SentinelNewsAdapter } from './adapters/news.adapter';
 import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
 import { SentinelTickSource } from './adapters/tick-source.adapter';
+import { SentinelOvernightEvidenceAdapter } from './adapters/overnight-evidence.adapter';
+import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
+import { MACRO_CUES } from './ports/market-cues.port';
+import { SentinelOvernightService } from './services/sentinel-overnight.service';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -70,6 +76,10 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
     // `@Global`, but imported explicitly so the dependency is visible here.
     SignalGeneratorModule,
     NewsModule,
+    // US closes/futures, FII/DII, FII index OI, GIFT Nifty, NSE pre-open — the
+    // owner's own shadow sentinel only (free sources; see the module's note).
+    // Off unless MARKET_CUES_ENABLED. Reaches no broker: HTTP to public endpoints.
+    MarketCuesModule,
   ],
   controllers: [SentinelController],
   providers: [
@@ -120,6 +130,13 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
     SentinelChartContextAdapter,
     { provide: CHART_CONTEXT_SHIM, useExisting: SentinelChartContextAdapter },
     { provide: TICK_SOURCE, useClass: SentinelTickSource },
+    // News, options-chain and market-data reads for the overnight review. Reaches
+    // the broker through those services, exactly like the adapters above — so it
+    // is bound here, behind `OvernightEvidenceSource`, and nowhere else.
+    { provide: OVERNIGHT_EVIDENCE, useClass: SentinelOvernightEvidenceAdapter },
+    // The live packet's macro reads the market-cues CACHE through this port —
+    // `peek`, no I/O. The overnight adapter reaches the same instance lazily.
+    { provide: MACRO_CUES, useExisting: MarketCuesService },
 
     SentinelVerdictRepository,
     WatchedPositionRepository,
@@ -132,6 +149,10 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
     OiWallSnapshotService,
     SentinelCycleService,
     SentinelRunnerService,
+    // After-close (15:45 NSE / 23:45 MCX) and pre-open (08:30) reviews, and the
+    // 09:10 pre-open check (NSE F&O, on the pre-open IEP). Shadow only; shares
+    // the cycle's judge cap. Off unless SENTINEL_SHADOW_ENABLED.
+    SentinelOvernightService,
   ],
   exports: [SentinelCycleService, SentinelRunnerService],
 })

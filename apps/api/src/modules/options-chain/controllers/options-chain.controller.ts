@@ -46,7 +46,7 @@ export class OptionsChainController {
     }
 
     const { chain, spotPrice: snapshotSpot } =
-      await this.optionsChainService.getOptionsChainWithSpot(underlying, expiry);
+      await this.optionsChainService.getOptionsChainWithSpot(underlying, expiry, { background: true });
 
     // Prefer the spot embedded in the snapshot/source; only hit the broker
     // when we have no spot at all (rare — would mean estimate-from-chain was
@@ -130,6 +130,7 @@ export class OptionsChainController {
     const chain = await this.optionsChainService.getOptionsChain(
       underlying,
       expiry,
+      { background: true },
     );
 
     return this.optionsChainService.getOISummary(chain);
@@ -185,6 +186,7 @@ export class OptionsChainController {
       await this.optionsChainService.getOptionsChainWithSpot(
         underlying,
         expiry,
+        { background: true },
       );
 
     // Score top 3 strikes across both sides. We reuse the strike selector

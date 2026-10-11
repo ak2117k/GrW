@@ -1006,3 +1006,40 @@ describe('SentinelTickSource — a stale price is refused, not judged', () => {
     await expect(t.svc.tickFor('t1')).rejects.toThrow(/no live price/i);
   });
 });
+
+/**
+ * THE OVERNIGHT REVIEW READS A CLOSED MARKET. After the close every tracker
+ * price is legitimately old, so the live staleness refusal would fail every
+ * position in every overnight window. The review asks for the closed-session
+ * read explicitly: the last stored price is accepted WITH its print time, so the
+ * packet can say when it was printed instead of passing it off as live.
+ */
+describe('SentinelTickSource — the closed-session read for the overnight review', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(NOW));
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('accepts an old price when asked for the closed session, and dates it', async () => {
+    const t = make();
+    const printed = new Date(NOW.getTime() - 17 * 3600_000);
+    t.findUnique.mockResolvedValue(row({ updatedAt: printed }));
+    await expect(t.svc.tickFor('t1', { closedSession: true })).resolves.toMatchObject({
+      ltp: 105,
+      ltpAt: printed.toISOString(),
+    });
+  });
+
+  it('still refuses the same old price on the live path', async () => {
+    const t = make();
+    t.findUnique.mockResolvedValue(row({ updatedAt: new Date(NOW.getTime() - 17 * 3600_000) }));
+    await expect(t.svc.tickFor('t1')).rejects.toThrow(/REFUSING to judge/i);
+  });
+
+  it('still refuses a MISSING price on the closed-session path — it never invents one', async () => {
+    const t = make();
+    t.findUnique.mockResolvedValue(row({ lastLtp: null }));
+    await expect(t.svc.tickFor('t1', { closedSession: true })).rejects.toThrow(/no live price/i);
+  });
+});

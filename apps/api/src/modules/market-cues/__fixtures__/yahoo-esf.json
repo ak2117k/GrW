@@ -1,0 +1,51 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "ES=F",
+     "exchangeName": "CME",
+     "instrumentType": "FUTURE",
+     "regularMarketTime": 1791579599,
+     "gmtoffset": -14400,
+     "timezone": "EDT",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 7859.75,
+     "shortName": "E-Mini S&P 500 Dec 26",
+     "chartPreviousClose": 7826.25,
+     "dataGranularity": "1d",
+     "range": "5d"
+    },
+    "timestamp": [
+     1791172800,
+     1791259200,
+     1791345600,
+     1791432000,
+     1791518400
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "close": [
+        7826.25,
+        7874,
+        7852.75,
+        7816.25,
+        7859.75
+       ],
+       "open": [
+        7781.5,
+        7831.75,
+        7881.5,
+        7850.75,
+        7820.5
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

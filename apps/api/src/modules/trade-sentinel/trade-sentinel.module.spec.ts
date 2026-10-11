@@ -10,6 +10,9 @@ import { ThesisService } from './services/thesis.service';
 import { OiWallSnapshotService } from './services/oi-wall-snapshot.service';
 import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.service';
 import { ANTHROPIC_CLIENT } from './services/sentinel-agent.service';
+import { SentinelOvernightService } from './services/sentinel-overnight.service';
+import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
+import { MACRO_CUES } from './ports/market-cues.port';
 
 /**
  * Every parameter Nest must resolve by an explicit TOKEN rather than by type.
@@ -24,10 +27,13 @@ const TOKEN_PARAMS: Array<[string, unknown, string]> = [
   ['RosterService.ownership', RosterService, ENGINE_OWNERSHIP_PROBE],
   ['ContextPacketService.chartContext', ContextPacketService, CHART_CONTEXT_SHIM],
   ['ContextPacketService.news', ContextPacketService, NEWS_SHIM],
+  ['ContextPacketService.macroCues', ContextPacketService, MACRO_CUES],
   ['ThesisService.client', ThesisService, ANTHROPIC_CLIENT],
   ['ThesisService.chartContext', ThesisService, CHART_CONTEXT_SHIM],
   ['OiWallSnapshotService.oiWall', OiWallSnapshotService, OI_WALL_SOURCE],
   ['SentinelCycleService.ticks', SentinelCycleService, TICK_SOURCE],
+  ['SentinelOvernightService.ticks', SentinelOvernightService, TICK_SOURCE],
+  ['SentinelOvernightService.evidence', SentinelOvernightService, OVERNIGHT_EVIDENCE],
 ];
 
 /** The `@Inject(...)` tokens Nest recorded for a class, in no particular order. */
@@ -89,6 +95,9 @@ describe('TradeSentinelModule — every token is actually provided', () => {
     expect(providedTokens().map((t) => (t as { name?: string })?.name)).toContain(
       'SentinelRunnerService',
     );
+    expect(providedTokens().map((t) => (t as { name?: string })?.name)).toContain(
+      'SentinelOvernightService',
+    );
   });
 
   it('imports the modules that export the concrete classes the adapters need', () => {
@@ -103,6 +112,8 @@ describe('TradeSentinelModule — every token is actually provided', () => {
         'MarketDataModule',
         'SignalGeneratorModule',
         'NewsModule',
+        // The market-cues cache: the live packet's macro and the overnight cues.
+        'MarketCuesModule',
       ]),
     );
   });
@@ -122,6 +133,8 @@ describe('TradeSentinelModule — every interface-typed dependency has a token',
       OI_WALL_SOURCE,
       TICK_SOURCE,
       ANTHROPIC_CLIENT,
+      OVERNIGHT_EVIDENCE,
+      MACRO_CUES,
     ];
     expect(new Set(tokens).size).toBe(tokens.length);
   });

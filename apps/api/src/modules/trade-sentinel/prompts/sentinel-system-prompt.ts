@@ -5,7 +5,15 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * it, because the replay harness cannot attribute a behaviour change to a prompt
  * change without it.
  */
-export const SENTINEL_PROMPT_VERSION = 'v2';
+export const SENTINEL_PROMPT_VERSION = 'v3';
+
+/**
+ * The live prompt while MARKET_CUES_ENABLED is off: v2, word for word. With the
+ * cues off the packet's macro blocks are the pre-cues ones too, so a live
+ * verdict is judged exactly as before the cues existed — prompt, packet and
+ * stamp. See {@link SENTINEL_SYSTEM_PROMPT_NO_CUES}.
+ */
+export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2';
 
 /**
  * What actually goes on the verdict row.
@@ -18,6 +26,7 @@ export const SENTINEL_PROMPT_VERSION = 'v2';
  * contract: still one string on one column, now `v2/t1`.
  */
 export const SENTINEL_COMPOSITE_PROMPT_VERSION = `${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`;
+export const SENTINEL_COMPOSITE_PROMPT_VERSION_NO_CUES = `${SENTINEL_PROMPT_VERSION_NO_CUES}/${THESIS_PROMPT_VERSION}`;
 
 /** Exact model id. No date suffix — see docs/claude-api model table. */
 export const SENTINEL_MODEL = 'claude-opus-5';
@@ -101,7 +110,9 @@ Reading those fields:
 - SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
 - position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
 - thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
-- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
 - news.freshCount counts headlines in the last 30 minutes.
 - session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
 - session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
@@ -113,3 +124,20 @@ Rules for your answer:
 - "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
 - "reviewIn" is how many seconds until you should be asked again.
 - Keep "reason" to one sentence a trader would recognise.`;
+
+
+/** The macro lines v3 added, and the single v2 line they replaced. */
+const V3_MACRO_LINES = SENTINEL_SYSTEM_PROMPT.slice(
+  SENTINEL_SYSTEM_PROMPT.indexOf('- macro.fiiDii is the latest published'),
+  SENTINEL_SYSTEM_PROMPT.indexOf('- news.freshCount counts'),
+);
+const V2_MACRO_LINE =
+  '- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.\n';
+
+/** v2's text: v3 with the macro lines put back. Fails at load rather than drift silently. */
+export const SENTINEL_SYSTEM_PROMPT_NO_CUES = (() => {
+  if (!V3_MACRO_LINES.startsWith('- macro.fiiDii is the latest published') || !V3_MACRO_LINES.endsWith('\n')) {
+    throw new Error('sentinel-system-prompt: the v3 macro lines moved — rebuild SENTINEL_SYSTEM_PROMPT_NO_CUES');
+  }
+  return SENTINEL_SYSTEM_PROMPT.replace(V3_MACRO_LINES, V2_MACRO_LINE);
+})();

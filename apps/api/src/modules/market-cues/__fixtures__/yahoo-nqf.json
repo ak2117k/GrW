@@ -1,0 +1,51 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "NQ=F",
+     "exchangeName": "CME",
+     "instrumentType": "FUTURE",
+     "regularMarketTime": 1791579599,
+     "gmtoffset": -14400,
+     "timezone": "EDT",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 31108.75,
+     "shortName": "Nasdaq 100 Dec 26",
+     "chartPreviousClose": 31317.75,
+     "dataGranularity": "1d",
+     "range": "5d"
+    },
+    "timestamp": [
+     1791172800,
+     1791259200,
+     1791345600,
+     1791432000,
+     1791518400
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "close": [
+        31317.75,
+        31483.25,
+        31402.25,
+        30969.5,
+        31108.75
+       ],
+       "open": [
+        31059,
+        31346.75,
+        31510,
+        31403,
+        31020.5
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

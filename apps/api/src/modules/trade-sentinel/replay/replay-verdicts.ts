@@ -2,6 +2,7 @@ import type { SentinelVerdict } from '@prisma/client';
 import type { ContextPacket } from '../services/context-packet.service';
 import type { SentinelAgentService } from '../services/sentinel-agent.service';
 import type { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
+import { isOvernightPromptVersion } from '../prompts/sentinel-overnight-prompt';
 
 /**
  * One stored verdict, reduced to what a replay needs.
@@ -87,9 +88,13 @@ export interface ReplayReport {
  * live position and corrupt every later run.
  */
 export async function replayVerdicts(
-  rows: ReplayRow[],
+  allRows: ReplayRow[],
   agent: ReplayAgent,
 ): Promise<ReplayReport> {
+  // Overnight-review rows were judged by a different prompt on a different
+  // verdict set; replaying them through the live `judge` would report every one
+  // as a failure or a flip that means nothing.
+  const rows = allRows.filter((r) => !isOvernightPromptVersion(r.promptVersion));
   const report: ReplayReport = {
     total: rows.length,
     agreed: 0,

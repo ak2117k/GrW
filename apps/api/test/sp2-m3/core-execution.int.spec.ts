@@ -112,7 +112,7 @@ describe('core execution tables (real database)', () => {
   it('allows one MTF interest row per user, token and day; ON CONFLICT DO NOTHING makes the cron idempotent', async () => {
     const u = await newUser();
     await insertLedger(u, 'MTF_INTEREST', '-2.47', { token: '1594', interestDate: '2026-10-12' });
-    await expect(insertLedger(u, 'MTF_INTEREST', '-2.47', { token: '1594', interestDate: '2026-10-12' })).rejects.toThrow(/core_cash_ledger_userId_token_interestDate_key/);
+    await expect(insertLedger(u, 'MTF_INTEREST', '-2.47', { token: '1594', interestDate: '2026-10-12' })).rejects.toThrow(/23505[\s\S]*Key \("userId", token, "interestDate"\)/);
     const n = await db.$executeRawUnsafe(
       `INSERT INTO "core_cash_ledger" ("id", "userId", "type", "amount", "token", "interestDate", "note") VALUES ($1, $2, 'MTF_INTEREST', -2.47, '1594', '2026-10-12', 'it') ON CONFLICT ("userId", "token", "interestDate") DO NOTHING`,
       `led_${rid()}`, u,

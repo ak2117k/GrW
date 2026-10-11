@@ -3,7 +3,7 @@ import { SessionClock } from '../session-clock';
 import { MemoryChainRepo } from '../testing/memory-chain-repo';
 import type { BuildOutcome } from './chain-builder';
 import type { ChainContract, HubChain } from './chain.types';
-import { ChainService, type ChainServiceDeps } from './chain-service';
+import { CHAIN_AWAIT_DEADLINE_MS, ChainService, type ChainServiceDeps } from './chain-service';
 
 const IST = (local: string) => Date.parse(`${local}Z`) - 5.5 * 3600_000;
 const E = '2026-10-13';
@@ -145,5 +145,103 @@ describe('ChainService', () => {
     await expect(svc.optionLtp('NIFTY', E, 25000, 'CE')).resolves.toBe(130.5);
     expect(watchContract).toHaveBeenCalledWith({ exchange: 'NFO', token: 'T25000', symbol: 'N25000' });
     await expect(svc.optionLtp('NIFTY', E, 25050, 'CE')).resolves.toBeNull();
+  });
+
+  describe('awaiting deadline', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('a caller joining a slow in-flight Routine refresh gets stale after 5 s (busy once); the shared build still lands', async () => {
+      const h = service('2026-10-12T10:00:00');
+      await h.svc.chain('NIFTY', E, { screen: true });
+      const fast = h.deps.builder.build;
+      h.deps.builder.build = (u, e, o) =>
+        new Promise((res) => setTimeout(() => res(fast(u, e, o)), 6_000));
+      h.advance(10_000);
+      const refresh = h.svc.refreshTick(h.now()); // Routine build, 6 s
+      h.advance(6_000); // cache now 16 s old: the caller needs a build and joins the in-flight one
+      const pending = h.svc.chain('NIFTY', E);
+      let settled: unknown = null;
+      void pending.then((r) => (settled = r));
+      await jest.advanceTimersByTimeAsync(CHAIN_AWAIT_DEADLINE_MS - 1);
+      expect(settled).toBeNull();
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ kind: 'stale', chain: expect.objectContaining({ underlying: 'NIFTY' }), ageMs: 16_000 });
+      expect(h.svc.status().unavailable.busy).toBe(1);
+      await jest.advanceTimersByTimeAsync(1_000); // the shared build completes and is cached
+      await refresh;
+      expect((await h.svc.chain('NIFTY', E)).kind).toBe('fresh');
+      expect(h.builds).toHaveLength(2);
+      expect(h.svc.status().unavailable.busy).toBe(1);
+    });
+
+    it('a build that never answers is unavailable: busy within 5 s, and a winning build leaves no timer behind', async () => {
+      const h = service('2026-10-12T10:00:00');
+      await h.svc.chain('NIFTY', E);
+      expect(jest.getTimerCount()).toBe(0);
+      h.deps.builder.build = () => new Promise(() => undefined);
+      const pending = h.svc.chain('NIFTY', '2026-10-20');
+      await jest.advanceTimersByTimeAsync(CHAIN_AWAIT_DEADLINE_MS);
+      await expect(pending).resolves.toEqual({ kind: 'unavailable', reason: 'busy' });
+    });
+  });
+
+  it("does not serve yesterday's cached chain as stale", async () => {
+    const { svc, advance, setNext } = service('2026-10-12T15:00:00');
+    await svc.chain('NIFTY', E);
+    advance(19 * 3600_000); // 2026-10-13 10:00 IST, NSE open
+    setNext(() => ({ kind: 'unavailable', reason: 'throttled' }));
+    await expect(svc.chain('NIFTY', E)).resolves.toEqual({ kind: 'unavailable', reason: 'throttled' });
+  });
+
+  it('a failing closed-market build is memoised for 5 minutes per chain', async () => {
+    const { svc, builds, advance, setNext } = service('2026-10-12T20:00:00'); // NSE closed
+    setNext(() => ({ kind: 'unavailable', reason: 'throttled' }));
+    await expect(svc.chain('NIFTY', E)).resolves.toEqual({ kind: 'unavailable', reason: 'throttled' });
+    advance(60_000);
+    await expect(svc.chain('NIFTY', E)).resolves.toEqual({ kind: 'unavailable', reason: 'throttled' });
+    expect(builds).toHaveLength(1);
+    advance(4 * 60_000);
+    await svc.chain('NIFTY', E);
+    expect(builds).toHaveLength(2);
+  });
+
+  it('evicts the least recently used chain, not the oldest inserted', async () => {
+    const { svc, builds } = service('2026-10-12T10:00:00', { maxCache: 2 });
+    await svc.chain('NIFTY', E);
+    await svc.chain('NIFTY', '2026-10-20');
+    await svc.chain('NIFTY', E); // hit: E is now the most recently used
+    await svc.chain('NIFTY', '2026-10-27'); // evicts 2026-10-20
+    expect(builds).toHaveLength(3);
+    expect((await svc.chain('NIFTY', E)).kind).toBe('fresh');
+    expect(builds).toHaveLength(3);
+    await svc.chain('NIFTY', '2026-10-20');
+    expect(builds).toHaveLength(4);
+  });
+
+  it('overlapping setHeld calls: only the latest one assigns the held set', async () => {
+    const { svc, repo } = service('2026-10-12T10:00:00');
+    let release!: (v: Array<{ name: string; expiry: string }>) => void;
+    const describe = jest
+      .spyOn(repo, 'describe')
+      .mockImplementationOnce(() => new Promise((res) => (release = res)))
+      .mockImplementationOnce(async () => []);
+    const first = svc.setHeld([{ exchange: 'NFO', token: 'HELD1', symbol: 'X' }]);
+    await svc.setHeld([]);
+    release([{ name: 'NIFTY', expiry: E }]);
+    await first;
+    expect(describe).toHaveBeenCalledTimes(2);
+    expect(svc.status().held).toBe(0);
+  });
+
+  it('held chains are not refreshed while refreshHeld() is false; screen-watched chains still are', async () => {
+    const { svc, repo, builds, advance, now } = service('2026-10-12T10:00:00', { refreshHeld: () => false });
+    repo.heldInfo.set('NFO:HELD1', { name: 'CRUDEOIL', expiry: E });
+    await svc.setHeld([{ exchange: 'NFO', token: 'HELD1', symbol: 'CRUDEOIL6000CE' }]);
+    expect(svc.status().held).toBe(1);
+    await svc.chain('NIFTY', E, { screen: true });
+    advance(10_000);
+    await svc.refreshTick(now());
+    expect(builds.map((b) => `${b.u}:${b.lane}`)).toEqual(['NIFTY:1', 'NIFTY:2']);
   });
 });

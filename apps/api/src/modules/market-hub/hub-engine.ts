@@ -207,6 +207,8 @@ export class HubEngine {
         watchContract: (ref) => void this.watchMany([ref], 3, 'chain:ltp', 120_000),
         priceOf: (ref) => this.price(ref, { maxAgeMs: 15_000 }),
         quoteNow: (refs, lane) => this.quoteNow(refs, lane),
+        // Held chains refresh only while a consumer reads them (HUB_SERVES_CHAIN).
+        refreshHeld: () => this.d.consumerFlags?.().chain ?? false,
         log: chainDeps.log,
       });
     } else {

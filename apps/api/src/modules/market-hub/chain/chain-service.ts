@@ -9,6 +9,13 @@ import type { ChainRequest, ChainResult, ChainStatus, ChainUnavailable, HubChain
 export const CHAIN_FRESH_MS = 15_000;
 export const CHAIN_REFRESH_MS = 10_000;
 export const SCREEN_WATCH_MS = 120_000;
+/**
+ * An awaiting caller's deadline. The Governor only gives the Interactive lane a deadline, and a caller
+ * that joins an in-flight Routine refresh build would otherwise wait as long as that build takes.
+ */
+export const CHAIN_AWAIT_DEADLINE_MS = 5_000;
+/** A failing closed-market one-off build is not retried for this long, per chain. */
+export const CLOSED_FAILURE_MEMO_MS = 5 * 60_000;
 const MAX_CACHE = 100;
 const BUILD_SAMPLES = 200;
 const REASONS: ChainUnavailable[] = ['no-contracts', 'throttled', 'busy', 'no-session', 'error'];
@@ -21,6 +28,10 @@ export interface ChainServiceDeps {
   watchContract(ref: InstrumentRef): void;
   priceOf(ref: InstrumentRef): PriceResult;
   quoteNow(refs: readonly InstrumentRef[], lane: Lane): Promise<Map<string, QuoteOutcome>>;
+  /** Whether held chains get the 10 s refresh (only while a consumer reads them: HUB_SERVES_CHAIN). Default true. */
+  refreshHeld?: () => boolean;
+  /** Cache capacity (LRU); default 100. */
+  maxCache?: number;
   log?: (message: string) => void;
   now?: () => number;
 }
@@ -41,6 +52,8 @@ export class ChainService implements HubChains {
   private readonly inflight = new Map<string, Promise<BuildOutcome>>();
   private readonly screenWatch = new Map<string, number>();
   private held = new Set<string>();
+  private heldGeneration = 0;
+  private readonly closedFailures = new Map<string, { until: number; reason: ChainUnavailable }>();
   private viewed = { day: '', keys: new Set<string>() };
   private readonly warned = new Set<string>();
   private readonly buildMs: number[] = [];
@@ -84,11 +97,14 @@ export class ChainService implements HubChains {
 
     if (cached && now - cached.at <= CHAIN_FRESH_MS) {
       this.cacheHits++;
+      this.touch(key, cached);
       return { kind: 'fresh', chain: cached };
     }
-    const out = await this.build(key, u, expiry, LANE.INTERACTIVE);
+    const { out } = await this.awaitBuild(key, u, expiry);
     if (out.kind === 'ok') return { kind: 'fresh', chain: out.chain };
-    const prior = cached ?? (await this.snapshotToday(u, expiry, exchange, now));
+    // Only today's chain is served as stale (a cached chain from yesterday is not "stale", it is old).
+    const cachedToday = cached && istDay(cached.at) === istDay(now) ? cached : null;
+    const prior = cachedToday ?? (await this.snapshotToday(u, expiry, exchange, now));
     if (prior) return { kind: 'stale', chain: prior, ageMs: now - prior.at };
     return { kind: 'unavailable', reason: out.reason }; // counted and logged by build()
   }
@@ -118,6 +134,7 @@ export class ChainService implements HubChains {
 
   /** Held option contracts → their chains (held expiry + the underlying's nearest), refreshed while held. */
   async setHeld(refs: readonly InstrumentRef[]): Promise<void> {
+    const generation = ++this.heldGeneration;
     try {
       const info = await this.d.repo.describe(refs);
       const next = new Set<string>();
@@ -126,7 +143,8 @@ export class ChainService implements HubChains {
         const nearest = (await this.expiries(name))[0];
         if (nearest) next.add(keyOf(name, nearest));
       }
-      this.held = next;
+      // Overlapping calls can finish out of order: only the latest may assign.
+      if (generation === this.heldGeneration) this.held = next;
     } catch (err) {
       this.warnOnce('held', `held-chain lookup failed: ${(err as Error)?.message ?? err}`);
     }
@@ -143,7 +161,8 @@ export class ChainService implements HubChains {
   /** Rebuild (Routine lane) every watched chain whose venue is open and whose cache is ≥ 10 s old. */
   async refreshTick(now: number): Promise<void> {
     for (const [k, until] of this.screenWatch) if (until <= now) this.screenWatch.delete(k);
-    const keys = new Set([...this.screenWatch.keys(), ...this.held]);
+    const refreshHeld = this.d.refreshHeld?.() ?? true;
+    const keys = new Set([...this.screenWatch.keys(), ...(refreshHeld ? this.held : [])]);
     await Promise.all(
       [...keys].map(async (key) => {
         const [u, e] = splitKey(key);
@@ -160,7 +179,10 @@ export class ChainService implements HubChains {
   async freshChain(underlying: string, expiry: string): Promise<HubChain | null> {
     const key = keyOf(underlying, expiry);
     const c = this.cache.get(key);
-    if (c && this.now() - c.at < CHAIN_REFRESH_MS) return c;
+    if (c && this.now() - c.at < CHAIN_REFRESH_MS) {
+      this.touch(key, c);
+      return c;
+    }
     const out = await this.build(key, underlying.toUpperCase(), expiry, LANE.ROUTINE);
     return out.kind === 'ok' ? out.chain : null;
   }
@@ -196,15 +218,30 @@ export class ChainService implements HubChains {
   }
 
   private async closed(key: string, u: string, e: string, exchange: HubExchange, cached: HubChain | undefined): Promise<ChainResult> {
-    if (cached) return { kind: 'market-closed', chain: cached };
+    if (cached) {
+      this.touch(key, cached);
+      return { kind: 'market-closed', chain: cached };
+    }
     const snap = await this.d.repo.latestChainSnapshot(u, e, exchange).catch(() => null);
     if (snap) {
       this.remember(key, snap);
       return { kind: 'market-closed', chain: snap };
     }
+    // A failing one-off build is memoised: no broker build per request while closed and failing.
+    const now = this.now();
+    const memo = this.closedFailures.get(key);
+    if (memo && now < memo.until) return { kind: 'unavailable', reason: memo.reason };
+    if (memo) this.closedFailures.delete(key);
     // Ruling 4: no snapshot yet (first evening after deploy) → build once and store it.
-    const out = await this.build(key, u, e, LANE.INTERACTIVE);
-    if (out.kind !== 'ok') return { kind: 'unavailable', reason: out.reason };
+    const { out, timedOut } = await this.awaitBuild(key, u, e);
+    if (out.kind !== 'ok') {
+      // A deadline miss is not a failure: the shared build keeps running and caches its result.
+      if (!timedOut) {
+        if (this.closedFailures.size >= MAX_CACHE) this.closedFailures.clear();
+        this.closedFailures.set(key, { until: now + CLOSED_FAILURE_MEMO_MS, reason: out.reason });
+      }
+      return { kind: 'unavailable', reason: out.reason };
+    }
     void this.d.repo.writeChainSnapshot(out.chain).catch((err) => this.warnOnce(`snap:${key}`, `closed-market snapshot write failed for ${key}: ${(err as Error)?.message ?? err}`));
     return { kind: 'market-closed', chain: out.chain };
   }
@@ -243,10 +280,39 @@ export class ChainService implements HubChains {
     return p;
   }
 
+  /**
+   * An awaiting caller's build (Interactive lane) raced against CHAIN_AWAIT_DEADLINE_MS. It may join
+   * an in-flight Routine build, which has no Governor deadline. On timeout this caller gets `busy`
+   * (counted once); the shared build keeps running and caches its result.
+   */
+  private async awaitBuild(key: string, u: string, e: string): Promise<{ out: BuildOutcome; timedOut: boolean }> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<null>((res) => {
+      timer = setTimeout(() => res(null), CHAIN_AWAIT_DEADLINE_MS);
+      timer.unref?.();
+    });
+    try {
+      const out = await Promise.race([this.build(key, u, e, LANE.INTERACTIVE), deadline]);
+      if (out) return { out, timedOut: false };
+      this.unavailable.busy++;
+      this.warnOnce(`${key}:deadline`, `option chain ${key}: no build within ${CHAIN_AWAIT_DEADLINE_MS} ms; caller served busy`);
+      return { out: { kind: 'unavailable', reason: 'busy' }, timedOut: true };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** LRU: a read moves the key to the most-recent end. */
+  private touch(key: string, chain: HubChain): void {
+    this.cache.delete(key);
+    this.cache.set(key, chain);
+  }
+
   private remember(key: string, chain: HubChain): void {
-    if (this.cache.size >= MAX_CACHE && !this.cache.has(key)) {
-      const oldest = this.cache.keys().next().value as string;
-      this.cache.delete(oldest);
+    this.cache.delete(key);
+    if (this.cache.size >= (this.d.maxCache ?? MAX_CACHE)) {
+      const leastRecent = this.cache.keys().next().value as string;
+      this.cache.delete(leastRecent);
     }
     this.cache.set(key, chain);
   }

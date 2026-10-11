@@ -45,6 +45,8 @@ const keyRank = (k: string) => PAPER_KEYS.indexOf(k as PaperKey);
 @Injectable()
 export class CorePaperDefaultsService {
   private cache: { at: number; result: PaperSettingsResult } | null = null;
+  /** Bumped on every change: a read that started before it must not refill the cache (mirrors CoreKillSwitchReader). */
+  private generation = 0;
 
   constructor(
     private readonly repo: CorePaperDefaultsRepository,
@@ -53,8 +55,9 @@ export class CorePaperDefaultsService {
 
   async settings(now: number = Date.now()): Promise<PaperSettingsResult> {
     if (this.cache && now - this.cache.at < PAPER_SETTINGS_CACHE_MS) return this.cache.result;
+    const g = this.generation;
     const result = resolvePaperSettings(await this.repo.list());
-    this.cache = { at: now, result };
+    if (g === this.generation) this.cache = { at: now, result }; // a change landed mid-read: answer this caller, cache nothing
     return result;
   }
 
@@ -77,6 +80,7 @@ export class CorePaperDefaultsService {
 
     const before = (await this.repo.list()).find((r) => r.key === input.key && r.scope === input.scope);
     const row = await this.repo.upsert(input.key, input.scope, parsed.value, reason, actor.userId, now);
+    this.generation++;
     this.cache = null;
     await this.audit.append({
       action: AUDIT_ACTIONS.paper.CORE_PAPER_DEFAULT_CHANGED,

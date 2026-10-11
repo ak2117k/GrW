@@ -70,6 +70,22 @@ describe('CorePaperDefaultsService', () => {
     expect(after.ok && after.settings.slippageBps.OPTIONS_BUY.toFixed(2)).toBe('30.00');
   });
 
+  it('a settings read in flight when a default changes does not refill the cache with the old rows', async () => {
+    const { store, repo, svc } = setup();
+    const oldRows = store.rows;
+    let release!: () => void;
+    repo.list.mockImplementationOnce(async () => { await new Promise<void>((r) => { release = r; }); return oldRows; }); // reads the old table, slowly
+    const slow = svc.settings(T);
+    await Promise.resolve();
+    await svc.change(OWNER, { key: 'maxLotsPerOrder', scope: 'NIFTY', value: 2, reason: 'tighter cap' }, NOW); // the owner edits mid-read
+    release();
+    const old = await slow;
+    expect(old.ok && old.settings.maxLotsPerOrder.NIFTY).toBe(10); // the in-flight caller still gets its (old) answer
+    const next = await svc.settings(T + 1);
+    expect(next.ok && next.settings.maxLotsPerOrder.NIFTY).toBe(2); // but the next read is not served the stale cap
+    expect(repo.list).toHaveBeenCalledTimes(3); // slow read, change's before-read, fresh re-read
+  });
+
   it('a change stamps updatedAt and updatedBy explicitly (the column has no @updatedAt)', async () => {
     const { repo, svc } = setup();
     const LATER = new Date(T + 60_000);

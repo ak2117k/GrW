@@ -48,3 +48,6 @@ export interface OiRow {
   volume: number;
   at: Date;
 }
+
+/** Why a chain could not be built (REST 503 reason). */
+export type ChainUnavailable = 'no-contracts' | 'throttled' | 'busy' | 'no-session' | 'error';

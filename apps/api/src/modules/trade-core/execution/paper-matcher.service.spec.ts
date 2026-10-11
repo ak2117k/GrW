@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import type { ModuleRef } from '@nestjs/core';
+import { BOOT_JOBS_DISABLED } from '../../../common/utils/boot-jobs';
 import type { CoreOrderRequest } from './execution.types';
 import { PaperLedgerService, type PlaceContext } from './paper-ledger.service';
 import { coreOrderOwner, MATCHER_SWEEP_MS, PaperMatcherService } from './paper-matcher.service';
@@ -260,6 +261,52 @@ describe('PaperMatcherService', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  describe('BOOT_JOBS=false (a one-shot script process)', () => {
+    const saved = process.env.BOOT_JOBS;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.BOOT_JOBS;
+      else process.env.BOOT_JOBS = saved;
+    });
+
+    it('starts no sweep, reloads nothing and touches no ledger; says why once', () => {
+      jest.useFakeTimers();
+      try {
+        process.env.BOOT_JOBS = 'false';
+        const { ledger, matcher } = setup();
+        const logged = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+        const sweep = jest.spyOn(matcher, 'sweep');
+        const reload = jest.spyOn(matcher, 'reload');
+        const openOrders = jest.spyOn(ledger, 'openOrders');
+        matcher.onModuleInit();
+        jest.advanceTimersByTime(MATCHER_SWEEP_MS * 5);
+        expect(jest.getTimerCount()).toBe(0);
+        expect(sweep).not.toHaveBeenCalled();
+        expect(reload).not.toHaveBeenCalled();
+        expect(openOrders).not.toHaveBeenCalled();
+        expect(logged).toHaveBeenCalledTimes(1);
+        expect(logged).toHaveBeenCalledWith(BOOT_JOBS_DISABLED);
+        matcher.onModuleDestroy();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('with BOOT_JOBS unset the sweep starts as before', () => {
+      jest.useFakeTimers();
+      try {
+        delete process.env.BOOT_JOBS;
+        const { matcher } = setup();
+        const sweep = jest.spyOn(matcher, 'sweep').mockResolvedValue(undefined);
+        matcher.onModuleInit();
+        jest.advanceTimersByTime(MATCHER_SWEEP_MS * 2);
+        expect(sweep).toHaveBeenCalledTimes(2);
+        matcher.onModuleDestroy();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
   });
 
   describe('SL_MARKET trigger persistence (ruling P10)', () => {

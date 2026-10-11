@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
+import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
 import { isHubExchange, refKey, type InstrumentRef, type Price } from '../../market-hub/hub.types';
 import type { SessionClock } from '../../market-hub/session-clock';
@@ -61,7 +62,15 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
     @Inject(CORE_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen'>,
   ) {}
 
+  /**
+   * The sweep writes (reload, fills, rejects): a process booted with BOOT_JOBS=false (a
+   * one-shot script, possibly against the production DB) must not start it.
+   */
   onModuleInit(): void {
+    if (!bootJobsEnabled()) {
+      this.logger.log(BOOT_JOBS_DISABLED);
+      return;
+    }
     this.timer = setInterval(() => void this.sweep(), MATCHER_SWEEP_MS);
     this.timer.unref?.();
   }

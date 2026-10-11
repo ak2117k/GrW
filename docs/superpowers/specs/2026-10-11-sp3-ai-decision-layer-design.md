@@ -164,10 +164,11 @@ enter a request object, and the CLI env scrub is unchanged.
    - the parsed verdict / thesis for fixed replies, including `refusal`, `max_tokens` and
      `model_context_window_exceeded` stop reasons and fenced JSON;
    - the rows written to `sentinel_verdicts` / `sentinel_theses` and the log lines.
-2. **Move.** `ANTHROPIC_CLIENT` is rebound to a `GatewayTransport` (`messages.create(params)` →
-   `gateway.call(job, params)`). The job is supplied by three tiny job-bound instances
-   (`SENTINEL_JUDGE_CLIENT`, …) so the services' call sites change only their injection token, not
-   their request-building code.
+2. **Move.** `ANTHROPIC_CLIENT` is rebound to a `SentinelGatewayTransport` whose
+   `messages.create(params)` calls `gateway.call(job, params)`; the job is inferred from the
+   request's schema **object identity** (`VERDICT_SCHEMA` → `sentinel.judge`,
+   `OVERNIGHT_VERDICT_SCHEMA` → `sentinel.overnight`, `THESIS_SCHEMA` → `sentinel.thesis`, anything
+   else → `sentinel.unknown`), so no sentinel service file changes at all.
 3. **Prove.** The same golden test must pass unchanged, plus: deep-equality between the request the
    sentinel builds and the request the provider receives; the Anthropic SDK is called with exactly
    one argument; exactly one `ai_calls` row per call; a throwing audit repository leaves verdicts,
@@ -219,7 +220,7 @@ DB role `grw_ai`: `SELECT` on `ai_calls`, `sentinel_*`, journal/silo/candle tabl
 
 ### 5.3 Exporters and retrieval (Python)
 
-- `export_tabular(featureSet, filters) → parquet` — features, labels, `setupGroupKey`, `decidedAt`.
+- `export_tabular(featureSet, filters) → CSV` — features, labels, `setupGroupKey`, `decidedAt`.
 - `similar(record, k, filters)` — k-nearest records on the standardised feature vector, filtered by
   strategy/vehicle/direction; returns their decisions and outcomes. Served as
   `POST /corpus/similar` for in-context prompts of any LLM or agent.
@@ -369,3 +370,4 @@ branched from it and add no further migrations, so they merge back in either ord
 - SSH tunnel window for the GrW-production import (owner).
 - Whether `sell_futures_*` P&L is repairable (lot-size check) — until then excluded.
 - When to enable an API fallback for the sentinel — owner, after the shadow comparison.
+- `grw_ai` can read every table (incl. users); narrow before SaaS.

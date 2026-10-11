@@ -2226,3 +2226,88 @@ model CoreKillSwitch {
   @@index([userId, createdAt])
   @@map("core_kill_switch")
 }
+
+/// SP3 — one row per LLM call attempt through the AI Gateway (spec §4.6). Append-only.
+model AiCall {
+  id               String   @id @default(cuid())
+  job              String
+  provider         String
+  model            String
+  effort           String?
+  priority         Int
+  userId           String?
+  positionId       String?
+  setupId          String?
+  decisionRecordId String?
+  requestHash      String
+  request          Json
+  response         Json?
+  errorClass       String?
+  errorMessage     String?
+  stopReason       String?
+  inputTokens      Int?
+  outputTokens     Int?
+  costInr          Decimal  @default(0) @db.Decimal(12, 4)
+  latencyMs        Int
+  queuedMs         Int      @default(0)
+  fallbackFrom     String?
+  createdAt        DateTime @default(now())
+
+  @@index([job, createdAt])
+  @@index([createdAt])
+  @@map("ai_calls")
+}
+
+/// SP3 — provider-neutral decision corpus (spec §5.1). Written by Node (core, later) and Python (importer).
+model AiDecisionRecord {
+  id                String    @id @default(cuid())
+  userId            String?
+  source            String    // core | sentinel | legacy:td_automation | legacy:grw_prod
+  sourceId          String    // idempotency key within source
+  kind              String    // ENTRY_SETUP | POSITION_REVIEW | OVERNIGHT_REVIEW | HOLDINGS_REVIEW
+  decidedAt         DateTime
+  symbol            String
+  exchange          String?
+  instrumentType    String?
+  direction         String?   // LONG | SHORT
+  vehicle           String?
+  strategyKey       String
+  strategyVersionId String?
+  setupGroupKey     String
+  evidence          Json
+  featureSet        String?
+  features          Json?
+  ruleScore         Float?
+  mlScore           Float?
+  mlModelId         String?
+  decision          Json
+  aiCallIds         String[]  @default([])
+  outcome           Json?
+  outcomeAt         DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@unique([source, sourceId])
+  @@index([kind, decidedAt])
+  @@index([setupGroupKey])
+  @@map("ai_decision_records")
+}
+
+/// SP3 — trained model registry (spec §5.1). At most one active row per kind (partial unique index in SQL).
+model AiModel {
+  id           String   @id
+  kind         String   // xgb-entry
+  featureSet   String
+  trainedAt    DateTime
+  dataWindow   Json
+  nTrain       Int
+  nHoldout     Int
+  metrics      Json
+  gate         String   // GO | NO_GO
+  gateReasons  String[] @default([])
+  artifactPath String
+  active       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([kind, active])
+  @@map("ai_models")
+}

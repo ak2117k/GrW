@@ -64,7 +64,7 @@ NODE (NestJS)                                                   PYTHON (ai-engin
 | Unit | Location | Built |
 |---|---|---|
 | AI Gateway | `apps/api/src/modules/ai-gateway/` | M1 |
-| Decision corpus (schema) | `prisma/schema.prisma` (`ai_calls`, `ai_decision_records`, `ai_models`) | M1 (`ai_calls`), M2 (rest) |
+| Decision corpus (schema) | `prisma/schema.prisma` (`ai_calls`, `ai_decision_records`, `ai_models`) — one migration | M0 (shared, before the streams fork) |
 | Scorer client (Node) | `apps/api/src/modules/ai-gateway/scorer/` — typed HTTP client, fail-open | M2 |
 | Scorer, corpus, retrieval, training | `ai-engine/src/scorer/`, `ai-engine/src/corpus/`, `ai-engine/scripts/` | M2 |
 | DecisionPipeline, vehicle pricer, judge | `apps/api/src/modules/ai-decision/` (new; beside trade-core, not inside it) | later |
@@ -199,14 +199,15 @@ enter a request object, and the CLI env scrub is unchanged.
 nHoldout, metrics (JSON), gate (`GO`/`NO_GO` + reasons), artifactPath, active (bool, at most one
 per kind).
 
-DB role `grw_ai`: `SELECT` on journal/silo/candle tables, `INSERT/UPDATE` on
+DB role `grw_ai`: `SELECT` on `ai_calls`, `sentinel_*`, journal/silo/candle tables, `INSERT/UPDATE` on
 `ai_decision_records` and `ai_models` only. Created by deploy SQL, not by Prisma.
 
 ### 5.2 Writers
 
-- **Sentinel (now, M1+M2):** after a verdict is persisted, a `POSITION_REVIEW`/`OVERNIGHT_REVIEW`
-  record is written fail-open with the packet as evidence; outcome is filled when the watched
-  position closes.
+- **Sentinel (now, derived — no sentinel code change):** the Python corpus job builds
+  `POSITION_REVIEW`/`OVERNIGHT_REVIEW` records from `ai_calls` (job `sentinel.*`, which carry the
+  packet as the request) joined to `sentinel_verdicts`; outcome is filled when the watched position
+  closes. Idempotent by `ai_calls.id`.
 - **Legacy importer (M2, Python, one-shot, idempotent by `source+sourceId`):**
   - `TD_Automation` local DB: gated `trades`(+`watch_entries`), `ungated_*`, `adaptive_stop_*`;
     gated MISSED/DISMISSED entries as **skipped** records with MFE/MAE outcome.
@@ -350,6 +351,7 @@ Entries fail closed; exits fail safe; no LLM → rules only (parent §12).
 
 | M | Deliverable | Depends on | Stream |
 |---|---|---|---|
+| **M0** | One Prisma migration: `ai_calls`, `ai_decision_records`, `ai_models`; `grw_ai` role SQL | — | base branch |
 | **M1** | AI Gateway, providers moved, routes, priority, budget, `ai_calls`, sentinel behind `AI_GATEWAY_SENTINEL` with golden proof | — | A (now) |
 | **M2** | `ai_decision_records`/`ai_models`, legacy importer, fs1 features, training + gate, `/score`, `/corpus/similar`, Node `ScorerClient`, ai-engine container | — | B (now) |
 | M3 | Vehicle pricer | SP2 M3 | later |
@@ -357,8 +359,8 @@ Entries fail closed; exits fail safe; no LLM → rules only (parent §12).
 | M5 | Overnight & holdings review | SP4 inputs | later |
 | M6 | Sentinel → guard rails on core positions; fine-tune exporters | SP2 M4 | later |
 
-M1 and M2 run in parallel (separate worktrees branched from `feature/sp3-ai-decision`, merged back
-in order M2 schema → M1 → M2 rest to keep one migration sequence). **SP3 done** after M4 in prod.
+M0 lands on `feature/sp3-ai-decision` first; M1 and M2 then run in parallel in separate worktrees
+branched from it and add no further migrations, so they merge back in either order. **SP3 done** after M4 in prod.
 
 ## 13. Open items
 

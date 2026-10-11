@@ -35,6 +35,11 @@ const slBuy = (over: Partial<CoreOrderRequest> = {}) =>
 const infy = { exchange: 'NSE', token: '1594', symbol: 'INFY-EQ', lotSize: 1, underlying: null };
 
 describe('PaperMatcherService', () => {
+  beforeEach(() => {
+    // Pristine output: tests that assert on a log line spy on it themselves.
+    for (const level of ['log', 'warn', 'error'] as const) jest.spyOn(Logger.prototype, level).mockImplementation(() => undefined);
+  });
+
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -122,6 +127,65 @@ describe('PaperMatcherService', () => {
     await matcher.sweep(SUB + 30_001);
     expect(stateOf(o.id)?.state).toBe('REJECTED');
     expect(hub.unwatches).toEqual([{ key: 'NSE:2885', owner: coreOrderOwner(o.id) }]);
+  });
+
+  describe('the no-price deadline across restarts and closed sessions (ruling P16a)', () => {
+    it('a restart while the session is closed rejects nothing however long it stays closed; open-session time then counts', async () => {
+      const { clock, hub, matcherWith, place, stateOf } = setup();
+      const o = await place();
+      clock.isOpen.mockReturnValue(false);
+      const restarted = matcherWith(new FakeHub());
+      await restarted.sweep(SUB + 3); // reload: the countdown starts at SUB + 3 (P4)
+      await restarted.sweep(SUB + 31_000);
+      await restarted.sweep(SUB + 10 * 3_600_000); // ten hours closed
+      expect(stateOf(o.id)?.state).toBe('OPEN');
+      expect(restarted.isTracked(o.id)).toBe(true);
+
+      clock.isOpen.mockReturnValue(true);
+      const opened = SUB + 10 * 3_600_000;
+      await restarted.sweep(opened + 29_999);
+      expect(stateOf(o.id)?.state).toBe('OPEN');
+      await restarted.sweep(opened + 30_001);
+      expect(stateOf(o.id)).toMatchObject({ state: 'REJECTED', rejectReason: 'no fresh price after submission (waited 30000 ms)' });
+      expect(hub.unwatches).toEqual([]); // the old instance's hub is untouched
+    });
+
+    it('time while the session is closed does not count, also without a restart', async () => {
+      const { clock, matcher, place, stateOf } = setup();
+      const o = await place();
+      await matcher.sweep(SUB + 10_000); // 10 s open
+      clock.isOpen.mockReturnValue(false);
+      await matcher.sweep(SUB + 100_000); // 90 s closed: not counted
+      clock.isOpen.mockReturnValue(true);
+      await matcher.sweep(SUB + 119_999); // 10 s + 19.999 s open
+      expect(stateOf(o.id)?.state).toBe('OPEN');
+      await matcher.sweep(SUB + 120_001);
+      expect(stateOf(o.id)?.state).toBe('REJECTED');
+    });
+
+    it('a reloaded PARTIAL order counts as priced and is never no-price rejected', async () => {
+      const { ledger, hub, matcher, matcherWith, place, stateOf } = setup();
+      const o = await place();
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 500, SUB + 1, depth([[500, 40]])), SUB + 2);
+      const close = jest.spyOn(ledger, 'close');
+      const restarted = matcherWith(new FakeHub());
+      await restarted.sweep(SUB + 3);
+      await restarted.sweep(SUB + 3_600_000);
+      expect(close).not.toHaveBeenCalled(); // no reject is even attempted
+      expect(stateOf(o.id)).toMatchObject({ state: 'PARTIAL', filledQty: 40 });
+      expect(restarted.isTracked(o.id)).toBe(true);
+    });
+
+    it('a reloaded triggered stop counts as priced and is never no-price rejected', async () => {
+      const { hub, matcher, matcherWith, place, stateOf } = setup();
+      const o = await place(slBuy());
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 511, SUB + 1, depth([], [[511, 100]])), SUB + 2);
+      const restarted = matcherWith(new FakeHub());
+      await restarted.sweep(SUB + 3);
+      await restarted.sweep(SUB + 3_600_000);
+      expect(stateOf(o.id)).toMatchObject({ state: 'OPEN', triggeredAt: new Date(SUB + 1) });
+      expect(restarted.isTracked(o.id)).toBe(true);
+    });
   });
 
   it('out of session nothing fills, even on a fresh push', async () => {

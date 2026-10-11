@@ -23,7 +23,10 @@ interface Tracked {
   ref: InstrumentRef | null;
   key: string;
   hub: HubPrices | null;
+  /** When an unpriced order is rejected; pushed forward by closed-session time (ruling P16a). */
   deadline: number;
+  /** The last instant the countdown has accounted for (closed-session time before it is already added). */
+  countedTo: number;
   noPriceRejectMs: number;
   /** It has seen a usable price (fresh, after submission, in session): never rejected for want of one. */
   priced: boolean;
@@ -84,15 +87,18 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
     const exchange = order.instrument.exchange.toUpperCase();
     const ref: InstrumentRef | null = isHubExchange(exchange) ? { exchange, token: order.instrument.token, symbol: order.instrument.symbol } : null;
     const key = ref ? refKey(ref) : `${exchange}:${order.instrument.token}`;
+    // Ruling P4: after a reload the deadline restarts from the reload time.
+    const deadline = noPriceDeadline(order.submittedAt.getTime(), now, noPriceRejectMs);
     const t: Tracked = {
       order,
       ref,
       key,
       hub: null,
-      // Ruling P4: after a reload the deadline restarts from the reload time.
-      deadline: noPriceDeadline(order.submittedAt.getTime(), now, noPriceRejectMs),
+      deadline,
+      countedTo: deadline - noPriceRejectMs,
       noPriceRejectMs,
-      priced: false,
+      // Ruling P16a: a reloaded order that has filled or triggered has already seen a usable price.
+      priced: order.filledQty > 0 || order.triggeredAt !== null,
       busy: false,
     };
     this.tracked.set(order.id, t);
@@ -141,7 +147,7 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
       if (!this.loaded) await this.reload(now);
       for (const t of [...this.tracked.values()]) {
         if (!this.tracked.has(t.order.id) || t.busy) continue;
-        if (!t.priced && now > t.deadline) {
+        if (!t.priced && this.noPriceExpired(t, now)) {
           await this.rejectNoPrice(t);
           continue;
         }
@@ -168,6 +174,19 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
     for (const o of open) this.track(o, loaded.settings.noPriceRejectMs, now);
     this.loaded = true;
     if (open.length > 0) this.logger.log(`reloaded ${open.length} open core order(s)`);
+  }
+
+  /**
+   * Ruling P16a: the no-price countdown runs only while the order's session is open. A
+   * sweep that finds the session closed pushes the deadline forward by the time since the
+   * last instant counted, so a restart outside market hours rejects nothing; once open,
+   * noPriceRejectMs of open-session time with no usable price rejects the order.
+   */
+  private noPriceExpired(t: Tracked, now: number): boolean {
+    const open = this.clock.isOpen(t.order.instrument.exchange, new Date(now));
+    if (!open && now > t.countedTo) t.deadline += now - t.countedTo;
+    t.countedTo = Math.max(t.countedTo, now);
+    return open && now > t.deadline;
   }
 
   private hubSource(): HubPriceSource | null {

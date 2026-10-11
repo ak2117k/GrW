@@ -170,28 +170,68 @@ function legBrokerage(segment: Segment, legTurnover: number): number {
   return Math.min(BROKERAGE_FLAT, legTurnover * BROKERAGE_PCT[segment]);
 }
 
+/** One executed order leg. SP2 M3 posts charges per fill, one leg at a time. */
+export type LegSide = 'BUY' | 'SELL';
+
+/** The parts of a charge, in rupees. `total` is their sum. */
+export interface ChargeBreakdown {
+  brokerage: number;
+  stt: number;
+  exchangeTxn: number;
+  stamp: number;
+  sebi: number;
+  dp: number;
+  gst: number;
+  total: number;
+}
+
+/**
+ * The charge parts for a buy turnover and a sell turnover. A round trip passes both
+ * legs; a single leg passes the other turnover as 0 and its flag false (so the flat
+ * options brokerage and the DP charge are not levied on a leg that did not happen).
+ * The arithmetic is exactly the order estimateCharges always used, so its numbers are
+ * bit-identical (trade-core/execution/charges-golden.spec.ts).
+ */
+function breakdown(segment: Segment, buyTurnover: number, sellTurnover: number, legs: { buy: boolean; sell: boolean }): ChargeBreakdown {
+  const r = RATES[segment];
+  const turnover = buyTurnover + sellTurnover;
+
+  // Brokerage is per executed order, so price each leg on its own turnover.
+  const brokerage = (legs.buy ? legBrokerage(segment, buyTurnover) : 0) + (legs.sell ? legBrokerage(segment, sellTurnover) : 0);
+
+  const stt = sellTurnover * r.sttSell + buyTurnover * r.sttBuy;
+  const exchangeTxn = turnover * r.exchangeTxn;
+  const stamp = buyTurnover * r.stampBuy;
+  const sebi = turnover * 0.000001;
+  const dp = segment === 'EQ_DELIVERY' && legs.sell ? DP_CHARGE_PER_SELL_RUPEES : 0;
+  const gst = (brokerage + exchangeTxn + sebi + dp) * GST;
+
+  return { brokerage, stt, exchangeTxn, stamp, sebi, dp, gst, total: brokerage + stt + exchangeTxn + stamp + sebi + dp + gst };
+}
+
+export interface LegChargeInput {
+  segment: Segment;
+  leg: LegSide;
+  price: number;
+  qty: number;
+}
+
+/** Charges for one executed leg (SP2 M3: posted per fill). Every part >= 0. */
+export function chargesForLeg({ segment, leg, price, qty }: LegChargeInput): ChargeBreakdown {
+  const turnover = Math.abs(price * qty);
+  return breakdown(segment, leg === 'BUY' ? turnover : 0, leg === 'SELL' ? turnover : 0, { buy: leg === 'BUY', sell: leg === 'SELL' });
+}
+
 /** Total round-trip charges in rupees. Always >= 0. */
 export function estimateCharges({ segment, entryPrice, exitPrice, qty, side }: ChargeInput): number {
-  const r = RATES[segment];
   const entryTurnover = Math.abs(entryPrice * qty);
   const exitTurnover = Math.abs(exitPrice * qty);
 
   // A LONG buys at entry and sells at exit; a SHORT does the reverse.
   const buyTurnover = side === 'LONG' ? entryTurnover : exitTurnover;
   const sellTurnover = side === 'LONG' ? exitTurnover : entryTurnover;
-  const turnover = buyTurnover + sellTurnover;
 
-  // Brokerage is per executed order, so price each leg on its own turnover.
-  const brokerage = legBrokerage(segment, buyTurnover) + legBrokerage(segment, sellTurnover);
-
-  const stt = sellTurnover * r.sttSell + buyTurnover * r.sttBuy;
-  const exchange = turnover * r.exchangeTxn;
-  const stamp = buyTurnover * r.stampBuy;
-  const sebi = turnover * 0.000001;
-  const dp = segment === 'EQ_DELIVERY' ? DP_CHARGE_PER_SELL_RUPEES : 0;
-  const gst = (brokerage + exchange + sebi + dp) * GST;
-
-  return brokerage + stt + exchange + stamp + sebi + dp + gst;
+  return breakdown(segment, buyTurnover, sellTurnover, { buy: true, sell: true }).total;
 }
 
 export interface GreenFloorInput {

@@ -133,8 +133,10 @@ export interface OptionsChainEntry {
 export interface OptionData {
   ltp: number;
   oi: number;
-  oiChange: number;
+  /** OI now minus the contract's last OI of the previous session. null = no baseline (unknown), never 0. */
+  oiChange: number | null;
   volume: number;
+  /** Percent, e.g. 13.4. */
   iv: number;
   delta: number;
   gamma: number;
@@ -142,6 +144,26 @@ export interface OptionData {
   vega: number;
   bidPrice: number;
   askPrice: number;
+  /** M5 hub chains: the contract's broker token and lot size. Absent on legacy chains. */
+  token?: string;
+  lotSize?: number;
+}
+
+export type OptionsChainSource = 'hub' | 'snapshot' | 'nse' | 'legacy';
+export type OptionsChainStatus = 'fresh' | 'stale' | 'market-closed' | 'unavailable';
+
+/** GET /api/options/chain/:underlying — the chain plus where it came from and how old it is. */
+export interface OptionsChainView {
+  chain: OptionsChainEntry[];
+  spotPrice: number | null;
+  /** ISO time the chain's prices were current. */
+  at: string;
+  source: OptionsChainSource;
+  status: OptionsChainStatus;
+  /** Hub chains: Greeks/IV from the broker, or computed locally from LTP after an optionGreek failure. */
+  greeks?: 'broker' | 'local';
+  /** status 'unavailable' only: why (throttled, busy, no-session, no-contracts, error). */
+  unavailable?: string;
 }
 
 // ---- Signals ----

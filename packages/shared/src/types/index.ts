@@ -160,8 +160,11 @@ export interface OptionsChainView {
   at: string;
   source: OptionsChainSource;
   status: OptionsChainStatus;
-  /** Hub chains: Greeks/IV from the broker, or computed locally from LTP after an optionGreek failure. */
-  greeks?: 'broker' | 'local';
+  /**
+   * Hub chains: Greeks/IV from the broker, or computed locally from LTP when the broker had no row for a leg;
+   * 'none' = no Greeks available for any leg (all zero).
+   */
+  greeks?: 'broker' | 'local' | 'none';
   /** status 'unavailable' only: why (throttled, busy, no-session, no-contracts, error). */
   unavailable?: string;
 }

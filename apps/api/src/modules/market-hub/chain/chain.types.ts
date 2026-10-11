@@ -3,6 +3,9 @@ import type { HubExchange, InstrumentRef } from '../hub.types';
 
 export type OptionSide = 'CE' | 'PE';
 
+/** Where a chain's Greeks came from; 'none' = no Greeks available for any leg. */
+export type ChainGreeksSource = 'broker' | 'local' | 'none';
+
 /** One contract's Greeks from Angel's optionGreek (IV in PERCENT, e.g. 13.36). */
 export interface OptionGreekRow {
   strike: number;
@@ -33,7 +36,7 @@ export interface HubChain {
   spot: number | null;
   /** ms epoch the prices were current (the quote call's completion). */
   at: number;
-  greeks: 'broker' | 'local';
+  greeks: ChainGreeksSource;
   entries: OptionsChainEntry[];
 }
 

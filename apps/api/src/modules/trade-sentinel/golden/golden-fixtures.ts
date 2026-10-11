@@ -1,0 +1,752 @@
+/**
+ * GOLDEN CHARACTERISATION FIXTURES for the trade sentinel's LLM seam (SP3 §4.7).
+ *
+ * WHAT THIS IS. A fixed set of scenarios that drive the REAL `SentinelAgentService`
+ * and `ThesisService` (and, separately, the real `ClaudeCliTransport`) and record
+ * exactly what crosses the transport boundary and what comes back out:
+ *  - the request object handed to `messages.create` (deep copy, one argument only),
+ *  - the resolved verdict / thesis, or the thrown error's class, name and message,
+ *  - the log lines the sentinel's own loggers emitted,
+ *  - for the CLI transport: the spawn command line, spawn options, the child env
+ *    contract, stdin, and the system-prompt FILE content.
+ *
+ * WHY. The sentinel is live in production. Later SP3 tasks move it onto the AI
+ * gateway; they must pass these same snapshots unchanged. The baseline was
+ * recorded against the pre-gateway code, so a diff here IS a behaviour change.
+ *
+ * THE ONLY THING THAT VARIES between the baseline run and the gateway run is the
+ * client factory handed to `runGoldenScenarios`. Everything else — packets, config,
+ * replies, normalisation — lives here and must not be edited to make a later run
+ * pass. Non-deterministic values (the temp dir) are normalised HERE, never in the
+ * services.
+ */
+import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname } from 'node:path';
+import { EventEmitter } from 'node:events';
+import { Logger } from '@nestjs/common';
+import { RateLimitError } from '@anthropic-ai/sdk';
+import { SentinelAgentService, type OvernightVerdict, type Verdict } from '../services/sentinel-agent.service';
+import { ThesisService } from '../services/thesis.service';
+import {
+  absent,
+  present,
+  type ChartContextShim,
+  type ContextPacket,
+  type TickSnapshot,
+} from '../services/context-packet.service';
+import type { MessagesTransport, TransportRequest } from '../services/llm-transport';
+import type { WakeTrigger } from '../services/tripwire.service';
+import type { RosterEntry } from '../services/roster.service';
+import type { ThesisDraft } from '../repositories/sentinel-thesis.repository';
+import type { OvernightPacket, OvernightSection } from '../overnight/overnight-packet.types';
+import { ClaudeCliTransport, CLI_TIMEOUT_MS, quoteArg } from '../adapters/claude-cli.transport';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public contract (A6 relies on these exact names)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One scenario's fake provider: what it was asked, and how it answers. */
+export interface Recorder {
+  /** Every request the client received, deep-copied, in call order. */
+  requests: unknown[];
+  /** The scripted reply. May THROW to simulate a transport failure. */
+  reply: (req: unknown) => { content: { type: string; text?: string }[]; stop_reason: string | null };
+}
+
+/** One scenario's observable behaviour. */
+export interface GoldenRecord {
+  scenario: string;
+  request: unknown;
+  result: unknown;
+  logs: string[];
+}
+
+/** The service-level scenarios `runGoldenScenarios` produces, one record each. */
+export const SCENARIO_NAMES = [
+  'judge-fire-cues-on',
+  'judge-heartbeat-cues-off',
+  'judge-env-overrides',
+  'judge-fenced-json',
+  'judge-refusal',
+  'judge-max-tokens',
+  'judge-context-exceeded',
+  'overnight',
+  'thesis',
+  'transport-throws',
+] as const;
+
+/** The `ClaudeCliTransport` scenarios `runCliGoldenScenarios` produces. */
+export const CLI_SCENARIO_NAMES = [
+  'cli-argv-and-env',
+  'cli-envelope-ok',
+  'cli-envelope-fenced',
+  'cli-envelope-is-error-401',
+  'cli-envelope-empty-result',
+  'cli-nonzero-exit',
+  'cli-timeout',
+] as const;
+
+/**
+ * Logger contexts whose lines are part of the sentinel's observable behaviour.
+ * Lines from any other context (e.g. a gateway's own audit logging) are not the
+ * sentinel's output and are deliberately not compared.
+ */
+export const SENTINEL_LOG_CONTEXTS: readonly string[] = [
+  SentinelAgentService.name,
+  ThesisService.name,
+  ClaudeCliTransport.name,
+];
+
+/**
+ * The baseline client: a plain object whose `messages.create` records the request
+ * and answers from the recorder. Asserts the single-argument call shape the
+ * Anthropic SDK is invoked with.
+ */
+export function recordingClient(rec: Recorder): MessagesTransport {
+  return {
+    messages: {
+      // `function`, not an arrow, so `arguments` is the real call's arguments.
+      create: async function (this: unknown, ...args: unknown[]) {
+        if (args.length !== 1) {
+          throw new Error(`golden: messages.create called with ${args.length} arguments, expected exactly 1`);
+        }
+        rec.requests.push(JSON.parse(JSON.stringify(args[0])));
+        return rec.reply(args[0]);
+      } as MessagesTransport['messages']['create'],
+    },
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fixtures — copied from the existing specs (see the note on each)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const AT = '2026-08-14T04:30:00.000Z';
+
+/** Verbatim `base` from services/sentinel-agent.service.spec.ts. */
+export const GOLDEN_PACKET: ContextPacket = {
+  position: {
+    symbol: 'INFY',
+    kind: 'POSITION',
+    ownership: 'SENTINEL',
+    segment: 'EQ_DELIVERY',
+    side: 'LONG',
+    qty: 100,
+    entryPrice: 1400,
+    ltp: 1462,
+    underlyingLtp: present(1462, 'market-data (underlying spot)', AT),
+    entryTime: '2026-08-13T04:15:00.000Z',
+    expiry: null,
+  },
+  money: {
+    grossPnl: 6200,
+    charges: 120,
+    netPnl: 6080,
+    greenFloorPrice: 1441,
+    greenFloorArmed: true,
+    mfe: 1478,
+    mae: 1396,
+  },
+  thesis: present(
+    {
+      direction: 'LONG',
+      reason: 'breakout above the 1400 shelf',
+      levelPrice: 1400,
+      targetPrice: 1500,
+      invalidation: 1380,
+      source: 'AGENT',
+    },
+    'agent inference',
+    AT,
+  ),
+  structure: {
+    levelBook: present([{ price: 1450, kind: 'SUPPORT' }], 'chart-context.service (1d)', AT),
+    nearestSupport: present(1450, 'level book (underlying scale)', AT),
+    nearestResistance: present(1500, 'level book (underlying scale)', AT),
+  },
+  flow: {
+    volumeRatio: present(1.8, 'market-data', AT),
+    oiWalls: present(
+      { now: { callWall: 1500, putWall: 1400 }, previous: { callWall: 1520, putWall: 1400 } },
+      'oi-wall.service',
+      AT,
+    ),
+  },
+  macro: {
+    fiiDii: absent('stub'),
+    sector: absent('stub'),
+    globalCues: absent('stub'),
+    realFactors: present({ mtfTrend: 0.6 }, 'context-scoring', AT),
+  },
+  news: {
+    headlines: absent('news aggregator returned nothing for this symbol'),
+    freshCount: present(0, 'news-aggregator.service', AT),
+  },
+  session: {
+    nowIst: '2026-08-14 10:00:00 IST',
+    nowUtc: AT,
+    minutesToClose: present(330, 'derived from IST wall clock', AT),
+    expiry: null,
+  },
+  trigger: present([{ name: 'heartbeat', detail: 'scheduled review' }], 'tripwire.service', AT),
+  memory: absent('no prior verdicts for this position — this is the first look'),
+};
+
+/** `validVerdict` from services/sentinel-agent.service.spec.ts — cites real packet paths. */
+const VALID_VERDICT: Verdict = {
+  verdict: 'HOLD',
+  confidence: 'high',
+  thesisStatus: 'INTACT',
+  recoveryAvailable: true,
+  reason: 'structure holding above the demand zone',
+  evidence: ['structure.nearestSupport', 'money.netPnl'],
+  invalidationPoint: 'close below 1450',
+  reviewIn: 300,
+};
+
+const OAT = '2026-10-12T10:15:00.000Z';
+
+/** Verbatim `live` + `overnight` from services/sentinel-agent.overnight.spec.ts. */
+const OVERNIGHT_LIVE: ContextPacket = {
+  position: {
+    symbol: 'NIFTY13OCT2625000CE',
+    kind: 'POSITION',
+    ownership: 'SENTINEL',
+    segment: 'OPT',
+    side: 'LONG',
+    qty: 75,
+    entryPrice: 140,
+    ltp: 120,
+    underlyingLtp: present(25050, 'market-data (underlying spot — broker FULL-mode quote)', OAT),
+    entryTime: '2026-10-12T04:00:00.000Z',
+    expiry: '2026-10-13',
+  },
+  money: { grossPnl: -1500, charges: 90, netPnl: -1590, greenFloorPrice: 142.4, greenFloorArmed: false, mfe: 150, mae: 112 },
+  thesis: present(
+    { direction: 'LONG', reason: 'bought the 25000 retest', levelPrice: 25000, targetPrice: 25300, invalidation: 24900, source: 'INFERRED' },
+    'agent inference',
+    OAT,
+  ),
+  structure: {
+    levelBook: present([{ price: 25000, kind: 'SUPPORT' }], 'chart-context.service (15m)', OAT),
+    nearestSupport: present(25000, 'level book', OAT),
+    nearestResistance: present(25200, 'level book', OAT),
+  },
+  flow: { volumeRatio: absent('n/a'), oiWalls: absent('no options chain for this symbol, so no OI walls') },
+  macro: { fiiDii: absent('stub'), sector: absent('stub'), globalCues: absent('stub'), realFactors: absent('none') },
+  news: { headlines: absent('none'), freshCount: absent('none') },
+  session: {
+    nowIst: '2026-10-12 15:45:00 IST',
+    nowUtc: OAT,
+    minutesToClose: absent('the NFO session has already closed (15:30 IST) — nothing left to run there today'),
+    expiry: '2026-10-13',
+  },
+  trigger: present([{ name: 'OVERNIGHT_REVIEW', detail: 'scheduled after-close review' }], 'sentinel-overnight.service', OAT),
+  memory: absent('no prior verdicts for this position — this is the first look'),
+};
+
+const OVERNIGHT_SECTION: OvernightSection = {
+  review: {
+    kind: 'OVERNIGHT_REVIEW',
+    window: 'window:OVERNIGHT_REVIEW:EQUITY:2026-10-12',
+    lastCloseAt: '2026-10-12T10:00:00.000Z',
+    nextOpenAt: '2026-10-13T03:45:00.000Z',
+    hoursUntilOpen: 17.5,
+    lastPriceAt: '2026-10-12T09:59:30.000Z',
+    lastPriceAtBasis: 'as of tracker update',
+  },
+  expiry: present({ expiry: '2026-10-13', calendarDays: 1, tradingSessionsLeft: 1 }, 'derived', OAT),
+  decay: present(
+    { thetaPerUnitPerDay: -24, nightDays: 0.7292, perUnitOvernight: -17.5, rupeesForPosition: -1312.5, method: 'options-chain greeks' },
+    'options-chain.service greeks',
+    OAT,
+  ),
+  greeks: present({ delta: 0.52, gamma: 0.001, theta: -24, vega: 9.1, iv: 13.2 }, 'options-chain.service greeks', OAT),
+  preOpenPrice: absent('after-close review — the next pre-open has not happened'),
+  preOpenGap: absent('only the 09:10 pre-open check reads an NSE pre-open IEP'),
+  news: present({ items: [], stale: false }, 'news-aggregator.service', OAT),
+  oi: present({ pcr: present(0.82, 'options-chain.service getPCR', OAT) }, 'options-chain.service', OAT),
+  marketCues: {
+    nasdaq: present({ value: 27366.17, change: 172.83, changePercent: 0.64, direction: 'UP', ageMinutes: 1100, basis: 'previous session close', status: 'ok' }, 'Yahoo', OAT),
+    sp500: absent('not fetched yet'),
+    dow: absent('not fetched yet'),
+    nasdaqFutures: present({ value: 31108.75, change: -60, changePercent: -0.19, direction: 'DOWN', ageMinutes: 5, basis: 'quote time', status: 'ok' }, 'Yahoo', OAT),
+    sp500Futures: absent('not fetched yet'),
+    giftNifty: absent('GIFT Nifty is read in the 23:45 and 08:30 reviews'),
+    fiiDerivatives: present({ session: '2026-10-09', indexFutures: { long: 1, short: 2, net: -1 } }, 'NSE participant OI', '2026-10-09'),
+    crudeOil: present({ value: 5600, change: -84, changePercent: -1.5, direction: 'DOWN', ageMinutes: 5, basis: 'quote time' }, 'commodities', OAT),
+    gold: absent('no quote'),
+    fiiFlows: present({ session: '2026-10-09', fii: { buy: 1, sell: 2, net: -1 }, todaysFigure: 'not yet published (NSE publishes ~18:00–20:00 IST)' }, 'NSE fiidiiTradeReact', '2026-10-09'),
+    indiaVix: present({ value: 13.4, change: 0.6, changePercent: 4.7, direction: 'UP', ageMinutes: 0, basis: 'previous session close' }, 'market-context.service', OAT),
+    sectorStrength: absent('underlying is an index'),
+    underlyingChange: absent('no previous close'),
+  },
+};
+
+const OVERNIGHT_PACKET: OvernightPacket = { ...OVERNIGHT_LIVE, overnight: OVERNIGHT_SECTION };
+
+/** A valid HOLD_OVERNIGHT verdict citing real overnight and live paths. */
+const VALID_OVERNIGHT: OvernightVerdict = {
+  verdict: 'HOLD_OVERNIGHT',
+  confidence: 'medium',
+  thesisStatus: 'WEAKENING',
+  overnightRisk: 'one session to expiry and ₹1,312 of theta overnight against a long call',
+  changeMindLevel: 'an open above 25150 on the spot',
+  openPlan: 'if it gaps below 24950, exit; if it opens above 25150, hold with a stop at 25020',
+  evidence: ['overnight.decay', 'overnight.expiry', 'structure.nearestSupport'],
+};
+
+/** `entry` and `tick` from services/thesis.service.spec.ts. */
+const THESIS_ENTRY: RosterEntry = {
+  userId: 'u1',
+  trackerId: 't1',
+  symbol: 'INFY',
+  exchange: 'NSE',
+  kind: 'POSITION',
+  ownership: 'SENTINEL',
+  watched: true,
+  reason: 'unowned position — sentinel claims it',
+};
+
+const THESIS_TICK: TickSnapshot = {
+  segment: 'EQ_DELIVERY',
+  side: 'LONG',
+  structureSymbol: 'INFY',
+  entryPrice: 1455,
+  qty: 10,
+  ltp: 1470,
+  underlyingLtp: 1470,
+  underlyingLtpAt: null,
+  underlyingLtpSource: 'market-data (underlying spot — live feed tick)',
+  underlyingLtpReason: null,
+  nearestSupport: 1450,
+  nearestResistance: 1500,
+  structureReason: null,
+  structureAt: null,
+  structureSource: 'signal-generator.analyze (15m level book)',
+  holdingHigh: 1478,
+  holdingLow: 1449,
+  entryTime: new Date('2026-08-13T04:15:00.000Z'),
+  expiry: null,
+  volumeRatio: 1.4,
+  freshNewsCount: 0,
+  factorValues: {},
+  factorsReason: null,
+  oiWallNow: null,
+  oiWallPrev: null,
+  oiWallsAt: null,
+  greenFloorArmedLatched: false,
+};
+
+/** `goodDraft` from services/thesis.service.spec.ts. */
+const GOOD_THESIS = {
+  direction: 'LONG',
+  reason: 'bought the demand zone',
+  levelPrice: 1450,
+  targetPrice: 1520,
+  invalidation: 1440,
+};
+
+/** The level book the chart shim returns — `at` fixed so nothing reads the clock. */
+const THESIS_LEVELS = {
+  value: [{ price: 1450, kind: 'SUPPORT' }],
+  source: 'chart-context.service (15m)',
+  at: AT,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Reply = ReturnType<Recorder['reply']>;
+
+const textReply = (text: string, stop_reason: string | null = 'end_turn'): Reply => ({
+  stop_reason,
+  content: [{ type: 'text', text }],
+});
+const jsonReply = (obj: unknown, stop_reason: string | null = 'end_turn'): Reply =>
+  textReply(JSON.stringify(obj), stop_reason);
+
+/** A fake `ConfigService`: only `get` is read by the sentinel. */
+function fakeConfig(env: Record<string, string>) {
+  return { get: (key: string) => env[key] } as never;
+}
+
+/** A thrown value, reduced to what is stable and meaningful. */
+function describeError(err: unknown): unknown {
+  if (err instanceof Error) {
+    return { class: err.constructor.name, name: err.name, message: err.message };
+  }
+  return { thrown: String(err) };
+}
+
+async function outcome(run: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return { ok: true, value: await run() };
+  } catch (err) {
+    return { ok: false, error: describeError(err) };
+  }
+}
+
+const LOG_LEVELS = ['error', 'warn', 'log', 'debug', 'verbose'] as const;
+
+/**
+ * Silences and captures every Nest `Logger` instance method for the duration of
+ * `run`, keeping only lines from the sentinel's own contexts.
+ */
+async function withLogCapture<T>(run: () => Promise<T>): Promise<{ value: T; logs: string[] }> {
+  const logs: string[] = [];
+  const spies = LOG_LEVELS.map((level) =>
+    jest.spyOn(Logger.prototype, level).mockImplementation(function (this: Logger, ...args: unknown[]) {
+      const context = (this as unknown as { context?: string }).context ?? '';
+      if (!SENTINEL_LOG_CONTEXTS.includes(context)) return;
+      logs.push(`[${context}] ${level}: ${args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' | ')}`);
+    }),
+  );
+  try {
+    const value = await run();
+    return { value, logs };
+  } finally {
+    for (const spy of spies) spy.mockRestore();
+  }
+}
+
+function onlyRequest(scenario: string, rec: Recorder): unknown {
+  if (rec.requests.length !== 1) {
+    throw new Error(`golden: scenario ${scenario} expected exactly 1 transport request, got ${rec.requests.length}`);
+  }
+  return rec.requests[0];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Service-level scenarios
+// ─────────────────────────────────────────────────────────────────────────────
+
+type ScenarioName = (typeof SCENARIO_NAMES)[number];
+
+interface Scenario {
+  name: ScenarioName;
+  reply: Recorder['reply'];
+  /** Drives the real service against `client`; resolves to the observable result. */
+  run: (client: MessagesTransport) => Promise<unknown>;
+}
+
+function judgeScenario(
+  name: ScenarioName,
+  env: Record<string, string>,
+  trigger: WakeTrigger,
+  reply: Recorder['reply'],
+): Scenario {
+  return {
+    name,
+    reply,
+    run: (client) => outcome(() => new SentinelAgentService(client, fakeConfig(env)).judge(GOLDEN_PACKET, trigger)),
+  };
+}
+
+const SCENARIOS: Scenario[] = [
+  judgeScenario('judge-fire-cues-on', { MARKET_CUES_ENABLED: 'true' }, 'FIRE', () => jsonReply(VALID_VERDICT)),
+  judgeScenario('judge-heartbeat-cues-off', {}, 'HEARTBEAT', () => jsonReply(VALID_VERDICT)),
+  judgeScenario(
+    'judge-env-overrides',
+    { SENTINEL_MODEL_TRIGGERED: 'x-model', SENTINEL_EFFORT_TRIGGERED: 'low' },
+    'FIRE',
+    () => jsonReply(VALID_VERDICT),
+  ),
+  judgeScenario('judge-fenced-json', {}, 'FIRE', () =>
+    textReply('```json\n' + JSON.stringify(VALID_VERDICT) + '\n```'),
+  ),
+  judgeScenario('judge-refusal', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'refusal')),
+  judgeScenario('judge-max-tokens', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'max_tokens')),
+  judgeScenario('judge-context-exceeded', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'model_context_window_exceeded')),
+  {
+    name: 'overnight',
+    reply: () => jsonReply(VALID_OVERNIGHT),
+    run: (client) => outcome(() => new SentinelAgentService(client, fakeConfig({})).judgeOvernight(OVERNIGHT_PACKET)),
+  },
+  {
+    name: 'thesis',
+    reply: () => jsonReply(GOOD_THESIS),
+    run: async (client) => {
+      const repoCalls: unknown[] = [];
+      const repo = {
+        find: async (trackerId: string) => {
+          repoCalls.push({ method: 'find', args: [trackerId] });
+          return null;
+        },
+        upsertInferred: async (trackerId: string, draft: ThesisDraft) => {
+          // The row as `sentinel_theses` would hold it.
+          repoCalls.push({ method: 'upsertInferred', args: [trackerId, JSON.parse(JSON.stringify(draft))] });
+          const { userId: _userId, ...rest } = draft;
+          return { ...rest, source: 'INFERRED' };
+        },
+        overrideByUser: async () => {
+          throw new Error('golden: overrideByUser must not be called while inferring');
+        },
+      };
+      const levelsForCalls: unknown[] = [];
+      const chart: ChartContextShim = {
+        levelsFor: async (...args: unknown[]) => {
+          levelsForCalls.push(args);
+          return THESIS_LEVELS;
+        },
+      };
+      const svc = new ThesisService(repo as never, client, chart);
+      const result = await outcome(() => svc.ensureFor(THESIS_ENTRY, THESIS_TICK));
+      return { ...(result as object), repoCalls, levelsForCalls };
+    },
+  },
+  judgeScenario('transport-throws', {}, 'FIRE', () => {
+    // Exactly as services/sentinel-agent.service.spec.ts constructs it.
+    throw new RateLimitError(429, undefined, 'quota exhausted', new Headers());
+  }),
+];
+
+/**
+ * Runs every service-level scenario against a client built by `makeClient`, in a
+ * fixed order. The factory is the ONLY input: the baseline passes
+ * `recordingClient`; the gateway run passes a gateway-backed transport whose fake
+ * provider records into, and replies from, the same recorder.
+ */
+export async function runGoldenScenarios(
+  makeClient: (rec: Recorder) => MessagesTransport,
+): Promise<GoldenRecord[]> {
+  const records: GoldenRecord[] = [];
+  for (const scenario of SCENARIOS) {
+    const rec: Recorder = { requests: [], reply: scenario.reply };
+    const client = makeClient(rec);
+    const { value: result, logs } = await withLogCapture(() => scenario.run(client));
+    records.push({ scenario: scenario.name, request: onlyRequest(scenario.name, rec), result, logs });
+  }
+  return records;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLI transport scenarios (ClaudeCliTransport with a mocked `spawn`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type FakeChild = EventEmitter & {
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+  stdin: EventEmitter & { end: jest.Mock };
+  kill: jest.Mock;
+};
+
+/**
+ * A fake child process, as in adapters/claude-cli.transport.spec.ts: emits the
+ * envelope on stdout and closes. `envelope === undefined && hang` never closes.
+ */
+function fakeChild(
+  envelope: unknown,
+  opts: { code?: number; stderr?: string; hang?: boolean } = {},
+): FakeChild {
+  const child = new EventEmitter() as FakeChild;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  const stdin = new EventEmitter() as EventEmitter & { end: jest.Mock };
+  stdin.end = jest.fn();
+  child.stdin = stdin;
+  child.kill = jest.fn();
+  if (opts.hang) return child;
+  setImmediate(() => {
+    if (opts.stderr) child.stderr.emit('data', Buffer.from(opts.stderr));
+    if (envelope !== undefined) {
+      child.stdout.emit('data', Buffer.from(typeof envelope === 'string' ? envelope : JSON.stringify(envelope)));
+    }
+    child.emit('close', opts.code ?? 0);
+  });
+  return child;
+}
+
+/** The small request from adapters/claude-cli.transport.spec.ts, for the envelope scenarios. */
+const SMALL_REQUEST: TransportRequest = {
+  model: 'claude-opus-5',
+  max_tokens: 16000,
+  output_config: {
+    effort: 'high',
+    format: { type: 'json_schema', schema: { type: 'object', required: ['verdict'] } },
+  },
+  system: [{ type: 'text', text: 'You are the sentinel.', cache_control: { type: 'ephemeral' } }],
+  messages: [{ role: 'user', content: '{"packet":1}' }],
+};
+
+const okEnvelope = (text: string) => ({ is_error: false, stop_reason: 'end_turn', result: text });
+
+/** The exact request `judge-fire-cues-on` sends, captured from the real service. */
+async function judgeFireCuesOnRequest(): Promise<TransportRequest> {
+  const rec: Recorder = { requests: [], reply: () => jsonReply(VALID_VERDICT) };
+  await withLogCapture(() =>
+    new SentinelAgentService(recordingClient(rec), fakeConfig({ MARKET_CUES_ENABLED: 'true' })).judge(GOLDEN_PACKET, 'FIRE'),
+  );
+  return onlyRequest('judge-fire-cues-on', rec) as TransportRequest;
+}
+
+const PROMPT_FILE_ARG = /"--system-prompt-file" "((?:[^"\\]|\\.)*)"/;
+
+/** Undoes `quoteArg`'s escaping of `"` and `\`. */
+function unquote(escaped: string): string {
+  return escaped.replace(/\\(["\\])/g, '$1');
+}
+
+const deepEqualEnv = (a: Record<string, unknown>, b: Record<string, unknown>): boolean => {
+  const ak = Object.keys(a).sort();
+  const bk = Object.keys(b).sort();
+  return ak.length === bk.length && ak.every((k, i) => k === bk[i] && a[k] === b[k]);
+};
+
+async function cliArgvAndEnv(spawnMock: jest.Mock): Promise<GoldenRecord> {
+  const request = await judgeFireCuesOnRequest();
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  const prevToken = process.env.ANTHROPIC_AUTH_TOKEN;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-golden-should-not-reach-the-child';
+  process.env.ANTHROPIC_AUTH_TOKEN = 'tok-golden-should-not-reach-the-child';
+  try {
+    const expectedEnv: Record<string, unknown> = { ...process.env };
+    delete expectedEnv.ANTHROPIC_API_KEY;
+    delete expectedEnv.ANTHROPIC_AUTH_TOKEN;
+
+    spawnMock.mockReset();
+    let child: FakeChild | undefined;
+    spawnMock.mockImplementation(() => {
+      child = fakeChild(okEnvelope(JSON.stringify(VALID_VERDICT)));
+      return child;
+    });
+
+    const transport = new ClaudeCliTransport();
+    const { value: result, logs } = await withLogCapture(() =>
+      outcome(() => transport.messages.create(request)),
+    );
+
+    if (spawnMock.mock.calls.length !== 1) {
+      throw new Error(`golden: expected exactly 1 spawn, got ${spawnMock.mock.calls.length}`);
+    }
+    const [commandLine, options] = spawnMock.mock.calls[0] as [string, Record<string, unknown>];
+    const env = options.env as Record<string, unknown>;
+
+    const match = PROMPT_FILE_ARG.exec(commandLine);
+    if (!match) throw new Error('golden: no --system-prompt-file argument in the spawn command line');
+    const promptPath = unquote(match[1]);
+    const promptDir = dirname(promptPath);
+    const normalisedPath = `<TMP>/${basename(promptPath)}`;
+
+    return {
+      scenario: 'cli-argv-and-env',
+      request,
+      result: {
+        outcome: result,
+        spawnCalls: spawnMock.mock.calls.length,
+        commandLine: commandLine.replace(match[0], `"--system-prompt-file" ${quoteArg(normalisedPath)}`),
+        options: {
+          keys: Object.keys(options).sort(),
+          shell: options.shell,
+          windowsHide: options.windowsHide,
+        },
+        promptFile: {
+          path: normalisedPath,
+          dirIsUnderOsTmpdir: promptDir.startsWith(tmpdir()),
+          dirName: basename(promptDir).replace(/^(sentinel-cli-).+$/, '$1<RANDOM>'),
+          content: readFileSync(promptPath, 'utf8'),
+        },
+        env: {
+          isCopyNotProcessEnv: env !== (process.env as unknown),
+          anthropicApiKeyAbsent: !('ANTHROPIC_API_KEY' in env),
+          anthropicAuthTokenAbsent: !('ANTHROPIC_AUTH_TOKEN' in env),
+          everyOtherKeyPassedThroughUnchanged: deepEqualEnv(env, expectedEnv),
+        },
+        stdin: child ? child.stdin.end.mock.calls : null,
+      },
+      logs,
+    };
+  } finally {
+    if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+    if (prevToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+    else process.env.ANTHROPIC_AUTH_TOKEN = prevToken;
+  }
+}
+
+async function cliEnvelope(
+  spawnMock: jest.Mock,
+  scenario: (typeof CLI_SCENARIO_NAMES)[number],
+  envelope: unknown,
+  opts: { code?: number; stderr?: string } = {},
+): Promise<GoldenRecord> {
+  spawnMock.mockReset();
+  spawnMock.mockImplementation(() => fakeChild(envelope, opts));
+  const transport = new ClaudeCliTransport();
+  const { value: result, logs } = await withLogCapture(() =>
+    outcome(() => transport.messages.create(SMALL_REQUEST)),
+  );
+  return {
+    scenario,
+    request: JSON.parse(JSON.stringify(SMALL_REQUEST)),
+    result: { outcome: result, spawnCalls: spawnMock.mock.calls.length },
+    logs,
+  };
+}
+
+async function cliTimeout(spawnMock: jest.Mock): Promise<GoldenRecord> {
+  spawnMock.mockReset();
+  let child: FakeChild | undefined;
+  spawnMock.mockImplementation(() => {
+    child = fakeChild(undefined, { hang: true });
+    return child;
+  });
+  const transport = new ClaudeCliTransport();
+  jest.useFakeTimers();
+  try {
+    const { value: result, logs } = await withLogCapture(async () => {
+      let settled = false;
+      const pending = outcome(() => transport.messages.create(SMALL_REQUEST)).finally(() => {
+        settled = true;
+      });
+      const flush = async () => {
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+      };
+      await flush();
+      jest.advanceTimersByTime(CLI_TIMEOUT_MS - 1);
+      await flush();
+      const settledBeforeDeadline = settled;
+      jest.advanceTimersByTime(1);
+      const out = await pending;
+      return {
+        outcome: out,
+        timeoutMs: CLI_TIMEOUT_MS,
+        settledBeforeDeadline,
+        killCalls: child ? child.kill.mock.calls.length : null,
+      };
+    });
+    return {
+      scenario: 'cli-timeout',
+      request: JSON.parse(JSON.stringify(SMALL_REQUEST)),
+      result: { ...result, spawnCalls: spawnMock.mock.calls.length },
+      logs,
+    };
+  } finally {
+    jest.useRealTimers();
+  }
+}
+
+/**
+ * Runs every CLI scenario against `ClaudeCliTransport`, with `spawnMock` being
+ * the `jest.mock('node:child_process')` spawn from the calling spec (a module
+ * mock must be declared in the test file to be hoisted reliably).
+ */
+export async function runCliGoldenScenarios(spawnMock: jest.Mock): Promise<GoldenRecord[]> {
+  const verdictText = JSON.stringify(VALID_VERDICT);
+  return [
+    await cliArgvAndEnv(spawnMock),
+    await cliEnvelope(spawnMock, 'cli-envelope-ok', okEnvelope(verdictText)),
+    await cliEnvelope(spawnMock, 'cli-envelope-fenced', okEnvelope('```json\n' + verdictText + '\n```')),
+    await cliEnvelope(spawnMock, 'cli-envelope-is-error-401', {
+      is_error: true,
+      api_error_status: 401,
+      subtype: 'success',
+      result: 'Invalid API key · Please run /login',
+    }),
+    await cliEnvelope(spawnMock, 'cli-envelope-empty-result', { is_error: false, stop_reason: 'end_turn', result: '   ' }),
+    await cliEnvelope(spawnMock, 'cli-nonzero-exit', undefined, { code: 1, stderr: 'error: unknown option --frobnicate' }),
+    await cliTimeout(spawnMock),
+  ];
+}

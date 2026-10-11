@@ -1522,6 +1522,9 @@ model User {
   coreStrategySelections CoreStrategySelection[]
   coreRiskLimits         CoreRiskLimit[]
   coreKillSwitches       CoreKillSwitch[]
+  coreOrders             CoreOrder[]
+  coreFills              CoreFill[]
+  coreCashLedger         CoreCashLedger[]
   @@index([status])
   @@map("users")
 }
@@ -2225,4 +2228,102 @@ model CoreKillSwitch {
 
   @@index([userId, createdAt])
   @@map("core_kill_switch")
+}
+
+// ─── SP2 M3: paper execution (orders, fills, cash ledger, paper defaults) ───
+// docs/superpowers/specs/2026-10-11-sp2-m3-execution-design.md §4.5.
+// core_fills and core_cash_ledger are append-only (a trigger in the 20261011120000
+// migration refuses UPDATE, reusing M2's core_append_only_guard()). CHECK constraints pin
+// the vocabularies, the ledger signs and the default shapes.
+
+/// One core order. State changes only through execution/order-state.ts.
+model CoreOrder {
+  id                String           @id @default(cuid())
+  userId            String
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  idempotencyKey    String           @unique
+  vehicle           String // CASH_INTRADAY | MTF | OPTIONS_BUY
+  exchange          String
+  token             String
+  symbol            String
+  lotSize           Int
+  underlying        String?
+  side              String // BUY | SELL
+  qty               Int
+  filledQty         Int              @default(0)
+  avgFillPrice      Decimal?         @db.Decimal(14, 4)
+  type              String // MARKET | LIMIT | SL_MARKET
+  limitPrice        Decimal?         @db.Decimal(14, 2)
+  triggerPrice      Decimal?         @db.Decimal(14, 2)
+  refPrice          Decimal          @db.Decimal(14, 2)
+  purpose           String // ENTRY | EXIT
+  strategyVersionId String?
+  state             String // NEW | OPEN | PARTIAL | FILLED | CANCELLED | REJECTED
+  rejectReason      String?
+  submittedAt       DateTime
+  /// When an SL_MARKET order's trigger was first reached; a stop never un-triggers (ruling P10).
+  triggeredAt       DateTime?        @map("triggered_at") @db.Timestamptz(3)
+  updatedAt         DateTime         @updatedAt
+  fills             CoreFill[]
+  ledger            CoreCashLedger[]
+
+  @@index([userId, state])
+  @@index([state])
+  @@index([userId, vehicle, token])
+  @@map("core_orders")
+}
+
+/// One fill (append-only). `charges` is the per-leg breakdown; chargesTotal is it rounded to the paisa.
+model CoreFill {
+  id           String           @id @default(cuid())
+  orderId      String
+  order        CoreOrder        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  price        Decimal          @db.Decimal(14, 4)
+  qty          Int
+  charges      Json
+  chargesTotal Decimal          @db.Decimal(14, 2)
+  priceAt      DateTime
+  createdAt    DateTime         @default(now())
+  ledger       CoreCashLedger[]
+
+  @@index([userId, createdAt])
+  @@index([orderId])
+  @@map("core_fills")
+}
+
+/// One signed money movement (append-only). (userId, token, interestDate) is unique; interestDate is set only on MTF_INTEREST.
+model CoreCashLedger {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         String // DEPOSIT | MARGIN_BLOCK | MARGIN_RELEASE | REALISED_PNL | CHARGES | MTF_INTEREST
+  amount       Decimal    @db.Decimal(14, 2)
+  orderId      String?
+  order        CoreOrder? @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fillId       String?
+  fill         CoreFill?  @relation(fields: [fillId], references: [id], onDelete: Cascade)
+  token        String?
+  interestDate DateTime?  @db.Date
+  note         String
+  createdAt    DateTime   @default(now())
+
+  @@unique([userId, token, interestDate])
+  @@index([userId, createdAt])
+  @@index([orderId])
+  @@map("core_cash_ledger")
+}
+
+/// Global paper settings (data, owner-editable; D4). Seeded "default — please review" except E1/E2.
+model CorePaperDefault {
+  key       String
+  scope     String
+  numValue  Decimal  @db.Decimal(14, 2)
+  note      String
+  updatedBy String? // the admin who last edited it (null = migration seed)
+  updatedAt DateTime @default(now())
+
+  @@id([key, scope])
+  @@map("core_paper_defaults")
 }

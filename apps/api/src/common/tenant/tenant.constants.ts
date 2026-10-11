@@ -30,6 +30,11 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   // seed data and deliberately absent.
   'CoreRiskLimit',
   'CoreKillSwitch',
+  // SP2 M3: per-user orders, fills and cash ledger. CorePaperDefault is global
+  // settings data and deliberately absent.
+  'CoreOrder',
+  'CoreFill',
+  'CoreCashLedger',
 ]);
 
 /**

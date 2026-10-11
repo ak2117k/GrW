@@ -31,11 +31,18 @@ export interface FillableOrder {
   limitPrice: number | null;
   triggerPrice: number | null;
   submittedAt: Date;
+  /** SL_MARKET: when the trigger was first reached (P10); null while untriggered. */
+  triggeredAt: Date | null;
 }
 
+/**
+ * `triggered: true` appears only on the decision for the price that FIRST reaches an
+ * untriggered SL_MARKET's trigger, with or without a fill; the caller persists triggeredAt
+ * (P10). Absent otherwise, including for an already-triggered stop.
+ */
 export type FillDecision =
-  | { kind: 'NONE'; reason: string }
-  | { kind: 'FILL'; qty: number; price: Dec; via: 'DEPTH' | 'SLIPPAGE' | 'LIMIT' };
+  | { kind: 'NONE'; reason: string; triggered?: true }
+  | { kind: 'FILL'; qty: number; price: Dec; via: 'DEPTH' | 'SLIPPAGE' | 'LIMIT'; triggered?: true };
 
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
 
@@ -92,7 +99,9 @@ function marketFill(order: FillableOrder, p: FillPrice, remaining: number, slipp
  * lots), else LTP ± slippage when the price has no usable depth at all; a book with
  * levels only on the wrong side waits (plan ruling 6). LIMIT fills the whole remainder
  * at the limit on a strict trade-through (E3). SL_MARKET triggers at the trigger (BUY ≥,
- * SELL ≤), or stays triggered once it has a fill, and then fills as MARKET on this price.
+ * SELL ≤) and then fills as MARKET on this price (a gap fills at the gap price). Once
+ * triggered (triggeredAt set, or any fill) it never un-triggers (P10): the trigger check is
+ * skipped and every later fresh price fills as MARKET.
  */
 export function decideFill(order: FillableOrder, p: FillPrice, now: number, slippageBps: Dec): FillDecision {
   const problem = priceProblem(p, order.submittedAt.getTime(), now);
@@ -105,10 +114,11 @@ export function decideFill(order: FillableOrder, p: FillPrice, now: number, slip
     if (!through) return { kind: 'NONE', reason: `the price ${p.ltp} has not traded through the limit ${limit}` };
     return { kind: 'FILL', qty: remaining, price: new D(limit), via: 'LIMIT' };
   }
-  if (order.type === 'SL_MARKET' && order.filledQty === 0) {
+  if (order.type === 'SL_MARKET' && order.filledQty === 0 && order.triggeredAt === null) {
     const trigger = order.triggerPrice as number;
     const hit = order.side === 'BUY' ? p.ltp >= trigger : p.ltp <= trigger;
     if (!hit) return { kind: 'NONE', reason: `the price ${p.ltp} has not reached the trigger ${trigger}` };
+    return { ...marketFill(order, p, remaining, slippageBps), triggered: true };
   }
   return marketFill(order, p, remaining, slippageBps);
 }

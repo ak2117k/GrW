@@ -31,6 +31,7 @@ const order = (over: Partial<FillableOrder> = {}): FillableOrder => ({
   limitPrice: null,
   triggerPrice: null,
   submittedAt: NOW,
+  triggeredAt: null,
   ...over,
 });
 const px = (ltp: number, book?: PriceDepth, at = SUB + 10): FillPrice => ({ ltp, at, ...(book ? { depth: book } : {}) });
@@ -145,6 +146,28 @@ describe('stop-loss market orders', () => {
 
   it('a partly filled stop keeps filling as a market order, even back across the trigger', () => {
     expect(shown(decideFill({ ...sellStop, filledQty: 4 }, px(96), AT, BPS0))).toEqual({ qty: 6, price: '96.0000', via: 'SLIPPAGE' });
+  });
+
+  describe('triggered state is persisted (ruling P10)', () => {
+    it('a trigger reached on a one-sided book does not fill but reports it was triggered', () => {
+      expect(decideFill(sellStop, px(95, depth([[95.5, 10]])), AT, BPS0)).toEqual({ kind: 'NONE', reason: 'the book has no bids', triggered: true });
+      const filled = decideFill(sellStop, px(95), AT, BPS0);
+      expect(filled.kind === 'FILL' && filled.triggered).toBe(true);
+    });
+
+    it('once triggered, the next fresh price back across the trigger fills as MARKET', () => {
+      const triggered = { ...sellStop, triggeredAt: new Date(SUB + 5) };
+      const d = decideFill(triggered, px(96), AT, BPS0);
+      expect(shown(d)).toEqual({ qty: 10, price: '96.0000', via: 'SLIPPAGE' });
+      expect(d.triggered).toBeUndefined();
+    });
+
+    it('a stop whose price never reaches the trigger reports not triggered', () => {
+      const d = decideFill(sellStop, px(95.5), AT, BPS0);
+      expect(d.kind).toBe('NONE');
+      expect(d.triggered).toBeUndefined();
+      expect(decideFill(sellStop, px(95, undefined, SUB), AT, BPS0).triggered).toBeUndefined();
+    });
   });
 });
 

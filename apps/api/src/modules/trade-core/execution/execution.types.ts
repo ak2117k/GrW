@@ -76,6 +76,11 @@ export interface CoreOrder {
   state: OrderState;
   rejectReason: string | null;
   submittedAt: Date;
+  /**
+   * SL_MARKET only (ruling P10): when a fresh price first reached the trigger. Once set the
+   * stop never un-triggers and fills as MARKET. Null for other types and untriggered stops.
+   */
+  triggeredAt: Date | null;
   updatedAt: Date;
 }
 

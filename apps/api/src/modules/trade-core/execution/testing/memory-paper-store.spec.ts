@@ -75,6 +75,22 @@ describe('MemoryPaperStore (ruling P13)', () => {
     expect(await store.orderRepo.listOpenAll()).toHaveLength(1);
     expect(await store.tx.run('user_A', (db) => store.orderRepo.findForUser('user_A', order.id, db))).toMatchObject({ id: order.id });
   });
+
+  it('every order write stamps updatedAt from the clock, as Prisma @updatedAt does (ruling P17 compares it)', async () => {
+    let t = NOW.getTime();
+    const store = new MemoryPaperStore(() => new Date(t));
+    const svc = new PaperLedgerService(store.tx, store.orderRepo, store.fillRepo, store.ledgerRepo, fakeDefaults());
+    const { order } = await svc.place(cashBuy(), OPEN, NOW);
+    expect(order.updatedAt).toEqual(new Date(t));
+    t += 5;
+    const modified = await svc.modify('user_A', order.id, { qty: 50 }, NOW);
+    expect(modified.updatedAt).toEqual(new Date(t));
+    expect(store.orders[0].updatedAt).toEqual(new Date(t));
+    t += 5;
+    const missed = await store.tx.run('user_A', (db) => store.orderRepo.update('user_A', order.id, { state: 'OPEN', filledQty: 9 }, { qty: 60 }, db));
+    expect(missed).toBeNull(); // a guarded update that matches nothing stamps nothing
+    expect(store.orders[0].updatedAt).toEqual(new Date(t - 5));
+  });
 });
 
 describe('MemoryPaperStore ledger CHECKs (ruling P15, migration core_cash_ledger_type_check)', () => {

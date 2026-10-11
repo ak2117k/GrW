@@ -273,7 +273,7 @@ describe('PaperMatcherService', () => {
 
       // The trigger is reached but the book has no asks: NONE + triggered.
       await matcher.onPrice(hub, hubPrice(cashBuy(), 511, SUB + 3, depth([], [[511, 100]])), SUB + 4);
-      expect(markTriggered).toHaveBeenCalledWith('user_A', o.id, 0, new Date(SUB + 3));
+      expect(markTriggered).toHaveBeenCalledWith('user_A', o.id, expect.objectContaining({ filledQty: 0, qty: 100, limitPrice: null, triggerPrice: 510 }), new Date(SUB + 3));
       expect(stateOf(o.id)).toMatchObject({ state: 'OPEN', filledQty: 0, triggeredAt: new Date(SUB + 3) });
 
       // A stop never un-triggers: a price back below the trigger fills it.
@@ -301,7 +301,7 @@ describe('PaperMatcherService', () => {
       const markTriggered = jest.spyOn(ledger, 'markTriggered');
       const o = await place(slBuy());
       await matcher.onPrice(hub, hubPrice(cashBuy(), 511, SUB + 1, depth([[511, 100]])), SUB + 2);
-      expect(applyFill).toHaveBeenCalledWith('user_A', o.id, 0, expect.objectContaining({ qty: 100, priceAt: new Date(SUB + 1), triggered: true }), new Date(SUB + 2));
+      expect(applyFill).toHaveBeenCalledWith('user_A', o.id, expect.objectContaining({ filledQty: 0, qty: 100, limitPrice: null, triggerPrice: 510 }), expect.objectContaining({ qty: 100, priceAt: new Date(SUB + 1), triggered: true }), new Date(SUB + 2));
       expect(markTriggered).not.toHaveBeenCalled();
       expect(stateOf(o.id)).toMatchObject({ state: 'FILLED', triggeredAt: new Date(SUB + 1) });
     });
@@ -350,5 +350,72 @@ describe('PaperMatcherService', () => {
     const pairs = (xs: Array<{ key: string; owner: string }>) => xs.map((x) => `${x.key}|${x.owner}`).sort();
     expect(pairs(hub.unwatches)).toEqual(pairs(hub.watches));
     expect(hub.watches).toHaveLength(3);
+  });
+
+  describe('a modify racing an evaluation (ruling P17)', () => {
+    const limitBuy = () => cashBuy({ idempotencyKey: 'lim_1', type: 'LIMIT', limitPrice: 500, refPrice: 500 });
+    const older = <T extends { updatedAt: Date }>(o: T): T => ({ ...o, updatedAt: new Date(o.updatedAt.getTime() - 1) });
+
+    it('a modify that lands between the decision and applyFill: no fill at the old limit; the next price meets the new limit', async () => {
+      const { store, ledger, hub, matcher, place, stateOf } = setup();
+      const o = await place(limitBuy());
+      const real = ledger.applyFill.bind(ledger);
+      const applyFill = jest.spyOn(ledger, 'applyFill').mockImplementationOnce(async (...args: Parameters<PaperLedgerService['applyFill']>) => {
+        // The user lowers the limit 500 -> 498 after the matcher decided on 500.
+        await ledger.modify('user_A', o.id, { limitPrice: 498 }, NOW);
+        return real(...args);
+      });
+
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 499, SUB + 1, depth([[499, 100]])), SUB + 2);
+      expect(applyFill).toHaveBeenCalledTimes(1);
+      expect(store.fills).toEqual([]);
+      expect(stateOf(o.id)).toMatchObject({ state: 'OPEN', filledQty: 0, limitPrice: 498 });
+
+      // The held copy now carries the new limit: a trade at 499 is not even sent to the ledger.
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 499, SUB + 3, depth([[499, 100]])), SUB + 4);
+      expect(applyFill).toHaveBeenCalledTimes(1);
+      expect(stateOf(o.id)?.state).toBe('OPEN');
+
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 497, SUB + 5, depth([[497, 100]])), SUB + 6);
+      expect(stateOf(o.id)).toMatchObject({ state: 'FILLED', filledQty: 100, avgFillPrice: 498 });
+    });
+
+    it('refresh with an older copy keeps the newer held copy', async () => {
+      const { ledger, hub, matcher, place, stateOf } = setup();
+      const o = await place(limitBuy());
+      const modified = await ledger.modify('user_A', o.id, { limitPrice: 498 }, NOW);
+      matcher.refresh(modified);
+      matcher.refresh(older({ ...modified, limitPrice: 500 })); // a late, older copy
+      const applyFill = jest.spyOn(ledger, 'applyFill');
+
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 499, SUB + 1, depth([[499, 100]])), SUB + 2);
+      expect(applyFill).not.toHaveBeenCalled();
+      expect(stateOf(o.id)).toMatchObject({ state: 'OPEN', filledQty: 0 });
+
+      // An equal-or-newer copy still replaces it.
+      matcher.refresh({ ...modified, limitPrice: 500 });
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 499, SUB + 3, depth([[499, 100]])), SUB + 4);
+      expect(applyFill).toHaveBeenCalledTimes(1);
+    });
+
+    it('the null-path re-read resolving after a newer refresh does not overwrite it', async () => {
+      const { ledger, hub, matcher, place, stateOf } = setup();
+      const o = await place(limitBuy());
+      const stale = older(o); // what an out-of-lock read could still return
+      const applyFill = jest.spyOn(ledger, 'applyFill').mockImplementationOnce(async () => {
+        // The modify commits and the adapter refreshes the matcher before the re-read resolves.
+        matcher.refresh(await ledger.modify('user_A', o.id, { limitPrice: 498 }, NOW));
+        return null;
+      });
+      jest.spyOn(ledger, 'findOrder').mockResolvedValueOnce(stale);
+
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 499, SUB + 1, depth([[499, 100]])), SUB + 2);
+      expect(applyFill).toHaveBeenCalledTimes(1);
+
+      // Still matched against 498: a trade at 499 is not sent to the ledger.
+      await matcher.onPrice(hub, hubPrice(cashBuy(), 499, SUB + 3, depth([[499, 100]])), SUB + 4);
+      expect(applyFill).toHaveBeenCalledTimes(1);
+      expect(stateOf(o.id)).toMatchObject({ state: 'OPEN', filledQty: 0, limitPrice: 498 });
+    });
   });
 });

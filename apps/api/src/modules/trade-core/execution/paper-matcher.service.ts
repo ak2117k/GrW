@@ -111,9 +111,18 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
   /** Replace the in-memory copy after a modify or a close (the DB already holds it). */
   refresh(order: CoreOrder): void {
     const t = this.tracked.get(order.id);
-    if (!t) return;
-    if (!isOpenState(order.state)) this.untrack(order.id);
-    else t.order = order;
+    if (t) this.adopt(t, order);
+  }
+
+  /**
+   * Take incoming as the held copy of t's order. A closed copy untracks (closed is
+   * terminal, so it is never older than an open one). Ruling P17: an open copy older than
+   * the held one (by updatedAt) is ignored; it may resolve after a newer refresh, and
+   * matching against it would use an old qty, limit or trigger. Equal replaces.
+   */
+  private adopt(t: Tracked, incoming: CoreOrder): void {
+    if (!isOpenState(incoming.state)) this.untrack(incoming.id);
+    else if (incoming.updatedAt.getTime() >= t.order.updatedAt.getTime()) t.order = incoming;
   }
 
   /** Stop matching an order and drop its hub watch. */
@@ -207,8 +216,10 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
   /**
    * One order against one price. A FILL goes through applyFill (with `triggered` when the
    * decision carries it); a NONE that first reached an SL_MARKET trigger is persisted with
-   * markTriggered (ruling P10). Both are guarded by the filledQty this copy holds, so a
-   * stale copy (another process, a restart) writes nothing and is refreshed from the DB.
+   * markTriggered (ruling P10). Both are guarded by the copy the decision was made on
+   * (filledQty, qty, limit, trigger; ruling P17), so a stale copy (another process, a
+   * restart, a modify that landed meanwhile) writes nothing and is refreshed from the DB,
+   * never with a copy older than the one held.
    * A throw is logged and the order stays tracked: the next price retries it, and the
    * no-price deadline still bounds an order that never saw a usable one.
    */
@@ -222,25 +233,26 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
       t.priced = true;
       const loaded = await this.defaults.settings(now);
       if (!loaded.ok) return;
-      const decision = decideFill(t.order, p, now, loaded.settings.slippageBps[t.order.vehicle]);
+      const decided = t.order;
+      const decision = decideFill(decided, p, now, loaded.settings.slippageBps[decided.vehicle]);
       const priceAt = new Date(p.at);
       let updated: CoreOrder | null;
       if (decision.kind === 'FILL') {
         updated = await this.ledger.applyFill(
-          t.order.userId,
-          t.order.id,
-          t.order.filledQty,
+          decided.userId,
+          decided.id,
+          decided,
           { qty: decision.qty, price: decision.price, priceAt, ...(decision.triggered ? { triggered: true } : {}) },
           new Date(now),
         );
       } else if (decision.triggered) {
-        updated = await this.ledger.markTriggered(t.order.userId, t.order.id, t.order.filledQty, priceAt);
+        updated = await this.ledger.markTriggered(decided.userId, decided.id, decided, priceAt);
       } else {
         return;
       }
-      const current = updated ?? (await this.ledger.findOrder(t.order.userId, t.order.id));
-      if (!current || !isOpenState(current.state)) this.untrack(t.order.id);
-      else t.order = current;
+      const current = updated ?? (await this.ledger.findOrder(decided.userId, decided.id));
+      if (!current) this.untrack(decided.id);
+      else this.adopt(t, current);
     } catch (err) {
       this.logger.error(`core order ${t.order.id}: evaluation failed: ${errorText(err)}`);
     } finally {
@@ -254,8 +266,8 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
       const o = await this.ledger.close(t.order.userId, t.order.id, 'REJECT', `no fresh price after submission (waited ${t.noPriceRejectMs} ms)`);
       if (!isOpenState(o.state)) this.untrack(t.order.id);
       else {
-        t.order = o;
-        t.priced = o.filledQty > 0;
+        this.adopt(t, o);
+        t.priced = t.order.filledQty > 0;
       }
     } catch (err) {
       this.logger.error(`core order ${t.order.id}: no-price reject failed: ${errorText(err)}`);

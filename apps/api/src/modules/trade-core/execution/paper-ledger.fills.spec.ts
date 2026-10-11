@@ -26,7 +26,7 @@ describe('PaperLedgerService.applyFill', () => {
   it('an entry fill posts its charges, frees the pending margin for its qty and blocks margin at the fill price', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(cashBuy(), OPEN, NOW);
-    const out = await svc.applyFill('user_A', order.id, 0, { qty: 100, price: D('500.7'), priceAt: AT });
+    const out = await svc.applyFill('user_A', order.id, order, { qty: 100, price: D('500.7'), priceAt: AT });
     expect(out).toMatchObject({ state: 'FILLED', filledQty: 100, avgFillPrice: 500.7 });
     expect(store.fills).toHaveLength(1);
     expect(store.fills[0].chargesTotal.toFixed(2)).toBe('26.92');
@@ -41,7 +41,7 @@ describe('PaperLedgerService.applyFill', () => {
   it('a partial fill, then a cancel, releases exactly the unfilled part', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(cashBuy(), OPEN, NOW);
-    const p = await svc.applyFill('user_A', order.id, 0, { qty: 40, price: D('500'), priceAt: AT });
+    const p = await svc.applyFill('user_A', order.id, order, { qty: 40, price: D('500'), priceAt: AT });
     expect(p).toMatchObject({ state: 'PARTIAL', filledQty: 40 });
     expect(rowsAfter(store, 3)).toEqual([
       ['MARGIN_RELEASE', '4000.00', false],
@@ -61,17 +61,17 @@ describe('PaperLedgerService.applyFill', () => {
   it('an exit books gross realised P&L and its own charges, releases margin in proportion, and all of it on the last fill', async () => {
     const { store, svc } = setup();
     const entry = (await svc.place(cashBuy(), OPEN, NOW)).order;
-    await svc.applyFill('user_A', entry.id, 0, { qty: 100, price: D('500.7'), priceAt: AT });
+    await svc.applyFill('user_A', entry.id, entry, { qty: 100, price: D('500.7'), priceAt: AT });
     const exit = (await svc.place(cashBuy({ idempotencyKey: 'intent_cash_1:exit', purpose: 'EXIT', side: 'SELL', refPrice: 505 }), OPEN, NOW)).order;
     expect(exit.state).toBe('OPEN');
     const before = store.ledger.length;
-    await svc.applyFill('user_A', exit.id, 0, { qty: 60, price: D('505'), priceAt: AT });
+    await svc.applyFill('user_A', exit.id, exit, { qty: 60, price: D('505'), priceAt: AT });
     expect(rowsAfter(store, before)).toEqual([
       ['CHARGES', legTotal('EQ_INTRADAY', 'SELL', 505, 60).neg().toFixed(2), true],
       ['REALISED_PNL', '258.00', true],
       ['MARGIN_RELEASE', '6008.40', true],
     ]);
-    await svc.applyFill('user_A', exit.id, 60, { qty: 40, price: D('506'), priceAt: AT });
+    await svc.applyFill('user_A', exit.id, { ...exit, filledQty: 60 }, { qty: 40, price: D('506'), priceAt: AT });
     expect(store.ledger.slice(-2).map((r) => [r.type, r.amount.toFixed(2)])).toEqual([
       ['REALISED_PNL', '212.00'],
       ['MARGIN_RELEASE', '4005.60'],
@@ -87,8 +87,8 @@ describe('PaperLedgerService.applyFill', () => {
     const { store, svc } = setup();
     const { order } = await svc.place(mtfBuy(), OPEN, NOW);
     expect(store.ledger[1].amount.toFixed(2)).toBe('-5000.00');
-    await svc.applyFill('user_A', order.id, 0, { qty: 4, price: D('1000.5'), priceAt: AT });
-    await svc.applyFill('user_A', order.id, 4, { qty: 6, price: D('1000.5'), priceAt: AT });
+    await svc.applyFill('user_A', order.id, order, { qty: 4, price: D('1000.5'), priceAt: AT });
+    await svc.applyFill('user_A', order.id, { ...order, filledQty: 4 }, { qty: 6, price: D('1000.5'), priceAt: AT });
     expect(store.fills.map((f) => [f.charges.segment, f.charges.pledgeFee])).toEqual([['EQ_DELIVERY', 23.6], ['EQ_DELIVERY', 0]]);
     expect(store.fills[0].chargesTotal.toFixed(2)).toBe(money(chargesForLeg({ segment: 'EQ_DELIVERY', leg: 'BUY', price: 1000.5, qty: 4 }).total + 23.6).toFixed(2));
     expect(store.ledger.filter((r) => r.type.startsWith('MARGIN')).map((r) => r.amount.toFixed(2))).toEqual(['-5000.00', '2000.00', '-2001.00', '3000.00', '-3001.50']);
@@ -97,7 +97,7 @@ describe('PaperLedgerService.applyFill', () => {
   it('options: the full premium is blocked and the option schedule applies', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(optionBuy(), OPEN, NOW);
-    await svc.applyFill('user_A', order.id, 0, { qty: 150, price: D('100'), priceAt: AT });
+    await svc.applyFill('user_A', order.id, order, { qty: 150, price: D('100'), priceAt: AT });
     expect(store.fills[0].charges).toMatchObject({ segment: 'OPT', leg: 'BUY', brokerage: 20 });
     expect(store.ledger.filter((r) => r.type.startsWith('MARGIN')).map((r) => r.amount.toFixed(2))).toEqual(['-15000.00', '15000.00', '-15000.00']);
   });
@@ -105,7 +105,7 @@ describe('PaperLedgerService.applyFill', () => {
   it('a stale expectation (another writer filled first) writes nothing and returns null', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(cashBuy(), OPEN, NOW);
-    expect(await svc.applyFill('user_A', order.id, 10, { qty: 100, price: D('500'), priceAt: AT })).toBeNull();
+    expect(await svc.applyFill('user_A', order.id, { ...order, filledQty: 10 }, { qty: 100, price: D('500'), priceAt: AT })).toBeNull();
     expect(store.fills).toEqual([]);
     expect(store.ledger).toHaveLength(2);
   });
@@ -114,16 +114,16 @@ describe('PaperLedgerService.applyFill', () => {
     const { store, svc } = setup();
     const { order } = await svc.place(cashBuy(), OPEN, NOW);
     const blind = new PaperLedgerService(store.tx, store.orderRepo, store.fillRepo, store.ledgerRepo, fakeDefaults(null));
-    expect(await blind.applyFill('user_A', order.id, 0, { qty: 100, price: D('500'), priceAt: AT })).toBeNull();
+    expect(await blind.applyFill('user_A', order.id, order, { qty: 100, price: D('500'), priceAt: AT })).toBeNull();
     expect(store.fills).toEqual([]);
   });
 
   it('a fill that does not fit the order throws and writes nothing', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(optionBuy(), OPEN, NOW);
-    await expect(svc.applyFill('user_A', order.id, 0, { qty: 100, price: D('100'), priceAt: AT })).rejects.toThrow('does not fit');
-    await expect(svc.applyFill('user_A', order.id, 0, { qty: 225, price: D('100'), priceAt: AT })).rejects.toThrow('does not fit');
-    await expect(svc.applyFill('user_A', order.id, 0, { qty: 75, price: D('0'), priceAt: AT })).rejects.toThrow('does not fit');
+    await expect(svc.applyFill('user_A', order.id, order, { qty: 100, price: D('100'), priceAt: AT })).rejects.toThrow('does not fit');
+    await expect(svc.applyFill('user_A', order.id, order, { qty: 225, price: D('100'), priceAt: AT })).rejects.toThrow('does not fit');
+    await expect(svc.applyFill('user_A', order.id, order, { qty: 75, price: D('0'), priceAt: AT })).rejects.toThrow('does not fit');
     expect(store.fills).toEqual([]);
     expect(store.ledger).toHaveLength(2);
     expect(store.orders[0]).toMatchObject({ state: 'OPEN', filledQty: 0 });
@@ -132,11 +132,12 @@ describe('PaperLedgerService.applyFill', () => {
   it('an exit fill larger than the open position throws and writes nothing', async () => {
     const { store, svc } = setup();
     const entry = (await svc.place(cashBuy(), OPEN, NOW)).order;
-    await svc.applyFill('user_A', entry.id, 0, { qty: 100, price: D('500'), priceAt: AT });
+    await svc.applyFill('user_A', entry.id, entry, { qty: 100, price: D('500'), priceAt: AT });
     const exit = (await svc.place(cashBuy({ idempotencyKey: 'x1', purpose: 'EXIT', side: 'SELL', refPrice: 505 }), OPEN, NOW)).order;
     store.orders[1].qty = 200; // a corrupted exit: the service must not trust it
     const rows = store.ledger.length;
-    await expect(svc.applyFill('user_A', exit.id, 0, { qty: 150, price: D('505'), priceAt: AT })).rejects.toThrow('exceeds the open position');
+    // The decision was made on the corrupted row (P17 would otherwise refuse it as stale).
+    await expect(svc.applyFill('user_A', exit.id, { ...exit, qty: 200 }, { qty: 150, price: D('505'), priceAt: AT })).rejects.toThrow('exceeds the open position');
     expect(store.fills).toHaveLength(1);
     expect(store.ledger).toHaveLength(rows);
     expect(store.orders[1]).toMatchObject({ state: 'OPEN', filledQty: 0 });
@@ -163,7 +164,7 @@ describe('PaperLedgerService: opposite entries on one key (ruling P14)', () => {
   it('placement rejects an ENTRY opposing the open position, blocking no margin', async () => {
     const { store, svc } = setup();
     const buy = (await svc.place(cashBuy(), OPEN, NOW)).order;
-    await svc.applyFill('user_A', buy.id, 0, { qty: 100, price: D('500'), priceAt: AT });
+    await svc.applyFill('user_A', buy.id, buy, { qty: 100, price: D('500'), priceAt: AT });
     const rows = store.ledger.length;
     const sell = (await svc.place(cashBuy({ idempotencyKey: 'e2', side: 'SELL' }), OPEN, NOW)).order;
     expect(sell).toMatchObject({ state: 'REJECTED', rejectReason: 'an ENTRY may not reduce the open position; place an EXIT' });
@@ -176,9 +177,9 @@ describe('PaperLedgerService: opposite entries on one key (ruling P14)', () => {
     // An opposite entry that slipped past placement (accepted on another key, then moved onto this one).
     const sell = (await svc.place(cashBuy({ idempotencyKey: 'e2', side: 'SELL', instrument: { exchange: 'NSE', token: '9999', symbol: 'X-EQ', lotSize: 1, underlying: null } }), OPEN, NOW)).order;
     store.orders[1].instrument = { ...store.orders[0].instrument };
-    await svc.applyFill('user_A', buy.id, 0, { qty: 100, price: D('500'), priceAt: AT });
+    await svc.applyFill('user_A', buy.id, buy, { qty: 100, price: D('500'), priceAt: AT });
     const before = { fills: store.fills.length, ledger: store.ledger.length };
-    await expect(svc.applyFill('user_A', sell.id, 0, { qty: 40, price: D('505'), priceAt: AT })).rejects.toThrow('opposes the open position of 100');
+    await expect(svc.applyFill('user_A', sell.id, sell, { qty: 40, price: D('505'), priceAt: AT })).rejects.toThrow('opposes the open position of 100');
     expect({ fills: store.fills.length, ledger: store.ledger.length }).toEqual(before);
     expect(store.orders[1]).toMatchObject({ state: 'OPEN', filledQty: 0 });
     expect(await svc.positions('user_A')).toMatchObject([{ key: 'CASH_INTRADAY:2885', netQty: 100 }]);
@@ -191,44 +192,90 @@ describe('PaperLedgerService: SL_MARKET triggers (ruling P10)', () => {
   it('markTriggered persists triggeredAt for a NONE decision that reached the trigger, once', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(stopBuy(), OPEN, NOW);
-    const out = await svc.markTriggered('user_A', order.id, 0, AT);
+    const out = await svc.markTriggered('user_A', order.id, order, AT);
     expect(out).toMatchObject({ state: 'OPEN', filledQty: 0, triggeredAt: AT });
     expect(store.orders[0].triggeredAt).toEqual(AT);
     expect(store.fills).toEqual([]);
     expect(store.ledger).toHaveLength(2);
     // A stop never un-triggers and its first trigger time is kept.
     const later = new Date(AT.getTime() + 1000);
-    expect(await svc.markTriggered('user_A', order.id, 0, later)).toMatchObject({ triggeredAt: AT });
+    expect(await svc.markTriggered('user_A', order.id, order, later)).toMatchObject({ triggeredAt: AT });
   });
 
   it('markTriggered writes nothing for a non-stop, a closed order, a stale expectation or another user', async () => {
     const { store, svc } = setup();
     const market = (await svc.place(cashBuy(), OPEN, NOW)).order;
-    expect(await svc.markTriggered('user_A', market.id, 0, AT)).toBeNull();
+    expect(await svc.markTriggered('user_A', market.id, market, AT)).toBeNull();
     const stop = (await svc.place(stopBuy(), OPEN, NOW)).order;
-    expect(await svc.markTriggered('user_A', stop.id, 5, AT)).toBeNull();
-    expect(await svc.markTriggered('user_B', stop.id, 0, AT)).toBeNull();
+    expect(await svc.markTriggered('user_A', stop.id, { ...stop, filledQty: 5 }, AT)).toBeNull();
+    expect(await svc.markTriggered('user_B', stop.id, stop, AT)).toBeNull();
     await svc.close('user_A', stop.id, 'CANCEL', 'gone');
-    expect(await svc.markTriggered('user_A', stop.id, 0, AT)).toBeNull();
+    expect(await svc.markTriggered('user_A', stop.id, stop, AT)).toBeNull();
     expect(store.orders.map((o) => o.triggeredAt)).toEqual([null, null]);
   });
 
   it('a triggered FILL decision persists triggeredAt in the same write as the fill', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(stopBuy(), OPEN, NOW);
-    const out = await svc.applyFill('user_A', order.id, 0, { qty: 40, price: D('511'), priceAt: AT, triggered: true });
+    const out = await svc.applyFill('user_A', order.id, order, { qty: 40, price: D('511'), priceAt: AT, triggered: true });
     expect(out).toMatchObject({ state: 'PARTIAL', filledQty: 40, triggeredAt: AT });
     expect(store.fills).toHaveLength(1);
     const later = new Date(AT.getTime() + 1000);
-    expect(await svc.applyFill('user_A', order.id, 40, { qty: 60, price: D('512'), priceAt: later, triggered: true })).toMatchObject({ triggeredAt: AT });
+    expect(await svc.applyFill('user_A', order.id, { ...order, filledQty: 40 }, { qty: 60, price: D('512'), priceAt: later, triggered: true })).toMatchObject({ triggeredAt: AT });
   });
 
   it('a stale triggered fill writes neither the fill nor triggeredAt', async () => {
     const { store, svc } = setup();
     const { order } = await svc.place(stopBuy(), OPEN, NOW);
-    expect(await svc.applyFill('user_A', order.id, 10, { qty: 40, price: D('511'), priceAt: AT, triggered: true })).toBeNull();
+    expect(await svc.applyFill('user_A', order.id, { ...order, filledQty: 10 }, { qty: 40, price: D('511'), priceAt: AT, triggered: true })).toBeNull();
     expect(store.orders[0].triggeredAt).toBeNull();
     expect(store.fills).toEqual([]);
+  });
+});
+
+describe('PaperLedgerService: a decision on an order modified meanwhile (ruling P17)', () => {
+  const stopBuy = () => cashBuy({ idempotencyKey: 'intent_stop_1:entry', type: 'SL_MARKET', triggerPrice: 510, refPrice: 510 });
+  const snapshot = (store: MemoryPaperStore) => ({ fills: store.fills.length, ledger: store.ledger.length, orders: store.orders.map((o) => ({ ...o })) });
+
+  it('applyFill decided on the old limit price returns null and writes nothing', async () => {
+    const { store, svc } = setup();
+    const { order } = await svc.place(optionBuy(), OPEN, NOW); // BUY LIMIT 100
+    await svc.modify('user_A', order.id, { limitPrice: 99 });
+    const before = snapshot(store);
+    expect(await svc.applyFill('user_A', order.id, order, { qty: 150, price: D('100'), priceAt: AT })).toBeNull();
+    expect(snapshot(store)).toEqual(before);
+    expect(store.orders[0]).toMatchObject({ state: 'OPEN', filledQty: 0, limitPrice: 99, avgFillPrice: null });
+  });
+
+  it('applyFill decided on the old trigger price returns null and writes neither the fill nor triggeredAt', async () => {
+    const { store, svc } = setup();
+    const { order } = await svc.place(stopBuy(), OPEN, NOW);
+    await svc.modify('user_A', order.id, { triggerPrice: 520 });
+    const before = snapshot(store);
+    expect(await svc.applyFill('user_A', order.id, order, { qty: 100, price: D('511'), priceAt: AT, triggered: true })).toBeNull();
+    expect(snapshot(store)).toEqual(before);
+    expect(store.orders[0]).toMatchObject({ state: 'OPEN', filledQty: 0, triggerPrice: 520, triggeredAt: null });
+  });
+
+  it('applyFill decided on the old qty returns null and writes nothing (even when the fill would fit the new qty)', async () => {
+    const { store, svc } = setup();
+    const { order } = await svc.place(cashBuy(), OPEN, NOW); // qty 100
+    await svc.modify('user_A', order.id, { qty: 150 });
+    const before = snapshot(store);
+    expect(await svc.applyFill('user_A', order.id, order, { qty: 100, price: D('500'), priceAt: AT })).toBeNull();
+    expect(snapshot(store)).toEqual(before);
+  });
+
+  it('markTriggered decided on the old trigger price returns null and does not set triggeredAt', async () => {
+    const { store, svc } = setup();
+    const { order } = await svc.place(stopBuy(), OPEN, NOW);
+    const moved = await svc.modify('user_A', order.id, { triggerPrice: 520 });
+    const before = snapshot(store);
+    expect(await svc.markTriggered('user_A', order.id, order, AT)).toBeNull();
+    expect(snapshot(store)).toEqual(before);
+    expect(store.orders[0].triggeredAt).toBeNull();
+    // The current expectation still triggers.
+    expect(await svc.markTriggered('user_A', order.id, moved, AT)).toMatchObject({ triggeredAt: AT, triggerPrice: 520 });
   });
 });
 
@@ -260,8 +307,9 @@ describe('PaperLedgerService.modify', () => {
   it('a triggered SL_MARKET, or one with a fill, cannot be modified (409, ruling P11)', async () => {
     const { store, svc } = setup();
     const stop = (await svc.place(cashBuy({ idempotencyKey: 's1', type: 'SL_MARKET', triggerPrice: 510, refPrice: 510 }), OPEN, NOW)).order;
-    expect((await svc.modify('user_A', stop.id, { triggerPrice: 512 })).triggerPrice).toBe(512);
-    await svc.markTriggered('user_A', stop.id, 0, AT);
+    const moved = await svc.modify('user_A', stop.id, { triggerPrice: 512 });
+    expect(moved.triggerPrice).toBe(512);
+    await svc.markTriggered('user_A', stop.id, moved, AT);
     const rows = store.ledger.length;
     await expect(svc.modify('user_A', stop.id, { triggerPrice: 520 })).rejects.toBeInstanceOf(ConflictException);
     await expect(svc.modify('user_A', stop.id, { qty: 50 })).rejects.toBeInstanceOf(ConflictException);
@@ -270,7 +318,7 @@ describe('PaperLedgerService.modify', () => {
 
     // A stop with a fill (triggeredAt not recorded) is also executing.
     const filled = (await svc.place(cashBuy({ idempotencyKey: 's2', type: 'SL_MARKET', triggerPrice: 510, refPrice: 510 }), OPEN, NOW)).order;
-    await svc.applyFill('user_A', filled.id, 0, { qty: 40, price: D('511'), priceAt: AT });
+    await svc.applyFill('user_A', filled.id, filled, { qty: 40, price: D('511'), priceAt: AT });
     expect(store.orders[1]).toMatchObject({ state: 'PARTIAL', triggeredAt: null });
     await expect(svc.modify('user_A', filled.id, { triggerPrice: 520 })).rejects.toBeInstanceOf(ConflictException);
   });
@@ -280,9 +328,9 @@ describe('PaperLedgerService.positions and fillCharges', () => {
   it('one view per non-flat (vehicle, token), with average, realised P&L and the margin it holds', async () => {
     const { svc } = setup();
     const entry = (await svc.place(cashBuy(), OPEN, NOW)).order;
-    await svc.applyFill('user_A', entry.id, 0, { qty: 100, price: D('500.7'), priceAt: AT });
+    await svc.applyFill('user_A', entry.id, entry, { qty: 100, price: D('500.7'), priceAt: AT });
     const exit = (await svc.place(cashBuy({ idempotencyKey: 'x1', purpose: 'EXIT', side: 'SELL', refPrice: 505 }), OPEN, NOW)).order;
-    await svc.applyFill('user_A', exit.id, 0, { qty: 60, price: D('505'), priceAt: AT });
+    await svc.applyFill('user_A', exit.id, exit, { qty: 60, price: D('505'), priceAt: AT });
     expect(await svc.positions('user_A')).toEqual([
       {
         key: 'CASH_INTRADAY:2885',
@@ -296,7 +344,7 @@ describe('PaperLedgerService.positions and fillCharges', () => {
         openedAt: AT,
       },
     ]);
-    await svc.applyFill('user_A', exit.id, 60, { qty: 40, price: D('506'), priceAt: AT });
+    await svc.applyFill('user_A', exit.id, { ...exit, filledQty: 60 }, { qty: 40, price: D('506'), priceAt: AT });
     expect(await svc.positions('user_A')).toEqual([]);
     expect(await svc.positions('user_B')).toEqual([]);
   });

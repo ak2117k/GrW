@@ -94,6 +94,24 @@ export function fillCharges(
   return { ...leg, segment, leg: order.side, pledgeFee, total: leg.total + pledgeFee };
 }
 
+/** The fields of the order copy a fill or trigger decision was made on (ruling P17). */
+export type OrderExpectation = Pick<CoreOrder, 'filledQty' | 'qty' | 'limitPrice' | 'triggerPrice'>;
+
+/**
+ * Ruling P17: the locked row still has every field the decision depended on. A modify
+ * changes qty, limit or trigger without moving filledQty, so filledQty alone misses it.
+ * Prices are numbers or null at this layer (the repository converts Decimals), so ===
+ * compares by value and null only equals null.
+ */
+export function matchesExpectation(row: OrderExpectation, expected: OrderExpectation): boolean {
+  return (
+    row.filledQty === expected.filledQty &&
+    row.qty === expected.qty &&
+    row.limitPrice === expected.limitPrice &&
+    row.triggerPrice === expected.triggerPrice
+  );
+}
+
 export interface FillInput {
   qty: number;
   price: Dec;
@@ -276,8 +294,9 @@ export class PaperLedgerService {
   }
 
   /**
-   * One fill (spec §4.4), guarded by the filledQty the caller decided on: null when the
-   * order moved on (another fill, a cancel), is gone, or the settings are incomplete —
+   * One fill (spec §4.4), guarded by the order copy the caller decided on (filledQty, qty,
+   * limit and trigger, ruling P17): null when the order moved on (another fill, a cancel,
+   * a modify), is gone, or the settings are incomplete —
    * nothing is written then (a settings read that throws propagates). A fill that does not
    * fit the order, or an exit fill beyond the open position, is a programming error and
    * throws; the transaction rolls back. The order update comes first (with triggeredAt
@@ -287,13 +306,13 @@ export class PaperLedgerService {
    * position (with the fillId); for an EXIT the gross realised P&L is booked and the
    * position's margin released in proportion (all of it on the last fill).
    */
-  async applyFill(userId: string, orderId: string, expectFilledQty: number, fill: FillInput, now: Date = new Date()): Promise<CoreOrder | null> {
+  async applyFill(userId: string, orderId: string, expected: OrderExpectation, fill: FillInput, now: Date = new Date()): Promise<CoreOrder | null> {
     const loaded = await this.defaults.settings(now.getTime());
     if (!loaded.ok) return null;
     const settings = loaded.settings;
     return this.tx.run(userId, async (db) => {
       const order = await this.orders.findForUser(userId, orderId, db);
-      if (!order || !isOpenState(order.state) || order.filledQty !== expectFilledQty) return null;
+      if (!order || !isOpenState(order.state) || !matchesExpectation(order, expected)) return null;
       const remaining = order.qty - order.filledQty;
       const lot = order.instrument.lotSize;
       if (fill.qty <= 0 || fill.qty > remaining || !isWholeLots(fill.qty, lot) || !fill.price.isFinite() || fill.price.lte(0)) {
@@ -356,14 +375,14 @@ export class PaperLedgerService {
    * Ruling P10, for a NONE decision that carries `triggered: true`: the price at `at` first
    * reached this SL_MARKET order's trigger but nothing filled. Persists triggeredAt so the
    * stop fills as MARKET on the next fresh price. Null when the order is gone, closed, not
-   * a stop, or moved on from `expectFilledQty`; an already-triggered stop is returned
+   * a stop, or no longer matches `expected` (a fill or a modify since, ruling P17); an already-triggered stop is returned
    * unchanged (a stop never un-triggers and keeps its first trigger time). A FILL decision
    * with `triggered: true` goes through applyFill with `fill.triggered` instead.
    */
-  async markTriggered(userId: string, orderId: string, expectFilledQty: number, at: Date): Promise<CoreOrder | null> {
+  async markTriggered(userId: string, orderId: string, expected: OrderExpectation, at: Date): Promise<CoreOrder | null> {
     return this.tx.run(userId, async (db) => {
       const order = await this.orders.findForUser(userId, orderId, db);
-      if (!order || !isOpenState(order.state) || order.type !== 'SL_MARKET' || order.filledQty !== expectFilledQty) return null;
+      if (!order || !isOpenState(order.state) || order.type !== 'SL_MARKET' || !matchesExpectation(order, expected)) return null;
       if (order.triggeredAt !== null) return order;
       return this.orders.update(userId, orderId, { state: order.state, filledQty: order.filledQty }, { triggeredAt: at }, db);
     });

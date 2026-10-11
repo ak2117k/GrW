@@ -20,12 +20,12 @@
  * pass. Non-deterministic values (the temp dir) are normalised HERE, never in the
  * services.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { Logger } from '@nestjs/common';
-import { RateLimitError } from '@anthropic-ai/sdk';
+import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk';
 import { SentinelAgentService, type OvernightVerdict, type Verdict } from '../services/sentinel-agent.service';
 import { ThesisService } from '../services/thesis.service';
 import {
@@ -74,9 +74,18 @@ export const SCENARIO_NAMES = [
   'overnight',
   'thesis',
   'transport-throws',
+  'transport-throws-plain-error',
+  'transport-throws-api-error',
+  'transport-throws-connection',
+  'overnight-transport-throws',
+  'thesis-transport-throws',
+  'thesis-rate-limited',
 ] as const;
 
-/** The `ClaudeCliTransport` scenarios `runCliGoldenScenarios` produces. */
+/**
+ * The CLI scenarios `runCliGoldenScenarios` produces: the transport alone over a
+ * mocked `spawn`, and (`*-end-to-end`) the real sentinel services driving it.
+ */
 export const CLI_SCENARIO_NAMES = [
   'cli-argv-and-env',
   'cli-envelope-ok',
@@ -85,6 +94,17 @@ export const CLI_SCENARIO_NAMES = [
   'cli-envelope-empty-result',
   'cli-nonzero-exit',
   'cli-timeout',
+  'cli-envelope-unparseable',
+  'cli-envelope-is-error-529',
+  'cli-spawn-error',
+  'cli-output-cap',
+  'cli-judge-end-to-end',
+  'cli-judge-fenced-end-to-end',
+  'cli-judge-refusal-end-to-end',
+  'cli-judge-nonzero-exit-end-to-end',
+  'cli-overnight-end-to-end',
+  'cli-thesis-end-to-end',
+  'cli-thesis-nonzero-exit-end-to-end',
 ] as const;
 
 /**
@@ -432,18 +452,60 @@ interface Scenario {
   run: (client: MessagesTransport) => Promise<unknown>;
 }
 
+/** The real judge, as configured by `env`, over `client`. */
+const runJudge = (client: MessagesTransport, env: Record<string, string>, trigger: WakeTrigger) =>
+  outcome(() => new SentinelAgentService(client, fakeConfig(env)).judge(GOLDEN_PACKET, trigger));
+
+/** The real overnight judge over `client`. */
+const runOvernight = (client: MessagesTransport) =>
+  outcome(() => new SentinelAgentService(client, fakeConfig({})).judgeOvernight(OVERNIGHT_PACKET));
+
+/**
+ * The real `ThesisService.ensureFor` over `client`, with a repository that holds
+ * no thesis yet. `repoCalls` pins the `sentinel_theses` row the service writes —
+ * including the honest-unknown row on a transport failure, whose `reason` is
+ * derived from the error.
+ */
+async function runThesis(client: MessagesTransport): Promise<unknown> {
+  const repoCalls: unknown[] = [];
+  const repo = {
+    find: async (trackerId: string) => {
+      repoCalls.push({ method: 'find', args: [trackerId] });
+      return null;
+    },
+    upsertInferred: async (trackerId: string, draft: ThesisDraft) => {
+      // The row as `sentinel_theses` would hold it.
+      repoCalls.push({ method: 'upsertInferred', args: [trackerId, JSON.parse(JSON.stringify(draft))] });
+      const { userId: _userId, ...rest } = draft;
+      return { ...rest, source: 'INFERRED' };
+    },
+    overrideByUser: async () => {
+      throw new Error('golden: overrideByUser must not be called while inferring');
+    },
+  };
+  const levelsForCalls: unknown[] = [];
+  const chart: ChartContextShim = {
+    levelsFor: async (...args: unknown[]) => {
+      levelsForCalls.push(args);
+      return THESIS_LEVELS;
+    },
+  };
+  const svc = new ThesisService(repo as never, client, chart);
+  const result = await outcome(() => svc.ensureFor(THESIS_ENTRY, THESIS_TICK));
+  return { ...(result as object), repoCalls, levelsForCalls };
+}
+
 function judgeScenario(
   name: ScenarioName,
   env: Record<string, string>,
   trigger: WakeTrigger,
   reply: Recorder['reply'],
 ): Scenario {
-  return {
-    name,
-    reply,
-    run: (client) => outcome(() => new SentinelAgentService(client, fakeConfig(env)).judge(GOLDEN_PACKET, trigger)),
-  };
+  return { name, reply, run: (client) => runJudge(client, env, trigger) };
 }
+
+/** The plain `Error` the CLI transport throws on a failed subprocess — the prod failure shape under `cli`. */
+const plainTransportError = () => new Error('claude CLI: exited with code 1: boom');
 
 const SCENARIOS: Scenario[] = [
   judgeScenario('judge-fire-cues-on', { MARKET_CUES_ENABLED: 'true' }, 'FIRE', () => jsonReply(VALID_VERDICT)),
@@ -460,54 +522,51 @@ const SCENARIOS: Scenario[] = [
   judgeScenario('judge-refusal', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'refusal')),
   judgeScenario('judge-max-tokens', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'max_tokens')),
   judgeScenario('judge-context-exceeded', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'model_context_window_exceeded')),
-  {
-    name: 'overnight',
-    reply: () => jsonReply(VALID_OVERNIGHT),
-    run: (client) => outcome(() => new SentinelAgentService(client, fakeConfig({})).judgeOvernight(OVERNIGHT_PACKET)),
-  },
-  {
-    name: 'thesis',
-    reply: () => jsonReply(GOOD_THESIS),
-    run: async (client) => {
-      const repoCalls: unknown[] = [];
-      const repo = {
-        find: async (trackerId: string) => {
-          repoCalls.push({ method: 'find', args: [trackerId] });
-          return null;
-        },
-        upsertInferred: async (trackerId: string, draft: ThesisDraft) => {
-          // The row as `sentinel_theses` would hold it.
-          repoCalls.push({ method: 'upsertInferred', args: [trackerId, JSON.parse(JSON.stringify(draft))] });
-          const { userId: _userId, ...rest } = draft;
-          return { ...rest, source: 'INFERRED' };
-        },
-        overrideByUser: async () => {
-          throw new Error('golden: overrideByUser must not be called while inferring');
-        },
-      };
-      const levelsForCalls: unknown[] = [];
-      const chart: ChartContextShim = {
-        levelsFor: async (...args: unknown[]) => {
-          levelsForCalls.push(args);
-          return THESIS_LEVELS;
-        },
-      };
-      const svc = new ThesisService(repo as never, client, chart);
-      const result = await outcome(() => svc.ensureFor(THESIS_ENTRY, THESIS_TICK));
-      return { ...(result as object), repoCalls, levelsForCalls };
-    },
-  },
+  { name: 'overnight', reply: () => jsonReply(VALID_OVERNIGHT), run: runOvernight },
+  { name: 'thesis', reply: () => jsonReply(GOOD_THESIS), run: runThesis },
   judgeScenario('transport-throws', {}, 'FIRE', () => {
     // Exactly as services/sentinel-agent.service.spec.ts constructs it.
     throw new RateLimitError(429, undefined, 'quota exhausted', new Headers());
   }),
+  judgeScenario('transport-throws-plain-error', {}, 'FIRE', () => {
+    throw plainTransportError();
+  }),
+  judgeScenario('transport-throws-api-error', {}, 'FIRE', () => {
+    throw new APIError(529, undefined, 'overloaded', new Headers());
+  }),
+  judgeScenario('transport-throws-connection', {}, 'FIRE', () => {
+    // Exactly as services/sentinel-agent.service.spec.ts constructs it.
+    throw new APIConnectionError({ message: 'ECONNRESET' });
+  }),
+  {
+    name: 'overnight-transport-throws',
+    reply: () => {
+      throw plainTransportError();
+    },
+    run: runOvernight,
+  },
+  {
+    name: 'thesis-transport-throws',
+    reply: () => {
+      throw plainTransportError();
+    },
+    run: runThesis,
+  },
+  {
+    name: 'thesis-rate-limited',
+    reply: () => {
+      throw new RateLimitError(429, undefined, 'quota exhausted', new Headers());
+    },
+    run: runThesis,
+  },
 ];
 
 /**
  * Runs every service-level scenario against a client built by `makeClient`, in a
  * fixed order. The factory is the ONLY input: the baseline passes
  * `recordingClient`; the gateway run passes a gateway-backed transport whose fake
- * provider records into, and replies from, the same recorder.
+ * provider records into, and replies from, the same recorder (a throw from
+ * `rec.reply` must reach the sentinel unchanged).
  */
 export async function runGoldenScenarios(
   makeClient: (rec: Recorder) => MessagesTransport,
@@ -522,8 +581,27 @@ export async function runGoldenScenarios(
   return records;
 }
 
+/**
+ * Asserts a candidate client produces EXACTLY the baseline's records.
+ *
+ * Use this — not `toMatchSnapshot` — from any other describe/test: jest snapshot
+ * keys include the test title, so a snapshot call elsewhere would write new keys
+ * instead of comparing. The baseline (`recordingClient`) is itself pinned by the
+ * snapshots in `sentinel-golden.spec.ts`, so equality here is transitive.
+ *
+ * `toEqual` gives a readable diff; the `JSON.stringify` comparison additionally
+ * pins KEY ORDER of every request (pretty-format sorts keys, `toEqual` ignores
+ * order), i.e. the wire bytes.
+ */
+export async function expectSameAsBaseline(makeClient: (rec: Recorder) => MessagesTransport): Promise<void> {
+  const baseline = await runGoldenScenarios((rec) => recordingClient(rec));
+  const candidate = await runGoldenScenarios(makeClient);
+  expect(candidate).toEqual(baseline);
+  expect(JSON.stringify(candidate)).toBe(JSON.stringify(baseline));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// CLI transport scenarios (ClaudeCliTransport with a mocked `spawn`)
+// CLI transport scenarios (ClaudeCliTransport, or a candidate, with a mocked `spawn`)
 // ─────────────────────────────────────────────────────────────────────────────
 
 type FakeChild = EventEmitter & {
@@ -535,11 +613,11 @@ type FakeChild = EventEmitter & {
 
 /**
  * A fake child process, as in adapters/claude-cli.transport.spec.ts: emits the
- * envelope on stdout and closes. `envelope === undefined && hang` never closes.
+ * stdout chunks and closes. `hang` never closes; `spawnError` emits `'error'`.
  */
 function fakeChild(
   envelope: unknown,
-  opts: { code?: number; stderr?: string; hang?: boolean } = {},
+  opts: { code?: number; stderr?: string; hang?: boolean; spawnError?: Error; chunks?: Buffer[] } = {},
 ): FakeChild {
   const child = new EventEmitter() as FakeChild;
   child.stdout = new EventEmitter();
@@ -550,7 +628,12 @@ function fakeChild(
   child.kill = jest.fn();
   if (opts.hang) return child;
   setImmediate(() => {
+    if (opts.spawnError) {
+      child.emit('error', opts.spawnError);
+      return;
+    }
     if (opts.stderr) child.stderr.emit('data', Buffer.from(opts.stderr));
+    for (const chunk of opts.chunks ?? []) child.stdout.emit('data', chunk);
     if (envelope !== undefined) {
       child.stdout.emit('data', Buffer.from(typeof envelope === 'string' ? envelope : JSON.stringify(envelope)));
     }
@@ -573,13 +656,29 @@ const SMALL_REQUEST: TransportRequest = {
 
 const okEnvelope = (text: string) => ({ is_error: false, stop_reason: 'end_turn', result: text });
 
-/** The exact request `judge-fire-cues-on` sends, captured from the real service. */
+/** The production CLI transport — the default for every CLI runner. */
+export const defaultCliTransport = (): MessagesTransport => new ClaudeCliTransport();
+
+/**
+ * The exact request object `judge-fire-cues-on` sends, captured from the real
+ * service. The RAW object is returned (not a copy), so anything downstream that
+ * keys on schema object identity sees the real `VERDICT_SCHEMA`.
+ */
 async function judgeFireCuesOnRequest(): Promise<TransportRequest> {
-  const rec: Recorder = { requests: [], reply: () => jsonReply(VALID_VERDICT) };
+  let raw: TransportRequest | undefined;
+  const client: MessagesTransport = {
+    messages: {
+      create: async (params) => {
+        raw = params;
+        return jsonReply(VALID_VERDICT);
+      },
+    },
+  };
   await withLogCapture(() =>
-    new SentinelAgentService(recordingClient(rec), fakeConfig({ MARKET_CUES_ENABLED: 'true' })).judge(GOLDEN_PACKET, 'FIRE'),
+    new SentinelAgentService(client, fakeConfig({ MARKET_CUES_ENABLED: 'true' })).judge(GOLDEN_PACKET, 'FIRE'),
   );
-  return onlyRequest('judge-fire-cues-on', rec) as TransportRequest;
+  if (!raw) throw new Error('golden: judge-fire-cues-on sent no request');
+  return raw;
 }
 
 const PROMPT_FILE_ARG = /"--system-prompt-file" "((?:[^"\\]|\\.)*)"/;
@@ -589,13 +688,68 @@ function unquote(escaped: string): string {
   return escaped.replace(/\\(["\\])/g, '$1');
 }
 
+/** Every temp dir a CLI scenario's transport wrote a prompt file into. */
+const cliTempDirs = new Set<string>();
+
+/**
+ * Removes every temp dir the CLI scenarios created. Call from `afterAll` — not
+ * per scenario, because a candidate transport may keep one dir across calls.
+ */
+export function cleanupCliTempDirs(): void {
+  for (const dir of cliTempDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Best effort: a leftover temp dir must not fail the suite.
+    }
+  }
+  cliTempDirs.clear();
+}
+
+/** Notes the prompt dir of every spawn so far, for `cleanupCliTempDirs`. */
+function noteTempDirs(spawnMock: jest.Mock): void {
+  for (const [commandLine] of spawnMock.mock.calls as [string][]) {
+    const match = PROMPT_FILE_ARG.exec(commandLine);
+    if (match) cliTempDirs.add(dirname(unquote(match[1])));
+  }
+}
+
+/**
+ * The single spawn, reduced to what is stable: the command line with the prompt
+ * path normalised to `<TMP>/<file>`, the prompt file's path facts and CONTENT,
+ * the spawn options and stdin.
+ */
+function inspectSpawn(spawnMock: jest.Mock, child: FakeChild | undefined) {
+  if (spawnMock.mock.calls.length !== 1) {
+    throw new Error(`golden: expected exactly 1 spawn, got ${spawnMock.mock.calls.length}`);
+  }
+  const [commandLine, options] = spawnMock.mock.calls[0] as [string, Record<string, unknown>];
+  const match = PROMPT_FILE_ARG.exec(commandLine);
+  if (!match) throw new Error('golden: no --system-prompt-file argument in the spawn command line');
+  const promptPath = unquote(match[1]);
+  const promptDir = dirname(promptPath);
+  cliTempDirs.add(promptDir);
+  const normalisedPath = `<TMP>/${basename(promptPath)}`;
+  return {
+    options,
+    commandLine: commandLine.replace(match[0], `"--system-prompt-file" ${quoteArg(normalisedPath)}`),
+    promptFile: {
+      path: normalisedPath,
+      dirIsUnderOsTmpdir: promptDir.startsWith(tmpdir()),
+      dirName: basename(promptDir).replace(/^(sentinel-cli-).+$/, '$1<RANDOM>'),
+      content: readFileSync(promptPath, 'utf8'),
+    },
+    stdin: child ? child.stdin.end.mock.calls : null,
+  };
+}
+
 const deepEqualEnv = (a: Record<string, unknown>, b: Record<string, unknown>): boolean => {
   const ak = Object.keys(a).sort();
   const bk = Object.keys(b).sort();
   return ak.length === bk.length && ak.every((k, i) => k === bk[i] && a[k] === b[k]);
 };
 
-async function cliArgvAndEnv(spawnMock: jest.Mock): Promise<GoldenRecord> {
+async function cliArgvAndEnv(spawnMock: jest.Mock, makeTransport: () => MessagesTransport): Promise<GoldenRecord> {
   const request = await judgeFireCuesOnRequest();
   const prevKey = process.env.ANTHROPIC_API_KEY;
   const prevToken = process.env.ANTHROPIC_AUTH_TOKEN;
@@ -613,48 +767,34 @@ async function cliArgvAndEnv(spawnMock: jest.Mock): Promise<GoldenRecord> {
       return child;
     });
 
-    const transport = new ClaudeCliTransport();
+    const transport = makeTransport();
     const { value: result, logs } = await withLogCapture(() =>
       outcome(() => transport.messages.create(request)),
     );
 
-    if (spawnMock.mock.calls.length !== 1) {
-      throw new Error(`golden: expected exactly 1 spawn, got ${spawnMock.mock.calls.length}`);
-    }
-    const [commandLine, options] = spawnMock.mock.calls[0] as [string, Record<string, unknown>];
-    const env = options.env as Record<string, unknown>;
-
-    const match = PROMPT_FILE_ARG.exec(commandLine);
-    if (!match) throw new Error('golden: no --system-prompt-file argument in the spawn command line');
-    const promptPath = unquote(match[1]);
-    const promptDir = dirname(promptPath);
-    const normalisedPath = `<TMP>/${basename(promptPath)}`;
+    const spawned = inspectSpawn(spawnMock, child);
+    const env = spawned.options.env as Record<string, unknown>;
 
     return {
       scenario: 'cli-argv-and-env',
-      request,
+      request: JSON.parse(JSON.stringify(request)),
       result: {
         outcome: result,
         spawnCalls: spawnMock.mock.calls.length,
-        commandLine: commandLine.replace(match[0], `"--system-prompt-file" ${quoteArg(normalisedPath)}`),
+        commandLine: spawned.commandLine,
         options: {
-          keys: Object.keys(options).sort(),
-          shell: options.shell,
-          windowsHide: options.windowsHide,
+          keys: Object.keys(spawned.options).sort(),
+          shell: spawned.options.shell,
+          windowsHide: spawned.options.windowsHide,
         },
-        promptFile: {
-          path: normalisedPath,
-          dirIsUnderOsTmpdir: promptDir.startsWith(tmpdir()),
-          dirName: basename(promptDir).replace(/^(sentinel-cli-).+$/, '$1<RANDOM>'),
-          content: readFileSync(promptPath, 'utf8'),
-        },
+        promptFile: spawned.promptFile,
         env: {
           isCopyNotProcessEnv: env !== (process.env as unknown),
           anthropicApiKeyAbsent: !('ANTHROPIC_API_KEY' in env),
           anthropicAuthTokenAbsent: !('ANTHROPIC_AUTH_TOKEN' in env),
           everyOtherKeyPassedThroughUnchanged: deepEqualEnv(env, expectedEnv),
         },
-        stdin: child ? child.stdin.end.mock.calls : null,
+        stdin: spawned.stdin,
       },
       logs,
     };
@@ -668,16 +808,18 @@ async function cliArgvAndEnv(spawnMock: jest.Mock): Promise<GoldenRecord> {
 
 async function cliEnvelope(
   spawnMock: jest.Mock,
-  scenario: (typeof CLI_SCENARIO_NAMES)[number],
+  makeTransport: () => MessagesTransport,
+  scenario: CliScenarioName,
   envelope: unknown,
-  opts: { code?: number; stderr?: string } = {},
+  opts: { code?: number; stderr?: string; spawnError?: Error; chunks?: Buffer[] } = {},
 ): Promise<GoldenRecord> {
   spawnMock.mockReset();
   spawnMock.mockImplementation(() => fakeChild(envelope, opts));
-  const transport = new ClaudeCliTransport();
+  const transport = makeTransport();
   const { value: result, logs } = await withLogCapture(() =>
     outcome(() => transport.messages.create(SMALL_REQUEST)),
   );
+  noteTempDirs(spawnMock);
   return {
     scenario,
     request: JSON.parse(JSON.stringify(SMALL_REQUEST)),
@@ -686,14 +828,14 @@ async function cliEnvelope(
   };
 }
 
-async function cliTimeout(spawnMock: jest.Mock): Promise<GoldenRecord> {
+async function cliTimeout(spawnMock: jest.Mock, makeTransport: () => MessagesTransport): Promise<GoldenRecord> {
   spawnMock.mockReset();
   let child: FakeChild | undefined;
   spawnMock.mockImplementation(() => {
     child = fakeChild(undefined, { hang: true });
     return child;
   });
-  const transport = new ClaudeCliTransport();
+  const transport = makeTransport();
   jest.useFakeTimers();
   try {
     const { value: result, logs } = await withLogCapture(async () => {
@@ -717,6 +859,7 @@ async function cliTimeout(spawnMock: jest.Mock): Promise<GoldenRecord> {
         killCalls: child ? child.kill.mock.calls.length : null,
       };
     });
+    noteTempDirs(spawnMock);
     return {
       scenario: 'cli-timeout',
       request: JSON.parse(JSON.stringify(SMALL_REQUEST)),
@@ -729,24 +872,170 @@ async function cliTimeout(spawnMock: jest.Mock): Promise<GoldenRecord> {
 }
 
 /**
- * Runs every CLI scenario against `ClaudeCliTransport`, with `spawnMock` being
- * the `jest.mock('node:child_process')` spawn from the calling spec (a module
- * mock must be declared in the test file to be hoisted reliably).
+ * END TO END: the real sentinel service → the transport from `makeTransport` →
+ * the mocked `spawn`. Pins what the production `SENTINEL_JUDGE=cli` chain spawns
+ * (command line, prompt-file content, stdin) and what the sentinel makes of the
+ * reply (verdict / thesis / error, logs, persisted thesis row).
+ *
+ * `request` is what the SENTINEL handed its client, captured by a pass-through
+ * proxy that forwards the original object untouched (schema identity intact).
  */
-export async function runCliGoldenScenarios(spawnMock: jest.Mock): Promise<GoldenRecord[]> {
+async function cliEndToEnd(
+  spawnMock: jest.Mock,
+  makeTransport: () => MessagesTransport,
+  scenario: CliScenarioName,
+  drive: (client: MessagesTransport) => Promise<unknown>,
+  envelope: unknown,
+  opts: { code?: number; stderr?: string } = {},
+): Promise<GoldenRecord> {
+  spawnMock.mockReset();
+  let child: FakeChild | undefined;
+  spawnMock.mockImplementation(() => {
+    child = fakeChild(envelope, opts);
+    return child;
+  });
+  const transport = makeTransport();
+  const sent: unknown[] = [];
+  const proxy: MessagesTransport = {
+    messages: {
+      create: (params) => {
+        sent.push(JSON.parse(JSON.stringify(params)));
+        return transport.messages.create(params);
+      },
+    },
+  };
+  const { value: result, logs } = await withLogCapture(() => drive(proxy));
+  if (sent.length !== 1) throw new Error(`golden: ${scenario} expected exactly 1 request, got ${sent.length}`);
+  const spawned = inspectSpawn(spawnMock, child);
+  return {
+    scenario,
+    request: sent[0],
+    result: {
+      outcome: result,
+      spawnCalls: spawnMock.mock.calls.length,
+      commandLine: spawned.commandLine,
+      options: { shell: spawned.options.shell, windowsHide: spawned.options.windowsHide },
+      promptFile: spawned.promptFile,
+      stdin: spawned.stdin,
+    },
+    logs,
+  };
+}
+
+type CliScenarioName = (typeof CLI_SCENARIO_NAMES)[number];
+
+/**
+ * Runs every CLI scenario. `spawnMock` is the `jest.mock('node:child_process')`
+ * spawn from the calling spec (a module mock must be declared in the test file
+ * to be hoisted reliably). `makeTransport` is the ONLY other input: the baseline
+ * uses the production `ClaudeCliTransport`; a candidate (e.g. a gateway-backed
+ * transport over the gateway's CLI provider) is passed in its place. It is
+ * called once per scenario.
+ */
+export async function runCliGoldenScenarios(
+  spawnMock: jest.Mock,
+  makeTransport: () => MessagesTransport = defaultCliTransport,
+): Promise<GoldenRecord[]> {
   const verdictText = JSON.stringify(VALID_VERDICT);
+  const cuesOn = { MARKET_CUES_ENABLED: 'true' };
   return [
-    await cliArgvAndEnv(spawnMock),
-    await cliEnvelope(spawnMock, 'cli-envelope-ok', okEnvelope(verdictText)),
-    await cliEnvelope(spawnMock, 'cli-envelope-fenced', okEnvelope('```json\n' + verdictText + '\n```')),
-    await cliEnvelope(spawnMock, 'cli-envelope-is-error-401', {
+    await cliArgvAndEnv(spawnMock, makeTransport),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-envelope-ok', okEnvelope(verdictText)),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-envelope-fenced', okEnvelope('```json\n' + verdictText + '\n```')),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-envelope-is-error-401', {
       is_error: true,
       api_error_status: 401,
       subtype: 'success',
       result: 'Invalid API key · Please run /login',
     }),
-    await cliEnvelope(spawnMock, 'cli-envelope-empty-result', { is_error: false, stop_reason: 'end_turn', result: '   ' }),
-    await cliEnvelope(spawnMock, 'cli-nonzero-exit', undefined, { code: 1, stderr: 'error: unknown option --frobnicate' }),
-    await cliTimeout(spawnMock),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-envelope-empty-result', {
+      is_error: false,
+      stop_reason: 'end_turn',
+      result: '   ',
+    }),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-nonzero-exit', undefined, {
+      code: 1,
+      stderr: 'error: unknown option --frobnicate',
+    }),
+    await cliTimeout(spawnMock, makeTransport),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-envelope-unparseable', 'not json at all'),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-envelope-is-error-529', {
+      is_error: true,
+      api_error_status: 529,
+      subtype: 'success',
+      result: 'Overloaded',
+    }),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-spawn-error', undefined, {
+      spawnError: new Error('spawn claude ENOENT'),
+    }),
+    await cliEnvelope(spawnMock, makeTransport, 'cli-output-cap', undefined, {
+      // One chunk past the 8 MiB capture limit, then one more to trip it.
+      chunks: [Buffer.alloc(8 * 1024 * 1024 + 1, 0x61), Buffer.from('b')],
+    }),
+    await cliEndToEnd(
+      spawnMock,
+      makeTransport,
+      'cli-judge-end-to-end',
+      (client) => runJudge(client, cuesOn, 'FIRE'),
+      okEnvelope(verdictText),
+    ),
+    await cliEndToEnd(
+      spawnMock,
+      makeTransport,
+      'cli-judge-fenced-end-to-end',
+      (client) => runJudge(client, cuesOn, 'FIRE'),
+      okEnvelope('```json\n' + verdictText + '\n```'),
+    ),
+    await cliEndToEnd(
+      spawnMock,
+      makeTransport,
+      'cli-judge-refusal-end-to-end',
+      (client) => runJudge(client, cuesOn, 'FIRE'),
+      { is_error: false, stop_reason: 'refusal', result: verdictText },
+    ),
+    await cliEndToEnd(
+      spawnMock,
+      makeTransport,
+      'cli-judge-nonzero-exit-end-to-end',
+      (client) => runJudge(client, cuesOn, 'FIRE'),
+      undefined,
+      { code: 1, stderr: 'boom' },
+    ),
+    await cliEndToEnd(
+      spawnMock,
+      makeTransport,
+      'cli-overnight-end-to-end',
+      runOvernight,
+      okEnvelope(JSON.stringify(VALID_OVERNIGHT)),
+    ),
+    await cliEndToEnd(
+      spawnMock,
+      makeTransport,
+      'cli-thesis-end-to-end',
+      runThesis,
+      okEnvelope(JSON.stringify(GOOD_THESIS)),
+    ),
+    await cliEndToEnd(
+      spawnMock,
+      makeTransport,
+      'cli-thesis-nonzero-exit-end-to-end',
+      runThesis,
+      undefined,
+      { code: 1, stderr: 'boom' },
+    ),
   ];
+}
+
+/**
+ * Asserts a candidate CLI transport produces EXACTLY the production
+ * `ClaudeCliTransport`'s records — same reasoning as `expectSameAsBaseline`.
+ */
+export async function expectCliSameAsBaseline(
+  spawnMock: jest.Mock,
+  makeTransport: () => MessagesTransport,
+): Promise<void> {
+  const baseline = await runCliGoldenScenarios(spawnMock, defaultCliTransport);
+  const candidate = await runCliGoldenScenarios(spawnMock, makeTransport);
+  expect(candidate).toEqual(baseline);
+  expect(JSON.stringify(candidate)).toBe(JSON.stringify(baseline));
 }

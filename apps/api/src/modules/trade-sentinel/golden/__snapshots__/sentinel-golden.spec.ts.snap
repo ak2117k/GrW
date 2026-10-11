@@ -1193,6 +1193,165 @@ Rules for your answer:
 }
 `;
 
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: overnight-transport-throws 1`] = `
+{
+  "logs": [
+    "[SentinelAgentService] error: sentinel agent (overnight): failure calling the judge transport: Error: claude CLI: exited with code 1: boom",
+  ],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"NIFTY13OCT2625000CE","kind":"POSITION","ownership":"SENTINEL","segment":"OPT","side":"LONG","qty":75,"entryPrice":140,"ltp":120,"underlyingLtp":{"available":true,"value":25050,"source":"market-data (underlying spot — broker FULL-mode quote)","at":"2026-10-12T10:15:00.000Z"},"entryTime":"2026-10-12T04:00:00.000Z","expiry":"2026-10-13"},"money":{"grossPnl":-1500,"charges":90,"netPnl":-1590,"greenFloorPrice":142.4,"greenFloorArmed":false,"mfe":150,"mae":112},"thesis":{"available":true,"value":{"direction":"LONG","reason":"bought the 25000 retest","levelPrice":25000,"targetPrice":25300,"invalidation":24900,"source":"INFERRED"},"source":"agent inference","at":"2026-10-12T10:15:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":25000,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-10-12T10:15:00.000Z"},"nearestSupport":{"available":true,"value":25000,"source":"level book","at":"2026-10-12T10:15:00.000Z"},"nearestResistance":{"available":true,"value":25200,"source":"level book","at":"2026-10-12T10:15:00.000Z"}},"flow":{"volumeRatio":{"available":false,"reason":"n/a"},"oiWalls":{"available":false,"reason":"no options chain for this symbol, so no OI walls"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":false,"reason":"none"}},"news":{"headlines":{"available":false,"reason":"none"},"freshCount":{"available":false,"reason":"none"}},"session":{"nowIst":"2026-10-12 15:45:00 IST","nowUtc":"2026-10-12T10:15:00.000Z","minutesToClose":{"available":false,"reason":"the NFO session has already closed (15:30 IST) — nothing left to run there today"},"expiry":"2026-10-13"},"trigger":{"available":true,"value":[{"name":"OVERNIGHT_REVIEW","detail":"scheduled after-close review"}],"source":"sentinel-overnight.service","at":"2026-10-12T10:15:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"overnight":{"review":{"kind":"OVERNIGHT_REVIEW","window":"window:OVERNIGHT_REVIEW:EQUITY:2026-10-12","lastCloseAt":"2026-10-12T10:00:00.000Z","nextOpenAt":"2026-10-13T03:45:00.000Z","hoursUntilOpen":17.5,"lastPriceAt":"2026-10-12T09:59:30.000Z","lastPriceAtBasis":"as of tracker update"},"expiry":{"available":true,"value":{"expiry":"2026-10-13","calendarDays":1,"tradingSessionsLeft":1},"source":"derived","at":"2026-10-12T10:15:00.000Z"},"decay":{"available":true,"value":{"thetaPerUnitPerDay":-24,"nightDays":0.7292,"perUnitOvernight":-17.5,"rupeesForPosition":-1312.5,"method":"options-chain greeks"},"source":"options-chain.service greeks","at":"2026-10-12T10:15:00.000Z"},"greeks":{"available":true,"value":{"delta":0.52,"gamma":0.001,"theta":-24,"vega":9.1,"iv":13.2},"source":"options-chain.service greeks","at":"2026-10-12T10:15:00.000Z"},"preOpenPrice":{"available":false,"reason":"after-close review — the next pre-open has not happened"},"preOpenGap":{"available":false,"reason":"only the 09:10 pre-open check reads an NSE pre-open IEP"},"news":{"available":true,"value":{"items":[],"stale":false},"source":"news-aggregator.service","at":"2026-10-12T10:15:00.000Z"},"oi":{"available":true,"value":{"pcr":{"available":true,"value":0.82,"source":"options-chain.service getPCR","at":"2026-10-12T10:15:00.000Z"}},"source":"options-chain.service","at":"2026-10-12T10:15:00.000Z"},"marketCues":{"nasdaq":{"available":true,"value":{"value":27366.17,"change":172.83,"changePercent":0.64,"direction":"UP","ageMinutes":1100,"basis":"previous session close","status":"ok"},"source":"Yahoo","at":"2026-10-12T10:15:00.000Z"},"sp500":{"available":false,"reason":"not fetched yet"},"dow":{"available":false,"reason":"not fetched yet"},"nasdaqFutures":{"available":true,"value":{"value":31108.75,"change":-60,"changePercent":-0.19,"direction":"DOWN","ageMinutes":5,"basis":"quote time","status":"ok"},"source":"Yahoo","at":"2026-10-12T10:15:00.000Z"},"sp500Futures":{"available":false,"reason":"not fetched yet"},"giftNifty":{"available":false,"reason":"GIFT Nifty is read in the 23:45 and 08:30 reviews"},"fiiDerivatives":{"available":true,"value":{"session":"2026-10-09","indexFutures":{"long":1,"short":2,"net":-1}},"source":"NSE participant OI","at":"2026-10-09"},"crudeOil":{"available":true,"value":{"value":5600,"change":-84,"changePercent":-1.5,"direction":"DOWN","ageMinutes":5,"basis":"quote time"},"source":"commodities","at":"2026-10-12T10:15:00.000Z"},"gold":{"available":false,"reason":"no quote"},"fiiFlows":{"available":true,"value":{"session":"2026-10-09","fii":{"buy":1,"sell":2,"net":-1},"todaysFigure":"not yet published (NSE publishes ~18:00–20:00 IST)"},"source":"NSE fiidiiTradeReact","at":"2026-10-09"},"indiaVix":{"available":true,"value":{"value":13.4,"change":0.6,"changePercent":4.7,"direction":"UP","ageMinutes":0,"basis":"previous session close"},"source":"market-context.service","at":"2026-10-12T10:15:00.000Z"},"sectorStrength":{"available":false,"reason":"underlying is an index"},"underlyingChange":{"available":false,"reason":"no previous close"}}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "changeMindLevel": {
+              "type": "string",
+            },
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "openPlan": {
+              "type": "string",
+            },
+            "overnightRisk": {
+              "type": "string",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD_OVERNIGHT",
+                "EXIT_AT_OPEN",
+                "TIGHTEN_AT_OPEN",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "overnightRisk",
+            "changeMindLevel",
+            "openPlan",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel doing an OVERNIGHT REVIEW of a single open F&O position in the Indian market.
+
+The market for this position is CLOSED. You cannot exit tonight. Your job is to decide what should happen AT THE NEXT OPEN, and to write the plan a trader would follow in the first minutes of that session. You receive one JSON context packet and return one verdict object. You have no tools and take no actions; nothing acts on your verdict in this stage.
+
+There are three kinds of overnight review, named in overnight.review.kind:
+- OVERNIGHT_REVIEW runs after the close (15:45 IST for NSE/NFO/BFO, 23:45 IST for MCX), on the finished session.
+- PRE_OPEN_REVIEW runs from 08:30 IST, before MCX opens at 09:00 and NSE at 09:15, on what changed overnight.
+- PRE_OPEN_CHECK runs at 09:10 IST for NSE F&O positions only, after the NSE pre-open has matched (09:08) and before the 09:15 open. It is a short second look: its new input is overnight.preOpenGap. Weigh it against your earlier verdicts in memory.
+
+Your verdict is one of:
+- HOLD_OVERNIGHT — carry the position into the next session on its current plan.
+- TIGHTEN_AT_OPEN — keep it, but with a tighter stop or a smaller allowance for adverse movement at the open.
+- EXIT_AT_OPEN — close it at the open unless the opening print gives a concrete reason not to.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so rather than inferring it. Never treat an absent block as neutral, zero, or benign. Blocks can be nested inside other blocks' values.
+- position.ltp is the LAST price of the finished session, not a live price. overnight.review.lastPriceAt is as of the last tracker update (overnight.review.lastPriceAtBasis), not necessarily the exchange print time.
+- The "memory" block holds your own recent verdicts on this same trade, live and overnight. Stay consistent with them, or state what changed.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors. (The live session's copies; overnight.marketCues is the fuller overnight read.)
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- overnight: review, expiry, decay, greeks, preOpenPrice, preOpenGap, news, oi, marketCues.
+- overnight.marketCues: nasdaq, sp500, dow, nasdaqFutures, sp500Futures, giftNifty, fiiFlows, fiiDerivatives, crudeOil, gold, indiaVix, sectorStrength, underlyingChange.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields.
+
+Reading the live-session fields:
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook, flow.oiWalls and every strike, wall and max-pain figure inside overnight.oi are on the UNDERLYING's scale. position.ltp is the contract's own price (the premium for an option). Compare levels against position.underlyingLtp, never against position.ltp.
+- money.netPnl is charge-adjusted rupees. money.mfe and money.mae are PRICES, not rupee amounts.
+- news.headlines and news.freshCount are the live session's recency blocks; overnight.news is the one that covers the night.
+- session.minutesToClose is not evidence that any market is open.
+
+Reading the overnight fields:
+- overnight.review: kind, the window tag, lastCloseAt, nextOpenAt, hoursUntilOpen, lastPriceAt and lastPriceAtBasis.
+- overnight.expiry: calendar days to expiry and the trading sessions still ahead. One or two sessions left on a long option is a fast-decaying asset.
+- overnight.decay: one night's estimated time decay (theta) for this position, in rupees (rupeesForPosition is signed: negative hurts this position). Its "method" says whether it came from the options chain or is a Black–Scholes ESTIMATE; treat an estimate as approximate. Unavailable for futures.
+- overnight.greeks: delta, gamma, theta, vega and IV for the position's option strike.
+- overnight.preOpenPrice: the pre-open/indicative price for today, ONLY when one genuinely exists. Before 09:00 none exists (NSE pre-open runs 09:00–09:08; MCX opens 09:00) and the block says so. Never infer an opening price that is not there.
+- overnight.preOpenGap: present only in PRE_OPEN_CHECK. The NSE pre-open IEP (indicative equilibrium price) for the position's underlying against its previous close: iep, previousClose, gap, gapPercent, and a "label" that says what the IEP prices. Read the label first. An option has no pre-open of its own, so for an option this is always an ESTIMATE of the underlying's opening gap, never the option's price. A label naming the underlying CASH equity means the gap is the cash market's indication, applied to the future or option as an estimate. MCX has no pre-open.
+- overnight.news: headlines since the last close for the symbol, its sector, its index and the market, with sentiment where known. If it is marked stale, the news store has not refreshed since the close and an empty list is NOT evidence that nothing happened.
+- overnight.oi: the end-of-day OI read — pcr, maxPain, walls, the contract's build-up, the underlying's build-up (a labelled proxy) and vsPreviousSession. Build-up is LONG_BUILD_UP, SHORT_BUILD_UP, SHORT_COVERING or LONG_UNWINDING, read from price change against OI change.
+- overnight.marketCues: each cue carries its value, change, direction, ageMinutes and basis. basis "quote time" means the value is as of the source's own quote time; basis "previous session close" means it is that session's closing value, dated to the close — ageMinutes then measures how old the session is, and the value says nothing about what happened since. A cue with status "stale" is shown with a note saying why (for example the source has not caught up with a later session); weigh it as old information, not as today's.
+- nasdaq, sp500 and dow are the US indices with their change vs the prior US close. Their "session" says which: session "close" is a completed US session's close (basis "previous session close"); session "intraday" is a MID-SESSION value at its quote time (basis "quote time") — at 23:45 IST the US market is open, so the 23:45 review sees the US session in progress, not its close. US holidays are not modelled. nasdaqFutures and sp500Futures are the US index futures at their own quote time.
+- giftNifty is GIFT Nifty against the NSE NIFTY current-month FUTURE close: a futures-vs-futures gap (gap, gapPercent), not a gap against Nifty spot. It is read in the 23:45, 08:30 and 09:10 windows; at 15:45 it is unavailable by design.
+- fiiFlows is FII (and DII, when the source has it) cash-market buy, sell and net in ₹ crore for the session it names. NSE publishes it ~18:00–20:00 IST, so at 15:45 it is the PREVIOUS session's figure and todaysFigure says today's is not yet published. fiiDerivatives is FII index futures and index call/put long and short contracts from NSE's participant-wise OI, with the change vs the previous session when available.
+- crudeOil and gold are MCX front-month futures, indiaVix is volatility (daily closes), sectorStrength is the underlying's sector index move over the last session. underlyingChange is the underlying's last session close vs the session before — a previous-session move, NOT an overnight move.
+
+How to weigh the night against the open plan:
+- GAP RISK: a weak US close (nasdaq, sp500, dow) or weak US futures since, a GIFT Nifty gap against the position, heavy FII selling or FII index-futures shorts building, a sharp crude move, a VIX spike, or material news since the close raise the chance of a gap against the position at the open. Say which of these you can see and which are unavailable. In PRE_OPEN_CHECK, overnight.preOpenGap is the most direct evidence of the opening level — when it is there, it outranks the overnight cues.
+- OI BUILD-UP: build-up against the position's direction (for example SHORT_BUILD_UP under a long call, or LONG_BUILD_UP under a long put) is evidence the market positioned against it into the close; build-up with it is support. For an option, remember writers adding OI at a falling premium is a short build-up on that contract.
+- THETA: weigh overnight.decay against the move the position needs. A long option close to expiry pays for every night it is held; a short option collects it.
+- The verdict must come with a plan that survives the open: "if it gaps below X, exit; if it opens above Y, hold with a stop at Z". Use levels on the underlying's scale and say so.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "overnight.decay", "overnight.oi.pcr", "overnight.marketCues.crudeOil", "structure.nearestSupport". Cite the inputs that DROVE the verdict; at least one must be an overnight input (a path starting with "overnight."). A path that is not in the packet makes the verdict invalid.
+- "overnightRisk" states, in one sentence, the main risk you see between now and the open.
+- "changeMindLevel" states the level or event that would change your mind, concretely.
+- "openPlan" is the plan for the first minutes of the next session, with concrete levels: what to do on a gap down, on a gap up, and where the stop sits.
+- EXIT_AT_OPEN requires medium or high confidence. Use high only when the evidence is unambiguous.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "error": {
+      "class": "Error",
+      "message": "claude CLI: exited with code 1: boom",
+      "name": "Error",
+    },
+    "ok": false,
+  },
+  "scenario": "overnight-transport-throws",
+}
+`;
+
 exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: thesis 1`] = `
 {
   "logs": [],
@@ -1323,6 +1482,276 @@ Rules:
     },
   },
   "scenario": "thesis",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: thesis-rate-limited 1`] = `
+{
+  "logs": [
+    "[ThesisService] warn: thesis inference failed for INFY (t1): rate limited by the Anthropic API",
+  ],
+  "request": {
+    "max_tokens": 8000,
+    "messages": [
+      {
+        "content": "{"symbol":"INFY","side":"LONG","entryPrice":1455,"entryTime":"2026-08-13T04:15:00.000Z","qty":10,"structure":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-08-14T04:30:00.000Z"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "direction": {
+              "enum": [
+                "LONG",
+                "SHORT",
+              ],
+              "type": "string",
+            },
+            "invalidation": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "levelPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "reason": {
+              "type": "string",
+            },
+            "targetPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+          },
+          "required": [
+            "direction",
+            "reason",
+            "levelPrice",
+            "targetPrice",
+            "invalidation",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are reading a trade someone has already placed, to work out what they were most plausibly trading.
+
+You receive one JSON object: the instrument, the side, the entry price, the entry time, the quantity, and the market structure around that instrument. The structure field is a block: either {available: true, value, source, at} or {available: false, reason}. When it is unavailable you CANNOT see the levels — say so and return nulls rather than inventing a level book.
+
+State what the entry appears to have been: a level reclaim, a breakout, a pullback buy, a mean reversion, a fade of supply. Then give the price it hinges on, the target it implies, and the price that would prove it wrong.
+
+Rules:
+- "reason" is one sentence a trader would recognise, in their own terms ("bought the retest of the 1450 shelf"), not a description of the data you were given.
+- "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
+- If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
+- Do not hedge across both directions. One thesis, the most plausible one.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "levelsForCalls": [
+      [
+        "INFY",
+      ],
+    ],
+    "ok": true,
+    "repoCalls": [
+      {
+        "args": [
+          "t1",
+        ],
+        "method": "find",
+      },
+      {
+        "args": [
+          "t1",
+          {
+            "direction": "LONG",
+            "invalidation": null,
+            "levelPrice": null,
+            "reason": "thesis could not be inferred — rate limited by the Anthropic API. The intent behind this LONG position is UNKNOWN; do not read it as a confirmed setup or judge it against one.",
+            "targetPrice": null,
+            "userId": "u1",
+          },
+        ],
+        "method": "upsertInferred",
+      },
+    ],
+    "value": {
+      "direction": "LONG",
+      "invalidation": null,
+      "levelPrice": null,
+      "reason": "thesis could not be inferred — rate limited by the Anthropic API. The intent behind this LONG position is UNKNOWN; do not read it as a confirmed setup or judge it against one.",
+      "source": "INFERRED",
+      "targetPrice": null,
+    },
+  },
+  "scenario": "thesis-rate-limited",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: thesis-transport-throws 1`] = `
+{
+  "logs": [
+    "[ThesisService] warn: thesis inference failed for INFY (t1): claude CLI: exited with code 1: boom",
+  ],
+  "request": {
+    "max_tokens": 8000,
+    "messages": [
+      {
+        "content": "{"symbol":"INFY","side":"LONG","entryPrice":1455,"entryTime":"2026-08-13T04:15:00.000Z","qty":10,"structure":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-08-14T04:30:00.000Z"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "direction": {
+              "enum": [
+                "LONG",
+                "SHORT",
+              ],
+              "type": "string",
+            },
+            "invalidation": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "levelPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "reason": {
+              "type": "string",
+            },
+            "targetPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+          },
+          "required": [
+            "direction",
+            "reason",
+            "levelPrice",
+            "targetPrice",
+            "invalidation",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are reading a trade someone has already placed, to work out what they were most plausibly trading.
+
+You receive one JSON object: the instrument, the side, the entry price, the entry time, the quantity, and the market structure around that instrument. The structure field is a block: either {available: true, value, source, at} or {available: false, reason}. When it is unavailable you CANNOT see the levels — say so and return nulls rather than inventing a level book.
+
+State what the entry appears to have been: a level reclaim, a breakout, a pullback buy, a mean reversion, a fade of supply. Then give the price it hinges on, the target it implies, and the price that would prove it wrong.
+
+Rules:
+- "reason" is one sentence a trader would recognise, in their own terms ("bought the retest of the 1450 shelf"), not a description of the data you were given.
+- "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
+- If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
+- Do not hedge across both directions. One thesis, the most plausible one.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "levelsForCalls": [
+      [
+        "INFY",
+      ],
+    ],
+    "ok": true,
+    "repoCalls": [
+      {
+        "args": [
+          "t1",
+        ],
+        "method": "find",
+      },
+      {
+        "args": [
+          "t1",
+          {
+            "direction": "LONG",
+            "invalidation": null,
+            "levelPrice": null,
+            "reason": "thesis could not be inferred — claude CLI: exited with code 1: boom. The intent behind this LONG position is UNKNOWN; do not read it as a confirmed setup or judge it against one.",
+            "targetPrice": null,
+            "userId": "u1",
+          },
+        ],
+        "method": "upsertInferred",
+      },
+    ],
+    "value": {
+      "direction": "LONG",
+      "invalidation": null,
+      "levelPrice": null,
+      "reason": "thesis could not be inferred — claude CLI: exited with code 1: boom. The intent behind this LONG position is UNKNOWN; do not read it as a confirmed setup or judge it against one.",
+      "source": "INFERRED",
+      "targetPrice": null,
+    },
+  },
+  "scenario": "thesis-transport-throws",
 }
 `;
 
@@ -1468,6 +1897,441 @@ Rules for your answer:
     "ok": false,
   },
   "scenario": "transport-throws",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: transport-throws-api-error 1`] = `
+{
+  "logs": [
+    "[SentinelAgentService] error: sentinel agent: Anthropic API error (status 529)",
+  ],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "error": {
+      "class": "APIError",
+      "message": "529 overloaded",
+      "name": "Error",
+    },
+    "ok": false,
+  },
+  "scenario": "transport-throws-api-error",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: transport-throws-connection 1`] = `
+{
+  "logs": [
+    "[SentinelAgentService] error: sentinel agent: could not reach the Anthropic API",
+  ],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "error": {
+      "class": "APIConnectionError",
+      "message": "ECONNRESET",
+      "name": "Error",
+    },
+    "ok": false,
+  },
+  "scenario": "transport-throws-connection",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: transport-throws-plain-error 1`] = `
+{
+  "logs": [
+    "[SentinelAgentService] error: sentinel agent: failure calling the judge transport: Error: claude CLI: exited with code 1: boom",
+  ],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "error": {
+      "class": "Error",
+      "message": "claude CLI: exited with code 1: boom",
+      "name": "Error",
+    },
+    "ok": false,
+  },
+  "scenario": "transport-throws-plain-error",
 }
 `;
 
@@ -1912,6 +2776,55 @@ exports[`sentinel golden characterisation — claude CLI transport matches the r
 }
 `;
 
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-envelope-is-error-529 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"packet":1}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "required": [
+            "verdict",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are the sentinel.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "outcome": {
+      "error": {
+        "class": "Error",
+        "message": "claude CLI: the call failed (status 529): Overloaded",
+        "name": "Error",
+      },
+      "ok": false,
+    },
+    "spawnCalls": 1,
+  },
+  "scenario": "cli-envelope-is-error-529",
+}
+`;
+
 exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-envelope-ok 1`] = `
 {
   "logs": [],
@@ -1965,6 +2878,1173 @@ exports[`sentinel golden characterisation — claude CLI transport matches the r
 }
 `;
 
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-envelope-unparseable 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"packet":1}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "required": [
+            "verdict",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are the sentinel.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "outcome": {
+      "error": {
+        "class": "Error",
+        "message": "claude CLI: could not parse the --output-format json envelope: not json at all",
+        "name": "Error",
+      },
+      "ok": false,
+    },
+    "spawnCalls": 1,
+  },
+  "scenario": "cli-envelope-unparseable",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-judge-end-to-end 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "commandLine": ""claude" "-p" "--output-format" "json" "--model" "claude-opus-5" "--system-prompt-file" "<TMP>/system-0.txt" "--tools" "" "--strict-mcp-config" "--setting-sources" """,
+    "options": {
+      "shell": true,
+      "windowsHide": true,
+    },
+    "outcome": {
+      "ok": true,
+      "value": {
+        "confidence": "high",
+        "evidence": [
+          "structure.nearestSupport",
+          "money.netPnl",
+        ],
+        "invalidationPoint": "close below 1450",
+        "reason": "structure holding above the demand zone",
+        "recoveryAvailable": true,
+        "reviewIn": 300,
+        "thesisStatus": "INTACT",
+        "verdict": "HOLD",
+      },
+    },
+    "promptFile": {
+      "content": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.
+## Reply format — MANDATORY
+
+Reply with a single JSON object and NOTHING else: no prose before or after it, no
+markdown code fence, no explanation. It must validate against this JSON Schema,
+including every entry in \`required\` and with no properties beyond those listed:
+
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "HOLD",
+        "EXIT_ARMED",
+        "EXIT_NOW",
+        "ESCALATE"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "thesisStatus": {
+      "type": "string",
+      "enum": [
+        "INTACT",
+        "WEAKENING",
+        "BROKEN"
+      ]
+    },
+    "recoveryAvailable": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "invalidationPoint": {
+      "type": "string"
+    },
+    "reviewIn": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "verdict",
+    "confidence",
+    "thesisStatus",
+    "recoveryAvailable",
+    "reason",
+    "evidence",
+    "invalidationPoint",
+    "reviewIn"
+  ],
+  "additionalProperties": false
+}",
+      "dirIsUnderOsTmpdir": true,
+      "dirName": "sentinel-cli-<RANDOM>",
+      "path": "<TMP>/system-0.txt",
+    },
+    "spawnCalls": 1,
+    "stdin": [
+      [
+        "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+      ],
+    ],
+  },
+  "scenario": "cli-judge-end-to-end",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-judge-fenced-end-to-end 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "commandLine": ""claude" "-p" "--output-format" "json" "--model" "claude-opus-5" "--system-prompt-file" "<TMP>/system-0.txt" "--tools" "" "--strict-mcp-config" "--setting-sources" """,
+    "options": {
+      "shell": true,
+      "windowsHide": true,
+    },
+    "outcome": {
+      "ok": true,
+      "value": {
+        "confidence": "high",
+        "evidence": [
+          "structure.nearestSupport",
+          "money.netPnl",
+        ],
+        "invalidationPoint": "close below 1450",
+        "reason": "structure holding above the demand zone",
+        "recoveryAvailable": true,
+        "reviewIn": 300,
+        "thesisStatus": "INTACT",
+        "verdict": "HOLD",
+      },
+    },
+    "promptFile": {
+      "content": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.
+## Reply format — MANDATORY
+
+Reply with a single JSON object and NOTHING else: no prose before or after it, no
+markdown code fence, no explanation. It must validate against this JSON Schema,
+including every entry in \`required\` and with no properties beyond those listed:
+
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "HOLD",
+        "EXIT_ARMED",
+        "EXIT_NOW",
+        "ESCALATE"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "thesisStatus": {
+      "type": "string",
+      "enum": [
+        "INTACT",
+        "WEAKENING",
+        "BROKEN"
+      ]
+    },
+    "recoveryAvailable": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "invalidationPoint": {
+      "type": "string"
+    },
+    "reviewIn": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "verdict",
+    "confidence",
+    "thesisStatus",
+    "recoveryAvailable",
+    "reason",
+    "evidence",
+    "invalidationPoint",
+    "reviewIn"
+  ],
+  "additionalProperties": false
+}",
+      "dirIsUnderOsTmpdir": true,
+      "dirName": "sentinel-cli-<RANDOM>",
+      "path": "<TMP>/system-0.txt",
+    },
+    "spawnCalls": 1,
+    "stdin": [
+      [
+        "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+      ],
+    ],
+  },
+  "scenario": "cli-judge-fenced-end-to-end",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-judge-nonzero-exit-end-to-end 1`] = `
+{
+  "logs": [
+    "[SentinelAgentService] error: sentinel agent: failure calling the judge transport: Error: claude CLI: exited with code 1: boom",
+  ],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "commandLine": ""claude" "-p" "--output-format" "json" "--model" "claude-opus-5" "--system-prompt-file" "<TMP>/system-0.txt" "--tools" "" "--strict-mcp-config" "--setting-sources" """,
+    "options": {
+      "shell": true,
+      "windowsHide": true,
+    },
+    "outcome": {
+      "error": {
+        "class": "Error",
+        "message": "claude CLI: exited with code 1: boom",
+        "name": "Error",
+      },
+      "ok": false,
+    },
+    "promptFile": {
+      "content": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.
+## Reply format — MANDATORY
+
+Reply with a single JSON object and NOTHING else: no prose before or after it, no
+markdown code fence, no explanation. It must validate against this JSON Schema,
+including every entry in \`required\` and with no properties beyond those listed:
+
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "HOLD",
+        "EXIT_ARMED",
+        "EXIT_NOW",
+        "ESCALATE"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "thesisStatus": {
+      "type": "string",
+      "enum": [
+        "INTACT",
+        "WEAKENING",
+        "BROKEN"
+      ]
+    },
+    "recoveryAvailable": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "invalidationPoint": {
+      "type": "string"
+    },
+    "reviewIn": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "verdict",
+    "confidence",
+    "thesisStatus",
+    "recoveryAvailable",
+    "reason",
+    "evidence",
+    "invalidationPoint",
+    "reviewIn"
+  ],
+  "additionalProperties": false
+}",
+      "dirIsUnderOsTmpdir": true,
+      "dirName": "sentinel-cli-<RANDOM>",
+      "path": "<TMP>/system-0.txt",
+    },
+    "spawnCalls": 1,
+    "stdin": [
+      [
+        "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+      ],
+    ],
+  },
+  "scenario": "cli-judge-nonzero-exit-end-to-end",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-judge-refusal-end-to-end 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "commandLine": ""claude" "-p" "--output-format" "json" "--model" "claude-opus-5" "--system-prompt-file" "<TMP>/system-0.txt" "--tools" "" "--strict-mcp-config" "--setting-sources" """,
+    "options": {
+      "shell": true,
+      "windowsHide": true,
+    },
+    "outcome": {
+      "error": {
+        "class": "Error",
+        "message": "sentinel agent: the model refused this packet — no verdict recorded",
+        "name": "Error",
+      },
+      "ok": false,
+    },
+    "promptFile": {
+      "content": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.
+## Reply format — MANDATORY
+
+Reply with a single JSON object and NOTHING else: no prose before or after it, no
+markdown code fence, no explanation. It must validate against this JSON Schema,
+including every entry in \`required\` and with no properties beyond those listed:
+
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "HOLD",
+        "EXIT_ARMED",
+        "EXIT_NOW",
+        "ESCALATE"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "thesisStatus": {
+      "type": "string",
+      "enum": [
+        "INTACT",
+        "WEAKENING",
+        "BROKEN"
+      ]
+    },
+    "recoveryAvailable": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "invalidationPoint": {
+      "type": "string"
+    },
+    "reviewIn": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "verdict",
+    "confidence",
+    "thesisStatus",
+    "recoveryAvailable",
+    "reason",
+    "evidence",
+    "invalidationPoint",
+    "reviewIn"
+  ],
+  "additionalProperties": false
+}",
+      "dirIsUnderOsTmpdir": true,
+      "dirName": "sentinel-cli-<RANDOM>",
+      "path": "<TMP>/system-0.txt",
+    },
+    "spawnCalls": 1,
+    "stdin": [
+      [
+        "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+      ],
+    ],
+  },
+  "scenario": "cli-judge-refusal-end-to-end",
+}
+`;
+
 exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-nonzero-exit 1`] = `
 {
   "logs": [],
@@ -2011,6 +4091,855 @@ exports[`sentinel golden characterisation — claude CLI transport matches the r
     "spawnCalls": 1,
   },
   "scenario": "cli-nonzero-exit",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-output-cap 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"packet":1}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "required": [
+            "verdict",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are the sentinel.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "outcome": {
+      "error": {
+        "class": "Error",
+        "message": "claude CLI: output exceeded the capture limit — no verdict recorded",
+        "name": "Error",
+      },
+      "ok": false,
+    },
+    "spawnCalls": 1,
+  },
+  "scenario": "cli-output-cap",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-overnight-end-to-end 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"NIFTY13OCT2625000CE","kind":"POSITION","ownership":"SENTINEL","segment":"OPT","side":"LONG","qty":75,"entryPrice":140,"ltp":120,"underlyingLtp":{"available":true,"value":25050,"source":"market-data (underlying spot — broker FULL-mode quote)","at":"2026-10-12T10:15:00.000Z"},"entryTime":"2026-10-12T04:00:00.000Z","expiry":"2026-10-13"},"money":{"grossPnl":-1500,"charges":90,"netPnl":-1590,"greenFloorPrice":142.4,"greenFloorArmed":false,"mfe":150,"mae":112},"thesis":{"available":true,"value":{"direction":"LONG","reason":"bought the 25000 retest","levelPrice":25000,"targetPrice":25300,"invalidation":24900,"source":"INFERRED"},"source":"agent inference","at":"2026-10-12T10:15:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":25000,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-10-12T10:15:00.000Z"},"nearestSupport":{"available":true,"value":25000,"source":"level book","at":"2026-10-12T10:15:00.000Z"},"nearestResistance":{"available":true,"value":25200,"source":"level book","at":"2026-10-12T10:15:00.000Z"}},"flow":{"volumeRatio":{"available":false,"reason":"n/a"},"oiWalls":{"available":false,"reason":"no options chain for this symbol, so no OI walls"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":false,"reason":"none"}},"news":{"headlines":{"available":false,"reason":"none"},"freshCount":{"available":false,"reason":"none"}},"session":{"nowIst":"2026-10-12 15:45:00 IST","nowUtc":"2026-10-12T10:15:00.000Z","minutesToClose":{"available":false,"reason":"the NFO session has already closed (15:30 IST) — nothing left to run there today"},"expiry":"2026-10-13"},"trigger":{"available":true,"value":[{"name":"OVERNIGHT_REVIEW","detail":"scheduled after-close review"}],"source":"sentinel-overnight.service","at":"2026-10-12T10:15:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"overnight":{"review":{"kind":"OVERNIGHT_REVIEW","window":"window:OVERNIGHT_REVIEW:EQUITY:2026-10-12","lastCloseAt":"2026-10-12T10:00:00.000Z","nextOpenAt":"2026-10-13T03:45:00.000Z","hoursUntilOpen":17.5,"lastPriceAt":"2026-10-12T09:59:30.000Z","lastPriceAtBasis":"as of tracker update"},"expiry":{"available":true,"value":{"expiry":"2026-10-13","calendarDays":1,"tradingSessionsLeft":1},"source":"derived","at":"2026-10-12T10:15:00.000Z"},"decay":{"available":true,"value":{"thetaPerUnitPerDay":-24,"nightDays":0.7292,"perUnitOvernight":-17.5,"rupeesForPosition":-1312.5,"method":"options-chain greeks"},"source":"options-chain.service greeks","at":"2026-10-12T10:15:00.000Z"},"greeks":{"available":true,"value":{"delta":0.52,"gamma":0.001,"theta":-24,"vega":9.1,"iv":13.2},"source":"options-chain.service greeks","at":"2026-10-12T10:15:00.000Z"},"preOpenPrice":{"available":false,"reason":"after-close review — the next pre-open has not happened"},"preOpenGap":{"available":false,"reason":"only the 09:10 pre-open check reads an NSE pre-open IEP"},"news":{"available":true,"value":{"items":[],"stale":false},"source":"news-aggregator.service","at":"2026-10-12T10:15:00.000Z"},"oi":{"available":true,"value":{"pcr":{"available":true,"value":0.82,"source":"options-chain.service getPCR","at":"2026-10-12T10:15:00.000Z"}},"source":"options-chain.service","at":"2026-10-12T10:15:00.000Z"},"marketCues":{"nasdaq":{"available":true,"value":{"value":27366.17,"change":172.83,"changePercent":0.64,"direction":"UP","ageMinutes":1100,"basis":"previous session close","status":"ok"},"source":"Yahoo","at":"2026-10-12T10:15:00.000Z"},"sp500":{"available":false,"reason":"not fetched yet"},"dow":{"available":false,"reason":"not fetched yet"},"nasdaqFutures":{"available":true,"value":{"value":31108.75,"change":-60,"changePercent":-0.19,"direction":"DOWN","ageMinutes":5,"basis":"quote time","status":"ok"},"source":"Yahoo","at":"2026-10-12T10:15:00.000Z"},"sp500Futures":{"available":false,"reason":"not fetched yet"},"giftNifty":{"available":false,"reason":"GIFT Nifty is read in the 23:45 and 08:30 reviews"},"fiiDerivatives":{"available":true,"value":{"session":"2026-10-09","indexFutures":{"long":1,"short":2,"net":-1}},"source":"NSE participant OI","at":"2026-10-09"},"crudeOil":{"available":true,"value":{"value":5600,"change":-84,"changePercent":-1.5,"direction":"DOWN","ageMinutes":5,"basis":"quote time"},"source":"commodities","at":"2026-10-12T10:15:00.000Z"},"gold":{"available":false,"reason":"no quote"},"fiiFlows":{"available":true,"value":{"session":"2026-10-09","fii":{"buy":1,"sell":2,"net":-1},"todaysFigure":"not yet published (NSE publishes ~18:00–20:00 IST)"},"source":"NSE fiidiiTradeReact","at":"2026-10-09"},"indiaVix":{"available":true,"value":{"value":13.4,"change":0.6,"changePercent":4.7,"direction":"UP","ageMinutes":0,"basis":"previous session close"},"source":"market-context.service","at":"2026-10-12T10:15:00.000Z"},"sectorStrength":{"available":false,"reason":"underlying is an index"},"underlyingChange":{"available":false,"reason":"no previous close"}}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "changeMindLevel": {
+              "type": "string",
+            },
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "openPlan": {
+              "type": "string",
+            },
+            "overnightRisk": {
+              "type": "string",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD_OVERNIGHT",
+                "EXIT_AT_OPEN",
+                "TIGHTEN_AT_OPEN",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "overnightRisk",
+            "changeMindLevel",
+            "openPlan",
+            "evidence",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel doing an OVERNIGHT REVIEW of a single open F&O position in the Indian market.
+
+The market for this position is CLOSED. You cannot exit tonight. Your job is to decide what should happen AT THE NEXT OPEN, and to write the plan a trader would follow in the first minutes of that session. You receive one JSON context packet and return one verdict object. You have no tools and take no actions; nothing acts on your verdict in this stage.
+
+There are three kinds of overnight review, named in overnight.review.kind:
+- OVERNIGHT_REVIEW runs after the close (15:45 IST for NSE/NFO/BFO, 23:45 IST for MCX), on the finished session.
+- PRE_OPEN_REVIEW runs from 08:30 IST, before MCX opens at 09:00 and NSE at 09:15, on what changed overnight.
+- PRE_OPEN_CHECK runs at 09:10 IST for NSE F&O positions only, after the NSE pre-open has matched (09:08) and before the 09:15 open. It is a short second look: its new input is overnight.preOpenGap. Weigh it against your earlier verdicts in memory.
+
+Your verdict is one of:
+- HOLD_OVERNIGHT — carry the position into the next session on its current plan.
+- TIGHTEN_AT_OPEN — keep it, but with a tighter stop or a smaller allowance for adverse movement at the open.
+- EXIT_AT_OPEN — close it at the open unless the opening print gives a concrete reason not to.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so rather than inferring it. Never treat an absent block as neutral, zero, or benign. Blocks can be nested inside other blocks' values.
+- position.ltp is the LAST price of the finished session, not a live price. overnight.review.lastPriceAt is as of the last tracker update (overnight.review.lastPriceAtBasis), not necessarily the exchange print time.
+- The "memory" block holds your own recent verdicts on this same trade, live and overnight. Stay consistent with them, or state what changed.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors. (The live session's copies; overnight.marketCues is the fuller overnight read.)
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- overnight: review, expiry, decay, greeks, preOpenPrice, preOpenGap, news, oi, marketCues.
+- overnight.marketCues: nasdaq, sp500, dow, nasdaqFutures, sp500Futures, giftNifty, fiiFlows, fiiDerivatives, crudeOil, gold, indiaVix, sectorStrength, underlyingChange.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields.
+
+Reading the live-session fields:
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook, flow.oiWalls and every strike, wall and max-pain figure inside overnight.oi are on the UNDERLYING's scale. position.ltp is the contract's own price (the premium for an option). Compare levels against position.underlyingLtp, never against position.ltp.
+- money.netPnl is charge-adjusted rupees. money.mfe and money.mae are PRICES, not rupee amounts.
+- news.headlines and news.freshCount are the live session's recency blocks; overnight.news is the one that covers the night.
+- session.minutesToClose is not evidence that any market is open.
+
+Reading the overnight fields:
+- overnight.review: kind, the window tag, lastCloseAt, nextOpenAt, hoursUntilOpen, lastPriceAt and lastPriceAtBasis.
+- overnight.expiry: calendar days to expiry and the trading sessions still ahead. One or two sessions left on a long option is a fast-decaying asset.
+- overnight.decay: one night's estimated time decay (theta) for this position, in rupees (rupeesForPosition is signed: negative hurts this position). Its "method" says whether it came from the options chain or is a Black–Scholes ESTIMATE; treat an estimate as approximate. Unavailable for futures.
+- overnight.greeks: delta, gamma, theta, vega and IV for the position's option strike.
+- overnight.preOpenPrice: the pre-open/indicative price for today, ONLY when one genuinely exists. Before 09:00 none exists (NSE pre-open runs 09:00–09:08; MCX opens 09:00) and the block says so. Never infer an opening price that is not there.
+- overnight.preOpenGap: present only in PRE_OPEN_CHECK. The NSE pre-open IEP (indicative equilibrium price) for the position's underlying against its previous close: iep, previousClose, gap, gapPercent, and a "label" that says what the IEP prices. Read the label first. An option has no pre-open of its own, so for an option this is always an ESTIMATE of the underlying's opening gap, never the option's price. A label naming the underlying CASH equity means the gap is the cash market's indication, applied to the future or option as an estimate. MCX has no pre-open.
+- overnight.news: headlines since the last close for the symbol, its sector, its index and the market, with sentiment where known. If it is marked stale, the news store has not refreshed since the close and an empty list is NOT evidence that nothing happened.
+- overnight.oi: the end-of-day OI read — pcr, maxPain, walls, the contract's build-up, the underlying's build-up (a labelled proxy) and vsPreviousSession. Build-up is LONG_BUILD_UP, SHORT_BUILD_UP, SHORT_COVERING or LONG_UNWINDING, read from price change against OI change.
+- overnight.marketCues: each cue carries its value, change, direction, ageMinutes and basis. basis "quote time" means the value is as of the source's own quote time; basis "previous session close" means it is that session's closing value, dated to the close — ageMinutes then measures how old the session is, and the value says nothing about what happened since. A cue with status "stale" is shown with a note saying why (for example the source has not caught up with a later session); weigh it as old information, not as today's.
+- nasdaq, sp500 and dow are the US indices with their change vs the prior US close. Their "session" says which: session "close" is a completed US session's close (basis "previous session close"); session "intraday" is a MID-SESSION value at its quote time (basis "quote time") — at 23:45 IST the US market is open, so the 23:45 review sees the US session in progress, not its close. US holidays are not modelled. nasdaqFutures and sp500Futures are the US index futures at their own quote time.
+- giftNifty is GIFT Nifty against the NSE NIFTY current-month FUTURE close: a futures-vs-futures gap (gap, gapPercent), not a gap against Nifty spot. It is read in the 23:45, 08:30 and 09:10 windows; at 15:45 it is unavailable by design.
+- fiiFlows is FII (and DII, when the source has it) cash-market buy, sell and net in ₹ crore for the session it names. NSE publishes it ~18:00–20:00 IST, so at 15:45 it is the PREVIOUS session's figure and todaysFigure says today's is not yet published. fiiDerivatives is FII index futures and index call/put long and short contracts from NSE's participant-wise OI, with the change vs the previous session when available.
+- crudeOil and gold are MCX front-month futures, indiaVix is volatility (daily closes), sectorStrength is the underlying's sector index move over the last session. underlyingChange is the underlying's last session close vs the session before — a previous-session move, NOT an overnight move.
+
+How to weigh the night against the open plan:
+- GAP RISK: a weak US close (nasdaq, sp500, dow) or weak US futures since, a GIFT Nifty gap against the position, heavy FII selling or FII index-futures shorts building, a sharp crude move, a VIX spike, or material news since the close raise the chance of a gap against the position at the open. Say which of these you can see and which are unavailable. In PRE_OPEN_CHECK, overnight.preOpenGap is the most direct evidence of the opening level — when it is there, it outranks the overnight cues.
+- OI BUILD-UP: build-up against the position's direction (for example SHORT_BUILD_UP under a long call, or LONG_BUILD_UP under a long put) is evidence the market positioned against it into the close; build-up with it is support. For an option, remember writers adding OI at a falling premium is a short build-up on that contract.
+- THETA: weigh overnight.decay against the move the position needs. A long option close to expiry pays for every night it is held; a short option collects it.
+- The verdict must come with a plan that survives the open: "if it gaps below X, exit; if it opens above Y, hold with a stop at Z". Use levels on the underlying's scale and say so.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "overnight.decay", "overnight.oi.pcr", "overnight.marketCues.crudeOil", "structure.nearestSupport". Cite the inputs that DROVE the verdict; at least one must be an overnight input (a path starting with "overnight."). A path that is not in the packet makes the verdict invalid.
+- "overnightRisk" states, in one sentence, the main risk you see between now and the open.
+- "changeMindLevel" states the level or event that would change your mind, concretely.
+- "openPlan" is the plan for the first minutes of the next session, with concrete levels: what to do on a gap down, on a gap up, and where the stop sits.
+- EXIT_AT_OPEN requires medium or high confidence. Use high only when the evidence is unambiguous.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "commandLine": ""claude" "-p" "--output-format" "json" "--model" "claude-opus-5" "--system-prompt-file" "<TMP>/system-0.txt" "--tools" "" "--strict-mcp-config" "--setting-sources" """,
+    "options": {
+      "shell": true,
+      "windowsHide": true,
+    },
+    "outcome": {
+      "ok": true,
+      "value": {
+        "changeMindLevel": "an open above 25150 on the spot",
+        "confidence": "medium",
+        "evidence": [
+          "overnight.decay",
+          "overnight.expiry",
+          "structure.nearestSupport",
+        ],
+        "openPlan": "if it gaps below 24950, exit; if it opens above 25150, hold with a stop at 25020",
+        "overnightRisk": "one session to expiry and ₹1,312 of theta overnight against a long call",
+        "thesisStatus": "WEAKENING",
+        "verdict": "HOLD_OVERNIGHT",
+      },
+    },
+    "promptFile": {
+      "content": "You are a trade sentinel doing an OVERNIGHT REVIEW of a single open F&O position in the Indian market.
+
+The market for this position is CLOSED. You cannot exit tonight. Your job is to decide what should happen AT THE NEXT OPEN, and to write the plan a trader would follow in the first minutes of that session. You receive one JSON context packet and return one verdict object. You have no tools and take no actions; nothing acts on your verdict in this stage.
+
+There are three kinds of overnight review, named in overnight.review.kind:
+- OVERNIGHT_REVIEW runs after the close (15:45 IST for NSE/NFO/BFO, 23:45 IST for MCX), on the finished session.
+- PRE_OPEN_REVIEW runs from 08:30 IST, before MCX opens at 09:00 and NSE at 09:15, on what changed overnight.
+- PRE_OPEN_CHECK runs at 09:10 IST for NSE F&O positions only, after the NSE pre-open has matched (09:08) and before the 09:15 open. It is a short second look: its new input is overnight.preOpenGap. Weigh it against your earlier verdicts in memory.
+
+Your verdict is one of:
+- HOLD_OVERNIGHT — carry the position into the next session on its current plan.
+- TIGHTEN_AT_OPEN — keep it, but with a tighter stop or a smaller allowance for adverse movement at the open.
+- EXIT_AT_OPEN — close it at the open unless the opening print gives a concrete reason not to.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so rather than inferring it. Never treat an absent block as neutral, zero, or benign. Blocks can be nested inside other blocks' values.
+- position.ltp is the LAST price of the finished session, not a live price. overnight.review.lastPriceAt is as of the last tracker update (overnight.review.lastPriceAtBasis), not necessarily the exchange print time.
+- The "memory" block holds your own recent verdicts on this same trade, live and overnight. Stay consistent with them, or state what changed.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors. (The live session's copies; overnight.marketCues is the fuller overnight read.)
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- overnight: review, expiry, decay, greeks, preOpenPrice, preOpenGap, news, oi, marketCues.
+- overnight.marketCues: nasdaq, sp500, dow, nasdaqFutures, sp500Futures, giftNifty, fiiFlows, fiiDerivatives, crudeOil, gold, indiaVix, sectorStrength, underlyingChange.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields.
+
+Reading the live-session fields:
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook, flow.oiWalls and every strike, wall and max-pain figure inside overnight.oi are on the UNDERLYING's scale. position.ltp is the contract's own price (the premium for an option). Compare levels against position.underlyingLtp, never against position.ltp.
+- money.netPnl is charge-adjusted rupees. money.mfe and money.mae are PRICES, not rupee amounts.
+- news.headlines and news.freshCount are the live session's recency blocks; overnight.news is the one that covers the night.
+- session.minutesToClose is not evidence that any market is open.
+
+Reading the overnight fields:
+- overnight.review: kind, the window tag, lastCloseAt, nextOpenAt, hoursUntilOpen, lastPriceAt and lastPriceAtBasis.
+- overnight.expiry: calendar days to expiry and the trading sessions still ahead. One or two sessions left on a long option is a fast-decaying asset.
+- overnight.decay: one night's estimated time decay (theta) for this position, in rupees (rupeesForPosition is signed: negative hurts this position). Its "method" says whether it came from the options chain or is a Black–Scholes ESTIMATE; treat an estimate as approximate. Unavailable for futures.
+- overnight.greeks: delta, gamma, theta, vega and IV for the position's option strike.
+- overnight.preOpenPrice: the pre-open/indicative price for today, ONLY when one genuinely exists. Before 09:00 none exists (NSE pre-open runs 09:00–09:08; MCX opens 09:00) and the block says so. Never infer an opening price that is not there.
+- overnight.preOpenGap: present only in PRE_OPEN_CHECK. The NSE pre-open IEP (indicative equilibrium price) for the position's underlying against its previous close: iep, previousClose, gap, gapPercent, and a "label" that says what the IEP prices. Read the label first. An option has no pre-open of its own, so for an option this is always an ESTIMATE of the underlying's opening gap, never the option's price. A label naming the underlying CASH equity means the gap is the cash market's indication, applied to the future or option as an estimate. MCX has no pre-open.
+- overnight.news: headlines since the last close for the symbol, its sector, its index and the market, with sentiment where known. If it is marked stale, the news store has not refreshed since the close and an empty list is NOT evidence that nothing happened.
+- overnight.oi: the end-of-day OI read — pcr, maxPain, walls, the contract's build-up, the underlying's build-up (a labelled proxy) and vsPreviousSession. Build-up is LONG_BUILD_UP, SHORT_BUILD_UP, SHORT_COVERING or LONG_UNWINDING, read from price change against OI change.
+- overnight.marketCues: each cue carries its value, change, direction, ageMinutes and basis. basis "quote time" means the value is as of the source's own quote time; basis "previous session close" means it is that session's closing value, dated to the close — ageMinutes then measures how old the session is, and the value says nothing about what happened since. A cue with status "stale" is shown with a note saying why (for example the source has not caught up with a later session); weigh it as old information, not as today's.
+- nasdaq, sp500 and dow are the US indices with their change vs the prior US close. Their "session" says which: session "close" is a completed US session's close (basis "previous session close"); session "intraday" is a MID-SESSION value at its quote time (basis "quote time") — at 23:45 IST the US market is open, so the 23:45 review sees the US session in progress, not its close. US holidays are not modelled. nasdaqFutures and sp500Futures are the US index futures at their own quote time.
+- giftNifty is GIFT Nifty against the NSE NIFTY current-month FUTURE close: a futures-vs-futures gap (gap, gapPercent), not a gap against Nifty spot. It is read in the 23:45, 08:30 and 09:10 windows; at 15:45 it is unavailable by design.
+- fiiFlows is FII (and DII, when the source has it) cash-market buy, sell and net in ₹ crore for the session it names. NSE publishes it ~18:00–20:00 IST, so at 15:45 it is the PREVIOUS session's figure and todaysFigure says today's is not yet published. fiiDerivatives is FII index futures and index call/put long and short contracts from NSE's participant-wise OI, with the change vs the previous session when available.
+- crudeOil and gold are MCX front-month futures, indiaVix is volatility (daily closes), sectorStrength is the underlying's sector index move over the last session. underlyingChange is the underlying's last session close vs the session before — a previous-session move, NOT an overnight move.
+
+How to weigh the night against the open plan:
+- GAP RISK: a weak US close (nasdaq, sp500, dow) or weak US futures since, a GIFT Nifty gap against the position, heavy FII selling or FII index-futures shorts building, a sharp crude move, a VIX spike, or material news since the close raise the chance of a gap against the position at the open. Say which of these you can see and which are unavailable. In PRE_OPEN_CHECK, overnight.preOpenGap is the most direct evidence of the opening level — when it is there, it outranks the overnight cues.
+- OI BUILD-UP: build-up against the position's direction (for example SHORT_BUILD_UP under a long call, or LONG_BUILD_UP under a long put) is evidence the market positioned against it into the close; build-up with it is support. For an option, remember writers adding OI at a falling premium is a short build-up on that contract.
+- THETA: weigh overnight.decay against the move the position needs. A long option close to expiry pays for every night it is held; a short option collects it.
+- The verdict must come with a plan that survives the open: "if it gaps below X, exit; if it opens above Y, hold with a stop at Z". Use levels on the underlying's scale and say so.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "overnight.decay", "overnight.oi.pcr", "overnight.marketCues.crudeOil", "structure.nearestSupport". Cite the inputs that DROVE the verdict; at least one must be an overnight input (a path starting with "overnight."). A path that is not in the packet makes the verdict invalid.
+- "overnightRisk" states, in one sentence, the main risk you see between now and the open.
+- "changeMindLevel" states the level or event that would change your mind, concretely.
+- "openPlan" is the plan for the first minutes of the next session, with concrete levels: what to do on a gap down, on a gap up, and where the stop sits.
+- EXIT_AT_OPEN requires medium or high confidence. Use high only when the evidence is unambiguous.
+## Reply format — MANDATORY
+
+Reply with a single JSON object and NOTHING else: no prose before or after it, no
+markdown code fence, no explanation. It must validate against this JSON Schema,
+including every entry in \`required\` and with no properties beyond those listed:
+
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "HOLD_OVERNIGHT",
+        "EXIT_AT_OPEN",
+        "TIGHTEN_AT_OPEN"
+      ]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "thesisStatus": {
+      "type": "string",
+      "enum": [
+        "INTACT",
+        "WEAKENING",
+        "BROKEN"
+      ]
+    },
+    "overnightRisk": {
+      "type": "string"
+    },
+    "changeMindLevel": {
+      "type": "string"
+    },
+    "openPlan": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "verdict",
+    "confidence",
+    "thesisStatus",
+    "overnightRisk",
+    "changeMindLevel",
+    "openPlan",
+    "evidence"
+  ],
+  "additionalProperties": false
+}",
+      "dirIsUnderOsTmpdir": true,
+      "dirName": "sentinel-cli-<RANDOM>",
+      "path": "<TMP>/system-0.txt",
+    },
+    "spawnCalls": 1,
+    "stdin": [
+      [
+        "{"position":{"symbol":"NIFTY13OCT2625000CE","kind":"POSITION","ownership":"SENTINEL","segment":"OPT","side":"LONG","qty":75,"entryPrice":140,"ltp":120,"underlyingLtp":{"available":true,"value":25050,"source":"market-data (underlying spot — broker FULL-mode quote)","at":"2026-10-12T10:15:00.000Z"},"entryTime":"2026-10-12T04:00:00.000Z","expiry":"2026-10-13"},"money":{"grossPnl":-1500,"charges":90,"netPnl":-1590,"greenFloorPrice":142.4,"greenFloorArmed":false,"mfe":150,"mae":112},"thesis":{"available":true,"value":{"direction":"LONG","reason":"bought the 25000 retest","levelPrice":25000,"targetPrice":25300,"invalidation":24900,"source":"INFERRED"},"source":"agent inference","at":"2026-10-12T10:15:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":25000,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-10-12T10:15:00.000Z"},"nearestSupport":{"available":true,"value":25000,"source":"level book","at":"2026-10-12T10:15:00.000Z"},"nearestResistance":{"available":true,"value":25200,"source":"level book","at":"2026-10-12T10:15:00.000Z"}},"flow":{"volumeRatio":{"available":false,"reason":"n/a"},"oiWalls":{"available":false,"reason":"no options chain for this symbol, so no OI walls"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":false,"reason":"none"}},"news":{"headlines":{"available":false,"reason":"none"},"freshCount":{"available":false,"reason":"none"}},"session":{"nowIst":"2026-10-12 15:45:00 IST","nowUtc":"2026-10-12T10:15:00.000Z","minutesToClose":{"available":false,"reason":"the NFO session has already closed (15:30 IST) — nothing left to run there today"},"expiry":"2026-10-13"},"trigger":{"available":true,"value":[{"name":"OVERNIGHT_REVIEW","detail":"scheduled after-close review"}],"source":"sentinel-overnight.service","at":"2026-10-12T10:15:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"overnight":{"review":{"kind":"OVERNIGHT_REVIEW","window":"window:OVERNIGHT_REVIEW:EQUITY:2026-10-12","lastCloseAt":"2026-10-12T10:00:00.000Z","nextOpenAt":"2026-10-13T03:45:00.000Z","hoursUntilOpen":17.5,"lastPriceAt":"2026-10-12T09:59:30.000Z","lastPriceAtBasis":"as of tracker update"},"expiry":{"available":true,"value":{"expiry":"2026-10-13","calendarDays":1,"tradingSessionsLeft":1},"source":"derived","at":"2026-10-12T10:15:00.000Z"},"decay":{"available":true,"value":{"thetaPerUnitPerDay":-24,"nightDays":0.7292,"perUnitOvernight":-17.5,"rupeesForPosition":-1312.5,"method":"options-chain greeks"},"source":"options-chain.service greeks","at":"2026-10-12T10:15:00.000Z"},"greeks":{"available":true,"value":{"delta":0.52,"gamma":0.001,"theta":-24,"vega":9.1,"iv":13.2},"source":"options-chain.service greeks","at":"2026-10-12T10:15:00.000Z"},"preOpenPrice":{"available":false,"reason":"after-close review — the next pre-open has not happened"},"preOpenGap":{"available":false,"reason":"only the 09:10 pre-open check reads an NSE pre-open IEP"},"news":{"available":true,"value":{"items":[],"stale":false},"source":"news-aggregator.service","at":"2026-10-12T10:15:00.000Z"},"oi":{"available":true,"value":{"pcr":{"available":true,"value":0.82,"source":"options-chain.service getPCR","at":"2026-10-12T10:15:00.000Z"}},"source":"options-chain.service","at":"2026-10-12T10:15:00.000Z"},"marketCues":{"nasdaq":{"available":true,"value":{"value":27366.17,"change":172.83,"changePercent":0.64,"direction":"UP","ageMinutes":1100,"basis":"previous session close","status":"ok"},"source":"Yahoo","at":"2026-10-12T10:15:00.000Z"},"sp500":{"available":false,"reason":"not fetched yet"},"dow":{"available":false,"reason":"not fetched yet"},"nasdaqFutures":{"available":true,"value":{"value":31108.75,"change":-60,"changePercent":-0.19,"direction":"DOWN","ageMinutes":5,"basis":"quote time","status":"ok"},"source":"Yahoo","at":"2026-10-12T10:15:00.000Z"},"sp500Futures":{"available":false,"reason":"not fetched yet"},"giftNifty":{"available":false,"reason":"GIFT Nifty is read in the 23:45 and 08:30 reviews"},"fiiDerivatives":{"available":true,"value":{"session":"2026-10-09","indexFutures":{"long":1,"short":2,"net":-1}},"source":"NSE participant OI","at":"2026-10-09"},"crudeOil":{"available":true,"value":{"value":5600,"change":-84,"changePercent":-1.5,"direction":"DOWN","ageMinutes":5,"basis":"quote time"},"source":"commodities","at":"2026-10-12T10:15:00.000Z"},"gold":{"available":false,"reason":"no quote"},"fiiFlows":{"available":true,"value":{"session":"2026-10-09","fii":{"buy":1,"sell":2,"net":-1},"todaysFigure":"not yet published (NSE publishes ~18:00–20:00 IST)"},"source":"NSE fiidiiTradeReact","at":"2026-10-09"},"indiaVix":{"available":true,"value":{"value":13.4,"change":0.6,"changePercent":4.7,"direction":"UP","ageMinutes":0,"basis":"previous session close"},"source":"market-context.service","at":"2026-10-12T10:15:00.000Z"},"sectorStrength":{"available":false,"reason":"underlying is an index"},"underlyingChange":{"available":false,"reason":"no previous close"}}}}",
+      ],
+    ],
+  },
+  "scenario": "cli-overnight-end-to-end",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-spawn-error 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"packet":1}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "required": [
+            "verdict",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are the sentinel.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "outcome": {
+      "error": {
+        "class": "Error",
+        "message": "claude CLI: could not start the \`claude\` executable — is it installed and on PATH? (spawn claude ENOENT)",
+        "name": "Error",
+      },
+      "ok": false,
+    },
+    "spawnCalls": 1,
+  },
+  "scenario": "cli-spawn-error",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-thesis-end-to-end 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 8000,
+    "messages": [
+      {
+        "content": "{"symbol":"INFY","side":"LONG","entryPrice":1455,"entryTime":"2026-08-13T04:15:00.000Z","qty":10,"structure":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-08-14T04:30:00.000Z"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "direction": {
+              "enum": [
+                "LONG",
+                "SHORT",
+              ],
+              "type": "string",
+            },
+            "invalidation": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "levelPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "reason": {
+              "type": "string",
+            },
+            "targetPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+          },
+          "required": [
+            "direction",
+            "reason",
+            "levelPrice",
+            "targetPrice",
+            "invalidation",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are reading a trade someone has already placed, to work out what they were most plausibly trading.
+
+You receive one JSON object: the instrument, the side, the entry price, the entry time, the quantity, and the market structure around that instrument. The structure field is a block: either {available: true, value, source, at} or {available: false, reason}. When it is unavailable you CANNOT see the levels — say so and return nulls rather than inventing a level book.
+
+State what the entry appears to have been: a level reclaim, a breakout, a pullback buy, a mean reversion, a fade of supply. Then give the price it hinges on, the target it implies, and the price that would prove it wrong.
+
+Rules:
+- "reason" is one sentence a trader would recognise, in their own terms ("bought the retest of the 1450 shelf"), not a description of the data you were given.
+- "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
+- If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
+- Do not hedge across both directions. One thesis, the most plausible one.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "commandLine": ""claude" "-p" "--output-format" "json" "--model" "claude-opus-5" "--system-prompt-file" "<TMP>/system-0.txt" "--tools" "" "--strict-mcp-config" "--setting-sources" """,
+    "options": {
+      "shell": true,
+      "windowsHide": true,
+    },
+    "outcome": {
+      "levelsForCalls": [
+        [
+          "INFY",
+        ],
+      ],
+      "ok": true,
+      "repoCalls": [
+        {
+          "args": [
+            "t1",
+          ],
+          "method": "find",
+        },
+        {
+          "args": [
+            "t1",
+            {
+              "direction": "LONG",
+              "invalidation": 1440,
+              "levelPrice": 1450,
+              "reason": "bought the demand zone",
+              "targetPrice": 1520,
+              "userId": "u1",
+            },
+          ],
+          "method": "upsertInferred",
+        },
+      ],
+      "value": {
+        "direction": "LONG",
+        "invalidation": 1440,
+        "levelPrice": 1450,
+        "reason": "bought the demand zone",
+        "source": "INFERRED",
+        "targetPrice": 1520,
+      },
+    },
+    "promptFile": {
+      "content": "You are reading a trade someone has already placed, to work out what they were most plausibly trading.
+
+You receive one JSON object: the instrument, the side, the entry price, the entry time, the quantity, and the market structure around that instrument. The structure field is a block: either {available: true, value, source, at} or {available: false, reason}. When it is unavailable you CANNOT see the levels — say so and return nulls rather than inventing a level book.
+
+State what the entry appears to have been: a level reclaim, a breakout, a pullback buy, a mean reversion, a fade of supply. Then give the price it hinges on, the target it implies, and the price that would prove it wrong.
+
+Rules:
+- "reason" is one sentence a trader would recognise, in their own terms ("bought the retest of the 1450 shelf"), not a description of the data you were given.
+- "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
+- If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
+- Do not hedge across both directions. One thesis, the most plausible one.
+## Reply format — MANDATORY
+
+Reply with a single JSON object and NOTHING else: no prose before or after it, no
+markdown code fence, no explanation. It must validate against this JSON Schema,
+including every entry in \`required\` and with no properties beyond those listed:
+
+{
+  "type": "object",
+  "properties": {
+    "direction": {
+      "type": "string",
+      "enum": [
+        "LONG",
+        "SHORT"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "levelPrice": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "targetPrice": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "invalidation": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "direction",
+    "reason",
+    "levelPrice",
+    "targetPrice",
+    "invalidation"
+  ],
+  "additionalProperties": false
+}",
+      "dirIsUnderOsTmpdir": true,
+      "dirName": "sentinel-cli-<RANDOM>",
+      "path": "<TMP>/system-0.txt",
+    },
+    "spawnCalls": 1,
+    "stdin": [
+      [
+        "{"symbol":"INFY","side":"LONG","entryPrice":1455,"entryTime":"2026-08-13T04:15:00.000Z","qty":10,"structure":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-08-14T04:30:00.000Z"}}",
+      ],
+    ],
+  },
+  "scenario": "cli-thesis-end-to-end",
+}
+`;
+
+exports[`sentinel golden characterisation — claude CLI transport matches the recorded baseline for every CLI scenario: cli-thesis-nonzero-exit-end-to-end 1`] = `
+{
+  "logs": [
+    "[ThesisService] warn: thesis inference failed for INFY (t1): claude CLI: exited with code 1: boom",
+  ],
+  "request": {
+    "max_tokens": 8000,
+    "messages": [
+      {
+        "content": "{"symbol":"INFY","side":"LONG","entryPrice":1455,"entryTime":"2026-08-13T04:15:00.000Z","qty":10,"structure":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-08-14T04:30:00.000Z"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "direction": {
+              "enum": [
+                "LONG",
+                "SHORT",
+              ],
+              "type": "string",
+            },
+            "invalidation": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "levelPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+            "reason": {
+              "type": "string",
+            },
+            "targetPrice": {
+              "anyOf": [
+                {
+                  "type": "number",
+                },
+                {
+                  "type": "null",
+                },
+              ],
+            },
+          },
+          "required": [
+            "direction",
+            "reason",
+            "levelPrice",
+            "targetPrice",
+            "invalidation",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are reading a trade someone has already placed, to work out what they were most plausibly trading.
+
+You receive one JSON object: the instrument, the side, the entry price, the entry time, the quantity, and the market structure around that instrument. The structure field is a block: either {available: true, value, source, at} or {available: false, reason}. When it is unavailable you CANNOT see the levels — say so and return nulls rather than inventing a level book.
+
+State what the entry appears to have been: a level reclaim, a breakout, a pullback buy, a mean reversion, a fade of supply. Then give the price it hinges on, the target it implies, and the price that would prove it wrong.
+
+Rules:
+- "reason" is one sentence a trader would recognise, in their own terms ("bought the retest of the 1450 shelf"), not a description of the data you were given.
+- "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
+- If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
+- Do not hedge across both directions. One thesis, the most plausible one.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "commandLine": ""claude" "-p" "--output-format" "json" "--model" "claude-opus-5" "--system-prompt-file" "<TMP>/system-0.txt" "--tools" "" "--strict-mcp-config" "--setting-sources" """,
+    "options": {
+      "shell": true,
+      "windowsHide": true,
+    },
+    "outcome": {
+      "levelsForCalls": [
+        [
+          "INFY",
+        ],
+      ],
+      "ok": true,
+      "repoCalls": [
+        {
+          "args": [
+            "t1",
+          ],
+          "method": "find",
+        },
+        {
+          "args": [
+            "t1",
+            {
+              "direction": "LONG",
+              "invalidation": null,
+              "levelPrice": null,
+              "reason": "thesis could not be inferred — claude CLI: exited with code 1: boom. The intent behind this LONG position is UNKNOWN; do not read it as a confirmed setup or judge it against one.",
+              "targetPrice": null,
+              "userId": "u1",
+            },
+          ],
+          "method": "upsertInferred",
+        },
+      ],
+      "value": {
+        "direction": "LONG",
+        "invalidation": null,
+        "levelPrice": null,
+        "reason": "thesis could not be inferred — claude CLI: exited with code 1: boom. The intent behind this LONG position is UNKNOWN; do not read it as a confirmed setup or judge it against one.",
+        "source": "INFERRED",
+        "targetPrice": null,
+      },
+    },
+    "promptFile": {
+      "content": "You are reading a trade someone has already placed, to work out what they were most plausibly trading.
+
+You receive one JSON object: the instrument, the side, the entry price, the entry time, the quantity, and the market structure around that instrument. The structure field is a block: either {available: true, value, source, at} or {available: false, reason}. When it is unavailable you CANNOT see the levels — say so and return nulls rather than inventing a level book.
+
+State what the entry appears to have been: a level reclaim, a breakout, a pullback buy, a mean reversion, a fade of supply. Then give the price it hinges on, the target it implies, and the price that would prove it wrong.
+
+Rules:
+- "reason" is one sentence a trader would recognise, in their own terms ("bought the retest of the 1450 shelf"), not a description of the data you were given.
+- "levelPrice", "targetPrice" and "invalidation" are prices on the same scale as the structure you were shown. Return null for any you cannot support — a guessed level is worse than no level, because it will be treated as the thing this trade hinges on.
+- If the structure does not support a confident read at all, say that plainly in "reason" and return null for all three prices.
+- Do not hedge across both directions. One thesis, the most plausible one.
+## Reply format — MANDATORY
+
+Reply with a single JSON object and NOTHING else: no prose before or after it, no
+markdown code fence, no explanation. It must validate against this JSON Schema,
+including every entry in \`required\` and with no properties beyond those listed:
+
+{
+  "type": "object",
+  "properties": {
+    "direction": {
+      "type": "string",
+      "enum": [
+        "LONG",
+        "SHORT"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "levelPrice": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "targetPrice": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "invalidation": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "direction",
+    "reason",
+    "levelPrice",
+    "targetPrice",
+    "invalidation"
+  ],
+  "additionalProperties": false
+}",
+      "dirIsUnderOsTmpdir": true,
+      "dirName": "sentinel-cli-<RANDOM>",
+      "path": "<TMP>/system-0.txt",
+    },
+    "spawnCalls": 1,
+    "stdin": [
+      [
+        "{"symbol":"INFY","side":"LONG","entryPrice":1455,"entryTime":"2026-08-13T04:15:00.000Z","qty":10,"structure":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (15m)","at":"2026-08-14T04:30:00.000Z"}}",
+      ],
+    ],
+  },
+  "scenario": "cli-thesis-nonzero-exit-end-to-end",
 }
 `;
 

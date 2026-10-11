@@ -59,6 +59,18 @@ export function pendingMargin(rows: readonly LedgerEntry[], orderId: string): De
 
 export const positionKey = (o: Pick<CoreOrder, 'vehicle' | 'instrument'>): string => `${o.vehicle}:${o.instrument.token}`;
 
+/**
+ * Ruling P14: an ENTRY may not oppose another open (NEW/OPEN/PARTIAL) ENTRY on the same
+ * position key (vehicle, token — P14a). `sameKey` are the user's orders on that key. Two
+ * opposite entries filling would net against each other as entries, which the position
+ * arithmetic cannot book. (Opposing an open position is validateOrder's rule.)
+ */
+export function opposingEntryProblem(req: Pick<CoreOrderRequest, 'side' | 'vehicle' | 'instrument'>, sameKey: readonly CoreOrder[]): string | null {
+  const other = sameKey.find((o) => o.purpose === 'ENTRY' && isOpenState(o.state) && o.side !== req.side);
+  if (!other) return null;
+  return `an open ${other.side} entry (${other.id}) on ${positionKey(req)} opposes this ${req.side} entry; cancel it first`;
+}
+
 /** The charges schedule per vehicle (spec §4.4): MTF is delivery plus the pledge fee. */
 export const SEGMENT_BY_VEHICLE: Readonly<Record<Vehicle, Segment>> = {
   CASH_INTRADAY: 'EQ_INTRADAY',
@@ -166,6 +178,7 @@ export class PaperLedgerService {
         else {
           const pos = await this.positionContext(req.userId, req.vehicle, req.instrument.token, rows, db);
           reason = validateOrder(req, { settings, position: { netQty: pos.state.netQty }, pendingExitQty: pos.pendingExitQty });
+          if (!reason && req.purpose === 'ENTRY') reason = opposingEntryProblem(req, pos.orders);
           if (!reason && req.purpose === 'ENTRY') {
             block = marginFor(req.vehicle, marginRefPrice(req).mul(req.qty), settings);
             const free = balances([...rows, ...deposit.map((d) => ({ type: d.type, amount: d.amount }))]).freeCash;
@@ -289,14 +302,17 @@ export class PaperLedgerService {
       // Fill and average prices are Decimal(14,4): round once, here, and use the stored value throughout.
       const price = fill.price.toDecimalPlaces(4, Prisma.Decimal.ROUND_HALF_UP);
       const rows = await this.ledger.listForUser(userId, db);
-      const pos = order.purpose === 'EXIT' ? await this.positionContext(userId, order.vehicle, order.instrument.token, rows, db) : null;
-      if (pos) {
-        const net = pos.state.netQty;
-        const reduces = (net > 0 && order.side === 'SELL') || (net < 0 && order.side === 'BUY');
-        if (!reduces || fill.qty > Math.abs(net)) {
-          throw new Error(`exit fill of ${order.side} ${fill.qty} on order ${orderId} exceeds the open position of ${net}`);
-        }
+      const position = await this.positionContext(userId, order.vehicle, order.instrument.token, rows, db);
+      const net = position.state.netQty;
+      const reduces = (net > 0 && order.side === 'SELL') || (net < 0 && order.side === 'BUY');
+      if (order.purpose === 'ENTRY' && reduces) {
+        // Ruling P14: an entry fill never reduces or flips a position (the key would become unbookable).
+        throw new Error(`entry fill of ${order.side} ${fill.qty} on order ${orderId} opposes the open position of ${net}`);
       }
+      if (order.purpose === 'EXIT' && (!reduces || fill.qty > Math.abs(net))) {
+        throw new Error(`exit fill of ${order.side} ${fill.qty} on order ${orderId} exceeds the open position of ${net}`);
+      }
+      const pos = order.purpose === 'EXIT' ? position : null;
 
       const newFilled = order.filledQty + fill.qty;
       const avg = order.avgFillPrice === null ? price : new Prisma.Decimal(order.avgFillPrice).mul(order.filledQty).plus(price.mul(fill.qty)).div(newFilled);

@@ -25,6 +25,29 @@ export function idempotencyKeyViolation(): Prisma.PrismaClientKnownRequestError 
 }
 
 /**
+ * Ruling P15: the migration's core_cash_ledger_type_check (migration.sql 116-125), so a
+ * row Postgres would refuse is refused here too. A batch is checked whole before any row
+ * is stored, as one INSERT would be.
+ */
+export function checkLedgerRow(r: NewLedgerRow): void {
+  const a = r.amount;
+  const has = (v: string | null | undefined) => v !== undefined && v !== null;
+  const ok: Record<string, boolean> = {
+    DEPOSIT: a.gt(0),
+    MARGIN_BLOCK: a.lt(0) && has(r.orderId),
+    MARGIN_RELEASE: a.gt(0) && has(r.orderId),
+    CHARGES: a.lt(0) && has(r.fillId),
+    REALISED_PNL: has(r.fillId),
+    MTF_INTEREST: a.lte(0) && has(r.token),
+  };
+  if (ok[r.type] !== true) {
+    throw new Error(
+      `memory store: core_cash_ledger_type_check violated by ${r.type} ${a.toFixed(2)} (orderId ${r.orderId ?? 'null'}, fillId ${r.fillId ?? 'null'}, token ${r.token ?? 'null'})`,
+    );
+  }
+}
+
+/**
  * One in-memory database behind the three repositories and the paper transaction, for
  * service tests (ruling P13):
  * - `tx.run` snapshots orders, fills and ledger and restores them if its callback
@@ -35,6 +58,7 @@ export function idempotencyKeyViolation(): Prisma.PrismaClientKnownRequestError 
  *   inside a run without it, or the sentinel used outside a run throws. Reads outside a
  *   run (top-level reads and system scans) take no db.
  * - Every read returns copies, so mutating a returned row never changes the store.
+ * - Ledger appends enforce the migration's per-type sign and link CHECK (ruling P15).
  */
 export class MemoryPaperStore {
   orders: CoreOrder[] = [];
@@ -200,10 +224,12 @@ export class MemoryPaperStore {
     },
     append: async (rows: readonly NewLedgerRow[], db: PaperDb) => {
       this.write('ledger append', db);
+      rows.forEach(checkLedgerRow);
       for (const r of rows) this.ledger.push(this.entry(r));
     },
     appendInterest: async (rows: readonly NewLedgerRow[], db: PaperDb) => {
       this.write('ledger appendInterest', db);
+      rows.forEach(checkLedgerRow);
       let n = 0;
       for (const r of rows) {
         const dup = this.ledger.some((x) => x.userId === r.userId && x.token === (r.token ?? null) && x.interestDate === (r.interestDate ?? null));

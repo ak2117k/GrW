@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { PaperLedgerService } from '../paper-ledger.service';
+import type { NewLedgerRow } from '../repositories/core-cash-ledger.repository';
 import type { PaperDb } from '../repositories/core-order.repository';
 import { fakeDefaults, MemoryPaperStore } from './memory-paper-store';
 import { cashBuy, NOW } from './paper-fixtures';
@@ -73,5 +74,50 @@ describe('MemoryPaperStore (ruling P13)', () => {
     expect(await store.orderRepo.findByKey(order.idempotencyKey)).not.toBeNull();
     expect(await store.orderRepo.listOpenAll()).toHaveLength(1);
     expect(await store.tx.run('user_A', (db) => store.orderRepo.findForUser('user_A', order.id, db))).toMatchObject({ id: order.id });
+  });
+});
+
+describe('MemoryPaperStore ledger CHECKs (ruling P15, migration core_cash_ledger_type_check)', () => {
+  const D = (s: string) => new Prisma.Decimal(s);
+  const row = (type: NewLedgerRow['type'], amount: string, links: Partial<NewLedgerRow> = {}): NewLedgerRow => ({ userId: 'user_A', type, amount: D(amount), note: 'n', ...links });
+
+  it.each<[string, NewLedgerRow]>([
+    ['a zero DEPOSIT', row('DEPOSIT', '0')],
+    ['a positive MARGIN_BLOCK', row('MARGIN_BLOCK', '10', { orderId: 'o' })],
+    ['a zero MARGIN_BLOCK', row('MARGIN_BLOCK', '0', { orderId: 'o' })],
+    ['a MARGIN_BLOCK with no orderId', row('MARGIN_BLOCK', '-10')],
+    ['a zero MARGIN_RELEASE', row('MARGIN_RELEASE', '0.00', { orderId: 'o' })],
+    ['a MARGIN_RELEASE with no orderId', row('MARGIN_RELEASE', '10')],
+    ['a zero CHARGES', row('CHARGES', '0.00', { fillId: 'f' })],
+    ['a CHARGES with no fillId', row('CHARGES', '-1')],
+    ['a REALISED_PNL with no fillId', row('REALISED_PNL', '5')],
+    ['a positive MTF_INTEREST', row('MTF_INTEREST', '1', { token: 't', interestDate: '2026-10-12' })],
+    ['an MTF_INTEREST with no token', row('MTF_INTEREST', '-1', { interestDate: '2026-10-12' })],
+  ])('refuses %s, and stores nothing of the batch', async (_name, bad) => {
+    const { store, order } = await seeded();
+    const before = store.ledger.length;
+    const good = row('MARGIN_RELEASE', '1', { orderId: order.id });
+    await expect(store.tx.run('user_A', (db) => store.ledgerRepo.append([good, bad], db))).rejects.toThrow(/core_cash_ledger_type_check/);
+    expect(store.ledger).toHaveLength(before);
+  });
+
+  it('appendInterest is checked too', async () => {
+    const { store } = await seeded();
+    await expect(store.tx.run('user_A', (db) => store.ledgerRepo.appendInterest([row('MTF_INTEREST', '2', { token: 't', interestDate: '2026-10-12' })], db))).rejects.toThrow(
+      /core_cash_ledger_type_check/,
+    );
+  });
+
+  it('accepts a REALISED_PNL of 0.00 or a negative one with a fillId, and a zero MTF_INTEREST with a token', async () => {
+    const { store } = await seeded();
+    await store.tx.run('user_A', async (db) => {
+      await store.ledgerRepo.append([row('REALISED_PNL', '0.00', { fillId: 'f' }), row('REALISED_PNL', '-12.50', { fillId: 'f' })], db);
+      await store.ledgerRepo.appendInterest([row('MTF_INTEREST', '0.00', { token: 't', interestDate: '2026-10-12' })], db);
+    });
+    expect(store.ledger.slice(-3).map((r) => [r.type, r.amount.toFixed(2)])).toEqual([
+      ['REALISED_PNL', '0.00'],
+      ['REALISED_PNL', '-12.50'],
+      ['MTF_INTEREST', '0.00'],
+    ]);
   });
 });

@@ -143,6 +143,48 @@ describe('PaperLedgerService.applyFill', () => {
   });
 });
 
+describe('PaperLedgerService: opposite entries on one key (ruling P14)', () => {
+  it('placement rejects an ENTRY opposing another open ENTRY on the same (vehicle, token), blocking no margin', async () => {
+    const { store, svc } = setup();
+    const buy = (await svc.place(cashBuy(), OPEN, NOW)).order;
+    const rows = store.ledger.length;
+    const sell = (await svc.place(cashBuy({ idempotencyKey: 'e2', side: 'SELL' }), OPEN, NOW)).order;
+    expect(sell.state).toBe('REJECTED');
+    expect(sell.rejectReason).toBe(`an open BUY entry (${buy.id}) on CASH_INTRADAY:2885 opposes this SELL entry; cancel it first`);
+    expect(store.ledger).toHaveLength(rows);
+    // Same side is fine; another key (P14a: vehicle + token) is not affected; a closed entry no longer opposes.
+    expect((await svc.place(cashBuy({ idempotencyKey: 'e3' }), OPEN, NOW)).order.state).toBe('OPEN');
+    expect((await svc.place(cashBuy({ idempotencyKey: 'e4', side: 'SELL', instrument: { exchange: 'NSE', token: '1594', symbol: 'INFY-EQ', lotSize: 1, underlying: null } }), OPEN, NOW)).order.state).toBe('OPEN');
+    await svc.close('user_A', buy.id, 'CANCEL', 'x');
+    await svc.close('user_A', store.orders[2].id, 'CANCEL', 'x');
+    expect((await svc.place(cashBuy({ idempotencyKey: 'e5', side: 'SELL' }), OPEN, NOW)).order.state).toBe('OPEN');
+  });
+
+  it('placement rejects an ENTRY opposing the open position, blocking no margin', async () => {
+    const { store, svc } = setup();
+    const buy = (await svc.place(cashBuy(), OPEN, NOW)).order;
+    await svc.applyFill('user_A', buy.id, 0, { qty: 100, price: D('500'), priceAt: AT });
+    const rows = store.ledger.length;
+    const sell = (await svc.place(cashBuy({ idempotencyKey: 'e2', side: 'SELL' }), OPEN, NOW)).order;
+    expect(sell).toMatchObject({ state: 'REJECTED', rejectReason: 'an ENTRY may not reduce the open position; place an EXIT' });
+    expect(store.ledger).toHaveLength(rows);
+  });
+
+  it('an ENTRY fill that would reduce the position throws, writes nothing, and positions() still works', async () => {
+    const { store, svc } = setup();
+    const buy = (await svc.place(cashBuy(), OPEN, NOW)).order;
+    // An opposite entry that slipped past placement (accepted on another key, then moved onto this one).
+    const sell = (await svc.place(cashBuy({ idempotencyKey: 'e2', side: 'SELL', instrument: { exchange: 'NSE', token: '9999', symbol: 'X-EQ', lotSize: 1, underlying: null } }), OPEN, NOW)).order;
+    store.orders[1].instrument = { ...store.orders[0].instrument };
+    await svc.applyFill('user_A', buy.id, 0, { qty: 100, price: D('500'), priceAt: AT });
+    const before = { fills: store.fills.length, ledger: store.ledger.length };
+    await expect(svc.applyFill('user_A', sell.id, 0, { qty: 40, price: D('505'), priceAt: AT })).rejects.toThrow('opposes the open position of 100');
+    expect({ fills: store.fills.length, ledger: store.ledger.length }).toEqual(before);
+    expect(store.orders[1]).toMatchObject({ state: 'OPEN', filledQty: 0 });
+    expect(await svc.positions('user_A')).toMatchObject([{ key: 'CASH_INTRADAY:2885', netQty: 100 }]);
+  });
+});
+
 describe('PaperLedgerService: SL_MARKET triggers (ruling P10)', () => {
   const stopBuy = () => cashBuy({ idempotencyKey: 'intent_stop_1:entry', type: 'SL_MARKET', triggerPrice: 510, refPrice: 510 });
 

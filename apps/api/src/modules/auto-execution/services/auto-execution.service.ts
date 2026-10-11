@@ -24,6 +24,7 @@ import type { PublicSignal, Segment } from '../../signal-fanout';
 import { AutoTradeRiskSizingService } from './auto-trade-risk-sizing.service';
 import { ExecutionClaimService } from './execution-claim.service';
 import { PerUserBrokerSessionFactory } from './per-user-broker-session.factory';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 /**
  * The per-user auto-execution pipeline (TDA-011 §4). It is the sole
@@ -69,6 +70,10 @@ export class AutoExecutionService implements AutoExecutionPort {
 
   async execute(job: ExecuteUserJob): Promise<void> {
     const { userId, signal, idempotencyKey } = job;
+    // SP2 M2 (owner answer 2): this user's core kill switch blocks new auto entries (fails closed).
+    if (!(await coreEntryAllowed('auto-execution', { userId, ref: signal.symbol }))) {
+      return this.rejectTerminal(userId, signal, idempotencyKey, 'USER_KILL_SWITCH');
+    }
     const segment = signal.segment;
 
     // ---- 1. Subscription gate (authoritative re-check; §4.1) ----

@@ -9,6 +9,7 @@ import { UngatedTradeExecutionService } from './ungated-trade-execution.service'
 import { UngatedWatchGateway } from '../gateways/ungated-watch.gateway';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { isHullScanner } from './ungated-scanner-filter';
+import { assertCoreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 // Note: NO MarketFeedService dependency — the ungated track uses
 // `UngatedTickPoller` (REST every 30s) to sidestep the broker's
 // ~50-token WebSocket cap. See specs/2026-05-20-ungated-shadow-track-design.md.
@@ -98,6 +99,8 @@ export class UngatedWatchService {
   ) {}
 
   async createFromAlert(input: UngatedCreateFromAlertInput) {
+    // SP2 M2 (owner answer 2): no new entry while the owner's core kill switch is on (fails closed).
+    await assertCoreEntryAllowed('ungated-track', { ref: input.symbol });
     // 0a. Hull-only scanner gate — the ungated track's profit is concentrated in
     //    the `Anand 100Hull >200 hull` scanner; admit ONLY Hull-scanner signals.
     //    Toggle off with UNGATED_HULL_ONLY=false (read at call time so tests can

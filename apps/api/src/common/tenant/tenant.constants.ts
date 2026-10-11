@@ -26,6 +26,10 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   // SP2 M1: per-user strategy selections. The catalogue (CoreStrategy,
   // CoreStrategyVersion) is global and deliberately absent.
   'CoreStrategySelection',
+  // SP2 M2: per-user risk limits and kill switch. CoreRiskLimitDefault is global
+  // seed data and deliberately absent.
+  'CoreRiskLimit',
+  'CoreKillSwitch',
 ]);
 
 /**

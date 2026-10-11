@@ -3,6 +3,7 @@ import { BreakoutSwingRepository } from '../repositories/breakout-swing.reposito
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { detectSwingPivots } from '../../signal-generator/services/swing-pivots';
 import { NEAR_RES_PCT, LIMIT_PCT } from '../constants';
+import { assertCoreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 /**
  * Thrown by createFromAlert whenever the breakout setup is not admitted (no live
@@ -90,6 +91,8 @@ export class BreakoutSwingService {
    * BreakoutSwingRejectError on any reject.
    */
   async createFromAlert(input: BreakoutSwingCreateFromAlertInput): Promise<{ id: string }> {
+    // SP2 M2 (owner answer 2): no new resting order while the owner's core kill switch is on (fails closed).
+    await assertCoreEntryAllowed('breakout-swing-track', { ref: input.symbol });
     const { symbol } = input;
     if (!input.token) throw new BreakoutSwingRejectError(symbol, 'no instrument token');
     const token = input.token;

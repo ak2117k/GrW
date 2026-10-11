@@ -1520,6 +1520,8 @@ model User {
   tradeTrackers      TradeTracker[]
   stockMonitors      StockMonitor[]
   coreStrategySelections CoreStrategySelection[]
+  coreRiskLimits         CoreRiskLimit[]
+  coreKillSwitches       CoreKillSwitch[]
   @@index([status])
   @@map("users")
 }
@@ -2169,4 +2171,58 @@ model CoreStrategySelection {
   @@unique([userId, strategyId])
   @@index([strategyVersionId])
   @@map("core_strategy_selections")
+}
+
+// ─── SP2 M2: Risk Wall limits and the persistent kill switch ────────────────
+// docs/superpowers/specs/2026-10-09-sp2-core-trade-lifecycle-design.md §5.2, §5.4.
+// Both per-user tables are append-only (a trigger in the 20261010120000 migration
+// refuses UPDATE); the row in force is the newest row whose effectiveFrom ≤ now.
+// CHECK constraints pin the (key, scope) vocabulary and value shapes.
+
+/// One limit change for one user: tighter = effective now, looser = next session open.
+model CoreRiskLimit {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key           String
+  scope         String // ALL | CASH_INTRADAY | MTF | OPTIONS_BUY
+  numValue      Decimal? @db.Decimal(14, 2) // rupees, counts, leverage
+  textValue     String? // HH:MM IST, or the daily-loss action
+  effectiveFrom DateTime
+  source        String // USER | USER_SETTINGS | DEFAULT
+  setBy         String // the actor's userId, or SEED
+  reason        String
+  createdAt     DateTime @default(now())
+
+  @@index([userId, key, scope, createdAt])
+  @@map("core_risk_limits")
+}
+
+/// Seed values for limits with no UserSettings equivalent (data, owner-reviewed; D4).
+model CoreRiskLimitDefault {
+  key       String
+  scope     String
+  numValue  Decimal? @db.Decimal(14, 2)
+  textValue String?
+  note      String
+  updatedBy String? // the admin who last edited it (null = migration seed)
+  updatedAt DateTime @default(now())
+
+  @@id([key, scope])
+  @@map("core_risk_limit_defaults")
+}
+
+/// One kill switch change for one user: on = effective now, off = next session open.
+model CoreKillSwitch {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  active        Boolean
+  effectiveFrom DateTime
+  setBy         String
+  reason        String
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@map("core_kill_switch")
 }

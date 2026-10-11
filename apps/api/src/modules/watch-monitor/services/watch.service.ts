@@ -13,6 +13,7 @@ import { formatTradeRejection } from '../../../common/utils/trade-rejection-log'
 import { isWithinEntryWindow } from '../../../common/utils/market-hours';
 import { evaluateTradePolicy } from './trade-policy';
 import { evaluateLossReentry } from './loss-reentry';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 export const WATCH_CAP = 50;
 
@@ -421,6 +422,9 @@ export class WatchService {
     entryId: string,
     options: { mode?: 'paper' | 'live'; quantityOverride?: number; force?: boolean } = {},
   ): Promise<any> {
+    // SP2 M2 (owner answer 2): no new position while the owner's core kill switch is on.
+    // Fails closed. Exits, stops and square-offs never pass through here.
+    if (!(await coreEntryAllowed('watch-monitor', { ref: entryId }))) return null;
     const mode = options.mode ?? 'paper';
     const entry = await this.repo.findById(entryId);
     if (!entry) throw new Error(`WatchEntry ${entryId} not found`);

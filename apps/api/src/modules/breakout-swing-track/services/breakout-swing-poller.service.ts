@@ -5,6 +5,7 @@ import { ExitPriceService, type ExitPrice } from '../../signal-generator/service
 import {
   NOTIONAL, TARGET_PCT, INIT_STOP_PCT, TRAIL_TRIGGER_PCT, TRAIL_GIVEBACK_PCT, BIG_MOVER_GAIN_PCT,
 } from '../constants';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 interface TradedEntry {
   id: string;
@@ -123,6 +124,8 @@ export class BreakoutSwingPollerService {
       // Price and Dist-to-Fill columns populate (previously null → "—").
       await this.repo.recordTick(entry.id, { currentPrice: ltp, lastTickAt: now });
       if (ltp >= entry.limitPrice) {
+        // SP2 M2 (owner answer 2): a resting order does not fill while the owner's core kill switch is on.
+        if (!(await coreEntryAllowed('breakout-swing-track', { ref: entry.symbol }))) continue;
         const quantity = ltp > 0 ? Math.floor(NOTIONAL / ltp) : 0;
         const stopPrice = ltp * (1 - INIT_STOP_PCT / 100);
         await this.repo.fill(entry.id, { entryPrice: ltp, enteredAt: now, quantity, stopPrice });

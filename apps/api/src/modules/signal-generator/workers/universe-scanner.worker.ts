@@ -19,6 +19,7 @@ import {
   SignalOutput,
 } from '../../../common/interfaces/trading-strategy.interface';
 import { OrderSideDto, OrderTypeDto, PositionTypeDto } from '../../trade-engine/dto/trade.dto';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 /**
  * Watches NIFTY and BANKNIFTY 15m bar closes, runs the combined Sniper+V25
@@ -395,6 +396,10 @@ export class UniverseScannerWorker implements OnModuleInit {
       return { signal, tradeId: null, reason: 'instrument upsert failed', diagnostic };
     }
 
+    // SP2 M2 (owner answer 2): no new position while the owner's core kill switch is on (fails closed).
+    if (!(await coreEntryAllowed('universe-scanner', { ref: syntheticSymbol }))) {
+      return { signal, tradeId: null, reason: 'core kill switch on', diagnostic };
+    }
     try {
       const result = await this.tradeExecutionService.executeTrade({
         symbol: syntheticSymbol,

@@ -28,6 +28,7 @@ import {
   PieChart,
   Target,
   Layers,
+  ShieldAlert,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -61,6 +62,7 @@ export const navItems: NavItem[] = [
   { path: '/strategy-builder', label: 'Strategy Builder', icon: Code2 },
   { path: '/strategy-review', label: 'Strategy Review', icon: ClipboardList },
   { path: '/core-strategies', label: 'Core Strategies', icon: Layers, badge: 'SP2' },
+  { path: '/core-risk', label: 'Core Risk', icon: ShieldAlert, badge: 'SP2' },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 

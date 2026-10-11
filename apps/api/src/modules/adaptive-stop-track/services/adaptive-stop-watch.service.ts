@@ -16,6 +16,7 @@ import {
   GATE_REQUIRE_15M_MACD, GATE_FETCH_ATTEMPTS, GATE_RETRY_MS, GATE_MIN_CANDLES,
 } from '../constants';
 import { atr } from '../../signal-generator/strategies/indicators';
+import { assertCoreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 // Note: NO MarketFeedService dependency — the adaptive-stop track uses
 // a REST poller (mirrors the ungated track) to sidestep the broker's
 // ~50-token WebSocket cap.
@@ -164,6 +165,8 @@ export class AdaptiveStopWatchService {
   }
 
   async createFromAlert(input: AdaptiveStopCreateFromAlertInput) {
+    // SP2 M2 (owner answer 2): no new entry while the owner's core kill switch is on (fails closed).
+    await assertCoreEntryAllowed('adaptive-stop-track', { ref: input.symbol });
     // 0. BUY-only gate — adaptive-stop track trades equities long only.
     if (input.side !== 'BUY') throw new AdaptiveStopSellDirectionError(input.symbol);
 

@@ -9,7 +9,9 @@ import {
   HttpCode,
   HttpStatus,
   Logger,
+  ForbiddenException,
 } from '@nestjs/common';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 import { TradeExecutionService } from '../services/trade-execution.service';
 import { PositionManagerService } from '../services/position-manager.service';
 import { RiskManagerService } from '../services/risk-manager.service';
@@ -53,6 +55,11 @@ export class TradeEngineController {
     this.logger.log(
       `Execute trade request: ${dto.side} ${dto.symbol} x${dto.quantity}`,
     );
+    // The persistent core kill switch, not just RiskManagerService's in-memory flag,
+    // which an API restart clears while the switch stays on.
+    if (!(await coreEntryAllowed('trade-engine', { ref: dto.symbol }))) {
+      throw new ForbiddenException('New entries are refused: the core kill switch is on (or its state cannot be read)');
+    }
     return this.tradeExecutionService.executeTrade(dto);
   }
 

@@ -90,6 +90,7 @@
       "^@td/shared/utils$": "<rootDir>/../../../packages/shared/src/utils/index.ts",
       "^@td/shared$": "<rootDir>/../../../packages/shared/src/index.ts"
     },
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "setupFiles": ["<rootDir>/../test/setup/core-kill-gate.ts"]
   }
 }

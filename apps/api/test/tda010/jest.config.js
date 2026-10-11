@@ -30,6 +30,8 @@ module.exports = {
     ],
   },
   testEnvironment: 'node',
+  // The core kill gate: every switch reads OFF unless a spec installs its own reader.
+  setupFiles: ['<rootDir>/test/setup/core-kill-gate.ts'],
   // The dlq-integration spec drives REAL Bull queues on Redis; Bull keeps its
   // ioredis clients open past teardown (a known Bull/Jest interaction), so force
   // Jest to exit after the suite completes rather than hang on those handles.

@@ -2,6 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { AnandDualTrackRepository, CreatedEntryRow } from '../repositories/anand-dual-track.repository';
 import { SignalFanoutService } from '../../signal-fanout/services/signal-fanout.service';
 import { toPublicSignal, Segment } from '../../signal-fanout/dto/public-signal.dto';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 export interface CreateEntriesInput {
   alertId: string;
@@ -35,6 +36,8 @@ export class AnandDualTrackService {
     await this.repo.bumpLeadStat('swing', input.symbol).catch((err) =>
       this.logger.warn(`[anand] bumpLeadStat failed for ${input.symbol}: ${err instanceof Error ? err.message : err}`),
     );
+    // SP2 M2 (owner answer 2): no new entry (and so no fan-out) while the owner's core kill switch is on.
+    if (!(await coreEntryAllowed('anand-dual-track', { ref: input.symbol }))) return;
 
     // Per-track guards: skip if an active TRADED entry exists, OR the symbol
     // already hit its target today, OR (new) it made a LOSING exit today on that

@@ -8,6 +8,7 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { TradeGateway } from '../../trade-engine/gateways/trade.gateway';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 
 export interface PendingApproval {
   signal: any;
@@ -154,6 +155,11 @@ export class AutoTradeService {
         };
 
         // Route based on auto-trade mode
+        // SP2 M2 (owner answer 2): no new entry while the owner's core kill switch is on (fails closed).
+        if (!(await coreEntryAllowed('auto-trade', { ref: tradeRequest.symbol }))) {
+          stats.skipped++;
+          continue;
+        }
         switch (settings.autoTradeMode) {
           case 'FULLY_AUTOMATIC': {
             const trade =
@@ -266,6 +272,7 @@ export class AutoTradeService {
       return null;
     }
 
+    if (!(await coreEntryAllowed('auto-trade', { ref: entry.tradeRequest.symbol }))) return null;
     try {
       const trade = await this.tradeExecutionService.executeTrade(
         entry.tradeRequest,
@@ -344,6 +351,7 @@ export class AutoTradeService {
       source: 'AUTO',
     };
 
+    if (!(await coreEntryAllowed('auto-trade', { ref: tradeRequest.symbol }))) return null;
     try {
       const trade =
         await this.tradeExecutionService.executeTrade(tradeRequest);

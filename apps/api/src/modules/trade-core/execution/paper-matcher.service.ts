@@ -31,6 +31,12 @@ interface Tracked {
   noPriceRejectMs: number;
   /** It has seen a usable price (fresh, after submission, in session): never rejected for want of one. */
   priced: boolean;
+  /**
+   * The `at` of the price its newest fill used; null before any fill. A later fill is
+   * decided only on a strictly newer price, so a MARKET remainder never re-walks a depth
+   * snapshot it already consumed (spec §4.3: the remainder fills on the next fresh price).
+   */
+  lastFillPriceAt: number | null;
   /** An evaluation or a reject is in flight for it in this process. */
   busy: boolean;
 }
@@ -90,8 +96,11 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
     return this.tracked.has(orderId);
   }
 
-  /** Start matching an open order (after placement, or on reload). Idempotent. */
-  track(order: CoreOrder, noPriceRejectMs: number, now: number = Date.now()): void {
+  /**
+   * Start matching an open order (after placement, or on reload). Idempotent.
+   * `lastFillPriceAt`: the priceAt of the order's newest fill, for an order that has filled.
+   */
+  track(order: CoreOrder, noPriceRejectMs: number, now: number = Date.now(), lastFillPriceAt: number | null = null): void {
     if (!isOpenState(order.state) || this.tracked.has(order.id)) return;
     const exchange = order.instrument.exchange.toUpperCase();
     const ref: InstrumentRef | null = isHubExchange(exchange) ? { exchange, token: order.instrument.token, symbol: order.instrument.symbol } : null;
@@ -108,6 +117,7 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
       noPriceRejectMs,
       // Ruling P16a: a reloaded order that has filled or triggered has already seen a usable price.
       priced: order.filledQty > 0 || order.triggeredAt !== null,
+      lastFillPriceAt,
       busy: false,
     };
     this.tracked.set(order.id, t);
@@ -189,9 +199,22 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const open = await this.ledger.openOrders();
-    for (const o of open) this.track(o, loaded.settings.noPriceRejectMs, now);
+    // Read before tracking, so no push can be evaluated on an already-used snapshot meanwhile.
+    const lastFill = await this.lastFillPriceAts(open.filter((o) => o.filledQty > 0));
+    for (const o of open) this.track(o, loaded.settings.noPriceRejectMs, now, lastFill.get(o.id) ?? null);
     this.loaded = true;
     if (open.length > 0) this.logger.log(`reloaded ${open.length} open core order(s)`);
+  }
+
+  /** order id -> newest fill priceAt (ms), one query per user. */
+  private async lastFillPriceAts(orders: readonly CoreOrder[]): Promise<Map<string, number>> {
+    const byUser = new Map<string, string[]>();
+    for (const o of orders) byUser.set(o.userId, [...(byUser.get(o.userId) ?? []), o.id]);
+    const out = new Map<string, number>();
+    for (const [userId, ids] of byUser) {
+      for (const [id, at] of await this.ledger.lastFillPriceAts(userId, ids)) out.set(id, at.getTime());
+    }
+    return out;
   }
 
   /**
@@ -239,6 +262,8 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
       if (!this.tracked.has(t.order.id)) return;
       if (priceProblem(p, t.order.submittedAt.getTime(), now) !== null) return;
       if (!this.clock.isOpen(t.order.instrument.exchange, new Date(now))) return;
+      // Spec §4.3: a remainder fills on the NEXT fresh price, never again on the snapshot a fill already used.
+      if (t.lastFillPriceAt !== null && p.at <= t.lastFillPriceAt) return;
       t.priced = true;
       const loaded = await this.defaults.settings(now);
       if (!loaded.ok) return;
@@ -259,14 +284,26 @@ export class PaperMatcherService implements OnModuleInit, OnModuleDestroy {
       } else {
         return;
       }
+      if (decision.kind === 'FILL' && updated) this.noteFill(t, p.at);
       const current = updated ?? (await this.ledger.findOrder(decided.userId, decided.id));
       if (!current) this.untrack(decided.id);
-      else this.adopt(t, current);
+      else {
+        // The write was refused and the order filled elsewhere meanwhile: learn which price that fill used.
+        if (!updated && current.filledQty > decided.filledQty) {
+          const at = (await this.ledger.lastFillPriceAts(decided.userId, [decided.id])).get(decided.id);
+          if (at) this.noteFill(t, at.getTime());
+        }
+        this.adopt(t, current);
+      }
     } catch (err) {
       this.logger.error(`core order ${t.order.id}: evaluation failed: ${errorText(err)}`);
     } finally {
       t.busy = false;
     }
+  }
+
+  private noteFill(t: Tracked, priceAt: number): void {
+    t.lastFillPriceAt = Math.max(t.lastFillPriceAt ?? priceAt, priceAt);
   }
 
   private async rejectNoPrice(t: Tracked): Promise<void> {

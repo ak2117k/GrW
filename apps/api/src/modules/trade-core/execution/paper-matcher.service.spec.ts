@@ -309,6 +309,79 @@ describe('PaperMatcherService', () => {
     });
   });
 
+  describe('a partial fill never re-walks a depth snapshot it already used (spec §4.3)', () => {
+    const thin = (at: number) => hubPrice(cashBuy(), 500, at, depth([[500, 40]]));
+
+    it('two sweeps on the same cached snapshot fill once', async () => {
+      const { store, hub, matcher, place, stateOf } = setup();
+      const o = await place();
+      hub.setFresh(thin(SUB + 1));
+      await matcher.sweep(SUB + 2);
+      await matcher.sweep(SUB + 3);
+      await matcher.sweep(SUB + 4);
+      expect(store.fills.map((f) => f.qty)).toEqual([40]);
+      expect(stateOf(o.id)).toMatchObject({ state: 'PARTIAL', filledQty: 40 });
+    });
+
+    it('a push then a sweep with the same price `at` fill once', async () => {
+      const { store, hub, matcher, place } = setup();
+      await place();
+      const p = thin(SUB + 1);
+      await matcher.onPrice(hub, p, SUB + 2);
+      hub.setFresh(p);
+      await matcher.sweep(SUB + 3);
+      await matcher.onPrice(hub, p, SUB + 4);
+      expect(store.fills.map((f) => f.qty)).toEqual([40]);
+    });
+
+    it('a newer price fills the remainder against its own book', async () => {
+      const { store, hub, matcher, place, stateOf } = setup();
+      const o = await place();
+      hub.setFresh(thin(SUB + 1));
+      await matcher.sweep(SUB + 2);
+      await matcher.sweep(SUB + 3);
+      hub.setFresh(hubPrice(cashBuy(), 501, SUB + 4, depth([[501, 100]])));
+      await matcher.sweep(SUB + 5);
+      expect(store.fills.map((f) => f.qty)).toEqual([40, 60]);
+      expect(stateOf(o.id)).toMatchObject({ state: 'FILLED', filledQty: 100 });
+    });
+
+    it('a reloaded PARTIAL does not refill on a price no newer than its last fill', async () => {
+      const { store, hub, matcher, matcherWith, place, stateOf } = setup();
+      const o = await place();
+      await matcher.onPrice(hub, thin(SUB + 1), SUB + 2);
+      expect(stateOf(o.id)).toMatchObject({ state: 'PARTIAL', filledQty: 40 });
+
+      const hub2 = new FakeHub();
+      hub2.setFresh(thin(SUB + 1));
+      const restarted = matcherWith(hub2);
+      await restarted.sweep(SUB + 3);
+      await restarted.sweep(SUB + 4);
+      expect(store.fills.map((f) => f.qty)).toEqual([40]);
+
+      hub2.setFresh(thin(SUB + 5));
+      await restarted.sweep(SUB + 6);
+      expect(store.fills.map((f) => f.qty)).toEqual([40, 40]);
+    });
+
+    it('a fill refused because another instance filled meanwhile learns that fill price and does not reuse it', async () => {
+      const { store, hub, matcher, matcherWith, place } = setup();
+      await place();
+      await matcher.onPrice(hub, thin(SUB + 1), SUB + 2); // PARTIAL 40, both instances will know it
+      const hub2 = new FakeHub();
+      const other = matcherWith(hub2);
+      await other.sweep(SUB + 3); // reload
+      await other.onPrice(hub2, thin(SUB + 4), SUB + 5); // the other instance fills 40 more on SUB + 4
+      expect(store.fills.map((f) => f.qty)).toEqual([40, 40]);
+
+      await matcher.onPrice(hub, thin(SUB + 4), SUB + 6); // stale copy: refused, re-read
+      await matcher.onPrice(hub, thin(SUB + 4), SUB + 7); // same snapshot: not walked again
+      expect(store.fills.map((f) => f.qty)).toEqual([40, 40]);
+      await matcher.onPrice(hub, thin(SUB + 8), SUB + 9);
+      expect(store.fills.map((f) => f.qty)).toEqual([40, 40, 20]);
+    });
+  });
+
   describe('SL_MARKET trigger persistence (ruling P10)', () => {
     it('a trigger reached with no fill persists triggeredAt; the stop then fills as MARKET below the trigger', async () => {
       const { ledger, hub, matcher, place, stateOf } = setup();

@@ -556,6 +556,16 @@ export class PaperLedgerService {
     return this.orders.listOpenAll();
   }
 
+  /** The newest fill priceAt of each listed order that has fills (the matcher's snapshot guard). */
+  async lastFillPriceAts(userId: string, orderIds: readonly string[]): Promise<Map<string, Date>> {
+    const out = new Map<string, Date>();
+    for (const f of await this.fills.listForOrders(userId, orderIds)) {
+      const seen = out.get(f.orderId);
+      if (!seen || f.priceAt.getTime() > seen.getTime()) out.set(f.orderId, f.priceAt);
+    }
+    return out;
+  }
+
   openOrdersForUser(userId: string): Promise<CoreOrder[]> {
     return this.orders.listOpenForUser(userId);
   }

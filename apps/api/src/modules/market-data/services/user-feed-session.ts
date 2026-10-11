@@ -395,8 +395,9 @@ export class UserFeedSession implements UserFeedSessionLike {
 
   /**
    * Greeks + IV for every contract of `name` expiring `expiryYmd`, in ONE call over THIS user's own
-   * session (the market hub's `greek` budget paces it). A throttle-shaped answer rejects with
-   * AngelThrottleError (throwForMissingData's rule); an empty list is a real "none".
+   * session. The session does NOT pace this call: callers must (the market hub's `greek` endpoint
+   * budget does). A throttle-shaped answer rejects with AngelThrottleError (throwForMissingData's
+   * rule); an empty list is a real "none". Rows missing IV or a Greek are dropped (mapOptionGreeks).
    */
   async getOptionGreeks(name: string, expiryYmd: string): Promise<OptionGreekRow[]> {
     await this.ensureConnected();

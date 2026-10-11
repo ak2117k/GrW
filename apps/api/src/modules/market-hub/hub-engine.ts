@@ -3,7 +3,8 @@ import type { CandleRepo } from './candles/candle-repository';
 import { CandleStore, type FixupReport } from './candles/candle-store';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
 import { istMidnight } from './candles/trading-calendar';
-import { DEFAULT_RATES, Governor, type GovernorMetrics } from './governor';
+import type { OptionGreekRow } from './chain/chain.types';
+import { DEFAULT_RATES, Governor, type GovernorMetrics, type GovResult } from './governor';
 import type { HubBroker } from './hub-broker';
 import type { HubConsumer, HubOutcome } from './hub-prices';
 import {
@@ -17,7 +18,7 @@ import {
 } from './hub.types';
 import { LiveFeed } from './live-feed';
 import { PriceBook } from './price-book';
-import { QuoteBatcher } from './quote-batcher';
+import { QuoteBatcher, type QuoteOutcome } from './quote-batcher';
 import { QuotePoller } from './quote-poller';
 import type { SessionClock } from './session-clock';
 import { WatchRegistry } from './watch-registry';
@@ -112,6 +113,7 @@ export class HubEngine {
   readonly governor: Governor;
   readonly feed: LiveFeed;
   private readonly poller: QuotePoller;
+  private readonly batcher: QuoteBatcher;
   private positions = new Map<string, { ref: InstrumentRef; priority: Priority }>();
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private lastError: string | null = null;
@@ -144,11 +146,11 @@ export class HubEngine {
     });
     this.feed = new LiveFeed({ broker: d.broker, registry: this.registry, book: this.book, cap: d.cap });
     this.feed.onPrice((p) => this.emit(p));
-    const batcher = new QuoteBatcher(this.governor, (refs) => d.broker.quotes(refs));
+    this.batcher = new QuoteBatcher(this.governor, (refs) => d.broker.quotes(refs));
     this.poller = new QuotePoller({
       feed: this.feed,
       book: this.book,
-      batcher,
+      batcher: this.batcher,
       clock: d.clock,
       nearLiveTargetMs: 5000,
       criticalTargetMs: 2000,
@@ -260,6 +262,27 @@ export class HubEngine {
 
   prices(refs: readonly InstrumentRef[], opts: { maxAgeMs: number }): Map<string, PriceResult> {
     return new Map(refs.map((r) => [refKey(r), this.price(r, opts)] as const));
+  }
+
+  /**
+   * Quote these refs now through the poller's batcher (150 ms window, ≤ 50 per call, one token per
+   * chunk) on `lane`. Never rejects: each ref gets its own outcome. Does not write the PriceBook
+   * (chain legs are not watched; a book entry would read as `not-watched` anyway).
+   */
+  async quoteNow(refs: readonly InstrumentRef[], lane: Lane): Promise<Map<string, QuoteOutcome>> {
+    const outs = await Promise.all(refs.map((r) => this.batcher.quote(r, lane)));
+    return new Map(refs.map((r, i) => [refKey(r), outs[i]] as const));
+  }
+
+  /** One optionGreek call on the `greek` budget; identical in-flight calls merge. Never rejects. */
+  greeks(name: string, expiryYmd: string, lane: Lane): Promise<GovResult<OptionGreekRow[]>> {
+    const n = name.toUpperCase();
+    return this.governor.submit({
+      endpoint: 'greek',
+      lane,
+      key: `greek:${n}:${expiryYmd}`,
+      run: () => this.d.broker.optionGreeks(n, expiryYmd),
+    });
   }
 
   /** Every price the hub learns: live ticks AND polled quotes (WS-down P0/P1, near-live). */

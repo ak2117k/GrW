@@ -348,4 +348,37 @@ describe('HubEngine', () => {
     expect(e.status().consumers.positions.hub).toBe(0);
     e.stop();
   });
+
+  it('quoteNow batches 82 legs into two governed quote calls, keyed by EXCHANGE:token', async () => {
+    const { e, broker } = engine();
+    await e.start();
+    broker.quoteCalls.length = 0;
+    const refs = Array.from({ length: 82 }, (_, i) => ({ exchange: 'NFO' as const, token: String(40000 + i), symbol: `L${i}` }));
+    const p = e.quoteNow(refs, 1);
+    await jest.advanceTimersByTimeAsync(1000);
+    const out = await p;
+    expect(broker.quoteCalls.map((c) => c.length)).toEqual([50, 32]);
+    expect(out.size).toBe(82);
+    expect(out.get('NFO:40000')).toEqual({ kind: 'ok', tick: expect.objectContaining({ ltp: 100 }) });
+    e.stop();
+  });
+
+  it('greeks uses the greek budget, merges identical calls, and reports a throttle instead of throwing', async () => {
+    const { AngelThrottleError } = await import('../market-data/services/angel-throttle');
+    const { e, broker } = engine();
+    await e.start();
+    broker.greeksImpl = async () => [{ strike: 25000, optionType: 'CE', iv: 13, delta: 0.5, gamma: 0.001, theta: -10, vega: 9 }];
+    const [a, b] = await Promise.all([e.greeks('NIFTY', '2026-10-13', 1), e.greeks('NIFTY', '2026-10-13', 1)]);
+    expect(a.kind).toBe('ok');
+    expect(b).toEqual(a);
+    expect(broker.greekCalls).toEqual([{ name: 'NIFTY', expiry: '2026-10-13' }]);
+
+    broker.greeksImpl = async () => {
+      throw new AngelThrottleError('rate');
+    };
+    const pending = e.greeks('BANKNIFTY', '2026-10-13', 1);
+    await jest.advanceTimersByTimeAsync(2000);
+    expect((await pending).kind).toBe('throttled');
+    e.stop();
+  });
 });

@@ -6437,4 +6437,4 @@ M3 is complete when this gate is observed in production, not when the tests pass
 
 | Date | Whole suite (API) | Typecheck (error lists) | Opt-in DB test + drift | Notes |
 |---|---|---|---|---|
-| | | | | |
+| 2026-10-11 | 303 suites (302 pass), 3892 tests (3891 pass); the 1 failure is the pre-existing Windows path-separator case in `sentinel-cycle.service.spec.ts` ("cannot reach anything that places an order"); all 18 M3 suites + `trade-core.module.spec` pass; `execution-tenant` 7 tests | pending: controller runs the tsc list comparison in the coordinated window (shared Prisma client lacks M3 models) | pending: controller runs the opt-in DB test + drift check in the coordinated window | Step 4: one cron (`mtf-interest.cron.ts:27`, specs excluded per ruling P1); no `LIVE_TRADING_ENABLED`/`@td/shared` in trade-core; no hard-coded default literals; files outside trade-core since 17058f1 = exactly the permitted list; `cron-timezone.spec.ts` untouched |

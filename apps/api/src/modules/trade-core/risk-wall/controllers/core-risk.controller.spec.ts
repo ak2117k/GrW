@@ -34,6 +34,12 @@ describe('CoreRiskController', () => {
     expect(route('setKillSwitch')).toEqual({ path: 'kill-switch', method: RequestMethod.POST, roles: undefined });
   });
 
+  it('POST kill-switch is never throttled (a safety press is never refused with 429)', () => {
+    // @nestjs/throttler 6.x: @SkipThrottle() writes `THROTTLER:SKIP<name>` = true for the 'default' throttler.
+    expect(Reflect.getMetadata('THROTTLER:SKIPdefault', CoreRiskController.prototype.setKillSwitch)).toBe(true);
+    expect(Reflect.getMetadata('THROTTLER:SKIPdefault', CoreRiskController.prototype.changeLimit)).toBeUndefined();
+  });
+
   it('routes take the user from the token, never from the path or body', async () => {
     const { limits, killSwitch, controller } = setup();
     await controller.listLimits('user_A');

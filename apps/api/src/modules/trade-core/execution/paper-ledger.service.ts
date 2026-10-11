@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { VEHICLES, type Vehicle } from '../strategies/blocks/block-types';
 import type { CoreFunds, CoreOrder, CoreOrderRequest, OrderSide } from './execution.types';
@@ -18,6 +18,8 @@ type Dec = Prisma.Decimal;
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 const MARGIN_TYPES: ReadonlySet<string> = new Set(['MARGIN_BLOCK', 'MARGIN_RELEASE']);
 const KEY_TAKEN = 'this idempotency key is already used by another order';
+/** Ruling P13: the stored reason when the settings read throws; the error itself is only logged. */
+export const SETTINGS_UNREADABLE = 'paper settings are unreadable';
 
 export interface PlaceContext {
   /** CORE_SESSION_CLOCK.isOpen(exchange, now) at placement. */
@@ -77,6 +79,8 @@ function isIdempotencyKeyViolation(err: unknown): boolean {
  */
 @Injectable()
 export class PaperLedgerService {
+  private readonly logger = new Logger(PaperLedgerService.name);
+
   constructor(
     private readonly tx: CorePaperTx,
     private readonly orders: CoreOrderRepository,
@@ -98,17 +102,19 @@ export class PaperLedgerService {
   async place(req: CoreOrderRequest, ctx: PlaceContext, now: Date = new Date()): Promise<PlaceResult> {
     const prior = await this.orders.findByKey(req.idempotencyKey);
     if (prior) return { order: this.sameUser(prior, req.userId), created: false, settings: null };
-    let loaded: PaperSettingsResult;
+    // null: the settings could not be read. The error is logged, never persisted (ruling P13).
+    let loaded: PaperSettingsResult | null;
     try {
       loaded = await this.defaults.settings(now.getTime());
     } catch (err) {
-      loaded = { ok: false, missing: [`unreadable (${errorText(err)})`] };
+      this.logger.error(`paper settings unreadable; order ${req.idempotencyKey} is rejected: ${errorText(err)}`);
+      loaded = null;
     }
     try {
       return await this.tx.run(req.userId, async (db) => {
         const again = await this.orders.findByKey(req.idempotencyKey, db);
         if (again) return { order: this.sameUser(again, req.userId), created: false, settings: null };
-        const settings = loaded.ok ? loaded.settings : null;
+        const settings = loaded?.ok ? loaded.settings : null;
         const rows = await this.ledger.listForUser(req.userId, db);
         const deposit: NewLedgerRow[] =
           rows.length === 0 && settings
@@ -117,7 +123,7 @@ export class PaperLedgerService {
 
         let reason: string | null = null;
         let block = ZERO;
-        if (!settings) reason = `paper settings are incomplete: ${loaded.ok ? '' : loaded.missing.join(', ')}`;
+        if (!settings) reason = loaded === null ? SETTINGS_UNREADABLE : `paper settings are incomplete: ${loaded.ok ? '' : loaded.missing.join(', ')}`;
         else if (!ctx.sessionOpen) reason = `${req.instrument.exchange.toUpperCase()} is not in session`;
         else if (req.purpose === 'ENTRY' && ctx.killSwitchActive) reason = 'the kill switch is on: no new entries';
         else {

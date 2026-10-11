@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Prisma } from '@prisma/client';
 import type { Vehicle } from '../../strategies/blocks/block-types';
 import type { CoreOrder, OrderState } from '../execution.types';
@@ -5,12 +6,14 @@ import { isOpenState } from '../order-state';
 import type { PaperSettings } from '../paper-settings';
 import type { CoreCashLedgerRepository, LedgerEntry, NewLedgerRow } from '../repositories/core-cash-ledger.repository';
 import type { CoreFillRepository, FillRow, NewFillRow } from '../repositories/core-fill.repository';
-import type { CoreOrderRepository, NewOrderRow, OrderUpdate } from '../repositories/core-order.repository';
+import type { CoreOrderRepository, NewOrderRow, OrderUpdate, PaperDb } from '../repositories/core-order.repository';
 import type { CorePaperTx } from '../repositories/core-paper-tx';
 import type { CorePaperDefaultsService } from '../services/core-paper-defaults.service';
 import { paperSettings } from './paper-fixtures';
 
 const copy = (o: CoreOrder): CoreOrder => ({ ...o, instrument: { ...o.instrument } });
+const copyFill = (f: FillRow): FillRow => ({ ...f, charges: { ...f.charges } });
+const copyEntry = (r: LedgerEntry): LedgerEntry => ({ ...r });
 
 /** The error Postgres-backed Prisma raises for a duplicate core_orders.idempotencyKey. */
 export function idempotencyKeyViolation(): Prisma.PrismaClientKnownRequestError {
@@ -23,8 +26,15 @@ export function idempotencyKeyViolation(): Prisma.PrismaClientKnownRequestError 
 
 /**
  * One in-memory database behind the three repositories and the paper transaction, for
- * service tests. There is no rollback: the services write their guarded order update
- * before any fill or ledger row, so a lost race writes nothing here either.
+ * service tests (ruling P13):
+ * - `tx.run` snapshots orders, fills and ledger and restores them if its callback
+ *   throws, as Postgres would roll back. (Runs are not isolated from each other: a
+ *   concurrent run's writes are also undone by a restore. Tests that throw inside a run
+ *   should not overlap it with another run.)
+ * - Inside a run the repositories receive the sentinel `db`; a write without it, a read
+ *   inside a run without it, or the sentinel used outside a run throws. Reads outside a
+ *   run (top-level reads and system scans) take no db.
+ * - Every read returns copies, so mutating a returned row never changes the store.
  */
 export class MemoryPaperStore {
   orders: CoreOrder[] = [];
@@ -32,6 +42,9 @@ export class MemoryPaperStore {
   ledger: LedgerEntry[] = [];
   /** The userId of every transaction, in order. */
   txUsers: string[] = [];
+  /** The transaction client the store hands to a run's callback. */
+  readonly db = Object.freeze({ memoryPaperTx: true }) as unknown as PaperDb;
+  private readonly inRun = new AsyncLocalStorage<true>();
   private seq = 0;
 
   constructor(private readonly clock: () => Date = () => new Date()) {}
@@ -41,26 +54,60 @@ export class MemoryPaperStore {
     return `${prefix}_${this.seq}`;
   }
 
+  /** A write must run inside a transaction, on its client. */
+  private write(op: string, db: unknown): void {
+    if (!this.inRun.getStore() || db !== this.db) throw new Error(`memory store: ${op} must run inside tx.run with its db`);
+  }
+
+  /** A read inside a run must use the run's client; outside a run it must not have one. */
+  private read(op: string, db: unknown): void {
+    if (this.inRun.getStore()) {
+      if (db !== this.db) throw new Error(`memory store: ${op} inside tx.run must be passed its db`);
+    } else if (db !== undefined) {
+      throw new Error(`memory store: ${op} outside tx.run was passed a db`);
+    }
+  }
+
   readonly tx = {
-    run: async <T>(userId: string, fn: (db: never) => Promise<T>): Promise<T> => {
+    run: async <T>(userId: string, fn: (db: PaperDb) => Promise<T>): Promise<T> => {
       this.txUsers.push(userId);
-      return fn(undefined as never);
+      const orders = this.orders.map(copy);
+      const fills = this.fills.map(copyFill);
+      const ledger = this.ledger.map(copyEntry);
+      try {
+        return await this.inRun.run(true, () => fn(this.db));
+      } catch (err) {
+        this.orders.splice(0, this.orders.length, ...orders);
+        this.fills.splice(0, this.fills.length, ...fills);
+        this.ledger.splice(0, this.ledger.length, ...ledger);
+        throw err;
+      }
     },
   } as unknown as CorePaperTx;
 
   readonly orderRepo = {
-    findByKey: async (key: string) => {
+    findByKey: async (key: string, db?: PaperDb) => {
+      this.read('findByKey', db);
       const o = this.orders.find((x) => x.idempotencyKey === key);
       return o ? copy(o) : null;
     },
-    findForUser: async (userId: string, id: string) => {
+    findForUser: async (userId: string, id: string, db?: PaperDb) => {
+      this.read('findForUser', db);
       const o = this.orders.find((x) => x.id === id && x.userId === userId);
       return o ? copy(o) : null;
     },
-    listForUser: async (userId: string) => this.orders.filter((o) => o.userId === userId).map(copy),
-    listOpenForUser: async (userId: string) => this.orders.filter((o) => o.userId === userId && isOpenState(o.state)).map(copy),
-    listForPosition: async (userId: string, vehicle: Vehicle, token: string) =>
-      this.orders.filter((o) => o.userId === userId && o.vehicle === vehicle && o.instrument.token === token).map(copy),
+    listForUser: async (userId: string, db?: PaperDb) => {
+      this.read('listForUser', db);
+      return this.orders.filter((o) => o.userId === userId).map(copy);
+    },
+    listOpenForUser: async (userId: string, db?: PaperDb) => {
+      this.read('listOpenForUser', db);
+      return this.orders.filter((o) => o.userId === userId && isOpenState(o.state)).map(copy);
+    },
+    listForPosition: async (userId: string, vehicle: Vehicle, token: string, db?: PaperDb) => {
+      this.read('listForPosition', db);
+      return this.orders.filter((o) => o.userId === userId && o.vehicle === vehicle && o.instrument.token === token).map(copy);
+    },
     listOpenAll: async () => this.orders.filter((o) => isOpenState(o.state)).map(copy),
     listMtfHolders: async () => {
       const seen = new Map<string, { userId: string; token: string }>();
@@ -69,7 +116,8 @@ export class MemoryPaperStore {
       }
       return [...seen.values()];
     },
-    create: async (data: NewOrderRow) => {
+    create: async (data: NewOrderRow, db: PaperDb) => {
+      this.write('order create', db);
       if (this.orders.some((o) => o.idempotencyKey === data.idempotencyKey)) throw idempotencyKeyViolation();
       const o: CoreOrder = {
         id: this.nextId('ord'),
@@ -96,7 +144,8 @@ export class MemoryPaperStore {
       this.orders.push(o);
       return copy(o);
     },
-    update: async (userId: string, id: string, expect: { state: OrderState; filledQty: number }, data: OrderUpdate) => {
+    update: async (userId: string, id: string, expect: { state: OrderState; filledQty: number }, data: OrderUpdate, db: PaperDb) => {
+      this.write('order update', db);
       const o = this.orders.find((x) => x.id === id && x.userId === userId && x.state === expect.state && x.filledQty === expect.filledQty);
       if (!o) return null;
       if (data.state !== undefined) o.state = data.state;
@@ -113,12 +162,19 @@ export class MemoryPaperStore {
   } as unknown as CoreOrderRepository;
 
   readonly fillRepo = {
-    listForOrders: async (userId: string, orderIds: readonly string[]) => this.fills.filter((f) => f.userId === userId && orderIds.includes(f.orderId)),
-    listForUser: async (userId: string) => this.fills.filter((f) => f.userId === userId),
-    create: async (data: NewFillRow) => {
-      const f: FillRow = { ...data, id: this.nextId('fil'), createdAt: this.clock() };
+    listForOrders: async (userId: string, orderIds: readonly string[], db?: PaperDb) => {
+      this.read('listForOrders', db);
+      return this.fills.filter((f) => f.userId === userId && orderIds.includes(f.orderId)).map(copyFill);
+    },
+    listForUser: async (userId: string, db?: PaperDb) => {
+      this.read('fill listForUser', db);
+      return this.fills.filter((f) => f.userId === userId).map(copyFill);
+    },
+    create: async (data: NewFillRow, db: PaperDb) => {
+      this.write('fill create', db);
+      const f: FillRow = { ...data, charges: { ...data.charges }, id: this.nextId('fil'), createdAt: this.clock() };
       this.fills.push(f);
-      return f;
+      return copyFill(f);
     },
   } as unknown as CoreFillRepository;
 
@@ -138,11 +194,16 @@ export class MemoryPaperStore {
   }
 
   readonly ledgerRepo = {
-    listForUser: async (userId: string) => this.ledger.filter((r) => r.userId === userId),
-    append: async (rows: readonly NewLedgerRow[]) => {
+    listForUser: async (userId: string, db?: PaperDb) => {
+      this.read('ledger listForUser', db);
+      return this.ledger.filter((r) => r.userId === userId).map(copyEntry);
+    },
+    append: async (rows: readonly NewLedgerRow[], db: PaperDb) => {
+      this.write('ledger append', db);
       for (const r of rows) this.ledger.push(this.entry(r));
     },
-    appendInterest: async (rows: readonly NewLedgerRow[]) => {
+    appendInterest: async (rows: readonly NewLedgerRow[], db: PaperDb) => {
+      this.write('ledger appendInterest', db);
       let n = 0;
       for (const r of rows) {
         const dup = this.ledger.some((x) => x.userId === r.userId && x.token === (r.token ?? null) && x.interestDate === (r.interestDate ?? null));
@@ -152,7 +213,8 @@ export class MemoryPaperStore {
       }
       return n;
     },
-    lastInterestDate: async (userId: string, token: string) => {
+    lastInterestDate: async (userId: string, token: string, db?: PaperDb) => {
+      this.read('lastInterestDate', db);
       const days = this.ledger.filter((r) => r.userId === userId && r.token === token && r.type === 'MTF_INTEREST').map((r) => r.interestDate as string);
       return days.length ? days.sort()[days.length - 1] : null;
     },

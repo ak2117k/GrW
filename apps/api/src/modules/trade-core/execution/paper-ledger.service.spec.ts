@@ -1,7 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PaperLedgerService, type PlaceContext } from './paper-ledger.service';
 import type { PaperSettings } from './paper-settings';
+import type { CorePaperDefaultsService } from './services/core-paper-defaults.service';
 import { fakeDefaults, idempotencyKeyViolation, MemoryPaperStore } from './testing/memory-paper-store';
 import { cashBuy, mtfBuy, NOW, optionBuy, paperSettings } from './testing/paper-fixtures';
 
@@ -70,6 +71,20 @@ describe('PaperLedgerService.place', () => {
     const r = await svc.place(cashBuy(), OPEN, NOW);
     expect(r).toMatchObject({ created: true, settings: null, order: { state: 'REJECTED', rejectReason: 'paper settings are incomplete: startingCapital@ALL' } });
     expect(store.ledger).toEqual([]);
+  });
+
+  it('an unreadable settings table logs the error and stores only the fixed reason (ruling P13)', async () => {
+    const store = new MemoryPaperStore(() => NOW);
+    const defaults = { settings: async () => Promise.reject(new Error('connect ECONNREFUSED 10.0.0.5:5432 password=hunter2')) } as unknown as CorePaperDefaultsService;
+    const svc = new PaperLedgerService(store.tx, store.orderRepo, store.fillRepo, store.ledgerRepo, defaults);
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const r = await svc.place(cashBuy(), OPEN, NOW);
+    expect(r).toMatchObject({ created: true, settings: null, order: { state: 'REJECTED', rejectReason: 'paper settings are unreadable' } });
+    expect(store.orders[0].rejectReason).toBe('paper settings are unreadable');
+    expect(store.ledger).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(String(logged.mock.calls[0][0])).toContain('ECONNREFUSED');
+    logged.mockRestore();
   });
 
   it('out of session, or an entry while the kill switch is on, is rejected; the kill switch never gates an exit', async () => {

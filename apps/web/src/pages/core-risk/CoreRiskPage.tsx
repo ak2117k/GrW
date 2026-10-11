@@ -75,7 +75,11 @@ export default function CoreRiskPage() {
       toast.success(!r.state.active ? 'Kill switch is off' : r.state.pendingRelease ? 'Release scheduled for the next session open' : 'Kill switch is ON');
       void qc.invalidateQueries({ queryKey: KILL_KEY });
     },
-    onError: (err: unknown) => toast.error(apiErrorMessage(err, 'Could not change the kill switch')),
+    onError: (err: unknown) => {
+      toast.error(apiErrorMessage(err, 'Could not change the kill switch'));
+      // The switch may be persisted even when the request failed: show the stored state.
+      void qc.invalidateQueries({ queryKey: KILL_KEY });
+    },
   });
 
   if (limitsQ.isLoading || killQ.isLoading) {

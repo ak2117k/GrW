@@ -95,6 +95,21 @@ describe('CoreKillSwitchReader', () => {
     expect(CoreKillSwitchReader.CACHE_MS).toBeLessThanOrEqual(5_000);
   });
 
+  it('a read in flight when the switch flips does not refill the cache with the old answer', async () => {
+    const rows: ReturnType<typeof row>[] = [];
+    const { findMany, reader } = setup(rows);
+    let release!: () => void;
+    findMany.mockImplementationOnce(async () => { await new Promise<void>((r) => { release = r; }); return []; }); // reads OFF, slowly
+    const slow = reader.isOnForPlatform();
+    await Promise.resolve();
+    rows.push(row('usr_owner', 'k1', true, T0)); // the owner turns it on mid-read…
+    reader.invalidate(); // …and the service clears the cache
+    release();
+    expect(await slow).toBe(false); // the in-flight caller still gets its (old) answer
+    expect(await reader.isOnForPlatform()).toBe(true); // but the next read is not served a stale OFF
+    expect(findMany).toHaveBeenCalledTimes(2);
+  });
+
   it('a failed read is not cached and reaches the gate as a refusal', async () => {
     const { findMany, reader } = setup();
     findMany.mockRejectedValueOnce(new Error('db down'));

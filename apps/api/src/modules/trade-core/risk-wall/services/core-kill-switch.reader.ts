@@ -23,6 +23,8 @@ export class CoreKillSwitchReader implements KillSwitchReadPort, OnModuleInit, O
   static readonly CACHE_MS = 5_000;
 
   private readonly cache = new Map<string, { on: boolean; at: number }>();
+  /** Bumped by invalidate(): a read that began before it must not refill the cache. */
+  private generation = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -44,6 +46,7 @@ export class CoreKillSwitchReader implements KillSwitchReadPort, OnModuleInit, O
   }
 
   invalidate(): void {
+    this.generation++;
     this.cache.clear();
   }
 
@@ -89,8 +92,11 @@ export class CoreKillSwitchReader implements KillSwitchReadPort, OnModuleInit, O
     const nowMs = Date.now();
     const hit = this.cache.get(key);
     if (hit && nowMs - hit.at < CoreKillSwitchReader.CACHE_MS) return hit.on;
+    const startedIn = this.generation;
     const on = await load(new Date(nowMs));
-    this.cache.set(key, { on, at: nowMs });
+    // A switch change landed mid-read: this answer may predate it, so return it once
+    // but never cache it (caching it would hide an "on" for up to CACHE_MS).
+    if (this.generation === startedIn) this.cache.set(key, { on, at: nowMs });
     return on;
   }
 }

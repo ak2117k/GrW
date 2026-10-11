@@ -1,4 +1,6 @@
+import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { setCoreKillSwitchReader } from '../../trade-core/risk-wall/kill-gate';
 import { TradeEngineController } from './trade-engine.controller';
 import { TradeExecutionService } from '../services/trade-execution.service';
 import { PositionManagerService } from '../services/position-manager.service';
@@ -45,5 +47,48 @@ describe('TradeEngineController — GET :id/events', () => {
     expect(result).toHaveLength(3);
     expect(result[0].eventType).toBe('CLOSED');
     expect(result[2].eventType).toBe('CREATED');
+  });
+});
+
+describe('TradeEngineController — POST execute is gated by the core kill switch', () => {
+  const dto = { symbol: 'NIFTY', side: 'BUY', quantity: 50 } as never;
+  let controller: TradeEngineController;
+  let exec: { executeTrade: jest.Mock };
+
+  beforeEach(async () => {
+    exec = { executeTrade: jest.fn(async () => ({ id: 'trade_1' })) };
+    const module: TestingModule = await Test.createTestingModule({
+      controllers: [TradeEngineController],
+      providers: [
+        { provide: TradeExecutionService, useValue: exec },
+        { provide: PositionManagerService, useValue: {} },
+        { provide: RiskManagerService, useValue: {} },
+        { provide: PaperTradeService, useValue: {} },
+        { provide: TradeRepository, useValue: {} },
+      ],
+    }).compile();
+    controller = module.get(TradeEngineController);
+  });
+
+  afterEach(() => setCoreKillSwitchReader(null));
+
+  const reader = (on: boolean) => ({ isOn: async () => on, isOnForPlatform: async () => on, invalidate: () => undefined });
+
+  it('refuses a new trade while the switch is on (e.g. after a restart cleared the in-memory flag)', async () => {
+    setCoreKillSwitchReader(reader(true));
+    await expect(controller.executeTrade(dto)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(exec.executeTrade).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when no reader is wired', async () => {
+    setCoreKillSwitchReader(null);
+    await expect(controller.executeTrade(dto)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(exec.executeTrade).not.toHaveBeenCalled();
+  });
+
+  it('executes when the switch is off', async () => {
+    setCoreKillSwitchReader(reader(false));
+    await expect(controller.executeTrade(dto)).resolves.toEqual({ id: 'trade_1' });
+    expect(exec.executeTrade).toHaveBeenCalledWith(dto);
   });
 });

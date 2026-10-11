@@ -9,6 +9,11 @@ import { assembleEntries, pickStrikes, type GreeksMath } from './chain-math';
 
 const GREEKS_TTL_MS = 60_000;
 const MAX_KEYS = 200;
+/**
+ * An EMPTY answer (no contracts, no expiries, no underlying ref) is cached for 10 minutes only: a build
+ * before or during the 08:00 master refresh must not pin "no-contracts" or no-spot for the whole day.
+ */
+const EMPTY_TTL_MS = 10 * 60_000;
 
 export interface ChainBuilderDeps {
   repo: ChainRepo;
@@ -24,6 +29,8 @@ export type BuildOutcome = { kind: 'ok'; chain: HubChain } | { kind: 'unavailabl
 interface DayCached<T> {
   day: string;
   value: T;
+  /** Set for empty answers: the entry is good only until this ms epoch. */
+  until?: number;
 }
 
 /** Bounded map: drop everything when it grows past MAX_KEYS (keys are per underlying+expiry; a day has few). */
@@ -59,23 +66,34 @@ export class ChainBuilder {
     return istDay(this.now());
   }
 
+  /** A cache hit: the same IST day and, for an empty answer, within its 10-minute TTL. */
+  private cached<T>(m: Map<string, DayCached<T>>, key: string): DayCached<T> | null {
+    const e = m.get(key);
+    if (!e || e.day !== this.today()) return null;
+    if (e.until !== undefined && this.now() >= e.until) return null;
+    return e;
+  }
+
+  /** Non-empty answers keep the per-IST-day cache; empty ones expire after EMPTY_TTL_MS. */
+  private remember<T>(m: Map<string, DayCached<T>>, key: string, value: T, empty: boolean): void {
+    boundedSet(m, key, { day: this.today(), value, ...(empty ? { until: this.now() + EMPTY_TTL_MS } : {}) });
+  }
+
   async contracts(underlying: string, expiry: string): Promise<ChainContract[]> {
     const key = `${underlying.toUpperCase()}:${expiry}`;
-    const day = this.today();
-    const hit = this.contractCache.get(key);
-    if (hit && hit.day === day) return hit.value;
+    const hit = this.cached(this.contractCache, key);
+    if (hit) return hit.value;
     const value = await this.d.repo.contracts(underlying.toUpperCase(), expiry);
-    boundedSet(this.contractCache, key, { day, value });
+    this.remember(this.contractCache, key, value, value.length === 0);
     return value;
   }
 
   async expiries(underlying: string): Promise<string[]> {
     const u = underlying.toUpperCase();
-    const day = this.today();
-    const hit = this.expiryCache.get(u);
-    if (hit && hit.day === day) return hit.value;
-    const value = await this.d.repo.expiries(u, day);
-    boundedSet(this.expiryCache, u, { day, value });
+    const hit = this.cached(this.expiryCache, u);
+    if (hit) return hit.value;
+    const value = await this.d.repo.expiries(u, this.today());
+    this.remember(this.expiryCache, u, value, value.length === 0);
     return value;
   }
 
@@ -142,11 +160,10 @@ export class ChainBuilder {
 
   private async underlyingRef(u: string, exchange: InstrumentRef['exchange'], expiry: string): Promise<InstrumentRef | null> {
     const key = `${u}:${expiry}`;
-    const day = this.today();
-    const hit = this.underlyingCache.get(key);
-    if (hit && hit.day === day) return hit.value;
+    const hit = this.cached(this.underlyingCache, key);
+    if (hit) return hit.value;
     const value = await this.d.repo.underlyingRef(u, exchange, expiry);
-    boundedSet(this.underlyingCache, key, { day, value });
+    this.remember(this.underlyingCache, key, value, value === null);
     return value;
   }
 

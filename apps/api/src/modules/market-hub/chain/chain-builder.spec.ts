@@ -117,4 +117,60 @@ describe('ChainBuilder', () => {
     await expect(b.contractFor('NIFTY', E, 25000, 'PE')).resolves.toEqual(expect.objectContaining({ strike: 25000, optionType: 'PE' }));
     await expect(b.contractFor('NIFTY', E, 25025, 'PE')).resolves.toBeNull();
   });
+
+  it('caches an empty contract list for 10 minutes only, so a build before the master refresh does not pin no-contracts', async () => {
+    const repo = new MemoryChainRepo();
+    const { b, advance } = builder({ repo });
+    await expect(b.build('NIFTY', E, { lane: 1, strikesAround: 1 })).resolves.toEqual({ kind: 'unavailable', reason: 'no-contracts' });
+    expect(repo.contractCalls).toBe(1);
+    const rows: ChainContract[] = [];
+    for (let s = 24900; s <= 25100; s += 50) rows.push(contract(s, 'CE'), contract(s, 'PE'));
+    repo.addContracts('NIFTY', E, rows);
+    repo.underlyings.set('NIFTY', NIFTY);
+    advance(9 * 60_000);
+    await expect(b.build('NIFTY', E, { lane: 1, strikesAround: 1 })).resolves.toEqual({ kind: 'unavailable', reason: 'no-contracts' });
+    expect(repo.contractCalls).toBe(1);
+    advance(2 * 60_000);
+    const out = await b.build('NIFTY', E, { lane: 1, strikesAround: 1 });
+    expect(repo.contractCalls).toBe(2);
+    expect(out.kind).toBe('ok');
+  });
+
+  it('caches empty expiries and a null underlying for 10 minutes only; non-empty answers keep the day cache', async () => {
+    const repo = new MemoryChainRepo();
+    const expiries = jest.spyOn(repo, 'expiries');
+    const underlying = jest.spyOn(repo, 'underlyingRef');
+    const quoted: InstrumentRef[][] = [];
+    const { b, advance } = builder({
+      repo,
+      bookSpot: () => null,
+      quoteNow: async (refs) => {
+        quoted.push([...refs]);
+        return new Map(refs.map((r) => [refKey(r), r.exchange === 'NSE' ? tick(25010) : tick(100)] as const));
+      },
+    });
+    await expect(b.expiries('NIFTY')).resolves.toEqual([]);
+    const rows: ChainContract[] = [];
+    for (let s = 24900; s <= 25100; s += 50) rows.push(contract(s, 'CE'), contract(s, 'PE'));
+    repo.addContracts('NIFTY', E, rows);
+    const first = await b.build('NIFTY', E, { lane: 1, strikesAround: 1 });
+    expect(first.kind === 'ok' && first.chain.spot).toBeNull();
+    repo.underlyings.set('NIFTY', NIFTY);
+    advance(9 * 60_000);
+    await expect(b.expiries('NIFTY')).resolves.toEqual([]);
+    await b.build('NIFTY', E, { lane: 1, strikesAround: 1 });
+    expect(expiries).toHaveBeenCalledTimes(1);
+    expect(underlying).toHaveBeenCalledTimes(1);
+    advance(2 * 60_000);
+    await expect(b.expiries('NIFTY')).resolves.toEqual([E]);
+    const later = await b.build('NIFTY', E, { lane: 1, strikesAround: 1 });
+    expect(later.kind === 'ok' && later.chain.spot).toBe(25010);
+    expect(expiries).toHaveBeenCalledTimes(2);
+    expect(underlying).toHaveBeenCalledTimes(2);
+    advance(60 * 60_000);
+    await b.expiries('NIFTY');
+    await b.build('NIFTY', E, { lane: 1, strikesAround: 1 });
+    expect(expiries).toHaveBeenCalledTimes(2);
+    expect(underlying).toHaveBeenCalledTimes(2);
+  });
 });

@@ -97,6 +97,59 @@ describe('CoreLifecycleService: exits (spec §7.2–§7.4)', () => {
     expect(h.positions.rows[0]).toMatchObject({ status: 'CLOSED', exitReason: 'STOP' });
   });
 
+  it('a rejected exit is not re-placed while the session is closed, nor more than once per 5 s, nor while one is open (Review Focus 1)', async () => {
+    const h = lifecycleHarness();
+    const p = await h.lifecycle.openPosition(openRequest());
+    await h.price(500);
+    await h.price(492); // STOP → exit:1
+    h.advance(30_001);
+    await h.matcher.sweep(Date.now()); // exit:1 REJECTED (no price)
+    await h.settle();
+    h.session.open = false;
+    for (let i = 0; i < 3; i += 1) {
+      h.advance(6_000);
+      await h.lifecycle.sweep(Date.now());
+      await h.settle();
+    }
+    expect(exitsOf(h, p.id).map((o) => o.idempotencyKey)).toEqual(['int_1:exit:1']);
+    expect(h.positions.rows[0]).toMatchObject({ status: 'EXITING', exitReason: 'STOP' });
+    h.session.open = true;
+    await h.lifecycle.sweep(Date.now()); // re-placed: exit:2
+    await h.settle();
+    h.advance(1_000);
+    await h.lifecycle.sweep(Date.now()); // within 5 s of the attempt: nothing
+    await h.settle();
+    h.advance(6_000);
+    await h.lifecycle.sweep(Date.now()); // exit:2 still open: nothing
+    await h.settle();
+    expect(exitsOf(h, p.id).map((o) => [o.idempotencyKey, o.state])).toEqual([
+      ['int_1:exit:1', 'REJECTED'],
+      ['int_1:exit:2', 'OPEN'],
+    ]);
+  });
+
+  it('an exit that dies at once is re-placed at most once per 5 s, never abandoned (Review Focus 1)', async () => {
+    const h = lifecycleHarness();
+    const p = await h.lifecycle.openPosition(openRequest());
+    await h.price(500);
+    const real = h.adapter.placeOrder.bind(h.adapter);
+    jest.spyOn(h.adapter, 'placeOrder').mockImplementation(async (req) => {
+      const o = await real(req);
+      if (req.purpose !== 'EXIT') return o;
+      await h.adapter.cancel(req.userId, o.id); // stands in for an immediate broker reject
+      return { ...o, state: 'REJECTED', rejectReason: 'test' };
+    });
+    await h.price(492); // STOP → exit:1, dies at once
+    for (let i = 0; i < 10; i += 1) {
+      h.advance(1_000);
+      await h.lifecycle.sweep(Date.now());
+      await h.settle();
+    }
+    // ~10 s of 1 s sweeps: exit:1 plus one re-placement per 5 s, not one per sweep.
+    expect(exitsOf(h, p.id).map((o) => o.idempotencyKey)).toEqual(['int_1:exit:1', 'int_1:exit:2', 'int_1:exit:3']);
+    expect(h.positions.rows[0]).toMatchObject({ status: 'EXITING', exitReason: 'STOP', exitSeq: 3 });
+  });
+
   it('a closed session decides nothing and flags no blind position (Review Focus 4, ruling L9)', async () => {
     const h = lifecycleHarness();
     const p = await h.lifecycle.openPosition(openRequest());

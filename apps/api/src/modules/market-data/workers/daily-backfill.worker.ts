@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
+import { AngelOneAuthService, BOOT_SESSION_WAIT_MS } from '../services/angel-one-auth.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 
@@ -66,6 +67,7 @@ export class DailyBackfillWorker implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly adapter: AngelOneAdapterService,
+    private readonly auth: AngelOneAuthService,
     private readonly repo: MarketDataRepository,
   ) {}
 
@@ -127,8 +129,20 @@ export class DailyBackfillWorker implements OnModuleInit {
    * acceptable for a once-per-process boot cost in exchange for
    * correctness across the universe + all timeframes the analyze
    * endpoint reads (1d / 1h / 15m / 5m).
+   *
+   * Waits (bounded, {@link BOOT_SESSION_WAIT_MS}) for the shared feed session
+   * first — see that constant. Without one there is nothing to fetch with, so
+   * it skips with ONE line instead of failing every target; the 15:35 / 23:35
+   * IST crons catch up.
    */
   async backfillUniverseAtBoot(): Promise<void> {
+    if (!(await this.auth.whenAuthenticated(BOOT_SESSION_WAIT_MS))) {
+      this.logger.warn(
+        `NSE+MCX universe (boot) candle backfill skipped — no Angel One feed session ` +
+          `within ${BOOT_SESSION_WAIT_MS / 1000}s of boot. Deferred to the 15:35 / 23:35 IST crons.`,
+      );
+      return;
+    }
     await this.runBackfill('NSE+MCX universe (boot)', [
       ...NSE_TARGETS,
       ...MCX_TARGETS,

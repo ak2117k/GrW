@@ -10,6 +10,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { AngelOneAdapterService } from './angel-one-adapter.service';
+import { AngelOneAuthService, BOOT_SESSION_WAIT_MS } from './angel-one-auth.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
 
 /**
@@ -127,6 +128,7 @@ export class DailyCandleBackfillCron implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly adapter: AngelOneAdapterService,
+    private readonly auth: AngelOneAuthService,
     private readonly repo: MarketDataRepository,
   ) {}
 
@@ -183,6 +185,17 @@ export class DailyCandleBackfillCron implements OnModuleInit {
         `Could not read the newest stored daily candle, backfilling anyway: ` +
           `${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    // The feed login is detached from boot too, so without this the pass races
+    // it and its first fetches reach the shared adapter before there is a
+    // client (the DailyBackfillWorker boot failure of 2026-10-12). Bounded; no
+    // session → one line, and the 23:45 IST cron owns the fill.
+    if (!(await this.auth.whenAuthenticated(BOOT_SESSION_WAIT_MS))) {
+      this.logger.warn(
+        `Boot daily-candle backfill skipped — no Angel One feed session within ` +
+          `${BOOT_SESSION_WAIT_MS / 1000}s of boot. Deferred to the 23:45 IST cron.`,
+      );
+      return;
     }
     await this.run('boot');
   }

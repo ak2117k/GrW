@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chainBadge, chainPollMs, formatAge } from './chainAge';
+import { chainBadge, chainPollMs, formatAge, unavailableMeta } from './chainAge';
 
 const NOW = Date.parse('2026-10-12T05:00:00Z'); // 10:30 IST
 
@@ -22,9 +22,32 @@ describe('chainAge', () => {
     expect(chainBadge(null, NOW)).toBeNull();
   });
 
+  it('never calls an aged chain Live: a fresh hub chain older than 15 s reads Stale', () => {
+    expect(chainBadge({ at: new Date(NOW - 16_000).toISOString(), source: 'hub', status: 'fresh' }, NOW)).toEqual({ label: 'Stale · 16 s', tone: 'stale' });
+    expect(chainBadge({ at: new Date(NOW - 16_000).toISOString(), source: 'hub' }, NOW)).toEqual({ label: 'Stale · 16 s', tone: 'stale' });
+    expect(chainBadge({ at: new Date(NOW - 15_000).toISOString(), source: 'hub', status: 'fresh' }, NOW)).toEqual({ label: 'Live · 15 s', tone: 'live' });
+  });
+
+  it('labels an unavailable chain with the age of the last one on screen', () => {
+    expect(chainBadge({ at: new Date(NOW - 40_000).toISOString(), source: 'hub', status: 'unavailable' }, NOW)).toEqual({ label: 'Unavailable · last 40 s', tone: 'stale' });
+    expect(chainBadge({ at: new Date(NOW - 40_000).toISOString(), source: 'nse', status: 'unavailable' }, NOW)).toEqual({ label: 'Unavailable · last 40 s', tone: 'stale' });
+  });
+
+  it('keeps the closed snapshot time and the NSE label regardless of age', () => {
+    expect(chainBadge({ at: '2026-10-11T09:59:00.000Z', source: 'hub', status: 'market-closed' }, NOW)).toEqual({ label: 'Closed · 15:29 snapshot', tone: 'closed' });
+    expect(chainBadge({ at: new Date(NOW - 120_000).toISOString(), source: 'nse', status: 'fresh' }, NOW)).toEqual({ label: 'NSE · 2 min', tone: 'legacy' });
+  });
+
+  it('marks the last meta unavailable after a failed fetch, keeping its time', () => {
+    const at = new Date(NOW - 5_000).toISOString();
+    expect(unavailableMeta({ at, source: 'hub', status: 'fresh' })).toEqual({ at, source: 'hub', status: 'unavailable' });
+    expect(unavailableMeta(null)).toBeNull();
+  });
+
   it('polls every 10 s while live or stale and every 60 s on a closed market', () => {
     expect(chainPollMs('fresh')).toBe(10_000);
     expect(chainPollMs('stale')).toBe(10_000);
+    expect(chainPollMs('unavailable')).toBe(10_000);
     expect(chainPollMs(undefined)).toBe(10_000);
     expect(chainPollMs('market-closed')).toBe(60_000);
   });

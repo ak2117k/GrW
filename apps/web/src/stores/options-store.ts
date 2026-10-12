@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import type { OptionsChainEntry } from '@/types';
 import api from '@/services/api';
-import type { ChainMeta } from '@/utils/chainAge';
+import { unavailableMeta, type ChainMeta } from '@/utils/chainAge';
+
+/** Sequence of chain fetches, so a superseded response only clears the spinner if nothing newer started. */
+let latestChainRequest = 0;
 
 interface OptionsState {
   chain: OptionsChainEntry[];
@@ -62,12 +65,22 @@ export const useOptionsStore = create<OptionsState>((set, get) => ({
   fetchChain: async () => {
     const { underlying, expiry } = get();
     if (!expiry) return;
+    const requestId = ++latestChainRequest;
+    // A response for an underlying/expiry the user has since left must not overwrite the new one.
+    // If no newer fetch has started, still clear the spinner.
+    const superseded = () => {
+      const now = get();
+      if (now.underlying === underlying && now.expiry === expiry) return false;
+      if (requestId === latestChainRequest) set({ isLoading: false });
+      return true;
+    };
 
     set({ isLoading: true, error: null });
     try {
       const res = await api.get(`/options/chain/${underlying}`, {
         params: { expiry },
       });
+      if (superseded()) return;
       const chain: OptionsChainEntry[] = res.data.chain ?? [];
       const chainMeta: ChainMeta = {
         at: res.data.at ?? null,
@@ -97,12 +110,13 @@ export const useOptionsStore = create<OptionsState>((set, get) => ({
 
       set({ chain, spotPrice, chainMeta, isLoading: false });
     } catch (err) {
-      // Keep the last chain on screen and say why it did not refresh.
+      if (superseded()) return;
+      // Keep the last chain on screen, say why it did not refresh, and stop its badge claiming "Live".
       const reason = (err as { response?: { status?: number; data?: { reason?: string } } })?.response;
       const error = reason?.status === 503
         ? `Option chain unavailable${reason.data?.reason ? ` (${reason.data.reason})` : ''}`
         : 'Failed to load options chain';
-      set({ error, isLoading: false });
+      set({ error, chainMeta: unavailableMeta(get().chainMeta), isLoading: false });
     }
   },
 }));

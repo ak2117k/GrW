@@ -33,6 +33,7 @@ export default function OptionsPage() {
   const strikeRange = useOptionsStore((s) => s.strikeRange);
   const isLoading = useOptionsStore((s) => s.isLoading);
   const chainMeta = useOptionsStore((s) => s.chainMeta);
+  const error = useOptionsStore((s) => s.error);
   const setUnderlying = useOptionsStore((s) => s.setUnderlying);
   const setExpiry = useOptionsStore((s) => s.setExpiry);
   const setStrikeRange = useOptionsStore((s) => s.setStrikeRange);
@@ -169,6 +170,12 @@ export default function OptionsPage() {
         {badge && (
           <span className={cn('text-xs font-mono', CHAIN_TONE_CLASS[badge.tone])} title="Option chain age">
             {badge.label}
+          </span>
+        )}
+
+        {error && (
+          <span className="text-xs text-[var(--color-accent-red)]" role="status">
+            {error}
           </span>
         )}
 

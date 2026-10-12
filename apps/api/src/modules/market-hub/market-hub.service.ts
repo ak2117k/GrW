@@ -8,7 +8,9 @@ import { MarketDataRepository } from '../market-data/repositories/market-data.re
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { TradeTrackerService } from '../trade-tracker/services/trade-tracker.service';
+import { GreeksCalculatorService } from '../options-chain/services/greeks-calculator.service';
 import { PrismaCandleRepo } from './candles/candle-repository';
+import { PrismaChainRepo } from './chain/chain-repository';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
 import { istDay } from './candles/trading-calendar';
 import { ManagerHubBroker } from './hub-broker';
@@ -27,15 +29,28 @@ const CONSUMER_FLAG: Record<HubConsumer, string> = {
   positions: 'hub.pricesPositions',
   tracks: 'hub.pricesTracks',
   browser: 'hub.servesBrowser',
+  chain: 'hub.servesChain',
 };
 /** Job name in job_runs and /healthz/detail (health-detail.service.ts EXPECTED_JOBS). */
 export const CANDLE_FIXUP_JOB = 'hub-candle-fixup';
 /** Well above a full fix-up (3 Background-lane calls per instrument), well under the daily cadence. */
 const CANDLE_FIXUP_LEASE_MS = 2 * 60 * 60 * 1000;
+/** Job name in job_runs and /healthz/detail (health-detail.service.ts EXPECTED_JOBS). */
+export const OI_PRUNE_JOB = 'hub-oi-prune';
+const OI_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const OI_PRUNE_LEASE_MS = 10 * 60 * 1000;
 
 // Lives in session-clock.ts (pure) so the trade sentinel can parse the same
 // HUB_MCX_LATE_CLOSE without importing this service; re-exported here.
 export { parseLateClose };
+
+const DEFAULT_CHAIN_STRIKES_AROUND = 20;
+
+/** HUB_CHAIN_STRIKES_AROUND read defensively: a non-finite or < 1 value falls back to 20; else rounded down. */
+export function chainStrikesAround(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_CHAIN_STRIKES_AROUND;
+}
 
 /**
  * SP1 market hub. M1 (shadow): prices a default context set and the owner's
@@ -47,6 +62,8 @@ export { parseLateClose };
  * HUB_PRICES_TRACKS through the HUB_PRICE_SOURCE token (see hub-prices.ts).
  * M4: feeds the owner's browser (the /ws gateway and the quote, depth, indices
  * and watchlist endpoints) behind HUB_SERVES_BROWSER.
+ * M5: option chains (HubChains, through `hubFor(…, 'chain')`) behind HUB_SERVES_CHAIN, and 3-minute OI
+ * snapshots behind HUB_OI_SNAPSHOT_ENABLED.
  * Start is fire-and-forget: boot must never wait on the broker.
  */
 @Injectable()
@@ -103,7 +120,19 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         positions: this.consumerEnabled('positions'),
         tracks: this.consumerEnabled('tracks'),
         browser: this.consumerEnabled('browser'),
+        chain: this.consumerEnabled('chain'),
       }),
+      chain: {
+        repo: new PrismaChainRepo(this.prisma),
+        math: new GreeksCalculatorService(),
+        strikesAround: chainStrikesAround(this.config.get<unknown>('hub.chainStrikesAround')),
+        coreUnderlyings: (this.config.get<string>('hub.oiCoreUnderlyings') ?? '')
+          .split(',')
+          .map((s) => s.trim().toUpperCase())
+          .filter(Boolean),
+        snapshots: this.config.get<boolean>('hub.oiSnapshotEnabled') !== false,
+        log: (m) => this.logger.warn(m),
+      },
     });
     this.engine = engine;
     this.ownerUserId = owner;
@@ -201,6 +230,21 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       });
     } catch (err) {
       this.logger.error(`Candle fix-up ${day} failed: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
+  /** 02:45 IST daily: drop oi_snapshots older than 30 days (spec §4). A no-op success without chains. */
+  @Cron('0 45 2 * * *', { name: OI_PRUNE_JOB, timeZone: 'Asia/Kolkata' })
+  async pruneOiSnapshots(): Promise<void> {
+    try {
+      await this.jobs.run(OI_PRUNE_JOB, { ttlMs: OI_PRUNE_LEASE_MS, onRedisError: 'run-anyway' }, async () => {
+        const chains = this.engine?.chains;
+        if (!chains) return;
+        const removed = await chains.pruneOi(new Date(Date.now() - OI_RETENTION_MS));
+        this.logger.log(`OI snapshot prune: ${removed} row(s) older than 30 days removed`);
+      });
+    } catch (err) {
+      this.logger.error(`OI snapshot prune failed: ${(err as Error)?.message ?? err}`);
     }
   }
 

@@ -42,6 +42,7 @@ function makeDeps() {
         ],
       },
     }),
+    optionGreek: jest.fn().mockResolvedValue({ data: [] }),
   };
   // Vault lease that just hands fake decrypted creds to the callback.
   const withCreds = jest.fn(async (_userId: string, cb: (c: any) => Promise<any>) =>
@@ -454,6 +455,45 @@ it('getCandleWindow reports a body-level errorcode (AG8001) as an error, not a t
   const err = await s.getCandleWindow('111', 'NSE', 'ONE_MINUTE', new Date(0), new Date(60_000)).catch((e) => e);
   expect(err).toBeInstanceOf(Error);
   expect(err).not.toBeInstanceOf(AngelThrottleError);
+});
+
+describe('getOptionGreeks', () => {
+  it('sends ONE optionGreek call with the name upper-cased and expirydate as DDMMMYYYY', async () => {
+    const { s, d } = makeSession();
+    await s.getOptionGreeks('nifty', '2026-10-13');
+    expect(d.smartApi.optionGreek).toHaveBeenCalledTimes(1);
+    expect(d.smartApi.optionGreek).toHaveBeenCalledWith({ name: 'NIFTY', expirydate: '13OCT2026' });
+  });
+
+  it('rejects a bare data:null (no status, no errorcode) with AngelThrottleError', async () => {
+    const d = makeDeps();
+    d.smartApi.optionGreek.mockResolvedValue({ data: null });
+    const { s } = makeSession(d);
+    await expect(s.getOptionGreeks('NIFTY', '2026-10-13')).rejects.toBeInstanceOf(AngelThrottleError);
+  });
+
+  it('reports a body-level errorcode as a plain error, not a throttle', async () => {
+    const d = makeDeps();
+    d.smartApi.optionGreek.mockResolvedValue({ status: false, message: 'No Data Available', errorcode: 'AB9019', data: null });
+    const { s } = makeSession(d);
+    const err = await s.getOptionGreeks('NIFTY', '2026-10-13').catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(AngelThrottleError);
+  });
+
+  it('maps the data array through mapOptionGreeks', async () => {
+    const d = makeDeps();
+    d.smartApi.optionGreek.mockResolvedValue({
+      data: [
+        { strikePrice: '25000.000000', optionType: 'CE', delta: '0.52', gamma: '0.0011', theta: '-12.5', vega: '9.8', impliedVolatility: '13.36' },
+        { strikePrice: '25000', optionType: 'PE' },
+      ],
+    });
+    const { s } = makeSession(d);
+    await expect(s.getOptionGreeks('NIFTY', '2026-10-13')).resolves.toEqual([
+      { strike: 25000, optionType: 'CE', iv: 13.36, delta: 0.52, gamma: 0.0011, theta: -12.5, vega: 9.8 },
+    ]);
+  });
 });
 
 // Production 2026-10-09: chart, chart-context (several timeframes), sentinel and scoring all

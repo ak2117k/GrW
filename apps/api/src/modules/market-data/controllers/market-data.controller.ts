@@ -24,6 +24,7 @@ import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
 import { CommodityRollService } from '../services/commodity-roll.service';
 import { GapDetectorService } from '../services/gap-detector.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { oiHistoryRow } from './oi-history-row';
 import {
   SubscribeDto,
   UnsubscribeDto,
@@ -671,12 +672,7 @@ export class MarketDataController {
       return {
         token,
         symbol: instrument.symbol,
-        oiHistory: oiHistory.map((snap) => ({
-          oi: Number(snap.oi),
-          oiChange: Number(snap.oiChange),
-          volume: Number(snap.volume),
-          timestamp: snap.timestamp,
-        })),
+        oiHistory: oiHistory.map(oiHistoryRow),
         count: oiHistory.length,
       };
     } catch (error) {

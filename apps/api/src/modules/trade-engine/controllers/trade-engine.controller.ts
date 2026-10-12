@@ -11,6 +11,7 @@ import {
   Logger,
   ForbiddenException,
 } from '@nestjs/common';
+import { CurrentUser, type AuthenticatedUser } from '../../../common/decorators';
 import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 import { TradeExecutionService } from '../services/trade-execution.service';
 import { PositionManagerService } from '../services/position-manager.service';
@@ -51,7 +52,7 @@ export class TradeEngineController {
    * POST /api/trades/execute — Execute a new trade.
    */
   @Post('execute')
-  async executeTrade(@Body() dto: ExecuteTradeDto) {
+  async executeTrade(@Body() dto: ExecuteTradeDto, @CurrentUser() user: AuthenticatedUser) {
     this.logger.log(
       `Execute trade request: ${dto.side} ${dto.symbol} x${dto.quantity}`,
     );
@@ -59,6 +60,10 @@ export class TradeEngineController {
     // which an API restart clears while the switch stays on.
     if (!(await coreEntryAllowed('trade-engine', { ref: dto.symbol }))) {
       throw new ForbiddenException('New entries are refused: the core kill switch is on (or its state cannot be read)');
+    }
+    // The caller's own core switch too (fail closed: no caller identity is a refusal).
+    if (!user?.userId || !(await coreEntryAllowed('trade-engine', { userId: user.userId, ref: dto.symbol }))) {
+      throw new ForbiddenException('New entries are refused: your core kill switch is on (or its state cannot be read)');
     }
     return this.tradeExecutionService.executeTrade(dto);
   }

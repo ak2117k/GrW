@@ -3,6 +3,7 @@ import type { FeedState } from '../../market-data/services/user-feed.types';
 import type { HubBroker } from '../hub-broker';
 import { refKey, type InstrumentRef } from '../hub.types';
 import type { BrokerInterval, HubCandle } from '../candles/candle.types';
+import type { OptionGreekRow } from '../chain/chain.types';
 
 /** In-memory broker for hub tests: records calls, emits ticks/states on demand. */
 export class FakeBroker implements HubBroker {
@@ -36,6 +37,12 @@ export class FakeBroker implements HubBroker {
   candles(ref: InstrumentRef, interval: BrokerInterval, from: Date, to: Date): Promise<HubCandle[]> {
     this.candleCalls.push({ ref, interval, from, to });
     return this.candlesImpl(ref, interval, from, to);
+  }
+  readonly greekCalls: Array<{ name: string; expiry: string }> = [];
+  greeksImpl: (name: string, expiry: string) => Promise<OptionGreekRow[]> = async () => [];
+  optionGreeks(name: string, expiry: string): Promise<OptionGreekRow[]> {
+    this.greekCalls.push({ name, expiry });
+    return this.greeksImpl(name, expiry);
   }
   onTick(fn: (t: TickData) => void): void {
     this.tickFns.push(fn);

@@ -1,5 +1,6 @@
 import { ForbiddenException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import type { AuthenticatedUser } from '../../../common/decorators';
 import { setCoreKillSwitchReader } from '../../trade-core/risk-wall/kill-gate';
 import { TradeEngineController } from './trade-engine.controller';
 import { TradeExecutionService } from '../services/trade-execution.service';
@@ -52,6 +53,7 @@ describe('TradeEngineController — GET :id/events', () => {
 
 describe('TradeEngineController — POST execute is gated by the core kill switch', () => {
   const dto = { symbol: 'NIFTY', side: 'BUY', quantity: 50 } as never;
+  const USER = { userId: 'user_A', role: 'USER', email: 'a@x' } as AuthenticatedUser;
   let controller: TradeEngineController;
   let exec: { executeTrade: jest.Mock };
 
@@ -76,19 +78,39 @@ describe('TradeEngineController — POST execute is gated by the core kill switc
 
   it('refuses a new trade while the switch is on (e.g. after a restart cleared the in-memory flag)', async () => {
     setCoreKillSwitchReader(reader(true));
-    await expect(controller.executeTrade(dto)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.executeTrade(dto, USER)).rejects.toBeInstanceOf(ForbiddenException);
     expect(exec.executeTrade).not.toHaveBeenCalled();
   });
 
   it('fails closed when no reader is wired', async () => {
     setCoreKillSwitchReader(null);
-    await expect(controller.executeTrade(dto)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(controller.executeTrade(dto, USER)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(exec.executeTrade).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the caller's own switch is on even though no platform (ADMIN) switch is", async () => {
+    const isOn = jest.fn(async (userId: string) => userId === 'user_A');
+    setCoreKillSwitchReader({ isOn, isOnForPlatform: async () => false, invalidate: () => undefined });
+    await expect(controller.executeTrade(dto, USER)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(isOn).toHaveBeenCalledWith('user_A');
+    expect(exec.executeTrade).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the platform switch is on even though the caller's own switch is off", async () => {
+    setCoreKillSwitchReader({ isOn: async () => false, isOnForPlatform: async () => true, invalidate: () => undefined });
+    await expect(controller.executeTrade(dto, USER)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(exec.executeTrade).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when no caller identity is present', async () => {
+    setCoreKillSwitchReader(reader(false));
+    await expect(controller.executeTrade(dto, undefined as unknown as AuthenticatedUser)).rejects.toBeInstanceOf(ForbiddenException);
     expect(exec.executeTrade).not.toHaveBeenCalled();
   });
 
   it('executes when the switch is off', async () => {
     setCoreKillSwitchReader(reader(false));
-    await expect(controller.executeTrade(dto)).resolves.toEqual({ id: 'trade_1' });
+    await expect(controller.executeTrade(dto, USER)).resolves.toEqual({ id: 'trade_1' });
     expect(exec.executeTrade).toHaveBeenCalledWith(dto);
   });
 });

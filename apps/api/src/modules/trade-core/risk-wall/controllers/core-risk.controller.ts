@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Put } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { CurrentUser, type AuthenticatedUser } from '../../../../common/decorators';
 import { ChangeLimitDto, SetKillSwitchDto } from '../dto/core-risk.dto';
 import { CoreKillSwitchService, type KillSwitchSetResult, type KillSwitchView } from '../services/core-kill-switch.service';
@@ -41,6 +42,8 @@ export class CoreRiskController {
 
   @Post('kill-switch')
   @HttpCode(HttpStatus.OK)
+  // A safety press is never refused with 429 (it is still authenticated by the global JwtAuthGuard).
+  @SkipThrottle()
   setKillSwitch(@CurrentUser() user: AuthenticatedUser, @Body() dto: SetKillSwitchDto): Promise<KillSwitchSetResult> {
     return this.killSwitch.set({ userId: user.userId, role: user.role }, { active: dto.active, reason: dto.reason });
   }

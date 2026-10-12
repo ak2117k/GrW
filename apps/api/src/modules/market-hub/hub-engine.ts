@@ -3,7 +3,12 @@ import type { CandleRepo } from './candles/candle-repository';
 import { CandleStore, type FixupReport } from './candles/candle-store';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
 import { istMidnight } from './candles/trading-calendar';
-import { DEFAULT_RATES, Governor, type GovernorMetrics } from './governor';
+import { ChainBuilder } from './chain/chain-builder';
+import type { GreeksMath } from './chain/chain-math';
+import type { ChainRepo } from './chain/chain-repository';
+import { ChainService } from './chain/chain-service';
+import type { ChainStatus, OptionGreekRow } from './chain/chain.types';
+import { DEFAULT_RATES, Governor, type GovernorMetrics, type GovResult } from './governor';
 import type { HubBroker } from './hub-broker';
 import type { HubConsumer, HubOutcome } from './hub-prices';
 import {
@@ -17,7 +22,7 @@ import {
 } from './hub.types';
 import { LiveFeed } from './live-feed';
 import { PriceBook } from './price-book';
-import { QuoteBatcher } from './quote-batcher';
+import { QuoteBatcher, type QuoteOutcome } from './quote-batcher';
 import { QuotePoller } from './quote-poller';
 import type { SessionClock } from './session-clock';
 import { WatchRegistry } from './watch-registry';
@@ -33,6 +38,15 @@ export interface HubEngineDeps {
   candles?: { repo: CandleRepo; interactiveCallBudget?: number };
   /** The consumer switches, read at status time. Absent ⇒ all off. */
   consumerFlags?: () => ConsumerFlags;
+  /** M5 option chains + OI snapshots. Absent ⇒ no chains (status().chain null). */
+  chain?: {
+    repo: ChainRepo;
+    math: GreeksMath;
+    strikesAround: number;
+    coreUnderlyings: readonly string[];
+    snapshots: boolean;
+    log?: (message: string) => void;
+  };
 }
 
 /** The consumer switches, so /healthz/detail tells "hub served 0" apart from "switch off". */
@@ -40,6 +54,7 @@ export interface ConsumerFlags {
   positions: boolean;
   tracks: boolean;
   browser: boolean;
+  chain: boolean;
 }
 
 export interface CandleStatus {
@@ -85,11 +100,14 @@ export interface HubStatus {
   lastError: string | null;
   /** M2 candle store; null when candles are not enabled. */
   candles: CandleStatus | null;
+  /** M5 option chains; null when the hub was built without chain deps. */
+  chain: ChainStatus | null;
   /** M3/M4: per consumer, how often the hub served, the legacy path served, or nothing did. */
   consumers: {
     positions: ConsumerCounters;
     tracks: ConsumerCounters;
     browser: ConsumerCounters;
+    chain: ConsumerCounters;
     listenerErrors: number;
     flags: ConsumerFlags;
   };
@@ -110,11 +128,13 @@ export class HubEngine {
   readonly governor: Governor;
   readonly feed: LiveFeed;
   private readonly poller: QuotePoller;
+  private readonly batcher: QuoteBatcher;
   private positions = new Map<string, { ref: InstrumentRef; priority: Priority }>();
   private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   private lastError: string | null = null;
   private readonly builder: CandleBuilder | null;
   private readonly store: CandleStore | null;
+  readonly chains: ChainService | null;
   private pendingBars: ClosedBar[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private tickBarsWritten = 0;
@@ -128,6 +148,7 @@ export class HubEngine {
     positions: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
     tracks: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
     browser: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
+    chain: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
   };
 
   constructor(private readonly d: HubEngineDeps) {
@@ -141,11 +162,11 @@ export class HubEngine {
     });
     this.feed = new LiveFeed({ broker: d.broker, registry: this.registry, book: this.book, cap: d.cap });
     this.feed.onPrice((p) => this.emit(p));
-    const batcher = new QuoteBatcher(this.governor, (refs) => d.broker.quotes(refs));
+    this.batcher = new QuoteBatcher(this.governor, (refs) => d.broker.quotes(refs));
     this.poller = new QuotePoller({
       feed: this.feed,
       book: this.book,
-      batcher,
+      batcher: this.batcher,
       clock: d.clock,
       nearLiveTargetMs: 5000,
       criticalTargetMs: 2000,
@@ -166,6 +187,37 @@ export class HubEngine {
       this.builder = null;
       this.store = null;
     }
+    if (d.chain) {
+      const chainDeps = d.chain;
+      const builder = new ChainBuilder({
+        repo: chainDeps.repo,
+        quoteNow: (refs, lane) => this.quoteNow(refs, lane),
+        greeks: (name, expiry, lane) => this.greeks(name, expiry, lane),
+        bookSpot: (ref) => {
+          const r = this.price(ref, { maxAgeMs: 15_000 });
+          return r.kind === 'fresh' ? r.price.ltp : null;
+        },
+        math: chainDeps.math,
+      });
+      this.chains = new ChainService({
+        builder,
+        repo: chainDeps.repo,
+        clock: d.clock,
+        strikesAround: chainDeps.strikesAround,
+        watchContract: (ref) => void this.watchMany([ref], 3, 'chain:ltp', 120_000),
+        priceOf: (ref) => this.price(ref, { maxAgeMs: 15_000 }),
+        quoteNow: (refs, lane) => this.quoteNow(refs, lane),
+        // Held chains refresh only while a consumer reads them (HUB_SERVES_CHAIN).
+        refreshHeld: () => this.d.consumerFlags?.().chain ?? false,
+        // Chain JSON only while the hub serves chains: legacy readers share OptionChainSnapshot.
+        snapshots: chainDeps.snapshots
+          ? { core: chainDeps.coreUnderlyings, writeChainJson: () => this.d.consumerFlags?.().chain ?? false }
+          : undefined,
+        log: chainDeps.log,
+      });
+    } else {
+      this.chains = null;
+    }
   }
 
   /**
@@ -179,6 +231,7 @@ export class HubEngine {
     const now = Date.now();
     for (const ref of this.d.defaults) this.registry.watch(ref, 2, CONTEXT, now);
     this.poller.start();
+    this.chains?.start();
     this.maintenanceTimer = setInterval(() => {
       this.registry.expire(Date.now());
       void this.reconcileSafely();
@@ -198,6 +251,7 @@ export class HubEngine {
 
   stop(): void {
     this.poller.stop();
+    this.chains?.stop();
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = null;
     if (this.flushTimer) clearInterval(this.flushTimer);
@@ -242,6 +296,7 @@ export class HubEngine {
     for (const [k, e] of this.positions) if (!next.has(k)) this.registry.unwatch(e.ref, POSITIONS);
     for (const e of next.values()) this.registry.watch(e.ref, e.priority, POSITIONS, now);
     this.positions = next;
+    void this.chains?.setHeld([...refs]); // never rejects
     await this.feed.reconcile();
   }
 
@@ -257,6 +312,27 @@ export class HubEngine {
 
   prices(refs: readonly InstrumentRef[], opts: { maxAgeMs: number }): Map<string, PriceResult> {
     return new Map(refs.map((r) => [refKey(r), this.price(r, opts)] as const));
+  }
+
+  /**
+   * Quote these refs now through the poller's batcher (150 ms window, ≤ 50 per call, one token per
+   * chunk) on `lane`. Never rejects: each ref gets its own outcome. Does not write the PriceBook
+   * (chain legs are not watched; a book entry would read as `not-watched` anyway).
+   */
+  async quoteNow(refs: readonly InstrumentRef[], lane: Lane): Promise<Map<string, QuoteOutcome>> {
+    const outs = await Promise.all(refs.map((r) => this.batcher.quote(r, lane)));
+    return new Map(refs.map((r, i) => [refKey(r), outs[i]] as const));
+  }
+
+  /** One optionGreek call on the `greek` budget; identical in-flight calls merge. Never rejects. */
+  greeks(name: string, expiryYmd: string, lane: Lane): Promise<GovResult<OptionGreekRow[]>> {
+    const n = name.toUpperCase();
+    return this.governor.submit({
+      endpoint: 'greek',
+      lane,
+      key: `greek:${n}:${expiryYmd}`,
+      run: () => this.d.broker.optionGreeks(n, expiryYmd),
+    });
   }
 
   /** Every price the hub learns: live ticks AND polled quotes (WS-down P0/P1, near-live). */
@@ -408,12 +484,14 @@ export class HubEngine {
       calendar: { missingYear: this.d.clock.calendarGap(new Date(now)) },
       lastError: this.lastError,
       candles: this.candleStatus(),
+      chain: this.chains?.status() ?? null,
       consumers: {
         positions: { ...this.consumerCounts.positions },
         tracks: { ...this.consumerCounts.tracks },
         browser: { ...this.consumerCounts.browser },
+        chain: { ...this.consumerCounts.chain },
         listenerErrors: this.listenerErrors,
-        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false, browser: false },
+        flags: this.d.consumerFlags?.() ?? { positions: false, tracks: false, browser: false, chain: false },
       },
     };
   }

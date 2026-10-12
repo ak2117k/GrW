@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, Logger } from '@nestjs/common';
 import type { CoreKillSwitch } from '@prisma/client';
 import type { AuditService } from '../../../../common/audit/audit.service';
 import type { SessionClock } from '../../../market-hub/session-clock';
@@ -78,6 +78,40 @@ describe('CoreKillSwitchService', () => {
     });
     expect(audit.append.mock.calls[1][0].meta).toEqual(r.cascade);
     expect(await service.isActive('user_A', NOW)).toBe(true);
+  });
+
+  it('a failing SET audit never fails an engaged switch: the result is returned, the CASCADE audit still runs, the error is logged', async () => {
+    const { repo, audit, core, silos, service } = setup();
+    const logError = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      audit.append.mockRejectedValueOnce(new Error('audit chain locked'));
+      const r = await service.set(A, { active: true, reason: 'stop now' }, NOW);
+      expect(r.state.active).toBe(true);
+      expect(r.cascade?.core.status).toBe('OK');
+      expect(repo.rows).toHaveLength(1);
+      expect(core.squareOffAll).toHaveBeenCalledTimes(1);
+      expect(silos.squareOffAll).toHaveBeenCalledTimes(1);
+      expect(audit.append.mock.calls.map((c) => c[0].action)).toEqual(['CORE_KILL_SWITCH_SET', 'CORE_KILL_SWITCH_CASCADE']);
+      expect(logError).toHaveBeenCalledTimes(1);
+      expect(String(logError.mock.calls[0][0])).toContain('CORE_KILL_SWITCH_SET');
+      expect(String(logError.mock.calls[0][0])).toContain('audit chain locked');
+    } finally {
+      logError.mockRestore();
+    }
+  });
+
+  it('a failing CASCADE audit is logged and the result is still returned', async () => {
+    const { audit, service } = setup();
+    const logError = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    try {
+      audit.append.mockResolvedValueOnce({ seq: 1n, hash: 'h' }).mockRejectedValueOnce(new Error('db gone'));
+      const r = await service.set(A, { active: true, reason: 'stop now' }, NOW);
+      expect(r.state.active).toBe(true);
+      expect(logError).toHaveBeenCalledTimes(1);
+      expect(String(logError.mock.calls[0][0])).toContain('CORE_KILL_SWITCH_CASCADE');
+    } finally {
+      logError.mockRestore();
+    }
   });
 
   it('turning on skips the concurrency check, so a press is never refused', async () => {

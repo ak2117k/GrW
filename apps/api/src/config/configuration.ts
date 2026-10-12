@@ -92,6 +92,16 @@ export default () => ({
     // M4 consumer switch: the owner's browser is fed by the hub (/ws ticks + quote, depth,
     // indices and watchlist endpoints) and stops polling while Live. Off = legacy path.
     servesBrowser: process.env.HUB_SERVES_BROWSER === 'true',
+    // M5 consumer switch: the option chain (/api/options, scanners, sentinel walls, trade-entry PCR,
+    // single-contract LTP) is built by the hub. Off = today's path (NSE scrape + legacy) — the revert.
+    servesChain: process.env.HUB_SERVES_CHAIN === 'true',
+    // M5: 3-minute OI snapshots for the core list + held + screen-viewed underlyings. ON by default so
+    // the "change vs yesterday" baseline exists before HUB_SERVES_CHAIN is turned on.
+    oiSnapshotEnabled: process.env.HUB_OI_SNAPSHOT_ENABLED !== 'false',
+    // M5: underlyings that always get OI snapshots (comma-separated master names, exact).
+    oiCoreUnderlyings: process.env.HUB_OI_CORE_UNDERLYINGS || 'NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY,CRUDEOIL,NATURALGAS',
+    // M5: strikes each side of ATM in a hub chain (20 → 82 legs → two quote calls).
+    chainStrikesAround: +(process.env.HUB_CHAIN_STRIKES_AROUND || 20),
     // MCX 23:55 close windows, "YYYY-MM-DD:YYYY-MM-DD" comma-separated (US-DST-linked).
     mcxLateClose: process.env.HUB_MCX_LATE_CLOSE || '',
   },

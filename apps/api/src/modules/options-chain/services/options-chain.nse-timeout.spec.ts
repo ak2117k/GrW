@@ -122,6 +122,7 @@ describe('NSE option-chain timeout split', () => {
       getExpiries: jest.fn().mockResolvedValue(['2026-10-13']),
       getOptionsChain: jest.fn().mockResolvedValue([]),
       getOptionsChainWithSpot: jest.fn().mockResolvedValue({ chain: [], spotPrice: 0 }),
+      getChainView: jest.fn().mockResolvedValue({ chain: [], spotPrice: null, at: '2026-10-12T04:40:00.000Z', source: 'nse', status: 'fresh' }),
       getOISummary: jest.fn().mockReturnValue({}),
       getPCR: jest.fn().mockReturnValue(0),
       getMaxPain: jest.fn().mockReturnValue(0),
@@ -134,7 +135,7 @@ describe('NSE option-chain timeout split', () => {
       await ctl.getChain('NIFTY', { expiry: '2026-10-13' } as any);
       await ctl.getAnalysis('NIFTY', { expiry: '2026-10-13' } as any);
 
-      expect(chain.getOptionsChainWithSpot).toHaveBeenCalledWith('NIFTY', '2026-10-13', { background: true });
+      expect(chain.getChainView).toHaveBeenCalledWith('NIFTY', '2026-10-13', { background: true, screen: true });
       expect(chain.getOptionsChain).toHaveBeenCalledWith('NIFTY', '2026-10-13', { background: true });
     });
 

@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Inject, Optional } from '@nestjs/common';
+import { Controller, Get, Param, Query, Inject, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { OptionsChainService } from '../services/options-chain.service';
 import { GreeksCalculatorService } from '../services/greeks-calculator.service';
 import { OptionStrikeSelectorService } from '../services/option-strike-selector.service';
@@ -45,14 +45,18 @@ export class OptionsChainController {
       expiry = expiries[0];
     }
 
-    const { chain, spotPrice: snapshotSpot } =
-      await this.optionsChainService.getOptionsChainWithSpot(underlying, expiry, { background: true });
+    const view = await this.optionsChainService.getChainView(underlying, expiry, { background: true, screen: true });
+    if (view.status === 'unavailable') {
+      throw new ServiceUnavailableException({
+        message: `Option chain unavailable for ${underlying.toUpperCase()} ${expiry}`,
+        reason: view.unavailable,
+      });
+    }
+    const { chain } = view;
 
-    // Prefer the spot embedded in the snapshot/source; only hit the broker
-    // when we have no spot at all (rare — would mean estimate-from-chain was
-    // also unable to derive one).
-    let spotPrice = snapshotSpot;
-    if (spotPrice === 0) {
+    // Legacy only: the hub already quoted the underlying with the legs when it had no book price.
+    let spotPrice = view.spotPrice ?? 0;
+    if (spotPrice === 0 && view.source !== 'hub') {
       const indexInfo = INDEX_TOKENS[underlying.toUpperCase()];
       if (indexInfo && this.brokerAdapter) {
         try {
@@ -88,6 +92,10 @@ export class OptionsChainController {
       expiry,
       spotPrice,
       underlying: underlying.toUpperCase(),
+      at: view.at,
+      source: view.source,
+      status: view.status,
+      ...(view.greeks ? { greeks: view.greeks } : {}),
     };
   }
 

@@ -1,15 +1,10 @@
 import { create } from 'zustand';
 import type { OptionsChainEntry } from '@/types';
 import api from '@/services/api';
+import { unavailableMeta, type ChainMeta } from '@/utils/chainAge';
 
-interface OISummary {
-  totalCEOI: number;
-  totalPEOI: number;
-  pcr: number;
-  maxPainStrike: number;
-  highestCEOIStrike: number;
-  highestPEOIStrike: number;
-}
+/** Sequence of chain fetches, so a superseded response only clears the spinner if nothing newer started. */
+let latestChainRequest = 0;
 
 interface OptionsState {
   chain: OptionsChainEntry[];
@@ -20,7 +15,7 @@ interface OptionsState {
   spotChange: number;
   spotChangePercent: number;
   strikeRange: number;
-  oiSummary: OISummary | null;
+  chainMeta: ChainMeta | null;
   isLoading: boolean;
   error: string | null;
 
@@ -29,7 +24,6 @@ interface OptionsState {
   setStrikeRange: (range: number) => void;
   fetchExpiries: () => Promise<void>;
   fetchChain: () => Promise<void>;
-  fetchAnalysis: () => Promise<void>;
 }
 
 export const useOptionsStore = create<OptionsState>((set, get) => ({
@@ -41,12 +35,12 @@ export const useOptionsStore = create<OptionsState>((set, get) => ({
   spotChange: 0,
   spotChangePercent: 0,
   strikeRange: 10,
-  oiSummary: null,
+  chainMeta: null,
   isLoading: false,
   error: null,
 
   setUnderlying: (underlying) => {
-    set({ underlying, chain: [], expiry: '', expiries: [] });
+    set({ underlying, chain: [], expiry: '', expiries: [], chainMeta: null });
   },
 
   setExpiry: (expiry) => {
@@ -71,15 +65,30 @@ export const useOptionsStore = create<OptionsState>((set, get) => ({
   fetchChain: async () => {
     const { underlying, expiry } = get();
     if (!expiry) return;
+    const requestId = ++latestChainRequest;
+    // A response for an underlying/expiry the user has since left must not overwrite the new one.
+    // If no newer fetch has started, still clear the spinner.
+    const superseded = () => {
+      const now = get();
+      if (now.underlying === underlying && now.expiry === expiry) return false;
+      if (requestId === latestChainRequest) set({ isLoading: false });
+      return true;
+    };
 
     set({ isLoading: true, error: null });
     try {
       const res = await api.get(`/options/chain/${underlying}`, {
         params: { expiry },
       });
+      if (superseded()) return;
       const chain: OptionsChainEntry[] = res.data.chain ?? [];
+      const chainMeta: ChainMeta = {
+        at: res.data.at ?? null,
+        source: res.data.source ?? null,
+        status: res.data.status ?? null,
+      };
 
-      // Use spot price from API response if available
+      // Use spot price from API response if available (null when the hub obtained no spot)
       let spotPrice = res.data.spotPrice ?? 0;
 
       // Fallback: estimate spot from chain data
@@ -99,23 +108,15 @@ export const useOptionsStore = create<OptionsState>((set, get) => ({
         if (spotPrice === 0) spotPrice = midStrike;
       }
 
-      set({ chain, spotPrice, isLoading: false });
+      set({ chain, spotPrice, chainMeta, isLoading: false });
     } catch (err) {
-      set({ error: 'Failed to load options chain', isLoading: false });
-    }
-  },
-
-  fetchAnalysis: async () => {
-    const { underlying, expiry } = get();
-    if (!expiry) return;
-
-    try {
-      const res = await api.get(`/options/analysis/${underlying}`, {
-        params: { expiry },
-      });
-      set({ oiSummary: res.data });
-    } catch {
-      // Non-critical — silently fail
+      if (superseded()) return;
+      // Keep the last chain on screen, say why it did not refresh, and stop its badge claiming "Live".
+      const reason = (err as { response?: { status?: number; data?: { reason?: string } } })?.response;
+      const error = reason?.status === 503
+        ? `Option chain unavailable${reason.data?.reason ? ` (${reason.data.reason})` : ''}`
+        : 'Failed to load options chain';
+      set({ error, chainMeta: unavailableMeta(get().chainMeta), isLoading: false });
     }
   },
 }));

@@ -15,6 +15,7 @@ import {
   SentinelExitExecutor,
 } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
+import { SentinelExecutorController } from './controllers/sentinel-executor.controller';
 
 /**
  * Sentinel auto-exit (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md).
@@ -24,7 +25,7 @@ import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
  */
 @Module({
   imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule],
-  controllers: [],
+  controllers: [SentinelExecutorController],
   providers: [
     AiExitExecutionRepository,
     OwnerBrokerSessionProvider,

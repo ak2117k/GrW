@@ -95,6 +95,30 @@ services:
       redis:
         condition: service_healthy
 
+  # SP3 entry scorer + decision-corpus retrieval (ai-engine/Dockerfile, src.scorer_main).
+  # Internal only: no host ports, no Caddy route; the API reaches it at http://ai-engine:5000.
+  # Off until the owner enables `--profile ai` after measuring headroom (spec §6.5).
+  ai-engine:
+    logging: *logging
+    image: grw-ai-engine:${GRW_AI_TAG:-current}
+    container_name: grw-ai-engine
+    restart: unless-stopped
+    mem_limit: 384m
+    environment:
+      MODELS_DIR: /models
+      AI_DB_URL: postgresql://grw_ai:${AI_DB_PASSWORD}@postgres:5432/${PG_DB}
+    volumes:
+      - /opt/grw/models:/models:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    profiles: ["ai"]
+
   caddy:
     logging: *logging
     image: caddy:2-alpine

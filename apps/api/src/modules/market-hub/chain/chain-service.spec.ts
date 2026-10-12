@@ -262,6 +262,38 @@ describe('ChainService', () => {
     expect((await svc.snapshotTargets(now())).map((x) => `${x.underlying}:${x.expiry}`)).toEqual([`NIFTY:${E}`]);
   });
 
+  it('on an expiry day the core list also targets the next expiry (tomorrow needs a baseline); otherwise only the nearest', async () => {
+    const NEXT = '2026-10-20';
+    const expiryDay = service('2026-10-13T10:00:00', { snapshots: { core: ['NIFTY'] } });
+    expiryDay.deps.builder.expiries = async () => [E, NEXT];
+    expect((await expiryDay.svc.snapshotTargets(expiryDay.now())).map((x) => `${x.underlying}:${x.expiry}`)).toEqual([`NIFTY:${E}`, `NIFTY:${NEXT}`]);
+
+    const ordinary = service('2026-10-12T10:00:00', { snapshots: { core: ['NIFTY'] } });
+    ordinary.deps.builder.expiries = async () => [E, NEXT];
+    expect((await ordinary.svc.snapshotTargets(ordinary.now())).map((x) => `${x.underlying}:${x.expiry}`)).toEqual([`NIFTY:${E}`]);
+
+    const lastListed = service('2026-10-13T10:00:00', { snapshots: { core: ['NIFTY'] } });
+    lastListed.deps.builder.expiries = async () => [E];
+    expect((await lastListed.svc.snapshotTargets(lastListed.now())).map((x) => `${x.underlying}:${x.expiry}`)).toEqual([`NIFTY:${E}`]);
+  });
+
+  describe('chain JSON switch', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it.each([
+      [false, 0],
+      [true, 1],
+    ])('writeChainJson() %s reaches the snapshot job (%i chain snapshots on its first run)', async (on, expected) => {
+      const h = service('2026-10-12T10:00:00', { snapshots: { core: ['NIFTY'], writeChainJson: () => on } });
+      h.svc.start();
+      await jest.advanceTimersByTimeAsync(30_000);
+      h.svc.stop();
+      expect(h.builds).toHaveLength(1);
+      expect(h.repo.chainSnapshots).toHaveLength(expected);
+    });
+  });
+
   it('without snapshots deps the job is off and reported disabled', () => {
     const { svc } = service('2026-10-12T10:00:00');
     expect(svc.status().snapshot).toEqual({ enabled: false, rowsToday: 0, failures: 0, lastAt: {} });

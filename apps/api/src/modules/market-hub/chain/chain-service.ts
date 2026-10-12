@@ -37,7 +37,7 @@ export interface ChainServiceDeps {
    * OI snapshots for these always-on underlyings (+ held + viewed today). Absent ⇒ the job is off.
    * Held chains are targets whatever refreshHeld() says: snapshots run with HUB_SERVES_CHAIN off.
    */
-  snapshots?: { core: readonly string[] };
+  snapshots?: { core: readonly string[]; writeChainJson?: () => boolean };
   /** Cache capacity (LRU); default 100. */
   maxCache?: number;
   log?: (message: string) => void;
@@ -81,6 +81,7 @@ export class ChainService implements HubChains {
           freshChain: (u, e) => this.freshChain(u, e),
           repo: d.repo,
           clock: d.clock,
+          writeChainJson: d.snapshots.writeChainJson,
           log: d.log,
         })
       : null;
@@ -215,12 +216,17 @@ export class ChainService implements HubChains {
     return out.kind === 'ok' ? out.chain : null;
   }
 
-  /** Core list (nearest expiry) ∪ held chains ∪ chains a screen opened today. */
+  /**
+   * Core list (nearest expiry; on its expiry day also the next, so tomorrow's chain has an OI
+   * baseline) ∪ held chains ∪ chains a screen opened today.
+   */
   async snapshotTargets(now: number): Promise<SnapshotTarget[]> {
     const keys = new Set<string>([...this.held, ...this.viewedKeys(now)]);
+    const today = istDay(now);
     for (const name of this.d.snapshots?.core ?? []) {
-      const nearest = (await this.expiries(name))[0];
+      const [nearest, next] = await this.expiries(name);
       if (nearest) keys.add(keyOf(name, nearest));
+      if (nearest === today && next) keys.add(keyOf(name, next));
     }
     return [...keys].map((k) => {
       const [underlying, expiry] = splitKey(k);

@@ -209,7 +209,10 @@ export class HubEngine {
         quoteNow: (refs, lane) => this.quoteNow(refs, lane),
         // Held chains refresh only while a consumer reads them (HUB_SERVES_CHAIN).
         refreshHeld: () => this.d.consumerFlags?.().chain ?? false,
-        snapshots: chainDeps.snapshots ? { core: chainDeps.coreUnderlyings } : undefined,
+        // Chain JSON only while the hub serves chains: legacy readers share OptionChainSnapshot.
+        snapshots: chainDeps.snapshots
+          ? { core: chainDeps.coreUnderlyings, writeChainJson: () => this.d.consumerFlags?.().chain ?? false }
+          : undefined,
         log: chainDeps.log,
       });
     } else {

@@ -73,6 +73,29 @@ describe('OiSnapshotJob', () => {
     expect(repo.chainSnapshots).toHaveLength(2); // first run + closing run
   });
 
+  it('with writeChainJson() false it writes OI rows but no chain JSON, not even at the close', async () => {
+    const { j, repo } = job({ writeChainJson: () => false });
+    for (let i = 0; i < 6; i++) {
+      jest.setSystemTime(IST('2026-10-12T15:10:00') + i * 180_000);
+      await j.tick(Date.now());
+    }
+    jest.setSystemTime(IST('2026-10-12T15:30:30'));
+    await j.tick(Date.now()); // the closing run
+    expect(repo.oiRows).toHaveLength(14); // 6 open runs + the closing run, 2 legs each
+    expect(repo.chainSnapshots).toHaveLength(0);
+  });
+
+  it('with writeChainJson() true it stores chain JSON as before (first run, every 5th, close)', async () => {
+    const { j, repo } = job({ writeChainJson: () => true });
+    for (let i = 0; i < 6; i++) {
+      jest.setSystemTime(IST('2026-10-12T15:10:00') + i * 180_000);
+      await j.tick(Date.now());
+    }
+    jest.setSystemTime(IST('2026-10-12T15:30:30'));
+    await j.tick(Date.now());
+    expect(repo.chainSnapshots).toHaveLength(3); // runs 1 and 6 + the closing run
+  });
+
   it('skips a holiday and a closed venue entirely', async () => {
     const { j, repo, built } = job();
     jest.setSystemTime(IST('2026-10-02T11:00:00')); // Gandhi Jayanti (NSE holiday in MARKET_HOLIDAYS)

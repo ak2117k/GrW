@@ -19,6 +19,12 @@ export interface OiSnapshotJobDeps {
   freshChain(underlying: string, expiry: string): Promise<HubChain | null>;
   repo: Pick<ChainRepo, 'writeOi' | 'writeChainSnapshot'>;
   clock: Pick<SessionClock, 'isOpen'>;
+  /**
+   * Whether chain JSON (`OptionChainSnapshot`) may be written; OI rows are written regardless.
+   * Off while HUB_SERVES_CHAIN is off: legacy readers would otherwise read the hub's ±N-strike chain.
+   * Default true.
+   */
+  writeChainJson?: () => boolean;
   log?: (m: string) => void;
 }
 
@@ -31,7 +37,8 @@ interface TargetState {
 /**
  * Spec §3 OiSnapshotJob: every 3 minutes while a target's venue is open, one oi_snapshots row per
  * quoted contract; the full chain JSON on the first run, every 5th run, and once at the venue's close
- * (what the closed-market view and the overnight review read). Never throws.
+ * (what the closed-market view and the overnight review read), while writeChainJson() allows it.
+ * Never throws.
  */
 export class OiSnapshotJob {
   private readonly state = new Map<string, TargetState>();
@@ -89,7 +96,8 @@ export class OiSnapshotJob {
       }
       this.counts.rows += await this.d.repo.writeOi(rows);
       st.runs++;
-      if (closing || st.runs % CHAIN_JSON_EVERY_RUNS === 1) await this.d.repo.writeChainSnapshot(chain);
+      const jsonDue = closing || st.runs % CHAIN_JSON_EVERY_RUNS === 1;
+      if (jsonDue && (this.d.writeChainJson?.() ?? true)) await this.d.repo.writeChainSnapshot(chain);
       this.lastAt[key] = chain.at;
     } catch (err) {
       this.counts.failures++;

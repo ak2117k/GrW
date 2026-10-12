@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
@@ -136,6 +136,7 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
   private hubSourceRef: HubPriceSource | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false;
+  private loaded = false;
   private readonly liveLimitCache = new Map<string, { at: number; squareOff: ReadonlyMap<string, string>; mtfMaxHoldDays: number | null }>();
 
   constructor(
@@ -273,6 +274,81 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     return h.pos;
   }
 
+  /**
+   * Spec §7.6, on boot (the first sweep): load every user's active positions, re-watch them at
+   * P0, re-read their orders. An EXITING position is re-placed by ensureExit with the same key
+   * (claimSeq); the first fresh price past the stop exits as RECOVERY_STOP.
+   */
+  async recover(now: number = Date.now()): Promise<number> {
+    const active = await this.repo.listActive();
+    for (const pos of active) {
+      const h = this.hold(pos, now, true);
+      await this.run(pos.id, () => this.applyOrders(h, new Date(now))).catch((err) => this.logger.error(`core position ${pos.id}: recovery failed: ${errorText(err)}`));
+    }
+    this.loaded = true;
+    this.logger.log(`lifecycle: recovered ${active.length} active core position(s)`);
+    return active.length;
+  }
+
+  /**
+   * CORE_POSITION_EXITS (Task 11): exit every active core position of the user, kill switch
+   * (priority 1) or daily loss (priority 2). Exits are never blocked; outside the session they
+   * are re-placed at the next open by ensureExit. Throws after trying all, so the cascade
+   * reports FAILED rather than a partial OK.
+   */
+  async exitAll(userId: string, cause: 'KILL_SWITCH' | 'DAILY_LOSS', reason: string): Promise<{ exitsRequested: number }> {
+    if (!this.loaded) await this.recover();
+    const mine = [...this.held.values()].filter((h) => h.pos.userId === userId && isActiveStatus(h.pos.status));
+    const failures: string[] = [];
+    let requested = 0;
+    for (const h of mine) {
+      try {
+        await this.run(h.pos.id, async () => {
+          const now = Date.now();
+          await this.exit(h, cause, reason, now, fresh(h.lastPrice, now));
+        });
+        requested += 1;
+      } catch (err) {
+        failures.push(`${h.pos.id}: ${errorText(err)}`);
+      }
+    }
+    if (failures.length > 0) throw new Error(`requested ${requested} of ${mine.length} core position exits; failed: ${failures.join('; ')}`);
+    return { exitsRequested: requested };
+  }
+
+  /** SP3/SP4 guard rails (SP3 spec §9): a stop may only tighten (spec §7.4). */
+  async proposeStop(userId: string, positionId: string, proposed: number, source: string, now: number = Date.now()): Promise<{ accepted: boolean; stopPrice: number | null }> {
+    const h = this.mine(userId, positionId);
+    return this.run(positionId, async () => {
+      const pos = h.pos;
+      if (!isActiveStatus(pos.status) || pos.status === 'EXITING' || pos.entryAvgPrice === null) return { accepted: false, stopPrice: pos.stopPrice };
+      const t = tightenStop(pos.stopPrice, proposed, pos.side);
+      if (!t.accepted) {
+        this.record('STOP_MOVED', h, { source, proposed, accepted: false, stop: pos.stopPrice }, new Date(now));
+        return { accepted: false, stopPrice: pos.stopPrice };
+      }
+      const updated = await this.persist(h, { ...this.pendingMarks(h), stopPrice: t.stop });
+      if (!updated) return { accepted: false, stopPrice: h.pos.stopPrice };
+      this.record('STOP_MOVED', h, { source, from: pos.stopPrice, to: t.stop, why: 'GUARD_RAIL', accepted: true }, new Date(now));
+      return { accepted: true, stopPrice: t.stop };
+    });
+  }
+
+  /** A guard rail or the owner asks for an exit (ranked with the stop, priority 3). */
+  async requestExit(userId: string, positionId: string, reason: 'GUARD_RAIL' | 'MANUAL', note: string, now: number = Date.now()): Promise<CorePosition> {
+    const h = this.mine(userId, positionId);
+    await this.run(positionId, async () => {
+      await this.exit(h, reason, note, now, fresh(h.lastPrice, now));
+    });
+    return h.pos;
+  }
+
+  private mine(userId: string, positionId: string): Held {
+    const h = this.held.get(positionId);
+    if (!h || h.pos.userId !== userId) throw new NotFoundException(`active core position ${positionId} not found`);
+    return h;
+  }
+
   /** The adapter's update stream (ruling L3): re-reduce the owning position. */
   async onOrderUpdate(order: CoreOrder): Promise<void> {
     if (!order.positionId) return;
@@ -312,6 +388,7 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     if (this.sweeping) return;
     this.sweeping = true;
     try {
+      if (!this.loaded) await this.recover(now);
       const blindAfterMs = await this.blindAfterMs(now);
       for (const h of [...this.held.values()]) {
         if (this.inflight.has(h.pos.id)) continue;

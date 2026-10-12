@@ -58,6 +58,17 @@ describe('kill-gate', () => {
     await expect(assertCoreEntryAllowed('adaptive-stop-track', { ref: 'INFY' })).resolves.toBeUndefined();
   });
 
+  it('a late re-check (just before opening) says so in its one refusal line, and throws the same error', async () => {
+    setCoreKillSwitchReader(reader({ isOnForPlatform: jest.fn(async () => true) }));
+    const err = await assertCoreEntryAllowed('ungated-track', { ref: 'INFY', recheck: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CoreKillSwitchEntryBlockedError);
+    expect(err).toMatchObject({ entry: 'ungated-track', ref: 'INFY' });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toBe(
+      '[ungated-track] new entry INFY refused at the re-check just before opening (engaged while the entry was being prepared): the core kill switch is on',
+    );
+  });
+
   it('invalidate reaches the registered reader, and is safe with none', () => {
     const r = reader();
     setCoreKillSwitchReader(r);

@@ -24,7 +24,7 @@ import type { PublicSignal, Segment } from '../../signal-fanout';
 import { AutoTradeRiskSizingService } from './auto-trade-risk-sizing.service';
 import { ExecutionClaimService } from './execution-claim.service';
 import { PerUserBrokerSessionFactory } from './per-user-broker-session.factory';
-import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
+import { coreEntryAllowed, CoreKillSwitchEntryBlockedError } from '../../trade-core/risk-wall/kill-gate';
 
 /**
  * The per-user auto-execution pipeline (TDA-011 §4). It is the sole
@@ -142,11 +142,24 @@ export class AutoExecutionService implements AutoExecutionPort {
         userId,
         { reason: 'ORDER', signalId: signal.entryId },
         (creds) =>
-          this.brokerFactory.withSession(creds, (session) =>
-            session.placeOrder(order, idempotencyKey),
-          ),
+          this.brokerFactory.withSession(creds, async (session) => {
+            // Re-check this user's core kill switch: the gate at the top ran before the
+            // gates, the claim and the decrypt + broker login, and an engage in that
+            // window must still stop the order. Checked inside the session, last thing
+            // before the broker call.
+            if (!(await coreEntryAllowed('auto-execution', { userId, ref: signal.symbol, recheck: true }))) {
+              throw new CoreKillSwitchEntryBlockedError('auto-execution', signal.symbol);
+            }
+            return session.placeOrder(order, idempotencyKey);
+          }),
       );
     } catch (err) {
+      if (err instanceof CoreKillSwitchEntryBlockedError) {
+        // Refused late: no order exists. Settle the claim and record the same terminal
+        // USER_KILL_SWITCH reject as the early refusal; no throw, so Bull does not retry.
+        await this.claims.markFailed(idempotencyKey, 'USER_KILL_SWITCH');
+        return this.rejectTerminal(userId, signal, idempotencyKey, 'USER_KILL_SWITCH');
+      }
       // Decrypt / ephemeral-login / infra fault. The claim is held, so a Bull
       // retry re-hits the unique constraint and skips — no double-place. Surface
       // as retryable so TDA-010 retries then dead-letters for TDA-012 reconcile.

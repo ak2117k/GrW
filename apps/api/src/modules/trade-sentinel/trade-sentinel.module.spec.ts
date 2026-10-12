@@ -1,3 +1,12 @@
+import type { Provider } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { Test } from '@nestjs/testing';
+import Anthropic from '@anthropic-ai/sdk';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
+import { AiGatewayService } from '../ai-gateway/ai-gateway.service';
+import { SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
+import { ClaudeCliTransport } from './adapters/claude-cli.transport';
 import { TradeSentinelModule } from './trade-sentinel.module';
 import { OI_WALL_SOURCE, OPEN_POSITIONS } from './ports/open-positions.port';
 import { ENGINE_OWNERSHIP_PROBE, RosterService } from './services/roster.service';
@@ -146,5 +155,66 @@ describe('TradeSentinelModule — every interface-typed dependency has a token',
       const tokens = injectedTokens(target);
       expect({ label, has: tokens.includes(token) }).toEqual({ label, has: true });
     }
+  });
+});
+
+/**
+ * SP3 A6 — the `ANTHROPIC_CLIENT` binding under `AI_GATEWAY_SENTINEL`.
+ *
+ * Boots the module's REAL factory provider (taken from the module metadata, so
+ * its `inject` list is exercised too) next to the real `AiGatewayModule`, with
+ * only Prisma faked. Building the whole sentinel module would drag in the
+ * market-data and broker graph, which this binding does not depend on.
+ */
+describe('TradeSentinelModule — ANTHROPIC_CLIENT binding (AI_GATEWAY_SENTINEL)', () => {
+  function clientProvider(): Provider {
+    const p = moduleMeta<Provider>('providers').find(
+      (x) => typeof x === 'object' && x !== null && 'provide' in x && x.provide === ANTHROPIC_CLIENT,
+    );
+    if (!p) throw new Error('no ANTHROPIC_CLIENT provider');
+    return p;
+  }
+
+  async function boot(env: Record<string, string>) {
+    const mod = await Test.createTestingModule({
+      imports: [
+        ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true, load: [() => env] }),
+        AiGatewayModule,
+      ],
+      providers: [clientProvider()],
+    })
+      .overrideProvider(PrismaService)
+      .useValue({ aiCall: { create: jest.fn(), aggregate: jest.fn() } })
+      .compile();
+    return { client: mod.get(ANTHROPIC_CLIENT), cli: mod.get(ClaudeCliTransport), mod };
+  }
+
+  it('no longer provides ClaudeCliTransport itself (the gateway module owns the one instance)', () => {
+    expect(providedTokens()).not.toContain(ClaudeCliTransport);
+    expect(moduleMeta<{ name?: string }>('imports').map((m) => m?.name)).toContain('AiGatewayModule');
+  });
+
+  it('flag unset, SENTINEL_JUDGE unset → a new Anthropic SDK client (exactly today)', async () => {
+    const { client } = await boot({});
+    expect(client).toBeInstanceOf(Anthropic);
+  });
+
+  it.each(['false', 'FALSE', '1', 'yes', ''])('AI_GATEWAY_SENTINEL=%p → the pre-gateway binding', async (flag) => {
+    const { client } = await boot({ AI_GATEWAY_SENTINEL: flag });
+    expect(client).toBeInstanceOf(Anthropic);
+  });
+
+  it('flag unset, SENTINEL_JUDGE=cli → the CLI transport, the SAME instance the gateway holds', async () => {
+    const { client, cli, mod } = await boot({ SENTINEL_JUDGE: 'cli' });
+    expect(client).toBe(cli);
+    const gw = mod.get(AiGatewayService) as unknown as {
+      deps: { adapters: { 'claude-cli': { cli: unknown } } };
+    };
+    expect(gw.deps.adapters['claude-cli'].cli).toBe(cli);
+  });
+
+  it.each(['true', ' TRUE '])('AI_GATEWAY_SENTINEL=%p → SentinelGatewayTransport', async (flag) => {
+    const { client } = await boot({ AI_GATEWAY_SENTINEL: flag, SENTINEL_JUDGE: 'cli' });
+    expect(client).toBeInstanceOf(SentinelGatewayTransport);
   });
 });

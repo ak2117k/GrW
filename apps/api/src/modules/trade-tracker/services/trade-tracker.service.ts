@@ -202,6 +202,41 @@ export function computeTickPatch(
  * Only net-nonzero positions are "open"; a squared-off intraday leg (netqty 0)
  * is treated as gone from the book so its tracker closes on the next reconcile.
  */
+/**
+ * Did the broker ANSWER this read? The SmartAPI client never rejects: a failed
+ * or unauthenticated call resolves to `{ status: false, data: null }`, an HTTP
+ * error to `{ status: 500, ... }`, an internal fault to `[]`. Only a strict
+ * `status === true` (or the newer `success === true`) is an answer.
+ */
+function brokerAnswered(envelope: unknown): boolean {
+  const e = envelope as { status?: unknown; success?: unknown } | null | undefined;
+  return !!e && !Array.isArray(e) && (e.status === true || e.success === true);
+}
+
+/**
+ * The positions array from a raw `getPosition` envelope, or NULL when the
+ * broker did not answer. An answered `data: null` is Angel's empty book → `[]`.
+ */
+export function answeredPositions(envelope: unknown): unknown[] | null {
+  if (!brokerAnswered(envelope)) return null;
+  const data = (envelope as { data?: unknown }).data;
+  if (Array.isArray(data)) return data;
+  return data == null ? [] : null;
+}
+
+/**
+ * The holdings array from a raw `getAllHolding` envelope (`data` is
+ * `{ holdings, totalholding }`), or NULL when the broker did not answer.
+ */
+export function answeredHoldings(envelope: unknown): unknown[] | null {
+  if (!brokerAnswered(envelope)) return null;
+  const data = (envelope as { data?: unknown }).data as { holdings?: unknown } | unknown[] | null | undefined;
+  if (data == null) return [];
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.holdings)) return data.holdings;
+  return data.holdings == null ? [] : null;
+}
+
 export function normalizePositions(positions: unknown): BookItem[] {
   if (!Array.isArray(positions)) return [];
   const out: BookItem[] = [];
@@ -337,7 +372,7 @@ export class TradeTrackerService implements OnModuleDestroy {
    */
   async snapshotBook(
     userId: string,
-  ): Promise<{ positions: unknown[]; holdings: unknown[] }> {
+  ): Promise<{ positions: unknown[] | null; holdings: unknown[] | null }> {
     // If the caller IS the market-data feed account, read via the feed's live
     // session instead of a fresh login — a second login on the same Angel One
     // client code would kill the feed's streaming session. Falls back to an
@@ -351,8 +386,8 @@ export class TradeTrackerService implements OnModuleDestroy {
       try {
         const api = this.authService.getSmartApi();
         raw = {
-          positions: (await api.getPosition())?.data ?? null,
-          holdings: (await api.getAllHolding())?.data ?? null,
+          positions: await api.getPosition(),
+          holdings: await api.getAllHolding(),
         };
       } catch (err) {
         this.logger.warn(
@@ -363,22 +398,22 @@ export class TradeTrackerService implements OnModuleDestroy {
     } else {
       raw = await this.ephemeralSnapshot(userId);
     }
-    const positions = Array.isArray(raw.positions) ? raw.positions : [];
-    // getHoldings() returns the `{ holdings, totalholding }` envelope.
-    const holdings = Array.isArray((raw.holdings as any)?.holdings)
-      ? (raw.holdings as any).holdings
-      : [];
-    return { positions, holdings };
+    // NULL, not `[]`, for a half the broker did not answer: collapsing it here
+    // would hand reconcile an "empty book" and defeat its fetchedKinds guard.
+    return {
+      positions: answeredPositions(raw.positions),
+      holdings: answeredHoldings(raw.holdings),
+    };
   }
 
-  /** One-login ephemeral broker snapshot via the isolated decrypt lease. */
+  /** One-login ephemeral broker snapshot (raw envelopes) via the isolated decrypt lease. */
   private ephemeralSnapshot(
     userId: string,
   ): Promise<{ positions: unknown; holdings: unknown }> {
     return this.decryptor.withDecryptedCredentials(userId, { reason: 'REVALIDATE' }, (creds) =>
       this.brokerFactory.withSession(creds, async (session) => ({
-        positions: await session.getPositions(),
-        holdings: await session.getHoldings(),
+        positions: await session.getPositionsEnvelope(),
+        holdings: await session.getHoldingsEnvelope(),
       })),
     );
   }
@@ -415,8 +450,8 @@ export class TradeTrackerService implements OnModuleDestroy {
 
   async reconcile(
     userId: string,
-    positions: unknown[],
-    holdings: unknown[],
+    positions: unknown[] | null,
+    holdings: unknown[] | null,
   ): Promise<void> {
     const book = [
       ...normalizePositions(positions),

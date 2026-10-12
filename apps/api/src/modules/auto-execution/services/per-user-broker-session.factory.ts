@@ -79,6 +79,18 @@ export interface UserBrokerSession {
   getPositions(): Promise<any>;
   getHoldings(): Promise<any>;
   getTradeBook(): Promise<any>;
+
+  /**
+   * The RAW broker ENVELOPE (`{ status, message, errorcode, data }`) of the
+   * positions / holdings reads, not just its `data`. The SmartAPI client never
+   * rejects: a failed or unauthenticated call resolves to `{ status: false,
+   * data: null }` (or `{ status: 500 }` on an HTTP error), while an empty book
+   * can be answered `{ status: true, data: null }` — so only the envelope can
+   * tell "the broker says you hold nothing" from "the broker did not answer".
+   * Same disposed-guard + timeout as every other read.
+   */
+  getPositionsEnvelope(): Promise<any>;
+  getHoldingsEnvelope(): Promise<any>;
 }
 
 /** Map our generic order types to Angel One SmartAPI order-type strings. */
@@ -240,11 +252,26 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
    * — the overview service turns them into an HTTP error, never a partial leak.
    */
   private async read(call: () => Promise<any>, label: string): Promise<any> {
+    const response = await this.readEnvelope(call, label);
+    return response?.data ?? null;
+  }
+
+  /** Positions read, whole envelope (see the interface). */
+  async getPositionsEnvelope(): Promise<any> {
+    return this.readEnvelope(() => this.client.getPosition(), 'Angel One getPosition');
+  }
+
+  /** Holdings read, whole envelope (see the interface). */
+  async getHoldingsEnvelope(): Promise<any> {
+    return this.readEnvelope(() => this.client.getAllHolding(), 'Angel One getAllHolding');
+  }
+
+  /** Disposed-guard + wall-clock cap; returns the broker's response untouched. */
+  private async readEnvelope(call: () => Promise<any>, label: string): Promise<any> {
     if (this.disposed) {
       throw new Error('UserBrokerSession has been disposed and can no longer be read');
     }
-    const response = await withTimeout(call(), BROKER_CALL_TIMEOUT_MS, label);
-    return response?.data ?? null;
+    return withTimeout(call(), BROKER_CALL_TIMEOUT_MS, label);
   }
 
   /** Mark the session unusable. Called by the factory in `finally`. */

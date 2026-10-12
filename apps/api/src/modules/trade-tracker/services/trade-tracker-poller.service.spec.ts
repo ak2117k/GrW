@@ -1,4 +1,5 @@
 import { Test } from '@nestjs/testing';
+import { SCHEDULE_CRON_OPTIONS } from '@nestjs/schedule/dist/schedule.constants';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
@@ -61,6 +62,13 @@ describe('TradeTrackerPoller', () => {
   });
 
   describe('reconcileAll', () => {
+    const IST = (local: string) => Date.parse(`${local}+05:30`);
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      jest.setSystemTime(IST('2026-10-07T10:00:00')); // Wednesday, every exchange open
+    });
+    afterEach(() => jest.useRealTimers());
+
     it('backfills every credentialed user then subscribes all OPEN tokens', async () => {
       prisma.brokerCredential.findMany.mockResolvedValue([{ userId: 'u1' }, { userId: 'u2' }]);
       service.distinctOpenTokens.mockResolvedValue(['111', '222']);
@@ -86,6 +94,59 @@ describe('TradeTrackerPoller', () => {
       await poller.reconcileAll();
       expect(service.backfill).not.toHaveBeenCalled();
       expect(feed.subscribe).not.toHaveBeenCalled();
+    });
+
+    describe('runs through the MCX evening session (the CRUDEOIL 8950 CE miss)', () => {
+      // The reconcile is the ONLY scheduled path that discovers a new broker
+      // position. Gated to 09:00-15:59 it never saw an MCX position opened in
+      // the evening session, so no tracker existed, nothing priced it, and the
+      // sentinel (which watches OPEN trackers only) was blind until 09:00.
+      const cronMeta = () =>
+        (Reflect as { getMetadata?: (k: unknown, t: unknown) => unknown }).getMetadata?.(
+          SCHEDULE_CRON_OPTIONS,
+          TradeTrackerPoller.prototype.reconcileAll,
+        ) as { cronTime?: string; timeZone?: string } | undefined;
+
+      it('is scheduled every 10 minutes from 09:00 to 23:50 IST, Mon-Fri', () => {
+        expect(cronMeta()?.cronTime).toBe('0 */10 9-23 * * 1-5');
+        expect(cronMeta()?.timeZone).toBe('Asia/Kolkata');
+      });
+
+      const credentialed = () =>
+        prisma.brokerCredential.findMany.mockResolvedValue([{ userId: 'u1' }]);
+
+      it.each([
+        ['19:30 on a weekday (MCX evening session)', '2026-10-12T19:30:00'],
+        ['23:20 on a weekday (MCX still open)', '2026-10-12T23:20:00'],
+        ['23:50 on a weekday (catches the MCX close-out)', '2026-10-12T23:50:00'],
+        ['09:00 on a weekday (MCX open)', '2026-10-12T09:00:00'],
+        ['15:50 on a weekday (catches the equity close-out, as before)', '2026-10-12T15:50:00'],
+      ])('does broker work at %s', async (_label, at) => {
+        jest.setSystemTime(IST(at));
+        credentialed();
+
+        await poller.reconcileAll();
+
+        expect(service.backfill).toHaveBeenCalledWith('u1');
+      });
+
+      it.each([
+        ['02:00 on a weekday', '2026-10-13T02:00:00'],
+        ['08:30 on a weekday (before any open)', '2026-10-13T08:30:00'],
+        ['a Saturday mid-day', '2026-10-10T11:00:00'],
+        ['a Sunday evening', '2026-10-11T19:30:00'],
+        ['an exchange holiday (Dussehra) evening', '2026-10-20T19:30:00'],
+        ['an exchange holiday (Dussehra) mid-day', '2026-10-20T11:00:00'],
+      ])('does NO broker work at %s', async (_label, at) => {
+        jest.setSystemTime(IST(at));
+        credentialed();
+
+        await poller.reconcileAll();
+
+        expect(prisma.brokerCredential.findMany).not.toHaveBeenCalled();
+        expect(service.backfill).not.toHaveBeenCalled();
+        expect(feed.subscribe).not.toHaveBeenCalled();
+      });
     });
   });
 

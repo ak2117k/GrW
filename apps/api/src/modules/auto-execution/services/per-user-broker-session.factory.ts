@@ -43,6 +43,8 @@ export interface UserSmartApiLike {
   getPosition(): Promise<any>;
   getAllHolding(): Promise<any>;
   getTradeBook(): Promise<any>;
+  /** Today's order book (smartapi-javascript `getOrderBook`). Read-only. */
+  getOrderBook(): Promise<any>;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -91,6 +93,13 @@ export interface UserBrokerSession {
    */
   getPositionsEnvelope(): Promise<any>;
   getHoldingsEnvelope(): Promise<any>;
+
+  /**
+   * The RAW order-book envelope. Angel can accept an order (orderid returned) and
+   * reject it a moment later in the RMS/exchange; the reason only appears here
+   * (`status: 'rejected'`, `text`). Same disposed-guard + timeout as every read.
+   */
+  getOrderBookEnvelope(): Promise<any>;
 }
 
 /** Map our generic order types to Angel One SmartAPI order-type strings. */
@@ -266,6 +275,11 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
     return this.readEnvelope(() => this.client.getAllHolding(), 'Angel One getAllHolding');
   }
 
+  /** Order book read, whole envelope (see the interface). */
+  async getOrderBookEnvelope(): Promise<any> {
+    return this.readEnvelope(() => this.client.getOrderBook(), 'Angel One getOrderBook');
+  }
+
   /** Disposed-guard + wall-clock cap; returns the broker's response untouched. */
   private async readEnvelope(call: () => Promise<any>, label: string): Promise<any> {
     if (this.disposed) {
@@ -369,6 +383,27 @@ export class PerUserBrokerSessionFactory {
       // session. Never let a logout fault mask the callback's own result/error.
       brokerSession.dispose();
       await this.safeLogout(client, creds.clientId);
+    }
+  }
+
+  /**
+   * Run `fn` against an ALREADY-AUTHENTICATED client that someone else owns — the
+   * owner's warm per-user feed session (sentinel auto-exit, plan ruling R1). A
+   * second Angel login on the same client code kills that session's live stream,
+   * so this never logs in and never logs out; it only lends the one order mapper
+   * above. The wrapper is disposed in `finally` so it cannot outlive the callback;
+   * disposing the wrapper does NOT touch the lent client (its owner keeps it).
+   */
+  async borrow<T>(
+    client: UserSmartApiLike,
+    clientId: string,
+    fn: (session: UserBrokerSession) => Promise<T>,
+  ): Promise<T> {
+    const session = new AngelOneUserBrokerSession(client, clientId, this.logger);
+    try {
+      return await fn(session);
+    } finally {
+      session.dispose();
     }
   }
 

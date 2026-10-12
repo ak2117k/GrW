@@ -6,9 +6,11 @@ import { PaperMatcherService } from './paper-matcher.service';
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
- * CORE_SQUARE_OFF's order half (spec §4.7): cancels every pending core order of the
+ * CORE_SQUARE_OFF's entry half (spec §4.7): cancels every pending core ENTRY order of the
  * user, each through the ledger (margin released) and out of the matcher (hub watch
- * released). Exits of open core positions arrive with M4. It goes through the ledger and
+ * released). EXIT orders are left alone: they are the square-off of open positions
+ * (SP2 M4 ruling L14), and SP2 M4's CoreSquareOff composes this with the lifecycle's
+ * exits. It goes through the ledger and
  * the matcher rather than the adapter because the adapter injects CoreKillSwitchService,
  * which injects this port (plan ruling 12): adapter → kill switch → square-off would be a
  * cycle. Any failed cancellation throws after trying every order, so the kill switch
@@ -22,7 +24,8 @@ export class PaperOrderSquareOff implements CoreSquareOffPort {
   ) {}
 
   async squareOffAll(userId: string, cause: CoreSquareOffCause, reason: string): Promise<CoreSquareOffResult> {
-    const open = await this.ledger.openOrdersForUser(userId);
+    // SP2 M4 (ruling L14): EXIT orders are the square-off of open positions; cancelling them would undo it.
+    const open = (await this.ledger.openOrdersForUser(userId)).filter((o) => o.purpose === 'ENTRY');
     const failures: string[] = [];
     let cancelled = 0;
     for (const o of open) {
@@ -36,12 +39,8 @@ export class PaperOrderSquareOff implements CoreSquareOffPort {
       }
     }
     if (failures.length > 0) {
-      throw new Error(`cancelled ${cancelled} of ${open.length} pending core orders; failed: ${failures.join('; ')}`);
+      throw new Error(`cancelled ${cancelled} of ${open.length} pending core entry orders; failed: ${failures.join('; ')}`);
     }
-    return {
-      cancelledOrders: cancelled,
-      exitsRequested: 0,
-      detail: `${cancelled} pending core order(s) cancelled; open core positions are exited by the lifecycle (M4), none in M3`,
-    };
+    return { cancelledOrders: cancelled, exitsRequested: 0, detail: `${cancelled} pending core entry order(s) cancelled` };
   }
 }

@@ -28,6 +28,7 @@ export interface NewOrderRow {
   state: OrderState;
   rejectReason: string | null;
   submittedAt: Date;
+  positionId?: string | null;
 }
 
 export interface OrderUpdate {
@@ -65,6 +66,7 @@ export function toCoreOrder(r: CoreOrderRow): CoreOrder {
     refPrice: r.refPrice.toNumber(),
     purpose: r.purpose as OrderPurpose,
     strategyVersionId: r.strategyVersionId,
+    positionId: r.positionId,
     state: r.state as OrderState,
     rejectReason: r.rejectReason,
     submittedAt: r.submittedAt,
@@ -106,6 +108,11 @@ export class CoreOrderRepository {
 
   async listForPosition(userId: string, vehicle: Vehicle, token: string, db: PaperDb = this.prisma): Promise<CoreOrder[]> {
     return (await db.coreOrder.findMany({ where: { userId, vehicle, token }, orderBy: OLDEST_FIRST })).map(toCoreOrder);
+  }
+
+  /** SP2 M4: one core position's orders. */
+  async listForPositionId(userId: string, positionId: string, db: PaperDb = this.prisma): Promise<CoreOrder[]> {
+    return (await db.coreOrder.findMany({ where: { userId, positionId }, orderBy: OLDEST_FIRST })).map(toCoreOrder);
   }
 
   /** System scan (matcher boot): every user's open orders. */

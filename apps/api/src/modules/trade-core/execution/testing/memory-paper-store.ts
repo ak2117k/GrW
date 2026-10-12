@@ -132,6 +132,10 @@ export class MemoryPaperStore {
       this.read('listForPosition', db);
       return this.orders.filter((o) => o.userId === userId && o.vehicle === vehicle && o.instrument.token === token).map(copy);
     },
+    listForPositionId: async (userId: string, positionId: string, db?: PaperDb) => {
+      this.read('listForPositionId', db);
+      return this.orders.filter((o) => o.userId === userId && o.positionId === positionId).map(copy);
+    },
     listOpenAll: async () => this.orders.filter((o) => isOpenState(o.state)).map(copy),
     listMtfHolders: async () => {
       const seen = new Map<string, { userId: string; token: string }>();
@@ -159,6 +163,7 @@ export class MemoryPaperStore {
         refPrice: data.refPrice,
         purpose: data.purpose,
         strategyVersionId: data.strategyVersionId,
+        positionId: data.positionId ?? null,
         state: data.state,
         rejectReason: data.rejectReason,
         submittedAt: data.submittedAt,

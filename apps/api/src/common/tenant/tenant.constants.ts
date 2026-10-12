@@ -35,6 +35,8 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'CoreOrder',
   'CoreFill',
   'CoreCashLedger',
+  // SP2 M4: per-user core positions.
+  'CorePosition',
 ]);
 
 /**

@@ -2,25 +2,18 @@ import type { ModuleRef } from '@nestjs/core';
 import type { CoreKillSwitch } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import type { AuditService } from '../../../common/audit/audit.service';
-import type { SessionClock } from '../../market-hub/session-clock';
-import { createCoreSessionClock, type RiskVerdictSink } from '../risk-wall/ports';
+import { createCoreSessionClock } from '../risk-wall/ports';
 import type { CoreKillSwitchRepository, NewKillSwitchRow } from '../risk-wall/repositories/core-kill-switch.repository';
-import { checkRisk } from '../risk-wall/risk-wall';
 import { CoreKillSwitchService } from '../risk-wall/services/core-kill-switch.service';
-import type { CoreRiskLimitService } from '../risk-wall/services/core-risk-limit.service';
-import { RiskWallService } from '../risk-wall/services/risk-wall.service';
 import type { SiloSquareOffAdapter } from '../risk-wall/services/silo-square-off.adapter';
-import { ctxFixture, intentFixture, limitsFixture } from '../risk-wall/testing/risk-fixtures';
 import { coreOrderOwner, PaperMatcherService } from './paper-matcher.service';
 import { PaperLedgerService, type PlaceContext } from './paper-ledger.service';
 import { PaperOrderSquareOff } from './paper-order-square-off';
-import { PaperRiskStateProvider } from './paper-risk-state.provider';
 import { FakeHub, fakeHubSource, fakeModuleRef } from './testing/fake-hub';
 import { fakeDefaults, MemoryPaperStore } from './testing/memory-paper-store';
 import { cashBuy, NOW, optionBuy } from './testing/paper-fixtures';
 
 const OPEN: PlaceContext = { sessionOpen: true, killSwitchActive: false };
-const AT = new Date(NOW.getTime() + 10);
 const D = (s: string) => new Prisma.Decimal(s);
 
 function setup() {
@@ -29,67 +22,8 @@ function setup() {
   const hub = new FakeHub();
   const ledger = new PaperLedgerService(store.tx, store.orderRepo, store.fillRepo, store.ledgerRepo, defaults);
   const matcher = new PaperMatcherService(ledger, defaults, fakeModuleRef(fakeHubSource({ user_A: hub })) as unknown as ModuleRef, { isOpen: () => true });
-  return { store, hub, ledger, matcher, provider: new PaperRiskStateProvider(ledger), squareOff: new PaperOrderSquareOff(ledger, matcher) };
+  return { store, hub, ledger, matcher, squareOff: new PaperOrderSquareOff(ledger, matcher) };
 }
-
-describe('RISK_STATE_PROVIDER (paper)', () => {
-  it("reports deployed capital, open positions, today's net P&L and entries; P&L and pricing stay fail-closed", async () => {
-    const { ledger, provider } = setup();
-    const { order } = await ledger.place(cashBuy(), OPEN, NOW);
-    await ledger.applyFill('user_A', order.id, order, { qty: 100, price: D('500.7'), priceAt: AT });
-    expect(await provider.liveState('user_A', NOW)).toEqual({
-      asOf: NOW,
-      openPositions: [
-        { positionId: 'CASH_INTRADAY:2885', strategyId: '', vehicle: 'CASH_INTRADAY', symbol: 'RELIANCE-EQ', underlying: 'RELIANCE-EQ', direction: 'LONG', state: 'OPEN', priced: false },
-      ],
-      realisedPnlToday: -26.92,
-      openPnl: null,
-      pnlTodayByStrategy: {},
-      tradesToday: 1,
-      deployedCapital: { CASH_INTRADAY: 10014, MTF: 0, OPTIONS_BUY: 0 },
-      dailyLossLatched: false,
-    });
-  });
-
-  it('a bought PE is SHORT its underlying', async () => {
-    const { ledger, provider } = setup();
-    const req = optionBuy({ instrument: { exchange: 'NFO', token: '43522', symbol: 'NIFTY13OCT2625000PE', lotSize: 75, underlying: 'NIFTY' } });
-    const { order } = await ledger.place(req, OPEN, NOW);
-    await ledger.applyFill('user_A', order.id, order, { qty: 150, price: D('100'), priceAt: AT });
-    const [p] = (await provider.liveState('user_A', NOW)).openPositions;
-    expect(p).toMatchObject({ vehicle: 'OPTIONS_BUY', underlying: 'NIFTY', direction: 'SHORT' });
-  });
-
-  it('with this state the Risk Wall still rejects every entry until M4 (P&L unknown)', async () => {
-    const { provider } = setup();
-    const v = checkRisk(intentFixture(), ctxFixture({ state: await provider.liveState('user_A', NOW) }));
-    expect(v.verdict).toBe('REJECT');
-    expect(v.reasons.map((r) => r.code)).toContain('PNL_UNKNOWN');
-  });
-
-  it('an unreadable ledger fails closed: liveState throws and the Risk Wall rejects (CONTEXT_UNAVAILABLE)', async () => {
-    const { ledger, provider } = setup();
-    jest.spyOn(ledger, 'funds').mockRejectedValue(new Error('ledger down'));
-    await expect(provider.liveState('user_A', NOW)).rejects.toThrow('ledger down');
-    const wall = new RiskWallService(
-      { inForce: jest.fn().mockResolvedValue(limitsFixture()) } as unknown as CoreRiskLimitService,
-      { isActive: jest.fn().mockResolvedValue(false) } as unknown as CoreKillSwitchService,
-      provider,
-      { record: jest.fn().mockResolvedValue(undefined) } as RiskVerdictSink,
-      { isOpen: () => true } as unknown as SessionClock,
-    );
-    const v = await wall.check(intentFixture(), NOW);
-    expect(v.verdict).toBe('REJECT');
-    expect(v.reasons.map((r) => r.code)).toEqual(['CONTEXT_UNAVAILABLE']);
-  });
-
-  it('an unparseable deployed amount is reported unknown (null), never as 0', async () => {
-    const { ledger, provider } = setup();
-    const funds = await ledger.funds('user_A');
-    jest.spyOn(ledger, 'funds').mockResolvedValue({ ...funds, deployedByVehicle: { ...funds.deployedByVehicle, MTF: 'garbage' } });
-    expect((await provider.liveState('user_A', NOW)).deployedCapital.MTF).toBeNull();
-  });
-});
 
 describe('CORE_SQUARE_OFF (paper)', () => {
   it("cancels every pending core order of the user and nothing of another user's", async () => {
@@ -101,7 +35,7 @@ describe('CORE_SQUARE_OFF (paper)', () => {
     expect(await squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop everything')).toEqual({
       cancelledOrders: 2,
       exitsRequested: 0,
-      detail: '2 pending core order(s) cancelled; open core positions are exited by the lifecycle (M4), none in M3',
+      detail: '2 pending core entry order(s) cancelled',
     });
     expect(store.orders.map((o) => [o.userId, o.state])).toEqual([['user_A', 'CANCELLED'], ['user_A', 'CANCELLED'], ['user_B', 'OPEN']]);
     expect([a1, a2, b1].map((o) => matcher.isTracked(o.id))).toEqual([false, false, true]);
@@ -112,7 +46,18 @@ describe('CORE_SQUARE_OFF (paper)', () => {
     await ledger.place(cashBuy(), OPEN, NOW);
     await ledger.place(optionBuy(), OPEN, NOW);
     jest.spyOn(ledger, 'close').mockRejectedValueOnce(new Error('db down'));
-    await expect(squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop')).rejects.toThrow('cancelled 1 of 2 pending core orders; failed: ');
+    await expect(squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop')).rejects.toThrow('cancelled 1 of 2 pending core entry orders; failed: ');
+  });
+
+  it('leaves exit orders alone: they are the square-off of open positions (ruling L14)', async () => {
+    const { store, ledger, squareOff } = setup();
+    const entry = (await ledger.place(cashBuy(), OPEN, NOW)).order;
+    await ledger.applyFill('user_A', entry.id, entry, { qty: 100, price: D('500'), priceAt: NOW }, NOW);
+    const exit = (await ledger.place(cashBuy({ idempotencyKey: 'intent_cash_1:exit:1', purpose: 'EXIT', side: 'SELL', type: 'LIMIT', limitPrice: 600 }), OPEN, NOW)).order;
+    const pending = (await ledger.place(optionBuy(), OPEN, NOW)).order;
+    expect(await squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop')).toEqual({ cancelledOrders: 1, exitsRequested: 0, detail: '1 pending core entry order(s) cancelled' });
+    expect(store.orders.find((o) => o.id === exit.id)?.state).toBe('OPEN');
+    expect(store.orders.find((o) => o.id === pending.id)?.state).toBe('CANCELLED');
   });
 });
 
@@ -152,7 +97,7 @@ describe('kill switch ON → CORE_SQUARE_OFF (paper)', () => {
 
     expect(r.cascade?.core).toEqual({
       status: 'OK',
-      detail: '2 pending core order(s) cancelled; open core positions are exited by the lifecycle (M4), none in M3 (cancelled 2 orders, requested 0 exits)',
+      detail: '2 pending core entry order(s) cancelled (cancelled 2 orders, requested 0 exits)',
     });
     expect(silos.squareOffAll).toHaveBeenCalledTimes(1);
     expect(store.orders.map((o) => o.state)).toEqual(['CANCELLED', 'CANCELLED']);

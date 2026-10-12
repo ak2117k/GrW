@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, Logger, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException, Optional, UnprocessableEntityException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { chargesForLeg, type Segment } from '../../trade-sentinel/charges';
 import { VEHICLES, type Vehicle } from '../strategies/blocks/block-types';
@@ -6,6 +6,7 @@ import type { CoreFunds, CoreOrder, CoreOrderPatch, CoreOrderRequest, CorePositi
 import { isWholeLots, maxLotsProblem, priceShapeProblem, validateOrder } from './fill-model';
 import { applyPositionFill, balances, dailyMtfInterest, FLAT, istDate, money, mtfInterestDays, ZERO, type PositionState } from './ledger-math';
 import { marginFor, marginRefPrice, mtfFunded, proportionalRelease } from './margin';
+import { CoreOrderEvents } from './order-events';
 import { isOpenState, nextState, transition } from './order-state';
 import type { PaperSettings, PaperSettingsResult } from './paper-settings';
 import { CoreCashLedgerRepository, type LedgerEntry, type NewLedgerRow } from './repositories/core-cash-ledger.repository';
@@ -154,6 +155,7 @@ export class PaperLedgerService {
     private readonly fills: CoreFillRepository,
     private readonly ledger: CoreCashLedgerRepository,
     private readonly defaults: CorePaperDefaultsService,
+    @Optional() private readonly events: CoreOrderEvents = new CoreOrderEvents(),
   ) {}
 
   /**
@@ -178,7 +180,7 @@ export class PaperLedgerService {
       loaded = null;
     }
     try {
-      return await this.tx.run(req.userId, async (db) => {
+      const r = await this.tx.run(req.userId, async (db) => {
         const again = await this.orders.findByKey(req.idempotencyKey, db);
         if (again) return { order: this.sameUser(again, req.userId), created: false, settings: null };
         const settings = loaded?.ok ? loaded.settings : null;
@@ -222,6 +224,7 @@ export class PaperLedgerService {
             refPrice: req.refPrice,
             purpose: req.purpose,
             strategyVersionId: req.strategyVersionId,
+            positionId: req.positionId ?? null,
             state: transition('NEW', reason ? 'REJECT' : 'ACCEPT'),
             rejectReason: reason,
             submittedAt: now,
@@ -242,6 +245,8 @@ export class PaperLedgerService {
         await this.ledger.append(entries, db);
         return { order, created: true, settings };
       });
+      if (r.created) this.events.emit(r.order);
+      return r;
     } catch (err) {
       if (!isIdempotencyKeyViolation(err)) throw err;
       // The transaction rolled back. A same-user race finds its order; a key held by
@@ -258,7 +263,7 @@ export class PaperLedgerService {
    * for want of a price (it had one), so REJECT on PARTIAL also returns it unchanged.
    */
   async close(userId: string, orderId: string, event: 'CANCEL' | 'REJECT', reason: string): Promise<CoreOrder> {
-    return this.tx.run(userId, async (db) => {
+    return this.emitted(this.tx.run(userId, async (db) => {
       const order = await this.orders.findForUser(userId, orderId, db);
       if (!order) throw new NotFoundException(`core order ${orderId} not found`);
       const state = nextState(order.state, event);
@@ -290,7 +295,7 @@ export class PaperLedgerService {
         }
       }
       return updated;
-    });
+    }));
   }
 
   /**
@@ -310,7 +315,7 @@ export class PaperLedgerService {
     const loaded = await this.defaults.settings(now.getTime());
     if (!loaded.ok) return null;
     const settings = loaded.settings;
-    return this.tx.run(userId, async (db) => {
+    return this.emitted(this.tx.run(userId, async (db) => {
       const order = await this.orders.findForUser(userId, orderId, db);
       if (!order || !isOpenState(order.state) || !matchesExpectation(order, expected)) return null;
       const remaining = order.qty - order.filledQty;
@@ -368,7 +373,7 @@ export class PaperLedgerService {
       }
       await this.ledger.append(entries, db);
       return updated;
-    });
+    }));
   }
 
   /**
@@ -380,12 +385,12 @@ export class PaperLedgerService {
    * with `triggered: true` goes through applyFill with `fill.triggered` instead.
    */
   async markTriggered(userId: string, orderId: string, expected: OrderExpectation, at: Date): Promise<CoreOrder | null> {
-    return this.tx.run(userId, async (db) => {
+    return this.emitted(this.tx.run(userId, async (db) => {
       const order = await this.orders.findForUser(userId, orderId, db);
       if (!order || !isOpenState(order.state) || order.type !== 'SL_MARKET' || !matchesExpectation(order, expected)) return null;
       if (order.triggeredAt !== null) return order;
       return this.orders.update(userId, orderId, { state: order.state, filledQty: order.filledQty }, { triggeredAt: at }, db);
-    });
+    }));
   }
 
   /**
@@ -397,7 +402,7 @@ export class PaperLedgerService {
     const loaded = await this.defaults.settings(now.getTime());
     if (!loaded.ok) throw new UnprocessableEntityException(`paper settings are incomplete: ${loaded.missing.join(', ')}`);
     const settings = loaded.settings;
-    return this.tx.run(userId, async (db) => {
+    return this.emitted(this.tx.run(userId, async (db) => {
       const order = await this.orders.findForUser(userId, orderId, db);
       if (!order) throw new NotFoundException(`core order ${orderId} not found`);
       if (!isOpenState(order.state)) throw new ConflictException(`core order ${orderId} is ${order.state}; it cannot be modified`);
@@ -437,7 +442,7 @@ export class PaperLedgerService {
       if (!updated) throw new ConflictException(`core order ${orderId} changed while modifying; retry`);
       await this.ledger.append(entries, db);
       return updated;
-    });
+    }));
   }
 
   /** Every non-flat position of the user, from fills; margin from the ledger (rows with a fillId). */
@@ -568,6 +573,41 @@ export class PaperLedgerService {
 
   openOrdersForUser(userId: string): Promise<CoreOrder[]> {
     return this.orders.listOpenForUser(userId);
+  }
+
+  /** SP2 M4 (ruling L3): every committed order change; returns the unsubscribe. */
+  onOrderUpdate(fn: (order: CoreOrder) => void): () => void {
+    return this.events.subscribe(fn);
+  }
+
+  /** SP2 M4: one core position's orders, oldest first. */
+  listPositionOrders(userId: string, positionId: string): Promise<CoreOrder[]> {
+    return this.orders.listForPositionId(userId, positionId);
+  }
+
+  /**
+   * SP2 M4: today's (IST) net realised P&L per core position: REALISED_PNL plus CHARGES rows
+   * of the position's orders. MTF interest is per holding (token), not per position, so it
+   * counts in dayStats' user total only.
+   */
+  async netPnlTodayByPosition(userId: string, now: Date): Promise<Map<string, Dec>> {
+    const day = istDate(now);
+    const [rows, orders] = await Promise.all([this.ledger.listForUser(userId), this.orders.listForUser(userId)]);
+    const positionOf = new Map(orders.filter((o) => o.positionId).map((o) => [o.id, o.positionId as string]));
+    const out = new Map<string, Dec>();
+    for (const r of rows) {
+      if ((r.type !== 'REALISED_PNL' && r.type !== 'CHARGES') || r.orderId === null || istDate(r.createdAt) !== day) continue;
+      const pid = positionOf.get(r.orderId);
+      if (pid) out.set(pid, (out.get(pid) ?? ZERO).plus(r.amount));
+    }
+    return out;
+  }
+
+  /** Emit a committed order (null: nothing was written). */
+  private async emitted<T extends CoreOrder | null>(write: Promise<T>): Promise<T> {
+    const o = await write;
+    if (o) this.events.emit(o);
+    return o;
   }
 
   async funds(userId: string): Promise<CoreFunds> {

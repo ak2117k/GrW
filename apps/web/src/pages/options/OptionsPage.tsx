@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react';
 import { Grid3X3, ChevronDown, Activity } from 'lucide-react';
 import { cn } from '@/utils/cn';
+import { chainBadge, CHAIN_TONE_CLASS } from '@/utils/chainAge';
 import { PageLoadingOverlay } from '@/components/common';
 import { useOptionsStore } from '@/stores/options-store';
 import { useOptionsChain } from '@/hooks/useOptionsChain';
@@ -31,6 +32,7 @@ export default function OptionsPage() {
   const spotPrice = useOptionsStore((s) => s.spotPrice);
   const strikeRange = useOptionsStore((s) => s.strikeRange);
   const isLoading = useOptionsStore((s) => s.isLoading);
+  const chainMeta = useOptionsStore((s) => s.chainMeta);
   const setUnderlying = useOptionsStore((s) => s.setUnderlying);
   const setExpiry = useOptionsStore((s) => s.setExpiry);
   const setStrikeRange = useOptionsStore((s) => s.setStrikeRange);
@@ -108,6 +110,9 @@ export default function OptionsPage() {
     [],
   );
 
+  // The page re-renders on every poll, so the age is current to within one poll.
+  const badge = chainBadge(chainMeta, Date.now());
+
   return (
     <div className="space-y-4">
       {/* Header row */}
@@ -159,6 +164,12 @@ export default function OptionsPage() {
               {spotPrice.toLocaleString('en-IN')}
             </span>
           </div>
+        )}
+
+        {badge && (
+          <span className={cn('text-xs font-mono', CHAIN_TONE_CLASS[badge.tone])} title="Option chain age">
+            {badge.label}
+          </span>
         )}
 
         {/* Loading indicator */}

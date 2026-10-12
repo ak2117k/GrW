@@ -5,6 +5,7 @@ import api from '@/services/api';
 import type { OptionsChainEntry } from '@/types';
 import { useMarketStore } from '@/stores/market-store';
 import { Card } from './_shared';
+import { chainBadge, CHAIN_TONE_CLASS } from '@/utils/chainAge';
 
 interface Props {
   symbol: string;
@@ -29,8 +30,11 @@ const NON_EQUITY_FNO_EXCHANGES = new Set(['MCX', 'CDS']);
 interface ChainResponse {
   chain: OptionsChainEntry[];
   expiry: string | null;
-  spotPrice: number;
+  spotPrice: number | null;
   underlying: string;
+  at?: string;
+  source?: string;
+  status?: string;
 }
 
 /**
@@ -153,13 +157,18 @@ export default function OptionsChainPreviewCard({ symbol, token, exchange }: Pro
         )
       : null;
 
+  const badge = chainBadge(data, Date.now());
+
   return (
     <Card
       title={`Options Chain${data.expiry ? ` — ${data.expiry.slice(0, 10)}` : ''}`}
       action={
-        <Link to={`/options/${symbol}`} className="text-xs text-blue-400 hover:text-blue-300">
-          View full chain →
-        </Link>
+        <span className="flex items-center gap-3">
+          {badge && <span className={`text-xs font-mono ${CHAIN_TONE_CLASS[badge.tone]}`}>{badge.label}</span>}
+          <Link to={`/options/${symbol}`} className="text-xs text-blue-400 hover:text-blue-300">
+            View full chain →
+          </Link>
+        </span>
       }
     >
       {slice.length === 0 ? (

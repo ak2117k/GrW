@@ -215,6 +215,26 @@ describe('CoreLifecycleService: exits (spec §7.2–§7.4)', () => {
     expect(h.positions.rows[0]).toMatchObject({ status: 'EXITING', exitReason: 'STOP', exitSeq: 1 });
   });
 
+  it('a lost version race never loosens a trailing stop held in memory (review fix 2)', async () => {
+    const h = lifecycleHarness();
+    const p = await h.lifecycle.openPosition(openRequest({ atr: 5 }, { strategyId: 'cs_adaptive', strategyVersionId: 'csv_adaptive_v1', stopPrice: 494 }));
+    await h.price(500);
+    await h.price(505);
+    await h.price(505);
+    await h.lifecycle.sweep(Date.now());
+    await h.settle();
+    expect(h.positions.rows[0]).toMatchObject({ status: 'PARTIAL', stopPrice: 500, highWater: 505 });
+    await h.price(508); // the trail moves the stop to 503 in memory, not yet flushed (ruling L11)
+    // Another writer bumps the row: the flush below loses the race and reloads stop 500.
+    await h.positions.repo.update('user_A', p.id, h.positions.rows[0].version, { blindSince: null });
+    h.advance(16_000); // the 508 is stale now: no fresh price re-derives the stop
+    await h.lifecycle.sweep(Date.now());
+    await h.settle();
+    await h.lifecycle.sweep(Date.now());
+    await h.settle();
+    expect(h.positions.rows[0]).toMatchObject({ status: 'PARTIAL', stopPrice: 503, highWater: 508 });
+  });
+
   it('the kill switch (reader) exits at priority 1 from the sweep, the safety net behind the cascade', async () => {
     const h = lifecycleHarness();
     const p = await h.lifecycle.openPosition(openRequest());

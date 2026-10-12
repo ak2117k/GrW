@@ -708,19 +708,40 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     else if (updated.openQty > 0) this.attachHub(h);
   }
 
-  /** Version-guarded write (ruling L11). A lost race reloads the row and returns null. */
+  /**
+   * Version-guarded write (ruling L11). A lost race reloads the row and returns null; marks
+   * still unflushed in memory are re-applied over it (tighten-only, extremes kept), so a
+   * reload never loosens a stop (spec §7.4).
+   */
   private async persist(h: Held, patch: PositionPatch): Promise<CorePosition | null> {
     const updated = await this.repo.update(h.pos.userId, h.pos.id, h.pos.version, patch);
     if (!updated) {
-      const fresh = await this.repo.findForUser(h.pos.userId, h.pos.id);
+      const reloaded = await this.repo.findForUser(h.pos.userId, h.pos.id);
       this.logger.warn(`core position ${h.pos.id}: a concurrent write won; reloaded`);
-      if (fresh) h.pos = fresh;
+      const unflushed = h.dirty ? h.pos : null;
       h.dirty = false;
+      if (reloaded) {
+        h.pos = reloaded;
+        if (unflushed && isActiveStatus(reloaded.status)) this.keepMarks(h, unflushed);
+      }
       return null;
     }
     h.pos = updated;
     h.dirty = false;
     return updated;
+  }
+
+  /** After a reload: the tighter stop, the wider water marks and an armed trail survive; dirty again if any differ. */
+  private keepMarks(h: Held, mem: CorePosition): void {
+    const r = h.pos;
+    const t = mem.stopPrice === null ? null : tightenStop(r.stopPrice, mem.stopPrice, r.side);
+    const stopPrice = t?.accepted ? t.stop : r.stopPrice;
+    const highWater = r.highWater === null ? mem.highWater : mem.highWater === null ? r.highWater : Math.max(r.highWater, mem.highWater);
+    const lowWater = r.lowWater === null ? mem.lowWater : mem.lowWater === null ? r.lowWater : Math.min(r.lowWater, mem.lowWater);
+    const trailActive = r.trailActive || mem.trailActive;
+    if (stopPrice === r.stopPrice && highWater === r.highWater && lowWater === r.lowWater && trailActive === r.trailActive) return;
+    h.pos = { ...r, stopPrice, highWater, lowWater, trailActive };
+    h.dirty = true;
   }
 
   /** The in-memory marks not yet written (ruling L11); empty when nothing is dirty. */

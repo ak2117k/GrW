@@ -184,6 +184,10 @@ export class UngatedWatchService {
     // 7. profitTarget and executedPrice are already set in step 5 above,
     //    anchored to the live fill price so the target is always 2% from entry.
 
+    // Re-check the core kill switch: the gate above ran before the quote fetch, and an
+    // engage (plus its cascade square-off) in that window must still stop this entry.
+    await assertCoreEntryAllowed('ungated-track', { ref: input.symbol, recheck: true });
+
     // 8. Create the WATCHING entry row.
     const createInput: UngatedCreateEntryInput = {
       alertId: input.alertId,

@@ -2,6 +2,7 @@
 import {
   aiExitOrderTag,
   findOrder,
+  findOrderByTag,
   hasOpenOrderFor,
   isFlat,
   isMarketRefusal,
@@ -277,5 +278,18 @@ describe('istDayStartUtc', () => {
     // 2026-10-12 23:59 IST = 18:29Z; 2026-10-13 00:01 IST = 18:31Z
     expect(istDayStartUtc(new Date('2026-10-12T18:29:00Z')).toISOString()).toBe('2026-10-11T18:30:00.000Z');
     expect(istDayStartUtc(new Date('2026-10-12T18:31:00Z')).toISOString()).toBe('2026-10-12T18:30:00.000Z');
+  });
+});
+
+describe('findOrderByTag (review fix 1)', () => {
+  it('finds our order by ordertag; a live row wins over a dead one; absent → null', () => {
+    const book = [
+      { orderid: 'A', ordertag: 'axMx', status: 'rejected', text: 'r' },
+      { orderid: 'B', ordertag: 'axMx', status: 'open', text: '' },
+      { orderid: 'C', ordertag: 'other', status: 'open' },
+    ];
+    expect(findOrderByTag(book, 'axMx')).toEqual({ orderId: 'B', status: 'open', text: '' });
+    expect(findOrderByTag([book[0]], 'axMx')).toEqual({ orderId: 'A', status: 'rejected', text: 'r' });
+    expect(findOrderByTag(book, 'axLx')).toBeNull();
   });
 });

@@ -41,8 +41,13 @@ describe('sentinel-executor is decoupled from trade-sentinel (spec §4, plan R14
 describe('sentinel-executor safety shape (plan Global Constraints, Review Focus)', () => {
   it('placeOrder has exactly one call site in executor source (the claimed, single-leg `place`)', () => {
     const sites = source().flatMap((f) =>
-      [...code(f).matchAll(/\.placeOrder\(/g)].map(() => relative(__dirname, f).replace(/\\/g, '/')));
+      [...code(f).matchAll(/\.placeOrder(Classified)?\(/g)].map(() => relative(__dirname, f).replace(/\\/g, '/')));
     expect(sites).toEqual(['services/sentinel-exit-executor.service.ts']);
+  });
+
+  it('only the classified placement is used (review fix 1: the legacy mapping turns an SDK `{}` into REJECTED)', () => {
+    const legacy = source().filter((f) => /\.placeOrder\(/.test(code(f)));
+    expect(legacy).toEqual([]);
   });
 
   it('never consults the core kill switch (exits are never blocked) and never uses the env-first feed login', () => {

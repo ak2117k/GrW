@@ -169,6 +169,25 @@ export function findOrder(rows: unknown[], orderId: string): OrderBookEntry | nu
   return { status: String(r.status ?? r.orderstatus ?? '').toLowerCase(), text: String(r.text ?? '') };
 }
 
+/** rejected/cancelled: the order never moved (or no longer can move) the position. */
+export function isDeadOrderStatus(status: string): boolean {
+  const s = String(status).toLowerCase();
+  return s === 'rejected' || s === 'cancelled';
+}
+
+const statusOf = (r: Row) => String(r?.status ?? r?.orderstatus ?? '').toLowerCase();
+
+/**
+ * Our own order in the book, found by its `ordertag` (review fix 1). A live
+ * (not rejected/cancelled) row wins over a dead one if the tag appears twice.
+ */
+export function findOrderByTag(rows: unknown[], tag: string): (OrderBookEntry & { orderId: string }) | null {
+  const mine = (rows as Row[]).filter((o) => String(o?.ordertag ?? '') === tag);
+  if (mine.length === 0) return null;
+  const r = mine.find((o) => !isDeadOrderStatus(statusOf(o))) ?? mine[0];
+  return { orderId: String(r.orderid ?? ''), status: statusOf(r), text: String(r.text ?? '') };
+}
+
 export function isTerminalOrderStatus(status: string): boolean {
   return TERMINAL.has(String(status).toLowerCase());
 }

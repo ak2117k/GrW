@@ -1,14 +1,18 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-executor.service.ts
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import type { OrderRequest, OrderResponse } from '../../../common/interfaces/broker-adapter.interface';
-import type { UserBrokerSession } from '../../auto-execution/services/per-user-broker-session.factory';
+import type { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
+import type {
+  ClassifiedPlacement,
+  UserBrokerSession,
+} from '../../auto-execution/services/per-user-broker-session.factory';
 import { answeredPositions } from '../../trade-tracker/services/trade-tracker.service';
 import type { SessionClock } from '../../market-hub/session-clock';
 import type { AiExitStatus, AutoExitConfig } from '../domain/auto-exit.types';
 import {
   aiExitOrderTag,
   findOrder,
+  findOrderByTag,
   hasOpenOrderFor,
   isFlat,
   isMarketRefusal,
@@ -32,6 +36,8 @@ export type AiExitOutcome = { status: AiExitStatus | 'DUPLICATE'; reason?: strin
 
 /** Plan R10: order-book checks at +2 s, +5 s, +10 s after placing. */
 const CONFIRM_STEPS_MS = [2_000, 3_000, 5_000];
+/** Review fix 1: grace before looking for an order whose placement answer was not definitive. */
+const TAG_LOOKUP_DELAY_MS = 2_000;
 
 type Tracker = { id: string; userId: string; status: string; kind: string; exchange: string; token: string; qty: number };
 type Inst = { tickSize: number | null; lotSize: number | null } | null;
@@ -135,16 +141,7 @@ export class SentinelExitExecutor {
           await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message });
           return this.confirm(s, run, o, r.orderId, 'M');
         }
-        if (r.status === 'REJECTED' && isMarketRefusal(r.message)) {
-          await this.repo.update(id, { brokerMessage: r.message });
-          return this.fallback(s, run, o, null);
-        }
-        if (r.status === 'REJECTED') {
-          return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message });
-        }
-        // FAILED (threw / timed out) or PLACED without an id — the order may or may
-        // not exist at the broker (ruling R9). Never retried, never a fallback.
-        return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
+        return this.settleUnplaced(s, run, o, r, 'M');
       });
     } catch (err) {
       if (err instanceof FeedSessionNotReadyError) {
@@ -157,9 +154,56 @@ export class SentinelExitExecutor {
   }
 
   /** The ONLY call site of placeOrder. Marks the run as sent before the call. */
-  private place(s: UserBrokerSession, run: Run, o: OrderRequest, leg: 'M' | 'L'): Promise<OrderResponse> {
+  private place(s: UserBrokerSession, run: Run, o: OrderRequest, leg: 'M' | 'L'): Promise<ClassifiedPlacement> {
     run.sent = true;
-    return s.placeOrder(o, aiExitOrderTag(run.v.id, leg));
+    return s.placeOrderClassified(o, aiExitOrderTag(run.v.id, leg));
+  }
+
+  /**
+   * Review fix 1. A placement that did not come back PLACED-with-an-id is settled
+   * from the ORDER BOOK, by our own ordertag, never from the SDK's answer alone:
+   * the SDK resolves network errors/timeouts to `{}` and HTTP errors to
+   * `{status:<http>}`, so the order may exist.
+   *  - book not answered                      → FAILED: ORDER_UNCERTAIN
+   *  - our tag live/complete in the book      → PLACED (then the R10 confirm)
+   *  - our tag rejected/cancelled in the book → REJECTED (MARKET refusal → the one fallback)
+   *  - no row with our tag + Angel's definitive REJECTED → REJECTED (MARKET refusal → fallback)
+   *  - no row with our tag otherwise          → FAILED: ORDER_UNCERTAIN
+   * Never re-sent.
+   */
+  private async settleUnplaced(
+    s: UserBrokerSession, run: Run, o: OrderRequest, r: ClassifiedPlacement, leg: 'M' | 'L',
+  ): Promise<AiExitOutcome> {
+    const { id, v } = run;
+    const definitive = r.status === 'REJECTED';
+    if (!definitive) await this.sleep(TAG_LOOKUP_DELAY_MS);
+    const book = await this.rows(() => s.getOrderBookEnvelope());
+    if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
+    const mine = findOrderByTag(book, aiExitOrderTag(v.id, leg));
+
+    if (mine && mine.status !== 'rejected' && mine.status !== 'cancelled') {
+      this.logger.warn(`[ai-exit] ${o.symbol} placement answer was "${r.message}" but order ${mine.orderId || '?'} (${mine.status || 'unknown'}) carries our tag — treating as PLACED`);
+      await this.repo.update(id, { status: 'PLACED', brokerOrderId: mine.orderId || null, brokerMessage: r.message, orderStatus: mine.status || null });
+      return mine.orderId ? this.confirm(s, run, o, mine.orderId, leg) : { status: 'PLACED' };
+    }
+    if (mine) {
+      const text = mine.text || r.message;
+      if (mine.status === 'rejected' && leg === 'M' && isMarketRefusal(text)) {
+        await this.repo.update(id, { orderStatus: 'rejected', brokerMessage: text });
+        return this.fallback(s, run, o, mine.orderId || null);
+      }
+      return this.finish(id, v, 'REJECTED', mine.status === 'cancelled' ? 'CANCELLED' : 'BROKER_REJECTED', {
+        orderStatus: mine.status, brokerMessage: text,
+      });
+    }
+    if (definitive) {
+      if (leg === 'M' && isMarketRefusal(r.message)) {
+        await this.repo.update(id, { brokerMessage: r.message });
+        return this.fallback(s, run, o, null);
+      }
+      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message });
+    }
+    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
   }
 
   /** A broker read whose throw (timeout, disposed) is treated as "not answered". */
@@ -244,8 +288,7 @@ export class SentinelExitExecutor {
       await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message });
       return this.confirm(s, run, limit, r.orderId, 'L');
     }
-    if (r.status === 'REJECTED') return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message });
-    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
+    return this.settleUnplaced(s, run, limit, r, 'L');
   }
 
   private async finish(

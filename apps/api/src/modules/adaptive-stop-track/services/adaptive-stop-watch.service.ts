@@ -270,6 +270,11 @@ export class AdaptiveStopWatchService {
       throw new AdaptiveStopRiskBudgetError(input.symbol);
     }
 
+    // Re-check the core kill switch: the gate above ran before the quote, decision-gate
+    // and ATR fetches, and an engage (plus its cascade square-off) in that window must
+    // still stop this entry.
+    await assertCoreEntryAllowed('adaptive-stop-track', { ref: input.symbol, recheck: true });
+
     // 8. Create the WATCHING entry row (with the resolved stop + risk metadata).
     const createInput: AdaptiveStopCreateEntryInput = {
       alertId: input.alertId,

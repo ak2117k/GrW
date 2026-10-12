@@ -96,7 +96,8 @@ services:
         condition: service_healthy
 
   # SP3 entry scorer + decision-corpus retrieval (ai-engine/Dockerfile, src.scorer_main).
-  # Internal only: no host ports, no Caddy route; the API reaches it at http://ai-engine:5000.
+  # Internal only: no host ports, no Caddy route; the API reaches it at http://ai-engine:5000
+  # via AI_SCORER_URL (NOT AI_ENGINE_URL, which still serves ai-advisor / weekly-report).
   # Off until the owner enables `--profile ai` after measuring headroom (spec §6.5).
   ai-engine:
     logging: *logging
@@ -106,6 +107,7 @@ services:
     mem_limit: 384m
     environment:
       MODELS_DIR: /models
+      # AI_DB_PASSWORD is interpolated unescaped: it must be URL-safe (see compose.env.example).
       AI_DB_URL: postgresql://grw_ai:${AI_DB_PASSWORD}@postgres:5432/${PG_DB}
     volumes:
       - /opt/grw/models:/models:ro

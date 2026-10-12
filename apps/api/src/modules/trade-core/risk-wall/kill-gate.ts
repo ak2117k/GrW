@@ -46,9 +46,21 @@ export function invalidateCoreKillSwitchCache(): void {
   reader?.invalidate();
 }
 
+/**
+ * `recheck: true` marks the second call an entry makes just before the write that opens
+ * the position (the first call ran before seconds of quote / candle / login I/O, and the
+ * switch may have been engaged, and the cascade run, in between). It changes only the
+ * log line; the answer and the refusal are the same.
+ */
+export interface CoreEntryContext {
+  userId?: string | null;
+  ref?: string | null;
+  recheck?: boolean;
+}
+
 export async function coreEntryAllowed(
   entry: GuardedEntry,
-  ctx: { userId?: string | null; ref?: string | null } = {},
+  ctx: CoreEntryContext = {},
 ): Promise<boolean> {
   let why: string;
   try {
@@ -59,13 +71,14 @@ export async function coreEntryAllowed(
   } catch (err) {
     why = `the core kill switch state cannot be read (${err instanceof Error ? err.message : String(err)}); failing closed`;
   }
-  logger.warn(`[${entry}] new entry${ctx.ref ? ` ${ctx.ref}` : ''} refused: ${why}`);
+  const when = ctx.recheck ? ' at the re-check just before opening (engaged while the entry was being prepared)' : '';
+  logger.warn(`[${entry}] new entry${ctx.ref ? ` ${ctx.ref}` : ''} refused${when}: ${why}`);
   return false;
 }
 
 export async function assertCoreEntryAllowed(
   entry: GuardedEntry,
-  ctx: { userId?: string | null; ref?: string | null } = {},
+  ctx: CoreEntryContext = {},
 ): Promise<void> {
   if (!(await coreEntryAllowed(entry, ctx))) throw new CoreKillSwitchEntryBlockedError(entry, ctx.ref ?? null);
 }

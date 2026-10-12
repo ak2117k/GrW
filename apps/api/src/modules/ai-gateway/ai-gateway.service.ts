@@ -125,8 +125,16 @@ export class AiGatewayService implements AiGateway {
           adapter.send(req),
         );
         const latencyMs = Math.max(0, Date.now() - startedAt - queuedMs);
+        // Unreported counts price as 0 (nothing is estimated); the reported
+        // ones, cache writes/reads included, are in the stored `response.usage`.
         const cost = price
-          ? costInr(price, result.meta.inputTokens ?? 0, result.meta.outputTokens ?? 0)
+          ? costInr(
+              price,
+              result.meta.inputTokens ?? 0,
+              result.meta.outputTokens ?? 0,
+              result.meta.cacheCreationInputTokens ?? 0,
+              result.meta.cacheReadInputTokens ?? 0,
+            )
           : 0;
         reservation?.settle(cost);
         this.audit(base, { result, cost, latencyMs, queuedMs });

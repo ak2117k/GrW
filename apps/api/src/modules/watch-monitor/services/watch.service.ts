@@ -524,6 +524,11 @@ export class WatchService {
       : Math.max(1, Math.floor(tradeCapital / Math.max(referencePrice, 1)));
     const qty = options.quantityOverride ?? computedQty;
 
+    // Re-check the core kill switch: the gate above ran before the live price fetch, and
+    // an engage (plus its cascade square-off) in that window must still stop this entry.
+    // Same outcome as the early refusal: null, the entry stays WATCHING.
+    if (!(await coreEntryAllowed('watch-monitor', { ref: entryId, recheck: true }))) return null;
+
     const trade = await this.trade.executeTrade({
       symbol: (entry as any).optionsToken ? (entry as any).optionsToken : entry.symbol,
       // Equity fallback must be the numeric instrument token (entry.token),

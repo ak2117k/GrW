@@ -55,6 +55,10 @@ export class AnandDualTrackService {
       this.repo.hasLossTodayBySymbol('swing', input.symbol),
     ]);
 
+    // Re-check the core kill switch: the gate above ran before the guard reads, and an
+    // engage in that window must still stop both entries (and their fan-out).
+    if (!(await coreEntryAllowed('anand-dual-track', { ref: input.symbol, recheck: true }))) return;
+
     if (activeIntraday) {
       this.logger.log(`[anand] intraday: ${input.symbol} already has active TRADED entry — skipping`);
     } else if (intradayHitToday) {

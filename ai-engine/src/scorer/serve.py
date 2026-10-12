@@ -66,12 +66,27 @@ class ScorerHolder:
     def mode(self) -> str:
         return f"model:{self.model_id}" if self.model_id else "rule"
 
-    def load(self, model_id: str | None) -> None:
-        """Load ``<models_dir>/<model_id>.json``; None → rule-only. Raises on a missing/bad artifact."""
+    def load(self, model_id: str | None, registry_gate: str | None = None) -> None:
+        """Load ``<models_dir>/<model_id>.json``; None → rule-only. Raises on a missing/bad artifact.
+
+        GO ONLY. A model is served only if its training gate was ``GO``: the artifact's own ``gate``
+        (written by training since this check), else — for artifacts written before it — the
+        ``ai_models`` row's gate passed in as ``registry_gate``. An artifact that says ``NO_GO`` is
+        refused whatever the registry says. A refused model leaves the holder rule-only (its
+        ``rule_calibrator`` is not adopted either) and logs one warning.
+        """
         if model_id is None:
             self.model_id, self._clf, self._reg, self._cal = None, None, None, None
             return
-        art = load_artifact(self.models_dir / f"{Path(model_id).stem}.json")
+        stem = Path(model_id).stem
+        art = load_artifact(self.models_dir / f"{stem}.json")
+        gate = art.get("gate") or registry_gate
+        if gate != "GO":
+            logger.warning("scorer: refusing model %s: training gate is %s, not GO (reasons: %s); "
+                           "serving rule scores", stem, gate or "unrecorded",
+                           ", ".join(art.get("gateReasons") or []) or "n/a")
+            self.load(None)
+            return
         clf = booster_from_json(art["classifier"])
         reg = booster_from_json(art["regressor"]) if art.get("regressor") else None
         self._clf, self._reg, self._cal = clf, reg, art.get("calibrator")

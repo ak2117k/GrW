@@ -961,6 +961,18 @@ describe('AngelOneAdapterService — cross-segment token collision', () => {
     expect(out.get('2885')).toBe(2500);
   });
 
+  it('getLiveQuote reports an empty successful reply as "no quote returned", not "SUCCESS"', async () => {
+    // Angel answers status=true / message "SUCCESS" with an empty fetched
+    // list for a token it doesn't know (expired or synthetic). Surfacing the
+    // reply's message as the error read "Get live quote failed: SUCCESS".
+    const marketData = jest.fn().mockResolvedValue({
+      status: true, message: 'SUCCESS', data: { fetched: [], unfetched: [] },
+    });
+    const { adapter } = buildAdapter(marketData);
+
+    await expect(adapter.getLiveQuote('25017', 'MCX')).rejects.toThrow('no quote returned for MCX:25017');
+  });
+
   it('getLiveQuote prefers the fresh REST snapshot over the WS cache (no regression)', async () => {
     const marketData = jest.fn().mockResolvedValue({
       data: { fetched: [{ symbolToken: '2885', tradingSymbol: 'RELIANCE', ltp: 2500, open: 2490, high: 2510, low: 2480, close: 2495 }] },
@@ -970,5 +982,55 @@ describe('AngelOneAdapterService — cross-segment token collision', () => {
 
     const q = await adapter.getLiveQuote('2885', 'NSE');
     expect(q.ltp).toBe(2500); // REST wins
+  });
+});
+
+/**
+ * Production boot 2026-10-12: a boot job reached the shared adapter before the
+ * feed login had built the SmartAPI client, and every adapter method failed
+ * with "Cannot read properties of null (reading '<method>')". With a REAL,
+ * never-logged-in auth service the adapter must instead fail with an explicit
+ * "not authenticated" error — which is also what `isNotAuthenticatedError`
+ * (and so the NO_FEED_SESSION warning) recognises.
+ */
+describe('AngelOneAdapterService — no feed session yet (null client)', () => {
+  function buildUnauthenticatedAdapter(): AngelOneAdapterService {
+    const neverLoggedIn = new AngelOneAuthService({
+      hasFeedCredentials: jest.fn().mockResolvedValue(false),
+      withFeedCredentials: jest.fn(),
+    } as any);
+    const fakeWs = { on: jest.fn(), removeListener: jest.fn() } as unknown as AngelOneWebSocketService;
+    const adapter = new AngelOneAdapterService(neverLoggedIn, fakeWs);
+    jest.spyOn(adapter as any, 'sleep').mockImplementation(() => Promise.resolve());
+    return adapter;
+  }
+
+  const NULL_DEREF = /cannot read properties of null/i;
+
+  it('getHistoricalData rejects with "not authenticated", never a null dereference', async () => {
+    const adapter = buildUnauthenticatedAdapter();
+    const to = new Date();
+    const from = new Date(to.getTime() - 60 * 60 * 1000);
+    const err = await adapter
+      .getHistoricalData('99926000', 'NSE', '1d', from, to)
+      .then(() => null, (e: unknown) => e as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err!.message).not.toMatch(NULL_DEREF);
+    expect(err!.message).toMatch(/not authenticated/i);
+  });
+
+  it.each<[string, (a: AngelOneAdapterService) => Promise<unknown>]>([
+    ['getPositions', (a: AngelOneAdapterService) => a.getPositions()],
+    ['getOrders', (a: AngelOneAdapterService) => a.getOrders()],
+    ['cancelOrder', (a: AngelOneAdapterService) => a.cancelOrder('o-1')],
+    ['searchInstruments', (a: AngelOneAdapterService) => a.searchInstruments('NIFTY')],
+  ])('%s fails explicitly (not a null dereference)', async (_name, call) => {
+    const adapter = buildUnauthenticatedAdapter();
+    const err = await Promise.resolve()
+      .then(() => call(adapter))
+      .then(() => null, (e: unknown) => e as Error);
+    // Some methods degrade to an empty result instead of throwing; either way
+    // they must never surface the anonymous null dereference.
+    if (err) expect(err.message).not.toMatch(NULL_DEREF);
   });
 });

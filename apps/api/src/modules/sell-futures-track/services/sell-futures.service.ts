@@ -130,6 +130,11 @@ export class SellFuturesService {
     const executedPrice = futPrice;
     const profitTarget = executedPrice * (1 - PROFIT_TARGET_PCT);
 
+    // Re-check the core kill switch: the gate above ran before the futures resolve and
+    // quote fetch, and an engage (plus its cascade square-off) in that window must still
+    // stop this entry.
+    await assertCoreEntryAllowed('sell-futures-track', { ref: input.symbol, recheck: true });
+
     // Create the WATCHING entry, carrying both the equity symbol and the
     // resolved futures contract.
     const createInput: SellFuturesCreateEntryInput = {

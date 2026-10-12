@@ -135,6 +135,10 @@ export class BreakoutSwingService {
       throw new BreakoutSwingRejectError(symbol, `not above prev close (₹${price} ≤ ₹${prevClose})`);
     }
 
+    // Re-check the core kill switch: the gate above ran before the quote and candle
+    // fetches, and an engage in that window must still stop this resting order.
+    await assertCoreEntryAllowed('breakout-swing-track', { ref: symbol, recheck: true });
+
     // 5. Both gates pass — queue the resting limit-buy. No score filter.
     const limitPrice = price * (1 + LIMIT_PCT / 100);
     const created = await this.repo.createQueuedEntry({

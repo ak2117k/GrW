@@ -60,7 +60,45 @@ describe('AnthropicApiProvider', () => {
     expect(create.mock.calls[0]).toHaveLength(1);
     expect(create.mock.calls[0][0]).toEqual(request());
     expect(result.message).toBe(reply);
-    expect(result.meta).toEqual({ inputTokens: 1234, outputTokens: 56, billed: true });
+    expect(result.meta).toEqual({
+      inputTokens: 1234,
+      outputTokens: 56,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+      billed: true,
+    });
+  });
+
+  it('records prompt-cache writes and reads the API reports separately from input_tokens', async () => {
+    const reply = {
+      content: [{ type: 'text', text: '{}' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 40, output_tokens: 7, cache_creation_input_tokens: 3000, cache_read_input_tokens: 9000 },
+    };
+    const provider = new AnthropicApiProvider({ messages: { create: jest.fn().mockResolvedValue(reply) } });
+    const result = await provider.send(request());
+    expect(result.meta).toEqual({
+      inputTokens: 40,
+      outputTokens: 7,
+      cacheCreationInputTokens: 3000,
+      cacheReadInputTokens: 9000,
+      billed: true,
+    });
+    expect(result.message).toBe(reply);
+  });
+
+  it('records null — never invented — for cache fields that are absent or not numbers', async () => {
+    const reply = {
+      content: [{ type: 'text', text: '{}' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 40, output_tokens: 7, cache_creation_input_tokens: null },
+    };
+    const provider = new AnthropicApiProvider({
+      messages: { create: jest.fn().mockResolvedValue(reply as never) },
+    });
+    const result = await provider.send(request());
+    expect(result.meta.cacheCreationInputTokens).toBeNull();
+    expect(result.meta.cacheReadInputTokens).toBeNull();
   });
 
   it('records null tokens when the SDK reply carries no usage', async () => {
@@ -69,7 +107,13 @@ describe('AnthropicApiProvider', () => {
       messages: { create: jest.fn().mockResolvedValue(reply) },
     });
     const result = await provider.send(request());
-    expect(result.meta).toEqual({ inputTokens: null, outputTokens: null, billed: true });
+    expect(result.meta).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+      billed: true,
+    });
   });
 
   it('propagates an SDK rejection as the same error instance', async () => {
@@ -92,7 +136,13 @@ describe('ClaudeCliProvider', () => {
     const result = await provider.send(request());
 
     expect(provider.name).toBe('claude-cli');
-    expect(result.meta).toEqual({ inputTokens: 12, outputTokens: 3, billed: false });
+    expect(result.meta).toEqual({
+      inputTokens: 12,
+      outputTokens: 3,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+      billed: false,
+    });
     expect(result.message).toEqual({
       stop_reason: 'end_turn',
       content: [{ type: 'text', text: '{}' }],
@@ -102,7 +152,13 @@ describe('ClaudeCliProvider', () => {
   it('records null tokens — never invented — when the envelope has no usage (Review Focus 3)', async () => {
     spawnMock.mockImplementation(() => fakeChild('{"result":"{}","stop_reason":"end_turn"}'));
     const result = await new ClaudeCliProvider(new ClaudeCliTransport()).send(request());
-    expect(result.meta).toEqual({ inputTokens: null, outputTokens: null, billed: false });
+    expect(result.meta).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+      billed: false,
+    });
   });
 
   it('records null for usage fields that are not numbers', async () => {
@@ -110,7 +166,30 @@ describe('ClaudeCliProvider', () => {
       fakeChild('{"result":"{}","stop_reason":"end_turn","usage":{"input_tokens":"12","output_tokens":null}}'),
     );
     const result = await new ClaudeCliProvider(new ClaudeCliTransport()).send(request());
-    expect(result.meta).toEqual({ inputTokens: null, outputTokens: null, billed: false });
+    expect(result.meta).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+      billed: false,
+    });
+  });
+
+  it('reads cache token counts from the envelope usage when the CLI reports them', async () => {
+    spawnMock.mockImplementation(() =>
+      fakeChild(
+        '{"result":"{}","stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":3,' +
+          '"cache_creation_input_tokens":500,"cache_read_input_tokens":800}}',
+      ),
+    );
+    const result = await new ClaudeCliProvider(new ClaudeCliTransport()).send(request());
+    expect(result.meta).toEqual({
+      inputTokens: 12,
+      outputTokens: 3,
+      cacheCreationInputTokens: 500,
+      cacheReadInputTokens: 800,
+      billed: false,
+    });
   });
 
   it('messages.create returns the same message as createWithMeta for the same envelope', async () => {

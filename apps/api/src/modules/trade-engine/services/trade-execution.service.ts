@@ -6,7 +6,9 @@ import {
   HttpException,
   HttpStatus,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
+import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 import {
   BrokerAdapter,
   OrderRequest,
@@ -115,6 +117,14 @@ export class TradeExecutionService {
         `Instrument not found: ${request.symbol} on ${request.exchange}`,
         HttpStatus.NOT_FOUND,
       );
+    }
+
+    // ---- STEP 3b: Re-check the core kill switch, last thing before the order ----
+    // Every caller (watch, auto-trade, universe scanner, POST /trades/execute) checked
+    // the gate before its own I/O and the risk / settings / instrument reads above; an
+    // engage (plus its cascade square-off) in that window must still stop this entry.
+    if (!(await coreEntryAllowed('trade-engine', { ref: request.symbol, recheck: true }))) {
+      throw new ForbiddenException('New entries are refused: the core kill switch is on (or its state cannot be read)');
     }
 
     // ---- STEP 4: Place order ----

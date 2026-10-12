@@ -22,6 +22,8 @@ import {
   type Candle,
 } from './user-historical.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
+import { greekExpiry, mapOptionGreeks } from './user-option-greeks.util';
+import type { OptionGreekRow } from '../../market-hub/chain/chain.types';
 import { describeUnfetched } from '../utils/quote-from-candles';
 import { depthFromSnapQuote } from '../utils/depth-levels';
 import { HISTORICAL_MIN_GAP_MS, fetchChunksResilient, rowsOrThrottle, throwForMissingData } from './angel-throttle';
@@ -84,6 +86,7 @@ export interface UserFeedSessionDeps {
     logout: Function;
     getCandleData: Function;
     marketData: Function;
+    optionGreek: Function;
   };
   wsFactory: (opts: {
     jwttoken: string;
@@ -112,6 +115,7 @@ export class UserFeedSession implements UserFeedSessionLike {
     logout: Function;
     getCandleData: Function;
     marketData: Function;
+    optionGreek: Function;
   } | null = null;
   /** Client code — kept for logout() on dispose; not a secret credential. */
   private clientId: string | null = null;
@@ -387,6 +391,25 @@ export class UserFeedSession implements UserFeedSessionLike {
     }
 
     return mapFullQuotes(response?.data?.fetched);
+  }
+
+  /**
+   * Greeks + IV for every contract of `name` expiring `expiryYmd`, in ONE call over THIS user's own
+   * session. The session does NOT pace this call: callers must (the market hub's `greek` endpoint
+   * budget does). A throttle-shaped answer rejects with AngelThrottleError (throwForMissingData's
+   * rule); an empty list is a real "none". Rows missing IV or a Greek are dropped (mapOptionGreeks).
+   */
+  async getOptionGreeks(name: string, expiryYmd: string): Promise<OptionGreekRow[]> {
+    await this.ensureConnected();
+    if (!this.smartApi) {
+      throw new Error('UserFeedSession has no SmartAPI client after connect');
+    }
+    const response: any = await this.smartApi.optionGreek({
+      name: name.toUpperCase(),
+      expirydate: greekExpiry(expiryYmd),
+    });
+    if (response?.data == null) throwForMissingData(response, `optionGreek (${name} ${expiryYmd})`);
+    return mapOptionGreeks(response.data);
   }
 
   private delay(ms: number): Promise<void> {

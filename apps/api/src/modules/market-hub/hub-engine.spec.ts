@@ -264,8 +264,9 @@ describe('HubEngine', () => {
       positions: { hub: 3, legacy: 1, unpriced: 0, lastHubAt: Date.now(), lastUnpricedAt: null },
       tracks: { hub: 0, legacy: 0, unpriced: 2, lastHubAt: null, lastUnpricedAt: Date.now() },
       browser: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
+      chain: { hub: 0, legacy: 0, unpriced: 0, lastHubAt: null, lastUnpricedAt: null },
       listenerErrors: 0,
-      flags: { positions: false, tracks: false, browser: false }, // no consumerFlags dep: every switch reads as off
+      flags: { positions: false, tracks: false, browser: false, chain: false }, // no consumerFlags dep: every switch reads as off
     });
     e.stop();
   });
@@ -346,5 +347,65 @@ describe('HubEngine', () => {
     expect(e.status().consumers.browser).toEqual({ hub: 4, legacy: 1, unpriced: 0, lastHubAt: Date.now(), lastUnpricedAt: null });
     expect(e.status().consumers.positions.hub).toBe(0);
     e.stop();
+  });
+
+  it('quoteNow batches 82 legs into two governed quote calls, keyed by EXCHANGE:token', async () => {
+    const { e, broker } = engine();
+    await e.start();
+    broker.quoteCalls.length = 0;
+    const refs = Array.from({ length: 82 }, (_, i) => ({ exchange: 'NFO' as const, token: String(40000 + i), symbol: `L${i}` }));
+    const p = e.quoteNow(refs, 1);
+    await jest.advanceTimersByTimeAsync(1000);
+    const out = await p;
+    expect(broker.quoteCalls.map((c) => c.length)).toEqual([50, 32]);
+    expect(out.size).toBe(82);
+    expect(out.get('NFO:40000')).toEqual({ kind: 'ok', tick: expect.objectContaining({ ltp: 100 }) });
+    e.stop();
+  });
+
+  it('greeks uses the greek budget, merges identical calls, and reports a throttle instead of throwing', async () => {
+    const { AngelThrottleError } = await import('../market-data/services/angel-throttle');
+    const { e, broker } = engine();
+    await e.start();
+    broker.greeksImpl = async () => [{ strike: 25000, optionType: 'CE', iv: 13, delta: 0.5, gamma: 0.001, theta: -10, vega: 9 }];
+    const [a, b] = await Promise.all([e.greeks('NIFTY', '2026-10-13', 1), e.greeks('NIFTY', '2026-10-13', 1)]);
+    expect(a.kind).toBe('ok');
+    expect(b).toEqual(a);
+    expect(broker.greekCalls).toEqual([{ name: 'NIFTY', expiry: '2026-10-13' }]);
+
+    broker.greeksImpl = async () => {
+      throw new AngelThrottleError('rate');
+    };
+    const pending = e.greeks('BANKNIFTY', '2026-10-13', 1);
+    await jest.advanceTimersByTimeAsync(2000);
+    expect((await pending).kind).toBe('throttled');
+    e.stop();
+  });
+
+  it('with chain deps the engine exposes chains, reports chain status, and marks held positions', async () => {
+    const { MemoryChainRepo } = await import('./testing/memory-chain-repo');
+    const { GreeksCalculatorService } = await import('../options-chain/services/greeks-calculator.service');
+    const repo = new MemoryChainRepo();
+    repo.heldInfo.set('NFO:35001', { name: 'NIFTY', expiry: '2026-10-27' });
+    const e = new HubEngine({
+      broker: new FakeBroker(),
+      clock: new SessionClock({ holidays: MARKET_HOLIDAYS }),
+      cap: 50,
+      defaults: [NIFTY],
+      chain: { repo, math: new GreeksCalculatorService(), strikesAround: 20, coreUnderlyings: [], snapshots: false },
+    });
+    await e.start();
+    await e.setPositions([POS]);
+    await jest.advanceTimersByTimeAsync(0);
+    expect(e.chains).not.toBeNull();
+    expect(e.status().chain).toEqual(expect.objectContaining({ builds: 0, held: 1 }));
+    await expect(e.chains!.chain('NOSUCH', '2026-10-13')).resolves.toEqual({ kind: 'unavailable', reason: 'no-contracts' });
+    e.stop();
+  });
+
+  it('without chain deps there are no chains and status().chain is null', async () => {
+    const { e } = engine();
+    expect(e.chains).toBeNull();
+    expect(e.status().chain).toBeNull();
   });
 });

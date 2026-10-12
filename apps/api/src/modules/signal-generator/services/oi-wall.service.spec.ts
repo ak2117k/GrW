@@ -157,6 +157,24 @@ describe('OiWallService', () => {
       expect(ext.some((w) => w.kind === 'OI_CALL')).toBe(true);
       expect(ext.some((w) => w.kind === 'MAX_PAIN')).toBe(true);
     });
+
+    it('OI-change walls skip legs whose oiChange is null (no baseline), and never read null as a build', async () => {
+      const leg = (oi: number, oiChange: number | null) => ({
+        ltp: 10, oi, oiChange, volume: 1, iv: 12, delta: 0, gamma: 0, theta: 0, vega: 0, bidPrice: 0, askPrice: 0,
+      });
+      const chain = [
+        { strikePrice: 25100, expiryDate: '2026-10-13', ceData: leg(1000, null), peData: leg(10, null) },
+        { strikePrice: 25200, expiryDate: '2026-10-13', ceData: leg(900, 500), peData: leg(10, null) },
+        { strikePrice: 24900, expiryDate: '2026-10-13', ceData: leg(10, null), peData: leg(800, null) },
+      ];
+      const optionsChain = {
+        getExpiries: jest.fn().mockResolvedValue(['2026-10-13']),
+        getOptionsChain: jest.fn().mockResolvedValue(chain),
+      };
+      const svc = new OiWallService(optionsChain as any);
+      const out = await svc.wallsExtended('NIFTY', 25000);
+      expect(out.filter((c) => c.kind === 'OI_CHANGE')).toEqual([{ price: 25200, kind: 'OI_CHANGE', score: 30 }]);
+    });
   });
 });
 

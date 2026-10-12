@@ -195,20 +195,26 @@ export class OiWallService {
     return { price: maxPainStrike, kind: 'MAX_PAIN', score: 25 };
   }
 
+  /** A leg's fresh build-up, or null when the chain has no baseline for it (unknown is not "no build"). */
+  private static build(leg: { oiChange?: number | null } | null | undefined): number | null {
+    const v = leg?.oiChange;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  }
+
   /**
    * Up to 2 OI_CHANGE candidates at the strikes with the largest fresh OI
    * build-up, sided OTM like the static walls (call build-up above spot, put
    * build-up below spot). Mirrors the static 30/20 rank weighting. If the chain
-   * exposes no change-in-OI (all zero/absent), this returns [] — no fabrication.
+   * exposes no change-in-OI (all null/zero/absent), this returns [] — no fabrication; null means no baseline yet.
    */
   private oiChangeWalls(chain: any[], ltp: number): LevelCandidate[] {
     const hasSpot = ltp > 0;
     const callBuilds = chain
-      .map((e: any) => ({ price: e.strikePrice, build: e.ceData?.oiChange ?? 0 }))
-      .filter((x) => x.build > 0 && (!hasSpot || x.price > ltp));
+      .map((e: any) => ({ price: e.strikePrice as number, build: OiWallService.build(e.ceData) }))
+      .filter((x): x is { price: number; build: number } => x.build !== null && x.build > 0 && (!hasSpot || x.price > ltp));
     const putBuilds = chain
-      .map((e: any) => ({ price: e.strikePrice, build: e.peData?.oiChange ?? 0 }))
-      .filter((x) => x.build > 0 && (!hasSpot || x.price < ltp));
+      .map((e: any) => ({ price: e.strikePrice as number, build: OiWallService.build(e.peData) }))
+      .filter((x): x is { price: number; build: number } => x.build !== null && x.build > 0 && (!hasSpot || x.price < ltp));
 
     const combined = [...callBuilds, ...putBuilds].sort(
       (a, b) => b.build - a.build || a.price - b.price,

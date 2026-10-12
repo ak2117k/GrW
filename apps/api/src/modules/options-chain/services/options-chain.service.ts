@@ -1,4 +1,5 @@
 import { Injectable, Logger, Inject, Optional } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -11,8 +12,11 @@ import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.s
 import { GreeksCalculatorService } from './greeks-calculator.service';
 import { NseOptionsChainService } from './nse-options-chain.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
-import { OptionsChainEntry, OptionData, OptionType } from '@td/shared/types';
+import { OptionsChainEntry, OptionData, OptionType, OptionsChainView } from '@td/shared/types';
 import { COMMODITIES } from '@td/shared/constants';
+import { lookupHubPrices, type HubPriceSource, type HubOutcome } from '../../market-hub/hub-prices';
+import type { HubChains } from '../../market-hub/chain/chain.types';
+import { legacyView, viewFromHub, type LegacyChain } from './chain-view';
 
 /**
  * MCX commodity underlyings that trade options-on-futures. Used to branch
@@ -80,6 +84,8 @@ export interface OptionsChainFetchOptions {
    * env NSE_OPTION_CHAIN_TIMEOUT_MS, default 8000 ms). Omit on hot paths.
    */
   background?: boolean;
+  /** A screen (GET /api/options/chain): the hub keeps this chain refreshed while it is open. */
+  screen?: boolean;
 }
 
 export interface OISummary {
@@ -108,7 +114,41 @@ export class OptionsChainService {
     private readonly authService: AngelOneAuthService,
     @Optional()
     private readonly marketFeed: MarketFeedService | null,
+    @Optional() private readonly moduleRef?: ModuleRef,
   ) {}
+
+  private hubSourceRef: HubPriceSource | null = null;
+
+  /** M5 seam: the hub's chains when HUB_SERVES_CHAIN is on and the hub runs; null → legacy path. */
+  private hubChains(): HubChains | null {
+    if (!this.hubSourceRef) this.hubSourceRef = lookupHubPrices(this.moduleRef);
+    try {
+      return this.hubSourceRef?.hubFor(null, 'chain')?.chains ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  private recordHub(outcome: HubOutcome): void {
+    try {
+      this.hubSourceRef?.record('chain', outcome);
+    } catch {
+      // counters must never break a chain read
+    }
+  }
+
+  /** The chain with its labels (`at`, `source`, `status`): hub first, else today's path. */
+  async getChainView(underlying: string, expiry: string, opts: OptionsChainFetchOptions = {}): Promise<OptionsChainView> {
+    const hub = this.hubChains();
+    if (hub) {
+      const view = viewFromHub(await hub.chain(underlying, expiry, { screen: opts.screen }), Date.now());
+      this.recordHub(view.status === 'unavailable' ? 'unpriced' : 'hub');
+      return view;
+    }
+    const legacy = await this.legacyChainWithSpot(underlying, expiry, opts);
+    this.recordHub('legacy');
+    return legacyView(legacy, Date.now(), this.isMarketHoursIST());
+  }
 
   /** True for symbols that trade MCX commodity options (OPTFUT). */
   private isMcxUnderlying(underlying: string): boolean {
@@ -168,6 +208,9 @@ export class OptionsChainService {
    * Tries DB first, falls back to fetching from Angel One instrument master.
    */
   async getExpiries(underlying: string): Promise<string[]> {
+    const hub = this.hubChains();
+    if (hub) return hub.expiries(underlying);
+
     // 1. Snapshots are the ground truth — they only exist for expiries we
     // actually have data for, so the expiry list matches what the chain
     // fetch can serve. This also dodges the local-time→UTC off-by-one in
@@ -240,6 +283,12 @@ export class OptionsChainService {
     expiry: string,
     opts: OptionsChainFetchOptions = {},
   ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number }> {
+    const view = await this.getChainView(underlying, expiry, opts);
+    return { chain: view.chain, spotPrice: view.spotPrice ?? 0 };
+  }
+
+  /** Today's path (HUB_SERVES_CHAIN off): snapshot → NSE → DB → 7-day snapshot → master. Deleted in Task 13. */
+  private async legacyChainWithSpot(underlying: string, expiry: string, opts: OptionsChainFetchOptions): Promise<LegacyChain> {
     // MCX branch: NSE chain API does not apply to commodity options, and
     // the `instrument` DB table is populated only for NFO instruments.
     // Go straight to snapshot → master-backed chain.
@@ -258,6 +307,8 @@ export class OptionsChainService {
       return {
         chain: this.enrichGreeks(todaysSnapshot.chain, todaysSnapshot.spotPrice, expiry),
         spotPrice: todaysSnapshot.spotPrice,
+        source: 'snapshot',
+        at: todaysSnapshot.capturedAt.getTime(),
       };
     }
 
@@ -276,7 +327,7 @@ export class OptionsChainService {
     if (nseResult && nseResult.chain.length > 0) {
       const enriched = this.enrichGreeks(nseResult.chain, nseResult.spotPrice, expiry);
       void this.persistSnapshot(underlying, expiry, enriched, nseResult.spotPrice, 'NSE');
-      return { chain: enriched, spotPrice: nseResult.spotPrice };
+      return { chain: enriched, spotPrice: nseResult.spotPrice, source: 'nse', at: Date.now() };
     }
 
     // 3. Angel One live via broker adapter (market-hours path).
@@ -284,7 +335,7 @@ export class OptionsChainService {
     if (dbChain.length > 0 && this.chainHasRealData(dbChain)) {
       const dbSpot = this.spotFromChain(dbChain);
       void this.persistSnapshot(underlying, expiry, dbChain, dbSpot, 'ANGEL_ONE');
-      return { chain: dbChain, spotPrice: dbSpot };
+      return { chain: dbChain, spotPrice: dbSpot, source: 'legacy', at: Date.now() };
     }
 
     // 4. Read-fallback: any snapshot within 7 days. Covers the case where
@@ -297,12 +348,14 @@ export class OptionsChainService {
       return {
         chain: this.enrichGreeks(snapshot.chain, snapshot.spotPrice, expiry),
         spotPrice: snapshot.spotPrice,
+        source: 'snapshot',
+        at: snapshot.capturedAt.getTime(),
       };
     }
 
     // 5. Last resort: synthetic chain from instrument master.
     const fallbackChain = dbChain.length > 0 ? dbChain : await this.getChainFromMaster(underlying, expiry);
-    return { chain: fallbackChain, spotPrice: 0 };
+    return { chain: fallbackChain, spotPrice: 0, source: 'legacy', at: Date.now() };
   }
 
   /**
@@ -318,7 +371,7 @@ export class OptionsChainService {
   private async getMcxOptionsChainWithSpot(
     underlying: string,
     expiry: string,
-  ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number }> {
+  ): Promise<LegacyChain> {
     // 1. Today's snapshot — same freshness gate as NSE path.
     const todaysSnapshot = await this.loadTodaysSnapshot(underlying, expiry);
     if (todaysSnapshot) {
@@ -332,6 +385,8 @@ export class OptionsChainService {
           expiry,
         ),
         spotPrice: todaysSnapshot.spotPrice,
+        source: 'snapshot',
+        at: todaysSnapshot.capturedAt.getTime(),
       };
     }
 
@@ -352,7 +407,7 @@ export class OptionsChainService {
         spotPrice,
         'ANGEL_ONE',
       );
-      return { chain: enriched, spotPrice };
+      return { chain: enriched, spotPrice, source: 'legacy', at: Date.now() };
     }
 
     // 3. 7-day read-fallback snapshot.
@@ -364,12 +419,14 @@ export class OptionsChainService {
       return {
         chain: this.enrichGreeks(snapshot.chain, snapshot.spotPrice, expiry),
         spotPrice: snapshot.spotPrice,
+        source: 'snapshot',
+        at: snapshot.capturedAt.getTime(),
       };
     }
 
     // 4. Last resort: return the scaffold (even with zero LTPs it lets the
     // strike selector see which strikes exist).
-    return { chain: liveChain, spotPrice };
+    return { chain: liveChain, spotPrice, source: 'legacy', at: Date.now() };
   }
 
   /**
@@ -516,6 +573,8 @@ export class OptionsChainService {
     strike: number,
     optionType: 'CE' | 'PE',
   ): Promise<number | null> {
+    const hub = this.hubChains();
+    if (hub) return hub.optionLtp(underlying.toUpperCase(), expiryIso.slice(0, 10), strike, optionType);
     const result = await this.getLiveOptionLtpDebug(underlying, expiryIso, strike, optionType);
     return result.ltp;
   }
@@ -608,7 +667,7 @@ export class OptionsChainService {
   private async loadTodaysSnapshot(
     underlying: string,
     expiry: string,
-  ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number; source: string } | null> {
+  ): Promise<{ chain: OptionsChainEntry[]; spotPrice: number; source: string; capturedAt: Date } | null> {
     const dayStart = new Date();
     dayStart.setHours(0, 0, 0, 0);
     const row = await this.prisma.optionChainSnapshot.findFirst({
@@ -636,6 +695,7 @@ export class OptionsChainService {
       chain: row.chainJson as unknown as OptionsChainEntry[],
       spotPrice: Number(row.spotPrice),
       source: row.source,
+      capturedAt: row.capturedAt,
     };
   }
 

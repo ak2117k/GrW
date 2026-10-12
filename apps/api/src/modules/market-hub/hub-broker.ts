@@ -3,6 +3,7 @@ import type { UserFeedManager } from '../market-data/services/user-feed-manager.
 import type { FeedState, TokenRef } from '../market-data/services/user-feed.types';
 import type { InstrumentRef } from './hub.types';
 import type { BrokerInterval, HubCandle } from './candles/candle.types';
+import type { OptionGreekRow } from './chain/chain.types';
 
 /** Everything the hub needs from a broker session — and nothing else. */
 export interface HubBroker {
@@ -13,6 +14,8 @@ export interface HubBroker {
   quotes(refs: InstrumentRef[]): Promise<Map<string, TickData>>;
   /** ONE getCandleData window. Rejects with AngelThrottleError when throttled; [] means no bars. */
   candles(ref: InstrumentRef, interval: BrokerInterval, from: Date, to: Date): Promise<HubCandle[]>;
+  /** ONE optionGreek call (Greeks + IV for every strike of one expiry). Rejects with AngelThrottleError when throttled. */
+  optionGreeks(name: string, expiryYmd: string): Promise<OptionGreekRow[]>;
   onTick(fn: (tick: TickData) => void): void;
   onState(fn: (state: FeedState) => void): void;
 }
@@ -28,7 +31,13 @@ export class ManagerHubBroker implements HubBroker {
   constructor(
     private readonly manager: Pick<
       UserFeedManager,
-      'pin' | 'unpin' | 'fetchQuotes' | 'fetchCandleWindow' | 'addTickListener' | 'addStateListener'
+      | 'pin'
+      | 'unpin'
+      | 'fetchQuotes'
+      | 'fetchCandleWindow'
+      | 'fetchOptionGreeks'
+      | 'addTickListener'
+      | 'addStateListener'
     >,
     private readonly ownerUserId: string,
   ) {}
@@ -61,6 +70,10 @@ export class ManagerHubBroker implements HubBroker {
       close: c.close,
       volume: Number(c.volume),
     }));
+  }
+
+  optionGreeks(name: string, expiryYmd: string): Promise<OptionGreekRow[]> {
+    return this.manager.fetchOptionGreeks(this.ownerUserId, name, expiryYmd);
   }
 
   onTick(fn: (tick: TickData) => void): void {

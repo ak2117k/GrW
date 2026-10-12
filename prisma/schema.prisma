@@ -43,6 +43,7 @@ model Instrument {
   @@unique([symbol, exchange, token])
   @@index([exchange, segment])
   @@index([symbol])
+  @@index([name, expiry])
   @@map("instruments")
 }
 
@@ -89,11 +90,13 @@ model OISnapshot {
   instrumentId String
   instrument   Instrument @relation(fields: [instrumentId], references: [id])
   oi           BigInt
-  oiChange     BigInt   @default(0)
+  /// OI minus the contract's last OI of the previous session; NULL = no baseline (SP1 M5).
+  oiChange     BigInt?
   volume       BigInt   @default(0)
   timestamp    DateTime
 
   @@index([instrumentId, timestamp])
+  @@index([timestamp])
   @@map("oi_snapshots")
 }
 
@@ -102,7 +105,7 @@ model OptionChainSnapshot {
   underlying  String   // NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
   expiryDate  DateTime @db.Date
   spotPrice   Decimal  @db.Decimal(12, 2)
-  source      String   // ANGEL_ONE | NSE | ANGEL_ONE_WS | DB_INSTRUMENTS
+  source      String   // HUB | ANGEL_ONE | NSE | ANGEL_ONE_WS | DB_INSTRUMENTS
   strikeCount Int
   chainJson   Json     // full OptionsChainEntry[] serialized
   capturedAt  DateTime @default(now())

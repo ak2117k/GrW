@@ -3797,9 +3797,9 @@ After deploying: remove `HUB_SERVES_CHAIN` and `NSE_OPTION_CHAIN_*` from `/opt/g
 
 | Date | Check | Result |
 |---|---|---|
-| | API suite (suites / tests) | |
-| | Web suite (files / tests) | |
-| | only-door + cron-timezone; trade-core diff empty | |
-| | API typecheck (M5 files) | |
-| | Web typecheck | |
-| | Migration diff | |
+| 2026-10-12 | API suite (suites / tests) | PASS: 296/296 suites, 3750/3750 tests (892 s). Jest printed "A worker process has failed to exit gracefully" once. Re-running in band with `jest market-hub --detectOpenHandles` (26 suites / 250 tests) and `jest options-chain market-data/services market-data/controllers --detectOpenHandles` (34 / 350) reported no open handle, so no M5 suite can be named as the leak |
+| 2026-10-12 | Web suite (files / tests) | PASS: 72/72 files, 646/646 tests (includes `chainAge.spec`) |
+| 2026-10-12 | only-door + cron-timezone; trade-core diff empty | PASS: 2 suites / 5 tests; `git diff 17058f1..HEAD -- only-door.spec.ts trade-core/` is empty |
+| 2026-10-12 | API typecheck (M5 files) | 19 errors, matching the pre-existing baseline (worktree config `tsconfig.api-wt.json`). The only one in a file this branch touched is `market-data.controller.ts(980)` TS2339 `updateInstrumentTokenFrom`. `git blame` shows the line is from ^68c8957 (2026-06-29), so this branch did not change it. No chain-repository/Prisma-client error |
+| 2026-10-12 | Web typecheck | PASS: `tsc --noEmit` exit 0, no errors |
+| 2026-10-12 | Migration diff | Not run: no SHADOW_DATABASE_URL locally. Relies on the deploy's `prisma migrate deploy` and the gate's SQL check |

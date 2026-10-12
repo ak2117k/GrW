@@ -3,7 +3,12 @@ import type { ProviderAdapter, ProviderName, ProviderResult } from './provider.t
 
 /** The SDK reply: a transport message plus the token usage the API reports. */
 export type AnthropicApiReply = TransportMessage & {
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+  };
 };
 
 /** The narrow slice of the Anthropic SDK client this provider calls. */
@@ -37,6 +42,8 @@ export class AnthropicApiProvider implements ProviderAdapter {
       meta: {
         inputTokens: tokenCount(message.usage?.input_tokens),
         outputTokens: tokenCount(message.usage?.output_tokens),
+        cacheCreationInputTokens: tokenCount(message.usage?.cache_creation_input_tokens),
+        cacheReadInputTokens: tokenCount(message.usage?.cache_read_input_tokens),
         billed: true,
       },
     };

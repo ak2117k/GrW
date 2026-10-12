@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { RateLimitError } from '@anthropic-ai/sdk';
 import { AiGatewayService } from './ai-gateway.service';
 import { loadRoutes } from './routes/route-config';
+import { loadPrices } from './budget/model-prices';
 import { BudgetMeter, AiBudgetExceeded } from './budget/budget-meter';
 import { PriorityScheduler, AiQueueTimeout } from './scheduler/priority-scheduler';
 import type { AiCallRow } from './audit/ai-call.repository';
@@ -20,11 +21,12 @@ const ROUTES_JSON = {
   'strategy.draft': { provider: 'claude-cli', model: 'unpriced-model', fallback: [], maxWaitMs: 600000 },
 };
 
-const PRICES = new Map([
-  ['claude-opus-5', { inputPerMTokInr: 440, outputPerMTokInr: 2200 }],
-  ['claude-sonnet-5', { inputPerMTokInr: 176, outputPerMTokInr: 880 }],
-  ['claude-haiku-4-5', { inputPerMTokInr: 88, outputPerMTokInr: 440 }],
-]);
+const PRICES = loadPrices({
+  cacheMultipliers: { writeOfInput: 1.25, readOfInput: 0.1 },
+  'claude-opus-5': { inputPerMTokInr: 440, outputPerMTokInr: 2200 },
+  'claude-sonnet-5': { inputPerMTokInr: 176, outputPerMTokInr: 880 },
+  'claude-haiku-4-5': { inputPerMTokInr: 88, outputPerMTokInr: 440 },
+});
 
 const request = (over: Partial<TransportRequest> = {}): TransportRequest => ({
   model: 'claude-opus-5',
@@ -35,9 +37,19 @@ const request = (over: Partial<TransportRequest> = {}): TransportRequest => ({
   ...over,
 });
 
-const okResult = (tokens: [number | null, number | null] = [100, 20], billed = false): ProviderResult => ({
+const okResult = (
+  tokens: [number | null, number | null] = [100, 20],
+  billed = false,
+  cache: [number | null, number | null] = [null, null],
+): ProviderResult => ({
   message: { content: [{ type: 'text', text: '{"ok":true}' }], stop_reason: 'end_turn' },
-  meta: { inputTokens: tokens[0], outputTokens: tokens[1], billed },
+  meta: {
+    inputTokens: tokens[0],
+    outputTokens: tokens[1],
+    cacheCreationInputTokens: cache[0],
+    cacheReadInputTokens: cache[1],
+    billed,
+  },
 });
 
 function adapter(name: ProviderName, send: jest.Mock): ProviderAdapter {
@@ -139,6 +151,27 @@ describe('AiGatewayService', () => {
     await gateway.call('sentinel.judge', request());
     await flush();
     expect(rows()[0].provider).toBe('anthropic-api');
+    expect(rows()[0].costInr).toBeCloseTo(440 + 2.2, 6);
+  });
+
+  it('API call cost includes prompt-cache writes (1.25x input) and reads (0.1x input)', async () => {
+    const { gateway, rows, meter } = build({
+      api: jest.fn().mockResolvedValue(okResult([1_000, 1_000], true, [1_000_000, 1_000_000])),
+    });
+    await gateway.call('sentinel.judge', request());
+    await flush();
+    // 1k input @440 + 1k output @2200 + 1M cache write @550 + 1M cache read @44
+    const expected = 0.44 + 2.2 + 550 + 44;
+    expect(rows()[0].costInr).toBeCloseTo(expected, 6);
+    expect(meter.snapshot().committedInr).toBeCloseTo(expected, 6);
+  });
+
+  it('missing cache counts contribute 0 to cost, never an estimate', async () => {
+    const { gateway, rows } = build({
+      api: jest.fn().mockResolvedValue(okResult([1_000_000, 1_000], true, [null, null])),
+    });
+    await gateway.call('sentinel.judge', request());
+    await flush();
     expect(rows()[0].costInr).toBeCloseTo(440 + 2.2, 6);
   });
 

@@ -1,4 +1,4 @@
-import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
 import type { CoreKillSwitch } from '@prisma/client';
 import { AuditService } from '../../../../common/audit/audit.service';
 import { AUDIT_ACTIONS } from '../../../../common/audit/audit-actions';
@@ -60,6 +60,8 @@ function viewOf(rows: readonly CoreKillSwitch[], now: Date): KillSwitchView {
  */
 @Injectable()
 export class CoreKillSwitchService {
+  private readonly logger = new Logger(CoreKillSwitchService.name);
+
   constructor(
     private readonly repo: CoreKillSwitchRepository,
     private readonly audit: AuditService,
@@ -108,20 +110,33 @@ export class CoreKillSwitchService {
     // Persist → cascade → audit: a failing audit can never stop the square-off (plan decision 17).
     const cascade = input.active ? await this.cascade(actor, reason) : null;
     const target = `core_kill_switch:${row.id}`;
-    await this.audit.append({
-      action: AUDIT_ACTIONS.risk.CORE_KILL_SWITCH_SET,
-      userId: actor.userId,
-      target,
-      meta: { active: input.active, wasActive, effectiveFrom: effectiveFrom.toISOString(), reason },
-    });
-    if (cascade) {
-      await this.audit.append({
-        action: AUDIT_ACTIONS.risk.CORE_KILL_SWITCH_CASCADE,
+    // Both audits are attempted independently (a SET failure never drops the CASCADE entry);
+    // a failure is logged, never thrown, so an engaged (persisted) switch is never reported
+    // as a failed request. CASCADE starts once SET has settled, keeping the chain order.
+    const audits = [
+      {
+        action: AUDIT_ACTIONS.risk.CORE_KILL_SWITCH_SET,
         userId: actor.userId,
         target,
-        meta: { core: cascade.core, silos: cascade.silos },
-      });
-    }
+        meta: { active: input.active, wasActive, effectiveFrom: effectiveFrom.toISOString(), reason },
+      },
+      ...(cascade
+        ? [{ action: AUDIT_ACTIONS.risk.CORE_KILL_SWITCH_CASCADE, userId: actor.userId, target, meta: { core: cascade.core, silos: cascade.silos } }]
+        : []),
+    ];
+    let previous: Promise<unknown> = Promise.resolve();
+    const settled = await Promise.allSettled(
+      audits.map((entry) => {
+        const next = previous.catch(() => undefined).then(() => this.audit.append(entry));
+        previous = next;
+        return next;
+      }),
+    );
+    settled.forEach((s, i) => {
+      if (s.status === 'rejected') {
+        this.logger.error(`${audits[i].action} audit append failed for ${target} (the kill switch change itself is persisted): ${errorText(s.reason)}`);
+      }
+    });
     return { state: viewOf([...rows, row], now), effectiveFrom: effectiveFrom.toISOString(), cascade };
   }
 

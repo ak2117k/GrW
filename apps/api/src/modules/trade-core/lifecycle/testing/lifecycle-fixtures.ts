@@ -1,9 +1,9 @@
+import type { CoreOrder } from '../../execution/execution.types';
 import { limitsFixture } from '../../risk-wall/testing/risk-fixtures';
 import type { StrategyBlocks } from '../../strategies/blocks/block-types';
 import { adaptiveBlocks, plainBlocks } from '../../strategies/testing/block-fixtures';
-import { buildExitPlan, type PlanInput } from '../exit-plan';
-import type { ExitPlan } from '../lifecycle.types';
-import type { CoreOrder } from '../../execution/execution.types';
+import { armLevels, buildExitPlan, type PlanInput } from '../exit-plan';
+import type { CorePosition, ExitPlan } from '../lifecycle.types';
 
 /** Test data only. Mon 2026-10-12 10:30 IST (the M2/M3 fixtures' NOW). */
 export const NOW = new Date('2026-10-12T05:00:00.000Z');
@@ -87,3 +87,50 @@ export const optionPlan = (over: Partial<ExitPlan> = {}): ExitPlan =>
     },
     over,
   );
+
+/** An OPEN position under `plan`: cash 100 @ 500, or options 75 (one lot) @ 100; opened 10 minutes before NOW. */
+export function positionFor(plan: ExitPlan, over: Partial<CorePosition> = {}): CorePosition {
+  const option = plan.vehicle === 'OPTIONS_BUY';
+  const entry = option ? 100 : 500;
+  const qty = option ? 75 : 100;
+  const lv = armLevels(plan, entry, qty, option ? 75 : 1);
+  return {
+    id: 'pos_1',
+    userId: 'user_A',
+    intentId: 'int_1',
+    strategyId: 'cs_ungated',
+    strategyVersionId: 'csv_ungated_v1',
+    vehicle: plan.vehicle,
+    instrument: option
+      ? { exchange: 'NFO', token: '43210', symbol: 'NIFTY26OCT25000CE', lotSize: 75, underlying: 'NIFTY' }
+      : { exchange: 'NSE', token: '2885', symbol: 'RELIANCE-EQ', lotSize: 1, underlying: null },
+    underlying: option ? 'NIFTY' : 'RELIANCE',
+    side: plan.side,
+    direction: plan.side === 'BUY' ? 'LONG' : 'SHORT',
+    status: 'OPEN',
+    requestedQty: qty,
+    entryFilledQty: qty,
+    exitFilledQty: 0,
+    openQty: qty,
+    entryAvgPrice: entry,
+    plan,
+    initialStopPrice: lv.stopPrice,
+    stopPrice: lv.stopPrice,
+    targetPrice: lv.targetPrice,
+    partialPrice: lv.partialPrice,
+    partialQty: lv.partialQty,
+    trailActive: false,
+    partialDone: false,
+    highWater: entry,
+    lowWater: entry,
+    exitSeq: 0,
+    exitReason: null,
+    blindSince: null,
+    openedAt: new Date(NOW.getTime() - 10 * 60_000),
+    closedAt: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    version: 1,
+    ...over,
+  };
+}

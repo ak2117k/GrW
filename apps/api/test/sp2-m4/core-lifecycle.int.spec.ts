@@ -1,4 +1,6 @@
 import { PrismaClient } from '@prisma/client';
+import type { PrismaService } from '../../src/common/prisma/prisma.service';
+import { ActivePositionExistsError, CorePositionRepository } from '../../src/modules/trade-core/lifecycle/repositories/core-position.repository';
 
 const url = process.env.DATABASE_URL_TEST;
 if (!url) throw new Error('DATABASE_URL_TEST must point at a throwaway database with all migrations applied');
@@ -96,5 +98,32 @@ describe('core_paper_defaults (widened by M4)', () => {
     await expect(
       db.$executeRawUnsafe(`INSERT INTO "core_paper_defaults" ("key", "scope", "numValue", "note") VALUES ('blindAfterMs', 'MTF', 30000, 'x')`),
     ).rejects.toThrow(/core_paper_defaults_pair_check/);
+  });
+});
+
+describe('CorePositionRepository (real database)', () => {
+  const repo = new CorePositionRepository(db as unknown as PrismaService);
+  const plan = { version: 1, vehicle: 'CASH_INTRADAY', side: 'BUY', stopPct: 1.5, targetPct: 3, trail: { kind: 'none' }, partial: { kind: 'none' }, timeExit: { kind: 'clock', hhmm: '15:25' }, atr: null, squareOffHhmm: '15:15', mtfMaxHoldDays: null, entryDay: '2026-10-12', option: null } as const;
+  const row = (userId: string, intentId: string) => ({
+    userId, intentId, strategyId: 'cs_x', strategyVersionId: 'csv_x', vehicle: 'CASH_INTRADAY' as const,
+    instrument: { exchange: 'NSE', token: '2885', symbol: 'RELIANCE-EQ', lotSize: 1, underlying: null },
+    underlying: 'RELIANCE', side: 'BUY' as const, direction: 'LONG' as const, requestedQty: 100, plan: plan as never,
+  });
+
+  it('two concurrent opens on one instrument: exactly one succeeds', async () => {
+    const u = await newUser();
+    const results = await Promise.allSettled([repo.createIfNoActive(row(u, `${u}:a`)), repo.createIfNoActive(row(u, `${u}:b`))]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+    expect(failed.reason).toBeInstanceOf(ActivePositionExistsError);
+  });
+
+  it('a version-guarded update applies once, maps prices back to numbers and bumps the version', async () => {
+    const u = await newUser();
+    const p = await repo.createIfNoActive(row(u, `${u}:c`));
+    const a = await repo.update(u, p.id, 0, { status: 'OPEN', entryFilledQty: 100, entryAvgPrice: 500.1234, stopPrice: 492.5, openedAt: new Date() });
+    expect(a).toMatchObject({ version: 1, status: 'OPEN', openQty: 100, entryAvgPrice: 500.1234, stopPrice: 492.5 });
+    expect(await repo.update(u, p.id, 0, { status: 'EXITING' })).toBeNull();
+    expect((await repo.listActiveUserIds()).includes(u)).toBe(true);
   });
 });

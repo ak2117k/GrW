@@ -54,6 +54,23 @@ describe('DailyLossMonitor (spec §5.3, ruling L15)', () => {
     expect(unknown.squareOff.squareOffAll).not.toHaveBeenCalled();
   });
 
+  it('owner ruling 2026-10-12: realised loss at the limit with open P&L unknown (blind) squares off once per day', async () => {
+    const s = setup({ realised: -5000, openPnl: null });
+    await s.monitor.runOnce(NOW);
+    await s.monitor.runOnce(NOW);
+    expect(s.squareOff.squareOffAll).toHaveBeenCalledTimes(1);
+    expect(s.squareOff.squareOffAll).toHaveBeenCalledWith(
+      'user_A', 'DAILY_LOSS', "today's realised loss ₹5000.00 reached the ₹5000.00 daily limit (open P&L unknown)",
+    );
+    expect(s.audit.append).toHaveBeenCalledWith(expect.objectContaining({ action: AUDIT_ACTIONS.lifecycle.CORE_DAILY_LOSS_SQUARE_OFF, userId: 'user_A' }));
+  });
+
+  it('realised loss under the limit with open P&L unknown does nothing', async () => {
+    const s = setup({ realised: -4999.99, openPnl: null });
+    await s.monitor.runOnce(NOW);
+    expect(s.squareOff.squareOffAll).not.toHaveBeenCalled();
+  });
+
   it('an unreadable state skips the user and never exits', async () => {
     const s = setup({ stateFails: true });
     await expect(s.monitor.runOnce(NOW)).resolves.toBeUndefined();

@@ -152,7 +152,8 @@ export type RiskVerdictKind = 'ALLOW' | 'REJECT' | 'RESIZE';
 /** Spec §5.3. squareOffCore tells M4 to exit every core position (CORE_SQUARE_OFF, cause DAILY_LOSS). */
 export interface DailyLossDecision {
   status: 'OK' | 'BREACHED' | 'UNKNOWN';
-  /** 2 dp; positive = loss, negative = profit. Null when P&L is unknown. */
+  /** 2 dp; positive = loss, negative = profit. Null when P&L is unknown, except a BREACHED decided on
+   *  the realised loss alone with open P&L unknown (owner ruling 2026-10-12): then the realised loss. */
   lossRupees: string | null;
   limitRupees: string | null;
   action: DailyLossAction | null;

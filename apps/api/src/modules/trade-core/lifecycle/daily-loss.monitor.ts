@@ -66,15 +66,22 @@ export class DailyLossMonitor implements OnModuleInit, OnModuleDestroy {
     const day = istDate(now);
     if (this.firedOn.get(userId) === day) return null;
     let d: DailyLossDecision;
+    let openPnlKnown: boolean;
     try {
-      d = decideDailyLoss(await this.limits.inForce(userId, now), await this.state.liveState(userId, now));
+      const live = await this.state.liveState(userId, now);
+      openPnlKnown = typeof live.openPnl === 'number' && Number.isFinite(live.openPnl);
+      d = decideDailyLoss(await this.limits.inForce(userId, now), live);
     } catch (err) {
       this.logger.warn(`daily-loss check for ${userId} skipped (state unreadable; positions keep their stops): ${errorText(err)}`);
       return null;
     }
+    // Owner ruling 2026-10-12: with open P&L unknown (a blind position), a realised loss alone at
+    // the limit is BREACHED (decideDailyLoss) and squares off here; under it, UNKNOWN does nothing.
     if (d.status !== 'BREACHED' || !d.squareOffCore) return d;
     this.firedOn.set(userId, day);
-    const reason = `today's loss ₹${d.lossRupees} reached the ₹${d.limitRupees} daily limit`;
+    const reason = openPnlKnown
+      ? `today's loss ₹${d.lossRupees} reached the ₹${d.limitRupees} daily limit`
+      : `today's realised loss ₹${d.lossRupees} reached the ₹${d.limitRupees} daily limit (open P&L unknown)`;
     let detail: string;
     try {
       detail = (await this.squareOff.squareOffAll(userId, 'DAILY_LOSS', reason)).detail;

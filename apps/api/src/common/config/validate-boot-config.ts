@@ -35,7 +35,10 @@ export function validateBootConfig(env: NodeJS.ProcessEnv = process.env): void {
       env.DATABASE_ALLOW_PLAINTEXT !== 'true'
     )
       fail.push('DATABASE_URL must enforce TLS (sslmode=require) in production, or set DATABASE_ALLOW_PLAINTEXT=true for a trusted private-network database (e.g. the VPS compose stack)');
-    if (!/^https:\/\//.test(env.AI_ENGINE_URL ?? '')) fail.push('AI_ENGINE_URL must be https in production');
+    // https anywhere, or plain http ONLY to the compose stack's internal `ai-engine` service
+    // (private Docker network, never published to the host).
+    if (!/^https:\/\//.test(env.AI_ENGINE_URL ?? '') && !/^http:\/\/ai-engine(:\d+)?$/.test(env.AI_ENGINE_URL ?? ''))
+      fail.push('AI_ENGINE_URL must be https in production (or exactly http://ai-engine[:port] inside the compose stack)');
     // Require in-transit encryption for external managed Redis (Upstash/
     // ElastiCache). Explicit opt-out for a trusted PRIVATE-network Redis whose
     // traffic never leaves the provider's network (e.g. Render Key Value's

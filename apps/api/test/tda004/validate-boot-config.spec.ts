@@ -39,4 +39,25 @@ describe('validateBootConfig', () => {
     expect(() => validateBootConfig(prod as any)).toThrow(/sslmode/);
     expect(() => validateBootConfig({ ...prod, DATABASE_ALLOW_PLAINTEXT: 'true' } as any)).not.toThrow();
   });
+  describe('AI_ENGINE_URL in production', () => {
+    const prod = {
+      ...base, NODE_ENV: 'production', WEB_ORIGIN: 'https://app.example.com',
+      DATABASE_URL: 'postgresql://x/db?sslmode=require',
+      REDIS_TLS: 'true', REDIS_THROTTLER: 'true', TELEGRAM_INGEST_SECRET: 'sekret',
+    };
+    const check = (url: string | undefined) => () => validateBootConfig({ ...prod, AI_ENGINE_URL: url } as any);
+    it('accepts the internal compose service over plain http', () => {
+      expect(check('http://ai-engine:5000')).not.toThrow();
+      expect(check('http://ai-engine')).not.toThrow();
+    });
+    it('accepts any https URL', () => {
+      expect(check('https://x')).not.toThrow();
+    });
+    it('rejects any other plain-http host or lookalike', () => {
+      for (const url of ['http://evil.example', 'http://ai-engine.evil.example', 'http://ai-engine:5000/path',
+        'http://ai-engine:5000@evil.example', 'http://localhost:5000', undefined]) {
+        expect(check(url)).toThrow(/AI_ENGINE_URL/);
+      }
+    });
+  });
 });

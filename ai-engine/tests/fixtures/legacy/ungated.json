@@ -1,0 +1,559 @@
+[
+ {
+  "id": "id-ungated0",
+  "alertId": "alertungated0",
+  "setupId": null,
+  "symbol": "SYM6",
+  "exchange": "NSE",
+  "side": "BUY",
+  "initialPrice": 1505.5,
+  "initialScore": 38,
+  "initialBreakdown": {
+   "checks": [
+    {
+     "name": "Sector aligned",
+     "detail": {
+      "reason": "no sector mapping"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "Relative strength",
+     "detail": {
+      "reason": "no sector mapping"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "Index aligned",
+     "detail": {
+      "emaNow": 24004.08020996838,
+      "emaThen": 24037.69223274677,
+      "closeLast": 23950.85,
+      "niftyTrend": "DOWN"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "MACD on 1d",
+     "detail": {
+      "macd": -11.70538287194677,
+      "signal": -22.30641280250416,
+      "aboveZero": false,
+      "belowZero": true
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 3
+    },
+    {
+     "name": "MACD on 1m",
+     "detail": {
+      "macd": -0.4097602836739043,
+      "signal": 1.141688319016376,
+      "aboveZero": false,
+      "belowZero": true
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 22
+    },
+    {
+     "name": "MACD on 5m",
+     "detail": {
+      "reason": "insufficient candles"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 18
+    },
+    {
+     "name": "EMA9 over EMA20",
+     "detail": {
+      "ema9": 1487.08,
+      "ema20": 1485.63
+     },
+     "passed": true,
+     "points": 3,
+     "pointsPossible": 3
+    },
+    {
+     "name": "SuperTrend match",
+     "detail": {
+      "reason": "insufficient candles"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "S/R room",
+     "detail": {
+      "atr20": 11.24148922975323,
+      "ratio": 0.08006056685247984,
+      "entryPrice": 1505.5,
+      "nextBlocker": 1506.4
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "Volume confirmation",
+     "detail": {
+      "ratio": 1.01,
+      "volSoFar": 701450,
+      "expectedSoFar": 692317,
+      "minutesElapsed": 328
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 7
+    },
+    {
+     "name": "VWAP relationship",
+     "detail": {
+      "vwap": 1480.54,
+      "entryPrice": 1505.5,
+      "sessionBars": 65
+     },
+     "passed": true,
+     "points": 15,
+     "pointsPossible": 15
+    },
+    {
+     "name": "ADX trend strength",
+     "detail": {
+      "adx": 20.2
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 12
+    },
+    {
+     "name": "RSI on 5m",
+     "detail": {
+      "rsi": 57.77
+     },
+     "passed": true,
+     "points": 10,
+     "pointsPossible": 10
+    },
+    {
+     "name": "ATR target feasibility",
+     "detail": {
+      "atr": 11.24,
+      "atrPct": 0.007466947346232637
+     },
+     "passed": true,
+     "points": 5,
+     "pointsPossible": 5
+    },
+    {
+     "name": "Multi-day breakout confirmation",
+     "detail": {
+      "ratio": 0.9801,
+      "lows20": 1352.1,
+      "highs20": 1536
+     },
+     "passed": true,
+     "points": 5,
+     "pointsPossible": 5
+    }
+   ],
+   "lotCount": 0
+  },
+  "initialAt": "2026-06-29T09:12:37.065000+00:00",
+  "profitTarget": 1532.846,
+  "profitTargetSource": "fallback-3pct",
+  "stopLossScore": 45,
+  "executedAt": "2026-06-29T09:12:37.090000+00:00",
+  "closedAt": "2026-06-29T09:51:30.525000+00:00",
+  "dismissedAt": null,
+  "maxFavorable": null,
+  "maxAdverse": null,
+  "status": "TARGET_HIT",
+  "t_id": "t_id-ungated0",
+  "t_status": "CLOSED",
+  "t_pnl": 5989.800000000007,
+  "t_fees": 119.13,
+  "t_entryPrice": 1488.2,
+  "t_quantity": 134,
+  "t_stoploss": null,
+  "t_entryTime": "2026-06-29T09:12:37.074000+00:00",
+  "t_exitTime": "2026-06-29T09:51:30.479000+00:00"
+ },
+ {
+  "id": "id-ungated1",
+  "alertId": "alertungated1",
+  "setupId": null,
+  "symbol": "SYM7",
+  "exchange": "NSE",
+  "side": "BUY",
+  "initialPrice": 407.75,
+  "initialScore": 0,
+  "initialBreakdown": {},
+  "initialAt": "2026-07-13T03:52:10.517000+00:00",
+  "profitTarget": 420.034,
+  "profitTargetSource": "fallback-3pct",
+  "stopLossScore": 45,
+  "executedAt": "2026-07-13T03:52:10.544000+00:00",
+  "closedAt": "2026-07-13T07:54:30.604000+00:00",
+  "dismissedAt": null,
+  "maxFavorable": null,
+  "maxAdverse": null,
+  "status": "STOPPED",
+  "t_id": "t_id-ungated1",
+  "t_status": "CLOSED",
+  "t_pnl": -2997.330000000009,
+  "t_fees": 116.7,
+  "t_entryPrice": 407.8,
+  "t_quantity": 490,
+  "t_stoploss": null,
+  "t_entryTime": "2026-07-13T03:52:10.530000+00:00",
+  "t_exitTime": "2026-07-13T07:54:30.576000+00:00"
+ },
+ {
+  "id": "id-ungated2",
+  "alertId": "alertungated2",
+  "setupId": null,
+  "symbol": "SYM8",
+  "exchange": "NSE",
+  "side": "BUY",
+  "initialPrice": 1410.0,
+  "initialScore": 55,
+  "initialBreakdown": {
+   "checks": [
+    {
+     "name": "Sector aligned",
+     "detail": {
+      "reason": "no sector mapping"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 10
+    },
+    {
+     "name": "Relative strength",
+     "detail": {
+      "reason": "no sector mapping"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 10
+    },
+    {
+     "name": "Index aligned",
+     "detail": {
+      "emaNow": 23690.79122887839,
+      "emaThen": 23672.20044798429,
+      "closeLast": 23779.65,
+      "niftyTrend": "UP"
+     },
+     "passed": true,
+     "points": 20,
+     "pointsPossible": 20
+    },
+    {
+     "name": "MACD on 1d",
+     "detail": {
+      "macd": 52.7969439502765,
+      "signal": 54.64818918659825,
+      "aboveZero": true,
+      "belowZero": false
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 5
+    },
+    {
+     "name": "MACD on 1m",
+     "detail": {
+      "macd": 2.265281338683735,
+      "signal": 2.488026933964813,
+      "aboveZero": true,
+      "belowZero": false
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 10
+    },
+    {
+     "name": "MACD on 5m",
+     "detail": {
+      "macd": 11.50735674212251,
+      "signal": 10.57703605979948,
+      "aboveZero": true,
+      "belowZero": false
+     },
+     "passed": true,
+     "points": 10,
+     "pointsPossible": 10
+    },
+    {
+     "name": "Price vs 20-EMA",
+     "detail": {
+      "ema9": 1397.78,
+      "ema20": 1380.8
+     },
+     "passed": true,
+     "points": 10,
+     "pointsPossible": 10
+    },
+    {
+     "name": "SuperTrend match",
+     "detail": {
+      "value": 1396.070553065708,
+      "direction": "UP"
+     },
+     "passed": true,
+     "points": 10,
+     "pointsPossible": 10
+    },
+    {
+     "name": "S/R room",
+     "detail": {
+      "reason": "no level book"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 10
+    },
+    {
+     "name": "Volume confirmation",
+     "detail": {
+      "ratio": 2.495796325650129,
+      "avgDaily": 409909.25,
+      "todayVol": 1023050
+     },
+     "passed": true,
+     "points": 5,
+     "pointsPossible": 5
+    }
+   ],
+   "lotCount": 1
+  },
+  "initialAt": "2026-05-22T04:49:52.823000+00:00",
+  "profitTarget": 1438.2,
+  "profitTargetSource": "fallback-2pct",
+  "stopLossScore": 50,
+  "executedAt": "2026-05-22T04:49:53.189000+00:00",
+  "closedAt": "2026-05-22T04:57:30.474000+00:00",
+  "dismissedAt": null,
+  "maxFavorable": null,
+  "maxAdverse": null,
+  "status": "TARGET_HIT",
+  "t_id": "t_id-ungated2",
+  "t_status": "CLOSED",
+  "t_pnl": 2842.799999999997,
+  "t_fees": 142.03,
+  "t_entryPrice": 1418.0,
+  "t_quantity": 71,
+  "t_stoploss": null,
+  "t_entryTime": "2026-05-22T04:49:53.146000+00:00",
+  "t_exitTime": "2026-05-22T04:57:30.461000+00:00"
+ },
+ {
+  "id": "id-ungated3",
+  "alertId": "alertungated3",
+  "setupId": null,
+  "symbol": "SYM9",
+  "exchange": "NSE",
+  "side": "BUY",
+  "initialPrice": 1647.6,
+  "initialScore": 23,
+  "initialBreakdown": {
+   "checks": [
+    {
+     "name": "Sector aligned",
+     "detail": {
+      "emaNow": 62260.50045324607,
+      "emaThen": 62234.81279674307,
+      "closeLast": 62276.2,
+      "sectorToken": "99926011",
+      "sectorTrend": "UP"
+     },
+     "passed": true,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "Relative strength",
+     "detail": {
+      "rs": -1.27,
+      "stockReturn": -1.27,
+      "lookbackBars": 20,
+      "sectorReturn": 0
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "Index aligned",
+     "detail": {
+      "emaNow": 24130.26742116254,
+      "emaThen": 24081.7936322164,
+      "closeLast": 24236.55,
+      "niftyTrend": "UP"
+     },
+     "passed": true,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "MACD on 1d",
+     "detail": {
+      "macd": 10.9570020564629,
+      "signal": 1.641539230745164,
+      "aboveZero": true,
+      "belowZero": false
+     },
+     "passed": true,
+     "points": 3,
+     "pointsPossible": 3
+    },
+    {
+     "name": "MACD on 1m",
+     "detail": {
+      "macd": -0.6290121217261913,
+      "signal": -0.7049655464593094,
+      "aboveZero": false,
+      "belowZero": true
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 22
+    },
+    {
+     "name": "MACD on 5m",
+     "detail": {
+      "reason": "insufficient candles"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 18
+    },
+    {
+     "name": "EMA9 over EMA20",
+     "detail": {
+      "ema9": 1669.84,
+      "ema20": 1674.68
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 3
+    },
+    {
+     "name": "SuperTrend match",
+     "detail": {
+      "reason": "insufficient candles"
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "S/R room",
+     "detail": {
+      "atr20": 7.76013301065439,
+      "ratio": 2.422638887012432,
+      "entryPrice": 1647.6,
+      "nextBlocker": 1666.4
+     },
+     "passed": true,
+     "points": 0,
+     "pointsPossible": 0
+    },
+    {
+     "name": "Volume confirmation",
+     "detail": {
+      "ratio": 0.69,
+      "volSoFar": 187566,
+      "expectedSoFar": 270902,
+      "minutesElapsed": 170
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 7
+    },
+    {
+     "name": "VWAP relationship",
+     "detail": {
+      "vwap": 1646.49,
+      "entryPrice": 1647.6,
+      "sessionBars": 33
+     },
+     "passed": true,
+     "points": 15,
+     "pointsPossible": 15
+    },
+    {
+     "name": "ADX trend strength",
+     "detail": {
+      "adx": 15.39
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 12
+    },
+    {
+     "name": "RSI on 5m",
+     "detail": {
+      "rsi": 39.39
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 10
+    },
+    {
+     "name": "ATR target feasibility",
+     "detail": {
+      "atr": 7.76,
+      "atrPct": 0.004709961769030341
+     },
+     "passed": true,
+     "points": 5,
+     "pointsPossible": 5
+    },
+    {
+     "name": "Multi-day breakout confirmation",
+     "detail": {
+      "ratio": 0.9547,
+      "lows20": 1541,
+      "highs20": 1725.7
+     },
+     "passed": false,
+     "points": 0,
+     "pointsPossible": 5
+    }
+   ],
+   "lotCount": 0
+  },
+  "initialAt": "2026-06-25T06:35:31.930000+00:00",
+  "profitTarget": 1673.106,
+  "profitTargetSource": "fallback-2pct",
+  "stopLossScore": 45,
+  "executedAt": null,
+  "closedAt": null,
+  "dismissedAt": null,
+  "maxFavorable": null,
+  "maxAdverse": null,
+  "status": "WATCHING",
+  "t_id": null,
+  "t_status": null,
+  "t_pnl": null,
+  "t_fees": null,
+  "t_entryPrice": null,
+  "t_quantity": null,
+  "t_stoploss": null,
+  "t_entryTime": null,
+  "t_exitTime": null
+ }
+]

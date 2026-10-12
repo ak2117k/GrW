@@ -77,6 +77,9 @@ secrets.json
 
 # Local data dumps (runtime artifacts, not source)
 ai-engine/data/
+# SP3 scorer: trained XGBoost artifacts + CSV corpus exports (explicit, in case ai-engine/data/ is ever un-ignored)
+ai-engine/data/models/xgb-*.json
+ai-engine/data/exports/
 apps/api/data/
 
 # Local test screenshots (debugging artifacts, not source)

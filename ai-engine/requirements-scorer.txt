@@ -1,0 +1,11 @@
+# requirements-scorer.txt — the scorer/corpus container and local training. Keep minimal (disk + 384 MB container).
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic>=2.10.0
+numpy>=2.0
+pandas>=2.2
+xgboost>=2.1
+scikit-learn>=1.5
+psycopg[binary]>=3.2
+pytest>=8.0
+httpx==0.28.0

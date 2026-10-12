@@ -210,8 +210,12 @@ def train(df: pd.DataFrame, *, seed: int = 7, feature_set: str = features_fs1.FE
 
     stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d%H%M")
     model_id = f"xgb-entry-{feature_set}-{stamp}"
+    gate = "NO_GO" if reasons else "GO"
     artifact = {
         "modelId": model_id,
+        # Recorded so serving can refuse a NO_GO file without a database (serve.ScorerHolder.load).
+        "gate": gate,
+        "gateReasons": list(reasons),
         "classifier": booster_to_json(clf),
         "calibrator": calibrator,
         "rule_calibrator": rule_calibrator(tr),
@@ -219,7 +223,7 @@ def train(df: pd.DataFrame, *, seed: int = 7, feature_set: str = features_fs1.FE
         "feature_names": names,
         "feature_set": feature_set,
     }
-    return TrainResult(model_id=model_id, gate="NO_GO" if reasons else "GO", gate_reasons=reasons,
+    return TrainResult(model_id=model_id, gate=gate, gate_reasons=reasons,
                        metrics=_clean(metrics), n_train=len(tr), n_holdout=len(ho),
                        data_window=_window(df, ho), artifact=artifact, feature_set=feature_set)
 

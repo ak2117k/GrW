@@ -103,7 +103,8 @@ function realGateway(
   insert: (row: AiCallRow) => Promise<void>,
 ): AiGatewayService {
   const prices = loadPrices(readAiConfig('ai-model-prices.json'));
-  prices.set('x-model', { inputPerMTokInr: 440, outputPerMTokInr: 2200 });
+  // Priced like claude-opus-5 (cache rates included), straight from the shipped table.
+  prices.set('x-model', { ...prices.get('claude-opus-5')! });
   return new AiGatewayService({
     routes: loadRoutes(readAiConfig('ai-routes.json'), { SENTINEL_JUDGE: sentinelJudge }),
     prices,

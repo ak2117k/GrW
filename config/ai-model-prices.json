@@ -1,5 +1,6 @@
 {
-  "_note": "INR per million tokens. SEEDED, OWNER TO REVIEW (spec 13). Seeded 2026-10-12 from Anthropic first-party USD list prices per MTok (opus-5-5 $4/$20, opus-5 $5/$25, sonnet-5-5 $2/$10, sonnet-5 $2/$10, haiku-5-5 $0.10/$0.50 up to 100K-token prompts, haiku-4-5 $1/$5) at 88 INR/USD. Cache reads/writes and GST are not modelled; an API call to a model missing here is refused.",
+  "_note": "INR per million tokens. SEEDED, OWNER TO REVIEW (spec 13). Seeded 2026-10-12 from Anthropic first-party USD list prices per MTok (opus-5-5 $4/$20, opus-5 $5/$25, sonnet-5-5 $2/$10, sonnet-5 $2/$10, haiku-5-5 $0.10/$0.50 up to 100K-token prompts, haiku-4-5 $1/$5) at 88 INR/USD. Prompt caching IS modelled: cacheMultipliers price cache_creation_input_tokens (5-minute ephemeral writes) at writeOfInput x the input rate and cache_read_input_tokens at readOfInput x the input rate (Anthropic list: 1.25x / 0.1x); input_tokens is the uncached remainder only. The worst-case budget reservation prices a cache_control request's whole input estimate at the cache-write rate. GST is not modelled; an API call to a model missing here is refused.",
+  "cacheMultipliers": { "writeOfInput": 1.25, "readOfInput": 0.1 },
   "claude-opus-5-5": { "inputPerMTokInr": 352, "outputPerMTokInr": 1760 },
   "claude-opus-5": { "inputPerMTokInr": 440, "outputPerMTokInr": 2200 },
   "claude-sonnet-5-5": { "inputPerMTokInr": 176, "outputPerMTokInr": 880 },

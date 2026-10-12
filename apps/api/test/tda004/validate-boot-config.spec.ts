@@ -60,4 +60,27 @@ describe('validateBootConfig', () => {
       }
     });
   });
+  describe('AI_SCORER_URL in production (optional; the scorer fails open when unset)', () => {
+    const prod = {
+      ...base, NODE_ENV: 'production', WEB_ORIGIN: 'https://app.example.com',
+      DATABASE_URL: 'postgresql://x/db?sslmode=require', AI_ENGINE_URL: 'https://ai.example.com',
+      REDIS_TLS: 'true', REDIS_THROTTLER: 'true', TELEGRAM_INGEST_SECRET: 'sekret',
+    };
+    const check = (url: string | undefined) => () => validateBootConfig({ ...prod, AI_SCORER_URL: url } as any);
+    it('may be unset or blank', () => {
+      expect(check(undefined)).not.toThrow();
+      expect(check('')).not.toThrow();
+    });
+    it('accepts the internal compose service over plain http, or any https URL', () => {
+      expect(check('http://ai-engine:5000')).not.toThrow();
+      expect(check('http://ai-engine')).not.toThrow();
+      expect(check('https://scorer.example.com')).not.toThrow();
+    });
+    it('rejects any other plain-http host or lookalike', () => {
+      for (const url of ['http://evil.example', 'http://ai-engine.evil.example', 'http://ai-engine:5000/path',
+        'http://ai-engine:5000@evil.example', 'http://localhost:5000']) {
+        expect(check(url)).toThrow(/AI_SCORER_URL/);
+      }
+    });
+  });
 });

@@ -37,8 +37,15 @@ export function validateBootConfig(env: NodeJS.ProcessEnv = process.env): void {
       fail.push('DATABASE_URL must enforce TLS (sslmode=require) in production, or set DATABASE_ALLOW_PLAINTEXT=true for a trusted private-network database (e.g. the VPS compose stack)');
     // https anywhere, or plain http ONLY to the compose stack's internal `ai-engine` service
     // (private Docker network, never published to the host).
-    if (!/^https:\/\//.test(env.AI_ENGINE_URL ?? '') && !/^http:\/\/ai-engine(:\d+)?$/.test(env.AI_ENGINE_URL ?? ''))
+    const internalOrHttps = (url: string) => /^https:\/\//.test(url) || /^http:\/\/ai-engine(:\d+)?$/.test(url);
+    // AI_ENGINE_URL feeds ai-advisor / weekly-report. The internal-http form stays accepted so an
+    // existing deploy keeps booting, but the SP3 scorer has its own AI_SCORER_URL: pointing
+    // AI_ENGINE_URL at the scorer container would redirect the advisor calls to it.
+    if (!internalOrHttps(env.AI_ENGINE_URL ?? ''))
       fail.push('AI_ENGINE_URL must be https in production (or exactly http://ai-engine[:port] inside the compose stack)');
+    // Optional: unset/blank = the scorer is simply unavailable (ScorerClient fails open).
+    if (env.AI_SCORER_URL && env.AI_SCORER_URL.trim() !== '' && !internalOrHttps(env.AI_SCORER_URL))
+      fail.push('AI_SCORER_URL must be https in production (or exactly http://ai-engine[:port] inside the compose stack)');
     // Require in-transit encryption for external managed Redis (Upstash/
     // ElastiCache). Explicit opt-out for a trusted PRIVATE-network Redis whose
     // traffic never leaves the provider's network (e.g. Render Key Value's

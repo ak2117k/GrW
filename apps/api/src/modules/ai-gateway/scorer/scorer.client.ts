@@ -67,6 +67,11 @@ function parseScore(body: unknown): ScoreResult | string {
  *
  * The deadline is enforced by our own timer racing the request (which it also
  * aborts), not by trusting `fetch` to honour the signal promptly.
+ *
+ * ITS OWN URL. The base comes from `AI_SCORER_URL` (compose: http://ai-engine:5000),
+ * never `AI_ENGINE_URL`: that variable also drives ai-advisor and weekly-report,
+ * which are not served by the scorer container, so sharing it would redirect
+ * them. Unset means unavailable (fail-open, rate-limited warn) — no fallback.
  */
 @Injectable()
 export class ScorerClient {
@@ -76,8 +81,8 @@ export class ScorerClient {
   constructor(private readonly config: ConfigService) {}
 
   async score(req: ScoreRequest): Promise<ScoreResult> {
-    const base = this.config.get<string>('AI_ENGINE_URL')?.trim();
-    if (!base) return this.unavailable('AI_ENGINE_URL not set');
+    const base = this.config.get<string>('AI_SCORER_URL')?.trim();
+    if (!base) return this.unavailable('AI_SCORER_URL not set');
     const url = `${base.replace(/\/+$/, '')}/score`;
 
     const controller = new AbortController();

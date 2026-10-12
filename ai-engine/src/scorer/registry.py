@@ -16,6 +16,7 @@ VALUES (%(id)s, %(kind)s, %(featureSet)s, %(trainedAt)s, %(dataWindow)s::jsonb, 
 DEACTIVATE_SQL = 'UPDATE "ai_models" SET "active" = false WHERE "kind" = %(kind)s AND "active"'
 ACTIVATE_SQL = 'UPDATE "ai_models" SET "active" = true WHERE "id" = %(id)s'
 ACTIVE_SQL = 'SELECT "id", "artifactPath" FROM "ai_models" WHERE "kind" = %(kind)s AND "active" LIMIT 1'
+GATE_SQL = 'SELECT "gate" FROM "ai_models" WHERE "id" = %(id)s LIMIT 1'
 
 
 def save_artifact(artifact: dict, models_dir: Path, model_id: str) -> Path:
@@ -63,3 +64,11 @@ def load_active(conn, kind: str = MODEL_KIND) -> tuple[str, Path] | None:
     if not row:
         return None
     return str(row["id"]), Path(row["artifactPath"])
+
+
+def gate_of(conn, model_id: str) -> str | None:
+    """The registry's recorded gate (``GO`` / ``NO_GO``) for ``model_id``, or None when unregistered."""
+    with conn.cursor() as cur:
+        cur.execute(GATE_SQL, {"id": model_id})
+        row = cur.fetchone()
+    return str(row["gate"]) if row and row.get("gate") is not None else None

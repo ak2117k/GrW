@@ -54,7 +54,12 @@ interface CliEnvelope {
   subtype?: string;
   api_error_status?: number | null;
   /** Token usage, when the CLI reports it. Read defensively — see `cliTokens`. */
-  usage?: { input_tokens?: unknown; output_tokens?: unknown };
+  usage?: {
+    input_tokens?: unknown;
+    output_tokens?: unknown;
+    cache_creation_input_tokens?: unknown;
+    cache_read_input_tokens?: unknown;
+  };
 }
 
 /**
@@ -164,6 +169,8 @@ export class ClaudeCliTransport implements MessagesTransport {
       meta: {
         inputTokens: cliTokens(envelope.usage?.input_tokens),
         outputTokens: cliTokens(envelope.usage?.output_tokens),
+        cacheCreationInputTokens: cliTokens(envelope.usage?.cache_creation_input_tokens),
+        cacheReadInputTokens: cliTokens(envelope.usage?.cache_read_input_tokens),
         billed: false,
       },
     };

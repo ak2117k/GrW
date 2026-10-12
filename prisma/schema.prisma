@@ -1526,6 +1526,7 @@ model User {
   coreRiskLimits         CoreRiskLimit[]
   coreKillSwitches       CoreKillSwitch[]
   coreOrders             CoreOrder[]
+  corePositions          CorePosition[]
   coreFills              CoreFill[]
   coreCashLedger         CoreCashLedger[]
   @@index([status])
@@ -2346,6 +2347,9 @@ model CoreOrder {
   refPrice          Decimal          @db.Decimal(14, 2)
   purpose           String // ENTRY | EXIT
   strategyVersionId String?
+  /// SP2 M4: the core position this order belongs to (null for orders placed outside the lifecycle).
+  positionId        String?
+  position          CorePosition?    @relation(fields: [positionId], references: [id], onDelete: SetNull)
   state             String // NEW | OPEN | PARTIAL | FILLED | CANCELLED | REJECTED
   rejectReason      String?
   submittedAt       DateTime
@@ -2358,6 +2362,7 @@ model CoreOrder {
   @@index([userId, state])
   @@index([state])
   @@index([userId, vehicle, token])
+  @@index([userId, positionId])
   @@map("core_orders")
 }
 
@@ -2414,4 +2419,53 @@ model CorePaperDefault {
 
   @@id([key, scope])
   @@map("core_paper_defaults")
+}
+
+/// SP2 M4 — one core position per entry intent (spec §7.1). Status is derived from its
+/// orders; the exit plan is frozen at entry; updates are guarded by `version`.
+model CorePosition {
+  id                String      @id @default(cuid())
+  userId            String
+  user              User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// The corpus sourceId for ai_decision_records.source = 'core' (ruling L13).
+  intentId          String      @unique
+  strategyId        String
+  strategyVersionId String
+  vehicle           String // CASH_INTRADAY | MTF | OPTIONS_BUY
+  exchange          String
+  token             String
+  symbol            String
+  lotSize           Int
+  underlying        String
+  side              String // BUY | SELL
+  direction         String // LONG | SHORT
+  status            String // PENDING_ENTRY | OPEN | PARTIAL | EXITING | CLOSED | CANCELLED
+  requestedQty      Int
+  entryFilledQty    Int         @default(0)
+  exitFilledQty     Int         @default(0)
+  entryAvgPrice     Decimal?    @db.Decimal(14, 4)
+  plan              Json
+  initialStopPrice  Decimal?    @db.Decimal(14, 4)
+  stopPrice         Decimal?    @db.Decimal(14, 4)
+  targetPrice       Decimal?    @db.Decimal(14, 4)
+  partialPrice      Decimal?    @db.Decimal(14, 4)
+  partialQty        Int         @default(0)
+  trailActive       Boolean     @default(false)
+  partialDone       Boolean     @default(false)
+  highWater         Decimal?    @db.Decimal(14, 4)
+  lowWater          Decimal?    @db.Decimal(14, 4)
+  exitSeq           Int         @default(0)
+  exitReason        String?
+  blindSince        DateTime?
+  openedAt          DateTime?
+  closedAt          DateTime?
+  version           Int         @default(0)
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  orders            CoreOrder[]
+
+  @@index([userId, status])
+  @@index([status])
+  @@index([userId, vehicle, token])
+  @@map("core_positions")
 }

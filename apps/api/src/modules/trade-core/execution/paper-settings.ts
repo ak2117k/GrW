@@ -19,10 +19,11 @@ export const PAPER_KEYS = [
   'mtfAnnualRatePct',
   'mtfPledgeFee',
   'maxLotsPerOrder',
+  'blindAfterMs',
 ] as const;
 export type PaperKey = (typeof PAPER_KEYS)[number];
 
-export const PAPER_KEY_SCOPES: Readonly<Record<Exclude<PaperKey, 'maxLotsPerOrder'>, readonly string[]>> = {
+export const PAPER_KEY_SCOPES: Readonly<Record<Exclude<PaperKey, 'maxLotsPerOrder' | 'blindAfterMs'>, readonly string[]>> = {
   startingCapital: ['ALL'],
   intradayLeverage: ['CASH_INTRADAY'],
   slippageBps: VEHICLES,
@@ -43,6 +44,12 @@ export const REQUIRED_PAPER_PAIRS: readonly string[] = (Object.keys(PAPER_KEY_SC
   (key) => PAPER_KEY_SCOPES[key].map((scope) => paperPairId(key, scope)),
 );
 
+/**
+ * SP2 M4 (ruling L10): pairs that may be absent without rejecting orders. The lifecycle
+ * reads blindAfterMs and falls back to PRICE_MAX_AGE_MS (stricter) when it is missing.
+ */
+export const OPTIONAL_PAPER_PAIRS: readonly string[] = ['blindAfterMs@ALL'];
+
 export function isPaperKey(k: string): k is PaperKey {
   return (PAPER_KEYS as readonly string[]).includes(k);
 }
@@ -50,6 +57,7 @@ export function isPaperKey(k: string): k is PaperKey {
 export function isPaperPair(key: string, scope: string): boolean {
   if (!isPaperKey(key)) return false;
   if (key === 'maxLotsPerOrder') return UNDERLYING_SCOPE.test(scope) && !RESERVED_SCOPES.includes(scope);
+  if (key === 'blindAfterMs') return scope === 'ALL';
   return PAPER_KEY_SCOPES[key].includes(scope);
 }
 
@@ -81,6 +89,8 @@ export function parsePaperValue(key: PaperKey, raw: unknown): Parsed<Dec> {
       return okValue(v);
     case 'maxLotsPerOrder':
       return v.isInteger() && v.gte(1) ? okValue(v) : fail('must be a whole number of lots, at least 1');
+    case 'blindAfterMs':
+      return v.isInteger() && v.gte(1000) ? okValue(v) : fail('must be a whole number of milliseconds, at least 1000');
   }
 }
 
@@ -94,6 +104,8 @@ export interface PaperSettings {
   mtfPledgeFee: Dec;
   /** Lots per order by option underlying; an underlying absent here rejects its orders. */
   maxLotsPerOrder: Readonly<Record<string, number>>;
+  /** SP2 M4: no fresh price for this long marks an open position blind; null when the optional row is absent. */
+  blindAfterMs: number | null;
 }
 
 export interface PaperDefaultValue {
@@ -130,6 +142,7 @@ export function resolvePaperSettings(rows: readonly PaperDefaultValue[]): PaperS
       mtfAnnualRatePct: get('mtfAnnualRatePct', 'MTF'),
       mtfPledgeFee: get('mtfPledgeFee', 'MTF'),
       maxLotsPerOrder,
+      blindAfterMs: valid.has('blindAfterMs@ALL') ? get('blindAfterMs', 'ALL').toNumber() : null,
     },
   };
 }

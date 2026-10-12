@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client';
-import { isPaperPair, parsePaperValue, REQUIRED_PAPER_PAIRS, resolvePaperSettings, type PaperKey } from './paper-settings';
+import { isPaperPair, OPTIONAL_PAPER_PAIRS, parsePaperValue, REQUIRED_PAPER_PAIRS, resolvePaperSettings, type PaperKey } from './paper-settings';
 import { SEED_ROWS } from './testing/paper-fixtures';
 
 const ok = (key: PaperKey, v: unknown) => parsePaperValue(key, v).ok;
@@ -63,5 +63,24 @@ describe('paper settings vocabulary (spec §4.5)', () => {
   it('an underlying with no maxLotsPerOrder row does not block the rest (its orders are rejected one by one)', () => {
     const r = resolvePaperSettings(SEED_ROWS.filter((row) => row.key !== 'maxLotsPerOrder'));
     expect(r.ok && r.settings.maxLotsPerOrder).toEqual({});
+  });
+});
+
+describe('blindAfterMs (SP2 M4, ruling L10: optional)', () => {
+  it('is a pair at ALL only, a whole number of ms of at least 1000', () => {
+    expect(isPaperPair('blindAfterMs', 'ALL')).toBe(true);
+    expect(isPaperPair('blindAfterMs', 'CASH_INTRADAY')).toBe(false);
+    expect(parsePaperValue('blindAfterMs', 30000).ok).toBe(true);
+    expect(parsePaperValue('blindAfterMs', 999).ok).toBe(false);
+    expect(parsePaperValue('blindAfterMs', '1500.5').ok).toBe(false);
+  });
+
+  it('is not required: absent resolves to null, present to its number', () => {
+    expect(REQUIRED_PAPER_PAIRS).not.toContain('blindAfterMs@ALL');
+    expect(OPTIONAL_PAPER_PAIRS).toEqual(['blindAfterMs@ALL']);
+    const base = resolvePaperSettings(SEED_ROWS);
+    expect(base.ok && base.settings.blindAfterMs).toBeNull();
+    const withBlind = resolvePaperSettings([...SEED_ROWS, { key: 'blindAfterMs', scope: 'ALL', numValue: new Prisma.Decimal('30000') }]);
+    expect(withBlind.ok && withBlind.settings.blindAfterMs).toBe(30000);
   });
 });

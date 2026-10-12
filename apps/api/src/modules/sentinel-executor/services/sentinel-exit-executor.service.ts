@@ -87,7 +87,7 @@ export class SentinelExitExecutor {
     // 2. GUARDS — DB + clock only.
     const tracker = (await this.prisma.tradeTracker.findUnique({ where: { id: v.trackerId } })) as Tracker | null;
     const [countedToday, inFlight] = await Promise.all([
-      this.repo.countCountedSince(v.userId, istDayStartUtc(now)),
+      this.repo.countCountedSince(v.userId, istDayStartUtc(now), cfg.mode),
       this.repo.hasInFlight(v.trackerId, id, now, tracker
         ? { userId: v.userId, exchange: String(tracker.exchange ?? '').toUpperCase(), token: String(tracker.token ?? '') }
         : undefined),

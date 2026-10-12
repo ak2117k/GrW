@@ -63,10 +63,11 @@ describe('AiExitExecutionRepository', () => {
   it('countCountedSince counts every row where an order may have been sent (PLACED, FILLED, ORDER_UNCERTAIN, INTERRUPTED) plus DRY_RUN', async () => {
     const p = fakePrisma();
     const since = new Date('2026-10-11T18:30:00Z');
-    await new AiExitExecutionRepository(p as never).countCountedSince('owner', since);
+    await new AiExitExecutionRepository(p as never).countCountedSince('owner', since, 'live');
     expect(p.aiExitExecution.count).toHaveBeenCalledWith({
       where: {
         userId: 'owner',
+        mode: 'live',
         createdAt: { gte: since },
         OR: [
           { status: { in: ['PLACED', 'FILLED', 'DRY_RUN'] } },
@@ -146,5 +147,17 @@ describe('AiExitExecutionRepository', () => {
     expect(p.aiExitExecution.findMany).toHaveBeenCalledWith({
       where: { userId: 'owner' }, orderBy: { createdAt: 'desc' }, take: 20,
     });
+  });
+});
+
+describe('cap is counted per mode (review fix 4)', () => {
+  it('a live count never includes dry-run rows, and vice versa', async () => {
+    const p = fakePrisma();
+    const repo = new AiExitExecutionRepository(p as never);
+    const since = new Date('2026-10-11T18:30:00Z');
+    await repo.countCountedSince('owner', since, 'live');
+    await repo.countCountedSince('owner', since, 'dry-run');
+    expect(p.aiExitExecution.count.mock.calls[0][0].where).toEqual(expect.objectContaining({ userId: 'owner', mode: 'live' }));
+    expect(p.aiExitExecution.count.mock.calls[1][0].where).toEqual(expect.objectContaining({ userId: 'owner', mode: 'dry-run' }));
   });
 });

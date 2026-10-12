@@ -501,3 +501,14 @@ describe('SentinelExitExecutor — dry-run never logs in (review fix 3)', () => 
     expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'SKIPPED', reason: 'NO_FEED_SESSION' }));
   });
 });
+
+describe('SentinelExitExecutor — cap per mode (review fix 4)', () => {
+  it('counts the cap in the verdict\'s own mode', async () => {
+    const live = harness({ positions: [env([posRow('100')]), env([posRow('0')])] });
+    await live.ex.process(V, LIVE, NOW);
+    expect(live.repo.countCountedSince).toHaveBeenCalledWith('owner', expect.any(Date), 'live');
+    const dry = harness();
+    await dry.ex.process(V, DRY_MCX_UNITS, NOW);
+    expect(dry.repo.countCountedSince).toHaveBeenCalledWith('owner', expect.any(Date), 'dry-run');
+  });
+});

@@ -77,12 +77,14 @@ export class AiExitExecutionRepository {
 
   /**
    * Cap count (spec §5.3, review fix 2): every row where an order may have been
-   * sent — PLACED, FILLED, FAILED with an unknown fate — plus DRY_RUN.
+   * sent — PLACED, FILLED, FAILED with an unknown fate — plus DRY_RUN, counted
+   * in ONE mode (review fix 4): dry-run rehearsals never use up the live cap.
    */
-  countCountedSince(userId: string, since: Date): Promise<number> {
+  countCountedSince(userId: string, since: Date, mode: AutoExitMode): Promise<number> {
     return this.prisma.aiExitExecution.count({
       where: {
         userId,
+        mode,
         createdAt: { gte: since },
         OR: [
           { status: { in: [...COUNTED_STATUSES] } },

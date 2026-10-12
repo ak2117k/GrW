@@ -189,9 +189,30 @@ describe('CoreLifecycleService: exits (spec §7.2–§7.4)', () => {
     h.advance(10);
     const crash: Price = { ref: { exchange: 'NSE', token: '2885', symbol: 'RELIANCE-EQ' }, ltp: 490, at: Date.now(), source: 'ws' };
     h.hub.setFresh(crash);
-    await Promise.all([h.lifecycle.onPrice(h.hub, crash, Date.now()), h.lifecycle.sweep(Date.now())]);
+    const writes = jest.spyOn(h.positions.repo, 'update');
+    await h.lifecycle.recover(Date.now()); // the boot reload done, so the sweep reaches the position at once
+    await Promise.all([h.lifecycle.onPrice(h.hub, crash, Date.now()), h.lifecycle.onPrice(h.hub, crash, Date.now()), h.lifecycle.sweep(Date.now())]);
     await h.settle();
     expect(exitsOf(h, p.id)).toHaveLength(1);
+    expect(h.sink.types(p.id).filter((t) => t === 'EXIT_DECIDED')).toHaveLength(1);
+    // Serialised: the second evaluation never even attempts the EXITING write (the version guard is the backstop).
+    expect(writes.mock.calls.filter((c) => c[3].status === 'EXITING')).toHaveLength(1);
+    expect(h.positions.rows[0]).toMatchObject({ status: 'EXITING', exitSeq: 1 });
+  });
+
+  it('an EXITING write that loses the version race places nothing; the next sweep decides on the fresh row, once (Review Focus 5)', async () => {
+    const h = lifecycleHarness();
+    const p = await h.lifecycle.openPosition(openRequest());
+    await h.price(500);
+    // Another writer bumps the row: the lifecycle's in-memory version is now stale.
+    await h.positions.repo.update('user_A', p.id, h.positions.rows[0].version, { highWater: 500 });
+    await h.price(490);
+    expect(exitsOf(h, p.id)).toEqual([]);
+    expect(h.positions.rows[0]).toMatchObject({ status: 'OPEN', exitSeq: 0 });
+    await h.lifecycle.sweep(Date.now());
+    await h.settle();
+    expect(exitsOf(h, p.id).map((o) => o.idempotencyKey)).toEqual(['int_1:exit:1']);
+    expect(h.positions.rows[0]).toMatchObject({ status: 'EXITING', exitReason: 'STOP', exitSeq: 1 });
   });
 
   it('the kill switch (reader) exits at priority 1 from the sweep, the safety net behind the cascade', async () => {

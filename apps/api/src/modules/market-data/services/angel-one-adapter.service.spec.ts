@@ -961,6 +961,18 @@ describe('AngelOneAdapterService — cross-segment token collision', () => {
     expect(out.get('2885')).toBe(2500);
   });
 
+  it('getLiveQuote reports an empty successful reply as "no quote returned", not "SUCCESS"', async () => {
+    // Angel answers status=true / message "SUCCESS" with an empty fetched
+    // list for a token it doesn't know (expired or synthetic). Surfacing the
+    // reply's message as the error read "Get live quote failed: SUCCESS".
+    const marketData = jest.fn().mockResolvedValue({
+      status: true, message: 'SUCCESS', data: { fetched: [], unfetched: [] },
+    });
+    const { adapter } = buildAdapter(marketData);
+
+    await expect(adapter.getLiveQuote('25017', 'MCX')).rejects.toThrow('no quote returned for MCX:25017');
+  });
+
   it('getLiveQuote prefers the fresh REST snapshot over the WS cache (no regression)', async () => {
     const marketData = jest.fn().mockResolvedValue({
       data: { fetched: [{ symbolToken: '2885', tradingSymbol: 'RELIANCE', ltp: 2500, open: 2490, high: 2510, low: 2480, close: 2495 }] },

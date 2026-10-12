@@ -6,6 +6,7 @@ import {
   BROKER_ADAPTER_TOKEN,
 } from '../../market-data/services/market-feed.service';
 import { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
+import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 
 /** Stub repo for the service constructor — onModuleInit isn't called in these tests. */
 const mockTradeRepository = {
@@ -749,5 +750,82 @@ describe('PaperTradeService.refreshOpenPositions — REST fallback when WS cache
 
     expect(broker.getLiveQuote).not.toHaveBeenCalled();
     expect(service.getVirtualPositions()[0].ltp).toBe(105);
+  });
+});
+
+/**
+ * Synthetic option tokens — the universe scanner books paper option trades
+ * against a synthetic instrument whose token is `PAPER-<UND>-<yymmdd>-<strike>-<CE|PE>`
+ * (universe-scanner.worker.ts). That id is not an exchange token: passing it
+ * to the broker's REST quote returns an empty `fetched` list every cycle
+ * (prod 2026-10-12: "Get live quote failed: SUCCESS" every 15 s). The
+ * refresher must resolve the real contract via the options chain instead,
+ * and a quote that genuinely can't be had must be skipped quietly.
+ */
+describe('PaperTradeService.refreshOpenPositions — synthetic option tokens and dead quotes', () => {
+  async function build(
+    broker: { getLiveQuote: jest.Mock },
+    optionsChain: { getLiveOptionLtp: jest.Mock },
+  ): Promise<PaperTradeService> {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PaperTradeService,
+        { provide: TradeRepository, useValue: mockTradeRepository },
+        { provide: MarketFeedService, useValue: { getQuote: jest.fn(() => null) } },
+        { provide: BROKER_ADAPTER_TOKEN, useValue: broker },
+        { provide: OptionsChainService, useValue: optionsChain },
+      ],
+    }).compile();
+    const service = module.get<PaperTradeService>(PaperTradeService);
+    service.resetVirtualPortfolio(2_000_000);
+    return service;
+  }
+
+  const syntheticOrder: OrderRequest = {
+    symbol: 'COPPER2610231420PE', token: 'PAPER-COPPER-261023-1420-PE', exchange: 'NFO',
+    side: 'BUY', orderType: 'MARKET', quantity: 2500, price: 10, positionType: 'INTRADAY',
+  };
+
+  it('prices a PAPER- position from the real contract and never sends the synthetic id to the broker', async () => {
+    const broker = { getLiveQuote: jest.fn() };
+    const optionsChain = { getLiveOptionLtp: jest.fn().mockResolvedValue(12.5) };
+    const service = await build(broker, optionsChain);
+    await service.simulateOrder(syntheticOrder);
+
+    await service.refreshOpenPositions();
+
+    expect(optionsChain.getLiveOptionLtp).toHaveBeenCalledWith('COPPER', '2026-10-23', 1420, 'PE');
+    expect(broker.getLiveQuote).not.toHaveBeenCalled();
+    expect(service.getVirtualPositions()[0].ltp).toBe(12.5);
+  });
+
+  it('skips an unresolvable PAPER- contract with one warning, not one per cycle', async () => {
+    const broker = { getLiveQuote: jest.fn() };
+    const optionsChain = { getLiveOptionLtp: jest.fn().mockResolvedValue(null) };
+    const service = await build(broker, optionsChain);
+    const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+    await service.simulateOrder(syntheticOrder);
+
+    await service.refreshOpenPositions();
+    await service.refreshOpenPositions();
+    await service.refreshOpenPositions();
+
+    expect(broker.getLiveQuote).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('PAPER-COPPER-261023-1420-PE'));
+  });
+
+  it('backs off a real token whose REST quote keeps failing — one warning, no per-cycle broker call', async () => {
+    const broker = { getLiveQuote: jest.fn().mockRejectedValue(new Error('no quote returned for MCX:25017')) };
+    const optionsChain = { getLiveOptionLtp: jest.fn() };
+    const service = await build(broker, optionsChain);
+    const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+    await service.simulateOrder({ ...syntheticOrder, symbol: 'CRUDEOILFUT', token: '25017', exchange: 'MCX' });
+
+    await service.refreshOpenPositions();
+    await service.refreshOpenPositions();
+
+    expect(broker.getLiveQuote).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

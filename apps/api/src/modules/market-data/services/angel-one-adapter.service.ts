@@ -785,8 +785,11 @@ export class AngelOneAdapterService implements BrokerAdapter {
       const cached = this.wsTickCache.get(this.cacheKey(exchange, token));
       if (cached) return cached;
 
-      // No REST data and no WS tick yet — surface the original REST error.
-      throw new Error(restMessage ?? 'Market data fetch failed');
+      // No REST data and no WS tick yet. An unknown (expired/synthetic) token
+      // comes back status=true / "SUCCESS" with an empty list, so the reply's
+      // message is only worth surfacing when the call itself failed.
+      const reason = restStatus === false && restMessage ? ` (${restMessage})` : '';
+      throw new Error(`no quote returned for ${exchange}:${token}${reason}`);
     } catch (error) {
       // Any error (network, 403, parse, etc.): try the WS cache before giving up.
       const cached = this.wsTickCache.get(this.cacheKey(exchange, token));
@@ -794,7 +797,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
         return cached;
       }
       const msg = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to get live quote for ${token}: ${msg}`);
+      this.logger.error(`Failed to get live quote for ${exchange}:${token}: ${msg}`);
       throw new Error(`Get live quote failed: ${msg}`);
     }
   }

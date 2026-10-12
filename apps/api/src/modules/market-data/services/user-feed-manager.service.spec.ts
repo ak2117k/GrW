@@ -167,3 +167,23 @@ it('fetchCandleWindow runs one window on the user’s own session', async () => 
   await mgr.fetchCandleWindow('u1', { token: '26000', exchange: 'NSE' }, 'ONE_HOUR', from, to);
   expect(s.getCandleWindow).toHaveBeenCalledWith('26000', 'NSE', 'ONE_HOUR', from, to);
 });
+
+it('warmRestClient never creates a session, and returns the live session client', async () => {
+  const factory = jest.fn(() => {
+    const s: any = fakeSession();
+    s.restClient = jest.fn(() => ({ client: { tag: 'warm' }, clientId: 'C1' }));
+    return s;
+  });
+  const mgr = new UserFeedManager(factory as any, { idleMs: 120000, maxSessions: 40 });
+  expect(mgr.warmRestClient('u1')).toBeNull();
+  expect(factory).not.toHaveBeenCalled();
+  await mgr.pin('u1', []);
+  expect(mgr.warmRestClient('u1')).toEqual({ client: { tag: 'warm' }, clientId: 'C1' });
+  expect(factory).toHaveBeenCalledTimes(1);
+});
+
+it('warmRestClient is null for a session without restClient support', async () => {
+  const mgr = new UserFeedManager(jest.fn(() => fakeSession()) as any, { idleMs: 120000, maxSessions: 40 });
+  await mgr.pin('u1', []);
+  expect(mgr.warmRestClient('u1')).toBeNull();
+});

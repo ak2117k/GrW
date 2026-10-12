@@ -551,3 +551,49 @@ describe('session-wide historical pacing', () => {
     expect(at).toHaveLength(2);
   });
 });
+
+describe('restClient (sentinel auto-exit borrows the warm client)', () => {
+  it('is null before connect, the authenticated client after, null after dispose', async () => {
+    const { s, d } = makeSession();
+    expect(s.restClient()).toBeNull();
+    await s.ensureConnected();
+    expect(s.restClient()).toEqual({ client: d.smartApi, clientId: 'C1' });
+    await s.dispose();
+    expect(s.restClient()).toBeNull();
+  });
+
+  it('is null when the login failed (client built but never authenticated)', async () => {
+    const d = makeDeps();
+    d.smartApi.generateSession.mockResolvedValue({ data: {} });
+    const { s } = makeSession(d);
+    await expect(s.ensureConnected()).rejects.toThrow();
+    expect(s.restClient()).toBeNull();
+  });
+
+  it('reading it never logs in or out', async () => {
+    const { s, d } = makeSession();
+    await s.ensureConnected();
+    s.restClient();
+    s.restClient();
+    expect(d.smartApi.generateSession).toHaveBeenCalledTimes(1);
+    expect(d.smartApi.logout).not.toHaveBeenCalled();
+  });
+
+  it('goes null while a re-login is in flight and stays null if it fails', async () => {
+    jest.useFakeTimers();
+    try {
+      const d = makeDeps();
+      const { s } = makeSession(d);
+      await s.ensureConnected();
+      expect(s.restClient()).not.toBeNull();
+      d.smartApi.generateSession.mockResolvedValue({ data: {} }); // the re-login fails
+      d.ws.handlers['close']();
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(d.smartApi.generateSession).toHaveBeenCalledTimes(2);
+      expect(s.restClient()).toBeNull();
+      await s.dispose();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

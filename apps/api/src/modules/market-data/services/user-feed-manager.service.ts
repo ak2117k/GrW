@@ -264,6 +264,16 @@ export class UserFeedManager {
     return this.registry.get(userId)?.session.restClient?.() ?? null;
   }
 
+  /**
+   * Whether the user has a registered feed session (live, connecting or
+   * re-logging-in). Never creates one. Lets a caller that found no warm client
+   * tell "no feed at all" (a fresh login is harmless) from "the feed is between
+   * logins" (a fresh login would kill it).
+   */
+  hasSession(userId: string): boolean {
+    return this.registry.has(userId);
+  }
+
   // ──────────────────────────────────────────────
   // Private
   // ──────────────────────────────────────────────

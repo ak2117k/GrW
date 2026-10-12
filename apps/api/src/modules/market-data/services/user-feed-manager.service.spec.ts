@@ -187,3 +187,12 @@ it('warmRestClient is null for a session without restClient support', async () =
   await mgr.pin('u1', []);
   expect(mgr.warmRestClient('u1')).toBeNull();
 });
+
+it('hasSession reports a registered session without creating one', async () => {
+  const factory = jest.fn(() => fakeSession());
+  const mgr = new UserFeedManager(factory as any, { idleMs: 120000, maxSessions: 40 });
+  expect(mgr.hasSession('u1')).toBe(false);
+  expect(factory).not.toHaveBeenCalled();
+  await mgr.pin('u1', []);
+  expect(mgr.hasSession('u1')).toBe(true);
+});

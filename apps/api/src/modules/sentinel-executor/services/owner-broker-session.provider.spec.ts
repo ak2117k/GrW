@@ -1,4 +1,4 @@
-import { OwnerBrokerSessionProvider, FeedSessionNotReadyError } from './owner-broker-session.provider';
+import { OwnerBrokerSessionProvider, FeedSessionNotReadyError, NoFeedSessionError } from './owner-broker-session.provider';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { UserFeedSession } from '../../market-data/services/user-feed-session';
@@ -38,7 +38,7 @@ describe('OwnerBrokerSessionProvider (ruling R1)', () => {
     const seen: string[] = [];
     await d.p.withOwnerSession('owner', async (_s, source) => {
       seen.push(source);
-    });
+    }, { allowEphemeralLogin: true });
     expect(seen).toEqual(['ephemeral']);
     expect(d.decryptor.withDecryptedCredentials).toHaveBeenCalledWith('owner', { reason: 'ORDER' }, expect.any(Function));
     expect(d.factory.withSession).toHaveBeenCalledTimes(1);
@@ -155,7 +155,7 @@ describe('borrowing the live owner feed session end to end (real manager + sessi
   it('with no feed session at all, the provider never creates one (falls to the vault tier)', async () => {
     const st = liveStack();
     st.vault.withDecryptedCredentials.mockRejectedValue(new Error('vault stub'));
-    await expect(st.provider.withOwnerSession('owner', jest.fn())).rejects.toThrow('vault stub');
+    await expect(st.provider.withOwnerSession('owner', jest.fn(), { allowEphemeralLogin: true })).rejects.toThrow('vault stub');
     expect(st.sessionFactory).not.toHaveBeenCalled();
     expect(st.vault.withDecryptedCredentials).toHaveBeenCalledWith('owner', { reason: 'ORDER' }, expect.any(Function));
   });
@@ -175,5 +175,28 @@ describe('borrowing the live owner feed session end to end (real manager + sessi
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('dry-run never logs in (review fix 3)', () => {
+  it('no feed session + login not allowed → NoFeedSessionError; no decrypt, no login, callback never runs', async () => {
+    const d = deps(null, false);
+    const fn = jest.fn();
+    await expect(d.p.withOwnerSession('owner', fn, { allowEphemeralLogin: false })).rejects.toBeInstanceOf(NoFeedSessionError);
+    expect(fn).not.toHaveBeenCalled();
+    expect(d.decryptor.withDecryptedCredentials).not.toHaveBeenCalled();
+    expect(d.factory.withSession).not.toHaveBeenCalled();
+  });
+
+  it('the default is NO login (fail-safe): a caller must opt in to the ephemeral tier', async () => {
+    const d = deps(null, false);
+    await expect(d.p.withOwnerSession('owner', jest.fn())).rejects.toBeInstanceOf(NoFeedSessionError);
+    expect(d.decryptor.withDecryptedCredentials).not.toHaveBeenCalled();
+  });
+
+  it('a warm feed session is still borrowed when login is not allowed', async () => {
+    const d = deps({ client: {}, clientId: 'C1' });
+    await d.p.withOwnerSession('owner', async (_s, source) => expect(source).toBe('user-feed'), { allowEphemeralLogin: false });
+    expect(d.factory.borrow).toHaveBeenCalledTimes(1);
   });
 });

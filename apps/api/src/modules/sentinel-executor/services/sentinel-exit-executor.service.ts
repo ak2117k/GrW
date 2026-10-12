@@ -28,7 +28,7 @@ import {
   AiExitExecutionRepository,
   type PendingVerdict,
 } from '../repositories/ai-exit-execution.repository';
-import { FeedSessionNotReadyError, OwnerBrokerSessionProvider } from './owner-broker-session.provider';
+import { FeedSessionNotReadyError, NoFeedSessionError, OwnerBrokerSessionProvider } from './owner-broker-session.provider';
 
 export const AI_EXIT_SESSION_CLOCK = Symbol('AI_EXIT_SESSION_CLOCK');
 export const AI_EXIT_SLEEP = Symbol('AI_EXIT_SLEEP');
@@ -145,11 +145,15 @@ export class SentinelExitExecutor {
           return this.confirm(s, run, o, r.orderId, 'M');
         }
         return this.settleUnplaced(s, run, o, r, 'M');
-      });
+      }, { allowEphemeralLogin: cfg.mode === 'live' });
     } catch (err) {
       if (err instanceof FeedSessionNotReadyError) {
         // Owner decision: refuse rather than a second Angel login over the live feed.
         return this.finish(id, v, 'SKIPPED', 'FEED_SESSION_NOT_READY', { brokerMessage: err.message }, true);
+      }
+      if (err instanceof NoFeedSessionError) {
+        // Review fix 3: dry-run never logs in to Angel; it rehearses on the warm feed only.
+        return this.finish(id, v, 'SKIPPED', 'NO_FEED_SESSION', { brokerMessage: err.message });
       }
       // Once an order has been sent, any later fault means its fate is unknown.
       return this.finish(id, v, 'FAILED', run.sent ? 'ORDER_UNCERTAIN' : 'SESSION', { brokerMessage: errText(err) });

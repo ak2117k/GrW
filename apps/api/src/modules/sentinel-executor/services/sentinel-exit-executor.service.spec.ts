@@ -1,6 +1,6 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-executor.service.spec.ts
 import { SentinelExitExecutor } from './sentinel-exit-executor.service';
-import { FeedSessionNotReadyError } from './owner-broker-session.provider';
+import { FeedSessionNotReadyError, NoFeedSessionError } from './owner-broker-session.provider';
 import { parseAutoExitConfig } from '../domain/auto-exit.config';
 import { aiExitOrderTag } from '../domain/exit-order';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
@@ -480,5 +480,24 @@ describe('SentinelExitExecutor — unknown-fate orders block later verdicts (rev
       books: [env([{ orderid: 'O1', ordertag: 'axLx', status: 'open', symboltoken: '445566', exchange: 'MCX' }])],
     });
     await expect(h.ex.process(V, DRY_MCX_UNITS, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'PRIOR_AI_EXIT_TODAY' });
+  });
+});
+
+describe('SentinelExitExecutor — dry-run never logs in (review fix 3)', () => {
+  it('asks the provider for an ephemeral login only in live mode', async () => {
+    const dry = harness();
+    await dry.ex.process(V, DRY_MCX_UNITS, NOW);
+    expect(dry.sessions.withOwnerSession).toHaveBeenCalledWith('owner', expect.any(Function), { allowEphemeralLogin: false });
+    const live = harness({ positions: [env([posRow('100')]), env([posRow('0')])] });
+    await live.ex.process(V, LIVE, NOW);
+    expect(live.sessions.withOwnerSession).toHaveBeenCalledWith('owner', expect.any(Function), { allowEphemeralLogin: true });
+  });
+
+  it('no feed session in dry-run → SKIPPED: NO_FEED_SESSION, no broker call', async () => {
+    const h = harness();
+    h.sessions.withOwnerSession.mockRejectedValueOnce(new NoFeedSessionError());
+    await expect(h.ex.process(V, DRY_MCX_UNITS, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'NO_FEED_SESSION' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'SKIPPED', reason: 'NO_FEED_SESSION' }));
   });
 });

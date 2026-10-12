@@ -526,12 +526,16 @@ export class SentinelChartContextAdapter implements ChartContextShim {
        * `levelBreak` had nothing to fire on. That is a failure to look reported
        * as a finding, on the one block the whole thesis is judged against.
        *
-       * `volumeRatio` below stays setup-only, and that is correct: it is computed
-       * as part of SCORING a setup, not as part of the book.
+       * `volumeRatio` follows the same rule, for the same reason: it is the last
+       * closed bar's volume over its VMA20 — a fact about the market that
+       * `analyze()` now reports on both arms. It used to be setup-only here, AND
+       * every setup carried a hard-coded 0, so the sentinel saw either no volume
+       * or a false "0x". Null (no reading) passes through as null.
        */
       const levels = result.levels ?? null;
+      const rawVolume = (result as { volumeRatio?: number | null }).volumeRatio;
       const volumeRatio =
-        result.kind === 'setup' && Number.isFinite(result.volumeRatio) ? result.volumeRatio : null;
+        typeof rawVolume === 'number' && Number.isFinite(rawVolume) ? rawVolume : null;
 
       // The context-scoring factors ride along on the SAME analyze() the level
       // book comes from — they are computed as part of scoring a setup, so there

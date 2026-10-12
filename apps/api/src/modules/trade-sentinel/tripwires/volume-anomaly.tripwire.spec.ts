@@ -35,3 +35,14 @@ describe('volumeAnomaly', () => {
     expect(volumeAnomaly.check({ ...base, volumeRatio: missing })).toBeNull();
   });
 });
+
+describe('volumeAnomaly wording', () => {
+  it('names the real baseline — 20 bars of 15m, not a 20-day average', () => {
+    // The ratio is the last CLOSED 15-minute bar over the median of the 20
+    // bars before it (~5 trading hours). Calling that a "20-day average"
+    // handed the agent a false baseline twenty sessions wide.
+    const fire = volumeAnomaly.check({ ...base, volumeRatio: 3 });
+    expect(fire?.detail).toBe('last closed 15m bar volume 3.0x its 20-bar median');
+    expect(fire?.detail).not.toMatch(/day/);
+  });
+});

@@ -810,11 +810,11 @@ export class ContextPacketService {
         volumeRatio: numberBlock(
           tick.volumeRatio,
           // The REAL producer, interval included — not 'market-data', which is a
-          // service this number never passed through. The wording of the reason
-          // is left alone: "not available" claims nothing about the market.
+          // service this number never passed through. The reason names the real
+          // measure (last closed 15m bar vs VMA20) and claims nothing about the market.
           tick.structureSource,
           tick.structureAt ?? at,
-          'session volume vs average not available or not a finite reading',
+          'last closed 15m bar volume vs its 20-bar median (VMA20) not available or not a finite reading',
         ),
         oiWalls:
           tick.oiWallNow === null

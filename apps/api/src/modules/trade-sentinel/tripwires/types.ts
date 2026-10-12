@@ -39,7 +39,7 @@ export interface TripwireInput {
   /** Nearest support/resistance from the level book, if the symbol has one. */
   nearestSupport: number | null;
   nearestResistance: number | null;
-  /** Session volume vs the 20-day average, as a ratio. Null when unavailable. */
+  /** Last closed 15m bar volume vs its 20-bar median (VMA20), as a ratio. Null when unavailable. */
   volumeRatio: number | null;
   /** Current OI walls and the previous snapshot, for shift detection. */
   oiWallNow: { callWall: number | null; putWall: number | null } | null;

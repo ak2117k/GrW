@@ -608,9 +608,28 @@ describe('the level book actually resolving', () => {
 
   it('does not lend a no-setup book a volume ratio it never computed', async () => {
     const t = make();
-    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels() });
-    // volumeRatio is computed while SCORING a setup, so it is genuinely absent
-    // here — and an absent reading must not be inferred from a present book.
+    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels(), volumeRatio: null });
+    // The engine had no reading (too few bars, a volume-less index): absent, and
+    // an absent reading must not be inferred from a present book.
     expect((await t.svc.structureFor('SUZLON-EQ', 100.5)).volumeRatio).toBeNull();
+  });
+
+  it('keeps the volume ratio the engine computed when there is NO SETUP', async () => {
+    // flow.volumeRatio used to be setup-gated here, so on most symbols most of
+    // the time the sentinel never saw volume at all. The ratio is a fact about
+    // the last closed bar, not about the engine liking a trade.
+    const t = make();
+    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels(), volumeRatio: 1.8 });
+    expect((await t.svc.structureFor('SUZLON-EQ', 100.5)).volumeRatio).toBe(1.8);
+  });
+
+  it('a lock re-served with no level book yields no levels, not lines at price 0', async () => {
+    const t = make();
+    t.analyze.mockResolvedValue({ kind: 'setup', side: 'BUY', levels: null, volumeRatio: null });
+    const result = await t.svc.structureFor('SUZLON-EQ', 100.5);
+    expect(result.reason).toBe(LEVEL_BOOK_UNBUILT);
+    expect(result.nearestSupport).toBeNull();
+    expect(result.volumeRatio).toBeNull();
+    expect(await t.svc.levelsFor('SUZLON-EQ')).toBeNull();
   });
 });

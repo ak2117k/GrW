@@ -48,6 +48,8 @@ export interface CoreOrderRequest {
   refPrice: number;
   purpose: OrderPurpose;
   strategyVersionId: string | null;
+  /** SP2 M4: the core position this order belongs to; absent or null outside the lifecycle. */
+  positionId?: string | null;
 }
 
 /** What modify may change on an open order. */
@@ -73,6 +75,8 @@ export interface CoreOrder {
   refPrice: number;
   purpose: OrderPurpose;
   strategyVersionId: string | null;
+  /** SP2 M4: the owning core position, or null. */
+  positionId?: string | null;
   state: OrderState;
   rejectReason: string | null;
   submittedAt: Date;
@@ -137,4 +141,12 @@ export interface ExecutionAdapter {
   getOrder(userId: string, orderId: string): Promise<CoreOrder>;
   getPositions(userId: string): Promise<CorePositionView[]>;
   getFunds(userId: string): Promise<CoreFunds>;
+  /**
+   * SP2 M4 (drift D2): every committed change of any core order (placement, fill, trigger,
+   * modify, cancel, reject). Returns the unsubscribe. A live adapter (SP7) feeds it from
+   * broker order updates.
+   */
+  onOrderUpdate(listener: (order: CoreOrder) => void): () => void;
+  /** SP2 M4: the user's orders of one core position, oldest first. */
+  listPositionOrders(userId: string, positionId: string): Promise<CoreOrder[]>;
 }

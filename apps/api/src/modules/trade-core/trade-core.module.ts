@@ -18,6 +18,7 @@ import { RiskWallService } from './risk-wall/services/risk-wall.service';
 import { SiloSquareOffAdapter } from './risk-wall/services/silo-square-off.adapter';
 import { CorePaperDefaultsController } from './execution/controllers/core-paper-defaults.controller';
 import { MtfInterestCron } from './execution/mtf-interest.cron';
+import { CoreOrderEvents } from './execution/order-events';
 import { CORE_EXECUTION_ADAPTER, PaperExecutionAdapter } from './execution/paper-execution.adapter';
 import { PaperLedgerService } from './execution/paper-ledger.service';
 import { PaperMatcherService } from './execution/paper-matcher.service';
@@ -66,6 +67,8 @@ import { CorePaperDefaultsService } from './execution/services/core-paper-defaul
     CorePaperDefaultsRepository,
     CorePaperTx,
     CorePaperDefaultsService,
+    // SP2 M4 (ruling L3): one emitter shared by the ledger and the lifecycle.
+    CoreOrderEvents,
     PaperLedgerService,
     PaperMatcherService,
     PaperExecutionAdapter,

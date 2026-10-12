@@ -101,7 +101,7 @@ describe('CORE_SQUARE_OFF (paper)', () => {
     expect(await squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop everything')).toEqual({
       cancelledOrders: 2,
       exitsRequested: 0,
-      detail: '2 pending core order(s) cancelled; open core positions are exited by the lifecycle (M4), none in M3',
+      detail: '2 pending core entry order(s) cancelled',
     });
     expect(store.orders.map((o) => [o.userId, o.state])).toEqual([['user_A', 'CANCELLED'], ['user_A', 'CANCELLED'], ['user_B', 'OPEN']]);
     expect([a1, a2, b1].map((o) => matcher.isTracked(o.id))).toEqual([false, false, true]);
@@ -112,7 +112,18 @@ describe('CORE_SQUARE_OFF (paper)', () => {
     await ledger.place(cashBuy(), OPEN, NOW);
     await ledger.place(optionBuy(), OPEN, NOW);
     jest.spyOn(ledger, 'close').mockRejectedValueOnce(new Error('db down'));
-    await expect(squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop')).rejects.toThrow('cancelled 1 of 2 pending core orders; failed: ');
+    await expect(squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop')).rejects.toThrow('cancelled 1 of 2 pending core entry orders; failed: ');
+  });
+
+  it('leaves exit orders alone: they are the square-off of open positions (ruling L14)', async () => {
+    const { store, ledger, squareOff } = setup();
+    const entry = (await ledger.place(cashBuy(), OPEN, NOW)).order;
+    await ledger.applyFill('user_A', entry.id, entry, { qty: 100, price: D('500'), priceAt: NOW }, NOW);
+    const exit = (await ledger.place(cashBuy({ idempotencyKey: 'intent_cash_1:exit:1', purpose: 'EXIT', side: 'SELL', type: 'LIMIT', limitPrice: 600 }), OPEN, NOW)).order;
+    const pending = (await ledger.place(optionBuy(), OPEN, NOW)).order;
+    expect(await squareOff.squareOffAll('user_A', 'KILL_SWITCH', 'stop')).toEqual({ cancelledOrders: 1, exitsRequested: 0, detail: '1 pending core entry order(s) cancelled' });
+    expect(store.orders.find((o) => o.id === exit.id)?.state).toBe('OPEN');
+    expect(store.orders.find((o) => o.id === pending.id)?.state).toBe('CANCELLED');
   });
 });
 
@@ -152,7 +163,7 @@ describe('kill switch ON → CORE_SQUARE_OFF (paper)', () => {
 
     expect(r.cascade?.core).toEqual({
       status: 'OK',
-      detail: '2 pending core order(s) cancelled; open core positions are exited by the lifecycle (M4), none in M3 (cancelled 2 orders, requested 0 exits)',
+      detail: '2 pending core entry order(s) cancelled (cancelled 2 orders, requested 0 exits)',
     });
     expect(silos.squareOffAll).toHaveBeenCalledTimes(1);
     expect(store.orders.map((o) => o.state)).toEqual(['CANCELLED', 'CANCELLED']);

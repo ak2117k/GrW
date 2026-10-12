@@ -73,6 +73,14 @@ export class PaperExecutionAdapter implements ExecutionAdapter {
     return this.ledger.funds(userId);
   }
 
+  onOrderUpdate(listener: (order: CoreOrder) => void): () => void {
+    return this.ledger.onOrderUpdate(listener);
+  }
+
+  listPositionOrders(userId: string, positionId: string): Promise<CoreOrder[]> {
+    return this.ledger.listPositionOrders(userId, positionId);
+  }
+
   /** Fail closed (plan ruling 7): a switch that cannot be read counts as on, and is logged. */
   private async killSwitchOn(req: CoreOrderRequest, now: Date): Promise<boolean> {
     try {

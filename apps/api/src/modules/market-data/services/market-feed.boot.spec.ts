@@ -1,42 +1,39 @@
 /**
- * Boot must reach `app.listen()` even when Redis is unreachable.
+ * The feed opens no Redis connection.
  *
- * Nest awaits every `onModuleInit` before the port is bound, and Render fails a
- * deploy that never opens a port. `initRedis` awaited `subscribe()` on a client
- * built with ioredis defaults — `enableOfflineQueue: true` and a retry strategy
- * that never gives up — so an unreachable Redis produced a promise that neither
- * resolved nor rejected. The surrounding try/catch caught nothing, because
- * nothing was ever thrown. The service was healthy; it simply never listened.
- *
- * Observed as: "Port scan timeout reached, no open ports detected."
+ * It used to publish every tick to a `market:ticks` channel and subscribe to it,
+ * "for cross-process distribution". No other process ever read that channel, and
+ * the subscribe raced the connect (`enableOfflineQueue: false` refuses commands
+ * before the socket is ready), so every boot logged "Stream isn't writeable" and
+ * the channel had zero subscribers while each tick was still serialised and
+ * published. Ticks are served from this process's memory; Redis here was pure
+ * cost. Bull queues and the cron lease own their own Redis clients elsewhere.
  */
-const subscribeNeverSettles = jest.fn(() => new Promise<void>(() => {}));
-const capturedOptions: Array<Record<string, unknown>> = [];
+const constructed: unknown[] = [];
 
 jest.mock('ioredis', () => ({
   __esModule: true,
   default: class FakeRedis {
-    constructor(options: Record<string, unknown>) {
-      capturedOptions.push(options);
+    constructor(options: unknown) {
+      constructed.push(options);
     }
     on() {
       return this;
     }
-    subscribe = subscribeNeverSettles;
-    publish = jest.fn();
+    subscribe = jest.fn().mockResolvedValue(1);
+    publish = jest.fn().mockResolvedValue(0);
     quit = jest.fn().mockResolvedValue('OK');
   },
 }));
 
 import { MarketFeedService } from './market-feed.service';
 
-describe('MarketFeedService boot — an unreachable Redis must not block the port bind', () => {
+describe('MarketFeedService boot — no Redis pub/sub', () => {
   const OLD_ENV = process.env.BOOT_JOBS;
 
   beforeEach(() => {
-    capturedOptions.length = 0;
-    subscribeNeverSettles.mockClear();
-    // Isolate the Redis path: no feed auto-start, no broker traffic.
+    constructed.length = 0;
+    // No feed auto-start, no broker traffic.
     process.env.BOOT_JOBS = 'false';
   });
 
@@ -58,32 +55,18 @@ describe('MarketFeedService boot — an unreachable Redis must not block the por
     );
   }
 
-  it('resolves onModuleInit even when subscribe() never settles', async () => {
+  it('opens no Redis connection at boot', async () => {
     const feed = buildFeed();
+    await feed.onModuleInit();
+    await new Promise((resolve) => setImmediate(resolve));
 
-    // A hang here is the production failure. Race against a timer so the test
-    // reports it as a failure rather than sitting until jest's own timeout.
-    const settled = await Promise.race([
-      feed.onModuleInit().then(() => 'initialised' as const),
-      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 1_000)),
-    ]);
-
-    expect(settled).toBe('initialised');
+    expect(constructed).toHaveLength(0);
   });
 
-  it('bounds the connection so an unreachable Redis fails instead of waiting', () => {
-    // The same bounds cron-lease.redis.ts and auth.module.ts already use.
-    // Without them ioredis queues the command offline and retries forever,
-    // which is what turns a missing Redis into a hung boot.
-    buildFeed().onModuleInit();
+  it('shuts down cleanly with no Redis to close', async () => {
+    const feed = buildFeed();
+    await feed.onModuleInit();
 
-    expect(capturedOptions.length).toBeGreaterThan(0);
-    for (const options of capturedOptions) {
-      expect(options).toMatchObject({
-        maxRetriesPerRequest: 1,
-        enableOfflineQueue: false,
-        connectTimeout: 3000,
-      });
-    }
+    await expect(feed.onModuleDestroy()).resolves.toBeUndefined();
   });
 });

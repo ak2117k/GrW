@@ -9,7 +9,6 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import Redis from 'ioredis';
 import {
   TickData,
   FeedCallback,
@@ -38,8 +37,6 @@ import { MarketDataGateway } from '../gateways/market-data.gateway';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { SlotPressureTracker, type SlotPressure } from './slot-pressure';
 
-/** Redis pub/sub channel for tick distribution across services. */
-const REDIS_TICKS_CHANNEL = 'market:ticks';
 
 /**
  * Injection token for the broker adapter.
@@ -125,12 +122,6 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   /** How often to retry WebSocket connection while REST-polling (ms). */
   private readonly WS_RECONNECT_RETRY_MS = 60_000;
 
-  /** Redis publisher for cross-service tick distribution. */
-  private redisPub: Redis | null = null;
-
-  /** Redis subscriber for receiving ticks from other processes. */
-  private redisSub: Redis | null = null;
-
   /** Handle returned by the broker adapter callback registration. */
   private feedCallback: FeedCallback | null = null;
 
@@ -149,22 +140,8 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    // DELIBERATELY NOT AWAITED. Nest awaits every `onModuleInit` before
-    // `app.listen()` runs, so anything slow here sits in front of the port bind
-    // and Render fails the deploy with "no open ports detected" — the same trap
-    // the boot instrument refresh above had to be detached from.
-    //
-    // Redis here carries cross-process tick distribution. That is an
-    // optimisation: this process serves its own ticks from memory without it.
-    // Trading an unavailable optimisation for an unbootable API is never the
-    // right trade, so the server binds and Redis attaches behind it.
-    void this.initRedis().catch((err) => {
-      this.logger.error(
-        `Redis init failed — cross-process tick distribution is off: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    });
+    // No Redis pub/sub here: ticks are served from this process's memory. The
+    // old `market:ticks` channel had no reader anywhere (see market-feed.boot.spec).
 
     // Per-user migration: closed candles are no longer pushed to the gateway
     // from the shared feed. The chart builds forming candles from per-user
@@ -177,8 +154,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     // quotes and optionally start the WebSocket feed.
     //
     // Processes that need this module's SERVICES but not a live feed otherwise
-    // pay a quote-seeding round trip to Angel, open a WebSocket nobody reads,
-    // and require a Redis they have no reason to run.
+    // pay a quote-seeding round trip to Angel and open a WebSocket nobody reads.
     if (!bootJobsEnabled()) {
       this.logger.log(BOOT_JOBS_DISABLED);
     } else {
@@ -190,8 +166,6 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
     this.stopRestPolling();
     this.stopWsReconnectTimer();
     await this.stopFeed();
-    await this.redisPub?.quit();
-    await this.redisSub?.quit();
   }
 
   // ------------------------------------------------------------------
@@ -713,10 +687,7 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
       // 3. Dispatch to watch monitor tick handler (Stage 2 watch lifecycle)
       this.dispatchWatchTick(tick.token, tick.ltp, tick.timestamp);
 
-      // 4. Publish to Redis for cross-service distribution
-      this.publishToRedis(tick);
-
-      // 5. Pass to candle aggregator
+      // 4. Pass to candle aggregator
       this.candleAggregator.processTick(tick);
 
       // Per-user migration: live ticks reach the frontend via the per-user
@@ -726,85 +697,6 @@ export class MarketFeedService implements OnModuleInit, OnModuleDestroy {
         `Error processing tick for ${tick.token}: ${error instanceof Error ? error.message : error}`,
       );
     }
-  }
-
-  // ------------------------------------------------------------------
-  //  Redis pub/sub
-  // ------------------------------------------------------------------
-
-  private async initRedis(): Promise<void> {
-    try {
-      const redisHost = this.configService.get<string>('redis.host', 'localhost');
-      const redisPort = this.configService.get<number>('redis.port', 6379);
-      const redisPassword = this.configService.get<string>('redis.password') || undefined;
-      // TLS-only managed Redis (Upstash/ElastiCache). undefined => plain TCP.
-      const redisTls = this.configService.get<Record<string, never> | undefined>('redis.tls');
-      // Force IPv4 to avoid AAAA-lookup ENOTFOUND on container networks.
-      const redisFamily = this.configService.get<number>('redis.family');
-
-      const redisOptions = {
-        host: redisHost,
-        port: redisPort,
-        password: redisPassword,
-        tls: redisTls,
-        family: redisFamily,
-        // WITHOUT THESE THREE, AN UNREACHABLE REDIS HANGS THE PROCESS FOREVER.
-        //
-        // ioredis defaults are built for a long-lived client that should ride
-        // out a blip: `enableOfflineQueue` queues commands issued while
-        // disconnected, and the default retry strategy never gives up. So
-        // `await subscribe()` below neither resolved nor rejected when Redis
-        // was gone — the try/catch caught nothing because nothing was thrown,
-        // and boot stopped dead in front of the port bind.
-        //
-        // Same bounds as cron-lease.redis.ts and auth.module.ts, for the same
-        // reason: a missing Redis must present as an error, not as silence.
-        maxRetriesPerRequest: 1,
-        enableOfflineQueue: false,
-        connectTimeout: 3000,
-      };
-
-      this.redisPub = new Redis(redisOptions);
-      this.redisSub = new Redis(redisOptions);
-
-      this.redisPub.on('error', (err) =>
-        this.logger.error(`Redis pub error: ${err.message}`),
-      );
-      this.redisSub.on('error', (err) =>
-        this.logger.error(`Redis sub error: ${err.message}`),
-      );
-
-      // Subscribe to ticks channel for cross-service communication
-      await this.redisSub.subscribe(REDIS_TICKS_CHANNEL);
-      this.redisSub.on('message', (_channel, message) => {
-        try {
-          const tick: TickData = JSON.parse(message);
-          tick.timestamp = new Date(tick.timestamp);
-          // Update local cache from ticks published by other processes
-          const quote = this.tickToQuote(tick);
-          this.quoteCache.set(this.quoteKey(quote.exchange, tick.token), quote);
-        } catch {
-          // Ignore malformed messages
-        }
-      });
-
-      this.logger.log('Redis pub/sub connections established');
-    } catch (error) {
-      this.logger.error(
-        `Failed to initialize Redis: ${error instanceof Error ? error.message : error}. ` +
-          'Continuing without Redis pub/sub.',
-      );
-    }
-  }
-
-  private publishToRedis(tick: TickData): void {
-    if (!this.redisPub) return;
-
-    this.redisPub
-      .publish(REDIS_TICKS_CHANNEL, JSON.stringify(tick))
-      .catch((err) =>
-        this.logger.error(`Redis publish error: ${err.message}`),
-      );
   }
 
   // ------------------------------------------------------------------

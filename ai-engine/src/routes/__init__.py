@@ -1,39 +1,35 @@
 """
 API route modules for the TD Automation AI Engine.
+
+Routers are resolved lazily (PEP 562) so importing one route module — e.g. the
+scorer container importing ``src.routes.scorer`` — does not import every other
+router and its heavy dependencies. ``from src.routes import scoring_router``
+still works and yields None when that router's dependencies are missing.
 """
 
+import importlib
 import logging
 
 _logger = logging.getLogger(__name__)
 
-_all_routers = []
+_ROUTERS = {
+    "scoring_router": "scoring",
+    "sentiment_router": "sentiment",
+    "analysis_router": "analysis",
+    "strategy_validator_router": "strategy_validator",
+}
 
-try:
-    from .scoring import router as scoring_router
-    _all_routers.append("scoring_router")
-except ImportError as exc:
-    scoring_router = None  # type: ignore[assignment]
-    _logger.warning("scoring routes could not be imported: %s", exc)
+__all__ = list(_ROUTERS)
 
-try:
-    from .sentiment import router as sentiment_router
-    _all_routers.append("sentiment_router")
-except ImportError as exc:
-    sentiment_router = None  # type: ignore[assignment]
-    _logger.warning("sentiment routes could not be imported: %s", exc)
 
-try:
-    from .analysis import router as analysis_router
-    _all_routers.append("analysis_router")
-except ImportError as exc:
-    analysis_router = None  # type: ignore[assignment]
-    _logger.warning("analysis routes could not be imported: %s", exc)
-
-try:
-    from .strategy_validator import router as strategy_validator_router
-    _all_routers.append("strategy_validator_router")
-except ImportError as exc:
-    strategy_validator_router = None  # type: ignore[assignment]
-    _logger.warning("strategy_validator routes could not be imported: %s", exc)
-
-__all__ = _all_routers
+def __getattr__(name):
+    module = _ROUTERS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    try:
+        router = importlib.import_module(f".{module}", __name__).router
+    except ImportError as exc:
+        _logger.warning("%s routes could not be imported: %s", module, exc)
+        router = None
+    globals()[name] = router
+    return router

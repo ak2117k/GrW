@@ -92,11 +92,21 @@ def _rule(df: pd.DataFrame, fill: float) -> np.ndarray:
     return df["rule_score"].astype(float).fillna(fill).to_numpy()
 
 
+def _baseline_iso(train_df: pd.DataFrame) -> tuple[IsotonicRegression, float]:
+    fill = float(train_df["rule_score"].astype(float).mean()) if train_df["rule_score"].notna().any() else 0.5
+    return _isotonic(_rule(train_df, fill), train_df["win"].astype(int).to_numpy()), fill
+
+
 def baseline_scores(train_df: pd.DataFrame, apply_df: pd.DataFrame) -> np.ndarray:
     """Isotonic(rule_score → win) fit on ``train_df`` and applied to ``apply_df``."""
-    fill = float(train_df["rule_score"].astype(float).mean()) if train_df["rule_score"].notna().any() else 0.5
-    iso = _isotonic(_rule(train_df, fill), train_df["win"].astype(int).to_numpy())
+    iso, fill = _baseline_iso(train_df)
     return iso.predict(_rule(apply_df, fill))
+
+
+def rule_calibrator(train_df: pd.DataFrame) -> dict:
+    """The baseline map as ``{"x", "y"}`` — served as the calibrated rule fallback."""
+    iso, _ = _baseline_iso(train_df)
+    return {"x": [float(v) for v in iso.X_thresholds_], "y": [float(v) for v in iso.y_thresholds_]}
 
 
 def booster_to_json(model) -> str:
@@ -204,6 +214,7 @@ def train(df: pd.DataFrame, *, seed: int = 7, feature_set: str = features_fs1.FE
         "modelId": model_id,
         "classifier": booster_to_json(clf),
         "calibrator": calibrator,
+        "rule_calibrator": rule_calibrator(tr),
         "regressor": reg_json,
         "feature_names": names,
         "feature_set": feature_set,

@@ -31,7 +31,7 @@ export interface ChainRepo {
   baseline(instrumentIds: readonly string[], before: Date): Promise<Map<string, number>>;
   writeOi(rows: readonly OiRow[]): Promise<number>;
   writeChainSnapshot(chain: HubChain): Promise<void>;
-  /** Latest stored chain for (underlying, expiry), any source, labelled with the caller's venue; null when none. */
+  /** Latest HUB-written chain for (underlying, expiry), labelled with the caller's venue; null when none. */
   latestChainSnapshot(underlying: string, expiry: string, exchange: HubExchange): Promise<HubChain | null>;
   pruneOi(before: Date): Promise<number>;
 }
@@ -157,7 +157,7 @@ export class PrismaChainRepo implements ChainRepo {
   async latestChainSnapshot(underlying: string, expiry: string, exchange: HubExchange): Promise<HubChain | null> {
     const u = underlying.toUpperCase();
     const row = await this.prisma.optionChainSnapshot.findFirst({
-      where: { underlying: u, expiryDate: new Date(expiry) },
+      where: { underlying: u, expiryDate: new Date(expiry), source: 'HUB' },
       orderBy: { capturedAt: 'desc' },
     });
     if (!row) return null;

@@ -90,6 +90,11 @@ describe('PrismaChainRepo', () => {
     await expect(repo.latestChainSnapshot('NIFTY', '2026-10-13', 'NFO')).resolves.toEqual({
       underlying: 'NIFTY', expiry: '2026-10-13', exchange: 'NFO', spot: null, at: Date.parse('2026-10-13T10:00:00Z'), greeks: 'none', entries,
     });
+    // Only the hub's own rows: a legacy NSE / Angel snapshot is not a hub chain.
+    expect(prisma.optionChainSnapshot.findFirst.mock.calls[0][0]).toEqual({
+      where: { underlying: 'NIFTY', expiryDate: new Date('2026-10-13'), source: 'HUB' },
+      orderBy: { capturedAt: 'desc' },
+    });
   });
 
   it('a stored chain is labelled broker Greeks only when some leg carries an IV, else none', async () => {

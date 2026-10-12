@@ -1648,6 +1648,41 @@ model SentinelVerdict {
   @@map("sentinel_verdicts")
 }
 
+/// One row per sentinel EXIT_NOW verdict the auto-exit executor picked up
+/// (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md §6).
+/// Inserted (status CLAIMED) BEFORE any broker call: the unique verdictId is the
+/// idempotency anchor. No FK, like sentinel_verdicts.
+model AiExitExecution {
+  id            String   @id @default(cuid())
+  userId        String
+  verdictId     String   @unique
+  trackerId     String
+  symbol        String
+  exchange      String?
+  token         String?
+  side          String?  // 'BUY' | 'SELL'
+  quantity      Int?
+  productType   String?  // 'INTRADAY' | 'CARRYFORWARD' | 'DELIVERY'
+  orderType     String?  // 'MARKET' | 'LIMIT'
+  limitPrice    Float?
+  mode          String   // 'dry-run' | 'live'
+  status        String   // 'CLAIMED' | 'SKIPPED' | 'DRY_RUN' | 'PLACED' | 'FILLED' | 'REJECTED' | 'FAILED'
+  reason        String?
+  sessionSource String?  // 'user-feed' | 'ephemeral'
+  brokerOrderId String?
+  brokerMessage String?
+  orderStatus   String?  // last broker order-book status seen
+  marketOrderId String?  // the refused MARKET order when the LIMIT fallback ran
+  verdictReason String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+  @@index([trackerId, createdAt])
+  @@map("ai_exit_executions")
+}
+
 model OiWallSnapshot {
   id           String   @id @default(cuid())
   symbol       String

@@ -137,6 +137,8 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false;
   private loaded = false;
+  /** The boot reload in progress, shared by the sweep and exitAll (review fix 1). */
+  private recovery: Promise<void> | null = null;
   private readonly liveLimitCache = new Map<string, { at: number; squareOff: ReadonlyMap<string, string>; mtfMaxHoldDays: number | null }>();
 
   constructor(
@@ -280,14 +282,32 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
    * (claimSeq); the first fresh price past the stop exits as RECOVERY_STOP.
    */
   async recover(now: number = Date.now()): Promise<number> {
-    const active = await this.repo.listActive();
-    for (const pos of active) {
-      const h = this.hold(pos, now, true);
-      await this.run(pos.id, () => this.applyOrders(h, new Date(now))).catch((err) => this.logger.error(`core position ${pos.id}: recovery failed: ${errorText(err)}`));
+    // System work, even when a user's request triggers it (exitAll before the first sweep):
+    // CorePosition and CoreOrder are tenant-scoped, and a scoped reload would hold only that
+    // user's positions, and read the others' orders as empty, with loaded then true for good.
+    return this.repo.withoutTenant(async () => {
+      const active = await this.repo.listActive();
+      for (const pos of active) {
+        const h = this.hold(pos, now, true);
+        await this.run(pos.id, () => this.applyOrders(h, new Date(now))).catch((err) => this.logger.error(`core position ${pos.id}: recovery failed: ${errorText(err)}`));
+      }
+      this.loaded = true;
+      this.logger.log(`lifecycle: recovered ${active.length} active core position(s)`);
+      return active.length;
+    });
+  }
+
+  /** The boot reload, once: a caller that arrives while it runs awaits the same one; a failure lets the next caller retry. */
+  private ensureLoaded(now: number = Date.now()): Promise<void> {
+    if (this.loaded) return Promise.resolve();
+    if (!this.recovery) {
+      this.recovery = this.recover(now)
+        .then(() => undefined)
+        .finally(() => {
+          this.recovery = null;
+        });
     }
-    this.loaded = true;
-    this.logger.log(`lifecycle: recovered ${active.length} active core position(s)`);
-    return active.length;
+    return this.recovery;
   }
 
   /**
@@ -297,7 +317,7 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
    * reports FAILED rather than a partial OK.
    */
   async exitAll(userId: string, cause: 'KILL_SWITCH' | 'DAILY_LOSS', reason: string): Promise<{ exitsRequested: number }> {
-    if (!this.loaded) await this.recover();
+    await this.ensureLoaded();
     const mine = [...this.held.values()].filter((h) => h.pos.userId === userId && isActiveStatus(h.pos.status));
     const failures: string[] = [];
     let requested = 0;
@@ -388,7 +408,7 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     if (this.sweeping) return;
     this.sweeping = true;
     try {
-      if (!this.loaded) await this.recover(now);
+      await this.ensureLoaded(now);
       const blindAfterMs = await this.blindAfterMs(now);
       for (const h of [...this.held.values()]) {
         if (this.inflight.has(h.pos.id)) continue;

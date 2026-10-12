@@ -1,5 +1,7 @@
 import { PrismaClient } from '@prisma/client';
+import type { ClsService } from 'nestjs-cls';
 import type { PrismaService } from '../../src/common/prisma/prisma.service';
+import type { TenantContextService } from '../../src/common/tenant/tenant-context.service';
 import { ActivePositionExistsError, CorePositionRepository } from '../../src/modules/trade-core/lifecycle/repositories/core-position.repository';
 
 const url = process.env.DATABASE_URL_TEST;
@@ -102,7 +104,8 @@ describe('core_paper_defaults (widened by M4)', () => {
 });
 
 describe('CorePositionRepository (real database)', () => {
-  const repo = new CorePositionRepository(db as unknown as PrismaService);
+  // No CLS store in this test process: the scans' tenant bypass is a pass-through.
+  const repo = new CorePositionRepository(db as unknown as PrismaService, { runWithoutTenant: <T>(fn: () => T) => fn() } as unknown as TenantContextService, { isActive: () => false } as unknown as ClsService);
   const plan = { version: 1, vehicle: 'CASH_INTRADAY', side: 'BUY', stopPct: 1.5, targetPct: 3, trail: { kind: 'none' }, partial: { kind: 'none' }, timeExit: { kind: 'clock', hhmm: '15:25' }, atr: null, squareOffHhmm: '15:15', mtfMaxHoldDays: null, entryDay: '2026-10-12', option: null } as const;
   const row = (userId: string, intentId: string) => ({
     userId, intentId, strategyId: 'cs_x', strategyVersionId: 'csv_x', vehicle: 'CASH_INTRADAY' as const,

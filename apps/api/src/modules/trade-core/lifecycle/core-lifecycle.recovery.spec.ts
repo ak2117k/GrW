@@ -44,6 +44,20 @@ describe('CoreLifecycleService: recovery (spec §7.6)', () => {
     expect(h.positions.rows[0]).toMatchObject({ status: 'CLOSED', exitReason: 'STOP' });
   });
 
+  it('a kill switch during the first sweep joins its recovery: one scan, one exit (review fix 1)', async () => {
+    const h = lifecycleHarness();
+    const p = await h.lifecycle.openPosition(openRequest());
+    await h.price(500);
+    const svc = h.restart();
+    const scans = jest.spyOn(h.positions.repo, 'listActive');
+    const [, r] = await Promise.all([svc.sweep(Date.now()), svc.exitAll('user_A', 'KILL_SWITCH', 'stop')]);
+    await h.settle();
+    expect(scans).toHaveBeenCalledTimes(1);
+    expect(r).toEqual({ exitsRequested: 1 });
+    expect(svc.activeCount()).toBe(1);
+    expect(exitsOf(h, p.id)).toHaveLength(1);
+  });
+
   it('a position whose entry was never placed (crash in between) is CANCELLED on recovery, never entered late', async () => {
     const h = lifecycleHarness();
     await h.positions.repo.createIfNoActive({

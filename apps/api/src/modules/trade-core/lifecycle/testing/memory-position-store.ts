@@ -68,6 +68,8 @@ export class MemoryPositionStore {
       const p = this.rows.find((x) => x.id === id && x.userId === userId);
       return p ? copy(p) : null;
     },
+    /** No tenant scoping in memory: the bypass just runs fn. */
+    withoutTenant: <T>(fn: () => T): T => fn(),
     listActive: async () => this.rows.filter((p) => isActiveStatus(p.status)).sort(oldestFirst).map(copy),
     listActiveUserIds: async () => [...new Set(this.rows.filter((p) => isActiveStatus(p.status)).map((p) => p.userId))].sort(),
     listForUser: async (userId: string, since: Date | null) =>

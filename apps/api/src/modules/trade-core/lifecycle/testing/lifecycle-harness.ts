@@ -18,6 +18,7 @@ import type { CoreStrategyRepository } from '../../strategies/repositories/core-
 import { adaptiveBlocks, plainBlocks } from '../../strategies/testing/block-fixtures';
 import { CoreLifecycleService, type CoreOpenRequest } from '../core-lifecycle.service';
 import type { LifecycleEventSink } from '../lifecycle-events';
+import type { CorePositionRepository } from '../repositories/core-position.repository';
 import type { LifecycleEvent } from '../lifecycle.types';
 import { mtfBlocks, optionBlocks } from './lifecycle-fixtures';
 import { MemoryPositionStore } from './memory-position-store';
@@ -54,6 +55,8 @@ export interface HarnessOptions {
   blindAfterMs?: number | null;
   /** Subscribe the service to order updates (default true). */
   subscribe?: boolean;
+  /** Wrap the repository the service uses (e.g. to emulate tenant scoping); the store's rows stay shared. */
+  repo?: (memory: CorePositionRepository) => CorePositionRepository;
 }
 
 /**
@@ -83,7 +86,8 @@ export function lifecycleHarness(opts: HarnessOptions = {}) {
   const limits = { inForce: async () => (opts.liveLimits ? opts.liveLimits() : limitsFixture()) } as unknown as CoreRiskLimitService;
   const killReader = { isOn: async (u: string) => killOn.has(u) } as unknown as CoreKillSwitchReader;
   const sink = new MemoryEventSink();
-  const make = () => new CoreLifecycleService(positions.repo, adapter, strategies, defaults, limits, killReader, moduleRef, clock, sink);
+  const serviceRepo = opts.repo ? opts.repo(positions.repo) : positions.repo;
+  const make = () => new CoreLifecycleService(serviceRepo, adapter, strategies, defaults, limits, killReader, moduleRef, clock, sink);
   let lifecycle = make();
   if (opts.subscribe !== false) lifecycle.subscribe();
 

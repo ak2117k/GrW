@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, type CorePosition as CorePositionRow } from '@prisma/client';
+import { ClsService } from 'nestjs-cls';
 import { PrismaService } from '../../../../common/prisma/prisma.service';
+import { TenantContextService } from '../../../../common/tenant/tenant-context.service';
 import type { OrderSide } from '../../execution/execution.types';
 import type { Direction } from '../../risk-wall/risk-wall.types';
 import type { Vehicle } from '../../strategies/blocks/block-types';
@@ -67,13 +69,28 @@ function patchData(p: PositionPatch): Prisma.CorePositionUpdateManyMutationInput
 
 /**
  * core_positions (spec §7.1). Every per-user query names the userId; listActive and
- * listActiveUserIds are the two system scans (boot recovery, the daily-loss monitor).
+ * listActiveUserIds are the two system scans (boot recovery, the daily-loss monitor); they run
+ * outside any tenant context, since CorePosition is tenant-scoped and a scan started inside a
+ * user's request (a kill switch before the first sweep) must still see every user's rows.
  * Updates are guarded by `version` (ruling L11); creation holds the user's position lock so
  * two intents can never open two active positions on one instrument.
  */
 @Injectable()
 export class CorePositionRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly tenant: TenantContextService,
+    private readonly cls: ClsService,
+  ) {}
+
+  /**
+   * Run fn with tenant scoping lifted (the CoreKillSwitchReader pattern): only when a CLS store
+   * is active, since runWithoutTenant throws outside one (crons, timers), where Prisma is
+   * already unscoped. For system work only; per-user queries name their userId.
+   */
+  withoutTenant<T>(fn: () => T): T {
+    return this.cls.isActive() ? this.tenant.runWithoutTenant(fn) : fn();
+  }
 
   async createIfNoActive(row: NewPositionRow): Promise<CorePosition> {
     return this.prisma.$transaction(async (tx) => {
@@ -119,13 +136,17 @@ export class CorePositionRepository {
 
   /** System scan (boot recovery): every user's active positions, oldest first. */
   async listActive(): Promise<CorePosition[]> {
-    const rows = await this.prisma.corePosition.findMany({ where: { status: { in: [...ACTIVE_STATUSES] } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] });
+    const rows = await this.withoutTenant(() =>
+      this.prisma.corePosition.findMany({ where: { status: { in: [...ACTIVE_STATUSES] } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+    );
     return rows.map(toCorePosition);
   }
 
   /** System scan (daily-loss monitor). */
   async listActiveUserIds(): Promise<string[]> {
-    const rows = await this.prisma.corePosition.findMany({ where: { status: { in: [...ACTIVE_STATUSES] } }, select: { userId: true }, distinct: ['userId'], orderBy: { userId: 'asc' } });
+    const rows = await this.withoutTenant(() =>
+      this.prisma.corePosition.findMany({ where: { status: { in: [...ACTIVE_STATUSES] } }, select: { userId: true }, distinct: ['userId'], orderBy: { userId: 'asc' } }),
+    );
     return rows.map((r) => r.userId);
   }
 

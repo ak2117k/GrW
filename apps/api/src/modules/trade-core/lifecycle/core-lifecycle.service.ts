@@ -2,9 +2,10 @@ import { BadRequestException, ConflictException, Inject, Injectable, Logger, typ
 import { ModuleRef } from '@nestjs/core';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
-import { isHubExchange, refKey, type InstrumentRef } from '../../market-hub/hub.types';
+import { isHubExchange, refKey, type InstrumentRef, type Price } from '../../market-hub/hub.types';
 import type { SessionClock } from '../../market-hub/session-clock';
-import type { CoreInstrument, CoreOrder, ExecutionAdapter } from '../execution/execution.types';
+import type { CoreInstrument, CoreOrder, ExecutionAdapter, OrderSide } from '../execution/execution.types';
+import { PRICE_MAX_AGE_MS } from '../execution/fill-model';
 import { istDate } from '../execution/ledger-math';
 import { CORE_EXECUTION_ADAPTER } from '../execution/paper-execution.adapter';
 import { CorePaperDefaultsService } from '../execution/services/core-paper-defaults.service';
@@ -15,17 +16,28 @@ import { CoreKillSwitchReader } from '../risk-wall/services/core-kill-switch.rea
 import { CoreRiskLimitService } from '../risk-wall/services/core-risk-limit.service';
 import type { StrategyBlocks } from '../strategies/blocks/block-types';
 import { CoreStrategyRepository } from '../strategies/repositories/core-strategy.repository';
-import { armLevels, buildExitPlan, type OptionOpen } from './exit-plan';
+import { armLevels, buildExitPlan, round2, type OptionOpen } from './exit-plan';
+import { decideExit, effectiveHoldDays, effectiveSquareOff, tradingDaysHeld } from './exit-decision';
 import { LIFECYCLE_EVENT_SINK, type LifecycleEventSink } from './lifecycle-events';
-import { entryKey, isActiveStatus, type CorePosition, type LifecycleEvent, type LifecycleEventType, type PositionPatch } from './lifecycle.types';
+import { entryKey, exitKey, isActiveStatus, outranks, type CorePosition, type ExitReason, type LifecycleEvent, type LifecycleEventType, type PositionPatch } from './lifecycle.types';
 import { reducePosition } from './position-state';
 import { ActivePositionExistsError, CorePositionRepository } from './repositories/core-position.repository';
-import { tightenStop } from './stop-rules';
+import { advanceMarks, tightenStop } from './stop-rules';
 
 /** Spec §7.2: the clock-rule sweep. */
 export const LIFECYCLE_SWEEP_MS = 1_000;
 /** Ruling L3: how often each held position's orders are re-read (missed updates). */
 export const ORDERS_REREAD_MS = 5_000;
+
+/** Ruling L7: live limits are re-read at most this often per user. */
+export const LIVE_LIMITS_CACHE_MS = 5_000;
+
+/** A price this process may act on: fresh (spec §6.3) and not from the future. */
+export function fresh(p: LifecycleMark | null, now: number): LifecycleMark | null {
+  return p && p.at <= now && now - p.at <= PRICE_MAX_AGE_MS ? p : null;
+}
+
+const opposite = (side: OrderSide): OrderSide => (side === 'BUY' ? 'SELL' : 'BUY');
 
 /** Spec §7.2: the hub watch owner of one core position. */
 export const corePositionOwner = (positionId: string): string => `core:${positionId}`;
@@ -124,6 +136,7 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
   private hubSourceRef: HubPriceSource | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweeping = false;
+  private readonly liveLimitCache = new Map<string, { at: number; squareOff: ReadonlyMap<string, string>; mtfMaxHoldDays: number | null }>();
 
   constructor(
     private readonly repo: CorePositionRepository,
@@ -275,23 +288,269 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  /** Every second (spec §7.2). Task 9 adds prices, blind detection and decisions; Task 10 the boot reload. */
+  /** A hub push (spec §7.2, the main path): evaluate the positions this ref prices, at once. */
+  onPrice(hub: HubPrices, p: Price, now: number = Date.now()): Promise<void> {
+    const key = refKey(p.ref);
+    const runs: Array<Promise<void>> = [];
+    for (const id of this.byRef.get(key) ?? []) {
+      const h = this.held.get(id);
+      if (!h || h.hub !== hub) continue;
+      if (!h.lastPrice || p.at > h.lastPrice.at) h.lastPrice = { ltp: p.ltp, at: p.at };
+      runs.push(this.evaluate(h, now));
+    }
+    for (const id of this.byUnderlying.get(key) ?? []) {
+      const h = this.held.get(id);
+      if (!h || h.hub !== hub) continue;
+      if (!h.underlyingPrice || p.at > h.underlyingPrice.at) h.underlyingPrice = { ltp: p.ltp, at: p.at };
+      runs.push(this.evaluate(h, now));
+    }
+    return Promise.all(runs).then(() => undefined);
+  }
+
+  /** Every second (spec §7.2): prices from the hub's book, re-reads, blind detection, clock rules, exit re-placement, mark flush. */
   async sweep(now: number = Date.now()): Promise<void> {
     if (this.sweeping) return;
     this.sweeping = true;
     try {
+      const blindAfterMs = await this.blindAfterMs(now);
       for (const h of [...this.held.values()]) {
         if (this.inflight.has(h.pos.id)) continue;
-        await this.run(h.pos.id, () => this.sweepOne(h, now)).catch((err) => this.logger.error(`core position ${h.pos.id}: sweep failed: ${errorText(err)}`));
+        await this.run(h.pos.id, () => this.sweepOne(h, now, blindAfterMs)).catch((err) => this.logger.error(`core position ${h.pos.id}: sweep failed: ${errorText(err)}`));
       }
+    } catch (err) {
+      this.logger.error(`lifecycle sweep failed: ${errorText(err)}`);
     } finally {
       this.sweeping = false;
     }
   }
 
-  private async sweepOne(h: Held, now: number): Promise<void> {
+  private async sweepOne(h: Held, now: number, blindAfterMs: number): Promise<void> {
     if (h.pos.openQty > 0) this.attachHub(h);
+    if (h.hub && h.ref) {
+      const r = h.hub.price(h.ref, { maxAgeMs: PRICE_MAX_AGE_MS });
+      if (r.kind === 'fresh' && (!h.lastPrice || r.price.at > h.lastPrice.at)) h.lastPrice = { ltp: r.price.ltp, at: r.price.at };
+    }
+    if (h.hub && h.underlyingRef) {
+      const r = h.hub.price(h.underlyingRef, { maxAgeMs: PRICE_MAX_AGE_MS });
+      if (r.kind === 'fresh' && (!h.underlyingPrice || r.price.at > h.underlyingPrice.at)) h.underlyingPrice = { ltp: r.price.ltp, at: r.price.at };
+    }
+    const open = this.clock.isOpen(h.pos.instrument.exchange, new Date(now));
+    h.sessionSince = open ? (h.sessionSince ?? now) : null;
     if (now - h.lastReread >= ORDERS_REREAD_MS) await this.applyOrders(h, new Date(now));
+    if (this.held.get(h.pos.id) !== h) return;
+    await this.checkBlind(h, now, blindAfterMs);
+    await this.decide(h, now);
+    await this.ensureExit(h, now);
+    if (h.dirty && this.held.get(h.pos.id) === h) await this.persist(h, this.pendingMarks(h));
+  }
+
+  /** Skip when this position already has work in flight: a push and the sweep never both decide. */
+  private evaluate(h: Held, now: number): Promise<void> {
+    if (this.inflight.has(h.pos.id)) return Promise.resolve();
+    return this.run(h.pos.id, () => this.decide(h, now)).catch((err) => this.logger.error(`core position ${h.pos.id}: evaluation failed: ${errorText(err)}`));
+  }
+
+  /** One position, one instant: marks and trail on a fresh price, then decideExit (spec §7.3). Runs inside run(). */
+  private async decide(h: Held, now: number): Promise<void> {
+    const pos = h.pos;
+    if (!isActiveStatus(pos.status) || pos.openQty <= 0 || pos.entryAvgPrice === null) return;
+    const at = new Date(now);
+    if (!this.clock.isOpen(pos.instrument.exchange, at)) return; // ruling L9
+    const price = fresh(h.lastPrice, now);
+    const today = istDate(at);
+    const firstPriceOfDay = price !== null && h.lastPricedDay !== today;
+    if (price) {
+      const m = advanceMarks(
+        { side: pos.side, plan: pos.plan, entryAvgPrice: pos.entryAvgPrice, stopPrice: pos.stopPrice, trailActive: pos.trailActive, partialDone: pos.partialDone, highWater: pos.highWater, lowWater: pos.lowWater },
+        price.ltp,
+      );
+      if (m.highWater !== pos.highWater || m.lowWater !== pos.lowWater || m.stopPrice !== pos.stopPrice || m.trailActive !== pos.trailActive) {
+        h.pos = { ...pos, highWater: m.highWater, lowWater: m.lowWater, stopPrice: m.stopPrice, trailActive: m.trailActive };
+        h.dirty = true;
+        if (m.stopMoved) this.record('STOP_MOVED', h, { from: pos.stopPrice, to: m.stopPrice, why: m.stopMoved }, at, price);
+      }
+    }
+    if (h.pos.status !== 'EXITING') {
+      const rules = await this.liveRules(pos.userId, now);
+      const d = decideExit({
+        position: h.pos,
+        price,
+        underlyingLtp: fresh(h.underlyingPrice, now)?.ltp ?? null,
+        now: at,
+        sessionOpen: true,
+        killSwitchActive: await this.killSwitchOn(pos.userId),
+        squareOffHhmm: effectiveSquareOff(pos.plan.squareOffHhmm, rules.squareOff.get(pos.vehicle) ?? null),
+        mtfMaxHoldDays: effectiveHoldDays(pos.plan.mtfMaxHoldDays, rules.mtfMaxHoldDays),
+        tradingDaysHeld: tradingDaysHeld(this.clock, pos.instrument.exchange, pos.plan.entryDay, at),
+        recovering: h.recovering,
+        firstPriceOfDay,
+      });
+      if (d.kind === 'EXIT') {
+        if (d.reason === 'RECOVERY_STOP') this.record('RECOVERY_STOP', h, { stop: h.pos.stopPrice, detail: d.detail }, at, price);
+        await this.exit(h, d.reason, d.detail, now, price);
+      } else if (d.kind === 'PARTIAL') {
+        await this.partial(h, d.qty, d.detail, now, price);
+      }
+    }
+    if (price) {
+      h.lastPricedDay = today;
+      h.recovering = false;
+    }
+  }
+
+  /**
+   * Decide a full exit (spec §7.3): persist EXITING and the reason first (Review Focus 2), then
+   * place. A position already exiting keeps its order; a higher-priority reason replaces the
+   * recorded one. Runs inside run(). Returns the quantity sent.
+   */
+  private async exit(h: Held, reason: ExitReason, detail: string, now: number, price: LifecycleMark | null): Promise<number> {
+    const pos = h.pos;
+    if (!isActiveStatus(pos.status)) return 0;
+    if (pos.status !== 'EXITING' || outranks(reason, pos.exitReason)) {
+      const updated = await this.persist(h, { ...this.pendingMarks(h), status: 'EXITING', exitReason: reason });
+      if (!updated) return 0;
+      this.record('EXIT_DECIDED', h, { reason, detail, from: pos.status, stop: pos.stopPrice, target: pos.targetPrice }, new Date(now), price);
+      if (pos.status !== 'EXITING') this.record('POSITION_STATE', h, { from: pos.status, to: 'EXITING', exitReason: reason }, new Date(now));
+    }
+    return this.placeExit(h, now);
+  }
+
+  /** Target 1 (spec §7.5): sell the partial quantity once; a trail that waits for it starts now. */
+  private async partial(h: Held, qty: number, detail: string, now: number, price: LifecycleMark | null): Promise<void> {
+    const pos = h.pos;
+    const startsTrail = pos.plan.trail.kind === 'atr' && pos.plan.trail.startsAfter === 'PARTIAL';
+    const updated = await this.persist(h, { ...this.pendingMarks(h), partialDone: true, trailActive: pos.trailActive || startsTrail });
+    if (!updated) return;
+    this.record('EXIT_DECIDED', h, { reason: 'PARTIAL_TARGET', partial: true, qty, detail }, new Date(now), price);
+    if (qty <= 0) return;
+    const orders = await this.adapter.listPositionOrders(pos.userId, pos.id);
+    const f = reducePosition(h.pos.status, orders);
+    const send = Math.min(qty, f.openQty - f.pendingExitQty);
+    if (send <= 0) return;
+    const seq = await this.claimSeq(h, orders);
+    if (seq === null) return;
+    const o = await this.adapter.placeOrder(this.exitRequest(h, seq, send, price?.ltp ?? h.pos.entryAvgPrice));
+    if (o.state === 'REJECTED') this.logger.warn(`core position ${pos.id}: partial ${o.idempotencyKey} rejected (${o.rejectReason}); not retried (ruling L17)`);
+    await this.applyOrders(h, new Date(now));
+  }
+
+  /**
+   * Rulings L1/L3: one MARKET exit for what is open and not already being exited. An open
+   * entry remainder is cancelled first, so nothing more is bought while exiting.
+   */
+  private async placeExit(h: Held, now: number): Promise<number> {
+    h.lastExitAttempt = now;
+    const pos = h.pos;
+    let orders = await this.adapter.listPositionOrders(pos.userId, pos.id);
+    let f = reducePosition(pos.status, orders);
+    if (f.openEntry) {
+      await this.adapter.cancel(pos.userId, f.openEntry.id);
+      orders = await this.adapter.listPositionOrders(pos.userId, pos.id);
+      f = reducePosition(pos.status, orders);
+    }
+    const qty = f.openQty - f.pendingExitQty;
+    if (qty > 0) {
+      const seq = await this.claimSeq(h, orders);
+      if (seq === null) return 0;
+      const o = await this.adapter.placeOrder(this.exitRequest(h, seq, qty, h.lastPrice?.ltp ?? f.entryAvgPrice));
+      if (o.state === 'REJECTED') this.logger.warn(`core position ${pos.id}: exit ${o.idempotencyKey} rejected (${o.rejectReason}); the sweep re-places it`);
+    }
+    await this.applyOrders(h, new Date(now));
+    return Math.max(qty, 0);
+  }
+
+  /**
+   * The exit sequence to use, persisted BEFORE the order is placed (Review Focus 2): the
+   * current one if no order has used its key yet (recovery re-places the same key), else the next.
+   */
+  private async claimSeq(h: Held, orders: readonly CoreOrder[]): Promise<number | null> {
+    const cur = h.pos.exitSeq;
+    if (cur > 0 && !orders.some((o) => o.idempotencyKey === exitKey(h.pos.intentId, cur))) return cur;
+    const next = cur + 1;
+    return (await this.persist(h, { ...this.pendingMarks(h), exitSeq: next })) ? next : null;
+  }
+
+  private exitRequest(h: Held, seq: number, qty: number, ref: number | null) {
+    const pos = h.pos;
+    return {
+      userId: pos.userId,
+      idempotencyKey: exitKey(pos.intentId, seq),
+      vehicle: pos.vehicle,
+      instrument: pos.instrument,
+      side: opposite(pos.side),
+      qty,
+      type: 'MARKET' as const,
+      limitPrice: null,
+      triggerPrice: null,
+      refPrice: round2(ref ?? pos.entryAvgPrice ?? 0),
+      purpose: 'EXIT' as const,
+      strategyVersionId: pos.strategyVersionId,
+      positionId: pos.id,
+    };
+  }
+
+  /** Review Focus 1: an EXITING position with nothing being exited is re-placed, in session, at most every 5 s. Runs inside run(). */
+  private async ensureExit(h: Held, now: number): Promise<void> {
+    if (h.pos.status !== 'EXITING' || now - h.lastExitAttempt < ORDERS_REREAD_MS) return;
+    if (!this.clock.isOpen(h.pos.instrument.exchange, new Date(now))) return;
+    await this.placeExit(h, now);
+  }
+
+  /** Spec §7.2: no fresh price for blindAfterMs while the session is open → BLIND (journaled, warned); a fresh price clears it. */
+  private async checkBlind(h: Held, now: number, blindAfterMs: number): Promise<void> {
+    const pos = h.pos;
+    if (!isActiveStatus(pos.status) || pos.openQty <= 0 || h.sessionSince === null) return;
+    const noPriceForMs = now - Math.max(h.lastPrice?.at ?? 0, h.since, h.sessionSince);
+    const blind = noPriceForMs > blindAfterMs;
+    if (blind && !pos.blindSince) {
+      if (await this.persist(h, { ...this.pendingMarks(h), blindSince: new Date(now) })) {
+        this.record('BLIND', h, { blind: true, noPriceForMs }, new Date(now));
+        this.logger.warn(`core position ${pos.id} (${pos.instrument.symbol}) is BLIND: no fresh price for ${noPriceForMs} ms`);
+      }
+    } else if (!blind && pos.blindSince) {
+      if (await this.persist(h, { ...this.pendingMarks(h), blindSince: null })) this.record('BLIND', h, { blind: false }, new Date(now));
+    }
+  }
+
+  /** Ruling L7: the user's live squareOffTime per vehicle and mtfMaxHoldDays, cached 5 s; unreadable → frozen values only. */
+  private async liveRules(userId: string, now: number): Promise<{ squareOff: ReadonlyMap<string, string>; mtfMaxHoldDays: number | null }> {
+    const c = this.liveLimitCache.get(userId);
+    if (c && now - c.at < LIVE_LIMITS_CACHE_MS) return c;
+    let limits: LimitInForce[] = [];
+    try {
+      limits = await this.limits.inForce(userId, new Date(now));
+    } catch (err) {
+      this.logger.warn(`live limits unreadable for ${userId}; the frozen values apply: ${errorText(err)}`);
+    }
+    const n = Number(limits.find((l) => l.key === 'mtfMaxHoldDays' && l.scope === 'MTF')?.value ?? Number.NaN);
+    const entry = {
+      at: now,
+      squareOff: new Map(limits.filter((l) => l.key === 'squareOffTime').map((l) => [l.scope as string, l.value] as const)),
+      mtfMaxHoldDays: Number.isSafeInteger(n) ? n : null,
+    };
+    this.liveLimitCache.set(userId, entry);
+    return entry;
+  }
+
+  /** An unreadable switch is never a reason to exit: positions keep their stops (Global Constraints). */
+  private async killSwitchOn(userId: string): Promise<boolean> {
+    try {
+      return await this.killSwitch.isOn(userId);
+    } catch (err) {
+      this.logger.error(`core kill switch unreadable for ${userId}; positions keep their stops: ${errorText(err)}`);
+      return false;
+    }
+  }
+
+  /** Ruling L10: the optional paper default, or PRICE_MAX_AGE_MS (stricter) when absent or unreadable. */
+  private async blindAfterMs(now: number): Promise<number> {
+    try {
+      const r = await this.defaults.settings(now);
+      if (r.ok && r.settings.blindAfterMs !== null) return r.settings.blindAfterMs;
+    } catch (err) {
+      this.logger.warn(`paper settings unreadable; blind after ${PRICE_MAX_AGE_MS} ms: ${errorText(err)}`);
+    }
+    return PRICE_MAX_AGE_MS;
   }
 
   /**
@@ -459,14 +718,5 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     );
     this.inflight.set(id, tail);
     return result;
-  }
-
-  /** Task 8: record the mark of the positions this ref prices (Task 9 adds the decisions). */
-  onPrice(hub: HubPrices, p: import('../../market-hub/hub.types').Price, _now: number = Date.now()): Promise<void> {
-    for (const id of this.byRef.get(refKey(p.ref)) ?? []) {
-      const h = this.held.get(id);
-      if (h && h.hub === hub && (!h.lastPrice || p.at > h.lastPrice.at)) h.lastPrice = { ltp: p.ltp, at: p.at };
-    }
-    return Promise.resolve();
   }
 }

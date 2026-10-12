@@ -107,6 +107,16 @@ describe('CoreLifecycleService: exitAll (kill switch / daily loss) and guard rai
     expect(exitsOf(h, p.id)).toHaveLength(1);
   });
 
+  it('exitAll counts only real exits: an EXITING write that loses the race is not reported as requested (review fix 3)', async () => {
+    const h = lifecycleHarness();
+    const p = await h.lifecycle.openPosition(openRequest());
+    await h.price(500);
+    jest.spyOn(h.positions.repo, 'update').mockResolvedValueOnce(null); // a concurrent writer wins the EXITING write
+    expect(await h.lifecycle.exitAll('user_A', 'KILL_SWITCH', 'stop')).toEqual({ exitsRequested: 0 });
+    expect(exitsOf(h, p.id)).toEqual([]);
+    expect(h.positions.rows[0]).toMatchObject({ status: 'OPEN' });
+  });
+
   it("exitAll touches only the user's own positions", async () => {
     const h = lifecycleHarness();
     await h.lifecycle.openPosition(openRequest());

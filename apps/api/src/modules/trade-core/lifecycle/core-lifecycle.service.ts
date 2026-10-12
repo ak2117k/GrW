@@ -323,11 +323,13 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     let requested = 0;
     for (const h of mine) {
       try {
-        await this.run(h.pos.id, async () => {
+        const sent = await this.run(h.pos.id, async () => {
           const now = Date.now();
-          await this.exit(h, cause, reason, now, fresh(h.lastPrice, now));
+          return this.exit(h, cause, reason, now, fresh(h.lastPrice, now));
         });
-        requested += 1;
+        // Only a real exit counts: one placed now, or a position confirmed EXITING (its exit already
+        // pending). A lost EXITING race (0, row reloaded) or a cancelled unfilled entry does not.
+        if (sent > 0 || h.pos.status === 'EXITING') requested += 1;
       } catch (err) {
         failures.push(`${h.pos.id}: ${errorText(err)}`);
       }

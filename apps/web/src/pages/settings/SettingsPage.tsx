@@ -657,6 +657,15 @@ function AdminSettings() {
         <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Settings</h1>
       </div>
 
+      {/* Broker connection: an admin trades on their own Angel One account too. */}
+      <SectionCard
+        icon={<Plug size={18} />}
+        title="Connect Angel One"
+        description="Connect your broker account to enable auto-execution"
+      >
+        <ConnectAngelOne />
+      </SectionCard>
+
       {/* Section 1: Trading Configuration */}
       <SectionCard
         icon={<Bot size={18} />}

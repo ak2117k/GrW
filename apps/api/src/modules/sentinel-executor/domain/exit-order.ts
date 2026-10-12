@@ -94,6 +94,9 @@ export function planExitOrder(
     if (lot !== null && units % lot !== 0) return { ok: false, reason: 'QTY_NOT_LOT_MULTIPLE' };
     if (unit === 'lots') {
       if (lot === null) return { ok: false, reason: 'NO_LOT_SIZE' };
+      // Every master parser in the repo coerces a missing lotsize to 1, so a caller
+      // lot of 1 may mean "unknown"; dividing by it would send |netqty| LOTS.
+      if (lot === 1 && rowLot !== 1) return { ok: false, reason: 'LOT_SIZE_UNCONFIRMED' };
       quantity = units / lot;
     } else {
       quantity = units;

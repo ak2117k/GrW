@@ -134,6 +134,16 @@ describe('planExitOrder — quantity unit (ruling R16, owner addition 2026-10-12
     expect(qty(planExitOrder([row({ lotsize: '100' })], target, { mode: 'live', qtyUnit: 'lots' }))).toBe(1);
   });
 
+  it('unit=lots with a caller lot of 1 the broker row does not confirm → LOT_SIZE_UNCONFIRMED (1 is the repo-wide "missing" coercion)', () => {
+    expect(planExitOrder([row()], { ...target, lotSize: 1 }, { mode: 'live', qtyUnit: 'lots' })).toEqual({
+      ok: false, reason: 'LOT_SIZE_UNCONFIRMED',
+    });
+    // confirmed by the broker row → lots == units, no hazard
+    expect(qty(planExitOrder([row({ lotsize: '1' })], { ...target, lotSize: 1 }, { mode: 'live', qtyUnit: 'lots' }))).toBe(100);
+    // unit=units never divides, so a lot of 1 is harmless there
+    expect(qty(planExitOrder([row()], { ...target, lotSize: 1 }, LIVE_UNITS))).toBe(100);
+  });
+
   it('caller lot size and broker row lotsize disagree → LOT_SIZE_MISMATCH (never guess)', () => {
     expect(planExitOrder([row({ lotsize: '10' })], mcx, { mode: 'live', qtyUnit: 'lots' })).toEqual({
       ok: false, reason: 'LOT_SIZE_MISMATCH',

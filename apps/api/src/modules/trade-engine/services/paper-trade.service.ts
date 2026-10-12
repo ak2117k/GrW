@@ -12,6 +12,7 @@ import {
   MarketFeedService,
   BROKER_ADAPTER_TOKEN,
 } from '../../market-data/services/market-feed.service';
+import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { v4 as uuidv4 } from 'uuid';
 
 /** Simulated slippage range: 0.01% to 0.05%. */
@@ -44,6 +45,16 @@ const DEFAULT_VIRTUAL_CAPITAL = 4_000_000;
  * bump this constant.
  */
 const PAPER_ACCOUNT_EPOCH = new Date('2026-05-14T11:00:00Z');
+
+/**
+ * Synthetic option token minted by the universe scanner
+ * (`PAPER-<UND>-<yymmdd>-<strike>-<CE|PE>`). Not an exchange token — the
+ * broker can't quote it, so the contract is resolved via the options chain.
+ */
+const SYNTHETIC_OPTION_TOKEN = /^PAPER-([A-Z0-9&]+)-(\d{2})(\d{2})(\d{2})-(\d+(?:\.\d+)?)-(CE|PE)$/;
+
+/** How long a token whose quote can't be had is left alone before retrying. */
+const QUOTE_FAILURE_BACKOFF_MS = 5 * 60_000;
 
 interface PendingPaperOrder {
   id: string;
@@ -93,12 +104,18 @@ export class PaperTradeService implements OnModuleInit {
   /** LTP cache for simulating fills. */
   private readonly ltpCache = new Map<string, number>();
 
+  /** token → epoch ms until which refreshOpenPositions skips its quote fetch. */
+  private readonly quoteBackoffUntil = new Map<string, number>();
+
   constructor(
     private readonly tradeRepository: TradeRepository,
     private readonly marketFeed: MarketFeedService,
     @Optional()
     @Inject(BROKER_ADAPTER_TOKEN)
     private readonly brokerAdapter: BrokerAdapter | null = null,
+    @Optional()
+    @Inject(OptionsChainService)
+    private readonly optionsChain: OptionsChainService | null = null,
   ) {}
 
   /**
@@ -572,22 +589,46 @@ export class PaperTradeService implements OnModuleInit {
   /**
    * Fetch a fresh LTP straight from the broker's REST quote API — used by
    * refreshOpenPositions when a position's token has no WebSocket tick.
-   * Returns 0 (caller keeps the last value) when no broker is wired or the
-   * call fails. Calls are naturally paced — refreshOpenPositions awaits them
+   * A scanner position's synthetic `PAPER-…` token is never sent to the
+   * broker (it isn't an exchange token); its real contract is quoted via the
+   * options chain instead.
+   *
+   * Returns 0 (caller keeps the last value) when no broker is wired or no
+   * price can be had. A token that yields no price is left alone for
+   * QUOTE_FAILURE_BACKOFF_MS with one warning, rather than re-failing every
+   * 15 s cycle. Calls are naturally paced — refreshOpenPositions awaits them
    * one position at a time.
    */
   private async fetchRestLtp(token: string, exchange: string): Promise<number> {
-    if (!this.brokerAdapter) return 0;
+    if ((this.quoteBackoffUntil.get(token) ?? 0) > Date.now()) return 0;
+    const synthetic = SYNTHETIC_OPTION_TOKEN.exec(token);
+    let ltp = 0;
+    let failure = synthetic ? 'option contract not resolvable' : 'broker returned no ltp';
     try {
-      const tick = await this.brokerAdapter.getLiveQuote(token, exchange || 'NSE');
-      const ltp = (tick as { ltp?: number } | null)?.ltp;
-      return typeof ltp === 'number' && ltp > 0 ? ltp : 0;
+      if (synthetic) {
+        if (!this.optionsChain) return 0;
+        const [, underlying, yy, mm, dd, strike, optionType] = synthetic;
+        ltp = (await this.optionsChain.getLiveOptionLtp(
+          underlying, `20${yy}-${mm}-${dd}`, Number(strike), optionType as 'CE' | 'PE',
+        )) ?? 0;
+      } else {
+        if (!this.brokerAdapter) return 0;
+        const tick = await this.brokerAdapter.getLiveQuote(token, exchange || 'NSE');
+        ltp = (tick as { ltp?: number } | null)?.ltp ?? 0;
+      }
     } catch (err) {
-      this.logger.warn(
-        `fetchRestLtp(${token}) failed: ${err instanceof Error ? err.message : err}`,
-      );
-      return 0;
+      failure = err instanceof Error ? err.message : String(err);
     }
+    if (typeof ltp === 'number' && ltp > 0) {
+      this.quoteBackoffUntil.delete(token);
+      return ltp;
+    }
+    this.quoteBackoffUntil.set(token, Date.now() + QUOTE_FAILURE_BACKOFF_MS);
+    this.logger.warn(
+      `No live price for paper position ${exchange}:${token} (${failure}) — ` +
+        `keeping last value, retrying in ${QUOTE_FAILURE_BACKOFF_MS / 60_000} min`,
+    );
+    return 0;
   }
 
   getPendingOrders(): PendingPaperOrder[] {

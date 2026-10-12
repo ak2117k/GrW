@@ -9,6 +9,7 @@ import type { TripwireFire } from '../tripwires/types';
 import type { Ownership, RosterEntry } from './roster.service';
 import { minutesToClose, sessionFor } from '../market-sessions';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
+import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import type { CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
 
 /**
@@ -693,6 +694,17 @@ export class ContextPacketService {
     const structureSymbol = tick.structureSymbol;
     const structureInstrument = tick.structureInstrument ?? null;
 
+    /**
+     * WHETHER THE NEWS FEED CAN SEE THIS UNDERLYING AT ALL. Articles are tagged
+     * with listed companies plus a fixed set of commodity / index aliases; an
+     * MCX commodity or an index outside that set can never be a relatedSymbol.
+     * Asking anyway returns nothing, and that nothing would reach the agent as
+     * "no headlines" and "0 in 30 minutes" — a claim about the market that is
+     * really a claim about our tagger. Both news blocks state THAT instead.
+     */
+    const newsKey = structureSymbol ? newsKeyFor(structureSymbol, entry.exchange) : null;
+    const untaggable = newsKey && newsKey.key === null ? newsKey.reason : null;
+
     const [levelBook, headlines] = structureSymbol
       ? await Promise.all([
           this.safely(
@@ -704,12 +716,14 @@ export class ContextPacketService {
             at,
             'level book unavailable for this symbol',
           ),
-          this.safely(
-            () => this.news.recentFor(structureSymbol),
-            'news-aggregator.service',
-            at,
-            'news aggregator returned nothing for this symbol',
-          ),
+          untaggable
+            ? Promise.resolve(absent(untaggable))
+            : this.safely(
+                () => this.news.recentFor(structureSymbol),
+                'news-aggregator.service',
+                at,
+                'news aggregator returned nothing for this symbol',
+              ),
         ])
       : // NO FALLBACK TO THE TRADINGSYMBOL. That call is guaranteed to miss, and
         // `safely` would report the miss as "level book unavailable for this
@@ -849,12 +863,14 @@ export class ContextPacketService {
       },
       news: {
         headlines,
-        freshCount: numberBlock(
-          tick.freshNewsCount,
-          'news-aggregator.service (headlines in the last 30 minutes)',
-          at,
-          'no 30-minute headline count available for this symbol',
-        ),
+        freshCount: untaggable
+          ? absent(untaggable)
+          : numberBlock(
+              tick.freshNewsCount,
+              'news-aggregator.service (headlines in the last 30 minutes)',
+              at,
+              'no 30-minute headline count available for this symbol',
+            ),
       },
       session: {
         nowIst: istWallClock(now),

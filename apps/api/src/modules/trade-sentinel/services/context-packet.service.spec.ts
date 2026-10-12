@@ -991,3 +991,53 @@ describe('ContextPacketService — the evidence sources are keyed by the underly
     });
   });
 });
+
+describe('ContextPacketService — news for an underlying the tagger can never match', () => {
+  function make() {
+    const recentFor = jest.fn().mockResolvedValue({ value: [{ title: 'x' }], source: 'news' });
+    const svc = new ContextPacketService(
+      { recentForTracker: jest.fn().mockResolvedValue([]) } as never,
+      { levelsFor: jest.fn().mockResolvedValue(null) } as never,
+      { recentFor } as never,
+    );
+    jest.spyOn((svc as never as { logger: { warn: () => void } }).logger, 'warn').mockImplementation(() => undefined);
+    return { svc, recentFor };
+  }
+  const entry = (symbol: string, exchange: string) =>
+    ({ exchange, userId: 'u1', trackerId: 't1', symbol, kind: 'POSITION', ownership: 'SENTINEL', watched: true, reason: '' }) as never;
+  const tick = (structureSymbol: string, freshNewsCount: number | null) =>
+    ({
+      segment: 'OPT', side: 'LONG', structureSymbol, entryPrice: 100, qty: 1, ltp: 110, underlyingLtp: 280,
+      underlyingLtpAt: null, underlyingLtpSource: 'x', underlyingLtpReason: null, nearestSupport: null,
+      nearestResistance: null, structureReason: null, structureAt: null, structureSource: LEVEL_SOURCE,
+      holdingHigh: null, holdingLow: null, entryTime: new Date('2026-10-12T10:00:00Z'), expiry: null,
+      volumeRatio: null, freshNewsCount, factorValues: {}, factorsReason: null, oiWallNow: null, oiWallPrev: null,
+      oiWallsAt: null, greenFloorArmedLatched: false,
+    }) as TickSnapshot;
+
+  it('MCX ZINC: headlines AND freshCount are unavailable with the tagger reason — never a present 0', async () => {
+    const t = make();
+    const packet = await t.svc.build(entry('ZINC30OCT26280CE', 'MCX'), tick('ZINC', 0), null, []);
+    expect(t.recentFor).not.toHaveBeenCalled();
+    for (const block of [packet.news.headlines, packet.news.freshCount]) {
+      expect(block.available).toBe(false);
+      expect((block as { reason: string }).reason).toMatch(/never tagged.*ZINC|ZINC.*never tagged/);
+    }
+  });
+
+  it('NFO FINNIFTY: the same — no headline mapping for that index', async () => {
+    const t = make();
+    const packet = await t.svc.build(entry('FINNIFTY28OCT2626000CE', 'NFO'), tick('FINNIFTY', 0), null, []);
+    expect(packet.news.freshCount.available).toBe(false);
+    expect(packet.news.headlines.available).toBe(false);
+  });
+
+  it('MCX CRUDEOIL and NFO NIFTY are mapped: a real zero is still a present 0', async () => {
+    const t = make();
+    const crude = await t.svc.build(entry('CRUDEOIL16NOV269000CE', 'MCX'), tick('CRUDEOIL', 0), null, []);
+    expect(crude.news.freshCount).toEqual(expect.objectContaining({ available: true, value: 0 }));
+    expect(crude.news.headlines.available).toBe(true);
+    const nifty = await t.svc.build(entry('NIFTY28OCT2625000CE', 'NFO'), tick('NIFTY', 0), null, []);
+    expect(nifty.news.freshCount).toEqual(expect.objectContaining({ available: true, value: 0 }));
+  });
+});

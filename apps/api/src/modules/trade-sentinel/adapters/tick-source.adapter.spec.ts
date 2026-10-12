@@ -1043,3 +1043,37 @@ describe('SentinelTickSource — the closed-session read for the overnight revie
     await expect(t.svc.tickFor('t1', { closedSession: true })).rejects.toThrow(/no live price/i);
   });
 });
+
+describe('freshNewsCount — never a present 0 for an underlying the tagger can never match', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(NOW));
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+  const mcxOption = (symbol: string) => row({ symbol, exchange: 'MCX', token: '5001', lastLtp: 210 });
+
+  it('an MCX underlying with no headline mapping (ZINC) reports NULL and never queries', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = make();
+    t.findUnique.mockResolvedValue(mcxOption('ZINC30OCT26280CE'));
+    t.getInstrumentByToken.mockResolvedValue({ name: 'ZINC', expiry: null });
+
+    const tick = await t.svc.tickFor('t1');
+
+    expect(tick.freshNewsCount).toBeNull();
+    expect(t.getNewsForSymbol).not.toHaveBeenCalled();
+  });
+
+  it('a mini (GOLDM) counts its benchmark’s headlines (GOLD)', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = make();
+    t.findUnique.mockResolvedValue(mcxOption('GOLDM05NOV26120000CE'));
+    t.getInstrumentByToken.mockResolvedValue({ name: 'GOLDM', expiry: null });
+    t.getNewsForSymbol.mockResolvedValue([{ publishedAt: new Date(NOW.getTime() - 60_000) }]);
+
+    const tick = await t.svc.tickFor('t1');
+
+    expect(t.getNewsForSymbol).toHaveBeenCalledWith('GOLD');
+    expect(tick.freshNewsCount).toBe(1);
+  });
+});

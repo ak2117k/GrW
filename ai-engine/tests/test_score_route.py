@@ -22,7 +22,8 @@ def _client(holder):
 @pytest.fixture(scope="module")
 def models_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("models")
-    r = train.train(frame(400, 10, signal=True), seed=7)
+    r = train.train(frame(2000, 40, signal=True), seed=7)
+    assert r.gate == "GO", r.gate_reasons  # serving refuses anything else
     registry.save_artifact(r.artifact, d, r.model_id)
     return d, r.model_id
 

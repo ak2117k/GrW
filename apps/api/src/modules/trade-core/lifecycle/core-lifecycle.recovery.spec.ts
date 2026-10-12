@@ -58,6 +58,22 @@ describe('CoreLifecycleService: recovery (spec §7.6)', () => {
     expect(exitsOf(h, p.id)).toHaveLength(1);
   });
 
+  it('with nothing held the sweep reads no settings, but keeps retrying a failed boot reload (review fix 4)', async () => {
+    const h = lifecycleHarness();
+    const settings = jest.spyOn(h.defaults, 'settings');
+    const scans = jest.spyOn(h.positions.repo, 'listActive').mockRejectedValueOnce(new Error('db down'));
+    await h.lifecycle.sweep(Date.now()); // the reload fails
+    await h.lifecycle.sweep(Date.now()); // retried: loaded, nothing active
+    h.advance(1_000);
+    await h.lifecycle.sweep(Date.now());
+    expect(scans).toHaveBeenCalledTimes(2);
+    expect(settings).not.toHaveBeenCalled();
+    await h.lifecycle.openPosition(openRequest());
+    await h.price(500);
+    await h.lifecycle.sweep(Date.now());
+    expect(settings).toHaveBeenCalled();
+  });
+
   it('a position whose entry was never placed (crash in between) is CANCELLED on recovery, never entered late', async () => {
     const h = lifecycleHarness();
     await h.positions.repo.createIfNoActive({

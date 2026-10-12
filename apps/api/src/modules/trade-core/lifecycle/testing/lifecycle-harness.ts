@@ -136,6 +136,7 @@ export function lifecycleHarness(opts: HarnessOptions = {}) {
   return {
     paper,
     positions,
+    defaults,
     ledger,
     matcher,
     adapter,

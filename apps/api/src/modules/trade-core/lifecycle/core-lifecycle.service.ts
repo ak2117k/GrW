@@ -410,7 +410,8 @@ export class CoreLifecycleService implements OnModuleInit, OnModuleDestroy {
     if (this.sweeping) return;
     this.sweeping = true;
     try {
-      await this.ensureLoaded(now);
+      await this.ensureLoaded(now); // throws until the boot reload succeeds: retried next tick
+      if (this.held.size === 0) return; // nothing to watch: no settings read every second
       const blindAfterMs = await this.blindAfterMs(now);
       for (const h of [...this.held.values()]) {
         if (this.inflight.has(h.pos.id)) continue;

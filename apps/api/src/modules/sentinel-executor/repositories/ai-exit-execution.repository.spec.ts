@@ -60,31 +60,55 @@ describe('AiExitExecutionRepository', () => {
     });
   });
 
-  it('countCountedSince counts PLACED/FILLED/DRY_RUN since the instant', async () => {
+  it('countCountedSince counts every row where an order may have been sent (PLACED, FILLED, ORDER_UNCERTAIN, INTERRUPTED) plus DRY_RUN', async () => {
     const p = fakePrisma();
     const since = new Date('2026-10-11T18:30:00Z');
     await new AiExitExecutionRepository(p as never).countCountedSince('owner', since);
     expect(p.aiExitExecution.count).toHaveBeenCalledWith({
-      where: { userId: 'owner', createdAt: { gte: since }, status: { in: ['PLACED', 'FILLED', 'DRY_RUN'] } },
-    });
-  });
-
-  it('hasInFlight: another CLAIMED row, or a PLACED row in the last 60 s, for the same tracker', async () => {
-    const p = fakePrisma();
-    const now = new Date('2026-10-12T10:00:00Z');
-    p.aiExitExecution.count.mockResolvedValueOnce(1);
-    await expect(new AiExitExecutionRepository(p as never).hasInFlight('t1', 'row1', now)).resolves.toBe(true);
-    expect(p.aiExitExecution.count).toHaveBeenCalledWith({
       where: {
-        trackerId: 't1',
-        id: { not: 'row1' },
+        userId: 'owner',
+        createdAt: { gte: since },
         OR: [
-          { status: 'CLAIMED' },
-          { status: 'PLACED', createdAt: { gte: new Date('2026-10-12T09:59:00Z') } },
+          { status: { in: ['PLACED', 'FILLED', 'DRY_RUN'] } },
+          { status: 'FAILED', reason: { in: ['ORDER_UNCERTAIN', 'INTERRUPTED'] } },
         ],
       },
     });
-    await expect(new AiExitExecutionRepository(p as never).hasInFlight('t1', 'row1', now)).resolves.toBe(false);
+  });
+
+  it('hasInFlight (review fix 2): CLAIMED, or — for the rest of the IST day — PLACED (any age), ORDER_UNCERTAIN or INTERRUPTED, on the same tracker OR the same user+contract', async () => {
+    const p = fakePrisma();
+    const now = new Date('2026-10-12T10:00:00Z'); // 15:30 IST; the IST day began 2026-10-11T18:30Z
+    p.aiExitExecution.count.mockResolvedValueOnce(1);
+    const repo = new AiExitExecutionRepository(p as never);
+    await expect(repo.hasInFlight('t1', 'row1', now, { userId: 'owner', exchange: 'mcx', token: '445566' })).resolves.toBe(true);
+    expect(p.aiExitExecution.count).toHaveBeenCalledWith({
+      where: {
+        id: { not: 'row1' },
+        AND: [
+          { OR: [{ trackerId: 't1' }, { userId: 'owner', exchange: 'MCX', token: '445566' }] },
+          {
+            OR: [
+              { status: 'CLAIMED' },
+              {
+                createdAt: { gte: new Date('2026-10-11T18:30:00Z') },
+                OR: [
+                  { status: 'PLACED' },
+                  { status: 'FAILED', reason: { in: ['ORDER_UNCERTAIN', 'INTERRUPTED'] } },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    await expect(repo.hasInFlight('t1', 'row1', now, { userId: 'owner', exchange: 'MCX', token: '445566' })).resolves.toBe(false);
+  });
+
+  it('hasInFlight without a known contract scopes by tracker only', async () => {
+    const p = fakePrisma();
+    await new AiExitExecutionRepository(p as never).hasInFlight('t1', 'row1', new Date('2026-10-12T10:00:00Z'));
+    expect(p.aiExitExecution.count.mock.calls[0][0].where.AND[0]).toEqual({ OR: [{ trackerId: 't1' }] });
   });
 
   it('sweepInterrupted turns old CLAIMED rows into FAILED: INTERRUPTED', async () => {

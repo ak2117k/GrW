@@ -6,6 +6,9 @@ const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const PRODUCTS = new Set(['INTRADAY', 'CARRYFORWARD', 'DELIVERY']);
 const TERMINAL = new Set(['complete', 'rejected', 'cancelled']);
 
+/** Prefix of every ordertag the executor sends (R4). auto-execution tags are sha256 hex, never 'x'. */
+export const AI_EXIT_TAG_PREFIX = 'ax';
+
 type Row = Record<string, unknown>;
 
 function toNum(v: unknown): number {
@@ -148,7 +151,7 @@ export function limitFallbackPrice(
 /** Angel `ordertag` (plan ruling R4): 'ax' + leg + last 17 alphanumerics of the verdict id. */
 export function aiExitOrderTag(verdictId: string, leg: 'M' | 'L'): string {
   const clean = String(verdictId).replace(/[^A-Za-z0-9]/g, '');
-  return `ax${leg}${clean.slice(-17)}`;
+  return `${AI_EXIT_TAG_PREFIX}${leg}${clean.slice(-17)}`;
 }
 
 /** Does this broker text say MARKET orders are refused for the instrument? (ruling R6) */
@@ -186,6 +189,20 @@ export function findOrderByTag(rows: unknown[], tag: string): (OrderBookEntry & 
   if (mine.length === 0) return null;
   const r = mine.find((o) => !isDeadOrderStatus(statusOf(o))) ?? mine[0];
   return { orderId: String(r.orderid ?? ''), status: statusOf(r), text: String(r.text ?? '') };
+}
+
+
+/**
+ * Review fix 2 (PRIOR_AI_EXIT_TODAY): does today's book hold an AI-exit order on
+ * this contract that may have moved the position (anything but rejected/cancelled)?
+ * Angel's order book only carries the current trading day.
+ */
+export function hasPriorAiExit(rows: unknown[], exchange: string, token: string): boolean {
+  return (rows as Row[]).some(
+    (o) => matches(o, exchange, token)
+      && String(o?.ordertag ?? '').startsWith(AI_EXIT_TAG_PREFIX)
+      && !isDeadOrderStatus(statusOf(o)),
+  );
 }
 
 export function isTerminalOrderStatus(status: string): boolean {

@@ -450,3 +450,35 @@ describe('SentinelExitExecutor — placement outcome through the REAL session (S
     expect(r.client.placeOrder).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('SentinelExitExecutor — unknown-fate orders block later verdicts (review fix 2)', () => {
+  it('the in-flight guard is scoped to the tracker AND the contract', async () => {
+    const h = harness();
+    await h.ex.process(V, LIVE, NOW);
+    expect(h.repo.hasInFlight).toHaveBeenCalledWith('t1', 'row1', NOW, { userId: 'owner', exchange: 'MCX', token: '445566' });
+  });
+
+  it('an ax-tagged order on this contract already in today\'s book → SKIPPED: PRIOR_AI_EXIT_TODAY, no order', async () => {
+    const h = harness({
+      books: [env([{ orderid: 'O1', ordertag: 'axMsomeoldverdict', status: 'complete', symboltoken: '445566', exchange: 'MCX' }])],
+    });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'PRIOR_AI_EXIT_TODAY' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('a rejected ax order earlier today does not block', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('0')])],
+      books: [env([{ orderid: 'O0', ordertag: 'axMold', status: 'rejected', symboltoken: '445566', exchange: 'MCX' }])],
+    });
+    await h.ex.process(V, LIVE, NOW);
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('dry-run reports PRIOR_AI_EXIT_TODAY too', async () => {
+    const h = harness({
+      books: [env([{ orderid: 'O1', ordertag: 'axLx', status: 'open', symboltoken: '445566', exchange: 'MCX' }])],
+    });
+    await expect(h.ex.process(V, DRY_MCX_UNITS, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'PRIOR_AI_EXIT_TODAY' });
+  });
+});

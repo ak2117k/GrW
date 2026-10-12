@@ -3,6 +3,7 @@ import {
   aiExitOrderTag,
   findOrder,
   findOrderByTag,
+  hasPriorAiExit,
   hasOpenOrderFor,
   isFlat,
   isMarketRefusal,
@@ -291,5 +292,22 @@ describe('findOrderByTag (review fix 1)', () => {
     expect(findOrderByTag(book, 'axMx')).toEqual({ orderId: 'B', status: 'open', text: '' });
     expect(findOrderByTag([book[0]], 'axMx')).toEqual({ orderId: 'A', status: 'rejected', text: 'r' });
     expect(findOrderByTag(book, 'axLx')).toBeNull();
+  });
+});
+
+describe('hasPriorAiExit (review fix 2: PRIOR_AI_EXIT_TODAY)', () => {
+  const o = (x: Record<string, unknown>) => ({ symboltoken: '445566', exchange: 'MCX', ...x });
+  it.each([
+    ['complete axM on the contract', [o({ ordertag: 'axMabc', status: 'complete' })], true],
+    ['open axL on the contract', [o({ ordertag: 'axLabc', status: 'open' })], true],
+    ['unknown status counts', [o({ ordertag: 'axMabc' })], true],
+    ['rejected ax order', [o({ ordertag: 'axMabc', status: 'rejected' })], false],
+    ['cancelled ax order', [o({ ordertag: 'axMabc', status: 'cancelled' })], false],
+    ['untagged order', [o({ status: 'complete' })], false],
+    ['auto-execution sha256 tag', [o({ ordertag: 'a3f9', status: 'complete' })], false],
+    ['ax order on another token', [o({ symboltoken: '1', ordertag: 'axMabc', status: 'complete' })], false],
+    ['ax order on another exchange', [o({ exchange: 'NFO', ordertag: 'axMabc', status: 'complete' })], false],
+  ])('%s → %s', (_n, rows, want) => {
+    expect(hasPriorAiExit(rows, 'mcx', '445566')).toBe(want);
   });
 });

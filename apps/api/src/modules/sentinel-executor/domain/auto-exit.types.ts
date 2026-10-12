@@ -16,6 +16,14 @@ export type SessionSource = 'user-feed' | 'ephemeral';
 /** Statuses that count toward the per-user IST-day cap (spec §5.3). */
 export const COUNTED_STATUSES: readonly AiExitStatus[] = ['PLACED', 'FILLED', 'DRY_RUN'];
 
+/**
+ * FAILED reasons after which an order MAY exist at the broker (review fix 2):
+ * the placement answer was not definitive, or the process died mid-flight. Such
+ * rows count toward the cap and block further exits on the same position for
+ * the rest of the IST day.
+ */
+export const UNKNOWN_FATE_REASONS: readonly string[] = ['ORDER_UNCERTAIN', 'INTERRUPTED'];
+
 /** Only derivative venues are in scope (spec §3). */
 export const AUTO_EXIT_EXCHANGES: readonly string[] = ['NFO', 'BFO', 'MCX'];
 

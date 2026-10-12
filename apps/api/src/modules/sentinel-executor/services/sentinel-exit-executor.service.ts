@@ -14,6 +14,7 @@ import {
   findOrder,
   findOrderByTag,
   hasOpenOrderFor,
+  hasPriorAiExit,
   isFlat,
   isMarketRefusal,
   isTerminalOrderStatus,
@@ -87,7 +88,9 @@ export class SentinelExitExecutor {
     const tracker = (await this.prisma.tradeTracker.findUnique({ where: { id: v.trackerId } })) as Tracker | null;
     const [countedToday, inFlight] = await Promise.all([
       this.repo.countCountedSince(v.userId, istDayStartUtc(now)),
-      this.repo.hasInFlight(v.trackerId, id, now),
+      this.repo.hasInFlight(v.trackerId, id, now, tracker
+        ? { userId: v.userId, exchange: String(tracker.exchange ?? '').toUpperCase(), token: String(tracker.token ?? '') }
+        : undefined),
     ]);
     const g = evaluateGuards({
       config: cfg, now, verdict: v, tracker, countedToday, inFlight,
@@ -229,6 +232,9 @@ export class SentinelExitExecutor {
     if (!plan.ok) return { kind: 'skip', reason: plan.reason };
     const book = await this.rows(() => s.getOrderBookEnvelope());
     if (book === null) return { kind: 'fail', reason: 'ORDER_BOOK_READ' };
+    // Review fix 2: one AI exit per contract per day — an earlier one (even of
+    // unknown fate) may have closed or be closing this position already.
+    if (hasPriorAiExit(book, plan.order.exchange, plan.order.token)) return { kind: 'skip', reason: 'PRIOR_AI_EXIT_TODAY' };
     if (hasOpenOrderFor(book, plan.order.exchange, plan.order.token)) return { kind: 'skip', reason: 'OPEN_ORDER_EXISTS' };
     return { kind: 'ok', order: plan.order, ltp: plan.ltp, unitVerified: plan.unitVerified };
   }

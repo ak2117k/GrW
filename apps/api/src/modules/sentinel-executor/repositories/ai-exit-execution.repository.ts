@@ -4,10 +4,12 @@ import { Prisma, type AiExitExecution } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   COUNTED_STATUSES,
+  UNKNOWN_FATE_REASONS,
   type AiExitStatus,
   type AutoExitMode,
   type SessionSource,
 } from '../domain/auto-exit.types';
+import { istDayStartUtc } from '../domain/exit-order';
 
 export interface PendingVerdict {
   id: string;
@@ -25,8 +27,6 @@ export type AiExitPatch = Partial<
     | 'reason' | 'brokerOrderId' | 'brokerMessage' | 'orderStatus' | 'marketOrderId'
   >
 > & { status?: AiExitStatus; sessionSource?: SessionSource };
-
-const IN_FLIGHT_PLACED_MS = 60_000;
 
 @Injectable()
 export class AiExitExecutionRepository {
@@ -75,20 +75,58 @@ export class AiExitExecutionRepository {
     await this.prisma.aiExitExecution.update({ where: { id }, data: patch });
   }
 
+  /**
+   * Cap count (spec §5.3, review fix 2): every row where an order may have been
+   * sent — PLACED, FILLED, FAILED with an unknown fate — plus DRY_RUN.
+   */
   countCountedSince(userId: string, since: Date): Promise<number> {
     return this.prisma.aiExitExecution.count({
-      where: { userId, createdAt: { gte: since }, status: { in: [...COUNTED_STATUSES] } },
+      where: {
+        userId,
+        createdAt: { gte: since },
+        OR: [
+          { status: { in: [...COUNTED_STATUSES] } },
+          { status: 'FAILED', reason: { in: [...UNKNOWN_FATE_REASONS] } },
+        ],
+      },
     });
   }
 
-  async hasInFlight(trackerId: string, excludeId: string, now: Date): Promise<boolean> {
+  /**
+   * Review fix 2. Another attempt blocks this one when it is still CLAIMED, or
+   * when — today (IST) — it is PLACED (any age; FILLED is settled) or FAILED with
+   * an unknown fate (ORDER_UNCERTAIN / INTERRUPTED): its order may be resting or
+   * already filled, and a second exit could reverse the position. Matched on the
+   * tracker OR the contract (exchange + token, as written to the row before the
+   * order), so a re-created tracker for the same position is blocked too.
+   */
+  async hasInFlight(
+    trackerId: string,
+    excludeId: string,
+    now: Date,
+    contract?: { userId: string; exchange: string; token: string },
+  ): Promise<boolean> {
+    const scope: Prisma.AiExitExecutionWhereInput[] = [{ trackerId }];
+    if (contract?.userId && contract?.exchange && contract?.token) {
+      scope.push({ userId: contract.userId, exchange: String(contract.exchange).toUpperCase(), token: String(contract.token) });
+    }
     const n = await this.prisma.aiExitExecution.count({
       where: {
-        trackerId,
         id: { not: excludeId },
-        OR: [
-          { status: 'CLAIMED' },
-          { status: 'PLACED', createdAt: { gte: new Date(now.getTime() - IN_FLIGHT_PLACED_MS) } },
+        AND: [
+          { OR: scope },
+          {
+            OR: [
+              { status: 'CLAIMED' },
+              {
+                createdAt: { gte: istDayStartUtc(now) },
+                OR: [
+                  { status: 'PLACED' },
+                  { status: 'FAILED', reason: { in: [...UNKNOWN_FATE_REASONS] } },
+                ],
+              },
+            ],
+          },
         ],
       },
     });

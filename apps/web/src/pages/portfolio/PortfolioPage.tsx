@@ -12,27 +12,11 @@ import api from '@/services/api';
 import { LoadingSkeleton } from '@/components/common';
 import { SymbolChartLink } from '@/components/common/SymbolChartLink';
 import { isDerivative } from '@/utils/positionRow';
+import { collectHeldExchanges, shouldAutoRefreshPortfolio } from '@/services/portfolio-session';
+import { createVisibilityAwarePoller } from '@/services/interval-poller';
 
-/** How often to re-pull Angel One's live holdings/positions during market hours. */
+/** How often to re-pull Angel One's live holdings/positions while in session. */
 const AUTO_REFRESH_MS = 20_000;
-
-/** True during NSE cash hours (Mon–Fri, 09:15–15:30 IST). Off-hours we don't
- *  auto-poll — each pull is a broker login, and prices don't move anyway. */
-function isMarketHoursIST(): boolean {
-  const parts = new Intl.DateTimeFormat('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    weekday: 'short',
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: false,
-  }).formatToParts(new Date());
-  const weekday = parts.find((p) => p.type === 'weekday')?.value ?? '';
-  if (weekday === 'Sat' || weekday === 'Sun') return false;
-  const hour = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
-  const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
-  const mins = hour * 60 + minute;
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
-}
 
 /** Tailwind text color for a signed P&L value. */
 function pnlColor(v: number): string {
@@ -534,14 +518,22 @@ export default function PortfolioPage() {
     void refresh();
   }, [refresh]);
 
-  // Auto-refresh Angel One's live holdings/positions during market hours so the
-  // page tracks the broker instead of a frozen snapshot. Uses Angel One's own
-  // LTP/P&L (no recompute) — just pulled continuously. Manual Refresh still works.
+  // Auto-refresh Angel One's live holdings/positions while something the user
+  // holds is trading: always during the NSE/NFO session, and in the MCX evening
+  // session only when an MCX instrument is held (each pull is a broker login,
+  // so we don't poll a shut book). Paused while the tab is hidden; no catch-up
+  // burst on return. Uses Angel One's own LTP/P&L — the summary tiles come from
+  // the same response, so they move with it. Manual Refresh still works.
+  const heldRef = useRef<Set<string>>(new Set());
+  heldRef.current = collectHeldExchanges(data, trackers.data);
   useEffect(() => {
-    const id = setInterval(() => {
-      if (isMarketHoursIST()) void refresh();
-    }, AUTO_REFRESH_MS);
-    return () => clearInterval(id);
+    const poller = createVisibilityAwarePoller({
+      intervalMs: AUTO_REFRESH_MS,
+      task: refresh,
+      shouldPoll: () => shouldAutoRefreshPortfolio(heldRef.current),
+      refreshOnVisible: false,
+    });
+    return () => poller.stop();
   }, [refresh]);
 
   // Dismiss the download menu on any outside click.
@@ -761,7 +753,7 @@ export default function PortfolioPage() {
           </section>
 
           <p className="text-center text-[10px] text-[var(--color-text-muted)]">
-            Angel One's own LTP &amp; P&amp;L, auto-refreshed every {AUTO_REFRESH_MS / 1000}s during market hours (09:15–15:30 IST). Press Refresh to pull now.
+            Angel One's own LTP &amp; P&amp;L, auto-refreshed every {AUTO_REFRESH_MS / 1000}s during market hours (NSE 09:15–15:30 IST; until the MCX close when you hold MCX). Press Refresh to pull now.
           </p>
         </>
       )}

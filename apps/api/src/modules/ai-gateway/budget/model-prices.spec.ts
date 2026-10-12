@@ -45,7 +45,7 @@ describe('model prices', () => {
 
   it('loads the shipped config/ai-model-prices.json with the sentinel models priced', () => {
     const prices = loadPrices(JSON.parse(fs.readFileSync(resolveAiConfig('ai-model-prices.json'), 'utf8')));
-    for (const m of ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5']) {
+    for (const m of ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-opus-5-5', 'claude-sonnet-5-5']) {
       expect(prices.get(m)).toBeDefined();
     }
   });

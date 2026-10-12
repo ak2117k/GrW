@@ -26,13 +26,21 @@ import { CORE_EXECUTION_ADAPTER, PaperExecutionAdapter } from './execution/paper
 import { PaperLedgerService } from './execution/paper-ledger.service';
 import { PaperMatcherService } from './execution/paper-matcher.service';
 import { PaperOrderSquareOff } from './execution/paper-order-square-off';
-import { PaperRiskStateProvider } from './execution/paper-risk-state.provider';
 import { CoreCashLedgerRepository } from './execution/repositories/core-cash-ledger.repository';
 import { CoreFillRepository } from './execution/repositories/core-fill.repository';
 import { CoreOrderRepository } from './execution/repositories/core-order.repository';
 import { CorePaperDefaultsRepository } from './execution/repositories/core-paper-defaults.repository';
 import { CorePaperTx } from './execution/repositories/core-paper-tx';
 import { CorePaperDefaultsService } from './execution/services/core-paper-defaults.service';
+import { CoreOrderEvents } from './execution/order-events';
+import { CorePositionsController } from './lifecycle/controllers/core-positions.controller';
+import { CoreLifecycleService } from './lifecycle/core-lifecycle.service';
+import { CoreRiskStateProvider } from './lifecycle/core-risk-state.provider';
+import { CoreSquareOff } from './lifecycle/core-square-off';
+import { DailyLossMonitor } from './lifecycle/daily-loss.monitor';
+import { LIFECYCLE_EVENT_SINK, LoggingLifecycleEventSink } from './lifecycle/lifecycle-events';
+import { CORE_POSITION_EXITS, LIFECYCLE_MARKS } from './lifecycle/lifecycle-ports';
+import { CorePositionRepository } from './lifecycle/repositories/core-position.repository';
 
 /**
  * Stands in for the real @Global AuditModule, @Global JobRegistryModule, @Global
@@ -81,8 +89,8 @@ describe('TradeCoreModule', () => {
 
   it('resolves the M3 execution parts and rebinds the M2 ports to them', async () => {
     const mod = await compile();
-    expect(mod.get(RISK_STATE_PROVIDER)).toBeInstanceOf(PaperRiskStateProvider);
-    expect(mod.get(CORE_SQUARE_OFF)).toBeInstanceOf(PaperOrderSquareOff);
+    expect(mod.get(RISK_STATE_PROVIDER)).toBeInstanceOf(CoreRiskStateProvider);
+    expect(mod.get(CORE_SQUARE_OFF)).toBeInstanceOf(CoreSquareOff);
     expect(mod.get(CORE_EXECUTION_ADAPTER)).toBeInstanceOf(PaperExecutionAdapter);
     expect(mod.get(CORE_EXECUTION_ADAPTER)).toBe(mod.get(PaperExecutionAdapter));
     expect(mod.get(PaperLedgerService)).toBeInstanceOf(PaperLedgerService);
@@ -102,11 +110,25 @@ describe('TradeCoreModule', () => {
 
   it('one process, one matcher: the square-off and the adapter share the ledger and matcher singletons', async () => {
     const mod = await compile();
-    const squareOff = mod.get<PaperOrderSquareOff>(CORE_SQUARE_OFF);
+    const squareOff = mod.get(PaperOrderSquareOff);
     const adapter = mod.get(PaperExecutionAdapter);
     const matcher = mod.get(PaperMatcherService);
     expect((squareOff as unknown as { matcher: unknown }).matcher).toBe(matcher);
     expect((adapter as unknown as { matcher: unknown }).matcher).toBe(matcher);
     expect(mod.get(CoreKillSwitchService)).toBe((adapter as unknown as { killSwitch: unknown }).killSwitch);
+  });
+
+  it('resolves the M4 lifecycle parts: one lifecycle behind both ports, one order-event stream', async () => {
+    const mod = await compile();
+    const lifecycle = mod.get(CoreLifecycleService);
+    expect(lifecycle).toBeInstanceOf(CoreLifecycleService);
+    expect(mod.get(LIFECYCLE_MARKS)).toBe(lifecycle);
+    expect(mod.get(CORE_POSITION_EXITS)).toBe(lifecycle);
+    expect(mod.get(LIFECYCLE_EVENT_SINK)).toBeInstanceOf(LoggingLifecycleEventSink);
+    expect(mod.get(DailyLossMonitor)).toBeInstanceOf(DailyLossMonitor);
+    expect(mod.get(CorePositionRepository)).toBeInstanceOf(CorePositionRepository);
+    expect((mod.get(PaperLedgerService) as unknown as { events: unknown }).events).toBe(mod.get(CoreOrderEvents));
+    expect(Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, TradeCoreModule)).toContain(CorePositionsController);
+    expect(Reflect.getMetadata(MODULE_METADATA.EXPORTS, TradeCoreModule)).toEqual(expect.arrayContaining([CoreLifecycleService]));
   });
 });

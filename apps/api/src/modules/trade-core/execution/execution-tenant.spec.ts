@@ -7,7 +7,6 @@ import { PaperExecutionAdapter } from './paper-execution.adapter';
 import { PaperLedgerService } from './paper-ledger.service';
 import { coreOrderOwner, PaperMatcherService } from './paper-matcher.service';
 import { PaperOrderSquareOff } from './paper-order-square-off';
-import { PaperRiskStateProvider } from './paper-risk-state.provider';
 import { FakeHub, fakeHubSource, fakeModuleRef } from './testing/fake-hub';
 import { fakeDefaults, MemoryPaperStore } from './testing/memory-paper-store';
 import { cashBuy, depth, hubPrice } from './testing/paper-fixtures';
@@ -140,28 +139,5 @@ describe("tenant isolation (spec §6: user A's orders, fills and ledger never ap
     const bFundsAfter = await adapter.getFunds('user_B');
     expect(bFundsAfter.freeCash).not.toBe(bFundsBefore.freeCash); // B's own second order blocked B's margin
     expect(bFundsAfter.deposited).toBe(bFundsBefore.deposited);
-  });
-
-  it("the risk state of user B never includes user A's positions or entries", async () => {
-    const { ledger, adapter, fill } = setup();
-    const provider = new PaperRiskStateProvider(ledger);
-    const at = new Date();
-    await adapter.placeOrder(cashBuy({ userId: 'user_B', idempotencyKey: 'intent_b:entry', type: 'LIMIT', limitPrice: 400 }));
-    const bAlone = await provider.liveState('user_B', at);
-    expect(bAlone.openPositions).toEqual([]);
-    expect(bAlone.tradesToday).toBe(1); // B's own pending entry
-
-    const aReq = cashBuy();
-    await fill(await adapter.placeOrder(aReq), aReq, 500);
-    const aExit = cashBuy({ idempotencyKey: 'intent_a:exit', purpose: 'EXIT', side: 'SELL', qty: 40, refPrice: 510 });
-    await fill(await adapter.placeOrder(aExit), aExit, 510);
-    await adapter.placeOrder(cashBuy({ idempotencyKey: 'intent_a2:entry', type: 'LIMIT', limitPrice: 400 }));
-
-    expect(await provider.liveState('user_B', at)).toEqual(bAlone);
-    const a = await provider.liveState('user_A', at);
-    expect(a.openPositions.map((p) => p.positionId)).toEqual(['CASH_INTRADAY:2885']);
-    expect(a.tradesToday).toBe(2);
-    expect(a.realisedPnlToday).not.toBe(0);
-    expect(a.deployedCapital.CASH_INTRADAY).not.toBe(bAlone.deployedCapital.CASH_INTRADAY);
   });
 });

@@ -10,6 +10,7 @@ import { AnthropicApiProvider } from './providers/anthropic-api.provider';
 import { ClaudeCliProvider, ClaudeCliTransport } from './providers/claude-cli.provider';
 import { loadRoutes, readAiConfig } from './routes/route-config';
 import { PriorityScheduler } from './scheduler/priority-scheduler';
+import { ScorerClient } from './scorer/scorer.client';
 
 /** Share of the daily cap reserved for position-review jobs (spec §4.5). */
 const REVIEW_RESERVE_SHARE = 0.25;
@@ -77,7 +78,9 @@ export function istMidnight(now: Date): Date {
       inject: [ConfigService, ClaudeCliTransport, AiCallRepository],
     },
     { provide: AI_GATEWAY, useExisting: AiGatewayService },
+    // Node -> ai-engine /score. Fail-open; nothing calls it yet (SP3 M2).
+    ScorerClient,
   ],
-  exports: [AI_GATEWAY, AiGatewayService, ClaudeCliTransport],
+  exports: [AI_GATEWAY, AiGatewayService, ClaudeCliTransport, ScorerClient],
 })
 export class AiGatewayModule {}

@@ -7,6 +7,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { AiGatewayModule, istMidnight } from './ai-gateway.module';
 import { AI_GATEWAY, AiGatewayService } from './ai-gateway.service';
 import { ClaudeCliTransport } from './providers/claude-cli.provider';
+import { ScorerClient } from './scorer/scorer.client';
 
 async function compile() {
   return Test.createTestingModule({
@@ -31,6 +32,7 @@ describe('AiGatewayModule', () => {
     expect(gw).toBeInstanceOf(AiGatewayService);
     expect(gw).toBe(mod.get(AiGatewayService));
     expect(mod.get(ClaudeCliTransport)).toBeInstanceOf(ClaudeCliTransport);
+    expect(mod.get(ScorerClient)).toBeInstanceOf(ScorerClient);
   });
 
   it('fails boot loudly when the config files cannot be found', async () => {

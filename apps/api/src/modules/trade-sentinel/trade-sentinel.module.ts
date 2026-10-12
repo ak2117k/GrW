@@ -29,6 +29,9 @@ import { SentinelRunnerService } from './services/sentinel-runner.service';
 import { EngineOwnershipAdapter } from './adapters/engine-ownership.adapter';
 import { SentinelChartContextAdapter } from './adapters/chart-context.adapter';
 import { ClaudeCliTransport } from './adapters/claude-cli.transport';
+import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
+import { AI_GATEWAY, type AiGateway } from '../ai-gateway/ai-gateway.service';
+import { SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
 import { judgeTransportFrom, type MessagesTransport } from './services/llm-transport';
 import { SentinelNewsAdapter } from './adapters/news.adapter';
 import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
@@ -80,10 +83,13 @@ import { SentinelOvernightService } from './services/sentinel-overnight.service'
     // owner's own shadow sentinel only (free sources; see the module's note).
     // Off unless MARKET_CUES_ENABLED. Reaches no broker: HTTP to public endpoints.
     MarketCuesModule,
+    // The AI gateway. Provides the ONE `ClaudeCliTransport` instance — shared by
+    // the flag-off CLI binding below and the gateway's own CLI provider — and
+    // the gateway the sentinel is served by when AI_GATEWAY_SENTINEL=true.
+    AiGatewayModule,
   ],
   controllers: [SentinelController],
   providers: [
-    ClaudeCliTransport,
     {
       provide: ANTHROPIC_CLIENT,
       /**
@@ -112,12 +118,27 @@ import { SentinelOvernightService } from './services/sentinel-overnight.service'
        * and the sentinel simply records no verdicts, which is right for a
        * default-off feature. It is NOT a boot-time guarantee — do not read it as
        * one.
+       *
+       * `AI_GATEWAY_SENTINEL=true` (default OFF) serves the SAME calls through the
+       * AI gateway instead (`SentinelGatewayTransport`): the same provider choice
+       * (the gateway derives sentinel routes from `SENTINEL_JUDGE` with this very
+       * `judgeTransportFrom`), the same request object, the same reply object, no
+       * fallback — plus one `ai_calls` audit row per call and, on the API path,
+       * the daily budget meter. Note the meter is a real gate: on the API it
+       * REFUSES a call whose model has no entry in `config/ai-model-prices.json`
+       * (e.g. an unpriced SENTINEL_MODEL_* override) or whose worst case would
+       * cross AI_API_DAILY_CAP_INR, and the sentinel records that as no verdict.
+       * `golden/sentinel-golden.spec.ts` proves the sentinel's observable
+       * behaviour is otherwise identical. Any value other than `true` binds
+       * exactly the pre-gateway factory, unchanged.
        */
-      useFactory: (config: ConfigService, cli: ClaudeCliTransport): MessagesTransport =>
-        judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')) === 'cli'
-          ? cli
-          : new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }),
-      inject: [ConfigService, ClaudeCliTransport],
+      useFactory: (config: ConfigService, cli: ClaudeCliTransport, gateway: AiGateway): MessagesTransport =>
+        config.get<string>('AI_GATEWAY_SENTINEL')?.trim().toLowerCase() === 'true'
+          ? new SentinelGatewayTransport(gateway)
+          : judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')) === 'cli'
+            ? cli
+            : new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }),
+      inject: [ConfigService, ClaudeCliTransport, AI_GATEWAY],
     },
 
     // Adapters — the narrow ports, bound to the real services.

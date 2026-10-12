@@ -3,7 +3,9 @@ import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SentinelCycleService, type CycleReport } from './sentinel-cycle.service';
-import { isAnyExchangeOpen, isAnyMarketOpen, isExchangeOpen } from '../market-sessions';
+import { isExchangeOpen } from '../market-sessions';
+import type { SessionClock } from '../../market-hub/session-clock';
+import { isAnyHeldVenueOpen, isAnyVenueOpen, makeSentinelClock } from '../overnight/overnight-calendar';
 
 /**
  * THE TICK CADENCE. Every-30-seconds, weekdays, 09:15–15:29 IST.
@@ -114,11 +116,22 @@ export class SentinelRunnerService {
    */
   private readonly inFlight = new Set<string>();
 
+  /**
+   * The session clock the tick gates on: the exchange holiday calendar AND the
+   * MCX late-close season (`hub.mcxLateClose` = HUB_MCX_LATE_CLOSE, the hub's own
+   * setting). The pure `market-sessions.ts` windows know neither, so from
+   * 2026-11-02 they stopped watching a live MCX position at 23:30 while MCX
+   * traded to 23:55, and polled on every holiday.
+   */
+  private readonly clock: SessionClock;
+
   constructor(
     private readonly cycle: SentinelCycleService,
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-  ) {}
+  ) {
+    this.clock = makeSentinelClock(this.config.get<string>('hub.mcxLateClose'));
+  }
 
   private get enabled(): boolean {
     return this.config.get<string>(SENTINEL_ENABLED_KEY) === 'true';
@@ -132,7 +145,10 @@ export class SentinelRunnerService {
     // That is exactly the constant background load just removed from the
     // tracker's quote sweep, reintroduced one module over. Outside the widest
     // window any venue keeps, nothing can be open and there is nothing to ask.
-    if (!this.enabled || !isAnyMarketOpen()) return;
+    // The clock models holidays and the MCX late close (see `clock`).
+    if (!this.enabled) return;
+    const now = new Date();
+    if (!isAnyVenueOpen(this.clock, now)) return;
 
     let book: Array<{ userId: string; exchange: string }>;
     try {
@@ -153,7 +169,6 @@ export class SentinelRunnerService {
     // way: one tenant holding a commodity would keep every other tenant's equity
     // positions being polled all evening, spending real money to re-read prices
     // that stopped moving at 15:30.
-    const now = new Date();
     const venuesByUser = new Map<string, string[]>();
     for (const row of book) {
       const list = venuesByUser.get(row.userId);
@@ -165,7 +180,7 @@ export class SentinelRunnerService {
     // Anthropic account, and a fan-out across every user would turn the rate
     // limiter into the thing that decides which positions get watched.
     for (const [userId, exchanges] of venuesByUser) {
-      if (!isAnyExchangeOpen(exchanges, now)) continue;
+      if (!isAnyHeldVenueOpen(this.clock, exchanges, now)) continue;
       await this.runForUser(userId);
     }
   }

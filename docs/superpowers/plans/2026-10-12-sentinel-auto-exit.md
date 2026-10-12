@@ -14,7 +14,7 @@
 
 - Owner decisions (verbatim from the spec): authority "Live, fully automatic (no per-trade confirmation)"; rollout "`dry-run` first (everything except the order), then `live`"; daily cap "at most **5** AI exits per user per IST day (config)"; MARKET refused → "one fallback: aggressive LIMIT at LTP − 2% (sell) / + 2% (buy-to-cover), rounded to tick size"; static IP 157.10.98.70 registered as app "GrWW".
 - Scope: `trade_trackers.kind = 'POSITION'`, exchanges **NFO, BFO, MCX**, allow-listed users only, verdict `EXIT_NOW` only. Never holdings, cash equity, opening/adding/reversing, `EXIT_ARMED`/`HOLD`/`ESCALATE`, overnight verdicts, core paper positions.
-- Env (in `api.env`, defaults safe): `AI_AUTO_EXIT_ENABLED=false`, `AI_AUTO_EXIT_MODE=dry-run`, `AI_AUTO_EXIT_USER_IDS=` (empty), `AI_AUTO_EXIT_DAILY_CAP=5`, `AI_AUTO_EXIT_MAX_VERDICT_AGE_SEC=90`, `AI_AUTO_EXIT_LIMIT_FALLBACK_PCT=2`.
+- Env (in `api.env`, defaults safe): `AI_AUTO_EXIT_ENABLED=false`, `AI_AUTO_EXIT_MODE=dry-run`, `AI_AUTO_EXIT_USER_IDS=` (empty), `AI_AUTO_EXIT_DAILY_CAP=5`, `AI_AUTO_EXIT_MAX_VERDICT_AGE_SEC=90`, `AI_AUTO_EXIT_LIMIT_FALLBACK_PCT=2`, `AI_AUTO_EXIT_QTY_UNITS=` (empty → NFO/BFO `units`, MCX unconfigured = never live; ruling R16).
 - Daily cap counts rows with `status ∈ {PLACED, FILLED, DRY_RUN}` created since IST midnight.
 - The core kill switch does **not** block these exits (CLAUDE.md §9: exits are never blocked). Do not call `coreEntryAllowed`.
 - `trade-sentinel` is **not modified**. `apps/api/src/modules/trade-sentinel/services/sentinel-cycle.service.spec.ts` ("shadow mode is structural") and `controllers/sentinel.controller.spec.ts` stay unchanged and green. No file under `sentinel-executor/` imports a specifier containing `trade-sentinel`; no file under `trade-sentinel/` imports `sentinel-executor`.
@@ -44,6 +44,7 @@
 - **R13 — Endpoint access.** `GET /api/sentinel-executor/executions` is authenticated by the global JWT guard; the caller must be `role === 'ADMIN'` or in `AI_AUTO_EXIT_USER_IDS` (else 403), and rows are always scoped to the caller's own `userId` (an admin does not see other users' rows). Lives in the executor module, never in `SentinelController` (whose spec forbids exit-ish routes and pins its constructor to 3 deps).
 - **R14 — Structural import rule.** "Imports nothing from trade-sentinel" is enforced first-hop (no import specifier in `sentinel-executor/**` contains `trade-sentinel`). `SessionClock` itself imports the pure `trade-sentinel/market-sessions.ts`; that transitive edge points away from the shadow guarantee and is allowed.
 - **R15 — Web placement.** `SentinelPanel` renders nothing when the charted instrument has no open position — and after an AI exit the tracker closes. So "AI exits" is a sibling component `AiExitsList` rendered on the Charts page right under `SentinelPanel`, showing the newest 10 rows of the last 24 h, rendering nothing when there are none or the endpoint answers 403/404.
+- **R16 — Order quantity unit per exchange (owner addition, 2026-10-12).** The MCX unit is unverified (positions `netqty` may be units while orders may need lots). `planExitOrder` therefore takes the instrument's lot size and an explicit per-exchange unit, `AI_AUTO_EXIT_QTY_UNITS` (`EXCHANGE:units|lots`, comma separated; parsed into `AutoExitConfig.qtyUnits`). Defaults: `NFO:units`, `BFO:units` (the repo's existing order paths already send NFO quantity as `lots × lotSize`); **MCX has no default**. `netqty` is taken as units; `lots` → quantity = `|netqty| / lotSize`. Refusals: unit not configured for the exchange in **live** → `QTY_UNIT_UNCONFIGURED:<EX>` (in **dry-run** the computed `|netqty|` is still returned with `unitVerified: false`, `qtyUnit: null`, so the row is recorded but flagged); caller lot size ≠ broker row `lotsize` → `LOT_SIZE_MISMATCH`; `|netqty|` not a whole number of lots (when a lot size is known) → `QTY_NOT_LOT_MULTIPLE`; `lots` with no lot size → `NO_LOT_SIZE`; `lots` with a lot of 1 that the broker row does not confirm → `LOT_SIZE_UNCONFIRMED` (every master parser in the repo coerces a missing `lotsize` to 1, and dividing by it would send `|netqty|` lots). The config parser fails closed: a malformed or contradictory entry for NFO/BFO/MCX removes that exchange's unit; an out-of-scope exchange is ignored. Both with a `problems` line.
 
 ## Where the Code Differs from the Spec
 
@@ -54,6 +55,14 @@
 - Spec §5.3 says "the exchange is in session (market-hub SessionClock)". The hub builds its clock with the `HUB_MCX_LATE_CLOSE` windows. A clock built without them would refuse MCX exits after 23:30 during the late-close months (R12).
 - Spec §9 says "the executor module imports nothing from trade-sentinel". That holds for direct imports only, because `SessionClock` imports the pure `trade-sentinel/market-sessions.ts` (R14).
 - Spec §5 does not guard a second `EXIT_NOW` that arrives while the first exit order is still open. A fresh read would still show the full position and a second order would reverse it. R3 adds the open-order check and the in-flight check.
+
+### Stream A deviations (Tasks 1–5, recorded during implementation)
+
+- **R16 changes Task 2 and Task 3 interfaces.** `AutoExitConfig` gains `qtyUnits: Partial<Record<string, QtyUnit>>`; `auto-exit.types.ts` gains `type QtyUnit = 'units' | 'lots'` and `DEFAULT_QTY_UNITS`. `planExitOrder(rows, target: { exchange; token; trackerQty; lotSize?: number | null }, policy: QtyPolicy)` with `QtyPolicy = { mode: AutoExitMode; qtyUnit: QtyUnit | null | undefined }`; `ExitPlan` ok-branch gains `qtyUnit: QtyUnit | null` and `unitVerified: boolean`.
+- **What Task 9 (Stream D) must do differently from the code block below:** `preOrderCheck` needs the config and the instrument's lot size. Read `instrument.findFirst({ where: { exchange, token }, select: { tickSize: true, lotSize: true } })` once (the fallback already reads `tickSize` there), and call `planExitOrder(rows, { exchange: t.exchange, token: t.token, trackerQty: t.qty, lotSize: inst?.lotSize ?? null }, { mode: cfg.mode, qtyUnit: cfg.qtyUnits[t.exchange.toUpperCase()] })`. In dry-run, when `plan.unitVerified === false`, the `DRY_RUN` row's `reason` must say so (e.g. prefix `UNIT_UNVERIFIED: `) — the table has no flag column. The fallback's POSITION_CHANGED comparison stays valid (both plans go through the same conversion). The fallback's synthetic tracker uses `first.quantity` only for its sign, which is unit-independent. Add `AI_AUTO_EXIT_QTY_UNITS=` to the Task 10 env example and `qty-units=…` to the ENABLED log line.
+- **Task 3 tests:** the plan's `planExitOrder` cases now pass `{ mode: 'live', qtyUnit: 'units' }` and their `toEqual` objects include `qtyUnit`/`unitVerified`; 13 R16 cases added (MCX 100 units / lot 100 → 1 lot with `lots`, 100 with `units`, refused live when unconfigured, dry-run flagged). One extra `limitFallbackPrice` case pins on-tick prices against float error.
+- **Task 2 tests:** the defaults case includes `qtyUnits: { NFO: 'units', BFO: 'units' }`; 5 `AI_AUTO_EXIT_QTY_UNITS` cases added.
+- **Task 1:** verified on a throwaway `postgres:16` (port 55437, removed): all migrations apply, `prisma migrate diff --from-migrations … --to-schema-datamodel` is empty, and the unique + CHECK constraints reject a duplicate verdict, `mode='LIVE'` and `side='buy'`. The repository's raw anti-join, P2002 claim, in-flight, count and sweep were exercised against the same container.
 
 ## Review Focus
 
@@ -1990,6 +1999,7 @@ export class SentinelExitExecutor {
   private async preOrderCheck(s: UserBrokerSession, t: Tracker): Promise<PreCheck> {
     const rows = answeredPositions(await s.getPositionsEnvelope());
     if (rows === null) return { kind: 'fail', reason: 'BROKER_READ' };
+    // R16: this call is OUT OF DATE — see "Stream A deviations": pass lotSize + { mode, qtyUnit }.
     const plan = planExitOrder(rows, { exchange: t.exchange, token: t.token, trackerQty: t.qty });
     if (!plan.ok) return { kind: 'skip', reason: plan.reason };
     const book = answeredPositions(await s.getOrderBookEnvelope());
@@ -2369,6 +2379,9 @@ AI_AUTO_EXIT_USER_IDS=
 AI_AUTO_EXIT_DAILY_CAP=5
 AI_AUTO_EXIT_MAX_VERDICT_AGE_SEC=90
 AI_AUTO_EXIT_LIMIT_FALLBACK_PCT=2
+# Order quantity unit per exchange, EXCHANGE:units|lots (ruling R16). Empty = NFO/BFO units,
+# MCX UNCONFIGURED (MCX exits are dry-run only until set, after the dry-run MCX check).
+AI_AUTO_EXIT_QTY_UNITS=
 ```
 
 - [ ] **Step 6: Typecheck and boot-shape check**
@@ -2959,4 +2972,4 @@ Deployment ships **inert** (`AI_AUTO_EXIT_ENABLED=false`): the migration applies
 
 ## Open Questions for the Owner
 
-1. **MCX quantity unit.** The executor sends `quantity = |netqty|` from Angel's own positions row. That is correct as long as Angel reports `netqty` and accepts order `quantity` in the same unit for MCX (lots vs units). The repo has no MCX order history to confirm it. The dry-run gate checks it (B, MCX check); live MCX exits should not be enabled until that check passes. If it fails, the fix is a one-line conversion in `planExitOrder` using the row's `lotsize`.
+1. **MCX quantity unit.** The executor sends `quantity = |netqty|` from Angel's own positions row. That is correct as long as Angel reports `netqty` and accepts order `quantity` in the same unit for MCX (lots vs units). The repo has no MCX order history to confirm it. The dry-run gate checks it (B, MCX check); live MCX exits should not be enabled until that check passes. **Resolved in code by R16:** MCX has no default unit, so live MCX exits are refused (`QTY_UNIT_UNCONFIGURED:MCX`) until the owner sets `AI_AUTO_EXIT_QTY_UNITS=MCX:units` or `MCX:lots` from the dry-run MCX check (dry-run rows for MCX are flagged unit-unverified and carry `|netqty|`).

@@ -195,3 +195,83 @@ describe('AngelOneAuthService boot hook', () => {
     expect(provider.withFeedCredentials).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Production boot 2026-10-12: DailyBackfillWorker's boot pass reached
+ * `getSmartApi().getCandleData(...)` ~1s before the detached auto-login had
+ * built the client, and failed with "Cannot read properties of null (reading
+ * 'getCandleData')". Two contracts close that:
+ *   1. `getSmartApi()` never hands out a client without a session — it throws
+ *      the same `Not authenticated` every other accessor throws (which is also
+ *      what `isNotAuthenticatedError` / NO_FEED_SESSION key on).
+ *   2. Boot jobs can WAIT for the session (bounded) instead of racing it.
+ */
+describe('AngelOneAuthService session readiness', () => {
+  beforeEach(() => {
+    generateSession.mockReset().mockResolvedValue({
+      data: { jwtToken: 'jwt-123', refreshToken: 'refresh-123', feedToken: 'feed-123' },
+    });
+  });
+
+  it('getSmartApi() throws an explicit Not authenticated error before any login (never returns null)', () => {
+    const service = new AngelOneAuthService(makeProvider());
+    expect(() => service.getSmartApi()).toThrow(/not authenticated/i);
+  });
+
+  it('getSmartApi() returns the client once the session is established', async () => {
+    const service = new AngelOneAuthService(makeProvider());
+    await service.login();
+    try {
+      expect(service.getSmartApi()).toBeTruthy();
+      expect(typeof service.getSmartApi().generateSession).toBe('function');
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
+
+  it('getSmartApi() throws again after logout', async () => {
+    const service = new AngelOneAuthService(makeProvider());
+    await service.login();
+    await service.logout();
+    expect(() => service.getSmartApi()).toThrow(/not authenticated/i);
+  });
+
+  it('whenAuthenticated() resolves true as soon as the detached boot login lands', async () => {
+    let finishLogin: () => void = () => undefined;
+    const loginGate = new Promise<void>((r) => (finishLogin = r));
+    const provider = makeProvider({
+      withFeedCredentials: jest.fn(async (use: any) => {
+        await loginGate;
+        return use(FEED_CREDS);
+      }) as any,
+    });
+    const service = new AngelOneAuthService(provider);
+    service.onModuleInit();
+
+    const ready = service.whenAuthenticated(60_000, 5);
+    finishLogin();
+    try {
+      await expect(ready).resolves.toBe(true);
+    } finally {
+      service.onModuleDestroy();
+    }
+  });
+
+  it('whenAuthenticated() resolves false promptly when the boot login gives up (no feed credentials) — no full-timeout stall', async () => {
+    const service = new AngelOneAuthService(
+      makeProvider({ hasFeedCredentials: jest.fn().mockResolvedValue(false) }),
+    );
+    service.onModuleInit();
+    const started = Date.now();
+    await expect(service.whenAuthenticated(60_000, 5)).resolves.toBe(false);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('whenAuthenticated() is bounded: resolves false at the timeout when the login hangs', async () => {
+    const service = new AngelOneAuthService(
+      makeProvider({ withFeedCredentials: jest.fn().mockReturnValue(new Promise(() => {})) as any }),
+    );
+    service.onModuleInit();
+    await expect(service.whenAuthenticated(50, 5)).resolves.toBe(false);
+  });
+});

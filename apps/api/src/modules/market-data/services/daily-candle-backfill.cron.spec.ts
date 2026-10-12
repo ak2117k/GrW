@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+import { BOOT_SESSION_WAIT_MS } from './angel-one-auth.service';
 import { INDICES } from '@td/shared/constants';
 import { DailyCandleBackfillCron, istMidnightUtc } from './daily-candle-backfill.cron';
 
@@ -35,6 +37,8 @@ function makeHarness(opts: {
   openTrackers?: Array<{ token: string; exchange: string; symbol: string }>;
   storedDailies?: Record<string, Array<{ timestamp: Date }>>;
   newestDailyAnywhere?: { timestamp: Date } | null;
+  /** What the shared feed session wait resolves to (default: ready). */
+  sessionReady?: boolean;
 }) {
   const instruments = opts.instruments ?? [];
   const stored = opts.storedDailies ?? {};
@@ -77,8 +81,10 @@ function makeHarness(opts: {
 
   const repo: any = { saveCandles: jest.fn(async (rows: any[]) => rows.length) };
 
-  const cron = new DailyCandleBackfillCron(prisma, adapter, repo);
-  return { cron, prisma, adapter, repo };
+  const auth: any = { whenAuthenticated: jest.fn(async () => opts.sessionReady ?? true) };
+
+  const cron = new DailyCandleBackfillCron(prisma, adapter, auth, repo);
+  return { cron, prisma, adapter, auth, repo };
 }
 
 /** Tokens the pass actually spent a slot of the shared historical lane on. */
@@ -264,6 +270,67 @@ describe('DailyCandleBackfillCron', () => {
       await new Promise((r) => setImmediate(r));
 
       expect(fetchedTokens(adapter)).toContain(nifty.token);
+    });
+
+    // Production boot 2026-10-12: boot passes reached the shared adapter before
+    // the detached feed login had built the SmartAPI client.
+    it('waits (bounded) for the feed session before the boot pass touches the broker', async () => {
+      delete process.env.BOOT_JOBS;
+      const { cron, adapter, auth } = makeHarness({
+        instruments: [
+          instrument({ id: 'i-nifty', symbol: nifty.symbol, token: nifty.token, exchange: nifty.exchange }),
+        ],
+        newestDailyAnywhere: { timestamp: new Date(Date.now() - 5 * MS_PER_DAY) },
+      });
+      const order: string[] = [];
+      auth.whenAuthenticated.mockImplementation(async () => {
+        order.push('session-ready');
+        return true;
+      });
+      adapter.getHistoricalData.mockImplementation(async () => {
+        order.push('broker-call');
+        return [];
+      });
+
+      await cron.onModuleInit();
+      for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+
+      expect(auth.whenAuthenticated).toHaveBeenCalledWith(BOOT_SESSION_WAIT_MS);
+      expect(order[0]).toBe('session-ready');
+      expect(order).toContain('broker-call');
+    });
+
+    it('skips the boot pass with one clear line when no feed session arrives', async () => {
+      delete process.env.BOOT_JOBS;
+      const { cron, adapter } = makeHarness({
+        instruments: [
+          instrument({ id: 'i-nifty', symbol: nifty.symbol, token: nifty.token, exchange: nifty.exchange }),
+        ],
+        newestDailyAnywhere: { timestamp: new Date(Date.now() - 5 * MS_PER_DAY) },
+        sessionReady: false,
+      });
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      await cron.onModuleInit();
+      for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r));
+
+      expect(adapter.getHistoricalData).not.toHaveBeenCalled();
+      const skipLines = warn.mock.calls.filter(([m]) => /skipp/i.test(String(m)));
+      expect(skipLines).toHaveLength(1);
+      expect(String(skipLines[0][0])).toMatch(/session/i);
+      warn.mockRestore();
+    });
+
+    it('does not wait on the session when today\'s dailies already landed', async () => {
+      delete process.env.BOOT_JOBS;
+      const { cron, auth } = makeHarness({
+        newestDailyAnywhere: { timestamp: istMidnightUtc(new Date()) },
+      });
+
+      await cron.onModuleInit();
+      await new Promise((r) => setImmediate(r));
+
+      expect(auth.whenAuthenticated).not.toHaveBeenCalled();
     });
 
     it('a cron tick firing during an in-flight pass does not double-queue the historical lane', async () => {

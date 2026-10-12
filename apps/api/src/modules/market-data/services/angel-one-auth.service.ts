@@ -6,6 +6,21 @@ import { SmartAPI } from 'smartapi-javascript';
 import { generateTOTP } from '../utils/angel-one-totp';
 import { FeedCredentialProvider } from './feed-credential-provider';
 
+/**
+ * How long a BOOT job waits for the shared feed session before giving up
+ * (see {@link AngelOneAuthService.whenAuthenticated}).
+ *
+ * The feed login is detached from boot (it must not gate the port bind), so
+ * every detached boot job that needs the broker starts out racing it — and on
+ * 2026-10-12 DailyBackfillWorker lost, hitting the broker ~1s after container
+ * start with no client ("Cannot read properties of null (reading
+ * 'getCandleData')"). A login is three attempts with 2s + 4s backoff plus
+ * broker round trips; two minutes covers a slow broker without letting a dead
+ * one hold a boot job forever. The wait ends early if the login settles
+ * without a session (no feed account configured).
+ */
+export const BOOT_SESSION_WAIT_MS = 120_000;
+
 @Injectable()
 export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AngelOneAuthService.name);
@@ -17,6 +32,13 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   private tokenExpiresAt: Date | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private authenticated = false;
+
+  /**
+   * The detached boot login (see onModuleInit). Held so boot jobs can wait on
+   * it via {@link whenAuthenticated} and stop waiting the moment it gives up,
+   * instead of racing it. Null until onModuleInit runs.
+   */
+  private bootLogin: Promise<void> | null = null;
 
   // The feed account's NON-secret identifiers, set at login() from the leased
   // credentials. The raw password / TOTP secret are NEVER stored on the instance —
@@ -51,7 +73,45 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
    * data — so it must not be able to gate the port either.
    */
   onModuleInit(): void {
-    void this.autoLogin();
+    this.bootLogin = this.autoLogin();
+  }
+
+  /**
+   * Wait (bounded) for the feed session — for BOOT JOBS that need the shared
+   * client.
+   *
+   * WHY: the boot login above is detached so it cannot gate the port, which
+   * means every other detached boot job starts out racing it. On 2026-10-12 the
+   * DailyBackfillWorker boot pass reached the broker ~1s before the client
+   * existed and died with "Cannot read properties of null (reading
+   * 'getCandleData')". Jobs that need a session await this instead.
+   *
+   * Resolves `true` as soon as a session exists. Resolves `false` when
+   * `timeoutMs` elapses, or as soon as the boot login has SETTLED without a
+   * session (no feed credentials, or every retry failed) — there is nothing
+   * left to wait for then, so a feed-less deployment does not stall its boot
+   * jobs for the full timeout. Never rejects.
+   */
+  async whenAuthenticated(timeoutMs: number, pollMs = 1_000): Promise<boolean> {
+    if (this.isAuthenticated()) return true;
+
+    // autoLogin never rejects (it catches everything), but guard both arms.
+    let bootLoginSettled = false;
+    const markSettled = (): void => {
+      bootLoginSettled = true;
+    };
+    void this.bootLogin?.then(markSettled, markSettled);
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now())));
+        timer.unref?.();
+      });
+      if (this.isAuthenticated()) return true;
+      if (bootLoginSettled) return false;
+    }
+    return this.isAuthenticated();
   }
 
   private async autoLogin(): Promise<void> {
@@ -213,8 +273,19 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Get the SmartAPI instance for making REST calls.
+   *
+   * Throws `Not authenticated. Call login() first.` when there is no session —
+   * the same error every other accessor here throws, and the message
+   * `isNotAuthenticatedError` (and so the NO_FEED_SESSION warning) keys on. It
+   * used to return the raw field, which is `null` until the first login, so a
+   * caller that got here early failed with an anonymous "Cannot read properties
+   * of null (reading 'getCandleData')" that no handler recognised as "no
+   * session".
    */
   getSmartApi(): any {
+    if (!this.smartApi || !this.isAuthenticated()) {
+      throw new Error('Not authenticated. Call login() first.');
+    }
     return this.smartApi;
   }
 

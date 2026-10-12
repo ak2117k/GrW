@@ -5,6 +5,7 @@ import type {
   TokenRef,
   UserFeedSessionFactory,
   UserFeedSessionLike,
+  WarmRestClient,
 } from './user-feed.types';
 
 /** Global, userId-tagged handlers the gateway registers once (Task 6). */
@@ -252,6 +253,25 @@ export class UserFeedManager {
   async fetchOptionGreeks(userId: string, name: string, expiryYmd: string) {
     const entry = this.getOrCreateEntry(userId);
     return entry.session.getOptionGreeks(name, expiryYmd);
+  }
+
+  /**
+   * The user's LIVE session's authenticated REST client, or null. Unlike every
+   * fetch above this NEVER creates a session: a caller that finds none must
+   * decide for itself whether a fresh login is acceptable (sentinel auto-exit).
+   */
+  warmRestClient(userId: string): WarmRestClient | null {
+    return this.registry.get(userId)?.session.restClient?.() ?? null;
+  }
+
+  /**
+   * Whether the user has a registered feed session (live, connecting or
+   * re-logging-in). Never creates one. Lets a caller that found no warm client
+   * tell "no feed at all" (a fresh login is harmless) from "the feed is between
+   * logins" (a fresh login would kill it).
+   */
+  hasSession(userId: string): boolean {
+    return this.registry.has(userId);
   }
 
   // ──────────────────────────────────────────────

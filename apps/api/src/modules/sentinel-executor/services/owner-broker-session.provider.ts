@@ -9,10 +9,7 @@ import {
   CREDENTIAL_DECRYPTOR,
   CredentialDecryptor,
 } from '../../credential-vault/execution/credential-decryptor';
-
-// TODO(stream-merge): replace with `import type { SessionSource } from '../domain/auto-exit.types';`
-// once Stream A's Task 2 lands (same literal union).
-type SessionSource = 'user-feed' | 'ephemeral';
+import type { SessionSource } from '../domain/auto-exit.types';
 
 /**
  * The owner HAS a feed session but it is between logins (socket dropped, re-login

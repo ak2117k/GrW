@@ -37,6 +37,15 @@ export function istMidnight(now: Date): Date {
  *
  * Config files (`config/ai-routes.json`, `config/ai-model-prices.json`) are
  * read at module init; a missing or malformed file fails boot loudly.
+ *
+ * BEFORE SETTING `AI_GATEWAY_SENTINEL=true` (operational, not enforced here):
+ * - `AI_CLI_CONCURRENCY` should be >= 3. Every sentinel CLI call then queues on
+ *   this scheduler's `claude-cli` limit, and the sentinel alone runs up to
+ *   `JUDGE_CONCURRENCY` (2) judgements plus thesis calls; at the default 2 a
+ *   thesis call queues behind both judges (a CLI call can run 180 s) — a delay
+ *   the direct, unscheduled binding never had.
+ * - `ai_calls` stores each request and response in full and nothing prunes it
+ *   yet: decide a retention policy (or at least watch its size) first.
  */
 @Module({
   imports: [PrismaModule],

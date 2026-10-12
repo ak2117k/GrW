@@ -107,6 +107,7 @@ services:
     mem_limit: 384m
     environment:
       MODELS_DIR: /models
+      # AI_DB_PASSWORD is interpolated unescaped: it must be URL-safe (see compose.env.example).
       AI_DB_URL: postgresql://grw_ai:${AI_DB_PASSWORD}@postgres:5432/${PG_DB}
     volumes:
       - /opt/grw/models:/models:ro

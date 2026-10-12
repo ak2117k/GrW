@@ -12,6 +12,28 @@ import { SessionClock } from '../../market-hub/session-clock';
 import { TradeTrackerService, type TickTarget } from './trade-tracker.service';
 
 /**
+ * Reconcile schedule: every 10 min, 09:00–23:50 IST, Mon–Fri. The hour range
+ * spans the widest session any venue keeps (MCX); the per-exchange calendar in
+ * `inReconcileWindow` decides whether a given firing actually reads brokers.
+ */
+export const TRACKER_RECONCILE_CRON = '0 */10 9-23 * * 1-5';
+
+/** Venues a tracker can hold; the reconcile runs while any of them is in session. */
+const RECONCILE_EXCHANGES = ['NSE', 'BSE', 'NFO', 'BFO', 'MCX'] as const;
+/** Minutes before an exchange's open that still count (09:00 for the 09:15 equity open). */
+const RECONCILE_OPEN_LEAD_MIN = 15;
+/** Minutes after an exchange's close that still count (15:40/15:50 equity, 23:40/23:50 MCX). */
+const RECONCILE_CLOSE_GRACE_MIN = 30;
+
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/** Minutes since IST midnight. */
+function istMinutes(at: Date): number {
+  const d = new Date(at.getTime() + IST_OFFSET_MS);
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+/**
  * Drives the per-trade tracker (design §4.2 / §4.3).
  *
  * Two cooperating schedules, both gated to Indian market hours:
@@ -107,11 +129,22 @@ export class TradeTrackerPoller implements OnModuleDestroy {
 
   /**
    * Reconcile every credentialed user's book, then (re)subscribe all OPEN
-   * tokens to the feed. Runs at minute 0,10,20,30,40,50 during 09:00–15:59 IST,
-   * Mon–Fri (6-field `sec min hour dom mon dow`).
+   * tokens to the feed. Fires at minute 0,10,20,30,40,50 during 09:00–23:59
+   * IST, Mon–Fri (6-field `sec min hour dom mon dow`), and does broker work
+   * only while {@link inReconcileWindow} says some exchange is in session.
+   *
+   * WHY TO 23:59 AND NOT 15:59. This is the ONLY scheduled path that discovers
+   * a new broker position. Stopped at 15:59 it never saw an MCX position opened
+   * in the evening session (MCX trades to 23:30, 23:55 in the late-close
+   * season): no tracker row, no prices, and the sentinel — which watches OPEN
+   * trackers only — was blind to it until 09:00 the next day (a CRUDEOIL
+   * 8950 CE on 2026-10-12 surfaced only when the owner opened Portfolio).
+   * The cadence is unchanged: one book snapshot per credentialed user per
+   * 10 minutes, now simply for as long as a market is trading.
    */
-  @Cron('0 */10 9-15 * * 1-5', { timeZone: 'Asia/Kolkata' })
+  @Cron(TRACKER_RECONCILE_CRON, { timeZone: 'Asia/Kolkata' })
   async reconcileAll(): Promise<void> {
+    if (!this.inReconcileWindow(new Date())) return;
     if (this.reconciling) {
       this.logger.debug('[trade-tracker] reconcile already in progress — skipping');
       return;
@@ -155,6 +188,27 @@ export class TradeTrackerPoller implements OnModuleDestroy {
     } finally {
       this.reconciling = false;
     }
+  }
+
+  /**
+   * Whether a reconcile pass should spend broker calls at `at`: some venue a
+   * tracker can hold is on a trading day (holiday calendar respected, per
+   * exchange) and `at` falls between its open (less a short lead, so 09:00
+   * still runs for the equity pre-open) and {@link RECONCILE_CLOSE_GRACE_MIN}
+   * after its close — the pass after the bell is the one that sees positions
+   * squared off at the close. Clock + in-memory calendar only: no DB read
+   * outside the window.
+   */
+  private inReconcileWindow(at: Date): boolean {
+    const minutes = istMinutes(at);
+    return RECONCILE_EXCHANGES.some((exchange) => {
+      const w = this.session.tradingWindow(exchange, at);
+      return (
+        w !== null &&
+        minutes >= w.openMin - RECONCILE_OPEN_LEAD_MIN &&
+        minutes < w.closeMin + RECONCILE_CLOSE_GRACE_MIN
+      );
+    });
   }
 
   /**

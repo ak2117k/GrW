@@ -410,15 +410,19 @@ describe('TradeTrackerService', () => {
       // Wire the isolated decrypt lease → disposable broker session, returning
       // one open position + one holding.
       const session = {
-        getPositions: jest
-          .fn()
-          .mockResolvedValue([
+        getPositionsEnvelope: jest.fn().mockResolvedValue({
+          status: true,
+          data: [
             { symboltoken: '111', tradingsymbol: 'NIFTY', exchange: 'NFO', netqty: '25', avgnetprice: '100', ltp: '130' },
-          ]),
-        getHoldings: jest.fn().mockResolvedValue({
-          holdings: [
-            { symboltoken: '1594', tradingsymbol: 'INFY', exchange: 'NSE', quantity: '10', averageprice: '1000', ltp: '1050' },
           ],
+        }),
+        getHoldingsEnvelope: jest.fn().mockResolvedValue({
+          status: true,
+          data: {
+            holdings: [
+              { symboltoken: '1594', tradingsymbol: 'INFY', exchange: 'NSE', quantity: '10', averageprice: '1000', ltp: '1050' },
+            ],
+          },
         }),
       };
       brokerFactory.withSession.mockImplementation((_creds: unknown, fn: any) => fn(session));
@@ -435,6 +439,91 @@ describe('TradeTrackerService', () => {
         expect.any(Function),
       );
       expect(prisma.tradeTracker.create).toHaveBeenCalledTimes(2);
+    });
+
+    describe('an unanswered read reaches reconcile as UNANSWERED, end to end', () => {
+      // snapshotBook used to collapse a failed read into `[]` before reconcile
+      // ever saw it — defeating reconcile's fetchedKinds guard, so one failed
+      // broker read still closed every OPEN tracker and orphaned the sentinel's
+      // verdicts. The SmartAPI client also never rejects: a failure comes back
+      // as `{ status: false, data: null }` (or `{ status: 500 }` on HTTP error),
+      // while Angel answers an EMPTY book as `{ status: true, data: null }` — so
+      // `data` alone cannot tell the two apart; the envelope's status can.
+      const AG8001 = { status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null };
+      const EMPTY_HOLDINGS = { status: true, data: { holdings: [] } };
+
+      function ephemeralBook(positionsEnvelope: unknown, holdingsEnvelope: unknown = EMPTY_HOLDINGS) {
+        const session = {
+          getPositionsEnvelope: jest.fn().mockResolvedValue(positionsEnvelope),
+          getHoldingsEnvelope: jest.fn().mockResolvedValue(holdingsEnvelope),
+        };
+        brokerFactory.withSession.mockImplementation((_creds: unknown, fn: any) => fn(session));
+        decryptor.withDecryptedCredentials.mockImplementation(
+          (_userId: string, _ctx: unknown, use: any) => use({ apiKey: 'k' }),
+        );
+      }
+
+      beforeEach(() => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'live_pos', token: '111', kind: 'POSITION', exchange: 'MCX' }),
+        ]);
+      });
+
+      it.each([
+        ['a failed read (status false, data null)', AG8001],
+        ['an HTTP-error object from the client ({ status: 500 })', { status: 500, message: 'Error' }],
+        ['a null response', null],
+        ['the client catch-block fallback ([])', []],
+      ])('leaves OPEN POSITION trackers open on %s', async (_label, envelope) => {
+        ephemeralBook(envelope);
+
+        await service.backfill('user_1');
+
+        expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['an empty array ({ status: true, data: [] })', { status: true, data: [] }],
+        ["Angel's empty-book answer ({ status: true, data: null })", { status: true, data: null }],
+      ])('closes OPEN POSITION trackers on %s', async (_label, envelope) => {
+        ephemeralBook(envelope);
+
+        await service.backfill('user_1');
+
+        expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+        expect(prisma.tradeTracker.updateMany.mock.calls[0][0]).toMatchObject({
+          where: { id: 'live_pos', userId: 'user_1' },
+          data: { status: 'CLOSED' },
+        });
+      });
+
+      it('leaves OPEN HOLDING trackers open on a failed holdings read', async () => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'live_hold', token: '1594', kind: 'HOLDING' }),
+        ]);
+        ephemeralBook({ status: true, data: [] }, AG8001);
+
+        await service.backfill('user_1');
+
+        expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('applies the same rule on the feed-account session path', async () => {
+        prisma.user.findUnique.mockResolvedValue({ isFeedAccount: true });
+        const api = {
+          getPosition: jest.fn().mockResolvedValue(AG8001),
+          getAllHolding: jest.fn().mockResolvedValue(EMPTY_HOLDINGS),
+        };
+        const auth = (service as unknown as { authService: { isAuthenticated: () => boolean; getSmartApi: () => unknown } })
+          .authService;
+        auth.isAuthenticated = () => true;
+        auth.getSmartApi = () => api;
+
+        await service.backfill('user_1');
+
+        expect(api.getPosition).toHaveBeenCalled();
+        expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+      });
     });
   });
 

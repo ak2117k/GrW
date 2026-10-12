@@ -280,8 +280,9 @@ no `current*`, `maxFavorable/Adverse`, `closedReason` or event-table field.
 - `ai-engine/Dockerfile` (python slim + only scorer deps: fastapi, uvicorn, pandas, numpy,
   xgboost, scikit-learn, psycopg); compose service `ai-engine` on the internal network only
   (no Caddy route), `mem_limit: 384m`, healthcheck `/health`.
-- `AI_ENGINE_URL=http://ai-engine:5000` (relax the boot validator's https rule for an internal
-  `http://ai-engine` host only).
+- `AI_SCORER_URL=http://ai-engine:5000` (relax the boot validator's https rule for an internal
+  `http://ai-engine` host only). A separate variable, not `AI_ENGINE_URL`: that one also drives
+  ai-advisor / weekly-report, which the scorer container does not serve (review follow-up).
 - **Before deploy:** owner measures VPS headroom (`free -m` with the API at steady state); if
   < 600 MB free, the container stays off and `/score` stays `unavailable` until resized.
 - Artifacts: `/opt/grw/models/<modelId>.json` on a volume; never in git.

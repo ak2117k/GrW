@@ -78,7 +78,7 @@ export function istMidnight(now: Date): Date {
       inject: [ConfigService, ClaudeCliTransport, AiCallRepository],
     },
     { provide: AI_GATEWAY, useExisting: AiGatewayService },
-    // Node -> ai-engine /score. Fail-open; nothing calls it yet (SP3 M2).
+    // Node -> ai-engine /score at AI_SCORER_URL (not AI_ENGINE_URL). Fail-open; nothing calls it yet (SP3 M2).
     ScorerClient,
   ],
   exports: [AI_GATEWAY, AiGatewayService, ClaudeCliTransport, ScorerClient],

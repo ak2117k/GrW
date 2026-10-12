@@ -96,7 +96,8 @@ services:
         condition: service_healthy
 
   # SP3 entry scorer + decision-corpus retrieval (ai-engine/Dockerfile, src.scorer_main).
-  # Internal only: no host ports, no Caddy route; the API reaches it at http://ai-engine:5000.
+  # Internal only: no host ports, no Caddy route; the API reaches it at http://ai-engine:5000
+  # via AI_SCORER_URL (NOT AI_ENGINE_URL, which still serves ai-advisor / weekly-report).
   # Off until the owner enables `--profile ai` after measuring headroom (spec §6.5).
   ai-engine:
     logging: *logging

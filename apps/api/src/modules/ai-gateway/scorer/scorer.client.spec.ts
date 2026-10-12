@@ -33,9 +33,9 @@ describe('ScorerClient', () => {
     jest.restoreAllMocks();
   });
 
-  const client = (url: string | undefined = 'http://ai-engine:5000') => new ScorerClient(config({ AI_ENGINE_URL: url }));
+  const client = (url: string | undefined = 'http://ai-engine:5000') => new ScorerClient(config({ AI_SCORER_URL: url }));
 
-  it('POSTs the request as JSON to ${AI_ENGINE_URL}/score and passes a model reply through', async () => {
+  it('POSTs the request as JSON to ${AI_SCORER_URL}/score and passes a model reply through', async () => {
     fetchMock.mockResolvedValue(jsonResponse(MODEL));
     await expect(client('http://ai-engine:5000/').score(req())).resolves.toEqual(MODEL);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -117,12 +117,28 @@ describe('ScorerClient', () => {
     expect(elapsed).toBeLessThan(SCORER_TIMEOUT_MS + 1000);
   });
 
-  it.each([undefined, '', '   '])('AI_ENGINE_URL=%p → unavailable without calling fetch', async (url) => {
-    await expect(new ScorerClient(config({ AI_ENGINE_URL: url })).score(req())).resolves.toEqual({
+  it.each([undefined, '', '   '])('AI_SCORER_URL=%p → unavailable without calling fetch, warned once', async (url) => {
+    await expect(new ScorerClient(config({ AI_SCORER_URL: url })).score(req())).resolves.toEqual({
       source: 'unavailable',
-      reason: 'AI_ENGINE_URL not set',
+      reason: 'AI_SCORER_URL not set',
     });
     expect(fetchMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('never falls back to AI_ENGINE_URL (that URL belongs to ai-advisor / weekly-report)', async () => {
+    const c = new ScorerClient(config({ AI_ENGINE_URL: 'http://ai-engine:5000', AI_SCORER_URL: undefined }));
+    await expect(c.score(req())).resolves.toEqual({ source: 'unavailable', reason: 'AI_SCORER_URL not set' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reads AI_SCORER_URL, not AI_ENGINE_URL, when both are set', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(RULE));
+    const c = new ScorerClient(
+      config({ AI_ENGINE_URL: 'https://advisor.example.com', AI_SCORER_URL: 'http://ai-engine:5000' }),
+    );
+    await c.score(req());
+    expect(fetchMock.mock.calls[0][0]).toBe('http://ai-engine:5000/score');
   });
 
   it('warns at most once per minute', async () => {

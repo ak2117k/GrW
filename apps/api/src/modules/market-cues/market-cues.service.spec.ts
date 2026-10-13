@@ -426,10 +426,15 @@ describe('schedule', () => {
 
   it('skips NSE holidays and weekends (Dussehra, Tue 2026-10-20)', () => {
     const { svc } = make();
-    const slots: CronSlot[] = ['usGiftMorning', 'usGiftNight', 'fii', 'fiiOi', 'preOpen'];
+    const slots: CronSlot[] = ['fii', 'fiiOi', 'preOpen'];
     for (const slot of slots) {
       expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-20T09:10:00')) }).toEqual({ slot, fires: false });
       expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-21T09:10:00')) }).toEqual({ slot, fires: true });
+    }
+    // The US/GIFT slots serve MCX too, and an NSE holiday is (by default) an
+    // MCX evening session — mcx-holidays.ts — so they still fire.
+    for (const slot of ['usGiftMorning', 'usGiftNight'] as CronSlot[]) {
+      expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-20T09:10:00')) }).toEqual({ slot, fires: true });
     }
     expect(svc.shouldFire('preOpen', ist('2026-10-10T09:10:00'))).toBe(false); // Saturday
   });

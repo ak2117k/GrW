@@ -2,7 +2,7 @@ import { InstrumentMasterRefreshCron } from './instrument-master-refresh.cron';
 
 describe('InstrumentMasterRefreshCron', () => {
   it('calls refreshMaster on boot with cash-equity rows mapped to the upsert shape', async () => {
-    const instruments = { refreshMaster: jest.fn().mockResolvedValue(1) } as any;
+    const instruments = { refreshMaster: jest.fn().mockResolvedValue(1), ensureCoreIndexInstruments: jest.fn().mockResolvedValue(0), lastMasterRefreshAt: jest.fn().mockResolvedValue(null) } as any;
     const adapter = {
       getInstrumentMaster: jest.fn().mockResolvedValue([
         {
@@ -19,6 +19,8 @@ describe('InstrumentMasterRefreshCron', () => {
 
     const cron = new InstrumentMasterRefreshCron(instruments, adapter);
     await cron.onModuleInit();
+    // The boot refresh is detached; let it run.
+    await new Promise((r) => setImmediate(r));
 
     expect(adapter.getInstrumentMaster).toHaveBeenCalledTimes(1);
     expect(instruments.refreshMaster).toHaveBeenCalledTimes(1);
@@ -34,7 +36,7 @@ describe('InstrumentMasterRefreshCron', () => {
   });
 
   it('excludes F&O/commodity contract rows (blank-instrumenttype cash equities only)', async () => {
-    const instruments = { refreshMaster: jest.fn().mockResolvedValue(0) } as any;
+    const instruments = { refreshMaster: jest.fn().mockResolvedValue(0), ensureCoreIndexInstruments: jest.fn().mockResolvedValue(0) } as any;
     const adapter = {
       getInstrumentMaster: jest.fn().mockResolvedValue([
         { symbol: 'RELIANCE-EQ', token: '2885', name: 'RELIANCE', exch_seg: 'NSE', instrumenttype: '' },
@@ -52,7 +54,7 @@ describe('InstrumentMasterRefreshCron', () => {
   });
 
   it('never throws when the adapter fetch fails (must not crash boot or the scheduler)', async () => {
-    const instruments = { refreshMaster: jest.fn() } as any;
+    const instruments = { refreshMaster: jest.fn(), ensureCoreIndexInstruments: jest.fn().mockResolvedValue(0), lastMasterRefreshAt: jest.fn().mockResolvedValue(null) } as any;
     const adapter = {
       getInstrumentMaster: jest.fn().mockRejectedValue(new Error('CDN down')),
     } as any;
@@ -60,5 +62,39 @@ describe('InstrumentMasterRefreshCron', () => {
     const cron = new InstrumentMasterRefreshCron(instruments, adapter);
     await expect(cron.onModuleInit()).resolves.toBeUndefined();
     expect(instruments.refreshMaster).not.toHaveBeenCalled();
+  });
+
+  describe('core index rows (the master never carries them)', () => {
+    const order: string[] = [];
+    const make = (lastRefresh: Date | null) => {
+      order.length = 0;
+      const instruments = {
+        lastMasterRefreshAt: jest.fn(async () => { order.push('freshness'); return lastRefresh; }),
+        ensureCoreIndexInstruments: jest.fn(async () => { order.push('ensure'); return 0; }),
+        refreshMaster: jest.fn(async () => { order.push('refresh'); return 0; }),
+      } as any;
+      const adapter = { getInstrumentMaster: jest.fn().mockResolvedValue([]) } as any;
+      return { instruments, cron: new InstrumentMasterRefreshCron(instruments, adapter) };
+    };
+
+    it('ensures them at boot even when the master refresh is skipped as fresh', async () => {
+      const { instruments, cron } = make(new Date());
+      await (cron as any).refreshOnBoot();
+      expect(instruments.ensureCoreIndexInstruments).toHaveBeenCalledTimes(1);
+      expect(instruments.refreshMaster).not.toHaveBeenCalled();
+    });
+
+    it('decides freshness BEFORE ensuring, so seeding index rows cannot fake a fresh table', async () => {
+      const { cron } = make(null);
+      await (cron as any).refreshOnBoot();
+      expect(order[0]).toBe('freshness');
+      expect(order).toContain('ensure');
+    });
+
+    it('ensures them on the daily refresh too', async () => {
+      const { instruments, cron } = make(null);
+      await cron.refreshDaily();
+      expect(instruments.ensureCoreIndexInstruments).toHaveBeenCalledTimes(1);
+    });
   });
 });

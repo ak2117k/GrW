@@ -5,7 +5,23 @@ import {
   UpsertInstrumentInput,
 } from '../repositories/market-data.repository';
 import { CandleAggregatorService } from './candle-aggregator.service';
-import { INDICES } from '@td/shared/constants';
+import { INDICES, SECTOR_INDICES } from '@td/shared/constants';
+import {
+  INDEX_SEGMENTS,
+  buildCoreIndexInstruments,
+  type IndexConstant,
+} from './core-index-instruments';
+/**
+ * Every index the app subscribes to, under its canonical symbol — see
+ * core-index-instruments.ts. INDICES first (so 99926009 is 'BANKNIFTY'), then
+ * MIDCPNIFTY (not in the shared INDICES; same token as the hub's
+ * INDEX_UNDERLYINGS in market-hub/underlying.ts), then the sector indices.
+ */
+export const CORE_INDEX_INSTRUMENTS = buildCoreIndexInstruments(
+  INDICES as Readonly<Record<string, IndexConstant>>,
+  { MIDCPNIFTY: { symbol: 'MIDCPNIFTY', token: '99926074', exchange: 'NSE' } },
+  SECTOR_INDICES as Readonly<Record<string, IndexConstant>>,
+);
 
 export interface InstrumentRecord {
   id: string;
@@ -257,6 +273,58 @@ export class InstrumentService implements OnModuleInit {
     );
 
     return count;
+  }
+
+  /**
+   * Make sure every core index (CORE_INDEX_INSTRUMENTS) has its canonical row,
+   * and that the row is in the in-memory caches + candle-aggregator map.
+   *
+   * The master refresh never writes index rows (they are AMXIDX in the scrip
+   * master and fall through its cash and derivative filters), which is why the
+   * scanner, level book and daily backfill all skipped NIFTY/BANKNIFTY/FINNIFTY
+   * in production. This pass is idempotent and WRITE-FREE when the rows are
+   * already right — important because `lastMasterRefreshAt` reads the newest
+   * `updatedAt`, and a pass that touched rows on every boot would make the boot
+   * master refresh think the table was always fresh.
+   *
+   * A token already owned by a DIFFERENT symbol is left alone (warned): a second
+   * row for the same exchange:token would make token lookups ambiguous.
+   * Never throws; returns how many rows it wrote.
+   */
+  async ensureCoreIndexInstruments(): Promise<number> {
+    let written = 0;
+    for (const def of CORE_INDEX_INSTRUMENTS) {
+      try {
+        const existing = (await this.repository.findInstrumentsByExchangeToken(
+          def.exchange,
+          def.token,
+        )) as Array<InstrumentRecord & { isActive?: boolean }>;
+        const canonical = existing.find((r) => r.symbol === def.symbol);
+        let record: InstrumentRecord | null = null;
+        if (canonical && canonical.isActive !== false && INDEX_SEGMENTS.has(canonical.segment)) {
+          record = canonical;
+        } else if (!canonical && existing.length > 0) {
+          this.logger.warn(
+            `Core index ${def.symbol} (${def.exchange}:${def.token}) is held by ` +
+              `${existing.map((r) => `'${r.symbol}'`).join(', ')}; not adding a duplicate-token row. ` +
+              `Lookups by symbol '${def.symbol}' will miss until that row is renamed.`,
+          );
+          continue;
+        } else {
+          record = (await this.repository.upsertInstrument(def)) as InstrumentRecord;
+          written++;
+        }
+        this.instrumentsByToken.set(record.token, record);
+        this.instrumentsByExchangeToken.set(`${record.exchange}:${record.token}`, record);
+        this.candleAggregator.setTokenInstrumentId(record.token, record.id);
+      } catch (err) {
+        this.logger.warn(
+          `ensureCoreIndexInstruments ${def.symbol} failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (written > 0) this.logger.log(`Core index instruments: ${written} row(s) created/repaired`);
+    return written;
   }
 
   /**

@@ -111,6 +111,33 @@ describe('SignalGeneratorService.analyze — volumeRatio and levels honesty', ()
     expect(r.kind === 'setup' && r.volumeRatio).toBeNull();
   });
 
+  it('a re-served lock reads the ratio from the stored candles — no broker historical call', async () => {
+    const service = build({ active: LOCKED, book: BOOK, candles: bars(30, (i) => (i === 28 ? 200 : 100)) });
+    const fetchHistorical = jest.spyOn(service as any, 'fetchHistorical');
+    const r = await service.analyze(TOKEN, 'NSE', 'SBIN', '15m');
+    expect(r.kind).toBe('setup');
+    expect(r.kind === 'setup' && r.volumeRatio).toBeCloseTo(2, 6);
+    expect(fetchHistorical).not.toHaveBeenCalled();
+  });
+
+  it('a re-served lock reuses the candles the last full analyze loaded (within the cache window)', async () => {
+    // Not in the DB: the full analyze had to fetch from the broker. The lock
+    // that follows must reuse those bars, not fetch again.
+    const service = build({ book: BOOK, candles: [] });
+    jest.spyOn(LevelsContextStrategy.prototype, 'analyze').mockReturnValue(null);
+    const fetchHistorical = jest
+      .spyOn(service as any, 'fetchHistorical')
+      .mockResolvedValue(bars(30, (i) => (i === 28 ? 400 : 100)));
+    await service.analyze(TOKEN, 'NSE', 'SBIN', '15m');
+    expect(fetchHistorical).toHaveBeenCalledTimes(1);
+
+    (service as any).setupTracker.getActive.mockReturnValue(LOCKED);
+    const r = await service.analyze(TOKEN, 'NSE', 'SBIN', '15m');
+    expect(r.kind).toBe('setup');
+    expect(r.kind === 'setup' && r.volumeRatio).toBeCloseTo(4, 6);
+    expect(fetchHistorical).toHaveBeenCalledTimes(1);
+  });
+
   it('a lock with no level book carries levels null — never zero-filled PDH/PDL/VWAP', async () => {
     const service = build({ active: LOCKED, book: null });
     const r = await service.analyze(TOKEN, 'NSE', 'SBIN', '15m');

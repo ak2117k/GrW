@@ -308,6 +308,15 @@ export class MarketDataRepository {
   }
 
   /**
+   * Every row (active or not) for one exchange:token. Used by the core-index
+   * ensure pass, which must see inactive and differently-named rows too so it
+   * repairs instead of duplicating.
+   */
+  async findInstrumentsByExchangeToken(exchange: string, token: string) {
+    return this.prisma.instrument.findMany({ where: { exchange, token } });
+  }
+
+  /**
    * Find an instrument by trading symbol + exchange. Used by
    * Chartink integration to resolve scanner-emitted symbols to
    * tokens. Returns null when no instrument matches.

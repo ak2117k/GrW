@@ -77,6 +77,18 @@ const MIN_TIMEFRAME_AGREEMENT = 2;
  */
 const REFRESH_FROM_BROKER_FRESH_MS = 5 * 60 * 1000;
 
+/** Cap on the per-symbol candle memo used by re-served locks (see recentCandles). */
+const RECENT_CANDLES_MAX = 200;
+
+/** One bar's width for a timeframe label; 60 s for anything unrecognised (the poll cadence). */
+function barWidthMs(timeframe: string): number {
+  const minutes: Record<string, number> = {
+    '1m': 1, '3m': 3, '5m': 5, '10m': 10, '15m': 15, '30m': 30,
+    '1h': 60, '60m': 60, '4h': 240, '1d': 1440,
+  };
+  return (minutes[timeframe] ?? 1) * 60_000;
+}
+
 /**
  * Map a working timeframe to the next-higher timeframe used for the MTF
  * trend filter. Daily has no higher TF — null short-circuits the check.
@@ -246,6 +258,17 @@ export class SignalGeneratorService {
    */
   private readonly lastBrokerRefreshAt = new Map<string, number>();
 
+  /**
+   * The bars the last full analyze() loaded, per exchange:token:timeframe, so a
+   * re-served locked setup can report the closed-bar volume ratio without a
+   * broker call. Valid for one bar width: until the next bar closes, the
+   * closed bar the ratio is read from cannot have changed.
+   */
+  private readonly recentCandles = new Map<
+    string,
+    { at: number; candles: Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }> }
+  >();
+
   /** token:timeframe keys already warned about in fetchHistorical. */
   private readonly warnedUserFetchKeys = new Set<string>();
 
@@ -347,8 +370,15 @@ export class SignalGeneratorService {
         this.setupTracker.updateFromTick(token, liveBook.spot, new Date());
       }
       const refreshed = this.setupTracker.getActive(token) ?? existing;
-      // No candles are loaded on this path, so volumeRatio is honestly null.
-      return this.lockedToResult(refreshed, liveBook, null);
+      // The lock re-serves frozen numbers, but the market's volume reading is
+      // still wanted (the sentinel's flow.volumeRatio). Read it CHEAPLY: the
+      // stored candles, else the bars the last full analyze loaded — never a
+      // broker historical call per poll. Nothing cached → honestly null.
+      return this.lockedToResult(
+        refreshed,
+        liveBook,
+        await this.cachedVolumeRatio(token, exchange, timeframe),
+      );
     }
 
     const book = await this.levelBookService.lazyLoad(
@@ -418,6 +448,7 @@ export class SignalGeneratorService {
         );
       }
     }
+    this.rememberCandles(token, exchange, timeframe, candles);
     if (candles.length < 25) {
       return {
         kind: 'no-setup',
@@ -729,6 +760,61 @@ export class SignalGeneratorService {
     const isLong = lastClose >= prevClose;
 
     return buildIndicatorReadings(candles, lastClose, isLong);
+  }
+
+  private rememberCandles(
+    token: string,
+    exchange: string,
+    timeframe: string,
+    candles: Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>,
+  ): void {
+    if (candles.length === 0) return;
+    const key = `${exchange}:${token}:${timeframe}`;
+    this.recentCandles.delete(key); // re-insert so Map order is recency
+    this.recentCandles.set(key, { at: Date.now(), candles });
+    // Bounded: one entry per charted symbol+timeframe; drop the oldest.
+    while (this.recentCandles.size > RECENT_CANDLES_MAX) {
+      const oldest = this.recentCandles.keys().next().value as string;
+      this.recentCandles.delete(oldest);
+    }
+  }
+
+  /**
+   * Closed-bar volume ratio for a re-served lock, from candles already at hand:
+   * the stored candles (DB — the same read the full path makes first), else the
+   * bars the last full analyze loaded within one bar width. Never calls the
+   * broker; null when neither has a reading.
+   */
+  private async cachedVolumeRatio(
+    token: string,
+    exchange: string,
+    timeframe: string,
+  ): Promise<number | null> {
+    try {
+      const instrument = await this.marketDataRepository.getInstrumentByToken(token);
+      if (instrument) {
+        const now = new Date();
+        const windowStart = new Date(now.getTime() - lookbackDaysFor(timeframe) * 24 * 60 * 60 * 1000);
+        const rows = await this.marketDataRepository.getCandles(instrument.id, timeframe, windowStart, now, 25);
+        const fromDb = closedBarVolumeRatio(
+          rows.map((c) => ({
+            timestamp: c.timestamp,
+            open: c.open, high: c.high, low: c.low, close: c.close,
+            volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+          })),
+        );
+        if (fromDb !== null) return fromDb;
+      }
+    } catch (err) {
+      this.logger.debug(
+        `cachedVolumeRatio: stored-candle read failed for ${token}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    const memo = this.recentCandles.get(`${exchange}:${token}:${timeframe}`);
+    if (memo && Date.now() - memo.at < barWidthMs(timeframe)) {
+      return closedBarVolumeRatio(memo.candles);
+    }
+    return null;
   }
 
   private lockedToResult(

@@ -5,6 +5,14 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { TIMEFRAMES } from '@td/shared/constants';
 import { DailyBackfillWorker } from '../../market-data/workers/daily-backfill.worker';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
+import { BOOT_SESSION_WAIT_MS } from '../../market-data/services/angel-one-auth.service';
+
+/**
+ * How long boot seeding waits for the shared boot backfill: the backfill's own
+ * bounded wait for a feed session, plus generous room for the rate-limited
+ * universe pass (~5 symbols × 4 timeframes × 1.2 s).
+ */
+export const LEVEL_BOOK_BACKFILL_WAIT_MS = BOOT_SESSION_WAIT_MS + 120_000;
 
 /**
  * Index tokens are stable (NIFTY = 99926000 forever) so we hardcode them.
@@ -82,15 +90,26 @@ export class LevelBookCron implements OnModuleInit {
   }
 
   private async seedAtBoot(): Promise<void> {
+    // Await the worker's ONE shared boot pass (never start a second one), and
+    // only for a bounded time: a stuck backfill must not leave the books empty
+    // all session. Seeding a little early beats never seeding.
     if (this.dailyBackfill) {
       try {
-        await this.dailyBackfill.backfillUniverseAtBoot();
+        const done = await this.dailyBackfill.waitForBootBackfill(LEVEL_BOOK_BACKFILL_WAIT_MS);
+        if (!done) {
+          this.logger.warn(
+            `Boot universe-backfill still running after ${LEVEL_BOOK_BACKFILL_WAIT_MS / 1000}s — ` +
+              'seeding level books on the candles already stored',
+          );
+        }
       } catch (err) {
         this.logger.warn(
-          `Boot universe-backfill failed (continuing with seed anyway): ` +
+          `Boot universe-backfill wait failed (continuing with seed anyway): ` +
           `${err instanceof Error ? err.message : err}`,
         );
       }
+    } else {
+      this.logger.warn('DailyBackfillWorker not injected — seeding level books without waiting for the boot backfill');
     }
     this.logger.log('Boot-seeding level books');
     try {

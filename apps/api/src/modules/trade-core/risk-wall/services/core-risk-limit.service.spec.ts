@@ -10,6 +10,7 @@ import {
   type NewLimitRow,
   type SettingsForSeed,
 } from '../repositories/core-risk-limit.repository';
+import { FakeJournal } from '../../journal/testing/fake-journal';
 import { limitsFixture, NOW } from '../testing/risk-fixtures';
 import { CoreRiskLimitService, type CoreRiskLimitView } from './core-risk-limit.service';
 
@@ -56,13 +57,33 @@ function setup(opts: { settings?: SettingsForSeed; defaults?: CoreRiskLimitDefau
   if (opts.settings) repo.settings = opts.settings;
   if (opts.defaults) repo.defaults = opts.defaults;
   const audit = { append: jest.fn().mockResolvedValue({ seq: 1n, hash: 'h' }) };
+  const journal = new FakeJournal();
   const service = new CoreRiskLimitService(
     repo as unknown as CoreRiskLimitRepository,
     audit as unknown as AuditService,
     (opts.clock ?? createCoreSessionClock()) as SessionClock,
+    journal,
   );
-  return { repo, audit, service };
+  return { repo, audit, service, journal };
 }
+
+describe('CoreRiskLimitService: journal rows (SP2 M5, D12)', () => {
+  it('M5: a limit change writes a LIMIT_CHANGED journal row with its direction and effective time', async () => {
+    const { service, journal } = setup();
+    await service.change('user_A', { key: 'maxTradesPerDay', scope: 'ALL', value: 3, reason: 'fewer' }, NOW);
+    expect(journal.ofType('LIMIT_CHANGED')).toEqual([
+      expect.objectContaining({ userId: 'user_A', payload: expect.objectContaining({ key: 'maxTradesPerDay', scope: 'ALL', direction: 'TIGHTER', reason: 'fewer' }) }),
+    ]);
+  });
+
+  it('M5: a journal that throws never fails the limit change', async () => {
+    const { service, journal } = setup();
+    journal.record = () => {
+      throw new Error('journal down');
+    };
+    await expect(service.change('user_A', { key: 'maxTradesPerDay', scope: 'ALL', value: 3, reason: 'fewer' }, NOW)).resolves.toMatchObject({ direction: 'TIGHTER' });
+  });
+});
 
 const find = (views: CoreRiskLimitView[], id: string) => views.find((v) => `${v.key}@${v.scope}` === id)!;
 const OWN = { settings: { maxDailyLoss: 7500, maxCapitalPerTrade: 40000, maxConcurrentPositions: 8 }, from: 'OWN' as const };

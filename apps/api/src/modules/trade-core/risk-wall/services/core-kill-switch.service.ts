@@ -1,8 +1,9 @@
-import { ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { CoreKillSwitch } from '@prisma/client';
 import { AuditService } from '../../../../common/audit/audit.service';
 import { AUDIT_ACTIONS } from '../../../../common/audit/audit-actions';
 import type { SessionClock } from '../../../market-hub/session-clock';
+import { CORE_JOURNAL, type CoreJournalPort } from '../../journal/journal-ports';
 import type { Actor } from '../../strategies/services/core-strategy-catalogue.service';
 import { invalidateCoreKillSwitchCache } from '../kill-gate';
 import { resolveAppendOnly } from '../limits/append-only';
@@ -68,6 +69,7 @@ export class CoreKillSwitchService {
     @Inject(CORE_SESSION_CLOCK) private readonly clock: SessionClock,
     @Inject(CORE_SQUARE_OFF) private readonly coreSquareOff: CoreSquareOffPort,
     private readonly silos: SiloSquareOffAdapter,
+    @Optional() @Inject(CORE_JOURNAL) private readonly journal?: CoreJournalPort,
   ) {}
 
   async get(userId: string, now: Date = new Date()): Promise<KillSwitchView> {
@@ -109,6 +111,18 @@ export class CoreKillSwitchService {
 
     // Persist → cascade → audit: a failing audit can never stop the square-off (plan decision 17).
     const cascade = input.active ? await this.cascade(actor, reason) : null;
+    // SP2 M5 (D12): the journal row, best effort — the switch itself is already persisted and the
+    // cascade has run, so a journal failure is logged and never fails the change.
+    try {
+      this.journal?.record({
+        type: 'KILL_SWITCH',
+        userId: actor.userId,
+        at: now,
+        payload: { active: input.active, wasActive, reason, effectiveFrom: effectiveFrom.toISOString(), rowId: row.id, cascade: cascade ? { core: cascade.core, silos: cascade.silos } : null },
+      });
+    } catch (err) {
+      this.logger.error(`KILL_SWITCH journal row for core_kill_switch:${row.id} not written: ${errorText(err)}`);
+    }
     const target = `core_kill_switch:${row.id}`;
     // Both audits are attempted independently (a SET failure never drops the CASCADE entry);
     // a failure is logged, never thrown, so an engaged (persisted) switch is never reported

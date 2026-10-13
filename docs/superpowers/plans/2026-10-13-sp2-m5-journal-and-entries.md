@@ -8118,6 +8118,22 @@ logging ones in the reverted module.
     - `toOrder` in the plan is `toCoreOrder` in `core-order.repository.ts`.
 12. **O9 changed by the owner (2026-10-13):** corpus rows in every trading mode, and real broker F&O trades join the corpus
     (Task 13b). See "Owner rulings (2026-10-13)".
+13. **Stream C deviations (Tasks 9–10), 2026-10-13:**
+    - `JournalRiskVerdictSink` writes an **EXIT** verdict through the buffered `record()` (never throws, never awaited),
+      not `recordNow()`: `RiskWallService.check` awaits the sink for exits too, so an awaited write against a slow or
+      down database would delay the exit (Global Constraints: exits are never delayed). Entry verdicts stay durable
+      (`recordNow`, an unrecordable verdict still rejects the entry with `JOURNAL_UNAVAILABLE`). New test in
+      `journal-sinks.spec.ts`.
+    - `OrderJournaler.onOrder` never rejects: the whole write is wrapped and logged. The adapter's listener is
+      `(o) => void this.onOrder(o)` and `CoreOrderEvents.emit` only isolates synchronous throws, so a rejecting
+      `onOrder` would be an unhandled rejection. New test "a journal that throws never rejects back into the order stream".
+    - `CoreKillSwitchService` / `CoreRiskLimitService` wrap their `journal.record` in `try/catch` + `logger.error`
+      (the port promises not to throw, but the switch/limit is already persisted and must never be reported failed);
+      `CoreRiskLimitService` gains a `Logger`. One extra "a journal that throws never fails …" test in each spec, and the
+      `LIMIT_CHANGED` test sits in its own `describe` block.
+    - `order-journaler.spec.ts` first test: `ORDER_PLACED` is written on every emission of the order under the same
+      `dedupeKey` (the store keeps one, J11), so with the non-deduping `FakeJournal` the test asserts one distinct key
+      and checks the first row, as the plan's own fill assertion already does. The plan's `toEqual([one row])` failed.
 
 ## Notes for later milestones (not in this plan)
 

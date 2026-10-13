@@ -299,3 +299,32 @@ describe('checkRisk: sizing reduces only', () => {
     }
   });
 });
+
+describe('checkRisk: reconciliation block (M5 J12, O10)', () => {
+  it('blocks the blocked strategy only; a user-wide block blocks every strategy', () => {
+    const blocked = ctxFixture({ state: stateFixture({ reconBlocked: { all: false, strategyIds: ['cs_ungated'] } }) });
+    expect(codes(checkRisk(intentFixture({ strategyId: 'cs_ungated' }), blocked))).toEqual(['RECON_BLOCKED']);
+    expect(checkRisk(intentFixture({ strategyId: 'cs_adaptive_stop', strategyVersionId: 'csv_adaptive_stop_v1' }), blocked).verdict).not.toBe('REJECT');
+    const all = ctxFixture({ state: stateFixture({ reconBlocked: { all: true, strategyIds: [] } }) });
+    expect(codes(checkRisk(intentFixture({ strategyId: 'cs_adaptive_stop' }), all))).toContain('RECON_BLOCKED');
+  });
+});
+
+describe('checkRisk: exits are never blocked by M5 inputs (recon block, daily-loss latch)', () => {
+  it('an EXIT passes with a user-wide recon block and the daily-loss latch set', () => {
+    const v = checkRisk(
+      { kind: 'EXIT', intentId: 'x_1', userId: 'user_A', positionId: 'pos_1', qty: 30 },
+      ctxFixture({ state: stateFixture({ reconBlocked: { all: true, strategyIds: ['cs_ungated'] }, dailyLossLatched: true }) }),
+    );
+    expect(v).toMatchObject({ verdict: 'ALLOW', qty: 30, intentKind: 'EXIT' });
+    expect(codes(v)).toEqual(['EXIT_NOT_CHECKED']);
+  });
+});
+
+describe('checkRisk: an unreadable journal (M5)', () => {
+  it('rejects every entry JOURNAL_UNAVAILABLE; an exit still passes', () => {
+    const ctx = ctxFixture({ state: stateFixture({ journalUnreadable: true }) });
+    expect(codes(checkRisk(intentFixture(), ctx))).toEqual(['JOURNAL_UNAVAILABLE']);
+    expect(codes(checkRisk({ kind: 'EXIT', intentId: 'x_1', userId: 'user_A', positionId: 'pos_1', qty: 30 }, ctx))).toEqual(['EXIT_NOT_CHECKED']);
+  });
+});

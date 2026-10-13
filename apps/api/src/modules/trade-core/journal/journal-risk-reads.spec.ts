@@ -11,3 +11,19 @@ describe('JournalRiskReads.latched (J13)', () => {
     expect(await r.latched('user_B', '2026-10-13')).toBe(false);
   });
 });
+
+describe('JournalRiskReads.reconBlock (O10)', () => {
+  it('unacked findings block their strategies; a null-strategy finding blocks all; an ack lifts it', async () => {
+    const s = new MemoryJournalStore();
+    const at = new Date('2026-10-13T05:00:00.000Z');
+    await s.repo.append([
+      { type: 'RECON_MISMATCH', userId: 'user_A', at, strategyId: 'cs_a', payload: {} },
+      { type: 'RECON_MISMATCH', userId: 'user_A', at, strategyId: null, payload: {} },
+    ]);
+    const r = new JournalRiskReads(s.repo);
+    expect(await r.reconBlock('user_A')).toEqual({ all: true, strategyIds: ['cs_a'] });
+    await s.repo.append([{ type: 'RECON_ACK', userId: 'user_A', at, payload: {}, dedupeKey: `ack:${s.rows[1].id}` }]);
+    expect(await r.reconBlock('user_A')).toEqual({ all: false, strategyIds: ['cs_a'] });
+    expect(await r.reconBlock('user_B')).toEqual({ all: false, strategyIds: [] });
+  });
+});

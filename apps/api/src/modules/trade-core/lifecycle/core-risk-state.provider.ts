@@ -1,9 +1,10 @@
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { chargesForLeg } from '../../trade-sentinel/charges';
 import { PRICE_MAX_AGE_MS } from '../execution/fill-model';
 import { istDate } from '../execution/ledger-math';
 import { PaperLedgerService, SEGMENT_BY_VEHICLE } from '../execution/paper-ledger.service';
 import { JOURNAL_RISK_READS, type JournalRiskReadsPort } from '../journal/journal-risk-reads';
+import type { ReconBlock } from '../journal/recon-checks';
 import type { RiskStateProvider } from '../risk-wall/ports';
 import type { RiskLiveState, RiskOpenPosition } from '../risk-wall/risk-wall.types';
 import { VEHICLES, type Vehicle } from '../strategies/blocks/block-types';
@@ -31,10 +32,16 @@ export function markToMarket(p: Pick<CorePosition, 'vehicle' | 'side' | 'openQty
  * their strategy and exposure underlying, `priced` from a lifecycle mark no older than
  * PRICE_MAX_AGE_MS, open P&L from those marks (null when any open position is unpriced: the
  * wall then rejects), today's realised P&L, per-strategy P&L, entries and deployed capital
- * from the ledger. M5: the daily-loss latch is read from the journal (J13). A read failure throws.
+ * from the ledger. A ledger or position read failure throws. M5: the daily-loss latch (J13)
+ * and the reconciliation block (J12, O10) are read from the journal; a journal read failure
+ * does NOT throw — it sets `journalUnreadable` (the wall rejects entries JOURNAL_UNAVAILABLE),
+ * because this state also feeds DailyLossMonitor, and a journal outage must never stop the
+ * daily-loss square-off (exits are never blocked).
  */
 @Injectable()
 export class CoreRiskStateProvider implements RiskStateProvider {
+  private readonly logger = new Logger(CoreRiskStateProvider.name);
+
   constructor(
     private readonly ledger: PaperLedgerService,
     private readonly positions: CorePositionRepository,
@@ -42,14 +49,27 @@ export class CoreRiskStateProvider implements RiskStateProvider {
     @Optional() @Inject(JOURNAL_RISK_READS) private readonly reads?: JournalRiskReadsPort,
   ) {}
 
+  /** The journal-derived inputs; never rejects. */
+  private async journalInputs(userId: string, at: Date): Promise<{ dailyLossLatched: boolean; reconBlocked: ReconBlock; journalUnreadable: boolean }> {
+    const none: ReconBlock = { all: false, strategyIds: [] };
+    if (!this.reads) return { dailyLossLatched: false, reconBlocked: none, journalUnreadable: false };
+    try {
+      const [dailyLossLatched, reconBlocked] = await Promise.all([this.reads.latched(userId, istDate(at)), this.reads.reconBlock(userId)]);
+      return { dailyLossLatched, reconBlocked, journalUnreadable: false };
+    } catch (err) {
+      this.logger.error(`journal risk reads for ${userId} failed (entries rejected JOURNAL_UNAVAILABLE): ${err instanceof Error ? err.message : String(err)}`);
+      return { dailyLossLatched: false, reconBlocked: none, journalUnreadable: true };
+    }
+  }
+
   async liveState(userId: string, at: Date): Promise<RiskLiveState> {
     const dayStart = new Date(`${istDate(at)}T00:00:00.000+05:30`);
-    const [funds, day, rows, realisedByPosition, dailyLossLatched] = await Promise.all([
+    const [funds, day, rows, realisedByPosition, journal] = await Promise.all([
       this.ledger.funds(userId),
       this.ledger.dayStats(userId, at),
       this.positions.listForUser(userId, dayStart),
       this.ledger.netPnlTodayByPosition(userId, at),
-      this.reads ? this.reads.latched(userId, istDate(at)) : Promise.resolve(false),
+      this.journalInputs(userId, at),
     ]);
     const byStrategy: Record<string, number> = {};
     const add = (strategyId: string, v: number) => {
@@ -92,7 +112,9 @@ export class CoreRiskStateProvider implements RiskStateProvider {
       pnlTodayByStrategy: byStrategy,
       tradesToday: day.entriesToday,
       deployedCapital: Object.fromEntries(VEHICLES.map((v) => [v, rupees(funds.deployedByVehicle[v])])) as Record<Vehicle, number | null>,
-      dailyLossLatched,
+      dailyLossLatched: journal.dailyLossLatched,
+      reconBlocked: journal.reconBlocked,
+      ...(journal.journalUnreadable ? { journalUnreadable: true } : {}),
     };
   }
 }

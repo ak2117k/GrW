@@ -78,7 +78,8 @@ export interface UserBrokerSession {
    * answered `status: false` / `success: false` with its own message or errorcode
    * is a definitive REJECTED; every other answer without an orderid, and any
    * throw or timeout, is UNCERTAIN (the order may exist at the broker).
-   * {@link placeOrder} keeps its old mapping for the auto-execution pipeline.
+   * Both the auto-execution pipeline and the sentinel auto-exit use this; the legacy
+   * {@link placeOrder} mapping (no answer ⇒ REJECTED) has no production caller left.
    */
   placeOrderClassified(order: OrderRequest, orderTag?: string): Promise<ClassifiedPlacement>;
 

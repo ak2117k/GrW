@@ -20,6 +20,12 @@ export const ExecutionClaimStatus = {
   CLAIMED: 'CLAIMED',
   PLACED: 'PLACED',
   FAILED: 'FAILED',
+  /**
+   * Terminal: the order was sent but the broker never answered definitively and
+   * our ordertag was not found in its order book. The order MAY exist; never
+   * retried, never re-placed — a human must check the broker.
+   */
+  ORDER_UNCERTAIN: 'ORDER_UNCERTAIN',
 } as const;
 
 /**
@@ -92,6 +98,17 @@ export class ExecutionClaimService {
       where: { idempotencyKey },
       data: {
         status: ExecutionClaimStatus.FAILED,
+        error,
+      },
+    });
+  }
+
+  /** Settle a claim as ORDER_UNCERTAIN (terminal; see {@link ExecutionClaimStatus}). */
+  async markUncertain(idempotencyKey: string, error: string): Promise<void> {
+    await this.prisma.executionClaim.update({
+      where: { idempotencyKey },
+      data: {
+        status: ExecutionClaimStatus.ORDER_UNCERTAIN,
         error,
       },
     });

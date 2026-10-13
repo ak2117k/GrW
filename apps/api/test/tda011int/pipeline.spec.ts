@@ -12,7 +12,7 @@
  *     risk-backstop veto) → ORDER_REJECTED with the right reason and NO
  *     decrypt/claim/order (the credential decryptor is never touched);
  *   - broker REJECTED → terminal, swallowed + audited (no throw);
- *   - broker FAILED → retryable, throws (Bull retries → DLQ) + audited.
+ *   - broker answer not definitive + tag not in the book → terminal ORDER_UNCERTAIN.
  *
  * Run from apps/api:
  *   npx jest --config test/tda011int/jest.config.js --runInBand --verbose
@@ -20,10 +20,8 @@
 import { AutoExecutionService } from '../../src/modules/auto-execution/services/auto-execution.service';
 import type { PublicSignal, ExecuteUserJob } from '../../src/modules/signal-fanout';
 import { AutoTradeRiskSizingService } from '../../src/modules/auto-execution/services/auto-trade-risk-sizing.service';
-import type {
-  OrderRequest,
-  OrderResponse,
-} from '../../src/common/interfaces/broker-adapter.interface';
+import type { OrderRequest } from '../../src/common/interfaces/broker-adapter.interface';
+import type { ClassifiedPlacement } from '../../src/modules/auto-execution/services/per-user-broker-session.factory';
 
 // ---- Fakes ---------------------------------------------------------------
 
@@ -49,13 +47,18 @@ function makeFakeClaims() {
       const r = rows.get(key);
       if (r) { r.status = 'FAILED'; r.error = error; }
     }),
+    markUncertain: jest.fn(async (key: string, error: string) => {
+      const r = rows.get(key);
+      if (r) { r.status = 'ORDER_UNCERTAIN'; r.error = error; }
+    }),
   };
 }
 
-/** A fake broker session recording placeOrder; response is configurable. */
-function makeFakeSession(response: OrderResponse) {
+/** A fake broker session recording placeOrderClassified; response is configurable. */
+function makeFakeSession(response: ClassifiedPlacement, book: unknown = { status: true, data: [] }) {
   return {
-    placeOrder: jest.fn(async (_order: OrderRequest, _tag?: string) => response),
+    placeOrderClassified: jest.fn(async (_order: OrderRequest, _tag?: string) => response),
+    getOrderBookEnvelope: jest.fn(async () => book),
   };
 }
 
@@ -74,13 +77,13 @@ interface Harness {
 
 function makeHarness(opts: {
   consentRow?: { enabled: boolean; killSwitch: boolean; riskPerTrade: number | null; maxCapital: number | null } | null;
-  brokerResponse?: OrderResponse;
+  brokerResponse?: ClassifiedPlacement;
 } = {}): Harness {
   const consentRow =
     opts.consentRow === undefined
       ? { enabled: true, killSwitch: false, riskPerTrade: 5000, maxCapital: 100000 }
       : opts.consentRow;
-  const brokerResponse: OrderResponse =
+  const brokerResponse: ClassifiedPlacement =
     opts.brokerResponse ?? { orderId: 'BRK-ORD-1', status: 'PLACED', message: 'ok' };
 
   const subscriptions = { hasActive: jest.fn().mockResolvedValue(true) };
@@ -114,6 +117,7 @@ function makeHarness(opts: {
     decryptor as never,
     brokerFactory as never,
     audit as never,
+    async () => undefined, // instant order-book grace
   );
 
   return { service, subscriptions, consent, prisma, risk, claims, decryptor, brokerFactory, session, audit };
@@ -159,9 +163,9 @@ describe('AutoExecutionService.execute — happy path', () => {
     expect(h.brokerFactory.withSession).toHaveBeenCalledTimes(1);
     expect(h.brokerFactory.withSession.mock.calls[0][0]).toBe(DUMMY_CREDS);
     // exactly one order, tagged with the idempotency key
-    expect(h.session.placeOrder).toHaveBeenCalledTimes(1);
-    const [order, tag] = h.session.placeOrder.mock.calls[0];
-    expect(tag).toBe('idem-1');
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    const [order, tag] = h.session.placeOrderClassified.mock.calls[0];
+    expect(tag).toBe('aeidem1'); // short Angel ordertag derived from the key
     expect(order.symbol).toBe('RELIANCE');
     expect(order.side).toBe('BUY');
     expect(order.quantity).toBeGreaterThan(0);
@@ -183,7 +187,7 @@ describe('AutoExecutionService.execute — idempotency (TDA-010 retry)', () => {
     await h.service.execute(job); // retry, same key
 
     expect(h.claims.claim).toHaveBeenCalledTimes(2);
-    expect(h.session.placeOrder).toHaveBeenCalledTimes(1); // only the first placed
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1); // only the first placed
     expect(h.decryptor.withDecryptedCredentials).toHaveBeenCalledTimes(1);
     expect(auditsFor(h, 'ORDER_PLACED')).toHaveLength(1);
   });
@@ -193,7 +197,7 @@ describe('AutoExecutionService.execute — gates (terminal, no decrypt/claim/ord
   const expectRejectedNoSideEffects = (h: Harness, reason: string) => {
     expect(h.decryptor.withDecryptedCredentials).not.toHaveBeenCalled();
     expect(h.claims.claim).not.toHaveBeenCalled();
-    expect(h.session.placeOrder).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
     const rejects = auditsFor(h, 'ORDER_REJECTED');
     expect(rejects).toHaveLength(1);
     expect(rejects[0].meta.reason).toContain(reason);
@@ -254,11 +258,11 @@ describe('AutoExecutionService.execute — gates (terminal, no decrypt/claim/ord
 
 describe('AutoExecutionService.execute — broker outcomes', () => {
   it('broker REJECTED → terminal: markFailed + ORDER_REJECTED{BROKER_REJECT}, no throw', async () => {
-    const h = makeHarness({ brokerResponse: { orderId: '', status: 'REJECTED', message: 'RMS margin block' } });
+    const h = makeHarness({ brokerResponse: { orderId: '', status: 'REJECTED', message: 'RMS margin block', errorcode: 'AB4008' } });
 
     await expect(h.service.execute(job)).resolves.toBeUndefined();
 
-    expect(h.session.placeOrder).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
     expect(h.claims.markFailed).toHaveBeenCalledWith('idem-1', 'RMS margin block');
     const rejects = auditsFor(h, 'ORDER_REJECTED');
     expect(rejects).toHaveLength(1);
@@ -266,16 +270,17 @@ describe('AutoExecutionService.execute — broker outcomes', () => {
     expect(auditsFor(h, 'ORDER_PLACED')).toHaveLength(0);
   });
 
-  it('broker FAILED → retryable: throws (Bull retries → DLQ) + markFailed + ORDER_REJECTED{BROKER_FAULT}', async () => {
-    const h = makeHarness({ brokerResponse: { orderId: '', status: 'FAILED', message: 'timeout' } });
+  it('broker answer not definitive + tag not in the order book → terminal ORDER_UNCERTAIN, no throw, never retried', async () => {
+    const h = makeHarness({ brokerResponse: { orderId: '', status: 'UNCERTAIN', message: 'no definitive broker answer: {}' } });
 
-    await expect(h.service.execute(job)).rejects.toThrow(/retryable/i);
+    await expect(h.service.execute(job)).resolves.toBeUndefined();
+    await h.service.execute(job); // a Bull retry / redelivery
 
-    expect(h.session.placeOrder).toHaveBeenCalledTimes(1);
-    expect(h.claims.markFailed).toHaveBeenCalledWith('idem-1', 'timeout');
-    const rejects = auditsFor(h, 'ORDER_REJECTED');
-    expect(rejects).toHaveLength(1);
-    expect(rejects[0].meta.reason).toBe('BROKER_FAULT');
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.claims.rows.get('idem-1')?.status).toBe('ORDER_UNCERTAIN');
+    expect(auditsFor(h, 'ORDER_UNCERTAIN')).toHaveLength(1);
+    expect(auditsFor(h, 'ORDER_REJECTED')).toHaveLength(0);
+    expect(auditsFor(h, 'ORDER_PLACED')).toHaveLength(0);
   });
 
   it('decrypt/session fault → retryable: throws + markFailed (claim held, no double-place on retry)', async () => {

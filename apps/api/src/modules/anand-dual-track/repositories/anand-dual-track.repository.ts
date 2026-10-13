@@ -7,6 +7,9 @@ const NOTIONAL = 200_000;
 // swing track's notional capital base (₹20,00,000), adjustable
 const SWING_BASE_CAPITAL = 2_000_000;
 
+/** Terminal status of a row closed by the core kill switch's square-off cascade. */
+export const SQUARED_OFF = 'SQUARED_OFF';
+
 export interface CreateEntryInput {
   symbol: string;
   token: string | null;
@@ -224,6 +227,28 @@ export class AnandDualTrackRepository {
 
   async updateSwingStatus(id: string, data: UpdateStatusInput): Promise<void> {
     await this.prisma.swingEntry.update({ where: { id }, data });
+  }
+
+  /**
+   * Kill-switch close: TRADED → SQUARED_OFF, guarded on the row still being
+   * TRADED (updateMany + status guard) so a concurrent poller exit is never
+   * overwritten. Returns whether this call made the transition.
+   */
+  async closeOpenIntraday(id: string, data: { exitPrice: number; exitedAt: Date; exitReason: string }): Promise<boolean> {
+    const r = await this.prisma.intradayEntry.updateMany({
+      where: { id, status: 'TRADED' },
+      data: { status: SQUARED_OFF, ...data },
+    });
+    return r.count > 0;
+  }
+
+  /** Swing twin of {@link closeOpenIntraday}. */
+  async closeOpenSwing(id: string, data: { exitPrice: number; exitedAt: Date; exitReason: string }): Promise<boolean> {
+    const r = await this.prisma.swingEntry.updateMany({
+      where: { id, status: 'TRADED' },
+      data: { status: SQUARED_OFF, ...data },
+    });
+    return r.count > 0;
   }
 
   async setIntradayTrailing(id: string, data: { trailing: boolean; peakPrice: number }): Promise<void> {
@@ -514,8 +539,8 @@ export class AnandDualTrackRepository {
     const yearStart = istMidnightDaysAgo(365);
     const exitStatuses =
       track === 'intraday'
-        ? ['TARGET_HIT', 'STOPPED', 'EXPIRED']
-        : ['TARGET_HIT', 'STOPPED'];
+        ? ['TARGET_HIT', 'STOPPED', 'EXPIRED', SQUARED_OFF]
+        : ['TARGET_HIT', 'STOPPED', SQUARED_OFF];
 
     // Intraday rows additionally carry the partial-booking legs so realized P&L
     // can be blended across the booked partial + the final-exit leg. Swing rows

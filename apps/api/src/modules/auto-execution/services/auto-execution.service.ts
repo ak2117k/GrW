@@ -1,12 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ClsService } from 'nestjs-cls';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { TenantContextService } from '../../../common/tenant/tenant-context.service';
 import { AuditService } from '../../../common/audit/audit.service';
-import {
-  OrderRequest,
-  OrderResponse,
-} from '../../../common/interfaces/broker-adapter.interface';
+import { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 import { SubscriptionService } from '../../subscription/subscription.service';
 import { ConsentService } from '../../consent/consent.service';
 import { RiskManagerService } from '../../trade-engine/services/risk-manager.service';
@@ -23,8 +20,42 @@ import type {
 import type { PublicSignal, Segment } from '../../signal-fanout';
 import { AutoTradeRiskSizingService } from './auto-trade-risk-sizing.service';
 import { ExecutionClaimService } from './execution-claim.service';
-import { PerUserBrokerSessionFactory } from './per-user-broker-session.factory';
+import {
+  PerUserBrokerSessionFactory,
+  type ClassifiedPlacement,
+  type UserBrokerSession,
+} from './per-user-broker-session.factory';
+import { answeredPositions } from '../../trade-tracker/services/trade-tracker.service';
+import { findOrderByTag } from '../../sentinel-executor/domain/exit-order';
 import { coreEntryAllowed, CoreKillSwitchEntryBlockedError } from '../../trade-core/risk-wall/kill-gate';
+
+/** DI seam for the pause before an order-book lookup (tests inject an instant one). */
+export const AUTO_EXEC_SLEEP = Symbol('AUTO_EXEC_SLEEP');
+export type AutoExecSleep = (ms: number) => Promise<void>;
+const defaultSleep: AutoExecSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Grace before looking for an order whose placement answer was not definitive. */
+const TAG_LOOKUP_DELAY_MS = 2_000;
+
+/**
+ * The Angel `ordertag` for one (signal, user) execution. Angel documents the tag
+ * as at most 20 alphanumeric characters, so the 64-char sha256 idempotency key is
+ * NOT sent raw: `ae` + its first 18 alphanumerics. Stable across retries (the key
+ * is), and never starts with the ai-exit executor's `ax` prefix. The DB claim,
+ * not the tag, is the idempotency anchor; the tag is how an UNCERTAIN placement
+ * is found again in the order book.
+ */
+export function autoExecOrderTag(idempotencyKey: string): string {
+  return `ae${String(idempotencyKey).replace(/[^A-Za-z0-9]/g, '').slice(0, 18)}`;
+}
+
+/** What happened inside the broker session, settled after the lease closes. */
+type Settlement =
+  | { kind: 'PLACED'; orderId: string; message: string; reconciled: boolean; bookStatus?: string }
+  | { kind: 'REJECTED'; message: string; bookStatus?: string }
+  | { kind: 'UNCERTAIN'; message: string; detail: string };
+
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
  * The per-user auto-execution pipeline (TDA-011 §4). It is the sole
@@ -42,11 +73,17 @@ import { coreEntryAllowed, CoreKillSwitchEntryBlockedError } from '../../trade-c
  * then settle + a coupled tamper-evident audit.
  *
  * Error classification for TDA-010's retry/DLQ routing:
- *  - every GATE + the broker's terminal REJECTED → audited `ORDER_REJECTED` and
+ *  - every GATE + Angel's own definitive REJECTED → audited `ORDER_REJECTED` and
  *    SWALLOWED (return normally; the job succeeds, no retry, no order);
  *  - a duplicate claim → success-shaped no-op (log + return);
- *  - a broker FAILED (transient fault) or a decrypt/session fault → THROWN so
- *    Bull retries with backoff and ultimately dead-letters. The claim is already
+ *  - a placement with no definitive answer (the SDK resolves a timeout/network
+ *    error to `{}` and an HTTP error to `{status,message}`, so the order MAY
+ *    exist) is reconciled from the order book by our ordertag: found live →
+ *    PLACED + `ORDER_PLACED`; found rejected/cancelled → `ORDER_REJECTED`; not
+ *    found, or the book did not answer → terminal `ORDER_UNCERTAIN` (claim +
+ *    audit), swallowed and NEVER retried — someone must check the broker;
+ *  - a decrypt/session fault before the order was sent → THROWN so Bull
+ *    retries with backoff and ultimately dead-letters. The claim is already
  *    held, so a retry re-hits the unique constraint and skips — at-most-once is
  *    preserved (never a duplicate real-money order).
  */
@@ -66,7 +103,12 @@ export class AutoExecutionService implements AutoExecutionPort {
     @Inject(CREDENTIAL_DECRYPTOR) private readonly decryptor: CredentialDecryptor,
     private readonly brokerFactory: PerUserBrokerSessionFactory,
     private readonly audit: AuditService,
-  ) {}
+    @Optional() @Inject(AUTO_EXEC_SLEEP) sleep?: AutoExecSleep,
+  ) {
+    this.sleep = sleep ?? defaultSleep;
+  }
+
+  private readonly sleep: AutoExecSleep;
 
   async execute(job: ExecuteUserJob): Promise<void> {
     const { userId, signal, idempotencyKey } = job;
@@ -134,11 +176,14 @@ export class AutoExecutionService implements AutoExecutionPort {
     // ---- 5 + 6. Decrypt (nested) → place order (§4.5, §4.6) ----
     // Decrypt is nested INSIDE the broker session build so plaintext creds live
     // only for the bounded lease the vault zeroizes in its finally. The order
-    // carries the idempotency key as the broker `ordertag` for best-effort
-    // broker-side dedupe (§5).
-    let placement: OrderResponse;
+    // carries a short tag derived from the idempotency key as the broker
+    // `ordertag` (§5): the only handle to find it again when the placement
+    // answer is not definitive.
+    const orderTag = autoExecOrderTag(idempotencyKey);
+    let sent = false;
+    let settled: Settlement;
     try {
-      placement = await this.decryptor.withDecryptedCredentials(
+      settled = await this.decryptor.withDecryptedCredentials(
         userId,
         { reason: 'ORDER', signalId: signal.entryId },
         (creds) =>
@@ -150,7 +195,14 @@ export class AutoExecutionService implements AutoExecutionPort {
             if (!(await coreEntryAllowed('auto-execution', { userId, ref: signal.symbol, recheck: true }))) {
               throw new CoreKillSwitchEntryBlockedError('auto-execution', signal.symbol);
             }
-            return session.placeOrder(order, idempotencyKey);
+            sent = true;
+            let placement: ClassifiedPlacement;
+            try {
+              placement = await session.placeOrderClassified(order, orderTag);
+            } catch (err) {
+              placement = { status: 'UNCERTAIN', orderId: '', message: errText(err) };
+            }
+            return this.settleInSession(session, placement, orderTag);
           }),
       );
     } catch (err) {
@@ -160,10 +212,18 @@ export class AutoExecutionService implements AutoExecutionPort {
         await this.claims.markFailed(idempotencyKey, 'USER_KILL_SWITCH');
         return this.rejectTerminal(userId, signal, idempotencyKey, 'USER_KILL_SWITCH');
       }
-      // Decrypt / ephemeral-login / infra fault. The claim is held, so a Bull
-      // retry re-hits the unique constraint and skips — no double-place. Surface
-      // as retryable so TDA-010 retries then dead-letters for TDA-012 reconcile.
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errText(err);
+      if (sent) {
+        // The order was handed to the broker; a later fault (lease teardown etc.)
+        // says nothing about whether it exists. Never retried.
+        return this.settleUncertain(userId, signal, idempotencyKey, orderTag, {
+          kind: 'UNCERTAIN', message: msg, detail: 'FAULT_AFTER_SEND',
+        });
+      }
+      // Decrypt / ephemeral-login / infra fault BEFORE any order was sent. The
+      // claim is held, so a Bull retry re-hits the unique constraint and skips —
+      // no double-place. Surface as retryable so TDA-010 retries then dead-letters
+      // for TDA-012 reconcile.
       await this.claims.markFailed(idempotencyKey, msg);
       await this.audit.append({
         action: 'ORDER_REJECTED',
@@ -175,53 +235,132 @@ export class AutoExecutionService implements AutoExecutionPort {
     }
 
     // ---- 7. Settle idempotency + coupled fatal audit (§4.7) ----
-    if (placement.status === 'PLACED' && placement.orderId) {
-      await this.claims.markPlaced(idempotencyKey, placement.orderId);
+    if (settled.kind === 'PLACED') {
+      await this.claims.markPlaced(idempotencyKey, settled.orderId);
       // Fatal/transactional audit (TDA-008 §4.1): an order must never exist
       // without its audit row, so this append is left to throw (strict).
       await this.audit.append({
         action: 'ORDER_PLACED',
         userId,
-        target: placement.orderId,
+        target: settled.orderId,
         meta: {
           entryId: signal.entryId,
           segment,
           quantity: sized.quantity,
           lots: sized.lots,
           idempotencyKey,
+          orderTag,
+          ...(settled.reconciled
+            ? { reconciled: true, placementMessage: settled.message, bookStatus: settled.bookStatus ?? null }
+            : {}),
         },
       });
       this.logger.log(
-        `[AUTO] Order ${placement.orderId} placed for user ${userId} (${signal.symbol} x${sized.quantity})`,
+        `[AUTO] Order ${settled.orderId} placed for user ${userId} (${signal.symbol} x${sized.quantity})` +
+          (settled.reconciled ? ` — found by ordertag after a non-definitive answer: ${settled.message}` : ''),
       );
       return;
     }
 
-    if (placement.status === 'REJECTED') {
-      // Terminal broker rejection (e.g. RMS margin block). Swallow + audit — a
-      // retry cannot fix it, so do NOT throw.
-      await this.claims.markFailed(idempotencyKey, placement.message);
+    if (settled.kind === 'REJECTED') {
+      // Terminal broker rejection (Angel's own answer, or our tag rejected/
+      // cancelled in its order book). A retry cannot fix it, so do NOT throw.
+      await this.claims.markFailed(idempotencyKey, settled.message);
       await this.audit.append({
         action: 'ORDER_REJECTED',
         userId,
         target: signal.entryId,
-        meta: { reason: 'BROKER_REJECT', message: placement.message, idempotencyKey, segment },
+        meta: {
+          reason: 'BROKER_REJECT',
+          message: settled.message,
+          idempotencyKey,
+          segment,
+          ...(settled.bookStatus ? { bookStatus: settled.bookStatus, orderTag } : {}),
+        },
       });
       this.logger.warn(
-        `[AUTO] Order REJECTED by broker for user ${userId}: ${placement.message}`,
+        `[AUTO] Order REJECTED by broker for user ${userId}: ${settled.message}`,
       );
       return;
     }
 
-    // FAILED (broker 5xx/timeout) → transient. Audit, then throw so Bull retries.
-    await this.claims.markFailed(idempotencyKey, placement.message);
+    return this.settleUncertain(userId, signal, idempotencyKey, orderTag, settled);
+  }
+
+  /**
+   * Turn a classified placement into a settlement while the session is still
+   * open. Only a non-definitive answer touches the order book: after a short
+   * grace, our own ordertag decides. Never re-sends.
+   */
+  private async settleInSession(
+    session: UserBrokerSession,
+    placement: ClassifiedPlacement,
+    orderTag: string,
+  ): Promise<Settlement> {
+    if (placement.status === 'PLACED') {
+      return { kind: 'PLACED', orderId: placement.orderId, message: placement.message, reconciled: false };
+    }
+    if (placement.status === 'REJECTED') {
+      return { kind: 'REJECTED', message: placement.message };
+    }
+    await this.sleep(TAG_LOOKUP_DELAY_MS);
+    let book: unknown[] | null;
+    try {
+      book = answeredPositions(await session.getOrderBookEnvelope());
+    } catch (err) {
+      this.logger.warn(`[AUTO] order-book read failed after an uncertain placement: ${errText(err)}`);
+      book = null;
+    }
+    if (book === null) {
+      return { kind: 'UNCERTAIN', message: placement.message, detail: 'ORDER_BOOK_NOT_ANSWERED' };
+    }
+    const mine = findOrderByTag(book, orderTag);
+    if (!mine) {
+      return { kind: 'UNCERTAIN', message: placement.message, detail: 'TAG_NOT_IN_ORDER_BOOK' };
+    }
+    if (mine.status === 'rejected' || mine.status === 'cancelled') {
+      return { kind: 'REJECTED', message: mine.text || placement.message, bookStatus: mine.status };
+    }
+    return {
+      kind: 'PLACED',
+      orderId: mine.orderId || `tag:${orderTag}`,
+      message: placement.message,
+      reconciled: true,
+      bookStatus: mine.status || undefined,
+    };
+  }
+
+  /**
+   * The order's fate is unknown: it may be live at the broker. Terminal and
+   * visible — the claim is settled ORDER_UNCERTAIN and an `ORDER_UNCERTAIN`
+   * audit is written; no throw, so Bull never retries (and the held claim would
+   * skip a retry anyway). Never audited as a rejection.
+   */
+  private async settleUncertain(
+    userId: string,
+    signal: PublicSignal,
+    idempotencyKey: string,
+    orderTag: string,
+    s: Extract<Settlement, { kind: 'UNCERTAIN' }>,
+  ): Promise<void> {
+    await this.claims.markUncertain(idempotencyKey, `${s.detail}: ${s.message}`);
     await this.audit.append({
-      action: 'ORDER_REJECTED',
+      action: 'ORDER_UNCERTAIN',
       userId,
       target: signal.entryId,
-      meta: { reason: 'BROKER_FAULT', message: placement.message, idempotencyKey, segment },
+      meta: {
+        reason: s.detail,
+        message: s.message,
+        idempotencyKey,
+        orderTag,
+        segment: signal.segment,
+        symbol: signal.symbol,
+      },
     });
-    throw new Error(`Broker order fault (retryable): ${placement.message}`);
+    this.logger.error(
+      `[AUTO] ORDER_UNCERTAIN for user ${userId} (${signal.symbol}, ordertag ${orderTag}): ` +
+        `${s.detail} — ${s.message}. The order may exist at the broker; check it manually. Not retried.`,
+    );
   }
 
   /**

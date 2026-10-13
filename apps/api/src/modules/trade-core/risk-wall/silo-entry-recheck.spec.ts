@@ -241,7 +241,7 @@ describe('auto-execution: AutoExecutionService.execute re-checks this user’s s
       claims,
       // Decrypt + ephemeral broker login: the slow window.
       { withDecryptedCredentials: jest.fn(async (_u: string, _m: unknown, fn: (c: unknown) => unknown) => { if (slowQuoteEngages) engage(); return fn({}); }) },
-      { withSession: jest.fn(async (_c: unknown, fn: (s: unknown) => unknown) => fn({ placeOrder })) },
+      { withSession: jest.fn(async (_c: unknown, fn: (s: unknown) => unknown) => fn({ placeOrderClassified: placeOrder })) },
       audit,
     ]);
     return { s, placeOrder, claims, audit };

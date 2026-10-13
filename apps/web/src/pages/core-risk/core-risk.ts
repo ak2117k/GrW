@@ -37,6 +37,8 @@ const SILO_LABELS: Record<string, string> = {
   'adaptive-stop-track': 'Adaptive-Stop silo',
   'ungated-track': 'Ungated silo',
   'sell-futures-track': 'Sell-futures silo',
+  'anand-dual-track': 'Anand dual-track silo',
+  'breakout-swing-track': 'Breakout-swing silo',
   'trade-engine': 'Trade engine',
 };
 

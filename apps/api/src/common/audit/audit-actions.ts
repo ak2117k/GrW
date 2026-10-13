@@ -41,6 +41,8 @@ export const AUDIT_ACTIONS = {
   execution: {
     ORDER_PLACED: 'ORDER_PLACED',
     ORDER_REJECTED: 'ORDER_REJECTED',
+    /** Sent, but its fate is unknown (no definitive answer, tag not in the book). */
+    ORDER_UNCERTAIN: 'ORDER_UNCERTAIN',
     ORDER_FILLED: 'ORDER_FILLED',
     ORDER_CANCELLED: 'ORDER_CANCELLED',
     AUTOTRADE_ENABLED: 'AUTOTRADE_ENABLED',

@@ -73,6 +73,81 @@ export class AnandPriceMonitorService {
     this.logger.log(`[anand-intraday] expired ${count} entries (marked to market) at market close`);
   }
 
+  /**
+   * Core kill switch square-off (CLAUDE.md §9 — ALL positions): close every open
+   * intraday + swing entry and every open reinvestment lot at a FRESH exit price,
+   * as SQUARED_OFF. Same price source and freshness rule as the poller's own
+   * exits. A position with no fresh price (or no token) is left open and counted
+   * `skipped`; a row that fails to close is counted in `errors` and the rest
+   * still run. Entry rows close through a TRADED-guarded update, so a concurrent
+   * poller exit is never overwritten (that row counts as closed: it is no longer
+   * open). Never throws for one row.
+   */
+  async squareOffAll(reason: string): Promise<{ attempted: number; closed: number; skipped: number; errors: number }> {
+    const [intraday, swing, lots] = await Promise.all([
+      this.repo.listWatchingIntraday(),
+      this.repo.listWatchingSwing(),
+      this.repo.listOpenReinvestmentLots(),
+    ]);
+    const attempted = intraday.length + swing.length + lots.length;
+    if (attempted === 0) {
+      this.logger.log('[anand-kill] no open positions to square off');
+      return { attempted: 0, closed: 0, skipped: 0, errors: 0 };
+    }
+
+    const lotTokens = lots.length
+      ? await this.repo.resolveTokens([...new Set(lots.map((l) => l.symbol))]).catch(() => new Map<string, string>())
+      : new Map<string, string>();
+    const tokens = [
+      ...new Set(
+        [...intraday, ...swing].map((e) => e.token).concat([...lotTokens.values()]).filter((t): t is string => !!t),
+      ),
+    ];
+    const prices = tokens.length
+      ? await this.exitPrice.resolveExitPrices('NSE', tokens).catch(() => new Map<string, ExitPrice>())
+      : new Map<string, ExitPrice>();
+    const freshPrice = (token: string | null | undefined): number | undefined => {
+      const p = token ? prices.get(token) : undefined;
+      return p?.fresh && p.price > 0 ? p.price : undefined;
+    };
+
+    const now = new Date();
+    let closed = 0;
+    let skipped = 0;
+    let errors = 0;
+    const run = async (label: string, token: string | null | undefined, close: (px: number) => Promise<unknown>) => {
+      const px = freshPrice(token);
+      if (px === undefined) {
+        this.logger.warn(`[anand-kill] ${label} — no fresh price, left OPEN`);
+        skipped++;
+        return;
+      }
+      try {
+        await close(px);
+        closed++;
+        this.logger.warn(`[anand-kill] ${label} squared off at ₹${px}`);
+      } catch (err) {
+        errors++;
+        this.logger.error(`[anand-kill] ${label} failed to close: ${err instanceof Error ? err.message : err}`);
+      }
+    };
+
+    for (const e of intraday) {
+      await run(`intraday ${e.id} (${e.symbol})`, e.token, (px) =>
+        this.repo.closeOpenIntraday(e.id, { exitPrice: px, exitedAt: now, exitReason: reason }));
+    }
+    for (const e of swing) {
+      await run(`swing ${e.id} (${e.symbol})`, e.token, (px) =>
+        this.repo.closeOpenSwing(e.id, { exitPrice: px, exitedAt: now, exitReason: reason }));
+    }
+    for (const l of lots) {
+      await run(`reinvest lot ${l.id} (${l.symbol})`, lotTokens.get(l.symbol), (px) =>
+        this.reinvest.closeLot({ id: l.id, capital: l.capital, entryPrice: l.entryPrice }, px, 'SQUARED_OFF'));
+    }
+    this.logger.warn(`[anand-kill] done — attempted=${attempted} closed=${closed} skipped=${skipped} errors=${errors}`);
+    return { attempted, closed, skipped, errors };
+  }
+
   // Poll swing entries every 10 min always; guard skips during market hours
   // (09:15–15:30 IST) since pollMarketHours covers that window.
   @Cron('0 */10 * * * *', { timeZone: 'Asia/Kolkata' })

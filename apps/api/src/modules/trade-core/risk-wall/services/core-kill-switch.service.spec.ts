@@ -129,7 +129,7 @@ describe('CoreKillSwitchService', () => {
     expect(silos.squareOffAll).toHaveBeenCalledTimes(1);
     silos.squareOffAll.mockRejectedValueOnce(new Error('adapter broke'));
     const again = await service.set(OWNER, { active: true, reason: 'stop again' }, NOW);
-    expect(again.cascade?.silos).toHaveLength(6);
+    expect(again.cascade?.silos).toHaveLength(8);
     expect(again.cascade?.silos.every((s) => s.status === 'FAILED' && s.detail === 'adapter broke')).toBe(true);
   });
 

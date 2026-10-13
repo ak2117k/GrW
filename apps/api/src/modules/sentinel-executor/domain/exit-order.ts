@@ -6,7 +6,7 @@ const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const PRODUCTS = new Set(['INTRADAY', 'CARRYFORWARD', 'DELIVERY']);
 const TERMINAL = new Set(['complete', 'rejected', 'cancelled']);
 
-/** Prefix of every ordertag the executor sends (R4). auto-execution tags are sha256 hex, never 'x'. */
+/** Prefix of every ordertag the executor sends (R4). auto-execution tags are 'ae' + idempotency-key hex, never 'ax'. */
 export const AI_EXIT_TAG_PREFIX = 'ax';
 
 type Row = Record<string, unknown>;

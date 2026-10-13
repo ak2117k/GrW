@@ -1,6 +1,11 @@
-import { CORE_INDEX_INSTRUMENTS } from './core-index-instruments';
-import { InstrumentService } from './instrument.service';
-import { INDICES, SECTOR_INDICES } from '@td/shared/constants';
+import { CORE_INDEX_INSTRUMENTS, InstrumentService } from './instrument.service';
+import { buildCoreIndexInstruments } from './core-index-instruments';
+
+/** The sector index tokens the app subscribes to (packages/shared SECTOR_INDICES). */
+const SECTOR_TOKENS = [
+  '99926013', '99926009', '99926017', '99926021', '99926015', '99926023', '99926019',
+  '99926027', '99926029', '99926031', '99926033', '99926035', '99926011', '99926041', '99926039',
+];
 
 /**
  * Production booted with NO row for NIFTY/BANKNIFTY/FINNIFTY in `instruments`:
@@ -54,15 +59,21 @@ describe('CORE_INDEX_INSTRUMENTS', () => {
     expect(byKey.get('BSE:SENSEX')?.token).toBe('99919000');
   });
 
-  it('covers every INDICES and SECTOR_INDICES token, one row per exchange:token, as segment INDEX', () => {
+  it('covers every sector index token, one row per exchange:token, as segment INDEX', () => {
     const keys = CORE_INDEX_INSTRUMENTS.map((r) => `${r.exchange}:${r.token}`);
     expect(new Set(keys).size).toBe(keys.length);
-    for (const d of [...Object.values(INDICES), ...Object.values(SECTOR_INDICES)]) {
-      expect(keys).toContain(`${d.exchange}:${d.token}`);
-    }
+    for (const token of SECTOR_TOKENS) expect(keys).toContain(`NSE:${token}`);
     expect(CORE_INDEX_INSTRUMENTS.every((r) => r.segment === 'INDEX')).toBe(true);
     // 99926009 is BANKNIFTY (what the scanner looks up), not the sector alias.
     expect(CORE_INDEX_INSTRUMENTS.find((r) => r.token === '99926009')?.symbol).toBe('BANKNIFTY');
+  });
+
+  it('first group wins a shared exchange:token', () => {
+    const rows = buildCoreIndexInstruments(
+      { A: { symbol: 'BANKNIFTY', token: '1', exchange: 'NSE' } },
+      { B: { symbol: 'NIFTY BANK', token: '1', exchange: 'NSE' } },
+    );
+    expect(rows).toEqual([expect.objectContaining({ symbol: 'BANKNIFTY', segment: 'INDEX' })]);
   });
 });
 

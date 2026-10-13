@@ -5,8 +5,23 @@ import {
   UpsertInstrumentInput,
 } from '../repositories/market-data.repository';
 import { CandleAggregatorService } from './candle-aggregator.service';
-import { INDICES } from '@td/shared/constants';
-import { CORE_INDEX_INSTRUMENTS, INDEX_SEGMENTS } from './core-index-instruments';
+import { INDICES, SECTOR_INDICES } from '@td/shared/constants';
+import {
+  INDEX_SEGMENTS,
+  buildCoreIndexInstruments,
+  type IndexConstant,
+} from './core-index-instruments';
+/**
+ * Every index the app subscribes to, under its canonical symbol — see
+ * core-index-instruments.ts. INDICES first (so 99926009 is 'BANKNIFTY'), then
+ * MIDCPNIFTY (not in the shared INDICES; same token as the hub's
+ * INDEX_UNDERLYINGS in market-hub/underlying.ts), then the sector indices.
+ */
+export const CORE_INDEX_INSTRUMENTS = buildCoreIndexInstruments(
+  INDICES as Readonly<Record<string, IndexConstant>>,
+  { MIDCPNIFTY: { symbol: 'MIDCPNIFTY', token: '99926074', exchange: 'NSE' } },
+  SECTOR_INDICES as Readonly<Record<string, IndexConstant>>,
+);
 
 export interface InstrumentRecord {
   id: string;

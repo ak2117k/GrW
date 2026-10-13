@@ -3,6 +3,8 @@ import type { PrismaService } from '../../src/common/prisma/prisma.service';
 import { balances } from '../../src/modules/trade-core/execution/ledger-math';
 import { CoreCashLedgerRepository } from '../../src/modules/trade-core/execution/repositories/core-cash-ledger.repository';
 import { CoreCorpusWriter } from '../../src/modules/trade-core/journal/core-corpus.writer';
+import { BrokerCorpusCron } from '../../src/modules/trade-core/journal/broker-corpus.cron';
+import type { JobRunnerService } from '../../src/common/job-registry';
 
 const url = process.env.DATABASE_URL_TEST;
 if (!url) throw new Error('DATABASE_URL_TEST must point at a throwaway database with all migrations applied');
@@ -141,6 +143,33 @@ describe('ai_decision_records from the core (O9) against SQL', () => {
     const row = await db.aiDecisionRecord.findUnique({ where: { source_sourceId: { source: 'core', sourceId: intentId } } });
     expect(row?.decision).toEqual({ taken: true, reason: 'opened' });
     expect(row?.outcome).toEqual({ netPnl: 12.5, priceAfterClose: 503 });
+    await db.aiDecisionRecord.delete({ where: { id: row?.id as string } });
+  });
+});
+
+describe('broker trades into ai_decision_records (Task 13b) against SQL', () => {
+  it('one record per closed F&O position tracker, joined to its verdicts; a rerun writes nothing', async () => {
+    const u = await newUser();
+    const trk = `trk_${rid()}`;
+    await db.$executeRawUnsafe(
+      `INSERT INTO "trade_trackers" ("id", "userId", "symbol", "exchange", "token", "kind", "entryPrice", "qty", "entryTime", "exitPrice", "exitTime", "status", "holdingHigh", "holdingLow", "updatedAt")
+       VALUES ($1, $2, 'NIFTY14OCT2525000CE', 'NFO', '45000', 'POSITION', 100, 75, CURRENT_TIMESTAMP - interval '2 hours', 120, CURRENT_TIMESTAMP - interval '1 hour', 'CLOSED', 130, 90, CURRENT_TIMESTAMP)`,
+      trk, u,
+    );
+    await db.$executeRawUnsafe(
+      `INSERT INTO "sentinel_verdicts" ("id", "userId", "trackerId", "symbol", "verdict", "confidence", "thesisStatus", "recoveryAvailable", "reason", "evidence", "reviewInSec", "packet", "promptVersion", "triggeredBy", "netPnl")
+       VALUES ($1, $2, $3, 'NIFTY14OCT2525000CE', 'HOLD', 'medium', 'INTACT', false, 'r', '{}'::jsonb, 60, '{}'::jsonb, 'p1', '["heartbeat"]'::jsonb, 0)`,
+      `sv_${rid()}`, u, trk,
+    );
+    // createdAt defaults to now(), after the exit: move it inside the holding window.
+    await db.$executeRawUnsafe(`UPDATE "sentinel_verdicts" SET "createdAt" = CURRENT_TIMESTAMP - interval '90 minutes' WHERE "trackerId" = $1`, trk);
+    const jobs = { run: (_n: string, _o: unknown, fn: () => Promise<unknown>) => fn() };
+    const cron = new BrokerCorpusCron(db as unknown as PrismaService, jobs as unknown as JobRunnerService);
+    expect(await cron.sync(new Date())).toMatchObject({ written: 1 });
+    expect(await cron.sync(new Date())).toMatchObject({ written: 0, already: 1 });
+    const row = await db.aiDecisionRecord.findUnique({ where: { source_sourceId: { source: 'broker:tracker', sourceId: trk } } });
+    expect(row).toMatchObject({ kind: 'BROKER_TRADE', userId: u, featureSet: null });
+    expect((row?.decision as { verdictCount: number }).verdictCount).toBe(1);
     await db.aiDecisionRecord.delete({ where: { id: row?.id as string } });
   });
 });

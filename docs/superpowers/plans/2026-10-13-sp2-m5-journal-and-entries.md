@@ -8119,6 +8119,22 @@ logging ones in the reverted module.
 12. **O9 changed by the owner (2026-10-13):** corpus rows in every trading mode, and real broker F&O trades join the corpus
     (Task 13b). See "Owner rulings (2026-10-13)".
 
+### Stream B deviations (Tasks 4–8, 2026-10-13)
+
+- **O9 in the intake:** the plan's `if (this.config.mode === 'paper')` around the skip's corpus row is written as
+  `if (!this.dryRunSwitch())` (`mode === 'journal'`), so the only exclusion is J9's dry-run entries switch, never a
+  trading mode. Spec: "journal mode writes no corpus row for an ordinary skip either".
+- **Fail-closed additions (all tested):** `process()` returns `[]` when `CORE_ENTRIES_MODE=off` even if called
+  directly; `staleEntryFails` fails (skip) when the alert or live price is not a positive number (the plan's version
+  passed a zero alert price as "not stale"); a verdict quantity outside `1..requested` (not an integer, 0, or above the
+  request) is `RISK_REJECT`, never opened; a throw before the attempt's own guard (the duplicate check, the
+  `ALERT_RECEIVED` record) is caught per selection and logged, so `process()` never throws.
+- `matchEntry`'s MIN_SCORE detail finds the applying window by time (`minScoreWindow`) rather than by matching the
+  score value (two windows with the same score, or a window equal to base, named the wrong one).
+- Known edge, not changed: a hit re-processed after a first attempt that **skipped** (e.g. no fresh price) can open on the
+  retry; the journal keeps the first `skip:<intentId>` row and the corpus keeps the first-written (skipped) setup.
+  Review Focus 2 (one position, one `ALERT_RECEIVED`) still holds.
+
 ## Notes for later milestones (not in this plan)
 
 - **SP3 M6 guard rails on core positions (O12):** a sentinel review packet built from `core_positions` + their journal, and

@@ -34,6 +34,28 @@ function istMinutes(at: Date): number {
 }
 
 /**
+ * Whether `exchange` is on a trading day (its own holiday calendar) and `at`
+ * falls between its open less {@link RECONCILE_OPEN_LEAD_MIN} and its close plus
+ * {@link RECONCILE_CLOSE_GRACE_MIN} — the window in which a broker read of a
+ * position on it can learn anything. Clock + in-memory calendar only.
+ */
+export function exchangeInReconcileWindow(
+  session: Pick<SessionClock, 'tradingWindow'>,
+  exchange: string,
+  at: Date,
+): boolean {
+  const w = session.tradingWindow(exchange, at);
+  if (w === null) return false;
+  const minutes = istMinutes(at);
+  return minutes >= w.openMin - RECONCILE_OPEN_LEAD_MIN && minutes < w.closeMin + RECONCILE_CLOSE_GRACE_MIN;
+}
+
+/** Whether ANY venue a tracker can hold is in its reconcile window at `at`. */
+export function anyExchangeInReconcileWindow(session: Pick<SessionClock, 'tradingWindow'>, at: Date): boolean {
+  return RECONCILE_EXCHANGES.some((exchange) => exchangeInReconcileWindow(session, exchange, at));
+}
+
+/**
  * Drives the per-trade tracker (design §4.2 / §4.3).
  *
  * Two cooperating schedules, both gated to Indian market hours:
@@ -200,15 +222,7 @@ export class TradeTrackerPoller implements OnModuleDestroy {
    * outside the window.
    */
   private inReconcileWindow(at: Date): boolean {
-    const minutes = istMinutes(at);
-    return RECONCILE_EXCHANGES.some((exchange) => {
-      const w = this.session.tradingWindow(exchange, at);
-      return (
-        w !== null &&
-        minutes >= w.openMin - RECONCILE_OPEN_LEAD_MIN &&
-        minutes < w.closeMin + RECONCILE_CLOSE_GRACE_MIN
-      );
-    });
+    return anyExchangeInReconcileWindow(this.session, at);
   }
 
   /**

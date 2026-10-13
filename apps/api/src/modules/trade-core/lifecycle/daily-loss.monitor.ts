@@ -1,8 +1,9 @@
-import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { AUDIT_ACTIONS } from '../../../common/audit/audit-actions';
 import { AuditService } from '../../../common/audit/audit.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { istDate } from '../execution/ledger-math';
+import { CORE_JOURNAL, type CoreJournalPort } from '../journal/journal-ports';
 import { CORE_SQUARE_OFF, RISK_STATE_PROVIDER, type CoreSquareOffPort, type RiskStateProvider } from '../risk-wall/ports';
 import { decideDailyLoss } from '../risk-wall/risk-wall';
 import type { DailyLossDecision } from '../risk-wall/risk-wall.types';
@@ -25,6 +26,7 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
 export class DailyLossMonitor implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DailyLossMonitor.name);
   private readonly firedOn = new Map<string, string>();
+  private readonly latchedOn = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
 
@@ -34,6 +36,7 @@ export class DailyLossMonitor implements OnModuleInit, OnModuleDestroy {
     private readonly limits: CoreRiskLimitService,
     @Inject(CORE_SQUARE_OFF) private readonly squareOff: CoreSquareOffPort,
     private readonly audit: AuditService,
+    @Optional() @Inject(CORE_JOURNAL) private readonly journal?: CoreJournalPort,
   ) {}
 
   onModuleInit(): void {
@@ -64,7 +67,9 @@ export class DailyLossMonitor implements OnModuleInit, OnModuleDestroy {
 
   async checkUser(userId: string, now: Date): Promise<DailyLossDecision | null> {
     const day = istDate(now);
-    if (this.firedOn.get(userId) === day) return null;
+    const fired = this.firedOn.get(userId) === day;
+    // M5: a square-off that ran while the latch could not be written keeps checking until it is.
+    if (fired && (!this.journal || this.latchedOn.get(userId) === day)) return null;
     let d: DailyLossDecision;
     let openPnlKnown: boolean;
     try {
@@ -77,7 +82,17 @@ export class DailyLossMonitor implements OnModuleInit, OnModuleDestroy {
     }
     // Owner ruling 2026-10-12: with open P&L unknown (a blind position), a realised loss alone at
     // the limit is BREACHED (decideDailyLoss) and squares off here; under it, UNKNOWN does nothing.
-    if (d.status !== 'BREACHED' || !d.squareOffCore) return d;
+    if (d.status !== 'BREACHED') return d;
+    if (d.squareOffCore && !fired) await this.squareOffOnBreach(userId, day, d, openPnlKnown);
+    // SP2 M5 (J13, O13): any breach latches the IST day — entries stay blocked for the rest of the
+    // session even if P&L recovers. Includes the 2026-10-12 realised-only breach. Written AFTER the
+    // square-off and never throws: a slow or failing journal never delays or blocks an exit.
+    await this.latch(userId, day, d, now);
+    return d;
+  }
+
+  /** BLOCK_AND_SQUARE_OFF: CORE_SQUARE_OFF once per user per IST day per process. Never throws. */
+  private async squareOffOnBreach(userId: string, day: string, d: DailyLossDecision, openPnlKnown: boolean): Promise<void> {
     this.firedOn.set(userId, day);
     const reason = openPnlKnown
       ? `today's loss ₹${d.lossRupees} reached the ₹${d.limitRupees} daily limit`
@@ -88,7 +103,7 @@ export class DailyLossMonitor implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.firedOn.delete(userId);
       this.logger.error(`daily-loss square-off for ${userId} failed; retried on the next check: ${errorText(err)}`);
-      return d;
+      return;
     }
     this.logger.warn(`daily loss for ${userId}: ${detail}`);
     // The audit is separate from the square-off: an audit failure (even a synchronous throw)
@@ -98,6 +113,22 @@ export class DailyLossMonitor implements OnModuleInit, OnModuleDestroy {
     } catch (err) {
       this.logger.error(`daily-loss audit for ${userId} failed (the square-off ran): ${errorText(err)}`);
     }
-    return d;
+  }
+
+  /** Once per user per IST day per process; a failed write is retried on the next check. Never throws. */
+  private async latch(userId: string, day: string, d: DailyLossDecision, now: Date): Promise<void> {
+    if (!this.journal || this.latchedOn.get(userId) === day) return;
+    try {
+      await this.journal.recordNow({
+        type: 'DAILY_LOSS_LATCHED',
+        userId,
+        at: now,
+        payload: { day, source: 'DAILY_LOSS_MONITOR', lossRupees: d.lossRupees, limitRupees: d.limitRupees, action: d.action },
+        dedupeKey: `latch:${userId}:${day}`,
+      });
+      this.latchedOn.set(userId, day);
+    } catch (err) {
+      this.logger.error(`daily-loss latch for ${userId} not written; retried on the next check: ${errorText(err)}`);
+    }
   }
 }

@@ -110,3 +110,22 @@ describe('CoreRiskStateProvider (RISK_STATE_PROVIDER, M2 notes for M4)', () => {
     await expect(s.provider.liveState('user_A', NOW)).rejects.toThrow('db down');
   });
 });
+
+describe('CoreRiskStateProvider — dailyLossLatched from the journal (M5 J13)', () => {
+  const build = (reads?: unknown) => {
+    const s = setup();
+    return reads === undefined
+      ? new CoreRiskStateProvider(s.ledger, s.positions.repo, { mark: () => null })
+      : new CoreRiskStateProvider(s.ledger, s.positions.repo, { mark: () => null }, reads as never);
+  };
+
+  it("reports today's latch; without the reads binding it is false (M4 behaviour); a failing read throws (the wall rejects)", async () => {
+    const latched = jest.fn().mockResolvedValue(true);
+    const reconBlock = jest.fn().mockResolvedValue({ all: false, strategyIds: [] });
+    expect((await build({ latched, reconBlock }).liveState('user_A', NOW)).dailyLossLatched).toBe(true);
+    expect(latched).toHaveBeenCalledWith('user_A', '2026-10-12');
+    expect((await build().liveState('user_A', NOW)).dailyLossLatched).toBe(false);
+    const failing = { latched: jest.fn().mockRejectedValue(new Error('journal down')), reconBlock };
+    await expect(build(failing).liveState('user_A', NOW)).rejects.toThrow('journal down');
+  });
+});

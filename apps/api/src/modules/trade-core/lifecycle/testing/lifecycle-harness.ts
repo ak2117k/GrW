@@ -57,6 +57,8 @@ export interface HarnessOptions {
   subscribe?: boolean;
   /** Wrap the repository the service uses (e.g. to emulate tenant scoping); the store's rows stay shared. */
   repo?: (memory: CorePositionRepository) => CorePositionRepository;
+  /** Also hand every lifecycle event to this sink (M5: the journal sink), after the memory sink. */
+  teeSink?: LifecycleEventSink;
 }
 
 /**
@@ -87,7 +89,15 @@ export function lifecycleHarness(opts: HarnessOptions = {}) {
   const killReader = { isOn: async (u: string) => killOn.has(u) } as unknown as CoreKillSwitchReader;
   const sink = new MemoryEventSink();
   const serviceRepo = opts.repo ? opts.repo(positions.repo) : positions.repo;
-  const make = () => new CoreLifecycleService(serviceRepo, adapter, strategies, defaults, limits, killReader, moduleRef, clock, sink);
+  const tee: LifecycleEventSink = opts.teeSink
+    ? {
+        record: async (e) => {
+          await sink.record(e);
+          await opts.teeSink?.record(e);
+        },
+      }
+    : sink;
+  const make = () => new CoreLifecycleService(serviceRepo, adapter, strategies, defaults, limits, killReader, moduleRef, clock, tee);
   let lifecycle = make();
   if (opts.subscribe !== false) lifecycle.subscribe();
 

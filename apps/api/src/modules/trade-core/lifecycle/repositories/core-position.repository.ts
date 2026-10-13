@@ -159,6 +159,38 @@ export class CorePositionRepository {
     return rows.map(toCorePosition);
   }
 
+  /** M5 cooldown (J5): when this strategy last opened (first fill) a position on the token. */
+  async lastOpenedAt(userId: string, strategyId: string, token: string): Promise<Date | null> {
+    const r = await this.prisma.corePosition.findFirst({
+      where: { userId, strategyId, token, openedAt: { not: null } },
+      orderBy: { openedAt: 'desc' },
+      select: { openedAt: true },
+    });
+    return r?.openedAt ?? null;
+  }
+
+  /** M5 last-loss filter (J5): this strategy's CLOSED positions on the token closed since `since`, newest close first. */
+  async listClosedSince(userId: string, strategyId: string, token: string, since: Date): Promise<CorePosition[]> {
+    const rows = await this.prisma.corePosition.findMany({
+      where: { userId, strategyId, token, status: 'CLOSED', closedAt: { gte: since } },
+      orderBy: [{ closedAt: 'desc' }, { id: 'desc' }],
+    });
+    return rows.map(toCorePosition);
+  }
+
+  /** M5 reconciliation system scan: users with an active position, or one created or closed since `since`. */
+  async listUserIdsSince(since: Date): Promise<string[]> {
+    const rows = await this.withoutTenant(() =>
+      this.prisma.corePosition.findMany({
+        where: { OR: [{ status: { in: [...ACTIVE_STATUSES] } }, { createdAt: { gte: since } }, { closedAt: { gte: since } }] },
+        select: { userId: true },
+        distinct: ['userId'],
+        orderBy: { userId: 'asc' },
+      }),
+    );
+    return rows.map((r) => r.userId);
+  }
+
   /** Applies `patch` only at `expectVersion`; null when another writer got there first. */
   async update(userId: string, id: string, expectVersion: number, patch: PositionPatch): Promise<CorePosition | null> {
     const { count } = await this.prisma.corePosition.updateMany({

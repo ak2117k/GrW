@@ -1527,6 +1527,8 @@ model User {
   coreKillSwitches       CoreKillSwitch[]
   coreOrders             CoreOrder[]
   corePositions          CorePosition[]
+  coreJournal            CoreJournal[]
+  coreTradeSummaries     CoreTradeSummary[]
   coreFills              CoreFill[]
   coreCashLedger         CoreCashLedger[]
   @@index([status])
@@ -2498,9 +2500,79 @@ model CorePosition {
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
   orders            CoreOrder[]
+  summary           CoreTradeSummary?
 
   @@index([userId, status])
   @@index([status])
   @@index([userId, vehicle, token])
   @@map("core_positions")
+}
+
+// ─── SP2 M5: the journal and closed-trade summaries ─────────────────────────
+// docs/superpowers/specs/2026-10-09-sp2-core-trade-lifecycle-design.md §8. Both tables are
+// append-only (a trigger refuses UPDATE; DELETE happens only through the cascades).
+
+/// One journal row (spec §8.1). A set dedupeKey makes an idempotent writer's second write a no-op.
+model CoreJournal {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              String
+  positionId        String?
+  strategyId        String?
+  strategyVersionId String?
+  intentId          String?
+  symbol            String?
+  payload           Json
+  priceUsed         Decimal? @db.Decimal(14, 4)
+  priceAgeMs        Int?
+  dedupeKey         String?  @unique
+  istDay            DateTime @db.Date
+  createdAt         DateTime @default(now())
+
+  @@index([userId, istDay, type])
+  @@index([userId, positionId])
+  @@index([intentId])
+  @@index([type, istDay])
+  @@map("core_journal")
+}
+
+/// One closed core position's result (spec §8.2), net of charges and MTF interest.
+model CoreTradeSummary {
+  id                String       @id @default(cuid())
+  userId            String
+  user              User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  positionId        String       @unique
+  position          CorePosition @relation(fields: [positionId], references: [id], onDelete: Cascade)
+  intentId          String       @unique
+  strategyId        String
+  strategyVersionId String
+  vehicle           String
+  exchange          String
+  token             String
+  symbol            String
+  side              String
+  qty               Int
+  entryAvgPrice     Decimal      @db.Decimal(14, 4)
+  exitAvgPrice      Decimal      @db.Decimal(14, 4)
+  openedAt          DateTime
+  closedAt          DateTime
+  grossPnl          Decimal      @db.Decimal(14, 2)
+  charges           Decimal      @db.Decimal(14, 2)
+  mtfInterest       Decimal      @db.Decimal(14, 2)
+  netPnl            Decimal      @db.Decimal(14, 2)
+  initialRisk       Decimal?     @db.Decimal(14, 2)
+  rMultiple         Decimal?     @db.Decimal(12, 4)
+  mfePrice          Decimal?     @db.Decimal(14, 4)
+  maePrice          Decimal?     @db.Decimal(14, 4)
+  mfeRupees         Decimal?     @db.Decimal(14, 2)
+  maeRupees         Decimal?     @db.Decimal(14, 2)
+  holdMinutes       Int
+  exitReason        String
+  istDay            DateTime     @db.Date
+  createdAt         DateTime     @default(now())
+
+  @@index([userId, istDay])
+  @@index([userId, strategyId, token, closedAt])
+  @@map("core_trade_summaries")
 }

@@ -1,8 +1,9 @@
-import { ConflictException, Inject, Injectable, NotFoundException, UnprocessableEntityException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, NotFoundException, Optional, UnprocessableEntityException } from '@nestjs/common';
 import type { CoreRiskLimit } from '@prisma/client';
 import { AuditService } from '../../../../common/audit/audit.service';
 import { AUDIT_ACTIONS } from '../../../../common/audit/audit-actions';
 import type { SessionClock } from '../../../market-hub/session-clock';
+import { CORE_JOURNAL, type CoreJournalPort } from '../../journal/journal-ports';
 import { resolveAppendOnly } from '../limits/append-only';
 import {
   compareLimit,
@@ -103,7 +104,10 @@ export class CoreRiskLimitService {
     private readonly repo: CoreRiskLimitRepository,
     private readonly audit: AuditService,
     @Inject(CORE_SESSION_CLOCK) private readonly clock: SessionClock,
+    @Optional() @Inject(CORE_JOURNAL) private readonly journal?: CoreJournalPort,
   ) {}
+
+  private readonly logger = new Logger(CoreRiskLimitService.name);
 
   async ensureSeeded(userId: string, now: Date = new Date()): Promise<number> {
     const present = await this.repo.pairsForUser(userId);
@@ -187,6 +191,18 @@ export class CoreRiskLimitService {
     } catch (err) {
       if (err instanceof ConcurrentRiskChangeError) throw new ConflictException(`${key} (${scope}) changed at the same time; reload and retry`);
       throw err;
+    }
+    // SP2 M5 (D12): the journal row, best effort — the limit row is already persisted, so a journal
+    // failure is logged and never fails the change.
+    try {
+      this.journal?.record({
+        type: 'LIMIT_CHANGED',
+        userId,
+        at: now,
+        payload: { key, scope, from: current, to: parsed.value, direction, effectiveFrom: effectiveFrom.toISOString(), reason, rowId: row.id },
+      });
+    } catch (err) {
+      this.logger.error(`LIMIT_CHANGED journal row for core_risk_limit:${row.id} not written: ${err instanceof Error ? err.message : String(err)}`);
     }
     await this.audit.append({
       action: AUDIT_ACTIONS.risk.CORE_RISK_LIMIT_CHANGED,

@@ -165,7 +165,7 @@ describe('TradeCoreModule', () => {
     expect(mod.get(JOURNAL_RISK_READS)).toBe(mod.get(JournalRiskReads));
     expect(mod.get(CORE_RECON_DESK)).toBe(mod.get(CoreReconciler));
     expect(mod.get(CORE_INTAKE_STATUS)).toBe(mod.get(CoreEntryIntake));
-    expect(mod.get(CORE_ENTRY_CONFIG)).toEqual({ mode: 'off', userIds: new Set() }); // the test env sets neither variable
+    expect(mod.get(CORE_ENTRY_CONFIG)).toEqual({ mode: 'off', userIds: new Set(), maxAlertAgeMs: 180_000 }); // the test env sets neither variable
     for (const cls of [OrderJournaler, SkipFollowupCron, BrokerCorpusCron, SiloComparisonReader, EntryMarket, CoreCandles, CoreJournalRepository, CoreTradeSummaryRepository]) {
       expect(mod.get(cls)).toBeInstanceOf(cls);
     }

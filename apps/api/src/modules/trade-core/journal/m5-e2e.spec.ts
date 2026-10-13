@@ -112,7 +112,7 @@ describe('SP2 M5 end to end (spec §1 done-when, §10)', () => {
 describe('SP2 M5 safety (Stream G checks beyond the plan)', () => {
   it('defaults (CORE_ENTRIES_MODE unset, empty CORE_ENTRY_USER_IDS): the intake never registers, a Chartink hit opens nothing and places no order', async () => {
     const config = readEntryConfig({});
-    expect(config).toEqual({ mode: 'off', userIds: new Set() });
+    expect(config).toEqual({ mode: 'off', userIds: new Set(), maxAlertAgeMs: 180_000 });
     const m = m5Harness({ mode: config.mode, users: [...config.userIds] });
     setCoreAlertIntake(null);
     m.intake.onModuleInit();

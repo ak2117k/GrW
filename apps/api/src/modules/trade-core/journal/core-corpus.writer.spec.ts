@@ -35,3 +35,18 @@ describe('CoreCorpusWriter (O9, J20)', () => {
     expect(values).toEqual([JSON.stringify({ priceAfter30m: 501.2 }), AT, 'ci_1']);
   });
 });
+
+describe('CoreCorpusWriter — skip then open (review fix 2: corpus label)', () => {
+  it('a taken setup replaces an earlier skipped one for the same intent (decision.taken becomes true); a skip never overwrites', async () => {
+    const upsert = jest.fn().mockResolvedValue({});
+    const w = new CoreCorpusWriter({ aiDecisionRecord: { upsert } } as unknown as PrismaService);
+    const opened: CorpusSetup = { ...setup, decidedAt: new Date(AT.getTime() + 60_000), evidence: { qty: 400 }, decision: { taken: true, reason: 'opened pos_1 for 400' } };
+    await w.entrySetup(opened);
+    expect(upsert.mock.calls[0][0].update).toEqual({
+      decidedAt: opened.decidedAt, setupGroupKey: opened.setupGroupKey, evidence: { qty: 400 }, ruleScore: 70,
+      decision: { taken: true, reason: 'opened pos_1 for 400' },
+    });
+    await w.entrySetup(setup);
+    expect(upsert.mock.calls[1][0].update).toEqual({});
+  });
+});

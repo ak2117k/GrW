@@ -6,7 +6,7 @@ import type { SessionClock } from '../../../market-hub/session-clock';
 import { PaperOrderSquareOff } from '../../execution/paper-order-square-off';
 import { fakeHubSource } from '../../execution/testing/fake-hub';
 import { CoreEntryIntake } from '../../intake/core-entry-intake.service';
-import type { EntryMode } from '../../intake/entry-config';
+import { DEFAULT_MAX_ALERT_AGE_MS, type EntryMode } from '../../intake/entry-config';
 import { EntryMarket } from '../../intake/entry-market';
 import { adaptiveSeedBlocks, hit } from '../../intake/testing/intake-fixtures';
 import type { CoreLifecycleService, CoreOpenRequest } from '../../lifecycle/core-lifecycle.service';
@@ -85,7 +85,7 @@ export function m5Harness(o: M5Options = {}) {
   const market = new EntryMarket(moduleRef, new CoreCandles(moduleRef));
   Object.assign(market, { sleep: async (ms: number) => { h.advance(ms); } });
   const selections = { listEnabledPaper: async () => o.selections ?? [SEL_UNGATED()] } as unknown as CoreStrategySelectionRepository;
-  const intake = new CoreEntryIntake({ mode: o.mode ?? 'paper', userIds: new Set(o.users ?? ['user_A']) }, selections, wall, lifecycle, h.defaults, market, summaries, journal, corpus);
+  const intake = new CoreEntryIntake({ mode: o.mode ?? 'paper', userIds: new Set(o.users ?? ['user_A']), maxAlertAgeMs: DEFAULT_MAX_ALERT_AGE_MS }, selections, wall, lifecycle, h.defaults, market, summaries, journal, corpus);
   const orders = new OrderJournaler(h.adapter, h.ledger, journal);
   orders.onModuleInit();
   const jobs = { run: jest.fn((_n: string, _o: unknown, fn: () => Promise<unknown>) => fn()) } as unknown as JobRunnerService;
@@ -106,7 +106,7 @@ export function m5Harness(o: M5Options = {}) {
 
   /** A Chartink hit now, with a fresh hub price for its instrument first (the intake reads the hub). */
   function hitAt(ltp: number, over: Parameters<typeof hit>[0] = {}) {
-    const x = hit({ receivedAt: new Date(), hitPrice: ltp, ...over });
+    const x = hit({ receivedAt: new Date(), alertAt: new Date(), hitPrice: ltp, ...over });
     h.hub.setFresh({ ref: { exchange: 'NSE', token: x.token, symbol: x.tradingSymbol }, ltp, at: Date.now(), source: 'ws' });
     return x;
   }

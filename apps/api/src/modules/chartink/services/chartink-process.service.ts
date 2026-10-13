@@ -86,10 +86,14 @@ export class ChartinkProcessService {
     // must not block processing.
     let scanName: string | undefined;
     let scannerCategory: string | undefined;
+    // Review fix 2: the alert's own creation time travels with every hit to the core, so a hit
+    // processed late (backlog, a Bull re-run after a restart) is judged by its real age.
+    let alertAt: Date | null = null;
     try {
       const alert = await this.repo.getAlertWithSetups(alertId);
       scanName = alert?.scanner?.scanName ?? undefined;
       scannerCategory = (alert?.scanner as any)?.category ?? undefined;
+      alertAt = alert?.receivedAt ?? null;
     } catch (err) {
       this.logger.warn(
         `could not resolve scanner name for alert ${alertId}: ${err instanceof Error ? err.message : err}`,
@@ -97,7 +101,7 @@ export class ChartinkProcessService {
     }
     for (let i = 0; i < hits.length; i++) {
       try {
-        await this.processOne(alertId, hits[i], scanName, scannerCategory);
+        await this.processOne(alertId, hits[i], scanName, scannerCategory, alertAt);
       } catch (err) {
         this.logger.warn(
           `processOne unexpected throw for ${hits[i].symbol}: ${err instanceof Error ? err.message : err}`,
@@ -132,7 +136,7 @@ export class ChartinkProcessService {
     else this.logger.log(line);
   }
 
-  async processOne(alertId: string, hit: Hit, scanName?: string, scannerCategory?: string): Promise<void> {
+  async processOne(alertId: string, hit: Hit, scanName?: string, scannerCategory?: string, alertAt: Date | null = null): Promise<void> {
     // === 0. ENTRY-WINDOW GATE (15:00 IST cutoff) ===
     // No new WATCHING entry may be opened after 15:00 IST (or before 09:15,
     // or on a weekend). Reject BEFORE any symbol resolution / scoring / broker
@@ -514,6 +518,7 @@ export class ChartinkProcessService {
       side,
       score: scoringResult.score,
       receivedAt: new Date(),
+      alertAt,
     });
   }
 

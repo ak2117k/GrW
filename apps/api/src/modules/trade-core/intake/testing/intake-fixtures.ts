@@ -18,6 +18,7 @@ export function hit(over: Partial<ChartinkHit> = {}): ChartinkHit {
     side: 'BUY',
     score: 70,
     receivedAt: ist('2026-10-13', '10:30'),
+    alertAt: ist('2026-10-13', '10:30'),
     ...over,
   };
 }

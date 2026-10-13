@@ -90,6 +90,7 @@ const SKIP_LABELS: Record<string, string> = {
   NO_PRICE_SOURCE: 'No price source for this user',
   NO_FRESH_PRICE: 'No fresh price in time',
   STALE_ENTRY: 'Price already ran past the alert',
+  STALE_ALERT: 'Alert too old to act on',
   GATE: 'Decision gate said no',
   GATE_UNKNOWN: 'Unknown gate',
   PAPER_SETTINGS_MISSING: 'Paper settings missing',

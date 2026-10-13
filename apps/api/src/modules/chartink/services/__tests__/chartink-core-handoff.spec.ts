@@ -87,7 +87,7 @@ describe('ChartinkProcessService → core hand-off (SP2 M5)', () => {
     expect(accept).toHaveBeenCalledTimes(1);
     expect(accept).toHaveBeenCalledWith({
       alertId: 'alert_1', symbol: 'RELIANCE', tradingSymbol: 'RELIANCE-EQ', token: '2885', exchange: 'NSE', hitPrice: 100,
-      scanName: 'Hull MA cross', side: 'BUY', score: 70, receivedAt: expect.any(Date),
+      scanName: 'Hull MA cross', side: 'BUY', score: 70, receivedAt: expect.any(Date), alertAt: null,
     });
     expect(mocks.watch.createFromAlert.mock.invocationCallOrder[0]).toBeLessThan(accept.mock.invocationCallOrder[0]);
     expect(mocks.ungated.createFromAlert.mock.invocationCallOrder[0]).toBeLessThan(accept.mock.invocationCallOrder[0]);
@@ -108,5 +108,26 @@ describe('ChartinkProcessService → core hand-off (SP2 M5)', () => {
     setCoreAlertIntake({ accept });
     await service.processOne('alert_1', { symbol: 'RELIANCE', hitPrice: 100 }, 'Hull MA cross', 'INTRADAY');
     expect(accept).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChartinkProcessService → core hand-off: alert time (review fix 2)', () => {
+  it("processAlert hands the core the stored alert's creation time, not the hand-off time", async () => {
+    const { service, mocks } = await build();
+    const created = new Date('2026-05-19T04:25:00Z');
+    (mocks.repo as Record<string, unknown>).getAlertWithSetups = jest.fn().mockResolvedValue({ receivedAt: created, scanner: { scanName: 'Hull MA cross', category: 'INTRADAY' }, setups: [] });
+    const accept = jest.fn();
+    setCoreAlertIntake({ accept });
+    await service.processAlert('alert_1', [{ symbol: 'RELIANCE', hitPrice: 100 }]);
+    expect(accept).toHaveBeenCalledWith(expect.objectContaining({ alertId: 'alert_1', alertAt: created }));
+  });
+
+  it('when the alert row cannot be read the alert time is unknown (null), so the core fails closed', async () => {
+    const { service, mocks } = await build();
+    (mocks.repo as Record<string, unknown>).getAlertWithSetups = jest.fn().mockRejectedValue(new Error('db down'));
+    const accept = jest.fn();
+    setCoreAlertIntake({ accept });
+    await service.processAlert('alert_1', [{ symbol: 'RELIANCE', hitPrice: 100 }]);
+    expect(accept).toHaveBeenCalledWith(expect.objectContaining({ alertAt: null }));
   });
 });

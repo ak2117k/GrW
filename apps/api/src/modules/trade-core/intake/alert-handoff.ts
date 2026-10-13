@@ -18,7 +18,14 @@ export interface ChartinkHit {
   side: 'BUY' | 'SELL';
   /** The silo pipeline's 0–100 Chartink score. */
   score: number;
+  /** When the core was handed the hit (not the alert time). */
   receivedAt: Date;
+  /**
+   * When the Chartink alert itself was stored (ChartinkAlert.receivedAt), so a hit handed off late, or
+   * re-run by Bull after a restart, can be judged by its real age. null when it could not be read
+   * (the intake then fails closed).
+   */
+  alertAt: Date | null;
 }
 
 export interface CoreAlertIntake {

@@ -6,7 +6,8 @@ import type { CorpusSetup } from './journal.types';
 
 /**
  * O9 / J20: the core's rows in SP3's provider-neutral decision corpus (SP3 spec §5.1). One ENTRY_SETUP
- * per intent (taken or skipped), first write wins; outcomes are merged key by key so the close (Task 11)
+ * per intent (taken or skipped), first write wins, except that a taken setup replaces a skipped one (an
+ * intent that skipped and opened when the alert came round again is labelled taken); outcomes are merged key by key so the close (Task 11)
  * and the price follow-ups (Task 13) never overwrite each other. SP3's DecisionPipeline will write
  * the same (source, sourceId) for intents it produces; the upsert keeps whichever came first.
  */
@@ -34,7 +35,16 @@ export class CoreCorpusWriter implements CoreCorpusPort {
         ruleScore: s.ruleScore,
         decision: s.decision as unknown as Prisma.InputJsonValue,
       },
-      update: {},
+      // A skip never overwrites; a taken setup upgrades an earlier skip of the same intent.
+      update: s.decision.taken
+        ? {
+            decidedAt: s.decidedAt,
+            setupGroupKey: s.setupGroupKey,
+            evidence: s.evidence as Prisma.InputJsonValue,
+            ruleScore: s.ruleScore,
+            decision: s.decision as unknown as Prisma.InputJsonValue,
+          }
+        : {},
     });
   }
 

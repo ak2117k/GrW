@@ -37,6 +37,7 @@ interface SetupOptions {
   verdict?: RiskVerdict;
   history?: Partial<CoreTradeHistory>;
   open?: jest.Mock;
+  maxAlertAgeMs?: number;
 }
 
 function setup(o: SetupOptions = {}) {
@@ -69,7 +70,7 @@ function setup(o: SetupOptions = {}) {
   const journal = new FakeJournal();
   const corpus = { entrySetup: jest.fn().mockResolvedValue(undefined), outcome: jest.fn().mockResolvedValue(undefined) };
   const intake = new CoreEntryIntake(
-    { mode: o.mode ?? 'paper', userIds: new Set(o.users ?? ['user_A']) },
+    { mode: o.mode ?? 'paper', userIds: new Set(o.users ?? ['user_A']), maxAlertAgeMs: o.maxAlertAgeMs ?? 180_000 },
     selections as unknown as CoreStrategySelectionRepository,
     wall as unknown as RiskWallService,
     lifecycle as unknown as CoreLifecycleService,
@@ -280,5 +281,50 @@ describe('CoreEntryIntake — idempotence and backpressure (Review Focus 1, 2)',
     s.intake.accept(hit({ alertId: 'a2', token: '1594', tradingSymbol: 'INFY-EQ', symbol: 'INFY' }));
     await s.intake.idle();
     expect(s.open.mock.calls.map((c) => c[0].intent.symbol)).toEqual(['RELIANCE-EQ', 'INFY-EQ']);
+  });
+});
+
+describe('CoreEntryIntake — alert age (review fix 2: stale / re-processed alerts never open)', () => {
+  const at = (msBeforeNow: number) => new Date(NOW.getTime() - msBeforeNow);
+
+  it('an alert older than the max age (default 180 s) is STALE_ALERT: journaled, no price read, no order', async () => {
+    const s = setup();
+    const [out] = await s.intake.process(hit({ alertAt: at(180_001) }), NOW);
+    expect(out).toMatchObject({ kind: 'SKIPPED', reason: 'STALE_ALERT' });
+    expect(s.open).not.toHaveBeenCalled();
+    expect(s.wall.check).not.toHaveBeenCalled();
+    expect(s.market.freshPrice).not.toHaveBeenCalled();
+    expect(s.journal.types()).toEqual(['ALERT_RECEIVED', 'INTENT_SKIPPED']);
+    expect(s.journal.entries[1].payload).toMatchObject({ reason: 'STALE_ALERT' });
+  });
+
+  it('an alert whose creation time is unknown fails closed (STALE_ALERT)', async () => {
+    const s = setup();
+    const [out] = await s.intake.process(hit({ alertAt: null }), NOW);
+    expect(out).toMatchObject({ kind: 'SKIPPED', reason: 'STALE_ALERT' });
+    expect(s.open).not.toHaveBeenCalled();
+  });
+
+  it('a fresh alert (inside the max age) proceeds and opens', async () => {
+    const s = setup();
+    const [out] = await s.intake.process(hit({ alertAt: at(179_000) }), NOW);
+    expect(out).toMatchObject({ kind: 'OPENED' });
+  });
+
+  it('the max age is configurable', async () => {
+    const s = setup({ maxAlertAgeMs: 60_000 });
+    const [out] = await s.intake.process(hit({ alertAt: at(61_000) }), NOW);
+    expect(out).toMatchObject({ kind: 'SKIPPED', reason: 'STALE_ALERT' });
+  });
+
+  it('an alert that ages past the max while it is being processed does not open (checked again before the order)', async () => {
+    const s = setup();
+    s.defaults.settings.mockImplementationOnce(async () => {
+      jest.setSystemTime(NOW.getTime() + 120_000); // gates / candles took two minutes
+      return { ok: true, settings: paperSettings() };
+    });
+    const [out] = await s.intake.process(hit({ alertAt: at(90_000) }), NOW);
+    expect(out).toMatchObject({ kind: 'SKIPPED', reason: 'STALE_ALERT' });
+    expect(s.open).not.toHaveBeenCalled();
   });
 });

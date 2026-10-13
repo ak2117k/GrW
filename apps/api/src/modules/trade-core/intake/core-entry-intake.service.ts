@@ -40,7 +40,7 @@ const errorText = (err: unknown): string => (err instanceof Error ? err.message 
 /**
  * Spec §3 entry source (rulings J2–J9, J24): Chartink hits handed off by ChartinkProcessService are
  * queued and processed one at a time. For each enabled PAPER selection of an allow-listed user whose
- * entry block matches: filters (cheap first) → hub price → stale entry → gates → ATR → sizing →
+ * entry block matches: alert age → filters (cheap first) → hub price → stale entry → gates → ATR → sizing →
  * RiskWallService.check → (paper) CoreLifecycleService.openPosition. Every skip is journaled with its
  * reason; nothing here throws back to Chartink, and nothing here touches an exit.
  */
@@ -145,6 +145,8 @@ export class CoreEntryIntake implements CoreAlertIntake, OnModuleInit, OnModuleD
       dedupeKey: `alert:${intentId}`,
     });
     if (m.kind === 'SKIP') return this.skip(a, m.reason, m.detail);
+    const stale = this.staleAlert(hit, now);
+    if (stale) return this.skip(a, 'STALE_ALERT', stale);
 
     const ref: InstrumentRef = { exchange: hit.exchange, token: hit.token, symbol: hit.tradingSymbol };
     const owner = intakeOwner(intentId);
@@ -213,6 +215,9 @@ export class CoreEntryIntake implements CoreAlertIntake, OnModuleInit, OnModuleD
         capitalPerUnit,
         mtfLeverage: vehicle === 'MTF' && capitalPerUnit > 0 ? round2(refPrice / capitalPerUnit) : null,
       };
+      // The alert may have aged past the max while prices, gates and candles were read.
+      const late = this.staleAlert(hit, new Date());
+      if (late) return await this.skip(a, 'STALE_ALERT', late);
       const verdict = await this.wall.check(intent, new Date());
       a.evidence.verdict = { verdict: verdict.verdict, qty: verdict.qty, reasons: verdict.reasons.map((r) => r.code) };
       if (verdict.verdict === 'REJECT') return await this.skip(a, 'RISK_REJECT', verdict.reasons.map((r) => `${r.code}: ${r.message}`).join('; '));
@@ -239,6 +244,17 @@ export class CoreEntryIntake implements CoreAlertIntake, OnModuleInit, OnModuleD
     } finally {
       if (watched) this.market.release(sel.userId, ref, owner);
     }
+  }
+
+  /**
+   * Review fix 2: an alert older than maxAlertAgeMs since it was stored never opens (a late hand-off,
+   * a Bull re-run after a restart, a hit that skipped and comes round again). Unknown age fails closed.
+   */
+  private staleAlert(hit: ChartinkHit, now: Date): string | null {
+    if (!hit.alertAt) return 'the alert time is unknown';
+    const ageMs = now.getTime() - hit.alertAt.getTime();
+    if (ageMs <= this.config.maxAlertAgeMs) return null;
+    return `the alert is ${Math.round(ageMs / 1000)} s old (max ${Math.round(this.config.maxAlertAgeMs / 1000)} s)`;
   }
 
   private skipEntry(a: Attempt, reason: SkipReason, detail: string, extra: Record<string, unknown> = {}) {

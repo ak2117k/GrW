@@ -20,12 +20,29 @@ in before the task that owns it.
 | O6 | The Adaptive-Stop decision gate cannot evaluate (too few 15m candles) | **Honour the version's `failOpen` param** (the seed says `true`: silo parity, M1 note) and journal `skipped: true` in the gate outcome | `intake/gate-evaluators.ts` |
 | O7 | No usable ATR (hub candles off or too few bars) for a `stop.atr` version | **Stop at `stop.minPct`** (`resolveStopPct`'s floor, the silo's rule), journaled `atrSource: 'none'`. Alternative: skip the entry | `intake/core-entry-intake.service.ts` |
 | O8 | `core_strategy_selections.capitalAllocation` | **Not enforced in M5** (journaled in `ALERT_RECEIVED`); the Risk Wall's `maxCapitalDeployed` per vehicle governs | intake |
-| O9 | SP3 corpus: does M5 write `ai_decision_records`? | **Yes**, in `paper` mode: one `ENTRY_SETUP` row per core setup that matched a strategy's entry (taken or skipped), `source='core'`, `sourceId=intentId`; `outcome` filled at close (summary) and by the skipped-intent price follow-ups | `journal/core-corpus.writer.ts` |
+| O9 | SP3 corpus: does M5 write `ai_decision_records`? | **Owner changed 2026-10-13 (see Owner rulings below): yes, in every trading mode** — paper now, live automatically once live core trading exists; not "paper only". One `ENTRY_SETUP` row per core setup that matched a strategy's entry (taken or skipped), `source='core'`, `sourceId=intentId`; `outcome` filled at close (summary) and by the skipped-intent price follow-ups. Plus real broker F&O trades (Task 13b) | `journal/core-corpus.writer.ts`, `journal/broker-corpus.cron.ts` |
 | O10 | Reconciliation block scope and threshold | A finding tied to a position blocks **that strategy's** entries; a user-wide finding blocks **all** the user's core entries; both until the owner acknowledges (POST with a reason). "Stuck" = older than **2 × `noPriceRejectMs`** (no new setting) | `journal/recon-checks.ts`, `journal/core-reconciler.service.ts` |
 | O11 | Alerts for `RECON_MISMATCH`, blind positions, the daily-loss latch | No owner push channel exists yet (same as the sentinel auto-exit spec §8): **journal row + `logger.error` + `GET /api/trade-core/journal/status`**, shown on the Core Journal page. Telegram later | controller + page |
 | O12 | May the sentinel / AI act on **core** paper positions in M5? | **No.** The sentinel reviews broker `trade_trackers` and its executor acts on broker positions only. The bridge (sentinel verdict → `CoreLifecycleService.requestExit(…, 'GUARD_RAIL', …)` / `proposeStop`) is SP3 M6; the seam already exists | — (note for SP3 M6) |
 | O13 | Daily-loss latch semantics (spec §5.3 "blocked for the rest of the session") | Latched the first time today's decision is `BREACHED` (any `dailyLossAction`, including the 2026-10-12 realised-only breach) or the wall rejects with `DAILY_LOSS`; lasts the IST day; there is no un-latch | `daily-loss.monitor.ts`, `journal-sinks.ts`, `journal-risk-reads.ts` |
 | O14 | Skipped-intent price follow-ups (spec §8.1) | **16:10 IST Mon–Fri**, at most **300 distinct instruments a day** (a load bound, not a risk value) | `journal/skip-followup.cron.ts` |
+
+### Owner rulings (2026-10-13)
+
+- **O1–O8, O10–O14: the defaults above are approved.**
+- **O9 changed.** SP3 corpus (`ai_decision_records`) rows for core trades are written in **every** trading mode: paper
+  now, and live automatically when live core trading exists — the corpus write must never be gated on the execution
+  mode being `paper`. Consequences for the tasks: Task 7 (intake) and Task 12 (`CoreCorpusWriter`) carry no
+  `mode === 'paper'` / `!live` condition around `entrySetup`/`outcome`; Task 11's close and Task 13's follow-ups write
+  outcomes for every core position and skip they see, whatever adapter traded it. Paper and live rows must stay
+  distinguishable for SP3: when a live adapter exists, the writer records the execution mode in `decision.mode`
+  (`'paper' | 'live'`) — an additive JSON key, no schema change. Tasks 1–3 encode no mode (the `CorpusSetup` type and
+  the `CoreCorpusPort` have no mode parameter, so nothing in Stream A changed). J9's "no corpus row in `journal` mode"
+  is about the **dry-run** entries switch (`CORE_ENTRIES_MODE=journal`, no order at all), not a trading mode; it stands
+  unless the owner says dry-run setups should be in the corpus too (flagged to the controller).
+- **New owner request: real broker trades into the corpus** — closed `trade_trackers` (kind `POSITION`, F&O) with their
+  outcome joined to their `sentinel_verdicts`, written idempotently as `ai_decision_records` (`source 'broker:tracker'`,
+  `sourceId` = tracker id). Specified as **Task 13b** in Stream D; built by Stream D, wired by Task 19.
 
 ## Preconditions (the controller checks these before dispatching)
 
@@ -100,7 +117,7 @@ Web: `cd apps/web && npx vitest run <path>`.
   `FOLLOWUP_MAX_INSTRUMENTS = 300`.
 - **`@Cron` must set `timeZone: 'Asia/Kolkata'`** (the `common/schedule/cron-timezone.spec.ts` ratchet stays green and
   untouched). M5 adds exactly two: `core-recon-nightly` at `0 45 15 * * 1-5` and `core-skip-followup` at
-  `0 10 16 * * 1-5`, both through `JobRunnerService` (leased, recorded). The 5-minute reconciliation is a
+  `0 10 16 * * 1-5` (Task 13b, owner request 2026-10-13, adds a third: `core-broker-corpus` at `0 20 16 * * 1-5`), all through `JobRunnerService` (leased, recorded). The 5-minute reconciliation is a
   `setInterval` gated by `bootJobsEnabled()`, like M3's matcher and M4's sweep.
 - **Migrations are expand-only and auto-applied** (`grw-deploy.timer` runs `prisma migrate deploy`): two new tables,
   their indexes, CHECKs, FKs and `BEFORE UPDATE` append-only triggers reusing M3's `core_append_only_guard()`. No
@@ -277,7 +294,7 @@ Web: `cd apps/web && npx vitest run <path>`.
 | join A | — | `feature/sp2-m5` | A | merge A (then every stream branches from here) |
 | **B — intake** | 4, 5, 6, 7, 8 | `.claude/worktrees/sp2-m5-intake` | join A | `intake/*`, `chartink/services/chartink-process.service.ts` (one call), `chartink/services/__tests__/chartink-core-handoff.spec.ts` |
 | **C — journal writers** | 9, 10 | `.claude/worktrees/sp2-m5-writers` | join A | `journal/core-journal.service.ts`, `journal/journal-sinks.ts`, `journal/order-journaler.ts` + specs, the two M2 services' journal hook and their specs |
-| **D — outcomes** | 11, 12, 13 | `.claude/worktrees/sp2-m5-outcomes` | join A | `journal/trade-summary.ts`, `journal/core-trade-summary.service.ts`, `journal/core-corpus.writer.ts`, `journal/skip-followup.cron.ts` + specs |
+| **D — outcomes** | 11, 12, 13, 13b | `.claude/worktrees/sp2-m5-outcomes` | join A | `journal/trade-summary.ts`, `journal/core-trade-summary.service.ts`, `journal/core-corpus.writer.ts`, `journal/skip-followup.cron.ts`, `journal/broker-corpus.ts`, `journal/broker-corpus.cron.ts` + specs |
 | **E — risk & recon** | 14, 15, 16 | `.claude/worktrees/sp2-m5-recon` | join A + **P1** | `lifecycle/daily-loss.monitor.ts`, `lifecycle/core-risk-state.provider.ts`, `risk-wall/risk-wall.ts`, `risk-wall/risk-wall.types.ts`, `journal/journal-risk-reads.ts`, `journal/recon-checks.ts`, `journal/core-reconciler.service.ts` + specs |
 | **F — surfaces** | 17, 18 | `.claude/worktrees/sp2-m5-surfaces` | join A (codes against the interfaces below with fakes) | `journal/controllers/*`, `journal/dto/*`, `journal/daily-summary.ts`, `journal/silo-comparison.reader.ts`, `apps/web/*` |
 | **G — wiring + proof** | 19, 20 | `feature/sp2-m5` | B + C + D + E + F | `trade-core.module.ts` (+spec), `health-detail.service.ts` + `health/expected-jobs.spec.ts`, `lifecycle/testing/lifecycle-harness.ts` (one option), `journal/testing/m5-harness.ts`, e2e specs, this plan's ledger |
@@ -325,6 +342,7 @@ Each stream commits with explicit pathspecs on its own branch; the controller me
 | Create `trade-core/journal/trade-summary.ts` (+spec) | `summarizeTrade` (pure) |
 | Create `trade-core/journal/core-trade-summary.service.ts` (+spec) | `writeFor`, `positionClosed`, `CoreTradeHistory` |
 | Create `trade-core/journal/core-corpus.writer.ts` (+spec) | `ai_decision_records` writer |
+| Create `trade-core/journal/broker-corpus.ts` (+spec), `journal/broker-corpus.cron.ts` (+spec) | Task 13b: closed broker F&O trackers + sentinel verdicts into `ai_decision_records` |
 | Create `trade-core/journal/skip-followup.cron.ts` (+spec) | `priceAt`, the 16:10 follow-up job |
 | Create `trade-core/journal/journal-risk-reads.ts` (+spec) | `latched`, `reconBlock` for the risk provider |
 | Modify `trade-core/lifecycle/daily-loss.monitor.ts` (+spec), `lifecycle/core-risk-state.provider.ts` (+spec) | The latch |
@@ -5043,6 +5061,489 @@ git commit -m "feat(trade-core): M5 skipped-intent price follow-ups at 16:10 IST
 
 ---
 
+### Task 13b: Real broker trades into the SP3 corpus (owner request 2026-10-13; specified, not built in Stream A)
+
+The owner asked (2026-10-13, with the O9 change) that the corpus also learn from his **real broker trades**, not only from
+core paper setups: every closed broker F&O position the platform tracked, with its outcome, joined to what the sentinel
+said about it while it was open. The rows go into `ai_decision_records` beside the core's, under their own source, so
+SP3 can study "what the sentinel said" against "what the trade then did" on real money.
+
+**Scope.** A `trade_trackers` row qualifies when `status = 'CLOSED'`, `kind = 'POSITION'` (holdings are swing/delivery and
+out of scope), `exitPrice`/`exitTime` are set, and its segment is F&O by the sentinel's own predicate:
+`isDerivativeSegment(segmentFor({ exchange, symbol, kind }))` from `trade-sentinel/charges.ts` (NFO, BFO and MCX
+contracts, or a derivative symbol suffix — the same scope rule the sentinel roster uses, so the two never drift).
+
+**Record shape** (one per tracker; `source = 'broker:tracker'`, `sourceId = trade_trackers.id`):
+- `kind = 'BROKER_TRADE'` — a new kind. SP3 spec §5.1's kinds are the platform's own decisions; a human-entered broker
+  trade is not one. `featureSet` stays `null`, so the SP3 entry-scorer export (`ai-engine/src/corpus/export.py` filters
+  `featureSet` **and** `kind`) never mixes these rows into its training frame.
+- `userId`, `decidedAt = entryTime`, `symbol`, `exchange`, `instrumentType` = the segment (`OPT` | `FUT`),
+  `direction` = `LONG` when `qty > 0`, else `SHORT` (tracker `qty` is signed), `vehicle = null`,
+  `strategyKey = 'broker:manual'`, `strategyVersionId = null`, `setupGroupKey = 'broker|<SYMBOL>|<IST entry day>'`,
+  `ruleScore = null`, `aiCallIds = []` (the Python `sentinel_records` importer links the `ai_calls`; this job does not).
+- `evidence`: `{ trackerId, token, segment, qty, entryPrice, verdicts: [...] }` — the tracker's `sentinel_verdicts` with
+  `createdAt` in [entryTime, exitTime], oldest first, at most the newest `BROKER_VERDICTS_MAX = 50` (a size bound), each
+  `{ at, verdict, confidence, thesisStatus, recoveryAvailable, reason, triggeredBy, netPnl, greenFloor, promptVersion }`.
+  The verbatim `packet` is **not** copied (it is large and already in `sentinel_verdicts`); join by `trackerId` when needed.
+- `decision`: `{ taken: true, by: 'human', reason: 'broker position (trade_trackers)', verdictCount, lastVerdict }`
+  (`lastVerdict` = the newest verdict's `{ at, verdict, confidence, thesisStatus }` or `null`).
+- `outcome` (rupees, 2 dp; prices as stored): `{ entryPrice, exitPrice, qty, grossPnl, fees, netPnl, win, mfe, mae,
+  mfePrice, maePrice, holdMins, exitedAt }`, with `grossPnl = (exit − entry) × qty` (the tracker's own `computePnl` rule),
+  `fees = estimateCharges({ segment, entryPrice, exitPrice, qty: |qty|, side })` (the sentinel's charge model; brokers'
+  contract notes are not available), `netPnl = gross − fees`, `win = netPnl > 0`, MFE/MAE from `holdingHigh`/`holdingLow`
+  (the favourable extreme for the side, × |qty|; `null` when the tracker never recorded one), `holdMins` =
+  ⌊(exitTime − entryTime) / 60 000⌋; `outcomeAt = exitTime`.
+
+**Idempotent.** `createMany({ skipDuplicates: true })` on the unique `(source, sourceId)`: a rerun, an overlapping
+look-back or a restart never duplicates; the first write wins (a closed tracker does not change).
+
+**Cadence and load.** A nightly job `core-broker-corpus` at `0 20 16 * * 1-5` (`timeZone: 'Asia/Kolkata'`, after the
+16:10 follow-ups) through `JobRunnerService`, scanning trackers whose `exitTime` is within the last
+`BROKER_CORPUS_LOOKBACK_DAYS = 7` days (so a missed night is caught up), at most `BROKER_CORPUS_MAX_TRACKERS = 2_000` per run,
+skipping trackers that already have a record (one `findMany` of the sourceIds). One verdict read per run (`trackerId IN`).
+No broker call, no historical-lane read. A one-off backfill of older trackers is `sync(now, { lookbackDays })` from a
+script, not a new endpoint. The job runs outside any request (no CLS tenant context), like every M5 cron:
+`trade_trackers`, `sentinel_verdicts` and `ai_decision_records` are not tenant-scoped models, and each record carries its
+tracker's `userId`.
+
+**Not in scope:** core positions (Tasks 11–12 already write those), equity/holding trackers, live order books, and any
+change to the sentinel or tracker modules (this job only reads their tables; it imports only the pure `charges.ts`).
+
+**Files:**
+- Create: `apps/api/src/modules/trade-core/journal/broker-corpus.ts` (pure mapping)
+- Test: `apps/api/src/modules/trade-core/journal/broker-corpus.spec.ts`
+- Create: `apps/api/src/modules/trade-core/journal/broker-corpus.cron.ts`
+- Test: `apps/api/src/modules/trade-core/journal/broker-corpus.cron.spec.ts`
+- Modify: `apps/api/test/sp2-m5/journal.int.spec.ts` (one SQL `describe`)
+- Stream G (Task 19) adds `BrokerCorpusCron` to the module providers and `'core-broker-corpus'` to `EXPECTED_JOBS` (and to
+  the `expected-jobs.spec.ts` list).
+
+**Interfaces:**
+- Consumes: `PrismaService` (`tradeTracker`, `sentinelVerdict`, `aiDecisionRecord`); `segmentFor`, `isDerivativeSegment`,
+  `estimateCharges` (`trade-sentinel/charges.ts`, pure, imports nothing); `istDate`; `JobRunnerService.run`.
+- Produces: `BROKER_CORPUS_SOURCE = 'broker:tracker'`, `BROKER_TRADE_KIND = 'BROKER_TRADE'`, `BROKER_VERDICTS_MAX`,
+  `TrackerRow`, `VerdictRow`, `BrokerSkip`, `brokerTradeRecord(t, verdicts)`; `CORE_BROKER_CORPUS_JOB = 'core-broker-corpus'`,
+  `BrokerCorpusCron` with `nightly()`, `run(now)`, `sync(now, opts?)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// apps/api/src/modules/trade-core/journal/broker-corpus.spec.ts
+import { estimateCharges } from '../../trade-sentinel/charges';
+import { BROKER_CORPUS_SOURCE, BROKER_TRADE_KIND, BROKER_VERDICTS_MAX, brokerTradeRecord, type TrackerRow, type VerdictRow } from './broker-corpus';
+
+const ENTRY = new Date('2026-10-13T04:00:00.000Z'); // 09:30 IST
+const EXIT = new Date('2026-10-13T05:30:00.000Z'); // 11:00 IST
+const tracker = (over: Partial<TrackerRow> = {}): TrackerRow => ({
+  id: 'trk_1', userId: 'user_A', symbol: 'NIFTY14OCT2525000CE', exchange: 'NFO', token: '45000', kind: 'POSITION',
+  entryPrice: 100, qty: 75, entryTime: ENTRY, exitPrice: 120, exitTime: EXIT, status: 'CLOSED', holdingHigh: 130, holdingLow: 90,
+  ...over,
+});
+const verdict = (at: Date, v = 'HOLD', over: Partial<VerdictRow> = {}): VerdictRow => ({
+  id: `sv_${at.getTime()}`, createdAt: at, verdict: v, confidence: 'medium', thesisStatus: 'INTACT', recoveryAvailable: false,
+  reason: 'r', triggeredBy: ['heartbeat'], netPnl: 0, greenFloor: null, promptVersion: 'p1', ...over,
+});
+
+describe('brokerTradeRecord (Task 13b)', () => {
+  it('maps a closed long option position: gross, the sentinel charge model, net, MFE/MAE, hold time', () => {
+    const r = brokerTradeRecord(tracker(), []);
+    if (!r.ok) throw new Error(r.skip);
+    const fees = Math.round(estimateCharges({ segment: 'OPT', entryPrice: 100, exitPrice: 120, qty: 75, side: 'LONG' }) * 100) / 100;
+    expect(r.record).toMatchObject({
+      userId: 'user_A', source: BROKER_CORPUS_SOURCE, sourceId: 'trk_1', kind: BROKER_TRADE_KIND, decidedAt: ENTRY,
+      instrumentType: 'OPT', direction: 'LONG', strategyKey: 'broker:manual', setupGroupKey: 'broker|NIFTY14OCT2525000CE|2026-10-13',
+      featureSet: null, outcomeAt: EXIT,
+    });
+    expect(r.record.outcome).toEqual({
+      entryPrice: 100, exitPrice: 120, qty: 75, grossPnl: 1500, fees, netPnl: Math.round((1500 - fees) * 100) / 100, win: true,
+      mfe: 2250, mae: -750, mfePrice: 130, maePrice: 90, holdMins: 90, exitedAt: EXIT.toISOString(),
+    });
+  });
+
+  it('a short future: the favourable extreme is the low', () => {
+    const r = brokerTradeRecord(tracker({ symbol: 'NIFTY28OCT25FUT', qty: -75, entryPrice: 25000, exitPrice: 24900, holdingHigh: 25050, holdingLow: 24850 }), []);
+    if (!r.ok) throw new Error(r.skip);
+    expect(r.record).toMatchObject({ instrumentType: 'FUT', direction: 'SHORT' });
+    expect(r.record.outcome).toMatchObject({ grossPnl: 7500, mfe: 11250, mae: -3750, mfePrice: 24850, maePrice: 25050 });
+  });
+
+  it('joins only the verdicts given while the position was open, oldest first, newest 50 kept, last verdict in the decision', () => {
+    const inside = Array.from({ length: BROKER_VERDICTS_MAX + 5 }, (_, i) => verdict(new Date(ENTRY.getTime() + (i + 1) * 60_000)));
+    const before = verdict(new Date(ENTRY.getTime() - 60_000), 'EXIT_NOW');
+    const last = verdict(new Date(EXIT.getTime() - 1_000), 'EXIT_ARMED', { confidence: 'high', thesisStatus: 'WEAKENING' });
+    const r = brokerTradeRecord(tracker(), [last, before, ...inside]);
+    if (!r.ok) throw new Error(r.skip);
+    const kept = r.record.evidence.verdicts as Array<{ at: string; verdict: string }>;
+    expect(kept).toHaveLength(BROKER_VERDICTS_MAX);
+    expect(kept[kept.length - 1]).toMatchObject({ verdict: 'EXIT_ARMED' });
+    expect(kept.some((v) => v.verdict === 'EXIT_NOW')).toBe(false);
+    expect(r.record.decision).toEqual({
+      taken: true, by: 'human', reason: 'broker position (trade_trackers)', verdictCount: BROKER_VERDICTS_MAX + 6,
+      lastVerdict: { at: last.createdAt.toISOString(), verdict: 'EXIT_ARMED', confidence: 'high', thesisStatus: 'WEAKENING' },
+    });
+  });
+
+  it('no recorded extremes: MFE/MAE are null, never zero', () => {
+    const r = brokerTradeRecord(tracker({ holdingHigh: null, holdingLow: null }), []);
+    if (!r.ok) throw new Error(r.skip);
+    expect(r.record.outcome).toMatchObject({ mfe: null, mae: null, mfePrice: null, maePrice: null });
+  });
+
+  it.each([
+    ['NOT_CLOSED', { status: 'OPEN', exitPrice: null, exitTime: null }],
+    ['NOT_POSITION', { kind: 'HOLDING' }],
+    ['NOT_DERIVATIVE', { symbol: 'RELIANCE-EQ', exchange: 'NSE' }],
+    ['BAD_SHAPE', { qty: 0 }],
+    ['BAD_SHAPE', { exitTime: new Date(ENTRY.getTime() - 1) }],
+  ] as const)('skips %s', (skip, over) => {
+    expect(brokerTradeRecord(tracker(over as Partial<TrackerRow>), [])).toEqual({ ok: false, skip });
+  });
+});
+```
+
+```ts
+// apps/api/src/modules/trade-core/journal/broker-corpus.cron.spec.ts
+import type { JobRunnerService } from '../../../common/job-registry';
+import type { PrismaService } from '../../../common/prisma/prisma.service';
+import { BROKER_CORPUS_SOURCE } from './broker-corpus';
+import { BrokerCorpusCron, CORE_BROKER_CORPUS_JOB } from './broker-corpus.cron';
+
+const NOW = new Date('2026-10-13T10:50:00.000Z'); // 16:20 IST
+const closed = (id: string, over: Record<string, unknown> = {}) => ({
+  id, userId: 'user_A', symbol: 'NIFTY14OCT2525000CE', exchange: 'NFO', token: '45000', kind: 'POSITION', entryPrice: 100, qty: 75,
+  entryTime: new Date('2026-10-13T04:00:00.000Z'), exitPrice: 120, exitTime: new Date('2026-10-13T05:30:00.000Z'), status: 'CLOSED',
+  holdingHigh: 130, holdingLow: 90, ...over,
+});
+
+function setup(trackers: unknown[], existing: string[] = []) {
+  const prisma = {
+    tradeTracker: { findMany: jest.fn().mockResolvedValue(trackers) },
+    sentinelVerdict: { findMany: jest.fn().mockResolvedValue([]) },
+    aiDecisionRecord: {
+      findMany: jest.fn().mockResolvedValue(existing.map((sourceId) => ({ sourceId }))),
+      createMany: jest.fn().mockImplementation(({ data }: { data: unknown[] }) => Promise.resolve({ count: data.length })),
+    },
+  };
+  const jobs = { run: jest.fn((_n: string, _o: unknown, fn: () => Promise<unknown>) => fn()) };
+  return { prisma, jobs, cron: new BrokerCorpusCron(prisma as unknown as PrismaService, jobs as unknown as JobRunnerService) };
+}
+
+describe('BrokerCorpusCron (Task 13b)', () => {
+  it('scans closed POSITION trackers of the look-back window and writes one record each, skipDuplicates', async () => {
+    const s = setup([closed('trk_1'), closed('trk_2', { kind: 'HOLDING' }), closed('trk_3', { symbol: 'RELIANCE-EQ', exchange: 'NSE' })]);
+    expect(await s.cron.sync(NOW)).toEqual({ scanned: 3, written: 1, already: 0, skipped: { NOT_POSITION: 1, NOT_DERIVATIVE: 1 } });
+    expect(s.prisma.tradeTracker.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { status: 'CLOSED', kind: 'POSITION', exitTime: { gte: new Date(NOW.getTime() - 7 * 86_400_000) } },
+      take: 2_000,
+    }));
+    expect(s.prisma.sentinelVerdict.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { trackerId: { in: ['trk_1', 'trk_2', 'trk_3'] } } }));
+    const { data, skipDuplicates } = s.prisma.aiDecisionRecord.createMany.mock.calls[0][0] as { data: Array<{ sourceId: string; source: string }>; skipDuplicates: boolean };
+    expect(skipDuplicates).toBe(true);
+    expect(data.map((d) => [d.source, d.sourceId])).toEqual([[BROKER_CORPUS_SOURCE, 'trk_1']]);
+  });
+
+  it('a rerun writes nothing for trackers that already have a record', async () => {
+    const s = setup([closed('trk_1')], ['trk_1']);
+    expect(await s.cron.sync(NOW)).toMatchObject({ written: 0, already: 1 });
+    expect(s.prisma.aiDecisionRecord.createMany).not.toHaveBeenCalled();
+  });
+
+  it('runs through the job runner under its name; a failure is logged, never thrown', async () => {
+    const s = setup([]);
+    await s.cron.run(NOW);
+    expect(s.jobs.run).toHaveBeenCalledWith(CORE_BROKER_CORPUS_JOB, expect.objectContaining({ onRedisError: 'run-anyway' }), expect.any(Function));
+    s.jobs.run.mockRejectedValueOnce(new Error('lease lost'));
+    await expect(s.cron.run(NOW)).resolves.toBeUndefined();
+  });
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cd apps/api && npx jest src/modules/trade-core/journal/broker-corpus`
+Expected: FAIL — `Cannot find module './broker-corpus'` / `'./broker-corpus.cron'`.
+
+- [ ] **Step 3: Implement**
+
+```ts
+// apps/api/src/modules/trade-core/journal/broker-corpus.ts
+import { estimateCharges, isDerivativeSegment, segmentFor } from '../../trade-sentinel/charges';
+import { istDate } from '../execution/ledger-math';
+
+/** Task 13b (owner request 2026-10-13): real broker F&O trades in the SP3 corpus. */
+export const BROKER_CORPUS_SOURCE = 'broker:tracker';
+export const BROKER_TRADE_KIND = 'BROKER_TRADE';
+/** Size bound: verdicts kept per record (the newest). */
+export const BROKER_VERDICTS_MAX = 50;
+
+export interface TrackerRow {
+  id: string;
+  userId: string;
+  symbol: string;
+  exchange: string;
+  token: string;
+  kind: string;
+  entryPrice: number;
+  /** Signed: negative is short. */
+  qty: number;
+  entryTime: Date;
+  exitPrice: number | null;
+  exitTime: Date | null;
+  status: string;
+  holdingHigh: number | null;
+  holdingLow: number | null;
+}
+
+export interface VerdictRow {
+  id: string;
+  createdAt: Date;
+  verdict: string;
+  confidence: string;
+  thesisStatus: string;
+  recoveryAvailable: boolean;
+  reason: string;
+  triggeredBy: unknown;
+  netPnl: number;
+  greenFloor: number | null;
+  promptVersion: string;
+}
+
+export type BrokerSkip = 'NOT_CLOSED' | 'NOT_POSITION' | 'NOT_DERIVATIVE' | 'BAD_SHAPE';
+
+export interface BrokerRecord {
+  userId: string;
+  source: typeof BROKER_CORPUS_SOURCE;
+  sourceId: string;
+  kind: typeof BROKER_TRADE_KIND;
+  decidedAt: Date;
+  symbol: string;
+  exchange: string;
+  instrumentType: string;
+  direction: 'LONG' | 'SHORT';
+  vehicle: null;
+  strategyKey: string;
+  strategyVersionId: null;
+  setupGroupKey: string;
+  featureSet: null;
+  ruleScore: null;
+  evidence: Record<string, unknown>;
+  decision: Record<string, unknown>;
+  outcome: Record<string, unknown>;
+  outcomeAt: Date;
+}
+
+const r2 = (n: number): number => Math.round(n * 100) / 100;
+
+export function brokerTradeRecord(t: TrackerRow, verdicts: readonly VerdictRow[]): { ok: true; record: BrokerRecord } | { ok: false; skip: BrokerSkip } {
+  if (t.status !== 'CLOSED' || t.exitPrice === null || t.exitTime === null) return { ok: false, skip: 'NOT_CLOSED' };
+  if (t.kind !== 'POSITION') return { ok: false, skip: 'NOT_POSITION' };
+  const segment = segmentFor({ exchange: t.exchange, symbol: t.symbol, kind: t.kind });
+  if (!isDerivativeSegment(segment)) return { ok: false, skip: 'NOT_DERIVATIVE' };
+  const exitPrice = t.exitPrice;
+  const exitTime = t.exitTime;
+  if (!(t.entryPrice > 0) || !(exitPrice > 0) || !Number.isFinite(t.qty) || t.qty === 0 || exitTime.getTime() < t.entryTime.getTime()) {
+    return { ok: false, skip: 'BAD_SHAPE' };
+  }
+  const side = t.qty > 0 ? 'LONG' : 'SHORT';
+  const qty = Math.abs(t.qty);
+  const sign = side === 'LONG' ? 1 : -1;
+  const grossPnl = r2((exitPrice - t.entryPrice) * t.qty);
+  const fees = r2(estimateCharges({ segment, entryPrice: t.entryPrice, exitPrice, qty, side }));
+  const netPnl = r2(grossPnl - fees);
+  const mfePrice = side === 'LONG' ? t.holdingHigh : t.holdingLow;
+  const maePrice = side === 'LONG' ? t.holdingLow : t.holdingHigh;
+  const excursion = (p: number | null): number | null => (p === null ? null : r2((p - t.entryPrice) * sign * qty));
+  const held = verdicts
+    .filter((v) => v.createdAt.getTime() >= t.entryTime.getTime() && v.createdAt.getTime() <= exitTime.getTime())
+    .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));
+  const last = held.length ? held[held.length - 1] : null;
+  return {
+    ok: true,
+    record: {
+      userId: t.userId,
+      source: BROKER_CORPUS_SOURCE,
+      sourceId: t.id,
+      kind: BROKER_TRADE_KIND,
+      decidedAt: t.entryTime,
+      symbol: t.symbol,
+      exchange: t.exchange,
+      instrumentType: segment,
+      direction: side,
+      vehicle: null,
+      strategyKey: 'broker:manual',
+      strategyVersionId: null,
+      setupGroupKey: `broker|${t.symbol.toUpperCase()}|${istDate(t.entryTime)}`,
+      featureSet: null,
+      ruleScore: null,
+      evidence: {
+        trackerId: t.id, token: t.token, segment, qty: t.qty, entryPrice: t.entryPrice,
+        verdicts: held.slice(-BROKER_VERDICTS_MAX).map((v) => ({
+          at: v.createdAt.toISOString(), verdict: v.verdict, confidence: v.confidence, thesisStatus: v.thesisStatus,
+          recoveryAvailable: v.recoveryAvailable, reason: v.reason, triggeredBy: v.triggeredBy, netPnl: v.netPnl,
+          greenFloor: v.greenFloor, promptVersion: v.promptVersion,
+        })),
+      },
+      decision: {
+        taken: true, by: 'human', reason: 'broker position (trade_trackers)', verdictCount: held.length,
+        lastVerdict: last ? { at: last.createdAt.toISOString(), verdict: last.verdict, confidence: last.confidence, thesisStatus: last.thesisStatus } : null,
+      },
+      outcome: {
+        entryPrice: t.entryPrice, exitPrice, qty: t.qty, grossPnl, fees, netPnl, win: netPnl > 0,
+        mfe: excursion(mfePrice), mae: excursion(maePrice), mfePrice, maePrice,
+        holdMins: Math.floor((exitTime.getTime() - t.entryTime.getTime()) / 60_000), exitedAt: exitTime.toISOString(),
+      },
+      outcomeAt: exitTime,
+    },
+  };
+}
+```
+
+```ts
+// apps/api/src/modules/trade-core/journal/broker-corpus.cron.ts
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
+import type { Prisma } from '@prisma/client';
+import { JobRunnerService } from '../../../common/job-registry';
+import { PrismaService } from '../../../common/prisma/prisma.service';
+import { BROKER_CORPUS_SOURCE, brokerTradeRecord, type BrokerSkip, type VerdictRow } from './broker-corpus';
+
+export const CORE_BROKER_CORPUS_JOB = 'core-broker-corpus';
+/** A missed night is caught up; older trackers are a one-off backfill (sync with lookbackDays). */
+export const BROKER_CORPUS_LOOKBACK_DAYS = 7;
+/** Load bound per run. */
+export const BROKER_CORPUS_MAX_TRACKERS = 2_000;
+const LEASE_MS = 30 * 60_000;
+const DAY_MS = 86_400_000;
+
+const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/**
+ * Task 13b: closed broker F&O positions (trade_trackers, kind POSITION) with their outcome and the sentinel's
+ * verdicts while they were open, as ai_decision_records (source 'broker:tracker', sourceId = tracker id).
+ * Reads only; writes only ai_decision_records, idempotently (createMany skipDuplicates on (source, sourceId)).
+ */
+@Injectable()
+export class BrokerCorpusCron {
+  private readonly logger = new Logger(BrokerCorpusCron.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jobs: JobRunnerService,
+  ) {}
+
+  @Cron('0 20 16 * * 1-5', { name: CORE_BROKER_CORPUS_JOB, timeZone: 'Asia/Kolkata' })
+  async nightly(): Promise<void> {
+    await this.run(new Date());
+  }
+
+  async run(now: Date): Promise<void> {
+    try {
+      await this.jobs.run(CORE_BROKER_CORPUS_JOB, { ttlMs: LEASE_MS, onRedisError: 'run-anyway' }, async () => {
+        const r = await this.sync(now);
+        this.logger.log(`broker corpus: ${r.scanned} scanned, ${r.written} written, ${r.already} already, skipped ${JSON.stringify(r.skipped)}`);
+        return r;
+      });
+    } catch (err) {
+      this.logger.error(`broker corpus failed: ${errorText(err)}`);
+    }
+  }
+
+  async sync(now: Date, opts: { lookbackDays?: number } = {}): Promise<{ scanned: number; written: number; already: number; skipped: Partial<Record<BrokerSkip, number>> }> {
+    const since = new Date(now.getTime() - (opts.lookbackDays ?? BROKER_CORPUS_LOOKBACK_DAYS) * DAY_MS);
+    const trackers = await this.prisma.tradeTracker.findMany({
+      where: { status: 'CLOSED', kind: 'POSITION', exitTime: { gte: since } },
+      orderBy: [{ exitTime: 'asc' }, { id: 'asc' }],
+      take: BROKER_CORPUS_MAX_TRACKERS,
+    });
+    const skipped: Partial<Record<BrokerSkip, number>> = {};
+    if (trackers.length === 0) return { scanned: 0, written: 0, already: 0, skipped };
+    const ids = trackers.map((t) => t.id);
+    const [existing, verdicts] = await Promise.all([
+      this.prisma.aiDecisionRecord.findMany({ where: { source: BROKER_CORPUS_SOURCE, sourceId: { in: ids } }, select: { sourceId: true } }),
+      this.prisma.sentinelVerdict.findMany({ where: { trackerId: { in: ids } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
+    ]);
+    const done = new Set(existing.map((e) => e.sourceId));
+    const byTracker = new Map<string, VerdictRow[]>();
+    for (const v of verdicts) byTracker.set(v.trackerId, [...(byTracker.get(v.trackerId) ?? []), v as unknown as VerdictRow]);
+    const data: Prisma.AiDecisionRecordCreateManyInput[] = [];
+    let already = 0;
+    for (const t of trackers) {
+      if (done.has(t.id)) {
+        already += 1;
+        continue;
+      }
+      const r = brokerTradeRecord(t, byTracker.get(t.id) ?? []);
+      if (!r.ok) {
+        skipped[r.skip] = (skipped[r.skip] ?? 0) + 1;
+        continue;
+      }
+      const { evidence, decision, outcome, ...rest } = r.record;
+      data.push({
+        ...rest,
+        evidence: evidence as Prisma.InputJsonValue,
+        decision: decision as Prisma.InputJsonValue,
+        outcome: outcome as Prisma.InputJsonValue,
+      });
+    }
+    const written = data.length ? (await this.prisma.aiDecisionRecord.createMany({ data, skipDuplicates: true })).count : 0;
+    return { scanned: trackers.length, written, already, skipped };
+  }
+}
+```
+
+(The tracker filter in SQL already restricts `kind = 'POSITION'`; `brokerTradeRecord` checks it again so the pure function
+is safe on any row. The spec's mock returns a HOLDING row on purpose to exercise that guard.)
+
+Append to `apps/api/test/sp2-m5/journal.int.spec.ts` (with `import { BrokerCorpusCron } from '../../src/modules/trade-core/journal/broker-corpus.cron';`
+and a pass-through `JobRunnerService` fake):
+
+```ts
+describe('broker trades into ai_decision_records (Task 13b) against SQL', () => {
+  it('one record per closed F&O position tracker, joined to its verdicts; a rerun writes nothing', async () => {
+    const u = await newUser();
+    const trk = `trk_${rid()}`;
+    await db.$executeRawUnsafe(
+      `INSERT INTO "trade_trackers" ("id", "userId", "symbol", "exchange", "token", "kind", "entryPrice", "qty", "entryTime", "exitPrice", "exitTime", "status", "holdingHigh", "holdingLow", "updatedAt")
+       VALUES ($1, $2, 'NIFTY14OCT2525000CE', 'NFO', '45000', 'POSITION', 100, 75, CURRENT_TIMESTAMP - interval '2 hours', 120, CURRENT_TIMESTAMP - interval '1 hour', 'CLOSED', 130, 90, CURRENT_TIMESTAMP)`,
+      trk, u,
+    );
+    await db.$executeRawUnsafe(
+      `INSERT INTO "sentinel_verdicts" ("id", "userId", "trackerId", "symbol", "verdict", "confidence", "thesisStatus", "recoveryAvailable", "reason", "evidence", "reviewInSec", "packet", "promptVersion", "triggeredBy", "netPnl")
+       VALUES ($1, $2, $3, 'NIFTY14OCT2525000CE', 'HOLD', 'medium', 'INTACT', false, 'r', '{}'::jsonb, 60, '{}'::jsonb, 'p1', '["heartbeat"]'::jsonb, 0)`,
+      `sv_${rid()}`, u, trk,
+    );
+    // createdAt defaults to now(), after the exit: move it inside the holding window.
+    await db.$executeRawUnsafe(`UPDATE "sentinel_verdicts" SET "createdAt" = CURRENT_TIMESTAMP - interval '90 minutes' WHERE "trackerId" = $1`, trk);
+    const jobs = { run: (_n: string, _o: unknown, fn: () => Promise<unknown>) => fn() };
+    const cron = new BrokerCorpusCron(db as unknown as PrismaService, jobs as unknown as JobRunnerService);
+    expect(await cron.sync(new Date())).toMatchObject({ written: 1 });
+    expect(await cron.sync(new Date())).toMatchObject({ written: 0, already: 1 });
+    const row = await db.aiDecisionRecord.findUnique({ where: { source_sourceId: { source: 'broker:tracker', sourceId: trk } } });
+    expect(row).toMatchObject({ kind: 'BROKER_TRADE', userId: u, featureSet: null });
+    expect((row?.decision as { verdictCount: number }).verdictCount).toBe(1);
+    await db.aiDecisionRecord.delete({ where: { id: row?.id as string } });
+  });
+});
+```
+
+(If a `trade_trackers` or `sentinel_verdicts` NOT NULL column is missing from the inserts, copy the column list from the
+migration that created the table; `sentinel_verdicts` is not append-only, so the `UPDATE` above is allowed.)
+
+- [ ] **Step 4: Run them to verify they pass**
+
+Run: `cd apps/api && npx jest src/modules/trade-core/journal/broker-corpus src/common/schedule/cron-timezone.spec.ts`
+Expected: PASS — both specs and the cron-timezone ratchet (the new `@Cron` carries `timeZone`). The opt-in DB test runs
+with the others (`npx jest --config test/sp2-m5/jest.config.js -i` against a throwaway Postgres).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add -- apps/api/src/modules/trade-core/journal/broker-corpus.ts apps/api/src/modules/trade-core/journal/broker-corpus.spec.ts apps/api/src/modules/trade-core/journal/broker-corpus.cron.ts apps/api/src/modules/trade-core/journal/broker-corpus.cron.spec.ts
+git commit -m "feat(trade-core): real broker F&O trades with sentinel verdicts into the SP3 corpus" -m "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>" -- apps/api/src/modules/trade-core/journal/broker-corpus.ts apps/api/src/modules/trade-core/journal/broker-corpus.spec.ts apps/api/src/modules/trade-core/journal/broker-corpus.cron.ts apps/api/src/modules/trade-core/journal/broker-corpus.cron.spec.ts apps/api/test/sp2-m5/journal.int.spec.ts
+```
+
+---
+
 ## Stream E — risk and reconciliation (requires P1)
 
 ### Task 14: The persisted daily-loss latch
@@ -5267,6 +5768,15 @@ git commit -m "feat(trade-core): M5 persisted daily-loss latch (journal-derived)
 ---
 
 ### Task 15: The reconciliation checks (pure)
+
+> **Stream A finding (2026-10-13) — read before coding `MARGIN_LEFT_ON_CLOSED`.** In the merged M3 code an exit fill's
+> `MARGIN_RELEASE` is booked on the **exit** order, not on the entry order (`paper-ledger.service.ts`: a closed
+> RELIANCE trade's ledger is entry `MARGIN_BLOCK −10000` on `ord_1` and exit `MARGIN_RELEASE +10000` on `ord_8`).
+> So `marginByOrder` (Task 3) reports +10000 on the entry order and −10000 on the exit order of every cleanly closed
+> position. The check below, which flags any order with non-zero margin, would raise a false `RECON_MISMATCH` for every
+> closed position every night. Implement it **per position**: flag when the **sum** of `marginByOrder` over the
+> position's orders is non-zero (report that sum; `orderId: null`), and adjust the test to give the closed position's
+> orders a non-zero **sum**. Task 3's parity spec asserts exactly this per-position zero sum.
 
 **Files:**
 - Create: `apps/api/src/modules/trade-core/journal/recon-checks.ts`
@@ -7593,6 +8103,21 @@ logging ones in the reverted module.
 9. **Alerts are journal + log + status endpoint**, no push channel (O11).
 10. "No file outside `trade-core/` changes except wiring" is read, as in M2–M4, to include the schema, the migration,
     `tenant.constants.ts`, `audit-actions.ts`, one Chartink call, `EXPECTED_JOBS` and the web page; Task 20 Step 4 lists them.
+11. **Stream A (Tasks 1–3) implementation deviations, 2026-10-13:**
+    - `journal-migration.spec.ts` normalises CRLF to LF before matching: the repo's `core.autocrlf` checks the
+      migration out with CRLF on Windows, and the plan's `'…"core_journal_append_only"\n    BEFORE UPDATE…'` match failed.
+    - Opt-in DB test: Prisma's unique-violation message names the key columns, not the index, so the two duplicate
+      assertions match `/23505[\s\S]*dedupeKey/` and `/23505[\s\S]*positionId/` instead of the index names; the
+      `core_orders` insert in the SQL parity case adds the NOT NULL `submittedAt`.
+    - `paper-ledger.reads.spec.ts`: a closed position's margin nets to zero **across its orders**, not per order (M3 books
+      the exit's `MARGIN_RELEASE` on the exit order); the assertion sums the closed position's orders. See the note at
+      the top of Task 15 — Stream E must check the per-position sum.
+    - `core-paper.repository.spec.ts`'s exact method-list ratchet for `CoreCashLedgerRepository` lists the six new read
+      methods (still no update or delete method).
+    - `memory-paper-store.ts` imports `LedgerType` (the plan's "if absent" case).
+    - `toOrder` in the plan is `toCoreOrder` in `core-order.repository.ts`.
+12. **O9 changed by the owner (2026-10-13):** corpus rows in every trading mode, and real broker F&O trades join the corpus
+    (Task 13b). See "Owner rulings (2026-10-13)".
 
 ## Notes for later milestones (not in this plan)
 

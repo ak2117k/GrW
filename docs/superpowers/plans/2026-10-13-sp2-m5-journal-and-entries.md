@@ -8118,6 +8118,17 @@ logging ones in the reverted module.
     - `toOrder` in the plan is `toCoreOrder` in `core-order.repository.ts`.
 12. **O9 changed by the owner (2026-10-13):** corpus rows in every trading mode, and real broker F&O trades join the corpus
     (Task 13b). See "Owner rulings (2026-10-13)".
+13. **Stream F (Tasks 17–18) implementation deviations, 2026-10-13:**
+    - `SiloComparisonReader.forDay` refuses a position whose `userId` is not the caller's: `findByIntent` is a global
+      read (intent ids are unique), so the comparison could otherwise show another user's position. The spec's position
+      fake gains `userId`, plus a test for the cross-user case and for a day with no setups (no silo reads).
+    - The ack endpoint does not audit in the controller: the bound `ReconDesk` (`CoreReconciler.ack`, Task 16) writes
+      `CORE_RECON_ACKNOWLEDGED`; auditing in both places would write it twice. Task 19 must bind `CORE_RECON_DESK` to
+      `CoreReconciler` (`useExisting`), not to a fake.
+    - The page polls through the shared `services/interval-poller.ts` (paused while the tab is hidden) instead of
+      TanStack's `refetchInterval`: every 15 s it refreshes the status, and the day only while it is today's IST date
+      (new pure helper `pollsDay`, tested). The page also shows a read error for the status or the day.
+    - `navItems.spec.ts` gains a test: ADMIN (the owner) sees `/core-journal` right after `/core-risk`; USER does not.
 
 ## Notes for later milestones (not in this plan)
 

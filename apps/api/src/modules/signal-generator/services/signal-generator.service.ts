@@ -30,7 +30,12 @@ import { OptionStrikeSelectorService } from '../../options-chain/services/option
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { ContextScoringService } from './context-scoring/context-scoring.service';
 import type { ContextFactorBreakdown } from '../types/setup-context.types';
-import { LevelsContextStrategy, classifyRegime, buildIndicatorReadings } from '../strategies/levels-context.strategy';
+import {
+  LevelsContextStrategy,
+  classifyRegime,
+  buildIndicatorReadings,
+  closedBarVolumeRatio,
+} from '../strategies/levels-context.strategy';
 import { ema } from '../strategies/indicators';
 import { SetupContext, IndicatorReadings } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
@@ -152,8 +157,14 @@ export type AnalyzeResult =
       setupType: SetupContext['setupType'];
       grade: SetupContext['grade'];
       atr14: number;
-      volumeRatio: number;
-      levels: LevelsSnapshot;
+      /**
+       * Last closed bar volume over its VMA20 (median of the 20 bars before it),
+       * or the option-chain proxy on an index. NULL = no reading — never 0.
+       * Null on a re-served lock, which loads no candles.
+       */
+      volumeRatio: number | null;
+      /** Null only when a lock is re-served with no level book — never zero-filled. */
+      levels: LevelsSnapshot | null;
       reason: string;
       indicators: SetupContext['indicators'];
       higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
@@ -197,6 +208,13 @@ export type AnalyzeResult =
       kind: 'no-setup';
       reason: string;
       levels: LevelsSnapshot | null;
+      /**
+       * The same closed-bar VMA20 reading as the setup arm, taken from the
+       * candles this call already loaded. It is a fact about the market, not
+       * about the engine liking a trade, so it must not be setup-gated. NULL =
+       * no reading (no book, too few bars, a volume-less index with no proxy).
+       */
+      volumeRatio: number | null;
       higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
       regime: SetupContext['regime'];
       intradayRangeRatio: number;
@@ -329,7 +347,8 @@ export class SignalGeneratorService {
         this.setupTracker.updateFromTick(token, liveBook.spot, new Date());
       }
       const refreshed = this.setupTracker.getActive(token) ?? existing;
-      return this.lockedToResult(refreshed, liveBook);
+      // No candles are loaded on this path, so volumeRatio is honestly null.
+      return this.lockedToResult(refreshed, liveBook, null);
     }
 
     const book = await this.levelBookService.lazyLoad(
@@ -340,6 +359,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: 'no level book available — symbol has no historical data',
         levels: null,
+        volumeRatio: null,
         higherTimeframeTrend: null,
         regime: null,
         intradayRangeRatio: 0,
@@ -403,6 +423,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: `not enough candles (got ${candles.length}, need 25 for ${timeframe})`,
         levels: snapshotFromBook(book),
+        volumeRatio: closedBarVolumeRatio(candles),
         higherTimeframeTrend: null,
         regime,
         intradayRangeRatio,
@@ -459,6 +480,11 @@ export class SignalGeneratorService {
     const proxyVolumeRatio = await this.computeIndexVolumeRatio(
       token, symbol, timeframe,
     );
+    // The market's volume reading, independent of whether the strategy fires:
+    // the same closed-bar / VMA20 rule (and the same index proxy fallback) the
+    // strategy's own gate uses, but reported on EVERY arm below — callers like
+    // the trade sentinel need it on symbols the engine has no opinion about.
+    const volumeRatio = closedBarVolumeRatio(candles) ?? proxyVolumeRatio ?? null;
     const output = strategy.analyze({
       candles,
       levelBook: book,
@@ -476,6 +502,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: lastReject,
         levels: snapshotFromBook(book),
+        volumeRatio,
         higherTimeframeTrend,
         regime,
         intradayRangeRatio,
@@ -539,6 +566,7 @@ export class SignalGeneratorService {
             kind: 'no-setup',
             reason: `reject:context-score (score=${scored.contextScore} <= ${rejectBelow})`,
             levels: snapshotFromBook(book),
+            volumeRatio,
             higherTimeframeTrend,
             regime,
             intradayRangeRatio,
@@ -608,12 +636,13 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: 'failed to lock setup',
         levels: snapshotFromBook(book),
+        volumeRatio,
         higherTimeframeTrend,
         regime,
         intradayRangeRatio,
       };
     }
-    return this.lockedToResult(final, book);
+    return this.lockedToResult(final, book, volumeRatio);
   }
 
   /**
@@ -705,6 +734,7 @@ export class SignalGeneratorService {
   private lockedToResult(
     setup: LockedSetup,
     book: LevelBook | null,
+    volumeRatio: number | null,
   ): AnalyzeResult {
     return {
       kind: 'setup',
@@ -719,16 +749,14 @@ export class SignalGeneratorService {
       setupType: setup.setupType,
       grade: setup.grade,
       atr14: setup.atr14,
-      // volumeRatio is part of the original setupContext but not held by
-      // the locked record — surface 0 when re-serving an existing lock.
-      volumeRatio: 0,
-      levels: book
-        ? snapshotFromBook(book)
-        : {
-            pdh: 0, pdl: 0, orh: null, orl: null,
-            prevOrh: null, prevOrl: null,
-            vwap: 0, todayHigh: 0, todayLow: 0, atr14: setup.atr14,
-          },
+      // The caller's reading of THIS call's candles, or null when it loaded
+      // none (a re-served lock). It used to be a hard-coded 0, which passes
+      // every Number.isFinite check downstream and reached the trade sentinel
+      // as a real "volume is 0x average" — a false input, not a missing one.
+      volumeRatio,
+      // No book → no levels. Zero-filled PDH/PDL/VWAP here used to reach the
+      // sentinel's level candidates as real lines at price 0.
+      levels: book ? snapshotFromBook(book) : null,
       reason: setup.reason,
       indicators: setup.indicators,
       higherTimeframeTrend: setup.higherTimeframeTrend,

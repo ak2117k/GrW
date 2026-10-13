@@ -55,11 +55,15 @@ export const EQUITY_SESSION: SessionWindow = { openMin: 9 * 60 + 15, closeMin: 1
  * to 23:30, and a crude-oil or gold contract is at its most volatile long after
  * the equity market has shut.
  *
- * 23:30 is the standard close; MCX moves it to 23:55 during US daylight-saving
- * months. The earlier time is used because the error is one-sided: closing the
- * watch 25 minutes early on some days costs a few polls, while claiming a
- * session is open when it is not would have the agent judging a frozen price —
- * and this codebase has already paid for a stale price treated as live.
+ * 23:30 is the close while the US is ON daylight saving (roughly mid-March to
+ * early November). MCX moves it to 23:55 while the US is OFF daylight saving —
+ * the northern winter, e.g. 2026-11-02 to 2027-03-08 — so the US session still
+ * lands inside it. This static window keeps 23:30 for pure callers because the
+ * error is one-sided: closing 25 minutes early costs a few polls, while claiming
+ * a session is open when it is not would have the agent judging a frozen price.
+ * The LIVE sentinel does not rely on it: its session math (packet
+ * `minutesToClose`) and tick gate go through the market hub's `SessionClock`,
+ * which applies the late close from `HUB_MCX_LATE_CLOSE` and the holiday calendar.
  */
 export const COMMODITY_SESSION: SessionWindow = { openMin: 9 * 60, closeMin: 23 * 60 + 30 };
 

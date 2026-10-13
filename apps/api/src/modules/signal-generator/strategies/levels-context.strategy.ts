@@ -187,6 +187,46 @@ export function buildIndicatorReadings(
   };
 }
 
+/**
+ * Median volume of a window — the strategy's VMA. Median, not arithmetic
+ * mean: some Indian-broker historical APIs occasionally write a single-day
+ * cumulative volume into one bar (session-close reporting artifacts). One
+ * 50M-vol bar in a 20-bar window can pull the mean up 1000x and make every
+ * other bar look like 0.001x "average". Coerces to Number defensively in case
+ * a candle still carries bigint volume. 0 for an empty window.
+ */
+export function medianVolume(candles: ReadonlyArray<{ volume: unknown }>): number {
+  if (candles.length === 0) return 0;
+  const vols = candles
+    .map((c) => Number(c.volume))
+    .filter((v) => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (vols.length === 0) return 0;
+  const mid = Math.floor(vols.length / 2);
+  return vols.length % 2 === 0 ? (vols[mid - 1] + vols[mid]) / 2 : vols[mid];
+}
+
+/**
+ * The last CLOSED bar's volume over the median of the 20 bars before it —
+ * the same reading the strategy's volume gate takes (candles[length-2] vs
+ * VMA20 of candles[-22..-2]), exposed so `analyze()` can report it on EVERY
+ * result, not only on a setup that survived the gates.
+ *
+ * NULL means NO READING, never "volume was zero": fewer than 20 bars behind
+ * the closed bar, a VMA20 of 0 (every index token — Angel sends volume:0 on
+ * NIFTY/BANKNIFTY), or a non-finite closed-bar volume.
+ */
+export function closedBarVolumeRatio(
+  candles: ReadonlyArray<{ volume: unknown }>,
+): number | null {
+  if (candles.length < 22) return null;
+  const vma20 = medianVolume(candles.slice(-22, -2));
+  if (!(vma20 > 0)) return null;
+  const closed = Number(candles[candles.length - 2].volume);
+  if (!Number.isFinite(closed)) return null;
+  return closed / vma20;
+}
+
 export interface AnalyzeInput {
   candles: CandleData[];
   levelBook: LevelBook;
@@ -710,21 +750,7 @@ export class LevelsContextStrategy implements TradingStrategy {
 
   private vma(candles: CandleData[]): number {
     if (candles.length === 0) return 0;
-    // Median, not arithmetic mean. Some Indian-broker historical APIs
-    // occasionally write a single-day cumulative volume into one bar
-    // (artifacts of session-close reporting). One 50M-vol bar in a
-    // 20-bar window can pull the mean up 1000x and make every
-    // subsequent bar look like 0.001× "average". Median is robust
-    // to those outliers without breaking the VMA semantics for the
-    // 99% of bars that are clean. Coerce to Number defensively in
-    // case any candle still carries bigint volume.
-    const vols = candles
-      .map((c) => Number(c.volume))
-      .filter((v) => Number.isFinite(v))
-      .sort((a, b) => a - b);
-    if (vols.length === 0) return 0;
-    const mid = Math.floor(vols.length / 2);
-    return vols.length % 2 === 0 ? (vols[mid - 1] + vols[mid]) / 2 : vols[mid];
+    return medianVolume(candles);
   }
 
   private buildReason(ctx: SetupContext, book: LevelBook): string {

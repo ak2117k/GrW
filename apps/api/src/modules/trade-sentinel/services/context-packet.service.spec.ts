@@ -1,4 +1,5 @@
 import { computeGreenFloor } from '../charges';
+import { makeSentinelClock } from '../overnight/overnight-calendar';
 import {
   ContextPacketService,
   FLOOR_CLAMP_TOLERANCE_RUPEES,
@@ -101,6 +102,48 @@ describe('IST session clock', () => {
     const saturday = minutesToSessionClose(new Date('2026-08-15T05:00:00Z')); // Sat 10:30 IST
     expect(saturday.available).toBe(false);
     if (!saturday.available) expect(saturday.reason).toMatch(/weekend|trading day/i);
+  });
+});
+
+describe('minutesToSessionClose — the MCX late close and holidays', () => {
+  // Monday 2026-11-02 23:40 IST = 18:10 UTC: the first day of the 2026-27
+  // late-close season, when MCX trades until 23:55.
+  const MON_2340_IST = new Date('2026-11-02T18:10:00Z');
+  const SEASON = '2026-11-02:2027-03-08';
+  const saved = process.env.HUB_MCX_LATE_CLOSE;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.HUB_MCX_LATE_CLOSE;
+    else process.env.HUB_MCX_LATE_CLOSE = saved;
+  });
+
+  it('counts down to 23:55 for MCX inside the late-close season', () => {
+    const block = minutesToSessionClose(MON_2340_IST, 'MCX', makeSentinelClock(SEASON));
+    expect(block.available).toBe(true);
+    if (block.available) {
+      expect(block.value).toBe(15);
+      expect(block.source).toMatch(/23:55/);
+    }
+  });
+
+  it('reads the season from HUB_MCX_LATE_CLOSE when no clock is passed (the live path)', () => {
+    process.env.HUB_MCX_LATE_CLOSE = SEASON;
+    const block = minutesToSessionClose(MON_2340_IST, 'MCX');
+    expect(block.available).toBe(true);
+    if (block.available) expect(block.value).toBe(15);
+  });
+
+  it('is closed at 23:40 for MCX outside the season — 23:30 is the standard close', () => {
+    delete process.env.HUB_MCX_LATE_CLOSE;
+    const block = minutesToSessionClose(MON_2340_IST, 'MCX');
+    expect(block.available).toBe(false);
+    if (!block.available) expect(block.reason).toMatch(/closed \(23:30/);
+  });
+
+  it('states an exchange holiday instead of counting down to a close that will not come', () => {
+    // Friday 2026-10-02, Gandhi Jayanti, 10:00 IST.
+    const block = minutesToSessionClose(new Date('2026-10-02T04:30:00Z'), 'NSE');
+    expect(block.available).toBe(false);
+    if (!block.available) expect(block.reason).toMatch(/holiday/i);
   });
 });
 

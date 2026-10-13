@@ -7,7 +7,9 @@ import { computeGreenFloor, type Segment, type Side } from '../charges';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import type { TripwireFire } from '../tripwires/types';
 import type { Ownership, RosterEntry } from './roster.service';
-import { minutesToClose, sessionFor } from '../market-sessions';
+import { sessionFor } from '../market-sessions';
+import type { SessionClock } from '../../market-hub/session-clock';
+import { liveSessionClock } from '../overnight/overnight-calendar';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
 import type { CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
 
@@ -143,15 +145,32 @@ export function istWallClock(now: Date): string {
  * false deadline with provenance attached, at exactly the hours when crude and
  * gold are most active. `exchange` defaults to NSE so an omitted argument keeps
  * the prior behaviour rather than silently widening someone's session.
+ *
+ * HOLIDAYS AND THE MCX LATE CLOSE ARE MODELLED, through the market hub's
+ * `SessionClock` (default: {@link liveSessionClock}, i.e. the shipped holiday
+ * calendar plus `HUB_MCX_LATE_CLOSE`). The plain `market-sessions.ts` window
+ * knew neither, so from 2026-11-02 an MCX position still trading to 23:55 was
+ * told at 23:31 that its session had closed — a false deadline — and on an
+ * exchange holiday the agent was handed a countdown to a close that never came.
  */
-export function minutesToSessionClose(now: Date, exchange = 'NSE'): Block<number> {
+export function minutesToSessionClose(
+  now: Date,
+  exchange = 'NSE',
+  clock: SessionClock = liveSessionClock(),
+): Block<number> {
   const ist = new Date(now.getTime() + IST_OFFSET_MS);
   const day = ist.getUTCDay();
   if (day === 0 || day === 6) {
     return absent('not a trading day (IST weekend) — no session close to count down to');
   }
-  const remaining = minutesToClose(exchange, now);
-  const { openMin, closeMin } = sessionFor(exchange);
+  if (!clock.isTradingDay(exchange, now)) {
+    return absent(
+      `not a trading day for ${exchange} (exchange holiday) — no session close to count down to`,
+    );
+  }
+  const remaining = clock.minutesToClose(exchange, now);
+  // Today's window, late close included — never the static table's.
+  const { openMin, closeMin } = clock.tradingWindow(exchange, now) ?? sessionFor(exchange);
   const hhmm = (m: number) =>
     `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   if (remaining === null) {
@@ -170,7 +189,8 @@ export function minutesToSessionClose(now: Date, exchange = 'NSE'): Block<number
   }
   return present(
     remaining,
-    `derived from IST wall clock (${exchange} closes ${hhmm(closeMin)}; trading holidays are NOT modelled)`,
+    `derived from IST wall clock (${exchange} closes ${hhmm(closeMin)} today; exchange holidays ` +
+      'and the MCX late-close season are modelled)',
     now.toISOString(),
   );
 }
@@ -810,11 +830,11 @@ export class ContextPacketService {
         volumeRatio: numberBlock(
           tick.volumeRatio,
           // The REAL producer, interval included — not 'market-data', which is a
-          // service this number never passed through. The wording of the reason
-          // is left alone: "not available" claims nothing about the market.
+          // service this number never passed through. The reason names the real
+          // measure (last closed 15m bar vs VMA20) and claims nothing about the market.
           tick.structureSource,
           tick.structureAt ?? at,
-          'session volume vs average not available or not a finite reading',
+          'last closed 15m bar volume vs its 20-bar median (VMA20) not available or not a finite reading',
         ),
         oiWalls:
           tick.oiWallNow === null

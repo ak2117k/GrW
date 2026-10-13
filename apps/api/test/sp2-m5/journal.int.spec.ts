@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import type { PrismaService } from '../../src/common/prisma/prisma.service';
 import { balances } from '../../src/modules/trade-core/execution/ledger-math';
 import { CoreCashLedgerRepository } from '../../src/modules/trade-core/execution/repositories/core-cash-ledger.repository';
+import { CoreCorpusWriter } from '../../src/modules/trade-core/journal/core-corpus.writer';
 
 const url = process.env.DATABASE_URL_TEST;
 if (!url) throw new Error('DATABASE_URL_TEST must point at a throwaway database with all migrations applied');
@@ -121,5 +122,25 @@ describe('bounded ledger reads (J19) against SQL', () => {
     expect(agg.cash.toFixed(2)).toBe(full.cash.toFixed(2));
     expect(agg.blockedMargin.toFixed(2)).toBe(full.blockedMargin.toFixed(2));
     expect((await repo.heldMarginByVehicle(u)).get('CASH_INTRADAY')?.toFixed(2)).toBe('0.00');
+  });
+});
+
+describe('ai_decision_records from the core (O9) against SQL', () => {
+  it('a setup is written once; outcome patches merge', async () => {
+    const u = await newUser();
+    const w = new CoreCorpusWriter(db as unknown as PrismaService);
+    const intentId = `ci_${rid()}`;
+    const s = {
+      intentId, userId: u, decidedAt: new Date(), symbol: 'RELIANCE-EQ', exchange: 'NSE', vehicle: 'CASH_INTRADAY' as const, direction: 'LONG' as const,
+      strategyKey: 'ungated', strategyVersionId: 'csv_ungated_v1', setupGroupKey: `a|RELIANCE|x`, evidence: {}, ruleScore: 50, decision: { taken: true, reason: 'opened' },
+    };
+    await w.entrySetup(s);
+    await w.entrySetup({ ...s, decision: { taken: false, reason: 'second write ignored' } });
+    await w.outcome(intentId, { netPnl: 12.5 }, new Date());
+    await w.outcome(intentId, { priceAfterClose: 503 }, new Date());
+    const row = await db.aiDecisionRecord.findUnique({ where: { source_sourceId: { source: 'core', sourceId: intentId } } });
+    expect(row?.decision).toEqual({ taken: true, reason: 'opened' });
+    expect(row?.outcome).toEqual({ netPnl: 12.5, priceAfterClose: 503 });
+    await db.aiDecisionRecord.delete({ where: { id: row?.id as string } });
   });
 });

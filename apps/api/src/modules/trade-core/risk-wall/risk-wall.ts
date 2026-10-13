@@ -180,6 +180,11 @@ function evaluateEntry(intent: CoreEntryIntent, ctx: RiskContext): RiskVerdict {
   for (const m of problems) add('INVALID_INTENT', m);
 
   if (ctx.killSwitchActive) add('KILL_SWITCH', 'the kill switch is on: no new entries');
+  if (state.journalUnreadable === true) add('JOURNAL_UNAVAILABLE', 'the journal cannot be read (daily-loss latch, reconciliation block): no new entries');
+  const rb = state.reconBlocked;
+  if (rb && (rb.all || rb.strategyIds.includes(intent.strategyId))) {
+    add('RECON_BLOCKED', `a reconciliation finding blocks new entries${rb.all ? '' : ' for this strategy'} until the owner acknowledges it`);
+  }
   if (vehicle) {
     for (const p of requiredLimitPairs(vehicle)) {
       if (lim.raw(p.key, p.scope) === null) add('LIMIT_MISSING', `no ${p.key} limit is in force for ${p.scope}`);

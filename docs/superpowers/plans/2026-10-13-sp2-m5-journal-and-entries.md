@@ -8163,6 +8163,31 @@ logging ones in the reverted module.
       `dedupeKey` (the store keeps one, J11), so with the non-deduping `FakeJournal` the test asserts one distinct key
       and checks the first row, as the plan's own fill assertion already does. The plan's `toEqual([one row])` failed.
 
+15. **Stream E deviations (Tasks 14–16, 2026-10-13):**
+    - **Latch after the square-off (Task 14).** The plan wrote `DAILY_LOSS_LATCHED` (an awaited `recordNow`) *before*
+      `squareOffAll`, so a slow journal would delay the daily-loss square-off. `checkUser` now squares off first
+      (moved into `squareOffOnBreach`, unchanged behaviour) and latches after; the latch never throws. A latch that
+      failed on the run that squared off is retried on later checks **without** a second square-off (the `firedOn`
+      early return now also waits for the latch when a journal is bound). Tests: "a journal outage never blocks the
+      square-off …; the latch is retried without a second square-off", "a journal write that never returns does not
+      delay the square-off".
+    - **Journal reads never make `liveState` throw (Tasks 14/16).** The plan had `CoreRiskStateProvider` reject when
+      `latched`/`reconBlock` fail ("the wall rejects"). The same provider feeds `DailyLossMonitor`, which skips the user
+      when `liveState` throws, so a journal outage would have stopped the daily-loss square-off (an exit). The provider
+      now catches journal-read failures and sets a new optional `RiskLiveState.journalUnreadable`; `evaluateEntry` adds
+      `JOURNAL_UNAVAILABLE` (existing code) for it, so entries still fail closed and exits pass. Ledger/position read
+      failures still throw as before. Test: "a failing journal read does not throw (… square-off is never blocked);
+      entries are rejected JOURNAL_UNAVAILABLE"; `risk-wall.spec` "an unreadable journal".
+    - **`MARGIN_LEFT_ON_CLOSED` per position (Task 15),** as the note at the top of Task 15 says: the sum of
+      `marginByOrder` over the position's orders, `orderId: null`, fingerprint `MARGIN_LEFT_ON_CLOSED:<pos>:-`. Tests:
+      "a cleanly closed position (+X …, −X …, summarised) raises no finding", "a partially exited then closed position
+      nets to zero …", and in the reconciler spec, over the real M3 ledger, "a cleanly closed position raises no
+      NIGHTLY finding".
+    - Task 14's provider test uses the spec file's own `setup()` (ledger + memory position store + a null mark source)
+      instead of `lifecycleHarness`, and passes `NOW` explicitly (no fake timers).
+    - Task 16's `stuckExitSnapshot` fixture gains the position's filled entry order (and its fill qty): with only the
+      exit order, `reducePosition` reports entry 0 vs the row's 100 and a third finding (`POSITION_VS_ORDERS`) appears.
+
 ## Notes for later milestones (not in this plan)
 
 - **SP3 M6 guard rails on core positions (O12):** a sentinel review packet built from `core_positions` + their journal, and

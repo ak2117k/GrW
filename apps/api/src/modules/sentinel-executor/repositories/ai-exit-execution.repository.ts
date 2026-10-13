@@ -10,6 +10,7 @@ import {
   type SessionSource,
 } from '../domain/auto-exit.types';
 import { istDayStartUtc } from '../domain/exit-order';
+import { MANUAL_VERDICT_PREFIX } from '../domain/manual-exit';
 
 export interface PendingVerdict {
   id: string;
@@ -90,8 +91,44 @@ export class AiExitExecutionRepository {
           { status: { in: [...COUNTED_STATUSES] } },
           { status: 'FAILED', reason: { in: [...UNKNOWN_FATE_REASONS] } },
         ],
+        // The owner's manual "Exit now" never uses up the AI's daily cap.
+        NOT: { verdictId: { startsWith: MANUAL_VERDICT_PREFIX } },
       },
     });
+  }
+
+  /** Every manual attempt ever made for the tracker (the next attempt's sequence number - 1). */
+  countManualForTracker(trackerId: string): Promise<number> {
+    return this.prisma.aiExitExecution.count({
+      where: { trackerId, verdictId: { startsWith: MANUAL_VERDICT_PREFIX } },
+    });
+  }
+
+  /**
+   * The caller's manual attempt on this tracker that is still working: CLAIMED,
+   * or PLACED today (its order may be resting). A repeat click returns it.
+   */
+  findActiveManual(trackerId: string, userId: string, now: Date): Promise<AiExitExecution | null> {
+    return this.prisma.aiExitExecution.findFirst({
+      where: {
+        trackerId,
+        userId,
+        verdictId: { startsWith: MANUAL_VERDICT_PREFIX },
+        OR: [
+          { status: 'CLAIMED' },
+          { status: 'PLACED', createdAt: { gte: istDayStartUtc(now) } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  findById(id: string): Promise<AiExitExecution | null> {
+    return this.prisma.aiExitExecution.findUnique({ where: { id } });
+  }
+
+  findByVerdictId(verdictId: string): Promise<AiExitExecution | null> {
+    return this.prisma.aiExitExecution.findUnique({ where: { verdictId } });
   }
 
   /**

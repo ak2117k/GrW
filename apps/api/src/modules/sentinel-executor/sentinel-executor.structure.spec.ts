@@ -62,3 +62,19 @@ describe('sentinel-executor safety shape (plan Global Constraints, Review Focus)
     expect(poller).toMatch(/bootJobsEnabled\(\)/);
   });
 });
+
+describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
+  const all = () => files(MODULES).filter((f) => !f.endsWith('.spec.ts'));
+  it('only sentinel-executor reads ai_exit_executions — no corpus writer can mistake a manual exit for an AI decision', () => {
+    const offenders = all()
+      .filter((f) => !f.includes(`${join('modules', 'sentinel-executor')}`))
+      .filter((f) => /aiExitExecution|ai_exit_executions/.test(code(f)))
+      .map((f) => relative(MODULES, f).replace(/\\/g, '/'));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the executor never writes a sentinel_verdicts row (a manual exit is not fabricated as a verdict)', () => {
+    const offenders = source().filter((f) => /sentinelVerdict\s*\.\s*(create|createMany|upsert|update|updateMany)\(/.test(code(f)));
+    expect(offenders).toEqual([]);
+  });
+});

@@ -24,6 +24,7 @@ import {
   tickRupees,
 } from '../domain/exit-order';
 import { evaluateGuards } from '../domain/guards';
+import type { ExitTrigger } from '../domain/manual-exit';
 import {
   AiExitExecutionRepository,
   type PendingVerdict,
@@ -54,6 +55,7 @@ interface Run {
   cfg: AutoExitConfig;
   inst: Inst;
   sent: boolean;
+  trigger: ExitTrigger;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -83,17 +85,31 @@ export class SentinelExitExecutor {
     // 1. CLAIM — the idempotency anchor. Nothing touches the broker before this.
     const id = await this.repo.claim(v, cfg.mode);
     if (!id) return { status: 'DUPLICATE' };
+    return this.execute(id, v, cfg, now, 'AI');
+  }
+
+  /**
+   * Steps 2–7 for an attempt whose row `id` the caller has ALREADY claimed.
+   * 'MANUAL' (the owner's "Exit now", ManualExitService): always live whatever
+   * AI_AUTO_EXIT_MODE says (still refused when the exchange's qty unit is not
+   * configured), the AI switch/allow-list/age/cap guards do not apply, every
+   * position and order-book guard does, and the ordertag prefix is 'am'.
+   */
+  async execute(
+    id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date = new Date(), trigger: ExitTrigger = 'AI',
+  ): Promise<AiExitOutcome> {
+    const cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
 
     // 2. GUARDS — DB + clock only.
     const tracker = (await this.prisma.tradeTracker.findUnique({ where: { id: v.trackerId } })) as Tracker | null;
     const [countedToday, inFlight] = await Promise.all([
-      this.repo.countCountedSince(v.userId, istDayStartUtc(now), cfg.mode),
+      trigger === 'MANUAL' ? Promise.resolve(0) : this.repo.countCountedSince(v.userId, istDayStartUtc(now), cfg.mode),
       this.repo.hasInFlight(v.trackerId, id, now, tracker
         ? { userId: v.userId, exchange: String(tracker.exchange ?? '').toUpperCase(), token: String(tracker.token ?? '') }
         : undefined),
     ]);
     const g = evaluateGuards({
-      config: cfg, now, verdict: v, tracker, countedToday, inFlight,
+      config: cfg, now, verdict: v, tracker, countedToday, inFlight, trigger,
       isOpen: (ex, at) => this.clock.isOpen(ex, at),
     });
     if (!g.ok) {
@@ -113,7 +129,7 @@ export class SentinelExitExecutor {
       return this.finish(id, v, 'FAILED', 'INSTRUMENT_READ', { brokerMessage: errText(err) });
     }
 
-    const run: Run = { id, v, cfg, inst, sent: false };
+    const run: Run = { id, v, cfg, inst, sent: false, trigger };
 
     // 3–7. BROKER — one session lease, tier chosen once (ruling R1).
     try {
@@ -163,7 +179,7 @@ export class SentinelExitExecutor {
   /** The ONLY call site of placeOrder. Marks the run as sent before the call. */
   private place(s: UserBrokerSession, run: Run, o: OrderRequest, leg: 'M' | 'L'): Promise<ClassifiedPlacement> {
     run.sent = true;
-    return s.placeOrderClassified(o, aiExitOrderTag(run.v.id, leg));
+    return s.placeOrderClassified(o, aiExitOrderTag(run.v.id, leg, run.trigger));
   }
 
   /**
@@ -186,7 +202,7 @@ export class SentinelExitExecutor {
     if (!definitive) await this.sleep(TAG_LOOKUP_DELAY_MS);
     const book = await this.rows(() => s.getOrderBookEnvelope());
     if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
-    const mine = findOrderByTag(book, aiExitOrderTag(v.id, leg));
+    const mine = findOrderByTag(book, aiExitOrderTag(v.id, leg, run.trigger));
 
     if (mine && mine.status !== 'rejected' && mine.status !== 'cancelled') {
       this.logger.warn(`[ai-exit] ${o.symbol} placement answer was "${r.message}" but order ${mine.orderId || '?'} (${mine.status || 'unknown'}) carries our tag — treating as PLACED`);

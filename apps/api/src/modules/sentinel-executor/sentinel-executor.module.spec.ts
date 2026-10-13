@@ -10,6 +10,7 @@ import { SessionClock } from '../market-hub/session-clock';
 import { SentinelExecutorModule } from './sentinel-executor.module';
 import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
+import { ManualExitService } from './services/manual-exit.service';
 
 /** The module's real imports (Prisma, MarketData, CredentialDecryptor), faked. */
 const prisma = { $queryRaw: jest.fn(), aiExitExecution: { updateMany: jest.fn(), create: jest.fn() } };
@@ -43,6 +44,7 @@ describe('SentinelExecutorModule wiring', () => {
     await app.init();
     expect(ref.get(SentinelExitExecutor)).toBeInstanceOf(SentinelExitExecutor);
     expect(ref.get(SentinelExitPoller)).toBeInstanceOf(SentinelExitPoller);
+    expect(ref.get(ManualExitService)).toBeInstanceOf(ManualExitService);
     expect(ref.get(AI_EXIT_SESSION_CLOCK)).toBeInstanceOf(SessionClock);
     // Disabled by default: not one query, not one broker touch.
     expect(prisma.$queryRaw).not.toHaveBeenCalled();

@@ -512,3 +512,71 @@ describe('SentinelExitExecutor — cap per mode (review fix 4)', () => {
     expect(dry.repo.countCountedSince).toHaveBeenCalledWith('owner', expect.any(Date), 'dry-run');
   });
 });
+
+describe('SentinelExitExecutor — MANUAL trigger (owner Exit button)', () => {
+  const MV: PendingVerdict = {
+    id: 'man_cmtracker00000000000000001_1', userId: 'owner', trackerId: 't1',
+    symbol: 'CRUDEOIL15OCT268950CE', reason: 'MANUAL: owner exit', createdAt: new Date(NOW.getTime() - 3_600_000),
+  };
+  // AI auto-exit disabled, dry-run, nobody allow-listed, cap 0 — none of it governs the owner's own order.
+  const AI_OFF_DRY = parseAutoExitConfig({ AI_AUTO_EXIT_DAILY_CAP: '0', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units' });
+  const AI_OFF_NO_MCX = parseAutoExitConfig({ AI_AUTO_EXIT_DAILY_CAP: '0' });
+
+  it('a long is closed with ONE live SELL MARKET of |netqty| tagged am…, even though the AI mode is dry-run', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('0')])],
+      books: [env([]), env([{ orderid: 'O1', status: 'complete', text: '', symboltoken: '445566', exchange: 'MCX' }])],
+      counted: 99,
+    });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'FILLED' });
+    expect(h.repo.claim).not.toHaveBeenCalled(); // the caller already claimed
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    const [order, tag] = h.session.placeOrderClassified.mock.calls[0];
+    expect(order).toEqual(expect.objectContaining({ side: 'SELL', quantity: 100, orderType: 'MARKET', exchange: 'MCX', token: '445566' }));
+    expect(tag).toBe(aiExitOrderTag(MV.id, 'M', 'MANUAL'));
+    expect(tag.startsWith('amM')).toBe(true);
+    expect((h.sessions.withOwnerSession.mock.calls[0] as unknown[])[2]).toEqual({ allowEphemeralLogin: true });
+  });
+
+  it('an open order on the contract → SKIPPED: OPEN_ORDER_EXISTS, no order', async () => {
+    const h = harness({ books: [env([{ orderid: 'X', status: 'open', symboltoken: '445566', exchange: 'MCX', ordertag: '' }])] });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('an earlier AI exit (ax tag) today on the contract → SKIPPED: PRIOR_AI_EXIT_TODAY, no order', async () => {
+    const h = harness({ books: [env([{ orderid: 'X', status: 'complete', symboltoken: '445566', exchange: 'MCX', ordertag: 'axMabc' }])] });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'PRIOR_AI_EXIT_TODAY' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('no configured qty unit for MCX → SKIPPED: QTY_UNIT_UNCONFIGURED:MCX, no order', async () => {
+    const h = harness();
+    await expect(h.ex.execute('row1', MV, AI_OFF_NO_MCX, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'QTY_UNIT_UNCONFIGURED:MCX' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('another attempt in flight → SKIPPED: EXIT_IN_FLIGHT, no broker call', async () => {
+    const h = harness({ inFlight: true });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'EXIT_IN_FLIGHT' });
+    expect(h.sessions.withOwnerSession).not.toHaveBeenCalled();
+  });
+
+  it('exchange closed → SKIPPED: EXCHANGE_CLOSED, no broker call', async () => {
+    const h = harness({ open: false });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'EXCHANGE_CLOSED' });
+    expect(h.sessions.withOwnerSession).not.toHaveBeenCalled();
+  });
+
+  it('a non-definitive placement with no tagged order in the book → FAILED: ORDER_UNCERTAIN, never re-sent', async () => {
+    const h = harness({ place: [{ orderId: '', status: 'UNCERTAIN', message: 'timeout' }] });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'FAILED', reason: 'ORDER_UNCERTAIN' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not read the AI daily cap', async () => {
+    const h = harness({ positions: [env([posRow('100')]), env([posRow('0')])] });
+    await h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL');
+    expect(h.repo.countCountedSince).not.toHaveBeenCalled();
+  });
+});

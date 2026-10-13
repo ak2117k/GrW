@@ -12,7 +12,7 @@ const row = {
 
 describe('SentinelExecutorController', () => {
   const repo = { listForUser: jest.fn().mockResolvedValue([row]) };
-  const ctl = new SentinelExecutorController(repo as never);
+  const ctl = new SentinelExecutorController(repo as never, {} as never);
   afterEach(() => { delete process.env.AI_AUTO_EXIT_USER_IDS; repo.listForUser.mockClear(); });
 
   it('allow-listed user sees only their own rows, mapped to the DTO', async () => {
@@ -44,5 +44,33 @@ describe('SentinelExecutorController', () => {
     expect(repo.listForUser).toHaveBeenLastCalledWith('owner', 20);
     await ctl.list({ userId: 'owner', role: 'USER', email: 'o@x' }, '-5');
     expect(repo.listForUser).toHaveBeenLastCalledWith('owner', 20);
+  });
+});
+
+describe('SentinelExecutorController — manual exit', () => {
+  it('rows carry a trigger: AI for a sentinel verdict, MANUAL for the owner button', async () => {
+    const repo = { listForUser: jest.fn().mockResolvedValue([row, { ...row, id: 'r2', verdictId: 'man_t1_1', verdictReason: 'MANUAL: owner exit' }]) };
+    const ctl = new SentinelExecutorController(repo as never, {} as never);
+    const out = await ctl.list({ userId: 'admin1', role: 'ADMIN', email: 'a@x' });
+    expect(out.map((r) => r.trigger)).toEqual(['AI', 'MANUAL']);
+  });
+
+  it('POST exit/:trackerId passes the JWT caller (never a body) and returns the row as a DTO without waiting for the broker', async () => {
+    let finish: (v: unknown) => void = () => undefined;
+    const done = new Promise((r) => { finish = r; });
+    const manual = { request: jest.fn().mockResolvedValue({ row: { ...row, status: 'CLAIMED', verdictId: 'man_t1_1' }, started: true, done }) };
+    const ctl = new SentinelExecutorController({} as never, manual as never);
+    const user = { userId: 'owner', role: 'ADMIN', email: 'o@x' };
+    const out = await ctl.exit(user, 't1');
+    expect(manual.request).toHaveBeenCalledWith(user, 't1');
+    expect(out).toEqual(expect.objectContaining({ status: 'CLAIMED', trigger: 'MANUAL', verdictId: 'man_t1_1' }));
+    finish({ status: 'FILLED' });
+  });
+
+  it('a rejected background run is logged, never an unhandled rejection', async () => {
+    const manual = { request: jest.fn().mockResolvedValue({ row: { ...row, verdictId: 'man_t1_1' }, started: true, done: Promise.reject(new Error('db down')) }) };
+    const ctl = new SentinelExecutorController({} as never, manual as never);
+    await expect(ctl.exit({ userId: 'owner', role: 'ADMIN', email: 'o@x' }, 't1')).resolves.toBeDefined();
+    await new Promise((r) => setImmediate(r));
   });
 });

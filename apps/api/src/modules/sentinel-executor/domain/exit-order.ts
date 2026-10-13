@@ -1,6 +1,7 @@
 // apps/api/src/modules/sentinel-executor/domain/exit-order.ts
 import type { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 import type { AutoExitMode, QtyUnit } from './auto-exit.types';
+import type { ExitTrigger } from './manual-exit';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const PRODUCTS = new Set(['INTRADAY', 'CARRYFORWARD', 'DELIVERY']);
@@ -8,6 +9,9 @@ const TERMINAL = new Set(['complete', 'rejected', 'cancelled']);
 
 /** Prefix of every ordertag the executor sends (R4). auto-execution tags are 'ae' + idempotency-key hex, never 'ax'. */
 export const AI_EXIT_TAG_PREFIX = 'ax';
+/** Prefix of the owner's manual "Exit now" ordertags. Both prefixes count as a prior exit. */
+export const MANUAL_EXIT_TAG_PREFIX = 'am';
+const EXIT_TAG_PREFIXES = [AI_EXIT_TAG_PREFIX, MANUAL_EXIT_TAG_PREFIX];
 
 type Row = Record<string, unknown>;
 
@@ -148,10 +152,14 @@ export function limitFallbackPrice(
   return price > 0 ? price : null;
 }
 
-/** Angel `ordertag` (plan ruling R4): 'ax' + leg + last 17 alphanumerics of the verdict id. */
-export function aiExitOrderTag(verdictId: string, leg: 'M' | 'L'): string {
+/**
+ * Angel `ordertag` (plan ruling R4): 'ax' (AI) or 'am' (owner's manual exit) +
+ * leg + last 17 alphanumerics of the (possibly synthetic) verdict id. ≤ 20 chars.
+ */
+export function aiExitOrderTag(verdictId: string, leg: 'M' | 'L', trigger: ExitTrigger = 'AI'): string {
   const clean = String(verdictId).replace(/[^A-Za-z0-9]/g, '');
-  return `${AI_EXIT_TAG_PREFIX}${leg}${clean.slice(-17)}`;
+  const prefix = trigger === 'MANUAL' ? MANUAL_EXIT_TAG_PREFIX : AI_EXIT_TAG_PREFIX;
+  return `${prefix}${leg}${clean.slice(-17)}`;
 }
 
 /** Does this broker text say MARKET orders are refused for the instrument? (ruling R6) */
@@ -193,16 +201,18 @@ export function findOrderByTag(rows: unknown[], tag: string): (OrderBookEntry & 
 
 
 /**
- * Review fix 2 (PRIOR_AI_EXIT_TODAY): does today's book hold an AI-exit order on
- * this contract that may have moved the position (anything but rejected/cancelled)?
+ * Review fix 2 (PRIOR_AI_EXIT_TODAY): does today's book hold an exit order of
+ * ours — AI ('ax') or the owner's manual button ('am') — on this contract that
+ * may have moved the position (anything but rejected/cancelled)?
  * Angel's order book only carries the current trading day.
  */
 export function hasPriorAiExit(rows: unknown[], exchange: string, token: string): boolean {
-  return (rows as Row[]).some(
-    (o) => matches(o, exchange, token)
-      && String(o?.ordertag ?? '').startsWith(AI_EXIT_TAG_PREFIX)
-      && !isDeadOrderStatus(statusOf(o)),
-  );
+  return (rows as Row[]).some((o) => {
+    const tag = String(o?.ordertag ?? '');
+    return matches(o, exchange, token)
+      && EXIT_TAG_PREFIXES.some((p) => tag.startsWith(p))
+      && !isDeadOrderStatus(statusOf(o));
+  });
 }
 
 export function isTerminalOrderStatus(status: string): boolean {

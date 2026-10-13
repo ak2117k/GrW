@@ -31,6 +31,11 @@ describe('canExitTracker', () => {
     expect(canExitTracker({ ...T, kind: 'HOLDING' }, 'ADMIN')).toBe(false);
     expect(canExitTracker({ ...T, exchange: 'NSE' }, 'ADMIN')).toBe(false);
   });
+
+  it('hidden for a zero-qty tracker (the closing side is unknown: the broker may make it a BUY)', () => {
+    expect(canExitTracker({ ...T, qty: 0 }, 'ADMIN')).toBe(false);
+    expect(canExitTracker({ ...T, qty: -50 }, 'ADMIN')).toBe(true);
+  });
 });
 
 describe('exitConfirmText', () => {

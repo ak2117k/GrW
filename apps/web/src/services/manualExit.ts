@@ -14,12 +14,17 @@ export const MANUAL_EXIT_POLL_MS = 3_000;
 /** Stop polling after this long; a row still PLACED then is a resting order the owner checks at the broker. */
 export const MANUAL_EXIT_POLL_MAX_MS = 120_000;
 
-/** Show the Exit button: ADMIN (the owner) only, OPEN F&O POSITION rows only. */
-export function canExitTracker(t: Pick<TradeTracker, 'status' | 'kind' | 'exchange'>, role: string | null | undefined): boolean {
+/**
+ * Show the Exit button: ADMIN (the owner) only, OPEN F&O POSITION rows only, and
+ * never at qty 0 — the closing side would be unknown (the server sizes from the
+ * broker and may BUY to close a short), so the confirm text could not be truthful.
+ */
+export function canExitTracker(t: Pick<TradeTracker, 'status' | 'kind' | 'exchange' | 'qty'>, role: string | null | undefined): boolean {
   return (
     role === 'ADMIN' &&
     t.status === 'OPEN' &&
     t.kind === 'POSITION' &&
+    Number(t.qty) !== 0 && Number.isFinite(Number(t.qty)) &&
     MANUAL_EXIT_EXCHANGES.includes(String(t.exchange ?? '').toUpperCase())
   );
 }

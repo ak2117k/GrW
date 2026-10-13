@@ -25,6 +25,7 @@ import {
 } from '../../sell-futures-track/services/sell-futures-paper-account.service';
 import { SellFuturesRejectionRepository, SellFuturesRejectionReason } from '../../sell-futures-track/repositories/sell-futures-rejection.repository';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { handOffChartinkHit } from '../../trade-core/intake/alert-handoff';
 
 interface Hit {
   symbol: string;
@@ -497,6 +498,23 @@ export class ChartinkProcessService {
 
     // (The Anand dual-track formerly ran here, after scoring; it now runs at
     // step 1b above so it's never starved by the scoring backlog.)
+
+    // === 7. SP2 core fan-out (docs/superpowers/plans/2026-10-13-sp2-m5-journal-and-entries.md, O3/J2). ===
+    // After every silo path above: hand the scored hit to the trade core. Synchronous, never throws,
+    // never awaited — the core only queues it, so nothing the core does can change the silo outcome.
+    // With CORE_ENTRIES_MODE=off no intake is registered and this is a no-op.
+    handOffChartinkHit({
+      alertId,
+      symbol: hit.symbol,
+      tradingSymbol: resolved.tradingSymbol,
+      token: instrument.token,
+      exchange: 'NSE',
+      hitPrice: hit.hitPrice,
+      scanName: scanName ?? null,
+      side,
+      score: scoringResult.score,
+      receivedAt: new Date(),
+    });
   }
 
   /**

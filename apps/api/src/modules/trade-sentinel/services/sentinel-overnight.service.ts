@@ -559,7 +559,7 @@ export class SentinelOvernightService {
         oiWallNow: null,
         oiWallPrev: null,
         oiWallsAt: null,
-        greenFloorArmedLatched: storedFloorArmed(last),
+        greenFloorArmedLatched: storedFloorArmed(last, tick.entryPrice),
       },
       thesis,
       [fire],

@@ -240,6 +240,54 @@ export function answeredHoldings(envelope: unknown): unknown[] | null {
   return data.holdings == null ? [] : null;
 }
 
+/**
+ * The cost basis of one SmartAPI `getPosition` row: the FIRST STRICTLY
+ * POSITIVE candidate, in this order —
+ *
+ *   1. `avgnetprice`, 2. `netprice` — Angel's own net average (unchanged
+ *      intraday behaviour);
+ *   3. `totalbuyavgprice` (long) / `totalsellavgprice` (short) — carry-forward
+ *      and today's legs combined;
+ *   4. the quantity-weighted blend of the carry-forward leg (`cfbuyqty` x
+ *      `cfbuyavgprice`) and today's leg (`buyqty` x `buyavgprice`) — sell-side
+ *      fields for a short;
+ *   5. `cfbuyavgprice` / `cfsellavgprice`, then 6. `buyavgprice` / `sellavgprice`.
+ *
+ * WHY "first positive" and not `??`: Angel reports an absent figure as the
+ * STRING "0", which is not nullish. A position carried overnight reports
+ * `avgnetprice` "0" with its real cost only in the `cf*` fields, so `??`
+ * stopped on the "0" and tracked an overnight option at entry 0 — every rupee
+ * of its premium read as profit, and the sentinel armed a green floor on it.
+ * A NEGATIVE net average (a profitable partial exit) is not a cost either.
+ *
+ * Only the side the position is ON is consulted: a short's buy fields are its
+ * cover trades, not its cost. Returns 0 only when the broker reports no
+ * positive cost at all.
+ */
+export function positionEntryPrice(p: Record<string, unknown>, netQty: number): number {
+  const side = netQty < 0 ? 'sell' : 'buy';
+  const cfQty = toNum(p?.[`cf${side}qty`]);
+  const cfAvg = toNum(p?.[`cf${side}avgprice`]);
+  const dayQty = toNum(p?.[`${side}qty`]);
+  const dayAvg = toNum(p?.[`${side}avgprice`]);
+  const legs = [
+    { q: cfQty, a: cfAvg },
+    { q: dayQty, a: dayAvg },
+  ].filter((l) => l.q > 0 && l.a > 0);
+  const blendQty = legs.reduce((s, l) => s + l.q, 0);
+  const blend = blendQty > 0 ? legs.reduce((s, l) => s + l.q * l.a, 0) / blendQty : 0;
+
+  const candidates = [
+    toNum(p?.avgnetprice),
+    toNum(p?.netprice),
+    toNum(p?.[`total${side}avgprice`]),
+    blend,
+    cfAvg,
+    dayAvg,
+  ];
+  return candidates.find((c) => c > 0) ?? 0;
+}
+
 export function normalizePositions(positions: unknown): BookItem[] {
   if (!Array.isArray(positions)) return [];
   const out: BookItem[] = [];
@@ -256,9 +304,8 @@ export function normalizePositions(positions: unknown): BookItem[] {
           : '',
       exchange: p?.exchange ? String(p.exchange) : '',
       token,
-      // Angel One reports average net price under a few keys across product
-      // types; prefer avgnetprice, then netprice, then the buy average.
-      entryPrice: toNum(p?.avgnetprice ?? p?.netprice ?? p?.buyavgprice),
+      // First POSITIVE cost — "0" is how Angel says "absent" (see positionEntryPrice).
+      entryPrice: positionEntryPrice(p, qty),
       qty,
       ltp: toNum(p?.ltp),
     });
@@ -475,7 +522,11 @@ export class TradeTrackerService implements OnModuleDestroy {
 
     // Open a tracker for every first-seen book instrument.
     for (const [key, item] of bookByKey) {
-      if (openByKey.has(key)) continue; // already tracked — idempotent no-op
+      const existing = openByKey.get(key);
+      if (existing) {
+        await this.repairZeroEntry(userId, existing, item);
+        continue; // already tracked — otherwise an idempotent no-op
+      }
       const seed = item.ltp > 0 ? item.ltp : item.entryPrice;
       const { pnl, pnlPercent } = computePnl(item.entryPrice, seed, item.qty);
       await this.prisma.tradeTracker.create({
@@ -548,6 +599,37 @@ export class TradeTrackerService implements OnModuleDestroy {
       // are only 30 — leaving it queued starves a live position behind it.
       this.invalidateOpenTokens();
     }
+  }
+
+  /**
+   * Correct an OPEN tracker that was opened with no cost basis (entryPrice 0 or
+   * null) once the broker reports a positive one. Before this, entryPrice was
+   * written ONLY on create, so a tracker born at 0 (an overnight F&O position
+   * whose cost lives in Angel's `cf*` fields) stayed at 0 for life — its whole
+   * premium counted as profit in P&L, the sentinel's money block and green
+   * floor, and the broker corpus. A positive entry price is never touched:
+   * reconcile does not otherwise move prices, and a later partial fill must not
+   * rewrite the basis the agent has been reasoning from.
+   *
+   * pnl/pnlPercent are recomputed off the last LTP (else the broker's). The
+   * tracker stores nothing else derived from entry — the green floor is solved
+   * per cycle from this row, so the repaired value flows through on its own.
+   * WARN, once per repair: the next reconcile sees a positive entry and skips.
+   */
+  private async repairZeroEntry(userId: string, tracker: TradeTracker, item: BookItem): Promise<void> {
+    if ((tracker.entryPrice ?? 0) > 0 || !(item.entryPrice > 0)) return;
+    const price = tracker.lastLtp != null && tracker.lastLtp > 0 ? tracker.lastLtp : item.ltp;
+    const { pnl, pnlPercent } = computePnl(item.entryPrice, price, tracker.qty);
+    await this.prisma.tradeTracker.updateMany({
+      // status in the predicate: a concurrent close must not be un-done into a
+      // repaired-but-CLOSED row with a stale pnl.
+      where: { id: tracker.id, userId, status: 'OPEN' },
+      data: { entryPrice: item.entryPrice, pnl, pnlPercent },
+    });
+    this.logger.warn(
+      `[trade-tracker] repaired tracker ${tracker.id} (${tracker.symbol} ${tracker.exchange}): ` +
+        `entryPrice ${tracker.entryPrice ?? 'null'} -> ${item.entryPrice} from the broker cost; pnl ${pnl.toFixed(2)}`,
+    );
   }
 
   /**

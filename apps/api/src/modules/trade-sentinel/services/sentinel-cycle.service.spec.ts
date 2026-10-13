@@ -706,6 +706,49 @@ describe('SentinelCycleService — the green-floor latch', () => {
     expect(t.buildPacket.mock.calls[0][1].greenFloorArmedLatched).toBe(true);
   });
 
+  describe('a latch armed against a DIFFERENT entry price is void', () => {
+    // Prod 2026-10-13: an overnight option tracked at entry 0 armed a green
+    // floor (its whole premium read as profit). Once the tracker's entry is
+    // repaired, a latch armed from the bogus basis must not survive.
+    it('drops the in-process latch when the entry price changes', async () => {
+      const t = makeSvc();
+      t.build.mockResolvedValue([watched('t1')]);
+      t.tickFor.mockResolvedValue(tick({ entryPrice: 0, ltp: ARMED_LTP }));
+      await t.svc.runForUser(USER);
+      expect(t.buildPacket.mock.calls[0][1].greenFloorArmedLatched).toBe(true);
+
+      t.tickFor.mockResolvedValue(tick({ entryPrice: 100, ltp: 101 }));
+      await t.svc.runForUser(USER);
+      expect(t.buildPacket.mock.calls[1][1].greenFloorArmedLatched).toBe(false);
+    });
+
+    it('ignores a stored armed packet written at another entry price', async () => {
+      const t = makeSvc();
+      t.build.mockResolvedValue([watched('t1')]);
+      t.tickFor.mockResolvedValue(tick({ entryPrice: 100, ltp: 90 }));
+      t.recentForTracker.mockResolvedValue([
+        verdictRow({ packet: { position: { entryPrice: 0 }, money: { greenFloorArmed: true } } }),
+      ]);
+
+      await t.svc.runForUser(USER);
+
+      expect(t.buildPacket.mock.calls[0][1].greenFloorArmedLatched).toBe(false);
+    });
+
+    it('still honours a stored armed packet at the same entry price', async () => {
+      const t = makeSvc();
+      t.build.mockResolvedValue([watched('t1')]);
+      t.tickFor.mockResolvedValue(tick({ entryPrice: 100, ltp: 90 }));
+      t.recentForTracker.mockResolvedValue([
+        verdictRow({ packet: { position: { entryPrice: 100 }, money: { greenFloorArmed: true } } }),
+      ]);
+
+      await t.svc.runForUser(USER);
+
+      expect(t.buildPacket.mock.calls[0][1].greenFloorArmedLatched).toBe(true);
+    });
+  });
+
   it('does not invent a latch from an unreadable stored packet', async () => {
     const t = makeSvc();
     t.build.mockResolvedValue([watched('t1')]);
@@ -776,6 +819,14 @@ describe('storedFloorArmed', () => {
     ['a corrupt packet', { packet: 7 }, false],
   ])('reads %s as %s', (_label, last, expected) => {
     expect(storedFloorArmed(last as { packet?: unknown } | undefined)).toBe(expected);
+  });
+
+  it.each([
+    ['the same entry', { position: { entryPrice: 1.4 }, money: { greenFloorArmed: true } }, true],
+    ['a different entry (armed off a zero basis)', { position: { entryPrice: 0 }, money: { greenFloorArmed: true } }, false],
+    ['no recorded entry (older packets)', { money: { greenFloorArmed: true } }, true],
+  ])('given the current entry price, reads a packet at %s as %s', (_label, packet, expected) => {
+    expect(storedFloorArmed({ packet }, 1.4)).toBe(expected);
   });
 });
 

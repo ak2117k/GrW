@@ -143,6 +143,71 @@ describe('trade-tracker pure helpers', () => {
     it('returns [] for a non-array', () => {
       expect(normalizePositions(null)).toEqual([]);
     });
+
+    // Field names below are exactly the SmartAPI getPosition payload keys (see
+    // smartapi-javascript/test/api_config.js getPosition fixture). Every value
+    // is a numeric STRING, and "0" is how Angel reports an absent figure.
+    const blank = {
+      buyqty: '0', sellqty: '0', buyavgprice: '0', sellavgprice: '0',
+      cfbuyqty: '0', cfsellqty: '0', cfbuyavgprice: '0', cfsellavgprice: '0',
+      totalbuyavgprice: '0', totalsellavgprice: '0', avgnetprice: '0', netprice: '0',
+    };
+    const entryOf = (row: Record<string, string>) =>
+      normalizePositions([{ symboltoken: '1', tradingsymbol: 'X', exchange: 'NFO', ltp: '2.5', ...blank, ...row }])[0]
+        .entryPrice;
+
+    it('intraday long: the net average', () => {
+      expect(entryOf({ netqty: '400', buyqty: '400', buyavgprice: '1.4', totalbuyavgprice: '1.4', avgnetprice: '1.4', netprice: '1.4' })).toBe(1.4);
+    });
+
+    it('carry-forward-only long (the COCHINSHIP case): avgnetprice/netprice "0" fall through to the overnight cost', () => {
+      // Prod 2026-10-13: entryPrice 0 on an overnight 400-qty option because
+      // `"0" ?? …` never falls through — "0" is not nullish.
+      expect(entryOf({ netqty: '400', cfbuyqty: '400', cfbuyavgprice: '1.4' })).toBe(1.4);
+    });
+
+    it('carry-forward long prefers the combined total average when the broker gives one', () => {
+      expect(entryOf({ netqty: '400', cfbuyqty: '400', cfbuyavgprice: '1.4', totalbuyavgprice: '1.4' })).toBe(1.4);
+    });
+
+    it('mixed long (cf + today) with no net/total average: quantity-weighted blend of both legs', () => {
+      // 400 overnight @ 1.4 + 200 today @ 2.0 → (560 + 400) / 600 = 1.6
+      expect(
+        entryOf({ netqty: '600', cfbuyqty: '400', cfbuyavgprice: '1.4', buyqty: '200', buyavgprice: '2.0' }),
+      ).toBeCloseTo(1.6, 10);
+    });
+
+    it('carry-forward-only short: the overnight SELL cost, never a buy-side figure', () => {
+      expect(
+        entryOf({ netqty: '-50', cfsellqty: '50', cfsellavgprice: '210', buyqty: '0', buyavgprice: '0', cfbuyavgprice: '0' }),
+      ).toBe(210);
+    });
+
+    it('intraday short: the net average', () => {
+      expect(entryOf({ netqty: '-50', sellqty: '50', sellavgprice: '200', totalsellavgprice: '200', avgnetprice: '200' })).toBe(200);
+    });
+
+    it('short partly covered today ignores the cover (buy) leg', () => {
+      // 100 sold overnight @ 210, 50 covered today @ 190 → 50 short, cost 210.
+      expect(
+        entryOf({ netqty: '-50', cfsellqty: '100', cfsellavgprice: '210', buyqty: '50', buyavgprice: '190' }),
+      ).toBe(210);
+    });
+
+    it('a negative net average (profitable partial exit) is skipped for a positive cost', () => {
+      expect(entryOf({ netqty: '10', avgnetprice: '-80', netprice: '-80', buyqty: '100', buyavgprice: '10', totalbuyavgprice: '10' })).toBe(10);
+    });
+
+    it('numeric zeros and missing keys behave like string zeros', () => {
+      const [item] = normalizePositions([
+        { symboltoken: '1', tradingsymbol: 'X', exchange: 'NFO', netqty: 400, avgnetprice: 0, netprice: 0, cfbuyavgprice: 1.4 },
+      ]);
+      expect(item.entryPrice).toBe(1.4);
+    });
+
+    it('stays 0 only when the broker reports no positive cost anywhere', () => {
+      expect(entryOf({ netqty: '400' })).toBe(0);
+    });
   });
 
   describe('computeOhlcWindow', () => {
@@ -397,6 +462,67 @@ describe('TradeTrackerService', () => {
 
       expect(prisma.tradeTracker.create).not.toHaveBeenCalled();
       expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+    });
+
+    describe('repairs an OPEN tracker opened with a zero entry price', () => {
+      // The COCHINSHIP tracker: opened 2026-10-12 with entryPrice 0, then left
+      // alone forever because reconcile only ever wrote entryPrice on create.
+      const cfBook = [
+        {
+          symboltoken: '777', tradingsymbol: 'COCHINSHIP27OCT261400CE', exchange: 'NFO', netqty: '400',
+          avgnetprice: '0', netprice: '0', cfbuyqty: '400', cfbuyavgprice: '1.4', ltp: '2.5',
+        },
+      ];
+
+      it('writes the broker cost and recomputes pnl/pnlPercent off the last LTP', async () => {
+        const log = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'cochin', token: '777', kind: 'POSITION', exchange: 'NFO', entryPrice: 0, qty: 400, lastLtp: 2.5, pnl: 1000, pnlPercent: 0 }),
+        ]);
+
+        await service.reconcile('user_1', cfBook, []);
+
+        expect(prisma.tradeTracker.create).not.toHaveBeenCalled();
+        expect(prisma.tradeTracker.updateMany).toHaveBeenCalledTimes(1);
+        const call = prisma.tradeTracker.updateMany.mock.calls[0][0];
+        expect(call.where).toEqual({ id: 'cochin', userId: 'user_1', status: 'OPEN' });
+        expect(call.data.entryPrice).toBe(1.4);
+        expect(call.data.pnl).toBeCloseTo(440, 6); // (2.5 - 1.4) * 400
+        expect(call.data.pnlPercent).toBeCloseTo((1.1 / 1.4) * 100, 6);
+        expect(call.data).not.toHaveProperty('status');
+        expect(log.mock.calls.map((c) => String(c[0])).join('')).toMatch(/cochin.*entryPrice 0 -> 1\.4/);
+        log.mockRestore();
+      });
+
+      it('falls back to the broker ltp when the tracker has no last LTP', async () => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'cochin', token: '777', kind: 'POSITION', entryPrice: 0, qty: 400, lastLtp: null }),
+        ]);
+
+        await service.reconcile('user_1', cfBook, []);
+
+        expect(prisma.tradeTracker.updateMany.mock.calls[0][0].data.pnl).toBeCloseTo(440, 6);
+      });
+
+      it('leaves it alone when the broker still reports no positive cost', async () => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'cochin', token: '777', kind: 'POSITION', entryPrice: 0, qty: 400 }),
+        ]);
+
+        await service.reconcile('user_1', [{ ...cfBook[0], cfbuyavgprice: '0' }], []);
+
+        expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+      });
+
+      it('never overwrites a positive entry price', async () => {
+        prisma.tradeTracker.findMany.mockResolvedValue([
+          tracker({ id: 'cochin', token: '777', kind: 'POSITION', entryPrice: 1.2, qty: 400 }),
+        ]);
+
+        await service.reconcile('user_1', cfBook, []);
+
+        expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
+      });
     });
 
     it('scopes the OPEN lookup by userId', async () => {

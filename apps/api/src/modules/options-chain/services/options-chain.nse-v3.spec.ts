@@ -55,7 +55,10 @@ describe('OptionsChainService on the NSE v3 chain', () => {
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
   });
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
 
   it('computes PCR, max pain and OI walls for NIFTY from the v3 fixture', async () => {
     mockNse(fixture('nse-contract-info-nifty.json'), fixture('nse-v3-nifty.json'));
@@ -87,6 +90,13 @@ describe('OptionsChainService on the NSE v3 chain', () => {
   });
 
   it('serves the v3 chain through getOptionsChainWithSpot and persists an NSE snapshot', async () => {
+    // The fixture's expiry is fixed (2026-10-13); greeks need time to expiry, so pin
+    // only Date to a morning before it (timers stay real for the setImmediate below).
+    jest.useFakeTimers({
+      now: new Date('2026-10-12T04:00:00.000Z'),
+      doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+        'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+    });
     mockNse(fixture('nse-contract-info-nifty.json'), fixture('nse-v3-nifty.json'));
     const { svc, prisma } = makeService();
 

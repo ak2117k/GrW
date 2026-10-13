@@ -124,8 +124,9 @@ export interface SentinelStructure extends NearestLevels {
  * `context-factor-flip.tripwire.ts`, which hard-codes the same three names.
  */
 export const FACTORS_NO_SETUP =
-  'the level engine returned no active setup for this symbol, and the context-scoring factors are ' +
-  'computed only as part of a setup — so no factor was evaluated. This is a FAILURE TO LOOK, not a ' +
+  'the level engine returned no active setup for this symbol (greeks and volatility are scored only ' +
+  'as part of a setup) and had no higher-timeframe trend reading for mtfTrend — so no factor was ' +
+  'evaluated. This is a FAILURE TO LOOK, not a ' +
   'finding: do not read it as a market with no directional context.';
 
 export const FACTORS_NOT_SCORED =
@@ -156,6 +157,10 @@ export const FACTORS_NO_BOOK =
  * Anchoring to UP rather than to the POSITION's side is deliberate too: a
  * position's side is fixed for its life, so either frame would be stable for one
  * position, but only this one is comparable across positions in the corpus.
+ *
+ * EXCEPT the side-agnostic factors ({@link SIDE_AGNOSTIC_FACTORS}): they ignore
+ * `FactorInput.side` and score the same under BUY and SELL, so mirroring them
+ * for SELL would MANUFACTURE the very flip this function exists to prevent.
  */
 export function normaliseFactors(
   factors: ReadonlyArray<{ name: string; value: number; isStub: boolean }>,
@@ -168,9 +173,35 @@ export function normaliseFactors(
     // comparison downstream (`Math.sign(NaN)` is NaN, which is !== every sign),
     // so it would read as a flip that never happened.
     if (f.isStub || !Number.isFinite(f.value)) continue;
-    out[f.name] = f.value * sign;
+    out[f.name] = SIDE_AGNOSTIC_FACTORS.has(f.name) ? f.value : f.value * sign;
   }
   return out;
+}
+
+/**
+ * Factors whose value does not depend on the setup's side. `volatility`
+ * (VolatilityFactor) is direction-symmetric by design — "vol up" is scored
+ * supportive for BUY and SELL alike — so it is already in a side-free frame.
+ */
+export const SIDE_AGNOSTIC_FACTORS: ReadonlySet<string> = new Set(['volatility']);
+
+/**
+ * Factors that read an NSE-only gauge and say nothing about a commodity.
+ * `volatility` is INDIA VIX (NIFTY options); on an MCX book it is a false input.
+ */
+const NSE_ONLY_FACTORS: ReadonlySet<string> = new Set(['volatility']);
+
+/**
+ * The mtfTrend factor straight from the higher-TF trend, in the UP frame:
+ * bullish +1, bearish −1, neutral 0, null when there is no reading. The same
+ * mapping MtfTrendFactor applies (re-expressed side-free), so it can be built on
+ * BOTH arms of `analyze()` without a setup and without any extra call.
+ */
+export function mtfTrendUp(
+  trend: { bias: 'bullish' | 'bearish' | 'neutral' } | null | undefined,
+): number | null {
+  if (!trend) return null;
+  return trend.bias === 'bullish' ? 1 : trend.bias === 'bearish' ? -1 : 0;
 }
 
 /**
@@ -526,19 +557,23 @@ export class SentinelChartContextAdapter implements ChartContextShim {
        * `levelBreak` had nothing to fire on. That is a failure to look reported
        * as a finding, on the one block the whole thesis is judged against.
        *
-       * `volumeRatio` below stays setup-only, and that is correct: it is computed
-       * as part of SCORING a setup, not as part of the book.
+       * `volumeRatio` follows the same rule, for the same reason: it is the last
+       * closed bar's volume over its VMA20 — a fact about the market that
+       * `analyze()` now reports on both arms. It used to be setup-only here, AND
+       * every setup carried a hard-coded 0, so the sentinel saw either no volume
+       * or a false "0x". Null (no reading) passes through as null.
        */
       const levels = result.levels ?? null;
+      const rawVolume = (result as { volumeRatio?: number | null }).volumeRatio;
       const volumeRatio =
-        result.kind === 'setup' && Number.isFinite(result.volumeRatio) ? result.volumeRatio : null;
+        typeof rawVolume === 'number' && Number.isFinite(rawVolume) ? rawVolume : null;
 
       // The context-scoring factors ride along on the SAME analyze() the level
       // book comes from — they are computed as part of scoring a setup, so there
       // is no separate call to make and no `SetupContext` to rebuild. Which of
       // the three empty cases we are in is recorded, because "no setup" and "all
       // stubs" would otherwise both reach the packet as a bare `{}`.
-      const { factorValues, factorsReason } = this.factorsFrom(result);
+      const { factorValues, factorsReason } = this.factorsFrom(result, instrument.exchange);
 
       return this.store(key, { at: Date.now(), levels, volumeRatio, factorValues, factorsReason });
     } catch (err) {
@@ -561,25 +596,37 @@ export class SentinelChartContextAdapter implements ChartContextShim {
    * never reach it unexplained — `contextFactorFlip` has already been dark once
    * for want of this, and a silent sensor is indistinguishable from a calm one.
    */
-  private factorsFrom(result: AnalyzeResult): {
+  private factorsFrom(
+    result: AnalyzeResult,
+    exchange: string,
+  ): {
     factorValues: Record<string, number>;
     factorsReason: string | null;
   } {
-    if (result.kind !== 'setup') {
-      return { factorValues: {}, factorsReason: FACTORS_NO_SETUP };
-    }
+    // mtfTrend is a pure function of `higherTimeframeTrend`, which BOTH arms
+    // carry — so it is built here directly, on every arm, rather than waiting
+    // for a setup to be scored. No extra call: the trend was already computed.
+    const mtf = mtfTrendUp(result.higherTimeframeTrend);
+    const withMtf = (values: Record<string, number>): Record<string, number> =>
+      mtf === null ? values : { ...values, mtfTrend: mtf };
+    const settle = (values: Record<string, number>, emptyReason: string) => {
+      const factorValues = withMtf(values);
+      return Object.keys(factorValues).length > 0
+        ? { factorValues, factorsReason: null }
+        : { factorValues, factorsReason: emptyReason };
+    };
+
+    if (result.kind !== 'setup') return settle({}, FACTORS_NO_SETUP);
     const factors = result.contextFactors;
     // Optional on the type: pre-scoring code paths and persisted-only setups
     // legitimately carry no breakdown at all, which is not the same fact as a
     // breakdown that turned out to be entirely stubs.
-    if (!Array.isArray(factors) || factors.length === 0) {
-      return { factorValues: {}, factorsReason: FACTORS_NOT_SCORED };
+    if (!Array.isArray(factors) || factors.length === 0) return settle({}, FACTORS_NOT_SCORED);
+    const normalised = normaliseFactors(factors, result.side);
+    if (exchange.toUpperCase() === 'MCX') {
+      for (const name of NSE_ONLY_FACTORS) delete normalised[name];
     }
-    const factorValues = normaliseFactors(factors, result.side);
-    if (Object.keys(factorValues).length === 0) {
-      return { factorValues, factorsReason: FACTORS_ALL_STUBBED };
-    }
-    return { factorValues, factorsReason: null };
+    return settle(normalised, FACTORS_ALL_STUBBED);
   }
 
   private warnOnce(key: string, message: string): void {

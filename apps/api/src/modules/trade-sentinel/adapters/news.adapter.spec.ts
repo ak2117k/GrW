@@ -85,3 +85,12 @@ describe('SentinelNewsAdapter', () => {
     expect(result?.value).toHaveLength(8);
   });
 });
+
+describe('SentinelNewsAdapter — commodity minis read their benchmark’s headlines', () => {
+  it('GOLDM looks up GOLD, CRUDEOILM looks up CRUDEOIL', async () => {
+    const t = make();
+    await t.svc.recentFor('GOLDM');
+    await t.svc.recentFor('CRUDEOILM');
+    expect(t.getNewsForSymbol.mock.calls.map((c) => c[0])).toEqual(['GOLD', 'CRUDEOIL']);
+  });
+});

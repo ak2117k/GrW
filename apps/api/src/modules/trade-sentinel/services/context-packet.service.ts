@@ -7,9 +7,12 @@ import { computeGreenFloor, type Segment, type Side } from '../charges';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import type { TripwireFire } from '../tripwires/types';
 import type { Ownership, RosterEntry } from './roster.service';
-import { minutesToClose, sessionFor } from '../market-sessions';
+import { sessionFor } from '../market-sessions';
+import type { SessionClock } from '../../market-hub/session-clock';
+import { liveSessionClock } from '../overnight/overnight-calendar';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
-import type { CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
+import { newsKeyFor } from '../../news/services/underlying-news-aliases';
+import type { CommodityCueKey, CommodityQuote, CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -143,15 +146,32 @@ export function istWallClock(now: Date): string {
  * false deadline with provenance attached, at exactly the hours when crude and
  * gold are most active. `exchange` defaults to NSE so an omitted argument keeps
  * the prior behaviour rather than silently widening someone's session.
+ *
+ * HOLIDAYS AND THE MCX LATE CLOSE ARE MODELLED, through the market hub's
+ * `SessionClock` (default: {@link liveSessionClock}, i.e. the shipped holiday
+ * calendar plus `HUB_MCX_LATE_CLOSE`). The plain `market-sessions.ts` window
+ * knew neither, so from 2026-11-02 an MCX position still trading to 23:55 was
+ * told at 23:31 that its session had closed — a false deadline — and on an
+ * exchange holiday the agent was handed a countdown to a close that never came.
  */
-export function minutesToSessionClose(now: Date, exchange = 'NSE'): Block<number> {
+export function minutesToSessionClose(
+  now: Date,
+  exchange = 'NSE',
+  clock: SessionClock = liveSessionClock(),
+): Block<number> {
   const ist = new Date(now.getTime() + IST_OFFSET_MS);
   const day = ist.getUTCDay();
   if (day === 0 || day === 6) {
     return absent('not a trading day (IST weekend) — no session close to count down to');
   }
-  const remaining = minutesToClose(exchange, now);
-  const { openMin, closeMin } = sessionFor(exchange);
+  if (!clock.isTradingDay(exchange, now)) {
+    return absent(
+      `not a trading day for ${exchange} (exchange holiday) — no session close to count down to`,
+    );
+  }
+  const remaining = clock.minutesToClose(exchange, now);
+  // Today's window, late close included — never the static table's.
+  const { openMin, closeMin } = clock.tradingWindow(exchange, now) ?? sessionFor(exchange);
   const hhmm = (m: number) =>
     `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   if (remaining === null) {
@@ -170,7 +190,8 @@ export function minutesToSessionClose(now: Date, exchange = 'NSE'): Block<number
   }
   return present(
     remaining,
-    `derived from IST wall clock (${exchange} closes ${hhmm(closeMin)}; trading holidays are NOT modelled)`,
+    `derived from IST wall clock (${exchange} closes ${hhmm(closeMin)} today; exchange holidays ` +
+      'and the MCX late-close season are modelled)',
     now.toISOString(),
   );
 }
@@ -492,6 +513,42 @@ const STUB_REASON =
 const FII_POST_CLOSE = 'FII/DII is published post-close (~18:00–20:00 IST) and can never be an intraday trigger';
 
 /**
+ * Why `macro.globalCues` is absent when the cues are off. The same text whether
+ * the switch is off or the service is not wired — both mean "never fetched".
+ * It used to read as a stub "(gold, crude-oil, nasdaq)", naming cues the module
+ * did not even have.
+ */
+const CUES_OFF =
+  'market cues are not switched on (MARKET_CUES_ENABLED is not true, or the market-cues service is not wired into ' +
+  'this process)';
+const GLOBAL_CUES_OFF =
+  `${CUES_OFF}, so no US index, US index future, GIFT Nifty, commodity benchmark or USD/INR reading is held`;
+/** Same for `macro.fiiDii`: it used to call itself a context-scoring stub — it is the cues switch. */
+const FII_DII_OFF = `${CUES_OFF}, so no FII/DII figure is held`;
+
+/**
+ * MCX underlying → the benchmarks its price follows. Minis read their parent's.
+ * USD/INR is added for every MCX position: an MCX price is the dollar benchmark
+ * times the rupee.
+ */
+const MCX_BENCHMARKS: Record<string, CommodityCueKey[]> = {
+  CRUDEOIL: ['wtiCrude', 'brentCrude'],
+  CRUDEOILM: ['wtiCrude', 'brentCrude'],
+  GOLD: ['gold'],
+  GOLDM: ['gold'],
+  GOLDGUINEA: ['gold'],
+  GOLDPETAL: ['gold'],
+  GOLDTEN: ['gold'],
+  SILVER: ['silver'],
+  SILVERM: ['silver'],
+  SILVERMIC: ['silver'],
+  SILVER1000: ['silver'],
+  NATURALGAS: ['naturalGas'],
+  NATGASMINI: ['naturalGas'],
+  COPPER: ['copper'],
+};
+
+/**
  * `macro.fiiDii` and `macro.globalCues` from the market-cues cache. Every
  * reading keeps its OWN source time — never the packet's — and its status; a
  * cue the cache does not hold is a nested absence with its reason.
@@ -499,15 +556,17 @@ const FII_POST_CLOSE = 'FII/DII is published post-close (~18:00–20:00 IST) and
 function macroBlocks(
   read: { snapshot: MarketCuesSnapshot | null; reason: string },
   now: Date,
+  position: { exchange: string; underlying: string | null },
 ): { fiiDii: Block<Prisma.InputJsonValue>; globalCues: Block<Prisma.InputJsonValue> } {
   const snap = read.snapshot;
   if (!snap || !snap.enabled) {
-    // Market cues off (or not wired): EXACTLY the pre-cues blocks, so the live
-    // packet — and with it every live verdict — is unchanged until the owner
-    // switches MARKET_CUES_ENABLED on. The agent sends the v2 prompt then too.
+    // Market cues off (or not wired): the pre-cues SHAPE — both blocks absent,
+    // nothing fetched — until the owner switches MARKET_CUES_ENABLED on. Only
+    // the reasons changed: they now name the switch instead of calling these a
+    // stub. The agent sends the no-cues prompt (v2.1) then too.
     return {
-      fiiDii: absent(`${STUB_REASON}. Note FII/DII is published post-close and can never be an intraday trigger.`),
-      globalCues: absent(`${STUB_REASON} (gold, crude-oil, nasdaq)`),
+      fiiDii: absent(`${FII_DII_OFF}. Note FII/DII is published post-close and can never be an intraday trigger.`),
+      globalCues: absent(GLOBAL_CUES_OFF),
     };
   }
   const f = snap.fiiDii;
@@ -564,6 +623,37 @@ function macroBlocks(
         )
       : absent(r.reason ?? 'no reading');
 
+  const commodity = (r: CueRecord<CommodityQuote> | undefined): Block<Prisma.InputJsonValue> =>
+    r?.values
+      ? present(
+          {
+            last: r.values.last,
+            previousClose: r.values.previousClose,
+            change: r.values.change,
+            changePercent: r.values.changePercent,
+            contract: r.values.contract,
+            status: r.status === 'stale' ? 'stale' : 'ok',
+            ...(r.reason ? { note: r.reason } : {}),
+          },
+          `${r.source}; ${r.basis}`,
+          r.sourceTime as string,
+        )
+      : absent(r?.reason ?? 'no reading');
+
+  // MCX only: the benchmark(s) this commodity follows, and USD/INR.
+  const mcx: Record<string, Block<Prisma.InputJsonValue>> = {};
+  if (String(position.exchange ?? '').toUpperCase() === 'MCX') {
+    const name = String(position.underlying ?? '').toUpperCase();
+    const keys = MCX_BENCHMARKS[name];
+    if (keys) for (const k of keys) mcx[k] = commodity(snap.commodities?.[k]);
+    else {
+      mcx.mcxBenchmark = absent(
+        `no benchmark quote is fetched for the MCX underlying ${name || '(unresolved)'} — its global direction is UNSEEN, not flat`,
+      );
+    }
+    mcx.usdInr = commodity(snap.commodities?.usdInr);
+  }
+
   const parts = {
     nasdaq: us(snap.us.nasdaq),
     sp500: us(snap.us.sp500),
@@ -571,6 +661,7 @@ function macroBlocks(
     nasdaqFutures: us(snap.us.nasdaqFutures),
     sp500Futures: us(snap.us.sp500Futures),
     giftNifty: gift(snap.gift),
+    ...mcx,
   };
   const shown = Object.values(parts).filter((b) => b.available) as Array<{ at: string }>;
   const globalCues: Block<Prisma.InputJsonValue> =
@@ -693,6 +784,17 @@ export class ContextPacketService {
     const structureSymbol = tick.structureSymbol;
     const structureInstrument = tick.structureInstrument ?? null;
 
+    /**
+     * WHETHER THE NEWS FEED CAN SEE THIS UNDERLYING AT ALL. Articles are tagged
+     * with listed companies plus a fixed set of commodity / index aliases; an
+     * MCX commodity or an index outside that set can never be a relatedSymbol.
+     * Asking anyway returns nothing, and that nothing would reach the agent as
+     * "no headlines" and "0 in 30 minutes" — a claim about the market that is
+     * really a claim about our tagger. Both news blocks state THAT instead.
+     */
+    const newsKey = structureSymbol ? newsKeyFor(structureSymbol, entry.exchange) : null;
+    const untaggable = newsKey && newsKey.key === null ? newsKey.reason : null;
+
     const [levelBook, headlines] = structureSymbol
       ? await Promise.all([
           this.safely(
@@ -704,12 +806,14 @@ export class ContextPacketService {
             at,
             'level book unavailable for this symbol',
           ),
-          this.safely(
-            () => this.news.recentFor(structureSymbol),
-            'news-aggregator.service',
-            at,
-            'news aggregator returned nothing for this symbol',
-          ),
+          untaggable
+            ? Promise.resolve(absent(untaggable))
+            : this.safely(
+                () => this.news.recentFor(structureSymbol),
+                'news-aggregator.service',
+                at,
+                'news aggregator returned nothing for this symbol',
+              ),
         ])
       : // NO FALLBACK TO THE TRADINGSYMBOL. That call is guaranteed to miss, and
         // `safely` would report the miss as "level book unavailable for this
@@ -810,11 +914,11 @@ export class ContextPacketService {
         volumeRatio: numberBlock(
           tick.volumeRatio,
           // The REAL producer, interval included — not 'market-data', which is a
-          // service this number never passed through. The wording of the reason
-          // is left alone: "not available" claims nothing about the market.
+          // service this number never passed through. The reason names the real
+          // measure (last closed 15m bar vs VMA20) and claims nothing about the market.
           tick.structureSource,
           tick.structureAt ?? at,
-          'session volume vs average not available or not a finite reading',
+          'last closed 15m bar volume vs its 20-bar median (VMA20) not available or not a finite reading',
         ),
         oiWalls:
           tick.oiWallNow === null
@@ -828,7 +932,10 @@ export class ContextPacketService {
               ),
       },
       macro: {
-        ...macroBlocks(this.readMacro(now), now),
+        ...macroBlocks(this.readMacro(now), now, {
+          exchange: entry.exchange,
+          underlying: tick.structureSymbol ?? null,
+        }),
         sector: absent(STUB_REASON),
         // The reason travels WITH the emptiness. "No setup on the underlying",
         // "scored but every factor is a stub" and "no level book at all" are
@@ -839,8 +946,9 @@ export class ContextPacketService {
             ? present(
                 tick.factorValues,
                 'context-scoring via signal-generator.analyze (real, non-stub factors only; ' +
-                  'sign is normalised so positive = supportive of a move UP, independent of ' +
-                  "the setup's own side)",
+                  'directional factors are sign-normalised so positive = supportive of a move UP, ' +
+                  "independent of the setup's own side; volatility is side-agnostic — positive means " +
+                  'India VIX rose day-on-day, not a move UP — and is never sent for MCX)',
                 at,
               )
             : absent(
@@ -849,12 +957,14 @@ export class ContextPacketService {
       },
       news: {
         headlines,
-        freshCount: numberBlock(
-          tick.freshNewsCount,
-          'news-aggregator.service (headlines in the last 30 minutes)',
-          at,
-          'no 30-minute headline count available for this symbol',
-        ),
+        freshCount: untaggable
+          ? absent(untaggable)
+          : numberBlock(
+              tick.freshNewsCount,
+              'news-aggregator.service (headlines in the last 30 minutes)',
+              at,
+              'no 30-minute headline count available for this symbol',
+            ),
       },
       session: {
         nowIst: istWallClock(now),

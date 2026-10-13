@@ -6,7 +6,7 @@ import { NewsSentimentService } from './news-sentiment.service';
 import { NewsFilterDto } from '../dto/news.dto';
 import { NewsArticle } from '@prisma/client';
 
-interface RSSSource {
+export interface RSSSource {
   name: string;
   url: string;
   category: 'indian' | 'global' | 'sector' | 'company';
@@ -103,6 +103,23 @@ const RSS_SOURCES: RSSSource[] = [
   },
 ];
 
+/**
+ * Economic Times "Commodities" RSS — crude, gold, silver, natural gas and base
+ * metals, published through the MCX evening. Without it the MCX underlyings'
+ * news blocks depended on the odd commodity story in the general feeds.
+ * Verified 2026-10-12: HTTP 200, text/xml, channel "Commodities-Markets-Economic
+ * Times". Override with NEWS_COMMODITIES_RSS_URL, or set it to `off`.
+ */
+export const ET_COMMODITIES_RSS_URL =
+  'https://economictimes.indiatimes.com/markets/commodities/rssfeeds/1808152121.cms';
+
+/** Every RSS source this process fetches. `env` is injectable for tests. */
+export function rssSources(env: Record<string, string | undefined> = process.env): RSSSource[] {
+  const raw = (env.NEWS_COMMODITIES_RSS_URL ?? '').trim();
+  if (raw.toLowerCase() === 'off') return RSS_SOURCES;
+  return [...RSS_SOURCES, { name: 'ET Commodities', url: raw || ET_COMMODITIES_RSS_URL, category: 'sector' }];
+}
+
 @Injectable()
 export class NewsAggregatorService {
   private readonly logger = new Logger(NewsAggregatorService.name);
@@ -121,7 +138,7 @@ export class NewsAggregatorService {
     this.logger.log('Starting news fetch from all RSS sources...');
 
     const results = await Promise.allSettled(
-      RSS_SOURCES.map((source) => this.fetchFromSource(source)),
+      rssSources().map((source) => this.fetchFromSource(source)),
     );
 
     let allArticles: ParsedArticle[] = [];

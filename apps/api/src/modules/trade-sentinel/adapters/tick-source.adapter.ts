@@ -21,6 +21,7 @@ import {
 } from '../services/context-packet.service';
 import { SENTINEL_LEVEL_SOURCE, SentinelChartContextAdapter } from './chart-context.adapter';
 import { normaliseSymbol } from '../symbols';
+import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 
 /**
  * The window the packet's `freshCount` block names, and therefore the window
@@ -392,7 +393,7 @@ export class SentinelTickSource implements TickSource {
           : this.charts.structureFor(structureSymbol, underlyingLtp, row.userId)
         : Promise.resolve(NO_STRUCTURE),
       // Null, not 0 — "no reading" and "nothing published" must stay apart.
-      structureSymbol ? this.freshNewsCount(structureSymbol) : Promise.resolve(null),
+      structureSymbol ? this.freshNewsCount(structureSymbol, row.exchange) : Promise.resolve(null),
     ]);
 
     return {
@@ -742,10 +743,17 @@ export class SentinelTickSource implements TickSource {
    * news" and null as "no reading", and those must stay distinguishable: a
    * failing aggregator reported as 0 tells the agent, with provenance, that
    * nothing has been published.
+   *
+   * NULL, TOO, for an underlying no article can ever be tagged with (an MCX
+   * commodity or an index with no headline mapping — see
+   * `underlying-news-aliases.ts`). Counting there always returns 0, and a 0
+   * is a claim that nothing was published when the truth is that we cannot see.
    */
-  private async freshNewsCount(symbol: string): Promise<number | null> {
+  private async freshNewsCount(symbol: string, exchange?: string | null): Promise<number | null> {
+    const news = newsKeyFor(symbol, exchange);
+    if (news.key === null) return null;
     try {
-      const articles = await this.news.getNewsForSymbol(normaliseSymbol(symbol));
+      const articles = await this.news.getNewsForSymbol(news.key);
       const cutoff = Date.now() - FRESH_NEWS_WINDOW_MS;
       return articles.filter((a) => a.publishedAt.getTime() >= cutoff).length;
     } catch (err) {

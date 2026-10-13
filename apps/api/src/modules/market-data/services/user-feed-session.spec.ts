@@ -597,3 +597,32 @@ describe('restClient (sentinel auto-exit borrows the warm client)', () => {
     }
   });
 });
+
+describe('streamAuth (the order-update stream rides the live session, never its own login)', () => {
+  it('is null before connect, the live tokens after, null after dispose', async () => {
+    const { s, d } = makeSession();
+    expect(s.streamAuth()).toBeNull();
+    await s.ensureConnected();
+    expect(s.streamAuth()).toEqual({ jwtToken: 'jwt', feedToken: 'feed', clientCode: 'C1', apiKey: 'k' });
+    expect(d.smartApi.generateSession).toHaveBeenCalledTimes(1);
+    await s.dispose();
+    expect(s.streamAuth()).toBeNull();
+  });
+
+  it('goes null while a re-login is in flight and stays null if it fails', async () => {
+    jest.useFakeTimers();
+    try {
+      const d = makeDeps();
+      const { s } = makeSession(d);
+      await s.ensureConnected();
+      expect(s.streamAuth()).not.toBeNull();
+      d.smartApi.generateSession.mockResolvedValue({ data: {} });
+      d.ws.handlers['close']();
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(s.streamAuth()).toBeNull();
+      await s.dispose();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});

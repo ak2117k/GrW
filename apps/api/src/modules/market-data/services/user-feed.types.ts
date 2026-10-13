@@ -26,8 +26,25 @@ export interface WarmRestClient {
   clientId: string;
 }
 
+/**
+ * The live session's own tokens, lent to Angel's order-update WebSocket so it
+ * rides the SAME login as the feed (a second login on one client code kills the
+ * feed's stream). Secrets: never log, never persist.
+ */
+export interface SessionStreamAuth {
+  jwtToken: string;
+  feedToken: string;
+  clientCode: string;
+  apiKey: string;
+}
+
 /** The per-user session surface the manager depends on (structural, for fakes). */
 export interface UserFeedSessionLike {
+  /**
+   * The live login's tokens for a companion stream (order updates), or null
+   * while not logged in / between logins. Never logs in. Optional: fakes omit it.
+   */
+  streamAuth?(): SessionStreamAuth | null;
   /**
    * The session's authenticated REST client, or null. Lets the sentinel
    * auto-exit place an order on the owner's account without a second Angel

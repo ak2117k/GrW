@@ -4,6 +4,7 @@ import type { TickData } from '../../../common/interfaces/broker-adapter.interfa
 import type { DecryptedBrokerCredentials } from '../../credential-vault/execution/credential-decryptor';
 import type {
   FeedState,
+  SessionStreamAuth,
   StateListener,
   TickListener,
   TokenRef,
@@ -120,6 +121,13 @@ export class UserFeedSession implements UserFeedSessionLike {
   } | null = null;
   /** Client code — kept for logout() on dispose; not a secret credential. */
   private clientId: string | null = null;
+  /**
+   * The current login's tokens, for Angel's order-update stream (which must
+   * ride this login, not a second one). The api key is already held by the
+   * SmartAPI client and the feed socket for the session's life; this keeps no
+   * more than they do. Null whenever {@link restReady} is false.
+   */
+  private auth: SessionStreamAuth | null = null;
 
   private connected = false;
   /** True only between a successful generateSession and the next connect attempt / dispose. */
@@ -213,6 +221,12 @@ export class UserFeedSession implements UserFeedSessionLike {
   restClient(): WarmRestClient | null {
     if (this.disposed || !this.restReady || !this.smartApi || !this.clientId) return null;
     return { client: this.smartApi, clientId: this.clientId };
+  }
+
+  /** See UserFeedSessionLike.streamAuth. Never logs in. */
+  streamAuth(): SessionStreamAuth | null {
+    if (this.disposed || !this.restReady || !this.auth) return null;
+    return { ...this.auth };
   }
 
   /**
@@ -457,6 +471,7 @@ export class UserFeedSession implements UserFeedSessionLike {
     this.connectPromise = null;
     this.connected = false;
     this.restReady = false;
+    this.auth = null;
 
     this.closeSocket();
 
@@ -496,6 +511,7 @@ export class UserFeedSession implements UserFeedSessionLike {
       // A fresh login is starting: the previous client is about to be replaced
       // (and its JWT superseded), so stop lending it until this one succeeds.
       this.restReady = false;
+      this.auth = null;
       this.smartApi = this.deps.smartApiFactory(creds.apiKey);
       const totp = generateTOTP(creds.totpSecret);
       const session = await this.smartApi.generateSession(creds.clientId, creds.password, totp);
@@ -507,6 +523,7 @@ export class UserFeedSession implements UserFeedSessionLike {
       }
 
       this.clientId = creds.clientId;
+      this.auth = { jwtToken, feedToken, clientCode: creds.clientId, apiKey: creds.apiKey };
       this.restReady = true;
       await this.openSocket({
         jwttoken: jwtToken,

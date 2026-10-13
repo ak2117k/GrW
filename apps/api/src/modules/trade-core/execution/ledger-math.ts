@@ -98,6 +98,11 @@ export function istDate(at: Date): string {
   return new Date(at.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
+/** IST midnight of `at`'s IST day (M5 ruling J19: day-bounded reads). */
+export function istDayStart(at: Date): Date {
+  return new Date(`${istDate(at)}T00:00:00.000+05:30`);
+}
+
 export function nextDate(day: string): string {
   const d = new Date(`${day}T00:00:00.000Z`);
   d.setUTCDate(d.getUTCDate() + 1);

@@ -4,7 +4,7 @@ import { chargesForLeg, type Segment } from '../../trade-sentinel/charges';
 import { VEHICLES, type Vehicle } from '../strategies/blocks/block-types';
 import type { CoreFunds, CoreOrder, CoreOrderPatch, CoreOrderRequest, CorePositionView, FillCharges, OrderSide } from './execution.types';
 import { isWholeLots, maxLotsProblem, priceShapeProblem, validateOrder } from './fill-model';
-import { applyPositionFill, balances, dailyMtfInterest, FLAT, istDate, money, mtfInterestDays, ZERO, type PositionState } from './ledger-math';
+import { applyPositionFill, balances, dailyMtfInterest, FLAT, istDate, istDayStart, money, mtfInterestDays, ZERO, type PositionState } from './ledger-math';
 import { marginFor, marginRefPrice, mtfFunded, proportionalRelease } from './margin';
 import { CoreOrderEvents } from './order-events';
 import { isOpenState, nextState, transition } from './order-state';
@@ -588,16 +588,17 @@ export class PaperLedgerService {
   /**
    * SP2 M4: today's (IST) net realised P&L per core position: REALISED_PNL plus CHARGES rows
    * of the position's orders. MTF interest is per holding (token), not per position, so it
-   * counts in dayStats' user total only.
+   * counts in dayStats' user total only. Reads today's rows only (M5 ruling J19).
    */
   async netPnlTodayByPosition(userId: string, now: Date): Promise<Map<string, Dec>> {
-    const day = istDate(now);
-    const [rows, orders] = await Promise.all([this.ledger.listForUser(userId), this.orders.listForUser(userId)]);
+    const rows = (await this.ledger.listForUserSince(userId, istDayStart(now))).filter(
+      (r) => (r.type === 'REALISED_PNL' || r.type === 'CHARGES') && r.orderId !== null,
+    );
+    const orders = await this.orders.listByIds(userId, [...new Set(rows.map((r) => r.orderId as string))]);
     const positionOf = new Map(orders.filter((o) => o.positionId).map((o) => [o.id, o.positionId as string]));
     const out = new Map<string, Dec>();
     for (const r of rows) {
-      if ((r.type !== 'REALISED_PNL' && r.type !== 'CHARGES') || r.orderId === null || istDate(r.createdAt) !== day) continue;
-      const pid = positionOf.get(r.orderId);
+      const pid = positionOf.get(r.orderId as string);
       if (pid) out.set(pid, (out.get(pid) ?? ZERO).plus(r.amount));
     }
     return out;
@@ -611,12 +612,9 @@ export class PaperLedgerService {
   }
 
   async funds(userId: string): Promise<CoreFunds> {
-    const [rows, orders] = await Promise.all([this.ledger.listForUser(userId), this.orders.listForUser(userId)]);
-    const b = balances(rows);
-    const vehicleOf = new Map(orders.map((o) => [o.id, o.vehicle]));
-    const deployedByVehicle = Object.fromEntries(
-      VEHICLES.map((v) => [v, heldMargin(rows, (r) => r.orderId !== null && vehicleOf.get(r.orderId) === v).toFixed(2)]),
-    ) as Record<Vehicle, string>;
+    const [sums, held] = await Promise.all([this.ledger.sumsByType(userId), this.ledger.heldMarginByVehicle(userId)]);
+    const b = balances(sums);
+    const deployedByVehicle = Object.fromEntries(VEHICLES.map((v) => [v, (held.get(v) ?? ZERO).toFixed(2)])) as Record<Vehicle, string>;
     return {
       userId,
       deposited: b.deposited.toFixed(2),
@@ -630,15 +628,37 @@ export class PaperLedgerService {
     };
   }
 
-  /** Today's (IST) net realised P&L (realised − charges − interest) and accepted entries, for the Risk Wall. */
+  /** Today's (IST) net realised P&L (realised − charges − interest) and accepted entries, for the Risk Wall. Day-bounded (J19). */
   async dayStats(userId: string, now: Date): Promise<{ netPnlToday: Dec; entriesToday: number }> {
-    const day = istDate(now);
-    const [rows, orders] = await Promise.all([this.ledger.listForUser(userId), this.orders.listForUser(userId)]);
+    const since = istDayStart(now);
+    const [rows, orders] = await Promise.all([this.ledger.listForUserSince(userId, since), this.orders.listForUserSince(userId, since)]);
     const netPnlToday = rows
-      .filter((r) => (r.type === 'REALISED_PNL' || r.type === 'CHARGES' || r.type === 'MTF_INTEREST') && istDate(r.createdAt) === day)
+      .filter((r) => r.type === 'REALISED_PNL' || r.type === 'CHARGES' || r.type === 'MTF_INTEREST')
       .reduce((a, r) => a.plus(r.amount), ZERO);
-    const entriesToday = orders.filter((o) => o.purpose === 'ENTRY' && o.state !== 'REJECTED' && istDate(o.submittedAt) === day).length;
+    const entriesToday = orders.filter((o) => o.purpose === 'ENTRY' && o.state !== 'REJECTED').length;
     return { netPnlToday, entriesToday };
+  }
+
+  /** M5 summaries (J16): the ledger rows of a position's orders plus MTF interest on its token over [fromDay, toDay]. */
+  async ledgerRowsForPosition(userId: string, orderIds: readonly string[], token: string, fromDay: string, toDay: string): Promise<LedgerEntry[]> {
+    const [own, interest] = await Promise.all([this.ledger.listForOrders(userId, orderIds), this.ledger.listInterest(userId, token, fromDay, toDay)]);
+    return [...own, ...interest];
+  }
+
+  /** M5 journal and reconciliation: the fills of these orders. */
+  async fillsFor(userId: string, orderIds: readonly string[]): Promise<FillRow[]> {
+    return this.fills.listForOrders(userId, orderIds);
+  }
+
+  /** M5 reconciliation (J17): margin each order still holds (−Σ of its MARGIN_* rows). */
+  async marginByOrder(userId: string, orderIds: readonly string[]): Promise<Map<string, Dec>> {
+    const rows = await this.ledger.listForOrders(userId, orderIds);
+    return new Map(orderIds.map((id) => [id, heldMargin(rows, (r) => r.orderId === id)]));
+  }
+
+  /** M5 nightly reconciliation: tokens with an MTF_INTEREST row for `day`. */
+  async interestTokensOn(userId: string, day: string): Promise<Set<string>> {
+    return this.ledger.interestTokensOn(userId, day);
   }
 
   /** The position on (vehicle, token) from its fills, and the margin it holds, from `rows`. */

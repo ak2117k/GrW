@@ -37,6 +37,9 @@ export const TENANT_MODELS: ReadonlySet<string> = new Set([
   'CoreCashLedger',
   // SP2 M4: per-user core positions.
   'CorePosition',
+  // SP2 M5: the per-user journal and closed-trade summaries.
+  'CoreJournal',
+  'CoreTradeSummary',
 ]);
 
 /**

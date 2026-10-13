@@ -14,6 +14,7 @@ import ProjectionBoxOverlay from '@/components/charts/ProjectionBoxOverlay';
 import EvidenceLevelOverlay from '@/components/charts/EvidenceLevelOverlay';
 import SentinelOverlay from '@/components/charts/SentinelOverlay';
 import SentinelPanel from '@/components/charts/SentinelPanel';
+import AiExitsList from '@/components/charts/AiExitsList';
 import { useSentinelPositions } from '@/hooks/useSentinelPositions';
 import { positionsForChart } from '@/utils/matchPositionToChart';
 import TrendLineOverlay from '@/components/charts/TrendLineOverlay';
@@ -706,6 +707,11 @@ export default function ChartsPage() {
           your position outranks the general analysis of the symbol. Renders
           nothing when you hold none of it. */}
       {!isFullscreen && <SentinelPanel positions={sentinelHere} />}
+
+      {/* What the auto-exit did (last 24 h). A sibling, not inside the panel:
+          once an exit closes the tracker the sentinel card disappears (R15).
+          Renders nothing for accounts the endpoint answers 403/404. */}
+      {!isFullscreen && <AiExitsList />}
 
       {/* Scrollable info panel below the chart. Hidden in fullscreen so the
           chart truly fills the viewport. */}

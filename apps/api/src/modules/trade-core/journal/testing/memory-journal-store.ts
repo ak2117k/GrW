@@ -10,6 +10,10 @@ export class MemoryJournalStore {
   summaries: TradeSummary[] = [];
   /** While true every write rejects (a journal outage). */
   failWrites = false;
+  /** A write containing a row this matches rejects (a permanently bad row). */
+  rejectRow: ((e: JournalEntry) => boolean) | null = null;
+  /** How many append calls were made. */
+  appendCalls = 0;
   private seq = 0;
 
   private nextId(prefix: string): string {
@@ -19,7 +23,9 @@ export class MemoryJournalStore {
 
   readonly repo = {
     append: async (entries: readonly JournalEntry[]) => {
+      this.appendCalls += 1;
       if (this.failWrites) throw new Error('journal down');
+      if (this.rejectRow && entries.some((e) => this.rejectRow?.(e))) throw new Error('violates core_journal_shape_check');
       let n = 0;
       for (const e of entries) {
         if (e.dedupeKey && this.rows.some((r) => r.dedupeKey === e.dedupeKey)) continue;

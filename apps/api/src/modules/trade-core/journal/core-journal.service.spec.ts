@@ -34,7 +34,7 @@ describe('CoreJournalService (ruling J10, Review Focus 3)', () => {
     journal.record(e('POSITION_STATE'));
     await journal.flush();
     expect(store.rows).toEqual([]);
-    expect(journal.status()).toMatchObject({ pending: 2, failures: 1, lastError: 'journal down' });
+    expect(journal.status()).toMatchObject({ pending: 2, failures: 3, lastError: 'journal down' }); // the batch, then each row alone
     store.failWrites = false;
     await journal.flush();
     expect(store.rows.map((r) => r.type)).toEqual(['BLIND', 'POSITION_STATE']);
@@ -79,7 +79,8 @@ describe('CoreJournalService under a request tenant scope (review fix 1: cross-t
   it("a USER's request that drains the buffer writes the owner's pending rows under the OWNER's userId", async () => {
     const { cls, tenant, db, journal } = realStack();
     db.failOnce();
-    journal.record(row('owner', 'FILL')); // background row; the first write fails so it stays pending
+    db.failOnce();
+    journal.record(row('owner', 'FILL')); // background row; its writes fail (batch, then alone) so it stays pending
     await journal.flush();
     expect(journal.status().pending).toBe(1);
     await cls.run(async () => {
@@ -98,5 +99,36 @@ describe('CoreJournalService under a request tenant scope (review fix 1: cross-t
       await journal.recordNow(row('owner', 'RECON_MISMATCH'));
     });
     expect(db.rows.coreJournal.map((r) => r.userId)).toEqual(['owner']);
+  });
+});
+
+describe('CoreJournalService — a permanently failing row (review fix 4)', () => {
+  it('never blocks the rows behind it, and is dropped (counted, logged) once it has failed twice', async () => {
+    const { store, journal } = setup();
+    store.rejectRow = (x) => x.type === 'BLIND';
+    journal.record(e('BLIND'));
+    journal.record(e('FILL'));
+    journal.record(e('ORDER_STATE'));
+    await journal.flush();
+    expect(store.rows.map((r) => r.type)).toEqual(['FILL', 'ORDER_STATE']);
+    expect(journal.status()).toMatchObject({ pending: 1, dropped: 0 });
+    journal.record(e('STOP_MOVED'));
+    await journal.flush();
+    expect(store.rows.map((r) => r.type)).toEqual(['FILL', 'ORDER_STATE', 'STOP_MOVED']);
+    expect(journal.status()).toMatchObject({ pending: 0, dropped: 1 });
+  });
+
+  it('an outage is not a bad row: nothing is dropped however often it is retried, and each retry is bounded', async () => {
+    const { store, journal } = setup();
+    store.failWrites = true;
+    for (let i = 0; i < 10; i += 1) journal.record(e('FILL'));
+    await journal.flush();
+    store.appendCalls = 0;
+    for (let i = 0; i < 5; i += 1) await journal.flush();
+    expect(journal.status()).toMatchObject({ pending: 10, dropped: 0 });
+    expect(store.appendCalls).toBeLessThanOrEqual(5 * 5);
+    store.failWrites = false;
+    await journal.flush();
+    expect(store.rows).toHaveLength(10);
   });
 });

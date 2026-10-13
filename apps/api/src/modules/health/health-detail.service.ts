@@ -28,6 +28,11 @@ export const EXPECTED_JOBS: string[] = [
   'hub-candle-fixup',
   // SP1 M5 30-day OI snapshot prune (MarketHubService). Recorded daily, as a no-op success without chains.
   'hub-oi-prune',
+  // SP2 M3/M5 trade-core jobs (plans 2026-10-11-sp2-m3-execution.md, 2026-10-13-sp2-m5-journal-and-entries.md).
+  'core-mtf-interest',
+  'core-recon-nightly',
+  'core-skip-followup',
+  'core-broker-corpus',
 ];
 
 /** The narrow slice of MarketFeedService this surface reads. */

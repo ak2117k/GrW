@@ -43,6 +43,7 @@ in before the task that owns it.
 - **New owner request: real broker trades into the corpus** — closed `trade_trackers` (kind `POSITION`, F&O) with their
   outcome joined to their `sentinel_verdicts`, written idempotently as `ai_decision_records` (`source 'broker:tracker'`,
   `sourceId` = tracker id). Specified as **Task 13b** in Stream D; built by Stream D, wired by Task 19.
+- **J9 confirmed by owner 2026-10-13: journal-mode (dry-run) setups are NOT written to the corpus — hypothetical outcomes would mislead training.**
 
 ## Preconditions (the controller checks these before dispatching)
 
@@ -8217,6 +8218,42 @@ logging ones in the reverted module.
       branched from). It equals the expected list plus `apps/web/src/components/layout/navItems.spec.ts` (Stream F, item 13).
     - **Opt-in DB test** ran on a throwaway `postgres:16` on port 55440 (not 55434), `DIRECT_URL` set, removed after.
 
+## Review fixes (2026-10-13)
+
+Code review of `feature/sp2-m5` at `624ed68`; one commit per item, each with a test that failed first. No schema
+change; the M5 migration has no CHECK on skip reasons (they live in the `payload`), so `STALE_ALERT` needed none.
+
+1. **Cross-tenant journal writes (must fix)** — `acc8840`. `CoreJournal` and `CoreTradeSummary` are `TENANT_MODELS` and
+   the tenant extension's `createMany` stamps the active tenant's `userId` over every row; `record()` drained the shared
+   buffer from whichever request called it, so a USER's kill-switch / limit-change request wrote the owner's pending
+   rows as its own. `CoreJournalRepository.append` (used by `record` and `recordNow`) and
+   `CoreTradeSummaryRepository.createIfAbsent` (write and read-back) now run in a fresh tenant-less CLS context
+   (`journal/repositories/system-scope.ts`: `cls.run({ ifNested: 'override' })`, awaited inside the scope;
+   `runWithoutTenant` is not used because it mutates the request's store). Tests: `core-journal.service.spec.ts`
+   "a USER's request that drains the buffer writes the owner's pending rows under the OWNER's userId", "recordNow
+   inside a USER's request keeps the entry's own userId"; `core-trade-summary.repository.spec.ts`.
+2. **Stale / re-processed alerts (must fix)** — `d3a6714`. `ChartinkProcessService.processAlert` passes the stored
+   alert's creation time (`ChartinkAlert.receivedAt`) into the new `ChartinkHit.alertAt` (null when unreadable). The
+   intake skips with the new reason **`STALE_ALERT`** when the alert is older than `EntryConfig.maxAlertAgeMs`
+   (`CORE_ENTRY_MAX_ALERT_AGE_SEC`, default 180 s) or its time is unknown (fail closed), right after `ALERT_RECEIVED`
+   and again just before the Risk Wall. `SKIP_REASONS` and the web label map carry it. Corpus: `CoreCorpusWriter.entrySetup`
+   with `decision.taken = true` now replaces an earlier skipped row of the same intent (decision, evidence, decidedAt,
+   setupGroupKey, ruleScore); a skip never overwrites. Note: a large multi-hit alert is rate-limited per hit, so its
+   later hits can age past 180 s and skip as `STALE_ALERT` — intended (raise the env value if that bites).
+3. **`FILLS_VS_ORDER` false positive (should fix)** — `79e88fa`. The snapshot reads orders then fills; a fill committing
+   in between looked like a mismatch. The check now waits until both the order's `updatedAt` and its newest fill's
+   `createdAt` (new `ReconSnapshot.lastFillAtByOrder`) are older than `stuckAfterMs`, like `POSITION_VS_ORDERS`.
+4. **A permanently failing journal row stalled the buffer** — `f44a515`. A failed batch is retried row by row; a row that
+   fails on its own while others write takes a strike and is dropped (counted in `dropped`, logged once) at the second.
+   When nothing writes it is an outage: nothing dropped, the retry bounded (3 single-row tries + 1 probe).
+5. **`unackedMismatches` loaded all history every 5 s** — `0168f01`. One SQL anti-join (`NOT EXISTS` the `ack:<id>` row,
+   via the unique `dedupeKey` index); covered against SQL in `test/sp2-m5`.
+6. **Broker corpus loaded every verdict nightly** — `42ff5d1`. Verdicts are read only for trackers without a record
+   (none when all are done) and only the columns the record uses (no `packet` / `evidence`).
+8. **`GET /journal/status` exposed platform-wide state** — `81743b0`. Admins see everything; anyone else gets the same
+   shape with the entries switch, zeros for the intake / journal counters, and their own positions and findings.
+9. **`day` accepted impossible dates (500)** — `28d67aa`. `JournalDayQueryDto.day` must be a real calendar date → 400.
+
 ## Notes for later milestones (not in this plan)
 
 - **SP3 M6 guard rails on core positions (O12):** a sentinel review packet built from `core_positions` + their journal, and
@@ -8274,3 +8311,4 @@ logging ones in the reverted module.
 | Date | Whole suite (API) | Typecheck (error lists) | Opt-in DB test + drift | Notes |
 |---|---|---|---|---|
 | 2026-10-13 | `feature/sp2-m5` `0dd84a6..8164d9f` (Task 19 `bb5ef7e`, Task 20 `8164d9f`). `npx jest --ci --maxWorkers=2`: 400 suites / 4870 tests, **4869 pass, 1 fail** — `options-chain.nse-v3.spec.ts` "serves the v3 chain … persists an NSE snapshot" (pre-existing, not M5: hard-coded NIFTY expiry `2026-10-13` = the run day, after 15:30 IST its delta is 0; untouched since `a9e3bd2`). New: `m5-e2e.spec.ts` 10/10, `m5-tenant.spec.ts` 2/2, `trade-core.module.spec.ts` 9/9, `expected-jobs.spec.ts` 1/1. Safety specs green: `SentinelCycleService — shadow mode is structural` ("cannot reach anything that places an order …"), `sentinel-executor.structure.spec.ts`, `cron-timezone.spec.ts`, `chartink-core-handoff.spec.ts`. Web: `vitest run` 79 files / 703 tests pass, `tsc --noEmit` clean, `vite build` ok | API `tsc --noEmit -p tsconfig.json` sorted error list (line numbers stripped) **identical** to the pre-change baseline at `0dd84a6` (244 lines, all pre-existing silo files; none in trade-core) | Opt-in `test/sp2-m5` (all migrations applied by `prisma migrate deploy` to a throwaway `postgres:16`, 127.0.0.1:55440): **8/8 pass**; container removed. Drift: M5 files outside trade-core (from `a55132d`) = expected list + `navItems.spec.ts`; `LIVE_TRADING_ENABLED` only in `silo-entry-recheck.spec.ts`; `@Cron` ×4 in trade-core (mtf-interest, recon-nightly, skip-followup, broker-corpus), all `Asia/Kolkata`; `openPosition(` only in `intake/core-entry-intake.service.ts`; `handOffChartinkHit(` only in `chartink-process.service.ts`; P1 `c26d613` is an ancestor | Stream G deviations: item 16. Defaults (`CORE_ENTRIES_MODE` unset) = intake never registers, zero entry orders (module spec + e2e safety tests) |
+| 2026-10-13 (review fixes) | `624ed68..28d67aa` (8 commits, items 1–6, 8, 9). Scoped `jest src/modules/trade-core src/modules/chartink`: 99 suites / 1022 tests pass. Whole suite `npx jest --ci --maxWorkers=2`: 401 suites / 4896 tests, **4895 pass, 1 fail** — the same pre-existing `options-chain.nse-v3.spec.ts` NIFTY-expiry failure as above. Web: `vitest run src/pages/core-journal` 5/5, `tsc --noEmit` clean | API sorted error list (line numbers stripped) **identical** to the baseline at `624ed68` | Opt-in `test/sp2-m5` on a throwaway `postgres:16` (127.0.0.1:55441, `DIRECT_URL` set, `prisma migrate deploy`): **9/9 pass** (new: the unacked-mismatch anti-join); container removed | See "Review fixes (2026-10-13)" |

@@ -412,13 +412,15 @@ describe('schedule', () => {
       fiiOi: '0 0 20 * * 1-5',
       fiiOiRetry: '0 0 21 * * 1-5',
       preOpen: '0 10 9 * * 1-5',
+      commoditiesDay: '0 */10 9-22 * * 1-5',
+      commoditiesLate: '0 0-30/10 23 * * 1-5',
     });
   });
 
   it('every cron method pins Asia/Kolkata', () => {
     const src = readFileSync(join(__dirname, 'market-cues.service.ts'), 'utf8');
     const crons = [...src.matchAll(/@Cron\(([^)]*)\)/g)].map((m) => m[1]);
-    expect(crons.length).toBe(7);
+    expect(crons.length).toBe(Object.keys(MARKET_CUES_CRONS).length);
     for (const c of crons) expect(c).toMatch(/timeZone: 'Asia\/Kolkata'/);
   });
 

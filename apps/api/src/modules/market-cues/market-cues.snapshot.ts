@@ -1,4 +1,13 @@
-import { US_CUE_KEYS, type CueRecord, type MarketCuesSnapshot, type UsCueKey, type UsQuote } from './market-cues.types';
+import {
+  COMMODITY_CUE_KEYS,
+  US_CUE_KEYS,
+  type CommodityCueKey,
+  type CommodityQuote,
+  type CueRecord,
+  type MarketCuesSnapshot,
+  type UsCueKey,
+  type UsQuote,
+} from './market-cues.types';
 
 /**
  * A snapshot in which every cue is unavailable for one stated reason — for a
@@ -17,5 +26,7 @@ export function unavailableSnapshot(reason: string): MarketCuesSnapshot {
   });
   const us = {} as Record<UsCueKey, CueRecord<UsQuote>>;
   for (const k of US_CUE_KEYS) us[k] = none<UsQuote>();
-  return { enabled: false, us, fiiDii: none(), fiiOi: none(), gift: none(), preOpen: none() };
+  const commodities = {} as Record<CommodityCueKey, CueRecord<CommodityQuote>>;
+  for (const k of COMMODITY_CUE_KEYS) commodities[k] = none<CommodityQuote>();
+  return { enabled: false, us, commodities, fiiDii: none(), fiiOi: none(), gift: none(), preOpen: none() };
 }

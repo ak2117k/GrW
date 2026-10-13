@@ -154,6 +154,13 @@ describe('SentinelAgentService', () => {
     expect(SENTINEL_SYSTEM_PROMPT).toMatch(/giftNifty/);
   });
 
+  it('with cues on, the prompt names every MCX benchmark block the packet can carry', () => {
+    for (const k of ['wtiCrude', 'brentCrude', 'gold', 'silver', 'naturalGas', 'copper', 'usdInr', 'mcxBenchmark']) {
+      expect({ k, named: SENTINEL_SYSTEM_PROMPT.includes(k) }).toEqual({ k, named: true });
+    }
+    expect(SENTINEL_SYSTEM_PROMPT_NO_CUES).not.toMatch(/wtiCrude|usdInr|mcxBenchmark/);
+  });
+
   it('the flag-off prompt IS the v2 text from main, pinned by length and SHA-256', () => {
     // Hash of SENTINEL_SYSTEM_PROMPT as shipped at 9095047 (v2, 5562 chars).
     // eslint-disable-next-line @typescript-eslint/no-var-requires

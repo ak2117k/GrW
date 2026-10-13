@@ -4,16 +4,21 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * Bump this whenever the prompt text or the schema changes. Every verdict stores
  * it, because the replay harness cannot attribute a behaviour change to a prompt
  * change without it.
+ *
+ * v4 (from v3): the session.minutesToClose line now matches the code — the
+ * position's OWN exchange close (NSE 15:30, MCX 23:30 / 23:55 late season) and
+ * ABSENT before the open. v3 claimed a fixed 15:30 close and a pre-open value.
  */
-export const SENTINEL_PROMPT_VERSION = 'v3';
+export const SENTINEL_PROMPT_VERSION = 'v4';
 
 /**
- * The live prompt while MARKET_CUES_ENABLED is off: v2, word for word. With the
+ * The live prompt while MARKET_CUES_ENABLED is off: v2, word for word, EXCEPT the
+ * v2.1 correction of the session.minutesToClose line (shared with v4). With the
  * cues off the packet's macro blocks are the pre-cues ones too, so a live
  * verdict is judged exactly as before the cues existed — prompt, packet and
  * stamp. See {@link SENTINEL_SYSTEM_PROMPT_NO_CUES}.
  */
-export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2';
+export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2.1';
 
 /**
  * What actually goes on the verdict row.
@@ -115,7 +120,7 @@ Reading those fields:
 - macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
 - news.freshCount counts headlines in the last 30 minutes.
 - session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
-- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
 
 Rules for your answer:
 - "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.

@@ -6,7 +6,7 @@ import { UserFeedSession } from '../../market-data/services/user-feed-session';
 function deps(warm: unknown, hasSession = warm != null) {
   const session = { placeOrder: jest.fn() };
   const userFeeds = {
-    warmRestClient: jest.fn().mockReturnValue(warm),
+    leaseRestClient: jest.fn(() => (warm ? { ...(warm as object), release: jest.fn() } : null)),
     hasSession: jest.fn().mockReturnValue(hasSession),
   };
   const factory = {
@@ -198,5 +198,69 @@ describe('dry-run never logs in (review fix 3)', () => {
     const d = deps({ client: {}, clientId: 'C1' });
     await d.p.withOwnerSession('owner', async (_s, source) => expect(source).toBe('user-feed'), { allowEphemeralLogin: false });
     expect(d.factory.borrow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the borrowed feed session is leased for the whole callback (cannot be disposed mid-order)', () => {
+  function leased() {
+    const d = deps({ client: { tag: 'warm' }, clientId: 'C1' });
+    const release = jest.fn();
+    (d.userFeeds as any).leaseRestClient = jest.fn(() => ({ client: { tag: 'warm' }, clientId: 'C1', release }));
+    return { ...d, release };
+  }
+
+  it('leases, borrows the leased client, and releases after the callback', async () => {
+    const d = leased();
+    const order: string[] = [];
+    d.release.mockImplementation(() => order.push('release'));
+    await d.p.withOwnerSession('owner', async () => { order.push('fn'); });
+    expect((d.userFeeds as any).leaseRestClient).toHaveBeenCalledWith('owner');
+    expect(d.factory.borrow).toHaveBeenCalledWith({ tag: 'warm' }, 'C1', expect.any(Function));
+    expect(order).toEqual(['fn', 'release']);
+  });
+
+  it('releases even when the callback throws', async () => {
+    const d = leased();
+    await expect(d.p.withOwnerSession('owner', async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+    expect(d.release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('lease end to end (real manager + feed session, fake SDK)', () => {
+  it('the hub unpinning mid-order cannot tear the feed down under the order; it idles out only after', async () => {
+    jest.useFakeTimers();
+    try {
+      const ws = { connect: jest.fn().mockResolvedValue(undefined), close: jest.fn(), fetchData: jest.fn(), on: jest.fn() };
+      const sdk = {
+        generateSession: jest.fn().mockResolvedValue({ data: { jwtToken: 'jwt', feedToken: 'feed' } }),
+        logout: jest.fn().mockResolvedValue({}),
+        placeOrder: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', data: { orderid: 'O9' } }),
+        getPosition: jest.fn().mockResolvedValue({ status: true, data: [] }),
+        getOrderBook: jest.fn().mockResolvedValue({ status: true, data: [] }),
+      };
+      const mgr = new UserFeedManager(
+        (userId: string) => new UserFeedSession(userId, {
+          withDecryptedCreds: (async (_u: string, cb: any) => cb({ apiKey: 'k', apiSecret: 's', clientId: 'C1', password: 'p', totpSecret: 'AAAA' })) as any,
+          smartApiFactory: () => sdk as any,
+          wsFactory: () => ws,
+        }),
+        { idleMs: 1000, maxSessions: 40 },
+      );
+      const provider = new OwnerBrokerSessionProvider(mgr, new PerUserBrokerSessionFactory(), { withDecryptedCredentials: jest.fn() } as never);
+      const T = [{ token: '1', exchange: 'NFO' }];
+      await mgr.pin('owner', T);
+
+      await provider.withOwnerSession('owner', async (s) => {
+        await mgr.unpin('owner', T); // the hub lets go mid-order
+        await jest.advanceTimersByTimeAsync(5000);
+        expect(mgr.hasSession('owner')).toBe(true);
+        await s.getOrderBookEnvelope(); // still usable
+      });
+      expect(mgr.hasSession('owner')).toBe(true);
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(mgr.hasSession('owner')).toBe(false); // lease released: normal idle teardown resumes
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

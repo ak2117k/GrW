@@ -29,6 +29,8 @@ interface UserFeedEntry {
   tokenRefs: Map<string, TokenRef>;
   /** Tokens held by a long-lived in-process consumer (the market hub). */
   pins: Map<string, TokenRef>;
+  /** Outstanding {@link UserFeedManager.leaseRestClient} leases (block teardown). */
+  leases: number;
   idleTimer: ReturnType<typeof setTimeout> | null;
   lastActive: number;
 }
@@ -265,6 +267,36 @@ export class UserFeedManager {
   }
 
   /**
+   * {@link warmRestClient} plus a LEASE: while held, the session counts as live
+   * interest, so neither the idle timer nor LRU eviction can dispose it under the
+   * borrower (sentinel auto-exit, mid-order). Never creates a session. `release()`
+   * is idempotent and re-arms the idle timer when nothing else holds the session.
+   * The lease does not stop the session's OWN re-login after a socket drop.
+   */
+  leaseRestClient(userId: string): (WarmRestClient & { release(): void }) | null {
+    const entry = this.registry.get(userId);
+    const warm = entry?.session.restClient?.() ?? null;
+    if (!entry || !warm) return null;
+    entry.leases += 1;
+    this.clearIdleTimer(entry);
+    entry.lastActive = Date.now();
+    let released = false;
+    return {
+      ...warm,
+      release: () => {
+        if (released) return;
+        released = true;
+        entry.leases = Math.max(0, entry.leases - 1);
+        entry.lastActive = Date.now();
+        // Only the registered entry re-arms; a torn-down one is already gone.
+        if (this.registry.get(userId) === entry && this.totalRefs(entry) === 0) {
+          this.startIdleTimer(userId, entry);
+        }
+      },
+    };
+  }
+
+  /**
    * Whether the user has a registered feed session (live, connecting or
    * re-logging-in). Never creates one. Lets a caller that found no warm client
    * tell "no feed at all" (a fresh login is harmless) from "the feed is between
@@ -302,6 +334,7 @@ export class UserFeedManager {
       refs: new Map(),
       tokenRefs: new Map(),
       pins: new Map(),
+      leases: 0,
       idleTimer: null,
       lastActive: Date.now(),
     };
@@ -337,7 +370,7 @@ export class UserFeedManager {
   }
 
   private totalRefs(entry: UserFeedEntry): number {
-    let sum = entry.pins.size;
+    let sum = entry.pins.size + entry.leases;
     for (const n of entry.refs.values()) sum += n;
     return sum;
   }

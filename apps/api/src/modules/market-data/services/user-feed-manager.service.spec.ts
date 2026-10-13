@@ -196,3 +196,69 @@ it('hasSession reports a registered session without creating one', async () => {
   await mgr.pin('u1', []);
   expect(mgr.hasSession('u1')).toBe(true);
 });
+
+describe('leaseRestClient (sentinel auto-exit: the lent session cannot be disposed mid-order)', () => {
+  function warmFactory() {
+    const sessions: any[] = [];
+    const factory = jest.fn(() => {
+      const s: any = fakeSession();
+      s.restClient = jest.fn(() => ({ client: { tag: 'warm' }, clientId: 'C1' }));
+      sessions.push(s);
+      return s;
+    });
+    return { factory, sessions };
+  }
+  afterEach(() => jest.useRealTimers());
+
+  it('is null (and creates nothing) with no session or no warm client', async () => {
+    const { factory } = warmFactory();
+    const mgr = new UserFeedManager(factory as any, { idleMs: 1000, maxSessions: 40 });
+    expect(mgr.leaseRestClient('u1')).toBeNull();
+    expect(factory).not.toHaveBeenCalled();
+    const cold = new UserFeedManager(jest.fn(() => fakeSession()) as any, { idleMs: 1000, maxSessions: 40 });
+    await cold.pin('u1', []);
+    expect(cold.leaseRestClient('u1')).toBeNull();
+  });
+
+  it('a held lease blocks idle teardown; releasing it re-arms the idle timer', async () => {
+    jest.useFakeTimers();
+    const { factory, sessions } = warmFactory();
+    const mgr = new UserFeedManager(factory as any, { idleMs: 1000, maxSessions: 40 });
+    await mgr.subscribe('u1', [{ token: '1', exchange: 'NFO' }]);
+    const lease = mgr.leaseRestClient('u1')!;
+    expect(lease).toEqual(expect.objectContaining({ client: { tag: 'warm' }, clientId: 'C1' }));
+    await mgr.unsubscribe('u1', [{ token: '1', exchange: 'NFO' }]); // viewer leaves mid-order
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(sessions[0].dispose).not.toHaveBeenCalled();
+    lease.release();
+    lease.release(); // idempotent
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(sessions[0].dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('a leased session is never the LRU eviction victim', async () => {
+    const { factory, sessions } = warmFactory();
+    const mgr = new UserFeedManager(factory as any, { idleMs: 120000, maxSessions: 1 });
+    await mgr.pin('u1', []);
+    const lease = mgr.leaseRestClient('u1')!;
+    await mgr.subscribe('u2', [{ token: '2', exchange: 'NSE' }]); // at cap: would evict idle u1
+    expect(sessions[0].dispose).not.toHaveBeenCalled();
+    lease.release();
+  });
+
+  it('a double release of one lease never cancels another holder', async () => {
+    jest.useFakeTimers();
+    const { factory, sessions } = warmFactory();
+    const mgr = new UserFeedManager(factory as any, { idleMs: 1000, maxSessions: 40 });
+    await mgr.pin('u1', []);
+    const a = mgr.leaseRestClient('u1')!;
+    const b = mgr.leaseRestClient('u1')!;
+    a.release();
+    a.release();
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(sessions[0].dispose).not.toHaveBeenCalled();
+    b.release();
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(sessions[0].dispose).toHaveBeenCalledTimes(1);
+  });
+});

@@ -75,9 +75,15 @@ export class OwnerBrokerSessionProvider {
     fn: (session: UserBrokerSession, source: SessionSource) => Promise<T>,
     opts: OwnerSessionOptions = {},
   ): Promise<T> {
-    const warm = this.userFeeds.warmRestClient(userId);
+    // Leased, not just read: while the callback runs the feed session cannot be
+    // idle-torn-down or LRU-evicted (and disposed) under the order.
+    const warm = this.userFeeds.leaseRestClient(userId);
     if (warm) {
-      return this.factory.borrow(warm.client as UserSmartApiLike, warm.clientId, (s) => fn(s, 'user-feed'));
+      try {
+        return await this.factory.borrow(warm.client as UserSmartApiLike, warm.clientId, (s) => fn(s, 'user-feed'));
+      } finally {
+        warm.release();
+      }
     }
     if (this.userFeeds.hasSession(userId)) {
       this.logger.warn(`[ai-exit] feed session for ${userId} is between logins — not logging in over it`);

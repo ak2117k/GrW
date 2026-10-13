@@ -204,7 +204,11 @@ export function reviewWindowIsClosed(
     const close = lastSessionClose(exchange, now, clock);
     return close !== null && now.getTime() - close.getTime() <= AFTER_CLOSE_GRACE_MS;
   }
-  if (!clock.isTradingDay(exchange, now)) return false;
+  const session = clock.tradingWindow(exchange, now);
+  if (!session) return false;
+  // An MCX evening-only holiday (mcx-holidays.ts) opens at 17:00: an 08:30
+  // "pre-open" review would judge a session eight hours away. Morning opens only.
+  if (session.openMin > EQUITY_OPEN_MIN) return false;
   const minutes = Math.floor((now.getTime() - istMidnightOf(istYmd(now))) / 60_000);
   if (window.kind === 'PRE_OPEN_CHECK') {
     return venueOf(exchange) === 'EQUITY' && minutes >= PRE_OPEN_MATCHED_MIN && minutes < EQUITY_OPEN_MIN;

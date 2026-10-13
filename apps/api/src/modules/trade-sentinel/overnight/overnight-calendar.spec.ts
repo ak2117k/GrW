@@ -15,6 +15,8 @@ import {
   selectForWindow,
   windowTag,
 } from './overnight-calendar';
+import { SessionClock } from '../../market-hub/session-clock';
+import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
 
 /** An IST wall-clock instant, written the way a trader says it. */
 const ist = (ymd: string, hhmm: string) => new Date(`${ymd}T${hhmm}:00+05:30`);
@@ -87,10 +89,20 @@ describe('overnight review windows — weekends and exchange holidays are skippe
     expect(selectForWindow(BOOK, PRE_OPEN, ist('2026-10-11', '08:50'))).toEqual([]);
   });
 
-  it('picks nothing on an exchange holiday (Dussehra, 2026-10-20)', () => {
+  it('picks nothing on an exchange holiday (Dussehra, 2026-10-20) — except MCX’s evening session', () => {
     expect(selectForWindow(BOOK, AFTER_CLOSE_EQUITY, ist('2026-10-20', '15:45'))).toEqual([]);
-    expect(selectForWindow(BOOK, AFTER_CLOSE_MCX, ist('2026-10-20', '23:45'))).toEqual([]);
     expect(selectForWindow(BOOK, PRE_OPEN, ist('2026-10-20', '08:50'))).toEqual([]);
+    // An NSE holiday is, by default, an MCX EVENING session (17:00–23:30), so the
+    // 23:45 after-close review judges the MCX book it just traded.
+    expect(ids(selectForWindow(BOOK, AFTER_CLOSE_MCX, ist('2026-10-20', '23:45')))).toEqual(['mcx-opt', 'mcx-fut']);
+  });
+
+  it('a full MCX holiday (MCX calendar CLOSED) reviews no MCX position', () => {
+    const shut = new SessionClock({
+      holidays: MARKET_HOLIDAYS,
+      mcxHolidays: { 2026: [{ date: '2026-10-20', name: 'test full close', session: 'CLOSED' }] },
+    });
+    expect(selectForWindow(BOOK, AFTER_CLOSE_MCX, ist('2026-10-20', '23:45'), shut)).toEqual([]);
   });
 
   it('the crons are weekday-only and land on the approved IST minutes', () => {
@@ -152,8 +164,9 @@ describe('session arithmetic for the overnight packet', () => {
     expect(nextSessionOpen('NFO', ist('2026-10-09', '15:45'))?.toISOString()).toBe(
       ist('2026-10-12', '09:15').toISOString(),
     );
+    // Dussehra is an NSE holiday but (by default) an MCX evening session.
     expect(nextSessionOpen('MCX', ist('2026-10-19', '23:45'))?.toISOString()).toBe(
-      ist('2026-10-21', '09:00').toISOString(),
+      ist('2026-10-20', '17:00').toISOString(),
     );
   });
 

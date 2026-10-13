@@ -1,6 +1,8 @@
 // apps/api/src/modules/sentinel-executor/domain/guards.spec.ts
 import { evaluateGuards, type GuardInput } from './guards';
 import { parseAutoExitConfig } from './auto-exit.config';
+import { SessionClock } from '../../market-hub/session-clock';
+import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
 
 const NOW = new Date('2026-10-12T10:00:00Z');
 function input(over: Partial<GuardInput> = {}): GuardInput {
@@ -53,5 +55,38 @@ describe('evaluateGuards', () => {
 
   it('a verdict from the future (clock skew) is not stale', () => {
     expect(evaluateGuards(input({ verdict: { userId: 'owner', createdAt: new Date(NOW.getTime() + 5_000) } }))).toEqual({ ok: true });
+  });
+});
+
+/**
+ * The executor's EXCHANGE_CLOSED guard asks the same SessionClock the module
+ * builds (MARKET_HOLIDAYS + MCX's own calendar). An NSE holiday is, by default,
+ * an MCX evening session — an MCX exit must be allowed then, and refused on a
+ * full MCX holiday.
+ */
+describe('evaluateGuards — MCX holidays through the real SessionClock', () => {
+  const DUSSEHRA_EVENING = new Date('2026-10-20T19:00:00+05:30');
+  const at = (clock: { isOpen: (e: string, a: Date) => boolean }, exchange: string) =>
+    evaluateGuards(
+      input({
+        now: DUSSEHRA_EVENING,
+        verdict: { userId: 'owner', createdAt: new Date(DUSSEHRA_EVENING.getTime() - 10_000) },
+        tracker: { userId: 'owner', status: 'OPEN', kind: 'POSITION', exchange },
+        isOpen: (e, a) => clock.isOpen(e, a),
+      }),
+    );
+
+  it('allows an MCX exit in the evening session of an NSE holiday; NFO stays closed', () => {
+    const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
+    expect(at(clock, 'MCX')).toEqual({ ok: true });
+    expect(at(clock, 'NFO')).toEqual({ ok: false, reason: 'EXCHANGE_CLOSED' });
+  });
+
+  it('refuses an MCX exit on a full MCX holiday', () => {
+    const clock = new SessionClock({
+      holidays: MARKET_HOLIDAYS,
+      mcxHolidays: { 2026: [{ date: '2026-10-20', name: 'test full close', session: 'CLOSED' }] },
+    });
+    expect(at(clock, 'MCX')).toEqual({ ok: false, reason: 'EXCHANGE_CLOSED' });
   });
 });

@@ -25,7 +25,7 @@ describe('SessionClock', () => {
   it('is closed on weekends and on listed holidays', () => {
     expect(clock.isOpen('NSE', ist('2026-10-10T10:00:00'))).toBe(false); // Saturday
     expect(clock.isTradingDay('NSE', ist('2026-10-20T10:00:00'))).toBe(false); // Dussehra
-    expect(clock.isOpen('MCX', ist('2026-10-20T19:00:00'))).toBe(false);
+    expect(clock.isOpen('MCX', ist('2026-10-10T19:00:00'))).toBe(false); // Saturday
   });
 
   it('treats BFO holidays as BSE holidays', () => {
@@ -72,5 +72,77 @@ describe('SessionClock', () => {
       mcxLateClose: [{ from: '2026-11-02', to: '2027-03-08' }],
     });
     expect(late.tradingWindow('MCX', at('2026-11-04T12:00:00'))).toEqual({ openMin: 540, closeMin: 1435 });
+  });
+});
+
+/**
+ * MCX keeps its OWN holiday calendar. On most NSE trading holidays MCX still
+ * runs an evening session (17:00 to the normal close); on a few it is shut all
+ * day. Treating every NSE holiday as an MCX full close left MCX positions
+ * unwatched through a live evening session.
+ */
+describe('SessionClock — MCX holiday sessions', () => {
+  const DUSSEHRA = '2026-10-20'; // NSE holiday, Tuesday
+
+  it('an NSE holiday not on the MCX list is an MCX EVENING session (17:00 → close)', () => {
+    expect(clock.isOpen('NSE', ist(`${DUSSEHRA}T11:00:00`))).toBe(false);
+    expect(clock.isOpen('MCX', ist(`${DUSSEHRA}T11:00:00`))).toBe(false); // morning is shut
+    expect(clock.isOpen('MCX', ist(`${DUSSEHRA}T16:59:00`))).toBe(false);
+    expect(clock.isOpen('MCX', ist(`${DUSSEHRA}T17:00:00`))).toBe(true);
+    expect(clock.isOpen('MCX', ist(`${DUSSEHRA}T23:29:00`))).toBe(true);
+    expect(clock.isOpen('MCX', ist(`${DUSSEHRA}T23:30:00`))).toBe(false);
+    expect(clock.isTradingDay('MCX', ist(`${DUSSEHRA}T11:00:00`))).toBe(true);
+    expect(clock.tradingWindow('MCX', ist(`${DUSSEHRA}T11:00:00`))).toEqual({ openMin: 17 * 60, closeMin: 23 * 60 + 30 });
+    expect(clock.minutesToClose('MCX', ist(`${DUSSEHRA}T23:00:00`))).toBe(30);
+  });
+
+  it('the evening session keeps the late close in the US-off-DST season', () => {
+    const late = new SessionClock({
+      holidays: MARKET_HOLIDAYS,
+      mcxLateClose: [{ from: '2026-11-02', to: '2027-03-08' }],
+    });
+    // 2026-11-27 Guru Nanak Jayanti (NSE holiday), inside the late season.
+    expect(late.isOpen('MCX', ist('2026-11-27T23:45:00'))).toBe(true);
+    expect(late.isOpen('MCX', ist('2026-11-27T10:00:00'))).toBe(false);
+  });
+
+  it('nextOpen on an evening-session holiday is 17:00 that day', () => {
+    expect(clock.nextOpen('MCX', ist('2026-10-19T23:45:00'))?.toISOString()).toBe(
+      ist(`${DUSSEHRA}T17:00:00`).toISOString(),
+    );
+  });
+
+  it('a date on the MCX list as CLOSED is shut all day', () => {
+    const shut = new SessionClock({
+      holidays: MARKET_HOLIDAYS,
+      mcxHolidays: { 2026: [{ date: DUSSEHRA, name: 'test full close', session: 'CLOSED' }] },
+    });
+    expect(shut.isTradingDay('MCX', ist(`${DUSSEHRA}T19:00:00`))).toBe(false);
+    expect(shut.isOpen('MCX', ist(`${DUSSEHRA}T19:00:00`))).toBe(false);
+    expect(shut.nextOpen('MCX', ist('2026-10-19T23:45:00'))?.toISOString()).toBe(
+      ist('2026-10-21T09:00:00').toISOString(),
+    );
+  });
+
+  it('an MCX-only EVENING date applies even when NSE trades', () => {
+    const c = new SessionClock({
+      holidays: MARKET_HOLIDAYS,
+      mcxHolidays: { 2026: [{ date: '2026-10-21', name: 'test', session: 'EVENING' }] },
+    });
+    expect(c.isOpen('NSE', ist('2026-10-21T11:00:00'))).toBe(true);
+    expect(c.isOpen('MCX', ist('2026-10-21T11:00:00'))).toBe(false);
+    expect(c.isOpen('MCX', ist('2026-10-21T18:00:00'))).toBe(true);
+  });
+
+  it('a generic holiday that explicitly names MCX is still a full MCX close', () => {
+    const c = new SessionClock({
+      holidays: { 2026: [{ date: DUSSEHRA, name: 'x', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] }] },
+      mcxHolidays: { 2026: [] },
+    });
+    expect(c.isOpen('MCX', ist(`${DUSSEHRA}T19:00:00`))).toBe(false);
+  });
+
+  it('the shipped NSE calendar no longer claims MCX is fully closed', () => {
+    for (const h of MARKET_HOLIDAYS[2026]) expect(h.exchanges).not.toContain('MCX');
   });
 });

@@ -51,3 +51,21 @@ describe('BrokerCorpusCron (Task 13b)', () => {
     await expect(s.cron.run(NOW)).resolves.toBeUndefined();
   });
 });
+
+describe('BrokerCorpusCron — bounded verdict read (review fix 6)', () => {
+  it('reads verdicts only for trackers without a record, selecting only the columns the record uses (no packet / evidence)', async () => {
+    const s = setup([closed('trk_1'), closed('trk_2')], ['trk_1']);
+    expect(await s.cron.sync(NOW)).toMatchObject({ written: 1, already: 1 });
+    const args = s.prisma.sentinelVerdict.findMany.mock.calls[0][0] as { where: unknown; select: Record<string, boolean> };
+    expect(args.where).toEqual({ trackerId: { in: ['trk_2'] } });
+    expect(Object.keys(args.select).sort()).toEqual(
+      ['confidence', 'createdAt', 'greenFloor', 'id', 'netPnl', 'promptVersion', 'reason', 'recoveryAvailable', 'thesisStatus', 'trackerId', 'triggeredBy', 'verdict'],
+    );
+  });
+
+  it('when every tracker already has a record no verdict is read', async () => {
+    const s = setup([closed('trk_1')], ['trk_1']);
+    await s.cron.sync(NOW);
+    expect(s.prisma.sentinelVerdict.findMany).not.toHaveBeenCalled();
+  });
+});

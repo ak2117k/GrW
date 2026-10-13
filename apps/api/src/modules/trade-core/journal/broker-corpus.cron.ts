@@ -13,6 +13,12 @@ export const BROKER_CORPUS_MAX_TRACKERS = 2_000;
 const LEASE_MS = 30 * 60_000;
 const DAY_MS = 86_400_000;
 
+/** VerdictRow's fields plus the tracker key. */
+const VERDICT_COLUMNS = {
+  id: true, trackerId: true, createdAt: true, verdict: true, confidence: true, thesisStatus: true, recoveryAvailable: true,
+  reason: true, triggeredBy: true, netPnl: true, greenFloor: true, promptVersion: true,
+} as const satisfies Prisma.SentinelVerdictSelect;
+
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
@@ -56,11 +62,14 @@ export class BrokerCorpusCron {
     const skipped: Partial<Record<BrokerSkip, number>> = {};
     if (trackers.length === 0) return { scanned: 0, written: 0, already: 0, skipped };
     const ids = trackers.map((t) => t.id);
-    const [existing, verdicts] = await Promise.all([
-      this.prisma.aiDecisionRecord.findMany({ where: { source: BROKER_CORPUS_SOURCE, sourceId: { in: ids } }, select: { sourceId: true } }),
-      this.prisma.sentinelVerdict.findMany({ where: { trackerId: { in: ids } }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] }),
-    ]);
+    const existing = await this.prisma.aiDecisionRecord.findMany({ where: { source: BROKER_CORPUS_SOURCE, sourceId: { in: ids } }, select: { sourceId: true } });
     const done = new Set(existing.map((e) => e.sourceId));
+    // Review fix 6: verdicts only for trackers still to write, and only the columns the record uses
+    // (never the verbatim packet or the evidence blob).
+    const todo = ids.filter((id) => !done.has(id));
+    const verdicts = todo.length
+      ? await this.prisma.sentinelVerdict.findMany({ where: { trackerId: { in: todo } }, select: VERDICT_COLUMNS, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] })
+      : [];
     const byTracker = new Map<string, VerdictRow[]>();
     for (const v of verdicts) byTracker.set(v.trackerId, [...(byTracker.get(v.trackerId) ?? []), v as unknown as VerdictRow]);
     const data: Prisma.AiDecisionRecordCreateManyInput[] = [];

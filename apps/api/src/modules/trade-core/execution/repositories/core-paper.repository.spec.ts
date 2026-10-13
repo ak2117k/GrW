@@ -141,7 +141,11 @@ describe('append-only repositories', () => {
     expect(prisma.coreCashLedger.findFirst).toHaveBeenLastCalledWith({
       where: { userId: 'user_A', token: '1594', type: 'MTF_INTEREST' }, orderBy: { interestDate: 'desc' }, select: { interestDate: true },
     });
-    expect(methods(CoreCashLedgerRepository)).toEqual(['append', 'appendInterest', 'lastInterestDate', 'listForUser']);
+    // M5 (ruling J19) adds reads only: still no update or delete method.
+    expect(methods(CoreCashLedgerRepository)).toEqual([
+      'append', 'appendInterest', 'heldMarginByVehicle', 'interestTokensOn', 'lastInterestDate',
+      'listForOrders', 'listForUser', 'listForUserSince', 'listInterest', 'sumsByType',
+    ]);
   });
 
   it('append writes nothing for an empty list', async () => {

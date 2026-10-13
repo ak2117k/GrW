@@ -518,9 +518,13 @@ const FII_POST_CLOSE = 'FII/DII is published post-close (~18:00–20:00 IST) and
  * It used to read as a stub "(gold, crude-oil, nasdaq)", naming cues the module
  * did not even have.
  */
-const GLOBAL_CUES_OFF =
+const CUES_OFF =
   'market cues are not switched on (MARKET_CUES_ENABLED is not true, or the market-cues service is not wired into ' +
-  'this process), so no US index, US index future, GIFT Nifty, commodity benchmark or USD/INR reading is held';
+  'this process)';
+const GLOBAL_CUES_OFF =
+  `${CUES_OFF}, so no US index, US index future, GIFT Nifty, commodity benchmark or USD/INR reading is held`;
+/** Same for `macro.fiiDii`: it used to call itself a context-scoring stub — it is the cues switch. */
+const FII_DII_OFF = `${CUES_OFF}, so no FII/DII figure is held`;
 
 /**
  * MCX underlying → the benchmarks its price follows. Minis read their parent's.
@@ -556,11 +560,12 @@ function macroBlocks(
 ): { fiiDii: Block<Prisma.InputJsonValue>; globalCues: Block<Prisma.InputJsonValue> } {
   const snap = read.snapshot;
   if (!snap || !snap.enabled) {
-    // Market cues off (or not wired): EXACTLY the pre-cues blocks, so the live
-    // packet — and with it every live verdict — is unchanged until the owner
-    // switches MARKET_CUES_ENABLED on. The agent sends the v2 prompt then too.
+    // Market cues off (or not wired): the pre-cues SHAPE — both blocks absent,
+    // nothing fetched — until the owner switches MARKET_CUES_ENABLED on. Only
+    // the reasons changed: they now name the switch instead of calling these a
+    // stub. The agent sends the no-cues prompt (v2.1) then too.
     return {
-      fiiDii: absent(`${STUB_REASON}. Note FII/DII is published post-close and can never be an intraday trigger.`),
+      fiiDii: absent(`${FII_DII_OFF}. Note FII/DII is published post-close and can never be an intraday trigger.`),
       globalCues: absent(GLOBAL_CUES_OFF),
     };
   }
@@ -941,8 +946,9 @@ export class ContextPacketService {
             ? present(
                 tick.factorValues,
                 'context-scoring via signal-generator.analyze (real, non-stub factors only; ' +
-                  'sign is normalised so positive = supportive of a move UP, independent of ' +
-                  "the setup's own side)",
+                  'directional factors are sign-normalised so positive = supportive of a move UP, ' +
+                  "independent of the setup's own side; volatility is side-agnostic — positive means " +
+                  'India VIX rose day-on-day, not a move UP — and is never sent for MCX)',
                 at,
               )
             : absent(

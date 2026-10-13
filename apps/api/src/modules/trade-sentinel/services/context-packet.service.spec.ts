@@ -220,15 +220,18 @@ describe('ContextPacketService', () => {
       side: t.side,
     }).floorPrice as number;
 
-  it('marks every stubbed macro factor unavailable with a stated reason', async () => {
+  it('marks the stubbed sector factor unavailable, and fiiDii / globalCues as the cues switch — not a stub', async () => {
     const packet = await svc.build(entry, tick, null);
-    for (const block of [packet.macro.fiiDii, packet.macro.sector]) {
+    expect(packet.macro.sector.available).toBe(false);
+    if (!packet.macro.sector.available) expect(packet.macro.sector.reason).toMatch(/stub/i);
+    // fiiDii and globalCues are not stubs: they are the market-cues module, switched off.
+    for (const block of [packet.macro.fiiDii, packet.macro.globalCues]) {
       expect(block.available).toBe(false);
-      if (!block.available) expect(block.reason).toMatch(/stub/i);
+      if (!block.available) {
+        expect(block.reason).toMatch(/MARKET_CUES_ENABLED/);
+        expect(block.reason).not.toMatch(/stub/i);
+      }
     }
-    // globalCues is not a stub: it is the market-cues module, switched off.
-    expect(packet.macro.globalCues.available).toBe(false);
-    if (!packet.macro.globalCues.available) expect(packet.macro.globalCues.reason).toMatch(/MARKET_CUES_ENABLED/);
     // FII/DII is post-close data; the agent must never treat it as intraday.
     expect(packet.macro.fiiDii.available).toBe(false);
     if (!packet.macro.fiiDii.available) {
@@ -245,7 +248,8 @@ describe('ContextPacketService', () => {
     expect(without.macro.fiiDii).toEqual({
       available: false,
       reason:
-        'context-scoring factor is a stub (returns isStub: true) — no real data behind it. Note FII/DII is published post-close and can never be an intraday trigger.',
+        'market cues are not switched on (MARKET_CUES_ENABLED is not true, or the market-cues service is not wired into ' +
+        'this process), so no FII/DII figure is held. Note FII/DII is published post-close and can never be an intraday trigger.',
     });
     expect(without.macro.globalCues).toEqual({
       available: false,
@@ -691,6 +695,19 @@ describe('ContextPacketService', () => {
     expect(withFactors.macro.realFactors.available).toBe(true);
     if (withFactors.macro.realFactors.available) {
       expect(withFactors.macro.realFactors.value).toEqual({ mtfTrend: 0.4 });
+    }
+  });
+
+  it('realFactors provenance does not claim the side-agnostic volatility factor is in the UP frame', async () => {
+    const p = await svc.build(entry, { ...tick, factorValues: { mtfTrend: 1, volatility: 0.5 } }, null);
+    expect(p.macro.realFactors.available).toBe(true);
+    if (p.macro.realFactors.available) {
+      // Directional factors are normalised to "positive = supportive of UP"...
+      expect(p.macro.realFactors.source).toMatch(/positive = supportive of a move UP/);
+      // ...but volatility is NOT: it is the India VIX day-on-day change, unsigned by side.
+      expect(p.macro.realFactors.source).toMatch(/volatility is side-agnostic/);
+      expect(p.macro.realFactors.source).toMatch(/India VIX/);
+      expect(p.macro.realFactors.source).not.toMatch(/sign is normalised so positive = supportive of a move UP, independent/);
     }
   });
 

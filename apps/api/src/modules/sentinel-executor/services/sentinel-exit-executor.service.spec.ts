@@ -247,8 +247,8 @@ describe('SentinelExitExecutor', () => {
     expect(h.lastPatch()).toEqual(expect.objectContaining({ brokerMessage: 'Insufficient margin' }));
   });
 
-  it('placeOrderClassified FAILED (timeout) → ORDER_UNCERTAIN, one call, no fallback', async () => {
-    const h = harness({ place: [{ orderId: '', status: 'FAILED', message: 'Angel One placeOrderClassified timed out after 15000ms' }] });
+  it('placeOrderClassified UNCERTAIN (timeout) → ORDER_UNCERTAIN, one call, no fallback', async () => {
+    const h = harness({ place: [{ orderId: '', status: 'UNCERTAIN', message: 'Angel One placeOrder timed out after 15000ms' }] });
     await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'ORDER_UNCERTAIN' });
     expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
   });

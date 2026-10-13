@@ -24,6 +24,7 @@ function snap(positions: CorePosition[], orders: CoreOrder[], over: Partial<Reco
   return {
     now: ist('11:00'), positions, ordersByPosition,
     fillQtyByOrder: new Map(orders.map((o) => [o.id, o.filledQty])),
+    lastFillAtByOrder: new Map(),
     marginByOrder: new Map(), summarised: new Set(), interestTokensToday: new Set(), stuckAfterMs: STUCK, ...over,
   };
 }
@@ -122,5 +123,22 @@ describe('reconBlockOf (O10)', () => {
     expect(reconBlockOf([])).toEqual({ all: false, strategyIds: [] });
     expect(reconBlockOf([row('cs_a'), row('cs_b'), row('cs_a')])).toEqual({ all: false, strategyIds: ['cs_a', 'cs_b'] });
     expect(reconBlockOf([row('cs_a'), row(null)])).toEqual({ all: true, strategyIds: ['cs_a'] });
+  });
+});
+
+describe('FILLS_VS_ORDER age guard (review fix 3: a fill landing between the order read and the fills read)', () => {
+  it('no finding while the order or its newest fill is younger than the stuck threshold; flagged once both are quiet', () => {
+    // The snapshot read the order (still OPEN, 0 filled) before its fill committed; the fills read saw the fill.
+    const racing = ord('o1', { state: 'OPEN', filledQty: 0, avgFillPrice: null, submittedAt: ist('10:59'), updatedAt: ist('10:59') });
+    const p = positionFor(cashPlan(), { status: 'PENDING_ENTRY', entryFilledQty: 0, openQty: 0, updatedAt: ist('10:59') });
+    const fresh = snap([p], [racing], { fillQtyByOrder: new Map([['o1', 100]]), lastFillAtByOrder: new Map([['o1', ist('11:00')]]) });
+    expect(intradayFindings(fresh).filter((f) => f.check === 'FILLS_VS_ORDER')).toEqual([]);
+    // An old order whose fill is brand new: still in motion, not a mismatch.
+    const oldOrder = ord('o1', { filledQty: 0 });
+    const s2 = snap([openPos()], [oldOrder], { fillQtyByOrder: new Map([['o1', 100]]), lastFillAtByOrder: new Map([['o1', new Date(ist('11:00').getTime() - 1_000)]]) });
+    expect(intradayFindings(s2).filter((f) => f.check === 'FILLS_VS_ORDER')).toEqual([]);
+    // Both quiet past the threshold: a real mismatch.
+    const s3 = snap([openPos()], [oldOrder], { fillQtyByOrder: new Map([['o1', 100]]), lastFillAtByOrder: new Map([['o1', ist('10:00')]]) });
+    expect(intradayFindings(s3)).toEqual(expect.arrayContaining([expect.objectContaining({ check: 'FILLS_VS_ORDER', orderId: 'o1' })]));
   });
 });

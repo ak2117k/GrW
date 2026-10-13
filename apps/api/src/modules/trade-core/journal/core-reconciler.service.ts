@@ -178,7 +178,12 @@ export class CoreReconciler implements OnModuleInit, OnModuleDestroy {
       this.summaries.positionIdsWithSummary(userId, positions.filter((p) => p.status === 'CLOSED').map((p) => p.id)),
     ]);
     const fillQtyByOrder = new Map<string, number>();
-    for (const f of fills) fillQtyByOrder.set(f.orderId, (fillQtyByOrder.get(f.orderId) ?? 0) + f.qty);
-    return { now, positions, ordersByPosition, fillQtyByOrder, marginByOrder, summarised, interestTokensToday, stuckAfterMs };
+    const lastFillAtByOrder = new Map<string, Date>();
+    for (const f of fills) {
+      fillQtyByOrder.set(f.orderId, (fillQtyByOrder.get(f.orderId) ?? 0) + f.qty);
+      const prev = lastFillAtByOrder.get(f.orderId);
+      if (!prev || f.createdAt > prev) lastFillAtByOrder.set(f.orderId, f.createdAt);
+    }
+    return { now, positions, ordersByPosition, fillQtyByOrder, lastFillAtByOrder, marginByOrder, summarised, interestTokensToday, stuckAfterMs };
   }
 }

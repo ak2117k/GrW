@@ -40,6 +40,8 @@ export interface ReconSnapshot {
   ordersByPosition: ReadonlyMap<string, readonly CoreOrder[]>;
   /** Σ core_fills.qty per order. */
   fillQtyByOrder: ReadonlyMap<string, number>;
+  /** When each order's newest fill was written (review fix 3: FILLS_VS_ORDER waits until it is quiet). */
+  lastFillAtByOrder: ReadonlyMap<string, Date>;
   /** Margin each order still holds. */
   marginByOrder: ReadonlyMap<string, Prisma.Decimal>;
   /** CLOSED positions that have a summary. */
@@ -72,7 +74,10 @@ export function intradayFindings(s: ReconSnapshot): ReconFinding[] {
     const base = { strategyId: p.strategyId, positionId: p.id };
     for (const o of orders) {
       const filled = s.fillQtyByOrder.get(o.id) ?? 0;
-      if (filled !== o.filledQty) {
+      // Orders and fills are separate reads: a fill committing between them looks like a mismatch.
+      // Like POSITION_VS_ORDERS, judge only once the order and its newest fill are quiet (review fix 3).
+      const lastMove = Math.max(o.updatedAt.getTime(), s.lastFillAtByOrder.get(o.id)?.getTime() ?? 0);
+      if (filled !== o.filledQty && now - lastMove > s.stuckAfterMs) {
         out.push(finding('FILLS_VS_ORDER', { ...base, orderId: o.id, repair: null, detail: `order ${o.id} says ${o.filledQty} filled; its fills sum to ${filled}` }));
       }
       if (OPEN_ORDER_STATES.has(o.state) && now - o.submittedAt.getTime() > s.stuckAfterMs) {

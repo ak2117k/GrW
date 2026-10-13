@@ -50,7 +50,7 @@ function stuckExitSnapshot(now: Date): ReconSnapshot {
   // The filled entry the EXITING position came from (so the position row agrees with its orders).
   const entry: CoreOrder = { ...exit, id: 'o_entry', idempotencyKey: 'int_1:entry', side: 'BUY', purpose: 'ENTRY', state: 'FILLED', filledQty: 100, avgFillPrice: 500 };
   return {
-    now, positions: [p], ordersByPosition: new Map([[p.id, [entry, exit]]]), fillQtyByOrder: new Map([[entry.id, 100]]), marginByOrder: new Map(),
+    now, positions: [p], ordersByPosition: new Map([[p.id, [entry, exit]]]), fillQtyByOrder: new Map([[entry.id, 100]]), lastFillAtByOrder: new Map(), marginByOrder: new Map(),
     summarised: new Set(), interestTokensToday: new Set(), stuckAfterMs: 60_000,
   };
 }
@@ -152,5 +152,26 @@ describe('CoreReconciler (spec §8.3, J17, Review Focus 4 and 5)', () => {
     jest.spyOn(s.h.ledger, 'listPositionOrders').mockRejectedValueOnce(new Error('db down'));
     await expect(s.recon.reconcileUser('user_A', 'INTRADAY', new Date())).resolves.toEqual([]);
     expect(mismatches(s)).toEqual([]);
+  });
+});
+
+describe('CoreReconciler — FILLS_VS_ORDER read race (review fix 3)', () => {
+  it('a fill that commits between the order read and the fills read is not a RECON_MISMATCH', async () => {
+    const s = setup();
+    await s.h.lifecycle.openPosition(openRequest()); // the entry order is OPEN, nothing filled
+    const settings = await s.h.defaults.settings();
+    if (!settings.ok) throw new Error('fixture settings');
+    s.h.advance(2 * settings.settings.noPriceRejectMs + 1_000); // the order row itself is old and quiet
+    const [order] = s.h.paper.orders;
+    const realFills = s.h.ledger.fillsFor.bind(s.h.ledger);
+    // The fills read sees a fill the order read did not (it committed in between, just now).
+    const racing = jest.spyOn(s.h.ledger, 'fillsFor').mockImplementation(async (userId, ids) => [
+      ...(await realFills(userId, ids)),
+      { id: 'f_race', orderId: order.id, userId: 'user_A', qty: order.qty, createdAt: new Date() } as unknown as Awaited<ReturnType<typeof realFills>>[number],
+    ]);
+    const found = await s.recon.reconcileUser('user_A', 'INTRADAY', new Date());
+    expect(found.filter((f) => f.check === 'FILLS_VS_ORDER')).toEqual([]);
+    expect(mismatches(s).filter((m) => m.payload.check === 'FILLS_VS_ORDER')).toEqual([]);
+    racing.mockRestore();
   });
 });

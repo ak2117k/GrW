@@ -231,7 +231,7 @@ function maskClientId(clientId: string): string {
  * users' orders. On timeout the call rejects so the pipeline treats it as a
  * transient fault (retry → DLQ) rather than freezing the fleet.
  */
-const BROKER_CALL_TIMEOUT_MS = 15_000;
+export const BROKER_CALL_TIMEOUT_MS = 15_000;
 
 /** Reject if `p` does not settle within `ms`; always clears the timer. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {

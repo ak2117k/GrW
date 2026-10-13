@@ -1,6 +1,7 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-poller.service.spec.ts
 import { Logger } from '@nestjs/common';
 import { SentinelExitPoller, AI_EXIT_POLL_MS } from './sentinel-exit-poller.service';
+import { CLAIM_STALE_MS, SECOND_SWEEP_MS } from '../domain/claim-timing';
 
 const ENV_KEYS = ['AI_AUTO_EXIT_ENABLED', 'AI_AUTO_EXIT_MODE', 'AI_AUTO_EXIT_USER_IDS', 'AI_AUTO_EXIT_QTY_UNITS', 'BOOT_JOBS'];
 function setEnv(e: Record<string, string>) {
@@ -37,18 +38,20 @@ describe('SentinelExitPoller', () => {
     poller.onModuleDestroy();
   });
 
-  it('enabled: sweeps at start and again at 65 s, polls every 5 s with a 2× age look-back', async () => {
+  it('enabled: sweeps at start and again after the stale bound, polls every 5 s with a 2× age look-back', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2026-10-12T10:00:00Z'));
     setEnv({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });
     const { poller, repo } = make();
     poller.onModuleInit();
     await Promise.resolve();
-    expect(repo.sweepInterrupted).toHaveBeenCalledWith(new Date('2026-10-12T09:59:00Z'));
+    expect(repo.sweepInterrupted).toHaveBeenCalledWith(new Date(new Date('2026-10-12T10:00:00Z').getTime() - CLAIM_STALE_MS));
     jest.advanceTimersByTime(AI_EXIT_POLL_MS);
     await Promise.resolve();
     expect(repo.pendingVerdicts).toHaveBeenCalledWith(['owner'], new Date('2026-10-12T09:57:05Z'), 5);
-    jest.advanceTimersByTime(65_000);
+    jest.advanceTimersByTime(SECOND_SWEEP_MS - AI_EXIT_POLL_MS - 1);
+    expect(repo.sweepInterrupted).toHaveBeenCalledTimes(1);
+    jest.advanceTimersByTime(1);
     expect(repo.sweepInterrupted).toHaveBeenCalledTimes(2);
     poller.onModuleDestroy();
     expect(jest.getTimerCount()).toBe(0);

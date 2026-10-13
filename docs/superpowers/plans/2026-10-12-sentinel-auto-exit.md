@@ -113,6 +113,8 @@ One non-protective order (entry side / an add / another product / bigger than th
 
 **Owner notes.** Turn on only after a dry-run day shows the expected `would cancel protective …` rows. A `CANCEL_UNCERTAIN` or `UNPROTECTED_AFTER_CANCEL:*` row needs a human at the Angel app now. A partially filled stop-loss whose total quantity exceeds the remaining position is NOT protective (quantity check uses the order's total `quantity`) and stays `OPEN_ORDER_EXISTS`.
 
+**Stale-claim bound (supersedes R8's 60 s, 2026-10-13).** A slow but live attempt could be swept `FAILED: INTERRUPTED` at 60 s (worst case is many 15 s-capped broker calls). One shared constant, `domain/claim-timing.ts` `CLAIM_STALE_MS`, now drives both the Exit button's pre-claim sweep and the poller's boot sweeps: `max(180 s, MAX_BROKER_CALLS_WHILE_CLAIMED × BROKER_CALL_TIMEOUT_MS + sleeps + 30 s)` = 310 s today, where the call count (17) covers login, both pre-checks, up to `MAX_PROTECTIVE_CANCELS` (3) cancels, the 3 cancel-confirm reads, MARKET + settle, fallback reads, LIMIT + settle and logout. More than 3 protective orders on one contract ⇒ `OPEN_ORDER_EXISTS` (nothing cancelled). The poller's second boot sweep runs at `CLAIM_STALE_MS + 5 s`. Cost: a row truly cut off by a crash blocks that contract (`EXIT_IN_FLIGHT`) for ~5 min instead of 1.
+
 ## Review Focus
 
 1. **Duplicate order impossibility** — two passes, a restart, or two `EXIT_NOW` verdicts 30 s apart for the same tracker must yield at most one live order per position at a time. Owners: Task 5 (unique claim → `null` on P2002, in-flight query), Task 9 (`second verdict while first order is open → OPEN_ORDER_EXISTS`, `claim lost → no broker call`), Task 10 (single-flight pass).

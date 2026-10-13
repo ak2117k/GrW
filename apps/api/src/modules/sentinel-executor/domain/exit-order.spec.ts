@@ -379,3 +379,13 @@ describe('protectiveCancelState', () => {
     expect(protectiveCancelState([o('A', 'cancelled', { filledshares: '40' })], ['A'])).toEqual({ open: [], filled: ['A'] });
   });
 });
+
+describe('protectiveOrdersFor — bounded cancels', () => {
+  it('more than MAX_PROTECTIVE_CANCELS protective orders → blocking (keeps the CLAIMED-duration bound)', () => {
+    const exit = { exchange: 'MCX', token: '445566', side: 'SELL' as const, quantity: 100, positionType: 'CARRYFORWARD' };
+    const o = (id: string) => ({ orderid: id, variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', transactiontype: 'SELL',
+      producttype: 'CARRYFORWARD', quantity: '25', status: 'trigger pending', symboltoken: '445566', exchange: 'MCX' });
+    expect(protectiveOrdersFor(['A', 'B', 'C'].map(o), exit).kind).toBe('protective');
+    expect(protectiveOrdersFor(['A', 'B', 'C', 'D'].map(o), exit).kind).toBe('blocking');
+  });
+});

@@ -27,6 +27,7 @@ import {
   planExitOrder,
   tickRupees,
 } from '../domain/exit-order';
+import { CANCEL_CONFIRM_STEPS_MS, TAG_LOOKUP_DELAY_MS } from '../domain/claim-timing';
 import { evaluateGuards } from '../domain/guards';
 import type { ExitTrigger } from '../domain/manual-exit';
 import {
@@ -42,10 +43,6 @@ export type AiExitOutcome = { status: AiExitStatus | 'DUPLICATE'; reason?: strin
 
 /** Plan R10: order-book checks at +2 s, +5 s, +10 s after placing. */
 const CONFIRM_STEPS_MS = [2_000, 3_000, 5_000];
-/** Review fix 1: grace before looking for an order whose placement answer was not definitive. */
-const TAG_LOOKUP_DELAY_MS = 2_000;
-/** Cancel protective then exit: order-book checks at +1 s, +3 s, +6 s after the cancel request(s). */
-const CANCEL_CONFIRM_STEPS_MS = [1_000, 2_000, 3_000];
 /** Reason prefix for every outcome that leaves a position whose protective order we cancelled unexited. */
 export const UNPROTECTED_AFTER_CANCEL = 'UNPROTECTED_AFTER_CANCEL';
 

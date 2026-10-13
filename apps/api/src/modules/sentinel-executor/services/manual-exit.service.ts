@@ -10,13 +10,14 @@ import type { AiExitExecution } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { AuthenticatedUser } from '../../../common/decorators/current-user.decorator';
 import { parseAutoExitConfig } from '../domain/auto-exit.config';
+import { CLAIM_STALE_MS } from '../domain/claim-timing';
 import { AUTO_EXIT_EXCHANGES } from '../domain/auto-exit.types';
 import { MANUAL_REASON_PREFIX, manualVerdictId } from '../domain/manual-exit';
 import { AiExitExecutionRepository, type PendingVerdict } from '../repositories/ai-exit-execution.repository';
 import { SentinelExitExecutor, type AiExitOutcome } from './sentinel-exit-executor.service';
 
-/** Same staleness as the AI poller's sweep (a CLAIMED row this old was cut off mid-flight). */
-const CLAIM_STALE_MS = 60_000;
+
+// CLAIM_STALE_MS: the shared worst-case-derived staleness bound (domain/claim-timing).
 
 export interface ManualExitResult {
   /** The attempt's row: freshly CLAIMED (started) or the attempt already working (not started). */

@@ -2,6 +2,7 @@
 import type { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 import type { AutoExitMode, QtyUnit } from './auto-exit.types';
 import type { ExitTrigger } from './manual-exit';
+import { MAX_PROTECTIVE_CANCELS } from './claim-timing';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const PRODUCTS = new Set(['INTRADAY', 'CARRYFORWARD', 'DELIVERY']);
@@ -262,6 +263,7 @@ export function protectiveOrdersFor(
 ): ProtectiveScan {
   const open = (rows as Row[]).filter((o) => matches(o, exit.exchange, exit.token) && !isTerminalOrderStatus(statusOf(o)));
   if (open.length === 0) return { kind: 'none' };
+  if (open.length > MAX_PROTECTIVE_CANCELS) return { kind: 'blocking' };
   const orders: ProtectiveOrder[] = [];
   for (const o of open) {
     const orderId = String(o?.orderid ?? '').trim();

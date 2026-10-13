@@ -3,6 +3,7 @@ import { ForbiddenException, NotFoundException, UnprocessableEntityException } f
 import { ManualExitService } from './manual-exit.service';
 import { SentinelExitExecutor } from './sentinel-exit-executor.service';
 import { istDayStartUtc } from '../domain/exit-order';
+import { CLAIM_STALE_MS } from '../domain/claim-timing';
 
 const NOW = new Date('2026-10-12T10:00:00Z');
 const OWNER = { userId: 'owner', role: 'ADMIN', email: 'o@x' };
@@ -186,9 +187,10 @@ describe('ManualExitService', () => {
     expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
   });
 
-  it('sweeps CLAIMED rows older than 60 s first, so a crashed attempt cannot block the button forever', async () => {
+  it('sweeps CLAIMED rows older than the shared stale bound (>= 180 s) first, so a crashed attempt cannot block the button forever', async () => {
     const h = harness();
     await (await h.svc.request(OWNER, 't1', { now: NOW, env: ENV })).done;
-    expect(h.repo.sweepInterrupted).toHaveBeenCalledWith(new Date(NOW.getTime() - 60_000));
+    expect(CLAIM_STALE_MS).toBeGreaterThanOrEqual(180_000);
+    expect(h.repo.sweepInterrupted).toHaveBeenCalledWith(new Date(NOW.getTime() - CLAIM_STALE_MS));
   });
 });

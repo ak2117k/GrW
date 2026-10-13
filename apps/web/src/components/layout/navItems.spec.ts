@@ -32,3 +32,12 @@ describe('visibleNavItems', () => {
     );
   });
 });
+
+describe('Core Journal (SP2 M5)', () => {
+  it('ADMIN (the owner) sees Core Journal right after Core Risk; USER does not', () => {
+    const admin = visibleNavItems('ADMIN').map((i) => i.path);
+    expect(admin).toContain('/core-journal');
+    expect(admin.indexOf('/core-journal')).toBe(admin.indexOf('/core-risk') + 1);
+    expect(visibleNavItems('USER').map((i) => i.path)).not.toContain('/core-journal');
+  });
+});

@@ -25,6 +25,7 @@ import BacktestPage from '@/pages/backtest/BacktestPage';
 import StrategyBuilderPage from '@/pages/strategy-builder/StrategyBuilderPage';
 import CoreStrategiesPage from '@/pages/core-strategies/CoreStrategiesPage';
 import CoreRiskPage from '@/pages/core-risk/CoreRiskPage';
+import CoreJournalPage from '@/pages/core-journal/CoreJournalPage';
 import { StrategyReviewPage } from '@/pages/strategy-review/StrategyReviewPage';
 import SettingsPage from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
@@ -183,6 +184,7 @@ export default function App() {
         <Route path="strategy-review" element={<RequireRole role="ADMIN"><StrategyReviewPage /></RequireRole>} />
         <Route path="core-strategies" element={<RequireRole role="ADMIN"><CoreStrategiesPage /></RequireRole>} />
         <Route path="core-risk" element={<RequireRole role="ADMIN"><CoreRiskPage /></RequireRole>} />
+        <Route path="core-journal" element={<RequireRole role="ADMIN"><CoreJournalPage /></RequireRole>} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>

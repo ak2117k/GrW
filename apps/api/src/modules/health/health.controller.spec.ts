@@ -1,5 +1,5 @@
 import { Reflector } from '@nestjs/core';
-import { HealthController } from './health.controller';
+import { ClientReportController, HealthController } from './health.controller';
 import type { HealthService } from './health.service';
 import type { HealthDetailService } from './health-detail.service';
 import { IS_PUBLIC_KEY, ROLES_KEY } from '../../common/decorators';
@@ -70,8 +70,7 @@ describe('HealthController', () => {
       // anonymous -- a silent absence, which is the thing this branch exists to
       // stamp out.
       const record = jest.fn().mockResolvedValue({ accepted: true });
-      const controller = new HealthController(
-        { check: jest.fn() } as unknown as HealthService,
+      const controller = new ClientReportController(
         { recordClientReport: record } as unknown as HealthDetailService,
       );
       const body = { health: 'stale', tickSocketUp: true, subscribedTokens: 0, namespaces: {} } as never;
@@ -83,8 +82,7 @@ describe('HealthController', () => {
 
     it('accepts an unauthenticated principal as a null user rather than throwing', async () => {
       const record = jest.fn().mockResolvedValue({ accepted: true });
-      const controller = new HealthController(
-        { check: jest.fn() } as unknown as HealthService,
+      const controller = new ClientReportController(
         { recordClientReport: record } as unknown as HealthDetailService,
       );
 

@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
   OnModuleDestroy,
+  Optional,
 } from '@nestjs/common';
 import type { TradeTracker } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -14,6 +15,8 @@ import {
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
+import { OwnSessionUnavailableError, withOwnAccountSession } from '../../auto-execution/services/own-account-session';
 import type { TokenRef } from '../../market-data/services/user-feed.types';
 import {
   DailyOhlcDto,
@@ -349,12 +352,14 @@ export class TradeTrackerService implements OnModuleDestroy {
     @Inject(CREDENTIAL_DECRYPTOR)
     private readonly decryptor: CredentialDecryptor,
     private readonly brokerFactory: PerUserBrokerSessionFactory,
-    // Persistent feed session — reused for the feed account's snapshot so a
-    // second login doesn't kill the live feed (see snapshotBook).
+    // The shared market-data feed session. Borrowed for a snapshot ONLY when it
+    // is logged in with this user's own client code (see snapshotBook).
     private readonly authService: AngelOneAuthService,
     // Daily historical candles for the sold-trade OHLC series (TTL-cached +
     // rate-paced; returns [] on any broker hiccup rather than throwing).
     private readonly adapter: AngelOneAdapterService,
+    // The user's own warm per-user feed session, preferred for snapshots (no login).
+    @Optional() private readonly userFeeds?: UserFeedManager,
   ) {}
 
   onModuleDestroy(): void {
@@ -373,30 +378,21 @@ export class TradeTrackerService implements OnModuleDestroy {
   async snapshotBook(
     userId: string,
   ): Promise<{ positions: unknown[] | null; holdings: unknown[] | null }> {
-    // If the caller IS the market-data feed account, read via the feed's live
-    // session instead of a fresh login — a second login on the same Angel One
-    // client code would kill the feed's streaming session. Falls back to an
-    // ephemeral login on any failure.
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { isFeedAccount: true },
-    });
+    // Read ONLY through a session on this user's own Angel account: the warm
+    // per-user feed session, else the shared feed session when (and only when)
+    // it is logged in with this user's client code, else one ephemeral login.
+    // The shared session's credentials are env-first, so `isFeedAccount` alone
+    // does not make it this user's account. A second login on a client code
+    // whose feed is live (or re-logging in) would kill that feed's stream, so in
+    // that case the snapshot is refused and reported as "not answered" (null),
+    // which reconcile already treats as "leave the trackers alone".
     let raw: { positions: unknown; holdings: unknown };
-    if (user?.isFeedAccount && this.authService.isAuthenticated()) {
-      try {
-        const api = this.authService.getSmartApi();
-        raw = {
-          positions: await api.getPosition(),
-          holdings: await api.getAllHolding(),
-        };
-      } catch (err) {
-        this.logger.warn(
-          `Feed-session snapshot failed; falling back to ephemeral login: ${err instanceof Error ? err.message : err}`,
-        );
-        raw = await this.ephemeralSnapshot(userId);
-      }
-    } else {
-      raw = await this.ephemeralSnapshot(userId);
+    try {
+      raw = await this.ownAccountSnapshot(userId);
+    } catch (err) {
+      if (!(err instanceof OwnSessionUnavailableError)) throw err;
+      this.logger.warn(`Snapshot for ${userId} skipped: ${err.message}`);
+      return { positions: null, holdings: null };
     }
     // NULL, not `[]`, for a half the broker did not answer: collapsing it here
     // would hand reconcile an "empty book" and defeat its fetchedKinds guard.
@@ -406,15 +402,23 @@ export class TradeTrackerService implements OnModuleDestroy {
     };
   }
 
-  /** One-login ephemeral broker snapshot (raw envelopes) via the isolated decrypt lease. */
-  private ephemeralSnapshot(
+  /** Raw positions + holdings envelopes from a session on this user's own account. */
+  private ownAccountSnapshot(
     userId: string,
   ): Promise<{ positions: unknown; holdings: unknown }> {
-    return this.decryptor.withDecryptedCredentials(userId, { reason: 'REVALIDATE' }, (creds) =>
-      this.brokerFactory.withSession(creds, async (session) => ({
+    return withOwnAccountSession(
+      {
+        userFeeds: this.userFeeds,
+        factory: this.brokerFactory,
+        decryptor: this.decryptor,
+        authService: this.authService,
+      },
+      userId,
+      { reason: 'REVALIDATE' },
+      async (session) => ({
         positions: await session.getPositionsEnvelope(),
         holdings: await session.getHoldingsEnvelope(),
-      })),
+      }),
     );
   }
 

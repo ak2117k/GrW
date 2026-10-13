@@ -77,6 +77,25 @@ export class MemoryPositionStore {
         .filter((p) => p.userId === userId && (since === null || isActiveStatus(p.status) || (p.closedAt !== null && p.closedAt.getTime() >= since.getTime())))
         .sort(oldestFirst)
         .map(copy),
+    lastOpenedAt: async (userId: string, strategyId: string, token: string) => {
+      const opened = this.rows
+        .filter((p) => p.userId === userId && p.strategyId === strategyId && p.instrument.token === token && p.openedAt !== null)
+        .map((p) => (p.openedAt as Date).getTime());
+      return opened.length ? new Date(Math.max(...opened)) : null;
+    },
+    listClosedSince: async (userId: string, strategyId: string, token: string, since: Date) =>
+      this.rows
+        .filter((p) => p.userId === userId && p.strategyId === strategyId && p.instrument.token === token && p.status === 'CLOSED' && p.closedAt !== null && p.closedAt.getTime() >= since.getTime())
+        .sort((a, b) => (b.closedAt as Date).getTime() - (a.closedAt as Date).getTime())
+        .map(copy),
+    listUserIdsSince: async (since: Date) =>
+      [
+        ...new Set(
+          this.rows
+            .filter((p) => isActiveStatus(p.status) || p.createdAt.getTime() >= since.getTime() || (p.closedAt !== null && p.closedAt.getTime() >= since.getTime()))
+            .map((p) => p.userId),
+        ),
+      ].sort(),
     update: async (userId: string, id: string, expectVersion: number, patch: PositionPatch) => {
       const p = this.rows.find((x) => x.id === id && x.userId === userId && x.version === expectVersion);
       if (!p) return null;

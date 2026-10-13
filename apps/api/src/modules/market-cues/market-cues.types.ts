@@ -42,6 +42,19 @@ export interface UsQuote {
 export type UsCueKey = 'nasdaq' | 'sp500' | 'dow' | 'nasdaqFutures' | 'sp500Futures';
 export const US_CUE_KEYS: readonly UsCueKey[] = ['nasdaq', 'sp500', 'dow', 'nasdaqFutures', 'sp500Futures'];
 
+/**
+ * Commodity benchmarks for MCX positions — the US-listed front-month futures
+ * MCX contracts track (NYMEX WTI, ICE Brent, COMEX gold/silver/copper, NYMEX
+ * natural gas), plus USD/INR, the other half of every MCX price.
+ */
+export type CommodityCueKey = 'wtiCrude' | 'brentCrude' | 'gold' | 'silver' | 'naturalGas' | 'copper' | 'usdInr';
+export const COMMODITY_CUE_KEYS: readonly CommodityCueKey[] = ['wtiCrude', 'brentCrude', 'gold', 'silver', 'naturalGas', 'copper', 'usdInr'];
+
+export interface CommodityQuote extends UsQuote {
+  /** The source's own contract name, e.g. "WTI Crude (Nov'26)" — which month this is. Null when not given. */
+  contract: string | null;
+}
+
 export interface BuySellNet {
   buy: number;
   sell: number;
@@ -120,10 +133,11 @@ export interface PreOpenBook {
 export interface MarketCuesSnapshot {
   enabled: boolean;
   us: Record<UsCueKey, CueRecord<UsQuote>>;
+  commodities: Record<CommodityCueKey, CueRecord<CommodityQuote>>;
   fiiDii: CueRecord<FiiDiiCash>;
   fiiOi: CueRecord<FiiDerivatives>;
   gift: CueRecord<GiftGap>;
   preOpen: CueRecord<PreOpenBook>;
 }
 
-export type CueGroup = 'us' | 'fiiDii' | 'fiiOi' | 'gift' | 'preOpen';
+export type CueGroup = 'us' | 'commodities' | 'fiiDii' | 'fiiOi' | 'gift' | 'preOpen';

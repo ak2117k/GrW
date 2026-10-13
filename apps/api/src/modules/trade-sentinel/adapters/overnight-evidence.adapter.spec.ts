@@ -293,3 +293,55 @@ describe('SentinelOvernightEvidenceAdapter — cue ages at 08:50 come from the s
     expect(c.crudeOil.reading).toEqual(expect.objectContaining({ at: FRI_MCX_CLOSE, basis: 'previous session close' }));
   });
 });
+
+describe('SentinelOvernightEvidenceAdapter.news — the symbol scope uses the news tagger’s key', () => {
+  it('an MCX mini reads its parent’s headlines: GOLDM is tagged as GOLD', async () => {
+    const t = make();
+    await t.adapter.news(q({ underlying: 'GOLDM', symbol: 'GOLDM05DEC26FUT', exchange: 'MCX', segment: 'FUT', option: null as never }));
+    expect(t.news.getNewsForSymbol).toHaveBeenCalledWith('GOLD');
+    expect(t.news.getNewsForSymbol).not.toHaveBeenCalledWith('GOLDM');
+  });
+
+  it('CRUDEOILM reads CRUDEOIL headlines', async () => {
+    const t = make();
+    await t.adapter.news(q({ underlying: 'CRUDEOILM', symbol: 'CRUDEOILM19OCT26FUT', exchange: 'MCX', segment: 'FUT', option: null as never }));
+    expect(t.news.getNewsForSymbol).toHaveBeenCalledWith('CRUDEOIL');
+  });
+
+  it('an MCX underlying no article can ever be tagged with is not looked up by symbol at all', async () => {
+    const t = make();
+    const ev = await t.adapter.news(q({ underlying: 'ZINC', symbol: 'ZINC30OCT26FUT', exchange: 'MCX', segment: 'FUT', option: null as never }));
+    expect(t.news.getNewsForSymbol).not.toHaveBeenCalled();
+    expect(ev.items.some((i) => i.scope === 'symbol')).toBe(false);
+  });
+});
+
+describe('SentinelOvernightEvidenceAdapter.cues — MCX crude/gold dated by the late-close-aware clock', () => {
+  const saved = process.env.HUB_MCX_LATE_CLOSE;
+  beforeEach(() => {
+    process.env.HUB_MCX_LATE_CLOSE = '2026-11-02:2027-03-08';
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.HUB_MCX_LATE_CLOSE;
+    else process.env.HUB_MCX_LATE_CLOSE = saved;
+  });
+
+  it('at 23:40 IST in the late-close season MCX is still OPEN: the quote’s own time, not the 23:30 close', async () => {
+    const t = make();
+    t.commodities.resolver.resolveQuotes.mockResolvedValue(
+      new Map([['c1', { token: 'c1', ltp: 5600, change: -84, changePercent: -1.5, timestamp: ist('2026-11-04', '23:39') }]]),
+    );
+    const c = await t.adapter.cues(q({ now: ist('2026-11-04', '23:40'), since: ist('2026-11-04', '15:30') }));
+    expect(c.crudeOil.reading).toEqual(
+      expect.objectContaining({ at: ist('2026-11-04', '23:39').toISOString(), basis: 'quote time' }),
+    );
+  });
+
+  it('after the late close the price is dated by the 23:55 close, not 23:30', async () => {
+    const t = make();
+    const c = await t.adapter.cues(q({ now: ist('2026-11-05', '00:03'), since: ist('2026-11-04', '15:30') }));
+    expect(c.crudeOil.reading).toEqual(
+      expect.objectContaining({ at: ist('2026-11-04', '23:55').toISOString(), basis: 'previous session close' }),
+    );
+  });
+});

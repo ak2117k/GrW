@@ -29,6 +29,7 @@ import {
   Target,
   Layers,
   ShieldAlert,
+  ScrollText,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -63,6 +64,7 @@ export const navItems: NavItem[] = [
   { path: '/strategy-review', label: 'Strategy Review', icon: ClipboardList },
   { path: '/core-strategies', label: 'Core Strategies', icon: Layers, badge: 'SP2' },
   { path: '/core-risk', label: 'Core Risk', icon: ShieldAlert, badge: 'SP2' },
+  { path: '/core-journal', label: 'Core Journal', icon: ScrollText, badge: 'SP2' },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 

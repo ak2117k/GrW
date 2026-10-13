@@ -5,6 +5,7 @@ import type { SessionClock } from '../../../market-hub/session-clock';
 import { createCoreSessionClock, type CoreSquareOffPort } from '../ports';
 import type { CoreKillSwitchRepository, NewKillSwitchRow } from '../repositories/core-kill-switch.repository';
 import { ConcurrentRiskChangeError } from '../repositories/core-risk-limit.repository';
+import { FakeJournal } from '../../journal/testing/fake-journal';
 import { NOW } from '../testing/risk-fixtures';
 import { CoreKillSwitchService } from './core-kill-switch.service';
 import type { SiloSquareOffAdapter } from './silo-square-off.adapter';
@@ -40,17 +41,36 @@ function setup(opts: { repo?: FakeKillRepo; clock?: Pick<SessionClock, 'nextOpen
   const audit = { append: jest.fn().mockResolvedValue({ seq: 1n, hash: 'h' }) };
   const core = { squareOffAll: jest.fn().mockResolvedValue({ cancelledOrders: 0, exitsRequested: 0, detail: 'no core orders or positions exist yet (M3/M4 add them)' }) };
   const silos = { squareOffAll: jest.fn().mockResolvedValue([{ target: 'auto-execution', status: 'OK', detail: 'set' }]) };
+  const journal = new FakeJournal();
   const service = new CoreKillSwitchService(
     repo as unknown as CoreKillSwitchRepository,
     audit as unknown as AuditService,
     (opts.clock ?? createCoreSessionClock()) as SessionClock,
     core as CoreSquareOffPort,
     silos as unknown as SiloSquareOffAdapter,
+    journal,
   );
-  return { repo, audit, core, silos, service };
+  return { repo, audit, core, silos, service, journal };
 }
 
 describe('CoreKillSwitchService', () => {
+  it('M5: every change writes a KILL_SWITCH journal row with the cascade (best effort)', async () => {
+    const { service, journal } = setup();
+    await service.set(A, { active: true, reason: 'stop now' }, NOW);
+    expect(journal.ofType('KILL_SWITCH')).toEqual([
+      expect.objectContaining({ userId: 'user_A', at: NOW, payload: expect.objectContaining({ active: true, wasActive: false, reason: 'stop now', cascade: expect.objectContaining({ core: expect.any(Object) }) }) }),
+    ]);
+  });
+
+  it('M5: a journal that throws never fails the kill switch or its cascade', async () => {
+    const { service, journal, core } = setup();
+    journal.record = () => {
+      throw new Error('journal down');
+    };
+    await expect(service.set(A, { active: true, reason: 'stop now' }, NOW)).resolves.toMatchObject({ state: { active: true } });
+    expect(core.squareOffAll).toHaveBeenCalled();
+  });
+
   it('GET is read-only and starts off', async () => {
     const { repo, audit, core, silos, service } = setup();
     expect(await service.get('user_A', NOW)).toEqual({ active: false, since: null, reason: null, setBy: null, pendingRelease: null });
@@ -129,7 +149,7 @@ describe('CoreKillSwitchService', () => {
     expect(silos.squareOffAll).toHaveBeenCalledTimes(1);
     silos.squareOffAll.mockRejectedValueOnce(new Error('adapter broke'));
     const again = await service.set(OWNER, { active: true, reason: 'stop again' }, NOW);
-    expect(again.cascade?.silos).toHaveLength(6);
+    expect(again.cascade?.silos).toHaveLength(8);
     expect(again.cascade?.silos.every((s) => s.status === 'FAILED' && s.detail === 'adapter broke')).toBe(true);
   });
 

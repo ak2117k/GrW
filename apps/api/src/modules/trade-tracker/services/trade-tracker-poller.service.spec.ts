@@ -121,6 +121,8 @@ describe('TradeTrackerPoller', () => {
         ['23:50 on a weekday (catches the MCX close-out)', '2026-10-12T23:50:00'],
         ['09:00 on a weekday (MCX open)', '2026-10-12T09:00:00'],
         ['15:50 on a weekday (catches the equity close-out, as before)', '2026-10-12T15:50:00'],
+        // An NSE holiday is, by default, an MCX evening session (mcx-holidays.ts).
+        ['an NSE holiday (Dussehra) evening — MCX evening session', '2026-10-20T19:30:00'],
       ])('does broker work at %s', async (_label, at) => {
         jest.setSystemTime(IST(at));
         credentialed();
@@ -135,7 +137,6 @@ describe('TradeTrackerPoller', () => {
         ['08:30 on a weekday (before any open)', '2026-10-13T08:30:00'],
         ['a Saturday mid-day', '2026-10-10T11:00:00'],
         ['a Sunday evening', '2026-10-11T19:30:00'],
-        ['an exchange holiday (Dussehra) evening', '2026-10-20T19:30:00'],
         ['an exchange holiday (Dussehra) mid-day', '2026-10-20T11:00:00'],
       ])('does NO broker work at %s', async (_label, at) => {
         jest.setSystemTime(IST(at));

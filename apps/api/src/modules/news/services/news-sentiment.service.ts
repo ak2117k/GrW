@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { extractSymbols } from './extract-symbols';
+import { aliasSymbols } from './underlying-news-aliases';
 import { NewsSymbolIndexService } from './news-symbol-index.service';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
@@ -38,16 +39,23 @@ export class NewsSentimentService {
     title: string,
     summary: string,
   ): Promise<SentimentResult> {
+    let result: SentimentResult;
     try {
-      return await this.callAIEngine(title, summary);
+      result = await this.callAIEngine(title, summary);
     } catch (error) {
       this.logger.debug(
         `AI engine unavailable, falling back to keyword analysis: ${
           error instanceof Error ? error.message : error
         }`,
       );
-      return this.keywordFallback(title, summary);
+      result = await this.keywordFallback(title, summary);
     }
+    // Commodity and index underlyings (CRUDEOIL, GOLD, BANKNIFTY…) are not in
+    // the listed-symbol index, so neither path above can ever produce them.
+    // Added on BOTH paths: the AI engine's own list would otherwise hide them.
+    const merged = [...result.relatedSymbols];
+    for (const s of aliasSymbols(title, summary)) if (!merged.includes(s)) merged.push(s);
+    return { ...result, relatedSymbols: merged };
   }
 
   private async callAIEngine(

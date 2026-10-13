@@ -60,6 +60,44 @@ describe('DailyBackfillWorker.onModuleInit (boot catch-up)', () => {
   });
 
   /**
+   * LevelBookCron must seed AFTER the boot backfill, but must not run the
+   * universe pass a second time. One shared, memoised boot promise serves both.
+   */
+  describe('one shared boot backfill', () => {
+    it('runs the universe pass once however many callers ask', async () => {
+      const spy = jest.spyOn(worker, 'backfillUniverseAtBoot').mockResolvedValue();
+      await worker.onModuleInit();
+      const a = worker.bootBackfill();
+      const b = worker.bootBackfill();
+      expect(a).toBe(b);
+      await a;
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('a caller arriving BEFORE onModuleInit starts it, and onModuleInit does not start another', async () => {
+      const spy = jest.spyOn(worker, 'backfillUniverseAtBoot').mockResolvedValue();
+      await worker.bootBackfill();
+      await worker.onModuleInit();
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it('the shared promise never rejects (a failed backfill still lets seeding proceed)', async () => {
+      jest.spyOn(worker, 'backfillUniverseAtBoot').mockRejectedValue(new Error('broker down'));
+      await expect(worker.bootBackfill()).resolves.toBeUndefined();
+    });
+
+    it('waitForBootBackfill gives up after the bound', async () => {
+      jest.spyOn(worker, 'backfillUniverseAtBoot').mockReturnValue(new Promise(() => {}));
+      await expect(worker.waitForBootBackfill(20)).resolves.toBe(false);
+    });
+
+    it('waitForBootBackfill reports completion', async () => {
+      jest.spyOn(worker, 'backfillUniverseAtBoot').mockResolvedValue();
+      await expect(worker.waitForBootBackfill(1_000)).resolves.toBe(true);
+    });
+  });
+
+  /**
    * Production boot 2026-10-12: this pass hit the broker ~1s after container
    * start, before the detached feed login had built the SmartAPI client, and
    * failed with "Cannot read properties of null (reading 'getCandleData')".

@@ -124,6 +124,22 @@ export class HealthController {
   async detail(): Promise<HealthDetailPayload> {
     return this.healthDetail.check();
   }
+}
+
+/**
+ * `POST /api/healthz/client-report` — the browser's stall report.
+ *
+ * Lives under /api, NOT on the `healthz` controller above: the web client posts
+ * through its axios instance (baseURL '/api'), and the Cloudflare worker only
+ * proxies /api/*, /auth/* and /socket.io/* to the API. On `@Controller('healthz')`
+ * the route was `/healthz/client-report`, so every report 404'd in production.
+ * The probes above stay at /healthz — Render and the keep-warm cron hit them
+ * directly on the API host.
+ */
+@ApiTags('Health')
+@Controller('api/healthz')
+export class ClientReportController {
+  constructor(private readonly healthDetail: HealthDetailService) {}
 
   /**
    * Ingest a browser stall report.

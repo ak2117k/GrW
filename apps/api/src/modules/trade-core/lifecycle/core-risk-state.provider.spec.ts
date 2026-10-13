@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client';
+import { Logger } from '@nestjs/common';
 import { chargesForLeg } from '../../trade-sentinel/charges';
 import { PaperLedgerService, type PlaceContext } from '../execution/paper-ledger.service';
 import { fakeDefaults, MemoryPaperStore } from '../execution/testing/memory-paper-store';
@@ -108,5 +109,44 @@ describe('CoreRiskStateProvider (RISK_STATE_PROVIDER, M2 notes for M4)', () => {
     const s = setup();
     jest.spyOn(s.ledger, 'funds').mockRejectedValueOnce(new Error('db down'));
     await expect(s.provider.liveState('user_A', NOW)).rejects.toThrow('db down');
+  });
+});
+
+describe('CoreRiskStateProvider — dailyLossLatched from the journal (M5 J13)', () => {
+  const build = (reads?: unknown) => {
+    const s = setup();
+    return reads === undefined
+      ? new CoreRiskStateProvider(s.ledger, s.positions.repo, { mark: () => null })
+      : new CoreRiskStateProvider(s.ledger, s.positions.repo, { mark: () => null }, reads as never);
+  };
+
+  it("reports today's latch; without the reads binding it is false (M4 behaviour)", async () => {
+    const latched = jest.fn().mockResolvedValue(true);
+    const reconBlock = jest.fn().mockResolvedValue({ all: false, strategyIds: [] });
+    const state = await build({ latched, reconBlock }).liveState('user_A', NOW);
+    expect(state.dailyLossLatched).toBe(true);
+    expect(state.journalUnreadable).toBeUndefined();
+    expect(latched).toHaveBeenCalledWith('user_A', '2026-10-12');
+    expect((await build().liveState('user_A', NOW)).dailyLossLatched).toBe(false);
+  });
+
+  it('a failing journal read does not throw (the daily-loss monitor still decides on P&L, so its square-off is never blocked); entries are rejected JOURNAL_UNAVAILABLE', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const failing = { latched: jest.fn().mockRejectedValue(new Error('journal down')), reconBlock: jest.fn().mockResolvedValue({ all: false, strategyIds: [] }) };
+    const state = await build(failing).liveState('user_A', NOW);
+    expect(state).toMatchObject({ journalUnreadable: true, dailyLossLatched: false, realisedPnlToday: 0, openPnl: 0 });
+    const v = checkRisk(intentFixture(), ctxFixture({ state }));
+    expect(v.verdict).toBe('REJECT');
+    expect(v.reasons.map((r) => r.code)).toContain('JOURNAL_UNAVAILABLE');
+    const exit = checkRisk({ kind: 'EXIT', intentId: 'x_1', userId: 'user_A', positionId: 'pos_1', qty: 10 }, ctxFixture({ state }));
+    expect(exit.verdict).toBe('ALLOW');
+    jest.restoreAllMocks();
+  });
+
+  it('reports the recon block from the journal; without the reads binding nothing is blocked', async () => {
+    const reads = { latched: jest.fn().mockResolvedValue(false), reconBlock: jest.fn().mockResolvedValue({ all: false, strategyIds: ['cs_ungated'] }) };
+    expect((await build(reads).liveState('user_A', NOW)).reconBlocked).toEqual({ all: false, strategyIds: ['cs_ungated'] });
+    expect(reads.reconBlock).toHaveBeenCalledWith('user_A');
+    expect((await build().liveState('user_A', NOW)).reconBlocked).toEqual({ all: false, strategyIds: [] });
   });
 });

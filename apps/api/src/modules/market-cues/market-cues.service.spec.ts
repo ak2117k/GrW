@@ -412,22 +412,29 @@ describe('schedule', () => {
       fiiOi: '0 0 20 * * 1-5',
       fiiOiRetry: '0 0 21 * * 1-5',
       preOpen: '0 10 9 * * 1-5',
+      commoditiesDay: '0 */10 9-22 * * 1-5',
+      commoditiesLate: '0 0-30/10 23 * * 1-5',
     });
   });
 
   it('every cron method pins Asia/Kolkata', () => {
     const src = readFileSync(join(__dirname, 'market-cues.service.ts'), 'utf8');
     const crons = [...src.matchAll(/@Cron\(([^)]*)\)/g)].map((m) => m[1]);
-    expect(crons.length).toBe(7);
+    expect(crons.length).toBe(Object.keys(MARKET_CUES_CRONS).length);
     for (const c of crons) expect(c).toMatch(/timeZone: 'Asia\/Kolkata'/);
   });
 
   it('skips NSE holidays and weekends (Dussehra, Tue 2026-10-20)', () => {
     const { svc } = make();
-    const slots: CronSlot[] = ['usGiftMorning', 'usGiftNight', 'fii', 'fiiOi', 'preOpen'];
+    const slots: CronSlot[] = ['fii', 'fiiOi', 'preOpen'];
     for (const slot of slots) {
       expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-20T09:10:00')) }).toEqual({ slot, fires: false });
       expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-21T09:10:00')) }).toEqual({ slot, fires: true });
+    }
+    // The US/GIFT slots serve MCX too, and an NSE holiday is (by default) an
+    // MCX evening session — mcx-holidays.ts — so they still fire.
+    for (const slot of ['usGiftMorning', 'usGiftNight'] as CronSlot[]) {
+      expect({ slot, fires: svc.shouldFire(slot, ist('2026-10-20T09:10:00')) }).toEqual({ slot, fires: true });
     }
     expect(svc.shouldFire('preOpen', ist('2026-10-10T09:10:00'))).toBe(false); // Saturday
   });

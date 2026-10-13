@@ -45,6 +45,7 @@ import { AutoExecutionModule } from './modules/auto-execution/auto-execution.mod
 import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module';
 import { MarketHubModule } from './modules/market-hub/market-hub.module';
 import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.module';
+import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-executor.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
@@ -235,6 +236,11 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // credit. See trade-sentinel.module.ts for exactly what its ports are
     // wired to and what that does and does not guarantee.
     TradeSentinelModule,
+
+    // Sentinel auto-exit — closes an owner F&O position on an EXIT_NOW verdict.
+    // Inert unless AI_AUTO_EXIT_ENABLED=true (no timer, no query, no broker call);
+    // meets TradeSentinelModule only in the database.
+    SentinelExecutorModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

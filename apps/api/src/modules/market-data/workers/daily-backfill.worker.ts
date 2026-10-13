@@ -26,6 +26,9 @@ interface BackfillTarget {
 const NSE_TARGETS: BackfillTarget[] = [
   { symbol: 'NIFTY', token: '99926000', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
   { symbol: 'BANKNIFTY', token: '99926009', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
+  // LevelBookCron seeds FINNIFTY too; without its candles it logged
+  // "No daily candles for FINNIFTY" even once the instrument row existed.
+  { symbol: 'FINNIFTY', token: '99926037', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
 ];
 
 /**
@@ -85,11 +88,48 @@ export class DailyBackfillWorker implements OnModuleInit {
       this.logger.log(BOOT_JOBS_DISABLED);
       return;
     }
-    this.backfillUniverseAtBoot().catch((err) => {
-      this.logger.warn(
-        `Boot-time candle backfill failed: ${err instanceof Error ? err.message : err}`,
-      );
+    void this.bootBackfill();
+  }
+
+  /** The ONE boot universe pass, shared by every caller (see {@link bootBackfill}). */
+  private bootBackfillPromise: Promise<void> | null = null;
+
+  /**
+   * The boot universe backfill, started at most once per process and shared.
+   *
+   * LevelBookCron must seed AFTER it (so PDH/PDL read yesterday's daily), but
+   * must not run the universe pass a second time — the rate-limited walk is the
+   * expensive part. Whichever caller arrives first (this worker's onModuleInit
+   * or LevelBookCron) starts it; everyone else awaits the same promise. Never
+   * rejects: a failed backfill is logged here and seeding proceeds on whatever
+   * candles exist.
+   */
+  bootBackfill(): Promise<void> {
+    if (!this.bootBackfillPromise) {
+      this.bootBackfillPromise = this.backfillUniverseAtBoot().catch((err) => {
+        this.logger.warn(
+          `Boot-time candle backfill failed: ${err instanceof Error ? err.message : err}`,
+        );
+      });
+    }
+    return this.bootBackfillPromise;
+  }
+
+  /**
+   * Wait for the shared boot backfill, but no longer than `maxWaitMs`.
+   * Resolves true when it finished, false when the bound expired first.
+   */
+  async waitForBootBackfill(maxWaitMs: number): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), maxWaitMs);
+      timer.unref?.();
     });
+    try {
+      return await Promise.race([this.bootBackfill().then(() => true), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**

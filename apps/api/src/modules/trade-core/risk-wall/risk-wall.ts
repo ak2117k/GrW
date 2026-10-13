@@ -80,8 +80,16 @@ export function decideDailyLoss(limits: readonly LimitInForce[], state: RiskLive
   const loss = finite(state.realisedPnlToday) && finite(state.openPnl)
     ? new D(0).minus(state.realisedPnlToday).minus(state.openPnl)
     : null;
-  if (state.dailyLossLatched || (loss && lossReaches(loss, limit))) {
-    return { status: 'BREACHED', lossRupees: loss ? loss.toFixed(2) : null, limitRupees, action, squareOffCore: action === 'BLOCK_AND_SQUARE_OFF' };
+  // Owner ruling 2026-10-12: today's REALISED loss is a known number, so when it alone has
+  // reached the limit (same >= rule) the day is BREACHED even if open P&L is unknown (a blind
+  // position, e.g. feed starvation). lossRupees is then the realised loss. When realised alone
+  // is under the limit and open P&L is unknown, the decision stays UNKNOWN: missing data is
+  // never on its own a reason to exit (entries still fail closed on UNKNOWN below).
+  const realisedLoss = loss === null && finite(state.realisedPnlToday) ? new D(0).minus(state.realisedPnlToday) : null;
+  const breachedBy = loss && lossReaches(loss, limit) ? loss : realisedLoss && lossReaches(realisedLoss, limit) ? realisedLoss : null;
+  if (state.dailyLossLatched || breachedBy) {
+    const shown = breachedBy ?? loss;
+    return { status: 'BREACHED', lossRupees: shown ? shown.toFixed(2) : null, limitRupees, action, squareOffCore: action === 'BLOCK_AND_SQUARE_OFF' };
   }
   if (!loss) return { status: 'UNKNOWN', lossRupees: null, limitRupees, action, squareOffCore: false };
   return { status: 'OK', lossRupees: loss.toFixed(2), limitRupees, action, squareOffCore: false };
@@ -172,6 +180,11 @@ function evaluateEntry(intent: CoreEntryIntent, ctx: RiskContext): RiskVerdict {
   for (const m of problems) add('INVALID_INTENT', m);
 
   if (ctx.killSwitchActive) add('KILL_SWITCH', 'the kill switch is on: no new entries');
+  if (state.journalUnreadable === true) add('JOURNAL_UNAVAILABLE', 'the journal cannot be read (daily-loss latch, reconciliation block): no new entries');
+  const rb = state.reconBlocked;
+  if (rb && (rb.all || rb.strategyIds.includes(intent.strategyId))) {
+    add('RECON_BLOCKED', `a reconciliation finding blocks new entries${rb.all ? '' : ' for this strategy'} until the owner acknowledges it`);
+  }
   if (vehicle) {
     for (const p of requiredLimitPairs(vehicle)) {
       if (lim.raw(p.key, p.scope) === null) add('LIMIT_MISSING', `no ${p.key} limit is in force for ${p.scope}`);
@@ -184,7 +197,8 @@ function evaluateEntry(intent: CoreEntryIntent, ctx: RiskContext): RiskVerdict {
 
   const dailyLoss = decideDailyLoss(ctx.limits, state);
   if (dailyLoss.status === 'BREACHED') {
-    add('DAILY_LOSS', `today's loss${dailyLoss.lossRupees ? ` ₹${dailyLoss.lossRupees}` : ''} has reached the ₹${dailyLoss.limitRupees} daily limit${state.dailyLossLatched ? ' (blocked for the rest of the session)' : ''}`);
+    const realisedOnly = !finite(state.openPnl) && dailyLoss.lossRupees !== null;
+    add('DAILY_LOSS', `today's ${realisedOnly ? 'realised ' : ''}loss${dailyLoss.lossRupees ? ` ₹${dailyLoss.lossRupees}` : ''} has reached the ₹${dailyLoss.limitRupees} daily limit${realisedOnly ? ' (open P&L unknown)' : ''}${state.dailyLossLatched ? ' (blocked for the rest of the session)' : ''}`);
   } else if (dailyLoss.status === 'UNKNOWN' && dailyLoss.limitRupees !== null && dailyLoss.action !== null) {
     add('PNL_UNKNOWN', "today's P&L cannot be computed");
   }

@@ -2,8 +2,9 @@ import { Module } from '@nestjs/common';
 import { MarketCuesService } from './market-cues.service';
 
 /**
- * Market cues — US closes and index futures, FII/DII cash flows, FII index F&O
- * positioning, GIFT Nifty and the NSE pre-open book.
+ * Market cues — US closes and index futures, MCX commodity benchmarks (WTI,
+ * Brent, gold, silver, natural gas, copper) and USD/INR, FII/DII cash flows,
+ * FII index F&O positioning, GIFT Nifty and the NSE pre-open book.
  *
  * LICENSING: every source here is a free, unofficial public endpoint (Yahoo,
  * CNBC, NSE, NSE IX, NSDL). That is acceptable for the OWNER'S OWN shadow

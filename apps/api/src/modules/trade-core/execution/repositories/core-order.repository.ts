@@ -102,6 +102,16 @@ export class CoreOrderRepository {
     return (await db.coreOrder.findMany({ where: { userId }, orderBy: OLDEST_FIRST })).map(toCoreOrder);
   }
 
+  /** M5 (J19): orders submitted at or after `since`. */
+  async listForUserSince(userId: string, since: Date, db: PaperDb = this.prisma): Promise<CoreOrder[]> {
+    return (await db.coreOrder.findMany({ where: { userId, submittedAt: { gte: since } }, orderBy: [{ submittedAt: 'asc' }, { id: 'asc' }] })).map(toCoreOrder);
+  }
+
+  async listByIds(userId: string, ids: readonly string[], db: PaperDb = this.prisma): Promise<CoreOrder[]> {
+    if (ids.length === 0) return [];
+    return (await db.coreOrder.findMany({ where: { userId, id: { in: [...ids] } } })).map(toCoreOrder);
+  }
+
   async listOpenForUser(userId: string, db: PaperDb = this.prisma): Promise<CoreOrder[]> {
     return (await db.coreOrder.findMany({ where: { userId, state: { in: [...OPEN_STATES] } }, orderBy: OLDEST_FIRST })).map(toCoreOrder);
   }

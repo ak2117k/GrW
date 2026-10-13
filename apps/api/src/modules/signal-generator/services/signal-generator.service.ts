@@ -30,7 +30,12 @@ import { OptionStrikeSelectorService } from '../../options-chain/services/option
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { ContextScoringService } from './context-scoring/context-scoring.service';
 import type { ContextFactorBreakdown } from '../types/setup-context.types';
-import { LevelsContextStrategy, classifyRegime, buildIndicatorReadings } from '../strategies/levels-context.strategy';
+import {
+  LevelsContextStrategy,
+  classifyRegime,
+  buildIndicatorReadings,
+  closedBarVolumeRatio,
+} from '../strategies/levels-context.strategy';
 import { ema } from '../strategies/indicators';
 import { SetupContext, IndicatorReadings } from '../types/setup-context.types';
 import { LevelBook } from '../types/level-book.types';
@@ -71,6 +76,18 @@ const MIN_TIMEFRAME_AGREEMENT = 2;
  * REFRESH_FROM_BROKER_FRESH_MS removes that redundant per-poll fetch.
  */
 const REFRESH_FROM_BROKER_FRESH_MS = 5 * 60 * 1000;
+
+/** Cap on the per-symbol candle memo used by re-served locks (see recentCandles). */
+const RECENT_CANDLES_MAX = 200;
+
+/** One bar's width for a timeframe label; 60 s for anything unrecognised (the poll cadence). */
+function barWidthMs(timeframe: string): number {
+  const minutes: Record<string, number> = {
+    '1m': 1, '3m': 3, '5m': 5, '10m': 10, '15m': 15, '30m': 30,
+    '1h': 60, '60m': 60, '4h': 240, '1d': 1440,
+  };
+  return (minutes[timeframe] ?? 1) * 60_000;
+}
 
 /**
  * Map a working timeframe to the next-higher timeframe used for the MTF
@@ -152,8 +169,14 @@ export type AnalyzeResult =
       setupType: SetupContext['setupType'];
       grade: SetupContext['grade'];
       atr14: number;
-      volumeRatio: number;
-      levels: LevelsSnapshot;
+      /**
+       * Last closed bar volume over its VMA20 (median of the 20 bars before it),
+       * or the option-chain proxy on an index. NULL = no reading — never 0.
+       * Null on a re-served lock, which loads no candles.
+       */
+      volumeRatio: number | null;
+      /** Null only when a lock is re-served with no level book — never zero-filled. */
+      levels: LevelsSnapshot | null;
       reason: string;
       indicators: SetupContext['indicators'];
       higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
@@ -197,6 +220,13 @@ export type AnalyzeResult =
       kind: 'no-setup';
       reason: string;
       levels: LevelsSnapshot | null;
+      /**
+       * The same closed-bar VMA20 reading as the setup arm, taken from the
+       * candles this call already loaded. It is a fact about the market, not
+       * about the engine liking a trade, so it must not be setup-gated. NULL =
+       * no reading (no book, too few bars, a volume-less index with no proxy).
+       */
+      volumeRatio: number | null;
       higherTimeframeTrend: SetupContext['higherTimeframeTrend'];
       regime: SetupContext['regime'];
       intradayRangeRatio: number;
@@ -227,6 +257,17 @@ export class SignalGeneratorService {
    * behind REFRESH_FROM_BROKER_FRESH_MS (see that constant).
    */
   private readonly lastBrokerRefreshAt = new Map<string, number>();
+
+  /**
+   * The bars the last full analyze() loaded, per exchange:token:timeframe, so a
+   * re-served locked setup can report the closed-bar volume ratio without a
+   * broker call. Valid for one bar width: until the next bar closes, the
+   * closed bar the ratio is read from cannot have changed.
+   */
+  private readonly recentCandles = new Map<
+    string,
+    { at: number; candles: Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }> }
+  >();
 
   /** token:timeframe keys already warned about in fetchHistorical. */
   private readonly warnedUserFetchKeys = new Set<string>();
@@ -329,7 +370,15 @@ export class SignalGeneratorService {
         this.setupTracker.updateFromTick(token, liveBook.spot, new Date());
       }
       const refreshed = this.setupTracker.getActive(token) ?? existing;
-      return this.lockedToResult(refreshed, liveBook);
+      // The lock re-serves frozen numbers, but the market's volume reading is
+      // still wanted (the sentinel's flow.volumeRatio). Read it CHEAPLY: the
+      // stored candles, else the bars the last full analyze loaded — never a
+      // broker historical call per poll. Nothing cached → honestly null.
+      return this.lockedToResult(
+        refreshed,
+        liveBook,
+        await this.cachedVolumeRatio(token, exchange, timeframe),
+      );
     }
 
     const book = await this.levelBookService.lazyLoad(
@@ -340,6 +389,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: 'no level book available — symbol has no historical data',
         levels: null,
+        volumeRatio: null,
         higherTimeframeTrend: null,
         regime: null,
         intradayRangeRatio: 0,
@@ -398,11 +448,13 @@ export class SignalGeneratorService {
         );
       }
     }
+    this.rememberCandles(token, exchange, timeframe, candles);
     if (candles.length < 25) {
       return {
         kind: 'no-setup',
         reason: `not enough candles (got ${candles.length}, need 25 for ${timeframe})`,
         levels: snapshotFromBook(book),
+        volumeRatio: closedBarVolumeRatio(candles),
         higherTimeframeTrend: null,
         regime,
         intradayRangeRatio,
@@ -459,6 +511,11 @@ export class SignalGeneratorService {
     const proxyVolumeRatio = await this.computeIndexVolumeRatio(
       token, symbol, timeframe,
     );
+    // The market's volume reading, independent of whether the strategy fires:
+    // the same closed-bar / VMA20 rule (and the same index proxy fallback) the
+    // strategy's own gate uses, but reported on EVERY arm below — callers like
+    // the trade sentinel need it on symbols the engine has no opinion about.
+    const volumeRatio = closedBarVolumeRatio(candles) ?? proxyVolumeRatio ?? null;
     const output = strategy.analyze({
       candles,
       levelBook: book,
@@ -476,6 +533,7 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: lastReject,
         levels: snapshotFromBook(book),
+        volumeRatio,
         higherTimeframeTrend,
         regime,
         intradayRangeRatio,
@@ -539,6 +597,7 @@ export class SignalGeneratorService {
             kind: 'no-setup',
             reason: `reject:context-score (score=${scored.contextScore} <= ${rejectBelow})`,
             levels: snapshotFromBook(book),
+            volumeRatio,
             higherTimeframeTrend,
             regime,
             intradayRangeRatio,
@@ -608,12 +667,13 @@ export class SignalGeneratorService {
         kind: 'no-setup',
         reason: 'failed to lock setup',
         levels: snapshotFromBook(book),
+        volumeRatio,
         higherTimeframeTrend,
         regime,
         intradayRangeRatio,
       };
     }
-    return this.lockedToResult(final, book);
+    return this.lockedToResult(final, book, volumeRatio);
   }
 
   /**
@@ -702,9 +762,65 @@ export class SignalGeneratorService {
     return buildIndicatorReadings(candles, lastClose, isLong);
   }
 
+  private rememberCandles(
+    token: string,
+    exchange: string,
+    timeframe: string,
+    candles: Array<{ timestamp: Date; open: number; high: number; low: number; close: number; volume: number }>,
+  ): void {
+    if (candles.length === 0) return;
+    const key = `${exchange}:${token}:${timeframe}`;
+    this.recentCandles.delete(key); // re-insert so Map order is recency
+    this.recentCandles.set(key, { at: Date.now(), candles });
+    // Bounded: one entry per charted symbol+timeframe; drop the oldest.
+    while (this.recentCandles.size > RECENT_CANDLES_MAX) {
+      const oldest = this.recentCandles.keys().next().value as string;
+      this.recentCandles.delete(oldest);
+    }
+  }
+
+  /**
+   * Closed-bar volume ratio for a re-served lock, from candles already at hand:
+   * the stored candles (DB — the same read the full path makes first), else the
+   * bars the last full analyze loaded within one bar width. Never calls the
+   * broker; null when neither has a reading.
+   */
+  private async cachedVolumeRatio(
+    token: string,
+    exchange: string,
+    timeframe: string,
+  ): Promise<number | null> {
+    try {
+      const instrument = await this.marketDataRepository.getInstrumentByToken(token);
+      if (instrument) {
+        const now = new Date();
+        const windowStart = new Date(now.getTime() - lookbackDaysFor(timeframe) * 24 * 60 * 60 * 1000);
+        const rows = await this.marketDataRepository.getCandles(instrument.id, timeframe, windowStart, now, 25);
+        const fromDb = closedBarVolumeRatio(
+          rows.map((c) => ({
+            timestamp: c.timestamp,
+            open: c.open, high: c.high, low: c.low, close: c.close,
+            volume: typeof c.volume === 'bigint' ? Number(c.volume) : c.volume,
+          })),
+        );
+        if (fromDb !== null) return fromDb;
+      }
+    } catch (err) {
+      this.logger.debug(
+        `cachedVolumeRatio: stored-candle read failed for ${token}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    const memo = this.recentCandles.get(`${exchange}:${token}:${timeframe}`);
+    if (memo && Date.now() - memo.at < barWidthMs(timeframe)) {
+      return closedBarVolumeRatio(memo.candles);
+    }
+    return null;
+  }
+
   private lockedToResult(
     setup: LockedSetup,
     book: LevelBook | null,
+    volumeRatio: number | null,
   ): AnalyzeResult {
     return {
       kind: 'setup',
@@ -719,16 +835,14 @@ export class SignalGeneratorService {
       setupType: setup.setupType,
       grade: setup.grade,
       atr14: setup.atr14,
-      // volumeRatio is part of the original setupContext but not held by
-      // the locked record — surface 0 when re-serving an existing lock.
-      volumeRatio: 0,
-      levels: book
-        ? snapshotFromBook(book)
-        : {
-            pdh: 0, pdl: 0, orh: null, orl: null,
-            prevOrh: null, prevOrl: null,
-            vwap: 0, todayHigh: 0, todayLow: 0, atr14: setup.atr14,
-          },
+      // The caller's reading of THIS call's candles, or null when it loaded
+      // none (a re-served lock). It used to be a hard-coded 0, which passes
+      // every Number.isFinite check downstream and reached the trade sentinel
+      // as a real "volume is 0x average" — a false input, not a missing one.
+      volumeRatio,
+      // No book → no levels. Zero-filled PDH/PDL/VWAP here used to reach the
+      // sentinel's level candidates as real lines at price 0.
+      levels: book ? snapshotFromBook(book) : null,
       reason: setup.reason,
       indicators: setup.indicators,
       higherTimeframeTrend: setup.higherTimeframeTrend,

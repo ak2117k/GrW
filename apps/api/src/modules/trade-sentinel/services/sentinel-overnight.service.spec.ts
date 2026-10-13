@@ -114,6 +114,7 @@ const market: MarketCuesSnapshot = {
     nasdaqFutures: rec(usq(31108.75, -139.25), { sourceTime: ist('2026-10-12', '15:40').toISOString(), basis: 'quote time' }),
     sp500Futures: rec(usq(7866, -10), { sourceTime: ist('2026-10-12', '15:40').toISOString(), basis: 'quote time' }),
   },
+  commodities: unavailableSnapshot('n/a').commodities,
   fiiDii: rec(
     { date: '2026-10-09', fii: { buy: 10373.99, sell: 13942.89, net: -3568.9 }, dii: { buy: 15626.53, sell: 10883.27, net: 4743.26 }, unit: '₹ crore' as const },
     { sourceTime: '2026-10-09', basis: 'session date', source: 'NSE fiidiiTradeReact' },

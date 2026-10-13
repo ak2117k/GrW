@@ -25,6 +25,7 @@ import {
 } from '../../sell-futures-track/services/sell-futures-paper-account.service';
 import { SellFuturesRejectionRepository, SellFuturesRejectionReason } from '../../sell-futures-track/repositories/sell-futures-rejection.repository';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
+import { handOffChartinkHit } from '../../trade-core/intake/alert-handoff';
 
 interface Hit {
   symbol: string;
@@ -85,10 +86,14 @@ export class ChartinkProcessService {
     // must not block processing.
     let scanName: string | undefined;
     let scannerCategory: string | undefined;
+    // Review fix 2: the alert's own creation time travels with every hit to the core, so a hit
+    // processed late (backlog, a Bull re-run after a restart) is judged by its real age.
+    let alertAt: Date | null = null;
     try {
       const alert = await this.repo.getAlertWithSetups(alertId);
       scanName = alert?.scanner?.scanName ?? undefined;
       scannerCategory = (alert?.scanner as any)?.category ?? undefined;
+      alertAt = alert?.receivedAt ?? null;
     } catch (err) {
       this.logger.warn(
         `could not resolve scanner name for alert ${alertId}: ${err instanceof Error ? err.message : err}`,
@@ -96,7 +101,7 @@ export class ChartinkProcessService {
     }
     for (let i = 0; i < hits.length; i++) {
       try {
-        await this.processOne(alertId, hits[i], scanName, scannerCategory);
+        await this.processOne(alertId, hits[i], scanName, scannerCategory, alertAt);
       } catch (err) {
         this.logger.warn(
           `processOne unexpected throw for ${hits[i].symbol}: ${err instanceof Error ? err.message : err}`,
@@ -131,7 +136,7 @@ export class ChartinkProcessService {
     else this.logger.log(line);
   }
 
-  async processOne(alertId: string, hit: Hit, scanName?: string, scannerCategory?: string): Promise<void> {
+  async processOne(alertId: string, hit: Hit, scanName?: string, scannerCategory?: string, alertAt: Date | null = null): Promise<void> {
     // === 0. ENTRY-WINDOW GATE (15:00 IST cutoff) ===
     // No new WATCHING entry may be opened after 15:00 IST (or before 09:15,
     // or on a weekend). Reject BEFORE any symbol resolution / scoring / broker
@@ -497,6 +502,24 @@ export class ChartinkProcessService {
 
     // (The Anand dual-track formerly ran here, after scoring; it now runs at
     // step 1b above so it's never starved by the scoring backlog.)
+
+    // === 7. SP2 core fan-out (docs/superpowers/plans/2026-10-13-sp2-m5-journal-and-entries.md, O3/J2). ===
+    // After every silo path above: hand the scored hit to the trade core. Synchronous, never throws,
+    // never awaited — the core only queues it, so nothing the core does can change the silo outcome.
+    // With CORE_ENTRIES_MODE=off no intake is registered and this is a no-op.
+    handOffChartinkHit({
+      alertId,
+      symbol: hit.symbol,
+      tradingSymbol: resolved.tradingSymbol,
+      token: instrument.token,
+      exchange: 'NSE',
+      hitPrice: hit.hitPrice,
+      scanName: scanName ?? null,
+      side,
+      score: scoringResult.score,
+      receivedAt: new Date(),
+      alertAt,
+    });
   }
 
   /**

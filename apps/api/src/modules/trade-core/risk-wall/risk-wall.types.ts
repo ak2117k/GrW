@@ -89,6 +89,17 @@ export interface RiskLiveState {
   deployedCapital: Readonly<Record<Vehicle, number | null>>;
   /** The daily loss limit was reached earlier this session (spec §5.3: blocked for the rest of it). */
   dailyLossLatched: boolean;
+  /**
+   * SP2 M5 (J12, O10): unacknowledged reconciliation findings. Absent = none (M2–M4 providers).
+   * `all` blocks every strategy of the user; otherwise only the listed strategies. Entries only.
+   */
+  reconBlocked?: { all: boolean; strategyIds: readonly string[] };
+  /**
+   * SP2 M5: the journal-derived inputs (latch, recon block) could not be read. Entries fail
+   * closed (JOURNAL_UNAVAILABLE); the provider does not throw, so DailyLossMonitor still decides
+   * on P&L and a journal outage never stops a square-off. Absent = readable.
+   */
+  journalUnreadable?: boolean;
 }
 
 /** One limit in force as the wall used it: the journal's limits snapshot. */
@@ -139,6 +150,7 @@ export const RISK_REASON_CODES = [
   'CAP_OPTIONS_PREMIUM',
   'CONTEXT_UNAVAILABLE',
   'JOURNAL_UNAVAILABLE',
+  'RECON_BLOCKED',
 ] as const;
 export type RiskReasonCode = (typeof RISK_REASON_CODES)[number];
 
@@ -152,7 +164,8 @@ export type RiskVerdictKind = 'ALLOW' | 'REJECT' | 'RESIZE';
 /** Spec §5.3. squareOffCore tells M4 to exit every core position (CORE_SQUARE_OFF, cause DAILY_LOSS). */
 export interface DailyLossDecision {
   status: 'OK' | 'BREACHED' | 'UNKNOWN';
-  /** 2 dp; positive = loss, negative = profit. Null when P&L is unknown. */
+  /** 2 dp; positive = loss, negative = profit. Null when P&L is unknown, except a BREACHED decided on
+   *  the realised loss alone with open P&L unknown (owner ruling 2026-10-12): then the realised loss. */
   lossRupees: string | null;
   limitRupees: string | null;
   action: DailyLossAction | null;

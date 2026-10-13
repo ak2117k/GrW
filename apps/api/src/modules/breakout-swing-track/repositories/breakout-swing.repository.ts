@@ -123,6 +123,16 @@ export class BreakoutSwingRepository {
     await this.prisma.breakoutSwingEntry.update({ where: { id }, data });
   }
 
+  /**
+   * Close a TRADED row, guarded on it still being TRADED (updateMany + status
+   * guard) so a concurrent poller exit is never overwritten. Returns whether this
+   * call made the transition. Used by the kill-switch square-off.
+   */
+  async closeTraded(id: string, data: Required<UpdateStatusInput>): Promise<boolean> {
+    const r = await this.prisma.breakoutSwingEntry.updateMany({ where: { id, status: 'TRADED' }, data });
+    return r.count > 0;
+  }
+
   async listEntries(filter: ListEntriesFilter = {}) {
     return this.prisma.breakoutSwingEntry.findMany({
       where: {

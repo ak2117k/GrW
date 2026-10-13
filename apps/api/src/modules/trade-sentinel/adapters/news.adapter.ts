@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { NewsAggregatorService } from '../../news/services/news-aggregator.service';
 import type { NewsShim, SourcedValue } from '../services/context-packet.service';
 import { normaliseSymbol } from '../symbols';
+import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 
 /**
  * How far back a headline still counts as "recent" for the packet's news block.
@@ -39,7 +40,8 @@ export class SentinelNewsAdapter implements NewsShim {
   async recentFor(symbol: string): Promise<SourcedValue | null> {
     // `relatedSymbols` is tagged from scanner/news feeds, which use the BASE
     // symbol. Querying the broker's `SUZLON-EQ` matches nothing, silently.
-    const base = normaliseSymbol(symbol);
+    // A commodity mini reads its benchmark's headlines: GOLDM → GOLD.
+    const base = newsKeyFor(symbol).key ?? normaliseSymbol(symbol);
     const articles = await this.news.getNewsForSymbol(base);
 
     const cutoff = Date.now() - NEWS_RECENCY_WINDOW_MS;

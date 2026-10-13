@@ -54,7 +54,7 @@ export const PRE_OPEN_CHECK: ReviewWindow = { kind: 'PRE_OPEN_CHECK', venue: 'EQ
  *
  * EVERY FIRE IS GATED ON THE CLOCK saying the venue's session is closed (see
  * {@link reviewWindowIsClosed}), so a fire that lands while the venue still
- * trades reviews nothing. MCX closes at 23:30 normally and 23:55 in the US-DST
+ * trades reviews nothing. MCX closes at 23:30 normally and 23:55 while the US is OFF DST
  * season (`HUB_MCX_LATE_CLOSE`): the 23:45/23:50 fires serve the normal season,
  * 23:55/23:58 and the after-midnight fires (Tue–Sat 00:03/00:08) serve the late
  * season. A fire after midnight is tagged with the session that just closed.
@@ -80,13 +80,53 @@ export const PRE_OPEN_CHECK_CRON = '0 10,11 9 * * 1-5';
 /**
  * The default clock: the shipped holiday calendar, NO late-close season. The
  * overnight service builds its own with {@link makeSentinelClock} from
- * `hub.mcxLateClose`; this default is for pure callers and tests.
+ * `hub.mcxLateClose`; this default is for pure callers and tests. DO NOT use it
+ * for anything that decides whether an MCX position is live after 23:30 — the
+ * live runner uses {@link makeSentinelClock} and the packet {@link liveSessionClock}.
  */
 export const SENTINEL_CLOCK = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
 /** A clock over the holiday calendar AND the MCX late-close season (HUB_MCX_LATE_CLOSE syntax). */
 export function makeSentinelClock(mcxLateCloseRaw?: string): SessionClock {
   return new SessionClock({ holidays: MARKET_HOLIDAYS, mcxLateClose: parseLateClose(mcxLateCloseRaw) });
+}
+
+let liveClock: { raw: string; clock: SessionClock } | null = null;
+
+/**
+ * The clock the LIVE sentinel's pure helpers use when no clock is handed to them
+ * (the packet's `session.minutesToClose`): holidays plus the late-close season
+ * from `HUB_MCX_LATE_CLOSE` — the same env var `configuration.ts` maps to
+ * `hub.mcxLateClose`. Read at CALL time, never at import (so a .env loaded by
+ * ConfigModule is seen), and rebuilt only when the raw value changes.
+ *
+ * Without the season, every live MCX position from 2026-11-02 was declared
+ * "closed" at 23:31 while MCX trades to 23:55.
+ */
+export function liveSessionClock(): SessionClock {
+  const raw = process.env.HUB_MCX_LATE_CLOSE ?? '';
+  if (!liveClock || liveClock.raw !== raw) liveClock = { raw, clock: makeSentinelClock(raw) };
+  return liveClock.clock;
+}
+
+/** The venues the live tick's clock-only pre-gate asks about — the widest windows any holding keeps. */
+const PRE_GATE_VENUES = ['NSE', 'BSE', 'MCX'] as const;
+
+/**
+ * Could ANY venue be trading now, by the holiday- and late-close-aware clock?
+ * The runner's cheap pre-gate before it queries what anyone holds.
+ */
+export function isAnyVenueOpen(clock: SessionClock, now: Date): boolean {
+  return PRE_GATE_VENUES.some((venue) => clock.isOpen(venue, now));
+}
+
+/** Whether any of the exchanges a user holds is trading now. Empty = closed. */
+export function isAnyHeldVenueOpen(
+  clock: SessionClock,
+  exchanges: readonly string[],
+  now: Date,
+): boolean {
+  return exchanges.some((exchange) => clock.isOpen(String(exchange ?? '').trim().toUpperCase(), now));
 }
 
 /**
@@ -164,7 +204,11 @@ export function reviewWindowIsClosed(
     const close = lastSessionClose(exchange, now, clock);
     return close !== null && now.getTime() - close.getTime() <= AFTER_CLOSE_GRACE_MS;
   }
-  if (!clock.isTradingDay(exchange, now)) return false;
+  const session = clock.tradingWindow(exchange, now);
+  if (!session) return false;
+  // An MCX evening-only holiday (mcx-holidays.ts) opens at 17:00: an 08:30
+  // "pre-open" review would judge a session eight hours away. Morning opens only.
+  if (session.openMin > EQUITY_OPEN_MIN) return false;
   const minutes = Math.floor((now.getTime() - istMidnightOf(istYmd(now))) / 60_000);
   if (window.kind === 'PRE_OPEN_CHECK') {
     return venueOf(exchange) === 'EQUITY' && minutes >= PRE_OPEN_MATCHED_MIN && minutes < EQUITY_OPEN_MIN;

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { Prisma } from '@prisma/client';
 import type { Vehicle } from '../../strategies/blocks/block-types';
-import type { CoreOrder, OrderState } from '../execution.types';
+import type { CoreOrder, LedgerType, OrderState } from '../execution.types';
 import { isOpenState } from '../order-state';
 import type { PaperSettings } from '../paper-settings';
 import type { CoreCashLedgerRepository, LedgerEntry, NewLedgerRow } from '../repositories/core-cash-ledger.repository';
@@ -124,6 +124,14 @@ export class MemoryPaperStore {
       this.read('listForUser', db);
       return this.orders.filter((o) => o.userId === userId).map(copy);
     },
+    listForUserSince: async (userId: string, since: Date, db?: PaperDb) => {
+      this.read('listForUserSince', db);
+      return this.orders.filter((o) => o.userId === userId && o.submittedAt.getTime() >= since.getTime()).map(copy);
+    },
+    listByIds: async (userId: string, ids: readonly string[], db?: PaperDb) => {
+      this.read('listByIds', db);
+      return this.orders.filter((o) => o.userId === userId && ids.includes(o.id)).map(copy);
+    },
     listOpenForUser: async (userId: string, db?: PaperDb) => {
       this.read('listOpenForUser', db);
       return this.orders.filter((o) => o.userId === userId && isOpenState(o.state)).map(copy);
@@ -226,6 +234,36 @@ export class MemoryPaperStore {
     listForUser: async (userId: string, db?: PaperDb) => {
       this.read('ledger listForUser', db);
       return this.ledger.filter((r) => r.userId === userId).map(copyEntry);
+    },
+    listForUserSince: async (userId: string, since: Date, db?: PaperDb) => {
+      this.read('ledger listForUserSince', db);
+      return this.ledger.filter((r) => r.userId === userId && r.createdAt.getTime() >= since.getTime()).map(copyEntry);
+    },
+    listForOrders: async (userId: string, orderIds: readonly string[], db?: PaperDb) => {
+      this.read('ledger listForOrders', db);
+      return this.ledger.filter((r) => r.userId === userId && r.orderId !== null && orderIds.includes(r.orderId)).map(copyEntry);
+    },
+    listInterest: async (userId: string, token: string, fromDay: string, toDay: string, db?: PaperDb) => {
+      this.read('ledger listInterest', db);
+      return this.ledger
+        .filter((r) => r.userId === userId && r.type === 'MTF_INTEREST' && r.token === token && r.interestDate !== null && r.interestDate >= fromDay && r.interestDate <= toDay)
+        .map(copyEntry);
+    },
+    interestTokensOn: async (userId: string, day: string) =>
+      new Set(this.ledger.filter((r) => r.userId === userId && r.type === 'MTF_INTEREST' && r.interestDate === day && r.token !== null).map((r) => r.token as string)),
+    sumsByType: async (userId: string) => {
+      const sums = new Map<LedgerType, Prisma.Decimal>();
+      for (const r of this.ledger.filter((x) => x.userId === userId)) sums.set(r.type, (sums.get(r.type) ?? new Prisma.Decimal(0)).plus(r.amount));
+      return [...sums].map(([type, amount]) => ({ type, amount }));
+    },
+    heldMarginByVehicle: async (userId: string) => {
+      const vehicleOf = new Map(this.orders.map((o) => [o.id, o.vehicle]));
+      const held = new Map<string, Prisma.Decimal>();
+      for (const r of this.ledger.filter((x) => x.userId === userId && (x.type === 'MARGIN_BLOCK' || x.type === 'MARGIN_RELEASE') && x.orderId !== null)) {
+        const v = vehicleOf.get(r.orderId as string);
+        if (v) held.set(v, (held.get(v) ?? new Prisma.Decimal(0)).minus(r.amount));
+      }
+      return held;
     },
     append: async (rows: readonly NewLedgerRow[], db: PaperDb) => {
       this.write('ledger append', db);

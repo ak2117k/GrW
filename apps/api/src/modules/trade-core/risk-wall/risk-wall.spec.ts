@@ -162,6 +162,44 @@ describe('checkRisk: daily loss (spec §5.3)', () => {
     expect(decideDailyLoss(zero, stateFixture({ openPnl: -0.01 })).status).toBe('BREACHED');
   });
 
+  describe('owner ruling 2026-10-12: a realised loss past the limit breaches even with open P&L unknown', () => {
+    const bso = limitsFixture({ 'dailyLossAction@ALL': 'BLOCK_AND_SQUARE_OFF' });
+    const blind = (realised: number) => stateFixture({ realisedPnlToday: realised, openPnl: null, openPositions: [positionFixture({ priced: false })] });
+
+    it('realised loss at exactly the limit (>=) with a blind position is BREACHED and asks for the square-off', () => {
+      expect(decideDailyLoss(bso, blind(-5000))).toEqual({
+        status: 'BREACHED', lossRupees: '5000.00', limitRupees: '5000.00', action: 'BLOCK_AND_SQUARE_OFF', squareOffCore: true,
+      });
+      expect(decideDailyLoss(limitsFixture(), blind(-6000))).toEqual({
+        status: 'BREACHED', lossRupees: '6000.00', limitRupees: '5000.00', action: 'BLOCK_ENTRIES', squareOffCore: false,
+      });
+    });
+
+    it('realised loss under the limit with open P&L unknown stays UNKNOWN and never squares off', () => {
+      expect(decideDailyLoss(bso, blind(-4999.99))).toEqual({
+        status: 'UNKNOWN', lossRupees: null, limitRupees: '5000.00', action: 'BLOCK_AND_SQUARE_OFF', squareOffCore: false,
+      });
+      expect(decideDailyLoss(bso, blind(800)).status).toBe('UNKNOWN');
+      expect(decideDailyLoss(bso, stateFixture({ realisedPnlToday: NaN, openPnl: -9000 })).status).toBe('UNKNOWN');
+    });
+
+    it('with a ₹0 limit any realised loss breaches; a flat realised day with open P&L unknown does not', () => {
+      const zero = limitsFixture({ 'maxDailyLoss@ALL': '0.00' });
+      expect(decideDailyLoss(zero, blind(-0.01)).status).toBe('BREACHED');
+      expect(decideDailyLoss(zero, blind(0)).status).toBe('UNKNOWN');
+    });
+
+    it('the entry check still rejects: DAILY_LOSS (realised) when breached, PNL_UNKNOWN otherwise', () => {
+      const breached = checkRisk(intentFixture(), ctxFixture({ state: blind(-5000) }));
+      expect(breached.verdict).toBe('REJECT');
+      expect(codes(breached)).toEqual(['UNPRICED_POSITION', 'DAILY_LOSS']);
+      expect(breached.reasons[1].message).toBe("today's realised loss ₹5000.00 has reached the ₹5000.00 daily limit (open P&L unknown)");
+      const under = checkRisk(intentFixture(), ctxFixture({ state: blind(-4000) }));
+      expect(under.verdict).toBe('REJECT');
+      expect(codes(under)).toEqual(['UNPRICED_POSITION', 'PNL_UNKNOWN']);
+    });
+  });
+
   it('a strategy at its own daily loss limit is blocked; another strategy is not', () => {
     const v = checkRisk(intentFixture(), ctxFixture({ state: stateFixture({ pnlTodayByStrategy: { cs_ungated: -2500 } }) }));
     expect(codes(v)).toEqual(['STRATEGY_DAILY_LOSS']);
@@ -259,5 +297,34 @@ describe('checkRisk: sizing reduces only', () => {
         if (v.verdict === 'ALLOW') expect(v.qty).toBe(qty);
       }
     }
+  });
+});
+
+describe('checkRisk: reconciliation block (M5 J12, O10)', () => {
+  it('blocks the blocked strategy only; a user-wide block blocks every strategy', () => {
+    const blocked = ctxFixture({ state: stateFixture({ reconBlocked: { all: false, strategyIds: ['cs_ungated'] } }) });
+    expect(codes(checkRisk(intentFixture({ strategyId: 'cs_ungated' }), blocked))).toEqual(['RECON_BLOCKED']);
+    expect(checkRisk(intentFixture({ strategyId: 'cs_adaptive_stop', strategyVersionId: 'csv_adaptive_stop_v1' }), blocked).verdict).not.toBe('REJECT');
+    const all = ctxFixture({ state: stateFixture({ reconBlocked: { all: true, strategyIds: [] } }) });
+    expect(codes(checkRisk(intentFixture({ strategyId: 'cs_adaptive_stop' }), all))).toContain('RECON_BLOCKED');
+  });
+});
+
+describe('checkRisk: exits are never blocked by M5 inputs (recon block, daily-loss latch)', () => {
+  it('an EXIT passes with a user-wide recon block and the daily-loss latch set', () => {
+    const v = checkRisk(
+      { kind: 'EXIT', intentId: 'x_1', userId: 'user_A', positionId: 'pos_1', qty: 30 },
+      ctxFixture({ state: stateFixture({ reconBlocked: { all: true, strategyIds: ['cs_ungated'] }, dailyLossLatched: true }) }),
+    );
+    expect(v).toMatchObject({ verdict: 'ALLOW', qty: 30, intentKind: 'EXIT' });
+    expect(codes(v)).toEqual(['EXIT_NOT_CHECKED']);
+  });
+});
+
+describe('checkRisk: an unreadable journal (M5)', () => {
+  it('rejects every entry JOURNAL_UNAVAILABLE; an exit still passes', () => {
+    const ctx = ctxFixture({ state: stateFixture({ journalUnreadable: true }) });
+    expect(codes(checkRisk(intentFixture(), ctx))).toEqual(['JOURNAL_UNAVAILABLE']);
+    expect(codes(checkRisk({ kind: 'EXIT', intentId: 'x_1', userId: 'user_A', positionId: 'pos_1', qty: 30 }, ctx))).toEqual(['EXIT_NOT_CHECKED']);
   });
 });

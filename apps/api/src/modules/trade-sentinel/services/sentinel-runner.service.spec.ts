@@ -8,6 +8,8 @@ import {
   SentinelRunnerService,
   isWithinSession,
 } from './sentinel-runner.service';
+import { SessionClock } from '../../market-hub/session-clock';
+import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
 
 const REPORT = { evaluated: 1, skipped: 0, failed: 0, unwatched: 0 };
 
@@ -204,6 +206,68 @@ describe('SentinelRunnerService — the tick is gated', () => {
         distinct: ['userId', 'exchange'],
       }),
     );
+  });
+
+  it('keeps watching an MCX position past 23:30 in the late-close season (HUB_MCX_LATE_CLOSE)', async () => {
+    // From 2026-11-02 MCX closes at 23:55. The tick used to go dark at 23:30,
+    // leaving a live commodity position unwatched for its last 25 minutes.
+    const t = make(true);
+    t.config.get.mockImplementation((key: string) =>
+      key === 'hub.mcxLateClose' ? '2026-11-02:2027-03-08' : 'true',
+    );
+    const svc = new SentinelRunnerService(
+      { startForUser: t.startForUser } as never,
+      { tradeTracker: { findMany: t.findMany }, oiWallSnapshot: {} } as never,
+      t.config as never,
+    );
+    t.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'MCX' }, { userId: 'u2', exchange: 'NFO' }]);
+    // Monday 2026-11-02, 23:40 IST.
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-02T18:10:00Z'));
+    await svc.tick();
+    jest.useRealTimers();
+    expect(t.runForUser).toHaveBeenCalledTimes(1);
+    expect(t.runForUser).toHaveBeenCalledWith('u1');
+  });
+
+  it('does not tick on an exchange holiday', async () => {
+    const t = make(true);
+    // Friday 2026-10-02 (Gandhi Jayanti), 10:00 IST.
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-02T04:30:00Z'));
+    await t.svc.tick();
+    jest.useRealTimers();
+    expect(t.runForUser).not.toHaveBeenCalled();
+  });
+
+  it('watches an MCX position through the MCX evening session of an NSE holiday', async () => {
+    // Dussehra (Tue 2026-10-20) is an NSE holiday; MCX (by default, see
+    // mcx-holidays.ts) runs its evening session. The NFO holder stays dark.
+    const t = make(true);
+    t.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'MCX' }, { userId: 'u2', exchange: 'NFO' }]);
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-20T13:30:00Z')); // 19:00 IST
+    await t.svc.tick();
+    jest.useRealTimers();
+    expect(t.runForUser).toHaveBeenCalledTimes(1);
+    expect(t.runForUser).toHaveBeenCalledWith('u1');
+  });
+
+  it('does not watch MCX on that holiday morning, nor on a full MCX holiday', async () => {
+    const morning = make(true);
+    morning.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'MCX' }]);
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-20T05:30:00Z')); // 11:00 IST
+    await morning.svc.tick();
+    jest.useRealTimers();
+    expect(morning.runForUser).not.toHaveBeenCalled();
+
+    const shut = make(true);
+    (shut.svc as unknown as { clock: SessionClock }).clock = new SessionClock({
+      holidays: MARKET_HOLIDAYS,
+      mcxHolidays: { 2026: [{ date: '2026-10-20', name: 'test full close', session: 'CLOSED' }] },
+    });
+    shut.findMany.mockResolvedValue([{ userId: 'u1', exchange: 'MCX' }]);
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-20T13:30:00Z')); // 19:00 IST
+    await shut.svc.tick();
+    jest.useRealTimers();
+    expect(shut.runForUser).not.toHaveBeenCalled();
   });
 
   it('a failed user listing is logged, not thrown out of the scheduler', async () => {

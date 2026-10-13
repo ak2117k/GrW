@@ -102,40 +102,50 @@ export class UniverseScannerWorker implements OnModuleInit {
 
   private async resolveUniverseInstruments(): Promise<void> {
     for (const w of WATCHED) {
-      // Match either 'INDEX' or 'INDICES' segment label — different parts of
-      // the codebase have used both historically (the backfill script writes
-      // 'INDEX', the older WS subscriber wrote 'INDICES').
-      //
-      // MCX commodities live under segment='COMMODITY' (upserted by the
-      // commodity backfill script) and have no INDEX counterpart, so we
-      // accept that label too. On MCX we intentionally drop the segment
-      // filter entirely — the (symbol, exchange) pair is already unique
-      // enough to pin the spot future row.
-      const segmentFilter =
-        w.exchange === 'MCX'
-          ? undefined
-          : { in: ['INDEX', 'INDICES', 'COMMODITY'] as string[] };
-      const inst = await this.prisma.instrument.findFirst({
-        where: {
-          symbol: w.underlying,
-          exchange: w.exchange,
-          ...(segmentFilter ? { segment: segmentFilter } : {}),
-        },
-      });
-      if (inst) {
-        w.instrumentId = inst.id;
-        w.token = inst.token;
-        this.logger.log(
-          `Resolved ${w.underlying} (${w.exchange}) → instrumentId=${inst.id} token=${inst.token} segment=${inst.segment}`,
-        );
-      } else {
+      if (!(await this.resolveInstrument(w))) {
         this.logger.warn(
-          `${w.underlying} (${w.exchange}) not in instruments table — scanner will skip it. ` +
-          `For NSE indices run scripts/backfill-candles.mjs; for MCX commodities ensure the ` +
-          `instrument row exists before the scanner starts.`,
+          `${w.underlying} (${w.exchange}) not in instruments table yet — retrying on each scan. ` +
+          `NSE index rows are ensured by InstrumentMasterRefreshCron at boot; for MCX ` +
+          `commodities ensure the instrument row exists.`,
         );
       }
     }
+  }
+
+  /**
+   * Resolve one watched symbol's instrument row. Called at boot AND lazily from
+   * each scan while unresolved: the core index rows are ensured by the detached
+   * instrument-master boot pass, which can land after this worker's own boot
+   * resolve, so a one-shot lookup would skip the symbol for the process's life.
+   */
+  private async resolveInstrument(w: WatchedSymbol): Promise<boolean> {
+    // Match either 'INDEX' or 'INDICES' segment label — different parts of
+    // the codebase have used both historically (the backfill script and the
+    // core-index ensure pass write 'INDEX', the older WS subscriber wrote 'INDICES').
+    //
+    // MCX commodities live under segment='COMMODITY' (upserted by the
+    // commodity backfill script) and have no INDEX counterpart, so we
+    // accept that label too. On MCX we intentionally drop the segment
+    // filter entirely — the (symbol, exchange) pair is already unique
+    // enough to pin the spot future row.
+    const segmentFilter =
+      w.exchange === 'MCX'
+        ? undefined
+        : { in: ['INDEX', 'INDICES', 'COMMODITY'] as string[] };
+    const inst = await this.prisma.instrument.findFirst({
+      where: {
+        symbol: w.underlying,
+        exchange: w.exchange,
+        ...(segmentFilter ? { segment: segmentFilter } : {}),
+      },
+    });
+    if (!inst) return false;
+    w.instrumentId = inst.id;
+    w.token = inst.token;
+    this.logger.log(
+      `Resolved ${w.underlying} (${w.exchange}) → instrumentId=${inst.id} token=${inst.token} segment=${inst.segment}`,
+    );
+    return true;
   }
 
   /**
@@ -193,6 +203,8 @@ export class UniverseScannerWorker implements OnModuleInit {
     reason: string;
     diagnostic: Record<string, unknown> | null;
   }> {
+    // Lazy retry: the row may have been ensured after this worker's boot resolve.
+    if (!w.instrumentId) await this.resolveInstrument(w);
     if (!w.instrumentId) {
       return { signal: null, tradeId: null, reason: 'instrument not resolved', diagnostic: null };
     }

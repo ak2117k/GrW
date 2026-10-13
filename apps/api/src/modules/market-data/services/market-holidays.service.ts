@@ -1,4 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { MCX_HOLIDAYS } from './mcx-holidays';
+
+/** True only when MCX's own calendar shuts it for the whole day. */
+function isMcxFullHoliday(ymd: string): boolean {
+  const year = Number(ymd.slice(0, 4));
+  return (MCX_HOLIDAYS[year] ?? []).some((h) => h.date === ymd && h.session === 'CLOSED');
+}
 
 export interface MarketHoliday {
   date: string; // YYYY-MM-DD
@@ -22,53 +29,55 @@ export interface TradingDayInfo {
 /**
  * NSE/BSE/MCX market holidays for 2026.
  * Source: NSE circular published at start of year.
- * MCX follows NSE holidays with rare exceptions.
+ * MCX is NOT listed here: it keeps its own calendar (mcx-holidays.ts), and on
+ * most NSE holidays it still runs an evening session — marking MCX closed on
+ * every NSE holiday left MCX positions unwatched through live evenings.
  * Update this list annually.
  */
 const HOLIDAYS_2026: MarketHoliday[] = [
   // January
-  { date: '2026-01-26', name: 'Republic Day', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-01-26', name: 'Republic Day', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // February
-  { date: '2026-02-17', name: 'Mahashivratri', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-02-17', name: 'Mahashivratri', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // March
-  { date: '2026-03-10', name: 'Holi', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-03-17', name: 'Id-ul-Fitr (Eid)', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-03-30', name: 'Ram Navami', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-03-10', name: 'Holi', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-03-17', name: 'Id-ul-Fitr (Eid)', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-03-30', name: 'Ram Navami', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // April
-  { date: '2026-04-03', name: 'Good Friday', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-04-14', name: 'Dr. Ambedkar Jayanti', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-04-03', name: 'Good Friday', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-04-14', name: 'Dr. Ambedkar Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // May
-  { date: '2026-05-01', name: 'Maharashtra Day / May Day', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-05-25', name: 'Buddha Purnima', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-05-01', name: 'Maharashtra Day / May Day', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-05-25', name: 'Buddha Purnima', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // June
-  { date: '2026-06-24', name: 'Eid-ul-Adha (Bakrid)', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-06-24', name: 'Eid-ul-Adha (Bakrid)', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // July
-  { date: '2026-07-10', name: 'Muharram', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-07-10', name: 'Muharram', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // August
-  { date: '2026-08-15', name: 'Independence Day', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-08-18', name: 'Janmashtami', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-08-15', name: 'Independence Day', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-08-18', name: 'Janmashtami', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // September
-  { date: '2026-09-08', name: 'Milad-un-Nabi', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-09-08', name: 'Milad-un-Nabi', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // October
-  { date: '2026-10-02', name: 'Mahatma Gandhi Jayanti', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-10-20', name: 'Dussehra', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-10-02', name: 'Mahatma Gandhi Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-10-20', name: 'Dussehra', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // November
-  { date: '2026-11-09', name: 'Diwali (Laxmi Puja)', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-11-10', name: 'Diwali (Balipratipada)', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
-  { date: '2026-11-27', name: 'Guru Nanak Jayanti', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-11-09', name: 'Diwali (Laxmi Puja)', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-11-10', name: 'Diwali (Balipratipada)', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-11-27', name: 'Guru Nanak Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
 
   // December
-  { date: '2026-12-25', name: 'Christmas', exchanges: ['NSE', 'BSE', 'MCX', 'NFO'] },
+  { date: '2026-12-25', name: 'Christmas', exchanges: ['NSE', 'BSE', 'NFO'] },
 ];
 
 /**
@@ -182,6 +191,8 @@ export class MarketHolidaysService {
    */
   isHoliday(date: Date, exchange: string = 'NSE'): boolean {
     const dateStr = formatDate(date);
+    // MCX: closed only on a full MCX holiday (an evening session is trading).
+    if (exchange.toUpperCase() === 'MCX') return isMcxFullHoliday(dateStr);
     const holiday = this.holidayMap.get(dateStr);
     if (!holiday) return false;
     return holiday.exchanges.includes(exchange as any);
@@ -220,6 +231,9 @@ export class MarketHolidaysService {
       closedExchanges.push('NSE', 'BSE', 'MCX', 'NFO');
     } else if (holiday) {
       closedExchanges.push(...holiday.exchanges);
+    }
+    if (!isWeekend && isMcxFullHoliday(dateStr) && !closedExchanges.includes('MCX')) {
+      closedExchanges.push('MCX');
     }
 
     return {

@@ -1,12 +1,21 @@
 import { sessionFor, type SessionWindow } from '../trade-sentinel/market-sessions';
 import type { MarketHoliday } from '../market-data/services/market-holidays.service';
+import {
+  MCX_DEFAULT_ON_NSE_HOLIDAY,
+  MCX_EVENING_OPEN_MIN,
+  MCX_HOLIDAYS,
+  type McxHoliday,
+  type McxHolidaySession,
+} from '../market-data/services/mcx-holidays';
 
 /**
  * The ONE answer to "is this exchange trading?" for the market hub.
  *
  * Builds on the pure, tested windows in trade-sentinel/market-sessions.ts and
  * adds what they deliberately leave out: holidays, the NSE/BSE pre-open, and
- * MCX's late close during the US-DST-linked window. A missing holiday list is
+ * MCX's late close during the US-DST-linked window. MCX holidays come from
+ * MCX's own calendar (mcx-holidays.ts): an NSE holiday is, by default, an MCX
+ * EVENING session (17:00 → close), not a full close. A missing holiday list is
  * reported (calendarGap) rather than silently treating every day as trading.
  */
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -37,6 +46,11 @@ export function parseLateClose(raw: string | undefined): DateRange[] {
 export interface SessionClockOptions {
   holidays: Readonly<Record<number, readonly MarketHoliday[]>>;
   mcxLateClose?: readonly DateRange[];
+  /**
+   * MCX's own holiday calendar (default: the shipped MCX_HOLIDAYS). MCX is
+   * resolved separately from NSE — see mcx-holidays.ts for the rules.
+   */
+  mcxHolidays?: Readonly<Record<number, readonly McxHoliday[]>>;
 }
 
 interface IstParts {
@@ -79,6 +93,7 @@ export class SessionClock {
     const { ymd, year, day } = istParts(at);
     if (day === 0 || day === 6) return false;
     const ex = holidayExchange(exchange);
+    if (ex === 'MCX') return this.mcxDay(ymd, year) !== 'CLOSED';
     const list = this.opts.holidays[year] ?? [];
     return !list.some((h) => h.date === ymd && (h.exchanges as readonly string[]).includes(ex));
   }
@@ -134,11 +149,26 @@ export class SessionClock {
     return null;
   }
 
+  /**
+   * MCX's day on an IST date: 'CLOSED' all day, 'EVENING' (17:00 → close) or
+   * 'NORMAL'. Order: the MCX list; a generic holiday that explicitly names MCX
+   * (full close); an NSE holiday (MCX_DEFAULT_ON_NSE_HOLIDAY); else normal.
+   */
+  private mcxDay(ymd: string, year: number): McxHolidaySession | 'NORMAL' {
+    const own = (this.opts.mcxHolidays ?? MCX_HOLIDAYS)[year]?.find((h) => h.date === ymd);
+    if (own) return own.session;
+    const generic = (this.opts.holidays[year] ?? []).filter((h) => h.date === ymd);
+    if (generic.some((h) => (h.exchanges as readonly string[]).includes('MCX'))) return 'CLOSED';
+    if (generic.some((h) => (h.exchanges as readonly string[]).includes('NSE'))) return MCX_DEFAULT_ON_NSE_HOLIDAY;
+    return 'NORMAL';
+  }
+
   private window(exchange: string, at: Date): SessionWindow {
     const base = sessionFor(exchange);
     if (exchange.toUpperCase() !== 'MCX') return base;
-    const { ymd } = istParts(at);
+    const { ymd, year } = istParts(at);
     const late = (this.opts.mcxLateClose ?? []).some((r) => ymd >= r.from && ymd <= r.to);
-    return late ? { openMin: base.openMin, closeMin: MCX_LATE_CLOSE_MIN } : base;
+    const openMin = this.mcxDay(ymd, year) === 'EVENING' ? MCX_EVENING_OPEN_MIN : base.openMin;
+    return { openMin, closeMin: late ? MCX_LATE_CLOSE_MIN : base.closeMin };
   }
 }

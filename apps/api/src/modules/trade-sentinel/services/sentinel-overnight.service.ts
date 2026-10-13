@@ -17,7 +17,6 @@ import {
   type TickSource,
 } from './sentinel-cycle.service';
 import { SENTINEL_ENABLED_KEY } from './sentinel-runner.service';
-import { isAnyExchangeOpen } from '../market-sessions';
 // The judge's own hard timeout: a job may not START unless it would end before the venue opens.
 import { CLI_TIMEOUT_MS } from '../adapters/claude-cli.transport';
 import {
@@ -30,6 +29,7 @@ import {
   PRE_OPEN_CHECK,
   PRE_OPEN_CHECK_CRON,
   PRE_OPEN_CRON,
+  isAnyHeldVenueOpen,
   makeSentinelClock,
   reviewWindowIsClosed,
   daysToExpiry,
@@ -501,7 +501,7 @@ export class SentinelOvernightService {
         // The 09:10 check runs minutes before the NSE open: always keep a slot
         // for live, whatever the held venues. Otherwise reserve only while a
         // venue someone holds is trading.
-        reserveLive: () => window.kind === 'PRE_OPEN_CHECK' || isAnyExchangeOpen(heldVenues, current()),
+        reserveLive: () => window.kind === 'PRE_OPEN_CHECK' || isAnyHeldVenueOpen(this.clock, heldVenues, current()),
       });
       this.failures.delete(failKey);
       report.judged += 1;

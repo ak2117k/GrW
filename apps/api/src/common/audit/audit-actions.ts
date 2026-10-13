@@ -41,6 +41,8 @@ export const AUDIT_ACTIONS = {
   execution: {
     ORDER_PLACED: 'ORDER_PLACED',
     ORDER_REJECTED: 'ORDER_REJECTED',
+    /** Sent, but its fate is unknown (no definitive answer, tag not in the book). */
+    ORDER_UNCERTAIN: 'ORDER_UNCERTAIN',
     ORDER_FILLED: 'ORDER_FILLED',
     ORDER_CANCELLED: 'ORDER_CANCELLED',
     AUTOTRADE_ENABLED: 'AUTOTRADE_ENABLED',
@@ -80,6 +82,9 @@ export const AUDIT_ACTIONS = {
   lifecycle: {
     CORE_POSITION_EXIT_REQUESTED: 'CORE_POSITION_EXIT_REQUESTED',
     CORE_DAILY_LOSS_SQUARE_OFF: 'CORE_DAILY_LOSS_SQUARE_OFF',
+  },
+  journal: {
+    CORE_RECON_ACKNOWLEDGED: 'CORE_RECON_ACKNOWLEDGED',
   },
 } as const;
 

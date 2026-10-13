@@ -2,6 +2,8 @@ import { Injectable, Logger, type Type } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { WatchStatus } from '@prisma/client';
 import { AdaptiveStopTickPoller } from '../../../adaptive-stop-track/services/adaptive-stop-tick-poller.service';
+import { AnandPriceMonitorService } from '../../../anand-dual-track/services/anand-price-monitor.service';
+import { BreakoutSwingPollerService } from '../../../breakout-swing-track/services/breakout-swing-poller.service';
 import { AUTO_EXEC_SEGMENTS, AutoExecSettingsService } from '../../../auto-execution/services/auto-exec-settings.service';
 import { SellFuturesService } from '../../../sell-futures-track/services/sell-futures.service';
 import { TradeRepository } from '../../../trade-engine/repositories/trade.repository';
@@ -17,7 +19,10 @@ import type { Actor } from '../../strategies/services/core-strategy-catalogue.se
  * only CALLS entry points that already exist (plan decision 9 lists each, and the
  * gaps where none exists). Several are not exported by their modules, so each is
  * resolved with ModuleRef.get(token, { strict: false }); the silo classes are imported
- * as tokens only.
+ * as tokens only. anand-dual-track and breakout-swing-track had no square-off entry
+ * point (one of decision 9's gaps), which left their open positions untouched by the
+ * switch (CLAUDE.md §9: ALL positions); each now has a kill-switch square-off method
+ * built on its own exit logic (fresh exit price, TRADED-guarded close).
  *
  * The silo tables have no userId and their controllers are @AdminOnly: they are the
  * owner's platform-wide tracks. Only auto-execution is per user. trade-engine's
@@ -31,6 +36,8 @@ export const SILO_TARGETS = [
   'adaptive-stop-track',
   'ungated-track',
   'sell-futures-track',
+  'anand-dual-track',
+  'breakout-swing-track',
   'trade-engine',
 ] as const;
 export type SiloTarget = (typeof SILO_TARGETS)[number];
@@ -102,6 +109,22 @@ const STEPS: readonly SiloStep[] = [
     async run(resolve) {
       const r = await resolve(SellFuturesService).squareOffOpenPositions();
       return { ok: r.errors === 0, detail: `closed ${r.closed}, ${r.errors} errors` };
+    },
+  },
+  {
+    target: 'anand-dual-track',
+    ownerOnly: true,
+    async run(resolve, _actor, reason) {
+      const r = await resolve(AnandPriceMonitorService).squareOffAll(`core kill switch: ${reason}`);
+      return { ok: r.errors === 0 && r.skipped === 0, detail: `closed ${r.closed} of ${r.attempted}, ${r.skipped} skipped (no fresh price), ${r.errors} errors` };
+    },
+  },
+  {
+    target: 'breakout-swing-track',
+    ownerOnly: true,
+    async run(resolve, _actor, reason) {
+      const r = await resolve(BreakoutSwingPollerService).squareOffOpenPositions(`core kill switch: ${reason}`);
+      return { ok: r.errors === 0 && r.skipped === 0, detail: `closed ${r.closed} of ${r.attempted}, ${r.skipped} skipped (no fresh price), ${r.errors} errors` };
     },
   },
   {

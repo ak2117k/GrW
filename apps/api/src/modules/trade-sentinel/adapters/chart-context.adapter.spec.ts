@@ -449,6 +449,84 @@ describe('SentinelChartContextAdapter', () => {
       );
     });
 
+    it('builds mtfTrend from the higher-TF trend on a NO-SETUP result, UP-anchored', async () => {
+      // `higherTimeframeTrend` rides on both arms of AnalyzeResult; the factor
+      // is a pure function of it. Gating it on a setup left macro.realFactors
+      // absent on most symbols most of the time — for no reason but plumbing.
+      const bear = make();
+      bear.analyze.mockResolvedValue({
+        kind: 'no-setup',
+        levels: levels(),
+        volumeRatio: null,
+        higherTimeframeTrend: { tf: '1h', bias: 'bearish', ema9: 1, ema21: 2 },
+      });
+      const out = await bear.svc.structureFor('SUZLON-EQ', 100.5, 'u1');
+      expect(out.factorValues).toEqual({ mtfTrend: -1 });
+      expect(out.factorsReason).toBeNull();
+
+      const bull = make();
+      bull.analyze.mockResolvedValue({
+        kind: 'no-setup',
+        levels: levels(),
+        volumeRatio: null,
+        higherTimeframeTrend: { tf: '1h', bias: 'bullish', ema9: 2, ema21: 1 },
+      });
+      expect((await bull.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorValues).toEqual({
+        mtfTrend: 1,
+      });
+    });
+
+    it('builds mtfTrend from the higher-TF trend on a SETUP too, whatever side it took', async () => {
+      const t = make();
+      t.analyze.mockResolvedValue({
+        kind: 'setup',
+        side: 'SELL',
+        levels: levels(),
+        volumeRatio: 1,
+        higherTimeframeTrend: { tf: '1h', bias: 'bullish', ema9: 2, ema21: 1 },
+        contextFactors: [{ name: 'mtfTrend', value: -1, isStub: false }],
+      });
+      // SELL against a bullish 1h = -1 raw, i.e. +1 in the UP frame.
+      expect((await t.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorValues).toEqual({
+        mtfTrend: 1,
+      });
+    });
+
+    it('does NOT sign-flip the side-agnostic volatility factor on a SELL setup', async () => {
+      // VolatilityFactor ignores `side` ("vol up" is supportive either way), so
+      // the same VIX read scores +0.5 under BUY and SELL. Multiplying it by -1
+      // for SELL made a BUY→SELL setup change look like volatility flipped —
+      // a false contextFactorFlip out of an unchanged market.
+      const raw = [{ name: 'volatility', value: 0.5, isStub: false }];
+      const buy = make();
+      buy.analyze.mockResolvedValue({ kind: 'setup', side: 'BUY', levels: levels(), volumeRatio: 1, contextFactors: raw });
+      const sell = make();
+      sell.analyze.mockResolvedValue({ kind: 'setup', side: 'SELL', levels: levels(), volumeRatio: 1, contextFactors: raw });
+      expect((await buy.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorValues).toEqual({ volatility: 0.5 });
+      expect((await sell.svc.structureFor('SUZLON-EQ', 100.5, 'u1')).factorValues).toEqual({ volatility: 0.5 });
+    });
+
+    it('does not feed India VIX volatility to an MCX book', async () => {
+      // VolatilityFactor reads INDIA VIX — an NSE equity-options gauge that says
+      // nothing about crude or gold. On a commodity it is a false input.
+      const t = make();
+      t.analyze.mockResolvedValue({
+        kind: 'setup',
+        side: 'BUY',
+        levels: levels(),
+        volumeRatio: 1,
+        higherTimeframeTrend: { tf: '1h', bias: 'bullish', ema9: 2, ema21: 1 },
+        contextFactors: [
+          { name: 'volatility', value: 1, isStub: false },
+          { name: 'mtfTrend', value: 1, isStub: false },
+        ],
+      });
+      const mcx = { exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' };
+      expect((await t.svc.structureFor('CRUDEOIL', 100.5, 'u1', mcx)).factorValues).toEqual({
+        mtfTrend: 1,
+      });
+    });
+
     it('reports factors even when the price cannot be placed against the levels', async () => {
       // The two are independent readings off one book. Sharing a reason between
       // them would tell the packet the wrong cause for one of the two.
@@ -608,9 +686,28 @@ describe('the level book actually resolving', () => {
 
   it('does not lend a no-setup book a volume ratio it never computed', async () => {
     const t = make();
-    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels() });
-    // volumeRatio is computed while SCORING a setup, so it is genuinely absent
-    // here — and an absent reading must not be inferred from a present book.
+    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels(), volumeRatio: null });
+    // The engine had no reading (too few bars, a volume-less index): absent, and
+    // an absent reading must not be inferred from a present book.
     expect((await t.svc.structureFor('SUZLON-EQ', 100.5)).volumeRatio).toBeNull();
+  });
+
+  it('keeps the volume ratio the engine computed when there is NO SETUP', async () => {
+    // flow.volumeRatio used to be setup-gated here, so on most symbols most of
+    // the time the sentinel never saw volume at all. The ratio is a fact about
+    // the last closed bar, not about the engine liking a trade.
+    const t = make();
+    t.analyze.mockResolvedValue({ kind: 'no-setup', levels: levels(), volumeRatio: 1.8 });
+    expect((await t.svc.structureFor('SUZLON-EQ', 100.5)).volumeRatio).toBe(1.8);
+  });
+
+  it('a lock re-served with no level book yields no levels, not lines at price 0', async () => {
+    const t = make();
+    t.analyze.mockResolvedValue({ kind: 'setup', side: 'BUY', levels: null, volumeRatio: null });
+    const result = await t.svc.structureFor('SUZLON-EQ', 100.5);
+    expect(result.reason).toBe(LEVEL_BOOK_UNBUILT);
+    expect(result.nearestSupport).toBeNull();
+    expect(result.volumeRatio).toBeNull();
+    expect(await t.svc.levelsFor('SUZLON-EQ')).toBeNull();
   });
 });

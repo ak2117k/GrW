@@ -173,6 +173,49 @@ export class BreakoutSwingPollerService {
     }
   }
 
+  /**
+   * Core kill switch square-off (CLAUDE.md §9 — ALL positions): close every
+   * TRADED entry at a FRESH exit price as SQUARED_OFF, through a TRADED-guarded
+   * update so a concurrent poller exit is never overwritten. Same price source
+   * and freshness rule as {@link manageTraded}. No fresh price (or no token) →
+   * left open, counted `skipped`; a failing row → `errors`, the rest still run.
+   * QUEUED resting limits are not positions (their fill is kill-gated).
+   */
+  async squareOffOpenPositions(reason: string): Promise<{ attempted: number; closed: number; skipped: number; errors: number }> {
+    const traded = (await this.repo.listTraded()) as unknown as TradedEntry[];
+    if (traded.length === 0) {
+      this.logger.log('[breakout-swing-kill] no open positions to square off');
+      return { attempted: 0, closed: 0, skipped: 0, errors: 0 };
+    }
+    const tokens = [...new Set(traded.map((e) => e.token).filter((t): t is string => !!t))];
+    const prices = tokens.length
+      ? await this.exitPrice.resolveExitPrices('NSE', tokens).catch(() => new Map<string, ExitPrice>())
+      : new Map<string, ExitPrice>();
+    const now = new Date();
+    let closed = 0;
+    let skipped = 0;
+    let errors = 0;
+    for (const entry of traded) {
+      const p = entry.token ? prices.get(entry.token) : undefined;
+      const ltp = p?.fresh && p.price > 0 ? p.price : undefined;
+      if (ltp === undefined) {
+        this.logger.warn(`[breakout-swing-kill] ${entry.symbol} — no fresh price, left OPEN`);
+        skipped++;
+        continue;
+      }
+      try {
+        await this.repo.closeTraded(entry.id, { status: 'SQUARED_OFF', exitPrice: ltp, exitedAt: now, exitReason: reason });
+        closed++;
+        this.logger.warn(`[breakout-swing-kill] ${entry.symbol} squared off at ₹${ltp.toFixed(2)}`);
+      } catch (err) {
+        errors++;
+        this.logger.error(`[breakout-swing-kill] ${entry.symbol} failed to close: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    this.logger.warn(`[breakout-swing-kill] done — attempted=${traded.length} closed=${closed} skipped=${skipped} errors=${errors}`);
+    return { attempted: traded.length, closed, skipped, errors };
+  }
+
   private async exit(entry: TradedEntry, ltp: number, now: Date, status: string, reason: string): Promise<void> {
     const entryPx = entry.entryPrice ?? 0;
     const qty = entryPx > 0 ? Math.floor(NOTIONAL / entryPx) : 0;

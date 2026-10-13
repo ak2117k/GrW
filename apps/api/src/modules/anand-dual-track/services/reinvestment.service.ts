@@ -32,7 +32,7 @@ export class ReinvestmentService {
   async closeLot(
     lot: { id: string; capital: number; entryPrice: number },
     ltp: number,
-    status: 'TARGET_HIT' | 'STOPPED',
+    status: 'TARGET_HIT' | 'STOPPED' | 'SQUARED_OFF',
   ): Promise<void> {
     const pnlPct = ((ltp - lot.entryPrice) / lot.entryPrice) * 100;
     const lotPnl = (pnlPct / 100) * lot.capital;

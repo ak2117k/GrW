@@ -8,7 +8,7 @@ import { YahooFinanceService } from '../../market-data/services/yahoo-finance.se
 import { NseSectorIndexService } from '../../market-data/services/nse-sector-index.service';
 import { CommodityRollService } from '../../market-data/services/commodity-roll.service';
 import { MarketQuoteResolver } from '../../market-data/services/market-quote-resolver.service';
-import { SENTINEL_CLOCK, lastSessionClose } from '../overnight/overnight-calendar';
+import { lastSessionClose, liveSessionClock } from '../overnight/overnight-calendar';
 import { BreadthSectorService, type SectorPerformanceEntry } from '../../market-data/services/breadth-sector.service';
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import type { NewsEvidence, NewsItemIn, NewsScope, RawOiAnalysis } from '../overnight/overnight-evidence';
@@ -20,6 +20,7 @@ import type {
   RawOiEvidence,
 } from '../ports/overnight-evidence.port';
 import { normaliseSymbol } from '../symbols';
+import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import { MarketCuesService } from '../../market-cues/market-cues.service';
 import { unavailableSnapshot } from '../../market-cues/market-cues.snapshot';
 import type { CueRecord, MarketCuesSnapshot, PreOpenBook } from '../../market-cues/market-cues.types';
@@ -71,8 +72,12 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
 
     const asks: Array<Promise<NewsItemIn[]>> = [];
     // Order matters: dedupe keeps the FIRST scope that surfaced a headline.
-    if (base) {
-      asks.push(this.articles.getNewsForSymbol(base).then((rows) => rows.map((r) => item(r, 'symbol'))));
+    // The key the news tagger stores in relatedSymbols — the same one the live
+    // packet uses: an MCX mini reads its parent (GOLDM -> GOLD), and an
+    // underlying no article can ever be tagged with is not asked for at all.
+    const symbolKey = base ? newsKeyFor(base, q.exchange).key : null;
+    if (symbolKey) {
+      asks.push(this.articles.getNewsForSymbol(symbolKey).then((rows) => rows.map((r) => item(r, 'symbol'))));
     }
     if (sector) {
       asks.push(this.listed({ category: NewsCategory.SECTOR, search: sector.sector, from: since, limit: 20 }, 'sector'));
@@ -309,8 +314,12 @@ export class SentinelOvernightEvidenceAdapter implements OvernightEvidenceSource
         userId,
         contracts.map((c) => ({ token: c.token, exchange: c.exchange || 'MCX', symbol: c.symbol })),
       );
-      const mcxOpen = SENTINEL_CLOCK.phase('MCX', now) === 'open';
-      const close = lastSessionClose('MCX', now);
+      // The LIVE clock: holidays AND the MCX late-close season (HUB_MCX_LATE_CLOSE).
+      // The default SENTINEL_CLOCK has no season, so from November it called MCX
+      // closed at 23:30 and dated a 23:40 quote to the wrong close.
+      const clock = liveSessionClock();
+      const mcxOpen = clock.phase('MCX', now) === 'open';
+      const close = lastSessionClose('MCX', now, clock);
       const pick = (name: string, test: (s: string) => boolean): RawCue => {
         const contract = contracts.find((c) => test(c.symbol.toUpperCase()));
         const quote = contract ? quotes.get(contract.token) : undefined;

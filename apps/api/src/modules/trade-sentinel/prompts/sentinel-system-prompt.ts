@@ -8,17 +8,22 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * v4 (from v3): the session.minutesToClose line now matches the code — the
  * position's OWN exchange close (NSE 15:30, MCX 23:30 / 23:55 late season) and
  * ABSENT before the open. v3 claimed a fixed 15:30 close and a pre-open value.
+ *
+ * v5 (from v4): the position.ownership line no longer says "nothing acts on your
+ * verdict in this stage" — with the sentinel auto-exit, an EXIT_NOW may close the
+ * real position. It now says so, independent of the owner's mode.
  */
-export const SENTINEL_PROMPT_VERSION = 'v4';
+export const SENTINEL_PROMPT_VERSION = 'v5';
 
 /**
  * The live prompt while MARKET_CUES_ENABLED is off: v2, word for word, EXCEPT the
- * v2.1 correction of the session.minutesToClose line (shared with v4). With the
+ * v2.1 correction of the session.minutesToClose line (shared with v4) and the
+ * v2.2 correction of the position.ownership line (shared with v5). With the
  * cues off the packet's macro blocks are the pre-cues ones too, so a live
  * verdict is judged exactly as before the cues existed — prompt, packet and
  * stamp. See {@link SENTINEL_SYSTEM_PROMPT_NO_CUES}.
  */
-export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2.1';
+export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2.2';
 
 /**
  * What actually goes on the verdict row.
@@ -113,7 +118,7 @@ Reading those fields:
 - money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
 - money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
 - SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
-- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
 - thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
 - macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
 - macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.

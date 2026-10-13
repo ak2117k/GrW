@@ -563,7 +563,7 @@ function macroBlocks(
     // Market cues off (or not wired): the pre-cues SHAPE — both blocks absent,
     // nothing fetched — until the owner switches MARKET_CUES_ENABLED on. Only
     // the reasons changed: they now name the switch instead of calling these a
-    // stub. The agent sends the no-cues prompt (v2.1) then too.
+    // stub. The agent sends the no-cues prompt (v2.2) then too.
     return {
       fiiDii: absent(`${FII_DII_OFF}. Note FII/DII is published post-close and can never be an intraday trigger.`),
       globalCues: absent(GLOBAL_CUES_OFF),

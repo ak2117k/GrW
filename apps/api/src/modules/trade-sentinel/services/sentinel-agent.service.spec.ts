@@ -129,9 +129,9 @@ describe('SentinelAgentService', () => {
     // The literal, not only the composition — an expectation built purely from
     // the constants under test would still pass if both were empty strings.
     // No config here = market cues off = the pre-cues live prompt, unchanged.
-    expect(svc.promptVersion).toBe('v2.1/t1');
+    expect(svc.promptVersion).toBe('v2.2/t1');
     const on = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'true' : undefined) } as never);
-    expect(on.promptVersion).toBe('v4/t1');
+    expect(on.promptVersion).toBe('v5/t1');
     expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');
@@ -165,15 +165,31 @@ describe('SentinelAgentService', () => {
   const OLD_MTC_LINE =
     '- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.';
 
-  it('the flag-off prompt IS the v2 text from main except the one corrected minutesToClose line', () => {
+  /** The v2-v4 ownership line — FALSE once the sentinel auto-exit can act on EXIT_NOW. */
+  const OLD_OWNERSHIP_LINE =
+    '- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way — nothing acts on your verdict in this stage.';
+
+  it.each([
+    ['cues on', SENTINEL_SYSTEM_PROMPT],
+    ['cues off', SENTINEL_SYSTEM_PROMPT_NO_CUES],
+  ])('says truthfully that an EXIT_NOW may be executed automatically, and nothing else is (%s)', (_label, prompt) => {
+    expect(prompt).not.toMatch(/nothing acts on your verdict/);
+    const line = prompt.split('\n').find((l) => l.startsWith('- position.ownership')) ?? '';
+    expect(line).toContain('Judge the trade the same way either way.');
+    expect(line).toContain("Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.");
+  });
+
+  it('the flag-off prompt IS the v2 text from main except the corrected minutesToClose and ownership lines', () => {
     // Hash of SENTINEL_SYSTEM_PROMPT as shipped at 9095047 (v2, 5562 chars).
-    // Putting the old line back must reproduce it byte for byte, so the ONLY
-    // change v2 -> v2.1 is that correction.
+    // Putting the old lines back must reproduce it byte for byte, so the ONLY
+    // changes v2 -> v2.2 are those two corrections (v2.1: minutesToClose, v2.2: ownership).
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { createHash } = require('crypto') as typeof import('crypto');
     const line = SENTINEL_SYSTEM_PROMPT_NO_CUES.split('\n').find((l) => l.startsWith('- session.minutesToClose'));
     expect(line).toBeDefined();
-    const restored = SENTINEL_SYSTEM_PROMPT_NO_CUES.replace(line as string, OLD_MTC_LINE);
+    const own = SENTINEL_SYSTEM_PROMPT_NO_CUES.split('\n').find((l) => l.startsWith('- position.ownership'));
+    expect(own).toBeDefined();
+    const restored = SENTINEL_SYSTEM_PROMPT_NO_CUES.replace(line as string, OLD_MTC_LINE).replace(own as string, OLD_OWNERSHIP_LINE);
     expect(restored).toHaveLength(5562);
     expect(createHash('sha256').update(restored, 'utf8').digest('hex')).toBe(
       '084d0a1422f2bdba2f10c1d19bd70dde7c18459461fb0122b7f055c01a3c16ad',
@@ -199,12 +215,12 @@ describe('SentinelAgentService', () => {
     expect(line).toMatch(/before the open/i);
   });
 
-  it('with market cues on, sends the v4 prompt and stamps v4', async () => {
+  it('with market cues on, sends the v5 prompt and stamps v5', async () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const on = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'TRUE' : undefined) } as never);
     await on.judge(packet());
     expect(c.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT);
-    expect(on.promptVersion).toBe('v4/t1');
+    expect(on.promptVersion).toBe('v5/t1');
   });
 
   it('sends the packet as the user turn and caches the system prompt', async () => {

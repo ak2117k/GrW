@@ -50,7 +50,7 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     const units = Object.entries(cfg.qtyUnits).map(([ex, u]) => `${ex}:${u}`).join(',') || 'none';
     this.logger.warn(
       `[ai-exit] ENABLED mode=${cfg.mode} users=${cfg.userIds.length} cap=${cfg.dailyCap}/day ` +
-        `maxAge=${cfg.maxVerdictAgeSec}s fallback=${cfg.limitFallbackPct}% qty-units=${units}`,
+        `maxAge=${cfg.maxVerdictAgeSec}s fallback=${cfg.limitFallbackPct}% qty-units=${units} cancel-protective=${cfg.cancelProtective ? 'ON' : 'off'}`,
     );
     void this.sweep();
     this.sweepTimer = setTimeout(() => void this.sweep(), SECOND_SWEEP_MS);

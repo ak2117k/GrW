@@ -45,6 +45,14 @@ describe('sentinel-executor safety shape (plan Global Constraints, Review Focus)
     expect(sites).toEqual(['services/sentinel-exit-executor.service.ts']);
   });
 
+  it('cancelOrder has exactly one call site in executor source (the intent-recorded `cancelProtective`), classified only', () => {
+    const sites = source().flatMap((f) =>
+      [...code(f).matchAll(/\.cancelOrder(Classified)?\(/g)].map((m) => `${relative(__dirname, f).replace(/\\/g, '/')}:${m[0]}`));
+    expect(sites).toEqual(['services/sentinel-exit-executor.service.ts:.cancelOrderClassified(']);
+    const modify = source().filter((f) => /\.modifyOrder\(/.test(code(f)));
+    expect(modify).toEqual([]);
+  });
+
   it('only the classified placement is used (review fix 1: the legacy mapping turns an SDK `{}` into REJECTED)', () => {
     const legacy = source().filter((f) => /\.placeOrder\(/.test(code(f)));
     expect(legacy).toEqual([]);

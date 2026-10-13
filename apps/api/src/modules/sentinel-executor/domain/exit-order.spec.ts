@@ -11,6 +11,8 @@ import {
   istDayStartUtc,
   limitFallbackPrice,
   planExitOrder,
+  protectiveCancelState,
+  protectiveOrdersFor,
   tickRupees,
   type QtyPolicy,
 } from './exit-order';
@@ -309,5 +311,71 @@ describe('hasPriorAiExit (review fix 2: PRIOR_AI_EXIT_TODAY)', () => {
     ['ax order on another exchange', [o({ exchange: 'NFO', ordertag: 'axMabc', status: 'complete' })], false],
   ])('%s → %s', (_n, rows, want) => {
     expect(hasPriorAiExit(rows, 'mcx', '445566')).toBe(want);
+  });
+});
+
+describe('protectiveOrdersFor (cancel protective then exit, 2026-10-13)', () => {
+  const exitSell = { exchange: 'MCX', token: '445566', side: 'SELL' as const, quantity: 100, positionType: 'CARRYFORWARD' };
+  const sl = (x: Record<string, unknown> = {}) => ({
+    orderid: 'SL1', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', transactiontype: 'SELL',
+    producttype: 'CARRYFORWARD', quantity: '100', status: 'trigger pending', symboltoken: '445566', exchange: 'MCX', ...x,
+  });
+
+  it('no open order on the contract → none (terminal and other-contract rows ignored)', () => {
+    expect(protectiveOrdersFor([sl({ status: 'complete' }), sl({ symboltoken: '1' })], exitSell)).toEqual({ kind: 'none' });
+  });
+
+  it.each([
+    ['SL-M sell on a long', sl()],
+    ['SL-limit sell', sl({ ordertype: 'STOPLOSS_LIMIT' })],
+    ['exit-side LIMIT (target) in the NORMAL variety', sl({ ordertype: 'LIMIT', variety: 'NORMAL', status: 'open' })],
+    ['smaller than the position', sl({ quantity: '50' })],
+  ])('%s → protective', (_n, o) => {
+    expect(protectiveOrdersFor([o], exitSell)).toEqual({
+      kind: 'protective',
+      orders: [expect.objectContaining({ orderId: 'SL1', variety: String((o as any).variety) })],
+    });
+  });
+
+  it('a BUY stop-loss on a short is protective', () => {
+    const exitBuy = { ...exitSell, side: 'BUY' as const };
+    expect(protectiveOrdersFor([sl({ transactiontype: 'BUY' })], exitBuy).kind).toBe('protective');
+  });
+
+  it.each([
+    ['entry-side (adds to the position)', sl({ transactiontype: 'BUY' })],
+    ['quantity larger than the position', sl({ quantity: '150' })],
+    ['different product', sl({ producttype: 'INTRADAY' })],
+    ['MARKET order', sl({ ordertype: 'MARKET' })],
+    ['bracket (ROBO) variety', sl({ variety: 'ROBO' })],
+    ['AMO variety', sl({ variety: 'AMO' })],
+    ['no order id', sl({ orderid: '' })],
+    ['no quantity', sl({ quantity: '' })],
+  ])('%s → blocking', (_n, o) => {
+    expect(protectiveOrdersFor([o], exitSell).kind).toBe('blocking');
+  });
+
+  it('one non-protective order among protective ones blocks the lot (cancel nothing)', () => {
+    const book = [sl(), sl({ orderid: 'T1', ordertype: 'LIMIT', variety: 'NORMAL' }), sl({ orderid: 'E1', transactiontype: 'BUY' })];
+    expect(protectiveOrdersFor(book, exitSell).kind).toBe('blocking');
+  });
+
+  it('SL + target both protective → both returned', () => {
+    const book = [sl(), sl({ orderid: 'T1', ordertype: 'LIMIT', variety: 'NORMAL', status: 'open' })];
+    const r = protectiveOrdersFor(book, exitSell);
+    expect(r.kind === 'protective' && r.orders.map((o) => o.orderId)).toEqual(['SL1', 'T1']);
+  });
+});
+
+describe('protectiveCancelState', () => {
+  const o = (orderid: string, status: string, x: Record<string, unknown> = {}) => ({ orderid, status, ...x });
+  it('cancelled/rejected are done; complete is done and filled; open or missing is still open', () => {
+    expect(protectiveCancelState([o('A', 'cancelled'), o('B', 'rejected')], ['A', 'B'])).toEqual({ open: [], filled: [] });
+    expect(protectiveCancelState([o('A', 'complete')], ['A'])).toEqual({ open: [], filled: ['A'] });
+    expect(protectiveCancelState([o('A', 'trigger pending')], ['A'])).toEqual({ open: ['A'], filled: [] });
+    expect(protectiveCancelState([], ['A'])).toEqual({ open: ['A'], filled: [] });
+  });
+  it('a cancelled order with filled shares counts as (partly) filled', () => {
+    expect(protectiveCancelState([o('A', 'cancelled', { filledshares: '40' })], ['A'])).toEqual({ open: [], filled: ['A'] });
   });
 });

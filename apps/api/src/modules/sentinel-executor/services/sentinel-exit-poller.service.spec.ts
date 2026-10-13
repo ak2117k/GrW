@@ -63,6 +63,7 @@ describe('SentinelExitPoller', () => {
     const line = warn.mock.calls.map((c) => String(c[0])).find((l) => l.includes('ENABLED'));
     expect(line).toContain('mode=dry-run');
     expect(line).toContain('qty-units=NFO:units,BFO:units,MCX:lots');
+    expect(line).toContain('cancel-protective=off');
     poller.onModuleDestroy();
   });
 

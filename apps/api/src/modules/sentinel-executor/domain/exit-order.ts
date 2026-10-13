@@ -226,6 +226,79 @@ export function hasOpenOrderFor(rows: unknown[], exchange: string, token: string
   );
 }
 
+/** Order types a protective exit-side order may have (Angel order-book `ordertype`). */
+const PROTECTIVE_ORDER_TYPES = new Set(['STOPLOSS_MARKET', 'STOPLOSS_LIMIT', 'SL-M', 'SL', 'LIMIT']);
+/** Varieties we are willing to cancel: a plain order or a plain stop-loss. Never ROBO (bracket) or AMO. */
+const CANCELLABLE_VARIETIES = new Set(['NORMAL', 'STOPLOSS']);
+
+export interface ProtectiveOrder {
+  orderId: string;
+  variety: string;
+  orderType: string;
+  side: string;
+  /** In the order book's own unit — the same unit the exit order is sent in (R16). */
+  quantity: number;
+  status: string;
+}
+
+export type ProtectiveScan =
+  | { kind: 'none' }
+  | { kind: 'protective'; orders: ProtectiveOrder[] }
+  | { kind: 'blocking' };
+
+/**
+ * Cancel protective then exit (2026-10-13). The non-terminal orders on the
+ * contract, classified against the exit we are about to send. `protective` only
+ * when EVERY one of them is the owner's protection of THIS position: exit side
+ * (SELL for a long, BUY for a short), STOPLOSS_MARKET / STOPLOSS_LIMIT or an
+ * exit-side LIMIT, quantity ≤ the exit quantity (|netqty| in the order unit),
+ * the same product, a NORMAL/STOPLOSS variety and an order id to cancel by.
+ * Anything else (an entry-side order, an add, another product, a bracket leg, a
+ * bigger order, an unreadable row) makes the whole scan `blocking`: cancel nothing.
+ */
+export function protectiveOrdersFor(
+  rows: unknown[],
+  exit: { exchange: string; token: string; side: 'BUY' | 'SELL'; quantity: number; positionType: string },
+): ProtectiveScan {
+  const open = (rows as Row[]).filter((o) => matches(o, exit.exchange, exit.token) && !isTerminalOrderStatus(statusOf(o)));
+  if (open.length === 0) return { kind: 'none' };
+  const orders: ProtectiveOrder[] = [];
+  for (const o of open) {
+    const orderId = String(o?.orderid ?? '').trim();
+    const variety = up(o?.variety);
+    const orderType = up(o?.ordertype);
+    const side = up(o?.transactiontype);
+    const qty = toNum(o?.quantity);
+    const ok = orderId !== ''
+      && CANCELLABLE_VARIETIES.has(variety)
+      && PROTECTIVE_ORDER_TYPES.has(orderType)
+      && side === exit.side
+      && up(o?.producttype) === up(exit.positionType)
+      && Number.isInteger(qty) && qty > 0 && qty <= exit.quantity;
+    if (!ok) return { kind: 'blocking' };
+    orders.push({ orderId, variety, orderType, side, quantity: qty, status: statusOf(o) });
+  }
+  return { kind: 'protective', orders };
+}
+
+/**
+ * Where each cancelled-for protective order stands in a fresh order book.
+ * `open`: still working, or missing from the book (unknown counts as open).
+ * `filled`: complete, or dead with filled shares (it moved the position).
+ * cancelled/rejected with nothing filled is simply done.
+ */
+export function protectiveCancelState(rows: unknown[], orderIds: string[]): { open: string[]; filled: string[] } {
+  const open: string[] = [];
+  const filled: string[] = [];
+  for (const id of orderIds) {
+    const r = (rows as Row[]).find((o) => String(o?.orderid ?? '') === id);
+    const s = r ? statusOf(r) : '';
+    if (!r || !isTerminalOrderStatus(s)) open.push(id);
+    else if (s === 'complete' || toNum(r.filledshares) > 0) filled.push(id);
+  }
+  return { open, filled };
+}
+
 /** True when no broker row for the contract has a non-zero net quantity. */
 export function isFlat(rows: unknown[], exchange: string, token: string): boolean {
   return !(rows as Row[]).some((r) => matches(r, exchange, token) && toNum(r?.netqty) !== 0);

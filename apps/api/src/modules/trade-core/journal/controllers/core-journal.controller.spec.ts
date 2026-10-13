@@ -51,9 +51,9 @@ describe('CoreJournalController (spec §8.4)', () => {
     await expect(c.position('user_B', 'pos_1')).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('status: entries, journal health, active / blind / exiting, unacknowledged findings', async () => {
+  it('status (admin): entries, journal health, active / blind / exiting, unacknowledged findings', async () => {
     const { c } = setup();
-    expect(await c.status('user_A')).toEqual({
+    expect(await c.status({ userId: 'user_A', role: 'ADMIN', email: 'a@x' })).toEqual({
       entries: { mode: 'journal', users: 1, pending: 0, dropped: 0 },
       journal: { pending: 0, written: 10, dropped: 0, failures: 0, lastError: null },
       positions: { active: 2, blind: 1, exiting: 1 },
@@ -69,5 +69,20 @@ describe('CoreJournalController (spec §8.4)', () => {
     expect(await validate(plainToInstance(AckReconDto, { reason: 'checked' }))).toHaveLength(0);
     expect(await validate(plainToInstance(JournalDayQueryDto, { day: '13-10-2026' }))).toHaveLength(1);
     expect(await validate(plainToInstance(JournalDayQueryDto, {}))).toHaveLength(0);
+  });
+});
+
+describe('CoreJournalController — status for a non-admin (review fix 8)', () => {
+  it("shows only the caller's own data: the entries switch, no platform-wide intake or journal counters", async () => {
+    const { c, positions, desk } = setup();
+    const r = await c.status({ userId: 'user_B', role: 'USER', email: 'b@x' });
+    expect(r).toEqual({
+      entries: { mode: 'journal', users: 0, pending: 0, dropped: 0 },
+      journal: { pending: 0, written: 0, dropped: 0, failures: 0, lastError: null },
+      positions: { active: 2, blind: 1, exiting: 1 },
+      mismatches: [],
+    });
+    expect(positions.listForUser).toHaveBeenCalledWith('user_B', expect.any(Date));
+    expect(desk.unacked).toHaveBeenCalledWith('user_B');
   });
 });

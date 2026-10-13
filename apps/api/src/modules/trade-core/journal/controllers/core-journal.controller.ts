@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Inject, NotFoundException, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { AdminOnly, CurrentUser } from '../../../../common/decorators';
+import { AdminOnly, CurrentUser, type AuthenticatedUser } from '../../../../common/decorators';
 import { istDate, istDayStart } from '../../execution/ledger-math';
 import { isActiveStatus, type CorePosition } from '../../lifecycle/lifecycle.types';
 import { CorePositionRepository } from '../../lifecycle/repositories/core-position.repository';
@@ -75,13 +75,20 @@ export class CoreJournalController {
     return { position, events, summary };
   }
 
+  /**
+   * The intake queue and journal buffer are platform-wide: only an admin sees their counters (review
+   * fix 8). Anyone else gets the same shape with the entries switch and zeros, plus their own rows.
+   */
   @Get('status')
-  async status(@CurrentUser('userId') userId: string) {
+  async status(@CurrentUser() user: AuthenticatedUser) {
+    const { userId } = user;
     const [rows, mismatches] = await Promise.all([this.positions.listForUser(userId, istDayStart(new Date())), this.desk.unacked(userId)]);
     const active = rows.filter((p) => isActiveStatus(p.status));
+    const admin = user.role === 'ADMIN';
+    const entries = this.intake.status();
     return {
-      entries: this.intake.status(),
-      journal: this.journalStatus.status(),
+      entries: admin ? entries : { mode: entries.mode, users: 0, pending: 0, dropped: 0 },
+      journal: admin ? this.journalStatus.status() : { pending: 0, written: 0, dropped: 0, failures: 0, lastError: null },
       positions: { active: active.length, blind: active.filter((p) => p.blindSince !== null).length, exiting: active.filter((p) => p.status === 'EXITING').length },
       mismatches,
     };

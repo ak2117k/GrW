@@ -3,6 +3,9 @@ import type { PrismaService } from '../../src/common/prisma/prisma.service';
 import { balances } from '../../src/modules/trade-core/execution/ledger-math';
 import { CoreCashLedgerRepository } from '../../src/modules/trade-core/execution/repositories/core-cash-ledger.repository';
 import { CoreCorpusWriter } from '../../src/modules/trade-core/journal/core-corpus.writer';
+import { CoreJournalRepository } from '../../src/modules/trade-core/journal/repositories/core-journal.repository';
+import type { TenantContextService } from '../../src/common/tenant/tenant-context.service';
+import type { ClsService } from 'nestjs-cls';
 import { BrokerCorpusCron } from '../../src/modules/trade-core/journal/broker-corpus.cron';
 import type { JobRunnerService } from '../../src/common/job-registry';
 
@@ -78,6 +81,20 @@ describe('core_journal (SP2 M5 migration)', () => {
     await expect(db.$executeRawUnsafe(`UPDATE "core_journal" SET "type" = 'FILL' WHERE "id" = $1`, id)).rejects.toThrow(/append-only/);
     await db.$executeRawUnsafe(`DELETE FROM "users" WHERE "id" = $1`, u);
     expect(await db.coreJournal.count({ where: { id } })).toBe(0);
+  });
+
+  it("unackedMismatches is one anti-join: acked and other users' mismatches are left out (review fix 5)", async () => {
+    const u = await newUser();
+    const other = await newUser();
+    const m1 = await journal(u, 'RECON_MISMATCH', `recon:${rid()}`);
+    const m2 = await journal(u, 'RECON_MISMATCH', `recon:${rid()}`);
+    await journal(other, 'RECON_MISMATCH', `recon:${rid()}`);
+    await journal(u, 'RECON_ACK', `ack:${m1}`);
+    const repo = new CoreJournalRepository(db as unknown as PrismaService, {} as TenantContextService, { isActive: () => false } as unknown as ClsService);
+    const rows = await repo.unackedMismatches(u);
+    expect(rows.map((r) => r.id)).toEqual([m2]);
+    expect(rows[0]).toMatchObject({ userId: u, type: 'RECON_MISMATCH', priceUsed: null, payload: {} });
+    expect(rows[0].istDay).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
 

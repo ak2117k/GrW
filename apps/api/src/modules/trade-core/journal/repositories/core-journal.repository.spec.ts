@@ -6,6 +6,7 @@ import { CoreJournalRepository, toJournalData } from './core-journal.repository'
 
 function setup() {
   const prisma = {
+    $queryRaw: jest.fn().mockResolvedValue([]),
     coreJournal: { createMany: jest.fn().mockResolvedValue({ count: 2 }), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
   };
   const tenant = { runWithoutTenant: jest.fn((fn: () => unknown) => fn()) };
@@ -51,16 +52,20 @@ describe('CoreJournalRepository (spec §8.1)', () => {
     expect(tenant.runWithoutTenant).toHaveBeenCalledTimes(1);
   });
 
-  it('unacked mismatches: a RECON_MISMATCH whose ack:<id> row exists is left out', async () => {
+  it('unacked mismatches: one bounded anti-join query for the user (review fix 5): acked and historical rows are never loaded', async () => {
     const { prisma, repo } = setup();
-    const row = (id: string, type: string, dedupeKey: string | null) => ({
-      id, userId: 'u', type, positionId: null, strategyId: null, strategyVersionId: null, intentId: null, symbol: null,
-      payload: {}, priceUsed: null, priceAgeMs: null, dedupeKey, istDay: new Date('2026-10-13T00:00:00.000Z'), createdAt: AT,
+    const row = (id: string) => ({
+      id, userId: 'u', type: 'RECON_MISMATCH', positionId: null, strategyId: null, strategyVersionId: null, intentId: null, symbol: null,
+      payload: {}, priceUsed: null, priceAgeMs: null, dedupeKey: 'recon:b', istDay: new Date('2026-10-13T00:00:00.000Z'), createdAt: AT,
     });
-    prisma.coreJournal.findMany
-      .mockResolvedValueOnce([row('m1', 'RECON_MISMATCH', 'recon:a'), row('m2', 'RECON_MISMATCH', 'recon:b')])
-      .mockResolvedValueOnce([{ dedupeKey: 'ack:m1' }]);
+    prisma.$queryRaw.mockResolvedValueOnce([row('m2')]);
     expect((await repo.unackedMismatches('u')).map((r) => r.id)).toEqual(['m2']);
+    expect(prisma.coreJournal.findMany).not.toHaveBeenCalled();
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    const [sql, ...values] = prisma.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]];
+    expect(sql.join('?')).toMatch(/NOT EXISTS/);
+    expect(sql.join('?')).toContain("'RECON_MISMATCH'");
+    expect(values).toEqual(['u']);
   });
 
   it('has no update or delete method (append-only)', () => {

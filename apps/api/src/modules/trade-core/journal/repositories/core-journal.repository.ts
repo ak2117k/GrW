@@ -96,13 +96,19 @@ export class CoreJournalRepository {
     return (await this.prisma.coreJournal.findFirst({ where: { userId, istDay: dayDate(day), type }, select: { id: true } })) !== null;
   }
 
-  /** Every RECON_MISMATCH of the user without its RECON_ACK (dedupeKey `ack:<mismatchId>`). */
+  /**
+   * Every RECON_MISMATCH of the user without its RECON_ACK (dedupeKey `ack:<mismatchId>`). Read on
+   * every liveState (5 s), so it is one anti-join in SQL (review fix 5): acked history is never
+   * loaded, the ack lookup uses the unique dedupeKey index. Raw SQL bypasses the tenant extension;
+   * the userId filter is explicit.
+   */
   async unackedMismatches(userId: string): Promise<JournalRow[]> {
-    const mismatches = await this.prisma.coreJournal.findMany({ where: { userId, type: 'RECON_MISMATCH' }, orderBy: OLDEST_FIRST });
-    if (mismatches.length === 0) return [];
-    const acks = await this.prisma.coreJournal.findMany({ where: { userId, type: 'RECON_ACK' }, select: { dedupeKey: true } });
-    const acked = new Set(acks.map((a) => a.dedupeKey));
-    return mismatches.filter((m) => !acked.has(`ack:${m.id}`)).map(toJournalRow);
+    const rows = await this.prisma.$queryRaw<CoreJournalDb[]>`
+      SELECT m.* FROM "core_journal" m
+      WHERE m."userId" = ${userId} AND m."type" = 'RECON_MISMATCH'
+        AND NOT EXISTS (SELECT 1 FROM "core_journal" a WHERE a."dedupeKey" = 'ack:' || m."id" AND a."type" = 'RECON_ACK' AND a."userId" = m."userId")
+      ORDER BY m."createdAt" ASC, m."id" ASC`;
+    return rows.map(toJournalRow);
   }
 
   /** System scan (follow-ups): every user's rows of one type on one IST day, oldest first, at most `take`. */

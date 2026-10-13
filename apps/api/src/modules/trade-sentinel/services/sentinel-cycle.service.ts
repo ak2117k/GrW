@@ -259,10 +259,20 @@ export function previousJudged(
  * Reading only the most recent verdict is sufficient because the flag is
  * self-propagating: every packet is written with `latched || floor.armed`, so
  * once one verdict records it armed, so does every verdict after it.
+ *
+ * Given `entryPrice`, a packet that recorded a DIFFERENT entry price is not
+ * evidence: its floor was solved from another cost basis. This is what voids a
+ * latch armed while the tracker carried entry 0 (an overnight F&O position
+ * whose cost the tracker had not read) once that entry is repaired. A packet
+ * that recorded no entry price is read as before.
  */
-export function storedFloorArmed(last: { packet?: unknown } | undefined | null): boolean {
-  const money = (last?.packet as { money?: { greenFloorArmed?: unknown } } | undefined)?.money;
-  return money?.greenFloorArmed === true;
+export function storedFloorArmed(last: { packet?: unknown } | undefined | null, entryPrice?: number): boolean {
+  const packet = last?.packet as
+    | { position?: { entryPrice?: unknown }; money?: { greenFloorArmed?: unknown } }
+    | undefined;
+  const storedEntry = packet?.position?.entryPrice;
+  if (entryPrice !== undefined && typeof storedEntry === 'number' && storedEntry !== entryPrice) return false;
+  return packet?.money?.greenFloorArmed === true;
 }
 
 /**
@@ -275,6 +285,12 @@ interface TrackerState {
   userId: string;
   /** The in-process half of the green-floor ratchet. */
   greenFloorArmed: boolean;
+  /**
+   * The entry price the ratchet was armed against. A change (a tracker whose
+   * zero entry was repaired from the broker's cost) voids the latch: a floor
+   * solved from another cost basis is not this position's floor.
+   */
+  greenFloorEntry?: number;
   /**
    * The last thesis obtained, and when.
    *
@@ -901,7 +917,12 @@ export class SentinelCycleService {
       side: tick.side,
     }).armed;
 
-    state.greenFloorArmed = state.greenFloorArmed || armedNow || storedFloorArmed(last);
+    // The one exception to "only ever false -> true": a changed cost basis.
+    if (state.greenFloorEntry !== undefined && state.greenFloorEntry !== tick.entryPrice) {
+      state.greenFloorArmed = false;
+    }
+    state.greenFloorEntry = tick.entryPrice;
+    state.greenFloorArmed = state.greenFloorArmed || armedNow || storedFloorArmed(last, tick.entryPrice);
     return state.greenFloorArmed;
   }
 

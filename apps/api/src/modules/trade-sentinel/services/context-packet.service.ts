@@ -11,7 +11,8 @@ import { sessionFor } from '../market-sessions';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { liveSessionClock } from '../overnight/overnight-calendar';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
-import type { CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
+import { newsKeyFor } from '../../news/services/underlying-news-aliases';
+import type { CommodityCueKey, CommodityQuote, CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -512,6 +513,38 @@ const STUB_REASON =
 const FII_POST_CLOSE = 'FII/DII is published post-close (~18:00–20:00 IST) and can never be an intraday trigger';
 
 /**
+ * Why `macro.globalCues` is absent when the cues are off. The same text whether
+ * the switch is off or the service is not wired — both mean "never fetched".
+ * It used to read as a stub "(gold, crude-oil, nasdaq)", naming cues the module
+ * did not even have.
+ */
+const GLOBAL_CUES_OFF =
+  'market cues are not switched on (MARKET_CUES_ENABLED is not true, or the market-cues service is not wired into ' +
+  'this process), so no US index, US index future, GIFT Nifty, commodity benchmark or USD/INR reading is held';
+
+/**
+ * MCX underlying → the benchmarks its price follows. Minis read their parent's.
+ * USD/INR is added for every MCX position: an MCX price is the dollar benchmark
+ * times the rupee.
+ */
+const MCX_BENCHMARKS: Record<string, CommodityCueKey[]> = {
+  CRUDEOIL: ['wtiCrude', 'brentCrude'],
+  CRUDEOILM: ['wtiCrude', 'brentCrude'],
+  GOLD: ['gold'],
+  GOLDM: ['gold'],
+  GOLDGUINEA: ['gold'],
+  GOLDPETAL: ['gold'],
+  GOLDTEN: ['gold'],
+  SILVER: ['silver'],
+  SILVERM: ['silver'],
+  SILVERMIC: ['silver'],
+  SILVER1000: ['silver'],
+  NATURALGAS: ['naturalGas'],
+  NATGASMINI: ['naturalGas'],
+  COPPER: ['copper'],
+};
+
+/**
  * `macro.fiiDii` and `macro.globalCues` from the market-cues cache. Every
  * reading keeps its OWN source time — never the packet's — and its status; a
  * cue the cache does not hold is a nested absence with its reason.
@@ -519,6 +552,7 @@ const FII_POST_CLOSE = 'FII/DII is published post-close (~18:00–20:00 IST) and
 function macroBlocks(
   read: { snapshot: MarketCuesSnapshot | null; reason: string },
   now: Date,
+  position: { exchange: string; underlying: string | null },
 ): { fiiDii: Block<Prisma.InputJsonValue>; globalCues: Block<Prisma.InputJsonValue> } {
   const snap = read.snapshot;
   if (!snap || !snap.enabled) {
@@ -527,7 +561,7 @@ function macroBlocks(
     // switches MARKET_CUES_ENABLED on. The agent sends the v2 prompt then too.
     return {
       fiiDii: absent(`${STUB_REASON}. Note FII/DII is published post-close and can never be an intraday trigger.`),
-      globalCues: absent(`${STUB_REASON} (gold, crude-oil, nasdaq)`),
+      globalCues: absent(GLOBAL_CUES_OFF),
     };
   }
   const f = snap.fiiDii;
@@ -584,6 +618,37 @@ function macroBlocks(
         )
       : absent(r.reason ?? 'no reading');
 
+  const commodity = (r: CueRecord<CommodityQuote> | undefined): Block<Prisma.InputJsonValue> =>
+    r?.values
+      ? present(
+          {
+            last: r.values.last,
+            previousClose: r.values.previousClose,
+            change: r.values.change,
+            changePercent: r.values.changePercent,
+            contract: r.values.contract,
+            status: r.status === 'stale' ? 'stale' : 'ok',
+            ...(r.reason ? { note: r.reason } : {}),
+          },
+          `${r.source}; ${r.basis}`,
+          r.sourceTime as string,
+        )
+      : absent(r?.reason ?? 'no reading');
+
+  // MCX only: the benchmark(s) this commodity follows, and USD/INR.
+  const mcx: Record<string, Block<Prisma.InputJsonValue>> = {};
+  if (String(position.exchange ?? '').toUpperCase() === 'MCX') {
+    const name = String(position.underlying ?? '').toUpperCase();
+    const keys = MCX_BENCHMARKS[name];
+    if (keys) for (const k of keys) mcx[k] = commodity(snap.commodities?.[k]);
+    else {
+      mcx.mcxBenchmark = absent(
+        `no benchmark quote is fetched for the MCX underlying ${name || '(unresolved)'} — its global direction is UNSEEN, not flat`,
+      );
+    }
+    mcx.usdInr = commodity(snap.commodities?.usdInr);
+  }
+
   const parts = {
     nasdaq: us(snap.us.nasdaq),
     sp500: us(snap.us.sp500),
@@ -591,6 +656,7 @@ function macroBlocks(
     nasdaqFutures: us(snap.us.nasdaqFutures),
     sp500Futures: us(snap.us.sp500Futures),
     giftNifty: gift(snap.gift),
+    ...mcx,
   };
   const shown = Object.values(parts).filter((b) => b.available) as Array<{ at: string }>;
   const globalCues: Block<Prisma.InputJsonValue> =
@@ -713,6 +779,17 @@ export class ContextPacketService {
     const structureSymbol = tick.structureSymbol;
     const structureInstrument = tick.structureInstrument ?? null;
 
+    /**
+     * WHETHER THE NEWS FEED CAN SEE THIS UNDERLYING AT ALL. Articles are tagged
+     * with listed companies plus a fixed set of commodity / index aliases; an
+     * MCX commodity or an index outside that set can never be a relatedSymbol.
+     * Asking anyway returns nothing, and that nothing would reach the agent as
+     * "no headlines" and "0 in 30 minutes" — a claim about the market that is
+     * really a claim about our tagger. Both news blocks state THAT instead.
+     */
+    const newsKey = structureSymbol ? newsKeyFor(structureSymbol, entry.exchange) : null;
+    const untaggable = newsKey && newsKey.key === null ? newsKey.reason : null;
+
     const [levelBook, headlines] = structureSymbol
       ? await Promise.all([
           this.safely(
@@ -724,12 +801,14 @@ export class ContextPacketService {
             at,
             'level book unavailable for this symbol',
           ),
-          this.safely(
-            () => this.news.recentFor(structureSymbol),
-            'news-aggregator.service',
-            at,
-            'news aggregator returned nothing for this symbol',
-          ),
+          untaggable
+            ? Promise.resolve(absent(untaggable))
+            : this.safely(
+                () => this.news.recentFor(structureSymbol),
+                'news-aggregator.service',
+                at,
+                'news aggregator returned nothing for this symbol',
+              ),
         ])
       : // NO FALLBACK TO THE TRADINGSYMBOL. That call is guaranteed to miss, and
         // `safely` would report the miss as "level book unavailable for this
@@ -848,7 +927,10 @@ export class ContextPacketService {
               ),
       },
       macro: {
-        ...macroBlocks(this.readMacro(now), now),
+        ...macroBlocks(this.readMacro(now), now, {
+          exchange: entry.exchange,
+          underlying: tick.structureSymbol ?? null,
+        }),
         sector: absent(STUB_REASON),
         // The reason travels WITH the emptiness. "No setup on the underlying",
         // "scored but every factor is a stub" and "no level book at all" are
@@ -869,12 +951,14 @@ export class ContextPacketService {
       },
       news: {
         headlines,
-        freshCount: numberBlock(
-          tick.freshNewsCount,
-          'news-aggregator.service (headlines in the last 30 minutes)',
-          at,
-          'no 30-minute headline count available for this symbol',
-        ),
+        freshCount: untaggable
+          ? absent(untaggable)
+          : numberBlock(
+              tick.freshNewsCount,
+              'news-aggregator.service (headlines in the last 30 minutes)',
+              at,
+              'no 30-minute headline count available for this symbol',
+            ),
       },
       session: {
         nowIst: istWallClock(now),

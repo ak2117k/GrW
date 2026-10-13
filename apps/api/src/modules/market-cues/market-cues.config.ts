@@ -24,7 +24,7 @@ export interface MarketCuesUrls {
 
 export interface MarketCuesConfig {
   enabled: boolean;
-  sources: { us: boolean; fii: boolean; fiiOi: boolean; gift: boolean; preOpen: boolean };
+  sources: { us: boolean; commodities: boolean; fii: boolean; fiiOi: boolean; gift: boolean; preOpen: boolean };
   timeoutMs: number;
   userAgent: string;
   accept: string;
@@ -82,6 +82,7 @@ export function readMarketCuesConfig(get: (key: string) => string | undefined): 
     enabled: str('MARKET_CUES_ENABLED')?.toLowerCase() === 'true',
     sources: {
       us: on('MARKET_CUES_US'),
+      commodities: on('MARKET_CUES_COMMODITIES'),
       fii: on('MARKET_CUES_FII'),
       fiiOi: on('MARKET_CUES_FII_OI'),
       gift: on('MARKET_CUES_GIFT'),

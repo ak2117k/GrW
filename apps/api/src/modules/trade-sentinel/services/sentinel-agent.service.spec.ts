@@ -154,6 +154,13 @@ describe('SentinelAgentService', () => {
     expect(SENTINEL_SYSTEM_PROMPT).toMatch(/giftNifty/);
   });
 
+  it('with cues on, the prompt names every MCX benchmark block the packet can carry', () => {
+    for (const k of ['wtiCrude', 'brentCrude', 'gold', 'silver', 'naturalGas', 'copper', 'usdInr', 'mcxBenchmark']) {
+      expect({ k, named: SENTINEL_SYSTEM_PROMPT.includes(k) }).toEqual({ k, named: true });
+    }
+    expect(SENTINEL_SYSTEM_PROMPT_NO_CUES).not.toMatch(/wtiCrude|usdInr|mcxBenchmark/);
+  });
+
   /** The v2/v3 minutesToClose line — FALSE about the code (see the next test). */
   const OLD_MTC_LINE =
     '- session.minutesToClose says how many minutes remain until the 15:30 IST close. It is present BEFORE the session opens as well as during it — at 07:00 IST it reads 510. It is NOT evidence that the market is open or that this position is currently trading. Nothing in the packet tells you the session has started, so do not claim it has.';

@@ -222,10 +222,13 @@ describe('ContextPacketService', () => {
 
   it('marks every stubbed macro factor unavailable with a stated reason', async () => {
     const packet = await svc.build(entry, tick, null);
-    for (const block of [packet.macro.fiiDii, packet.macro.sector, packet.macro.globalCues]) {
+    for (const block of [packet.macro.fiiDii, packet.macro.sector]) {
       expect(block.available).toBe(false);
       if (!block.available) expect(block.reason).toMatch(/stub/i);
     }
+    // globalCues is not a stub: it is the market-cues module, switched off.
+    expect(packet.macro.globalCues.available).toBe(false);
+    if (!packet.macro.globalCues.available) expect(packet.macro.globalCues.reason).toMatch(/MARKET_CUES_ENABLED/);
     // FII/DII is post-close data; the agent must never treat it as intraday.
     expect(packet.macro.fiiDii.available).toBe(false);
     if (!packet.macro.fiiDii.available) {
@@ -246,7 +249,9 @@ describe('ContextPacketService', () => {
     });
     expect(without.macro.globalCues).toEqual({
       available: false,
-      reason: 'context-scoring factor is a stub (returns isStub: true) — no real data behind it (gold, crude-oil, nasdaq)',
+      reason:
+        'market cues are not switched on (MARKET_CUES_ENABLED is not true, or the market-cues service is not wired into ' +
+        'this process), so no US index, US index future, GIFT Nifty, commodity benchmark or USD/INR reading is held',
     });
   });
 
@@ -1032,5 +1037,157 @@ describe('ContextPacketService — the evidence sources are keyed by the underly
       expect(packet.money.netPnl).toEqual(expect.any(Number));
       expect(packet.session.nowIst).toEqual(expect.any(String));
     });
+  });
+});
+
+describe('ContextPacketService — news for an underlying the tagger can never match', () => {
+  function make() {
+    const recentFor = jest.fn().mockResolvedValue({ value: [{ title: 'x' }], source: 'news' });
+    const svc = new ContextPacketService(
+      { recentForTracker: jest.fn().mockResolvedValue([]) } as never,
+      { levelsFor: jest.fn().mockResolvedValue(null) } as never,
+      { recentFor } as never,
+    );
+    jest.spyOn((svc as never as { logger: { warn: () => void } }).logger, 'warn').mockImplementation(() => undefined);
+    return { svc, recentFor };
+  }
+  const entry = (symbol: string, exchange: string) =>
+    ({ exchange, userId: 'u1', trackerId: 't1', symbol, kind: 'POSITION', ownership: 'SENTINEL', watched: true, reason: '' }) as never;
+  const tick = (structureSymbol: string, freshNewsCount: number | null) =>
+    ({
+      segment: 'OPT', side: 'LONG', structureSymbol, entryPrice: 100, qty: 1, ltp: 110, underlyingLtp: 280,
+      underlyingLtpAt: null, underlyingLtpSource: 'x', underlyingLtpReason: null, nearestSupport: null,
+      nearestResistance: null, structureReason: null, structureAt: null, structureSource: LEVEL_SOURCE,
+      holdingHigh: null, holdingLow: null, entryTime: new Date('2026-10-12T10:00:00Z'), expiry: null,
+      volumeRatio: null, freshNewsCount, factorValues: {}, factorsReason: null, oiWallNow: null, oiWallPrev: null,
+      oiWallsAt: null, greenFloorArmedLatched: false,
+    }) as TickSnapshot;
+
+  it('MCX ZINC: headlines AND freshCount are unavailable with the tagger reason — never a present 0', async () => {
+    const t = make();
+    const packet = await t.svc.build(entry('ZINC30OCT26280CE', 'MCX'), tick('ZINC', 0), null, []);
+    expect(t.recentFor).not.toHaveBeenCalled();
+    for (const block of [packet.news.headlines, packet.news.freshCount]) {
+      expect(block.available).toBe(false);
+      expect((block as { reason: string }).reason).toMatch(/never tagged.*ZINC|ZINC.*never tagged/);
+    }
+  });
+
+  it('NFO FINNIFTY: the same — no headline mapping for that index', async () => {
+    const t = make();
+    const packet = await t.svc.build(entry('FINNIFTY28OCT2626000CE', 'NFO'), tick('FINNIFTY', 0), null, []);
+    expect(packet.news.freshCount.available).toBe(false);
+    expect(packet.news.headlines.available).toBe(false);
+  });
+
+  it('MCX CRUDEOIL and NFO NIFTY are mapped: a real zero is still a present 0', async () => {
+    const t = make();
+    const crude = await t.svc.build(entry('CRUDEOIL16NOV269000CE', 'MCX'), tick('CRUDEOIL', 0), null, []);
+    expect(crude.news.freshCount).toEqual(expect.objectContaining({ available: true, value: 0 }));
+    expect(crude.news.headlines.available).toBe(true);
+    const nifty = await t.svc.build(entry('NIFTY28OCT2625000CE', 'NFO'), tick('NIFTY', 0), null, []);
+    expect(nifty.news.freshCount).toEqual(expect.objectContaining({ available: true, value: 0 }));
+  });
+});
+
+describe('ContextPacketService — commodity benchmarks in macro.globalCues for MCX positions', () => {
+  const q = (symbol: string, last: number, at: string, over: Record<string, unknown> = {}) => ({
+    values: { symbol, last, previousClose: last - 1, change: 1, changePercent: 1.1, contract: `${symbol} (Nov'26)` },
+    sourceTime: at,
+    fetchedAt: '2026-10-12T17:50:00.000Z',
+    basis: 'quote time',
+    source: `CNBC quote JSON ${symbol}`,
+    status: 'ok',
+    ...over,
+  });
+  const none = { values: null, sourceTime: null, fetchedAt: null, basis: '', source: '', status: 'unavailable', reason: 'not fetched yet in this process' };
+  const snapshot = {
+    enabled: true,
+    us: { nasdaq: none, sp500: none, dow: none, nasdaqFutures: none, sp500Futures: none },
+    commodities: {
+      wtiCrude: q('CL=F', 93.85, '2026-10-12T17:44:17.000Z'),
+      brentCrude: q('BZ=F', 106.8, '2026-10-12T17:44:18.000Z'),
+      gold: q('GC=F', 4193, '2026-10-12T17:44:19.000Z', { status: 'stale', reason: 'COMEX gold futures quote is 45 minutes old (limit 30)' }),
+      silver: q('SI=F', 60.51, '2026-10-12T17:43:13.000Z'),
+      naturalGas: none,
+      copper: q('HG=F', 6.75, '2026-10-12T17:43:43.000Z'),
+      usdInr: q('USDINR', 95.77, '2026-10-12T10:02:00.000Z'),
+    },
+    fiiDii: none,
+    fiiOi: none,
+    gift: none,
+    preOpen: none,
+  };
+  function make(snap: unknown = snapshot) {
+    const svc = new ContextPacketService(
+      { recentForTracker: jest.fn().mockResolvedValue([]) } as never,
+      { levelsFor: jest.fn().mockResolvedValue(null) } as never,
+      { recentFor: jest.fn().mockResolvedValue(null) } as never,
+      { peek: () => snap } as never,
+    );
+    jest.spyOn((svc as never as { logger: { warn: () => void } }).logger, 'warn').mockImplementation(() => undefined);
+    return svc;
+  }
+  const entry = (symbol: string, exchange: string) =>
+    ({ exchange, userId: 'u1', trackerId: 't1', symbol, kind: 'POSITION', ownership: 'SENTINEL', watched: true, reason: '' }) as never;
+  const tick = (structureSymbol: string) =>
+    ({
+      segment: 'OPT', side: 'LONG', structureSymbol, entryPrice: 100, qty: 1, ltp: 110, underlyingLtp: 8900,
+      underlyingLtpAt: null, underlyingLtpSource: 'x', underlyingLtpReason: null, nearestSupport: null,
+      nearestResistance: null, structureReason: null, structureAt: null, structureSource: LEVEL_SOURCE,
+      holdingHigh: null, holdingLow: null, entryTime: new Date('2026-10-12T10:00:00Z'), expiry: null,
+      volumeRatio: null, freshNewsCount: null, factorValues: {}, factorsReason: null, oiWallNow: null, oiWallPrev: null,
+      oiWallsAt: null, greenFloorArmedLatched: false,
+    }) as TickSnapshot;
+  const cues = (p: { macro: { globalCues: { available: boolean } } }) =>
+    (p.macro.globalCues as { available: true; value: Record<string, any> }).value;
+
+  it('crude: WTI and Brent plus USD/INR, each with its own time and status; no gold', async () => {
+    const p = await make().build(entry('CRUDEOIL16NOV269000CE', 'MCX'), tick('CRUDEOIL'), null, []);
+    expect(p.macro.globalCues.available).toBe(true);
+    const g = cues(p);
+    expect(g.wtiCrude).toEqual({
+      available: true,
+      at: '2026-10-12T17:44:17.000Z',
+      source: 'CNBC quote JSON CL=F; quote time',
+      value: expect.objectContaining({ last: 93.85, contract: "CL=F (Nov'26)", status: 'ok' }),
+    });
+    expect(g.brentCrude.value.last).toBe(106.8);
+    expect(g.usdInr.value.last).toBe(95.77);
+    expect(g.gold).toBeUndefined();
+    // The US blocks are still there, absent with their own reasons.
+    expect(g.nasdaq).toEqual({ available: false, reason: expect.stringMatching(/not fetched/) });
+  });
+
+  it('a mini reads its benchmark: GOLDM → gold (stale, with the note) + USD/INR', async () => {
+    const g = cues(await make().build(entry('GOLDM05NOV26120000CE', 'MCX'), tick('GOLDM'), null, []));
+    expect(g.gold.value).toEqual(expect.objectContaining({ last: 4193, status: 'stale', note: expect.stringMatching(/45 minutes/) }));
+    expect(g.usdInr.available).toBe(true);
+    expect(g.wtiCrude).toBeUndefined();
+  });
+
+  it('a benchmark the cache does not hold is a nested absence with its reason', async () => {
+    const g = cues(await make().build(entry('NATURALGAS27OCT26300CE', 'MCX'), tick('NATURALGAS'), null, []));
+    expect(g.naturalGas).toEqual({ available: false, reason: expect.stringMatching(/not fetched/) });
+  });
+
+  it('an MCX underlying with no benchmark fetched says so (mcxBenchmark), and still gets USD/INR', async () => {
+    const g = cues(await make().build(entry('ZINC30OCT26280CE', 'MCX'), tick('ZINC'), null, []));
+    expect(g.mcxBenchmark).toEqual({ available: false, reason: expect.stringMatching(/ZINC/) });
+    expect(g.usdInr.available).toBe(true);
+  });
+
+  it('an NSE / NFO position gets no commodity blocks', async () => {
+    const g = (await make().build(entry('NIFTY28OCT2625000CE', 'NFO'), tick('NIFTY'), null, [])).macro.globalCues;
+    // Nothing held for the US/GIFT keys in this snapshot → the whole block is absent, with a reason.
+    expect(g.available).toBe(false);
+  });
+
+  it('cues switched off: the reason is the switch, not a stub naming cues that never existed', async () => {
+    const p = await make({ enabled: false }).build(entry('CRUDEOIL16NOV269000CE', 'MCX'), tick('CRUDEOIL'), null, []);
+    expect(p.macro.globalCues.available).toBe(false);
+    const reason = (p.macro.globalCues as { reason: string }).reason;
+    expect(reason).toMatch(/MARKET_CUES_ENABLED/);
+    expect(reason).not.toMatch(/stub|\(gold, crude-oil, nasdaq\)/);
   });
 });

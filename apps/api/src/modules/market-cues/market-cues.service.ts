@@ -18,7 +18,10 @@ import {
   type Freshness,
 } from './market-cues.freshness';
 import {
+  COMMODITY_CUE_KEYS,
   US_CUE_KEYS,
+  type CommodityCueKey,
+  type CommodityQuote,
   type CueGroup,
   type CueRecord,
   type FiiDerivatives,
@@ -33,6 +36,7 @@ import {
 } from './market-cues.types';
 import { cueGet, cueGetJson, describeFetchError, type CueHttpOptions, type FetchLike } from './fetchers/cue-http';
 import { US_SYMBOLS, cnbcQuoteUrl, parseCnbcQuotes, parseYahooCue, yahooChartUrl } from './fetchers/us-cues.fetcher';
+import { COMMODITY_SYMBOLS, parseCnbcCommodities } from './fetchers/commodity-cues.fetcher';
 import { parseNsdlLatest, parseNseFiiDii } from './fetchers/fii-dii.fetcher';
 import { parseParticipantOi, participantOiChange, participantOiUrl } from './fetchers/fii-oi.fetcher';
 import { computeGiftGap, parseMarketStatusGift, parseNseIxGift, parseNseNiftyFutures } from './fetchers/gift-nifty.fetcher';
@@ -48,6 +52,9 @@ import { istAt, istMinutes, istYmd } from './fetchers/ist-dates';
  *   FII/DII     19:00, retry 20:30 — NSE publishes ~18:00–20:00;
  *   FII OI      20:00, retry 21:00 — the participant-OI archive file;
  *   pre-open    09:10 — after NSE's 09:08 pre-open match, before the 09:15 open.
+ *   commodities every 10 minutes 09:00–23:30 (the MCX session) — ONE CNBC
+ *               request for all seven benchmarks — and also at 23:40 and 08:25
+ *               with US + GIFT, so the overnight reviews read fresh benchmarks.
  */
 export const MARKET_CUES_CRONS = {
   usGiftNight: '0 40 23 * * 1-5',
@@ -57,18 +64,22 @@ export const MARKET_CUES_CRONS = {
   fiiOi: '0 0 20 * * 1-5',
   fiiOiRetry: '0 0 21 * * 1-5',
   preOpen: '0 10 9 * * 1-5',
+  commoditiesDay: '0 */10 9-22 * * 1-5',
+  commoditiesLate: '0 0-30/10 23 * * 1-5',
 } as const;
 
 export type CronSlot = keyof typeof MARKET_CUES_CRONS;
 
 const SLOT_GROUPS: Record<CronSlot, CueGroup[]> = {
-  usGiftNight: ['us', 'gift'],
-  usGiftMorning: ['us', 'gift'],
+  usGiftNight: ['us', 'gift', 'commodities'],
+  usGiftMorning: ['us', 'gift', 'commodities'],
   fii: ['fiiDii'],
   fiiRetry: ['fiiDii'],
   fiiOi: ['fiiOi'],
   fiiOiRetry: ['fiiOi'],
   preOpen: ['preOpen'],
+  commoditiesDay: ['commodities'],
+  commoditiesLate: ['commodities'],
 };
 
 /** A source whose last read was not ok may be re-read by `ensure` this long after the last attempt. */
@@ -83,6 +94,7 @@ const PREOPEN_REFETCH_MS = 45_000;
 
 const GROUP_SWITCH: Record<CueGroup, { key: keyof MarketCuesConfig['sources']; env: string }> = {
   us: { key: 'us', env: 'MARKET_CUES_US' },
+  commodities: { key: 'commodities', env: 'MARKET_CUES_COMMODITIES' },
   fiiDii: { key: 'fii', env: 'MARKET_CUES_FII' },
   fiiOi: { key: 'fiiOi', env: 'MARKET_CUES_FII_OI' },
   gift: { key: 'gift', env: 'MARKET_CUES_GIFT' },
@@ -177,8 +189,9 @@ export class MarketCuesService implements OnApplicationBootstrap {
     const groups = (Object.keys(GROUP_SWITCH) as CueGroup[]).filter((g) => this.cfg.sources[GROUP_SWITCH[g].key]);
     await Promise.all(groups.map((g) => this.refresh(g, now)));
     const snap = this.snapshot(now);
-    const held = [...US_CUE_KEYS.map((k) => snap.us[k]), snap.fiiDii, snap.fiiOi, snap.gift, snap.preOpen].filter((r) => r.values).length;
-    this.logger.log(`market cues warm-up: ${groups.join(', ')} fetched; ${held} of 9 cues hold a reading`);
+    const all = [...US_CUE_KEYS.map((k) => snap.us[k]), ...COMMODITY_CUE_KEYS.map((k) => snap.commodities[k]), snap.fiiDii, snap.fiiOi, snap.gift, snap.preOpen];
+    const held = all.filter((r) => r.values).length;
+    this.logger.log(`market cues warm-up: ${groups.join(', ')} fetched; ${held} of ${all.length} cues hold a reading`);
   }
 
   // ─── Schedule ───────────────────────────────────────────────────────────────
@@ -218,10 +231,21 @@ export class MarketCuesService implements OnApplicationBootstrap {
     await this.fire('preOpen');
   }
 
+  @Cron(MARKET_CUES_CRONS.commoditiesDay, { timeZone: 'Asia/Kolkata' })
+  async commoditiesDay(): Promise<void> {
+    await this.fire('commoditiesDay');
+  }
+
+  @Cron(MARKET_CUES_CRONS.commoditiesLate, { timeZone: 'Asia/Kolkata' })
+  async commoditiesLate(): Promise<void> {
+    await this.fire('commoditiesLate');
+  }
+
   /**
    * Whether a scheduled slot should fetch at `now`: the master switch, the
-   * source's own switch, an NSE trading day (US + GIFT also run on an MCX-only
-   * trading day — the MCX after-close review reads them), and for a retry slot,
+   * source's own switch, an NSE trading day (US + GIFT and the commodities also
+   * run on an MCX-only trading day — the MCX session and its after-close review
+   * read them), and for a retry slot,
    * only when the first fire did not land today's figure.
    */
   shouldFire(slot: CronSlot, now: Date): boolean {
@@ -230,7 +254,7 @@ export class MarketCuesService implements OnApplicationBootstrap {
     if (groups.length === 0) return false;
     const noon = istAt(istYmd(now), 12);
     const tradingDay =
-      slot === 'usGiftNight' || slot === 'usGiftMorning'
+      slot === 'usGiftNight' || slot === 'usGiftMorning' || slot === 'commoditiesDay' || slot === 'commoditiesLate'
         ? this.clock.isTradingDay('NSE', noon) || this.clock.isTradingDay('MCX', noon)
         : this.clock.isTradingDay('NSE', noon);
     if (!tradingDay) return false;
@@ -281,7 +305,11 @@ export class MarketCuesService implements OnApplicationBootstrap {
     if (group === 'preOpen') return snap.preOpen.status !== 'ok' && now.getTime() - last >= PREOPEN_REFETCH_MS;
     if (now.getTime() - last < REFETCH_AFTER_MS) return false;
     const records: Array<CueRecord<unknown>> =
-      group === 'us' ? US_CUE_KEYS.map((k) => snap.us[k]) : [snap[group] as CueRecord<unknown>];
+      group === 'us'
+        ? US_CUE_KEYS.map((k) => snap.us[k])
+        : group === 'commodities'
+          ? COMMODITY_CUE_KEYS.map((k) => snap.commodities[k])
+          : [snap[group] as CueRecord<unknown>];
     return records.some((r) => r.status !== 'ok');
   }
 
@@ -297,9 +325,17 @@ export class MarketCuesService implements OnApplicationBootstrap {
             : usCloseFreshness(s.sourceTime as string, now),
       );
     }
+    const commodities = {} as Record<CommodityCueKey, CueRecord<CommodityQuote>>;
+    for (const key of COMMODITY_CUE_KEYS) {
+      const sym = COMMODITY_SYMBOLS[key];
+      commodities[key] = this.record<CommodityQuote>(`commodities:${key}`, 'commodities', now, (s) =>
+        quoteAge(s.sourceTime as string, now, sym.maxAgeMs, `${sym.label} quote`),
+      );
+    }
     return {
       enabled: this.cfg.enabled,
       us,
+      commodities,
       fiiDii: this.record<FiiDiiCash>('fiiDii', 'fiiDii', now, (s) =>
         publishedFreshness(
           (s.values as FiiDiiCash).date,
@@ -389,6 +425,8 @@ export class MarketCuesService implements OnApplicationBootstrap {
     switch (group) {
       case 'us':
         return this.refreshUs(now);
+      case 'commodities':
+        return this.refreshCommodities(now);
       case 'fiiDii':
         return this.refreshFiiDii(now);
       case 'fiiOi':
@@ -502,6 +540,45 @@ export class MarketCuesService implements OnApplicationBootstrap {
           `Yahoo failed (${f.error}); CNBC fallback ${cnbc ? `had no ${sym.cnbc} quote` : `failed (${cnbcError})`}`,
         );
       }
+    }
+  }
+
+  /**
+   * Every commodity benchmark in ONE CNBC request — no per-symbol calls, no
+   * fallback fan-out: this runs every 10 minutes through the MCX session, and
+   * one request per refresh is the whole load budget. A benchmark the reply did
+   * not carry is unavailable with that reason; the others are kept.
+   */
+  private async refreshCommodities(now: Date): Promise<void> {
+    const keys = COMMODITY_CUE_KEYS;
+    const basis = (k: CommodityCueKey, t: string) =>
+      `quote time${t ? ` (CNBC last_time ${t})` : ''} — ${COMMODITY_SYMBOLS[k].label}; change vs its previous close (settlement)`;
+    let parsed: ReturnType<typeof parseCnbcCommodities>;
+    try {
+      parsed = await this.guarded('CNBC commodities quote', now, async () =>
+        parseCnbcCommodities(
+          await cueGetJson(cnbcQuoteUrl(this.cfg.urls.cnbcQuote, keys.map((k) => COMMODITY_SYMBOLS[k].cnbc)), this.http()),
+        ),
+      );
+    } catch (err) {
+      const why = describeFetchError(err);
+      for (const k of keys) this.fail(`commodities:${k}`, now, `CNBC quote JSON ${COMMODITY_SYMBOLS[k].cnbc}`, basis(k, ''), why);
+      return;
+    }
+    for (const k of keys) {
+      const sym = COMMODITY_SYMBOLS[k];
+      const hit = parsed[k];
+      if (!hit) {
+        this.fail(`commodities:${k}`, now, `CNBC quote JSON ${sym.cnbc}`, basis(k, ''), `CNBC returned no usable ${sym.cnbc} quote`);
+        continue;
+      }
+      this.put<CommodityQuote>(`commodities:${k}`, {
+        values: hit.values,
+        sourceTime: hit.sourceTime,
+        fetchedAt: now.toISOString(),
+        basis: basis(k, hit.sourceTime),
+        source: `CNBC quote JSON ${sym.cnbc} (${sym.label})`,
+      });
     }
   }
 

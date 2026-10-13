@@ -86,3 +86,13 @@ describe('CoreJournalController — status for a non-admin (review fix 8)', () =
     expect(desk.unacked).toHaveBeenCalledWith('user_B');
   });
 });
+
+describe('JournalDayQueryDto — a real calendar date (review fix 9)', () => {
+  it.each(['2026-13-45', '2026-02-30', '2026-00-10', '2025-02-29'])('%s is refused (400, not a 500 later)', async (day) => {
+    expect(await validate(plainToInstance(JournalDayQueryDto, { day }))).toHaveLength(1);
+  });
+
+  it.each(['2026-10-13', '2028-02-29', '2026-12-31'])('%s is accepted', async (day) => {
+    expect(await validate(plainToInstance(JournalDayQueryDto, { day }))).toHaveLength(0);
+  });
+});

@@ -324,7 +324,8 @@ function TradeTrackerSection({
             <p className="font-semibold text-[var(--color-text-primary)]">{exitConfirmText(confirming)}</p>
             <p className="text-xs text-[var(--color-text-muted)]">
               This places a REAL order on Angel One for the whole open position on {confirming.exchange}, sized from
-              the broker&apos;s live net quantity. It is refused if another order on this contract is open or an exit
+              the broker&apos;s live net quantity. It is refused if another order on this contract is open (unless the
+              server is set to cancel your protective stop-loss first, AI_AUTO_EXIT_CANCEL_PROTECTIVE) or an exit
               already ran today.
             </p>
             <div className="flex justify-end gap-2">

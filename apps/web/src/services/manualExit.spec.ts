@@ -112,3 +112,25 @@ describe('startExitStatusPolling', () => {
     expect(onRow).not.toHaveBeenCalled();
   });
 });
+
+describe('exitStatusLine — what the owner must do next', () => {
+  it.each(['ORDER_UNCERTAIN', 'INTERRUPTED'])('FAILED: %s says the exit is locked for today (a retry is EXIT_IN_FLIGHT until IST midnight)', (reason) => {
+    const line = exitStatusLine(row('FAILED', { reason }));
+    expect(line).toContain('exit locked for today — check/close at the broker');
+    expect(line).not.toMatch(/before retrying/);
+  });
+
+  it('a cancelled stop-loss whose exit failed is called out as UNPROTECTED', () => {
+    expect(exitStatusLine(row('REJECTED', { reason: 'UNPROTECTED_AFTER_CANCEL:BROKER_REJECTED' })))
+      .toContain('position UNPROTECTED — re-place a stop-loss or close at the broker now');
+  });
+
+  it('an unconfirmed stop-loss cancel says to check the broker now', () => {
+    expect(exitStatusLine(row('FAILED', { reason: 'CANCEL_UNCERTAIN' })))
+      .toContain('stop-loss may be cancelled — check the broker now');
+  });
+
+  it('other failures carry no extra hint', () => {
+    expect(exitStatusLine(row('FAILED', { reason: 'BROKER_READ' }))).toBe('FAILED: BROKER_READ');
+  });
+});

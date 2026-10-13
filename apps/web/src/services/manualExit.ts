@@ -44,12 +44,27 @@ export function isTerminalExitStatus(status: AiExitRow['status'] | string | null
   return status !== 'CLAIMED' && status !== 'PLACED';
 }
 
+/**
+ * What the owner must do next, for the outcomes where it is not obvious.
+ * ORDER_UNCERTAIN / INTERRUPTED: an order may exist, and the server refuses every
+ * further exit on the contract until IST midnight (EXIT_IN_FLIGHT), so retrying is useless.
+ */
+function nextStep(reason: string | null | undefined): string | null {
+  const r = String(reason ?? '');
+  if (r === 'ORDER_UNCERTAIN' || r === 'INTERRUPTED') return 'exit locked for today — check/close at the broker';
+  if (r.startsWith('UNPROTECTED_AFTER_CANCEL')) return 'position UNPROTECTED — re-place a stop-loss or close at the broker now';
+  if (r === 'CANCEL_UNCERTAIN') return 'stop-loss may be cancelled — check the broker now';
+  return null;
+}
+
 /** One-line inline status for the row: "FILLED · order O1", "SKIPPED: OPEN_ORDER_EXISTS". */
 export function exitStatusLine(r: Pick<AiExitRow, 'status' | 'reason' | 'brokerOrderId' | 'brokerMessage'>): string {
   const head = r.status === 'CLAIMED' ? 'SENDING' : r.status;
   const parts = [r.reason ? `${head}: ${r.reason}` : head];
   if (r.brokerOrderId) parts.push(`order ${r.brokerOrderId}`);
   if ((r.status === 'REJECTED' || r.status === 'FAILED') && r.brokerMessage) parts.push(r.brokerMessage);
+  const hint = r.status === 'REJECTED' || r.status === 'FAILED' ? nextStep(r.reason) : null;
+  if (hint) parts.push(hint);
   return parts.join(' · ');
 }
 

@@ -207,6 +207,10 @@ import type { UserFeedSessionFactory } from './services/user-feed.types';
     // already imports MarketDataModule; only the export was missing.
     UserFeedManager,
     BROKER_ADAPTER_TOKEN,
+    // LevelBookCron (SignalGeneratorModule) awaits its shared boot backfill
+    // before seeding. Unexported, its @Optional() dependency was always
+    // undefined and level books seeded before the backfill landed.
+    DailyBackfillWorker,
   ],
 })
 export class MarketDataModule {}

@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { HealthController } from './health.controller';
+import { ClientReportController, HealthController } from './health.controller';
 import { HealthService } from './health.service';
 import { HealthDetailService } from './health-detail.service';
 import { FEED_STATUS_SOURCE, HUB_STATUS_SOURCE } from './health.types';
@@ -25,7 +25,7 @@ import { MarketHubService } from '../market-hub/market-hub.service';
  */
 @Module({
   imports: [MarketDataModule, MarketHubModule],
-  controllers: [HealthController],
+  controllers: [HealthController, ClientReportController],
   providers: [
     HealthService,
     HealthDetailService,

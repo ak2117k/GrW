@@ -9,7 +9,7 @@ function setup() {
     coreJournal: { createMany: jest.fn().mockResolvedValue({ count: 2 }), findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
   };
   const tenant = { runWithoutTenant: jest.fn((fn: () => unknown) => fn()) };
-  const cls = { isActive: jest.fn().mockReturnValue(true) };
+  const cls = { isActive: jest.fn().mockReturnValue(true), run: jest.fn((_opts: unknown, fn: () => unknown) => fn()) };
   const repo = new CoreJournalRepository(prisma as unknown as PrismaService, tenant as unknown as TenantContextService, cls as unknown as ClsService);
   return { prisma, tenant, repo };
 }

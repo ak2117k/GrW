@@ -1,9 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, type CoreTradeSummary as CoreTradeSummaryDb } from '@prisma/client';
+import { ClsService } from 'nestjs-cls';
 import { PrismaService } from '../../../../common/prisma/prisma.service';
 import type { ExitReason } from '../../lifecycle/lifecycle.types';
 import type { Vehicle } from '../../strategies/blocks/block-types';
 import type { NewTradeSummary, TradeSummary } from '../journal.types';
+import { inSystemScope } from './system-scope';
 
 const dec = (s: string | null): Prisma.Decimal | null => (s === null ? null : new Prisma.Decimal(s));
 const str = (d: Prisma.Decimal | null, dp: number): string | null => (d === null ? null : d.toFixed(dp));
@@ -46,10 +48,20 @@ export function toSummary(r: CoreTradeSummaryDb): TradeSummary {
 /** core_trade_summaries (spec §8.2): one per closed position, append-only (no update or delete method). */
 @Injectable()
 export class CoreTradeSummaryRepository {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly cls: ClsService,
+  ) {}
 
-  /** Writes the summary unless the position already has one, then returns the stored row (first write wins). */
+  /**
+   * Writes the summary unless the position already has one, then returns the stored row (first
+   * write wins). Outside any tenant scope: the row keeps its own userId whoever's context closes it.
+   */
   async createIfAbsent(s: NewTradeSummary): Promise<TradeSummary> {
+    return inSystemScope(this.cls, () => this.writeAndRead(s));
+  }
+
+  private async writeAndRead(s: NewTradeSummary): Promise<TradeSummary> {
     await this.prisma.coreTradeSummary.createMany({
       data: [
         {

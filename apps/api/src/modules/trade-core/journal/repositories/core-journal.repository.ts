@@ -5,6 +5,7 @@ import { PrismaService } from '../../../../common/prisma/prisma.service';
 import { TenantContextService } from '../../../../common/tenant/tenant-context.service';
 import { istDate } from '../../execution/ledger-math';
 import type { JournalEntry, JournalRow, JournalType } from '../journal.types';
+import { inSystemScope } from './system-scope';
 
 const dayDate = (day: string): Date => new Date(`${day}T00:00:00.000Z`);
 const OLDEST_FIRST = [{ createdAt: 'asc' as const }, { id: 'asc' as const }];
@@ -66,10 +67,14 @@ export class CoreJournalRepository {
     return this.cls.isActive() ? this.tenant.runWithoutTenant(fn) : fn();
   }
 
-  /** In order; a row whose dedupeKey already exists is skipped. Returns how many were new. */
+  /**
+   * In order; a row whose dedupeKey already exists is skipped. Returns how many were new. Written
+   * outside any tenant scope, so every row keeps its own userId whoever's request drains it.
+   */
   async append(entries: readonly JournalEntry[]): Promise<number> {
     if (entries.length === 0) return 0;
-    const { count } = await this.prisma.coreJournal.createMany({ data: entries.map(toJournalData), skipDuplicates: true });
+    const data = entries.map(toJournalData);
+    const { count } = await inSystemScope(this.cls, () => this.prisma.coreJournal.createMany({ data, skipDuplicates: true }));
     return count;
   }
 

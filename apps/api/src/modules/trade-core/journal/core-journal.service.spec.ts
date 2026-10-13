@@ -1,6 +1,12 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { ClsService } from 'nestjs-cls';
+import type { PrismaService } from '../../../common/prisma/prisma.service';
+import { TenantContextService } from '../../../common/tenant/tenant-context.service';
 import { CoreJournalService, JOURNAL_BUFFER_MAX } from './core-journal.service';
 import type { JournalEntry } from './journal.types';
+import { CoreJournalRepository } from './repositories/core-journal.repository';
 import { MemoryJournalStore } from './testing/memory-journal-store';
+import { tenantStampingPrisma } from './testing/tenant-prisma';
 
 const AT = new Date('2026-10-13T05:00:00.000Z');
 const e = (type: JournalEntry['type'], dedupeKey: string | null = null): JournalEntry => ({ userId: 'user_A', type, at: AT, payload: {}, dedupeKey });
@@ -57,5 +63,40 @@ describe('CoreJournalService (ruling J10, Review Focus 3)', () => {
     journal.record(e('EXIT_DECIDED'));
     await journal.onModuleDestroy();
     expect(store.rows.map((r) => r.type)).toEqual(['EXIT_DECIDED']);
+  });
+});
+
+describe('CoreJournalService under a request tenant scope (review fix 1: cross-tenant journal writes)', () => {
+  function realStack() {
+    const cls = new ClsService(new AsyncLocalStorage());
+    const tenant = new TenantContextService(cls);
+    const db = tenantStampingPrisma(tenant, ['coreJournal']);
+    const repo = new CoreJournalRepository(db.prisma as unknown as PrismaService, tenant, cls);
+    return { cls, tenant, db, journal: new CoreJournalService(repo) };
+  }
+  const row = (userId: string, type: JournalEntry['type']): JournalEntry => ({ userId, type, at: AT, payload: {} });
+
+  it("a USER's request that drains the buffer writes the owner's pending rows under the OWNER's userId", async () => {
+    const { cls, tenant, db, journal } = realStack();
+    db.failOnce();
+    journal.record(row('owner', 'FILL')); // background row; the first write fails so it stays pending
+    await journal.flush();
+    expect(journal.status().pending).toBe(1);
+    await cls.run(async () => {
+      tenant.set({ userId: 'user_B', role: 'USER' });
+      journal.record(row('user_B', 'KILL_SWITCH'));
+      await journal.flush();
+      expect(tenant.get()).toEqual({ userId: 'user_B', role: 'USER' }); // the request keeps its scope
+    });
+    expect(db.rows.coreJournal.map((r) => [r.userId, r.type])).toEqual([['owner', 'FILL'], ['user_B', 'KILL_SWITCH']]);
+  });
+
+  it("recordNow inside a USER's request keeps the entry's own userId", async () => {
+    const { cls, tenant, db, journal } = realStack();
+    await cls.run(async () => {
+      tenant.set({ userId: 'user_B', role: 'USER' });
+      await journal.recordNow(row('owner', 'RECON_MISMATCH'));
+    });
+    expect(db.rows.coreJournal.map((r) => r.userId)).toEqual(['owner']);
   });
 });

@@ -17,7 +17,11 @@ import { toDerivativeInput } from './master-contract';
  * refresh to run once at boot and daily pre-open.
  *
  * Scope: cash equities (NSE/BSE, blank `instrumenttype`) AND live derivative
- * contracts (NFO/MCX/BFO/CDS, expiry today or later).
+ * contracts (NFO/MCX/BFO/CDS, expiry today or later). Index rows (AMXIDX) are
+ * NOT taken from the master — the master names them "Nifty 50"/"Nifty Bank",
+ * not the canonical 'NIFTY'/'BANKNIFTY' every consumer looks up — so each pass
+ * also runs `InstrumentService.ensureCoreIndexInstruments()` (see
+ * core-index-instruments.ts).
  *
  * Derivatives were excluded until 2026-08-17 on the grounds that they "carry
  * strike/expiry/optionType that this flat upsert shape cannot represent" — no
@@ -98,17 +102,12 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
    * the case the boot hook was added for.
    */
   private async refreshOnBoot(): Promise<void> {
+    // Freshness is decided BEFORE the index rows are ensured: ensuring can
+    // create rows, and a just-created row's updatedAt would make an empty table
+    // look freshly refreshed and skip the very refresh it needs.
+    let recent: Date | null = null;
     try {
-      const recent = await this.instruments.lastMasterRefreshAt();
-      if (recent && Date.now() - recent.getTime() < BOOT_REFRESH_SKIP_MS) {
-        this.logger.log(
-          `Skipping boot instrument refresh — the master was last refreshed at ` +
-            `${recent.toISOString()}, inside the ${BOOT_REFRESH_SKIP_MS / 3600_000}h window. ` +
-            'The 08:00 IST cron owns the daily refresh; loading the 155k-row scrip master at ' +
-            'every boot is what OOMed a 512MB container into a restart loop.',
-        );
-        return;
-      }
+      recent = await this.instruments.lastMasterRefreshAt();
     } catch (err) {
       // A failed freshness check must not SKIP the refresh — an empty table is
       // the state this hook exists for. Fall through and refresh.
@@ -117,6 +116,20 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
           `${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    // Index rows are never in the master (AMXIDX falls through both filters),
+    // so they are ensured on EVERY boot — including the skipped-refresh one.
+    // Idempotent, write-free when present, never throws.
+    await this.instruments.ensureCoreIndexInstruments();
+
+    if (recent && Date.now() - recent.getTime() < BOOT_REFRESH_SKIP_MS) {
+      this.logger.log(
+        `Skipping boot instrument refresh — the master was last refreshed at ` +
+          `${recent.toISOString()}, inside the ${BOOT_REFRESH_SKIP_MS / 3600_000}h window. ` +
+          'The 08:00 IST cron owns the daily refresh; loading the 155k-row scrip master at ' +
+          'every boot is what OOMed a 512MB container into a restart loop.',
+      );
+      return;
+    }
     await this.refresh('boot');
   }
 
@@ -124,6 +137,7 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
   // are trackable for the session.
   @Cron('0 0 8 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async refreshDaily(): Promise<void> {
+    await this.instruments.ensureCoreIndexInstruments();
     await this.refresh('daily');
   }
 

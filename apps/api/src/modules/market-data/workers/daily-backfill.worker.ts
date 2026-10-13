@@ -26,6 +26,9 @@ interface BackfillTarget {
 const NSE_TARGETS: BackfillTarget[] = [
   { symbol: 'NIFTY', token: '99926000', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
   { symbol: 'BANKNIFTY', token: '99926009', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
+  // LevelBookCron seeds FINNIFTY too; without its candles it logged
+  // "No daily candles for FINNIFTY" even once the instrument row existed.
+  { symbol: 'FINNIFTY', token: '99926037', exchange: 'NSE', timeframes: ['1d', '1h', '15m', '5m'] },
 ];
 
 /**

@@ -213,7 +213,7 @@ describe('TradeTrackerService', () => {
     user: { findUnique: jest.Mock };
   };
   let decryptor: { withDecryptedCredentials: jest.Mock };
-  let brokerFactory: { withSession: jest.Mock };
+  let brokerFactory: { withSession: jest.Mock; borrow: jest.Mock };
   let adapter: { getHistoricalData: jest.Mock };
 
   beforeEach(async () => {
@@ -229,9 +229,11 @@ describe('TradeTrackerService', () => {
       user: { findUnique: jest.fn().mockResolvedValue({ isFeedAccount: false }) },
     };
     decryptor = { withDecryptedCredentials: jest.fn() };
-    brokerFactory = { withSession: jest.fn() };
+    brokerFactory = { withSession: jest.fn(), borrow: jest.fn() };
     adapter = { getHistoricalData: jest.fn().mockResolvedValue([]) };
-    const authService = { isAuthenticated: () => false, getSmartApi: () => null };
+    // The shared feed is logged in as NO account by default, so snapshotBook
+    // takes the ephemeral path (the user's own vault creds).
+    const authService = { isAuthenticated: () => false, getSmartApi: () => null, getClientId: () => '' };
 
     const mod = await Test.createTestingModule({
       providers: [
@@ -508,20 +510,27 @@ describe('TradeTrackerService', () => {
         expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
       });
 
-      it('applies the same rule on the feed-account session path', async () => {
-        prisma.user.findUnique.mockResolvedValue({ isFeedAccount: true });
+      it('applies the same rule on the shared feed session path (same client code as the user)', async () => {
         const api = {
           getPosition: jest.fn().mockResolvedValue(AG8001),
           getAllHolding: jest.fn().mockResolvedValue(EMPTY_HOLDINGS),
         };
-        const auth = (service as unknown as { authService: { isAuthenticated: () => boolean; getSmartApi: () => unknown } })
-          .authService;
+        const auth = (service as unknown as {
+          authService: { isAuthenticated: () => boolean; getSmartApi: () => unknown; getClientId: () => string };
+        }).authService;
         auth.isAuthenticated = () => true;
         auth.getSmartApi = () => api;
+        auth.getClientId = () => 'C1';
+        decryptor.withDecryptedCredentials.mockImplementation(
+          (_userId: string, _ctx: unknown, use: any) => use({ apiKey: 'k', clientId: 'C1' }),
+        );
+        brokerFactory.borrow.mockImplementation((client: any, _id: string, fn: any) =>
+          fn({ getPositionsEnvelope: () => client.getPosition(), getHoldingsEnvelope: () => client.getAllHolding() }));
 
         await service.backfill('user_1');
 
         expect(api.getPosition).toHaveBeenCalled();
+        expect(brokerFactory.withSession).not.toHaveBeenCalled();
         expect(prisma.tradeTracker.updateMany).not.toHaveBeenCalled();
       });
     });
@@ -1040,5 +1049,72 @@ describe('TradeTrackerService', () => {
 
       expect(res).toEqual({ symbol: 'INFY', ohlc: [] });
     });
+  });
+});
+
+/**
+ * Safety batch 2, item 3: the shared AngelOneAuthService session resolves its
+ * credentials ENV-FIRST, so it can be another Angel account than this user's
+ * vault one even when the user isFeedAccount. snapshotBook must read the user's
+ * book only through a session on THAT user's own account.
+ */
+describe('TradeTrackerService.snapshotBook — whose account is read', () => {
+  const USER_CREDS = { apiKey: 'UK', apiSecret: 'US', clientId: 'U123', password: 'PW', totpSecret: 'JBSWY3DPEHPK3PXP' };
+  const book = (owner: string) => ({ status: true, data: [{ symboltoken: owner, tradingsymbol: owner, exchange: 'NSE', netqty: '1' }] });
+  const holdings = { status: true, data: { holdings: [] } };
+
+  function client(owner: string) {
+    return {
+      generateSession: jest.fn(async () => ({ data: { jwtToken: 'jwt' } })),
+      logout: jest.fn(async () => ({})),
+      placeOrder: jest.fn(), getRMS: jest.fn(), getProfile: jest.fn(), getTradeBook: jest.fn(), getOrderBook: jest.fn(),
+      getPosition: jest.fn(async () => book(owner)),
+      getAllHolding: jest.fn(async () => holdings),
+    };
+  }
+
+  function build(opts: { sharedClientId: string; warm?: boolean }) {
+    const ephemeral = client('EPHEMERAL');
+    const shared = client('SHARED');
+    const warm = client('WARM');
+    const factory = new PerUserBrokerSessionFactory(() => ephemeral);
+    const prisma = { user: { findUnique: jest.fn().mockResolvedValue({ isFeedAccount: true }) } };
+    const decryptor = { withDecryptedCredentials: jest.fn(async (_u: string, _c: unknown, use: any) => use({ ...USER_CREDS })) };
+    const authService = { isAuthenticated: () => true, getSmartApi: jest.fn(() => shared), getClientId: () => opts.sharedClientId };
+    const release = jest.fn();
+    const userFeeds = {
+      leaseRestClient: jest.fn(() => (opts.warm ? { client: warm, clientId: 'U123', release } : null)),
+      hasSession: jest.fn(() => !!opts.warm),
+    };
+    const service = new TradeTrackerService(
+      prisma as never, decryptor as never, factory, authService as never, {} as never, userFeeds as never,
+    );
+    return { service, ephemeral, shared, warm, decryptor, release };
+  }
+
+  it('isFeedAccount user whose vault client code differs from the env-first feed account: the shared session is NOT used', async () => {
+    const h = build({ sharedClientId: 'ENV999' });
+    const r = await h.service.snapshotBook('user_1');
+    expect(h.shared.getPosition).not.toHaveBeenCalled();
+    expect(h.ephemeral.generateSession).toHaveBeenCalledWith('U123', 'PW', expect.any(String));
+    expect(r.positions).toEqual(book('EPHEMERAL').data);
+  });
+
+  it('warm per-user feed session is used without any login', async () => {
+    const h = build({ sharedClientId: 'ENV999', warm: true });
+    const r = await h.service.snapshotBook('user_1');
+    expect(r.positions).toEqual(book('WARM').data);
+    expect(h.warm.generateSession).not.toHaveBeenCalled();
+    expect(h.ephemeral.generateSession).not.toHaveBeenCalled();
+    expect(h.shared.getPosition).not.toHaveBeenCalled();
+    expect(h.decryptor.withDecryptedCredentials).not.toHaveBeenCalled();
+    expect(h.release).toHaveBeenCalled();
+  });
+
+  it('the shared feed session is used (no second login) only when its client code equals the user\'s', async () => {
+    const h = build({ sharedClientId: 'U123' });
+    const r = await h.service.snapshotBook('user_1');
+    expect(r.positions).toEqual(book('SHARED').data);
+    expect(h.ephemeral.generateSession).not.toHaveBeenCalled();
   });
 });

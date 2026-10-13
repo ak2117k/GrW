@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, Logger, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
   CREDENTIAL_DECRYPTOR,
@@ -7,6 +7,13 @@ import {
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
+import {
+  OwnSessionUnavailableError,
+  withOwnAccountSession,
+  type OwnAccountSessionDeps,
+} from '../../auto-execution/services/own-account-session';
+import type { UserBrokerSession } from '../../auto-execution/services/per-user-broker-session.factory';
 
 /**
  * Sanitized, secret-free account overview returned by GET /api/broker/overview.
@@ -248,7 +255,8 @@ export function sanitizeTrades(data: any): BrokerTradeDto[] {
 /**
  * Live, read-only Angel One account overview for the calling user (TDA-017).
  *
- * Performs exactly ONE ephemeral broker login (not three) to respect Angel One
+ * Performs at most ONE broker login (not three; none when a session on the
+ * caller's own account is already warm) to respect Angel One
  * rate limits, fetching funds + profile + positions inside a single disposable
  * per-user session, then returns a SANITIZED payload — no tokens, no creds, no
  * raw broker envelope.
@@ -267,13 +275,42 @@ export class BrokerOverviewService {
     @Inject(CREDENTIAL_DECRYPTOR) private readonly decryptor: CredentialDecryptor,
     private readonly brokerFactory: PerUserBrokerSessionFactory,
     private readonly prisma: PrismaService,
-    // The persistent market-data feed session. When the caller IS the feed
-    // account, reads reuse this session instead of a fresh login (see getOverview).
+    // The shared market-data feed session. Borrowed ONLY when it is logged in
+    // with the caller's own client code (see readOwnAccount).
     private readonly authService: AngelOneAuthService,
     // The instrument master, for resolving a derivative's underlying to its NSE
     // cash token. Read-only and never on the credential path.
     private readonly instruments: MarketDataRepository,
+    // The caller's own warm per-user feed session, preferred (no login).
+    @Optional() private readonly userFeeds?: UserFeedManager,
   ) {}
+
+  /**
+   * Run `fn` on a session authenticated with the CALLER's own Angel account
+   * (warm per-user feed → the shared feed only when its client code equals the
+   * caller's vault client code → one ephemeral login). The shared session's
+   * credentials resolve env-first, so `isFeedAccount` alone never made it the
+   * caller's account. When the only way in would be a second login over a feed
+   * session of the same account that is between logins, answer 503 rather than
+   * kill that feed.
+   */
+  private async readOwnAccount<T>(userId: string, fn: (session: UserBrokerSession) => Promise<T>): Promise<T> {
+    const deps: OwnAccountSessionDeps = {
+      userFeeds: this.userFeeds,
+      factory: this.brokerFactory,
+      decryptor: this.decryptor,
+      authService: this.authService,
+    };
+    try {
+      return await withOwnAccountSession(deps, userId, { reason: 'REVALIDATE' }, (s) => fn(s));
+    } catch (err) {
+      if (err instanceof OwnSessionUnavailableError) {
+        this.logger.warn(`Broker read for ${userId} refused: ${err.message}`);
+        throw new ServiceUnavailableException('Your broker session is reconnecting; try again in a few seconds');
+      }
+      throw err;
+    }
+  }
 
   /**
    * Fetch + sanitize the caller's account overview. Throws NotFoundException
@@ -288,44 +325,14 @@ export class BrokerOverviewService {
       throw new NotFoundException('No Angel One account connected');
     }
 
-    // If the caller IS the market-data feed account, read through the feed's
-    // ALREADY-authenticated session instead of a fresh ephemeral login. A second
-    // login on the same Angel One client code invalidates the feed's live
-    // WebSocket session (Angel One allows ~one session per account), which would
-    // stall live prices/charts for the whole app. Same account, one session.
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { isFeedAccount: true },
-    });
-    if (user?.isFeedAccount && this.authService.isAuthenticated()) {
-      try {
-        const api = this.authService.getSmartApi();
-        return await this.attachUnderlyingTokens(
-          sanitizeOverview({
-            funds: (await api.getRMS())?.data ?? null,
-            profile: (await api.getProfile())?.data ?? null,
-            positions: (await api.getPosition())?.data ?? null,
-            holdings: (await api.getAllHolding())?.data ?? null,
-          }),
-        );
-      } catch (err) {
-        this.logger.warn(
-          `Feed-session overview read failed; falling back to ephemeral login: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-
-    const raw = await this.decryptor.withDecryptedCredentials(
-      userId,
-      { reason: 'REVALIDATE' },
-      (creds) =>
-        this.brokerFactory.withSession(creds, async (session) => ({
-          funds: await session.getFunds(),
-          profile: await session.getProfile(),
-          positions: await session.getPositions(),
-          holdings: await session.getHoldings(),
-        })),
-    );
+    // One session on the caller's OWN account (a second login on a client code
+    // whose feed is live would stall that feed — see readOwnAccount).
+    const raw = await this.readOwnAccount(userId, async (session) => ({
+      funds: await session.getFunds(),
+      profile: await session.getProfile(),
+      positions: await session.getPositions(),
+      holdings: await session.getHoldings(),
+    }));
 
     return this.attachUnderlyingTokens(sanitizeOverview(raw));
   }
@@ -388,11 +395,9 @@ export class BrokerOverviewService {
 
   /**
    * Fetch + sanitize the caller's day trade book (executed trades) from Angel
-   * One's `getTradeBook`. Uses the SAME feed-session-reuse-or-ephemeral dual path
-   * as {@link getOverview}: if the caller IS the market-data feed account and its
-   * session is live, read through it (a second login on the same client code
-   * would invalidate the feed's WebSocket session); otherwise fall back to one
-   * disposable ephemeral login. Returns a sanitized, secret-free list. Throws
+   * One's `getTradeBook`, through the same own-account session as
+   * {@link getOverview} (see {@link readOwnAccount}). Returns a sanitized,
+   * secret-free list. Throws
    * NotFoundException (→ 404) when the user has no stored Angel One credentials.
    */
   async getTrades(userId: string): Promise<BrokerTradeDto[]> {
@@ -401,30 +406,8 @@ export class BrokerOverviewService {
       throw new NotFoundException('No Angel One account connected');
     }
 
-    // Same account, one session: reuse the live feed session when the caller IS
-    // the feed account, so we never trigger a second login that would stall the
-    // shared market-data WebSocket (see getOverview for the full rationale).
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { isFeedAccount: true },
-    });
-    if (user?.isFeedAccount && this.authService.isAuthenticated()) {
-      try {
-        const api = this.authService.getSmartApi();
-        return sanitizeTrades((await api.getTradeBook())?.data ?? null);
-      } catch (err) {
-        this.logger.warn(
-          `Feed-session trade-book read failed; falling back to ephemeral login: ${err instanceof Error ? err.message : err}`,
-        );
-      }
-    }
-
-    const raw = await this.decryptor.withDecryptedCredentials(
-      userId,
-      { reason: 'REVALIDATE' },
-      (creds) =>
-        this.brokerFactory.withSession(creds, (session) => session.getTradeBook()),
-    );
+    // Same rule as getOverview: one session on the caller's OWN account.
+    const raw = await this.readOwnAccount(userId, (session) => session.getTradeBook());
 
     return sanitizeTrades(raw);
   }

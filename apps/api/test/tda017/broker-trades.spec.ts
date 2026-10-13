@@ -65,7 +65,7 @@ const fakeDecryptor = {
 // getTrades takes the ephemeral path. A test can override either.
 function serviceWith(
   prisma: any,
-  authService: any = { isAuthenticated: () => false, getSmartApi: () => null },
+  authService: any = { isAuthenticated: () => false, getSmartApi: () => null, getClientId: () => '' },
   tradeBook: any = DEFAULT_TRADEBOOK,
 ) {
   const p = { user: { findUnique: async () => ({ isFeedAccount: false }) }, ...prisma };
@@ -141,25 +141,24 @@ describe('BrokerOverviewService.getTrades — sanitized trade book (TDA-017)', (
     await expect(serviceWith(prisma).getTrades('u1')).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('reads via the feed session (NO ephemeral login) when the caller IS the feed account', async () => {
+  it('reads via the feed session (NO ephemeral login) when it is logged in with the caller own client code', async () => {
     const prisma = {
       brokerCredential: { findUnique: async () => ({ userId: 'u1' }) },
       user: { findUnique: async () => ({ isFeedAccount: true }) },
     };
-    let ephemeralUsed = false;
-    const decryptorSpy = {
-      withDecryptedCredentials: async () => {
-        ephemeralUsed = true;
-        return null;
-      },
-    };
-    const factory = new PerUserBrokerSessionFactory(() => fakeSmartApi() as any);
-    const authService = { isAuthenticated: () => true, getSmartApi: () => fakeSmartApi() };
-    const svc = new BrokerOverviewService(decryptorSpy as any, factory, prisma as any, authService as any);
+    // The shared feed session is logged in with THIS user's client code
+    // (AB1234, the vault creds), so it is borrowed: no ephemeral login.
+    let ephemeralLogins = 0;
+    const factory = new PerUserBrokerSessionFactory(() => ({
+      ...fakeSmartApi(),
+      generateSession: async () => { ephemeralLogins++; return { data: { jwtToken: 'j' } }; },
+    }) as any);
+    const authService = { isAuthenticated: () => true, getSmartApi: () => fakeSmartApi(), getClientId: () => 'AB1234' };
+    const svc = new BrokerOverviewService(fakeDecryptor as any, factory, prisma as any, authService as any);
 
     const out = await svc.getTrades('u1');
 
-    expect(ephemeralUsed).toBe(false); // reused the live feed session — no second login
+    expect(ephemeralLogins).toBe(0); // reused the live feed session — no second login
     expect(out.map((t) => t.orderId)).toEqual(['ORD-2', 'ORD-1']);
     expect(out[0].side).toBe('SELL');
   });

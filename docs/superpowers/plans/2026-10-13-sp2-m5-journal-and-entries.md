@@ -8188,6 +8188,35 @@ logging ones in the reverted module.
     - Task 16's `stuckExitSnapshot` fixture gains the position's filled entry order (and its fill qty): with only the
       exit order, `reducePosition` reports entry 0 vs the row's 100 and a third finding (`POSITION_VS_ORDERS`) appears.
 
+16. **Stream G deviations (Tasks 19–20, 2026-10-13):**
+    - **Task 13b wired:** `BrokerCorpusCron` is a provider and `core-broker-corpus` joins `EXPECTED_JOBS`, so
+      `expected-jobs.spec.ts` asserts four trade-core jobs (`core-mtf-interest`, `core-recon-nightly`,
+      `core-skip-followup`, `core-broker-corpus`) and trade-core has **four** `@Cron`s, not three (all
+      `timeZone: 'Asia/Kolkata'`, all through `JobRunnerService` with `onRedisError: 'run-anyway'`).
+      `core-mtf-interest` was never added in M3 (drift item); it is now.
+    - **Module spec additions:** one test that `CORE_JOURNAL` reaches every `@Optional` consumer (kill switch, limit
+      service, daily-loss monitor), that the lifecycle sink holds the journal and `CORE_POSITION_CLOSED` (the summary
+      service), the verdict sink holds the journal, the summary service holds `CoreCorpusWriter` (not `NoopCorpus`), the
+      reconciler holds the paper adapter and the controller's `CORE_RECON_DESK` is the real `CoreReconciler`; and one
+      test that with `CORE_ENTRIES_MODE` unset the intake's `onModuleInit` registers no Chartink hand-off. No DI cycle:
+      the M5 providers depend on the adapter, never the reverse; no `forwardRef`.
+    - **`lifecycleHarness` tee:** the tee sink wraps the memory sink only when `teeSink` is given (M4 specs keep the
+      plain `MemoryEventSink` instance).
+    - **`m5Harness`:** `hitAt(ltp)` also sets the hit's `hitPrice` to `ltp` (the plan left it at the fixture's 500, so
+      the INFY hit at 1500 would have failed `staleEntry` before reaching the wall, and the kill-switch / daily-loss
+      assertions would never see `KILL_SWITCH` / `DAILY_LOSS`); the memory stores are cast to the repository types;
+      the square-off is the **real** `CoreSquareOff` over a real `PaperOrderSquareOff` (the `ModuleRef` fake also answers
+      `CORE_POSITION_EXITS` with the current lifecycle) instead of a jest mock, so the kill-switch test exercises the
+      production cascade target.
+    - **Four extra safety tests** in `m5-e2e.spec.ts` ("SP2 M5 safety"): defaults open nothing and never register the
+      hand-off; `paper` with an empty allow-list admits nobody; exits fill with a recon block, the latch and a down
+      journal all against the user (entries meanwhile fail closed); the kill-switch square-off exits every open core
+      position and cancels the pending entry (no open orders left).
+    - **Drift check base:** `053da3a...HEAD` also lists files from the pre-plan base merges (P1 `08f9ab4`,
+      `fix/safety-batch-2`, `fix/data-batch-2`); M5's own footprint is measured from `a55132d` (the base the plan
+      branched from). It equals the expected list plus `apps/web/src/components/layout/navItems.spec.ts` (Stream F, item 13).
+    - **Opt-in DB test** ran on a throwaway `postgres:16` on port 55440 (not 55434), `DIRECT_URL` set, removed after.
+
 ## Notes for later milestones (not in this plan)
 
 - **SP3 M6 guard rails on core positions (O12):** a sentinel review packet built from `core_positions` + their journal, and
@@ -8244,3 +8273,4 @@ logging ones in the reverted module.
 
 | Date | Whole suite (API) | Typecheck (error lists) | Opt-in DB test + drift | Notes |
 |---|---|---|---|---|
+| 2026-10-13 | `feature/sp2-m5` `0dd84a6..8164d9f` (Task 19 `bb5ef7e`, Task 20 `8164d9f`). `npx jest --ci --maxWorkers=2`: 400 suites / 4870 tests, **4869 pass, 1 fail** — `options-chain.nse-v3.spec.ts` "serves the v3 chain … persists an NSE snapshot" (pre-existing, not M5: hard-coded NIFTY expiry `2026-10-13` = the run day, after 15:30 IST its delta is 0; untouched since `a9e3bd2`). New: `m5-e2e.spec.ts` 10/10, `m5-tenant.spec.ts` 2/2, `trade-core.module.spec.ts` 9/9, `expected-jobs.spec.ts` 1/1. Safety specs green: `SentinelCycleService — shadow mode is structural` ("cannot reach anything that places an order …"), `sentinel-executor.structure.spec.ts`, `cron-timezone.spec.ts`, `chartink-core-handoff.spec.ts`. Web: `vitest run` 79 files / 703 tests pass, `tsc --noEmit` clean, `vite build` ok | API `tsc --noEmit -p tsconfig.json` sorted error list (line numbers stripped) **identical** to the pre-change baseline at `0dd84a6` (244 lines, all pre-existing silo files; none in trade-core) | Opt-in `test/sp2-m5` (all migrations applied by `prisma migrate deploy` to a throwaway `postgres:16`, 127.0.0.1:55440): **8/8 pass**; container removed. Drift: M5 files outside trade-core (from `a55132d`) = expected list + `navItems.spec.ts`; `LIVE_TRADING_ENABLED` only in `silo-entry-recheck.spec.ts`; `@Cron` ×4 in trade-core (mtf-interest, recon-nightly, skip-followup, broker-corpus), all `Asia/Kolkata`; `openPosition(` only in `intake/core-entry-intake.service.ts`; `handOffChartinkHit(` only in `chartink-process.service.ts`; P1 `c26d613` is an ancestor | Stream G deviations: item 16. Defaults (`CORE_ENTRIES_MODE` unset) = intake never registers, zero entry orders (module spec + e2e safety tests) |

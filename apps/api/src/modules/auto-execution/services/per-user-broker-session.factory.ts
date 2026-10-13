@@ -43,6 +43,8 @@ export interface UserSmartApiLike {
   getPosition(): Promise<any>;
   getAllHolding(): Promise<any>;
   getTradeBook(): Promise<any>;
+  /** Today's order book (smartapi-javascript `getOrderBook`). Read-only. */
+  getOrderBook(): Promise<any>;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -68,6 +70,19 @@ export interface UserBrokerSession {
   placeOrder(order: OrderRequest, orderTag?: string): Promise<OrderResponse>;
 
   /**
+   * Same order mapping and transport as {@link placeOrder}, but the result says
+   * WHO decided it (sentinel auto-exit review fix). The installed SDK never
+   * rejects: its axios error interceptor resolves a network error / its own 7 s
+   * timeout to `{}`, an HTTP error to `{ status: <http>, message: <statusText> }`
+   * and an interceptor fault to `[]`. Only an envelope in which Angel itself
+   * answered `status: false` / `success: false` with its own message or errorcode
+   * is a definitive REJECTED; every other answer without an orderid, and any
+   * throw or timeout, is UNCERTAIN (the order may exist at the broker).
+   * {@link placeOrder} keeps its old mapping for the auto-execution pipeline.
+   */
+  placeOrderClassified(order: OrderRequest, orderTag?: string): Promise<ClassifiedPlacement>;
+
+  /**
    * Read-only account reads on this user's own Angel One account, used by the
    * TDA-017 sanitized overview. Each returns the RAW broker `data` payload (the
    * service layer is responsible for sanitizing it into safe fields). Like every
@@ -91,6 +106,52 @@ export interface UserBrokerSession {
    */
   getPositionsEnvelope(): Promise<any>;
   getHoldingsEnvelope(): Promise<any>;
+
+  /**
+   * The RAW order-book envelope. Angel can accept an order (orderid returned) and
+   * reject it a moment later in the RMS/exchange; the reason only appears here
+   * (`status: 'rejected'`, `text`). Same disposed-guard + timeout as every read.
+   */
+  getOrderBookEnvelope(): Promise<any>;
+}
+
+/**
+ * Outcome of {@link UserBrokerSession.placeOrderClassified}. `REJECTED` is
+ * definitive (Angel answered); `UNCERTAIN` means the order may or may not exist.
+ */
+export type ClassifiedPlacement =
+  | { status: 'PLACED'; orderId: string; message: string }
+  | { status: 'REJECTED'; orderId: ''; message: string; errorcode: string }
+  | { status: 'UNCERTAIN'; orderId: ''; message: string };
+
+const trimmed = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+
+/**
+ * Classify a raw smartapi-javascript `placeOrder` resolution (see
+ * {@link UserBrokerSession.placeOrderClassified}). Pure; never throws.
+ */
+export function classifyPlaceOrderResponse(response: unknown): ClassifiedPlacement {
+  const isObj = !!response && typeof response === 'object' && !Array.isArray(response);
+  const r = (isObj ? response : {}) as Record<string, any>;
+  const rawId = r.data?.orderid;
+  const orderId = typeof rawId === 'number' ? String(rawId) : trimmed(rawId);
+  if (orderId) {
+    return { status: 'PLACED', orderId, message: trimmed(r.message) || 'Order placed successfully' };
+  }
+  if (r.status === false || r.success === false) {
+    const message = trimmed(r.message);
+    const errorcode = trimmed(r.errorcode) || trimmed(r.errorCode);
+    if (message || errorcode) {
+      return { status: 'REJECTED', orderId: '', message: message || errorcode, errorcode };
+    }
+  }
+  let shape: string;
+  try {
+    shape = JSON.stringify(response) ?? String(response);
+  } catch {
+    shape = String(response);
+  }
+  return { status: 'UNCERTAIN', orderId: '', message: `no definitive broker answer: ${shape.slice(0, 200)}` };
 }
 
 /** Map our generic order types to Angel One SmartAPI order-type strings. */
@@ -148,44 +209,10 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
   ) {}
 
   async placeOrder(order: OrderRequest, orderTag?: string): Promise<OrderResponse> {
-    if (this.disposed) {
-      throw new Error('UserBrokerSession has been disposed and can no longer place orders');
-    }
+    this.assertCanPlace();
 
     try {
-      const params: Record<string, string> = {
-        variety: 'NORMAL',
-        tradingsymbol: order.symbol,
-        symboltoken: order.token,
-        transactiontype: order.side,
-        exchange: order.exchange,
-        ordertype: ORDER_TYPE_MAP[order.orderType] ?? order.orderType,
-        producttype: PRODUCT_TYPE_MAP[order.positionType] ?? order.positionType,
-        duration: 'DAY',
-        quantity: String(order.quantity),
-        price: order.price != null && order.price > 0 ? String(order.price) : '0',
-        triggerprice:
-          order.triggerPrice != null && order.triggerPrice > 0
-            ? String(order.triggerPrice)
-            : '0',
-      };
-
-      // Best-effort broker-side dedupe tag (spec §5): visible in the order book
-      // so post-hoc reconciliation can match on the idempotency key.
-      if (orderTag) {
-        params.ordertag = orderTag;
-      }
-
-      this.logger.log(
-        `Placing per-user ${order.orderType} ${order.side} order for ${order.symbol} ` +
-          `qty=${order.quantity} (client ${maskClientId(this.clientId)})`,
-      );
-
-      const response = await withTimeout(
-        this.client.placeOrder(params),
-        BROKER_CALL_TIMEOUT_MS,
-        'Angel One placeOrder',
-      );
+      const response = await this.send(order, orderTag);
 
       if (!response?.data?.orderid) {
         return {
@@ -207,6 +234,62 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
       this.logger.error(`Failed to place per-user order: ${msg}`);
       return { orderId: '', status: 'FAILED', message: msg };
     }
+  }
+
+  async placeOrderClassified(order: OrderRequest, orderTag?: string): Promise<ClassifiedPlacement> {
+    this.assertCanPlace();
+    let response: unknown;
+    try {
+      response = await this.send(order, orderTag);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to place per-user order (outcome unknown): ${msg}`);
+      return { status: 'UNCERTAIN', orderId: '', message: msg };
+    }
+    return classifyPlaceOrderResponse(response);
+  }
+
+  private assertCanPlace(): void {
+    if (this.disposed) {
+      throw new Error('UserBrokerSession has been disposed and can no longer place orders');
+    }
+  }
+
+  /** Map + send one order under the wall-clock cap; returns the SDK's resolution untouched. */
+  private async send(order: OrderRequest, orderTag?: string): Promise<any> {
+    const params: Record<string, string> = {
+      variety: 'NORMAL',
+      tradingsymbol: order.symbol,
+      symboltoken: order.token,
+      transactiontype: order.side,
+      exchange: order.exchange,
+      ordertype: ORDER_TYPE_MAP[order.orderType] ?? order.orderType,
+      producttype: PRODUCT_TYPE_MAP[order.positionType] ?? order.positionType,
+      duration: 'DAY',
+      quantity: String(order.quantity),
+      price: order.price != null && order.price > 0 ? String(order.price) : '0',
+      triggerprice:
+        order.triggerPrice != null && order.triggerPrice > 0
+          ? String(order.triggerPrice)
+          : '0',
+    };
+
+    // Best-effort broker-side dedupe tag (spec §5): visible in the order book
+    // so post-hoc reconciliation can match on the idempotency key.
+    if (orderTag) {
+      params.ordertag = orderTag;
+    }
+
+    this.logger.log(
+      `Placing per-user ${order.orderType} ${order.side} order for ${order.symbol} ` +
+        `qty=${order.quantity} (client ${maskClientId(this.clientId)})`,
+    );
+
+    return withTimeout(
+      this.client.placeOrder(params),
+      BROKER_CALL_TIMEOUT_MS,
+      'Angel One placeOrder',
+    );
   }
 
   /**
@@ -264,6 +347,11 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
   /** Holdings read, whole envelope (see the interface). */
   async getHoldingsEnvelope(): Promise<any> {
     return this.readEnvelope(() => this.client.getAllHolding(), 'Angel One getAllHolding');
+  }
+
+  /** Order book read, whole envelope (see the interface). */
+  async getOrderBookEnvelope(): Promise<any> {
+    return this.readEnvelope(() => this.client.getOrderBook(), 'Angel One getOrderBook');
   }
 
   /** Disposed-guard + wall-clock cap; returns the broker's response untouched. */
@@ -369,6 +457,27 @@ export class PerUserBrokerSessionFactory {
       // session. Never let a logout fault mask the callback's own result/error.
       brokerSession.dispose();
       await this.safeLogout(client, creds.clientId);
+    }
+  }
+
+  /**
+   * Run `fn` against an ALREADY-AUTHENTICATED client that someone else owns — the
+   * owner's warm per-user feed session (sentinel auto-exit, plan ruling R1). A
+   * second Angel login on the same client code kills that session's live stream,
+   * so this never logs in and never logs out; it only lends the one order mapper
+   * above. The wrapper is disposed in `finally` so it cannot outlive the callback;
+   * disposing the wrapper does NOT touch the lent client (its owner keeps it).
+   */
+  async borrow<T>(
+    client: UserSmartApiLike,
+    clientId: string,
+    fn: (session: UserBrokerSession) => Promise<T>,
+  ): Promise<T> {
+    const session = new AngelOneUserBrokerSession(client, clientId, this.logger);
+    try {
+      return await fn(session);
+    } finally {
+      session.dispose();
     }
   }
 

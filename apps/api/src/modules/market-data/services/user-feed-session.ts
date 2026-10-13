@@ -8,6 +8,7 @@ import type {
   TickListener,
   TokenRef,
   UserFeedSessionLike,
+  WarmRestClient,
 } from './user-feed.types';
 import {
   AGGREGATED_MIN_LOOKBACK_DAYS,
@@ -121,6 +122,8 @@ export class UserFeedSession implements UserFeedSessionLike {
   private clientId: string | null = null;
 
   private connected = false;
+  /** True only between a successful generateSession and the next connect attempt / dispose. */
+  private restReady = false;
   private disposed = false;
   private state: FeedState = 'connecting';
 
@@ -204,6 +207,12 @@ export class UserFeedSession implements UserFeedSessionLike {
 
   activeTokenCount(): number {
     return this.activeTokens.size;
+  }
+
+  /** See UserFeedSessionLike.restClient. Never logs in. */
+  restClient(): WarmRestClient | null {
+    if (this.disposed || !this.restReady || !this.smartApi || !this.clientId) return null;
+    return { client: this.smartApi, clientId: this.clientId };
   }
 
   /**
@@ -447,6 +456,7 @@ export class UserFeedSession implements UserFeedSessionLike {
     this.clearReconnectTimer();
     this.connectPromise = null;
     this.connected = false;
+    this.restReady = false;
 
     this.closeSocket();
 
@@ -483,6 +493,9 @@ export class UserFeedSession implements UserFeedSessionLike {
     // SmartAPI client + WebSocket INSIDE the lease so the api key never lives
     // beyond it; only jwtToken/feedToken (+ non-secret clientId) survive.
     await this.deps.withDecryptedCreds(this.userId, async (creds) => {
+      // A fresh login is starting: the previous client is about to be replaced
+      // (and its JWT superseded), so stop lending it until this one succeeds.
+      this.restReady = false;
       this.smartApi = this.deps.smartApiFactory(creds.apiKey);
       const totp = generateTOTP(creds.totpSecret);
       const session = await this.smartApi.generateSession(creds.clientId, creds.password, totp);
@@ -494,6 +507,7 @@ export class UserFeedSession implements UserFeedSessionLike {
       }
 
       this.clientId = creds.clientId;
+      this.restReady = true;
       await this.openSocket({
         jwttoken: jwtToken,
         clientcode: creds.clientId,

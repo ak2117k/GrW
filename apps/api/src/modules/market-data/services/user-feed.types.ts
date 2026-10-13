@@ -20,8 +20,21 @@ export type FeedState =
 export type TickListener = (tick: TickData) => void;
 export type StateListener = (state: FeedState) => void;
 
+/** An already-authenticated SmartAPI REST client lent out by a live session (never a login). */
+export interface WarmRestClient {
+  client: unknown;
+  clientId: string;
+}
+
 /** The per-user session surface the manager depends on (structural, for fakes). */
 export interface UserFeedSessionLike {
+  /**
+   * The session's authenticated REST client, or null. Lets the sentinel
+   * auto-exit place an order on the owner's account without a second Angel
+   * login (which would kill this session's stream). Optional: fakes omit it.
+   * The borrower must never log the client in or out.
+   */
+  restClient?(): WarmRestClient | null;
   ensureConnected(): Promise<void>;
   subscribe(tokens: TokenRef[]): Promise<void>;
   unsubscribe(tokens: TokenRef[]): Promise<void>;

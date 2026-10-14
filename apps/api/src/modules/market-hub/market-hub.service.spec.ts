@@ -392,3 +392,35 @@ describe('MarketHubService', () => {
     svc.onModuleDestroy();
   });
 });
+
+describe('MarketHubService — the owner book changing re-watches positions at once', () => {
+  const cfg = () => config({ 'hub.enabled': true, 'hub.ownerUserId': 'owner', 'hub.slotCap': 50, 'hub.mcxLateClose': '' });
+
+  it("refreshes the owner's positions when the tracker reports the owner's open set changed (not on the 60 s timer)", async () => {
+    let listener: ((userId: string) => void) | null = null;
+    const off = jest.fn();
+    const t = {
+      openTrackerRefsByUser: jest.fn().mockResolvedValue(new Map()),
+      openPositionRefsByUser: jest.fn().mockResolvedValue(new Map()),
+      onOpenSetChanged: jest.fn((fn: (userId: string) => void) => {
+        listener = fn;
+        return off;
+      }),
+    };
+    const svc = new MarketHubService(cfg() as any, manager(jest.fn().mockResolvedValue(undefined)) as any, t as any, prisma as any, runner as any, instruments as any);
+    svc.onModuleInit();
+    await new Promise((r) => setImmediate(r));
+    const before = t.openPositionRefsByUser.mock.calls.length;
+
+    listener!('someone-else');
+    await new Promise((r) => setImmediate(r));
+    expect(t.openPositionRefsByUser.mock.calls.length).toBe(before);
+
+    listener!('owner');
+    await new Promise((r) => setImmediate(r));
+    expect(t.openPositionRefsByUser.mock.calls.length).toBe(before + 1);
+
+    svc.onModuleDestroy();
+    expect(off).toHaveBeenCalled();
+  });
+});

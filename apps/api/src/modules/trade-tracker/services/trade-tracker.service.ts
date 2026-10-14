@@ -12,7 +12,10 @@ import {
   CREDENTIAL_DECRYPTOR,
   CredentialDecryptor,
 } from '../../credential-vault/execution/credential-decryptor';
-import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
+import {
+  PerUserBrokerSessionFactory,
+  type UserBrokerSession,
+} from '../../auto-execution/services/per-user-broker-session.factory';
 import { AngelOneAuthService } from '../../market-data/services/angel-one-auth.service';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
@@ -44,6 +47,40 @@ export interface PositionRef {
   exchange: string;
   token: string;
   symbol: string;
+}
+
+/**
+ * How a {@link TradeTrackerService.backfill} reads the book.
+ *
+ * - `positionsOnly`: read `getPosition` only. HOLDING trackers are then left
+ *   exactly as they are (neither opened nor closed) — the same per-kind guard
+ *   an unanswered holdings read gets, minus the warning, because it was not asked.
+ * - `warmOnly`: read only over the user's LIVE per-user feed session (no login,
+ *   no decrypt). With no live session the pass is skipped (`skipped: true`) and
+ *   nothing is touched — the near-live paths must never cost a login, and a
+ *   second login on a client code whose feed is live kills that feed.
+ *
+ * The defaults (both false) are the cron/manual-refresh behaviour, unchanged.
+ */
+export interface BackfillOptions {
+  positionsOnly?: boolean;
+  warmOnly?: boolean;
+}
+
+/** What one reconcile did. `skipped` = no broker read happened (warmOnly, no live session). */
+export interface ReconcileResult {
+  opened: number;
+  closed: number;
+  skipped: boolean;
+}
+
+/** Called after a reconcile that opened or closed at least one of `userId`'s trackers. */
+export type OpenSetListener = (userId: string, change: { opened: number; closed: number }) => void;
+
+/** One user's reconcile in flight, plus at most one coalesced run queued behind it. */
+interface BackfillSlot {
+  running: Promise<ReconcileResult>;
+  queued: { opts: BackfillOptions; promise: Promise<ReconcileResult> } | null;
 }
 
 /** Which instrument a tick prices. Tokens collide across exchanges, so both are required. */
@@ -342,6 +379,16 @@ function bookKey(token: string, kind: string): string {
   return `${token}:${kind}`;
 }
 
+/** The raw book envelopes over one session; holdings are not requested on a positions-only read. */
+async function readBook(
+  session: Pick<UserBrokerSession, 'getPositionsEnvelope' | 'getHoldingsEnvelope'>,
+  positionsOnly: boolean,
+): Promise<{ positions: unknown; holdings: unknown }> {
+  const positions = await session.getPositionsEnvelope();
+  const holdings = positionsOnly ? null : await session.getHoldingsEnvelope();
+  return { positions, holdings };
+}
+
 /** How long applyTick coalesces ticks before a batched DB flush (design §4.1). */
 const TICK_DEBOUNCE_MS = 3_000;
 
@@ -394,6 +441,11 @@ export class TradeTrackerService implements OnModuleDestroy {
    */
   private openRefsCache: { byUser: Map<string, PositionRef[]>; at: number } | null = null;
 
+  /** Per-user single flight shared by EVERY reconcile path (cron, refresh, poll, order stream). */
+  private readonly backfills = new Map<string, BackfillSlot>();
+
+  private readonly openSetListeners = new Set<OpenSetListener>();
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(CREDENTIAL_DECRYPTOR)
@@ -424,7 +476,9 @@ export class TradeTrackerService implements OnModuleDestroy {
    */
   async snapshotBook(
     userId: string,
-  ): Promise<{ positions: unknown[] | null; holdings: unknown[] | null }> {
+    opts: BackfillOptions = {},
+  ): Promise<{ positions: unknown[] | null; holdings: unknown[] | null; skipped?: boolean }> {
+    if (opts.warmOnly) return this.warmSnapshot(userId, !!opts.positionsOnly);
     // Read ONLY through a session on this user's own Angel account: the warm
     // per-user feed session, else the shared feed session when (and only when)
     // it is logged in with this user's client code, else one ephemeral login.
@@ -435,7 +489,7 @@ export class TradeTrackerService implements OnModuleDestroy {
     // which reconcile already treats as "leave the trackers alone".
     let raw: { positions: unknown; holdings: unknown };
     try {
-      raw = await this.ownAccountSnapshot(userId);
+      raw = await this.ownAccountSnapshot(userId, !!opts.positionsOnly);
     } catch (err) {
       if (!(err instanceof OwnSessionUnavailableError)) throw err;
       this.logger.warn(`Snapshot for ${userId} skipped: ${err.message}`);
@@ -449,9 +503,34 @@ export class TradeTrackerService implements OnModuleDestroy {
     };
   }
 
+  /**
+   * The near-live read: ONLY over the user's live per-user feed session
+   * (leased, so it cannot be torn down mid-read). No live session → skipped,
+   * with no login, no decrypt and no broker call.
+   */
+  private async warmSnapshot(
+    userId: string,
+    positionsOnly: boolean,
+  ): Promise<{ positions: unknown[] | null; holdings: unknown[] | null; skipped?: boolean }> {
+    const warm = this.userFeeds?.leaseRestClient(userId) ?? null;
+    if (!warm) return { positions: null, holdings: null, skipped: true };
+    try {
+      const raw = await this.brokerFactory.borrow(warm.client as never, warm.clientId, (session) =>
+        readBook(session, positionsOnly),
+      );
+      return {
+        positions: answeredPositions(raw.positions),
+        holdings: positionsOnly ? null : answeredHoldings(raw.holdings),
+      };
+    } finally {
+      warm.release();
+    }
+  }
+
   /** Raw positions + holdings envelopes from a session on this user's own account. */
   private ownAccountSnapshot(
     userId: string,
+    positionsOnly = false,
   ): Promise<{ positions: unknown; holdings: unknown }> {
     return withOwnAccountSession(
       {
@@ -462,10 +541,7 @@ export class TradeTrackerService implements OnModuleDestroy {
       },
       userId,
       { reason: 'REVALIDATE' },
-      async (session) => ({
-        positions: await session.getPositionsEnvelope(),
-        holdings: await session.getHoldingsEnvelope(),
-      }),
+      (session) => readBook(session, positionsOnly),
     );
   }
 
@@ -503,7 +579,10 @@ export class TradeTrackerService implements OnModuleDestroy {
     userId: string,
     positions: unknown[] | null,
     holdings: unknown[] | null,
-  ): Promise<void> {
+    opts: { notRead?: ReadonlyArray<'POSITION' | 'HOLDING'> } = {},
+  ): Promise<ReconcileResult> {
+    let opened = 0;
+    let closed = 0;
     const book = [
       ...normalizePositions(positions),
       ...normalizeHoldings(holdings),
@@ -553,6 +632,7 @@ export class TradeTrackerService implements OnModuleDestroy {
       // A brand-new tracker that is not in the feed queue gets no ticks at all,
       // and a position's first minutes are exactly when it is being watched.
       this.invalidateOpenTokens();
+      opened++;
     }
 
     // Close every OPEN tracker whose instrument left the book — but ONLY for
@@ -563,7 +643,10 @@ export class TradeTrackerService implements OnModuleDestroy {
     // Scoped by KIND rather than all-or-nothing so a broken positions read does
     // not also freeze holdings reconciliation, and vice versa.
     const fetched = TradeTrackerService.fetchedKinds(positions, holdings);
-    const unanswered = ['POSITION', 'HOLDING'].filter((k) => !fetched.has(k));
+    // A kind deliberately not read (a positions-only pass) is not "unanswered":
+    // it is left alone just the same, but there is nothing to warn about.
+    const notRead = new Set<string>(opts.notRead ?? []);
+    const unanswered = ['POSITION', 'HOLDING'].filter((k) => !fetched.has(k) && !notRead.has(k));
     if (unanswered.length > 0) {
       // WARN, not debug. This is the state in which the tracker knowingly stops
       // reconciling part of the book; if it were quiet, a broker session that
@@ -598,6 +681,33 @@ export class TradeTrackerService implements OnModuleDestroy {
       // A closed instrument holds a feed slot it can no longer use, and there
       // are only 30 — leaving it queued starves a live position behind it.
       this.invalidateOpenTokens();
+      closed++;
+    }
+
+    if (opened + closed > 0) this.emitOpenSetChanged(userId, { opened, closed });
+    return { opened, closed, skipped: false };
+  }
+
+  /**
+   * Subscribe to "this user's OPEN set changed" (a tracker opened or closed by
+   * a reconcile). The market hub uses it to re-watch the owner's positions at
+   * once instead of on its next 60 s refresh. Returns the unsubscribe.
+   */
+  onOpenSetChanged(fn: OpenSetListener): () => void {
+    this.openSetListeners.add(fn);
+    return () => {
+      this.openSetListeners.delete(fn);
+    };
+  }
+
+  private emitOpenSetChanged(userId: string, change: { opened: number; closed: number }): void {
+    for (const fn of this.openSetListeners) {
+      try {
+        fn(userId, change);
+      } catch (err) {
+        // A listener must never undo or fail the reconcile that already happened.
+        this.logger.warn(`[trade-tracker] open-set listener failed: ${err instanceof Error ? err.message : err}`);
+      }
     }
   }
 
@@ -637,9 +747,73 @@ export class TradeTrackerService implements OnModuleDestroy {
    * reconcile it, so existing positions/holdings appear immediately without
    * waiting for the cron.
    */
-  async backfill(userId: string): Promise<void> {
-    const { positions, holdings } = await this.snapshotBook(userId);
-    await this.reconcile(userId, positions, holdings);
+  /**
+   * SINGLE FLIGHT PER USER. The 10-min cron, the manual refresh, the adaptive
+   * poll and the order stream all land here, and two reconciles of one user
+   * running at once would each read the OPEN set, each miss the other's
+   * create, and open a DUPLICATE tracker for the same position. So one runs at
+   * a time; a request arriving mid-run queues ONE trailing run (a fill that
+   * landed after the running read started must still be seen), and further
+   * requests join that queued run — its options widened to the broadest asked
+   * for (any full request reads holdings; any non-warm request may log in).
+   */
+  backfill(userId: string, opts: BackfillOptions = {}): Promise<ReconcileResult> {
+    const slot = this.backfills.get(userId);
+    if (!slot) return this.startBackfill(userId, { ...opts });
+    if (slot.queued) {
+      if (!opts.positionsOnly) slot.queued.opts.positionsOnly = false;
+      if (!opts.warmOnly) slot.queued.opts.warmOnly = false;
+      return slot.queued.promise;
+    }
+    const queuedOpts: BackfillOptions = { ...opts };
+    const promise = slot.running
+      .catch(() => undefined)
+      .then(() => this.startBackfill(userId, queuedOpts));
+    slot.queued = { opts: queuedOpts, promise };
+    return promise;
+  }
+
+  /** Whether a reconcile of this user is running (or queued). The poll skips such a user. */
+  isBackfilling(userId: string): boolean {
+    return this.backfills.has(userId);
+  }
+
+  private startBackfill(userId: string, opts: BackfillOptions): Promise<ReconcileResult> {
+    const slot: BackfillSlot = { running: Promise.resolve({ opened: 0, closed: 0, skipped: true }), queued: null };
+    this.backfills.set(userId, slot);
+    slot.running = this.runBackfill(userId, opts).finally(() => {
+      // A queued run takes the slot over in its own startBackfill.
+      if (this.backfills.get(userId) === slot && !slot.queued) this.backfills.delete(userId);
+    });
+    return slot.running;
+  }
+
+  private async runBackfill(userId: string, opts: BackfillOptions): Promise<ReconcileResult> {
+    const { positions, holdings, skipped } = await this.snapshotBook(userId, opts);
+    if (skipped) return { opened: 0, closed: 0, skipped: true };
+    return this.reconcile(userId, positions, holdings, opts.positionsOnly ? { notRead: ['HOLDING'] } : {});
+  }
+
+  /**
+   * Users with at least one OPEN POSITION tracker, with the exchanges those
+   * positions are on (upper-cased). The adaptive poll's roster: one cheap
+   * system-level query per poll, holdings excluded (a holding does not move
+   * intraday by an order the way a position does).
+   */
+  async openPositionExchangesByUser(): Promise<Map<string, Set<string>>> {
+    const rows = await this.prisma.tradeTracker.findMany({
+      where: { status: 'OPEN', kind: 'POSITION' },
+      select: { userId: true, exchange: true },
+      distinct: ['userId', 'exchange'],
+    });
+    const byUser = new Map<string, Set<string>>();
+    for (const r of rows) {
+      if (!r.userId || !r.exchange) continue;
+      const set = byUser.get(r.userId) ?? new Set<string>();
+      set.add(String(r.exchange).toUpperCase());
+      byUser.set(r.userId, set);
+    }
+    return byUser;
   }
 
   /**

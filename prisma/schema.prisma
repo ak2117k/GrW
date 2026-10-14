@@ -1639,6 +1639,10 @@ model SentinelVerdict {
   triggeredBy    Json     // tripwire names that fired, or ["heartbeat"]
   netPnl         Float
   greenFloor     Float?
+  /// The judge's machine-readable exit level as the cycle persisted it
+  /// ({v:1, instrument, op, price, watch, seen} or {v:1, problem}); NULL when the
+  /// verdict carried none. Read only by sentinel-executor's TriggerWatchService.
+  exitTrigger    Json?
   createdAt      DateTime @default(now())
 
   @@index([userId, createdAt])
@@ -1683,6 +1687,40 @@ model AiExitExecution {
   @@index([status, createdAt])
   @@index([trackerId, createdAt])
   @@map("ai_exit_executions")
+}
+
+/// One row per exitTrigger proposal the executor looked at
+/// (docs/superpowers/specs/2026-10-13-sentinel-price-triggers-design.md §3.3).
+/// verdictId is UNIQUE: a proposal is armed or rejected exactly once. At most one
+/// ARMED row per tracker — a partial unique index in the migration SQL (Prisma
+/// cannot express it). No FK, like sentinel_verdicts and ai_exit_executions.
+model SentinelExitTrigger {
+  id            String    @id @default(cuid())
+  userId        String
+  trackerId     String
+  verdictId     String    @unique
+  symbol        String
+  instrument    String?   // 'UNDERLYING' | 'PREMIUM' (null only for MALFORMED)
+  op            String?   // 'BELOW' | 'ABOVE'
+  price         Float?
+  watchExchange String?
+  watchToken    String?
+  watchSymbol   String?
+  refPrice      Float?    // the watched instrument's price when armed
+  status        String    // 'ARMED' | 'FIRED' | 'SUPERSEDED' | 'REJECTED' | 'EXPIRED'
+  reason        String?
+  armedAt       DateTime?
+  endedAt       DateTime? // SUPERSEDED / EXPIRED
+  firedAt       DateTime?
+  firedPrice    Float?
+  firedTickAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@index([trackerId, createdAt])
+  @@map("sentinel_exit_triggers")
 }
 
 model OiWallSnapshot {

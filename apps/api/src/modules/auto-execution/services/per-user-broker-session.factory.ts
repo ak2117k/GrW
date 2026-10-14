@@ -45,6 +45,12 @@ export interface UserSmartApiLike {
   getTradeBook(): Promise<any>;
   /** Today's order book (smartapi-javascript `getOrderBook`). Read-only. */
   getOrderBook(): Promise<any>;
+  /**
+   * smartapi-javascript `cancelOrder({ variety, orderid })` (POST order_cancel). Optional in
+   * this structural seam only so read-only fakes need not stub it; the real SDK always has it,
+   * and a client without it makes every cancel UNCERTAIN (never a silent success).
+   */
+  cancelOrder?(params: Record<string, string>): Promise<any>;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -114,6 +120,47 @@ export interface UserBrokerSession {
    * (`status: 'rejected'`, `text`). Same disposed-guard + timeout as every read.
    */
   getOrderBookEnvelope(): Promise<any>;
+
+  /**
+   * Cancel one of this user's resting orders (sentinel auto-exit "cancel
+   * protective then exit"). Same never-rejects SDK caveat as
+   * {@link placeOrderClassified}: only an envelope in which Angel itself answered
+   * is definitive — `ACCEPTED` (status true + the orderid) or `REJECTED`
+   * (status false + its own message/errorcode). Everything else, and any
+   * throw/timeout, is `UNCERTAIN`. Even `ACCEPTED` only means Angel took the
+   * request: the caller must confirm the order is `cancelled` in the order book.
+   */
+  cancelOrderClassified(variety: string, orderId: string): Promise<ClassifiedCancel>;
+}
+
+/** Outcome of {@link UserBrokerSession.cancelOrderClassified}. */
+export type ClassifiedCancel =
+  | { status: 'ACCEPTED'; message: string }
+  | { status: 'REJECTED'; message: string; errorcode: string }
+  | { status: 'UNCERTAIN'; message: string };
+
+/** Classify a raw smartapi-javascript `cancelOrder` resolution. Pure; never throws. */
+export function classifyCancelResponse(response: unknown): ClassifiedCancel {
+  const isObj = !!response && typeof response === 'object' && !Array.isArray(response);
+  const r = (isObj ? response : {}) as Record<string, any>;
+  const rawId = r.data?.orderid;
+  const orderId = typeof rawId === 'number' ? String(rawId) : typeof rawId === 'string' ? rawId.trim() : '';
+  const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  if ((r.status === true || r.success === true) && orderId) {
+    return { status: 'ACCEPTED', message: text(r.message) || 'cancel accepted' };
+  }
+  if (r.status === false || r.success === false) {
+    const message = text(r.message);
+    const errorcode = text(r.errorcode) || text(r.errorCode);
+    if (message || errorcode) return { status: 'REJECTED', message: message || errorcode, errorcode };
+  }
+  let shape: string;
+  try {
+    shape = JSON.stringify(response) ?? String(response);
+  } catch {
+    shape = String(response);
+  }
+  return { status: 'UNCERTAIN', message: `no definitive broker answer: ${shape.slice(0, 200)}` };
 }
 
 /**
@@ -184,7 +231,7 @@ function maskClientId(clientId: string): string {
  * users' orders. On timeout the call rejects so the pipeline treats it as a
  * transient fault (retry → DLQ) rather than freezing the fleet.
  */
-const BROKER_CALL_TIMEOUT_MS = 15_000;
+export const BROKER_CALL_TIMEOUT_MS = 15_000;
 
 /** Reject if `p` does not settle within `ms`; always clears the timer. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -248,6 +295,26 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
       return { status: 'UNCERTAIN', orderId: '', message: msg };
     }
     return classifyPlaceOrderResponse(response);
+  }
+
+  async cancelOrderClassified(variety: string, orderId: string): Promise<ClassifiedCancel> {
+    this.assertCanPlace();
+    this.logger.log(`Cancelling per-user order ${orderId} (${variety}) (client ${maskClientId(this.clientId)})`);
+    let response: unknown;
+    try {
+      response = await withTimeout(
+        this.client.cancelOrder
+          ? this.client.cancelOrder({ variety, orderid: orderId })
+          : Promise.reject(new Error('this broker client has no cancelOrder')),
+        BROKER_CALL_TIMEOUT_MS,
+        'Angel One cancelOrder',
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to cancel per-user order ${orderId} (outcome unknown): ${msg}`);
+      return { status: 'UNCERTAIN', message: msg };
+    }
+    return classifyCancelResponse(response);
   }
 
   private assertCanPlace(): void {

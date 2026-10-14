@@ -11,6 +11,7 @@ describe('parseAutoExitConfig', () => {
       maxVerdictAgeSec: 90,
       limitFallbackPct: 2,
       qtyUnits: { NFO: 'units', BFO: 'units' },
+      cancelProtective: false,
       problems: [],
     });
   });
@@ -92,5 +93,14 @@ describe('parseAutoExitConfig', () => {
       a.qtyUnits.MCX = 'lots';
       expect(parseAutoExitConfig({}).qtyUnits.MCX).toBeUndefined();
     });
+  });
+});
+
+describe('AI_AUTO_EXIT_CANCEL_PROTECTIVE (cancel the owner\'s protective stop-loss, then exit)', () => {
+  it('is on only for the exact string "true"; default off', () => {
+    expect(parseAutoExitConfig({}).cancelProtective).toBe(false);
+    expect(parseAutoExitConfig({ AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' }).cancelProtective).toBe(true);
+    expect(parseAutoExitConfig({ AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'TRUE' }).cancelProtective).toBe(false);
+    expect(parseAutoExitConfig({ AI_AUTO_EXIT_CANCEL_PROTECTIVE: '1' }).cancelProtective).toBe(false);
   });
 });

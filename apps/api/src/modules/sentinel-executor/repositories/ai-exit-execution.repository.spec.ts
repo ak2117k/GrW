@@ -11,6 +11,8 @@ function fakePrisma() {
       count: jest.fn().mockResolvedValue(0),
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
       findMany: jest.fn().mockResolvedValue([]),
+      findUnique: jest.fn().mockResolvedValue(null),
+      findFirst: jest.fn().mockResolvedValue(null),
     },
   };
 }
@@ -73,6 +75,8 @@ describe('AiExitExecutionRepository', () => {
           { status: { in: ['PLACED', 'FILLED', 'DRY_RUN'] } },
           { status: 'FAILED', reason: { in: ['ORDER_UNCERTAIN', 'INTERRUPTED'] } },
         ],
+        // Owner-triggered manual exits never use up the AI's daily cap.
+        NOT: { verdictId: { startsWith: 'man_' } },
       },
     });
   });
@@ -159,5 +163,53 @@ describe('cap is counted per mode (review fix 4)', () => {
     await repo.countCountedSince('owner', since, 'dry-run');
     expect(p.aiExitExecution.count.mock.calls[0][0].where).toEqual(expect.objectContaining({ userId: 'owner', mode: 'live' }));
     expect(p.aiExitExecution.count.mock.calls[1][0].where).toEqual(expect.objectContaining({ userId: 'owner', mode: 'dry-run' }));
+  });
+});
+
+describe('manual exits (owner Exit button)', () => {
+  it('claim of a manual attempt inserts a live CLAIMED row with the synthetic id and the MANUAL reason', async () => {
+    const p = fakePrisma();
+    const repo = new AiExitExecutionRepository(p as never);
+    const v = { ...V, id: 'man_t1_1', reason: 'MANUAL: owner exit' };
+    await expect(repo.claim(v, 'live')).resolves.toBe('row1');
+    expect(p.aiExitExecution.create.mock.calls[0][0].data).toEqual(expect.objectContaining({
+      verdictId: 'man_t1_1', mode: 'live', status: 'CLAIMED', verdictReason: 'MANUAL: owner exit',
+    }));
+  });
+
+  it('countManualForTracker counts every manual row ever made for the tracker', async () => {
+    const p = fakePrisma();
+    p.aiExitExecution.count.mockResolvedValueOnce(2);
+    await expect(new AiExitExecutionRepository(p as never).countManualForTracker('t1')).resolves.toBe(2);
+    expect(p.aiExitExecution.count).toHaveBeenCalledWith({
+      where: { trackerId: 't1', verdictId: { startsWith: 'man_' } },
+    });
+  });
+
+  it('findActiveManual returns the newest CLAIMED, or PLACED today, manual row of the tracker', async () => {
+    const p = fakePrisma();
+    const now = new Date('2026-10-12T10:00:00Z');
+    await new AiExitExecutionRepository(p as never).findActiveManual('t1', 'owner', now);
+    expect(p.aiExitExecution.findFirst).toHaveBeenCalledWith({
+      where: {
+        trackerId: 't1',
+        userId: 'owner',
+        verdictId: { startsWith: 'man_' },
+        OR: [
+          { status: 'CLAIMED' },
+          { status: 'PLACED', createdAt: { gte: new Date('2026-10-11T18:30:00Z') } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  });
+
+  it('findByVerdictId / findById read one row', async () => {
+    const p = fakePrisma();
+    const repo = new AiExitExecutionRepository(p as never);
+    await repo.findByVerdictId('man_t1_1');
+    expect(p.aiExitExecution.findUnique).toHaveBeenLastCalledWith({ where: { verdictId: 'man_t1_1' } });
+    await repo.findById('row1');
+    expect(p.aiExitExecution.findUnique).toHaveBeenLastCalledWith({ where: { id: 'row1' } });
   });
 });

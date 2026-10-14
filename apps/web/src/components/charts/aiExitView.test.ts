@@ -93,3 +93,11 @@ describe('recentAiExits', () => {
     expect(recentAiExits(null as unknown as AiExitRow[], NOW)).toEqual([]);
   });
 });
+
+describe('aiExitRowView — owner manual exits', () => {
+  it('labels a MANUAL row so it is never read as an AI decision; AI rows are unchanged', () => {
+    expect(aiExitRowView(row({ status: 'FILLED', trigger: 'MANUAL' })).label).toBe('MANUAL FILLED');
+    expect(aiExitRowView(row({ status: 'FILLED', trigger: 'AI' })).label).toBe('FILLED');
+    expect(aiExitRowView(row({ status: 'FILLED' })).label).toBe('FILLED');
+  });
+});

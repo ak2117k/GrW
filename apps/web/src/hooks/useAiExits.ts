@@ -23,6 +23,8 @@ export interface AiExitRow {
   orderStatus: string | null;
   marketOrderId: string | null;
   verdictReason: string;
+  /** AI = sentinel verdict; MANUAL = the owner's Exit button. Optional: older APIs omit it. */
+  trigger?: 'AI' | 'MANUAL';
   createdAt: string;
   updatedAt: string;
 }

@@ -29,6 +29,7 @@ function harness(opts: {
   positions?: unknown[];         // successive getPositionsEnvelope answers (an Error is thrown)
   books?: unknown[];             // successive getOrderBookEnvelope answers (an Error is thrown)
   place?: unknown[];             // successive placeOrderClassified results
+  cancel?: unknown[];            // successive cancelOrderClassified results
   claim?: string | null;
   tracker?: unknown;
   counted?: number;
@@ -49,15 +50,17 @@ function harness(opts: {
   const nextPos = queue(opts.positions, env([posRow('100')]) as unknown);
   const nextBook = queue(opts.books, env([]) as unknown);
   const nextPlace = queue(opts.place, { orderId: 'O1', status: 'PLACED', message: 'SUCCESS' } as unknown);
+  const nextCancel = queue(opts.cancel, { status: 'ACCEPTED', message: 'SUCCESS' } as unknown);
 
   const session = {
     getPositionsEnvelope: jest.fn(async () => { calls.push('positions'); return answer(nextPos()); }),
     getOrderBookEnvelope: jest.fn(async () => { calls.push('book'); return answer(nextBook()); }),
     placeOrderClassified: jest.fn(async (o: any, tag: string) => { calls.push(`place:${o.orderType}:${tag}`); return nextPlace(); }),
+    cancelOrderClassified: jest.fn(async (variety: string, orderId: string) => { calls.push(`cancel:${variety}:${orderId}`); return nextCancel(); }),
   };
   const repo = {
     claim: jest.fn(async () => { calls.push('claim'); return opts.claim === undefined ? 'row1' : opts.claim; }),
-    update: jest.fn(async (_id: string, patch: any) => { calls.push(`update:${patch.status ?? (patch.quantity != null ? 'plan' : '-')}`); }),
+    update: jest.fn(async (_id: string, patch: any) => { calls.push(`update:${patch.status ?? (patch.quantity != null ? 'plan' : String(patch.reason ?? '-').split(':')[0])}`); }),
     countCountedSince: jest.fn(async () => opts.counted ?? 0),
     hasInFlight: jest.fn(async () => opts.inFlight ?? false),
   };
@@ -510,5 +513,271 @@ describe('SentinelExitExecutor — cap per mode (review fix 4)', () => {
     const dry = harness();
     await dry.ex.process(V, DRY_MCX_UNITS, NOW);
     expect(dry.repo.countCountedSince).toHaveBeenCalledWith('owner', expect.any(Date), 'dry-run');
+  });
+});
+
+describe('SentinelExitExecutor — MANUAL trigger (owner Exit button)', () => {
+  const MV: PendingVerdict = {
+    id: 'man_cmtracker00000000000000001_1', userId: 'owner', trackerId: 't1',
+    symbol: 'CRUDEOIL15OCT268950CE', reason: 'MANUAL: owner exit', createdAt: new Date(NOW.getTime() - 3_600_000),
+  };
+  // AI auto-exit disabled, dry-run, nobody allow-listed, cap 0 — none of it governs the owner's own order.
+  const AI_OFF_DRY = parseAutoExitConfig({ AI_AUTO_EXIT_DAILY_CAP: '0', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units' });
+  const AI_OFF_NO_MCX = parseAutoExitConfig({ AI_AUTO_EXIT_DAILY_CAP: '0' });
+
+  it('a long is closed with ONE live SELL MARKET of |netqty| tagged am…, even though the AI mode is dry-run', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('0')])],
+      books: [env([]), env([{ orderid: 'O1', status: 'complete', text: '', symboltoken: '445566', exchange: 'MCX' }])],
+      counted: 99,
+    });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'FILLED' });
+    expect(h.repo.claim).not.toHaveBeenCalled(); // the caller already claimed
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    const [order, tag] = h.session.placeOrderClassified.mock.calls[0];
+    expect(order).toEqual(expect.objectContaining({ side: 'SELL', quantity: 100, orderType: 'MARKET', exchange: 'MCX', token: '445566' }));
+    expect(tag).toBe(aiExitOrderTag(MV.id, 'M', 'MANUAL'));
+    expect(tag.startsWith('amM')).toBe(true);
+    expect((h.sessions.withOwnerSession.mock.calls[0] as unknown[])[2]).toEqual({ allowEphemeralLogin: true });
+  });
+
+  it('an open order on the contract → SKIPPED: OPEN_ORDER_EXISTS, no order', async () => {
+    const h = harness({ books: [env([{ orderid: 'X', status: 'open', symboltoken: '445566', exchange: 'MCX', ordertag: '' }])] });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('an earlier AI exit (ax tag) today on the contract → SKIPPED: PRIOR_AI_EXIT_TODAY, no order', async () => {
+    const h = harness({ books: [env([{ orderid: 'X', status: 'complete', symboltoken: '445566', exchange: 'MCX', ordertag: 'axMabc' }])] });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'PRIOR_AI_EXIT_TODAY' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('no configured qty unit for MCX → SKIPPED: QTY_UNIT_UNCONFIGURED:MCX, no order', async () => {
+    const h = harness();
+    await expect(h.ex.execute('row1', MV, AI_OFF_NO_MCX, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'QTY_UNIT_UNCONFIGURED:MCX' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('another attempt in flight → SKIPPED: EXIT_IN_FLIGHT, no broker call', async () => {
+    const h = harness({ inFlight: true });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'EXIT_IN_FLIGHT' });
+    expect(h.sessions.withOwnerSession).not.toHaveBeenCalled();
+  });
+
+  it('exchange closed → SKIPPED: EXCHANGE_CLOSED, no broker call', async () => {
+    const h = harness({ open: false });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'SKIPPED', reason: 'EXCHANGE_CLOSED' });
+    expect(h.sessions.withOwnerSession).not.toHaveBeenCalled();
+  });
+
+  it('a non-definitive placement with no tagged order in the book → FAILED: ORDER_UNCERTAIN, never re-sent', async () => {
+    const h = harness({ place: [{ orderId: '', status: 'UNCERTAIN', message: 'timeout' }] });
+    await expect(h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL')).resolves.toEqual({ status: 'FAILED', reason: 'ORDER_UNCERTAIN' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not read the AI daily cap', async () => {
+    const h = harness({ positions: [env([posRow('100')]), env([posRow('0')])] });
+    await h.ex.execute('row1', MV, AI_OFF_DRY, NOW, 'MANUAL');
+    expect(h.repo.countCountedSince).not.toHaveBeenCalled();
+  });
+});
+
+describe('SentinelExitExecutor — cancel the protective stop-loss, then exit (AI_AUTO_EXIT_CANCEL_PROTECTIVE)', () => {
+  const CP = { AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' };
+  const LIVE_CP = parseAutoExitConfig({
+    AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', ...CP,
+  });
+  const DRY_CP = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', ...CP });
+  const SHORT = { id: 't1', userId: 'owner', status: 'OPEN', kind: 'POSITION', exchange: 'MCX', token: '445566', qty: -100 };
+  const sl = (x: Record<string, unknown> = {}) => ({
+    orderid: 'SL1', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', transactiontype: 'SELL', producttype: 'CARRYFORWARD',
+    quantity: '100', status: 'trigger pending', symboltoken: '445566', exchange: 'MCX', ordertag: '', ...x,
+  });
+  const done = (x: Record<string, unknown> = {}) => env([sl({ status: 'cancelled', ...x })]);
+  const filledExit = env([sl({ status: 'cancelled' }), { orderid: 'O1', status: 'complete', symboltoken: '445566', exchange: 'MCX' }]);
+
+  it('flag off: a resting SL-M → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled (unchanged)', async () => {
+    const h = harness({ books: [env([sl()])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('long with an SL-M SELL: intent recorded, SL cancelled, then exactly one SELL MARKET of the fresh |netqty|', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('100')]), env([posRow('0')])],
+      books: [env([sl()]), done(), done(), filledExit],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 100, orderType: 'MARKET' }));
+    // Intent BEFORE the cancel; the cancel BEFORE the order; positions re-read between them.
+    const intent = h.calls.indexOf('update:CANCELLING_PROTECTIVE');
+    const cancel = h.calls.indexOf('cancel:STOPLOSS:SL1');
+    const place = h.calls.findIndex((c) => c.startsWith('place'));
+    expect(intent).toBeGreaterThan(-1);
+    expect(intent).toBeLessThan(cancel);
+    expect(cancel).toBeLessThan(place);
+    expect(h.calls.slice(cancel, place)).toContain('positions');
+    expect(h.patches()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: 'CANCELLING_PROTECTIVE:SL1', brokerMessage: expect.stringContaining('SL1') }),
+    ]));
+  });
+
+  it('cancel answer not definitive and the SL is still open → FAILED: CANCEL_UNCERTAIN, no exit order', async () => {
+    const h = harness({ cancel: [{ status: 'UNCERTAIN', message: 'no definitive broker answer: {}' }], books: [env([sl()])] });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'CANCEL_UNCERTAIN' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('cancel answer not definitive but the book shows it cancelled → proceeds to the exit', async () => {
+    const h = harness({
+      cancel: [{ status: 'UNCERTAIN', message: 'no definitive broker answer: {}' }],
+      positions: [env([posRow('100')]), env([posRow('100')]), env([posRow('0')])],
+      books: [env([sl()]), done(), done(), filledExit],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('order book unanswered after the cancel → FAILED: CANCEL_UNCERTAIN, no exit order', async () => {
+    const h = harness({ books: [env([sl()]), { status: false, data: null }] });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'CANCEL_UNCERTAIN' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('the SL filled during the cancel and the position is flat → SKIPPED: PROTECTIVE_FILLED, no exit order', async () => {
+    const h = harness({
+      cancel: [{ status: 'REJECTED', message: 'Order already complete' }],
+      positions: [env([posRow('100')]), env([posRow('0')])],
+      books: [env([sl()]), done({ status: 'complete' })],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'PROTECTIVE_FILLED' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('the SL partly filled before the cancel took → exits only the fresh remainder', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('60')]), env([posRow('0')])],
+      books: [env([sl()]), done({ filledshares: '40' }), done({ filledshares: '40' }), filledExit],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 60 }));
+  });
+
+  it('a non-protective open order (entry side) → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled', async () => {
+    const h = harness({ books: [env([sl({ transactiontype: 'BUY' })])] });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('an SL for MORE than the position is not protective → OPEN_ORDER_EXISTS, nothing cancelled', async () => {
+    const h = harness({ books: [env([sl({ quantity: '150' })])] });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('dry-run records what WOULD be cancelled and sold; cancels and places nothing', async () => {
+    const h = harness({ books: [env([sl()])] });
+    await expect(h.ex.process(V, DRY_CP, NOW)).resolves.toEqual({
+      status: 'DRY_RUN',
+      reason: 'would cancel protective SL1 (STOPLOSS_MARKET SELL 100) then SELL 100 CRUDEOIL15OCT268950CE (CARRYFORWARD) at MARKET',
+    });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('the exit is definitively REJECTED after the cancel → REJECTED: UNPROTECTED_AFTER_CANCEL (SL not re-placed)', async () => {
+    const h = harness({
+      place: [{ orderId: '', status: 'REJECTED', message: 'Insufficient margin' }],
+      positions: [env([posRow('100')])],
+      books: [env([sl()]), done()],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'REJECTED', reason: 'UNPROTECTED_AFTER_CANCEL:BROKER_REJECTED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'REJECTED', reason: 'UNPROTECTED_AFTER_CANCEL:BROKER_REJECTED' }));
+  });
+
+  it('an uncertain exit after the cancel keeps the unknown-fate reason ORDER_UNCERTAIN (it must still block later exits)', async () => {
+    const h = harness({
+      place: [{ orderId: '', status: 'UNCERTAIN', message: 'timeout' }],
+      positions: [env([posRow('100')])],
+      books: [env([sl()]), done()],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'ORDER_UNCERTAIN' });
+  });
+
+  it('a new non-protective order appears after the cancel → FAILED: UNPROTECTED_AFTER_CANCEL:OPEN_ORDER_EXISTS, no exit', async () => {
+    const other = { orderid: 'E9', status: 'open', transactiontype: 'BUY', symboltoken: '445566', exchange: 'MCX' };
+    const h = harness({ books: [env([sl()]), done(), env([sl({ status: 'cancelled' }), other])] });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'UNPROTECTED_AFTER_CANCEL:OPEN_ORDER_EXISTS' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('a short with a BUY stop-loss: cancel it, then one BUY MARKET', async () => {
+    const h = harness({
+      tracker: SHORT,
+      positions: [env([posRow('-100')]), env([posRow('-100')]), env([posRow('0')])],
+      books: [env([sl({ transactiontype: 'BUY' })]), done({ transactiontype: 'BUY' }), done({ transactiontype: 'BUY' }), filledExit],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
+    expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'BUY', quantity: 100 }));
+  });
+
+  it('the LIMIT fallback never cancels anything (a resting order there still aborts it)', async () => {
+    const h = harness({
+      place: [{ orderId: '', status: 'REJECTED', message: 'Market orders are not allowed' }],
+      books: [env([]), env([sl()])],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'FALLBACK_ABORTED:OPEN_ORDER_EXISTS' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('applies to the owner MANUAL exit too (flag read from the same config)', async () => {
+    const MV: PendingVerdict = { ...V, id: 'man_cmtracker00000000000000001_1', reason: 'MANUAL: owner exit' };
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('100')]), env([posRow('0')])],
+      books: [env([sl()]), done(), done(), filledExit],
+    });
+    const cfg = parseAutoExitConfig({ AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', ...CP });
+    await expect(h.ex.execute('row1', MV, cfg, NOW, 'MANUAL')).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified.mock.calls[0][1]).toBe(aiExitOrderTag(MV.id, 'M', 'MANUAL'));
+  });
+});
+
+describe('SentinelExitExecutor — cancel through the REAL session (SDK interceptor shapes)', () => {
+  it('cancel answered {} (SDK timeout) and the SL still open in the book → CANCEL_UNCERTAIN, no exit', async () => {
+    const h = harness();
+    const sl = {
+      orderid: 'SL1', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', transactiontype: 'SELL', producttype: 'CARRYFORWARD',
+      quantity: '100', status: 'trigger pending', symboltoken: '445566', exchange: 'MCX',
+    };
+    const client = {
+      generateSession: jest.fn(), logout: jest.fn(), getRMS: jest.fn(), getProfile: jest.fn(),
+      getAllHolding: jest.fn(), getTradeBook: jest.fn(),
+      getPosition: jest.fn(async () => env([posRow('100')])),
+      getOrderBook: jest.fn(async () => env([sl])),
+      placeOrder: jest.fn(),
+      cancelOrder: jest.fn(async () => ({})),
+    };
+    const factory = new PerUserBrokerSessionFactory(() => { throw new Error('no login'); });
+    h.sessions.withOwnerSession.mockImplementation(async (_u: string, fn: any) =>
+      factory.borrow(client as never, 'C1', (s) => fn(s, 'user-feed')));
+    const cfg = parseAutoExitConfig({
+      AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner',
+      AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true',
+    });
+    await expect(h.ex.process(V, cfg, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'CANCEL_UNCERTAIN' });
+    expect(client.cancelOrder).toHaveBeenCalledTimes(1);
+    expect(client.cancelOrder).toHaveBeenCalledWith({ variety: 'STOPLOSS', orderid: 'SL1' });
+    expect(client.placeOrder).not.toHaveBeenCalled();
   });
 });

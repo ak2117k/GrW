@@ -50,6 +50,12 @@ export interface AutoExitConfig {
   limitFallbackPct: number;
   /** Order quantity unit per exchange (R16). A missing exchange = unit unverified. */
   qtyUnits: Partial<Record<string, QtyUnit>>;
+  /**
+   * AI_AUTO_EXIT_CANCEL_PROTECTIVE (default false): when every open order on the
+   * contract is the owner's protective exit-side order, cancel it and then exit
+   * instead of refusing OPEN_ORDER_EXISTS. Applies to AI and MANUAL exits.
+   */
+  cancelProtective: boolean;
   /** Human-readable notes about values that were ignored in favour of a safe default. */
   problems: string[];
 }

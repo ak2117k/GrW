@@ -45,6 +45,14 @@ describe('sentinel-executor safety shape (plan Global Constraints, Review Focus)
     expect(sites).toEqual(['services/sentinel-exit-executor.service.ts']);
   });
 
+  it('cancelOrder has exactly one call site in executor source (the intent-recorded `cancelProtective`), classified only', () => {
+    const sites = source().flatMap((f) =>
+      [...code(f).matchAll(/\.cancelOrder(Classified)?\(/g)].map((m) => `${relative(__dirname, f).replace(/\\/g, '/')}:${m[0]}`));
+    expect(sites).toEqual(['services/sentinel-exit-executor.service.ts:.cancelOrderClassified(']);
+    const modify = source().filter((f) => /\.modifyOrder\(/.test(code(f)));
+    expect(modify).toEqual([]);
+  });
+
   it('only the classified placement is used (review fix 1: the legacy mapping turns an SDK `{}` into REJECTED)', () => {
     const legacy = source().filter((f) => /\.placeOrder\(/.test(code(f)));
     expect(legacy).toEqual([]);
@@ -60,5 +68,21 @@ describe('sentinel-executor safety shape (plan Global Constraints, Review Focus)
     expect(offenders).toEqual([]);
     const poller = code(join(__dirname, 'services', 'sentinel-exit-poller.service.ts'));
     expect(poller).toMatch(/bootJobsEnabled\(\)/);
+  });
+});
+
+describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
+  const all = () => files(MODULES).filter((f) => !f.endsWith('.spec.ts'));
+  it('only sentinel-executor reads ai_exit_executions — no corpus writer can mistake a manual exit for an AI decision', () => {
+    const offenders = all()
+      .filter((f) => !f.includes(`${join('modules', 'sentinel-executor')}`))
+      .filter((f) => /aiExitExecution|ai_exit_executions/.test(code(f)))
+      .map((f) => relative(MODULES, f).replace(/\\/g, '/'));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the executor never writes a sentinel_verdicts row (a manual exit is not fabricated as a verdict)', () => {
+    const offenders = source().filter((f) => /sentinelVerdict\s*\.\s*(create|createMany|upsert|update|updateMany)\(/.test(code(f)));
+    expect(offenders).toEqual([]);
   });
 });

@@ -61,7 +61,8 @@ export function aiExitRowView(r: AiExitRow, now: number = Date.now()): AiExitRow
   if (r.verdictReason) parts.push(r.verdictReason);
 
   return {
-    label: r.status === 'DRY_RUN' ? 'DRY RUN' : r.status,
+    // The owner's Exit button shares this table; say so, so it is never read as an AI decision.
+    label: `${r.trigger === 'MANUAL' ? 'MANUAL ' : ''}${r.status === 'DRY_RUN' ? 'DRY RUN' : r.status}`,
     tone: TONE[r.status] ?? 'muted',
     line,
     detail: parts.join(' · '),

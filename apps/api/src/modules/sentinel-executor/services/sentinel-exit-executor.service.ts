@@ -27,7 +27,12 @@ import {
   planExitOrder,
   tickRupees,
 } from '../domain/exit-order';
-import { CANCEL_CONFIRM_STEPS_MS, TAG_LOOKUP_DELAY_MS } from '../domain/claim-timing';
+import {
+  CANCEL_CONFIRM_STEPS_MS,
+  READ_RETRY_BACKOFF_MS,
+  READ_RETRY_WINDOW_MS,
+  TAG_LOOKUP_DELAY_MS,
+} from '../domain/claim-timing';
 import { evaluateGuards } from '../domain/guards';
 import type { ExitTrigger } from '../domain/manual-exit';
 import {
@@ -52,7 +57,7 @@ type PreCheck =
   | { kind: 'ok'; order: OrderRequest; ltp: number; unitVerified: boolean }
   | { kind: 'protective'; order: OrderRequest; ltp: number; unitVerified: boolean; orders: ProtectiveOrder[] }
   | { kind: 'skip'; reason: string }
-  | { kind: 'fail'; reason: string };
+  | { kind: 'fail'; reason: string; detail?: string };
 type OkCheck = Extract<PreCheck, { kind: 'ok' }>;
 
 /**
@@ -67,9 +72,35 @@ interface Run {
   sent: boolean;
   cancelSent: boolean;
   trigger: ExitTrigger;
+  /** The `now` the guards judged the verdict's age against. */
+  now: Date;
+  /** Wall clock (Date.now) when the attempt started: read retries are budgeted from here. */
+  startedMs: number;
 }
 
+/** One broker read: its rows, or null when not answered after `attempts` tries (`detail` says why). */
+type ReadResult = { rows: unknown[] | null; attempts: number; detail: string };
+
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/**
+ * Why an envelope is not an answer, from the broker's own status / errorcode /
+ * message only (never the request, credentials or tokens). SDK shapes: `{}` on a
+ * network error or its 7 s timeout, `{status:<http>,message}` on an HTTP error,
+ * `{status:false,message,errorcode}` on an Angel refusal.
+ */
+function unansweredDetail(envelope: unknown): string {
+  if (envelope == null) return 'no answer (empty)';
+  if (Array.isArray(envelope)) return 'no answer (empty array)';
+  if (typeof envelope !== 'object') return 'no answer (unexpected shape)';
+  const e = envelope as Record<string, unknown>;
+  const parts: string[] = [];
+  if (e.status !== undefined) parts.push(`status ${String(e.status)}`);
+  const code = e.errorcode ?? e.errorCode;
+  if (code != null && code !== '') parts.push(`errorcode ${String(code)}`);
+  if (typeof e.message === 'string' && e.message) parts.push(`"${e.message}"`);
+  if (e.status === true || e.success === true) parts.push('unreadable data');
+  return (parts.length > 0 ? parts.join(' ') : 'no answer (empty)').slice(0, 200);
+}
 /** A non-ok check's reason. `protective` only comes back from a check that may cancel; elsewhere it is an open order. */
 const refusal = (pre: Exclude<PreCheck, { kind: 'ok' }>) => (pre.kind === 'protective' ? 'OPEN_ORDER_EXISTS' : pre.reason);
 /** "SL1 (STOPLOSS_MARKET SELL 100), T1 (LIMIT SELL 100)" */
@@ -145,7 +176,7 @@ export class SentinelExitExecutor {
       return this.finish(id, v, 'FAILED', 'INSTRUMENT_READ', { brokerMessage: errText(err) });
     }
 
-    const run: Run = { id, v, cfg, inst, sent: false, cancelSent: false, trigger };
+    const run: Run = { id, v, cfg, inst, sent: false, cancelSent: false, trigger, now, startedMs: Date.now() };
 
     // 3–7. BROKER — one session lease, tier chosen once (ruling R1).
     let outcome: AiExitOutcome;
@@ -154,7 +185,9 @@ export class SentinelExitExecutor {
         await this.repo.update(id, { sessionSource: source });
         const first = await this.preOrderCheck(s, t, run, true);
         if (first.kind === 'skip' || first.kind === 'fail') {
-          return this.finish(id, v, first.kind === 'skip' ? 'SKIPPED' : 'FAILED', first.reason);
+          return first.kind === 'skip'
+            ? this.finish(id, v, 'SKIPPED', first.reason)
+            : this.finish(id, v, 'FAILED', first.reason, first.detail ? { brokerMessage: first.detail } : {});
         }
         await this.recordPlan(id, first.order);
 
@@ -259,7 +292,7 @@ export class SentinelExitExecutor {
     let state: { open: string[]; filled: string[] } | null = null;
     for (const step of CANCEL_CONFIRM_STEPS_MS) {
       await this.sleep(step);
-      const book = await this.rows(() => s.getOrderBookEnvelope());
+      const { rows: book } = await this.readRows(run, 'order book', () => s.getOrderBookEnvelope());
       if (book) state = protectiveCancelState(book, ids);
       if (state && state.open.length === 0) break;
     }
@@ -327,7 +360,8 @@ export class SentinelExitExecutor {
     const { id, v } = run;
     const definitive = r.status === 'REJECTED';
     if (!definitive) await this.sleep(TAG_LOOKUP_DELAY_MS);
-    const book = await this.rows(() => s.getOrderBookEnvelope());
+    // A read retry here is safe: it only looks for our tag; nothing is ever re-sent.
+    const { rows: book } = await this.readRows(run, 'order book', () => s.getOrderBookEnvelope());
     if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
     const mine = findOrderByTag(book, aiExitOrderTag(v.id, leg, run.trigger));
 
@@ -356,7 +390,7 @@ export class SentinelExitExecutor {
     return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
   }
 
-  /** A broker read whose throw (timeout, disposed) is treated as "not answered". */
+  /** A broker read whose throw (timeout, disposed) is treated as "not answered". Never retried (R10 confirm polls). */
   private async rows(read: () => Promise<unknown>): Promise<unknown[] | null> {
     try {
       return answeredPositions(await read());
@@ -367,14 +401,62 @@ export class SentinelExitExecutor {
   }
 
   /**
+   * A broker read while the row is CLAIMED. Only an answered envelope
+   * (status === true) is an answer; anything else, or a throw, is retried after
+   * READ_RETRY_BACKOFF_MS while {@link mayRetryRead} allows. Reads are side-effect
+   * free: this never sends, cancels or re-sends anything.
+   */
+  private async readRows(run: Run, what: 'positions' | 'order book', read: () => Promise<unknown>): Promise<ReadResult> {
+    for (let attempt = 1; ; attempt++) {
+      let detail: string;
+      try {
+        const envelope = await read();
+        const rows = answeredPositions(envelope);
+        if (rows) return { rows, attempts: attempt, detail: '' };
+        detail = unansweredDetail(envelope);
+      } catch (err) {
+        detail = `threw: ${errText(err)}`.slice(0, 200);
+      }
+      const wait = READ_RETRY_BACKOFF_MS[attempt - 1];
+      if (wait === undefined || !this.mayRetryRead(run, wait)) {
+        const why = `${what} read not answered (attempts=${attempt}): ${detail}`;
+        this.logger.warn(`[ai-exit] ${why} — giving up — ${run.v.symbol} verdict ${run.v.id}`);
+        return { rows: null, attempts: attempt, detail: why };
+      }
+      this.logger.warn(
+        `[ai-exit] ${what} read not answered (attempt ${attempt}): ${detail} — retrying in ${wait} ms — ${run.v.symbol} verdict ${run.v.id}`,
+      );
+      await this.sleep(wait);
+    }
+  }
+
+  /**
+   * A read retry must finish its wait inside READ_RETRY_WINDOW_MS of the attempt
+   * (bounds CLAIM_STALE_MS). Before anything was sent or cancelled, an AI
+   * attempt must also still be within the verdict's max age when its wait ends.
+   * Once a protective order was cancelled (or an order sent) age no longer
+   * applies: giving up then leaves the position unprotected/uncertain.
+   */
+  private mayRetryRead(run: Run, wait: number): boolean {
+    const elapsed = Math.max(0, Date.now() - run.startedMs);
+    if (elapsed + wait > READ_RETRY_WINDOW_MS) return false;
+    if (run.trigger === 'AI' && !run.sent && !run.cancelSent) {
+      const age = run.now.getTime() - run.v.createdAt.getTime() + elapsed + wait;
+      if (age > run.cfg.maxVerdictAgeSec * 1000) return false;
+    }
+    return true;
+  }
+
+  /**
    * Ruling R3 + R16: fresh positions + order book, inside the lease, before EVERY order.
    * `allowCancel` (the first check of an attempt only, never the re-check after a
    * cancel nor the LIMIT fallback): with AI_AUTO_EXIT_CANCEL_PROTECTIVE on, open
    * orders that are ALL protective come back as `protective` instead of OPEN_ORDER_EXISTS.
    */
   private async preOrderCheck(s: UserBrokerSession, t: Tracker, run: Run, allowCancel = false): Promise<PreCheck> {
-    const rows = await this.rows(() => s.getPositionsEnvelope());
-    if (rows === null) return { kind: 'fail', reason: 'BROKER_READ' };
+    const pos = await this.readRows(run, 'positions', () => s.getPositionsEnvelope());
+    if (pos.rows === null) return { kind: 'fail', reason: 'BROKER_READ', detail: pos.detail };
+    const rows = pos.rows;
     const exchange = String(t.exchange ?? '').toUpperCase();
     const plan = planExitOrder(
       rows,
@@ -382,8 +464,9 @@ export class SentinelExitExecutor {
       { mode: run.cfg.mode, qtyUnit: run.cfg.qtyUnits[exchange] },
     );
     if (!plan.ok) return { kind: 'skip', reason: plan.reason };
-    const book = await this.rows(() => s.getOrderBookEnvelope());
-    if (book === null) return { kind: 'fail', reason: 'ORDER_BOOK_READ' };
+    const ob = await this.readRows(run, 'order book', () => s.getOrderBookEnvelope());
+    if (ob.rows === null) return { kind: 'fail', reason: 'ORDER_BOOK_READ', detail: ob.detail };
+    const book = ob.rows;
     // Review fix 2: one AI exit per contract per day — an earlier one (even of
     // unknown fate) may have closed or be closing this position already.
     if (hasPriorAiExit(book, plan.order.exchange, plan.order.token)) return { kind: 'skip', reason: 'PRIOR_AI_EXIT_TODAY' };

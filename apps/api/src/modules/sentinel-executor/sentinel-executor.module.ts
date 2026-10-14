@@ -15,6 +15,7 @@ import {
   SentinelExitExecutor,
 } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
+import { ManualExitService } from './services/manual-exit.service';
 import { SentinelExecutorController } from './controllers/sentinel-executor.controller';
 
 /**
@@ -31,6 +32,7 @@ import { SentinelExecutorController } from './controllers/sentinel-executor.cont
     OwnerBrokerSessionProvider,
     SentinelExitExecutor,
     SentinelExitPoller,
+    ManualExitService,
     PerUserBrokerSessionFactory,
     {
       // Ruling R12: the hub's own inputs, so MCX's late-close window is honoured.

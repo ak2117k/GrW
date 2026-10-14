@@ -73,6 +73,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
   private engine: HubEngine | null = null;
   private reason: string | null = null;
   private timers: ReturnType<typeof setInterval>[] = [];
+  private offOpenSet: (() => void) | null = null;
   private ownerUserId: string | null = null;
   private ownerHub: HubPrices | null = null;
   private readonly underlyings = new Map<string, InstrumentRef | null>();
@@ -142,6 +143,14 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       .then(() => this.refreshPositions(owner))
       .catch((err) => this.logger.error(`Market hub start failed: ${err?.message ?? err}`));
     const refresh = setInterval(() => void this.refreshPositions(owner), POSITION_REFRESH_MS);
+    // A reconcile that opened/closed one of the owner's trackers (order stream,
+    // adaptive poll, cron) re-watches at once: a fresh position is priced from
+    // its first seconds, and a closed one frees its slot, without waiting for
+    // the 60 s refresh above (which stays as the backstop).
+    this.offOpenSet =
+      this.tracker.onOpenSetChanged?.((userId) => {
+        if (userId === owner) void this.refreshPositions(owner);
+      }) ?? null;
     const calendar = setInterval(() => this.checkCalendar(), CALENDAR_ALERT_MS);
     refresh.unref?.();
     calendar.unref?.();
@@ -152,6 +161,8 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
   onModuleDestroy(): void {
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+    this.offOpenSet?.();
+    this.offOpenSet = null;
     this.engine?.stop();
   }
 

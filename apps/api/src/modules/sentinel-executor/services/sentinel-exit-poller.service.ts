@@ -3,12 +3,11 @@ import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@ne
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { parseAutoExitConfig } from '../domain/auto-exit.config';
 import type { AutoExitConfig } from '../domain/auto-exit.types';
+import { CLAIM_STALE_MS, SECOND_SWEEP_MS } from '../domain/claim-timing';
 import { AiExitExecutionRepository } from '../repositories/ai-exit-execution.repository';
 import { SentinelExitExecutor } from './sentinel-exit-executor.service';
 
 export const AI_EXIT_POLL_MS = 5_000;
-const CLAIM_STALE_MS = 60_000;
-const SECOND_SWEEP_MS = 65_000;
 const PER_PASS = 5;
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -16,7 +15,8 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /**
  * Spec §5.1. Disabled (the default), BOOT_JOBS=false, or an empty allow-list:
  * NOTHING runs — no timer, no query, no broker call. Enabled: crash sweep now and
- * at +65 s (ruling R8), then one indexed query every 5 s. No @Cron.
+ * again after CLAIM_STALE_MS + 5 s (ruling R8; bound derived in domain/claim-timing),
+ * then one indexed query every 5 s. No @Cron.
  */
 @Injectable()
 export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
@@ -50,7 +50,7 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     const units = Object.entries(cfg.qtyUnits).map(([ex, u]) => `${ex}:${u}`).join(',') || 'none';
     this.logger.warn(
       `[ai-exit] ENABLED mode=${cfg.mode} users=${cfg.userIds.length} cap=${cfg.dailyCap}/day ` +
-        `maxAge=${cfg.maxVerdictAgeSec}s fallback=${cfg.limitFallbackPct}% qty-units=${units}`,
+        `maxAge=${cfg.maxVerdictAgeSec}s fallback=${cfg.limitFallbackPct}% qty-units=${units} cancel-protective=${cfg.cancelProtective ? 'ON' : 'off'}`,
     );
     void this.sweep();
     this.sweepTimer = setTimeout(() => void this.sweep(), SECOND_SWEEP_MS);

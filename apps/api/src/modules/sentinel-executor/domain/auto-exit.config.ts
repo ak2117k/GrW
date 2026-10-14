@@ -95,6 +95,7 @@ export function parseAutoExitConfig(env: Record<string, string | undefined>): Au
     limitFallbackPct: num(env.AI_AUTO_EXIT_LIMIT_FALLBACK_PCT, 'AI_AUTO_EXIT_LIMIT_FALLBACK_PCT',
       DEFAULTS.limitFallbackPct, (n) => n >= 0.5 && n <= 10, problems),
     qtyUnits: parseQtyUnits(env.AI_AUTO_EXIT_QTY_UNITS, problems),
+    cancelProtective: env.AI_AUTO_EXIT_CANCEL_PROTECTIVE === 'true',
     problems,
   };
 }

@@ -1,5 +1,6 @@
 // apps/api/src/modules/sentinel-executor/dto/ai-exit-execution.dto.ts
 import type { AiExitExecution } from '@prisma/client';
+import { triggerOf, type ExitTrigger } from '../domain/manual-exit';
 
 /** Wire contract of GET /api/sentinel-executor/executions (copied into the web, plan Task 12). */
 export interface AiExitExecutionDto {
@@ -22,6 +23,8 @@ export interface AiExitExecutionDto {
   orderStatus: string | null;
   marketOrderId: string | null;
   verdictReason: string;
+  /** AI = a sentinel EXIT_NOW verdict; MANUAL = the owner's "Exit now" button (synthetic verdictId man_…). */
+  trigger: ExitTrigger;
   createdAt: string;
   updatedAt: string;
 }
@@ -47,6 +50,7 @@ export function toAiExitExecutionDto(r: AiExitExecution): AiExitExecutionDto {
     orderStatus: r.orderStatus,
     marketOrderId: r.marketOrderId,
     verdictReason: r.verdictReason,
+    trigger: triggerOf(r.verdictId),
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
   };

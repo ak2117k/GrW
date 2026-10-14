@@ -105,6 +105,18 @@ export default () => ({
     // MCX 23:55 close windows, "YYYY-MM-DD:YYYY-MM-DD" comma-separated (US-DST-linked).
     mcxLateClose: process.env.HUB_MCX_LATE_CLOSE || '',
   },
+  liveSync: {
+    // Near-live broker position tracking (LiveBrokerSyncService). Both ON by default; both read
+    // positions only, and only over a user's LIVE feed session (never a login).
+    // A) Angel's order-update WebSocket for one user (default: HUB_OWNER_USER_ID); a fill /
+    //    cancel / reject reconciles that user after a short debounce.
+    orderStreamEnabled: process.env.LIVE_SYNC_ORDER_STREAM_ENABLED !== 'false',
+    orderStreamUserId: process.env.LIVE_SYNC_ORDER_STREAM_USER_ID || '',
+    debounceMs: +(process.env.LIVE_SYNC_DEBOUNCE_MS || 2000),
+    // B) Reconcile users holding an OPEN position on an exchange in session every pollMs (floor 30 s).
+    pollEnabled: process.env.LIVE_SYNC_POLL_ENABLED !== 'false',
+    pollMs: +(process.env.LIVE_SYNC_POLL_MS || 60000),
+  },
   telegram: {
     // Min parser confidence for a message to be promoted to a tracked signal.
     minConfidence: parseFloat(process.env.TELEGRAM_MIN_CONFIDENCE || '0.55'),

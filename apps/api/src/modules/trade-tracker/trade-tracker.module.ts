@@ -5,6 +5,7 @@ import { CredentialDecryptorModule } from '../credential-vault/execution/credent
 import { PerUserBrokerSessionFactory } from '../auto-execution/services/per-user-broker-session.factory';
 import { TradeTrackerService } from './services/trade-tracker.service';
 import { TradeTrackerPoller } from './services/trade-tracker-poller.service';
+import { LiveBrokerSyncService } from './services/live-broker-sync.service';
 import { TradeTrackerController } from './controllers/trade-tracker.controller';
 import { SoldTradesController } from './controllers/sold-trades.controller';
 
@@ -27,7 +28,7 @@ import { SoldTradesController } from './controllers/sold-trades.controller';
 @Module({
   imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule],
   controllers: [TradeTrackerController, SoldTradesController],
-  providers: [TradeTrackerService, TradeTrackerPoller, PerUserBrokerSessionFactory],
+  providers: [TradeTrackerService, TradeTrackerPoller, LiveBrokerSyncService, PerUserBrokerSessionFactory],
   exports: [TradeTrackerService],
 })
 export class TradeTrackerModule {}

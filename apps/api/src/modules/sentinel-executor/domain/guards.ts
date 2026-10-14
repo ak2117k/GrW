@@ -1,5 +1,6 @@
 // apps/api/src/modules/sentinel-executor/domain/guards.ts
 import { AUTO_EXIT_EXCHANGES, type AutoExitConfig } from './auto-exit.types';
+import type { ExitTrigger } from './manual-exit';
 
 export interface GuardInput {
   config: AutoExitConfig;
@@ -9,6 +10,12 @@ export interface GuardInput {
   isOpen: (exchange: string, at: Date) => boolean;
   countedToday: number;
   inFlight: boolean;
+  /**
+   * 'AI' (default): a sentinel EXIT_NOW verdict. 'MANUAL': the owner's own
+   * "Exit now" — the AI switches (enabled, allow-list, verdict age, daily cap)
+   * do not apply (the caller authorised the user), every position guard does.
+   */
+  trigger?: ExitTrigger;
 }
 
 export type GuardResult = { ok: true } | { ok: false; reason: string };
@@ -20,10 +27,13 @@ const no = (reason: string): GuardResult => ({ ok: false, reason });
  * The first failing guard names the SKIPPED reason; nothing is sent on any failure.
  */
 export function evaluateGuards(i: GuardInput): GuardResult {
-  if (!i.config.enabled) return no('DISABLED');
-  if (!i.config.userIds.includes(i.verdict.userId)) return no('NOT_ALLOWED_USER');
-  if (i.now.getTime() - i.verdict.createdAt.getTime() > i.config.maxVerdictAgeSec * 1000) {
-    return no('STALE_VERDICT');
+  const ai = i.trigger !== 'MANUAL';
+  if (ai) {
+    if (!i.config.enabled) return no('DISABLED');
+    if (!i.config.userIds.includes(i.verdict.userId)) return no('NOT_ALLOWED_USER');
+    if (i.now.getTime() - i.verdict.createdAt.getTime() > i.config.maxVerdictAgeSec * 1000) {
+      return no('STALE_VERDICT');
+    }
   }
   const t = i.tracker;
   if (!t) return no('TRACKER_MISSING');
@@ -34,6 +44,6 @@ export function evaluateGuards(i: GuardInput): GuardResult {
   if (!AUTO_EXIT_EXCHANGES.includes(exchange)) return no('EXCHANGE_NOT_FNO');
   if (!i.isOpen(exchange, i.now)) return no('EXCHANGE_CLOSED');
   if (i.inFlight) return no('EXIT_IN_FLIGHT');
-  if (i.countedToday >= i.config.dailyCap) return no('DAILY_CAP');
+  if (ai && i.countedToday >= i.config.dailyCap) return no('DAILY_CAP');
   return { ok: true };
 }

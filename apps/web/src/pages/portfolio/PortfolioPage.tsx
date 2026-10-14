@@ -14,6 +14,10 @@ import { SymbolChartLink } from '@/components/common/SymbolChartLink';
 import { isDerivative } from '@/utils/positionRow';
 import { collectHeldExchanges, shouldAutoRefreshPortfolio } from '@/services/portfolio-session';
 import { createVisibilityAwarePoller } from '@/services/interval-poller';
+import { Modal } from '@/components/common';
+import { useAuthStore } from '@/stores/auth-store';
+import { useManualExit, type ManualExitState } from '@/hooks/useManualExit';
+import { canExitTracker, exitConfirmText, exitStatusLine, exitTone, type ExitTone } from '@/services/manualExit';
 
 /** How often to re-pull Angel One's live holdings/positions while in session. */
 const AUTO_REFRESH_MS = 20_000;
@@ -139,6 +143,57 @@ function StatusBadge({ status }: { status: TradeTracker['status'] }) {
   );
 }
 
+const EXIT_TONE_CLS: Record<ExitTone, string> = {
+  working: 'text-amber-400',
+  good: 'text-[var(--color-accent-green)]',
+  bad: 'text-[var(--color-accent-red)]',
+  muted: 'text-[var(--color-text-muted)]',
+};
+
+/**
+ * Owner-only "Exit" on an OPEN F&O position row. Places a REAL order (after the
+ * confirm dialog) through the guarded sentinel-executor pipeline; the outcome
+ * is shown inline and polled until final. Disabled while an attempt is working.
+ */
+function ExitCell({
+  tracker,
+  state,
+  onAsk,
+}: {
+  tracker: TradeTracker;
+  state: ManualExitState | undefined;
+  onAsk: (t: TradeTracker) => void;
+}) {
+  const busy = state?.busy ?? false;
+  return (
+    <div className="flex flex-col items-start gap-0.5">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => onAsk(tracker)}
+        className="inline-flex items-center gap-1 rounded border border-[var(--color-accent-red)]/50 px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-red)] hover:bg-[var(--color-accent-red)]/10 disabled:cursor-not-allowed disabled:opacity-50"
+        title="Close this whole position at MARKET on Angel One"
+      >
+        {busy && <Loader2 size={10} className="animate-spin" />}
+        Exit
+      </button>
+      <ExitStatusText state={state} />
+    </div>
+  );
+}
+
+function ExitStatusText({ state }: { state: ManualExitState | undefined }) {
+  if (state?.error) {
+    return <span className="max-w-[16rem] break-words text-[10px] text-[var(--color-accent-red)]">{state.error}</span>;
+  }
+  if (!state?.row) return null;
+  return (
+    <span className={`max-w-[16rem] break-words text-[10px] ${EXIT_TONE_CLS[exitTone(state.row.status)]}`}>
+      {exitStatusLine(state.row)}
+    </span>
+  );
+}
+
 /**
  * Trade Tracker — persistent per-position/holding tracker rows from the DB
  * (independent of the live broker snapshot above), with a client-side Excel/PDF
@@ -157,6 +212,15 @@ function TradeTrackerSection({
 }) {
   const rows = data ?? [];
   const hasRows = rows.length > 0;
+  const role = useAuthStore((s) => s.user?.role);
+  const isOwner = role === 'ADMIN';
+  const { states: exitStates, exit } = useManualExit();
+  const [confirming, setConfirming] = useState<TradeTracker | null>(null);
+  const confirmExit = () => {
+    const t = confirming;
+    setConfirming(null);
+    if (t) void exit(t);
+  };
 
   return (
     <section className="rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)]">
@@ -198,6 +262,7 @@ function TradeTrackerSection({
                 <th className={THR}>Day H/L</th>
                 <th className={THR}>P&amp;L</th>
                 <th className={TH}>Status</th>
+                {isOwner && <th className={TH}>Action</th>}
               </tr>
             </thead>
             <tbody>
@@ -236,12 +301,52 @@ function TradeTrackerSection({
                   <td className="px-3 py-1.5">
                     <StatusBadge status={t.status} />
                   </td>
+                  {isOwner && (
+                    <td className="px-3 py-1.5">
+                      {canExitTracker(t, role) ? (
+                        <ExitCell tracker={t} state={exitStates[t.id]} onAsk={setConfirming} />
+                      ) : (
+                        // The row closed (e.g. after a FILLED exit): keep the outcome visible.
+                        <ExitStatusText state={exitStates[t.id]} />
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      <Modal isOpen={confirming !== null} onClose={() => setConfirming(null)} title="Exit position" size="sm">
+        {confirming && (
+          <div className="flex flex-col gap-3 text-sm">
+            <p className="font-semibold text-[var(--color-text-primary)]">{exitConfirmText(confirming)}</p>
+            <p className="text-xs text-[var(--color-text-muted)]">
+              This places a REAL order on Angel One for the whole open position on {confirming.exchange}, sized from
+              the broker&apos;s live net quantity. It is refused if another order on this contract is open (unless the
+              server is set to cancel your protective stop-loss first, AI_AUTO_EXIT_CANCEL_PROTECTIVE) or an exit
+              already ran today.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirming(null)}
+                className="rounded border border-[var(--color-border-default)] px-3 py-1 text-xs text-[var(--color-text-secondary)]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmExit}
+                className="rounded bg-[var(--color-accent-red)] px-3 py-1 text-xs font-semibold text-white"
+              >
+                {confirming.qty < 0 ? 'Buy' : 'Sell'} at MARKET
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </section>
   );
 }

@@ -262,3 +262,17 @@ describe('leaseRestClient (sentinel auto-exit: the lent session cannot be dispos
     expect(sessions[0].dispose).toHaveBeenCalledTimes(1);
   });
 });
+
+it('streamAuth never creates a session, and returns the live session tokens', async () => {
+  const auth = { jwtToken: 'j', feedToken: 'f', clientCode: 'C1', apiKey: 'k' };
+  const factory = jest.fn(() => {
+    const s: any = fakeSession();
+    s.streamAuth = jest.fn(() => auth);
+    return s;
+  });
+  const mgr = new UserFeedManager(factory as any, { idleMs: 120000, maxSessions: 40 });
+  expect(mgr.streamAuth('u1')).toBeNull();
+  expect(factory).not.toHaveBeenCalled();
+  await mgr.pin('u1', []);
+  expect(mgr.streamAuth('u1')).toEqual(auth);
+});

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import type {
   FeedState,
+  SessionStreamAuth,
   TokenRef,
   UserFeedSessionFactory,
   UserFeedSessionLike,
@@ -294,6 +295,15 @@ export class UserFeedManager {
         }
       },
     };
+  }
+
+  /**
+   * The user's LIVE session's login tokens for Angel's order-update stream, or
+   * null. Like {@link warmRestClient} this NEVER creates a session (and so never
+   * logs in): the order stream must ride the feed's own login.
+   */
+  streamAuth(userId: string): SessionStreamAuth | null {
+    return this.registry.get(userId)?.session.streamAuth?.() ?? null;
   }
 
   /**

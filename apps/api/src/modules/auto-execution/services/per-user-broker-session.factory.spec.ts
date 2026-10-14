@@ -1,6 +1,6 @@
-import { PerUserBrokerSessionFactory, type UserSmartApiLike } from './per-user-broker-session.factory';
+import { PerUserBrokerSessionFactory, classifyCancelResponse, type UserSmartApiLike } from './per-user-broker-session.factory';
 
-function fakeClient(): jest.Mocked<UserSmartApiLike> {
+function fakeClient(): jest.Mocked<Required<UserSmartApiLike>> {
   return {
     generateSession: jest.fn().mockResolvedValue({ data: { jwtToken: 'jwt' } }),
     placeOrder: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', data: { orderid: 'O1' } }),
@@ -11,6 +11,7 @@ function fakeClient(): jest.Mocked<UserSmartApiLike> {
     getAllHolding: jest.fn(),
     getTradeBook: jest.fn(),
     getOrderBook: jest.fn().mockResolvedValue({ status: true, data: [{ orderid: 'O1', status: 'open' }] }),
+    cancelOrder: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', errorcode: '', data: { orderid: 'SL1' } }),
   };
 }
 const CREDS = { apiKey: 'k', apiSecret: 's', clientId: 'C1', password: 'p', totpSecret: 'JBSWY3DPEHPK3PXP' };
@@ -146,5 +147,51 @@ describe('placeOrderClassified — only Angel itself can say REJECTED (SDK inter
     let leaked: any;
     await new PerUserBrokerSessionFactory().borrow(fakeClient(), 'C1', async (s) => { leaked = s; });
     await expect(leaked.placeOrderClassified(ORDER, 'axMabc')).rejects.toThrow(/disposed/);
+  });
+});
+
+describe('cancelOrderClassified — only Angel itself can answer a cancel (SDK interceptor never rejects)', () => {
+  const f = () => new PerUserBrokerSessionFactory(() => { throw new Error('must not build a client'); });
+
+  it('sends variety + orderid and classifies an Angel success as ACCEPTED', async () => {
+    const client = fakeClient();
+    const r = await f().borrow(client, 'C1', (s) => s.cancelOrderClassified('STOPLOSS', 'SL1'));
+    expect(client.cancelOrder).toHaveBeenCalledWith({ variety: 'STOPLOSS', orderid: 'SL1' });
+    expect(r).toEqual({ status: 'ACCEPTED', message: 'SUCCESS' });
+  });
+
+  it('a throw/timeout is UNCERTAIN, never an exception', async () => {
+    const client = fakeClient();
+    client.cancelOrder.mockRejectedValueOnce(new Error('socket hang up'));
+    const r = await f().borrow(client, 'C1', (s) => s.cancelOrderClassified('NORMAL', 'SL1'));
+    expect(r).toEqual({ status: 'UNCERTAIN', message: 'socket hang up' });
+  });
+
+  it('refuses after disposal', async () => {
+    let leaked: any;
+    await f().borrow(fakeClient(), 'C1', async (s) => { leaked = s; });
+    await expect(leaked.cancelOrderClassified('NORMAL', 'SL1')).rejects.toThrow(/disposed/);
+  });
+
+  it.each([
+    ['{} (network error / 7 s timeout)', {}, 'UNCERTAIN'],
+    ['{status:504} (HTTP error)', { status: 504, message: 'Gateway Time-out' }, 'UNCERTAIN'],
+    ['[] (interceptor fault)', [], 'UNCERTAIN'],
+    ['undefined', undefined, 'UNCERTAIN'],
+    ['status:false with no message/code', { status: false }, 'UNCERTAIN'],
+    ['status:true with no orderid', { status: true, message: 'SUCCESS', data: null }, 'UNCERTAIN'],
+    ['Angel status:false + message', { status: false, message: 'Order already complete', errorcode: 'AB2003' }, 'REJECTED'],
+    ['Angel status:true + orderid', { status: true, message: 'SUCCESS', data: { orderid: 'SL1' } }, 'ACCEPTED'],
+  ])('%s → %s', (_n, answer, status) => {
+    expect(classifyCancelResponse(answer).status).toBe(status);
+  });
+});
+
+describe('cancelOrderClassified — a client without cancelOrder', () => {
+  it('is UNCERTAIN, never a silent success', async () => {
+    const { cancelOrder: _omit, ...client } = fakeClient();
+    const f = new PerUserBrokerSessionFactory(() => { throw new Error('must not build a client'); });
+    const r = await f.borrow(client as never, 'C1', (s) => s.cancelOrderClassified('NORMAL', 'SL1'));
+    expect(r.status).toBe('UNCERTAIN');
   });
 });

@@ -3,6 +3,7 @@ import { SentinelExitExecutor } from './sentinel-exit-executor.service';
 import { FeedSessionNotReadyError, NoFeedSessionError } from './owner-broker-session.provider';
 import { parseAutoExitConfig } from '../domain/auto-exit.config';
 import { aiExitOrderTag } from '../domain/exit-order';
+import { UNKNOWN_FATE_REASONS } from '../domain/auto-exit.types';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
 
@@ -779,5 +780,147 @@ describe('SentinelExitExecutor — cancel through the REAL session (SDK intercep
     expect(client.cancelOrder).toHaveBeenCalledTimes(1);
     expect(client.cancelOrder).toHaveBeenCalledWith({ variety: 'STOPLOSS', orderid: 'SL1' });
     expect(client.placeOrder).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 2026-10-14 prod: one unanswered pre-order positions read at 09:16 (Angel's
+ * busiest minute) turned an EXIT_NOW into FAILED: BROKER_READ with an empty
+ * brokerMessage. Reads are side-effect free, so an unanswered one is retried
+ * (500 ms, 1500 ms) while the attempt is still fresh; placeOrder never is.
+ */
+describe('SentinelExitExecutor — unanswered broker reads are retried, orders never', () => {
+  const RATE = { status: 403, message: 'Access denied because of exceeding access rate' };
+  const filledBook = env([{ orderid: 'O1', status: 'complete', text: '', symboltoken: '445566', exchange: 'MCX' }]);
+  const sleeps = (h: ReturnType<typeof harness>) => h.sleep.mock.calls.map((c) => (c as unknown[])[0]);
+  const LIVE_CP = parseAutoExitConfig({
+    AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner',
+    AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true',
+  });
+  const sl = (status: string) => ({
+    orderid: 'SL1', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', transactiontype: 'SELL', producttype: 'CARRYFORWARD',
+    quantity: '100', status, symboltoken: '445566', exchange: 'MCX', ordertag: '',
+  });
+  const exitDone = env([sl('cancelled'), { orderid: 'O1', status: 'complete', symboltoken: '445566', exchange: 'MCX' }]);
+  afterEach(() => jest.useRealTimers());
+
+  it('first positions read unanswered, second answered → proceeds and places exactly one order', async () => {
+    const h = harness({ positions: [{}, env([posRow('100')]), env([posRow('0')])], books: [env([]), filledBook] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.getPositionsEnvelope).toHaveBeenCalledTimes(3); // 2 pre-order + 1 confirm
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(sleeps(h)[0]).toBe(500);
+    expect(h.patches().some((p) => p.status === 'FAILED')).toBe(false);
+  });
+
+  it('all three positions reads unanswered → FAILED: BROKER_READ, brokerMessage says why and attempts=3, no order', async () => {
+    const h = harness({ positions: [{}, {}, RATE] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
+    expect(h.session.getPositionsEnvelope).toHaveBeenCalledTimes(3);
+    expect(sleeps(h)).toEqual([500, 1_500]);
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'FAILED', reason: 'BROKER_READ' }));
+    const msg = h.lastPatch().brokerMessage as string;
+    expect(msg).toContain('attempts=3');
+    expect(msg).toContain('Access denied because of exceeding access rate');
+    expect(msg).toContain('403');
+  });
+
+  it('an Angel errorcode in the last envelope is recorded', async () => {
+    const h = harness({ positions: [{ status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null }] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
+    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('AG8001'));
+    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('Invalid Token'));
+  });
+
+  it('a thrown read counts as unanswered: order book throws thrice → FAILED: ORDER_BOOK_READ with the error and attempts=3', async () => {
+    const h = harness({ books: [new Error('Angel One getOrderBook timed out after 15000ms')] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'ORDER_BOOK_READ' });
+    expect(h.session.getOrderBookEnvelope).toHaveBeenCalledTimes(3);
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('timed out after 15000ms'));
+    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('attempts=3'));
+  });
+
+  it('a thrown book read followed by an answer → proceeds, one order', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('0')])],
+      books: [new Error('Angel One getOrderBook timed out after 15000ms'), env([]), filledBook],
+    });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries respect the verdict age budget: 600 ms left → one retry (500 ms) only, attempts=2', async () => {
+    const h = harness({ positions: [{}] });
+    const old = { ...V, createdAt: new Date(NOW.getTime() - 89_400) };
+    await expect(h.ex.process(old, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
+    expect(h.session.getPositionsEnvelope).toHaveBeenCalledTimes(2);
+    expect(sleeps(h)).toEqual([500]);
+    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('attempts=2'));
+  });
+
+  it('retries respect the verdict age budget: 200 ms left → no retry at all', async () => {
+    const h = harness({ positions: [{}] });
+    const old = { ...V, createdAt: new Date(NOW.getTime() - 89_800) };
+    await expect(h.ex.process(old, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
+    expect(h.session.getPositionsEnvelope).toHaveBeenCalledTimes(1);
+    expect(h.sleep).not.toHaveBeenCalled();
+    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('attempts=1'));
+  });
+
+  it('retries stop once the attempt has used its read-retry window (keeps the stale-claim bound finite)', async () => {
+    jest.useFakeTimers({ now: 1_000_000, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const h = harness();
+    // Each unanswered read takes 15 s (the cap): 15 + 0.5 fits the 30 s window, 30 + 1.5 does not.
+    h.session.getPositionsEnvelope.mockImplementation(async () => { jest.setSystemTime(Date.now() + 15_000); return {}; });
+    await expect(h.ex.process(V, { ...LIVE, maxVerdictAgeSec: 600 }, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
+    expect(h.session.getPositionsEnvelope).toHaveBeenCalledTimes(2);
+    expect(sleeps(h)).toEqual([500]);
+  });
+
+  it('a BROKER_READ failure does not block the next EXIT_NOW on the same contract (no order was sent)', async () => {
+    expect(UNKNOWN_FATE_REASONS).not.toContain('BROKER_READ');
+    expect(UNKNOWN_FATE_REASONS).not.toContain('ORDER_BOOK_READ');
+    const failed = harness({ positions: [{}] });
+    await expect(failed.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
+    expect(failed.session.placeOrderClassified).not.toHaveBeenCalled();
+    const next = harness({ positions: [env([posRow('100')]), env([posRow('0')])], books: [env([]), filledBook] });
+    await expect(next.ex.process({ ...V, id: 'cm9verdict000000000000002' }, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(next.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('after a protective cancel the re-check read is retried even past the age budget (unexited AND unprotected is worse)', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), {}, env([posRow('100')]), env([posRow('0')])],
+      books: [env([sl('trigger pending')]), env([sl('cancelled')]), env([sl('cancelled')]), exitDone],
+    });
+    const old = { ...V, createdAt: new Date(NOW.getTime() - 89_800) };
+    await expect(h.ex.process(old, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('a cancel-confirm book read is retried', async () => {
+    const h = harness({
+      positions: [env([posRow('100')]), env([posRow('100')]), env([posRow('0')])],
+      books: [env([sl('trigger pending')]), {}, env([sl('cancelled')]), env([sl('cancelled')]), exitDone],
+    });
+    await expect(h.ex.process(V, LIVE_CP, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(sleeps(h).slice(0, 2)).toEqual([1_000, 500]);
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('an uncertain placement settles from a RETRIED book read and is never re-sent', async () => {
+    const tag = aiExitOrderTag(V.id, 'M');
+    const mine = env([{ orderid: 'O9', ordertag: tag, status: 'open', symboltoken: '445566', exchange: 'MCX' }]);
+    const h = harness({
+      place: [{ orderId: '', status: 'UNCERTAIN', message: 'no definitive broker answer: {}' }],
+      books: [env([]), {}, mine],
+    });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'PLACED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.patches()).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'PLACED', brokerOrderId: 'O9' })]));
+    expect(h.patches().some((p) => p.reason === 'ORDER_UNCERTAIN')).toBe(false);
   });
 });

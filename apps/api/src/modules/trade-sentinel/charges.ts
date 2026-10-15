@@ -271,6 +271,40 @@ function roundToTickConservative(price: number, dir: number): number {
 }
 
 /**
+ * The exit price at which gross P&L covers the charges incurred AT THAT PRICE
+ * plus `marginRupees`, solved as a fixed point from the starting estimate
+ * `charges`, then rounded one tick in the conservative direction. Shared by the
+ * green floor (margin ₹150) and breakeven (margin 0). The caller guarantees qty ≠ 0.
+ */
+function solveFloorPrice(
+  { segment, entryPrice, qty, side }: Omit<GreenFloorInput, 'ltp'>,
+  marginRupees: number,
+  charges: number,
+): number {
+  const dir = side === 'LONG' ? 1 : -1;
+  let floorPrice = entryPrice + ((charges + marginRupees) / qty) * dir;
+  for (let i = 0; i < FLOOR_MAX_ITERATIONS; i += 1) {
+    const chargesAtFloor = estimateCharges({ segment, entryPrice, exitPrice: floorPrice, qty, side });
+    const next = entryPrice + ((chargesAtFloor + marginRupees) / qty) * dir;
+    const converged = Math.abs(next - floorPrice) < FLOOR_TOLERANCE_RUPEES;
+    floorPrice = next;
+    if (converged) break;
+  }
+  return roundToTickConservative(floorPrice, dir);
+}
+
+/**
+ * Exit discipline §4: breakeven after charges — the green-floor solve with no
+ * margin. Null for qty 0, a non-finite entry, or a solve that is not a price.
+ */
+export function breakevenPrice(i: { segment: Segment; entryPrice: number; qty: number; side: Side }): number | null {
+  if (i.qty === 0 || !Number.isFinite(i.entryPrice)) return null;
+  const charges = estimateCharges({ segment: i.segment, entryPrice: i.entryPrice, exitPrice: i.entryPrice, qty: i.qty, side: i.side });
+  const p = solveFloorPrice(i, 0, charges);
+  return p > 0 ? p : null;
+}
+
+/**
  * Net P&L and the price that locks it in. `armed` is computed from the CURRENT
  * ltp only; the caller is responsible for latching it (once armed, always armed
  * for that position) — the ratchet is state, and this function stays pure.
@@ -294,19 +328,10 @@ export function computeGreenFloor({ segment, entryPrice, ltp, qty, side }: Green
   }
 
   // Price at which gross P&L covers the charges incurred AT THAT PRICE, plus the margin.
-  let floorPrice = entryPrice + ((charges + GREEN_FLOOR_MARGIN_RUPEES) / qty) * dir;
-  for (let i = 0; i < FLOOR_MAX_ITERATIONS; i += 1) {
-    const chargesAtFloor = estimateCharges({ segment, entryPrice, exitPrice: floorPrice, qty, side });
-    const next = entryPrice + ((chargesAtFloor + GREEN_FLOOR_MARGIN_RUPEES) / qty) * dir;
-    const converged = Math.abs(next - floorPrice) < FLOOR_TOLERANCE_RUPEES;
-    floorPrice = next;
-    if (converged) break;
-  }
-
   // Only a POSITIVE price is a price. `> 0` rather than `<= 0` so a NaN that
   // escaped the solve becomes null too, rather than reaching the packet as a
   // reading. See `GreenFloor.floorPrice`.
-  const rounded = roundToTickConservative(floorPrice, dir);
+  const rounded = solveFloorPrice({ segment, entryPrice, qty, side }, GREEN_FLOOR_MARGIN_RUPEES, charges);
 
   return {
     armed: netPnl >= GREEN_FLOOR_MARGIN_RUPEES,

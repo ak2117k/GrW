@@ -1,0 +1,11 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`breakevenPrice computeGreenFloor is unchanged (same outputs as before the refactor) 1`] = `
+{
+  "armed": true,
+  "charges": 66.21504019999999,
+  "floorPrice": 102.17,
+  "marginRupees": 150,
+  "netPnl": 233.78495980000002,
+}
+`;

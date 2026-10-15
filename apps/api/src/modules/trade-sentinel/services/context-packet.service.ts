@@ -13,6 +13,7 @@ import { liveSessionClock } from '../overnight/overnight-calendar';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import type { CommodityCueKey, CommodityQuote, CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
+import type { NoiseFloor, NoiseReading } from '../../exit-discipline/types';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -377,6 +378,14 @@ export interface TickSnapshot {
    * review), where `ltp` is the finished session's last price, not a live one.
    */
   ltpAt?: string | null;
+  /**
+   * Exit discipline §3: the contract's and the underlying's 1-minute noise unit,
+   * from the hub's tick bars (DB only). Null/absent ⇒ discipline off or nothing
+   * read; the packet then states `flow.noiseUnit` absent with this reason.
+   */
+  noise?: { contract: NoiseReading | null; underlying1m: NoiseReading | null; reason: string | null } | null;
+  /** Exit discipline §4: set by the CYCLE only (like the latch); a tick source never sets it. */
+  noiseFloor?: NoiseFloor | null;
 }
 
 /**

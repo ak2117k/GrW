@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
 import { isHubExchange, type InstrumentRef } from '../../market-hub/hub.types';
@@ -22,6 +22,9 @@ import {
 import { SENTINEL_LEVEL_SOURCE, SentinelChartContextAdapter } from './chart-context.adapter';
 import { normaliseSymbol } from '../symbols';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
+import { EXIT_DISCIPLINE_CONFIG, type ExitDisciplineConfig } from '../../exit-discipline/config';
+import { noiseFromBars } from '../../exit-discipline/noise';
+import { MinuteBarsReader } from './minute-bars.reader';
 
 /**
  * The window the packet's `freshCount` block names, and therefore the window
@@ -271,6 +274,10 @@ export class SentinelTickSource implements TickSource {
     @Optional() private readonly userFeed?: UserFeedManager,
     // SP1 M3: HUB_PRICE_SOURCE, resolved lazily (MarketHubModule is not imported here). Absent ⇒ no hub tier.
     @Optional() private readonly moduleRef?: ModuleRef,
+    // Exit discipline §3: the 1-minute noise unit, read from candles_1m (a DB
+    // read — never a broker call). Absent either ⇒ `tick.noise` is null.
+    @Optional() private readonly minuteBars?: MinuteBarsReader,
+    @Optional() @Inject(EXIT_DISCIPLINE_CONFIG) private readonly discipline?: ExitDisciplineConfig,
   ) {
     if (!this.userFeed) {
       this.logger.warn(
@@ -396,6 +403,8 @@ export class SentinelTickSource implements TickSource {
       structureSymbol ? this.freshNewsCount(structureSymbol, row.exchange) : Promise.resolve(null),
     ]);
 
+    const noise = opts.closedSession ? null : await this.noiseFor(row, isCash, underlying);
+
     return {
       segment,
       side,
@@ -443,6 +452,40 @@ export class SentinelTickSource implements TickSource {
       // no window in which the levels and the factors describe different bars.
       factorValues: structure.factorValues,
       factorsReason: structure.factorsReason,
+      noise,
+    };
+  }
+
+  /**
+   * Exit discipline §3: the contract's and the underlying's noise unit from the
+   * hub's tick-built 1-minute bars. Null when discipline is off or no reader is
+   * wired (the reader is then never asked). For cash the contract IS the
+   * underlying. Never throws — the reader turns a DB failure into no bars.
+   */
+  private async noiseFor(
+    row: { exchange: string; token: string; symbol: string },
+    isCash: boolean,
+    underlying: Underlying,
+  ): Promise<TickReading['noise']> {
+    if (!this.discipline?.enabled || !this.minuteBars) return null;
+    const now = new Date();
+    const [cBars, uBars] = await Promise.all([
+      this.minuteBars.recent({ exchange: row.exchange, token: row.token, symbol: row.symbol }, now),
+      !isCash && underlying.token && underlying.exchange
+        ? this.minuteBars.recent(
+            { exchange: underlying.exchange, token: underlying.token, symbol: underlying.contract ?? underlying.name ?? underlying.token },
+            now,
+          )
+        : Promise.resolve([]),
+    ]);
+    const contract = noiseFromBars(cBars);
+    const underlying1m = isCash ? contract : noiseFromBars(uBars);
+    return {
+      contract,
+      underlying1m,
+      reason: contract
+        ? null
+        : 'no hub 1-minute bars for this contract in the last 120 minutes (needs MARKET_HUB_ENABLED + HUB_CANDLES_ENABLED and a live feed slot)',
     };
   }
 

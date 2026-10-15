@@ -4,7 +4,7 @@ import { EMPTY_CONFIRM, stepConfirm, type ConfirmState } from './confirmation';
 const CFG = { ticks: 2, ms: 1000, gapResetMs: 5000 };
 const BELOW = { op: 'BELOW' as const, price: 8930 };
 /** Feed [price, at] ticks; return the fire flags. */
-function feed(ticks: Array<[number, number]>, level = BELOW, cfg = CFG): boolean[] {
+function feed(ticks: Array<[number, number]>, level: { op: 'BELOW' | 'ABOVE'; price: number } = BELOW, cfg = CFG): boolean[] {
   let s: ConfirmState = EMPTY_CONFIRM;
   return ticks.map(([price, at]) => {
     const r = stepConfirm(s, { price, at }, level, cfg);

@@ -14,7 +14,11 @@ export interface AiExitRowView {
   dryRun: boolean;
   /** Dry-run row whose quantity unit is not verified for the exchange (reason prefix `UNIT_UNVERIFIED:`, ruling R16). */
   unitUnverified: boolean;
+  /** What started the exit: a sentinel verdict, the owner's button, or a sentinel price trigger. */
+  source: 'AI' | 'MANUAL' | 'PRICE_TRIGGER';
 }
+
+const SOURCE_PREFIX: Record<AiExitRowView['source'], string> = { AI: '', MANUAL: 'MANUAL ', PRICE_TRIGGER: 'PRICE TRIGGER ' };
 
 const TONE: Record<AiExitRow['status'], AiExitTone> = {
   FILLED: 'emerald',
@@ -60,9 +64,12 @@ export function aiExitRowView(r: AiExitRow, now: number = Date.now()): AiExitRow
   if (r.marketOrderId) parts.push(`MARKET refused (${r.marketOrderId})`);
   if (r.verdictReason) parts.push(r.verdictReason);
 
+  const source = r.trigger ?? 'AI';
   return {
-    // The owner's Exit button shares this table; say so, so it is never read as an AI decision.
-    label: `${r.trigger === 'MANUAL' ? 'MANUAL ' : ''}${r.status === 'DRY_RUN' ? 'DRY RUN' : r.status}`,
+    // The owner's Exit button and price-trigger fires share this table; say so,
+    // so neither is read as a judged AI decision.
+    label: `${SOURCE_PREFIX[source] ?? ''}${r.status === 'DRY_RUN' ? 'DRY RUN' : r.status}`,
+    source,
     tone: TONE[r.status] ?? 'muted',
     line,
     detail: parts.join(' · '),

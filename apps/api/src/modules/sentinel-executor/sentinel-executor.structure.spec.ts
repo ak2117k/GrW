@@ -86,3 +86,28 @@ describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe('price triggers stay inside the executor (price-triggers plan, Review Focus 7)', () => {
+  const all = () => files(MODULES).filter((f) => !f.endsWith('.spec.ts'));
+
+  it('only sentinel-executor names sentinel_exit_triggers — trade-sentinel never reads or writes it', () => {
+    const offenders = all()
+      .filter((f) => !f.includes(join('modules', 'sentinel-executor')))
+      .filter((f) => /sentinelExitTrigger|sentinel_exit_triggers/.test(code(f)))
+      .map((f) => relative(MODULES, f).replace(/\\/g, '/'));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the tick path (trigger-book, confirmation) imports nothing but its own domain files', () => {
+    for (const name of ['trigger-book.ts', 'confirmation.ts']) {
+      const specs = specifiers(join(__dirname, 'domain', name));
+      expect(specs.every((s) => s.startsWith('./'))).toBe(true);
+    }
+  });
+
+  it('the trigger watcher reaches orders only through the executor (no placeOrder of its own)', () => {
+    const w = code(join(__dirname, 'services', 'trigger-watch.service.ts'));
+    expect(w).not.toMatch(/placeOrder|getPositionsEnvelope|getOrderBookEnvelope|withOwnerSession/);
+    expect(w).toMatch(/bootJobsEnabled\(\)/);
+  });
+});

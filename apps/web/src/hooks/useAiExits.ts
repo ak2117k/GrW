@@ -23,8 +23,13 @@ export interface AiExitRow {
   orderStatus: string | null;
   marketOrderId: string | null;
   verdictReason: string;
-  /** AI = sentinel verdict; MANUAL = the owner's Exit button. Optional: older APIs omit it. */
-  trigger?: 'AI' | 'MANUAL';
+  /**
+   * AI = sentinel verdict; MANUAL = the owner's Exit button; PRICE_TRIGGER = a
+   * sentinel price trigger fired. Optional: older APIs omit it.
+   */
+  trigger?: 'AI' | 'MANUAL' | 'PRICE_TRIGGER';
+  /** The sentinel_exit_triggers row behind a PRICE_TRIGGER execution. */
+  triggerId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,11 +53,11 @@ export function isQuietDenial(err: unknown): boolean {
  * keeps the last rows and the next tick retries. Nothing is delivered after
  * `stop()`.
  */
-export function startAiExitPolling(opts: {
+export function startQuietPolling<T>(opts: {
   get: () => Promise<unknown>;
-  onData: (rows: AiExitRow[]) => void;
+  onData: (rows: T[]) => void;
   doc?: VisibilityDoc | null;
-  intervalMs?: number;
+  intervalMs: number;
 }): { stop: () => void } {
   let stopped = false;
   let denied = false;
@@ -63,7 +68,7 @@ export function startAiExitPolling(opts: {
     busy = true;
     try {
       const data = await opts.get();
-      if (!stopped) opts.onData(Array.isArray(data) ? (data as AiExitRow[]) : []);
+      if (!stopped) opts.onData(Array.isArray(data) ? (data as T[]) : []);
     } catch (err) {
       if (isQuietDenial(err)) {
         denied = true;
@@ -77,7 +82,7 @@ export function startAiExitPolling(opts: {
   };
 
   const poller = createVisibilityAwarePoller({
-    intervalMs: opts.intervalMs ?? AI_EXITS_POLL_MS,
+    intervalMs: opts.intervalMs,
     doc: opts.doc,
     shouldPoll: () => !denied,
     task: load,
@@ -90,6 +95,16 @@ export function startAiExitPolling(opts: {
       poller.stop();
     },
   };
+}
+
+/** The AI exits list's poller (startQuietPolling at AI_EXITS_POLL_MS by default). */
+export function startAiExitPolling(opts: {
+  get: () => Promise<unknown>;
+  onData: (rows: AiExitRow[]) => void;
+  doc?: VisibilityDoc | null;
+  intervalMs?: number;
+}): { stop: () => void } {
+  return startQuietPolling<AiExitRow>({ ...opts, intervalMs: opts.intervalMs ?? AI_EXITS_POLL_MS });
 }
 
 /**

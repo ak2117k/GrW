@@ -10,9 +10,16 @@ const TERMINAL = new Set(['complete', 'rejected', 'cancelled']);
 
 /** Prefix of every ordertag the executor sends (R4). auto-execution tags are 'ae' + idempotency-key hex, never 'ax'. */
 export const AI_EXIT_TAG_PREFIX = 'ax';
-/** Prefix of the owner's manual "Exit now" ordertags. Both prefixes count as a prior exit. */
+/** Prefix of the owner's manual "Exit now" ordertags. Every exit prefix counts as a prior exit. */
 export const MANUAL_EXIT_TAG_PREFIX = 'am';
-const EXIT_TAG_PREFIXES = [AI_EXIT_TAG_PREFIX, MANUAL_EXIT_TAG_PREFIX];
+/** Prefix of a price-trigger fire's ordertags (price-triggers plan R13). */
+export const PRICE_TRIGGER_TAG_PREFIX = 'at';
+const EXIT_TAG_PREFIXES = [AI_EXIT_TAG_PREFIX, MANUAL_EXIT_TAG_PREFIX, PRICE_TRIGGER_TAG_PREFIX];
+const TAG_PREFIX: Record<ExitTrigger, string> = {
+  AI: AI_EXIT_TAG_PREFIX,
+  MANUAL: MANUAL_EXIT_TAG_PREFIX,
+  PRICE_TRIGGER: PRICE_TRIGGER_TAG_PREFIX,
+};
 
 type Row = Record<string, unknown>;
 
@@ -154,13 +161,13 @@ export function limitFallbackPrice(
 }
 
 /**
- * Angel `ordertag` (plan ruling R4): 'ax' (AI) or 'am' (owner's manual exit) +
- * leg + last 17 alphanumerics of the (possibly synthetic) verdict id. ≤ 20 chars.
+ * Angel `ordertag` (plan ruling R4): 'ax' (AI), 'am' (owner's manual exit) or
+ * 'at' (price-trigger fire) + leg + last 17 alphanumerics of the (possibly
+ * synthetic) verdict id. ≤ 20 chars.
  */
 export function aiExitOrderTag(verdictId: string, leg: 'M' | 'L', trigger: ExitTrigger = 'AI'): string {
   const clean = String(verdictId).replace(/[^A-Za-z0-9]/g, '');
-  const prefix = trigger === 'MANUAL' ? MANUAL_EXIT_TAG_PREFIX : AI_EXIT_TAG_PREFIX;
-  return `${prefix}${leg}${clean.slice(-17)}`;
+  return `${TAG_PREFIX[trigger]}${leg}${clean.slice(-17)}`;
 }
 
 /** Does this broker text say MARKET orders are refused for the instrument? (ruling R6) */
@@ -203,7 +210,7 @@ export function findOrderByTag(rows: unknown[], tag: string): (OrderBookEntry & 
 
 /**
  * Review fix 2 (PRIOR_AI_EXIT_TODAY): does today's book hold an exit order of
- * ours — AI ('ax') or the owner's manual button ('am') — on this contract that
+ * ours — AI ('ax'), the owner's manual button ('am') or a price trigger ('at') — on this contract that
  * may have moved the position (anything but rejected/cancelled)?
  * Angel's order book only carries the current trading day.
  */

@@ -11,6 +11,8 @@ import { SentinelExecutorModule } from './sentinel-executor.module';
 import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
 import { ManualExitService } from './services/manual-exit.service';
+import { TriggerWatchService } from './services/trigger-watch.service';
+import { SentinelExitTriggerRepository } from './repositories/sentinel-exit-trigger.repository';
 
 /** The module's real imports (Prisma, MarketData, CredentialDecryptor), faked. */
 const prisma = { $queryRaw: jest.fn(), aiExitExecution: { updateMany: jest.fn(), create: jest.fn() } };
@@ -46,12 +48,33 @@ describe('SentinelExecutorModule wiring', () => {
     expect(ref.get(SentinelExitPoller)).toBeInstanceOf(SentinelExitPoller);
     expect(ref.get(ManualExitService)).toBeInstanceOf(ManualExitService);
     expect(ref.get(AI_EXIT_SESSION_CLOCK)).toBeInstanceOf(SessionClock);
+    // Price triggers: registered, and inert (flag unset) — no timer, no hub lookup, no query.
+    expect(ref.get(TriggerWatchService)).toBeInstanceOf(TriggerWatchService);
+    expect(ref.get(SentinelExitTriggerRepository)).toBeInstanceOf(SentinelExitTriggerRepository);
     // Disabled by default: not one query, not one broker touch.
     expect(prisma.$queryRaw).not.toHaveBeenCalled();
     expect(prisma.aiExitExecution.updateMany).not.toHaveBeenCalled();
     expect(userFeeds.warmRestClient).not.toHaveBeenCalled();
     expect(decryptor.withDecryptedCredentials).not.toHaveBeenCalled();
     await app.close();
+  });
+
+  it('SENTINEL_TRIGGERS_ENABLED=true with the auto-exit off still boots inert (no timer, no query)', async () => {
+    process.env.SENTINEL_TRIGGERS_ENABLED = 'true';
+    const interval = jest.spyOn(global, 'setInterval');
+    try {
+      const providers = Reflect.getMetadata(MODULE_METADATA.PROVIDERS, SentinelExecutorModule);
+      const controllers = Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, SentinelExecutorModule);
+      const ref = await Test.createTestingModule({ imports: [FakeDepsModule], providers, controllers }).compile();
+      const app = ref.createNestApplication();
+      await app.init();
+      expect(interval).not.toHaveBeenCalled();
+      expect(prisma.$queryRaw).not.toHaveBeenCalled();
+      await app.close();
+    } finally {
+      interval.mockRestore();
+      delete process.env.SENTINEL_TRIGGERS_ENABLED;
+    }
   });
 
   it('declares exactly the three imports the plan names (no trade-sentinel, no auto-execution module)', () => {

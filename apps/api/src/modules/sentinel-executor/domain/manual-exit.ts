@@ -7,7 +7,7 @@
  * sentinel_verdicts row. No schema change: the trigger is recognisable from
  * the id prefix (and the `MANUAL:` verdictReason).
  */
-export type ExitTrigger = 'AI' | 'MANUAL';
+export type ExitTrigger = 'AI' | 'MANUAL' | 'PRICE_TRIGGER';
 
 export const MANUAL_VERDICT_PREFIX = 'man_';
 export const MANUAL_REASON_PREFIX = 'MANUAL:';
@@ -25,6 +25,19 @@ export function isManualVerdictId(verdictId: string | null | undefined): boolean
   return String(verdictId ?? '').startsWith(MANUAL_VERDICT_PREFIX);
 }
 
+/** Synthetic verdictId of a price-trigger fire: `trg_<sentinel_exit_triggers.id>` (price-triggers plan R13). */
+export const PRICE_TRIGGER_VERDICT_PREFIX = 'trg_';
+
+export function triggerVerdictId(triggerId: string): string {
+  return `${PRICE_TRIGGER_VERDICT_PREFIX}${triggerId}`;
+}
+
+export function triggerIdOf(verdictId: string | null | undefined): string | null {
+  const v = String(verdictId ?? '');
+  return v.startsWith(PRICE_TRIGGER_VERDICT_PREFIX) ? v.slice(PRICE_TRIGGER_VERDICT_PREFIX.length) : null;
+}
+
 export function triggerOf(verdictId: string | null | undefined): ExitTrigger {
-  return isManualVerdictId(verdictId) ? 'MANUAL' : 'AI';
+  if (isManualVerdictId(verdictId)) return 'MANUAL';
+  return triggerIdOf(verdictId) !== null ? 'PRICE_TRIGGER' : 'AI';
 }

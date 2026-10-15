@@ -5,12 +5,19 @@ import type { AuthenticatedUser } from '../../../common/decorators/current-user.
 import { parseAutoExitConfig } from '../domain/auto-exit.config';
 import { AiExitExecutionRepository } from '../repositories/ai-exit-execution.repository';
 import { toAiExitExecutionDto, type AiExitExecutionDto } from '../dto/ai-exit-execution.dto';
+import { SentinelExitTriggerRepository } from '../repositories/sentinel-exit-trigger.repository';
+import { toSentinelExitTriggerDto, type SentinelExitTriggerDto } from '../dto/sentinel-exit-trigger.dto';
 import { ManualExitService } from '../services/manual-exit.service';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** `?limit=` clamped to 1..MAX_LIMIT; anything unparsable is DEFAULT_LIMIT. */
+const takeOf = (limit: string | undefined) => {
+  const n = Number.parseInt(String(limit ?? ''), 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, MAX_LIMIT) : DEFAULT_LIMIT;
+};
 
 /**
  * What the auto-exit did (spec §8), plus the owner's manual "Exit now". Global
@@ -23,6 +30,7 @@ export class SentinelExecutorController {
 
   constructor(
     private readonly repo: AiExitExecutionRepository,
+    private readonly triggerRepo: SentinelExitTriggerRepository,
     private readonly manual: ManualExitService,
   ) {}
 
@@ -31,14 +39,28 @@ export class SentinelExecutorController {
     @CurrentUser() user: AuthenticatedUser,
     @Query('limit') limit?: string,
   ): Promise<AiExitExecutionDto[]> {
+    this.assertAllowed(user);
+    const rows = await this.repo.listForUser(user.userId, takeOf(limit));
+    return rows.map(toAiExitExecutionDto);
+  }
+
+  /** Price triggers (armed first, then recent), the caller's own — what WILL fire (ruling R16). */
+  @Get('triggers')
+  async triggers(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('limit') limit?: string,
+  ): Promise<SentinelExitTriggerDto[]> {
+    this.assertAllowed(user);
+    const rows = await this.triggerRepo.listForUser(user.userId, takeOf(limit));
+    return rows.map(toSentinelExitTriggerDto);
+  }
+
+  /** ADMIN or allow-listed (ruling R13); checked before any query. */
+  private assertAllowed(user: AuthenticatedUser | undefined): void {
     const allowed = parseAutoExitConfig(process.env).userIds;
     if (!user?.userId || (user.role !== 'ADMIN' && !allowed.includes(user.userId))) {
       throw new ForbiddenException('AI exits are not enabled for this account');
     }
-    const n = Number.parseInt(String(limit ?? ''), 10);
-    const take = Number.isFinite(n) && n > 0 ? Math.min(n, MAX_LIMIT) : DEFAULT_LIMIT;
-    const rows = await this.repo.listForUser(user.userId, take);
-    return rows.map(toAiExitExecutionDto);
   }
 
   /**

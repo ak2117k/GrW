@@ -11,7 +11,8 @@ export interface GuardInput {
   countedToday: number;
   inFlight: boolean;
   /**
-   * 'AI' (default): a sentinel EXIT_NOW verdict. 'MANUAL': the owner's own
+   * 'AI' (default): a sentinel EXIT_NOW verdict, and 'PRICE_TRIGGER' (a
+   * pre-agreed sentinel level crossed): every guard. 'MANUAL': the owner's own
    * "Exit now" — the AI switches (enabled, allow-list, verdict age, daily cap)
    * do not apply (the caller authorised the user), every position guard does.
    */

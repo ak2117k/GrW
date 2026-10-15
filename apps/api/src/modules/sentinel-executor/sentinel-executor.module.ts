@@ -17,6 +17,9 @@ import {
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
 import { ManualExitService } from './services/manual-exit.service';
 import { SentinelExecutorController } from './controllers/sentinel-executor.controller';
+import { ExitGateRepository } from './repositories/exit-gate.repository';
+import { ExitGateService } from './services/exit-gate.service';
+import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
 
 /**
  * Sentinel auto-exit (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md).
@@ -45,6 +48,10 @@ import { SentinelExecutorController } from './controllers/sentinel-executor.cont
       inject: [ConfigService],
     },
     { provide: AI_EXIT_SLEEP, useValue: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)) },
+    // Exit discipline (docs/superpowers/specs/2026-10-14-exit-discipline-design.md): the AI exit gate.
+    ExitGateRepository,
+    ExitGateService,
+    { provide: EXIT_DISCIPLINE_CONFIG, useFactory: () => parseExitDisciplineConfig(process.env) },
   ],
 })
 export class SentinelExecutorModule {}

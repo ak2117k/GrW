@@ -11,6 +11,9 @@ import { SentinelExecutorModule } from './sentinel-executor.module';
 import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
 import { ManualExitService } from './services/manual-exit.service';
+import { ExitGateService } from './services/exit-gate.service';
+import { ExitGateRepository } from './repositories/exit-gate.repository';
+import { EXIT_DISCIPLINE_CONFIG } from '../exit-discipline/config';
 
 /** The module's real imports (Prisma, MarketData, CredentialDecryptor), faked. */
 const prisma = { $queryRaw: jest.fn(), aiExitExecution: { updateMany: jest.fn(), create: jest.fn() } };
@@ -46,6 +49,10 @@ describe('SentinelExecutorModule wiring', () => {
     expect(ref.get(SentinelExitPoller)).toBeInstanceOf(SentinelExitPoller);
     expect(ref.get(ManualExitService)).toBeInstanceOf(ManualExitService);
     expect(ref.get(AI_EXIT_SESSION_CLOCK)).toBeInstanceOf(SessionClock);
+    // Exit discipline: the gate, its reads and its config are providers.
+    expect(ref.get(ExitGateService)).toBeInstanceOf(ExitGateService);
+    expect(ref.get(ExitGateRepository)).toBeInstanceOf(ExitGateRepository);
+    expect(ref.get(EXIT_DISCIPLINE_CONFIG)).toEqual(expect.objectContaining({ enabled: true, floorArmN: 1.5 }));
     // Disabled by default: not one query, not one broker touch.
     expect(prisma.$queryRaw).not.toHaveBeenCalled();
     expect(prisma.aiExitExecution.updateMany).not.toHaveBeenCalled();

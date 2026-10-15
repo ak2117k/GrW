@@ -6,6 +6,10 @@ import { aiExitOrderTag } from '../domain/exit-order';
 import { UNKNOWN_FATE_REASONS } from '../domain/auto-exit.types';
 import { PerUserBrokerSessionFactory } from '../../auto-execution/services/per-user-broker-session.factory';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
+import { bypassRecord } from '../../exit-discipline/decision';
+import { parseExitDisciplineConfig } from '../../exit-discipline/config';
+import type { GateRecordV1 } from '../../exit-discipline/types';
+import { ExitGateService } from './exit-gate.service';
 
 const NOW = new Date('2026-10-12T10:00:00Z');
 const V: PendingVerdict = {
@@ -38,6 +42,7 @@ function harness(opts: {
   open?: boolean;
   tick?: number | null;
   lotSize?: number | null;
+  gate?: { enabled: () => boolean; load: jest.Mock; decide: jest.Mock };
 } = {}) {
   const calls: string[] = [];
   const queue = <T>(xs: T[] | undefined, dflt: T) => {
@@ -78,12 +83,13 @@ function harness(opts: {
     },
   };
   const sessions = { withOwnerSession: jest.fn(async (_u: string, fn: any) => fn(session, 'user-feed')) };
-  const clock = { isOpen: jest.fn(() => opts.open ?? true) };
+  const gate = opts.gate ?? { enabled: () => false, load: jest.fn(), decide: jest.fn() };
+  const clock = { isOpen: jest.fn(() => opts.open ?? true), minutesToClose: jest.fn(() => 419), tradingWindow: jest.fn(() => null) };
   const sleep = jest.fn(async () => undefined);
-  const ex = new SentinelExitExecutor(repo as never, prisma as never, sessions as never, clock as never, sleep);
+  const ex = new SentinelExitExecutor(repo as never, prisma as never, sessions as never, clock as never, sleep, gate as never);
   const lastPatch = () => repo.update.mock.calls.at(-1)?.[1];
   const patches = () => repo.update.mock.calls.map((c) => c[1]);
-  return { ex, session, repo, prisma, sessions, calls, lastPatch, patches, sleep };
+  return { ex, session, repo, prisma, sessions, calls, lastPatch, patches, sleep, gate };
 }
 
 describe('SentinelExitExecutor', () => {
@@ -922,5 +928,194 @@ describe('SentinelExitExecutor — unanswered broker reads are retried, orders n
     expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
     expect(h.patches()).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'PLACED', brokerOrderId: 'O9' })]));
     expect(h.patches().some((p) => p.reason === 'ORDER_UNCERTAIN')).toBe(false);
+  });
+});
+
+const DCFG = parseExitDisciplineConfig({});
+const rec = (outcome: GateRecordV1['outcome'], justification: GateRecordV1['justification'] = null): GateRecordV1 =>
+  ({ ...bypassRecord('DISABLED', DCFG, NOW), outcome, bypassReason: undefined, justification });
+function gateStub(record: GateRecordV1, calls?: string[]) {
+  return {
+    enabled: () => true,
+    load: jest.fn(async () => { calls?.push('gate-load'); return { kind: 'ready' } as never; }),
+    decide: jest.fn(() => record),
+  };
+}
+const FILLED_BOOK = env([{ orderid: 'O1', status: 'complete', averageprice: '527.10', filledshares: '100', exchorderupdatetime: '12-Oct-2026 15:30:04' }]);
+
+describe('SentinelExitExecutor — exit gate (exit discipline §6/§7, Review Focus 1–2)', () => {
+  it('GATED_THESIS_INTACT: SKIPPED, gate JSON on the row, no place, no cancel', async () => {
+    const gate = gateStub(rec('GATED_THESIS_INTACT'));
+    const h = harness({ gate });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.patches()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ side: 'SELL', quantity: 100, orderLtp: 50.25, gate: expect.objectContaining({ outcome: 'GATED_THESIS_INTACT' }) }),
+    ]));
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT' }));
+    expect(gate.decide).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ ltpNow: 50.25, productType: 'CARRYFORWARD', exchange: 'MCX' }));
+  });
+
+  it('AWAITING_CONFIRMATION: SKIPPED, nothing sent', async () => {
+    const h = harness({ gate: gateStub(rec('AWAITING_CONFIRMATION', 'THESIS_BROKEN')) });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'AWAITING_CONFIRMATION' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('dry-run is gated too (a blocked verdict never records DRY_RUN)', async () => {
+    const h = harness({ gate: gateStub(rec('GATED_THESIS_INTACT')) });
+    await expect(h.ex.process(V, DRY_MCX_UNITS, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT' });
+  });
+
+  it('a gated verdict never cancels a protective stop-loss (gate runs before cancelProtective)', async () => {
+    const cfg = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner',
+      AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' });
+    const sl = { orderid: 'SL1', symboltoken: '445566', exchange: 'MCX', status: 'trigger pending', transactiontype: 'SELL',
+      ordertype: 'STOPLOSS_MARKET', quantity: '100', producttype: 'CARRYFORWARD', variety: 'STOPLOSS', ordertag: '' };
+    const h = harness({ gate: gateStub(rec('GATED_THESIS_INTACT')), books: [env([sl])] });
+    await expect(h.ex.process(V, cfg, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT' });
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('PASS (hard risk, first EXIT_NOW): sells; the gate load started BEFORE the positions read', async () => {
+    const gate = gateStub(rec('PASS', 'HARD_RISK'));
+    const h = harness({ gate, positions: [env([posRow('100')]), env([posRow('0')])], books: [env([]), FILLED_BOOK] });
+    gate.load.mockImplementation(async () => { h.calls.push('gate-load'); return { kind: 'ready' } as never; });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.calls.indexOf('gate-load')).toBeGreaterThan(-1);
+    expect(h.calls.indexOf('gate-load')).toBeLessThan(h.calls.indexOf('positions'));
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('BYPASS FACTS_UNREADABLE fails open: the exit proceeds as today', async () => {
+    const h = harness({ gate: gateStub(bypassRecord('FACTS_UNREADABLE', DCFG, NOW, 'x')), positions: [env([posRow('100')]), env([posRow('0')])] });
+    await h.ex.process(V, LIVE, NOW);
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('disabled: no load, no decide, the row records BYPASS DISABLED, behaviour unchanged', async () => {
+    const gate = { enabled: () => false, load: jest.fn(), decide: jest.fn() };
+    const h = harness({ gate, positions: [env([posRow('100')]), env([posRow('0')])] });
+    await h.ex.process(V, LIVE, NOW);
+    expect(gate.load).not.toHaveBeenCalled();
+    expect(gate.decide).not.toHaveBeenCalled();
+    expect(h.patches()).toEqual(expect.arrayContaining([expect.objectContaining({ gate: expect.objectContaining({ outcome: 'BYPASS', bypassReason: 'DISABLED' }) })]));
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('MANUAL never consults the gate — a gate that blocks everything changes nothing (E2)', async () => {
+    const gate = gateStub(rec('GATED_THESIS_INTACT'));
+    const h = harness({ gate, positions: [env([posRow('100')]), env([posRow('0')])] });
+    await h.ex.execute('row1', V, LIVE, NOW, 'MANUAL');
+    expect(gate.load).not.toHaveBeenCalled();
+    expect(gate.decide).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.patches().some((p: any) => 'gate' in p)).toBe(false);
+  });
+
+  it('PRICE_TRIGGER never consults the gate (E2; cast until price triggers merges — Merge point M1)', async () => {
+    const gate = gateStub(rec('GATED_THESIS_INTACT'));
+    const h = harness({ gate, positions: [env([posRow('100')]), env([posRow('0')])] });
+    await h.ex.execute('row1', { ...V, id: 'trg_cm9trigger0000000000000001' }, LIVE, NOW, 'PRICE_TRIGGER' as never);
+    expect(gate.load).not.toHaveBeenCalled();
+    expect(gate.decide).not.toHaveBeenCalled();
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('a guard failure (e.g. stale verdict) never starts the gate load', async () => {
+    const gate = gateStub(rec('PASS', 'HARD_RISK'));
+    const h = harness({ gate });
+    await h.ex.process({ ...V, createdAt: new Date(NOW.getTime() - 10 * 60_000) }, LIVE, NOW);
+    expect(gate.load).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Task 7 proofs with the REAL ExitGateService (only its DB reads faked): the
+ * pure rules, not a stub, decide. Hard risk sells on the FIRST EXIT_NOW; an
+ * intact thesis never sells; unreadable facts fail open.
+ */
+describe('SentinelExitExecutor — real exit gate end to end', () => {
+  const PACKET = {
+    position: { symbol: 'CRUDEOIL15OCT268950CE', side: 'LONG', qty: 100, entryPrice: 45, ltp: 50.25, expiry: '2026-10-15',
+      underlyingLtp: { available: true, value: 9003 } },
+    money: { charges: 61, netPnl: 400, greenFloorPrice: 51, greenFloorArmed: true, floorBasis: 'noise' },
+    thesis: { available: true, value: { invalidation: 8932 } },
+    structure: { levelBook: { available: true, value: { vwap: 9000, atr14: 13.5 } } },
+    flow: { noiseUnit: { available: true, value: { contract: { n: 1.2, method: 'atr14-1m', bars: 14, at: 'x' }, underlying: null } } },
+    session: { nowUtc: '2026-10-12T09:59:50Z' },
+  };
+  // Only a HOLD before this verdict: this EXIT_NOW is the FIRST of its streak.
+  const HOLD = { id: 'h1', verdict: 'HOLD', createdAt: new Date(NOW.getTime() - 10 * 60_000), underlying: 8998, support: 8946, resistance: 9020 };
+  function realGate(o: { latched?: boolean; minutesToClose?: number; throws?: boolean } = {}) {
+    const repo = {
+      verdictPacket: jest.fn(async () => { if (o.throws) throw new Error('db down'); return PACKET; }),
+      recentVerdicts: jest.fn(async () => [HOLD]),
+      maxRiskPerTrade: jest.fn(async () => 2000),
+      dailyLossLatched: jest.fn(async () => o.latched ?? false),
+    };
+    const clock = { minutesToClose: jest.fn(() => o.minutesToClose ?? 300) };
+    return new ExitGateService(repo as never, clock as never, parseExitDisciplineConfig({}));
+  }
+  const gatePatch = (h: ReturnType<typeof harness>) => h.patches().find((p: any) => p.gate)?.gate as GateRecordV1 | undefined;
+
+  it('thesis intact (floor breached by premium noise, underlying above VWAP and up since the HOLD) ⇒ no sell', async () => {
+    const h = harness({ gate: realGate() as never });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT' });
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    expect(gatePatch(h)).toMatchObject({ outcome: 'GATED_THESIS_INTACT', facts: { ltpNow: 50.25, productType: 'CARRYFORWARD' } });
+  });
+
+  it('hard risk (daily-loss latch) sells on the FIRST EXIT_NOW', async () => {
+    const h = harness({ gate: realGate({ latched: true }) as never, positions: [env([posRow('100')]), env([posRow('0')])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(gatePatch(h)).toMatchObject({ outcome: 'PASS', justification: 'HARD_RISK', persistence: { rule: 'BYPASS' } });
+  });
+
+  it('hard risk (INTRADAY product, 9 min to close — product read from the broker position) sells on the FIRST EXIT_NOW', async () => {
+    const intraday = (n: string) => posRow(n, '50.25', { producttype: 'INTRADAY' });
+    const h = harness({ gate: realGate({ minutesToClose: 9 }) as never, positions: [env([intraday('100')]), env([intraday('0')])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(gatePatch(h)).toMatchObject({ outcome: 'PASS', justification: 'HARD_RISK' });
+  });
+
+  it('hard risk with a protective SL and cancel-protective ON: cancels then sells (the gate only ever prevents)', async () => {
+    const cfg = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner',
+      AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' });
+    const sl = (status: string) => ({ orderid: 'SL1', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', transactiontype: 'SELL',
+      producttype: 'CARRYFORWARD', quantity: '100', status, symboltoken: '445566', exchange: 'MCX', ordertag: '' });
+    const h = harness({
+      gate: realGate({ latched: true }) as never,
+      positions: [env([posRow('100')]), env([posRow('100')]), env([posRow('0')])],
+      books: [env([sl('trigger pending')]), env([sl('cancelled')]), env([sl('cancelled')]),
+        env([sl('cancelled'), { orderid: 'O1', status: 'complete', symboltoken: '445566', exchange: 'MCX' }])],
+    });
+    await expect(h.ex.process(V, cfg, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.cancelOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('facts unreadable (DB down) ⇒ fails OPEN: the exit proceeds as today, BYPASS recorded', async () => {
+    const h = harness({ gate: realGate({ throws: true }) as never, positions: [env([posRow('100')]), env([posRow('0')])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(gatePatch(h)).toMatchObject({ outcome: 'BYPASS', bypassReason: 'FACTS_UNREADABLE', error: expect.stringContaining('db down') });
+  });
+});
+
+describe('SentinelExitExecutor — a faulting gate fails OPEN (the gate may only prevent a sell)', () => {
+  it.each([
+    ['decide throws', { enabled: () => true, load: jest.fn(async () => ({ kind: 'ready' })), decide: jest.fn(() => { throw new Error('bug'); }) }],
+    ['load rejects', { enabled: () => true, load: jest.fn(() => Promise.reject(new Error('bug'))), decide: jest.fn() }],
+  ])('%s ⇒ the exit proceeds, BYPASS FACTS_UNREADABLE recorded', async (_l, gate) => {
+    const h = harness({ gate: gate as never, positions: [env([posRow('100')]), env([posRow('0')])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.patches()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ gate: expect.objectContaining({ outcome: 'BYPASS', bypassReason: 'FACTS_UNREADABLE', error: 'bug' }) }),
+    ]));
   });
 });

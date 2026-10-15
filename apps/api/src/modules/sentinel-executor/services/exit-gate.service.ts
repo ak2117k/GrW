@@ -7,7 +7,7 @@ import type { GateRecordV1 } from '../../exit-discipline/types';
 import type { SessionClock } from '../../market-hub/session-clock';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
 import { ExitGateRepository } from '../repositories/exit-gate.repository';
-import { AI_EXIT_SESSION_CLOCK } from './sentinel-exit-executor.service';
+import { AI_EXIT_SESSION_CLOCK } from './executor.tokens';
 
 export type GateContext =
   | { kind: 'ready'; verdict: { id: string; createdAt: Date }; packet: PacketFacts; history: HistoryVerdict[]; maxLossPerTrade: number | null; dailyLossLatched: boolean }

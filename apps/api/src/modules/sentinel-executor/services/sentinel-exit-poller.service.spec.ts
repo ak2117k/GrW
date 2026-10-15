@@ -70,6 +70,23 @@ describe('SentinelExitPoller', () => {
     poller.onModuleDestroy();
   });
 
+  it('enabled: logs the exit-discipline config line and warns each config problem', () => {
+    jest.useFakeTimers();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    setEnv({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });
+    process.env.GATE_CLOSE_MIN = '999';
+    try {
+      const { poller } = make();
+      poller.onModuleInit();
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      expect(lines).toContain('[exit-discipline] GATE_CLOSE_MIN=999 is out of range — using 10');
+      expect(lines.find((l) => l.startsWith('[exit-discipline] ON '))).toContain('floorArmN=1.5');
+      poller.onModuleDestroy();
+    } finally {
+      delete process.env.GATE_CLOSE_MIN;
+    }
+  });
+
   it('processes verdicts sequentially, oldest first, and a failing verdict does not stop the rest', async () => {
     setEnv({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });
     const { poller, repo, executor } = make();

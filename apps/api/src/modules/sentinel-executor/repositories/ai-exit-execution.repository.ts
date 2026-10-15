@@ -11,6 +11,7 @@ import {
 } from '../domain/auto-exit.types';
 import { istDayStartUtc } from '../domain/exit-order';
 import { MANUAL_VERDICT_PREFIX } from '../domain/manual-exit';
+import type { GateRecordV1 } from '../../exit-discipline/types';
 
 export interface PendingVerdict {
   id: string;
@@ -26,8 +27,11 @@ export type AiExitPatch = Partial<
     AiExitExecution,
     | 'exchange' | 'token' | 'side' | 'quantity' | 'productType' | 'orderType' | 'limitPrice'
     | 'reason' | 'brokerOrderId' | 'brokerMessage' | 'orderStatus' | 'marketOrderId'
+    // Exit discipline E5 (execution quality) — nullable observation columns.
+    | 'decisionLtp' | 'decisionAt' | 'orderLtp' | 'orderSentAt' | 'fillPrice' | 'fillQty' | 'fillAt'
+    | 'slippage' | 'latencyMs'
   >
-> & { status?: AiExitStatus; sessionSource?: SessionSource };
+> & { status?: AiExitStatus; sessionSource?: SessionSource; /** Exit discipline E7: the gate evaluation. */ gate?: GateRecordV1 };
 
 @Injectable()
 export class AiExitExecutionRepository {
@@ -73,7 +77,11 @@ export class AiExitExecutionRepository {
   }
 
   async update(id: string, patch: AiExitPatch): Promise<void> {
-    await this.prisma.aiExitExecution.update({ where: { id }, data: patch });
+    const { gate, ...rest } = patch;
+    await this.prisma.aiExitExecution.update({
+      where: { id },
+      data: gate === undefined ? rest : { ...rest, gate: gate as unknown as Prisma.InputJsonValue },
+    });
   }
 
   /**

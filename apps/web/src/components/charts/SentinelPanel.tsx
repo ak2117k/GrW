@@ -1,6 +1,8 @@
 import { Eye, AlertTriangle, ShieldCheck, HelpCircle, Moon } from 'lucide-react';
 import clsx from 'clsx';
 import type { SentinelPosition } from '@/hooks/useSentinelPositions';
+import type { SentinelTriggerRow } from '@/hooks/useSentinelTriggers';
+import { armedForTracker, armedTriggerLine } from './triggerView';
 import { agoLabel, overnightPlanCard, type OvernightPlanCard, type OvernightTone } from './overnightPlanView';
 
 export { agoLabel };
@@ -90,7 +92,14 @@ function OvernightPlan({ card }: { card: OvernightPlanCard }) {
  * Renders NOTHING when there are none — a chart of an instrument you do not
  * hold should look exactly as it did before this existed.
  */
-export default function SentinelPanel({ positions }: { positions: SentinelPosition[] }) {
+export default function SentinelPanel({
+  positions,
+  triggers = [],
+}: {
+  positions: SentinelPosition[];
+  /** The executor's price triggers (what WILL fire); optional — none = the panel as before. */
+  triggers?: SentinelTriggerRow[];
+}) {
   if (positions.length === 0) return null;
 
   return (
@@ -147,6 +156,15 @@ export default function SentinelPanel({ positions }: { positions: SentinelPositi
                     {v.invalidationPoint}
                   </p>
                 )}
+                {(() => {
+                  const armed = armedForTracker(triggers, p.trackerId);
+                  const line = armed ? armedTriggerLine(armed) : null;
+                  return line ? (
+                    <p className="mt-1 text-[11px] font-medium text-amber-400" title={armed?.verdictId}>
+                      {line}
+                    </p>
+                  ) : null;
+                })()}
               </>
             ) : (
               <p className="text-[var(--color-text-muted)]">

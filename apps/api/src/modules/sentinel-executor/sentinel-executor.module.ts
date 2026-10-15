@@ -16,6 +16,8 @@ import {
 } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
 import { ManualExitService } from './services/manual-exit.service';
+import { SentinelExitTriggerRepository } from './repositories/sentinel-exit-trigger.repository';
+import { TriggerWatchService } from './services/trigger-watch.service';
 import { SentinelExecutorController } from './controllers/sentinel-executor.controller';
 import { ExitGateRepository } from './repositories/exit-gate.repository';
 import { ExitGateService } from './services/exit-gate.service';
@@ -35,6 +37,10 @@ import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-disci
     OwnerBrokerSessionProvider,
     SentinelExitExecutor,
     SentinelExitPoller,
+    SentinelExitTriggerRepository,
+    // Price triggers (docs/superpowers/plans/2026-10-13-sentinel-price-triggers.md).
+    // Inert unless SENTINEL_TRIGGERS_ENABLED=true and the AI auto-exit is on.
+    TriggerWatchService,
     ManualExitService,
     PerUserBrokerSessionFactory,
     {

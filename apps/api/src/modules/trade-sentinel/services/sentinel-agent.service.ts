@@ -19,6 +19,7 @@ import {
   SENTINEL_OVERNIGHT_SYSTEM_PROMPT,
 } from '../prompts/sentinel-overnight-prompt';
 import type { OvernightPacket } from '../overnight/overnight-packet.types';
+import { parseExitTriggerProposal, type ExitTriggerProposal } from './exit-trigger-proposal';
 
 /**
  * The effort values the API accepts. Narrowed here rather than left as `string`
@@ -44,7 +45,35 @@ export interface Verdict {
   evidence: string[];
   invalidationPoint: string;
   reviewIn: number;
+  /**
+   * The level at which this trade is wrong, machine-readable (v6). Optional on
+   * the TYPE because pre-v6 replies and stored verdicts have no such key; the
+   * schema requires it, so a live v6 reply carries it (possibly null).
+   */
+  exitTrigger?: ExitTriggerProposal | null;
+  /** Set when the reply's exitTrigger was malformed; exitTrigger is then null. */
+  exitTriggerProblem?: string;
 }
+
+/**
+ * Nullable via `anyOf`, NOT `type: [...]` — see NULLABLE_PRICE in thesis.service.ts:
+ * type arrays are outside the structured-outputs subset.
+ */
+const EXIT_TRIGGER_SCHEMA = {
+  anyOf: [
+    { type: 'null' },
+    {
+      type: 'object',
+      properties: {
+        instrument: { type: 'string', enum: ['UNDERLYING', 'PREMIUM'] },
+        op: { type: 'string', enum: ['BELOW', 'ABOVE'] },
+        price: { type: 'number' },
+      },
+      required: ['instrument', 'op', 'price'],
+      additionalProperties: false,
+    },
+  ],
+} as const;
 
 /** Structured-output schema. `additionalProperties: false` and full `required` are mandatory. */
 export const VERDICT_SCHEMA = {
@@ -58,6 +87,7 @@ export const VERDICT_SCHEMA = {
     evidence: { type: 'array', items: { type: 'string' } },
     invalidationPoint: { type: 'string' },
     reviewIn: { type: 'integer' },
+    exitTrigger: EXIT_TRIGGER_SCHEMA,
   },
   required: [
     'verdict',
@@ -68,6 +98,7 @@ export const VERDICT_SCHEMA = {
     'evidence',
     'invalidationPoint',
     'reviewIn',
+    'exitTrigger',
   ],
   additionalProperties: false,
 } as const;
@@ -467,6 +498,17 @@ export class SentinelAgentService {
       throw new Error(`sentinel agent: reviewIn must be a positive number of seconds — rejected`);
     }
 
+    // Ruling R12: shape-checked here (the CLI cannot enforce the schema); a bad
+    // trigger never costs the verdict. An ABSENT key (pre-v6 reply) is left
+    // exactly as it was — no key is added.
+    const parsed = parseExitTriggerProposal(raw as Record<string, unknown>);
+    if (parsed.kind === 'proposal') v.exitTrigger = parsed.proposal;
+    else if (parsed.kind === 'none') v.exitTrigger = null;
+    else if (parsed.kind === 'malformed') {
+      v.exitTrigger = null;
+      v.exitTriggerProblem = parsed.problem;
+      this.logger.warn(`sentinel agent: exitTrigger ignored (${parsed.problem}) — verdict kept`);
+    }
     return v;
   }
 }

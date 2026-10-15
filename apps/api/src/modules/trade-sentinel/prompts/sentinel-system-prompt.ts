@@ -12,18 +12,24 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * v5 (from v4): the position.ownership line no longer says "nothing acts on your
  * verdict in this stage" — with the sentinel auto-exit, an EXIT_NOW may close the
  * real position. It now says so, independent of the owner's mode.
+ *
+ * v6 (from v5): price triggers. Every verdict carries "exitTrigger" — on HOLD and
+ * EXIT_ARMED the machine-readable level its invalidationPoint describes, which a
+ * tick watcher may execute without asking again — and the position.ownership
+ * line says so. The schema gained the exitTrigger property. No other line moves.
  */
-export const SENTINEL_PROMPT_VERSION = 'v5';
+export const SENTINEL_PROMPT_VERSION = 'v6';
 
 /**
  * The live prompt while MARKET_CUES_ENABLED is off: v2, word for word, EXCEPT the
  * v2.1 correction of the session.minutesToClose line (shared with v4) and the
- * v2.2 correction of the position.ownership line (shared with v5). With the
+ * v2.2 correction of the position.ownership line (shared with v5), and the v2.3
+ * exitTrigger rules and ownership line, shared with v6. With the
  * cues off the packet's macro blocks are the pre-cues ones too, so a live
  * verdict is judged exactly as before the cues existed — prompt, packet and
  * stamp. See {@link SENTINEL_SYSTEM_PROMPT_NO_CUES}.
  */
-export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2.2';
+export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2.3';
 
 /**
  * What actually goes on the verdict row.
@@ -78,6 +84,18 @@ export const SENTINEL_MODEL_ROUTINE = 'claude-sonnet-5';
 export const SENTINEL_EFFORT_TRIGGERED = 'high' as const;
 export const SENTINEL_EFFORT_ROUTINE = 'medium' as const;
 
+/** The v5 ownership line, kept so tests can prove v6 changed nothing else. */
+export const V5_OWNERSHIP_LINE =
+  '- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner\'s settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.';
+
+/** The v6 rules block, inserted after the "reviewIn" rule. Ends with a newline. */
+export const EXIT_TRIGGER_RULES = [
+  '- "exitTrigger" turns your invalidationPoint into a level a machine can watch. On HOLD and EXIT_ARMED give {"instrument", "op", "price"} for the price at which this trade is wrong — the same level your invalidationPoint describes — or null when there is no defensible level. On EXIT_NOW and ESCALATE give null; it is ignored.',
+  '- exitTrigger.instrument "UNDERLYING" compares price against position.underlyingLtp, the scale of structure and flow levels; "PREMIUM" compares it against position.ltp. Never put an underlying-scale level on PREMIUM or a premium on UNDERLYING. If position.underlyingLtp is unavailable, use PREMIUM or null.',
+  '- exitTrigger.op is the direction of the cross that proves the trade wrong: "BELOW" when price falling through the level hurts this position, "ABOVE" when price rising through it hurts. The level must not already be crossed, and it must protect the position — never a profit target.',
+  '- A later exitTrigger may only move the level closer to the current price; one that moves it further away is ignored, and null leaves an existing level in place.',
+].join('\n') + '\n';
+
 /**
  * The prompt describes the packet AS IT IS, field path by field path.
  *
@@ -118,7 +136,7 @@ Reading those fields:
 - money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
 - money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
 - SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
-- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position, and so may the exitTrigger of a HOLD or EXIT_ARMED verdict once price crosses it; ESCALATE never is.
 - thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
 - macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
 - macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
@@ -133,7 +151,7 @@ Rules for your answer:
 - Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
 - "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
 - "reviewIn" is how many seconds until you should be asked again.
-- Keep "reason" to one sentence a trader would recognise.`;
+${EXIT_TRIGGER_RULES}- Keep "reason" to one sentence a trader would recognise.`;
 
 
 /** The macro lines v3 added, and the single v2 line they replaced. */

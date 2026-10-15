@@ -26,6 +26,10 @@ import { ANTHROPIC_CLIENT, SentinelAgentService } from './services/sentinel-agen
 import { OiWallSnapshotService } from './services/oi-wall-snapshot.service';
 import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.service';
 import { SentinelRunnerService } from './services/sentinel-runner.service';
+import { TickSensorBook } from './services/tick-sensor-book';
+import { TickTripwireService } from './services/tick-tripwire.service';
+import { HubTickStream } from './adapters/hub-tick-stream.adapter';
+import { TICK_STREAM } from './ports/tick-stream.port';
 import { EngineOwnershipAdapter } from './adapters/engine-ownership.adapter';
 import { SentinelChartContextAdapter } from './adapters/chart-context.adapter';
 import { ClaudeCliTransport } from './adapters/claude-cli.transport';
@@ -170,6 +174,11 @@ import { SentinelOvernightService } from './services/sentinel-overnight.service'
     OiWallSnapshotService,
     SentinelCycleService,
     SentinelRunnerService,
+    // Part B — tick-driven price sensors. The hub is reached ONLY through this
+    // port binding (composition root), so the cycle's walk never reaches it.
+    TickSensorBook,
+    { provide: TICK_STREAM, useClass: HubTickStream },
+    TickTripwireService,
     // After-close (15:45 NSE / 23:45 MCX) and pre-open (08:30) reviews, and the
     // 09:10 pre-open check (NSE F&O, on the pre-open IEP). Shadow only; shares
     // the cycle's judge cap. Off unless SENTINEL_SHADOW_ENABLED.

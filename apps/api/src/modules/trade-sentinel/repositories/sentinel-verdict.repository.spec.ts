@@ -1,4 +1,4 @@
-import { SentinelVerdictRepository } from './sentinel-verdict.repository';
+import { SentinelVerdictRepository, type RecordVerdictInput } from './sentinel-verdict.repository';
 
 describe('SentinelVerdictRepository', () => {
   const create = jest.fn();
@@ -136,5 +136,36 @@ describe('SentinelVerdictRepository — the live cycle never mistakes an overnig
       orderBy: { createdAt: 'desc' },
       take: 1,
     });
+  });
+});
+
+describe('SentinelVerdictRepository — exitTrigger (price triggers)', () => {
+  // The file has no shared input builder; this is the minimal valid input.
+  const input = (): RecordVerdictInput => ({
+    userId: 'u1',
+    trackerId: 't1',
+    symbol: 'INFY',
+    verdict: 'HOLD',
+    confidence: 'high',
+    thesisStatus: 'INTACT',
+    recoveryAvailable: true,
+    reason: 'structure holding',
+    evidence: ['structure.nearestSupport'],
+    invalidationPoint: 'close below 1450',
+    reviewInSec: 300,
+    packet: { position: { symbol: 'INFY' } },
+    promptVersion: 'v6/t1',
+    triggeredBy: ['heartbeat'],
+    netPnl: 1200,
+    greenFloor: 1455,
+  });
+
+  it('writes exitTrigger only when given (omitted = SQL NULL; existing callers unchanged)', async () => {
+    const create = jest.fn().mockResolvedValue({});
+    const repo = new SentinelVerdictRepository({ sentinelVerdict: { create } } as never);
+    await repo.record({ ...input(), exitTrigger: { v: 1, problem: 'x' } });
+    expect(create.mock.calls[0][0].data.exitTrigger).toEqual({ v: 1, problem: 'x' });
+    await repo.record(input());
+    expect('exitTrigger' in create.mock.calls[1][0].data).toBe(false);
   });
 });

@@ -39,6 +39,8 @@ export interface RecordVerdictInput {
   triggeredBy: string[];
   netPnl: number;
   greenFloor: number | null;
+  /** The persisted exitTrigger proposal (price triggers). Omitted = NULL. */
+  exitTrigger?: Prisma.InputJsonValue;
 }
 
 /**
@@ -71,6 +73,7 @@ export class SentinelVerdictRepository {
         triggeredBy: input.triggeredBy satisfies Prisma.InputJsonValue,
         netPnl: input.netPnl,
         greenFloor: input.greenFloor,
+        ...(input.exitTrigger !== undefined ? { exitTrigger: input.exitTrigger } : {}),
       },
     });
   }

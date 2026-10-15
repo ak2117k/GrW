@@ -20,6 +20,8 @@ import {
 import type { RosterEntry } from './roster.service';
 import type { StoredThesis } from './context-packet.service';
 import { HEARTBEAT_INTERVAL_MS, type TripwireResult } from './tripwire.service';
+import { STORED_TRIGGER_FIXTURE } from './exit-trigger-proposal';
+import { TickSensorBook } from './tick-sensor-book';
 
 const USER = 'u1';
 
@@ -419,6 +421,8 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // The overnight review is a second scheduler-driven entry point: it judges
     // every open F&O position twice a day, so it is walked exactly like the runner.
     join(__dirname, 'sentinel-overnight.service.ts'),
+    // Part B: hub ticks wake the runner. A production entry point, so it is walked.
+    join(__dirname, 'tick-tripwire.service.ts'),
   ];
 
   /**
@@ -543,7 +547,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         'design:paramtypes',
         SentinelCycleService,
       ) ?? [];
-    expect(injected).toHaveLength(8);
+    expect(injected).toHaveLength(9); // 9th: the optional TickSensorBook (Part B, memory only)
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -2123,5 +2127,64 @@ describe('SentinelCycleService — final round: every job failure backs off, FIR
     const pass = await t.svc.startForUser(USER, at(60));
     expect(pass.pending).toBe(2); // both slots free again
     await pass.settled;
+  });
+});
+
+describe('SentinelCycleService — exitTrigger persistence (price triggers)', () => {
+  it('persists the proposal with the underlying the tick priced', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({
+      ltp: 212.5, underlyingLtp: 8951, underlyingLtpAt: '2026-10-13T16:59:58.000Z',
+      underlyingRef: { exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19NOV26FUT' },
+    }));
+    t.judge.mockResolvedValue({
+      verdict: 'EXIT_ARMED', confidence: 'medium', thesisStatus: 'WEAKENING', recoveryAvailable: true,
+      reason: 'r', evidence: ['money.netPnl'], invalidationPoint: 'loses 8930', reviewIn: 120,
+      exitTrigger: { instrument: 'UNDERLYING', op: 'BELOW', price: 8930 },
+    });
+
+    await t.svc.runForUser(USER);
+
+    expect(t.record.mock.calls[0][0].exitTrigger).toEqual(STORED_TRIGGER_FIXTURE);
+  });
+
+  it('a verdict without a trigger writes no exitTrigger key', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    await t.svc.runForUser(USER);
+    expect('exitTrigger' in t.record.mock.calls[0][0]).toBe(false);
+  });
+
+  it('EXIT_NOW never persists a trigger', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.judge.mockResolvedValue({
+      verdict: 'EXIT_NOW', confidence: 'high', thesisStatus: 'BROKEN', recoveryAvailable: false,
+      reason: 'r', evidence: ['money.netPnl'], invalidationPoint: 'x', reviewIn: 60,
+      exitTrigger: { instrument: 'PREMIUM', op: 'BELOW', price: 1 },
+    });
+    await t.svc.runForUser(USER);
+    expect('exitTrigger' in t.record.mock.calls[0][0]).toBe(false);
+  });
+});
+
+describe('SentinelCycleService — publishes tick-sensor context (Part B)', () => {
+  it('every evaluated position is published to the TickSensorBook; a closed one is pruned', async () => {
+    const t = makeSvc();
+    const book = new TickSensorBook();
+    const svc = new SentinelCycleService(
+      { build: t.build } as never, { evaluate: t.evaluate } as never, { build: t.buildPacket } as never,
+      { ensureFor: t.ensureFor } as never, { judge: t.judge, promptVersion: 'v' } as never,
+      { record: t.record, recentForTracker: t.recentForTracker } as never, { captureAndCompare: t.captureAndCompare } as never,
+      { tickFor: t.tickFor } as never, book,
+    );
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ contractRef: { exchange: 'NFO', token: '1', symbol: 'S' }, underlyingRef: { exchange: 'NSE', token: '99926000', symbol: 'NIFTY' } }));
+    await svc.runForUser(USER);
+    expect(book.forKey('NFO:1').map((c) => c.trackerId)).toEqual(['t1']);
+    t.build.mockResolvedValue([]);
+    await svc.runForUser(USER);
+    expect(book.forKey('NFO:1')).toEqual([]);
   });
 });

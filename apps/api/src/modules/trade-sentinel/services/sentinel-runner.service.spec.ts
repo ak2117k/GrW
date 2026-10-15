@@ -377,3 +377,32 @@ describe('SentinelRunnerService — OI snapshot retention', () => {
     expect(t.deleteMany).toHaveBeenCalled();
   });
 });
+
+describe('wakeForTick (Part B)', () => {
+  it('runs the ordinary sensor pass for that user when enabled', async () => {
+    const t = make(true);
+    t.svc.wakeForTick('u1', 'level-break on X');
+    await new Promise((r) => setImmediate(r));
+    expect(t.startForUser).toHaveBeenCalledWith('u1');
+  });
+
+  it('disabled → nothing', () => {
+    const t = make(false);
+    t.svc.wakeForTick('u1', 'x');
+    expect(t.startForUser).not.toHaveBeenCalled();
+  });
+
+  it('a pass already in flight for the user → no second pass, no warning spam', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = make(true);
+    const held = pending<typeof REPORT>();
+    t.runForUser.mockReturnValueOnce(held.promise);
+    const first = t.svc.runForUser('u1');
+    t.svc.wakeForTick('u1', 'x');
+    expect(t.startForUser).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+    held.resolve(REPORT);
+    await first;
+    warn.mockRestore();
+  });
+});

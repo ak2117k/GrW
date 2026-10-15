@@ -122,7 +122,9 @@ export class TickTripwireService implements OnModuleInit, OnModuleDestroy {
       if (!ctx.firing || was) continue;
       if (now - (this.lastWake.get(userId) ?? -Infinity) < WAKE_COOLDOWN_MS) continue;
       this.lastWake.set(userId, now);
-      this.runner.wakeForTick(userId, `${fires.map((f) => f.name).join(', ')} on ${ctx.symbol}`);
+      // The POSITION's exchange (contractKey is EXCHANGE:token) — the runner's session gate.
+      const exchange = ctx.contractKey.slice(0, ctx.contractKey.indexOf(':'));
+      this.runner.wakeForTick(userId, `${fires.map((f) => f.name).join(', ')} on ${ctx.symbol}`, exchange);
     }
   }
 }

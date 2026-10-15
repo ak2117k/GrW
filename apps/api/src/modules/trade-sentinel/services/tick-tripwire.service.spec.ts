@@ -34,7 +34,7 @@ describe('TickTripwireService', () => {
     const h = harness();
     h.book.upsert(seed());
     h.svc.onTick('u1', { key: 'NSE:99926000', ltp: 23990, at: 1 }, 10_000);
-    expect(h.runner.wakeForTick).toHaveBeenCalledWith('u1', 'level-break on NIFTY28OCT2624000CE');
+    expect(h.runner.wakeForTick).toHaveBeenCalledWith('u1', 'level-break on NIFTY28OCT2624000CE', 'NFO');
     h.svc.onTick('u1', { key: 'NSE:99926000', ltp: 23980, at: 2 }, 11_500);
     expect(h.runner.wakeForTick).toHaveBeenCalledTimes(1);
   });

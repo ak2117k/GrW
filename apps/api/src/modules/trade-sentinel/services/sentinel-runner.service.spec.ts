@@ -379,17 +379,35 @@ describe('SentinelRunnerService — OI snapshot retention', () => {
 });
 
 describe('wakeForTick (Part B)', () => {
+  const OPEN = new Date('2026-08-14T04:30:00Z'); // Fri 10:00 IST
   it('runs the ordinary sensor pass for that user when enabled', async () => {
     const t = make(true);
-    t.svc.wakeForTick('u1', 'level-break on X');
+    t.svc.wakeForTick('u1', 'level-break on X', 'NFO', OPEN);
     await new Promise((r) => setImmediate(r));
     expect(t.startForUser).toHaveBeenCalledWith('u1');
   });
 
   it('disabled → nothing', () => {
     const t = make(false);
-    t.svc.wakeForTick('u1', 'x');
+    t.svc.wakeForTick('u1', 'x', 'NFO', OPEN);
     expect(t.startForUser).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['NFO after the NSE close (19:00 IST)', 'NFO', new Date('2026-08-14T13:30:00Z')],
+    ['NFO on a Sunday', 'NFO', new Date('2026-08-16T06:00:00Z')],
+    ['MCX on its holiday morning', 'MCX', new Date('2026-10-20T05:30:00Z')],
+  ])('the position’s exchange is closed (%s) → no pass, same gate as the cron', (_l, ex, at) => {
+    const t = make(true);
+    t.svc.wakeForTick('u1', 'x', ex, at);
+    expect(t.startForUser).not.toHaveBeenCalled();
+  });
+
+  it('MCX evening while NSE is shut still wakes an MCX position', async () => {
+    const t = make(true);
+    t.svc.wakeForTick('u1', 'x', 'MCX', new Date('2026-10-20T13:30:00Z'));
+    await new Promise((r) => setImmediate(r));
+    expect(t.startForUser).toHaveBeenCalledWith('u1');
   });
 
   it('a pass already in flight for the user → no second pass, no warning spam', async () => {
@@ -398,7 +416,7 @@ describe('wakeForTick (Part B)', () => {
     const held = pending<typeof REPORT>();
     t.runForUser.mockReturnValueOnce(held.promise);
     const first = t.svc.runForUser('u1');
-    t.svc.wakeForTick('u1', 'x');
+    t.svc.wakeForTick('u1', 'x', 'NFO', OPEN);
     expect(t.startForUser).toHaveBeenCalledTimes(1);
     expect(warn).not.toHaveBeenCalled();
     held.resolve(REPORT);

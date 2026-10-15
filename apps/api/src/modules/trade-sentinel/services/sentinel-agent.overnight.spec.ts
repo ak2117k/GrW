@@ -1,5 +1,5 @@
 import { SentinelAgentService, type OvernightVerdict } from './sentinel-agent.service';
-import { NOISE_UNIT_ABSENT_REASON, absent, present, type ContextPacket } from './context-packet.service';
+import { absent, present, type ContextPacket } from './context-packet.service';
 import { SENTINEL_SYSTEM_PROMPT, SENTINEL_SYSTEM_PROMPT_NO_CUES } from '../prompts/sentinel-system-prompt';
 import {
   SENTINEL_OVERNIGHT_PROMPT_VERSION,
@@ -24,7 +24,7 @@ const live: ContextPacket = {
     entryTime: '2026-10-12T04:00:00.000Z',
     expiry: '2026-10-13',
   },
-  money: { grossPnl: -1500, charges: 90, netPnl: -1590, greenFloorPrice: 142.4, greenFloorArmed: false, floorBasis: 'fixed', mfe: 150, mae: 112 },
+  money: { grossPnl: -1500, charges: 90, netPnl: -1590, greenFloorPrice: 142.4, greenFloorArmed: false, mfe: 150, mae: 112 },
   thesis: present(
     { direction: 'LONG', reason: 'bought the 25000 retest', levelPrice: 25000, targetPrice: 25300, invalidation: 24900, source: 'INFERRED' },
     'agent inference',
@@ -35,7 +35,7 @@ const live: ContextPacket = {
     nearestSupport: present(25000, 'level book', AT),
     nearestResistance: present(25200, 'level book', AT),
   },
-  flow: { volumeRatio: absent('n/a'), oiWalls: absent('no options chain for this symbol, so no OI walls'), noiseUnit: absent(NOISE_UNIT_ABSENT_REASON) },
+  flow: { volumeRatio: absent('n/a'), oiWalls: absent('no options chain for this symbol, so no OI walls') },
   macro: { fiiDii: absent('stub'), sector: absent('stub'), globalCues: absent('stub'), realFactors: absent('none') },
   news: { headlines: absent('none'), freshCount: absent('none') },
   session: {

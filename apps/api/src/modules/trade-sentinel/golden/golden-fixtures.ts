@@ -29,7 +29,6 @@ import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk'
 import { SentinelAgentService, type OvernightVerdict, type Verdict } from '../services/sentinel-agent.service';
 import { ThesisService } from '../services/thesis.service';
 import {
-  NOISE_UNIT_ABSENT_REASON,
   absent,
   present,
   type ChartContextShim,
@@ -166,7 +165,6 @@ export const GOLDEN_PACKET: ContextPacket = {
     netPnl: 6080,
     greenFloorPrice: 1441,
     greenFloorArmed: true,
-    floorBasis: 'fixed',
     mfe: 1478,
     mae: 1396,
   },
@@ -194,7 +192,6 @@ export const GOLDEN_PACKET: ContextPacket = {
       'oi-wall.service',
       AT,
     ),
-    noiseUnit: absent(NOISE_UNIT_ABSENT_REASON),
   },
   macro: {
     fiiDii: absent('stub'),
@@ -245,7 +242,7 @@ const OVERNIGHT_LIVE: ContextPacket = {
     entryTime: '2026-10-12T04:00:00.000Z',
     expiry: '2026-10-13',
   },
-  money: { grossPnl: -1500, charges: 90, netPnl: -1590, greenFloorPrice: 142.4, greenFloorArmed: false, floorBasis: 'fixed', mfe: 150, mae: 112 },
+  money: { grossPnl: -1500, charges: 90, netPnl: -1590, greenFloorPrice: 142.4, greenFloorArmed: false, mfe: 150, mae: 112 },
   thesis: present(
     { direction: 'LONG', reason: 'bought the 25000 retest', levelPrice: 25000, targetPrice: 25300, invalidation: 24900, source: 'INFERRED' },
     'agent inference',
@@ -256,7 +253,7 @@ const OVERNIGHT_LIVE: ContextPacket = {
     nearestSupport: present(25000, 'level book', OAT),
     nearestResistance: present(25200, 'level book', OAT),
   },
-  flow: { volumeRatio: absent('n/a'), oiWalls: absent('no options chain for this symbol, so no OI walls'), noiseUnit: absent(NOISE_UNIT_ABSENT_REASON) },
+  flow: { volumeRatio: absent('n/a'), oiWalls: absent('no options chain for this symbol, so no OI walls') },
   macro: { fiiDii: absent('stub'), sector: absent('stub'), globalCues: absent('stub'), realFactors: absent('none') },
   news: { headlines: absent('none'), freshCount: absent('none') },
   session: {

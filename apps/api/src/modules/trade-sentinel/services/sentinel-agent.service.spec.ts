@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { APIConnectionError, RateLimitError } from '@anthropic-ai/sdk';
 import { SentinelAgentService, VERDICT_SCHEMA, type Verdict } from './sentinel-agent.service';
-import { NOISE_UNIT_ABSENT_REASON, absent, present, type ContextPacket } from './context-packet.service';
+import { absent, present, type ContextPacket } from './context-packet.service';
 import {
   SENTINEL_PROMPT_VERSION,
   SENTINEL_SYSTEM_PROMPT,
@@ -74,7 +74,8 @@ const base: ContextPacket = {
       'oi-wall.service',
       AT,
     ),
-    noiseUnit: absent(NOISE_UNIT_ABSENT_REASON),
+    // Exit discipline on (the default): the packet carries both discipline fields.
+    noiseUnit: absent('no hub 1-minute bars for this contract in the last 120 minutes (needs MARKET_HUB_ENABLED + HUB_CANDLES_ENABLED and a live feed slot)'),
   },
   macro: {
     fiiDii: absent('stub'),

@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { APIConnectionError, RateLimitError } from '@anthropic-ai/sdk';
-import { SentinelAgentService, type Verdict } from './sentinel-agent.service';
+import { SentinelAgentService, VERDICT_SCHEMA, type Verdict } from './sentinel-agent.service';
 import { absent, present, type ContextPacket } from './context-packet.service';
 import {
   SENTINEL_PROMPT_VERSION,
@@ -510,5 +510,49 @@ describe('SentinelAgentService', () => {
       // mentions is evidence the agent is never told it can see.
       expect(undocumented).toEqual([]);
     });
+  });
+});
+
+describe('exitTrigger (price triggers, plan Task 3)', () => {
+  const base = {
+    verdict: 'HOLD', confidence: 'medium', thesisStatus: 'INTACT', recoveryAvailable: true,
+    reason: 'holding above demand', evidence: ['money.netPnl'], invalidationPoint: 'loses 8930', reviewIn: 300,
+  };
+  const PACKET = { money: { netPnl: 10 } } as never;
+  const agentReplying = (obj: unknown) =>
+    new SentinelAgentService({
+      messages: {
+        create: jest.fn().mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(obj) }] }),
+      },
+    } as never);
+
+  it('the schema requires exitTrigger (last) and allows null through anyOf, not a type array', () => {
+    expect(VERDICT_SCHEMA.required[VERDICT_SCHEMA.required.length - 1]).toBe('exitTrigger');
+    const p = VERDICT_SCHEMA.properties.exitTrigger as unknown as { anyOf: Array<{ type: string }> };
+    expect(p.anyOf.map((s) => s.type)).toEqual(['null', 'object']);
+  });
+
+  it('keeps a valid trigger', async () => {
+    const v = await agentReplying({ ...base, exitTrigger: { instrument: 'UNDERLYING', op: 'BELOW', price: 8930 } }).judge(PACKET);
+    expect(v.exitTrigger).toEqual({ instrument: 'UNDERLYING', op: 'BELOW', price: 8930 });
+    expect(v.exitTriggerProblem).toBeUndefined();
+  });
+
+  it('keeps an explicit null', async () => {
+    const v = await agentReplying({ ...base, exitTrigger: null }).judge(PACKET);
+    expect(v.exitTrigger).toBeNull();
+  });
+
+  it('a pre-v6 reply with no exitTrigger key gains no key (golden results do not move)', async () => {
+    const v = await agentReplying(base).judge(PACKET);
+    expect(Object.prototype.hasOwnProperty.call(v, 'exitTrigger')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(v, 'exitTriggerProblem')).toBe(false);
+  });
+
+  it('a malformed trigger keeps the verdict, nulls the trigger and states the problem', async () => {
+    const v = await agentReplying({ ...base, exitTrigger: { instrument: 'UNDERLYING', op: 'BELOW', price: '8930' } }).judge(PACKET);
+    expect(v.verdict).toBe('HOLD');
+    expect(v.exitTrigger).toBeNull();
+    expect(v.exitTriggerProblem).toMatch(/price/);
   });
 });

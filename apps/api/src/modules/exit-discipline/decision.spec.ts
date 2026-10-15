@@ -1,7 +1,8 @@
 import { parseExitDisciplineConfig } from './config';
-import { bypassRecord, decideExit, gateSummary, isBlocking, istDate, lastHoldRef } from './decision';
+import { buildGateFacts, bypassRecord, decideExit, gateSummary, isBlocking, istDate, lastHoldRef } from './decision';
 import type { GateFacts } from './gate';
 import type { HistoryVerdict } from './persistence';
+import type { PacketFacts } from './packet-facts';
 
 const CFG = parseExitDisciplineConfig({});
 const NOW = new Date('2026-10-14T11:01:30Z');
@@ -82,5 +83,33 @@ describe('bypassRecord / isBlocking / gateSummary', () => {
     expect(s).toContain('floor 530.5');
     expect(s.length).toBeLessThanOrEqual(300);
     expect(s).not.toContain('\n');
+  });
+});
+
+describe('buildGateFacts', () => {
+  const PF = { symbol: 'CRUDEOIL17NOV269000CE', side: 'LONG', qty: 100, entryPrice: 521.9, ltp: 527.6, underlying: 9003,
+    invalidation: 8932, vwap: 9000, levelBookAtr15m: 13.5, noise: null, floor: { price: 524.85, armed: true, basis: 'fixed' },
+    netPnl: 509, charges: 61, expiry: '2026-10-14', builtAt: null, minutesToClose: 419, support: 8946, resistance: 9020 } as PacketFacts;
+  const ctx = { ltpNow: 527.1, productType: 'CARRYFORWARD', minutesToClose: 418, maxLossPerTrade: 2000, dailyLossLatched: false, history: HIST, now: NOW };
+
+  it('assembles facts: exposure, fresh ltp, worse-of P&L, expiry day, scaled N_u, last HOLD', () => {
+    const f = buildGateFacts(PF, ctx);
+    expect(f).toMatchObject({
+      exposure: 'BULLISH', positionSide: 'LONG', ltpNow: 527.1, underlying: 9003, invalidation: 8932, vwap: 9000,
+      nContract: null, floor: { price: 524.85, armed: true, basis: 'fixed' }, minutesToClose: 418,
+      productType: 'CARRYFORWARD', isExpiryDay: true, dailyLossLatched: false, maxLossPerTrade: 2000,
+      holdRef: { underlying: 8998, support: 8946 },
+    });
+    expect(f.nUnderlying).toBeCloseTo(13.5 / Math.sqrt(15), 6);
+    expect(f.netPnlNow).toBeCloseTo(Math.min(509, (527.1 - 521.9) * 100 - 61), 6);
+  });
+
+  it('overrides win (replay re-measures N and the floor)', () => {
+    const f = buildGateFacts(PF, { ...ctx, nContractOverride: 5, nUnderlyingOverride: 3, floorOverride: { price: 531, armed: true, basis: 'noise' } });
+    expect(f).toMatchObject({ nContract: 5, nUnderlying: 3, floor: { price: 531, basis: 'noise' } });
+  });
+
+  it('a packet minutesToClose is the fallback when the clock has none', () => {
+    expect(buildGateFacts(PF, { ...ctx, minutesToClose: null }).minutesToClose).toBe(419);
   });
 });

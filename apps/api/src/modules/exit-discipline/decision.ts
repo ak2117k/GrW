@@ -1,7 +1,9 @@
 import type { ExitDisciplineConfig } from './config';
 import { evaluateExitGate, type GateFacts } from './gate';
 import { evaluatePersistence, type HistoryVerdict } from './persistence';
-import type { GateFactsSnapshot, GateRecordV1 } from './types';
+import { exposureOf } from './exposure';
+import type { PacketFacts } from './packet-facts';
+import type { FloorBasis, GateFactsSnapshot, GateRecordV1 } from './types';
 
 const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
 /** `YYYY-MM-DD` in Asia/Kolkata. */
@@ -60,4 +62,34 @@ export function gateSummary(r: GateRecordV1): string {
     ? `${r.outcome}: ${r.justification} via ${passed.join('+')}${r.persistence ? ` persist=${r.persistence.rule ?? 'pending'}` : ''}`
     : `${r.outcome}: `;
   return `${head}${r.outcome === 'GATED_THESIS_INTACT' ? '' : '; '}${parts.join(', ')}`.slice(0, 300);
+}
+
+export function buildGateFacts(p: PacketFacts, ctx: {
+  ltpNow: number; productType: string | null; minutesToClose: number | null; maxLossPerTrade: number | null;
+  dailyLossLatched: boolean; history: HistoryVerdict[]; now: Date;
+  nContractOverride?: number | null; nUnderlyingOverride?: number | null;
+  floorOverride?: { price: number | null; armed: boolean; basis: FloorBasis };
+}): GateFacts {
+  const dir = p.side === 'LONG' ? 1 : -1;
+  const fresh = Number.isFinite(ctx.ltpNow) && p.charges !== null ? (ctx.ltpNow - p.entryPrice) * p.qty * dir - p.charges : null;
+  const netPnlNow = p.netPnl === null ? fresh : fresh === null ? p.netPnl : Math.min(p.netPnl, fresh);
+  const scaled = p.levelBookAtr15m !== null && p.levelBookAtr15m > 0 ? p.levelBookAtr15m / Math.sqrt(15) : null;
+  return {
+    exposure: p.symbol ? exposureOf(p.symbol, p.side) : null,
+    positionSide: p.side,
+    ltpNow: ctx.ltpNow,
+    underlying: p.underlying,
+    invalidation: p.invalidation,
+    holdRef: lastHoldRef(ctx.history),
+    vwap: p.vwap,
+    nContract: ctx.nContractOverride !== undefined ? ctx.nContractOverride : p.noise?.contract?.n ?? null,
+    nUnderlying: ctx.nUnderlyingOverride !== undefined ? ctx.nUnderlyingOverride : p.noise?.underlying?.n ?? scaled,
+    floor: ctx.floorOverride ?? p.floor,
+    netPnlNow,
+    maxLossPerTrade: ctx.maxLossPerTrade,
+    minutesToClose: ctx.minutesToClose ?? p.minutesToClose,
+    productType: ctx.productType,
+    isExpiryDay: p.expiry !== null && p.expiry === istDate(ctx.now),
+    dailyLossLatched: ctx.dailyLossLatched,
+  };
 }

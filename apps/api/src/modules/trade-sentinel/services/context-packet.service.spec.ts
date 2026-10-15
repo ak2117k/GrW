@@ -220,6 +220,17 @@ describe('ContextPacketService', () => {
       side: t.side,
     }).floorPrice as number;
 
+  it('never renders underlyingRef or contractRef into the packet (executor plumbing only)', async () => {
+    const packet = await svc.build(
+      entry,
+      { ...tick, underlyingRef: { exchange: 'MCX', token: '1', symbol: 'X' }, contractRef: { exchange: 'MCX', token: '2', symbol: 'Y' } },
+      null,
+    );
+    const text = JSON.stringify(packet);
+    expect(text).not.toContain('underlyingRef');
+    expect(text).not.toContain('contractRef');
+  });
+
   it('marks the stubbed sector factor unavailable, and fiiDii / globalCues as the cues switch — not a stub', async () => {
     const packet = await svc.build(entry, tick, null);
     expect(packet.macro.sector.available).toBe(false);

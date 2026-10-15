@@ -433,14 +433,15 @@ export class SentinelExitExecutor {
   /**
    * A read retry must finish its wait inside READ_RETRY_WINDOW_MS of the attempt
    * (bounds CLAIM_STALE_MS). Before anything was sent or cancelled, an AI
-   * attempt must also still be within the verdict's max age when its wait ends.
+   * (or PRICE_TRIGGER, aged from its fire) attempt must also still be within the
+   * verdict's max age when its wait ends.
    * Once a protective order was cancelled (or an order sent) age no longer
    * applies: giving up then leaves the position unprotected/uncertain.
    */
   private mayRetryRead(run: Run, wait: number): boolean {
     const elapsed = Math.max(0, Date.now() - run.startedMs);
     if (elapsed + wait > READ_RETRY_WINDOW_MS) return false;
-    if (run.trigger === 'AI' && !run.sent && !run.cancelSent) {
+    if (run.trigger !== 'MANUAL' && !run.sent && !run.cancelSent) {
       const age = run.now.getTime() - run.v.createdAt.getTime() + elapsed + wait;
       if (age > run.cfg.maxVerdictAgeSec * 1000) return false;
     }

@@ -2,7 +2,9 @@
 import { aiExitOrderTag, hasPriorAiExit, MANUAL_EXIT_TAG_PREFIX, AI_EXIT_TAG_PREFIX } from './exit-order';
 import { evaluateGuards, type GuardInput } from './guards';
 import { parseAutoExitConfig } from './auto-exit.config';
-import { isManualVerdictId, manualVerdictId, MANUAL_VERDICT_PREFIX, MANUAL_REASON_PREFIX } from './manual-exit';
+import {
+  isManualVerdictId, manualVerdictId, MANUAL_VERDICT_PREFIX, MANUAL_REASON_PREFIX, triggerIdOf, triggerOf, triggerVerdictId,
+} from './manual-exit';
 
 const NOW = new Date('2026-10-12T10:00:00Z');
 
@@ -67,5 +69,17 @@ describe('evaluateGuards — MANUAL trigger', () => {
 
   it('the AI trigger (default) is unchanged: disabled config is still DISABLED', () => {
     expect(evaluateGuards(input({ trigger: undefined }))).toEqual({ ok: false, reason: 'DISABLED' });
+  });
+});
+
+describe('price-trigger synthetic ids (ruling R13)', () => {
+  it('trg_<id> round-trips and is recognised as PRICE_TRIGGER', () => {
+    const v = triggerVerdictId('cm9trigger0000000000000001');
+    expect(v).toBe('trg_cm9trigger0000000000000001');
+    expect(triggerOf(v)).toBe('PRICE_TRIGGER');
+    expect(triggerIdOf(v)).toBe('cm9trigger0000000000000001');
+    expect(triggerIdOf('man_t1_1')).toBeNull();
+    expect(triggerOf('man_t1_1')).toBe('MANUAL');
+    expect(triggerOf('cm9verdict')).toBe('AI');
   });
 });

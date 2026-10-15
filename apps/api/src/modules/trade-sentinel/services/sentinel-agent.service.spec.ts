@@ -1,11 +1,14 @@
 import { Logger } from '@nestjs/common';
 import { APIConnectionError, RateLimitError } from '@anthropic-ai/sdk';
-import { SentinelAgentService, type Verdict } from './sentinel-agent.service';
+import { SentinelAgentService, VERDICT_SCHEMA, type Verdict } from './sentinel-agent.service';
 import { NOISE_UNIT_ABSENT_REASON, absent, present, type ContextPacket } from './context-packet.service';
 import {
   SENTINEL_PROMPT_VERSION,
   SENTINEL_SYSTEM_PROMPT,
   SENTINEL_SYSTEM_PROMPT_NO_CUES,
+  SENTINEL_PROMPT_VERSION_NO_CUES,
+  EXIT_TRIGGER_RULES,
+  V5_OWNERSHIP_LINE,
 } from '../prompts/sentinel-system-prompt';
 import { THESIS_PROMPT_VERSION } from '../prompts/thesis-prompt';
 
@@ -131,9 +134,9 @@ describe('SentinelAgentService', () => {
     // The literal, not only the composition — an expectation built purely from
     // the constants under test would still pass if both were empty strings.
     // No config here = market cues off = the pre-cues live prompt, unchanged.
-    expect(svc.promptVersion).toBe('v2.2/t1');
+    expect(svc.promptVersion).toBe('v2.3/t1');
     const on = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'true' : undefined) } as never);
-    expect(on.promptVersion).toBe('v5/t1');
+    expect(on.promptVersion).toBe('v6/t1');
     expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');
@@ -174,24 +177,28 @@ describe('SentinelAgentService', () => {
   it.each([
     ['cues on', SENTINEL_SYSTEM_PROMPT],
     ['cues off', SENTINEL_SYSTEM_PROMPT_NO_CUES],
-  ])('says truthfully that an EXIT_NOW may be executed automatically, and nothing else is (%s)', (_label, prompt) => {
+  ])('says truthfully that an EXIT_NOW, or a HOLD/EXIT_ARMED exitTrigger once crossed, may be executed automatically; ESCALATE never is (%s)', (_label, prompt) => {
     expect(prompt).not.toMatch(/nothing acts on your verdict/);
     const line = prompt.split('\n').find((l) => l.startsWith('- position.ownership')) ?? '';
     expect(line).toContain('Judge the trade the same way either way.');
-    expect(line).toContain("Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.");
+    expect(line).toContain("Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position, and so may the exitTrigger of a HOLD or EXIT_ARMED verdict once price crosses it; ESCALATE never is.");
   });
 
   it('the flag-off prompt IS the v2 text from main except the corrected minutesToClose and ownership lines', () => {
     // Hash of SENTINEL_SYSTEM_PROMPT as shipped at 9095047 (v2, 5562 chars).
     // Putting the old lines back must reproduce it byte for byte, so the ONLY
-    // changes v2 -> v2.2 are those two corrections (v2.1: minutesToClose, v2.2: ownership).
+    // changes v2 -> v2.3 are those two corrections plus the v2.3 exitTrigger block
+    // (v2.1: minutesToClose, v2.2/v2.3: ownership, v2.3: exitTrigger rules).
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { createHash } = require('crypto') as typeof import('crypto');
     const line = SENTINEL_SYSTEM_PROMPT_NO_CUES.split('\n').find((l) => l.startsWith('- session.minutesToClose'));
     expect(line).toBeDefined();
     const own = SENTINEL_SYSTEM_PROMPT_NO_CUES.split('\n').find((l) => l.startsWith('- position.ownership'));
     expect(own).toBeDefined();
-    const restored = SENTINEL_SYSTEM_PROMPT_NO_CUES.replace(line as string, OLD_MTC_LINE).replace(own as string, OLD_OWNERSHIP_LINE);
+    const restored = SENTINEL_SYSTEM_PROMPT_NO_CUES
+      .replace(EXIT_TRIGGER_RULES, '')
+      .replace(line as string, OLD_MTC_LINE)
+      .replace(own as string, OLD_OWNERSHIP_LINE);
     expect(restored).toHaveLength(5562);
     expect(createHash('sha256').update(restored, 'utf8').digest('hex')).toBe(
       '084d0a1422f2bdba2f10c1d19bd70dde7c18459461fb0122b7f055c01a3c16ad',
@@ -217,12 +224,12 @@ describe('SentinelAgentService', () => {
     expect(line).toMatch(/before the open/i);
   });
 
-  it('with market cues on, sends the v5 prompt and stamps v5', async () => {
+  it('with market cues on, sends the v6 prompt and stamps v6', async () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const on = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'TRUE' : undefined) } as never);
     await on.judge(packet());
     expect(c.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT);
-    expect(on.promptVersion).toBe('v5/t1');
+    expect(on.promptVersion).toBe('v6/t1');
   });
 
   it('sends the packet as the user turn and caches the system prompt', async () => {
@@ -512,5 +519,78 @@ describe('SentinelAgentService', () => {
       // mentions is evidence the agent is never told it can see.
       expect(undocumented).toEqual([]);
     });
+  });
+});
+
+describe('exitTrigger (price triggers, plan Task 3)', () => {
+  const base = {
+    verdict: 'HOLD', confidence: 'medium', thesisStatus: 'INTACT', recoveryAvailable: true,
+    reason: 'holding above demand', evidence: ['money.netPnl'], invalidationPoint: 'loses 8930', reviewIn: 300,
+  };
+  const PACKET = { money: { netPnl: 10 } } as never;
+  const agentReplying = (obj: unknown) =>
+    new SentinelAgentService({
+      messages: {
+        create: jest.fn().mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(obj) }] }),
+      },
+    } as never);
+
+  it('the schema requires exitTrigger (last) and allows null through anyOf, not a type array', () => {
+    expect(VERDICT_SCHEMA.required[VERDICT_SCHEMA.required.length - 1]).toBe('exitTrigger');
+    const p = VERDICT_SCHEMA.properties.exitTrigger as unknown as { anyOf: Array<{ type: string }> };
+    expect(p.anyOf.map((s) => s.type)).toEqual(['null', 'object']);
+  });
+
+  it('keeps a valid trigger', async () => {
+    const v = await agentReplying({ ...base, exitTrigger: { instrument: 'UNDERLYING', op: 'BELOW', price: 8930 } }).judge(PACKET);
+    expect(v.exitTrigger).toEqual({ instrument: 'UNDERLYING', op: 'BELOW', price: 8930 });
+    expect(v.exitTriggerProblem).toBeUndefined();
+  });
+
+  it('keeps an explicit null', async () => {
+    const v = await agentReplying({ ...base, exitTrigger: null }).judge(PACKET);
+    expect(v.exitTrigger).toBeNull();
+  });
+
+  it('a pre-v6 reply with no exitTrigger key gains no key (golden results do not move)', async () => {
+    const v = await agentReplying(base).judge(PACKET);
+    expect(Object.prototype.hasOwnProperty.call(v, 'exitTrigger')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(v, 'exitTriggerProblem')).toBe(false);
+  });
+
+  it('a malformed trigger keeps the verdict, nulls the trigger and states the problem', async () => {
+    const v = await agentReplying({ ...base, exitTrigger: { instrument: 'UNDERLYING', op: 'BELOW', price: '8930' } }).judge(PACKET);
+    expect(v.verdict).toBe('HOLD');
+    expect(v.exitTrigger).toBeNull();
+    expect(v.exitTriggerProblem).toMatch(/price/);
+  });
+});
+
+describe('prompt v6 / v2.3 (price triggers)', () => {
+  /** SENTINEL_SYSTEM_PROMPT at v5 (7032 chars), recorded in Task 4 Step 1. */
+  const V5_SHA256 = '74cde747d42359970a85810953e52b10160e08117591b6760011b280928c8b87';
+
+  it.each([
+    ['cues on', SENTINEL_SYSTEM_PROMPT],
+    ['cues off', SENTINEL_SYSTEM_PROMPT_NO_CUES],
+  ])('%s: carries the exitTrigger rules exactly once and the corrected ownership line', (_l, prompt) => {
+    expect(prompt.split(EXIT_TRIGGER_RULES)).toHaveLength(2);
+    expect(prompt).not.toContain(V5_OWNERSHIP_LINE);
+    const own = prompt.split('\n').find((l) => l.startsWith('- position.ownership')) ?? '';
+    expect(own).toMatch(/exitTrigger/);
+    expect(own).toMatch(/ESCALATE never is/);
+  });
+
+  it('v6 differs from v5 ONLY by the rules block and the ownership line', () => {
+    const own = SENTINEL_SYSTEM_PROMPT.split('\n').find((l) => l.startsWith('- position.ownership')) as string;
+    const v5 = SENTINEL_SYSTEM_PROMPT.replace(EXIT_TRIGGER_RULES, '').replace(own, V5_OWNERSHIP_LINE);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { createHash } = require('crypto') as typeof import('crypto');
+    expect(createHash('sha256').update(v5, 'utf8').digest('hex')).toBe(V5_SHA256);
+  });
+
+  it('the stamps moved', () => {
+    expect(SENTINEL_PROMPT_VERSION).toBe('v6');
+    expect(SENTINEL_PROMPT_VERSION_NO_CUES).toBe('v2.3');
   });
 });

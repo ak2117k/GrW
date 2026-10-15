@@ -75,7 +75,9 @@ export class ExitGateService {
         minutesToClose: this.clock.minutesToClose(live.exchange, live.now),
         maxLossPerTrade: ctx.maxLossPerTrade, dailyLossLatched: ctx.dailyLossLatched, history: ctx.history, now: live.now,
       });
-      return decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg: this.cfg, now: live.now });
+      const record = decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg: this.cfg, now: live.now });
+      if (record.outcome === 'BYPASS') this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${record.error ?? record.bypassReason}`);
+      return record;
     } catch (err) {
       this.logger.warn(`[exit-gate] evaluation threw — failing OPEN: ${errText(err)}`);
       return bypassRecord('FACTS_UNREADABLE', this.cfg, live.now, errText(err));

@@ -84,6 +84,18 @@ describe('bypassRecord / isBlocking / gateSummary', () => {
     expect(s.length).toBeLessThanOrEqual(300);
     expect(s).not.toContain('\n');
   });
+  it('no thesis or floor clause measurable (e.g. no underlying LTP) ⇒ BYPASS FACTS_UNREADABLE, never blocking (Open Question 1: fail open)', () => {
+    const r = decideExit({ facts: { ...FACTS, underlying: null }, current: CUR, history: HIST, cfg: CFG, now: NOW });
+    expect(r).toMatchObject({ outcome: 'BYPASS', bypassReason: 'FACTS_UNREADABLE', justification: null, persistence: null });
+    expect(r.error).toMatch(/no thesis or floor clause/);
+    expect(r.facts).toMatchObject({ underlying: null });
+    expect(r.clauses.length).toBeGreaterThan(0);
+    expect(isBlocking(r)).toBe(false);
+  });
+  it('one measurable thesis clause that holds ⇒ still GATED (the gate may block when it can see)', () => {
+    const r = decideExit({ facts: { ...FACTS, holdRef: null, vwap: null }, current: CUR, history: HIST, cfg: CFG, now: NOW });
+    expect(r.outcome).toBe('GATED_THESIS_INTACT');
+  });
   it('rounds N to 2 dp in the display only — the stored facts keep full precision', () => {
     const facts = { ...FACTS, nContract: 1.23456789, nUnderlying: 3.4641016151377544 };
     const r = decideExit({ facts, current: CUR, history: HIST, cfg: CFG, now: NOW });

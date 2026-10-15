@@ -37,7 +37,20 @@ export function decideExit(i: {
   if (!i.cfg.enabled) return bypassRecord('DISABLED', i.cfg, i.now);
   const g = evaluateExitGate(i.facts, i.cfg);
   const base = { v: 1 as const, justification: g.justification, clauses: g.clauses, facts: i.facts, cfg: cfgOf(i.cfg), evaluatedAt: i.now.toISOString() };
-  if (!g.justified) return { ...base, outcome: 'GATED_THESIS_INTACT', persistence: null };
+  if (!g.justified) {
+    // Fail OPEN when the gate cannot see: with no thesis or floor clause measurable
+    // (no underlying LTP, no exposure, no invalidation/HOLD/VWAP), "thesis intact" is
+    // not a finding, and blocking would hold every non-hard-risk AI exit — a
+    // collapsing premium included — on a data gap. Same rule as unreadable facts
+    // (Open Question 1); the clauses and facts stay on the record for the audit.
+    if (g.clauses.filter((c) => !c.id.startsWith('HARD_')).every((c) => c.pass === null)) {
+      return {
+        ...base, outcome: 'BYPASS', bypassReason: 'FACTS_UNREADABLE', persistence: null,
+        error: 'no thesis or floor clause measurable (underlying, invalidation, HOLD level, VWAP)',
+      };
+    }
+    return { ...base, outcome: 'GATED_THESIS_INTACT', persistence: null };
+  }
   const p = evaluatePersistence({ current: i.current, history: i.history, bypass: g.hardRisk || g.thesisClearMargin, cfg: i.cfg });
   return { ...base, outcome: p.confirmed ? 'PASS' : 'AWAITING_CONFIRMATION', persistence: p };
 }

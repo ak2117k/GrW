@@ -279,10 +279,13 @@ export function previousJudged(
  */
 export function storedFloorArmed(last: { packet?: unknown } | undefined | null, entryPrice?: number): boolean {
   const packet = last?.packet as
-    | { position?: { entryPrice?: unknown }; money?: { greenFloorArmed?: unknown } }
+    | { position?: { entryPrice?: unknown }; money?: { greenFloorArmed?: unknown; floorBasis?: unknown } }
     | undefined;
   const storedEntry = packet?.position?.entryPrice;
   if (entryPrice !== undefined && typeof storedEntry === 'number' && storedEntry !== entryPrice) return false;
+  // Exit discipline: with floorBasis 'noise' the flag is the NOISE floor's arming, not
+  // the ₹150 latch's — never evidence for the fixed floor (the mirror of storedNoiseFloor).
+  if (packet?.money?.floorBasis === 'noise') return false;
   return packet?.money?.greenFloorArmed === true;
 }
 

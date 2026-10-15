@@ -971,6 +971,15 @@ describe('storedFloorArmed', () => {
   ])('given the current entry price, reads a packet at %s as %s', (_label, packet, expected) => {
     expect(storedFloorArmed({ packet }, 1.4)).toBe(expected);
   });
+
+  it.each([
+    ['a noise-basis armed packet (the NOISE floor armed, not the ₹150 latch)', { money: { greenFloorArmed: true, floorBasis: 'noise' } }, false],
+    ['a fixed-basis armed packet', { money: { greenFloorArmed: true, floorBasis: 'fixed' } }, true],
+  ])('exit discipline: reads %s as %s — the fixed latch never inherits the noise floor’s arming', (_label, packet, expected) => {
+    // Otherwise a noise floor armed early (1.5 N < ₹150) and a later N gap would show the
+    // FIXED floor armed at breakeven + ₹150 — a price the trade never reached, already breached.
+    expect(storedFloorArmed({ packet }, 1.4)).toBe(expected);
+  });
 });
 
 describe('withCashUnderlying', () => {

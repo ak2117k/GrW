@@ -26,8 +26,13 @@ export type AiExitPatch = Partial<
     AiExitExecution,
     | 'exchange' | 'token' | 'side' | 'quantity' | 'productType' | 'orderType' | 'limitPrice'
     | 'reason' | 'brokerOrderId' | 'brokerMessage' | 'orderStatus' | 'marketOrderId'
+    // Exit discipline (E5 execution quality, E7 gate record).
+    | 'decisionLtp' | 'decisionAt' | 'orderLtp' | 'orderSentAt' | 'fillPrice' | 'fillQty' | 'fillAt' | 'slippage' | 'latencyMs'
   >
-> & { status?: AiExitStatus; sessionSource?: SessionSource };
+> & { status?: AiExitStatus; sessionSource?: SessionSource; gate?: Prisma.InputJsonValue };
+
+/** A live exit whose order was sent but whose fill has not been seen yet (E5 settle sweep). */
+export type PlacedAwaitingFill = Pick<AiExitExecution, 'id' | 'userId' | 'verdictId' | 'symbol' | 'brokerOrderId' | 'createdAt'>;
 
 @Injectable()
 export class AiExitExecutionRepository {
@@ -179,6 +184,25 @@ export class AiExitExecutionRepository {
       data: { status: 'FAILED', reason: 'INTERRUPTED' },
     });
     return r.count;
+  }
+
+  /** E5: live PLACED rows with a broker order id since `since`, oldest first. */
+  placedAwaitingFill(since: Date, limit = 20): Promise<PlacedAwaitingFill[]> {
+    return this.prisma.aiExitExecution.findMany({
+      where: { status: 'PLACED', mode: 'live', createdAt: { gte: since }, brokerOrderId: { not: null } },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+      select: { id: true, userId: true, verdictId: true, symbol: true, brokerOrderId: true, createdAt: true },
+    });
+  }
+
+  /**
+   * E5: settle a row ONLY while it is still PLACED (the executor, a manual
+   * attempt or an earlier sweep may have moved it). True when it was moved.
+   */
+  async settlePlaced(id: string, patch: AiExitPatch): Promise<boolean> {
+    const r = await this.prisma.aiExitExecution.updateMany({ where: { id, status: 'PLACED' }, data: patch });
+    return r.count > 0;
   }
 
   listForUser(userId: string, limit: number): Promise<AiExitExecution[]> {

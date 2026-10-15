@@ -212,4 +212,25 @@ describe('manual exits (owner Exit button)', () => {
     await repo.findById('row1');
     expect(p.aiExitExecution.findUnique).toHaveBeenLastCalledWith({ where: { id: 'row1' } });
   });
+
+  it('placedAwaitingFill (E5): live PLACED rows with a broker order id since the given time, oldest first', async () => {
+    const p = fakePrisma();
+    const since = new Date('2026-10-13T18:30:00Z');
+    await new AiExitExecutionRepository(p as never).placedAwaitingFill(since);
+    expect(p.aiExitExecution.findMany).toHaveBeenCalledWith({
+      where: { status: 'PLACED', mode: 'live', createdAt: { gte: since }, brokerOrderId: { not: null } },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+      select: { id: true, userId: true, verdictId: true, symbol: true, brokerOrderId: true, createdAt: true },
+    });
+  });
+
+  it('settlePlaced (E5) only moves a row that is STILL PLACED, and says whether it did', async () => {
+    const p = fakePrisma();
+    const repo = new AiExitExecutionRepository(p as never);
+    p.aiExitExecution.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    await expect(repo.settlePlaced('r1', { status: 'FILLED', fillPrice: 1 })).resolves.toBe(true);
+    await expect(repo.settlePlaced('r1', { status: 'FILLED', fillPrice: 1 })).resolves.toBe(false);
+    expect(p.aiExitExecution.updateMany).toHaveBeenCalledWith({ where: { id: 'r1', status: 'PLACED' }, data: { status: 'FILLED', fillPrice: 1 } });
+  });
 });

@@ -924,3 +924,56 @@ describe('SentinelExitExecutor — unanswered broker reads are retried, orders n
     expect(h.patches().some((p) => p.reason === 'ORDER_UNCERTAIN')).toBe(false);
   });
 });
+
+describe('SentinelExitExecutor — fill capture (E5)', () => {
+  const COMPLETE = env([{ orderid: 'O1', status: 'complete', averageprice: '50.10', filledshares: '100', exchorderupdatetime: '12-Oct-2026 15:30:04', symboltoken: '445566', exchange: 'MCX' }]);
+
+  it('a complete order is FILLED even while the positions read still lags (the PLACED-forever bug)', async () => {
+    const h = harness({ books: [env([]), COMPLETE], positions: [env([posRow('100')]), env([posRow('100')])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.lastPatch()).toEqual(expect.objectContaining({
+      status: 'FILLED', orderStatus: 'complete', fillPrice: 50.1, fillQty: 100, fillAt: new Date('2026-10-12T10:00:04Z'),
+    }));
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('a complete order and an unanswered positions read is still FILLED from the order book', async () => {
+    const h = harness({ books: [env([]), COMPLETE], positions: [env([posRow('100')]), {}] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+  });
+
+  it('records orderLtp with the plan and orderSentAt with PLACED', async () => {
+    const h = harness({ books: [env([]), COMPLETE] });
+    await h.ex.process(V, LIVE, NOW);
+    expect(h.patches()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ quantity: 100, orderLtp: 50.25 }),
+      expect.objectContaining({ status: 'PLACED', orderSentAt: expect.any(Date) }),
+    ]));
+  });
+
+  it('dry-run records the order LTP too (nothing sent, no orderSentAt)', async () => {
+    const h = harness();
+    await h.ex.process(V, DRY_MCX_UNITS, NOW);
+    expect(h.patches()).toEqual(expect.arrayContaining([expect.objectContaining({ quantity: 100, orderLtp: 50.25 })]));
+    expect(h.patches().some((p) => p.orderSentAt)).toBe(false);
+  });
+
+  it('flat positions with a fill in the book carries the fill too', async () => {
+    const h = harness({ books: [env([]), env([{ orderid: 'O1', status: 'open' }])], positions: [env([posRow('100')]), env([posRow('0')])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'FILLED', orderStatus: 'open' }));
+  });
+
+  it('still open after 10 s ⇒ left PLACED (the settle sweep finishes it)', async () => {
+    const h = harness({ books: [env([]), env([{ orderid: 'O1', status: 'open' }])], positions: [env([posRow('100')]), env([posRow('100')])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'PLACED' });
+    expect(h.patches().some((p) => p.status === 'FILLED')).toBe(false);
+  });
+
+  it('a rejected placement settled from the book carries orderSentAt (an order WAS sent)', async () => {
+    const h = harness({ place: [{ orderId: '', status: 'REJECTED', message: 'Insufficient margin' }], books: [env([]), env([])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'REJECTED', reason: 'BROKER_REJECTED' });
+    expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'REJECTED', orderSentAt: expect.any(Date) }));
+  });
+});

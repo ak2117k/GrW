@@ -15,6 +15,7 @@ import {
   SentinelExitExecutor,
 } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
+import { ExitFillSettler } from './services/exit-fill-settler.service';
 import { ManualExitService } from './services/manual-exit.service';
 import { SentinelExecutorController } from './controllers/sentinel-executor.controller';
 
@@ -32,6 +33,7 @@ import { SentinelExecutorController } from './controllers/sentinel-executor.cont
     OwnerBrokerSessionProvider,
     SentinelExitExecutor,
     SentinelExitPoller,
+    ExitFillSettler,
     ManualExitService,
     PerUserBrokerSessionFactory,
     {

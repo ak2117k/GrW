@@ -15,7 +15,6 @@ import {
   protectiveOrdersFor,
   type ProtectiveOrder,
   aiExitOrderTag,
-  findOrder,
   findOrderByTag,
   hasOpenOrderFor,
   hasPriorAiExit,
@@ -33,10 +32,12 @@ import {
   READ_RETRY_WINDOW_MS,
   TAG_LOOKUP_DELAY_MS,
 } from '../domain/claim-timing';
+import { findOrderFill, type OrderFill } from '../domain/exit-fill';
 import { evaluateGuards } from '../domain/guards';
 import type { ExitTrigger } from '../domain/manual-exit';
 import {
   AiExitExecutionRepository,
+  type AiExitPatch,
   type PendingVerdict,
 } from '../repositories/ai-exit-execution.repository';
 import { FeedSessionNotReadyError, NoFeedSessionError, OwnerBrokerSessionProvider } from './owner-broker-session.provider';
@@ -70,6 +71,8 @@ interface Run {
   cfg: AutoExitConfig;
   inst: Inst;
   sent: boolean;
+  /** E5: wall clock immediately before the (last) placeOrder call; null until one is sent. */
+  sentAt: Date | null;
   cancelSent: boolean;
   trigger: ExitTrigger;
   /** The `now` the guards judged the verdict's age against. */
@@ -176,7 +179,7 @@ export class SentinelExitExecutor {
       return this.finish(id, v, 'FAILED', 'INSTRUMENT_READ', { brokerMessage: errText(err) });
     }
 
-    const run: Run = { id, v, cfg, inst, sent: false, cancelSent: false, trigger, now, startedMs: Date.now() };
+    const run: Run = { id, v, cfg, inst, sent: false, sentAt: null, cancelSent: false, trigger, now, startedMs: Date.now() };
 
     // 3–7. BROKER — one session lease, tier chosen once (ruling R1).
     let outcome: AiExitOutcome;
@@ -189,7 +192,7 @@ export class SentinelExitExecutor {
             ? this.finish(id, v, 'SKIPPED', first.reason)
             : this.finish(id, v, 'FAILED', first.reason, first.detail ? { brokerMessage: first.detail } : {});
         }
-        await this.recordPlan(id, first.order);
+        await this.recordPlan(id, first.order, first.ltp);
 
         if (cfg.mode === 'dry-run') {
           const sell = `${first.order.side} ${first.order.quantity} ${first.order.symbol} (${first.order.positionType}) at MARKET`;
@@ -211,7 +214,7 @@ export class SentinelExitExecutor {
           const c = await this.cancelProtective(s, t, run, first.orders);
           if (c.kind === 'stop') return c.outcome;
           pre = c.pre;
-          await this.recordPlan(id, pre.order);
+          await this.recordPlan(id, pre.order, pre.ltp);
         } else {
           pre = first;
         }
@@ -220,7 +223,7 @@ export class SentinelExitExecutor {
         const r = await this.place(s, run, o, 'M');
         this.logger.log(`[ai-exit] LIVE MARKET ${o.side} ${o.quantity} ${o.symbol} → ${r.status} ${r.orderId || ''} (${r.message}) — verdict ${v.id}`);
         if (r.status === 'PLACED' && r.orderId) {
-          await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message });
+          await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message, orderSentAt: run.sentAt ?? undefined });
           return this.confirm(s, run, o, r.orderId, 'M');
         }
         return this.settleUnplaced(s, run, o, r, 'M');
@@ -240,16 +243,19 @@ export class SentinelExitExecutor {
     return this.flagUnprotected(run, outcome);
   }
 
-  private recordPlan(id: string, o: OrderRequest): Promise<void> {
+  /** The planned order, with the positions LTP the pre-check saw (E5 `orderLtp`). */
+  private recordPlan(id: string, o: OrderRequest, ltp: number): Promise<void> {
     return this.repo.update(id, {
       exchange: o.exchange, token: o.token, side: o.side, quantity: o.quantity,
       productType: o.positionType, orderType: 'MARKET',
+      ...(Number.isFinite(ltp) && ltp > 0 ? { orderLtp: ltp } : {}),
     });
   }
 
   /** The ONLY call site of placeOrder. Marks the run as sent before the call. */
   private place(s: UserBrokerSession, run: Run, o: OrderRequest, leg: 'M' | 'L'): Promise<ClassifiedPlacement> {
     run.sent = true;
+    run.sentAt = new Date();
     return s.placeOrderClassified(o, aiExitOrderTag(run.v.id, leg, run.trigger));
   }
 
@@ -358,16 +364,20 @@ export class SentinelExitExecutor {
     s: UserBrokerSession, run: Run, o: OrderRequest, r: ClassifiedPlacement, leg: 'M' | 'L',
   ): Promise<AiExitOutcome> {
     const { id, v } = run;
+    const sentAt = { orderSentAt: run.sentAt ?? undefined };
     const definitive = r.status === 'REJECTED';
     if (!definitive) await this.sleep(TAG_LOOKUP_DELAY_MS);
     // A read retry here is safe: it only looks for our tag; nothing is ever re-sent.
     const { rows: book } = await this.readRows(run, 'order book', () => s.getOrderBookEnvelope());
-    if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
+    if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message, ...sentAt });
     const mine = findOrderByTag(book, aiExitOrderTag(v.id, leg, run.trigger));
 
     if (mine && mine.status !== 'rejected' && mine.status !== 'cancelled') {
       this.logger.warn(`[ai-exit] ${o.symbol} placement answer was "${r.message}" but order ${mine.orderId || '?'} (${mine.status || 'unknown'}) carries our tag — treating as PLACED`);
-      await this.repo.update(id, { status: 'PLACED', brokerOrderId: mine.orderId || null, brokerMessage: r.message, orderStatus: mine.status || null });
+      await this.repo.update(id, {
+        status: 'PLACED', brokerOrderId: mine.orderId || null, brokerMessage: r.message, orderStatus: mine.status || null,
+        orderSentAt: run.sentAt ?? undefined,
+      });
       return mine.orderId ? this.confirm(s, run, o, mine.orderId, leg) : { status: 'PLACED' };
     }
     if (mine) {
@@ -377,7 +387,7 @@ export class SentinelExitExecutor {
         return this.fallback(s, run, o, mine.orderId || null);
       }
       return this.finish(id, v, 'REJECTED', mine.status === 'cancelled' ? 'CANCELLED' : 'BROKER_REJECTED', {
-        orderStatus: mine.status, brokerMessage: text,
+        orderStatus: mine.status, brokerMessage: text, ...sentAt,
       });
     }
     if (definitive) {
@@ -385,9 +395,9 @@ export class SentinelExitExecutor {
         await this.repo.update(id, { brokerMessage: r.message });
         return this.fallback(s, run, o, null);
       }
-      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message });
+      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message, ...sentAt });
     }
-    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
+    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message, ...sentAt });
   }
 
   /** A broker read whose throw (timeout, disposed) is treated as "not answered". Never retried (R10 confirm polls). */
@@ -490,11 +500,11 @@ export class SentinelExitExecutor {
     s: UserBrokerSession, run: Run, o: OrderRequest, orderId: string, leg: 'M' | 'L',
   ): Promise<AiExitOutcome> {
     const { id, v } = run;
-    let last: { status: string; text: string } | null = null;
+    let last: OrderFill | null = null;
     for (const step of CONFIRM_STEPS_MS) {
       await this.sleep(step);
       const book = await this.rows(() => s.getOrderBookEnvelope());
-      last = book ? findOrder(book, orderId) ?? last : last;
+      last = book ? findOrderFill(book, orderId) ?? last : last;
       if (last && isTerminalOrderStatus(last.status)) break;
     }
     if (last?.status === 'rejected') {
@@ -507,9 +517,23 @@ export class SentinelExitExecutor {
     if (last?.status === 'cancelled') {
       return this.finish(id, v, 'REJECTED', 'CANCELLED', { orderStatus: 'cancelled', brokerMessage: last.text });
     }
+    // E5 (plan item 12): Angel's positions lag its order book. A `complete` order IS
+    // the fill: FILLED with its price/qty/exchange time even while positions lag.
     const rows = await this.rows(() => s.getPositionsEnvelope());
-    if (rows && isFlat(rows, o.exchange, o.token)) {
-      return this.finish(id, v, 'FILLED', undefined, { orderStatus: last?.status ?? null });
+    const flat = !!rows && isFlat(rows, o.exchange, o.token);
+    if (last?.status === 'complete') {
+      if (!flat) {
+        this.logger.log(`[exit-fill] ${o.symbol} order ${orderId} complete; positions not flat yet (broker lag) — FILLED from the order book`);
+      }
+      return this.finish(id, v, 'FILLED', undefined, {
+        orderStatus: 'complete', fillPrice: last.averagePrice, fillQty: last.filledQty, fillAt: last.fillAt ?? new Date(),
+      });
+    }
+    if (flat) {
+      return this.finish(id, v, 'FILLED', undefined, {
+        orderStatus: last?.status ?? null,
+        ...(last ? { fillPrice: last.averagePrice, fillQty: last.filledQty, fillAt: last.fillAt } : {}),
+      });
     }
     await this.repo.update(id, { orderStatus: last?.status ?? null });
     this.logger.log(`[ai-exit] ${o.symbol} order ${orderId} still ${last?.status ?? 'unseen'} after 10 s — left PLACED`);
@@ -545,7 +569,7 @@ export class SentinelExitExecutor {
 
   private async finish(
     id: string, v: PendingVerdict, status: AiExitStatus, reason?: string,
-    extra: { brokerMessage?: string; orderStatus?: string | null; marketOrderId?: string | null } = {},
+    extra: Pick<AiExitPatch, 'orderStatus' | 'marketOrderId' | 'orderSentAt' | 'fillPrice' | 'fillQty' | 'fillAt' | 'gate'> & { brokerMessage?: string | null } = {},
     warn = false,
   ): Promise<AiExitOutcome> {
     await this.repo.update(id, { status, reason: reason ?? null, ...extra });

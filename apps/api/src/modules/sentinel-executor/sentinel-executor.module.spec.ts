@@ -13,6 +13,9 @@ import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
 import { ManualExitService } from './services/manual-exit.service';
 import { ExitGateService } from './services/exit-gate.service';
 import { ExitGateRepository } from './repositories/exit-gate.repository';
+import { ExitFillSettler } from './services/exit-fill-settler.service';
+import { ExitOutcomeService } from './services/exit-outcome.service';
+import { AiExitOutcomeRepository } from './repositories/ai-exit-outcome.repository';
 import { EXIT_DISCIPLINE_CONFIG } from '../exit-discipline/config';
 import { TriggerWatchService } from './services/trigger-watch.service';
 import { SentinelExitTriggerRepository } from './repositories/sentinel-exit-trigger.repository';
@@ -50,11 +53,14 @@ describe('SentinelExecutorModule wiring', () => {
     expect(ref.get(SentinelExitExecutor)).toBeInstanceOf(SentinelExitExecutor);
     expect(ref.get(SentinelExitPoller)).toBeInstanceOf(SentinelExitPoller);
     expect(ref.get(ManualExitService)).toBeInstanceOf(ManualExitService);
+    expect(ref.get(ExitFillSettler)).toBeInstanceOf(ExitFillSettler);
+    expect(ref.get(ExitOutcomeService)).toBeInstanceOf(ExitOutcomeService);
+    expect(ref.get(AiExitOutcomeRepository)).toBeInstanceOf(AiExitOutcomeRepository);
     expect(ref.get(AI_EXIT_SESSION_CLOCK)).toBeInstanceOf(SessionClock);
     // Exit discipline: the gate, its reads and its config are providers.
     expect(ref.get(ExitGateService)).toBeInstanceOf(ExitGateService);
     expect(ref.get(ExitGateRepository)).toBeInstanceOf(ExitGateRepository);
-    expect(ref.get(EXIT_DISCIPLINE_CONFIG)).toEqual(expect.objectContaining({ enabled: true, floorArmN: 1.5 }));
+    expect(ref.get(EXIT_DISCIPLINE_CONFIG)).toEqual(expect.objectContaining({ enabled: true, floorArmN: 1.5, outcomeWindowMin: 60 }));
     // Price triggers: registered, and inert (flag unset) — no timer, no hub lookup, no query.
     expect(ref.get(TriggerWatchService)).toBeInstanceOf(TriggerWatchService);
     expect(ref.get(SentinelExitTriggerRepository)).toBeInstanceOf(SentinelExitTriggerRepository);

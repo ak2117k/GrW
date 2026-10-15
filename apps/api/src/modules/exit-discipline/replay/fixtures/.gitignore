@@ -1,0 +1,3 @@
+# Real production exports (scripts/export-exit-fixture.ts). Never committed;
+# replay-exits.spec.ts replays every *.real.json found here.
+*.real.json

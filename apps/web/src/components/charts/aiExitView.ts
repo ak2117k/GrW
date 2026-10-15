@@ -16,6 +16,55 @@ export interface AiExitRowView {
   unitUnverified: boolean;
   /** What started the exit: a sentinel verdict, the owner's button, or a sentinel price trigger. */
   source: 'AI' | 'MANUAL' | 'PRICE_TRIGGER';
+  /** Exit discipline: the gate's reason (AI rows), fill quality, and what the price did after. Null when absent. */
+  gateLine: string | null;
+  qualityLine: string | null;
+  outcomeLine: string | null;
+}
+
+/** The scoring window the API uses by default (EXIT_OUTCOME_WINDOW_MIN=60). */
+export const OUTCOME_WINDOW_LABEL = 'Next 60 min';
+
+const GATE_HEAD: Record<NonNullable<AiExitRow['gate']>['outcome'], string> = {
+  GATED_THESIS_INTACT: 'Held — thesis intact',
+  AWAITING_CONFIRMATION: 'Held — awaiting a confirming EXIT_NOW',
+  PASS: 'Gate passed',
+  BYPASS: 'Gate bypassed',
+};
+
+/** The API summary minus its leading `OUTCOME: ` (the head says it in words). */
+function gateLine(g: AiExitRow['gate']): string | null {
+  if (!g || !GATE_HEAD[g.outcome]) return null;
+  const rest = String(g.summary ?? '').replace(/^[A-Z_]+:\s*/, '').trim();
+  const head = GATE_HEAD[g.outcome];
+  if (!rest) return head;
+  return g.outcome === 'PASS' || g.outcome === 'BYPASS' ? `${head} — ${rest}` : `${head}: ${rest}`;
+}
+
+function qualityLine(q: AiExitRow['quality']): string | null {
+  if (!q) return null;
+  if (q.fillPrice == null) return q.orderLtp != null ? `LTP at the check ${q.orderLtp}` : null;
+  const parts = [`Filled ${q.fillPrice}`];
+  if (q.costPerUnit != null && q.decisionLtp != null) parts.push(`cost ${q.costPerUnit}/unit vs decision ${q.decisionLtp}`);
+  if (q.latencyMs != null && Number.isFinite(q.latencyMs)) parts.push(`${Math.round(q.latencyMs / 1000)} s`);
+  return parts.join(' · ');
+}
+
+const inr = (x: number) => `₹${Math.round(Math.abs(x)).toLocaleString('en-IN')}`;
+
+function outcomeLine(o: AiExitRow['outcome']): string | null {
+  if (!o) return null;
+  if (o.status === 'PENDING') {
+    const at = istTime(o.windowEnd);
+    return at ? `Scoring after ${at}` : 'Scoring after the window';
+  }
+  if (o.status === 'NO_DATA') return 'Not scored — no price data after the decision';
+  const parts = [`${OUTCOME_WINDOW_LABEL}: missed ${inr(o.missedPnl ?? 0)}`, `saved ${inr(o.savedPnl ?? 0)}`];
+  // A held (gated / awaiting) decision: what holding to the window end did.
+  if ((o.kind === 'GATED' || o.kind === 'AWAITING') && o.netAtEnd != null) {
+    parts.push(`holding ${o.netAtEnd < 0 ? '−' : '+'}${inr(o.netAtEnd)}`);
+  }
+  return parts.join(' · ');
 }
 
 const SOURCE_PREFIX: Record<AiExitRowView['source'], string> = { AI: '', MANUAL: 'MANUAL ', PRICE_TRIGGER: 'PRICE TRIGGER ' };
@@ -77,6 +126,9 @@ export function aiExitRowView(r: AiExitRow, now: number = Date.now()): AiExitRow
     time: istTime(r.createdAt),
     dryRun: r.mode === 'dry-run',
     unitUnverified: r.status === 'DRY_RUN' && (r.reason ?? '').startsWith('UNIT_UNVERIFIED'),
+    gateLine: gateLine(r.gate),
+    qualityLine: qualityLine(r.quality),
+    outcomeLine: outcomeLine(r.outcome),
   };
 }
 

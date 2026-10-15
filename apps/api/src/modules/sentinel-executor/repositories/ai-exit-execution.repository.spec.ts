@@ -222,6 +222,56 @@ describe('manual exits (owner Exit button)', () => {
     await repo.findById('row1');
     expect(p.aiExitExecution.findUnique).toHaveBeenLastCalledWith({ where: { id: 'row1' } });
   });
+
+  it('placedAwaitingFill (E5): live PLACED rows with a broker order id since the given time, oldest first', async () => {
+    const p = fakePrisma();
+    const since = new Date('2026-10-13T18:30:00Z');
+    await new AiExitExecutionRepository(p as never).placedAwaitingFill(since);
+    expect(p.aiExitExecution.findMany).toHaveBeenCalledWith({
+      where: { status: 'PLACED', mode: 'live', createdAt: { gte: since }, brokerOrderId: { not: null } },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+      select: { id: true, userId: true, verdictId: true, symbol: true, brokerOrderId: true, createdAt: true },
+    });
+  });
+
+  it('settlePlaced (E5) only moves a row that is STILL PLACED, and says whether it did', async () => {
+    const p = fakePrisma();
+    const repo = new AiExitExecutionRepository(p as never);
+    p.aiExitExecution.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    await expect(repo.settlePlaced('r1', { status: 'FILLED', fillPrice: 1 })).resolves.toBe(true);
+    await expect(repo.settlePlaced('r1', { status: 'FILLED', fillPrice: 1 })).resolves.toBe(false);
+    expect(p.aiExitExecution.updateMany).toHaveBeenCalledWith({ where: { id: 'r1', status: 'PLACED' }, data: { status: 'FILLED', fillPrice: 1 } });
+  });
+
+  it('scoringCandidates (exit discipline R10): ONE raw anti-join over executed, dry-run, late PLACED and gated/awaiting skips; never MANUAL', async () => {
+    const p = fakePrisma();
+    const now = new Date('2026-10-14T12:10:00Z');
+    const since = new Date('2026-10-12T12:10:00Z');
+    await new AiExitExecutionRepository(p as never).scoringCandidates(now, since, 60);
+    expect(p.$queryRaw).toHaveBeenCalledTimes(1);
+    const q = p.$queryRaw.mock.calls[0][0] as { strings: string[]; values: unknown[] };
+    const sql = q.strings.join('?').replace(/\s+/g, ' ');
+    expect(sql).toMatch(/FROM "ai_exit_executions" e/);
+    expect(sql).toMatch(/left\(e\."verdictId", \?\) <> \?/);
+    expect(sql).toMatch(/e\."exchange" IS NOT NULL AND e\."token" IS NOT NULL/);
+    expect(sql).toMatch(/e\."status" IN \('FILLED', 'DRY_RUN'\)/);
+    expect(sql).toMatch(/e\."status" = 'PLACED' AND e\."createdAt" < \?/);
+    expect(sql).toMatch(/e\."status" = 'SKIPPED' AND e\."reason" IN \('GATED_THESIS_INTACT', 'AWAITING_CONFIRMATION'\)/);
+    expect(sql).toMatch(/NOT EXISTS \(SELECT 1 FROM "ai_exit_outcomes" o WHERE o\."executionId" = e\."id"\)/);
+    expect(q.values).toEqual(expect.arrayContaining([since, 'man_'.length, 'man_', new Date(now.getTime() - 60 * 60_000)]));
+  });
+
+  it('qualityBackfillCandidates (E5): filled rows whose slippage is not yet computed', async () => {
+    const p = fakePrisma();
+    const since = new Date('2026-10-12T12:10:00Z');
+    await new AiExitExecutionRepository(p as never).qualityBackfillCandidates(since);
+    expect(p.aiExitExecution.findMany).toHaveBeenCalledWith({
+      where: { fillPrice: { not: null }, slippage: null, createdAt: { gte: since } },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+    });
+  });
 });
 
 describe('price-trigger fires and the AI cap (sentinel price triggers R13)', () => {

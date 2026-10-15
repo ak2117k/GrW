@@ -2,6 +2,32 @@ import { useEffect, useState } from 'react';
 import api from '@/services/api';
 import { createVisibilityAwarePoller, type VisibilityDoc } from '@/services/interval-poller';
 
+/** api: AiExitGateDto */
+export interface AiExitGate {
+  outcome: 'PASS' | 'GATED_THESIS_INTACT' | 'AWAITING_CONFIRMATION' | 'BYPASS';
+  justification: string | null;
+  summary: string;
+}
+/** api: AiExitQualityDto — costPerUnit > 0 means the fill was worse than the decision price. */
+export interface AiExitQuality {
+  decisionLtp: number | null;
+  orderLtp: number | null;
+  fillPrice: number | null;
+  fillAt: string | null;
+  slippage: number | null;
+  costPerUnit: number | null;
+  latencyMs: number | null;
+}
+/** api: AiExitOutcomeDto */
+export interface AiExitOutcome {
+  kind: 'EXECUTED' | 'DRY_RUN' | 'GATED' | 'AWAITING';
+  status: 'PENDING' | 'DONE' | 'NO_DATA';
+  missedPnl: number | null;
+  savedPnl: number | null;
+  netAtEnd: number | null;
+  windowEnd: string;
+}
+
 /** Wire shape of GET /api/sentinel-executor/executions (api: AiExitExecutionDto). */
 export interface AiExitRow {
   id: string;
@@ -30,6 +56,12 @@ export interface AiExitRow {
   trigger?: 'AI' | 'MANUAL' | 'PRICE_TRIGGER';
   /** The sentinel_exit_triggers row behind a PRICE_TRIGGER execution. */
   triggerId?: string | null;
+  /** Exit discipline (E7): the gate's decision on an AI exit. Optional: older APIs omit it. */
+  gate?: AiExitGate | null;
+  /** Exit discipline (E5): fill vs the decision price. Optional. */
+  quality?: AiExitQuality | null;
+  /** Exit discipline (spec §8): what the price did after the decision. Optional. */
+  outcome?: AiExitOutcome | null;
   createdAt: string;
   updatedAt: string;
 }

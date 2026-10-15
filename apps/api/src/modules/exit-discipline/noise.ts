@@ -1,13 +1,21 @@
 import { ATR_PERIOD } from './config';
 import type { MinuteBar, NoiseReading } from './types';
 
+/**
+ * Below this many valid bars there is no noise unit (null ⇒ the fixed floor and the
+ * 40 % giveback, exactly as with discipline off). One to four bars can give an N of
+ * a tick or two, which would arm a "noise" floor ticks below the peak and keep it
+ * there (the floor only tightens).
+ */
+export const MIN_NOISE_BARS = 5;
+
 const ok = (b: MinuteBar) =>
   [b.ts, b.open, b.high, b.low, b.close].every((x) => Number.isFinite(x)) && b.low > 0 && b.high >= b.low;
 
 /** R2. The caller chooses the window (last NOISE_LOOKBACK_MIN minutes of the IST day). */
 export function noiseFromBars(input: MinuteBar[]): NoiseReading | null {
   const bars = input.filter(ok).sort((a, b) => a.ts - b.ts);
-  if (bars.length === 0) return null;
+  if (bars.length < MIN_NOISE_BARS) return null;
   const at = new Date(bars[bars.length - 1].ts + 60_000).toISOString();
   if (bars.length >= ATR_PERIOD) {
     const tr = bars.map((b, i) => (i === 0 ? b.high - b.low

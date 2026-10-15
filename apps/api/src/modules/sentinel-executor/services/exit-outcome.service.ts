@@ -31,6 +31,14 @@ const CANDIDATE_LOOKBACK_MS = 48 * HOUR;
 const RETRY_UNTIL_MS = 24 * HOUR;
 const CORPUS_LOOKBACK_MS = 7 * 24 * HOUR;
 const DUE_PER_PASS = 10;
+/**
+ * Hub-fill backoff for a row whose window stays uncovered: the first attempts fill
+ * eagerly, then once every HUB_FILL_EVERY passes (~100 governed historical calls a
+ * day per stuck row instead of one a minute). candles_1m is still read every pass.
+ */
+const HUB_FILL_EAGER_ATTEMPTS = 3;
+const HUB_FILL_EVERY = 15;
+const hubFillDue = (attempts: number) => attempts < HUB_FILL_EAGER_ATTEMPTS || attempts % HUB_FILL_EVERY === 0;
 /** The previous IST day is scored from 00:05 IST. */
 const SCORECARD_AFTER_MIN = 5;
 
@@ -200,7 +208,7 @@ export class ExitOutcomeService {
 
     let hubBars: MinuteBar[] = [];
     const hub = this.hub();
-    if (hub?.servesCharts()) {
+    if (hub?.servesCharts() && hubFillDue(o.attempts ?? 0)) {
       try {
         hubBars = (await hub.candles(ref, '1m', o.decisionAt, o.windowEnd)).candles.map(toBar);
       } catch (err) {

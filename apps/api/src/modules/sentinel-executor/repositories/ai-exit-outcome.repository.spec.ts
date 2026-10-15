@@ -29,12 +29,14 @@ describe('AiExitOutcomeRepository', () => {
     await expect(repo.createPending(ROW)).rejects.toThrow('db down');
   });
 
-  it('due = PENDING whose window ended at least 2 min ago, oldest window first', async () => {
+  it('due = PENDING whose window ended at least 2 min ago, fewest attempts first, then oldest window', async () => {
+    // Fewest attempts first: rows stuck retrying (no bars for 24 h) can never
+    // starve a fresh row out of the per-pass limit.
     const p = fakePrisma();
     await new AiExitOutcomeRepository(p as never).due(NOW, 10);
     expect(p.aiExitOutcome.findMany).toHaveBeenCalledWith({
       where: { status: 'PENDING', windowEnd: { lte: new Date(NOW.getTime() - 120_000) } },
-      orderBy: { windowEnd: 'asc' },
+      orderBy: [{ attempts: 'asc' }, { windowEnd: 'asc' }],
       take: 10,
     });
   });

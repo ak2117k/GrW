@@ -32,11 +32,15 @@ export class AiExitOutcomeRepository {
     }
   }
 
-  /** PENDING rows whose window ended at least 2 min ago (the last bar has closed), oldest first. */
+  /**
+   * PENDING rows whose window ended at least 2 min ago (the last bar has closed):
+   * fewest attempts first, so rows stuck retrying for 24 h never starve a fresh
+   * one out of the per-pass limit; then oldest window first.
+   */
   due(now: Date, limit = 10): Promise<AiExitOutcome[]> {
     return this.prisma.aiExitOutcome.findMany({
       where: { status: 'PENDING', windowEnd: { lte: new Date(now.getTime() - 120_000) } },
-      orderBy: { windowEnd: 'asc' },
+      orderBy: [{ attempts: 'asc' }, { windowEnd: 'asc' }],
       take: limit,
     });
   }

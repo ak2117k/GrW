@@ -122,6 +122,38 @@ describe('ExitOutcomeService', () => {
     expect(outRepo.markNoData).not.toHaveBeenCalled();
   });
 
+  it('a row that keeps failing to cover backs off the hub fill (bounded historical calls: ~100/day, not 1440)', async () => {
+    const calledAt = (attempts: number) => {
+      const m = make({ due: [{ ...DUE, attempts }], serves: true });
+      return m.svc.runOnce(NOW).then(() => m.hub.candles.mock.calls.length);
+    };
+    // The first few attempts fill eagerly; then once every 15 passes.
+    expect(await calledAt(0)).toBe(1);
+    expect(await calledAt(2)).toBe(1);
+    expect(await calledAt(3)).toBe(0);
+    expect(await calledAt(14)).toBe(0);
+    expect(await calledAt(15)).toBe(1);
+    expect(await calledAt(29)).toBe(0);
+    expect(await calledAt(30)).toBe(1);
+    const fills = Array.from({ length: 1440 }, (_, a) => a).filter((a) => a < 3 || a % 15 === 0).length;
+    expect(fills).toBeLessThanOrEqual(100);
+  });
+
+  it('a backed-off row still reads candles_1m every pass and is retried, not NO_DATA', async () => {
+    const { svc, outRepo, hub, candles } = make({ due: [{ ...DUE, attempts: 7 }], serves: true });
+    await svc.runOnce(NOW);
+    expect(candles.read).toHaveBeenCalledTimes(1);
+    expect(hub.candles).not.toHaveBeenCalled();
+    expect(outRepo.markRetry).toHaveBeenCalledWith('o1', expect.any(String));
+  });
+
+  it('a backed-off row still gets the last-chance partial scoring after 24 h', async () => {
+    const late = new Date(DUE.windowEnd.getTime() + 25 * 3_600_000);
+    const { svc, outRepo } = make({ due: [{ ...DUE, attempts: 7 }], bars: fullBars().slice(0, 10), serves: true });
+    await svc.runOnce(late);
+    expect(outRepo.markDone).toHaveBeenCalledWith('o1', expect.anything(), 'candles_1m', 'partial', late);
+  });
+
   it('a hub that does not serve charts (or is absent) is never called', async () => {
     for (const o of [{ serves: false }, { noHub: true }]) {
       const { svc, outRepo, hub } = make({ due: [DUE], ...o });

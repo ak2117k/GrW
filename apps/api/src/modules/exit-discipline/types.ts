@@ -5,7 +5,8 @@ export type Exposure = 'BULLISH' | 'BEARISH';
 /** One 1-minute bar; `ts` = bar start, ms epoch (HubCandle without volume/oi). */
 export interface MinuteBar { ts: number; open: number; high: number; low: number; close: number }
 
-export type NoiseMethod = 'atr14-1m' | 'range-sqrt-1m' | 'atr14-15m-scaled';
+/** 'atr14-15m-scaled' is legacy (mis-scaled daily ATR) — kept so stored packets still parse. */
+export type NoiseMethod = 'atr14-1m' | 'range-sqrt-1m' | 'atr14-daily-scaled' | 'atr14-15m-scaled';
 export interface NoiseReading { n: number; method: NoiseMethod; bars: number; at: string }
 
 /**

@@ -918,15 +918,25 @@ describe('ContextPacketService', () => {
       expect(p.flow.noiseUnit).toMatchObject({ available: true, value: { contract, underlying: null } });
     });
 
-    it('tick.noise ⇒ present NoiseUnitValue; the underlying falls back to the level book atr14/√15', async () => {
+    it('tick.noise ⇒ present NoiseUnitValue; the underlying falls back to the level book DAILY atr14 / √(MCX session minutes)', async () => {
       const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
-      levelsFor.mockResolvedValue({ value: { atr14: 13.5, vwap: 9000 }, source: LEVEL_SOURCE, at: '2026-10-14T10:45:00.000Z' });
-      const p = await svc.build(entry, { ...tick, noise: { contract, underlying1m: null, reason: null } }, null);
+      levelsFor.mockResolvedValue({ value: { atr14: 316, vwap: 9000 }, source: LEVEL_SOURCE, at: '2026-10-14T10:45:00.000Z' });
+      const p = await svc.build(entry, {
+        ...tick, underlyingRef: { exchange: 'MCX', token: '1', symbol: 'X' }, noise: { contract, underlying1m: null, reason: null },
+      }, null);
+      // 09:00–23:30 = 870 min: 316 / √870 ≈ 10.71 (the old ÷√15 gave 81.6 — real 2026-10-14 CRUDEOIL replay).
       expect(p.flow.noiseUnit).toMatchObject({
         available: true,
         at: '2026-10-14T11:00:00.000Z',
-        value: { contract, underlying: { n: 13.5 / Math.sqrt(15), method: 'atr14-15m-scaled', bars: 0, at: '2026-10-14T10:45:00.000Z' } },
+        value: { contract, underlying: { n: 316 / Math.sqrt(870), method: 'atr14-daily-scaled', bars: 0, at: '2026-10-14T10:45:00.000Z' } },
       });
+    });
+
+    it('the daily-ATR fallback uses the equity session (375 min) when the underlying is not MCX / unknown', async () => {
+      const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      levelsFor.mockResolvedValue({ value: { atr14: 300, vwap: 22500 }, source: LEVEL_SOURCE, at: '2026-10-14T10:45:00.000Z' });
+      const p = await svc.build(entry, { ...tick, underlyingRef: null, contractRef: null, noise: { contract, underlying1m: null, reason: null } }, null);
+      expect((p.flow.noiseUnit as { value: { underlying: { n: number } } }).value.underlying.n).toBeCloseTo(300 / Math.sqrt(375), 9);
     });
 
     it('tick.noise with neither reading ⇒ absent with the tick reason', async () => {

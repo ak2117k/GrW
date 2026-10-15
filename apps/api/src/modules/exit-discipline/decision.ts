@@ -2,6 +2,7 @@ import type { ExitDisciplineConfig } from './config';
 import { evaluateExitGate, type GateFacts } from './gate';
 import { evaluatePersistence, type HistoryVerdict } from './persistence';
 import { exposureOf } from './exposure';
+import { scaledUnderlyingNoise } from './noise';
 import type { PacketFacts } from './packet-facts';
 import type { FloorBasis, GateFactsSnapshot, GateRecordV1 } from './types';
 
@@ -85,12 +86,14 @@ export function buildGateFacts(p: PacketFacts, ctx: {
   ltpNow: number; productType: string | null; minutesToClose: number | null; maxLossPerTrade: number | null;
   dailyLossLatched: boolean; history: HistoryVerdict[]; now: Date;
   nContractOverride?: number | null; nUnderlyingOverride?: number | null;
+  /** Underlying exchange session length (minutes) for the daily-ATR fallback; default 375. */
+  underlyingSessionMinutes?: number;
   floorOverride?: { price: number | null; armed: boolean; basis: FloorBasis };
 }): GateFacts {
   const dir = p.side === 'LONG' ? 1 : -1;
   const fresh = Number.isFinite(ctx.ltpNow) && p.charges !== null ? (ctx.ltpNow - p.entryPrice) * p.qty * dir - p.charges : null;
   const netPnlNow = p.netPnl === null ? fresh : fresh === null ? p.netPnl : Math.min(p.netPnl, fresh);
-  const scaled = p.levelBookAtr15m !== null && p.levelBookAtr15m > 0 ? p.levelBookAtr15m / Math.sqrt(15) : null;
+  const scaled = scaledUnderlyingNoise(p.levelBookAtr15m, '', ctx.underlyingSessionMinutes)?.n ?? null;
   return {
     exposure: p.symbol ? exposureOf(p.symbol, p.side) : null,
     positionSide: p.side,

@@ -51,6 +51,8 @@ function historyOf(prior: Array<{ v: FixtureVerdict; facts: PacketFacts | null }
 export function replayExits(fx: ExitFixtureV1, o: ReplayOptions): ReplayResult {
   const { meta } = fx;
   const dir = meta.side === 'LONG' ? 1 : -1;
+  // Mirrors trade-sentinel market-sessions (exit-discipline may not import it): MCX 09:00–23:30, else 09:15–15:30.
+  const sessionMinutesOf = (ex: string | null | undefined): number => (String(ex ?? '').toUpperCase() === 'MCX' ? 870 : 375);
   const entryMs = Date.parse(meta.entryAt);
   const contract = [...fx.contractBars].sort((a, b) => a.ts - b.ts);
   const underlying = [...fx.underlyingBars].sort((a, b) => a.ts - b.ts);
@@ -75,7 +77,7 @@ export function replayExits(fx: ExitFixtureV1, o: ReplayOptions): ReplayResult {
 
     const n: NoiseReading | null = noiseFromBars(closedWindow(contract, t, NOISE_LOOKBACK_MIN));
     const nU: NoiseReading | null = noiseFromBars(closedWindow(underlying, t, NOISE_LOOKBACK_MIN))
-      ?? scaledUnderlyingNoise(facts?.levelBookAtr15m, now.toISOString());
+      ?? scaledUnderlyingNoise(facts?.levelBookAtr15m, now.toISOString(), sessionMinutesOf(meta.underlyingExchange));
 
     const since = contract.filter((b) => b.ts >= Math.floor(entryMs / MIN) * MIN && b.ts + MIN <= t);
     const barPeak = since.length === 0 ? null

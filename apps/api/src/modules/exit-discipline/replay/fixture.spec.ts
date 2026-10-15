@@ -30,7 +30,7 @@ describe('ExitFixtureV1', () => {
       position: { ltp: 527.1, underlyingLtp: { available: true, value: 9003 } },
       money: { charges: 61, greenFloorPrice: 524.85, greenFloorArmed: true },
       thesis: { available: true, value: { invalidation: 8932 } },
-      structure: { levelBook: { value: { vwap: 8995, atr14: 13.5 } } },
+      structure: { levelBook: { value: { vwap: 8995, atr14: 316 } } }, // daily ATR, as the level book really stores it
       session: { nowUtc: '2026-10-14T11:00:30.000Z', minutesToClose: { available: true, value: 419 } },
     });
     expect((v.packet as { money: { netPnl: number } }).money.netPnl).toBeCloseTo((527.1 - 521.9) * 100 - 61, 6);
@@ -62,6 +62,10 @@ describe('ExitFixtureV1', () => {
     ['signed qty', { ...fx, meta: { ...fx.meta, qty: -100 } }, /meta\.qty/],
     ['bad bar', { ...fx, contractBars: [{ ...fx.contractBars[0], high: 'x' }] }, /contractBars\[0\]\.high/],
     ['verdicts out of order', { ...fx, verdicts: [...fx.verdicts].reverse() }, /oldest first/],
+    // psql's json of a `timestamp without time zone` has no zone; Node would parse it as LOCAL time and the
+    // replay would silently miss every bar (found on the real 2026-10-14 export).
+    ['a zone-less verdict time', { ...fx, verdicts: [{ ...fx.verdicts[0], createdAt: '2026-10-14T10:13:40.194' }] }, /verdicts\[0\]\.createdAt.*time zone/],
+    ['a zone-less entry time', { ...fx, meta: { ...fx.meta, entryAt: '2026-10-14T10:09:56.659' } }, /meta\.entryAt.*time zone/],
     ['not an object', null, /fixture/],
   ])('rejects %s, naming the field', (_l, bad, msg) => expect(() => validateFixture(bad)).toThrow(msg));
 

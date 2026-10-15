@@ -40,8 +40,11 @@ describe('noiseFromBars (R2)', () => {
 });
 
 describe('scaledUnderlyingNoise (R3)', () => {
-  it('15m ATR14 / √15', () => {
-    expect(scaledUnderlyingNoise(13.5, 'x')).toEqual({ n: 13.5 / Math.sqrt(15), method: 'atr14-15m-scaled', bars: 0, at: 'x' });
+  it('daily ATR14 / √(session minutes); default 375; bad minutes fall back to 375', () => {
+    expect(scaledUnderlyingNoise(316, 'x', 870)).toEqual({ n: 316 / Math.sqrt(870), method: 'atr14-daily-scaled', bars: 0, at: 'x' });
+    expect(scaledUnderlyingNoise(300, 'x')!.n).toBeCloseTo(300 / Math.sqrt(375), 9);
+    expect(scaledUnderlyingNoise(300, 'x', 0)!.n).toBeCloseTo(300 / Math.sqrt(375), 9);
+    expect(scaledUnderlyingNoise(0, 'x', 870)).toBeNull();
   });
   it.each([null, undefined, 0, -1, NaN])('%s ⇒ null', (v) => expect(scaledUnderlyingNoise(v as never, 'x')).toBeNull());
 });

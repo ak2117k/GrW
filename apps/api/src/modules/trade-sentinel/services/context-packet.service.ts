@@ -525,17 +525,20 @@ const PRIOR_VERDICT_LIMIT = 3;
 /**
  * Exit discipline §3: `flow.noiseUnit`, built only when the tick carried a noise
  * reading (discipline on). Present when either reading exists — the underlying
- * falls back to the level book's 15m ATR14 / √15 when the hub has no 1-minute
+ * falls back to the level book's daily ATR14 / √(session minutes) when the hub has no 1-minute
  * bars for it; absent WITH the reason otherwise.
  */
 function noiseUnitBlock(
   noise: NonNullable<TickSnapshot['noise']>,
   levelBook: Block<Prisma.InputJsonValue>,
   at: string,
+  exchange: string | null,
 ): Block<Prisma.InputJsonValue> {
   const book = levelBook.available ? (levelBook.value as { atr14?: unknown } | null) : null;
+  // The level book's atr14 is a DAILY ATR — scale it by the underlying's session length.
+  const session = sessionFor(exchange ?? 'NSE');
   const scaled = levelBook.available
-    ? scaledUnderlyingNoise(typeof book?.atr14 === 'number' ? book.atr14 : null, levelBook.at)
+    ? scaledUnderlyingNoise(typeof book?.atr14 === 'number' ? book.atr14 : null, levelBook.at, session.closeMin - session.openMin)
     : null;
   const value: NoiseUnitValue = { contract: noise.contract, underlying: noise.underlying1m ?? scaled };
   if (!value.contract && !value.underlying) {
@@ -1001,7 +1004,7 @@ export class ContextPacketService {
                 // read on their own cadence and can be up to a minute old.
                 tick.oiWallsAt ?? at,
               ),
-        ...(tick.noise ? { noiseUnit: noiseUnitBlock(tick.noise, levelBook, at) } : {}),
+        ...(tick.noise ? { noiseUnit: noiseUnitBlock(tick.noise, levelBook, at, tick.underlyingRef?.exchange ?? tick.contractRef?.exchange ?? null) } : {}),
       },
       macro: {
         ...macroBlocks(this.readMacro(now), now, {

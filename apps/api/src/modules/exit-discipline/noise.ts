@@ -28,9 +28,21 @@ export function noiseFromBars(input: MinuteBar[]): NoiseReading | null {
   return n > 0 ? { n, method: 'range-sqrt-1m', bars: bars.length, at } : null;
 }
 
-/** R3 fallback: the underlying's 15m level-book ATR14 scaled to one minute. */
-export function scaledUnderlyingNoise(atr15m: number | null | undefined, at: string): NoiseReading | null {
-  return typeof atr15m === 'number' && Number.isFinite(atr15m) && atr15m > 0
-    ? { n: atr15m / Math.sqrt(15), method: 'atr14-15m-scaled', bars: 0, at }
+/** Session length used to scale a DAILY ATR to one minute when the caller does not know the exchange. */
+export const DEFAULT_SESSION_MINUTES = 375;
+
+/**
+ * R3 fallback: the underlying's level-book ATR14 scaled to one minute. The level book's `atr14` is
+ * computed from DAILY candles (LevelBookService.seedSession) even though the book's `interval` says
+ * 15m — so it scales by √(session minutes), not √15 (which overstated MCX crude ~8x: 81.7 vs ~10.7).
+ */
+export function scaledUnderlyingNoise(
+  atrDaily: number | null | undefined,
+  at: string,
+  sessionMinutes: number = DEFAULT_SESSION_MINUTES,
+): NoiseReading | null {
+  const minutes = Number.isFinite(sessionMinutes) && sessionMinutes > 0 ? sessionMinutes : DEFAULT_SESSION_MINUTES;
+  return typeof atrDaily === 'number' && Number.isFinite(atrDaily) && atrDaily > 0
+    ? { n: atrDaily / Math.sqrt(minutes), method: 'atr14-daily-scaled', bars: 0, at }
     : null;
 }

@@ -121,7 +121,7 @@ describe('buildGateFacts', () => {
       productType: 'CARRYFORWARD', isExpiryDay: true, dailyLossLatched: false, maxLossPerTrade: 2000,
       holdRef: { underlying: 8998, support: 8946 },
     });
-    expect(f.nUnderlying).toBeCloseTo(13.5 / Math.sqrt(15), 6);
+    expect(f.nUnderlying).toBeCloseTo(13.5 / Math.sqrt(375), 6);
     expect(f.netPnlNow).toBeCloseTo(Math.min(509, (527.1 - 521.9) * 100 - 61), 6);
   });
 

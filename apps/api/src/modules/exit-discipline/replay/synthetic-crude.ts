@@ -77,7 +77,7 @@ function packetAt(atMs: number, ltp: number, underlying: number, contractBars: M
     money: { grossPnl: gross, charges: CHARGES, netPnl: r2(gross - CHARGES), greenFloorPrice: 524.85, greenFloorArmed: true, mfe, mae },
     thesis: block({ direction: 'LONG', reason: 'synthetic: long call into 9100', levelPrice: 8960, targetPrice: 9100, invalidation: 8932, source: 'AGENT' }, 'synthetic', nowUtc),
     structure: {
-      levelBook: block({ vwap: 8995, atr14: 13.5, interval: '15m' }, 'synthetic', nowUtc),
+      levelBook: block({ vwap: 8995, atr14: 316, interval: '15m' }, 'synthetic', nowUtc),
       nearestSupport: block(8946, 'synthetic', nowUtc),
       nearestResistance: block(9020, 'synthetic', nowUtc),
     },

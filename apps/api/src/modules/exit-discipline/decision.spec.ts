@@ -84,6 +84,15 @@ describe('bypassRecord / isBlocking / gateSummary', () => {
     expect(s.length).toBeLessThanOrEqual(300);
     expect(s).not.toContain('\n');
   });
+  it('rounds N to 2 dp in the display only — the stored facts keep full precision', () => {
+    const facts = { ...FACTS, nContract: 1.23456789, nUnderlying: 3.4641016151377544 };
+    const r = decideExit({ facts, current: CUR, history: HIST, cfg: CFG, now: NOW });
+    const s = gateSummary(r);
+    expect(s).toContain('N 1.23/3.46');
+    expect(s).not.toContain('1.23456789');
+    expect(r.facts?.nContract).toBe(1.23456789);
+    expect(r.facts?.nUnderlying).toBe(3.4641016151377544);
+  });
 });
 
 describe('buildGateFacts', () => {

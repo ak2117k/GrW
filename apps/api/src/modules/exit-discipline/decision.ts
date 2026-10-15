@@ -47,6 +47,10 @@ export function isBlocking(r: GateRecordV1 | null | undefined): boolean {
 }
 
 /** One log/UI line: outcome + the numbers that decided it. */
+/** Display only: a noise unit to 2 dp ('?' when unknown). Stored facts keep full precision. */
+const dp2 = (n: number | null | undefined): string =>
+  n === null || n === undefined || !Number.isFinite(n) ? '?' : String(Math.round(n * 100) / 100);
+
 export function gateSummary(r: GateRecordV1): string {
   if (r.outcome === 'BYPASS') return `BYPASS: ${r.bypassReason}${r.error ? ` (${r.error})` : ''}`.slice(0, 300);
   const f = r.facts;
@@ -55,7 +59,7 @@ export function gateSummary(r: GateRecordV1): string {
     parts.push(`u ${f.underlying ?? '?'}`, `inv ${f.invalidation ?? '?'}`);
     if (f.holdRef) parts.push(`held ${f.exposure === 'BEARISH' ? f.holdRef.resistance : f.holdRef.support} @HOLD u ${f.holdRef.underlying ?? '?'}`);
     parts.push(`vwap ${f.vwap ?? '?'}`, `floor ${f.floor.price ?? '?'}${f.floor.armed ? '' : ' (unarmed)'} ltp ${f.ltpNow}`,
-      `N ${f.nContract ?? '?'}/${f.nUnderlying ?? '?'}`);
+      `N ${dp2(f.nContract)}/${dp2(f.nUnderlying)}`);
   }
   const passed = r.clauses.filter((c) => c.pass === true).map((c) => c.id);
   const head = r.outcome === 'PASS' || r.outcome === 'AWAITING_CONFIRMATION'

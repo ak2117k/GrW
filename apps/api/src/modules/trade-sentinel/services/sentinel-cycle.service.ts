@@ -490,6 +490,9 @@ export class SentinelCycleService {
       // still clears this user's state.
       new Set([userId, ...entries.map((e) => e.userId)]),
       new Set(entries.map((e) => e.trackerId)),
+      // Part B: only WATCHED entries keep a tick-sensor context — an unwatched one
+      // is skipped by every pass, so a tick wake for it would be a wasted pass.
+      new Set(entries.filter((e) => e.watched).map((e) => e.trackerId)),
     );
 
     // DISPATCH, MOST URGENT AND LONGEST-WAITING FIRST. Slots are scarce
@@ -1068,14 +1071,14 @@ export class SentinelCycleService {
   }
 
   /** Drop carry-over for these tenants' trackers that are no longer on the roster. */
-  private prune(owners: Set<string>, live: Set<string>): void {
+  private prune(owners: Set<string>, live: Set<string>, watched: Set<string>): void {
     for (const [trackerId, state] of this.state) {
       if (owners.has(state.userId) && !live.has(trackerId)) {
         this.state.delete(trackerId);
         this.warnedMissingUnderlying.delete(trackerId);
       }
     }
-    for (const u of owners) this.sensorBook?.prune(u, live);
+    for (const u of owners) this.sensorBook?.prune(u, watched);
   }
 }
 

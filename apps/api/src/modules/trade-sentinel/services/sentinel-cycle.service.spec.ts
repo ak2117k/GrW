@@ -2187,4 +2187,23 @@ describe('SentinelCycleService — publishes tick-sensor context (Part B)', () =
     await svc.runForUser(USER);
     expect(book.forKey('NFO:1')).toEqual([]);
   });
+
+  it('a position that drops to UNWATCHED is pruned too — its ticks must not wake passes it is skipped in', async () => {
+    const t = makeSvc();
+    const book = new TickSensorBook();
+    const svc = new SentinelCycleService(
+      { build: t.build } as never, { evaluate: t.evaluate } as never, { build: t.buildPacket } as never,
+      { ensureFor: t.ensureFor } as never, { judge: t.judge, promptVersion: 'v' } as never,
+      { record: t.record, recentForTracker: t.recentForTracker } as never, { captureAndCompare: t.captureAndCompare } as never,
+      { tickFor: t.tickFor } as never, book,
+    );
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ contractRef: { exchange: 'NFO', token: '1', symbol: 'S' }, underlyingRef: { exchange: 'NSE', token: '99926000', symbol: 'NIFTY' } }));
+    await svc.runForUser(USER);
+    expect(book.size()).toBe(1);
+    t.build.mockResolvedValue([watched('t1', { watched: false, reason: 'over capacity' })]);
+    await svc.runForUser(USER);
+    expect(book.size()).toBe(0);
+    expect(book.forKey('NSE:99926000')).toEqual([]);
+  });
 });

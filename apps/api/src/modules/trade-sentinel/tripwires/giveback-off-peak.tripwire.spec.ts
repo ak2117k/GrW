@@ -94,3 +94,27 @@ describe('givebackOffPeak', () => {
     ).toBeNull();
   });
 });
+
+describe('noise-scaled (exit discipline §5)', () => {
+  const nBase = { ...base, side: 'LONG' as const, entryPrice: 521.9, holdingHigh: 534.6 };
+  it('a 9.0 pullback after a 12.7 excursion fires when N = 4.5', () => {
+    expect(givebackOffPeak.check({ ...nBase, ltp: 525.6, noise: { n: 4.5, armN: 1.5, givebackN: 1.5 } })).toMatchObject({
+      name: 'giveback-off-peak', detail: expect.stringMatching(/2\.0 N/),
+    });
+  });
+  it('a 6.6 pullback is chop with N = 4.5 — but the 40 % rule (no noise) still fires on it', () => {
+    expect(givebackOffPeak.check({ ...nBase, ltp: 528, noise: { n: 4.5, armN: 1.5, givebackN: 1.5 } })).toBeNull();
+    expect(givebackOffPeak.check({ ...nBase, ltp: 528 })).not.toBeNull();
+  });
+  it('noise: null keeps the 40 % rule', () => {
+    expect(givebackOffPeak.check({ ...nBase, ltp: 528, noise: null })).not.toBeNull();
+  });
+  it('SHORT: excursion and pullback are measured off holdingLow', () => {
+    const s = { ...base, side: 'SHORT' as const, entryPrice: 100, holdingLow: 90, holdingHigh: 101, noise: { n: 2, armN: 1.5, givebackN: 1.5 } };
+    expect(givebackOffPeak.check({ ...s, ltp: 94 })).not.toBeNull();
+    expect(givebackOffPeak.check({ ...s, ltp: 92 })).toBeNull();
+  });
+  it('a never-favourable trade stays silent under the noise rule too', () => {
+    expect(givebackOffPeak.check({ ...nBase, holdingHigh: 521.9, ltp: 510, noise: { n: 4.5, armN: 1.5, givebackN: 1.5 } })).toBeNull();
+  });
+});

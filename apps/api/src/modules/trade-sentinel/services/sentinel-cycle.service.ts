@@ -18,7 +18,13 @@ import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } f
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service';
-import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, type ExitDisciplineConfig } from '../../exit-discipline/config';
+import {
+  EXIT_CONFIRM_MAX_RELOOKS,
+  EXIT_DISCIPLINE_CONFIG,
+  parseExitDisciplineConfig,
+  type ExitDisciplineConfig,
+} from '../../exit-discipline/config';
+import { exitConfirmFire, withExitConfirm } from '../tripwires/exit-confirm';
 import { solveCycleFloor } from './cycle-floor';
 
 export interface CycleReport {
@@ -568,7 +574,14 @@ export class SentinelCycleService {
     if (tick !== raw) this.warnMissingUnderlying(entry);
 
     // LIVE-ONLY: an overnight-review row is not a live look (see recentForTracker).
-    const [last] = await this.verdicts.recentForTracker(entry.trackerId, 1, { liveOnly: true });
+    // With exit discipline on, enough rows to count a run of EXIT_NOWs for the
+    // exit-confirm re-look (§7); otherwise exactly the one row, as before.
+    const recent = await this.verdicts.recentForTracker(
+      entry.trackerId,
+      this.discipline?.enabled ? EXIT_CONFIRM_MAX_RELOOKS + 1 : 1,
+      { liveOnly: true },
+    );
+    const last = recent[0];
 
     // The ratchet is updated BEFORE the skip decision, deliberately: a floor that
     // arms on a quiet tick and pulls back before the next evaluation has still
@@ -624,6 +637,12 @@ export class SentinelCycleService {
         // state. Empty on first sight, which correctly means contextFactorFlip
         // cannot fire until there is something to compare against.
         prevFactorValues: previousFactorValues(last),
+        // Exit discipline §5: the giveback sensor's noise rule. Spread only when
+        // on and measured, so with discipline off the input is exactly today's
+        // (absent ⇒ the 40 % rule).
+        ...(this.discipline?.enabled && tick.noise?.contract
+          ? { noise: { n: tick.noise.contract.n, armN: this.discipline.floorArmN, givebackN: this.discipline.givebackN } }
+          : {}),
       },
       last ? last.createdAt : null,
       now,
@@ -641,9 +660,15 @@ export class SentinelCycleService {
     );
 
     const state = this.stateFor(entry);
-    const decision = withCarriedFires(
-      suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey),
-      state.carriedFires,
+    // Exit discipline §7: an EXIT_NOW executes only once confirmed by a second
+    // verdict, and nothing else guarantees one soon — so while the latest live
+    // verdict is EXIT_NOW, ask again after PERSIST_MIN_SEC (at most 3 in a row).
+    const confirm = this.discipline?.enabled
+      ? exitConfirmFire({ recent, now, relookMs: this.discipline.persistMinSec * 1000, maxRelooks: EXIT_CONFIRM_MAX_RELOOKS })
+      : null;
+    const decision = withExitConfirm(
+      withCarriedFires(suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey), state.carriedFires),
+      confirm,
     );
 
     if (!decision.shouldEvaluate) {

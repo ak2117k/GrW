@@ -20,7 +20,7 @@ import {
 import type { RosterEntry } from './roster.service';
 import type { StoredThesis } from './context-packet.service';
 import { HEARTBEAT_INTERVAL_MS, type TripwireResult } from './tripwire.service';
-import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, type ExitDisciplineConfig } from '../../exit-discipline/config';
+import { EXIT_CONFIRM_MAX_RELOOKS, EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, type ExitDisciplineConfig } from '../../exit-discipline/config';
 
 const USER = 'u1';
 
@@ -421,6 +421,8 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // The overnight review is a second scheduler-driven entry point: it judges
     // every open F&O position twice a day, so it is walked exactly like the runner.
     join(__dirname, 'sentinel-overnight.service.ts'),
+    // Exit discipline: the exit-confirm re-look is reached from the cycle.
+    join(__dirname, '..', 'tripwires', 'exit-confirm.ts'),
   ];
 
   /**
@@ -884,6 +886,64 @@ describe('SentinelCycleService — exit discipline: the noise-aware floor', () =
 
     expect(t.buildPacket.mock.calls[0][1].noiseFloor ?? null).toBeNull();
     expect(t.evaluate.mock.calls[0][3]).toMatchObject({ greenFloorArmed: false });
+  });
+});
+
+describe('SentinelCycleService — exit discipline: noise giveback and the exit-confirm re-look', () => {
+  const ON = parseExitDisciplineConfig({});
+  const OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
+  const NOW = new Date('2026-10-14T11:03:00.000Z');
+  const QUIET = { fires: [], heartbeat: false, shouldEvaluate: false, trigger: null };
+  const noisy = () =>
+    tick({ segment: 'OPT', entryPrice: 521.9, qty: 100, ltp: 528, holdingHigh: 534.6, holdingLow: 518,
+      noise: { contract: { n: 4.5, method: 'atr14-1m', bars: 20, at: '2026-10-14T11:02:00.000Z' }, underlying1m: null, reason: null } });
+  const exitNowAgo = (sec: number) => verdictRow({ verdict: 'EXIT_NOW', createdAt: new Date(NOW.getTime() - sec * 1000) });
+
+  it('(a) enabled + a contract noise unit ⇒ the sensors get the noise rule inputs', async () => {
+    const t = makeSvc(ON);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(noisy());
+    await t.svc.runForUser(USER, NOW);
+    expect(tripwireInput(t.evaluate).noise).toEqual({ n: 4.5, armN: 1.5, givebackN: 1.5 });
+  });
+
+  it('(b) latest live verdict EXIT_NOW 130 s ago and nothing else fires ⇒ judged with an exit-confirm FIRE', async () => {
+    const t = makeSvc(ON);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(noisy());
+    t.evaluate.mockReturnValue(QUIET);
+    t.recentForTracker.mockResolvedValue([exitNowAgo(130), verdictRow({ verdict: 'HOLD', createdAt: new Date(NOW.getTime() - 900_000) })]);
+
+    await t.svc.runForUser(USER, NOW);
+
+    expect(t.recentForTracker).toHaveBeenCalledWith('t1', EXIT_CONFIRM_MAX_RELOOKS + 1, { liveOnly: true });
+    expect(t.buildPacket).toHaveBeenCalledTimes(1);
+    expect(t.buildPacket.mock.calls[0][3]).toEqual([expect.objectContaining({ name: 'exit-confirm' })]);
+    expect(t.judge.mock.calls[0][1]).toBe('FIRE');
+  });
+
+  it('(b) too soon after the EXIT_NOW ⇒ no re-look yet', async () => {
+    const t = makeSvc(ON);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(noisy());
+    t.evaluate.mockReturnValue(QUIET);
+    t.recentForTracker.mockResolvedValue([exitNowAgo(60)]);
+    await t.svc.runForUser(USER, NOW);
+    expect(t.buildPacket).not.toHaveBeenCalled();
+  });
+
+  it.each([['absent', undefined], ['EXIT_DISCIPLINE_ENABLED=false', OFF]])('(c) discipline %s ⇒ no noise input, no re-look, one-row read', async (_l, cfg) => {
+    const t = makeSvc(cfg);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(noisy());
+    t.evaluate.mockReturnValue(QUIET);
+    t.recentForTracker.mockResolvedValue([exitNowAgo(130)]);
+
+    await t.svc.runForUser(USER, NOW);
+
+    expect(tripwireInput(t.evaluate).noise ?? null).toBeNull();
+    expect(t.recentForTracker).toHaveBeenCalledWith('t1', 1, { liveOnly: true });
+    expect(t.buildPacket).not.toHaveBeenCalled();
   });
 });
 

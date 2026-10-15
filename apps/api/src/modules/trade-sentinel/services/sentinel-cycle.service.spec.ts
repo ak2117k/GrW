@@ -421,6 +421,8 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // The overnight review is a second scheduler-driven entry point: it judges
     // every open F&O position twice a day, so it is walked exactly like the runner.
     join(__dirname, 'sentinel-overnight.service.ts'),
+    // Part B: hub ticks wake the runner. A production entry point, so it is walked.
+    join(__dirname, 'tick-tripwire.service.ts'),
   ];
 
   /**

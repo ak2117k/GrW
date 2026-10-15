@@ -236,6 +236,19 @@ export class SentinelRunnerService {
   }
 
   /**
+   * Part B (price-triggers plan R14): a hub tick fired a price sensor, so run
+   * this user's ordinary sensor pass now instead of at the next 30-s tick. All
+   * the usual caps apply inside the pass. Never throws; a pass already in
+   * flight will see the move itself (or the next tick will).
+   */
+  wakeForTick(userId: string, why: string): void {
+    if (!this.enabled) return;
+    if (this.inFlight.has(userId)) return;
+    this.logger.log(`[sentinel-tick] waking ${userId}: ${why}`);
+    void this.runForUser(userId);
+  }
+
+  /**
    * Tenants with something to watch, AND the exchanges they hold it on. Nobody
    * else costs a roster query.
    *

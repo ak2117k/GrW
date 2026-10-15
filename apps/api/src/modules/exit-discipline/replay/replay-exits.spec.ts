@@ -4,7 +4,7 @@ import { breakevenPrice } from '../../trade-sentinel/charges';
 import { parseExitDisciplineConfig } from '../config';
 import { gateSummary } from '../decision';
 import { validateFixture, type ExitFixtureV1 } from './fixture';
-import { replayExits } from './replay-exits';
+import { gridConfigs, replayExits } from './replay-exits';
 import { buildSyntheticCrudeFixture } from './synthetic-crude';
 
 const ON = parseExitDisciplineConfig({});
@@ -83,5 +83,22 @@ const real = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.real.
       // If this fails on the CRUDEOIL export: STOP and report the clause numbers to the owner — do not tune to pass.
       if (sold?.record.outcome === 'PASS') throw new Error(`the sold exit would still PASS: ${gateSummary(sold.record)}`);
     }
+  });
+});
+
+describe('gridConfigs', () => {
+  it('cartesian product over the given keys, base elsewhere, stable order', () => {
+    const g = gridConfigs(ON, { floorTrailN: [1.5, 2], gateUnderlyingN: [0.5, 1] });
+    expect(g.map((c) => [c.floorTrailN, c.gateUnderlyingN])).toEqual([[1.5, 0.5], [1.5, 1], [2, 0.5], [2, 1]]);
+    expect(g.every((c) => c.floorArmN === 1.5 && c.enabled)).toBe(true);
+  });
+  it('no grid (or empty value lists) ⇒ just the base', () => {
+    expect(gridConfigs(ON, {})).toEqual([ON]);
+    expect(gridConfigs(ON, { floorArmN: [] })).toEqual([ON]);
+  });
+  it('a lower gateUnderlyingN can only add executions on the synthetic day (monotone sanity)', () => {
+    const fx = buildSyntheticCrudeFixture();
+    const passed = (n: number) => replayExits(fx, { cfg: { ...ON, gateUnderlyingN: n }, breakeven: be }).counts.passed;
+    expect(passed(0.25)).toBeGreaterThanOrEqual(passed(1));
   });
 });

@@ -143,3 +143,18 @@ function mfeOf(packet: unknown): number | null {
   const mfe = money && typeof money === 'object' ? (money as Record<string, unknown>).mfe : null;
   return typeof mfe === 'number' && Number.isFinite(mfe) ? mfe : null;
 }
+
+/** The multipliers the E6 harness may sweep. */
+export type GridKey = 'floorArmN' | 'floorTrailN' | 'gateUnderlyingN' | 'persistWindowSec' | 'persistMinSec';
+export const GRID_KEYS: readonly GridKey[] = ['floorArmN', 'floorTrailN', 'gateUnderlyingN', 'persistWindowSec', 'persistMinSec'];
+
+/** Cartesian product over the given keys (GRID_KEYS order, values in the given order); base values elsewhere. */
+export function gridConfigs(base: ExitDisciplineConfig, grid: Partial<Record<GridKey, number[]>>): ExitDisciplineConfig[] {
+  let out: ExitDisciplineConfig[] = [base];
+  for (const key of GRID_KEYS) {
+    const values = grid[key];
+    if (!values || values.length === 0) continue;
+    out = out.flatMap((c) => values.map((x) => ({ ...c, [key]: x })));
+  }
+  return out;
+}

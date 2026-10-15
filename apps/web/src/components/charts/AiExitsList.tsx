@@ -51,6 +51,9 @@ export default function AiExitsList() {
               {v.detail && (
                 <span className="basis-full break-words text-[11px] text-[var(--color-text-muted)]">{v.detail}</span>
               )}
+              {[v.gateLine, v.qualityLine, v.outcomeLine].filter(Boolean).map((l) => (
+                <span key={l} className="basis-full break-words text-[11px] text-[var(--color-text-muted)]">{l}</span>
+              ))}
             </li>
           );
         })}

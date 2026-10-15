@@ -50,6 +50,8 @@ function str(x: unknown, path: string): string {
 function iso(x: unknown, path: string): string {
   const s = str(x, path);
   if (!Number.isFinite(Date.parse(s))) fail(path, 'must be an ISO timestamp');
+  // A zone-less timestamp parses as LOCAL time in Node — the replay would shift every verdict off its bars.
+  if (!/(Z|[+-]\d\d:?\d\d)$/i.test(s)) fail(path, 'must carry a time zone (Z or ±hh:mm) — export UTC with a Z');
   return s;
 }
 /** Finite number; a numeric string is accepted (psql/Decimal exports). */

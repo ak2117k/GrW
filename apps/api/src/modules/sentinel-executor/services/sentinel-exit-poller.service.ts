@@ -6,11 +6,14 @@ import type { AutoExitConfig } from '../domain/auto-exit.types';
 import { CLAIM_STALE_MS, SECOND_SWEEP_MS } from '../domain/claim-timing';
 import { AiExitExecutionRepository } from '../repositories/ai-exit-execution.repository';
 import { ExitFillSettler } from './exit-fill-settler.service';
+import { ExitOutcomeService } from './exit-outcome.service';
 import { SentinelExitExecutor } from './sentinel-exit-executor.service';
 
 export const AI_EXIT_POLL_MS = 5_000;
 /** E5 fill settle sweep (plan R11): its own timer, never the exit poll's. */
 export const EXIT_FILL_SETTLE_MS = 30_000;
+/** Exit discipline §8 outcome scoring (plan R11): its own timer, never the exit poll's. */
+export const EXIT_OUTCOME_MS = 60_000;
 const PER_PASS = 5;
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -27,6 +30,7 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private settleTimer: ReturnType<typeof setInterval> | null = null;
+  private outcomeTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private cfg: AutoExitConfig | null = null;
 
@@ -34,6 +38,7 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     private readonly repo: AiExitExecutionRepository,
     private readonly executor: SentinelExitExecutor,
     private readonly settler: ExitFillSettler,
+    private readonly outcomes: ExitOutcomeService,
   ) {}
 
   onModuleInit(): void {
@@ -65,15 +70,20 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     // E5: settles PLACED rows from the order book (reads only, never logs in).
     this.settleTimer = setInterval(() => void this.settler.runOnce(), EXIT_FILL_SETTLE_MS);
     this.settleTimer.unref?.();
+    // Exit discipline §8: post-decision scoring (DB + governed hub reads only).
+    this.outcomeTimer = setInterval(() => void this.outcomes.runOnce(), EXIT_OUTCOME_MS);
+    this.outcomeTimer.unref?.();
   }
 
   onModuleDestroy(): void {
     if (this.timer) clearInterval(this.timer);
     if (this.sweepTimer) clearTimeout(this.sweepTimer);
     if (this.settleTimer) clearInterval(this.settleTimer);
+    if (this.outcomeTimer) clearInterval(this.outcomeTimer);
     this.timer = null;
     this.sweepTimer = null;
     this.settleTimer = null;
+    this.outcomeTimer = null;
     this.cfg = null;
   }
 

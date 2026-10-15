@@ -31,6 +31,13 @@ export type AiExitPatch = Partial<
   >
 > & { status?: AiExitStatus; sessionSource?: SessionSource; gate?: Prisma.InputJsonValue };
 
+/** An execution row the outcome job may score (exit discipline R10). */
+export type ScoringCandidate = Pick<
+  AiExitExecution,
+  | 'id' | 'userId' | 'verdictId' | 'trackerId' | 'symbol' | 'exchange' | 'token' | 'side' | 'quantity'
+  | 'status' | 'reason' | 'createdAt' | 'fillPrice' | 'orderLtp' | 'decisionLtp'
+>;
+
 /** A live exit whose order was sent but whose fill has not been seen yet (E5 settle sweep). */
 export type PlacedAwaitingFill = Pick<AiExitExecution, 'id' | 'userId' | 'verdictId' | 'symbol' | 'brokerOrderId' | 'createdAt'>;
 
@@ -203,6 +210,40 @@ export class AiExitExecutionRepository {
   async settlePlaced(id: string, patch: AiExitPatch): Promise<boolean> {
     const r = await this.prisma.aiExitExecution.updateMany({ where: { id, status: 'PLACED' }, data: patch });
     return r.count > 0;
+  }
+
+  /**
+   * Exit discipline R10: rows to score, ONE raw anti-join against ai_exit_outcomes.
+   * FILLED / DRY_RUN; PLACED older than the window (its fill was never seen);
+   * SKIPPED by the gate (GATED_THESIS_INTACT / AWAITING_CONFIRMATION, E4).
+   * Never a manual exit; only rows whose contract was recorded.
+   */
+  scoringCandidates(now: Date, since: Date, windowMin: number, limit = 50): Promise<ScoringCandidate[]> {
+    const placedBefore = new Date(now.getTime() - windowMin * 60_000);
+    return this.prisma.$queryRaw<ScoringCandidate[]>(Prisma.sql`
+      SELECT e."id", e."userId", e."verdictId", e."trackerId", e."symbol", e."exchange", e."token", e."side", e."quantity",
+             e."status", e."reason", e."createdAt", e."fillPrice", e."orderLtp", e."decisionLtp"
+      FROM "ai_exit_executions" e
+      WHERE e."createdAt" >= ${since}
+        AND left(e."verdictId", ${MANUAL_VERDICT_PREFIX.length}) <> ${MANUAL_VERDICT_PREFIX}
+        AND e."exchange" IS NOT NULL AND e."token" IS NOT NULL
+        AND (
+          e."status" IN ('FILLED', 'DRY_RUN')
+          OR (e."status" = 'PLACED' AND e."createdAt" < ${placedBefore})
+          OR (e."status" = 'SKIPPED' AND e."reason" IN ('GATED_THESIS_INTACT', 'AWAITING_CONFIRMATION'))
+        )
+        AND NOT EXISTS (SELECT 1 FROM "ai_exit_outcomes" o WHERE o."executionId" = e."id")
+      ORDER BY e."createdAt" ASC
+      LIMIT ${limit}`);
+  }
+
+  /** E5: filled rows whose decision LTP / slippage / latency are not computed yet. */
+  qualityBackfillCandidates(since: Date, limit = 20): Promise<AiExitExecution[]> {
+    return this.prisma.aiExitExecution.findMany({
+      where: { fillPrice: { not: null }, slippage: null, createdAt: { gte: since } },
+      orderBy: { createdAt: 'asc' },
+      take: limit,
+    });
   }
 
   listForUser(userId: string, limit: number): Promise<AiExitExecution[]> {

@@ -1,6 +1,6 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-poller.service.spec.ts
 import { Logger } from '@nestjs/common';
-import { SentinelExitPoller, AI_EXIT_POLL_MS, EXIT_FILL_SETTLE_MS } from './sentinel-exit-poller.service';
+import { SentinelExitPoller, AI_EXIT_POLL_MS, EXIT_FILL_SETTLE_MS, EXIT_OUTCOME_MS } from './sentinel-exit-poller.service';
 import { CLAIM_STALE_MS, SECOND_SWEEP_MS } from '../domain/claim-timing';
 
 const ENV_KEYS = ['AI_AUTO_EXIT_ENABLED', 'AI_AUTO_EXIT_MODE', 'AI_AUTO_EXIT_USER_IDS', 'AI_AUTO_EXIT_QTY_UNITS', 'BOOT_JOBS'];
@@ -12,7 +12,8 @@ function make() {
   const repo = { pendingVerdicts: jest.fn().mockResolvedValue([]), sweepInterrupted: jest.fn().mockResolvedValue(0) };
   const executor = { process: jest.fn().mockResolvedValue({ status: 'SKIPPED' }) };
   const settler = { runOnce: jest.fn().mockResolvedValue(undefined) };
-  return { repo, executor, settler, poller: new SentinelExitPoller(repo as never, executor as never, settler as never) };
+  const outcomes = { runOnce: jest.fn().mockResolvedValue(undefined) };
+  return { repo, executor, settler, outcomes, poller: new SentinelExitPoller(repo as never, executor as never, settler as never, outcomes as never) };
 }
 
 describe('SentinelExitPoller', () => {
@@ -26,10 +27,11 @@ describe('SentinelExitPoller', () => {
   ])('%s → no timer, no query, no executor call', async (_n, env) => {
     jest.useFakeTimers();
     setEnv(env as Record<string, string>);
-    const { poller, repo, executor, settler } = make();
+    const { poller, repo, executor, settler, outcomes } = make();
     poller.onModuleInit();
     expect(jest.getTimerCount()).toBe(0);
     expect(settler.runOnce).not.toHaveBeenCalled();
+    expect(outcomes.runOnce).not.toHaveBeenCalled();
     jest.advanceTimersByTime(10 * AI_EXIT_POLL_MS);
     await Promise.resolve();
     // Even a direct call does nothing when the poller never started.
@@ -125,5 +127,21 @@ describe('SentinelExitPoller', () => {
     expect(jest.getTimerCount()).toBe(0);
     jest.advanceTimersByTime(10 * EXIT_FILL_SETTLE_MS);
     expect(settler.runOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it('enabled: outcome scoring runs on its own 60 s timer, cleared on destroy', () => {
+    jest.useFakeTimers();
+    setEnv({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });
+    const spy = jest.spyOn(global, 'setInterval');
+    const { poller, outcomes } = make();
+    poller.onModuleInit();
+    expect(EXIT_OUTCOME_MS).toBe(60_000);
+    expect(spy.mock.calls.map((c) => c[1])).toEqual(expect.arrayContaining([EXIT_OUTCOME_MS]));
+    jest.advanceTimersByTime(EXIT_OUTCOME_MS);
+    expect(outcomes.runOnce).toHaveBeenCalledTimes(1);
+    poller.onModuleDestroy();
+    expect(jest.getTimerCount()).toBe(0);
+    jest.advanceTimersByTime(5 * EXIT_OUTCOME_MS);
+    expect(outcomes.runOnce).toHaveBeenCalledTimes(1);
   });
 });

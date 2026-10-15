@@ -12,6 +12,9 @@ import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './services/sentinel
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
 import { ManualExitService } from './services/manual-exit.service';
 import { ExitFillSettler } from './services/exit-fill-settler.service';
+import { ExitOutcomeService } from './services/exit-outcome.service';
+import { AiExitOutcomeRepository } from './repositories/ai-exit-outcome.repository';
+import { EXIT_DISCIPLINE_CONFIG } from '../exit-discipline/config';
 
 /** The module's real imports (Prisma, MarketData, CredentialDecryptor), faked. */
 const prisma = { $queryRaw: jest.fn(), aiExitExecution: { updateMany: jest.fn(), create: jest.fn() } };
@@ -47,6 +50,9 @@ describe('SentinelExecutorModule wiring', () => {
     expect(ref.get(SentinelExitPoller)).toBeInstanceOf(SentinelExitPoller);
     expect(ref.get(ManualExitService)).toBeInstanceOf(ManualExitService);
     expect(ref.get(ExitFillSettler)).toBeInstanceOf(ExitFillSettler);
+    expect(ref.get(ExitOutcomeService)).toBeInstanceOf(ExitOutcomeService);
+    expect(ref.get(AiExitOutcomeRepository)).toBeInstanceOf(AiExitOutcomeRepository);
+    expect(ref.get(EXIT_DISCIPLINE_CONFIG)).toEqual(expect.objectContaining({ enabled: true, outcomeWindowMin: 60 }));
     expect(ref.get(AI_EXIT_SESSION_CLOCK)).toBeInstanceOf(SessionClock);
     // Disabled by default: not one query, not one broker touch.
     expect(prisma.$queryRaw).not.toHaveBeenCalled();

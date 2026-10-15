@@ -80,10 +80,25 @@ export class TickTripwireService implements OnModuleInit, OnModuleDestroy {
     this.on = false;
   }
 
-  /** Subscribe users the cycle has published and we have not subscribed yet. */
+  /**
+   * Subscribe users the cycle has published and we have not subscribed yet;
+   * release users the book no longer holds (every position closed or unwatched).
+   */
   subscribeNew(): void {
     if (!this.on) return;
-    for (const u of this.book.users()) {
+    const users = this.book.users();
+    const present = new Set(users);
+    for (const [u, off] of [...this.unsubs]) {
+      if (present.has(u)) continue;
+      this.unsubs.delete(u);
+      this.lastWake.delete(u);
+      try {
+        off();
+      } catch {
+        // A failed unsubscribe leaves a listener that finds no context: harmless.
+      }
+    }
+    for (const u of users) {
       if (this.unsubs.has(u)) continue;
       const off = this.stream.subscribe(u, (t) => this.onTick(u, t));
       if (off) this.unsubs.set(u, off);

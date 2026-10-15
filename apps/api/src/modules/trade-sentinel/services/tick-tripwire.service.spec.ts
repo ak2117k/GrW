@@ -95,4 +95,19 @@ describe('TickTripwireService', () => {
     h.subs.get('u1')!({ key: 'NSE:99926000', ltp: 23990, at: Date.now() });
     expect(h.runner.wakeForTick).toHaveBeenCalledTimes(1);
   });
+
+  it('releases a user’s hub subscription once the book no longer holds them, and re-subscribes when they return', () => {
+    const h = harness();
+    h.book.upsert(seed());
+    h.svc.start({ shadow: true, tickTripwires: true });
+    h.svc.subscribeNew();
+    expect(h.subs.has('u1')).toBe(true);
+    h.book.prune('u1', new Set());
+    h.svc.subscribeNew();
+    expect(h.subs.has('u1')).toBe(false);
+    h.book.upsert(seed());
+    h.svc.subscribeNew();
+    expect(h.stream.subscribe).toHaveBeenCalledTimes(2);
+    expect(h.subs.has('u1')).toBe(true);
+  });
 });

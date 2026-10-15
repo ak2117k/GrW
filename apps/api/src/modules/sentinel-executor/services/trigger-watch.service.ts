@@ -150,6 +150,12 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
         continue;
       }
       this.hubs.set(userId, hub);
+      // Triggers rebuilt at boot before this user's hub existed: watch their underlyings now.
+      for (const t of this.book?.all() ?? []) {
+        if (t.userId === userId && t.instrument === 'UNDERLYING') {
+          this.hold({ exchange: t.watch.exchange as HubExchange, token: t.watch.token, symbol: t.watch.symbol }, hub);
+        }
+      }
       if (!this.subscribed.has(hub)) {
         this.subscribed.add(hub);
         this.unsubs.push(hub.onPrice((p) => this.onPrice(p)));
@@ -289,6 +295,7 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
           `${newer ? `superseded by ${newer.id} meanwhile, not re-armed` : 're-armed'}, nothing sent`,
       );
       if (!newer) this.book?.add({ ...t, confirm: EMPTY_CONFIRM });
+      else this.releaseIfUnused(t.watch.key);
       return;
     }
     if (!won) {

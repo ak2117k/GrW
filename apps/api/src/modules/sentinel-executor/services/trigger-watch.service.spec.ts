@@ -214,6 +214,26 @@ describe('TriggerWatchService — firing', () => {
     expect(h.executor.execute).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'trg_trg1' }), expect.anything(), expect.anything(), expect.anything());
   });
 
+  it('a claim that THROWS after a newer trigger moved to another instrument releases the old watch', async () => {
+    let fail!: (e: Error) => void;
+    const claimFire = jest.fn().mockImplementationOnce(() => new Promise<boolean>((_r, j) => { fail = j; }));
+    const other = { exchange: 'MCX', token: '472790', symbol: 'CRUDEOIL18DEC26FUT' };
+    const h = harness({
+      proposals: [[proposal()], [proposal({ id: 'v2', exitTrigger: { ...STORED, price: 8935, watch: other } })], []],
+      claimFire, closed: [],
+    });
+    await armed(h);
+    h.emit(8925, ms(T0, 1000));
+    h.emit(8924, ms(T0, 2100));   // trg1 fires; its claim hangs
+    h.repo.arm.mockResolvedValueOnce({ id: 'trg2', superseded: ['trg1'] });
+    await h.svc.pass(ms(T0, 5000)); // v2 arms trg2 on the other future
+    expect(h.repo.arm).toHaveBeenCalledTimes(2);
+    fail(new Error('db down'));
+    await new Promise((r) => setImmediate(r));
+    expect(h.hub.unwatch).toHaveBeenCalledWith([{ exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19NOV26FUT' }], 'sentinel-triggers');
+    expect(h.hub.unwatch).not.toHaveBeenCalledWith([other], 'sentinel-triggers');
+  });
+
   it('one bad print never sells', async () => {
     const h = harness({ proposals: [[proposal()], []] });
     await armed(h);
@@ -246,6 +266,20 @@ describe('TriggerWatchService — expiry and rebuild', () => {
     expect(h.hub.watch).toHaveBeenCalledWith([{ exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19NOV26FUT' }], 1, 'sentinel-triggers');
     h.emit(8925, ms(T0, 1000));
     h.emit(8924, ms(T0, 2100));
+    expect(h.repo.claimFire).toHaveBeenCalledWith('trg9', expect.anything(), expect.any(Date));
+  });
+
+  it('a hub that appears only AFTER the boot rebuild still gets the rebuilt underlyings watched', async () => {
+    const h = harness({ armed: [row()] });
+    h.source.hubFor.mockReturnValue(null as never);
+    h.svc.start(ENV);
+    await h.svc.pass(T0);               // boot: no hub yet — the trigger is in memory, unwatched
+    expect(h.hub.watch).not.toHaveBeenCalled();
+    h.source.hubFor.mockReturnValue(h.hub as never);
+    await h.svc.pass(ms(T0, 5000));     // the hub is up now
+    expect(h.hub.watch).toHaveBeenCalledWith([{ exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19NOV26FUT' }], 1, 'sentinel-triggers');
+    h.emit(8925, ms(T0, 6000));
+    h.emit(8924, ms(T0, 7100));
     expect(h.repo.claimFire).toHaveBeenCalledWith('trg9', expect.anything(), expect.any(Date));
   });
 

@@ -21,6 +21,7 @@ import type { RosterEntry } from './roster.service';
 import type { StoredThesis } from './context-packet.service';
 import { HEARTBEAT_INTERVAL_MS, type TripwireResult } from './tripwire.service';
 import { STORED_TRIGGER_FIXTURE } from './exit-trigger-proposal';
+import { TickSensorBook } from './tick-sensor-book';
 
 const USER = 'u1';
 
@@ -544,7 +545,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         'design:paramtypes',
         SentinelCycleService,
       ) ?? [];
-    expect(injected).toHaveLength(8);
+    expect(injected).toHaveLength(9); // 9th: the optional TickSensorBook (Part B, memory only)
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -2163,5 +2164,25 @@ describe('SentinelCycleService — exitTrigger persistence (price triggers)', ()
     });
     await t.svc.runForUser(USER);
     expect('exitTrigger' in t.record.mock.calls[0][0]).toBe(false);
+  });
+});
+
+describe('SentinelCycleService — publishes tick-sensor context (Part B)', () => {
+  it('every evaluated position is published to the TickSensorBook; a closed one is pruned', async () => {
+    const t = makeSvc();
+    const book = new TickSensorBook();
+    const svc = new SentinelCycleService(
+      { build: t.build } as never, { evaluate: t.evaluate } as never, { build: t.buildPacket } as never,
+      { ensureFor: t.ensureFor } as never, { judge: t.judge, promptVersion: 'v' } as never,
+      { record: t.record, recentForTracker: t.recentForTracker } as never, { captureAndCompare: t.captureAndCompare } as never,
+      { tickFor: t.tickFor } as never, book,
+    );
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ contractRef: { exchange: 'NFO', token: '1', symbol: 'S' }, underlyingRef: { exchange: 'NSE', token: '99926000', symbol: 'NIFTY' } }));
+    await svc.runForUser(USER);
+    expect(book.forKey('NFO:1').map((c) => c.trackerId)).toEqual(['t1']);
+    t.build.mockResolvedValue([]);
+    await svc.runForUser(USER);
+    expect(book.forKey('NFO:1')).toEqual([]);
   });
 });

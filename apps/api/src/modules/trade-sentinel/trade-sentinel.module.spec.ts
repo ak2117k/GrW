@@ -22,6 +22,9 @@ import { ANTHROPIC_CLIENT } from './services/sentinel-agent.service';
 import { SentinelOvernightService } from './services/sentinel-overnight.service';
 import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
 import { MACRO_CUES } from './ports/market-cues.port';
+import { EXIT_DISCIPLINE_CONFIG } from '../exit-discipline/config';
+import { SentinelTickSource } from './adapters/tick-source.adapter';
+import { MinuteBarsReader } from './adapters/minute-bars.reader';
 
 /**
  * Every parameter Nest must resolve by an explicit TOKEN rather than by type.
@@ -43,6 +46,7 @@ const TOKEN_PARAMS: Array<[string, unknown, string]> = [
   ['SentinelCycleService.ticks', SentinelCycleService, TICK_SOURCE],
   ['SentinelOvernightService.ticks', SentinelOvernightService, TICK_SOURCE],
   ['SentinelOvernightService.evidence', SentinelOvernightService, OVERNIGHT_EVIDENCE],
+  ['SentinelTickSource.discipline', SentinelTickSource, EXIT_DISCIPLINE_CONFIG],
 ];
 
 /** The `@Inject(...)` tokens Nest recorded for a class, in no particular order. */
@@ -91,6 +95,10 @@ describe('TradeSentinelModule — every token is actually provided', () => {
       ([label]) => label,
     );
     expect(missing).toEqual([]);
+  });
+
+  it('provides the exit-discipline config and the 1-minute bars reader (DB only)', () => {
+    expect(providedTokens()).toEqual(expect.arrayContaining([EXIT_DISCIPLINE_CONFIG, MinuteBarsReader]));
   });
 
   it('reads a non-empty provider list, so the check cannot pass vacuously', () => {

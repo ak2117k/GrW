@@ -1,4 +1,5 @@
 import {
+  breakevenPrice,
   estimateCharges,
   computeGreenFloor,
   GREEN_FLOOR_MARGIN_RUPEES,
@@ -269,5 +270,21 @@ describe('computeGreenFloor', () => {
 
       expect(netAtFloor).toBeGreaterThanOrEqual(GREEN_FLOOR_MARGIN_RUPEES);
     });
+  });
+});
+
+describe('breakevenPrice', () => {
+  it('is the green floor solved with a zero margin (LONG above entry, SHORT below)', () => {
+    const long = breakevenPrice({ segment: 'OPT', entryPrice: 521.9, qty: 100, side: 'LONG' })!;
+    const floor = computeGreenFloor({ segment: 'OPT', entryPrice: 521.9, ltp: 521.9, qty: 100, side: 'LONG' }).floorPrice!;
+    expect(long).toBeGreaterThan(521.9);
+    expect(floor - long).toBeCloseTo(GREEN_FLOOR_MARGIN_RUPEES / 100, 1);
+    expect(breakevenPrice({ segment: 'OPT', entryPrice: 100, qty: 50, side: 'SHORT' })!).toBeLessThan(100);
+  });
+  it('qty 0 ⇒ null', () => {
+    expect(breakevenPrice({ segment: 'OPT', entryPrice: 100, qty: 0, side: 'LONG' })).toBeNull();
+  });
+  it('computeGreenFloor is unchanged (same outputs as before the refactor)', () => {
+    expect(computeGreenFloor({ segment: 'OPT', entryPrice: 100, ltp: 103, qty: 100, side: 'LONG' })).toMatchSnapshot();
   });
 });

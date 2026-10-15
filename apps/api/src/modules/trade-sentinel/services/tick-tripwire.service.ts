@@ -19,6 +19,8 @@ export function tickFires(ctx: TickSensorContext): TripwireFire[] {
     qty: 0, ltp: ctx.ltp, underlyingLtp: ctx.underlyingLtp, holdingHigh: ctx.holdingHigh, holdingLow: ctx.holdingLow,
     nearestSupport: ctx.nearestSupport, nearestResistance: ctx.nearestResistance, volumeRatio: null,
     oiWallNow: null, oiWallPrev: null, freshNewsCount: null, factorValues: {}, prevFactorValues: {},
+    // Exit discipline §5: the same giveback rule the 30-s pass uses.
+    ...(ctx.noise ? { noise: ctx.noise } : {}),
   };
   const out: TripwireFire[] = [];
   for (const t of [levelBreak, givebackOffPeak]) {

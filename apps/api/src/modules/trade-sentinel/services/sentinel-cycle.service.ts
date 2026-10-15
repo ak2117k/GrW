@@ -21,6 +21,14 @@ import { exitTriggerRecord } from './exit-trigger-proposal';
 import { TickSensorBook, sensorSeed } from './tick-sensor-book';
 import type { Prisma } from '@prisma/client';
 import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service';
+import {
+  EXIT_CONFIRM_MAX_RELOOKS,
+  EXIT_DISCIPLINE_CONFIG,
+  parseExitDisciplineConfig,
+  type ExitDisciplineConfig,
+} from '../../exit-discipline/config';
+import { exitConfirmFire, withExitConfirm } from '../tripwires/exit-confirm';
+import { solveCycleFloor } from './cycle-floor';
 
 export interface CycleReport {
   evaluated: number;
@@ -349,7 +357,16 @@ interface TrackerState {
    * after "last judged" — see {@link SentinelCycleService.startForUser}.
    */
   wantedSince: number | null;
+  /**
+   * Exit discipline §4: the in-process half of the noise-floor ratchet (armed,
+   * the last armed level, the entry it was armed against). The durable half is
+   * the last live packet — see `storedNoiseFloor`.
+   */
+  noiseFloor: { armed: boolean; level: number | null; entry: number | null };
 }
+
+/** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
+const DISCIPLINE_OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
 
 /** A position the sensor pass decided to judge, waiting for the dispatch phase. */
 interface JudgeCandidate {
@@ -430,6 +447,9 @@ export class SentinelCycleService {
     // Part B (price triggers, R14): per-tracker context for price-only sensors on
     // hub ticks between passes. Optional so specs and a module without it are unaffected.
     @Optional() private readonly sensorBook?: TickSensorBook,
+    // Exit discipline (docs/superpowers/specs/2026-10-14-exit-discipline-design.md).
+    // Optional: absent ⇒ discipline off, the fixed floor and the 40 % giveback as before.
+    @Optional() @Inject(EXIT_DISCIPLINE_CONFIG) private readonly discipline?: ExitDisciplineConfig,
   ) {}
 
   /**
@@ -562,17 +582,52 @@ export class SentinelCycleService {
     // otherwise look permanently healthy behind the repair.
     if (tick !== raw) this.warnMissingUnderlying(entry);
 
+    // Exit discipline §5: the giveback sensor's noise rule, for this pass AND the
+    // hub-tick sensors. Null when off or unmeasured (⇒ the 40 % rule, as before).
+    const noiseInput =
+      this.discipline?.enabled && tick.noise?.contract
+        ? { n: tick.noise.contract.n, armN: this.discipline.floorArmN, givebackN: this.discipline.givebackN }
+        : null;
+
     // Part B: the price-only sensors' context for hub ticks between passes. Memory only.
-    const seed = this.sensorBook ? sensorSeed(entry, tick) : null;
+    const seed = this.sensorBook ? sensorSeed(entry, tick, noiseInput) : null;
     if (seed) this.sensorBook!.upsert(seed);
 
     // LIVE-ONLY: an overnight-review row is not a live look (see recentForTracker).
-    const [last] = await this.verdicts.recentForTracker(entry.trackerId, 1, { liveOnly: true });
+    // With exit discipline on, enough rows to count a run of EXIT_NOWs for the
+    // exit-confirm re-look (§7); otherwise exactly the one row, as before.
+    const recent = await this.verdicts.recentForTracker(
+      entry.trackerId,
+      this.discipline?.enabled ? EXIT_CONFIRM_MAX_RELOOKS + 1 : 1,
+      { liveOnly: true },
+    );
+    const last = recent[0];
 
     // The ratchet is updated BEFORE the skip decision, deliberately: a floor that
     // arms on a quiet tick and pulls back before the next evaluation has still
     // armed, and the agent must not be shown it un-arming.
     const greenFloorArmedLatched = this.armedLatch(entry, tick, last);
+
+    // Exit discipline §4: the noise-aware floor, ratcheted like the latch above
+    // (in-process memory + the last live packet). Null when discipline is off or
+    // N is unknown — the fixed floor then stays in charge, exactly as before.
+    const floorSolve = solveCycleFloor({
+      cfg: this.discipline ?? DISCIPLINE_OFF,
+      segment: tick.segment,
+      side: tick.side,
+      entryPrice: tick.entryPrice,
+      qty: tick.qty,
+      holdingHigh: tick.holdingHigh,
+      holdingLow: tick.holdingLow,
+      nContract: tick.noise?.contract?.n ?? null,
+      memory: this.stateFor(entry).noiseFloor,
+      last,
+    });
+    this.stateFor(entry).noiseFloor = floorSolve.memory;
+    const tickF: TickReading = { ...tick, noiseFloor: floorSolve.noiseFloor };
+    // What the heartbeat cadence reads: the noise floor's latch when it is in
+    // charge, else the fixed one.
+    const armedForCadence = floorSolve.noiseFloor ? floorSolve.noiseFloor.armed : greenFloorArmedLatched;
 
     const capture = await this.wallsFor(entry, tick, now);
     const walls = capture.walls;
@@ -602,26 +657,36 @@ export class SentinelCycleService {
         // state. Empty on first sight, which correctly means contextFactorFlip
         // cannot fire until there is something to compare against.
         prevFactorValues: previousFactorValues(last),
+        // Exit discipline §5: the giveback sensor's noise rule. Spread only when
+        // on and measured, so with discipline off the input is exactly today's
+        // (absent ⇒ the 40 % rule).
+        ...(noiseInput ? { noise: noiseInput } : {}),
       },
       last ? last.createdAt : null,
       now,
       {
         // The LATCHED value, not `computeGreenFloor`'s per-tick snapshot — a
         // cadence that read the snapshot would oscillate with the market.
-        greenFloorArmed: greenFloorArmedLatched,
+        greenFloorArmed: armedForCadence,
         lastJudged: previousJudged(last),
         current: {
           ltp: tick.ltp,
           qty: tick.qty,
-          greenFloorArmed: greenFloorArmedLatched,
+          greenFloorArmed: armedForCadence,
         },
       },
     );
 
     const state = this.stateFor(entry);
-    const decision = withCarriedFires(
-      suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey),
-      state.carriedFires,
+    // Exit discipline §7: an EXIT_NOW executes only once confirmed by a second
+    // verdict, and nothing else guarantees one soon — so while the latest live
+    // verdict is EXIT_NOW, ask again after PERSIST_MIN_SEC (at most 3 in a row).
+    const confirm = this.discipline?.enabled
+      ? exitConfirmFire({ recent, now, relookMs: this.discipline.persistMinSec * 1000, maxRelooks: EXIT_CONFIRM_MAX_RELOOKS })
+      : null;
+    const decision = withExitConfirm(
+      withCarriedFires(suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey), state.carriedFires),
+      confirm,
     );
 
     if (!decision.shouldEvaluate) {
@@ -661,7 +726,8 @@ export class SentinelCycleService {
       index,
       entry,
       state,
-      tick,
+      // Carries the noise floor, so the packet's money block IS that floor.
+      tick: tickF,
       walls,
       wallsAt: capture.at,
       greenFloorArmedLatched,
@@ -998,6 +1064,7 @@ export class SentinelCycleService {
         oiEvaluatedKey: null,
         carriedFires: [],
         wantedSince: null,
+        noiseFloor: { armed: false, level: null, entry: null },
       };
       this.state.set(entry.trackerId, state);
     }

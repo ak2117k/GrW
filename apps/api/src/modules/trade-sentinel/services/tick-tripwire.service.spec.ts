@@ -27,6 +27,13 @@ describe('tickFires', () => {
     expect(tickFires({ ...seed(), ltp: 105, lastEvalAt: 0, firing: false }).map((f) => f.name)).toEqual(['giveback-off-peak']);
   });
   it('quiet', () => expect(tickFires({ ...seed(), lastEvalAt: 0, firing: false })).toEqual([]));
+  it('exit discipline §5: a noise unit on the context switches giveback to the noise rule on hub ticks too', () => {
+    // Peak 130 from 100, now 118: 40 % rule fires (40 %), but 12 is < 1.5 N for N = 10.
+    const ctx = { ...seed(), ltp: 118, lastEvalAt: 0, firing: false };
+    expect(tickFires(ctx).map((f) => f.name)).toEqual(['giveback-off-peak']);
+    expect(tickFires({ ...ctx, noise: { n: 10, armN: 1.5, givebackN: 1.5 } })).toEqual([]);
+    expect(tickFires({ ...ctx, ltp: 112, noise: { n: 10, armN: 1.5, givebackN: 1.5 } }).map((f) => f.name)).toEqual(['giveback-off-peak']);
+  });
 });
 
 describe('TickTripwireService', () => {

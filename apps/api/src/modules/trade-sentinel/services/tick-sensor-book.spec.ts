@@ -58,6 +58,11 @@ describe('sensorSeed', () => {
     expect(sensorSeed(entry, cash)).toMatchObject({ contractKey: 'NSE:2885', underlyingKey: 'NSE:2885' });
   });
 
+  it('carries the giveback noise input only when given (exit discipline §5)', () => {
+    expect('noise' in (sensorSeed(entry, tickBase) as object)).toBe(false);
+    expect(sensorSeed(entry, tickBase, { n: 4.5, armN: 1.5, givebackN: 1.5 })).toMatchObject({ noise: { n: 4.5, armN: 1.5, givebackN: 1.5 } });
+  });
+
   it('no contractRef → nothing to watch', () => {
     expect(sensorSeed(entry, { ...(tickBase as object), contractRef: null } as never)).toBeNull();
   });

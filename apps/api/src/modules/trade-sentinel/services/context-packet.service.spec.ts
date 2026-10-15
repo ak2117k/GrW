@@ -893,6 +893,57 @@ describe('ContextPacketService', () => {
       jest.useRealTimers();
     }
   });
+
+  describe('exit discipline fields', () => {
+    it('discipline off (no tick.noise) ⇒ neither field exists: the packet is byte-identical to before', async () => {
+      jest.useFakeTimers({ now: new Date('2026-08-14T05:00:00Z') });
+      try {
+        const p = await svc.build(entry, tick, null);
+        expect('floorBasis' in p.money).toBe(false);
+        expect('noiseUnit' in p.flow).toBe(false);
+        expect(p.money.greenFloorPrice).toBe(clampFloorTowardLtp(floorFor(tick), tick.ltp, tick.side));
+        const q = await svc.build(entry, { ...tick, noise: null, noiseFloor: null }, null);
+        expect(JSON.stringify(q)).toBe(JSON.stringify(p));
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('discipline on but no noise floor solved ⇒ floorBasis fixed and the fixed floor, noiseUnit stated', async () => {
+      const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      const p = await svc.build(entry, { ...tick, noise: { contract, underlying1m: null, reason: null } }, null);
+      expect(p.money.floorBasis).toBe('fixed');
+      expect(p.money.greenFloorPrice).toBe(clampFloorTowardLtp(floorFor(tick), tick.ltp, tick.side));
+      expect(Object.keys(p.money)).toEqual(['grossPnl', 'charges', 'netPnl', 'greenFloorPrice', 'greenFloorArmed', 'floorBasis', 'mfe', 'mae']);
+      expect(p.flow.noiseUnit).toMatchObject({ available: true, value: { contract, underlying: null } });
+    });
+
+    it('tick.noise ⇒ present NoiseUnitValue; the underlying falls back to the level book atr14/√15', async () => {
+      const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      levelsFor.mockResolvedValue({ value: { atr14: 13.5, vwap: 9000 }, source: LEVEL_SOURCE, at: '2026-10-14T10:45:00.000Z' });
+      const p = await svc.build(entry, { ...tick, noise: { contract, underlying1m: null, reason: null } }, null);
+      expect(p.flow.noiseUnit).toMatchObject({
+        available: true,
+        at: '2026-10-14T11:00:00.000Z',
+        value: { contract, underlying: { n: 13.5 / Math.sqrt(15), method: 'atr14-15m-scaled', bars: 0, at: '2026-10-14T10:45:00.000Z' } },
+      });
+    });
+
+    it('tick.noise with neither reading ⇒ absent with the tick reason', async () => {
+      const p = await svc.build(entry, { ...tick, noise: { contract: null, underlying1m: null, reason: 'no hub 1-minute bars' } }, null);
+      expect(p.flow.noiseUnit).toEqual({ available: false, reason: 'no hub 1-minute bars' });
+    });
+
+    it('tick.noiseFloor ⇒ the packet floor IS the noise floor', async () => {
+      const p = await svc.build(entry, { ...tick, noiseFloor: { basis: 'noise', armed: true, level: 530.5, armPrice: 529.65, n: 4.5 } }, null);
+      expect(p.money).toMatchObject({ greenFloorPrice: 530.5, greenFloorArmed: true, floorBasis: 'noise' });
+    });
+
+    it('an unarmed noise floor is reported unarmed even when the fixed latch is set (the ₹150 latch never arms the noise floor)', async () => {
+      const p = await svc.build(entry, { ...tick, greenFloorArmedLatched: true, noiseFloor: { basis: 'noise', armed: false, level: 529.65, armPrice: 529.65, n: 4.5 } }, null);
+      expect(p.money).toMatchObject({ greenFloorPrice: 529.65, greenFloorArmed: false, floorBasis: 'noise' });
+    });
+  });
 });
 
 /**

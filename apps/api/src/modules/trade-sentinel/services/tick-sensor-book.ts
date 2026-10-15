@@ -1,5 +1,6 @@
 import type { Segment, Side } from '../charges';
 import type { TickSnapshot } from './context-packet.service';
+import type { TripwireInput } from '../tripwires/types';
 
 /** The tick fields a seed needs (a TickReading satisfies it). */
 export type SeedTick = Pick<
@@ -29,6 +30,12 @@ export interface TickSensorContext {
   holdingLow: number | null;
   ltp: number;
   underlyingLtp: number | null;
+  /**
+   * Exit discipline §5: the giveback sensor's noise input, as the 30-s pass hands
+   * it — so a hub tick never fires the 40 % rule the pass would have suppressed.
+   * Absent ⇒ the 40 % rule (discipline off, or no noise unit measured).
+   */
+  noise?: TripwireInput['noise'];
   /** Tick bookkeeping, preserved across upserts. */
   lastEvalAt: number;
   firing: boolean;
@@ -42,7 +49,11 @@ export function keyOf(r: { exchange: string; token: string }): string {
   return `${String(r.exchange ?? '').toUpperCase()}:${r.token}`;
 }
 
-export function sensorSeed(entry: { userId: string; trackerId: string; symbol: string }, tick: SeedTick): SensorSeed | null {
+export function sensorSeed(
+  entry: { userId: string; trackerId: string; symbol: string },
+  tick: SeedTick,
+  noise?: TripwireInput['noise'],
+): SensorSeed | null {
   if (!tick.contractRef) return null;
   const contractKey = keyOf(tick.contractRef);
   const isCash = tick.segment === 'EQ_DELIVERY' || tick.segment === 'EQ_INTRADAY';
@@ -54,6 +65,7 @@ export function sensorSeed(entry: { userId: string; trackerId: string; symbol: s
     nearestSupport: tick.nearestSupport, nearestResistance: tick.nearestResistance,
     holdingHigh: tick.holdingHigh, holdingLow: tick.holdingLow,
     ltp: tick.ltp, underlyingLtp: tick.underlyingLtp,
+    ...(noise ? { noise } : {}),
   };
 }
 

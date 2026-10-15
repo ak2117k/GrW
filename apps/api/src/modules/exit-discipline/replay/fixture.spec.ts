@@ -1,18 +1,7 @@
 import { buildSyntheticCrudeFixture } from './synthetic-crude';
 import { validateFixture } from './fixture';
+import { noiseFromBars } from '../noise';
 import type { MinuteBar } from '../types';
-
-/**
- * R2's `atr14-1m` (mean of the last 14 true ranges). Local until Stream B's
- * `noiseFromBars` (exit-discipline/noise.ts) is merged into this branch.
- */
-function atr14(bars: MinuteBar[]): number {
-  const s = [...bars].sort((a, b) => a.ts - b.ts);
-  const tr = s.map((b, i) => (i === 0 ? b.high - b.low
-    : Math.max(b.high - b.low, Math.abs(b.high - s[i - 1].close), Math.abs(b.low - s[i - 1].close))));
-  const last = tr.slice(-14);
-  return last.reduce((a, x) => a + x, 0) / last.length;
-}
 
 describe('ExitFixtureV1', () => {
   const fx = buildSyntheticCrudeFixture();
@@ -51,7 +40,7 @@ describe('ExitFixtureV1', () => {
   });
 
   it('the contract noise unit is in the spec range (N ≈ 4–7)', () => {
-    const n = atr14(fx.contractBars.filter((b) => b.ts <= Date.parse('2026-10-14T11:01:00Z')));
+    const n = noiseFromBars(fx.contractBars.filter((b) => b.ts <= Date.parse('2026-10-14T11:01:00Z')))!.n;
     expect(n).toBeGreaterThan(4);
     expect(n).toBeLessThan(7);
   });

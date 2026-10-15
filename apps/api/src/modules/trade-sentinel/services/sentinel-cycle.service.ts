@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { computeGreenFloor } from '../charges';
 import { RosterService, type RosterEntry } from './roster.service';
 import {
@@ -18,6 +18,8 @@ import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } f
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service';
+import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, type ExitDisciplineConfig } from '../../exit-discipline/config';
+import { solveCycleFloor } from './cycle-floor';
 
 export interface CycleReport {
   evaluated: number;
@@ -346,7 +348,16 @@ interface TrackerState {
    * after "last judged" — see {@link SentinelCycleService.startForUser}.
    */
   wantedSince: number | null;
+  /**
+   * Exit discipline §4: the in-process half of the noise-floor ratchet (armed,
+   * the last armed level, the entry it was armed against). The durable half is
+   * the last live packet — see `storedNoiseFloor`.
+   */
+  noiseFloor: { armed: boolean; level: number | null; entry: number | null };
 }
+
+/** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
+const DISCIPLINE_OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
 
 /** A position the sensor pass decided to judge, waiting for the dispatch phase. */
 interface JudgeCandidate {
@@ -424,6 +435,9 @@ export class SentinelCycleService {
     private readonly verdicts: SentinelVerdictRepository,
     private readonly oiWalls: OiWallSnapshotService,
     @Inject(TICK_SOURCE) private readonly ticks: TickSource,
+    // Exit discipline (docs/superpowers/specs/2026-10-14-exit-discipline-design.md).
+    // Optional: absent ⇒ discipline off, the fixed floor and the 40 % giveback as before.
+    @Optional() @Inject(EXIT_DISCIPLINE_CONFIG) private readonly discipline?: ExitDisciplineConfig,
   ) {}
 
   /**
@@ -561,6 +575,27 @@ export class SentinelCycleService {
     // armed, and the agent must not be shown it un-arming.
     const greenFloorArmedLatched = this.armedLatch(entry, tick, last);
 
+    // Exit discipline §4: the noise-aware floor, ratcheted like the latch above
+    // (in-process memory + the last live packet). Null when discipline is off or
+    // N is unknown — the fixed floor then stays in charge, exactly as before.
+    const floorSolve = solveCycleFloor({
+      cfg: this.discipline ?? DISCIPLINE_OFF,
+      segment: tick.segment,
+      side: tick.side,
+      entryPrice: tick.entryPrice,
+      qty: tick.qty,
+      holdingHigh: tick.holdingHigh,
+      holdingLow: tick.holdingLow,
+      nContract: tick.noise?.contract?.n ?? null,
+      memory: this.stateFor(entry).noiseFloor,
+      last,
+    });
+    this.stateFor(entry).noiseFloor = floorSolve.memory;
+    const tickF: TickReading = { ...tick, noiseFloor: floorSolve.noiseFloor };
+    // What the heartbeat cadence reads: the noise floor's latch when it is in
+    // charge, else the fixed one.
+    const armedForCadence = floorSolve.noiseFloor ? floorSolve.noiseFloor.armed : greenFloorArmedLatched;
+
     const capture = await this.wallsFor(entry, tick, now);
     const walls = capture.walls;
 
@@ -595,12 +630,12 @@ export class SentinelCycleService {
       {
         // The LATCHED value, not `computeGreenFloor`'s per-tick snapshot — a
         // cadence that read the snapshot would oscillate with the market.
-        greenFloorArmed: greenFloorArmedLatched,
+        greenFloorArmed: armedForCadence,
         lastJudged: previousJudged(last),
         current: {
           ltp: tick.ltp,
           qty: tick.qty,
-          greenFloorArmed: greenFloorArmedLatched,
+          greenFloorArmed: armedForCadence,
         },
       },
     );
@@ -648,7 +683,8 @@ export class SentinelCycleService {
       index,
       entry,
       state,
-      tick,
+      // Carries the noise floor, so the packet's money block IS that floor.
+      tick: tickF,
       walls,
       wallsAt: capture.at,
       greenFloorArmedLatched,
@@ -980,6 +1016,7 @@ export class SentinelCycleService {
         oiEvaluatedKey: null,
         carriedFires: [],
         wantedSince: null,
+        noiseFloor: { armed: false, level: null, entry: null },
       };
       this.state.set(entry.trackerId, state);
     }

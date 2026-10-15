@@ -13,7 +13,8 @@ import { liveSessionClock } from '../overnight/overnight-calendar';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import type { CommodityCueKey, CommodityQuote, CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
-import type { NoiseFloor, NoiseReading } from '../../exit-discipline/types';
+import type { FloorBasis, NoiseFloor, NoiseReading, NoiseUnitValue } from '../../exit-discipline/types';
+import { scaledUnderlyingNoise } from '../../exit-discipline/noise';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -446,6 +447,12 @@ export type ContextPacket = {
     netPnl: number;
     greenFloorPrice: number | null;
     greenFloorArmed: boolean;
+    /**
+     * How `greenFloorPrice` was set. 'noise' — arms at FLOOR_ARM_N noise units
+     * beyond breakeven-after-charges, then trails the peak by FLOOR_TRAIL_N units
+     * (tighten-only); 'fixed' — breakeven + ₹150.
+     */
+    floorBasis: FloorBasis;
     mfe: number | null;
     mae: number | null;
   };
@@ -458,6 +465,8 @@ export type ContextPacket = {
   flow: {
     volumeRatio: Block<number>;
     oiWalls: Block<Prisma.InputJsonValue>;
+    /** Exit discipline §3: a `NoiseUnitValue` (contract and underlying 1-minute noise units). */
+    noiseUnit: Block<Prisma.InputJsonValue>;
   };
   macro: {
     /** The latest published FII/DII cash figures from the market-cues cache — post-close data, never intraday. */
@@ -495,6 +504,37 @@ export function packetAsJson(packet: ContextPacket): Prisma.InputJsonValue {
 
 /** How many of this trade's own prior verdicts the agent is shown. */
 const PRIOR_VERDICT_LIMIT = 3;
+
+/**
+ * `flow.noiseUnit` when no noise unit was measured at all — discipline off, or
+ * a tick source that did not read bars. Exported so packet literals (golden
+ * fixtures, specs) state exactly what the builder states.
+ */
+export const NOISE_UNIT_ABSENT_REASON =
+  'no noise unit measured — exit discipline is off, or the tick source read no 1-minute bars';
+
+/**
+ * Exit discipline §3: `flow.noiseUnit`. Present when either noise reading
+ * exists — the underlying falls back to the level book's 15m ATR14 / √15 when
+ * the hub has no 1-minute bars for it; absent WITH the reason otherwise.
+ */
+function noiseUnitBlock(tick: TickSnapshot, levelBook: Block<Prisma.InputJsonValue>, at: string): Block<Prisma.InputJsonValue> {
+  if (!tick.noise) return absent(NOISE_UNIT_ABSENT_REASON);
+  const book = levelBook.available ? (levelBook.value as { atr14?: unknown } | null) : null;
+  const scaled = levelBook.available
+    ? scaledUnderlyingNoise(typeof book?.atr14 === 'number' ? book.atr14 : null, levelBook.at)
+    : null;
+  const value: NoiseUnitValue = { contract: tick.noise.contract, underlying: tick.noise.underlying1m ?? scaled };
+  if (!value.contract && !value.underlying) {
+    return absent(tick.noise.reason ?? 'no 1-minute bars for the contract and no 15m ATR on the level book');
+  }
+  const stamps = [value.contract?.at, value.underlying?.at].filter((s): s is string => !!s).sort();
+  return present(
+    value as unknown as Prisma.InputJsonValue,
+    'exit-discipline noise unit (ATR14 of hub 1-minute bars; underlying falls back to the 15m level-book ATR14 / √15)',
+    stamps[stamps.length - 1] ?? at,
+  );
+}
 
 /**
  * Why a source is missing when the underlying could not be resolved.
@@ -872,10 +912,14 @@ export class ContextPacketService {
         // Only the one-tick rounding artifact is repaired — see
         // clampFloorTowardLtp for why an unconditional clamp makes the packet
         // lie about a losing position.
-        greenFloorPrice: clampFloorTowardLtp(floor.floorPrice, tick.ltp, tick.side),
+        // Exit discipline §4: when the cycle solved a noise-aware floor it IS
+        // the floor (its level is a trail or a target, never clamped toward ltp).
+        greenFloorPrice: tick.noiseFloor ? tick.noiseFloor.level : clampFloorTowardLtp(floor.floorPrice, tick.ltp, tick.side),
         // The latch wins: `floor.armed` is a snapshot of the CURRENT ltp, and a
-        // floor that un-arms on a pullback is not a floor.
-        greenFloorArmed: tick.greenFloorArmedLatched || floor.armed,
+        // floor that un-arms on a pullback is not a floor. A noise floor carries
+        // its own latch (the cycle's), which the fixed ₹150 latch never arms.
+        greenFloorArmed: tick.noiseFloor ? tick.noiseFloor.armed : tick.greenFloorArmedLatched || floor.armed,
+        floorBasis: tick.noiseFloor ? 'noise' : 'fixed',
         // Excursions are read from the position's side: a LONG's best case is
         // the high, a SHORT's is the low. Both are PRICES, not rupee figures.
         mfe: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
@@ -939,6 +983,7 @@ export class ContextPacketService {
                 // read on their own cadence and can be up to a minute old.
                 tick.oiWallsAt ?? at,
               ),
+        noiseUnit: noiseUnitBlock(tick, levelBook, at),
       },
       macro: {
         ...macroBlocks(this.readMacro(now), now, {

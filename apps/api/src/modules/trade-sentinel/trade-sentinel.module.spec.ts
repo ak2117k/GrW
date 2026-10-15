@@ -44,6 +44,7 @@ const TOKEN_PARAMS: Array<[string, unknown, string]> = [
   ['ThesisService.chartContext', ThesisService, CHART_CONTEXT_SHIM],
   ['OiWallSnapshotService.oiWall', OiWallSnapshotService, OI_WALL_SOURCE],
   ['SentinelCycleService.ticks', SentinelCycleService, TICK_SOURCE],
+  ['SentinelCycleService.discipline', SentinelCycleService, EXIT_DISCIPLINE_CONFIG],
   ['SentinelOvernightService.ticks', SentinelOvernightService, TICK_SOURCE],
   ['SentinelOvernightService.evidence', SentinelOvernightService, OVERNIGHT_EVIDENCE],
   ['SentinelTickSource.discipline', SentinelTickSource, EXIT_DISCIPLINE_CONFIG],

@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { APIConnectionError, RateLimitError } from '@anthropic-ai/sdk';
 import { SentinelAgentService, type Verdict } from './sentinel-agent.service';
-import { absent, present, type ContextPacket } from './context-packet.service';
+import { NOISE_UNIT_ABSENT_REASON, absent, present, type ContextPacket } from './context-packet.service';
 import {
   SENTINEL_PROMPT_VERSION,
   SENTINEL_SYSTEM_PROMPT,
@@ -43,6 +43,7 @@ const base: ContextPacket = {
     netPnl: 6080,
     greenFloorPrice: 1441,
     greenFloorArmed: true,
+    floorBasis: 'fixed',
     mfe: 1478,
     mae: 1396,
   },
@@ -70,6 +71,7 @@ const base: ContextPacket = {
       'oi-wall.service',
       AT,
     ),
+    noiseUnit: absent(NOISE_UNIT_ABSENT_REASON),
   },
   macro: {
     fiiDii: absent('stub'),

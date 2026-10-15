@@ -20,6 +20,7 @@ import {
 import type { RosterEntry } from './roster.service';
 import type { StoredThesis } from './context-packet.service';
 import { HEARTBEAT_INTERVAL_MS, type TripwireResult } from './tripwire.service';
+import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, type ExitDisciplineConfig } from '../../exit-discipline/config';
 
 const USER = 'u1';
 
@@ -95,7 +96,7 @@ const verdictRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function makeSvc() {
+function makeSvc(discipline?: ExitDisciplineConfig) {
   const build = jest.fn().mockResolvedValue([]);
   const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
   const buildPacket = jest.fn();
@@ -137,6 +138,7 @@ function makeSvc() {
     { record, recentForTracker } as never,
     { captureAndCompare } as never,
     { tickFor } as never,
+    discipline,
   );
 
   return {
@@ -543,7 +545,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         'design:paramtypes',
         SentinelCycleService,
       ) ?? [];
-    expect(injected).toHaveLength(8);
+    // 9: the eighth is the TickSource; the ninth the exit-discipline CONFIG (a
+    // plain parsed value object — no collaborator, no methods).
+    expect(injected).toHaveLength(9);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -553,7 +557,10 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         SentinelCycleService,
       ) as never;
     expect(byToken).toEqual(
-      expect.arrayContaining([expect.objectContaining({ index: 7, param: TICK_SOURCE })]),
+      expect.arrayContaining([
+        expect.objectContaining({ index: 7, param: TICK_SOURCE }),
+        expect.objectContaining({ index: 8, param: EXIT_DISCIPLINE_CONFIG }),
+      ]),
     );
 
     for (const dep of injected) {
@@ -806,6 +813,77 @@ describe('SentinelCycleService — the green-floor latch', () => {
     await t.svc.runForUser('other');
 
     expect(t.buildPacket.mock.calls[1][1].greenFloorArmedLatched).toBe(true);
+  });
+});
+
+describe('SentinelCycleService — exit discipline: the noise-aware floor', () => {
+  const ON = parseExitDisciplineConfig({});
+  const noise = (n: number) => ({ contract: { n, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' }, underlying1m: null, reason: null });
+  /** OPT 521.9 x 100: the fixed ₹150 floor arms near 524; the noise floor (N 4.5) only once the peak is ~6.75 beyond breakeven. */
+  const opt = (over: Partial<TickReading> = {}) =>
+    tick({ segment: 'OPT', entryPrice: 521.9, qty: 100, ltp: 523, holdingHigh: 539.5, holdingLow: 518, noise: noise(4.5), ...over });
+
+  it('a peak beyond the arm threshold ⇒ the packet gets an armed noise floor and the cadence reads it', async () => {
+    const t = makeSvc(ON);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(opt());
+
+    await t.svc.runForUser(USER);
+
+    const packetTick = t.buildPacket.mock.calls[0][1];
+    expect(packetTick.noiseFloor).toMatchObject({ basis: 'noise', armed: true });
+    expect(packetTick.noiseFloor.level).toBeCloseTo(539.5 - 9, 2);
+    // ltp 523 nets < ₹150: the fixed latch is NOT armed, yet the cadence follows the noise floor.
+    expect(packetTick.greenFloorArmedLatched).toBe(false);
+    expect(t.evaluate.mock.calls[0][3]).toMatchObject({ greenFloorArmed: true, current: { greenFloorArmed: true } });
+  });
+
+  it('the fixed latch never arms the noise floor: a ₹150 profit inside one swing stays unarmed', async () => {
+    const t = makeSvc(ON);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(opt({ ltp: 535, holdingHigh: 535, noise: noise(10) }));
+
+    await t.svc.runForUser(USER);
+
+    const packetTick = t.buildPacket.mock.calls[0][1];
+    expect(packetTick.greenFloorArmedLatched).toBe(true);
+    expect(packetTick.noiseFloor).toMatchObject({ basis: 'noise', armed: false });
+    expect(t.evaluate.mock.calls[0][3]).toMatchObject({ greenFloorArmed: false, current: { greenFloorArmed: false } });
+  });
+
+  it('tighten-only across ticks: a pullback and a wider N later never lower the level', async () => {
+    const t = makeSvc(ON);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(opt());
+    await t.svc.runForUser(USER);
+    const first = t.buildPacket.mock.calls[0][1].noiseFloor.level;
+
+    t.tickFor.mockResolvedValue(opt({ ltp: 531, noise: noise(6) }));
+    await t.svc.runForUser(USER);
+    expect(t.buildPacket.mock.calls[1][1].noiseFloor).toMatchObject({ armed: true, level: first });
+  });
+
+  it('no EXIT_DISCIPLINE_CONFIG (constructor param omitted) ⇒ no noise floor, cadence = the fixed latch, exactly today', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(opt());
+
+    await t.svc.runForUser(USER);
+
+    const packetTick = t.buildPacket.mock.calls[0][1];
+    expect(packetTick.noiseFloor ?? null).toBeNull();
+    expect(t.evaluate.mock.calls[0][3]).toMatchObject({ greenFloorArmed: false, current: { greenFloorArmed: false } });
+  });
+
+  it('EXIT_DISCIPLINE_ENABLED=false ⇒ same as absent', async () => {
+    const t = makeSvc(parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' }));
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(opt());
+
+    await t.svc.runForUser(USER);
+
+    expect(t.buildPacket.mock.calls[0][1].noiseFloor ?? null).toBeNull();
+    expect(t.evaluate.mock.calls[0][3]).toMatchObject({ greenFloorArmed: false });
   });
 });
 

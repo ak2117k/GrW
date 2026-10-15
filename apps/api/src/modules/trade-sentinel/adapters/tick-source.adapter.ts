@@ -418,6 +418,13 @@ export class SentinelTickSource implements TickSource {
       // that cannot tell them apart is not provenance.
       underlyingLtpSource: spot.source,
       underlyingLtpReason: spot.reason,
+      // Executor plumbing for price triggers (never rendered into the packet):
+      // the instrument an UNDERLYING exitTrigger watches, and the contract itself.
+      underlyingRef:
+        !isCash && underlying.token && underlying.exchange
+          ? { exchange: underlying.exchange, token: underlying.token, symbol: underlying.contract ?? underlying.name ?? underlying.token }
+          : null,
+      contractRef: { exchange: String(row.exchange ?? '').toUpperCase(), token: String(row.token), symbol: row.symbol },
       // Carried so the packet builder and the thesis inference look their
       // evidence up by the SAME symbol these sensors did. Resolved once, here;
       // a second resolution downstream is how the two paths came to disagree.

@@ -2,6 +2,7 @@
 import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { parseAutoExitConfig } from '../domain/auto-exit.config';
+import { describeExitDiscipline, parseExitDisciplineConfig } from '../../exit-discipline/config';
 import type { AutoExitConfig } from '../domain/auto-exit.types';
 import { CLAIM_STALE_MS, SECOND_SWEEP_MS } from '../domain/claim-timing';
 import { AiExitExecutionRepository } from '../repositories/ai-exit-execution.repository';
@@ -52,6 +53,9 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
       `[ai-exit] ENABLED mode=${cfg.mode} users=${cfg.userIds.length} cap=${cfg.dailyCap}/day ` +
         `maxAge=${cfg.maxVerdictAgeSec}s fallback=${cfg.limitFallbackPct}% qty-units=${units} cancel-protective=${cfg.cancelProtective ? 'ON' : 'off'}`,
     );
+    const d = parseExitDisciplineConfig(process.env);
+    for (const p of d.problems) this.logger.warn(`[exit-discipline] ${p}`);
+    this.logger.warn(`[exit-discipline] ${describeExitDiscipline(d)}`);
     void this.sweep();
     this.sweepTimer = setTimeout(() => void this.sweep(), SECOND_SWEEP_MS);
     this.sweepTimer.unref?.();

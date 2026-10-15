@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { isQuietDenial, startAiExitPolling, AI_EXITS_POLL_MS } from './useAiExits';
+import { isQuietDenial, startAiExitPolling, startQuietPolling, AI_EXITS_POLL_MS } from './useAiExits';
 import type { VisibilityDoc } from '@/services/interval-poller';
 
 function fakeDoc(initial: 'visible' | 'hidden' = 'visible') {
@@ -106,5 +106,21 @@ describe('startAiExitPolling', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(onData).not.toHaveBeenCalled();
     expect(get).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('startQuietPolling (generic)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  it('delivers whatever rows the endpoint returns and stops quietly on 403', async () => {
+    const get = vi.fn().mockResolvedValueOnce([{ id: 'x' }]).mockRejectedValueOnce(httpErr(403));
+    const onData = vi.fn();
+    const { doc } = fakeDoc();
+    const p = startQuietPolling<{ id: string }>({ get, onData, doc, intervalMs: 1000 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onData).toHaveBeenLastCalledWith([{ id: 'x' }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(onData).toHaveBeenLastCalledWith([]);
+    p.stop();
   });
 });

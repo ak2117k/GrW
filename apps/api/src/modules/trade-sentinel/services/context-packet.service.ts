@@ -295,6 +295,16 @@ export interface TickSnapshot {
    * `structureReason`: the absence has to say which failure it was.
    */
   underlyingLtpReason: string | null;
+  /**
+   * WHERE `underlyingLtp` was read: the index, the NSE cash row, or the MCX
+   * future of the option's own month — exactly what the spot tiers priced. Null
+   * for cash (the contract IS the underlying) and when unresolved. NEVER rendered
+   * into the packet: the cycle copies it into a persisted exitTrigger so
+   * sentinel-executor knows which instrument an UNDERLYING level watches.
+   */
+  underlyingRef?: { exchange: string; token: string; symbol: string } | null;
+  /** The position's own contract (tracker exchange/token/symbol). Same rule: never in the packet. */
+  contractRef?: { exchange: string; token: string; symbol: string } | null;
   /** Nearest level from the level book, on the UNDERLYING's scale. */
   nearestSupport: number | null;
   nearestResistance: number | null;

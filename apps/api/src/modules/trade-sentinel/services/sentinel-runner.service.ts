@@ -236,6 +236,23 @@ export class SentinelRunnerService {
   }
 
   /**
+   * Part B (price-triggers plan R14): a hub tick fired a price sensor, so run
+   * this user's ordinary sensor pass now instead of at the next 30-s tick. All
+   * the usual caps apply inside the pass. Never throws; a pass already in
+   * flight will see the move itself (or the next tick will).
+   *
+   * Same session gate as the cron: a tick for a position whose exchange is
+   * closed (a late print after the close, a holiday) wakes nothing.
+   */
+  wakeForTick(userId: string, why: string, exchange: string, now: Date = new Date()): void {
+    if (!this.enabled) return;
+    if (!isAnyHeldVenueOpen(this.clock, [exchange], now)) return;
+    if (this.inFlight.has(userId)) return;
+    this.logger.log(`[sentinel-tick] waking ${userId}: ${why}`);
+    void this.runForUser(userId);
+  }
+
+  /**
    * Tenants with something to watch, AND the exchanges they hold it on. Nobody
    * else costs a roster query.
    *

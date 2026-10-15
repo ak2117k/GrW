@@ -37,12 +37,19 @@ import { evaluateGuards } from '../domain/guards';
 import type { ExitTrigger } from '../domain/manual-exit';
 import {
   AiExitExecutionRepository,
+  type AiExitPatch,
   type PendingVerdict,
 } from '../repositories/ai-exit-execution.repository';
 import { FeedSessionNotReadyError, NoFeedSessionError, OwnerBrokerSessionProvider } from './owner-broker-session.provider';
+import { parseExitDisciplineConfig } from '../../exit-discipline/config';
+import { bypassRecord, gateSummary, isBlocking } from '../../exit-discipline/decision';
+import type { GateRecordV1 } from '../../exit-discipline/types';
+import { ExitGateService, type GateContext } from './exit-gate.service';
+import { AI_EXIT_SESSION_CLOCK, AI_EXIT_SLEEP } from './executor.tokens';
 
-export const AI_EXIT_SESSION_CLOCK = Symbol('AI_EXIT_SESSION_CLOCK');
-export const AI_EXIT_SLEEP = Symbol('AI_EXIT_SLEEP');
+export { AI_EXIT_SESSION_CLOCK, AI_EXIT_SLEEP } from './executor.tokens';
+/** Only stamps the cfg block of a `BYPASS: DISABLED` gate record; the live cfg lives in ExitGateService. */
+const DISABLED_CFG = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
 export type Sleep = (ms: number) => Promise<void>;
 export type AiExitOutcome = { status: AiExitStatus | 'DUPLICATE'; reason?: string };
 
@@ -124,8 +131,9 @@ export class SentinelExitExecutor {
     private readonly repo: AiExitExecutionRepository,
     private readonly prisma: PrismaService,
     private readonly sessions: OwnerBrokerSessionProvider,
-    @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen'>,
+    @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen' | 'minutesToClose' | 'tradingWindow'>,
     @Inject(AI_EXIT_SLEEP) private readonly sleep: Sleep,
+    private readonly gate: ExitGateService,
   ) {}
 
   async process(v: PendingVerdict, cfg: AutoExitConfig, now: Date = new Date()): Promise<AiExitOutcome> {
@@ -176,6 +184,14 @@ export class SentinelExitExecutor {
       return this.finish(id, v, 'FAILED', 'INSTRUMENT_READ', { brokerMessage: errText(err) });
     }
 
+    // Exit discipline (plan R8): AI verdicts only — MANUAL and PRICE_TRIGGER never reach the gate (E2).
+    // Started now so its DB reads overlap the session lease and the broker reads below.
+    // The gate can only PREVENT an AI sell; load never rejects and is bounded (fail-open).
+    const gated = trigger === 'AI';
+    const gateLoad: Promise<GateContext> | null = gated && this.gate.enabled() ? this.gate.load(v, now) : null;
+    // Never an unhandled rejection if the lease fails before the gate is awaited (gateRecord still sees any rejection).
+    gateLoad?.catch(() => undefined);
+
     const run: Run = { id, v, cfg, inst, sent: false, cancelSent: false, trigger, now, startedMs: Date.now() };
 
     // 3–7. BROKER — one session lease, tier chosen once (ruling R1).
@@ -189,7 +205,18 @@ export class SentinelExitExecutor {
             ? this.finish(id, v, 'SKIPPED', first.reason)
             : this.finish(id, v, 'FAILED', first.reason, first.detail ? { brokerMessage: first.detail } : {});
         }
-        await this.recordPlan(id, first.order);
+        // Exit gate (plan R7/R8): after the first pre-order check, BEFORE the plan write's
+        // consequences — the dry-run branch, any protective cancel and the order. A blocked
+        // verdict ends SKIPPED here: nothing is cancelled, nothing is sent.
+        const gate = gated ? await this.gateRecord(gateLoad, first, t, now) : null;
+        await this.recordPlan(id, first.order, { orderLtp: first.ltp, ...(gate ? { gate } : {}) });
+        if (gate && isBlocking(gate)) {
+          this.logger.log(`[exit-gate] ${gateSummary(gate)} — ${v.symbol} verdict ${v.id}`);
+          return this.finish(id, v, 'SKIPPED', gate.outcome);
+        }
+        if (gate && gate.outcome === 'PASS') {
+          this.logger.log(`[exit-gate] ${gateSummary(gate)} — ${v.symbol} verdict ${v.id}`);
+        }
 
         if (cfg.mode === 'dry-run') {
           const sell = `${first.order.side} ${first.order.quantity} ${first.order.symbol} (${first.order.positionType}) at MARKET`;
@@ -211,7 +238,7 @@ export class SentinelExitExecutor {
           const c = await this.cancelProtective(s, t, run, first.orders);
           if (c.kind === 'stop') return c.outcome;
           pre = c.pre;
-          await this.recordPlan(id, pre.order);
+          await this.recordPlan(id, pre.order, { orderLtp: pre.ltp });
         } else {
           pre = first;
         }
@@ -240,10 +267,29 @@ export class SentinelExitExecutor {
     return this.flagUnprotected(run, outcome);
   }
 
-  private recordPlan(id: string, o: OrderRequest): Promise<void> {
+  /**
+   * The exit-gate record for an AI verdict. Never throws: the gate may only
+   * PREVENT a sell, so any fault here fails OPEN (BYPASS: FACTS_UNREADABLE)
+   * instead of ending the attempt FAILED.
+   */
+  private async gateRecord(
+    gateLoad: Promise<GateContext> | null, first: { order: OrderRequest; ltp: number }, t: Tracker, now: Date,
+  ): Promise<GateRecordV1> {
+    if (!gateLoad) return bypassRecord('DISABLED', DISABLED_CFG, now);
+    try {
+      return this.gate.decide(await gateLoad, {
+        ltpNow: first.ltp, productType: first.order.positionType ?? null, exchange: String(t.exchange ?? '').toUpperCase(), now,
+      });
+    } catch (err) {
+      this.logger.warn(`[exit-gate] gate faulted — failing OPEN: ${errText(err)}`);
+      return bypassRecord('FACTS_UNREADABLE', DISABLED_CFG, now, errText(err));
+    }
+  }
+
+  private recordPlan(id: string, o: OrderRequest, extra: AiExitPatch = {}): Promise<void> {
     return this.repo.update(id, {
       exchange: o.exchange, token: o.token, side: o.side, quantity: o.quantity,
-      productType: o.positionType, orderType: 'MARKET',
+      productType: o.positionType, orderType: 'MARKET', ...extra,
     });
   }
 
@@ -433,14 +479,15 @@ export class SentinelExitExecutor {
   /**
    * A read retry must finish its wait inside READ_RETRY_WINDOW_MS of the attempt
    * (bounds CLAIM_STALE_MS). Before anything was sent or cancelled, an AI
-   * attempt must also still be within the verdict's max age when its wait ends.
+   * (or PRICE_TRIGGER, aged from its fire) attempt must also still be within the
+   * verdict's max age when its wait ends.
    * Once a protective order was cancelled (or an order sent) age no longer
    * applies: giving up then leaves the position unprotected/uncertain.
    */
   private mayRetryRead(run: Run, wait: number): boolean {
     const elapsed = Math.max(0, Date.now() - run.startedMs);
     if (elapsed + wait > READ_RETRY_WINDOW_MS) return false;
-    if (run.trigger === 'AI' && !run.sent && !run.cancelSent) {
+    if (run.trigger !== 'MANUAL' && !run.sent && !run.cancelSent) {
       const age = run.now.getTime() - run.v.createdAt.getTime() + elapsed + wait;
       if (age > run.cfg.maxVerdictAgeSec * 1000) return false;
     }

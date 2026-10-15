@@ -62,6 +62,16 @@ describe('AiExitExecutionRepository', () => {
     });
   });
 
+  it('update writes the gate record (E7) and the order LTP (E5) in the SAME call as the plan', async () => {
+    const p = fakePrisma();
+    const gate = { v: 1, outcome: 'GATED_THESIS_INTACT', justification: null, clauses: [], persistence: null, facts: null,
+      cfg: { floorArmN: 1.5, floorTrailN: 2, gateCloseMin: 10, gateUnderlyingN: 1, persistWindowSec: 300, persistMinSec: 120 },
+      evaluatedAt: '2026-10-14T11:01:30.000Z' } as const;
+    await new AiExitExecutionRepository(p as never).update('row1', { quantity: 100, orderLtp: 527.1, gate: gate as never });
+    expect(p.aiExitExecution.update).toHaveBeenCalledTimes(1);
+    expect(p.aiExitExecution.update).toHaveBeenCalledWith({ where: { id: 'row1' }, data: { quantity: 100, orderLtp: 527.1, gate } });
+  });
+
   it('countCountedSince counts every row where an order may have been sent (PLACED, FILLED, ORDER_UNCERTAIN, INTERRUPTED) plus DRY_RUN', async () => {
     const p = fakePrisma();
     const since = new Date('2026-10-11T18:30:00Z');
@@ -211,5 +221,16 @@ describe('manual exits (owner Exit button)', () => {
     expect(p.aiExitExecution.findUnique).toHaveBeenLastCalledWith({ where: { verdictId: 'man_t1_1' } });
     await repo.findById('row1');
     expect(p.aiExitExecution.findUnique).toHaveBeenLastCalledWith({ where: { id: 'row1' } });
+  });
+});
+
+describe('price-trigger fires and the AI cap (sentinel price triggers R13)', () => {
+  it('price-trigger rows count toward the AI cap (only man_ is excluded)', async () => {
+    const count = jest.fn().mockResolvedValue(0);
+    const repo = new AiExitExecutionRepository({ aiExitExecution: { count } } as never);
+    await repo.countCountedSince('owner', new Date(0), 'live');
+    const where = count.mock.calls[0][0].where;
+    expect(JSON.stringify(where)).not.toContain('trg_');
+    expect(where.NOT).toEqual({ verdictId: { startsWith: 'man_' } });
   });
 });

@@ -17,7 +17,7 @@ export function exitConfirmFire(i: { recent: Array<{ verdict: string; createdAt:
   return {
     name: 'exit-confirm',
     detail: `your last verdict was EXIT_NOW at ${IST.format(last.createdAt)} IST (${run} in a row since the last HOLD) and the ` +
-      'position is still open — an exit executes only when a justification holds and a second EXIT_NOW confirms it; judge it again',
+      'position is still open — judge it afresh on the current packet; the earlier verdict is not a reason to repeat it',
   };
 }
 

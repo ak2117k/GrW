@@ -7,8 +7,13 @@ const run = (recent: ReturnType<typeof v>[]) => exitConfirmFire({ recent, now: N
 describe('exitConfirmFire', () => {
   it('latest EXIT_NOW, >= relook ago ⇒ fires with the count', () => {
     expect(run([v('EXIT_NOW', 130), v('HOLD', 600)])).toEqual({
-      name: 'exit-confirm', detail: expect.stringMatching(/EXIT_NOW.*1 in a row.*judge it again/),
+      name: 'exit-confirm', detail: expect.stringMatching(/EXIT_NOW.*1 in a row.*judge it afresh/),
     });
+  });
+  it('the wording is neutral: it never tells the judge that repeating EXIT_NOW executes the exit', () => {
+    const d = run([v('EXIT_NOW', 130), v('HOLD', 600)])!.detail;
+    expect(d).not.toMatch(/second EXIT_NOW|confirms it|executes/i);
+    expect(d).toMatch(/not a reason to repeat it/);
   });
   it('too soon ⇒ null', () => expect(run([v('EXIT_NOW', 60)])).toBeNull());
   it('latest is not EXIT_NOW ⇒ null', () => expect(run([v('EXIT_ARMED', 300), v('EXIT_NOW', 400)])).toBeNull());

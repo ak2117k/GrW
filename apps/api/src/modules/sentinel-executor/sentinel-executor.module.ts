@@ -23,6 +23,8 @@ import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-disci
 import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ManualExitService } from './services/manual-exit.service';
+import { SentinelExitTriggerRepository } from './repositories/sentinel-exit-trigger.repository';
+import { TriggerWatchService } from './services/trigger-watch.service';
 import { SentinelExecutorController } from './controllers/sentinel-executor.controller';
 
 /**
@@ -42,6 +44,10 @@ import { SentinelExecutorController } from './controllers/sentinel-executor.cont
     ExitFillSettler,
     AiExitOutcomeRepository,
     ExitOutcomeService,
+    SentinelExitTriggerRepository,
+    // Price triggers (docs/superpowers/plans/2026-10-13-sentinel-price-triggers.md).
+    // Inert unless SENTINEL_TRIGGERS_ENABLED=true and the AI auto-exit is on.
+    TriggerWatchService,
     ManualExitService,
     PerUserBrokerSessionFactory,
     {

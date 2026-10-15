@@ -16,6 +16,7 @@ import SentinelOverlay from '@/components/charts/SentinelOverlay';
 import SentinelPanel from '@/components/charts/SentinelPanel';
 import AiExitsList from '@/components/charts/AiExitsList';
 import { useSentinelPositions } from '@/hooks/useSentinelPositions';
+import { useSentinelTriggers } from '@/hooks/useSentinelTriggers';
 import { positionsForChart } from '@/utils/matchPositionToChart';
 import TrendLineOverlay from '@/components/charts/TrendLineOverlay';
 import { useChartContext } from '@/hooks/useChartContext';
@@ -125,6 +126,8 @@ export default function ChartsPage() {
   // tying its read to the 60s composite would make a fresh verdict wait for a
   // level-book refresh it has nothing to do with.
   const { positions: sentinelPositions } = useSentinelPositions();
+  // Armed price triggers come from the executor's table (what WILL fire), not the verdict.
+  const { rows: sentinelTriggers } = useSentinelTriggers();
   const sentinelHere = useMemo(
     () => positionsForChart(sentinelPositions, selectedSymbol.symbol),
     [sentinelPositions, selectedSymbol.symbol],
@@ -706,7 +709,7 @@ export default function ChartsPage() {
           if you are holding this instrument, what the sentinel thinks about
           your position outranks the general analysis of the symbol. Renders
           nothing when you hold none of it. */}
-      {!isFullscreen && <SentinelPanel positions={sentinelHere} />}
+      {!isFullscreen && <SentinelPanel positions={sentinelHere} triggers={sentinelTriggers} />}
 
       {/* What the auto-exit did (last 24 h). A sibling, not inside the panel:
           once an exit closes the tracker the sentinel card disappears (R15).

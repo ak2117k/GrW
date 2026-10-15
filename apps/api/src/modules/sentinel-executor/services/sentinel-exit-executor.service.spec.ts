@@ -977,3 +977,130 @@ describe('SentinelExitExecutor — fill capture (E5)', () => {
     expect(h.lastPatch()).toEqual(expect.objectContaining({ status: 'REJECTED', orderSentAt: expect.any(Date) }));
   });
 });
+
+describe('SentinelExitExecutor — PRICE_TRIGGER (sentinel price triggers)', () => {
+  const TV: PendingVerdict = {
+    id: 'trg_cm9trigger0000000000000001', userId: 'owner', trackerId: 't1',
+    symbol: 'CRUDEOIL15OCT268950CE', reason: 'PRICE_TRIGGER: CRUDEOIL19NOV26FUT < 8930 — fired at 8927', createdAt: NOW,
+  };
+
+  it('live: exactly one MARKET with the at-tag, then FILLED', async () => {
+    const h = harness({ positions: [env([posRow('100')]), env([posRow('0')])] });
+    await expect(h.ex.execute('row1', TV, LIVE, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'FILLED' });
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified.mock.calls[0][1]).toBe(aiExitOrderTag(TV.id, 'M', 'PRICE_TRIGGER'));
+  });
+
+  it('follows AI_AUTO_EXIT_MODE: dry-run records the order and sends nothing', async () => {
+    const h = harness();
+    const r = await h.ex.execute('row1', TV, DRY_MCX_UNITS, NOW, 'PRICE_TRIGGER');
+    expect(r.status).toBe('DRY_RUN');
+    expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+  });
+
+  it('counts toward (and is stopped by) the AI daily cap', async () => {
+    const h = harness({ counted: LIVE.dailyCap });
+    await expect(h.ex.execute('row1', TV, LIVE, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'DAILY_CAP' });
+    expect(h.repo.countCountedSince).toHaveBeenCalled();
+  });
+
+  it('AI switches apply: auto-exit disabled → SKIPPED: DISABLED, no broker call', async () => {
+    const h = harness();
+    const off = parseAutoExitConfig({ AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units' });
+    await expect(h.ex.execute('row1', TV, off, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'DISABLED' });
+    expect(h.sessions.withOwnerSession).not.toHaveBeenCalled();
+  });
+
+  it("a resting order (the owner's broker SL) → SKIPPED: OPEN_ORDER_EXISTS, like an AI verdict (cancel-protective off)", async () => {
+    const h = harness({ books: [env([{ symboltoken: '445566', exchange: 'MCX', status: 'trigger pending', ordertag: '' }])] });
+    await expect(h.ex.execute('row1', TV, LIVE, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+  });
+
+  it('an at-tagged exit already in the book blocks a later AI verdict on the contract', async () => {
+    const h = harness({ books: [env([{ symboltoken: '445566', exchange: 'MCX', status: 'complete', ordertag: 'atMtrigger0000000001' }])] });
+    await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'SKIPPED', reason: 'PRIOR_AI_EXIT_TODAY' });
+  });
+
+  it('read retries respect the fire-time age budget, like an AI verdict (200 ms left → no retry)', async () => {
+    const h = harness({ positions: [{}] });
+    const old = { ...TV, createdAt: new Date(NOW.getTime() - 89_800) };
+    await expect(h.ex.execute('row1', old, LIVE, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
+    expect(h.session.getPositionsEnvelope).toHaveBeenCalledTimes(1);
+    expect(h.sleep).not.toHaveBeenCalled();
+  });
+
+  describe('P2 compatibility: AI_AUTO_EXIT_CANCEL_PROTECTIVE takes exactly the AI branch', () => {
+    const CP = { AI_AUTO_EXIT_CANCEL_PROTECTIVE: 'true' };
+    const LIVE_CP = parseAutoExitConfig({
+      AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', ...CP,
+    });
+    const DRY_CP = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units', ...CP });
+    const sl = (x: Record<string, unknown> = {}) => ({
+      orderid: 'SL1', variety: 'STOPLOSS', ordertype: 'STOPLOSS_MARKET', transactiontype: 'SELL', producttype: 'CARRYFORWARD',
+      quantity: '100', status: 'trigger pending', symboltoken: '445566', exchange: 'MCX', ordertag: '', ...x,
+    });
+    const done = (x: Record<string, unknown> = {}) => env([sl({ status: 'cancelled', ...x })]);
+    const filledExit = env([sl({ status: 'cancelled' }), { orderid: 'O1', status: 'complete', symboltoken: '445566', exchange: 'MCX' }]);
+
+    it('flag off: a resting SL-M → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled', async () => {
+      const h = harness({ books: [env([sl()])] });
+      await expect(h.ex.execute('row1', TV, LIVE, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+      expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    });
+
+    it('long with an SL-M SELL: SL cancelled, then exactly one SELL MARKET tagged at…', async () => {
+      const h = harness({
+        positions: [env([posRow('100')]), env([posRow('100')]), env([posRow('0')])],
+        books: [env([sl()]), done(), done(), filledExit],
+      });
+      await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'FILLED' });
+      expect(h.session.cancelOrderClassified).toHaveBeenCalledWith('STOPLOSS', 'SL1');
+      expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+      expect(h.session.placeOrderClassified.mock.calls[0][1]).toBe(aiExitOrderTag(TV.id, 'M', 'PRICE_TRIGGER'));
+      expect(h.calls.indexOf('cancel:STOPLOSS:SL1')).toBeLessThan(h.calls.findIndex((c) => c.startsWith('place')));
+    });
+
+    it('cancel answer not definitive and the SL still open → FAILED: CANCEL_UNCERTAIN, no exit order', async () => {
+      const h = harness({ cancel: [{ status: 'UNCERTAIN', message: 'no definitive broker answer: {}' }], books: [env([sl()])] });
+      await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'FAILED', reason: 'CANCEL_UNCERTAIN' });
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    });
+
+    it('the SL filled during the cancel and the position is flat → SKIPPED: PROTECTIVE_FILLED', async () => {
+      const h = harness({
+        cancel: [{ status: 'REJECTED', message: 'Order already complete' }],
+        positions: [env([posRow('100')]), env([posRow('0')])],
+        books: [env([sl()]), done({ status: 'complete' })],
+      });
+      await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'PROTECTIVE_FILLED' });
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    });
+
+    it('a non-protective open order → SKIPPED: OPEN_ORDER_EXISTS, nothing cancelled', async () => {
+      const h = harness({ books: [env([sl({ transactiontype: 'BUY' })])] });
+      await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER')).resolves.toEqual({ status: 'SKIPPED', reason: 'OPEN_ORDER_EXISTS' });
+      expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+    });
+
+    it('dry-run records what WOULD be cancelled and sold; cancels and places nothing', async () => {
+      const h = harness({ books: [env([sl()])] });
+      await expect(h.ex.execute('row1', TV, DRY_CP, NOW, 'PRICE_TRIGGER')).resolves.toEqual({
+        status: 'DRY_RUN',
+        reason: 'would cancel protective SL1 (STOPLOSS_MARKET SELL 100) then SELL 100 CRUDEOIL15OCT268950CE (CARRYFORWARD) at MARKET',
+      });
+      expect(h.session.cancelOrderClassified).not.toHaveBeenCalled();
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+    });
+
+    it('the exit is definitively REJECTED after the cancel → REJECTED: UNPROTECTED_AFTER_CANCEL', async () => {
+      const h = harness({
+        place: [{ orderId: '', status: 'REJECTED', message: 'Insufficient margin' }],
+        positions: [env([posRow('100')])],
+        books: [env([sl()]), done()],
+      });
+      await expect(h.ex.execute('row1', TV, LIVE_CP, NOW, 'PRICE_TRIGGER'))
+        .resolves.toEqual({ status: 'REJECTED', reason: 'UNPROTECTED_AFTER_CANCEL:BROKER_REJECTED' });
+    });
+  });
+});

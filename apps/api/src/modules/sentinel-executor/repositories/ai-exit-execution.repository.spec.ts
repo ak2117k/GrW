@@ -263,3 +263,14 @@ describe('manual exits (owner Exit button)', () => {
     });
   });
 });
+
+describe('price-trigger fires and the AI cap (sentinel price triggers R13)', () => {
+  it('price-trigger rows count toward the AI cap (only man_ is excluded)', async () => {
+    const count = jest.fn().mockResolvedValue(0);
+    const repo = new AiExitExecutionRepository({ aiExitExecution: { count } } as never);
+    await repo.countCountedSince('owner', new Date(0), 'live');
+    const where = count.mock.calls[0][0].where;
+    expect(JSON.stringify(where)).not.toContain('trg_');
+    expect(where.NOT).toEqual({ verdictId: { startsWith: 'man_' } });
+  });
+});

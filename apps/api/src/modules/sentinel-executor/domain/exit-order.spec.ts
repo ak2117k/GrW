@@ -389,3 +389,18 @@ describe('protectiveOrdersFor — bounded cancels', () => {
     expect(protectiveOrdersFor(['A', 'B', 'C', 'D'].map(o), exit).kind).toBe('blocking');
   });
 });
+
+describe('PRICE_TRIGGER ordertag (ruling R13)', () => {
+  it("is 'at' + leg + last 17 alphanumerics, ≤ 20 chars, alphanumeric", () => {
+    const tag = aiExitOrderTag('trg_cm9trigger0000000000000001', 'M', 'PRICE_TRIGGER');
+    expect(tag.startsWith('atM')).toBe(true);
+    expect(tag.length).toBeLessThanOrEqual(20);
+    expect(tag).toMatch(/^[A-Za-z0-9]+$/);
+  });
+
+  it('an at-tagged live order counts as a prior exit; a rejected one does not', () => {
+    const row = (status: string) => ({ symboltoken: '445566', exchange: 'MCX', ordertag: 'atMtrigger0000000001', status });
+    expect(hasPriorAiExit([row('complete')], 'MCX', '445566')).toBe(true);
+    expect(hasPriorAiExit([row('rejected')], 'MCX', '445566')).toBe(false);
+  });
+});

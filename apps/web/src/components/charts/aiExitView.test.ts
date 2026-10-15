@@ -19,7 +19,7 @@ describe('aiExitRowView', () => {
       label: 'FILLED', tone: 'emerald',
       line: 'SELL 100 CRUDEOIL15OCT268950CE (CARRYFORWARD) at MARKET',
       detail: 'order 2610120001 · thesis broken', ago: '5 min ago', time: '15:30 IST',
-      dryRun: false, unitUnverified: false,
+      dryRun: false, unitUnverified: false, source: 'AI',
     });
   });
   it('live PLACED is amber and shows the broker order id', () => {
@@ -99,5 +99,20 @@ describe('aiExitRowView — owner manual exits', () => {
     expect(aiExitRowView(row({ status: 'FILLED', trigger: 'MANUAL' })).label).toBe('MANUAL FILLED');
     expect(aiExitRowView(row({ status: 'FILLED', trigger: 'AI' })).label).toBe('FILLED');
     expect(aiExitRowView(row({ status: 'FILLED' })).label).toBe('FILLED');
+  });
+});
+
+describe('aiExitRowView — sentinel price triggers', () => {
+  it('a PRICE_TRIGGER row is labelled as such and carries the level and tick from verdictReason', () => {
+    const v = aiExitRowView(row({ trigger: 'PRICE_TRIGGER', triggerId: 'trg1',
+      verdictReason: 'PRICE_TRIGGER: CRUDEOIL19NOV26FUT < 8930 — fired at 8927.5 (2 ticks over 1200 ms); armed 22:33 IST by verdict v1' }));
+    expect(v.source).toBe('PRICE_TRIGGER');
+    expect(v.label).toBe('PRICE TRIGGER FILLED');
+    expect(v.detail).toContain('< 8930 — fired at 8927.5');
+  });
+
+  it('rows without trigger (older API) are AI; MANUAL rows say MANUAL', () => {
+    expect(aiExitRowView(row()).source).toBe('AI');
+    expect(aiExitRowView(row({ trigger: 'MANUAL' })).source).toBe('MANUAL');
   });
 });

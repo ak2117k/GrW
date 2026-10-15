@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { computeGreenFloor } from '../charges';
 import { RosterService, type RosterEntry } from './roster.service';
 import {
@@ -17,6 +17,9 @@ import {
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
+import { exitTriggerRecord } from './exit-trigger-proposal';
+import { TickSensorBook, sensorSeed } from './tick-sensor-book';
+import type { Prisma } from '@prisma/client';
 import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service';
 
 export interface CycleReport {
@@ -424,6 +427,9 @@ export class SentinelCycleService {
     private readonly verdicts: SentinelVerdictRepository,
     private readonly oiWalls: OiWallSnapshotService,
     @Inject(TICK_SOURCE) private readonly ticks: TickSource,
+    // Part B (price triggers, R14): per-tracker context for price-only sensors on
+    // hub ticks between passes. Optional so specs and a module without it are unaffected.
+    @Optional() private readonly sensorBook?: TickSensorBook,
   ) {}
 
   /**
@@ -484,6 +490,9 @@ export class SentinelCycleService {
       // still clears this user's state.
       new Set([userId, ...entries.map((e) => e.userId)]),
       new Set(entries.map((e) => e.trackerId)),
+      // Part B: only WATCHED entries keep a tick-sensor context — an unwatched one
+      // is skipped by every pass, so a tick wake for it would be a wasted pass.
+      new Set(entries.filter((e) => e.watched).map((e) => e.trackerId)),
     );
 
     // DISPATCH, MOST URGENT AND LONGEST-WAITING FIRST. Slots are scarce
@@ -552,6 +561,10 @@ export class SentinelCycleService {
     // had nothing to repair. A tick source that never sets `underlyingLtp` would
     // otherwise look permanently healthy behind the repair.
     if (tick !== raw) this.warnMissingUnderlying(entry);
+
+    // Part B: the price-only sensors' context for hub ticks between passes. Memory only.
+    const seed = this.sensorBook ? sensorSeed(entry, tick) : null;
+    if (seed) this.sensorBook!.upsert(seed);
 
     // LIVE-ONLY: an overnight-review row is not a live look (see recentForTracker).
     const [last] = await this.verdicts.recentForTracker(entry.trackerId, 1, { liveOnly: true });
@@ -851,6 +864,10 @@ export class SentinelCycleService {
     // representable rather than merely unreachable.
     state.agentRetryAt = 0;
 
+    // Price triggers: the judge's level and the instrument it watches. DATA ONLY —
+    // arming, validation and execution all live in sentinel-executor (ruling R1).
+    const exitTrigger = exitTriggerRecord(verdict, tick);
+
     progress.stage = 'verdict write';
     await this.verdicts.record({
       // Taken from the entry, not from the argument: the roster carries the
@@ -875,6 +892,7 @@ export class SentinelCycleService {
         decision.fires.length > 0 ? decision.fires.map((f) => f.name) : ['heartbeat'],
       netPnl: packet.money.netPnl,
       greenFloor: packet.money.greenFloorPrice,
+      ...(exitTrigger ? { exitTrigger: exitTrigger as unknown as Prisma.InputJsonValue } : {}),
     });
   }
 
@@ -1053,13 +1071,14 @@ export class SentinelCycleService {
   }
 
   /** Drop carry-over for these tenants' trackers that are no longer on the roster. */
-  private prune(owners: Set<string>, live: Set<string>): void {
+  private prune(owners: Set<string>, live: Set<string>, watched: Set<string>): void {
     for (const [trackerId, state] of this.state) {
       if (owners.has(state.userId) && !live.has(trackerId)) {
         this.state.delete(trackerId);
         this.warnedMissingUnderlying.delete(trackerId);
       }
     }
+    for (const u of owners) this.sensorBook?.prune(u, watched);
   }
 }
 

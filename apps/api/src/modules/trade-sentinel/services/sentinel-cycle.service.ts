@@ -17,6 +17,8 @@ import {
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
+import { exitTriggerRecord } from './exit-trigger-proposal';
+import type { Prisma } from '@prisma/client';
 import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service';
 
 export interface CycleReport {
@@ -851,6 +853,10 @@ export class SentinelCycleService {
     // representable rather than merely unreachable.
     state.agentRetryAt = 0;
 
+    // Price triggers: the judge's level and the instrument it watches. DATA ONLY —
+    // arming, validation and execution all live in sentinel-executor (ruling R1).
+    const exitTrigger = exitTriggerRecord(verdict, tick);
+
     progress.stage = 'verdict write';
     await this.verdicts.record({
       // Taken from the entry, not from the argument: the roster carries the
@@ -875,6 +881,7 @@ export class SentinelCycleService {
         decision.fires.length > 0 ? decision.fires.map((f) => f.name) : ['heartbeat'],
       netPnl: packet.money.netPnl,
       greenFloor: packet.money.greenFloorPrice,
+      ...(exitTrigger ? { exitTrigger: exitTrigger as unknown as Prisma.InputJsonValue } : {}),
     });
   }
 

@@ -220,6 +220,17 @@ describe('ContextPacketService', () => {
       side: t.side,
     }).floorPrice as number;
 
+  it('never renders underlyingRef or contractRef into the packet (executor plumbing only)', async () => {
+    const packet = await svc.build(
+      entry,
+      { ...tick, underlyingRef: { exchange: 'MCX', token: '1', symbol: 'X' }, contractRef: { exchange: 'MCX', token: '2', symbol: 'Y' } },
+      null,
+    );
+    const text = JSON.stringify(packet);
+    expect(text).not.toContain('underlyingRef');
+    expect(text).not.toContain('contractRef');
+  });
+
   it('marks the stubbed sector factor unavailable, and fiiDii / globalCues as the cues switch — not a stub', async () => {
     const packet = await svc.build(entry, tick, null);
     expect(packet.macro.sector.available).toBe(false);
@@ -881,6 +892,67 @@ describe('ContextPacketService', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  describe('exit discipline fields', () => {
+    it('discipline off (no tick.noise) ⇒ neither field exists: the packet is byte-identical to before', async () => {
+      jest.useFakeTimers({ now: new Date('2026-08-14T05:00:00Z') });
+      try {
+        const p = await svc.build(entry, tick, null);
+        expect('floorBasis' in p.money).toBe(false);
+        expect('noiseUnit' in p.flow).toBe(false);
+        expect(p.money.greenFloorPrice).toBe(clampFloorTowardLtp(floorFor(tick), tick.ltp, tick.side));
+        const q = await svc.build(entry, { ...tick, noise: null, noiseFloor: null }, null);
+        expect(JSON.stringify(q)).toBe(JSON.stringify(p));
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('discipline on but no noise floor solved ⇒ floorBasis fixed and the fixed floor, noiseUnit stated', async () => {
+      const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      const p = await svc.build(entry, { ...tick, noise: { contract, underlying1m: null, reason: null } }, null);
+      expect(p.money.floorBasis).toBe('fixed');
+      expect(p.money.greenFloorPrice).toBe(clampFloorTowardLtp(floorFor(tick), tick.ltp, tick.side));
+      expect(Object.keys(p.money)).toEqual(['grossPnl', 'charges', 'netPnl', 'greenFloorPrice', 'greenFloorArmed', 'floorBasis', 'mfe', 'mae']);
+      expect(p.flow.noiseUnit).toMatchObject({ available: true, value: { contract, underlying: null } });
+    });
+
+    it('tick.noise ⇒ present NoiseUnitValue; the underlying falls back to the level book DAILY atr14 / √(MCX session minutes)', async () => {
+      const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      levelsFor.mockResolvedValue({ value: { atr14: 316, vwap: 9000 }, source: LEVEL_SOURCE, at: '2026-10-14T10:45:00.000Z' });
+      const p = await svc.build(entry, {
+        ...tick, underlyingRef: { exchange: 'MCX', token: '1', symbol: 'X' }, noise: { contract, underlying1m: null, reason: null },
+      }, null);
+      // 09:00–23:30 = 870 min: 316 / √870 ≈ 10.71 (the old ÷√15 gave 81.6 — real 2026-10-14 CRUDEOIL replay).
+      expect(p.flow.noiseUnit).toMatchObject({
+        available: true,
+        at: '2026-10-14T11:00:00.000Z',
+        value: { contract, underlying: { n: 316 / Math.sqrt(870), method: 'atr14-daily-scaled', bars: 0, at: '2026-10-14T10:45:00.000Z' } },
+      });
+    });
+
+    it('the daily-ATR fallback uses the equity session (375 min) when the underlying is not MCX / unknown', async () => {
+      const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      levelsFor.mockResolvedValue({ value: { atr14: 300, vwap: 22500 }, source: LEVEL_SOURCE, at: '2026-10-14T10:45:00.000Z' });
+      const p = await svc.build(entry, { ...tick, underlyingRef: null, contractRef: null, noise: { contract, underlying1m: null, reason: null } }, null);
+      expect((p.flow.noiseUnit as unknown as { value: { underlying: { n: number } } }).value.underlying.n).toBeCloseTo(300 / Math.sqrt(375), 9);
+    });
+
+    it('tick.noise with neither reading ⇒ absent with the tick reason', async () => {
+      const p = await svc.build(entry, { ...tick, noise: { contract: null, underlying1m: null, reason: 'no hub 1-minute bars' } }, null);
+      expect(p.flow.noiseUnit).toEqual({ available: false, reason: 'no hub 1-minute bars' });
+    });
+
+    it('tick.noiseFloor ⇒ the packet floor IS the noise floor', async () => {
+      const p = await svc.build(entry, { ...tick, noiseFloor: { basis: 'noise', armed: true, level: 530.5, armPrice: 529.65, n: 4.5 } }, null);
+      expect(p.money).toMatchObject({ greenFloorPrice: 530.5, greenFloorArmed: true, floorBasis: 'noise' });
+    });
+
+    it('an unarmed noise floor is reported unarmed even when the fixed latch is set (the ₹150 latch never arms the noise floor)', async () => {
+      const p = await svc.build(entry, { ...tick, greenFloorArmedLatched: true, noiseFloor: { basis: 'noise', armed: false, level: 529.65, armPrice: 529.65, n: 4.5 } }, null);
+      expect(p.money).toMatchObject({ greenFloorPrice: 529.65, greenFloorArmed: false, floorBasis: 'noise' });
+    });
   });
 });
 

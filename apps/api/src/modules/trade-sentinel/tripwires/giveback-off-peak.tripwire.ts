@@ -1,8 +1,9 @@
+import { noiseGiveback } from '../../exit-discipline/giveback';
 import type { Tripwire, TripwireFire, TripwireInput } from './types';
 
 /**
  * Fraction of peak favourable excursion that must be surrendered before this
- * sensor speaks. Deliberately loose: a sensor's job is "look at this", not
+ * sensor speaks — the rule when no noise unit is known (exit discipline §5). Deliberately loose: a sensor's job is "look at this", not
  * "sell this", so a false alarm costs one agent call, not a trade.
  */
 export const GIVEBACK_FRACTION = 0.4;
@@ -27,6 +28,21 @@ export const givebackOffPeak: Tripwire = {
     // hardening a sensor is that the producer chain is not trusted.
     if (peak === null || !Number.isFinite(peak)) return null;
     if (!Number.isFinite(ltp) || !Number.isFinite(entryPrice)) return null;
+
+    // Exit discipline §5: with a measured noise unit, speak only on a pullback of
+    // GIVEBACK_N units after an excursion of FLOOR_ARM_N units — a smaller
+    // pullback is the instrument's ordinary swing. Without one, the 40 % rule.
+    if (input.noise) {
+      const g = noiseGiveback({ side, entryPrice, ltp, peak, n: input.noise.n, armN: input.noise.armN, givebackN: input.noise.givebackN });
+      if (!g || !g.fire) return null;
+      const n = input.noise.n;
+      return {
+        name: 'giveback-off-peak',
+        detail:
+          `gave back ${g.pullback.toFixed(1)} (${(g.pullback / n).toFixed(1)} N) from peak ${peak} after a ` +
+          `${g.excursion.toFixed(1)} (${(g.excursion / n).toFixed(1)} N) excursion; now ${ltp}, entry ${entryPrice}, N=${n.toFixed(2)}`,
+      };
+    }
 
     const dir = side === 'LONG' ? 1 : -1;
     const peakGain = (peak - entryPrice) * dir;

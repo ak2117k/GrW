@@ -71,6 +71,30 @@ describe('sentinel-executor safety shape (plan Global Constraints, Review Focus)
   });
 });
 
+describe('exit gate shape (exit discipline, Review Focus 1)', () => {
+  it('the executor consults the gate only on trigger === \'AI\' (positive match, never !== MANUAL)', () => {
+    const src = code(join(__dirname, 'services', 'sentinel-exit-executor.service.ts'));
+    const sites = [...src.matchAll(/this\.gate\.(load|decide|enabled)\(/g)];
+    expect(sites.length).toBeGreaterThanOrEqual(2);
+    expect(src).toMatch(/const gated = trigger === 'AI'/);
+  });
+  it('the gate decides before the dry-run branch and before any protective cancel', () => {
+    const src = code(join(__dirname, 'services', 'sentinel-exit-executor.service.ts'));
+    // execute() asks for the gate record (gateRecord → gate.decide) exactly once.
+    expect([...src.matchAll(/this\.gateRecord\(/g)]).toHaveLength(1);
+    expect(src).toMatch(/const gate = gated \? await this\.gateRecord\(/);
+    const decide = src.indexOf('this.gateRecord(');
+    expect(decide).toBeLessThan(src.indexOf("cfg.mode === 'dry-run'"));
+    expect(decide).toBeLessThan(src.indexOf('this.cancelProtective('));
+    expect(decide).toBeLessThan(src.indexOf("this.place(s, run, o, 'M')"));
+  });
+  it('no new exit-discipline file in this module writes to the broker', () => {
+    for (const f of ['services/exit-gate.service.ts', 'repositories/exit-gate.repository.ts']) {
+      expect(code(join(__dirname, f))).not.toMatch(/placeOrder|cancelOrder|modifyOrder|withOwnerSession/);
+    }
+  });
+});
+
 describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
   const all = () => files(MODULES).filter((f) => !f.endsWith('.spec.ts'));
   it('only sentinel-executor reads ai_exit_executions — no corpus writer can mistake a manual exit for an AI decision', () => {
@@ -84,5 +108,30 @@ describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
   it('the executor never writes a sentinel_verdicts row (a manual exit is not fabricated as a verdict)', () => {
     const offenders = source().filter((f) => /sentinelVerdict\s*\.\s*(create|createMany|upsert|update|updateMany)\(/.test(code(f)));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('price triggers stay inside the executor (price-triggers plan, Review Focus 7)', () => {
+  const all = () => files(MODULES).filter((f) => !f.endsWith('.spec.ts'));
+
+  it('only sentinel-executor names sentinel_exit_triggers — trade-sentinel never reads or writes it', () => {
+    const offenders = all()
+      .filter((f) => !f.includes(join('modules', 'sentinel-executor')))
+      .filter((f) => /sentinelExitTrigger|sentinel_exit_triggers/.test(code(f)))
+      .map((f) => relative(MODULES, f).replace(/\\/g, '/'));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the tick path (trigger-book, confirmation) imports nothing but its own domain files', () => {
+    for (const name of ['trigger-book.ts', 'confirmation.ts']) {
+      const specs = specifiers(join(__dirname, 'domain', name));
+      expect(specs.every((s) => s.startsWith('./'))).toBe(true);
+    }
+  });
+
+  it('the trigger watcher reaches orders only through the executor (no placeOrder of its own)', () => {
+    const w = code(join(__dirname, 'services', 'trigger-watch.service.ts'));
+    expect(w).not.toMatch(/placeOrder|getPositionsEnvelope|getOrderBookEnvelope|withOwnerSession/);
+    expect(w).toMatch(/bootJobsEnabled\(\)/);
   });
 });

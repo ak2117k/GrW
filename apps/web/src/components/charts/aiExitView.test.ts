@@ -19,7 +19,8 @@ describe('aiExitRowView', () => {
       label: 'FILLED', tone: 'emerald',
       line: 'SELL 100 CRUDEOIL15OCT268950CE (CARRYFORWARD) at MARKET',
       detail: 'order 2610120001 · thesis broken', ago: '5 min ago', time: '15:30 IST',
-      dryRun: false, unitUnverified: false,
+      dryRun: false, unitUnverified: false, source: 'AI',
+      gateLine: null, qualityLine: null, outcomeLine: null,
     });
   });
   it('live PLACED is amber and shows the broker order id', () => {
@@ -99,5 +100,62 @@ describe('aiExitRowView — owner manual exits', () => {
     expect(aiExitRowView(row({ status: 'FILLED', trigger: 'MANUAL' })).label).toBe('MANUAL FILLED');
     expect(aiExitRowView(row({ status: 'FILLED', trigger: 'AI' })).label).toBe('FILLED');
     expect(aiExitRowView(row({ status: 'FILLED' })).label).toBe('FILLED');
+  });
+});
+
+describe('aiExitRowView — sentinel price triggers', () => {
+  it('a PRICE_TRIGGER row is labelled as such and carries the level and tick from verdictReason', () => {
+    const v = aiExitRowView(row({ trigger: 'PRICE_TRIGGER', triggerId: 'trg1',
+      verdictReason: 'PRICE_TRIGGER: CRUDEOIL19NOV26FUT < 8930 — fired at 8927.5 (2 ticks over 1200 ms); armed 22:33 IST by verdict v1' }));
+    expect(v.source).toBe('PRICE_TRIGGER');
+    expect(v.label).toBe('PRICE TRIGGER FILLED');
+    expect(v.detail).toContain('< 8930 — fired at 8927.5');
+  });
+
+  it('rows without trigger (older API) are AI; MANUAL rows say MANUAL', () => {
+    expect(aiExitRowView(row()).source).toBe('AI');
+    expect(aiExitRowView(row({ trigger: 'MANUAL' })).source).toBe('MANUAL');
+  });
+
+});
+
+describe('aiExitRowView — exit discipline lines (optional fields; an older API renders as before)', () => {
+  it('gate line: GATED reads as "held — thesis intact" with the numbers', () => {
+    const v = aiExitRowView(row({ status: 'SKIPPED', reason: 'GATED_THESIS_INTACT',
+      gate: { outcome: 'GATED_THESIS_INTACT', justification: null, summary: 'GATED_THESIS_INTACT: u 9003, inv 8932, vwap 9000, floor 530.5 ltp 527.1, N 4.5/3.1' } }), NOW);
+    expect(v.gateLine).toBe('Held — thesis intact: u 9003, inv 8932, vwap 9000, floor 530.5 ltp 527.1, N 4.5/3.1');
+  });
+  it('gate line: awaiting confirmation, passed, bypassed', () => {
+    expect(aiExitRowView(row({ gate: { outcome: 'AWAITING_CONFIRMATION', justification: 'CONFIRMED_FLOOR_BREACH',
+      summary: 'AWAITING_CONFIRMATION: CONFIRMED_FLOOR_BREACH via FLOOR_BREACH_VWAP persist=pending; u 8990' } }), NOW).gateLine)
+      .toBe('Held — awaiting a confirming EXIT_NOW: CONFIRMED_FLOOR_BREACH via FLOOR_BREACH_VWAP persist=pending; u 8990');
+    expect(aiExitRowView(row({ gate: { outcome: 'PASS', justification: 'THESIS_BROKEN',
+      summary: 'PASS: THESIS_BROKEN via THESIS_INVALIDATION persist=BYPASS; u 8925, inv 8932' } }), NOW).gateLine)
+      .toBe('Gate passed — THESIS_BROKEN via THESIS_INVALIDATION persist=BYPASS; u 8925, inv 8932');
+    expect(aiExitRowView(row({ gate: { outcome: 'BYPASS', justification: null, summary: 'BYPASS: DISABLED' } }), NOW).gateLine)
+      .toBe('Gate bypassed — DISABLED');
+  });
+  it('quality line: fill, slippage cost and latency', () => {
+    const v = aiExitRowView(row({ status: 'FILLED', quality: { decisionLtp: 527.6, orderLtp: 527.4, fillPrice: 527.1, fillAt: '2026-10-14T11:01:05Z', slippage: -0.5, costPerUnit: 0.5, latencyMs: 35_000 } }), NOW);
+    expect(v.qualityLine).toBe('Filled 527.1 · cost 0.5/unit vs decision 527.6 · 35 s');
+  });
+  it('quality line: a fill not yet compared; no fill but an order LTP', () => {
+    expect(aiExitRowView(row({ quality: { decisionLtp: null, orderLtp: 527.4, fillPrice: 527.1, fillAt: null, slippage: null, costPerUnit: null, latencyMs: null } }), NOW).qualityLine)
+      .toBe('Filled 527.1');
+    expect(aiExitRowView(row({ status: 'SKIPPED', quality: { decisionLtp: null, orderLtp: 527.4, fillPrice: null, fillAt: null, slippage: null, costPerUnit: null, latencyMs: null } }), NOW).qualityLine)
+      .toBe('LTP at the check 527.4');
+  });
+  it('outcome line: missed / saved after the window; pending says so', () => {
+    expect(aiExitRowView(row({ outcome: { kind: 'EXECUTED', status: 'DONE', missedPnl: 1490, savedPnl: 410, netAtEnd: 1190, windowEnd: 'x' } }), NOW).outcomeLine)
+      .toBe('Next 60 min: missed ₹1,490 · saved ₹410');
+    expect(aiExitRowView(row({ outcome: { kind: 'GATED', status: 'PENDING', missedPnl: null, savedPnl: null, netAtEnd: null, windowEnd: '2026-10-14T12:00:30Z' } }), NOW).outcomeLine)
+      .toMatch(/^Scoring after /);
+    expect(aiExitRowView(row(), NOW).outcomeLine).toBeNull();
+  });
+  it('outcome line: a held decision says what holding did; no data says so', () => {
+    expect(aiExitRowView(row({ outcome: { kind: 'GATED', status: 'DONE', missedPnl: 900, savedPnl: 300, netAtEnd: -250, windowEnd: 'x' } }), NOW).outcomeLine)
+      .toBe('Next 60 min: missed ₹900 · saved ₹300 · holding −₹250');
+    expect(aiExitRowView(row({ outcome: { kind: 'EXECUTED', status: 'NO_DATA', missedPnl: null, savedPnl: null, netAtEnd: null, windowEnd: 'x' } }), NOW).outcomeLine)
+      .toBe('Not scored — no price data after the decision');
   });
 });

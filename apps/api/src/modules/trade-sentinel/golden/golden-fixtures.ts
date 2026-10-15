@@ -71,6 +71,14 @@ export const SCENARIO_NAMES = [
   'judge-refusal',
   'judge-max-tokens',
   'judge-context-exceeded',
+  // Exit discipline (Task 12) and the price-trigger prompt switch: every prompt
+  // variant other than the baseline (both off) gets its own scenario.
+  'judge-fire-cues-on-triggers',
+  'judge-heartbeat-cues-off-triggers',
+  'judge-fire-cues-on-discipline',
+  'judge-heartbeat-cues-off-discipline',
+  'judge-fire-cues-on-discipline-triggers',
+  'judge-heartbeat-cues-off-discipline-triggers',
   'overnight',
   'thesis',
   'transport-throws',
@@ -211,6 +219,35 @@ export const GOLDEN_PACKET: ContextPacket = {
   },
   trigger: present([{ name: 'heartbeat', detail: 'scheduled review' }], 'tripwire.service', AT),
   memory: absent('no prior verdicts for this position — this is the first look'),
+};
+
+/**
+ * {@link GOLDEN_PACKET} as the builder emits it with exit discipline ON: an armed
+ * noise floor (money.floorBasis after greenFloorArmed) and flow.noiseUnit.
+ */
+export const GOLDEN_PACKET_DISCIPLINE: ContextPacket = {
+  ...GOLDEN_PACKET,
+  money: {
+    grossPnl: 6200,
+    charges: 120,
+    netPnl: 6080,
+    greenFloorPrice: 1452.5,
+    greenFloorArmed: true,
+    floorBasis: 'noise',
+    mfe: 1478,
+    mae: 1396,
+  },
+  flow: {
+    ...GOLDEN_PACKET.flow,
+    noiseUnit: present(
+      {
+        contract: { n: 4.5, method: 'atr14-1m', bars: 20, at: AT },
+        underlying: { n: 4.5, method: 'atr14-1m', bars: 20, at: AT },
+      },
+      'exit-discipline noise unit (ATR14 of hub 1-minute bars; underlying falls back to the 15m level-book ATR14 / √15)',
+      AT,
+    ),
+  },
 };
 
 /** `validVerdict` from services/sentinel-agent.service.spec.ts — cites real packet paths. */
@@ -452,9 +489,21 @@ interface Scenario {
   run: (client: MessagesTransport) => Promise<unknown>;
 }
 
-/** The real judge, as configured by `env`, over `client`. */
-const runJudge = (client: MessagesTransport, env: Record<string, string>, trigger: WakeTrigger) =>
-  outcome(() => new SentinelAgentService(client, fakeConfig(env)).judge(GOLDEN_PACKET, trigger));
+/**
+ * What every judge scenario runs under unless it says otherwise: exit discipline
+ * OFF (and, by omission, price triggers off). That is the pre-feature sentinel,
+ * so the baseline scenarios' recorded requests — prompt, packet and stamp —
+ * prove both switches off change nothing.
+ */
+const BASELINE_ENV: Record<string, string> = { EXIT_DISCIPLINE_ENABLED: 'false' };
+
+/** The real judge, as configured by `env` (over BASELINE_ENV), over `client`. */
+const runJudge = (
+  client: MessagesTransport,
+  env: Record<string, string>,
+  trigger: WakeTrigger,
+  packet: ContextPacket = GOLDEN_PACKET,
+) => outcome(() => new SentinelAgentService(client, fakeConfig({ ...BASELINE_ENV, ...env })).judge(packet, trigger));
 
 /** The real overnight judge over `client`. */
 const runOvernight = (client: MessagesTransport) =>
@@ -500,8 +549,9 @@ function judgeScenario(
   env: Record<string, string>,
   trigger: WakeTrigger,
   reply: Recorder['reply'],
+  packet: ContextPacket = GOLDEN_PACKET,
 ): Scenario {
-  return { name, reply, run: (client) => runJudge(client, env, trigger) };
+  return { name, reply, run: (client) => runJudge(client, env, trigger, packet) };
 }
 
 /** The plain `Error` the CLI transport throws on a failed subprocess — the prod failure shape under `cli`. */
@@ -522,6 +572,38 @@ const SCENARIOS: Scenario[] = [
   judgeScenario('judge-refusal', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'refusal')),
   judgeScenario('judge-max-tokens', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'max_tokens')),
   judgeScenario('judge-context-exceeded', {}, 'FIRE', () => jsonReply(VALID_VERDICT, 'model_context_window_exceeded')),
+  judgeScenario('judge-fire-cues-on-triggers', { MARKET_CUES_ENABLED: 'true', SENTINEL_TRIGGERS_ENABLED: 'true' }, 'FIRE', () =>
+    jsonReply(VALID_VERDICT),
+  ),
+  judgeScenario('judge-heartbeat-cues-off-triggers', { SENTINEL_TRIGGERS_ENABLED: 'true' }, 'HEARTBEAT', () => jsonReply(VALID_VERDICT)),
+  judgeScenario(
+    'judge-fire-cues-on-discipline',
+    { MARKET_CUES_ENABLED: 'true', EXIT_DISCIPLINE_ENABLED: 'true' },
+    'FIRE',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_DISCIPLINE,
+  ),
+  judgeScenario(
+    'judge-heartbeat-cues-off-discipline',
+    { EXIT_DISCIPLINE_ENABLED: 'true' },
+    'HEARTBEAT',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_DISCIPLINE,
+  ),
+  judgeScenario(
+    'judge-fire-cues-on-discipline-triggers',
+    { MARKET_CUES_ENABLED: 'true', EXIT_DISCIPLINE_ENABLED: 'true', SENTINEL_TRIGGERS_ENABLED: 'true' },
+    'FIRE',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_DISCIPLINE,
+  ),
+  judgeScenario(
+    'judge-heartbeat-cues-off-discipline-triggers',
+    { EXIT_DISCIPLINE_ENABLED: 'true', SENTINEL_TRIGGERS_ENABLED: 'true' },
+    'HEARTBEAT',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_DISCIPLINE,
+  ),
   { name: 'overnight', reply: () => jsonReply(VALID_OVERNIGHT), run: runOvernight },
   { name: 'thesis', reply: () => jsonReply(GOOD_THESIS), run: runThesis },
   judgeScenario('transport-throws', {}, 'FIRE', () => {
@@ -675,7 +757,7 @@ async function judgeFireCuesOnRequest(): Promise<TransportRequest> {
     },
   };
   await withLogCapture(() =>
-    new SentinelAgentService(client, fakeConfig({ MARKET_CUES_ENABLED: 'true' })).judge(GOLDEN_PACKET, 'FIRE'),
+    new SentinelAgentService(client, fakeConfig({ ...BASELINE_ENV, MARKET_CUES_ENABLED: 'true' })).judge(GOLDEN_PACKET, 'FIRE'),
   );
   if (!raw) throw new Error('golden: judge-fire-cues-on sent no request');
   return raw;

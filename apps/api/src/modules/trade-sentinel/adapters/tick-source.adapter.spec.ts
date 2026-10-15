@@ -10,6 +10,7 @@ import {
 import type { HubPriceSource, HubPrices } from '../../market-hub/hub-prices';
 import type { HubExchange, InstrumentRef, PriceResult } from '../../market-hub/hub.types';
 import { SPOT_SOURCE_HUB } from '../services/context-packet.service';
+import { parseExitDisciplineConfig } from '../../exit-discipline/config';
 
 const NOW = new Date('2026-08-14T06:00:00Z');
 
@@ -41,7 +42,7 @@ const row = (over: Record<string, unknown> = {}) => ({
  * for it — the blind case is what shipped, and it should never be what a new
  * test gets by accident.
  */
-function make(opts: { withFeed?: boolean; hub?: HubPriceSource } = {}) {
+function make(opts: { withFeed?: boolean; hub?: HubPriceSource; minuteBars?: unknown; discipline?: unknown } = {}) {
   const fetchQuote = jest.fn().mockResolvedValue(null);
   const userFeed = opts.withFeed === false ? undefined : ({ fetchQuote } as never);
   const findUnique = jest.fn().mockResolvedValue(row());
@@ -69,6 +70,8 @@ function make(opts: { withFeed?: boolean; hub?: HubPriceSource } = {}) {
     { structureFor } as never,
     userFeed,
     opts.hub ? ({ get: jest.fn(() => opts.hub) } as never) : undefined,
+    opts.minuteBars as never,
+    opts.discipline as never,
   );
   return {
     svc,
@@ -158,6 +161,14 @@ describe('SentinelTickSource', () => {
   afterEach(() => {
     jest.useRealTimers();
     jest.restoreAllMocks();
+  });
+
+  it('cash: underlyingRef is null (the contract IS the underlying); contractRef is the row', async () => {
+    const t = make();
+    const tick = await t.svc.tickFor('t1');
+    const r = row();
+    expect(tick.underlyingRef).toBeNull();
+    expect(tick.contractRef).toEqual({ exchange: String(r.exchange).toUpperCase(), token: String(r.token), symbol: r.symbol });
   });
 
   it('sets underlyingLtp to ltp on a cash position, never null', async () => {
@@ -305,6 +316,27 @@ describe('SentinelTickSource', () => {
     const option = () =>
       row({ symbol: 'NIFTY28AUG2524000CE', exchange: 'NFO', token: '99', lastLtp: 120 });
     const stockOption = () => row({ symbol: 'KEI29SEP265800CE', exchange: 'NFO', token: '77', lastLtp: 40 });
+
+    it('an index option names the index as underlyingRef', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue({ name: 'NIFTY', expiry: null });
+      t.getLevels.mockReturnValue({ spot: 24010, lastTickAt: NOW });
+
+      const tick = await t.svc.tickFor('t1');
+
+      expect(tick.underlyingRef).toEqual({ exchange: 'NSE', token: '99926000', symbol: 'NIFTY' });
+    });
+
+    it('an unresolvable underlying gives underlyingRef null, never the contract', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(option());
+      t.getInstrumentByToken.mockResolvedValue(null);
+
+      const tick = await t.svc.tickFor('t1');
+
+      expect(tick.underlyingRef).toBeNull();
+    });
 
     it('resolves the expiry from the instrument master as YYYY-MM-DD', async () => {
       const t = make();
@@ -770,6 +802,19 @@ describe('SentinelTickSource', () => {
         expect(warn.mock.calls.filter((c) => String(c[0]).includes('CRUDEOIL15OCT268850PE'))).toHaveLength(0);
       });
 
+      it('names the future it priced as underlyingRef (the executor watches exactly this)', async () => {
+        const t = make();
+        t.findUnique.mockResolvedValue(crudeOption());
+        t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: null });
+        t.getNearestFuture.mockResolvedValue({ token: '472789', symbol: 'CRUDEOIL19OCT26FUT', exchange: 'MCX' });
+        t.fetchQuote.mockResolvedValue({ ltp: 8875 });
+
+        const tick = await t.svc.tickFor('t1');
+
+        expect(tick.underlyingRef).toEqual({ exchange: 'MCX', token: '472789', symbol: 'CRUDEOIL19OCT26FUT' });
+        expect(tick.contractRef).toEqual({ exchange: 'MCX', token: '5001', symbol: 'CRUDEOIL15OCT268850PE' });
+      });
+
       it('uses the future from the live feed when it is ticking', async () => {
         const t = make();
         t.findUnique.mockResolvedValue(crudeOption());
@@ -846,6 +891,55 @@ describe('SentinelTickSource', () => {
         const hits = warn.mock.calls.filter((c) => String(c[0]).includes('CRUDEOIL15OCT268850PE'));
         expect(hits).toHaveLength(1);
         expect(String(hits[0][0])).toMatch(/future/i);
+      });
+
+      describe('exit discipline §3: the 1-minute noise unit (DB bars only)', () => {
+        const T0 = Date.parse('2026-10-14T10:00:00Z');
+        /** n bars of high-low = w around base. */
+        const bars = (n: number, w: number, base: number) =>
+          Array.from({ length: n }, (_, i) => ({ ts: T0 + i * 60_000, open: base, high: base + w / 2, low: base - w / 2, close: base }));
+        const ON = parseExitDisciplineConfig({});
+        const OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
+        const setup = (discipline: unknown, withReader = true) => {
+          const recent = jest.fn(async (ref: { token: string }) => (ref.token === '5001' ? bars(20, 4, 210) : bars(20, 10, 8875)));
+          const t = make({ minuteBars: withReader ? { recent } : undefined, discipline });
+          t.findUnique.mockResolvedValue(crudeOption());
+          t.getInstrumentByToken.mockResolvedValue({ name: 'CRUDEOIL', expiry: null });
+          t.getNearestFuture.mockResolvedValue({ token: '472789', symbol: 'CRUDEOIL19OCT26FUT', exchange: 'MCX' });
+          t.fetchQuote.mockResolvedValue({ ltp: 8875 });
+          return { ...t, recent };
+        };
+
+        it('carries noise.contract from the contract bars and noise.underlying1m from the resolved future', async () => {
+          const t = setup(ON);
+          const tick = await t.svc.tickFor('t1');
+          expect(t.recent).toHaveBeenCalledWith({ exchange: 'MCX', token: '5001', symbol: 'CRUDEOIL15OCT268850PE' }, expect.any(Date));
+          expect(t.recent).toHaveBeenCalledWith(expect.objectContaining({ exchange: 'MCX', token: '472789' }), expect.any(Date));
+          expect(tick.noise).toEqual({
+            contract: expect.objectContaining({ n: 4, method: 'atr14-1m', bars: 20 }),
+            underlying1m: expect.objectContaining({ n: 10, method: 'atr14-1m', bars: 20 }),
+            reason: null,
+          });
+        });
+
+        it('no contract bars ⇒ contract null with the reason', async () => {
+          const t = setup(ON);
+          t.recent.mockResolvedValue([]);
+          const tick = await t.svc.tickFor('t1');
+          expect(tick.noise).toEqual({ contract: null, underlying1m: null, reason: expect.stringMatching(/1-minute bars/) });
+        });
+
+        it('discipline disabled ⇒ tick.noise null and the reader is NOT called', async () => {
+          const t = setup(OFF);
+          const tick = await t.svc.tickFor('t1');
+          expect(tick.noise).toBeNull();
+          expect(t.recent).not.toHaveBeenCalled();
+        });
+
+        it('no reader wired ⇒ tick.noise null', async () => {
+          const t = setup(ON, false);
+          expect((await t.svc.tickFor('t1')).noise).toBeNull();
+        });
       });
     });
 

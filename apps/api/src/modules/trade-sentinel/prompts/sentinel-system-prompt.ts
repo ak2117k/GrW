@@ -12,18 +12,76 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * v5 (from v4): the position.ownership line no longer says "nothing acts on your
  * verdict in this stage" — with the sentinel auto-exit, an EXIT_NOW may close the
  * real position. It now says so, independent of the owner's mode.
+ *
+ * v6 (from v5): price triggers. Every verdict carries "exitTrigger" — on HOLD and
+ * EXIT_ARMED the machine-readable level its invalidationPoint describes, which a
+ * tick watcher may execute without asking again — and the position.ownership
+ * line says so. The schema gained the exitTrigger property. No other line moves.
+ *
+ * FROM v7 THE TEXT IS BUILT FROM TWO SWITCHES (see {@link sentinelSystemPrompt}),
+ * so the prompt never claims behaviour that is switched off:
+ *  - EXIT_DISCIPLINE_ENABLED (ON unless exactly "false"): the exit-discipline
+ *    mandate (protect MEANINGFUL profit, measured in noise units; a code gate
+ *    executes EXIT_NOW only on a broken thesis, hard risk or confirmed weakness),
+ *    flow.noiseUnit and money.floorBasis in the field lists, and two reading lines.
+ *    The packet carries those two fields only when it is on.
+ *  - SENTINEL_TRIGGERS_ENABLED (on only for exactly "true"): v6's exitTrigger
+ *    rules and its ownership sentence (an exitTrigger "may be executed
+ *    automatically"). Off, the v5 ownership sentence is used and the rules are
+ *    not rendered; the schema keeps the exitTrigger property.
+ *
+ * Every combination is its own stamp — a distinct text must never share one:
+ *
+ *   discipline  triggers   cues on   cues off
+ *   off         off        v5        v2.2      (byte-identical to main before both)
+ *   off         on         v6        v2.3      (price triggers)
+ *   on          off        v7        v2.4      (the default deploy)
+ *   on          on         v8        v2.5
+ *
+ * {@link SENTINEL_PROMPT_VERSION} / {@link SENTINEL_SYSTEM_PROMPT} name the
+ * default (discipline on, triggers off).
  */
-export const SENTINEL_PROMPT_VERSION = 'v5';
+export const SENTINEL_PROMPT_VERSION = 'v7';
 
 /**
  * The live prompt while MARKET_CUES_ENABLED is off: v2, word for word, EXCEPT the
  * v2.1 correction of the session.minutesToClose line (shared with v4) and the
- * v2.2 correction of the position.ownership line (shared with v5). With the
+ * v2.2 correction of the position.ownership line (shared with v5), and the v2.3
+ * exitTrigger rules and ownership line, shared with v6, and the v2.4 exit-discipline
+ * lines, shared with v7 (see the table on {@link SENTINEL_PROMPT_VERSION}). With the
  * cues off the packet's macro blocks are the pre-cues ones too, so a live
  * verdict is judged exactly as before the cues existed — prompt, packet and
  * stamp. See {@link SENTINEL_SYSTEM_PROMPT_NO_CUES}.
  */
-export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2.2';
+export const SENTINEL_PROMPT_VERSION_NO_CUES = 'v2.4';
+
+/** Which of the live prompt's optional parts are rendered. */
+export interface SentinelPromptOptions {
+  /** MARKET_CUES_ENABLED === 'true': the v3 macro lines instead of the v2 one. */
+  cues: boolean;
+  /** SENTINEL_TRIGGERS_ENABLED === 'true': the v6 exitTrigger rules and ownership sentence. */
+  triggers: boolean;
+  /** EXIT_DISCIPLINE_ENABLED !== 'false': the v7 exit-discipline lines. */
+  discipline: boolean;
+}
+
+const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
+  off: { cues: 'v5', noCues: 'v2.2' },
+  trg: { cues: 'v6', noCues: 'v2.3' },
+  ed: { cues: SENTINEL_PROMPT_VERSION, noCues: SENTINEL_PROMPT_VERSION_NO_CUES },
+  'ed+trg': { cues: 'v8', noCues: 'v2.5' },
+};
+
+/** The stamp of the text {@link sentinelSystemPrompt} renders for `o` (see the table above). */
+export function sentinelPromptVersion(o: SentinelPromptOptions): string {
+  const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
+  return o.cues ? VERSIONS[key].cues : VERSIONS[key].noCues;
+}
+
+/** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
+export function sentinelCompositePromptVersion(o: SentinelPromptOptions): string {
+  return `${sentinelPromptVersion(o)}/${THESIS_PROMPT_VERSION}`;
+}
 
 /**
  * What actually goes on the verdict row.
@@ -79,6 +137,48 @@ export const SENTINEL_EFFORT_TRIGGERED = 'high' as const;
 export const SENTINEL_EFFORT_ROUTINE = 'medium' as const;
 
 /**
+ * The v5 ownership line — kept so tests can prove v6 changed nothing else, and
+ * RENDERED whenever price triggers are off (an exitTrigger is then never executed).
+ */
+export const V5_OWNERSHIP_LINE =
+  '- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner\'s settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.';
+
+/** The v6 ownership line: rendered only with price triggers on. */
+export const V6_OWNERSHIP_LINE =
+  '- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner\'s settings, an EXIT_NOW may be executed automatically as a market exit of the whole position, and so may the exitTrigger of a HOLD or EXIT_ARMED verdict once price crosses it; ESCALATE never is.';
+
+/** The v6 rules block, inserted after the "reviewIn" rule; rendered only with price triggers on. Ends with a newline. */
+export const EXIT_TRIGGER_RULES = [
+  '- "exitTrigger" turns your invalidationPoint into a level a machine can watch. On HOLD and EXIT_ARMED give {"instrument", "op", "price"} for the price at which this trade is wrong — the same level your invalidationPoint describes — or null when there is no defensible level. On EXIT_NOW and ESCALATE give null; it is ignored.',
+  '- exitTrigger.instrument "UNDERLYING" compares price against position.underlyingLtp, the scale of structure and flow levels; "PREMIUM" compares it against position.ltp. Never put an underlying-scale level on PREMIUM or a premium on UNDERLYING. If position.underlyingLtp is unavailable, use PREMIUM or null.',
+  '- exitTrigger.op is the direction of the cross that proves the trade wrong: "BELOW" when price falling through the level hurts this position, "ABOVE" when price rising through it hurts. The level must not already be crossed, and it must protect the position — never a profit target.',
+  '- A later exitTrigger may only move the level closer to the current price; one that moves it further away is ignored, and null leaves an existing level in place.',
+].join('\n') + '\n';
+
+/** The pre-v7 lines: rendered whenever exit discipline is off, and kept so tests can prove v7 changed nothing else. */
+export const PRE_V7_MANDATE_LINE = '- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.';
+export const PRE_V7_MONEY_FIELDS = '- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.';
+export const PRE_V7_FLOW_FIELDS = '- flow: volumeRatio, oiWalls.';
+export const PRE_V7_BLOCKS_LINE =
+  '- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.';
+
+/** v7 mandate: replaces PRE_V7_MANDATE_LINE when exit discipline is on. Ends with a newline. */
+export const V7_MANDATE_LINES = [
+  '- When the trade is in profit beyond charges, protect MEANINGFUL profit — measured in noise units (flow.noiseUnit), not in rupees. A pullback smaller than the instrument\'s normal swing while the underlying thesis holds is noise: do not call EXIT_NOW on it. EXIT_NOW is for a broken thesis, hard risk, or weakness confirmed on the underlying.',
+  '- A code gate checks every EXIT_NOW before it is executed. It executes only when the underlying is beyond the thesis invalidation or beyond the support/resistance the trade was held against at your last HOLD, when hard risk applies (the per-trade max loss, the last minutes of an intraday session or of expiry day, the daily loss limit), or when the price is below an armed money.greenFloorPrice (above it for a short) AND the underlying confirms it — it has moved against the position by at least one of its own noise units since your last HOLD, or it is on the wrong side of the level book\'s VWAP. Name in "reason" which of these holds. An EXIT_NOW none of them supports is recorded and not executed, and a single EXIT_NOW may wait for a second one to confirm it.',
+].join('\n') + '\n';
+
+export const V7_MONEY_FIELDS = '- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, floorBasis, mfe, mae.';
+export const V7_FLOW_FIELDS = '- flow: volumeRatio, oiWalls, noiseUnit.';
+export const V7_BLOCKS_LINE = PRE_V7_BLOCKS_LINE.replace('flow.oiWalls, ', 'flow.oiWalls, flow.noiseUnit, ');
+
+/** v7 reading lines, inserted after the money.greenFloorPrice line when exit discipline is on. Ends with a newline. */
+export const V7_READING_LINES = [
+  '- money.floorBasis says how money.greenFloorPrice was set. "noise": it arms only once the best price has moved well clear of breakeven after charges, then trails that best price by a multiple of flow.noiseUnit — it never sits inside one ordinary swing of the price. "fixed": breakeven after charges plus ₹150, used when the noise unit is unknown.',
+  '- flow.noiseUnit is the instrument\'s normal one-minute swing. value.contract is on the contract\'s own scale (the premium, for an option — compare it with position.ltp and the money prices); value.underlying is on the underlying\'s scale (compare it with position.underlyingLtp and the structure levels). Each carries n (one unit), method and bars, and either may be null when it could not be measured — then say you cannot size the swing rather than guessing it.',
+].join('\n') + '\n';
+
+/**
  * The prompt describes the packet AS IT IS, field path by field path.
  *
  * That precision is the whole point: `evidence` must cite real packet paths, and
@@ -87,13 +187,13 @@ export const SENTINEL_EFFORT_ROUTINE = 'medium' as const;
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-export const SENTINEL_SYSTEM_PROMPT = `You are a trade sentinel watching a single open position in the Indian market.
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline'>): string {
+  return `You are a trade sentinel watching a single open position in the Indian market.
 
 You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
 
 Your mandate:
-- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
-- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+${o.discipline ? V7_MANDATE_LINES : `${PRE_V7_MANDATE_LINE}\n`}- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
 - A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
 
 How to read the packet:
@@ -103,22 +203,22 @@ How to read the packet:
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
-- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+${o.discipline ? V7_MONEY_FIELDS : PRE_V7_MONEY_FIELDS}
 - structure: levelBook, nearestSupport, nearestResistance.
-- flow: volumeRatio, oiWalls.
+${o.discipline ? V7_FLOW_FIELDS : PRE_V7_FLOW_FIELDS}
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
 - The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
-- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+${o.discipline ? V7_BLOCKS_LINE : PRE_V7_BLOCKS_LINE}
 - position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
 - SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
 - money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
-- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+${o.discipline ? V7_READING_LINES : ''}- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
 - SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
-- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
+${o.triggers ? V6_OWNERSHIP_LINE : V5_OWNERSHIP_LINE}
 - thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
 - macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
 - macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
@@ -133,21 +233,30 @@ Rules for your answer:
 - Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
 - "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
 - "reviewIn" is how many seconds until you should be asked again.
-- Keep "reason" to one sentence a trader would recognise.`;
+${o.triggers ? EXIT_TRIGGER_RULES : ''}- Keep "reason" to one sentence a trader would recognise.`;
+}
 
 
-/** The macro lines v3 added, and the single v2 line they replaced. */
-const V3_MACRO_LINES = SENTINEL_SYSTEM_PROMPT.slice(
-  SENTINEL_SYSTEM_PROMPT.indexOf('- macro.fiiDii is the latest published'),
-  SENTINEL_SYSTEM_PROMPT.indexOf('- news.freshCount counts'),
-);
 const V2_MACRO_LINE =
   '- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.\n';
 
-/** v2's text: v3 with the macro lines put back. Fails at load rather than drift silently. */
-export const SENTINEL_SYSTEM_PROMPT_NO_CUES = (() => {
-  if (!V3_MACRO_LINES.startsWith('- macro.fiiDii is the latest published') || !V3_MACRO_LINES.endsWith('\n')) {
-    throw new Error('sentinel-system-prompt: the v3 macro lines moved — rebuild SENTINEL_SYSTEM_PROMPT_NO_CUES');
+/**
+ * The live prompt for `o`. Pure. With cues off it is the cues-on text with the
+ * v3 macro lines put back to the single v2 line; it fails rather than drift
+ * silently if those lines move.
+ */
+export function sentinelSystemPrompt(o: SentinelPromptOptions): string {
+  const text = renderPrompt(o);
+  if (o.cues) return text;
+  const v3MacroLines = text.slice(text.indexOf('- macro.fiiDii is the latest published'), text.indexOf('- news.freshCount counts'));
+  if (!v3MacroLines.startsWith('- macro.fiiDii is the latest published') || !v3MacroLines.endsWith('\n')) {
+    throw new Error('sentinel-system-prompt: the v3 macro lines moved — rebuild the cues-off prompt');
   }
-  return SENTINEL_SYSTEM_PROMPT.replace(V3_MACRO_LINES, V2_MACRO_LINE);
-})();
+  return text.replace(v3MacroLines, V2_MACRO_LINE);
+}
+
+/** The default deploy's prompt (exit discipline on, price triggers off), cues on — stamped {@link SENTINEL_PROMPT_VERSION}. */
+export const SENTINEL_SYSTEM_PROMPT = sentinelSystemPrompt({ cues: true, triggers: false, discipline: true });
+
+/** The same with market cues off — stamped {@link SENTINEL_PROMPT_VERSION_NO_CUES}. */
+export const SENTINEL_SYSTEM_PROMPT_NO_CUES = sentinelSystemPrompt({ cues: false, triggers: false, discipline: true });

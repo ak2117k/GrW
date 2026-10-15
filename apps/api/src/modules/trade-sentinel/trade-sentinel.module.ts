@@ -26,6 +26,10 @@ import { ANTHROPIC_CLIENT, SentinelAgentService } from './services/sentinel-agen
 import { OiWallSnapshotService } from './services/oi-wall-snapshot.service';
 import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.service';
 import { SentinelRunnerService } from './services/sentinel-runner.service';
+import { TickSensorBook } from './services/tick-sensor-book';
+import { TickTripwireService } from './services/tick-tripwire.service';
+import { HubTickStream } from './adapters/hub-tick-stream.adapter';
+import { TICK_STREAM } from './ports/tick-stream.port';
 import { EngineOwnershipAdapter } from './adapters/engine-ownership.adapter';
 import { SentinelChartContextAdapter } from './adapters/chart-context.adapter';
 import { ClaudeCliTransport } from './adapters/claude-cli.transport';
@@ -40,6 +44,10 @@ import { SentinelOvernightEvidenceAdapter } from './adapters/overnight-evidence.
 import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
 import { MACRO_CUES } from './ports/market-cues.port';
 import { SentinelOvernightService } from './services/sentinel-overnight.service';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
+import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
+import { MinuteBarsReader } from './adapters/minute-bars.reader';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -151,6 +159,15 @@ import { SentinelOvernightService } from './services/sentinel-overnight.service'
     SentinelChartContextAdapter,
     { provide: CHART_CONTEXT_SHIM, useExisting: SentinelChartContextAdapter },
     { provide: TICK_SOURCE, useClass: SentinelTickSource },
+    // Exit discipline (docs/superpowers/specs/2026-10-14-exit-discipline-design.md):
+    // the parsed EXIT_DISCIPLINE_* config, and the candles_1m reader the tick
+    // source measures the noise unit from — a DATABASE read, never a broker call.
+    { provide: EXIT_DISCIPLINE_CONFIG, useFactory: () => parseExitDisciplineConfig(process.env) },
+    {
+      provide: MinuteBarsReader,
+      useFactory: (prisma: PrismaService) => new MinuteBarsReader(new PrismaCandleRepo(prisma as never)),
+      inject: [PrismaService],
+    },
     // News, options-chain and market-data reads for the overnight review. Reaches
     // the broker through those services, exactly like the adapters above — so it
     // is bound here, behind `OvernightEvidenceSource`, and nowhere else.
@@ -170,6 +187,11 @@ import { SentinelOvernightService } from './services/sentinel-overnight.service'
     OiWallSnapshotService,
     SentinelCycleService,
     SentinelRunnerService,
+    // Part B — tick-driven price sensors. The hub is reached ONLY through this
+    // port binding (composition root), so the cycle's walk never reaches it.
+    TickSensorBook,
+    { provide: TICK_STREAM, useClass: HubTickStream },
+    TickTripwireService,
     // After-close (15:45 NSE / 23:45 MCX) and pre-open (08:30) reviews, and the
     // 09:10 pre-open check (NSE F&O, on the pre-open IEP). Shadow only; shares
     // the cycle's judge cap. Off unless SENTINEL_SHADOW_ENABLED.

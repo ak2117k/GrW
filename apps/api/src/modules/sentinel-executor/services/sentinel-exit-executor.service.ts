@@ -15,7 +15,6 @@ import {
   protectiveOrdersFor,
   type ProtectiveOrder,
   aiExitOrderTag,
-  findOrder,
   findOrderByTag,
   hasOpenOrderFor,
   hasPriorAiExit,
@@ -33,16 +32,24 @@ import {
   READ_RETRY_WINDOW_MS,
   TAG_LOOKUP_DELAY_MS,
 } from '../domain/claim-timing';
+import { findOrderFill, type OrderFill } from '../domain/exit-fill';
 import { evaluateGuards } from '../domain/guards';
 import type { ExitTrigger } from '../domain/manual-exit';
 import {
   AiExitExecutionRepository,
+  type AiExitPatch,
   type PendingVerdict,
 } from '../repositories/ai-exit-execution.repository';
 import { FeedSessionNotReadyError, NoFeedSessionError, OwnerBrokerSessionProvider } from './owner-broker-session.provider';
+import { parseExitDisciplineConfig } from '../../exit-discipline/config';
+import { bypassRecord, gateSummary, isBlocking } from '../../exit-discipline/decision';
+import type { GateRecordV1 } from '../../exit-discipline/types';
+import { ExitGateService, type GateContext } from './exit-gate.service';
+import { AI_EXIT_SESSION_CLOCK, AI_EXIT_SLEEP } from './executor.tokens';
 
-export const AI_EXIT_SESSION_CLOCK = Symbol('AI_EXIT_SESSION_CLOCK');
-export const AI_EXIT_SLEEP = Symbol('AI_EXIT_SLEEP');
+export { AI_EXIT_SESSION_CLOCK, AI_EXIT_SLEEP } from './executor.tokens';
+/** Only stamps the cfg block of a `BYPASS: DISABLED` gate record; the live cfg lives in ExitGateService. */
+const DISABLED_CFG = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
 export type Sleep = (ms: number) => Promise<void>;
 export type AiExitOutcome = { status: AiExitStatus | 'DUPLICATE'; reason?: string };
 
@@ -70,6 +77,8 @@ interface Run {
   cfg: AutoExitConfig;
   inst: Inst;
   sent: boolean;
+  /** E5: wall clock immediately before the (last) placeOrder call; null until one is sent. */
+  sentAt: Date | null;
   cancelSent: boolean;
   trigger: ExitTrigger;
   /** The `now` the guards judged the verdict's age against. */
@@ -124,8 +133,9 @@ export class SentinelExitExecutor {
     private readonly repo: AiExitExecutionRepository,
     private readonly prisma: PrismaService,
     private readonly sessions: OwnerBrokerSessionProvider,
-    @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen'>,
+    @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen' | 'minutesToClose' | 'tradingWindow'>,
     @Inject(AI_EXIT_SLEEP) private readonly sleep: Sleep,
+    private readonly gate: ExitGateService,
   ) {}
 
   async process(v: PendingVerdict, cfg: AutoExitConfig, now: Date = new Date()): Promise<AiExitOutcome> {
@@ -176,7 +186,15 @@ export class SentinelExitExecutor {
       return this.finish(id, v, 'FAILED', 'INSTRUMENT_READ', { brokerMessage: errText(err) });
     }
 
-    const run: Run = { id, v, cfg, inst, sent: false, cancelSent: false, trigger, now, startedMs: Date.now() };
+    // Exit discipline (plan R8): AI verdicts only — MANUAL and PRICE_TRIGGER never reach the gate (E2).
+    // Started now so its DB reads overlap the session lease and the broker reads below.
+    // The gate can only PREVENT an AI sell; load never rejects and is bounded (fail-open).
+    const gated = trigger === 'AI';
+    const gateLoad: Promise<GateContext> | null = gated && this.gate.enabled() ? this.gate.load(v, now) : null;
+    // Never an unhandled rejection if the lease fails before the gate is awaited (gateRecord still sees any rejection).
+    gateLoad?.catch(() => undefined);
+
+    const run: Run = { id, v, cfg, inst, sent: false, sentAt: null, cancelSent: false, trigger, now, startedMs: Date.now() };
 
     // 3–7. BROKER — one session lease, tier chosen once (ruling R1).
     let outcome: AiExitOutcome;
@@ -189,7 +207,18 @@ export class SentinelExitExecutor {
             ? this.finish(id, v, 'SKIPPED', first.reason)
             : this.finish(id, v, 'FAILED', first.reason, first.detail ? { brokerMessage: first.detail } : {});
         }
-        await this.recordPlan(id, first.order);
+        // Exit gate (plan R7/R8): after the first pre-order check, BEFORE the plan write's
+        // consequences — the dry-run branch, any protective cancel and the order. A blocked
+        // verdict ends SKIPPED here: nothing is cancelled, nothing is sent.
+        const gate = gated ? await this.gateRecord(gateLoad, first, t, now) : null;
+        await this.recordPlan(id, first.order, first.ltp, gate ? { gate } : {});
+        if (gate && isBlocking(gate)) {
+          this.logger.log(`[exit-gate] ${gateSummary(gate)} — ${v.symbol} verdict ${v.id}`);
+          return this.finish(id, v, 'SKIPPED', gate.outcome);
+        }
+        if (gate && gate.outcome === 'PASS') {
+          this.logger.log(`[exit-gate] ${gateSummary(gate)} — ${v.symbol} verdict ${v.id}`);
+        }
 
         if (cfg.mode === 'dry-run') {
           const sell = `${first.order.side} ${first.order.quantity} ${first.order.symbol} (${first.order.positionType}) at MARKET`;
@@ -211,7 +240,7 @@ export class SentinelExitExecutor {
           const c = await this.cancelProtective(s, t, run, first.orders);
           if (c.kind === 'stop') return c.outcome;
           pre = c.pre;
-          await this.recordPlan(id, pre.order);
+          await this.recordPlan(id, pre.order, pre.ltp);
         } else {
           pre = first;
         }
@@ -220,7 +249,7 @@ export class SentinelExitExecutor {
         const r = await this.place(s, run, o, 'M');
         this.logger.log(`[ai-exit] LIVE MARKET ${o.side} ${o.quantity} ${o.symbol} → ${r.status} ${r.orderId || ''} (${r.message}) — verdict ${v.id}`);
         if (r.status === 'PLACED' && r.orderId) {
-          await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message });
+          await this.repo.update(id, { status: 'PLACED', brokerOrderId: r.orderId, brokerMessage: r.message, orderSentAt: run.sentAt ?? undefined });
           return this.confirm(s, run, o, r.orderId, 'M');
         }
         return this.settleUnplaced(s, run, o, r, 'M');
@@ -240,16 +269,38 @@ export class SentinelExitExecutor {
     return this.flagUnprotected(run, outcome);
   }
 
-  private recordPlan(id: string, o: OrderRequest): Promise<void> {
+  /**
+   * The exit-gate record for an AI verdict. Never throws: the gate may only
+   * PREVENT a sell, so any fault here fails OPEN (BYPASS: FACTS_UNREADABLE)
+   * instead of ending the attempt FAILED.
+   */
+  private async gateRecord(
+    gateLoad: Promise<GateContext> | null, first: { order: OrderRequest; ltp: number }, t: Tracker, now: Date,
+  ): Promise<GateRecordV1> {
+    if (!gateLoad) return bypassRecord('DISABLED', DISABLED_CFG, now);
+    try {
+      return this.gate.decide(await gateLoad, {
+        ltpNow: first.ltp, productType: first.order.positionType ?? null, exchange: String(t.exchange ?? '').toUpperCase(), now,
+      });
+    } catch (err) {
+      this.logger.warn(`[exit-gate] gate faulted — failing OPEN: ${errText(err)}`);
+      return bypassRecord('FACTS_UNREADABLE', DISABLED_CFG, now, errText(err));
+    }
+  }
+
+  /** The planned order, with the positions LTP the pre-check saw (E5 `orderLtp`). */
+  private recordPlan(id: string, o: OrderRequest, ltp: number, extra: AiExitPatch = {}): Promise<void> {
     return this.repo.update(id, {
       exchange: o.exchange, token: o.token, side: o.side, quantity: o.quantity,
       productType: o.positionType, orderType: 'MARKET',
+      ...(Number.isFinite(ltp) && ltp > 0 ? { orderLtp: ltp } : {}), ...extra,
     });
   }
 
   /** The ONLY call site of placeOrder. Marks the run as sent before the call. */
   private place(s: UserBrokerSession, run: Run, o: OrderRequest, leg: 'M' | 'L'): Promise<ClassifiedPlacement> {
     run.sent = true;
+    run.sentAt = new Date();
     return s.placeOrderClassified(o, aiExitOrderTag(run.v.id, leg, run.trigger));
   }
 
@@ -358,16 +409,20 @@ export class SentinelExitExecutor {
     s: UserBrokerSession, run: Run, o: OrderRequest, r: ClassifiedPlacement, leg: 'M' | 'L',
   ): Promise<AiExitOutcome> {
     const { id, v } = run;
+    const sentAt = { orderSentAt: run.sentAt ?? undefined };
     const definitive = r.status === 'REJECTED';
     if (!definitive) await this.sleep(TAG_LOOKUP_DELAY_MS);
     // A read retry here is safe: it only looks for our tag; nothing is ever re-sent.
     const { rows: book } = await this.readRows(run, 'order book', () => s.getOrderBookEnvelope());
-    if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
+    if (book === null) return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message, ...sentAt });
     const mine = findOrderByTag(book, aiExitOrderTag(v.id, leg, run.trigger));
 
     if (mine && mine.status !== 'rejected' && mine.status !== 'cancelled') {
       this.logger.warn(`[ai-exit] ${o.symbol} placement answer was "${r.message}" but order ${mine.orderId || '?'} (${mine.status || 'unknown'}) carries our tag — treating as PLACED`);
-      await this.repo.update(id, { status: 'PLACED', brokerOrderId: mine.orderId || null, brokerMessage: r.message, orderStatus: mine.status || null });
+      await this.repo.update(id, {
+        status: 'PLACED', brokerOrderId: mine.orderId || null, brokerMessage: r.message, orderStatus: mine.status || null,
+        orderSentAt: run.sentAt ?? undefined,
+      });
       return mine.orderId ? this.confirm(s, run, o, mine.orderId, leg) : { status: 'PLACED' };
     }
     if (mine) {
@@ -377,7 +432,7 @@ export class SentinelExitExecutor {
         return this.fallback(s, run, o, mine.orderId || null);
       }
       return this.finish(id, v, 'REJECTED', mine.status === 'cancelled' ? 'CANCELLED' : 'BROKER_REJECTED', {
-        orderStatus: mine.status, brokerMessage: text,
+        orderStatus: mine.status, brokerMessage: text, ...sentAt,
       });
     }
     if (definitive) {
@@ -385,9 +440,9 @@ export class SentinelExitExecutor {
         await this.repo.update(id, { brokerMessage: r.message });
         return this.fallback(s, run, o, null);
       }
-      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message });
+      return this.finish(id, v, 'REJECTED', 'BROKER_REJECTED', { brokerMessage: r.message, ...sentAt });
     }
-    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message });
+    return this.finish(id, v, 'FAILED', 'ORDER_UNCERTAIN', { brokerMessage: r.message, ...sentAt });
   }
 
   /** A broker read whose throw (timeout, disposed) is treated as "not answered". Never retried (R10 confirm polls). */
@@ -433,14 +488,15 @@ export class SentinelExitExecutor {
   /**
    * A read retry must finish its wait inside READ_RETRY_WINDOW_MS of the attempt
    * (bounds CLAIM_STALE_MS). Before anything was sent or cancelled, an AI
-   * attempt must also still be within the verdict's max age when its wait ends.
+   * (or PRICE_TRIGGER, aged from its fire) attempt must also still be within the
+   * verdict's max age when its wait ends.
    * Once a protective order was cancelled (or an order sent) age no longer
    * applies: giving up then leaves the position unprotected/uncertain.
    */
   private mayRetryRead(run: Run, wait: number): boolean {
     const elapsed = Math.max(0, Date.now() - run.startedMs);
     if (elapsed + wait > READ_RETRY_WINDOW_MS) return false;
-    if (run.trigger === 'AI' && !run.sent && !run.cancelSent) {
+    if (run.trigger !== 'MANUAL' && !run.sent && !run.cancelSent) {
       const age = run.now.getTime() - run.v.createdAt.getTime() + elapsed + wait;
       if (age > run.cfg.maxVerdictAgeSec * 1000) return false;
     }
@@ -490,11 +546,11 @@ export class SentinelExitExecutor {
     s: UserBrokerSession, run: Run, o: OrderRequest, orderId: string, leg: 'M' | 'L',
   ): Promise<AiExitOutcome> {
     const { id, v } = run;
-    let last: { status: string; text: string } | null = null;
+    let last: OrderFill | null = null;
     for (const step of CONFIRM_STEPS_MS) {
       await this.sleep(step);
       const book = await this.rows(() => s.getOrderBookEnvelope());
-      last = book ? findOrder(book, orderId) ?? last : last;
+      last = book ? findOrderFill(book, orderId) ?? last : last;
       if (last && isTerminalOrderStatus(last.status)) break;
     }
     if (last?.status === 'rejected') {
@@ -507,9 +563,23 @@ export class SentinelExitExecutor {
     if (last?.status === 'cancelled') {
       return this.finish(id, v, 'REJECTED', 'CANCELLED', { orderStatus: 'cancelled', brokerMessage: last.text });
     }
+    // E5 (plan item 12): Angel's positions lag its order book. A `complete` order IS
+    // the fill: FILLED with its price/qty/exchange time even while positions lag.
     const rows = await this.rows(() => s.getPositionsEnvelope());
-    if (rows && isFlat(rows, o.exchange, o.token)) {
-      return this.finish(id, v, 'FILLED', undefined, { orderStatus: last?.status ?? null });
+    const flat = !!rows && isFlat(rows, o.exchange, o.token);
+    if (last?.status === 'complete') {
+      if (!flat) {
+        this.logger.log(`[exit-fill] ${o.symbol} order ${orderId} complete; positions not flat yet (broker lag) — FILLED from the order book`);
+      }
+      return this.finish(id, v, 'FILLED', undefined, {
+        orderStatus: 'complete', fillPrice: last.averagePrice, fillQty: last.filledQty, fillAt: last.fillAt ?? new Date(),
+      });
+    }
+    if (flat) {
+      return this.finish(id, v, 'FILLED', undefined, {
+        orderStatus: last?.status ?? null,
+        ...(last ? { fillPrice: last.averagePrice, fillQty: last.filledQty, fillAt: last.fillAt } : {}),
+      });
     }
     await this.repo.update(id, { orderStatus: last?.status ?? null });
     this.logger.log(`[ai-exit] ${o.symbol} order ${orderId} still ${last?.status ?? 'unseen'} after 10 s — left PLACED`);
@@ -545,7 +615,7 @@ export class SentinelExitExecutor {
 
   private async finish(
     id: string, v: PendingVerdict, status: AiExitStatus, reason?: string,
-    extra: { brokerMessage?: string; orderStatus?: string | null; marketOrderId?: string | null } = {},
+    extra: Pick<AiExitPatch, 'orderStatus' | 'marketOrderId' | 'orderSentAt' | 'fillPrice' | 'fillQty' | 'fillAt' | 'gate'> & { brokerMessage?: string | null } = {},
     warn = false,
   ): Promise<AiExitOutcome> {
     await this.repo.update(id, { status, reason: reason ?? null, ...extra });

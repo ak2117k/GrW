@@ -2,6 +2,32 @@ import { useEffect, useState } from 'react';
 import api from '@/services/api';
 import { createVisibilityAwarePoller, type VisibilityDoc } from '@/services/interval-poller';
 
+/** api: AiExitGateDto */
+export interface AiExitGate {
+  outcome: 'PASS' | 'GATED_THESIS_INTACT' | 'AWAITING_CONFIRMATION' | 'BYPASS';
+  justification: string | null;
+  summary: string;
+}
+/** api: AiExitQualityDto — costPerUnit > 0 means the fill was worse than the decision price. */
+export interface AiExitQuality {
+  decisionLtp: number | null;
+  orderLtp: number | null;
+  fillPrice: number | null;
+  fillAt: string | null;
+  slippage: number | null;
+  costPerUnit: number | null;
+  latencyMs: number | null;
+}
+/** api: AiExitOutcomeDto */
+export interface AiExitOutcome {
+  kind: 'EXECUTED' | 'DRY_RUN' | 'GATED' | 'AWAITING';
+  status: 'PENDING' | 'DONE' | 'NO_DATA';
+  missedPnl: number | null;
+  savedPnl: number | null;
+  netAtEnd: number | null;
+  windowEnd: string;
+}
+
 /** Wire shape of GET /api/sentinel-executor/executions (api: AiExitExecutionDto). */
 export interface AiExitRow {
   id: string;
@@ -23,8 +49,19 @@ export interface AiExitRow {
   orderStatus: string | null;
   marketOrderId: string | null;
   verdictReason: string;
-  /** AI = sentinel verdict; MANUAL = the owner's Exit button. Optional: older APIs omit it. */
-  trigger?: 'AI' | 'MANUAL';
+  /**
+   * AI = sentinel verdict; MANUAL = the owner's Exit button; PRICE_TRIGGER = a
+   * sentinel price trigger fired. Optional: older APIs omit it.
+   */
+  trigger?: 'AI' | 'MANUAL' | 'PRICE_TRIGGER';
+  /** The sentinel_exit_triggers row behind a PRICE_TRIGGER execution. */
+  triggerId?: string | null;
+  /** Exit discipline (E7): the gate's decision on an AI exit. Optional: older APIs omit it. */
+  gate?: AiExitGate | null;
+  /** Exit discipline (E5): fill vs the decision price. Optional. */
+  quality?: AiExitQuality | null;
+  /** Exit discipline (spec §8): what the price did after the decision. Optional. */
+  outcome?: AiExitOutcome | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -48,11 +85,11 @@ export function isQuietDenial(err: unknown): boolean {
  * keeps the last rows and the next tick retries. Nothing is delivered after
  * `stop()`.
  */
-export function startAiExitPolling(opts: {
+export function startQuietPolling<T>(opts: {
   get: () => Promise<unknown>;
-  onData: (rows: AiExitRow[]) => void;
+  onData: (rows: T[]) => void;
   doc?: VisibilityDoc | null;
-  intervalMs?: number;
+  intervalMs: number;
 }): { stop: () => void } {
   let stopped = false;
   let denied = false;
@@ -63,7 +100,7 @@ export function startAiExitPolling(opts: {
     busy = true;
     try {
       const data = await opts.get();
-      if (!stopped) opts.onData(Array.isArray(data) ? (data as AiExitRow[]) : []);
+      if (!stopped) opts.onData(Array.isArray(data) ? (data as T[]) : []);
     } catch (err) {
       if (isQuietDenial(err)) {
         denied = true;
@@ -77,7 +114,7 @@ export function startAiExitPolling(opts: {
   };
 
   const poller = createVisibilityAwarePoller({
-    intervalMs: opts.intervalMs ?? AI_EXITS_POLL_MS,
+    intervalMs: opts.intervalMs,
     doc: opts.doc,
     shouldPoll: () => !denied,
     task: load,
@@ -90,6 +127,16 @@ export function startAiExitPolling(opts: {
       poller.stop();
     },
   };
+}
+
+/** The AI exits list's poller (startQuietPolling at AI_EXITS_POLL_MS by default). */
+export function startAiExitPolling(opts: {
+  get: () => Promise<unknown>;
+  onData: (rows: AiExitRow[]) => void;
+  doc?: VisibilityDoc | null;
+  intervalMs?: number;
+}): { stop: () => void } {
+  return startQuietPolling<AiExitRow>({ ...opts, intervalMs: opts.intervalMs ?? AI_EXITS_POLL_MS });
 }
 
 /**

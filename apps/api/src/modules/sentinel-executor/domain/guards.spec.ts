@@ -90,3 +90,15 @@ describe('evaluateGuards — MCX holidays through the real SessionClock', () => 
     expect(at(clock, 'MCX')).toEqual({ ok: false, reason: 'EXCHANGE_CLOSED' });
   });
 });
+
+describe('PRICE_TRIGGER takes every AI guard (ruling R13)', () => {
+  const t = { trigger: 'PRICE_TRIGGER' as const };
+  it.each([
+    ['disabled', { config: { ...input().config, enabled: false } }, 'DISABLED'],
+    ['not allow-listed', { verdict: { ...input().verdict, userId: 'stranger' } }, 'NOT_ALLOWED_USER'],
+    ['fired 91 s ago', { verdict: { ...input().verdict, createdAt: new Date(input().now.getTime() - 91_000) } }, 'STALE_VERDICT'],
+    ['cap reached', { countedToday: input().config.dailyCap }, 'DAILY_CAP'],
+  ])('%s → %s', (_l, over, reason) => {
+    expect(evaluateGuards({ ...input(), ...over, ...t } as never)).toEqual({ ok: false, reason });
+  });
+});

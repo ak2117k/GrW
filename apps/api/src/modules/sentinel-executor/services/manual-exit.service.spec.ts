@@ -66,11 +66,17 @@ function harness(opts: { tracker?: unknown; book?: unknown[] } = {}) {
     placeOrderClassified: jest.fn(async () => { flat = true; return { status: 'PLACED', orderId: 'O1', message: 'SUCCESS' }; }),
   };
   const sessions = { withOwnerSession: jest.fn(async (_u: string, fn: any) => fn(session, 'user-feed')) };
+  // Exit discipline E2: a gate that would block every exit AND throws if touched — MANUAL must never reach it.
+  const gate = {
+    enabled: jest.fn(() => { throw new Error('gate consulted on a MANUAL exit'); }),
+    load: jest.fn(() => { throw new Error('gate consulted on a MANUAL exit'); }),
+    decide: jest.fn(() => { throw new Error('gate consulted on a MANUAL exit'); }),
+  };
   const executor = new SentinelExitExecutor(
-    repo as never, prisma as never, sessions as never, { isOpen: () => true } as never, async () => undefined,
+    repo as never, prisma as never, sessions as never, { isOpen: () => true } as never, async () => undefined, gate as never,
   );
   const svc = new ManualExitService(repo as never, prisma as never, executor);
-  return { svc, repo, prisma, session, sessions, executor };
+  return { svc, repo, prisma, session, sessions, executor, gate };
 }
 
 describe('ManualExitService', () => {
@@ -87,6 +93,10 @@ describe('ManualExitService', () => {
     expect(tag.startsWith('amM')).toBe(true);
     // Never counted toward the AI cap.
     expect(h.repo.countCountedSince).not.toHaveBeenCalled();
+    // Exit discipline E2: the AI exit gate is never consulted for a MANUAL exit.
+    expect(h.gate.enabled).not.toHaveBeenCalled();
+    expect(h.gate.load).not.toHaveBeenCalled();
+    expect(h.gate.decide).not.toHaveBeenCalled();
   });
 
   it('an allow-listed non-admin may use it', async () => {

@@ -50,6 +50,11 @@ export interface TripwireInput {
   factorValues: Record<string, number>;
   /** The same factors as of the previous evaluation, for flip detection. */
   prevFactorValues: Record<string, number>;
+  /**
+   * Exit discipline §5: the contract's noise unit and multipliers. Present ⇒ the
+   * giveback sensor uses the noise rule; absent/null ⇒ the 40 % rule.
+   */
+  noise?: { n: number; armN: number; givebackN: number } | null;
 }
 
 /** A sensor firing. It reports WHAT CHANGED — never what to do about it. */

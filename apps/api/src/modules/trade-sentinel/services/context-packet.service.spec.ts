@@ -936,7 +936,7 @@ describe('ContextPacketService', () => {
       const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
       levelsFor.mockResolvedValue({ value: { atr14: 300, vwap: 22500 }, source: LEVEL_SOURCE, at: '2026-10-14T10:45:00.000Z' });
       const p = await svc.build(entry, { ...tick, underlyingRef: null, contractRef: null, noise: { contract, underlying1m: null, reason: null } }, null);
-      expect((p.flow.noiseUnit as { value: { underlying: { n: number } } }).value.underlying.n).toBeCloseTo(300 / Math.sqrt(375), 9);
+      expect((p.flow.noiseUnit as unknown as { value: { underlying: { n: number } } }).value.underlying.n).toBeCloseTo(300 / Math.sqrt(375), 9);
     });
 
     it('tick.noise with neither reading ⇒ absent with the tick reason', async () => {

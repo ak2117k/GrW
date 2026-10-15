@@ -26,7 +26,7 @@ export class ExitGateService {
 
   constructor(
     private readonly repo: ExitGateRepository,
-    @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'minutesToClose'>,
+    @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'minutesToClose'> & Partial<Pick<SessionClock, 'tradingWindow'>>,
     @Inject(EXIT_DISCIPLINE_CONFIG) private readonly cfg: ExitDisciplineConfig,
   ) {}
 
@@ -70,7 +70,7 @@ export class ExitGateService {
       return bypassRecord('FACTS_UNREADABLE', this.cfg, live.now, ctx.reason);
     }
     try {
-      const w = typeof this.clock.tradingWindow === 'function' ? this.clock.tradingWindow(live.exchange, live.now) : null;
+      const w = this.clock.tradingWindow?.(live.exchange, live.now) ?? null;
       const facts = buildGateFacts(ctx.packet, {
         ltpNow: live.ltpNow, productType: live.productType,
         underlyingSessionMinutes: w ? w.closeMin - w.openMin : undefined,

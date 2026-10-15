@@ -41,6 +41,23 @@ describe('ExitGateService', () => {
     expect(repo.recentVerdicts).toHaveBeenCalledWith('t1', 'cur', V.createdAt, new Date(V.createdAt.getTime() - 60 * 60_000));
   });
 
+  it('N_u fallback scales the level book DAILY atr14 by the exchange session from the clock (MCX 09:00–23:30 = 870 min)', async () => {
+    const { svc, clock } = make();
+    (clock as { tradingWindow?: unknown }).tradingWindow = jest.fn(() => ({ openMin: 9 * 60, closeMin: 23 * 60 + 30 }));
+    const ctx = await svc.load(V as never, NOW);
+    const r = svc.decide(ctx, { ltpNow: 527.1, productType: 'CARRYFORWARD', exchange: 'MCX', now: NOW });
+    expect((clock as unknown as { tradingWindow: jest.Mock }).tradingWindow).toHaveBeenCalledWith('MCX', NOW);
+    expect(r.facts!.nUnderlying).toBeCloseTo(13.5 / Math.sqrt(870), 9);
+  });
+
+  it('a clock without a trading window ⇒ the equity default (375 min), not a failure', async () => {
+    const { svc } = make();
+    const ctx = await svc.load(V as never, NOW);
+    const r = svc.decide(ctx, { ltpNow: 527.1, productType: 'CARRYFORWARD', exchange: 'MCX', now: NOW });
+    expect(r.outcome).not.toBe('BYPASS');
+    expect(r.facts!.nUnderlying).toBeCloseTo(13.5 / Math.sqrt(375), 9);
+  });
+
   it('missing verdict row ⇒ BYPASS FACTS_UNREADABLE (fail-open), never throws', async () => {
     const { svc } = make({ packet: null });
     const r = svc.decide(await svc.load(V as never, NOW), { ltpNow: 527.1, productType: null, exchange: 'MCX', now: NOW });

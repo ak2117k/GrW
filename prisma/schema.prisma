@@ -1676,6 +1676,20 @@ model AiExitExecution {
   orderStatus   String?  // last broker order-book status seen
   marketOrderId String?  // the refused MARKET order when the LIMIT fallback ran
   verdictReason String
+  /// Exit discipline E7: the gate's evaluation (GateRecordV1), AI rows only.
+  gate          Json?
+  /// E5 execution quality. decision* = what the decision saw; order* = at send; fill* = the broker's fill.
+  decisionLtp   Float?
+  decisionAt    DateTime?
+  orderLtp      Float?
+  orderSentAt   DateTime?
+  fillPrice     Float?
+  fillQty       Int?
+  fillAt        DateTime?
+  /// fillPrice − decisionLtp (raw, contract scale)
+  slippage      Float?
+  /// fillAt − decisionAt, ms
+  latencyMs     Int?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -1683,6 +1697,47 @@ model AiExitExecution {
   @@index([status, createdAt])
   @@index([trackerId, createdAt])
   @@map("ai_exit_executions")
+}
+
+/// Exit discipline §8: what the price did after an AI exit decision (executed or skipped).
+/// One row per ai_exit_executions row scored. No FK (mirrors ai_exit_executions).
+model AiExitOutcome {
+  id            String    @id @default(cuid())
+  executionId   String    @unique
+  userId        String
+  verdictId     String
+  trackerId     String
+  symbol        String
+  exchange      String
+  token         String
+  kind          String    // EXECUTED | DRY_RUN | GATED | AWAITING
+  positionSide  String    // LONG | SHORT
+  qty           Float
+  decisionPrice Float
+  decisionAt    DateTime
+  windowEnd     DateTime
+  status        String    // PENDING | DONE | NO_DATA
+  attempts      Int       @default(0)
+  barsUsed      Int?
+  maxAfter      Float?
+  minAfter      Float?
+  closeAt15     Float?
+  closeAt30     Float?
+  closeAt60     Float?
+  closeAtEnd    Float?
+  missedPnl     Float?
+  savedPnl      Float?
+  netAtEnd      Float?
+  dataSource    String?   // candles_1m | hub-fill
+  note          String?
+  computedAt    DateTime?
+  corpusAt      DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, decisionAt])
+  @@index([status, windowEnd])
+  @@map("ai_exit_outcomes")
 }
 
 model OiWallSnapshot {

@@ -4,15 +4,15 @@ import { APIConnectionError, APIError, RateLimitError } from '@anthropic-ai/sdk'
 import type { ContextPacket } from './context-packet.service';
 import type { MessagesTransport, TransportMessage } from './llm-transport';
 import {
-  SENTINEL_COMPOSITE_PROMPT_VERSION,
-  SENTINEL_COMPOSITE_PROMPT_VERSION_NO_CUES,
   SENTINEL_EFFORT_ROUTINE,
   SENTINEL_EFFORT_TRIGGERED,
   SENTINEL_MODEL,
   SENTINEL_MODEL_ROUTINE,
-  SENTINEL_SYSTEM_PROMPT,
-  SENTINEL_SYSTEM_PROMPT_NO_CUES,
+  sentinelCompositePromptVersion,
+  sentinelSystemPrompt,
+  type SentinelPromptOptions,
 } from '../prompts/sentinel-system-prompt';
+import { parseExitDisciplineConfig } from '../../exit-discipline/config';
 import type { WakeTrigger } from './tripwire.service';
 import {
   SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION,
@@ -244,7 +244,26 @@ export class SentinelAgentService {
    * the packet's `thesis` block. See `SENTINEL_COMPOSITE_PROMPT_VERSION`.
    */
   get promptVersion(): string {
-    return this.cuesOn ? SENTINEL_COMPOSITE_PROMPT_VERSION : SENTINEL_COMPOSITE_PROMPT_VERSION_NO_CUES;
+    return sentinelCompositePromptVersion(this.promptOptions);
+  }
+
+  /**
+   * Which optional parts of the live prompt are true for this process — the
+   * prompt must never describe behaviour that is switched off.
+   *  - cues: MARKET_CUES_ENABLED (below).
+   *  - triggers: SENTINEL_TRIGGERS_ENABLED exactly 'true', the same test the
+   *    executor's trigger watcher uses; off ⇒ no claim that an exitTrigger is executed.
+   *  - discipline: EXIT_DISCIPLINE_ENABLED, parsed exactly as the tick source,
+   *    the cycle and the executor's gate parse it (ON unless exactly 'false').
+   */
+  private get promptOptions(): SentinelPromptOptions {
+    return {
+      cues: this.cuesOn,
+      triggers: String(this.config?.get<string>('SENTINEL_TRIGGERS_ENABLED') ?? '') === 'true',
+      discipline: parseExitDisciplineConfig({
+        EXIT_DISCIPLINE_ENABLED: this.config?.get<string>('EXIT_DISCIPLINE_ENABLED') ?? undefined,
+      }).enabled,
+    };
   }
 
   /**
@@ -314,7 +333,7 @@ export class SentinelAgentService {
         system: [
           {
             type: 'text',
-            text: this.cuesOn ? SENTINEL_SYSTEM_PROMPT : SENTINEL_SYSTEM_PROMPT_NO_CUES,
+            text: sentinelSystemPrompt(this.promptOptions),
             // Identical on every call, and the packet rides in the user turn —
             // so the whole prefix is cacheable across every position, every tick.
             cache_control: { type: 'ephemeral' },

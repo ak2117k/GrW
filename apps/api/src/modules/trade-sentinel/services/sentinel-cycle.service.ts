@@ -582,8 +582,15 @@ export class SentinelCycleService {
     // otherwise look permanently healthy behind the repair.
     if (tick !== raw) this.warnMissingUnderlying(entry);
 
+    // Exit discipline §5: the giveback sensor's noise rule, for this pass AND the
+    // hub-tick sensors. Null when off or unmeasured (⇒ the 40 % rule, as before).
+    const noiseInput =
+      this.discipline?.enabled && tick.noise?.contract
+        ? { n: tick.noise.contract.n, armN: this.discipline.floorArmN, givebackN: this.discipline.givebackN }
+        : null;
+
     // Part B: the price-only sensors' context for hub ticks between passes. Memory only.
-    const seed = this.sensorBook ? sensorSeed(entry, tick) : null;
+    const seed = this.sensorBook ? sensorSeed(entry, tick, noiseInput) : null;
     if (seed) this.sensorBook!.upsert(seed);
 
     // LIVE-ONLY: an overnight-review row is not a live look (see recentForTracker).
@@ -653,9 +660,7 @@ export class SentinelCycleService {
         // Exit discipline §5: the giveback sensor's noise rule. Spread only when
         // on and measured, so with discipline off the input is exactly today's
         // (absent ⇒ the 40 % rule).
-        ...(this.discipline?.enabled && tick.noise?.contract
-          ? { noise: { n: tick.noise.contract.n, armN: this.discipline.floorArmN, givebackN: this.discipline.givebackN } }
-          : {}),
+        ...(noiseInput ? { noise: noiseInput } : {}),
       },
       last ? last.createdAt : null,
       now,

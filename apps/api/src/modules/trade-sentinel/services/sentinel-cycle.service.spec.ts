@@ -2327,6 +2327,26 @@ describe('SentinelCycleService — publishes tick-sensor context (Part B)', () =
     expect(book.forKey('NFO:1')).toEqual([]);
   });
 
+  it('exit discipline on: the published context carries the giveback noise input; off: it does not', async () => {
+    for (const [cfg, expected] of [[parseExitDisciplineConfig({}), { n: 4.5, armN: 1.5, givebackN: 1.5 }], [undefined, undefined]] as const) {
+      const t = makeSvc();
+      const book = new TickSensorBook();
+      const svc = new SentinelCycleService(
+        { build: t.build } as never, { evaluate: t.evaluate } as never, { build: t.buildPacket } as never,
+        { ensureFor: t.ensureFor } as never, { judge: t.judge, promptVersion: 'v' } as never,
+        { record: t.record, recentForTracker: t.recentForTracker } as never, { captureAndCompare: t.captureAndCompare } as never,
+        { tickFor: t.tickFor } as never, book, cfg,
+      );
+      t.build.mockResolvedValue([watched('t1')]);
+      t.tickFor.mockResolvedValue(tick({
+        contractRef: { exchange: 'NFO', token: '1', symbol: 'S' }, underlyingRef: { exchange: 'NSE', token: '99926000', symbol: 'NIFTY' },
+        noise: { contract: { n: 4.5, method: 'atr14-1m', bars: 20, at: '2026-10-14T11:00:00.000Z' }, underlying1m: null, reason: null },
+      }));
+      await svc.runForUser(USER);
+      expect(book.forKey('NFO:1')[0].noise).toEqual(expected);
+    }
+  });
+
   it('a position that drops to UNWATCHED is pruned too — its ticks must not wake passes it is skipped in', async () => {
     const t = makeSvc();
     const book = new TickSensorBook();

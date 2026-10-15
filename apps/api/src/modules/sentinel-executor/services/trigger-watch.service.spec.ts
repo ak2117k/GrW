@@ -274,3 +274,34 @@ describe('TriggerWatchService — expiry and rebuild', () => {
     expect(h.hub.unwatch).toHaveBeenCalled();
   });
 });
+
+describe('TriggerWatchService — disabled is inert (R11, Review Focus 6)', () => {
+  it.each([
+    ['flag unset', {}],
+    ['flag not exactly true', { ...ENV, SENTINEL_TRIGGERS_ENABLED: 'TRUE' }],
+    ['auto-exit off', { ...ENV, AI_AUTO_EXIT_ENABLED: 'false' }],
+    ['no allow-listed user', { ...ENV, AI_AUTO_EXIT_USER_IDS: '' }],
+  ])('%s: no timer, no hub lookup, no query, no listener', async (_l, env) => {
+    const h = harness({ proposals: [[proposal()]] });
+    expect(h.svc.start(env)).toBe(false);
+    await h.svc.pass(T0);
+    h.svc.onPrice({ ref: { exchange: 'MCX', token: '472789', symbol: 'F' }, ltp: 1, at: T0.getTime(), source: 'ws' });
+    expect(intervalSpy).not.toHaveBeenCalled();
+    expect(h.moduleRef.get).not.toHaveBeenCalled();
+    expect(h.hub.onPrice).not.toHaveBeenCalled();
+    expect(h.hub.watch).not.toHaveBeenCalled();
+    for (const fn of Object.values(h.repo)) expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('BOOT_JOBS=false: inert even when everything is enabled', async () => {
+    const prev = process.env.BOOT_JOBS;
+    process.env.BOOT_JOBS = 'false';
+    try {
+      const h = harness();
+      expect(h.svc.start(ENV)).toBe(false);
+      expect(intervalSpy).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.BOOT_JOBS; else process.env.BOOT_JOBS = prev;
+    }
+  });
+});

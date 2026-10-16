@@ -179,4 +179,20 @@ describe('SentinelVerdictRepository — exitTrigger (price triggers)', () => {
     await repo.record({ ...input(), newsShadow: null });
     expect('newsShadow' in create.mock.calls[2][0].data).toBe(false);
   });
+
+  it('a write that fails WITH newsShadow is retried once without it — the observe shadow never costs a verdict', async () => {
+    const create = jest.fn().mockRejectedValueOnce(new Error('invalid input syntax for type json')).mockResolvedValueOnce({ id: 'v9' });
+    const repo = new SentinelVerdictRepository({ sentinelVerdict: { create } } as never);
+    await expect(repo.record({ ...input(), newsShadow: { news: {}, events: {} } })).resolves.toEqual({ id: 'v9' });
+    expect(create).toHaveBeenCalledTimes(2);
+    expect('newsShadow' in create.mock.calls[1][0].data).toBe(false);
+    expect(create.mock.calls[1][0].data.verdict).toBe(create.mock.calls[0][0].data.verdict);
+  });
+
+  it('a write that fails WITHOUT newsShadow is not retried (exactly today)', async () => {
+    const create = jest.fn().mockRejectedValue(new Error('db down'));
+    const repo = new SentinelVerdictRepository({ sentinelVerdict: { create } } as never);
+    await expect(repo.record(input())).rejects.toThrow('db down');
+    expect(create).toHaveBeenCalledTimes(1);
+  });
 });

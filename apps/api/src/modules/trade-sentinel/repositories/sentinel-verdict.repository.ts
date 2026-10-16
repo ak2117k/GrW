@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, type SentinelVerdict } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 
@@ -56,9 +56,27 @@ export interface RecordVerdictInput {
  */
 @Injectable()
 export class SentinelVerdictRepository {
+  private readonly logger = new Logger(SentinelVerdictRepository.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async record(input: RecordVerdictInput): Promise<SentinelVerdict> {
+    const shadow = input.newsShadow !== undefined && input.newsShadow !== null;
+    try {
+      return await this.create(input, shadow);
+    } catch (err) {
+      if (!shadow) throw err;
+      // News & events v2 OBSERVE: the shadow is diagnostics. A write it broke (bad
+      // JSON, a column a half-applied migration lacks) must never cost the verdict —
+      // the live exit path reads these rows. Retry once without it.
+      this.logger.warn(
+        `[news-shadow] verdict write with newsShadow failed for ${input.symbol}, retrying without it: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return this.create(input, false);
+    }
+  }
+
+  private create(input: RecordVerdictInput, withShadow: boolean): Promise<SentinelVerdict> {
     return this.prisma.sentinelVerdict.create({
       data: {
         userId: input.userId,
@@ -80,7 +98,7 @@ export class SentinelVerdictRepository {
         netPnl: input.netPnl,
         greenFloor: input.greenFloor,
         ...(input.exitTrigger !== undefined ? { exitTrigger: input.exitTrigger } : {}),
-        ...(input.newsShadow !== undefined && input.newsShadow !== null ? { newsShadow: input.newsShadow } : {}),
+        ...(withShadow && input.newsShadow != null ? { newsShadow: input.newsShadow } : {}),
       },
     });
   }

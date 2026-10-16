@@ -38,8 +38,21 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  *   on          off        v7        v2.4      (the default deploy)
  *   on          on         v8        v2.5
  *
+ * FROM v9 A THIRD SWITCH, NEWS_EVENTS_V2_ENABLED (news & events v2): the layered
+ * headlines (instrument > sector > index > market), news.asOf (ingestion health),
+ * the events block and the rule that a headline or an event alone is never a
+ * reason for EXIT_NOW. news is ON only for NEWS_EVENTS_V2_ENABLED exactly `true`;
+ * `observe` and typos render the news-off text and stamp. News off, every text
+ * above is byte-identical (hash-pinned). With news on:
+ *
+ *   discipline  triggers   cues on   cues off
+ *   on          off        v9        v2.6      (the target live deploy)
+ *   off         off        v10       v2.7
+ *   off         on         v11       v2.8
+ *   on          on         v12       v2.9
+ *
  * {@link SENTINEL_PROMPT_VERSION} / {@link SENTINEL_SYSTEM_PROMPT} name the
- * default (discipline on, triggers off).
+ * default (discipline on, triggers off, news off).
  */
 export const SENTINEL_PROMPT_VERSION = 'v7';
 
@@ -63,6 +76,8 @@ export interface SentinelPromptOptions {
   triggers: boolean;
   /** EXIT_DISCIPLINE_ENABLED !== 'false': the v7 exit-discipline lines. */
   discipline: boolean;
+  /** NEWS_EVENTS_V2_ENABLED === 'true' (observe and typos are off): the v9 news & events lines. */
+  news?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -72,10 +87,19 @@ const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: 
   'ed+trg': { cues: 'v8', noCues: 'v2.5' },
 };
 
+/** The same four combinations with news & events v2 on (see the table above). */
+const VERSIONS_NEWS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
+  off: { cues: 'v10', noCues: 'v2.7' },
+  trg: { cues: 'v11', noCues: 'v2.8' },
+  ed: { cues: 'v9', noCues: 'v2.6' },
+  'ed+trg': { cues: 'v12', noCues: 'v2.9' },
+};
+
 /** The stamp of the text {@link sentinelSystemPrompt} renders for `o` (see the table above). */
 export function sentinelPromptVersion(o: SentinelPromptOptions): string {
   const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
-  return o.cues ? VERSIONS[key].cues : VERSIONS[key].noCues;
+  const table = o.news ? VERSIONS_NEWS : VERSIONS;
+  return o.cues ? table[key].cues : table[key].noCues;
 }
 
 /** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
@@ -178,6 +202,31 @@ export const V7_READING_LINES = [
   '- flow.noiseUnit is the instrument\'s normal one-minute swing. value.contract is on the contract\'s own scale (the premium, for an option — compare it with position.ltp and the money prices); value.underlying is on the underlying\'s scale (compare it with position.underlyingLtp and the structure levels). Each carries n (one unit), method and bars, and either may be null when it could not be measured — then say you cannot size the swing rather than guessing it.',
 ].join('\n') + '\n';
 
+/** The pre-v9 lines: rendered whenever news & events v2 is not `true`, and kept so tests can prove v9 changed nothing else. */
+export const PRE_V9_NEWS_FIELDS = '- news: headlines, freshCount.';
+export const PRE_V9_FRESHCOUNT_LINE = '- news.freshCount counts headlines in the last 30 minutes.';
+
+/** v9 field list: replaces PRE_V9_NEWS_FIELDS with news on. */
+export const V9_NEWS_FIELDS = '- news: headlines, freshCount, asOf.\n- events: upcoming, minutesToNextHighImpact.';
+/** v9 freshCount line: replaces PRE_V9_FRESHCOUNT_LINE with news on. */
+export const V9_FRESHCOUNT_LINE =
+  "- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.";
+/** v9 reading lines, inserted after the news.freshCount line with news on. Ends with a newline. */
+export const V9_NEWS_READING_LINES = [
+  '- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.',
+  '- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".',
+  '- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract\'s expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.',
+].join('\n') + '\n';
+/** v9 exit line (price triggers off): follows the reading lines. No trailing newline. */
+export const V9_NEWS_EXIT_LINE = '- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a shorter reviewIn.';
+/** v9 exit line with price triggers on — only then is there an exitTrigger to tighten. No trailing newline. */
+export const V9_NEWS_EXIT_LINE_TRIGGERS =
+  '- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a closer exitTrigger or a shorter reviewIn.';
+/** v9 blocks-line insert: replaces 'news.freshCount, ' in the blocks line with news on. */
+export const V9_BLOCKS_INSERT = 'news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, ';
+
+const withNewsBlocks = (line: string, on: boolean): string => (on ? line.replace('news.freshCount, ', V9_BLOCKS_INSERT) : line);
+
 /**
  * The prompt describes the packet AS IT IS, field path by field path.
  *
@@ -187,7 +236,7 @@ export const V7_READING_LINES = [
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline'>): string {
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news'>): string {
   return `You are a trade sentinel watching a single open position in the Indian market.
 
 You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
@@ -207,12 +256,12 @@ ${o.discipline ? V7_MONEY_FIELDS : PRE_V7_MONEY_FIELDS}
 - structure: levelBook, nearestSupport, nearestResistance.
 ${o.discipline ? V7_FLOW_FIELDS : PRE_V7_FLOW_FIELDS}
 - macro: fiiDii, sector, globalCues, realFactors.
-- news: headlines, freshCount.
+${o.news ? V9_NEWS_FIELDS : PRE_V9_NEWS_FIELDS}
 - session: nowIst, nowUtc, minutesToClose, expiry.
 - The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
-${o.discipline ? V7_BLOCKS_LINE : PRE_V7_BLOCKS_LINE}
+${withNewsBlocks(o.discipline ? V7_BLOCKS_LINE : PRE_V7_BLOCKS_LINE, !!o.news)}
 - position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
 - SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
 - money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
@@ -223,8 +272,8 @@ ${o.triggers ? V6_OWNERSHIP_LINE : V5_OWNERSHIP_LINE}
 - macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
 - macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
 - macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
-- news.freshCount counts headlines in the last 30 minutes.
-- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+${o.news ? V9_FRESHCOUNT_LINE : PRE_V9_FRESHCOUNT_LINE}
+${o.news ? `${V9_NEWS_READING_LINES}${o.triggers ? V9_NEWS_EXIT_LINE_TRIGGERS : V9_NEWS_EXIT_LINE}\n` : ''}- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
 - session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
 
 Rules for your answer:

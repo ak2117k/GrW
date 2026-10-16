@@ -11,6 +11,7 @@ import {
   runGoldenScenarios,
   type GoldenRecord,
 } from './golden-fixtures';
+import { undoNews } from './news-attribution';
 import { AiGatewayService } from '../../ai-gateway/ai-gateway.service';
 import type { AiCallRow } from '../../ai-gateway/audit/ai-call.repository';
 import { BudgetMeter } from '../../ai-gateway/budget/budget-meter';
@@ -204,5 +205,56 @@ describe('through the gateway (AI_GATEWAY_SENTINEL=true)', () => {
         realGateway('cli', { 'claude-cli': new ClaudeCliProvider(new ClaudeCliTransport()) }, async () => undefined),
       ),
     );
+  });
+});
+
+describe('news & events v2 — every new scenario is attributable to the news edits alone', () => {
+  /** news scenario → [its news-off twin, price triggers on]. */
+  const TWIN: Record<string, [string, boolean]> = {
+    'judge-fire-cues-on-news-discipline': ['judge-fire-cues-on-discipline', false],
+    'judge-heartbeat-cues-off-news-discipline': ['judge-heartbeat-cues-off-discipline', false],
+    'judge-fire-cues-on-news': ['judge-fire-cues-on', false],
+    'judge-heartbeat-cues-off-news': ['judge-heartbeat-cues-off', false],
+    'judge-fire-cues-on-news-triggers': ['judge-fire-cues-on-triggers', true],
+    'judge-heartbeat-cues-off-news-triggers': ['judge-heartbeat-cues-off-triggers', true],
+    'judge-fire-cues-on-news-discipline-triggers': ['judge-fire-cues-on-discipline-triggers', true],
+    'judge-heartbeat-cues-off-news-discipline-triggers': ['judge-heartbeat-cues-off-discipline-triggers', true],
+  };
+  type Req = { system: Array<{ text: string }>; messages: Array<{ content: string }> };
+  let byName: Map<string, GoldenRecord>;
+  beforeAll(async () => {
+    byName = new Map((await runGoldenScenarios((rec) => recordingClient(rec))).map((r) => [r.scenario, r]));
+  });
+
+  it('covers every news scenario', () => {
+    expect(Object.keys(TWIN).every((n) => byName.has(n))).toBe(true);
+    expect(byName.has('judge-heartbeat-cues-off-news-observe')).toBe(true);
+  });
+
+  it.each(Object.entries(TWIN))('%s = %s + the news prompt lines + the news/events packet blocks, nothing else', (name, [twin, triggers]) => {
+    const r = JSON.parse(JSON.stringify(byName.get(name)!.request)) as Req;
+    const b = byName.get(twin)!;
+    const twinReq = b.request as Req;
+    const twinPacket = JSON.parse(twinReq.messages[0].content);
+    // The prompt: undoing exactly the news edits gives the twin's text (and the text really changed).
+    expect(r.system[0].text).not.toBe(twinReq.system[0].text);
+    r.system[0].text = undoNews(r.system[0].text, triggers);
+    // The packet: dropping `events` and swapping `news` back gives the twin's packet.
+    const pkt = JSON.parse(r.messages[0].content);
+    expect(Object.keys(pkt.news)).toEqual(['headlines', 'freshCount', 'asOf']);
+    expect(Object.keys(pkt.events)).toEqual(['upcoming', 'minutesToNextHighImpact']);
+    delete pkt.events;
+    pkt.news = twinPacket.news;
+    expect(pkt).toEqual(twinPacket);
+    r.messages[0].content = twinReq.messages[0].content;
+    expect(r).toEqual(b.request);
+    expect(byName.get(name)!.result).toEqual(b.result);
+    expect(byName.get(name)!.logs).toEqual(b.logs);
+  });
+
+  it('observe is exactly off: same request, result and logs as judge-heartbeat-cues-off', () => {
+    const o = byName.get('judge-heartbeat-cues-off-news-observe')!;
+    const off = byName.get('judge-heartbeat-cues-off')!;
+    expect([o.request, o.result, o.logs]).toEqual([off.request, off.result, off.logs]);
   });
 });

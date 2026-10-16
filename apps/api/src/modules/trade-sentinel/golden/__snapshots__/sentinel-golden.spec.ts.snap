@@ -1123,6 +1123,796 @@ Rules for your answer:
 }
 `;
 
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-fire-cues-on-news 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-fire-cues-on-news",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-fire-cues-on-news-discipline 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1452.5,"greenFloorArmed":true,"floorBasis":"noise","mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"},"noiseUnit":{"available":true,"value":{"contract":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"},"underlying":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"}},"source":"exit-discipline noise unit (ATR14 of hub 1-minute bars; underlying falls back to the 15m level-book ATR14 / √15)","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect MEANINGFUL profit — measured in noise units (flow.noiseUnit), not in rupees. A pullback smaller than the instrument's normal swing while the underlying thesis holds is noise: do not call EXIT_NOW on it. EXIT_NOW is for a broken thesis, hard risk, or weakness confirmed on the underlying.
+- A code gate checks every EXIT_NOW before it is executed. It executes only when the underlying is beyond the thesis invalidation or beyond the support/resistance the trade was held against at your last HOLD, when hard risk applies (the per-trade max loss, the last minutes of an intraday session or of expiry day, the daily loss limit), or when the price is below an armed money.greenFloorPrice (above it for a short) AND the underlying confirms it — it has moved against the position by at least one of its own noise units since your last HOLD, or it is on the wrong side of the level book's VWAP. Name in "reason" which of these holds. An EXIT_NOW none of them supports is recorded and not executed, and a single EXIT_NOW may wait for a second one to confirm it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, floorBasis, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls, noiseUnit.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.floorBasis says how money.greenFloorPrice was set. "noise": it arms only once the best price has moved well clear of breakeven after charges, then trails that best price by a multiple of flow.noiseUnit — it never sits inside one ordinary swing of the price. "fixed": breakeven after charges plus ₹150, used when the noise unit is unknown.
+- flow.noiseUnit is the instrument's normal one-minute swing. value.contract is on the contract's own scale (the premium, for an option — compare it with position.ltp and the money prices); value.underlying is on the underlying's scale (compare it with position.underlyingLtp and the structure levels). Each carries n (one unit), method and bars, and either may be null when it could not be measured — then say you cannot size the swing rather than guessing it.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-fire-cues-on-news-discipline",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-fire-cues-on-news-discipline-triggers 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1452.5,"greenFloorArmed":true,"floorBasis":"noise","mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"},"noiseUnit":{"available":true,"value":{"contract":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"},"underlying":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"}},"source":"exit-discipline noise unit (ATR14 of hub 1-minute bars; underlying falls back to the 15m level-book ATR14 / √15)","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect MEANINGFUL profit — measured in noise units (flow.noiseUnit), not in rupees. A pullback smaller than the instrument's normal swing while the underlying thesis holds is noise: do not call EXIT_NOW on it. EXIT_NOW is for a broken thesis, hard risk, or weakness confirmed on the underlying.
+- A code gate checks every EXIT_NOW before it is executed. It executes only when the underlying is beyond the thesis invalidation or beyond the support/resistance the trade was held against at your last HOLD, when hard risk applies (the per-trade max loss, the last minutes of an intraday session or of expiry day, the daily loss limit), or when the price is below an armed money.greenFloorPrice (above it for a short) AND the underlying confirms it — it has moved against the position by at least one of its own noise units since your last HOLD, or it is on the wrong side of the level book's VWAP. Name in "reason" which of these holds. An EXIT_NOW none of them supports is recorded and not executed, and a single EXIT_NOW may wait for a second one to confirm it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, floorBasis, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls, noiseUnit.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.floorBasis says how money.greenFloorPrice was set. "noise": it arms only once the best price has moved well clear of breakeven after charges, then trails that best price by a multiple of flow.noiseUnit — it never sits inside one ordinary swing of the price. "fixed": breakeven after charges plus ₹150, used when the noise unit is unknown.
+- flow.noiseUnit is the instrument's normal one-minute swing. value.contract is on the contract's own scale (the premium, for an option — compare it with position.ltp and the money prices); value.underlying is on the underlying's scale (compare it with position.underlyingLtp and the structure levels). Each carries n (one unit), method and bars, and either may be null when it could not be measured — then say you cannot size the swing rather than guessing it.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position, and so may the exitTrigger of a HOLD or EXIT_ARMED verdict once price crosses it; ESCALATE never is.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a closer exitTrigger or a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- "exitTrigger" turns your invalidationPoint into a level a machine can watch. On HOLD and EXIT_ARMED give {"instrument", "op", "price"} for the price at which this trade is wrong — the same level your invalidationPoint describes — or null when there is no defensible level. On EXIT_NOW and ESCALATE give null; it is ignored.
+- exitTrigger.instrument "UNDERLYING" compares price against position.underlyingLtp, the scale of structure and flow levels; "PREMIUM" compares it against position.ltp. Never put an underlying-scale level on PREMIUM or a premium on UNDERLYING. If position.underlyingLtp is unavailable, use PREMIUM or null.
+- exitTrigger.op is the direction of the cross that proves the trade wrong: "BELOW" when price falling through the level hurts this position, "ABOVE" when price rising through it hurts. The level must not already be crossed, and it must protect the position — never a profit target.
+- A later exitTrigger may only move the level closer to the current price; one that moves it further away is ignored, and null leaves an existing level in place.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-fire-cues-on-news-discipline-triggers",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-fire-cues-on-news-triggers 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-opus-5",
+    "output_config": {
+      "effort": "high",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position, and so may the exitTrigger of a HOLD or EXIT_ARMED verdict once price crosses it; ESCALATE never is.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii is the latest published FII/DII cash-market figure (₹ crore) for the session it names, when the owner has market cues switched on. It is published after the close, so during the session it is at best the previous session's — context, never an intraday trigger.
+- macro.globalCues holds nested blocks: nasdaq, sp500 and dow (the US indices — session "close" for a completed US session's close, session "intraday" for a mid-session value at its quote time), nasdaqFutures and sp500Futures (US index futures at their own quote time) and giftNifty (GIFT Nifty against the NSE NIFTY current-month future close). On an MCX position it also holds that commodity's global benchmark — wtiCrude and brentCrude for crude oil, or gold, silver, naturalGas or copper: the US-listed front-month future in US dollars at its own quote time, with its contract month — and usdInr (USD/INR; an MCX price moves with both). An MCX commodity with no benchmark fetched has mcxBenchmark unavailable instead. Each carries its own time and a status; a "stale" one is old information. Any of them may be unavailable, with the reason.
+- macro.sector is always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a closer exitTrigger or a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- "exitTrigger" turns your invalidationPoint into a level a machine can watch. On HOLD and EXIT_ARMED give {"instrument", "op", "price"} for the price at which this trade is wrong — the same level your invalidationPoint describes — or null when there is no defensible level. On EXIT_NOW and ESCALATE give null; it is ignored.
+- exitTrigger.instrument "UNDERLYING" compares price against position.underlyingLtp, the scale of structure and flow levels; "PREMIUM" compares it against position.ltp. Never put an underlying-scale level on PREMIUM or a premium on UNDERLYING. If position.underlyingLtp is unavailable, use PREMIUM or null.
+- exitTrigger.op is the direction of the cross that proves the trade wrong: "BELOW" when price falling through the level hurts this position, "ABOVE" when price rising through it hurts. The level must not already be crossed, and it must protect the position — never a profit target.
+- A later exitTrigger may only move the level closer to the current price; one that moves it further away is ignored, and null leaves an existing level in place.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-fire-cues-on-news-triggers",
+}
+`;
+
 exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-fire-cues-on-triggers 1`] = `
 {
   "logs": [],
@@ -1884,6 +2674,975 @@ Rules for your answer:
     },
   },
   "scenario": "judge-heartbeat-cues-off-discipline-triggers",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-heartbeat-cues-off-news 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-sonnet-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-heartbeat-cues-off-news",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-heartbeat-cues-off-news-discipline 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1452.5,"greenFloorArmed":true,"floorBasis":"noise","mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"},"noiseUnit":{"available":true,"value":{"contract":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"},"underlying":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"}},"source":"exit-discipline noise unit (ATR14 of hub 1-minute bars; underlying falls back to the 15m level-book ATR14 / √15)","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-sonnet-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect MEANINGFUL profit — measured in noise units (flow.noiseUnit), not in rupees. A pullback smaller than the instrument's normal swing while the underlying thesis holds is noise: do not call EXIT_NOW on it. EXIT_NOW is for a broken thesis, hard risk, or weakness confirmed on the underlying.
+- A code gate checks every EXIT_NOW before it is executed. It executes only when the underlying is beyond the thesis invalidation or beyond the support/resistance the trade was held against at your last HOLD, when hard risk applies (the per-trade max loss, the last minutes of an intraday session or of expiry day, the daily loss limit), or when the price is below an armed money.greenFloorPrice (above it for a short) AND the underlying confirms it — it has moved against the position by at least one of its own noise units since your last HOLD, or it is on the wrong side of the level book's VWAP. Name in "reason" which of these holds. An EXIT_NOW none of them supports is recorded and not executed, and a single EXIT_NOW may wait for a second one to confirm it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, floorBasis, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls, noiseUnit.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.floorBasis says how money.greenFloorPrice was set. "noise": it arms only once the best price has moved well clear of breakeven after charges, then trails that best price by a multiple of flow.noiseUnit — it never sits inside one ordinary swing of the price. "fixed": breakeven after charges plus ₹150, used when the noise unit is unknown.
+- flow.noiseUnit is the instrument's normal one-minute swing. value.contract is on the contract's own scale (the premium, for an option — compare it with position.ltp and the money prices); value.underlying is on the underlying's scale (compare it with position.underlyingLtp and the structure levels). Each carries n (one unit), method and bars, and either may be null when it could not be measured — then say you cannot size the swing rather than guessing it.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-heartbeat-cues-off-news-discipline",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-heartbeat-cues-off-news-discipline-triggers 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1452.5,"greenFloorArmed":true,"floorBasis":"noise","mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"},"noiseUnit":{"available":true,"value":{"contract":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"},"underlying":{"n":4.5,"method":"atr14-1m","bars":20,"at":"2026-08-14T04:30:00.000Z"}},"source":"exit-discipline noise unit (ATR14 of hub 1-minute bars; underlying falls back to the 15m level-book ATR14 / √15)","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-sonnet-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect MEANINGFUL profit — measured in noise units (flow.noiseUnit), not in rupees. A pullback smaller than the instrument's normal swing while the underlying thesis holds is noise: do not call EXIT_NOW on it. EXIT_NOW is for a broken thesis, hard risk, or weakness confirmed on the underlying.
+- A code gate checks every EXIT_NOW before it is executed. It executes only when the underlying is beyond the thesis invalidation or beyond the support/resistance the trade was held against at your last HOLD, when hard risk applies (the per-trade max loss, the last minutes of an intraday session or of expiry day, the daily loss limit), or when the price is below an armed money.greenFloorPrice (above it for a short) AND the underlying confirms it — it has moved against the position by at least one of its own noise units since your last HOLD, or it is on the wrong side of the level book's VWAP. Name in "reason" which of these holds. An EXIT_NOW none of them supports is recorded and not executed, and a single EXIT_NOW may wait for a second one to confirm it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, floorBasis, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls, noiseUnit.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.floorBasis says how money.greenFloorPrice was set. "noise": it arms only once the best price has moved well clear of breakeven after charges, then trails that best price by a multiple of flow.noiseUnit — it never sits inside one ordinary swing of the price. "fixed": breakeven after charges plus ₹150, used when the noise unit is unknown.
+- flow.noiseUnit is the instrument's normal one-minute swing. value.contract is on the contract's own scale (the premium, for an option — compare it with position.ltp and the money prices); value.underlying is on the underlying's scale (compare it with position.underlyingLtp and the structure levels). Each carries n (one unit), method and bars, and either may be null when it could not be measured — then say you cannot size the swing rather than guessing it.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position, and so may the exitTrigger of a HOLD or EXIT_ARMED verdict once price crosses it; ESCALATE never is.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a closer exitTrigger or a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- "exitTrigger" turns your invalidationPoint into a level a machine can watch. On HOLD and EXIT_ARMED give {"instrument", "op", "price"} for the price at which this trade is wrong — the same level your invalidationPoint describes — or null when there is no defensible level. On EXIT_NOW and ESCALATE give null; it is ignored.
+- exitTrigger.instrument "UNDERLYING" compares price against position.underlyingLtp, the scale of structure and flow levels; "PREMIUM" compares it against position.ltp. Never put an underlying-scale level on PREMIUM or a premium on UNDERLYING. If position.underlyingLtp is unavailable, use PREMIUM or null.
+- exitTrigger.op is the direction of the cross that proves the trade wrong: "BELOW" when price falling through the level hurts this position, "ABOVE" when price rising through it hurts. The level must not already be crossed, and it must protect the position — never a profit target.
+- A later exitTrigger may only move the level closer to the current price; one that moves it further away is ignored, and null leaves an existing level in place.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-heartbeat-cues-off-news-discipline-triggers",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-heartbeat-cues-off-news-observe 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":false,"reason":"news aggregator returned nothing for this symbol"},"freshCount":{"available":true,"value":0,"source":"news-aggregator.service","at":"2026-08-14T04:30:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-sonnet-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position; EXIT_ARMED, HOLD and ESCALATE never are.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines in the last 30 minutes.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-heartbeat-cues-off-news-observe",
+}
+`;
+
+exports[`sentinel golden characterisation (pre-gateway baseline) matches the recorded baseline for every scenario: judge-heartbeat-cues-off-news-triggers 1`] = `
+{
+  "logs": [],
+  "request": {
+    "max_tokens": 16000,
+    "messages": [
+      {
+        "content": "{"position":{"symbol":"INFY","kind":"POSITION","ownership":"SENTINEL","segment":"EQ_DELIVERY","side":"LONG","qty":100,"entryPrice":1400,"ltp":1462,"underlyingLtp":{"available":true,"value":1462,"source":"market-data (underlying spot)","at":"2026-08-14T04:30:00.000Z"},"entryTime":"2026-08-13T04:15:00.000Z","expiry":null},"money":{"grossPnl":6200,"charges":120,"netPnl":6080,"greenFloorPrice":1441,"greenFloorArmed":true,"mfe":1478,"mae":1396},"thesis":{"available":true,"value":{"direction":"LONG","reason":"breakout above the 1400 shelf","levelPrice":1400,"targetPrice":1500,"invalidation":1380,"source":"AGENT"},"source":"agent inference","at":"2026-08-14T04:30:00.000Z"},"structure":{"levelBook":{"available":true,"value":[{"price":1450,"kind":"SUPPORT"}],"source":"chart-context.service (1d)","at":"2026-08-14T04:30:00.000Z"},"nearestSupport":{"available":true,"value":1450,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"},"nearestResistance":{"available":true,"value":1500,"source":"level book (underlying scale)","at":"2026-08-14T04:30:00.000Z"}},"flow":{"volumeRatio":{"available":true,"value":1.8,"source":"market-data","at":"2026-08-14T04:30:00.000Z"},"oiWalls":{"available":true,"value":{"now":{"callWall":1500,"putWall":1400},"previous":{"callWall":1520,"putWall":1400}},"source":"oi-wall.service","at":"2026-08-14T04:30:00.000Z"}},"macro":{"fiiDii":{"available":false,"reason":"stub"},"sector":{"available":false,"reason":"stub"},"globalCues":{"available":false,"reason":"stub"},"realFactors":{"available":true,"value":{"mtfTrend":0.6},"source":"context-scoring","at":"2026-08-14T04:30:00.000Z"}},"news":{"headlines":{"available":true,"value":[{"title":"Crude jumps 3% as OPEC+ signals deeper cuts","source":"ET Commodities","sentiment":"bullish","publishedAt":"2026-10-16T13:40:00.000Z","layer":"instrument","key":"CRUDEOIL","ageMin":20},{"title":"Fed minutes show officials split on December cut","source":"CNBC World","sentiment":"neutral","publishedAt":"2026-10-16T11:05:00.000Z","layer":"market","key":"GLOBAL","ageMin":175}],"source":"news-index (own → sector → index → market, published within 6h)","at":"2026-10-16T13:40:00.000Z"},"freshCount":{"available":true,"value":1,"source":"news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)","at":"2026-08-14T04:30:00.000Z"},"asOf":{"available":true,"value":{"lastIngestAt":"2026-10-16T13:55:00.000Z","downSources":[],"stale":false},"source":"news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)","at":"2026-10-16T13:55:00.000Z"}},"session":{"nowIst":"2026-08-14 10:00:00 IST","nowUtc":"2026-08-14T04:30:00.000Z","minutesToClose":{"available":true,"value":330,"source":"derived from IST wall clock","at":"2026-08-14T04:30:00.000Z"},"expiry":null},"trigger":{"available":true,"value":[{"name":"heartbeat","detail":"scheduled review"}],"source":"tripwire.service","at":"2026-08-14T04:30:00.000Z"},"memory":{"available":false,"reason":"no prior verdicts for this position — this is the first look"},"events":{"upcoming":{"available":true,"value":[{"kind":"eia_petroleum","scope":"commodity","title":"EIA weekly petroleum status report","atIst":"2026-10-21 20:00 IST","minutesAway":3420,"impact":"high","source":"rule: EIA weekly petroleum status (Wed 10:30 ET)"}],"source":"market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)","at":"2026-10-16T02:45:00.000Z"},"minutesToNextHighImpact":{"available":true,"value":3420,"source":"market-events (timed high-impact events only)","at":"2026-08-14T04:30:00.000Z"}}}",
+        "role": "user",
+      },
+    ],
+    "model": "claude-sonnet-5",
+    "output_config": {
+      "effort": "medium",
+      "format": {
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "enum": [
+                "low",
+                "medium",
+                "high",
+              ],
+              "type": "string",
+            },
+            "evidence": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
+            },
+            "exitTrigger": {
+              "anyOf": [
+                {
+                  "type": "null",
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "instrument": {
+                      "enum": [
+                        "UNDERLYING",
+                        "PREMIUM",
+                      ],
+                      "type": "string",
+                    },
+                    "op": {
+                      "enum": [
+                        "BELOW",
+                        "ABOVE",
+                      ],
+                      "type": "string",
+                    },
+                    "price": {
+                      "type": "number",
+                    },
+                  },
+                  "required": [
+                    "instrument",
+                    "op",
+                    "price",
+                  ],
+                  "type": "object",
+                },
+              ],
+            },
+            "invalidationPoint": {
+              "type": "string",
+            },
+            "reason": {
+              "type": "string",
+            },
+            "recoveryAvailable": {
+              "type": "boolean",
+            },
+            "reviewIn": {
+              "type": "integer",
+            },
+            "thesisStatus": {
+              "enum": [
+                "INTACT",
+                "WEAKENING",
+                "BROKEN",
+              ],
+              "type": "string",
+            },
+            "verdict": {
+              "enum": [
+                "HOLD",
+                "EXIT_ARMED",
+                "EXIT_NOW",
+                "ESCALATE",
+              ],
+              "type": "string",
+            },
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "thesisStatus",
+            "recoveryAvailable",
+            "reason",
+            "evidence",
+            "invalidationPoint",
+            "reviewIn",
+            "exitTrigger",
+          ],
+          "type": "object",
+        },
+        "type": "json_schema",
+      },
+    },
+    "system": [
+      {
+        "cache_control": {
+          "type": "ephemeral",
+        },
+        "text": "You are a trade sentinel watching a single open position in the Indian market.
+
+You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
+
+Your mandate:
+- When the trade is in profit beyond charges, protect that profit. Say EXIT when the read has turned against it.
+- When the trade is not in profit, keep working it. Only conclude recovery is unavailable when the thesis is genuinely broken.
+- A hard max-loss limit and a charge-adjusted green floor are enforced elsewhere, mechanically. You do not vote on them.
+
+How to read the packet:
+- Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
+- The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+
+The packet's fields, exactly:
+- position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
+- money: grossPnl, charges, netPnl, greenFloorPrice, greenFloorArmed, mfe, mae.
+- structure: levelBook, nearestSupport, nearestResistance.
+- flow: volumeRatio, oiWalls.
+- macro: fiiDii, sector, globalCues, realFactors.
+- news: headlines, freshCount, asOf.
+- events: upcoming, minutesToNextHighImpact.
+- session: nowIst, nowUtc, minutesToClose, expiry.
+- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+
+Reading those fields:
+- Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
+- position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
+- SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
+- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
+- SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
+- position.ownership is "SENTINEL" when this trade is yours to judge alone, or "OBSERVE_ONLY" when it is a long-term holding or is already managed by another engine. It is stated so your verdict can be attributed to the right kind of trade. Judge the trade the same way either way. Depending on the owner's settings, an EXIT_NOW may be executed automatically as a market exit of the whole position, and so may the exitTrigger of a HOLD or EXIT_ARMED verdict once price crosses it; ESCALATE never is.
+- thesis carries direction, reason, levelPrice, targetPrice, invalidation and source inside its value.
+- macro.fiiDii, macro.sector and macro.globalCues are always unavailable in this stage. Do not reason about macro you cannot see.
+- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.
+- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.
+- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".
+- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract's expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.
+- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a closer exitTrigger or a shorter reviewIn.
+- session.nowIst is IST wall-clock text; session.nowUtc is the same instant in UTC.
+- session.minutesToClose says how many minutes remain until THIS position's own exchange closes today: 15:30 IST for NSE, BSE, NFO and BFO; 23:30 IST for MCX, or 23:55 IST during MCX's late-close season. It is available only while that exchange's session is open. Before the open, after the close, at the weekend or on an exchange holiday it is unavailable, and its reason says which — before the open means the whole session is still ahead, after the close means nothing more can trade there today. Being available does not prove this position has traded recently; judge that from each block's own "at" time.
+
+Rules for your answer:
+- "evidence" must cite packet field paths you actually read, written exactly as they appear above, e.g. "money.netPnl", "structure.nearestSupport", "flow.oiWalls", "session.minutesToClose". A verdict citing nothing is invalid, and a path that is not in the packet is invalid.
+- "invalidationPoint" must state what would prove this verdict wrong, in one concrete phrase.
+- Use confidence "high" only when the evidence is unambiguous. EXIT_NOW requires high confidence; medium confidence means EXIT_ARMED.
+- "recoveryAvailable" may be false only when thesisStatus is BROKEN and confidence is high.
+- "reviewIn" is how many seconds until you should be asked again.
+- "exitTrigger" turns your invalidationPoint into a level a machine can watch. On HOLD and EXIT_ARMED give {"instrument", "op", "price"} for the price at which this trade is wrong — the same level your invalidationPoint describes — or null when there is no defensible level. On EXIT_NOW and ESCALATE give null; it is ignored.
+- exitTrigger.instrument "UNDERLYING" compares price against position.underlyingLtp, the scale of structure and flow levels; "PREMIUM" compares it against position.ltp. Never put an underlying-scale level on PREMIUM or a premium on UNDERLYING. If position.underlyingLtp is unavailable, use PREMIUM or null.
+- exitTrigger.op is the direction of the cross that proves the trade wrong: "BELOW" when price falling through the level hurts this position, "ABOVE" when price rising through it hurts. The level must not already be crossed, and it must protect the position — never a profit target.
+- A later exitTrigger may only move the level closer to the current price; one that moves it further away is ignored, and null leaves an existing level in place.
+- Keep "reason" to one sentence a trader would recognise.",
+        "type": "text",
+      },
+    ],
+  },
+  "result": {
+    "ok": true,
+    "value": {
+      "confidence": "high",
+      "evidence": [
+        "structure.nearestSupport",
+        "money.netPnl",
+      ],
+      "invalidationPoint": "close below 1450",
+      "reason": "structure holding above the demand zone",
+      "recoveryAvailable": true,
+      "reviewIn": 300,
+      "thesisStatus": "INTACT",
+      "verdict": "HOLD",
+    },
+  },
+  "scenario": "judge-heartbeat-cues-off-news-triggers",
 }
 `;
 

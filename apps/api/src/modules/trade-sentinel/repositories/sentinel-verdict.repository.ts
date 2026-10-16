@@ -41,6 +41,12 @@ export interface RecordVerdictInput {
   greenFloor: number | null;
   /** The persisted exitTrigger proposal (price triggers). Omitted = NULL. */
   exitTrigger?: Prisma.InputJsonValue;
+  /**
+   * News & events v2 OBSERVE mode: the news/events blocks the packet WOULD have
+   * carried with the flag on — stored beside the verdict, never in the packet.
+   * Omitted / null = SQL NULL (every other mode; existing callers unchanged).
+   */
+  newsShadow?: Prisma.InputJsonValue | null;
 }
 
 /**
@@ -74,6 +80,7 @@ export class SentinelVerdictRepository {
         netPnl: input.netPnl,
         greenFloor: input.greenFloor,
         ...(input.exitTrigger !== undefined ? { exitTrigger: input.exitTrigger } : {}),
+        ...(input.newsShadow !== undefined && input.newsShadow !== null ? { newsShadow: input.newsShadow } : {}),
       },
     });
   }

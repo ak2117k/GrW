@@ -1,4 +1,5 @@
 import type { Segment, Side } from '../charges';
+import type { FreshItem } from '../../news-events/types';
 
 /**
  * What every sensor sees. Deliberately narrow: a tripwire may only look at data
@@ -55,6 +56,14 @@ export interface TripwireInput {
    * giveback sensor uses the noise rule; absent/null ⇒ the 40 % rule.
    */
   noise?: { n: number; armN: number; givebackN: number } | null;
+  /**
+   * News & events v2 (`true` only): fresh own-instrument headlines this tracker has
+   * not fired on yet. PRESENT ⇒ newsHit is edge-triggered on it and ignores
+   * freshNewsCount; absent ⇒ today's level-triggered rule.
+   */
+  newsUnseen?: FreshItem[];
+  /** News & events v2 (`true` only): the nearest timed high-impact event ≤ EVENT_WAKE_LEAD_MIN away, not yet fired for this tracker. */
+  eventNear?: { id: string; title: string; minutesAway: number } | null;
 }
 
 /** A sensor firing. It reports WHAT CHANGED — never what to do about it. */

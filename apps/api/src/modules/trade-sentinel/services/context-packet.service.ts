@@ -15,6 +15,12 @@ import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import type { CommodityCueKey, CommodityQuote, CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
 import type { FloorBasis, NoiseFloor, NoiseReading, NoiseUnitValue } from '../../exit-discipline/types';
 import { scaledUnderlyingNoise } from '../../exit-discipline/noise';
+import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
+import { baseSymbol, newsPositionOf } from '../../news-events/keys';
+import type { EventsPeek, FreshItem, NewsPeek, NewsPosition } from '../../news-events/types';
+import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
+import { NEWS_INDEX, type NewsIndexReader } from '../ports/news-index.port';
+import { allEventsAbsent, allNewsAbsent, eventsBlocks, newsBlocksV2, type EventsBlocksV2, type NewsBlocksV2 } from './news-events-blocks';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -352,6 +358,11 @@ export interface TickSnapshot {
   expiry: string | null;
   volumeRatio: number | null;
   freshNewsCount: number | null;
+  /**
+   * News & events v2 (NEWS_EVENTS_V2_ENABLED=true only): the own-instrument headlines
+   * of the last 30 minutes by id, for the edge-triggered `news-hit`. Absent otherwise.
+   */
+  freshNews?: FreshItem[] | null;
   factorValues: Record<string, number>;
   /**
    * Why {@link factorValues} is empty, or null when it is populated. Carried so
@@ -497,6 +508,13 @@ export type ContextPacket = {
     headlines: Block<Prisma.InputJsonValue>;
     /** Headlines in the last 30 minutes — the recency signal the list lacks. */
     freshCount: Block<number>;
+    /** News & events v2 (`true` only): ingestion health. Absent key ⇒ flag off (byte-identical packet). */
+    asOf?: Block<Prisma.InputJsonValue>;
+  };
+  /** News & events v2 (`true` only): the next scheduled events. Absent key ⇒ flag off. */
+  events?: {
+    upcoming: Block<Prisma.InputJsonValue>;
+    minutesToNextHighImpact: Block<number>;
   };
   session: {
     nowIst: string;
@@ -802,6 +820,10 @@ export class ContextPacketService {
     @Inject(NEWS_SHIM) private readonly news: NewsShim,
     /** The market-cues cache, read without I/O. Optional: a process without it states macro unavailable. */
     @Optional() @Inject(MACRO_CUES) private readonly macroCues?: MacroCuesReader,
+    /** News & events v2 — all three optional: absent ⇒ the flag-off packet. */
+    @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly newsCfg?: NewsEventsConfig,
+    @Optional() @Inject(NEWS_INDEX) private readonly newsIndex?: NewsIndexReader,
+    @Optional() @Inject(MARKET_EVENTS) private readonly marketEvents?: EventsReader,
   ) {}
 
   private readMacro(now: Date): { snapshot: MarketCuesSnapshot | null; reason: string } {
@@ -811,6 +833,59 @@ export class ContextPacketService {
     } catch (err) {
       return { snapshot: null, reason: `the market-cues cache could not be read: ${err instanceof Error ? err.message : String(err)}` };
     }
+  }
+
+  /**
+   * News & events v2 blocks (`true`, and the `observe` shadow): two SYNCHRONOUS
+   * peeks of in-memory state — never a DB or HTTP call on the packet's hot path.
+   * Never throws: a failed peek becomes an absence naming the failed read.
+   */
+  private v2Blocks(entry: RosterEntry, tick: TickSnapshot, now: Date, at: string): { news: NewsBlocksV2; events: EventsBlocksV2 } {
+    const pos = newsPositionOf(tick.structureSymbol ?? null, entry.exchange, tick.expiry);
+    // An MCX underlying with no headline mapping still has events (FOMC, its expiry).
+    const evPos: NewsPosition | null = !('unresolved' in pos)
+      ? pos
+      : tick.structureSymbol && String(entry.exchange).toUpperCase() === 'MCX'
+        ? {
+            kind: 'COMMODITY',
+            underlying: baseSymbol(tick.structureSymbol),
+            key: baseSymbol(tick.structureSymbol),
+            exchange: 'MCX',
+            expiry: tick.expiry,
+          }
+        : null;
+    const read = <T>(label: string, fn: () => T | null): T | { status: 'unavailable'; reason: string } | null => {
+      try {
+        return fn();
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`${label} peek failed while building packet: ${m}`);
+        return { status: 'unavailable', reason: `${label} could not be read: ${m}` };
+      }
+    };
+    const news =
+      'unresolved' in pos
+        ? allNewsAbsent(pos.unresolved)
+        : newsBlocksV2(read('news index', () => this.newsIndex?.peek(pos, now) ?? null) as NewsPeek | null, at);
+    const events = evPos
+      ? eventsBlocks(
+          read('events calendar', () => this.marketEvents?.peek(evPos, now) ?? null) as EventsPeek | null,
+          at,
+          this.newsCfg?.eventsHorizonTradingDays ?? 3,
+        )
+      : allEventsAbsent('unresolved' in pos ? pos.unresolved : 'no position to look events up for');
+    return { news, events };
+  }
+
+  /**
+   * OBSERVE mode only: the blocks the packet WOULD carry with the flag on — stored
+   * in sentinel_verdicts.newsShadow beside the verdict, never shown to the judge.
+   * Null in every other mode. Synchronous, never throws.
+   */
+  shadowNewsEvents(entry: RosterEntry, tick: TickSnapshot, now: Date = new Date()): Prisma.InputJsonValue | null {
+    if (this.newsCfg?.mode !== 'observe') return null;
+    const b = this.v2Blocks(entry, tick, now, now.toISOString());
+    return { news: b.news, events: b.events } as unknown as Prisma.InputJsonValue;
   }
 
   async build(
@@ -859,6 +934,9 @@ export class ContextPacketService {
      */
     const newsKey = structureSymbol ? newsKeyFor(structureSymbol, entry.exchange) : null;
     const untaggable = newsKey && newsKey.key === null ? newsKey.reason : null;
+    // News & events v2: ONLY the exact `true` changes the packet; `observe`, a typo
+    // and an unwired config build exactly today's packet (hash-pinned).
+    const v2 = this.newsCfg?.rendering === true;
 
     const [levelBook, headlines] = structureSymbol
       ? await Promise.all([
@@ -873,12 +951,15 @@ export class ContextPacketService {
           ),
           untaggable
             ? Promise.resolve(absent(untaggable))
-            : this.safely(
-                () => this.news.recentFor(structureSymbol),
-                'news-aggregator.service',
-                at,
-                'news aggregator returned nothing for this symbol',
-              ),
+            : v2
+              ? // Never awaited for news under `true`: the v2 blocks below replace this.
+                Promise.resolve(absent('superseded by the news-events v2 blocks'))
+              : this.safely(
+                  () => this.news.recentFor(structureSymbol),
+                  'news-aggregator.service',
+                  at,
+                  'news aggregator returned nothing for this symbol',
+                ),
         ])
       : // NO FALLBACK TO THE TRADINGSYMBOL. That call is guaranteed to miss, and
         // `safely` would report the miss as "level book unavailable for this
@@ -899,6 +980,8 @@ export class ContextPacketService {
       entry.trackerId,
       PRIOR_VERDICT_LIMIT,
     );
+
+    const v2b = v2 ? this.v2Blocks(entry, tick, now, at) : null;
 
     return {
       position: {
@@ -1030,17 +1113,20 @@ export class ContextPacketService {
                 tick.factorsReason ?? 'no real context factors computed for this symbol',
               ),
       },
-      news: {
-        headlines,
-        freshCount: untaggable
-          ? absent(untaggable)
-          : numberBlock(
-              tick.freshNewsCount,
-              'news-aggregator.service (headlines in the last 30 minutes)',
-              at,
-              'no 30-minute headline count available for this symbol',
-            ),
-      },
+      news: v2b
+        ? v2b.news
+        : {
+            headlines,
+            freshCount: untaggable
+              ? absent(untaggable)
+              : numberBlock(
+                  tick.freshNewsCount,
+                  'news-aggregator.service (headlines in the last 30 minutes)',
+                  at,
+                  'no 30-minute headline count available for this symbol',
+                ),
+          },
+      ...(v2b ? { events: v2b.events } : {}),
       session: {
         nowIst: istWallClock(now),
         nowUtc: at,

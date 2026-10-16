@@ -57,7 +57,7 @@ describe('TripwireService', () => {
     expect(result.shouldEvaluate).toBe(true);
   });
 
-  it('runs all six sensors, so none can be dropped from the roster unnoticed', () => {
+  it('runs all seven sensors, so none can be dropped from the roster unnoticed', () => {
     const everything: TripwireInput = {
       ...quiet,
       holdingHigh: 130, ltp: 105,                              // giveback
@@ -68,12 +68,13 @@ describe('TripwireService', () => {
       freshNewsCount: 3,                                       // news
       factorValues: { greeks: -0.4 },                          // factor flip
       prevFactorValues: { greeks: 0.6 },
+      eventNear: { id: 'e', title: 'x', minutesAway: 5 },     // event near (news & events v2)
     };
     const names = svc.evaluate(everything, new Date(now.getTime() - 1000), now).fires
       .map((f) => f.name)
       .sort();
     expect(names).toEqual([
-      'context-factor-flip', 'giveback-off-peak', 'level-break',
+      'context-factor-flip', 'event-near', 'giveback-off-peak', 'level-break',
       'news-hit', 'oi-wall-shift', 'volume-anomaly',
     ]);
   });

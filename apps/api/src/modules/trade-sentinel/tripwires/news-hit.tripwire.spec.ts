@@ -42,3 +42,22 @@ describe('newsHit', () => {
     expect(newsHit.check({ ...base, freshNewsCount: missing })).toBeNull();
   });
 });
+
+describe('edge mode (news & events v2 true): newsUnseen present', () => {
+  const edge = { ...base, freshNewsCount: 4 };
+  it('fires on unseen ids with the newest title; ignores the 30-min count', () => {
+    expect(newsHit.check({ ...edge, newsUnseen: [{ id: 'a', title: 'Infosys wins $1.5bn deal' }] })).toEqual({
+      name: 'news-hit',
+      detail: 'new headline on this instrument: "Infosys wins $1.5bn deal"',
+    });
+    expect(newsHit.check({ ...edge, newsUnseen: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }] })?.detail).toBe(
+      '2 new headlines on this instrument, newest: "A"',
+    );
+  });
+  it('an empty unseen list is silent even when the 30-min count is high (already fired on them)', () => {
+    expect(newsHit.check({ ...edge, newsUnseen: [] })).toBeNull();
+  });
+  it('absent newsUnseen keeps the level-triggered rule exactly', () => {
+    expect(newsHit.check(edge)?.detail).toBe('4 fresh headline(s) in the last 30 minutes');
+  });
+});

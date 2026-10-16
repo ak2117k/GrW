@@ -2375,3 +2375,48 @@ describe('SentinelCycleService — publishes tick-sensor context (Part B)', () =
     expect(book.forKey('NSE:99926000')).toEqual([]);
   });
 });
+
+describe('news & events v2 observe — the shadow is stored beside the verdict, never in it', () => {
+  const shadow = {
+    news: { headlines: { available: false, reason: 'x' }, freshCount: { available: true, value: 0, source: 's', at: 'a' }, asOf: { available: false, reason: 'x' } },
+    events: { upcoming: { available: false, reason: 'y' }, minutesToNextHighImpact: { available: false, reason: 'y' } },
+  };
+
+  it('records newsShadow when the packet service returns one, and logs one [news-shadow] line', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const log = jest.spyOn((t.svc as unknown as { logger: { log: (m: string) => void } }).logger, 'log').mockImplementation(() => undefined);
+    (t.svc as unknown as { packets: Record<string, unknown> }).packets.shadowNewsEvents = jest.fn().mockReturnValue(shadow);
+    await t.svc.runForUser(USER);
+    expect(t.record.mock.calls[0][0].newsShadow).toEqual(shadow);
+    expect(t.judge.mock.calls[0][0]).not.toHaveProperty('newsShadow');
+    expect(log.mock.calls.filter((c) => String(c[0]).startsWith('[news-shadow] T1 HOLD: headlines absent'))).toHaveLength(1);
+  });
+
+  it('flag off: the record carries no newsShadow key at all', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    (t.svc as unknown as { packets: Record<string, unknown> }).packets.shadowNewsEvents = jest.fn().mockReturnValue(null);
+    await t.svc.runForUser(USER);
+    expect('newsShadow' in t.record.mock.calls[0][0]).toBe(false);
+  });
+
+  it('a packets double without shadowNewsEvents is "off"', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    await t.svc.runForUser(USER);
+    expect('newsShadow' in t.record.mock.calls[0][0]).toBe(false);
+  });
+
+  it('a throwing shadow never costs the verdict: recorded without newsShadow', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    jest.spyOn((t.svc as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn').mockImplementation(() => undefined);
+    (t.svc as unknown as { packets: Record<string, unknown> }).packets.shadowNewsEvents = jest.fn(() => {
+      throw new Error('boom');
+    });
+    await t.svc.runForUser(USER);
+    expect(t.record).toHaveBeenCalledTimes(1);
+    expect('newsShadow' in t.record.mock.calls[0][0]).toBe(false);
+  });
+});

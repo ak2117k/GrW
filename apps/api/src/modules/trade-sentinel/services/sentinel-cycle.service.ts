@@ -18,6 +18,7 @@ import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } f
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
 import { exitTriggerRecord } from './exit-trigger-proposal';
+import { shadowSummary } from './news-events-blocks';
 import { TickSensorBook, sensorSeed } from './tick-sensor-book';
 import type { Prisma } from '@prisma/client';
 import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service';
@@ -900,18 +901,18 @@ export class SentinelCycleService {
     const thesis = await this.thesisFor(entry, state, tick, now);
     progress.stage = 'packet';
 
-    const packet: ContextPacket = await this.packets.build(
-      entry,
-      {
-        ...tick,
-        oiWallNow: walls.now,
-        oiWallPrev: walls.prev,
-        oiWallsAt: wallsAt,
-        greenFloorArmedLatched,
-      },
-      thesis,
-      decision.fires,
-    );
+    const packetTick = {
+      ...tick,
+      oiWallNow: walls.now,
+      oiWallPrev: walls.prev,
+      oiWallsAt: wallsAt,
+      greenFloorArmedLatched,
+    };
+    const packet: ContextPacket = await this.packets.build(entry, packetTick, thesis, decision.fires);
+    // News & events v2 OBSERVE: what the packet WOULD carry — stored beside the
+    // verdict, never shown to the judge. Optional call: a packets double without it
+    // is "off". It must never cost the verdict, so a throw is logged and dropped.
+    const newsShadow = this.newsShadowFor(entry, packetTick, now);
 
     progress.stage = 'judge';
     // The trigger picks the model tier. `?? 'FIRE'` keeps the expensive tier
@@ -936,6 +937,7 @@ export class SentinelCycleService {
     // Price triggers: the judge's level and the instrument it watches. DATA ONLY —
     // arming, validation and execution all live in sentinel-executor (ruling R1).
     const exitTrigger = exitTriggerRecord(verdict, tick);
+    if (newsShadow) this.logger.log(`[news-shadow] ${entry.symbol} ${verdict.verdict}: ${shadowSummary(newsShadow as never)}`);
 
     progress.stage = 'verdict write';
     await this.verdicts.record({
@@ -962,7 +964,18 @@ export class SentinelCycleService {
       netPnl: packet.money.netPnl,
       greenFloor: packet.money.greenFloorPrice,
       ...(exitTrigger ? { exitTrigger: exitTrigger as unknown as Prisma.InputJsonValue } : {}),
+      ...(newsShadow ? { newsShadow } : {}),
     });
+  }
+
+  /** The observe-mode shadow (see {@link judgeAndRecord}); null when off or on failure. */
+  private newsShadowFor(entry: RosterEntry, packetTick: TickSnapshot, now: Date): Prisma.InputJsonValue | null {
+    try {
+      return this.packets.shadowNewsEvents?.(entry, packetTick, now) ?? null;
+    } catch (err) {
+      this.logger.warn(`[news-shadow] ${entry.symbol}: shadow blocks failed, verdict recorded without them: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   /** A full cap is expected under a slow judge; said once a minute, not once per skipped position per tick. */

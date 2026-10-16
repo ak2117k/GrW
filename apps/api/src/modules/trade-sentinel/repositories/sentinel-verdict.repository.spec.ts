@@ -168,4 +168,15 @@ describe('SentinelVerdictRepository — exitTrigger (price triggers)', () => {
     await repo.record(input());
     expect('exitTrigger' in create.mock.calls[1][0].data).toBe(false);
   });
+
+  it('writes newsShadow only when given one (observe mode); otherwise the create data is unchanged', async () => {
+    const create = jest.fn().mockResolvedValue({});
+    const repo = new SentinelVerdictRepository({ sentinelVerdict: { create } } as never);
+    await repo.record({ ...input(), newsShadow: { news: {}, events: {} } });
+    expect(create.mock.calls[0][0].data.newsShadow).toEqual({ news: {}, events: {} });
+    await repo.record(input());
+    expect('newsShadow' in create.mock.calls[1][0].data).toBe(false);
+    await repo.record({ ...input(), newsShadow: null });
+    expect('newsShadow' in create.mock.calls[2][0].data).toBe(false);
+  });
 });

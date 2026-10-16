@@ -51,6 +51,12 @@ import { MinuteBarsReader } from './adapters/minute-bars.reader';
 import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
 import { NewsWatchBook } from './services/news-watch-book';
 import { NewsWakeService } from './services/news-wake.service';
+import { NewsIndexModule } from '../news-events/index/news-index.module';
+import { NewsIndexService } from '../news-events/index/news-index.service';
+import { MarketEventsModule } from '../news-events/events/market-events.module';
+import { EventsService } from '../news-events/events/events.service';
+import { NEWS_INDEX } from './ports/news-index.port';
+import { MARKET_EVENTS } from './ports/events.port';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -71,7 +77,9 @@ import { NewsWakeService } from './services/news-wake.service';
  * That is exactly what the ports are for. The cycle depends on `OiWallSource`,
  * `TickSource`, `ChartContextShim`, `NewsShim`, `OpenPositionsPort` and
  * `EngineOwnershipProbe` — six interfaces that between them expose seven
- * read-only methods — and THIS FILE is the only place the broker-capable
+ * read-only methods (plus the news & events v2 readers `NewsIndexReader` and
+ * `EventsReader`: synchronous in-memory `peek`s and an `onAdded` subscription,
+ * none of which reaches a broker) — and THIS FILE is the only place the broker-capable
  * implementations behind them are named. A composition root is the correct home
  * for that edge, because it is the one file where a human decides what is wired
  * to what and a reviewer can see the whole decision at once. Adding an executor
@@ -100,6 +108,11 @@ import { NewsWakeService } from './services/news-wake.service';
     AiGatewayModule,
     // News & events v2 config + singletons; HTTP/DB-free from here.
     NewsEventsCoreModule,
+    // News & events v2 (docs/superpowers/specs/2026-10-16-news-events-design.md): the
+    // in-memory news index and events calendar. HTTP to news/NSE/Yahoo and DB reads
+    // live there; the cycle sees only the two ports below (NEWS_INDEX, MARKET_EVENTS).
+    NewsIndexModule,
+    MarketEventsModule,
   ],
   controllers: [SentinelController],
   providers: [
@@ -201,8 +214,12 @@ import { NewsWakeService } from './services/news-wake.service';
     // 09:10 pre-open check (NSE F&O, on the pre-open IEP). Shadow only; shares
     // the cycle's judge cap. Off unless SENTINEL_SHADOW_ENABLED.
     SentinelOvernightService,
+    // News & events v2: the packet, the tick source and the wake service read these
+    // through type-only ports — `peek` is synchronous, no I/O. Bound HERE only.
+    { provide: NEWS_INDEX, useExisting: NewsIndexService },
+    { provide: MARKET_EVENTS, useExisting: EventsService },
     // News & events v2 push wakes. The index is reached ONLY through the NEWS_INDEX
-    // port binding (I1); unbound, NewsWakeService subscribes to nothing.
+    // port binding above; unbound, NewsWakeService subscribes to nothing.
     NewsWatchBook,
     NewsWakeService,
   ],

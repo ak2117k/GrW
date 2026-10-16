@@ -1,6 +1,6 @@
 # News & Events v2 — Design
 
-**Date:** 2026-10-16 · **Status:** draft for owner review · **Trigger:** the sentinel judges every open position
+**Date:** 2026-10-16 · **Status:** approved 2026-10-16 (N1–N9 defaults; `observe` period 2–3 days) · **Trigger:** the sentinel judges every open position
 (stocks, index options, MCX) but only sees headlines tagged to its exact underlying, has no idea that results, RBI
 policy or the EIA inventory print are minutes away, and learns about a headline only on the next 30-s pass.
 
@@ -208,8 +208,8 @@ prompt flag-off identity (all 8 existing hashes unchanged) and new golden snapsh
 ## 17. Rollout
 **M0** source verification + NSE spike (cookie or not) + volume measurement. **M1** migration, tag-once, aliases,
 index, events (flag `false` — nothing reads them). **M2** `observe`: ingestion, index, events and wakes computed and
-logged (would-wake lines, would-be blocks stored beside the verdict) but packet/prompt unchanged — one week,
-review false-positive tags and wake rate. **M3** `true` on the owner's shadow sentinel (prompt v9), then live.
+logged (would-wake lines, would-be blocks stored beside the verdict) but packet/prompt unchanged — 2–3 trading
+days (owner decision 2026-10-16), review false-positive tags and wake rate. **M3** `true` on the owner's shadow sentinel (prompt v9), then live.
 
 ## 18. Owner decisions (defaults)
 - **N1** one master switch `NEWS_EVENTS_V2_ENABLED` with an `observe` step. *(yes)*

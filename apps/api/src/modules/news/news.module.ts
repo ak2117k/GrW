@@ -9,6 +9,7 @@ import { NewsSentimentService } from './services/news-sentiment.service';
 import { NewsSymbolIndexService } from './services/news-symbol-index.service';
 import { NewsFetchProcessor } from './workers/news-fetch.processor';
 import { NewsFetchScheduler } from './news-fetch.schedule';
+import { NseAnnouncementsService } from '../news-events/ingest/nse-announcements.service';
 import { RetagService } from '../news-events/ingest/retag.service';
 import { AliasLoaderService } from '../news-events/tagging/alias-loader.service';
 import { NewsTaggerService } from '../news-events/tagging/tagger.service';
@@ -30,6 +31,7 @@ import { NewsTaggerService } from '../news-events/tagging/tagger.service';
     NewsTaggerService,
     AliasLoaderService,
     RetagService,
+    NseAnnouncementsService,
   ],
   exports: [NewsAggregatorService, NewsSentimentService, NewsTaggerService],
 })

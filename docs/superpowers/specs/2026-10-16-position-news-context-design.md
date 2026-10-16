@@ -1,6 +1,7 @@
 # Position News Context v3 — open-position profiles + self-correcting tag loop
 
-**Date:** 2026-10-16 · **Status:** draft for owner review (P1–P12 defaults below) · **Builds on:**
+**Date:** 2026-10-16 · **Status:** APPROVED 2026-10-16 by the owner with all defaults P1–P12 (plan:
+`docs/superpowers/plans/2026-10-16-position-news-context.md`) · **Builds on:**
 `2026-10-16-news-events-design.md` (v2, deployed `observe` since 2026-10-16 16:24 IST). **Trigger:** the first hour of
 prod observe (235 articles, all tagged, ~60 % to an instrument) shows the broad v2 tagger is good enough for the
 sector/index/market layers and for a future nightly market scan, but not precise enough to put in front of the judge

@@ -1,10 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { NewsSentimentService } from './news-sentiment.service';
 import { NewsFilterDto } from '../dto/news.dto';
 import { NewsArticle } from '@prisma/client';
+import { FUTURE_PUBDATE_TOLERANCE_MS, NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
+import { NSE_BROWSER_UA } from '../../news-events/nse-client';
+import { SourceHealthBook } from '../../news-events/source-health';
+import { NEWS_INGEST_BUS, type NewsIngestBus } from '../../news-events/ingest-bus';
+import { toIndexedArticle } from '../../news-events/keys';
+import { NewsTaggerService } from '../../news-events/tagging/tagger.service';
+import type { ArticleTags } from '../../news-events/types';
 
 export interface RSSSource {
   name: string;
@@ -19,8 +26,16 @@ interface ParsedArticle {
   publishedAt: Date;
   source: string;
   category: 'indian' | 'global' | 'sector' | 'company';
+  /** v2 (R6): the pubDate as placed in time; used only when news-events v2 is computing. */
+  guard: { publishedAt: Date; dateInferred: boolean };
 }
 
+/**
+ * Verified by the M0 probe (scripts/news-source-check.ts) on 2026-10-16 from the dev
+ * machine with the browser UA and the 15 s timeout: every source here answered HTTP 200
+ * with XML, ≥ 1 <item> and a pubDate within 7 days. The Production Gate re-runs the probe
+ * on the VPS before `observe`.
+ */
 const RSS_SOURCES: RSSSource[] = [
   // Indian market sources
   {
@@ -29,21 +44,11 @@ const RSS_SOURCES: RSSSource[] = [
     category: 'indian',
   },
   {
-    name: 'MoneyControl',
-    url: 'https://www.moneycontrol.com/rss/MCtopnews.xml',
-    category: 'indian',
-  },
-  {
     name: 'LiveMint',
     url: 'https://www.livemint.com/rss/markets',
     category: 'indian',
   },
   // Global market sources
-  {
-    name: 'Reuters Business',
-    url: 'https://www.reutersagency.com/feed/?best-topics=business-finance',
-    category: 'global',
-  },
   {
     name: 'CNBC World',
     url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362',
@@ -85,12 +90,17 @@ const RSS_SOURCES: RSSSource[] = [
     url: 'https://realty.economictimes.indiatimes.com/rss/topstories',
     category: 'sector',
   },
-  // Company-specific sources
   {
-    name: 'ET Earnings',
-    url: 'https://economictimes.indiatimes.com/markets/stocks/earnings/rssfeeds/12aborede_2.cms',
-    category: 'company',
+    name: 'Hindu BusinessLine Commodities',
+    url: 'https://www.thehindubusinessline.com/markets/commodities/feeder/default.rss',
+    category: 'sector',
   },
+  {
+    name: 'Investing.com Commodities',
+    url: 'https://www.investing.com/rss/news_11.rss',
+    category: 'sector',
+  },
+  // Company-specific sources
   {
     name: 'ET Stock News',
     url: 'https://economictimes.indiatimes.com/markets/stocks/news/rssfeeds/2146842.cms',
@@ -101,7 +111,42 @@ const RSS_SOURCES: RSSSource[] = [
     url: 'https://www.livemint.com/rss/companies',
     category: 'company',
   },
+  {
+    name: 'Business Standard Markets',
+    url: 'https://www.business-standard.com/rss/markets-106.rss',
+    category: 'company',
+  },
+  {
+    name: 'Business Standard Companies',
+    url: 'https://www.business-standard.com/rss/companies-101.rss',
+    category: 'company',
+  },
+  {
+    name: 'Hindu BusinessLine Markets',
+    url: 'https://www.thehindubusinessline.com/markets/feeder/default.rss',
+    category: 'company',
+  },
 ];
+
+/**
+ * Removed in M0 (2026-10-16) after failing the probe — kept as a list so a test proves they stay gone.
+ * MoneyControl: HTTP 200 but its newest item is from 2016 (a frozen feed). Reuters Business: HTTP 404.
+ * ET Earnings: HTTP 404 (malformed id "12aborede_2"); ET's RSS directory lists no earnings feed.
+ */
+export const REMOVED_SOURCES: readonly string[] = ['MoneyControl', 'Reuters Business', 'ET Earnings'];
+export const RSS_FETCH_TIMEOUT_MS = 15_000;
+
+const ZONE_RE = /(?:[+-]\d{2}:?\d{2}|\b(?:GMT|UTC|UT|Z|[ECMP][SD]T|IST))\s*$/i;
+
+/** R6: a pubDate we cannot place in time (missing, unparseable, zone-less, > 10 min ahead) is `fetchedAt` + inferred. */
+export function pubDateGuard(raw: string | null, fetchedAt: Date): { publishedAt: Date; dateInferred: boolean } {
+  const s = (raw ?? '').replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+  const ms = s ? Date.parse(s) : NaN;
+  if (!s || !Number.isFinite(ms) || !ZONE_RE.test(s) || ms - fetchedAt.getTime() > FUTURE_PUBDATE_TOLERANCE_MS) {
+    return { publishedAt: fetchedAt, dateInferred: true };
+  }
+  return { publishedAt: new Date(ms), dateInferred: false };
+}
 
 /**
  * Economic Times "Commodities" RSS — crude, gold, silver, natural gas and base
@@ -123,11 +168,19 @@ export function rssSources(env: Record<string, string | undefined> = process.env
 @Injectable()
 export class NewsAggregatorService {
   private readonly logger = new Logger(NewsAggregatorService.name);
+  /** Test seam: replaces rssSources() when set. */
+  sourcesForTest?: RSSSource[];
+  /** Test seam: the fetch clock. */
+  clock: () => Date = () => new Date();
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly httpService: HttpService,
     private readonly sentimentService: NewsSentimentService,
+    @Optional() private readonly health?: SourceHealthBook,
+    @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly cfg?: NewsEventsConfig,
+    @Optional() private readonly tagger?: NewsTaggerService,
+    @Optional() @Inject(NEWS_INGEST_BUS) private readonly bus?: NewsIngestBus,
   ) {}
 
   /**
@@ -136,9 +189,10 @@ export class NewsAggregatorService {
    */
   async fetchAllNews(): Promise<number> {
     this.logger.log('Starting news fetch from all RSS sources...');
+    const fetchedAt = this.clock();
 
     const results = await Promise.allSettled(
-      rssSources().map((source) => this.fetchFromSource(source)),
+      (this.sourcesForTest ?? rssSources()).map((source) => this.fetchFromSource(source, fetchedAt)),
     );
 
     let allArticles: ParsedArticle[] = [];
@@ -195,7 +249,9 @@ export class NewsAggregatorService {
           article.summary,
         );
 
-        await this.prisma.newsArticle.create({
+        const v2 = this.cfg?.computing ? await this.tagV2(article) : null;
+
+        const saved = await this.prisma.newsArticle.create({
           data: {
             title: article.title,
             summary: article.summary || null,
@@ -205,10 +261,22 @@ export class NewsAggregatorService {
             sentiment: sentimentResult.sentiment,
             sentimentScore: sentimentResult.score,
             relatedSymbols: sentimentResult.relatedSymbols,
-            publishedAt: article.publishedAt,
+            publishedAt: this.cfg?.computing ? article.guard.publishedAt : article.publishedAt,
+            ...(v2
+              ? {
+                  dateInferred: article.guard.dateInferred,
+                  instruments: v2.tags.instruments,
+                  sectors: v2.tags.sectors,
+                  indices: v2.tags.indices,
+                  markets: v2.tags.markets,
+                  tagVersion: v2.version,
+                }
+              : {}),
           },
         });
 
+        // v2: push the saved row to the in-memory index right after its insert.
+        if (v2) this.bus?.publish([toIndexedArticle(saved)]);
         savedCount++;
       } catch (error) {
         // Skip duplicates or other insert errors
@@ -222,6 +290,18 @@ export class NewsAggregatorService {
 
     this.logger.log(`Saved ${savedCount} new articles`);
     return savedCount;
+  }
+
+  /** v2 tag-once (spec §5). A tagger failure never loses the article: it is saved untagged at version 0. */
+  private async tagV2(article: ParsedArticle): Promise<{ tags: ArticleTags; version: number }> {
+    const empty = { tags: { instruments: [], sectors: [], indices: [], markets: [] }, version: 0 };
+    if (!this.tagger) return empty;
+    try {
+      return await this.tagger.tag({ title: article.title, summary: article.summary, source: article.source, category: article.category });
+    } catch (err) {
+      this.logger.warn(`[news-tag] tagging failed for "${article.title.slice(0, 60)}": ${err instanceof Error ? err.message : String(err)}`);
+      return empty;
+    }
   }
 
   /**
@@ -297,13 +377,13 @@ export class NewsAggregatorService {
   /**
    * Fetch and parse RSS XML from a single source.
    */
-  private async fetchFromSource(source: RSSSource): Promise<ParsedArticle[]> {
+  private async fetchFromSource(source: RSSSource, fetchedAt: Date): Promise<ParsedArticle[]> {
     try {
       const response = await firstValueFrom(
         this.httpService.get<any>(source.url, {
-          timeout: 10000,
+          timeout: RSS_FETCH_TIMEOUT_MS,
           headers: {
-            'User-Agent': 'TD-Automation-News-Bot/1.0',
+            'User-Agent': NSE_BROWSER_UA, // several feeds refuse a bot UA
             Accept: 'application/rss+xml, application/xml, text/xml',
           },
           responseType: 'text',
@@ -314,12 +394,14 @@ export class NewsAggregatorService {
         ? response.data
         : String(response.data);
 
-      return this.parseRSS(xml, source);
+      const articles = this.parseRSS(xml, source, fetchedAt);
+      this.health?.ok(source.name, articles.length, this.clock());
+      return articles;
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.health?.fail(source.name, message, this.clock());
       this.logger.error(
-        `Failed to fetch RSS from ${source.name}: ${
-          error instanceof Error ? error.message : error
-        }`,
+        `Failed to fetch RSS from ${source.name}: ${message}`,
       );
       return [];
     }
@@ -328,7 +410,7 @@ export class NewsAggregatorService {
   /**
    * Parse RSS XML using regex to extract <item> elements.
    */
-  private parseRSS(xml: string, source: RSSSource): ParsedArticle[] {
+  private parseRSS(xml: string, source: RSSSource, fetchedAt: Date): ParsedArticle[] {
     const articles: ParsedArticle[] = [];
 
     // Match all <item>...</item> blocks
@@ -367,6 +449,7 @@ export class NewsAggregatorService {
         publishedAt,
         source: source.name,
         category: source.category,
+        guard: pubDateGuard(pubDate, fetchedAt),
       });
     }
 

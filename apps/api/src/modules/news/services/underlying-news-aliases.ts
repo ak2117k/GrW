@@ -20,7 +20,7 @@
  * discount it — worse than no tag at all.
  */
 
-interface AliasPattern {
+export interface AliasPattern {
   /** Global regex; case-sensitivity is part of the rule (Nifty vs "nifty"). */
   re: RegExp;
   /** Rejects the match when the text BEFORE it matches (anchored at its end). */
@@ -79,7 +79,7 @@ const PARENT: Readonly<Record<string, string>> = {
 /** Index underlyings that are not listed companies — taggable only through an alias. */
 const INDEX_UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX', 'SENSEX50']);
 
-function firstHit(text: string, p: AliasPattern): number {
+export function firstHit(text: string, p: AliasPattern): number {
   const re = new RegExp(p.re.source, p.re.flags.includes('g') ? p.re.flags : `${p.re.flags}g`);
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {

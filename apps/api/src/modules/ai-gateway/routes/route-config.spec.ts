@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { AI_JOBS } from '../ai-job';
+import { AI_JOBS, priorityOf } from '../ai-job';
 import { loadRoutes, resolveAiConfig } from './route-config';
 
 const json = () => ({
@@ -13,6 +13,10 @@ const json = () => ({
   'picks.pre-market': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 300000 },
   'learning.nightly': { provider: 'claude-cli', model: 'claude-opus-5', fallback: [], maxWaitMs: 1800000 },
   'strategy.draft': { provider: 'claude-cli', model: 'claude-opus-5', fallback: [], maxWaitMs: 600000 },
+  'news.profile': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 300000 },
+  'news.audit': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 600000 },
+  'news.curate': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 600000 },
+  'news.label': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 600000 },
 });
 
 const SENTINEL_JOBS = ['sentinel.judge', 'sentinel.overnight', 'sentinel.thesis', 'sentinel.unknown'] as const;
@@ -103,6 +107,14 @@ describe('loadRoutes', () => {
     const raw = JSON.parse(fs.readFileSync(resolveAiConfig('ai-routes.json'), 'utf8'));
     const routes = loadRoutes(raw, {});
     expect(routes['decision.judge'].fallback).toEqual(['anthropic-api']);
+  });
+
+  it('news.* context jobs: claude-cli, Sonnet, no fallback (spec P4), priority 4', () => {
+    const routes = loadRoutes(json(), {});
+    for (const j of ['news.profile', 'news.audit', 'news.curate', 'news.label'] as const) {
+      expect(routes[j]).toEqual(expect.objectContaining({ provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [] }));
+      expect(priorityOf(j)).toBe(4);
+    }
   });
 });
 

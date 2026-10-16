@@ -19,6 +19,10 @@ const ROUTES_JSON = {
   'picks.pre-market': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 300000 },
   'learning.nightly': { provider: 'claude-cli', model: 'claude-opus-5', fallback: [], maxWaitMs: 1800000 },
   'strategy.draft': { provider: 'claude-cli', model: 'unpriced-model', fallback: [], maxWaitMs: 600000 },
+  'news.profile': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 300000 },
+  'news.audit': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 600000 },
+  'news.curate': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 600000 },
+  'news.label': { provider: 'claude-cli', model: 'claude-sonnet-5', fallback: [], maxWaitMs: 600000 },
 };
 
 const PRICES = loadPrices({

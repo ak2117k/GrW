@@ -16,6 +16,10 @@ export const AI_JOBS = [
   'review.overnight',
   'review.holdings',
   'news.impact',
+  'news.profile',
+  'news.audit',
+  'news.curate',
+  'news.label',
   'picks.next-day',
   'picks.pre-market',
   'learning.nightly',
@@ -31,6 +35,7 @@ export function isAiJob(value: string): value is AiJob {
 /**
  * Lower = more urgent. Spec §4.4: position review (`sentinel.*`, `review.*`) >
  * `decision.judge` > `news.impact` > picks > learning / strategy drafting.
+ * news.profile|audit|curate|label fall to 4 — below every sentinel.* / review.* job, spec §9.1.
  */
 export function priorityOf(job: AiJob): number {
   if (job.startsWith('sentinel.') || job.startsWith('review.')) return 0;

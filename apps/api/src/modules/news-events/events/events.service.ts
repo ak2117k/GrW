@@ -36,7 +36,22 @@ export class EventsService implements EventsReader, OnApplicationBootstrap {
   onApplicationBootstrap(): void {
     if (!this.cfg.computing || !bootJobsEnabled()) return;
     this.markWarming();
-    void this.reload(new Date()).then(() => this.refresh(new Date()));
+    void this.boot(new Date());
+  }
+
+  /**
+   * Serve the stored events at once, then build. A failed first load (DB not ready)
+   * is logged and the build still runs — its own reload retries it. Never rejects:
+   * a bare `reload().then(refresh)` turned a DB blip into an unhandled rejection and
+   * skipped the build, leaving the calendar "warming" until the next 2-hourly cron.
+   */
+  async boot(now: Date): Promise<void> {
+    try {
+      await this.reload(now);
+    } catch (err) {
+      this.logger.warn(`[market-events] stored events could not be loaded at boot (the build retries): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await this.refresh(now);
   }
 
   markWarming(): void {

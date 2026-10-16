@@ -140,6 +140,18 @@ describe('NewsIndexService', () => {
     svc.onModuleDestroy();
   });
 
+  it('get / itemsSince are empty unless ready; then read the index; the boot select includes drivers', async () => {
+    const { svc, findMany } = harness();
+    expect(svc.get('b1')).toBeUndefined();
+    expect(svc.itemsSince(0)).toEqual([]);
+    await svc.start();
+    expect(findMany.mock.calls[0][0].select).toMatchObject({ drivers: true });
+    expect(svc.get('b1')?.id).toBe('b1');
+    expect(svc.itemsSince(NOW - 60 * 60_000).map((a) => a.id)).toEqual(['b2']);
+    expect(svc.itemsSince(0).map((a) => a.id)).toEqual(['b2', 'b1']);
+    svc.onModuleDestroy();
+  });
+
   it('peek is synchronous, does no I/O, and p99 < 5 ms with a full index (spec §12 budget)', async () => {
     const boot = Array.from({ length: 5000 }, (_, i) => ({ ...row(`r${i}`, i % 1400), instruments: [`S${i % 700}`, 'SBIN'].slice(i % 2), markets: ['IN'] }));
     const { svc, findMany } = harness('true', boot);

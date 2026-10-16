@@ -9,6 +9,23 @@ const tagged = (id: string, minsAgo: number, instruments: string[], markets: Arr
   article({ id, publishedAt: NOW - minsAgo * 60_000, fetchedAt: NOW - minsAgo * 60_000, tags: { instruments, sectors: [], indices: [], markets } });
 
 describe('NewsIndex', () => {
+  it('get(id) and itemsSince(ms) read without changing anything', () => {
+    const ix = mk();
+    ix.upsert(tagged('a', 10, ['SBIN']), NOW);
+    ix.upsert(tagged('b', 400, ['TCS']), NOW);
+    expect(ix.get('a')?.id).toBe('a');
+    expect(ix.get('zz')).toBeUndefined();
+    expect(ix.itemsSince(NOW - 6 * H).map((x) => x.id)).toEqual(['a']);
+    expect(ix.itemsSince(0).map((x) => x.id)).toEqual(['a', 'b']);
+    expect(ix.size).toBe(2);
+  });
+
+  it('an article with drivers is keyed D:<KEY>', () => {
+    const ix = mk();
+    ix.upsert(article({ id: 'd', publishedAt: NOW - 60_000, fetchedAt: NOW, tags: { instruments: [], sectors: [], indices: [], markets: [], drivers: ['CRUDE_SUPPLY'] } }), NOW);
+    expect(ix.list('D:CRUDE_SUPPLY', 0).map((x) => x.id)).toEqual(['d']);
+  });
+
   it('lists newest-first per key, within a window', () => {
     const ix = mk();
     ix.upsert(tagged('old', 400, ['SBIN']), NOW);

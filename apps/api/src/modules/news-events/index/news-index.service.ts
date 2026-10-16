@@ -15,7 +15,7 @@ import { NewsIndex } from './news-index';
 
 const ROW_SELECT = {
   id: true, title: true, source: true, sentiment: true, publishedAt: true, fetchedAt: true, dateInferred: true,
-  instruments: true, sectors: true, indices: true, markets: true,
+  instruments: true, sectors: true, indices: true, markets: true, drivers: true,
 } as const;
 
 /** Delta-poll page size. A full page is followed by the next one on the next poll (the cursor never skips). */
@@ -170,6 +170,16 @@ export class NewsIndexService implements NewsIndexReader, OnApplicationBootstrap
         this.logger.error(`[news-index] onAdded listener threw: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+  }
+
+  /** The held article with this id, or undefined (always undefined unless the index is ready). Memory only. */
+  get(id: string): IndexedArticle | undefined {
+    return this.state === 'ready' ? this.index.get(id) : undefined;
+  }
+
+  /** Held articles published at or after `sinceMs`, newest first ([] unless the index is ready). Memory only. */
+  itemsSince(sinceMs: number): IndexedArticle[] {
+    return this.state === 'ready' ? this.index.itemsSince(sinceMs) : [];
   }
 
   /** Synchronous, in-memory only: never awaits, never touches the DB or the network. */

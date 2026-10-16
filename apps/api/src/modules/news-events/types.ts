@@ -10,7 +10,11 @@ export type NewsLayer = 'instrument' | 'sector' | 'index' | 'market';
 export type MarketTag = 'IN' | 'GLOBAL';
 
 /** Tag-once result stored on `news_articles` (v2 columns, never `relatedSymbols`). */
-export interface ArticleTags { instruments: string[]; sectors: string[]; indices: string[]; markets: MarketTag[] }
+export interface ArticleTags {
+  instruments: string[]; sectors: string[]; indices: string[]; markets: MarketTag[];
+  /** v3 driver keys (§5.4); present only when non-empty. */
+  drivers?: string[];
+}
 
 /** One article as the in-memory index holds it (times in epoch ms, title already capped). */
 export interface IndexedArticle {
@@ -22,13 +26,19 @@ export interface IndexedArticle {
 export interface NewsRowLike {
   id: string; title: string; source: string; sentiment: string | null; publishedAt: Date; fetchedAt: Date;
   dateInferred: boolean; instruments: string[]; sectors: string[]; indices: string[]; markets: string[];
+  /** v3 driver keys (`news_articles.drivers`); absent on rows read before the v3 column existed. */
+  drivers?: string[];
 }
 
 /** What kind of underlying a position trades. */
 export type PositionKind = 'STOCK' | 'INDEX' | 'COMMODITY';
 
 /** A position as news/events see it: `key` is the index key without prefix (benchmark for MCX). */
-export interface NewsPosition { kind: PositionKind; underlying: string; key: string; exchange: string; expiry: string | null }
+export interface NewsPosition {
+  kind: PositionKind; underlying: string; key: string; exchange: string; expiry: string | null;
+  /** v3 composite MCX index (MCXBULLDEX/MCXMETLDEX): its component benchmarks. Absent otherwise. */
+  components?: string[];
+}
 
 /** A resolved position, or the honest reason news cannot be looked up for it. */
 export type NewsPositionResult = NewsPosition | { unresolved: string };

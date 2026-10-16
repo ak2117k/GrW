@@ -76,7 +76,7 @@ export function newsPositionOf(underlying: string | null, exchange: string | nul
 }
 
 export function instrumentKeysOf(p: NewsPosition): string[] {
-  return [p.kind === 'INDEX' ? `X:${p.key}` : `I:${p.key}`];
+  return (p.components ?? [p.key]).map((k) => (p.kind === 'INDEX' ? `X:${k}` : `I:${k}`));
 }
 
 export function keysOfTags(t: ArticleTags): string[] {
@@ -85,6 +85,7 @@ export function keysOfTags(t: ArticleTags): string[] {
     ...t.sectors.map((k) => `S:${k}`),
     ...t.indices.map((k) => `X:${k}`),
     ...t.markets.map((k) => `M:${k}`),
+    ...(t.drivers ?? []).map((k) => `D:${k}`),
   ];
 }
 
@@ -105,6 +106,7 @@ export function toIndexedArticle(row: NewsRowLike): IndexedArticle {
       sectors: [...row.sectors],
       indices: [...row.indices],
       markets: row.markets.filter((m): m is MarketTag => MARKETS.has(m)),
+      ...(row.drivers && row.drivers.length ? { drivers: [...row.drivers] } : {}),
     },
   };
 }

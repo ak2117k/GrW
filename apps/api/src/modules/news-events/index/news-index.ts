@@ -50,6 +50,18 @@ export class NewsIndex {
     return this.maxFetched;
   }
 
+  /** The held article with this id (no copy), or undefined. */
+  get(id: string): IndexedArticle | undefined {
+    return this.items.get(id)?.a;
+  }
+
+  /** Every held article published at or after `sinceMs`, newest first (a fresh array). */
+  itemsSince(sinceMs: number): IndexedArticle[] {
+    let end = 0;
+    while (end < this.order.length && this.order[end].publishedAt >= sinceMs) end++;
+    return this.order.slice(0, end);
+  }
+
   upsert(a: IndexedArticle, now: number): UpsertResult {
     if (a.publishedAt < now - this.o.horizonMs) return 'ignored';
     const prev = this.items.get(a.id);
@@ -88,7 +100,7 @@ export class NewsIndex {
     let b = 0;
     for (const { a, keys } of this.items.values()) {
       b += 160 + 2 * (a.id.length + a.title.length + a.source.length + (a.sentiment?.length ?? 0));
-      for (const t of [...a.tags.instruments, ...a.tags.sectors, ...a.tags.indices, ...a.tags.markets]) b += 16 + 2 * t.length;
+      for (const t of [...a.tags.instruments, ...a.tags.sectors, ...a.tags.indices, ...a.tags.markets, ...(a.tags.drivers ?? [])]) b += 16 + 2 * t.length;
       b += keys.length * (16 + 8); // the key list on the item + the reference in each per-key array
       b += 8; // the reference in the age order
     }

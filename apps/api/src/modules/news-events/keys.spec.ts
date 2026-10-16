@@ -34,6 +34,20 @@ describe('keys', () => {
     ]);
   });
 
+  it('drivers: keyed D:<KEY>; absent or empty drivers add no key and no property', () => {
+    expect(keysOfTags({ instruments: [], sectors: [], indices: [], markets: [], drivers: ['CRUDE_SUPPLY'] })).toEqual(['D:CRUDE_SUPPLY']);
+    const row = { id: 'a', title: 't', source: 's', sentiment: null, publishedAt: new Date(0), fetchedAt: new Date(0), dateInferred: false,
+      instruments: ['SBIN'], sectors: [], indices: [], markets: [] };
+    expect(toIndexedArticle(row).tags).toEqual({ instruments: ['SBIN'], sectors: [], indices: [], markets: [] });
+    expect('drivers' in toIndexedArticle({ ...row, drivers: [] }).tags).toBe(false);
+    expect(toIndexedArticle({ ...row, drivers: ['GOLD_MACRO'] }).tags.drivers).toEqual(['GOLD_MACRO']);
+  });
+
+  it('composite positions (v3 MCXBULLDEX/MCXMETLDEX): one instrument key per component; none today', () => {
+    expect(instrumentKeysOf({ kind: 'COMMODITY', underlying: 'MCXBULLDEX', key: 'MCXBULLDEX', exchange: 'MCX', expiry: null, components: ['GOLD', 'SILVER'] }))
+      .toEqual(['I:GOLD', 'I:SILVER']);
+  });
+
   it('sector tables', () => {
     expect(SECTOR_TOKEN_NAME['99926009']).toBe('NIFTY BANK');
     expect(Object.keys(SECTOR_TOKEN_NAME)).toHaveLength(15);

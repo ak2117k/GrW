@@ -5,11 +5,13 @@ import type { AliasRow } from './alias-derivation';
 interface Node { next: Map<string, Node>; symbols?: string[] }
 const TOKEN_RE = /[A-Za-z0-9]+(?:[&'’.][A-Za-z0-9]+)*/g;
 
-function tokens(text: string): Array<{ t: string; start: number; end: number }> {
+/** The matcher's tokenizer: word tokens with their character span (curly apostrophes normalised). */
+export function tokenSpans(text: string): Array<{ t: string; start: number; end: number }> {
   const out: Array<{ t: string; start: number; end: number }> = [];
   for (const m of text.matchAll(TOKEN_RE)) out.push({ t: m[0].replace(/’/g, "'"), start: m.index!, end: m.index! + m[0].length });
   return out;
 }
+const tokens = tokenSpans;
 
 /**
  * Company-name matcher (spec §5.2): one token-trie compiled at build time, one pass

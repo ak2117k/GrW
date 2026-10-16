@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { HttpModule } from '@nestjs/axios';
 import { PrismaModule } from '../../common/prisma/prisma.module';
+import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
 import { NewsController } from './controllers/news.controller';
 import { NewsAggregatorService } from './services/news-aggregator.service';
 import { NewsSentimentService } from './services/news-sentiment.service';
@@ -14,6 +15,7 @@ import { NewsFetchScheduler } from './news-fetch.schedule';
     BullModule.registerQueue({ name: 'news-fetch' }),
     HttpModule.register({ timeout: 15000 }),
     PrismaModule,
+    NewsEventsCoreModule,
   ],
   controllers: [NewsController],
   providers: [

@@ -6,6 +6,7 @@ import { volumeAnomaly } from '../tripwires/volume-anomaly.tripwire';
 import { oiWallShift } from '../tripwires/oi-wall-shift.tripwire';
 import { newsHit } from '../tripwires/news-hit.tripwire';
 import { contextFactorFlip } from '../tripwires/context-factor-flip.tripwire';
+import { eventNear } from '../tripwires/event-near.tripwire';
 
 /**
  * How long a watched position may go unexamined when every sensor is quiet.
@@ -141,6 +142,8 @@ const ALL_TRIPWIRES: Tripwire[] = [
   oiWallShift,
   newsHit,
   contextFactorFlip,
+  // News & events v2: silent unless the input carries eventNear (flag `true` only).
+  eventNear,
 ];
 
 /**

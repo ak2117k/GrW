@@ -25,6 +25,10 @@ import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import { EXIT_DISCIPLINE_CONFIG, type ExitDisciplineConfig } from '../../exit-discipline/config';
 import { noiseFromBars } from '../../exit-discipline/noise';
 import { MinuteBarsReader } from './minute-bars.reader';
+import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
+import { newsPositionOf } from '../../news-events/keys';
+import type { FreshItem } from '../../news-events/types';
+import { NEWS_INDEX, type NewsIndexReader } from '../ports/news-index.port';
 
 /**
  * The window the packet's `freshCount` block names, and therefore the window
@@ -278,6 +282,10 @@ export class SentinelTickSource implements TickSource {
     // read — never a broker call). Absent either ⇒ `tick.noise` is null.
     @Optional() private readonly minuteBars?: MinuteBarsReader,
     @Optional() @Inject(EXIT_DISCIPLINE_CONFIG) private readonly discipline?: ExitDisciplineConfig,
+    // News & events v2: with NEWS_EVENTS_V2_ENABLED=true the fresh count (and ids)
+    // come from the in-memory index. Absent / observe / false ⇒ the legacy read.
+    @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly newsCfg?: NewsEventsConfig,
+    @Optional() @Inject(NEWS_INDEX) private readonly newsIndex?: NewsIndexReader,
   ) {
     if (!this.userFeed) {
       this.logger.warn(
@@ -393,6 +401,8 @@ export class SentinelTickSource implements TickSource {
         ? { exchange: underlying.exchange, token: underlying.token, symbol: underlying.contract }
         : null;
 
+    // News & events v2 (`true` only): a synchronous peek, never a DB read.
+    const v2News = this.newsCfg?.rendering === true && structureSymbol ? this.freshFromIndex(structureSymbol, row.exchange) : null;
     const [structure, freshNewsCount] = await Promise.all([
       structureSymbol
         ? structureInstrument
@@ -400,7 +410,11 @@ export class SentinelTickSource implements TickSource {
           : this.charts.structureFor(structureSymbol, underlyingLtp, row.userId)
         : Promise.resolve(NO_STRUCTURE),
       // Null, not 0 — "no reading" and "nothing published" must stay apart.
-      structureSymbol ? this.freshNewsCount(structureSymbol, row.exchange) : Promise.resolve(null),
+      structureSymbol
+        ? v2News
+          ? Promise.resolve(v2News.count)
+          : this.freshNewsCount(structureSymbol, row.exchange)
+        : Promise.resolve(null),
     ]);
 
     const noise = opts.closedSession ? null : await this.noiseFor(row, isCash, underlying);
@@ -454,6 +468,7 @@ export class SentinelTickSource implements TickSource {
       expiry: await this.expiryFor(row.token, row.exchange, segment),
       volumeRatio: structure.volumeRatio,
       freshNewsCount,
+      ...(v2News?.fresh ? { freshNews: v2News.fresh } : {}),
       // Both come off the SAME `analyze()` the levels above did — the factors
       // are computed as part of scoring a setup, so there is no second call and
       // no window in which the levels and the factors describe different bars.
@@ -810,6 +825,19 @@ export class SentinelTickSource implements TickSource {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`fresh-news count failed for ${symbol}: ${message}`);
       return null;
+    }
+  }
+
+  /** News & events v2 (`true`): the 30-min own-instrument count and ids from the index — synchronous, no DB. */
+  private freshFromIndex(symbol: string, exchange?: string | null): { count: number | null; fresh: FreshItem[] | null } {
+    const pos = newsPositionOf(symbol, exchange ?? null, null);
+    if ('unresolved' in pos || !this.newsIndex) return { count: null, fresh: null };
+    try {
+      const p = this.newsIndex.peek(pos, new Date());
+      return p.status === 'ok' ? { count: p.freshCount, fresh: p.fresh } : { count: null, fresh: null };
+    } catch (err) {
+      this.logger.warn(`fresh-news (index) failed for ${symbol}: ${err instanceof Error ? err.message : String(err)}`);
+      return { count: null, fresh: null };
     }
   }
 }

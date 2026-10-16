@@ -25,6 +25,8 @@ import { MACRO_CUES } from './ports/market-cues.port';
 import { EXIT_DISCIPLINE_CONFIG } from '../exit-discipline/config';
 import { SentinelTickSource } from './adapters/tick-source.adapter';
 import { MinuteBarsReader } from './adapters/minute-bars.reader';
+import { NewsWatchBook } from './services/news-watch-book';
+import { NewsWakeService } from './services/news-wake.service';
 
 /**
  * Every parameter Nest must resolve by an explicit TOKEN rather than by type.
@@ -132,8 +134,14 @@ describe('TradeSentinelModule — every token is actually provided', () => {
         'NewsModule',
         // The market-cues cache: the live packet's macro and the overnight cues.
         'MarketCuesModule',
+        // News & events v2: the parsed NEWS_EVENTS_CONFIG and its singletons.
+        'NewsEventsCoreModule',
       ]),
     );
+  });
+
+  it('provides the news & events v2 push wakes (NewsWatchBook, NewsWakeService)', () => {
+    expect(providedTokens()).toEqual(expect.arrayContaining([NewsWatchBook, NewsWakeService]));
   });
 });
 

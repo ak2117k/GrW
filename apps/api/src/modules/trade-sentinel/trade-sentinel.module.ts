@@ -48,6 +48,9 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
 import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
 import { MinuteBarsReader } from './adapters/minute-bars.reader';
+import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
+import { NewsWatchBook } from './services/news-watch-book';
+import { NewsWakeService } from './services/news-wake.service';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -95,6 +98,8 @@ import { MinuteBarsReader } from './adapters/minute-bars.reader';
     // the flag-off CLI binding below and the gateway's own CLI provider — and
     // the gateway the sentinel is served by when AI_GATEWAY_SENTINEL=true.
     AiGatewayModule,
+    // News & events v2 config + singletons; HTTP/DB-free from here.
+    NewsEventsCoreModule,
   ],
   controllers: [SentinelController],
   providers: [
@@ -196,6 +201,10 @@ import { MinuteBarsReader } from './adapters/minute-bars.reader';
     // 09:10 pre-open check (NSE F&O, on the pre-open IEP). Shadow only; shares
     // the cycle's judge cap. Off unless SENTINEL_SHADOW_ENABLED.
     SentinelOvernightService,
+    // News & events v2 push wakes. The index is reached ONLY through the NEWS_INDEX
+    // port binding (I1); unbound, NewsWakeService subscribes to nothing.
+    NewsWatchBook,
+    NewsWakeService,
   ],
   exports: [SentinelCycleService, SentinelRunnerService],
 })

@@ -30,6 +30,11 @@ import {
 } from '../../exit-discipline/config';
 import { exitConfirmFire, withExitConfirm } from '../tripwires/exit-confirm';
 import { solveCycleFloor } from './cycle-floor';
+import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
+import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
+import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
+import type { TripwireInput } from '../tripwires/types';
+import { NewsWatchBook } from './news-watch-book';
 
 export interface CycleReport {
   evaluated: number;
@@ -367,6 +372,12 @@ interface TrackerState {
    * the last live packet — see `storedNoiseFloor`.
    */
   noiseFloor: { armed: boolean; level: number | null; entry: number | null };
+  /** News & events v2 edge-trigger memory (R4): fresh own-instrument article ids already fired on. */
+  newsSeen?: Set<string>;
+  /** News & events v2 edge-trigger memory (R4): event ids already fired (or, in observe, logged) as event-near. */
+  eventsFired?: Set<string>;
+  /** News & events v2 edge-trigger memory (R4): epoch ms of the last news-hit fire, for the cooldown. */
+  lastNewsFireAt?: number;
 }
 
 /** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
@@ -454,6 +465,11 @@ export class SentinelCycleService {
     // Exit discipline (docs/superpowers/specs/2026-10-14-exit-discipline-design.md).
     // Optional: absent ⇒ discipline off, the fixed floor and the 40 % giveback as before.
     @Optional() @Inject(EXIT_DISCIPLINE_CONFIG) private readonly discipline?: ExitDisciplineConfig,
+    // News & events v2 (docs/superpowers/specs/2026-10-16-news-events-design.md). All
+    // optional: absent ⇒ the sensor input is exactly today's (no new keys).
+    @Optional() private readonly newsWatch?: NewsWatchBook,
+    @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly newsCfg?: NewsEventsConfig,
+    @Optional() @Inject(MARKET_EVENTS) private readonly events?: EventsReader,
   ) {}
 
   /**
@@ -597,6 +613,20 @@ export class SentinelCycleService {
     const seed = this.sensorBook ? sensorSeed(entry, tick, noiseInput) : null;
     if (seed) this.sensorBook!.upsert(seed);
 
+    // News & events v2: which open positions the push-wake service may wake (memory only).
+    if (this.newsWatch && this.newsCfg?.computing && tick.structureSymbol) {
+      const p = newsPositionOf(tick.structureSymbol, entry.exchange, tick.expiry);
+      if (!('unresolved' in p)) {
+        this.newsWatch.upsert({
+          trackerId: entry.trackerId,
+          userId: entry.userId,
+          symbol: entry.symbol,
+          exchange: String(entry.exchange).toUpperCase(),
+          instrumentKeys: instrumentKeysOf(p),
+        });
+      }
+    }
+
     // LIVE-ONLY: an overnight-review row is not a live look (see recentForTracker).
     // With exit discipline on, enough rows to count a run of EXIT_NOWs for the
     // exit-confirm re-look (§7); otherwise exactly the one row, as before.
@@ -636,6 +666,8 @@ export class SentinelCycleService {
     const capture = await this.wallsFor(entry, tick, now);
     const walls = capture.walls;
 
+    // News & events v2 sensor inputs: {} unless NEWS_EVENTS_V2_ENABLED=true.
+    const newsIn = this.newsInputs(entry, tick, this.stateFor(entry), now);
     const rawDecision = this.tripwires.evaluate(
       {
         trackerId: entry.trackerId,
@@ -665,6 +697,9 @@ export class SentinelCycleService {
         // on and measured, so with discipline off the input is exactly today's
         // (absent ⇒ the 40 % rule).
         ...(noiseInput ? { noise: noiseInput } : {}),
+        // News & events v2: present only with the flag `true` (edge-triggered
+        // news-hit, event-near); otherwise no key — exactly today's input.
+        ...newsIn,
       },
       last ? last.createdAt : null,
       now,
@@ -680,6 +715,8 @@ export class SentinelCycleService {
         },
       },
     );
+
+    this.markNewsFired(this.stateFor(entry), rawDecision.fires, newsIn, now);
 
     const state = this.stateFor(entry);
     // Exit discipline §7: an EXIT_NOW executes only once confirmed by a second
@@ -1162,6 +1199,68 @@ export class SentinelCycleService {
       }
     }
     for (const u of owners) this.sensorBook?.prune(u, watched);
+    for (const u of owners) this.newsWatch?.prune(u, watched);
+  }
+
+  /**
+   * News & events v2 sensor inputs (R4/R5). `true`: the unseen fresh own-instrument ids
+   * (empty inside the news cooldown, so a busy tape cannot fire every pass) and the
+   * nearest un-fired timed high-impact event ≤ EVENT_WAKE_LEAD_MIN. `observe`: no input
+   * keys — the would-be event fire is logged once instead. `false`: {}.
+   */
+  private newsInputs(entry: RosterEntry, tick: TickReading, st: TrackerState, now: Date): Pick<TripwireInput, 'newsUnseen' | 'eventNear'> {
+    const cfg = this.newsCfg;
+    if (!cfg?.computing) return {};
+    const out: Pick<TripwireInput, 'newsUnseen' | 'eventNear'> = {};
+    if (cfg.rendering && tick.freshNews) {
+      const seen = (st.newsSeen ??= new Set<string>());
+      const live = new Set(tick.freshNews.map((f) => f.id));
+      for (const id of [...seen]) if (!live.has(id)) seen.delete(id);
+      const cooling = now.getTime() - (st.lastNewsFireAt ?? -Infinity) < cfg.wakeCooldownMin * 60_000;
+      out.newsUnseen = cooling ? [] : tick.freshNews.filter((f) => !seen.has(f.id));
+    }
+    const near = this.nearEvent(entry, tick, st, now, cfg.eventWakeLeadMin);
+    if (cfg.rendering) out.eventNear = near;
+    else if (near) {
+      (st.eventsFired ??= new Set<string>()).add(near.id);
+      this.logger.log(`[news-wake] observe: would fire event-near on ${entry.symbol}: ${near.title} in ${near.minutesAway} min`);
+    }
+    return out;
+  }
+
+  /** The nearest timed high-impact event ≤ `leadMin` away not yet fired for this tracker; a synchronous peek, never throws. */
+  private nearEvent(
+    entry: RosterEntry,
+    tick: TickReading,
+    st: TrackerState,
+    now: Date,
+    leadMin: number,
+  ): { id: string; title: string; minutesAway: number } | null {
+    const fired = (st.eventsFired ??= new Set<string>());
+    if (!this.events || !tick.structureSymbol) return null;
+    const p = newsPositionOf(tick.structureSymbol, entry.exchange, tick.expiry);
+    if ('unresolved' in p) return null;
+    let peek;
+    try {
+      peek = this.events.peek(p, now);
+    } catch {
+      return null;
+    }
+    if (peek.status !== 'ok') return null;
+    const live = new Set(peek.events.map((e) => e.id));
+    for (const id of [...fired]) if (!live.has(id)) fired.delete(id);
+    const e = peek.events.find((x) => x.impact === 'high' && !x.allDay && x.minutesAway <= leadMin && !fired.has(x.id));
+    return e ? { id: e.id, title: e.title, minutesAway: e.minutesAway } : null;
+  }
+
+  /** After the sensors: remember what news-hit / event-near fired on, so neither fires twice (R4). */
+  private markNewsFired(st: TrackerState, fires: TripwireFire[], newsIn: Pick<TripwireInput, 'newsUnseen' | 'eventNear'>, now: Date): void {
+    if (newsIn.newsUnseen?.length && fires.some((f) => f.name === 'news-hit')) {
+      const seen = (st.newsSeen ??= new Set<string>());
+      for (const f of newsIn.newsUnseen) seen.add(f.id);
+      st.lastNewsFireAt = now.getTime();
+    }
+    if (newsIn.eventNear && fires.some((f) => f.name === 'event-near')) (st.eventsFired ??= new Set<string>()).add(newsIn.eventNear.id);
   }
 }
 

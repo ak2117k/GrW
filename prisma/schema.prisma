@@ -359,6 +359,10 @@ model NewsArticle {
   markets         String[] @default([])
   tagVersion      Int      @default(0)
   dateInferred    Boolean  @default(false)
+  /// Position news context v3 (spec §6 / §5.4): the active tag-rule set the row was tagged
+  /// under, and its driver keys (`D:<KEY>` in the index; never read by v2 ladders).
+  ruleSetVersion  Int      @default(0)
+  drivers         String[] @default([])
 
   @@index([category, publishedAt])
   @@index([sentiment])
@@ -366,6 +370,7 @@ model NewsArticle {
   @@index([instruments], type: Gin)
   @@index([sectors], type: Gin)
   @@index([indices], type: Gin)
+  @@index([drivers], type: Gin)
   @@index([fetchedAt])
   @@map("news_articles")
 }
@@ -401,6 +406,96 @@ model MarketEvent {
   @@unique([kind, key, startsAt])
   @@index([key, startsAt])
   @@map("market_events")
+}
+
+/// Position news context v3 (spec §4): versioned entity profile per underlying; one active.
+model NewsEntityProfile {
+  id            String   @id @default(cuid())
+  symbol        String
+  version       Int
+  active        Boolean  @default(false)
+  builtBy       String   // baseline | llm
+  model         String?
+  promptVersion String?
+  profile       Json
+  rejected      Json     @default("[]")
+  createdAt     DateTime @default(now())
+
+  @@unique([symbol, version])
+  @@index([symbol, active])
+  @@map("news_entity_profiles")
+}
+
+/// Rules as data (spec §6). Literal phrases only, never regex.
+model NewsTagRule {
+  id             String   @id @default(cuid())
+  ruleSetVersion Int
+  kind           String
+  symbol         String?
+  pattern        String
+  params         Json     @default("{}")
+  status         String   // proposed | active | rejected | rolled_back
+  origin         String   // seed | curator | owner
+  evidence       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@index([ruleSetVersion])
+  @@index([kind, status])
+  @@map("news_tag_rules")
+}
+
+/// Immutable rule-set versions; exactly one active (spec §6).
+model NewsTagRuleSet {
+  id            String    @id @default(cuid())
+  version       Int       @unique
+  parentVersion Int?
+  active        Boolean   @default(false)
+  metrics       Json      @default("{}")
+  summary       String    @default("")
+  appliedAt     DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@map("news_tag_rule_sets")
+}
+
+/// Wrong / misleading / missed tag log (spec §7).
+model NewsTagFeedback {
+  id               String   @id @default(cuid())
+  articleId        String
+  tag              String
+  symbol           String?
+  kind             String
+  signal           String
+  reason           String
+  verdictId        String?
+  trackerId        String?
+  tagVersion       Int
+  ruleSetVersion   Int
+  status           String   @default("open")
+  resolvedByRuleId String?
+  createdAt        DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([kind, status])
+  @@index([articleId])
+  @@map("news_tag_feedback")
+}
+
+/// One row per (job, nightOf) — the night runner's claim, budget and summary (spec §9.1).
+model NightJobRun {
+  id         String    @id @default(cuid())
+  job        String
+  nightOf    String    // YYYY-MM-DD, IST date of the evening
+  status     String    // running | done | failed | skipped
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  budget     Json      @default("{}")
+  summary    Json      @default("{}")
+  error      String?
+
+  @@unique([job, nightOf])
+  @@index([job, startedAt])
+  @@map("night_job_runs")
 }
 
 // ============================================

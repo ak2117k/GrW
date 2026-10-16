@@ -2473,6 +2473,24 @@ describe('news & events v2 in the sensor pass', () => {
     expect(tripwireInput(t.evaluate, 2).newsUnseen).toEqual([{ id: 'b', title: 'B' }]);
   });
 
+  it('true: a news-hit / event-near fire swallowed by the agent backoff is NOT spent — it fires again once the backoff ends', async () => {
+    const peek = jest.fn().mockReturnValue(near(12));
+    const t = makeSvc(undefined, { cfg: cfg('true'), events: { peek } });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ structureSymbol: 'INFY', freshNews: fresh }));
+    const t0 = new Date('2026-10-16T05:00:00Z');
+    const state = (t.svc as unknown as { stateFor: (e: unknown) => { agentRetryAt: number } }).stateFor(watched('t1'));
+    state.agentRetryAt = t0.getTime() + 120_000; // the judge is in its failure backoff
+    t.evaluate.mockReturnValueOnce({
+      fires: [{ name: 'news-hit', detail: 'x' }, { name: 'event-near', detail: 'y' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE',
+    });
+    await t.svc.runForUser(USER, t0);
+    expect(t.judge).not.toHaveBeenCalled();
+    await t.svc.runForUser(USER, new Date(t0.getTime() + 180_000));
+    expect(tripwireInput(t.evaluate, 1).newsUnseen).toEqual(fresh);
+    expect(tripwireInput(t.evaluate, 1).eventNear).toMatchObject({ id: 'eia1' });
+  });
+
   it('true: unseen ids that did NOT fire (sensor silent) stay unseen', async () => {
     const t = makeSvc(undefined, { cfg: cfg('true') });
     t.build.mockResolvedValue([watched('t1')]);

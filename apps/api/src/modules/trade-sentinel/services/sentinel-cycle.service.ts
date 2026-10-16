@@ -716,7 +716,10 @@ export class SentinelCycleService {
       },
     );
 
-    this.markNewsFired(this.stateFor(entry), rawDecision.fires, newsIn, now);
+    // Edge-triggered fires are spent only when they can reach the judge: inside the
+    // agent-failure backoff (checked below) this pass is dropped, not carried, so the
+    // headline / event must stay unseen and fire again once the backoff ends.
+    if (now.getTime() >= this.stateFor(entry).agentRetryAt) this.markNewsFired(this.stateFor(entry), rawDecision.fires, newsIn, now);
 
     const state = this.stateFor(entry);
     // Exit discipline §7: an EXIT_NOW executes only once confirmed by a second

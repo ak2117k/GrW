@@ -6,6 +6,7 @@ import { NewsSentimentService } from './news-sentiment.service';
 import { NewsFilterDto } from '../dto/news.dto';
 import { NewsArticle } from '@prisma/client';
 import { FUTURE_PUBDATE_TOLERANCE_MS, NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
+import { NSE_BROWSER_UA } from '../../news-events/nse-client';
 import { SourceHealthBook } from '../../news-events/source-health';
 
 export interface RSSSource {
@@ -130,10 +131,6 @@ const RSS_SOURCES: RSSSource[] = [
  */
 export const REMOVED_SOURCES: readonly string[] = ['MoneyControl', 'Reuters Business', 'ET Earnings'];
 export const RSS_FETCH_TIMEOUT_MS = 15_000;
-
-/** Same string as NSE_BROWSER_UA in news-events/nse-client.ts (F3); several feeds refuse a bot UA. */
-const RSS_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
 const ZONE_RE = /(?:[+-]\d{2}:?\d{2}|\b(?:GMT|UTC|UT|Z|[ECMP][SD]T|IST))\s*$/i;
 
@@ -355,7 +352,7 @@ export class NewsAggregatorService {
         this.httpService.get<any>(source.url, {
           timeout: RSS_FETCH_TIMEOUT_MS,
           headers: {
-            'User-Agent': RSS_USER_AGENT,
+            'User-Agent': NSE_BROWSER_UA, // several feeds refuse a bot UA
             Accept: 'application/rss+xml, application/xml, text/xml',
           },
           responseType: 'text',

@@ -9,6 +9,8 @@ import { NewsSentimentService } from './services/news-sentiment.service';
 import { NewsSymbolIndexService } from './services/news-symbol-index.service';
 import { NewsFetchProcessor } from './workers/news-fetch.processor';
 import { NewsFetchScheduler } from './news-fetch.schedule';
+import { AliasLoaderService } from '../news-events/tagging/alias-loader.service';
+import { NewsTaggerService } from '../news-events/tagging/tagger.service';
 
 @Module({
   imports: [
@@ -24,7 +26,9 @@ import { NewsFetchScheduler } from './news-fetch.schedule';
     NewsSymbolIndexService,
     NewsFetchProcessor,
     NewsFetchScheduler,
+    NewsTaggerService,
+    AliasLoaderService,
   ],
-  exports: [NewsAggregatorService, NewsSentimentService],
+  exports: [NewsAggregatorService, NewsSentimentService, NewsTaggerService],
 })
 export class NewsModule {}

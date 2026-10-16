@@ -231,7 +231,7 @@ export class AiExitExecutionRepository {
              e."status", e."reason", e."createdAt", e."fillPrice", e."orderLtp", e."decisionLtp"
       FROM "ai_exit_executions" e
       WHERE e."createdAt" >= ${since}
-        AND left(e."verdictId", ${MANUAL_VERDICT_PREFIX.length}) <> ${MANUAL_VERDICT_PREFIX}
+        AND left(e."verdictId", ${MANUAL_VERDICT_PREFIX.length}::int) <> ${MANUAL_VERDICT_PREFIX}
         AND e."exchange" IS NOT NULL AND e."token" IS NOT NULL
         AND (
           e."status" IN ('FILLED', 'DRY_RUN')

@@ -253,7 +253,9 @@ describe('manual exits (owner Exit button)', () => {
     const q = p.$queryRaw.mock.calls[0][0] as { strings: string[]; values: unknown[] };
     const sql = q.strings.join('?').replace(/\s+/g, ' ');
     expect(sql).toMatch(/FROM "ai_exit_executions" e/);
-    expect(sql).toMatch(/left\(e\."verdictId", \?\) <> \?/);
+    // Prisma binds a JS number as bigint; Postgres has no left(text, bigint) — the cast is required
+    // (prod 2026-10-16: "function left(text, bigint) does not exist" stopped every outcome from scoring).
+    expect(sql).toMatch(/left\(e\."verdictId", \?::int\) <> \?/);
     expect(sql).toMatch(/e\."exchange" IS NOT NULL AND e\."token" IS NOT NULL/);
     expect(sql).toMatch(/e\."status" IN \('FILLED', 'DRY_RUN'\)/);
     expect(sql).toMatch(/e\."status" = 'PLACED' AND e\."createdAt" < \?/);

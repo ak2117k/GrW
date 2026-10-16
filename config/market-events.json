@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "usFederalHolidays": [
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07", "2026-10-12", "2026-11-11", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-05-31", "2027-06-18", "2027-07-05", "2027-09-06", "2027-10-11", "2027-11-11", "2027-11-25", "2027-12-24"
+  ],
+  "eiaOverrides": [
+    { "kind": "eia_petroleum", "originalDate": "2026-11-11", "date": "2026-11-12", "localTime": "12:00" },
+    { "kind": "eia_natgas", "originalDate": "2026-11-12", "date": "2026-11-13", "localTime": "10:30" },
+    { "kind": "eia_natgas", "originalDate": "2026-11-26", "date": "2026-11-25", "localTime": "12:00" }
+  ],
+  "macro": [
+    { "kind": "fomc", "date": "2026-10-28", "localTime": "14:00", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+    { "kind": "us_nfp", "date": "2026-11-06", "localTime": "08:30", "tz": "America/New_York", "impact": "medium", "sourceUrl": "https://www.bls.gov/schedule/news_release/empsit.htm" },
+    { "kind": "us_cpi", "date": "2026-11-10", "localTime": "08:30", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.bls.gov/schedule/news_release/cpi.htm" },
+    { "kind": "india_cpi", "date": "2026-11-12", "localTime": "16:00", "tz": "Asia/Kolkata", "impact": "high", "sourceUrl": "https://www.mospi.gov.in/uploads/latestreleasesfiles/1791801549227-Press%20Release%20for%20the%20month%20of%20September,%202026.pdf" },
+    { "kind": "opec", "date": "2026-11-01", "localTime": "12:00", "tz": "Europe/Vienna", "impact": "high", "title": "OPEC+ seven-country monthly production meeting", "sourceUrl": "https://opec.org/pr-detail/1891616-4-october-2026.html" },
+    { "kind": "opec", "date": "2026-11-29", "localTime": "12:00", "tz": "Europe/Vienna", "impact": "high", "title": "OPEC+ 42nd ONOMM + 69th JMMC", "sourceUrl": "https://opec.org/pr-detail/605-7-june-2026.html" },
+    { "kind": "rbi_mpc", "date": "2026-12-04", "localTime": "10:00", "tz": "Asia/Kolkata", "impact": "high", "sourceUrl": "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422" },
+    { "kind": "us_nfp", "date": "2026-12-04", "localTime": "08:30", "tz": "America/New_York", "impact": "medium", "sourceUrl": "https://www.bls.gov/schedule/news_release/empsit.htm" },
+    { "kind": "fomc", "date": "2026-12-09", "localTime": "14:00", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+    { "kind": "us_cpi", "date": "2026-12-10", "localTime": "08:30", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.bls.gov/schedule/news_release/cpi.htm" },
+    { "kind": "india_cpi", "date": "2026-12-14", "localTime": "16:00", "tz": "Asia/Kolkata", "impact": "high", "sourceUrl": "https://www.mospi.gov.in/uploads/documents/releaseCalender/1791356248513-ARC_2026_27_Sept_2026.pdf" },
+    { "kind": "us_nfp", "date": "2027-01-08", "localTime": "08:30", "tz": "America/New_York", "impact": "medium", "sourceUrl": "https://www.bls.gov/schedule/news_release/empsit.htm" },
+    { "kind": "india_cpi", "date": "2027-01-12", "localTime": "16:00", "tz": "Asia/Kolkata", "impact": "high", "sourceUrl": "https://www.mospi.gov.in/uploads/documents/releaseCalender/1791356248513-ARC_2026_27_Sept_2026.pdf" },
+    { "kind": "us_cpi", "date": "2027-01-13", "localTime": "08:30", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.bls.gov/schedule/news_release/cpi.htm" },
+    { "kind": "fomc", "date": "2027-01-27", "localTime": "14:00", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
+    { "kind": "rbi_mpc", "date": "2027-02-05", "localTime": "10:00", "tz": "Asia/Kolkata", "impact": "high", "sourceUrl": "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422" },
+    { "kind": "us_nfp", "date": "2027-02-05", "localTime": "08:30", "tz": "America/New_York", "impact": "medium", "sourceUrl": "https://www.bls.gov/schedule/news_release/empsit.htm" },
+    { "kind": "us_cpi", "date": "2027-02-11", "localTime": "08:30", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.bls.gov/schedule/news_release/cpi.htm" },
+    { "kind": "india_cpi", "date": "2027-02-12", "localTime": "16:00", "tz": "Asia/Kolkata", "impact": "high", "sourceUrl": "https://www.mospi.gov.in/uploads/documents/releaseCalender/1791356248513-ARC_2026_27_Sept_2026.pdf" },
+    { "kind": "us_nfp", "date": "2027-03-05", "localTime": "08:30", "tz": "America/New_York", "impact": "medium", "sourceUrl": "https://www.bls.gov/schedule/news_release/empsit.htm" },
+    { "kind": "us_cpi", "date": "2027-03-10", "localTime": "08:30", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.bls.gov/schedule/news_release/cpi.htm" },
+    { "kind": "india_cpi", "date": "2027-03-12", "localTime": "16:00", "tz": "Asia/Kolkata", "impact": "high", "sourceUrl": "https://www.mospi.gov.in/uploads/documents/releaseCalender/1791356248513-ARC_2026_27_Sept_2026.pdf" },
+    { "kind": "fomc", "date": "2027-03-17", "localTime": "14:00", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" }
+  ]
+}

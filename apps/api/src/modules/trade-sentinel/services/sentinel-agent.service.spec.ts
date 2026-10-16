@@ -17,11 +17,18 @@ import {
   PRE_V7_BLOCKS_LINE,
   V7_MANDATE_LINES,
   V7_READING_LINES,
+  PRE_V9_FRESHCOUNT_LINE,
+  PRE_V9_NEWS_FIELDS,
+  V9_FRESHCOUNT_LINE,
+  V9_NEWS_EXIT_LINE,
+  V9_NEWS_EXIT_LINE_TRIGGERS,
+  V9_NEWS_READING_LINES,
   sentinelPromptVersion,
   sentinelSystemPrompt,
   type SentinelPromptOptions,
 } from '../prompts/sentinel-system-prompt';
 import { THESIS_PROMPT_VERSION } from '../prompts/thesis-prompt';
+import { undoNews } from '../golden/news-attribution';
 
 const AT = '2026-08-14T04:30:00.000Z';
 
@@ -741,5 +748,95 @@ describe('prompt v7 / v2.4 (exit discipline) and the two switches', () => {
     await expect(agent.judge(p)).resolves.toMatchObject({ evidence: ['flow.noiseUnit', 'money.floorBasis'] });
     create.mockResolvedValue(reply({ ...validVerdict, evidence: ['money.noiseFloor'] }));
     await expect(agent.judge(p)).rejects.toThrow(/money\.noiseFloor/);
+  });
+});
+
+describe('prompt v9–v12 / v2.6–v2.9 (news & events v2)', () => {
+  /** main @ 7b976b3, recorded in news-events Task D3 Step 1. */
+  const MAIN_V7 = { len: 8875, sha: '5c8237a45268859cb345dcdf4ef8b8a8cccebf6962403901b8b8ac5bda28514c' };
+  const MAIN_V2_4 = { len: 7790, sha: '58221866d08b749466ad26ee27ee9783979c949ac2c9d13c9aa01b091c5578f7' };
+  const MAIN_V8 = { len: 10013, sha: '232db7e47fcefd80ee6214fb473f58a8febd2446fe310b27e8e1b3d057ae5d1f' };
+  const MAIN_V2_5 = { len: 8928, sha: '70de95169dbdb620571eea483502ad2c4a35c20f4fdcf13c2e5635d2f9e021f2' };
+
+  const OFF: Array<[SentinelPromptOptions, string]> = [
+    [{ cues: true, triggers: false, discipline: false }, 'v5'],
+    [{ cues: false, triggers: false, discipline: false }, 'v2.2'],
+    [{ cues: true, triggers: true, discipline: false }, 'v6'],
+    [{ cues: false, triggers: true, discipline: false }, 'v2.3'],
+    [{ cues: true, triggers: false, discipline: true }, 'v7'],
+    [{ cues: false, triggers: false, discipline: true }, 'v2.4'],
+    [{ cues: true, triggers: true, discipline: true }, 'v8'],
+    [{ cues: false, triggers: true, discipline: true }, 'v2.5'],
+  ];
+  const ON: Array<[SentinelPromptOptions, string]> = [
+    [{ cues: true, triggers: false, discipline: true, news: true }, 'v9'],
+    [{ cues: false, triggers: false, discipline: true, news: true }, 'v2.6'],
+    [{ cues: true, triggers: false, discipline: false, news: true }, 'v10'],
+    [{ cues: false, triggers: false, discipline: false, news: true }, 'v2.7'],
+    [{ cues: true, triggers: true, discipline: false, news: true }, 'v11'],
+    [{ cues: false, triggers: true, discipline: false, news: true }, 'v2.8'],
+    [{ cues: true, triggers: true, discipline: true, news: true }, 'v12'],
+    [{ cues: false, triggers: true, discipline: true, news: true }, 'v2.9'],
+  ];
+
+  it.each(ON)('%j is stamped %s', (o, stamp) => expect(sentinelPromptVersion(o)).toBe(stamp));
+
+  it.each(OFF)('%j with news: false is still stamped %s', (o, stamp) => expect(sentinelPromptVersion({ ...o, news: false })).toBe(stamp));
+
+  it('NEWS OFF IS MAIN, BYTE FOR BYTE: all eight existing texts, hash-pinned', () => {
+    for (const [o] of OFF) expect(sentinelSystemPrompt({ ...o, news: false })).toBe(sentinelSystemPrompt(o));
+    const pin = (o: SentinelPromptOptions, p: { len: number; sha: string }) => {
+      const t = sentinelSystemPrompt(o);
+      expect([t.length, sha(t)]).toEqual([p.len, p.sha]);
+    };
+    pin({ cues: true, triggers: false, discipline: true }, MAIN_V7);
+    pin({ cues: false, triggers: false, discipline: true }, MAIN_V2_4);
+    pin({ cues: true, triggers: true, discipline: true }, MAIN_V8);
+    pin({ cues: false, triggers: true, discipline: true }, MAIN_V2_5);
+    // v5, v2.2, v6, v2.3 stay pinned by the v7 describe above (MAIN_V5_SHA256, MAIN_V2_2_SHA256, PT_V6_SHA256, PT_V2_3_SHA256).
+  });
+
+  it('sixteen distinct texts, sixteen distinct stamps', () => {
+    const all = [...OFF, ...ON];
+    expect(new Set(all.map(([o]) => sentinelSystemPrompt(o))).size).toBe(16);
+    expect(new Set(all.map(([, v]) => v)).size).toBe(16);
+  });
+
+  it.each(ON)('%j differs from its news-off twin ONLY by the news edits', (o) => {
+    expect(undoNews(sentinelSystemPrompt(o), o.triggers)).toBe(sentinelSystemPrompt({ ...o, news: false }));
+  });
+
+  it.each(ON)('%j: the reading lines once, the exit line matching the triggers switch, the field and block lists', (o) => {
+    const p = sentinelSystemPrompt(o);
+    expect(p.split(V9_NEWS_READING_LINES)).toHaveLength(2);
+    expect(p).toContain(o.triggers ? V9_NEWS_EXIT_LINE_TRIGGERS : V9_NEWS_EXIT_LINE);
+    expect(p).toMatch(/^- news: headlines, freshCount, asOf\.$/m);
+    expect(p).toMatch(/^- events: upcoming, minutesToNextHighImpact\.$/m);
+    expect(p).toMatch(/^- Blocks are .*news\.asOf, events\.upcoming, events\.minutesToNextHighImpact, /m);
+    expect(p).toMatch(/never a reason for EXIT_NOW/);
+    expect(p).toContain(V9_FRESHCOUNT_LINE);
+    expect(p).not.toContain(PRE_V9_FRESHCOUNT_LINE);
+    if (!o.triggers) expect(p).not.toMatch(/closer exitTrigger/);
+  });
+
+  it.each(OFF)('%j: names no news & events v2 field', (o) => {
+    const p = sentinelSystemPrompt(o);
+    expect(p).not.toMatch(/news\.asOf|events\.upcoming|minutesToNextHighImpact|never a reason for EXIT_NOW/);
+    expect(p).toContain(PRE_V9_NEWS_FIELDS);
+  });
+
+  it.each([
+    [{ NEWS_EVENTS_V2_ENABLED: 'true', MARKET_CUES_ENABLED: 'true' }, 'v9'],
+    [{ NEWS_EVENTS_V2_ENABLED: 'true' }, 'v2.6'],
+    [{ NEWS_EVENTS_V2_ENABLED: ' TRUE ' }, 'v2.6'],
+    [{ NEWS_EVENTS_V2_ENABLED: 'observe', MARKET_CUES_ENABLED: 'true' }, 'v7'],
+    [{ NEWS_EVENTS_V2_ENABLED: 'ture', MARKET_CUES_ENABLED: 'true' }, 'v7'],
+    [{ NEWS_EVENTS_V2_ENABLED: 'false' }, 'v2.4'],
+    [{ NEWS_EVENTS_V2_ENABLED: 'true', MARKET_CUES_ENABLED: 'true', SENTINEL_TRIGGERS_ENABLED: 'true' }, 'v12'],
+  ] as const)('the agent under %j stamps %s (observe and typos are off)', async (env, stamp) => {
+    const c = jest.fn().mockResolvedValue(reply(validVerdict));
+    const agent = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (env as Record<string, string>)[k] } as never);
+    await agent.judge(packet());
+    expect(agent.promptVersion).toBe(`${stamp}/${THESIS_PROMPT_VERSION}`);
   });
 });

@@ -79,6 +79,16 @@ export const SCENARIO_NAMES = [
   'judge-heartbeat-cues-off-discipline',
   'judge-fire-cues-on-discipline-triggers',
   'judge-heartbeat-cues-off-discipline-triggers',
+  // News & events v2 (Task D3): every news-on prompt variant, plus observe (must equal off).
+  'judge-fire-cues-on-news-discipline',
+  'judge-heartbeat-cues-off-news-discipline',
+  'judge-fire-cues-on-news',
+  'judge-heartbeat-cues-off-news',
+  'judge-fire-cues-on-news-triggers',
+  'judge-heartbeat-cues-off-news-triggers',
+  'judge-fire-cues-on-news-discipline-triggers',
+  'judge-heartbeat-cues-off-news-discipline-triggers',
+  'judge-heartbeat-cues-off-news-observe',
   'overnight',
   'thesis',
   'transport-throws',
@@ -249,6 +259,55 @@ export const GOLDEN_PACKET_DISCIPLINE: ContextPacket = {
     ),
   },
 };
+
+/**
+ * News & events v2 (Task D3): the blocks the builder emits with NEWS_EVENTS_V2_ENABLED=true
+ * — layered headlines, the own-instrument fresh count, ingestion health (news.asOf) and
+ * the events block. The cast is only because `ContextPacket` gains `news.asOf` and
+ * `events` in Task D1.
+ */
+const NEWS_V2_BLOCKS = {
+  news: {
+    headlines: present(
+      [
+        { title: 'Crude jumps 3% as OPEC+ signals deeper cuts', source: 'ET Commodities', sentiment: 'bullish', publishedAt: '2026-10-16T13:40:00.000Z', layer: 'instrument', key: 'CRUDEOIL', ageMin: 20 },
+        { title: 'Fed minutes show officials split on December cut', source: 'CNBC World', sentiment: 'neutral', publishedAt: '2026-10-16T11:05:00.000Z', layer: 'market', key: 'GLOBAL', ageMin: 175 },
+      ] as never,
+      'news-index (own → sector → index → market, published within 6h)',
+      '2026-10-16T13:40:00.000Z',
+    ),
+    freshCount: present(1, 'news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)', AT),
+    asOf: present(
+      { lastIngestAt: '2026-10-16T13:55:00.000Z', downSources: [], stale: false } as never,
+      'news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)',
+      '2026-10-16T13:55:00.000Z',
+    ),
+  },
+  events: {
+    upcoming: present(
+      [
+        {
+          kind: 'eia_petroleum',
+          scope: 'commodity',
+          title: 'EIA weekly petroleum status report',
+          atIst: '2026-10-21 20:00 IST',
+          minutesAway: 3420,
+          impact: 'high',
+          source: 'rule: EIA weekly petroleum status (Wed 10:30 ET)',
+        },
+      ] as never,
+      'market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)',
+      '2026-10-16T02:45:00.000Z',
+    ),
+    minutesToNextHighImpact: present(3420, 'market-events (timed high-impact events only)', AT),
+  },
+};
+export const GOLDEN_PACKET_NEWS = { ...GOLDEN_PACKET, news: NEWS_V2_BLOCKS.news, events: NEWS_V2_BLOCKS.events } as ContextPacket;
+export const GOLDEN_PACKET_NEWS_DISCIPLINE = {
+  ...GOLDEN_PACKET_DISCIPLINE,
+  news: NEWS_V2_BLOCKS.news,
+  events: NEWS_V2_BLOCKS.events,
+} as ContextPacket;
 
 /** `validVerdict` from services/sentinel-agent.service.spec.ts — cites real packet paths. */
 const VALID_VERDICT: Verdict = {
@@ -604,6 +663,58 @@ const SCENARIOS: Scenario[] = [
     () => jsonReply(VALID_VERDICT),
     GOLDEN_PACKET_DISCIPLINE,
   ),
+  // News & events v2 (Task D3): every news-on prompt variant, and observe (= off).
+  judgeScenario(
+    'judge-fire-cues-on-news-discipline',
+    { MARKET_CUES_ENABLED: 'true', EXIT_DISCIPLINE_ENABLED: 'true', NEWS_EVENTS_V2_ENABLED: 'true' },
+    'FIRE',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_NEWS_DISCIPLINE,
+  ),
+  judgeScenario(
+    'judge-heartbeat-cues-off-news-discipline',
+    { EXIT_DISCIPLINE_ENABLED: 'true', NEWS_EVENTS_V2_ENABLED: 'true' },
+    'HEARTBEAT',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_NEWS_DISCIPLINE,
+  ),
+  judgeScenario(
+    'judge-fire-cues-on-news',
+    { MARKET_CUES_ENABLED: 'true', NEWS_EVENTS_V2_ENABLED: 'true' },
+    'FIRE',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_NEWS,
+  ),
+  judgeScenario('judge-heartbeat-cues-off-news', { NEWS_EVENTS_V2_ENABLED: 'true' }, 'HEARTBEAT', () => jsonReply(VALID_VERDICT), GOLDEN_PACKET_NEWS),
+  judgeScenario(
+    'judge-fire-cues-on-news-triggers',
+    { MARKET_CUES_ENABLED: 'true', SENTINEL_TRIGGERS_ENABLED: 'true', NEWS_EVENTS_V2_ENABLED: 'true' },
+    'FIRE',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_NEWS,
+  ),
+  judgeScenario(
+    'judge-heartbeat-cues-off-news-triggers',
+    { SENTINEL_TRIGGERS_ENABLED: 'true', NEWS_EVENTS_V2_ENABLED: 'true' },
+    'HEARTBEAT',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_NEWS,
+  ),
+  judgeScenario(
+    'judge-fire-cues-on-news-discipline-triggers',
+    { MARKET_CUES_ENABLED: 'true', EXIT_DISCIPLINE_ENABLED: 'true', SENTINEL_TRIGGERS_ENABLED: 'true', NEWS_EVENTS_V2_ENABLED: 'true' },
+    'FIRE',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_NEWS_DISCIPLINE,
+  ),
+  judgeScenario(
+    'judge-heartbeat-cues-off-news-discipline-triggers',
+    { EXIT_DISCIPLINE_ENABLED: 'true', SENTINEL_TRIGGERS_ENABLED: 'true', NEWS_EVENTS_V2_ENABLED: 'true' },
+    'HEARTBEAT',
+    () => jsonReply(VALID_VERDICT),
+    GOLDEN_PACKET_NEWS_DISCIPLINE,
+  ),
+  judgeScenario('judge-heartbeat-cues-off-news-observe', { NEWS_EVENTS_V2_ENABLED: 'observe' }, 'HEARTBEAT', () => jsonReply(VALID_VERDICT)),
   { name: 'overnight', reply: () => jsonReply(VALID_OVERNIGHT), run: runOvernight },
   { name: 'thesis', reply: () => jsonReply(GOOD_THESIS), run: runThesis },
   judgeScenario('transport-throws', {}, 'FIRE', () => {

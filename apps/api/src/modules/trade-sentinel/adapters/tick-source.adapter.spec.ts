@@ -11,6 +11,7 @@ import type { HubPriceSource, HubPrices } from '../../market-hub/hub-prices';
 import type { HubExchange, InstrumentRef, PriceResult } from '../../market-hub/hub.types';
 import { SPOT_SOURCE_HUB } from '../services/context-packet.service';
 import { parseExitDisciplineConfig } from '../../exit-discipline/config';
+import { parseNewsEventsConfig } from '../../news-events/config';
 
 const NOW = new Date('2026-08-14T06:00:00Z');
 
@@ -42,7 +43,9 @@ const row = (over: Record<string, unknown> = {}) => ({
  * for it — the blind case is what shipped, and it should never be what a new
  * test gets by accident.
  */
-function make(opts: { withFeed?: boolean; hub?: HubPriceSource; minuteBars?: unknown; discipline?: unknown } = {}) {
+function make(
+  opts: { withFeed?: boolean; hub?: HubPriceSource; minuteBars?: unknown; discipline?: unknown; news?: { mode: string; peek: jest.Mock } } = {},
+) {
   const fetchQuote = jest.fn().mockResolvedValue(null);
   const userFeed = opts.withFeed === false ? undefined : ({ fetchQuote } as never);
   const findUnique = jest.fn().mockResolvedValue(row());
@@ -72,6 +75,8 @@ function make(opts: { withFeed?: boolean; hub?: HubPriceSource; minuteBars?: unk
     opts.hub ? ({ get: jest.fn(() => opts.hub) } as never) : undefined,
     opts.minuteBars as never,
     opts.discipline as never,
+    opts.news ? parseNewsEventsConfig({ NEWS_EVENTS_V2_ENABLED: opts.news.mode }) : undefined,
+    opts.news ? ({ peek: opts.news.peek, onAdded: jest.fn() } as never) : undefined,
   );
   return {
     svc,
@@ -1169,5 +1174,49 @@ describe('freshNewsCount — never a present 0 for an underlying the tagger can 
 
     expect(t.getNewsForSymbol).toHaveBeenCalledWith('GOLD');
     expect(tick.freshNewsCount).toBe(1);
+  });
+});
+
+describe('news & events v2: the fresh count comes from the index when true', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(NOW));
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+  const okPeek = () =>
+    jest.fn().mockReturnValue({
+      status: 'ok', headlines: [], newestAt: null, freshCount: 2, fresh: [{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }],
+      asOf: { lastIngestAt: null, downSources: [], stale: false },
+    });
+  it('true: count and ids from the index; the aggregator is never queried', async () => {
+    const peek = okPeek();
+    const t = make({ news: { mode: 'true', peek } });
+    const tick = await t.svc.tickFor('t1');
+    expect(tick.freshNewsCount).toBe(2);
+    expect(tick.freshNews).toEqual([{ id: 'a', title: 'A' }, { id: 'b', title: 'B' }]);
+    expect(t.getNewsForSymbol).not.toHaveBeenCalled();
+    expect(peek.mock.calls[0][0]).toMatchObject({ kind: 'STOCK', key: 'SUZLON' });
+  });
+  it('true + index warming: null (no reading), no ids', async () => {
+    const t = make({ news: { mode: 'true', peek: jest.fn().mockReturnValue({ status: 'warming', reason: 'x' }) } });
+    const tick = await t.svc.tickFor('t1');
+    expect(tick.freshNewsCount).toBeNull();
+    expect(tick).not.toHaveProperty('freshNews');
+    expect(t.getNewsForSymbol).not.toHaveBeenCalled();
+  });
+  it('true + a throwing index: null, logged, never thrown', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const t = make({ news: { mode: 'true', peek: jest.fn(() => { throw new Error('boom'); }) } });
+    const tick = await t.svc.tickFor('t1');
+    expect(tick.freshNewsCount).toBeNull();
+    expect(tick).not.toHaveProperty('freshNews');
+  });
+  it.each(['observe', 'false', 'ture'])('%s: exactly the legacy read, no freshNews key', async (mode) => {
+    const peek = okPeek();
+    const t = make({ news: { mode, peek } });
+    const tick = await t.svc.tickFor('t1');
+    expect(t.getNewsForSymbol).toHaveBeenCalled();
+    expect(peek).not.toHaveBeenCalled();
+    expect(tick).not.toHaveProperty('freshNews');
   });
 });

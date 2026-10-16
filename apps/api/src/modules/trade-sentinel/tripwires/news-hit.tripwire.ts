@@ -8,7 +8,20 @@ import type { Tripwire, TripwireFire, TripwireInput } from './types';
 export const newsHit: Tripwire = {
   name: 'news-hit',
 
-  check({ freshNewsCount }: TripwireInput): TripwireFire | null {
+  check({ freshNewsCount, newsUnseen }: TripwireInput): TripwireFire | null {
+    // News & events v2 (`true`): edge-triggered on headlines this tracker has not
+    // fired on yet — a busy 30-minute window must not re-fire every pass.
+    if (newsUnseen !== undefined) {
+      if (newsUnseen.length === 0) return null;
+      const newest = newsUnseen[0].title;
+      return {
+        name: 'news-hit',
+        detail:
+          newsUnseen.length === 1
+            ? `new headline on this instrument: "${newest}"`
+            : `${newsUnseen.length} new headlines on this instrument, newest: "${newest}"`,
+      };
+    }
     // Absent data is not a signal. `=== null` alone is not enough: `undefined`
     // and `NaN` both fail `< 1`, so they would fire and hand the agent
     // "NaN fresh headline(s)" as evidence. A non-reading is not a reading.

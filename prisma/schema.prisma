@@ -351,10 +351,56 @@ model NewsArticle {
   relatedSymbols  String[] @default([])
   publishedAt     DateTime
   fetchedAt       DateTime @default(now())
+  /// News & events v2 tag-once columns (spec §5/§11). `instruments` is separate from
+  /// `relatedSymbols` so the legacy packet is unchanged in observe mode (plan "differs" 1).
+  instruments     String[] @default([])
+  sectors         String[] @default([])
+  indices         String[] @default([])
+  markets         String[] @default([])
+  tagVersion      Int      @default(0)
+  dateInferred    Boolean  @default(false)
 
   @@index([category, publishedAt])
   @@index([sentiment])
+  @@index([relatedSymbols], type: Gin)
+  @@index([instruments], type: Gin)
+  @@index([sectors], type: Gin)
+  @@index([indices], type: Gin)
+  @@index([fetchedAt])
   @@map("news_articles")
+}
+
+/// Company-name aliases for news tagging (news-events v2 §5.2). kind: official|derived|curated|blocked.
+model InstrumentNameAlias {
+  id        String   @id @default(cuid())
+  symbol    String
+  alias     String
+  kind      String
+  source    String
+  updatedAt DateTime @updatedAt
+
+  @@unique([alias, symbol])
+  @@index([symbol])
+  @@map("instrument_name_aliases")
+}
+
+/// Scheduled events (news-events v2 §8). scope: company|market|commodity; impact: high|medium|low.
+model MarketEvent {
+  id        String   @id @default(cuid())
+  scope     String
+  kind      String
+  key       String
+  title     String
+  startsAt  DateTime @db.Timestamptz(3)
+  allDay    Boolean  @default(false)
+  impact    String
+  source    String
+  sourceRef String?
+  fetchedAt DateTime @default(now())
+
+  @@unique([kind, key, startsAt])
+  @@index([key, startsAt])
+  @@map("market_events")
 }
 
 // ============================================
@@ -1643,6 +1689,9 @@ model SentinelVerdict {
   /// ({v:1, instrument, op, price, watch, seen} or {v:1, problem}); NULL when the
   /// verdict carried none. Read only by sentinel-executor's TriggerWatchService.
   exitTrigger    Json?
+  /// News & events v2 OBSERVE mode: the {news, events} blocks the packet WOULD have
+  /// carried; NULL unless NEWS_EVENTS_V2_ENABLED=observe.
+  newsShadow     Json?
   createdAt      DateTime @default(now())
 
   @@index([userId, createdAt])

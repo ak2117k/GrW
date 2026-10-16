@@ -13,6 +13,7 @@ import {
   type SentinelPromptOptions,
 } from '../prompts/sentinel-system-prompt';
 import { parseExitDisciplineConfig } from '../../exit-discipline/config';
+import { parseNewsEventsConfig } from '../../news-events/config';
 import type { WakeTrigger } from './tripwire.service';
 import {
   SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION,
@@ -255,6 +256,8 @@ export class SentinelAgentService {
    *    executor's trigger watcher uses; off ⇒ no claim that an exitTrigger is executed.
    *  - discipline: EXIT_DISCIPLINE_ENABLED, parsed exactly as the tick source,
    *    the cycle and the executor's gate parse it (ON unless exactly 'false').
+   *  - news: NEWS_EVENTS_V2_ENABLED exactly 'true' (parseNewsEventsConfig().rendering);
+   *    'observe' and typos are off — the news-off text and stamp.
    */
   private get promptOptions(): SentinelPromptOptions {
     return {
@@ -263,6 +266,9 @@ export class SentinelAgentService {
       discipline: parseExitDisciplineConfig({
         EXIT_DISCIPLINE_ENABLED: this.config?.get<string>('EXIT_DISCIPLINE_ENABLED') ?? undefined,
       }).enabled,
+      news: parseNewsEventsConfig({
+        NEWS_EVENTS_V2_ENABLED: this.config?.get<string>('NEWS_EVENTS_V2_ENABLED') ?? undefined,
+      }).rendering,
     };
   }
 

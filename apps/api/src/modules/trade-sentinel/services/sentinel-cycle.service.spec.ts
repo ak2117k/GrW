@@ -23,6 +23,9 @@ import { HEARTBEAT_INTERVAL_MS, type TripwireResult } from './tripwire.service';
 import { EXIT_CONFIRM_MAX_RELOOKS, EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, type ExitDisciplineConfig } from '../../exit-discipline/config';
 import { STORED_TRIGGER_FIXTURE } from './exit-trigger-proposal';
 import { TickSensorBook } from './tick-sensor-book';
+import { NEWS_EVENTS_CONFIG, parseNewsEventsConfig, type NewsEventsConfig } from '../../news-events/config';
+import { MARKET_EVENTS } from '../ports/events.port';
+import { NewsWatchBook } from './news-watch-book';
 
 const USER = 'u1';
 
@@ -98,7 +101,7 @@ const verdictRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function makeSvc(discipline?: ExitDisciplineConfig) {
+function makeSvc(discipline?: ExitDisciplineConfig, news?: { cfg?: NewsEventsConfig; events?: unknown; watch?: NewsWatchBook }) {
   const build = jest.fn().mockResolvedValue([]);
   const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
   const buildPacket = jest.fn();
@@ -142,6 +145,9 @@ function makeSvc(discipline?: ExitDisciplineConfig) {
     { tickFor } as never,
     undefined,
     discipline,
+    news?.watch,
+    news?.cfg,
+    news?.events as never,
   );
 
   return {
@@ -428,6 +434,8 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     join(__dirname, 'tick-tripwire.service.ts'),
     // Exit discipline: the exit-confirm re-look is reached from the cycle.
     join(__dirname, '..', 'tripwires', 'exit-confirm.ts'),
+    // News & events v2: index additions wake the runner. A production entry point, so it is walked.
+    join(__dirname, 'news-wake.service.ts'),
   ];
 
   /**
@@ -552,9 +560,11 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         'design:paramtypes',
         SentinelCycleService,
       ) ?? [];
-    // 10: the eighth is the TickSource; the ninth the optional TickSensorBook (Part B,
-    // memory only); the tenth the exit-discipline CONFIG (a plain parsed value object).
-    expect(injected).toHaveLength(10);
+    // 13: the eighth is the TickSource; the ninth the optional TickSensorBook (Part B,
+    // memory only); the tenth the exit-discipline CONFIG (a plain parsed value object);
+    // the 11th–13th news & events v2: NewsWatchBook (memory only), its CONFIG (a plain
+    // parsed value object) and the MARKET_EVENTS port (a synchronous peek, type-only).
+    expect(injected).toHaveLength(13);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -567,6 +577,8 @@ describe('SentinelCycleService — shadow mode is structural', () => {
       expect.arrayContaining([
         expect.objectContaining({ index: 7, param: TICK_SOURCE }),
         expect.objectContaining({ index: 9, param: EXIT_DISCIPLINE_CONFIG }),
+        expect.objectContaining({ index: 11, param: NEWS_EVENTS_CONFIG }),
+        expect.objectContaining({ index: 12, param: MARKET_EVENTS }),
       ]),
     );
 
@@ -2373,5 +2385,173 @@ describe('SentinelCycleService — publishes tick-sensor context (Part B)', () =
     await svc.runForUser(USER);
     expect(book.size()).toBe(0);
     expect(book.forKey('NSE:99926000')).toEqual([]);
+  });
+});
+
+describe('news & events v2 observe — the shadow is stored beside the verdict, never in it', () => {
+  const shadow = {
+    news: { headlines: { available: false, reason: 'x' }, freshCount: { available: true, value: 0, source: 's', at: 'a' }, asOf: { available: false, reason: 'x' } },
+    events: { upcoming: { available: false, reason: 'y' }, minutesToNextHighImpact: { available: false, reason: 'y' } },
+  };
+
+  it('records newsShadow when the packet service returns one, and logs one [news-shadow] line', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    const log = jest.spyOn((t.svc as unknown as { logger: { log: (m: string) => void } }).logger, 'log').mockImplementation(() => undefined);
+    (t.svc as unknown as { packets: Record<string, unknown> }).packets.shadowNewsEvents = jest.fn().mockReturnValue(shadow);
+    await t.svc.runForUser(USER);
+    expect(t.record.mock.calls[0][0].newsShadow).toEqual(shadow);
+    expect(t.judge.mock.calls[0][0]).not.toHaveProperty('newsShadow');
+    expect(log.mock.calls.filter((c) => String(c[0]).startsWith('[news-shadow] T1 HOLD: headlines absent'))).toHaveLength(1);
+  });
+
+  it('flag off: the record carries no newsShadow key at all', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    (t.svc as unknown as { packets: Record<string, unknown> }).packets.shadowNewsEvents = jest.fn().mockReturnValue(null);
+    await t.svc.runForUser(USER);
+    expect('newsShadow' in t.record.mock.calls[0][0]).toBe(false);
+  });
+
+  it('a packets double without shadowNewsEvents is "off"', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    await t.svc.runForUser(USER);
+    expect('newsShadow' in t.record.mock.calls[0][0]).toBe(false);
+  });
+
+  it('a throwing shadow never costs the verdict: recorded without newsShadow', async () => {
+    const t = makeSvc();
+    t.build.mockResolvedValue([watched('t1')]);
+    jest.spyOn((t.svc as unknown as { logger: { warn: (m: string) => void } }).logger, 'warn').mockImplementation(() => undefined);
+    (t.svc as unknown as { packets: Record<string, unknown> }).packets.shadowNewsEvents = jest.fn(() => {
+      throw new Error('boom');
+    });
+    await t.svc.runForUser(USER);
+    expect(t.record).toHaveBeenCalledTimes(1);
+    expect('newsShadow' in t.record.mock.calls[0][0]).toBe(false);
+  });
+});
+
+describe('news & events v2 in the sensor pass', () => {
+  const cfg = (mode: string) => parseNewsEventsConfig({ NEWS_EVENTS_V2_ENABLED: mode });
+  const near = (minutesAway: number, over: Record<string, unknown> = {}) => ({
+    status: 'ok',
+    events: [{ id: 'eia1', kind: 'eia_petroleum', scope: 'commodity', title: 'EIA weekly petroleum status report', atIst: 'x', minutesAway, impact: 'high', source: 's', allDay: false, ...over }],
+    minutesToNextHighImpact: minutesAway,
+    noHighImpactReason: null,
+    notes: [],
+    fetchedAt: null,
+  });
+  const fresh = [{ id: 'a', title: 'A' }];
+
+  it.each([undefined, 'false'])('%s: the sensor input has neither key (byte-for-byte the old input), nothing peeked', async (mode) => {
+    const peek = jest.fn(() => near(10));
+    const watch = new NewsWatchBook();
+    const t = makeSvc(undefined, { cfg: mode === undefined ? undefined : cfg(mode), events: { peek }, watch });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ freshNews: fresh }));
+    await t.svc.runForUser(USER);
+    expect(tripwireInput(t.evaluate)).not.toHaveProperty('newsUnseen');
+    expect(tripwireInput(t.evaluate)).not.toHaveProperty('eventNear');
+    expect(peek).not.toHaveBeenCalled();
+    expect(watch.size()).toBe(0);
+  });
+
+  it('true: unseen ids go in; after a news-hit fire they are seen; the next fire waits out the 5-min cooldown', async () => {
+    const t = makeSvc(undefined, { cfg: cfg('true') });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ freshNews: fresh }));
+    t.evaluate.mockReturnValueOnce({ fires: [{ name: 'news-hit', detail: 'x' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    const t0 = new Date('2026-10-16T05:00:00Z');
+    await t.svc.runForUser(USER, t0);
+    expect(tripwireInput(t.evaluate, 0).newsUnseen).toEqual(fresh);
+    t.tickFor.mockResolvedValue(tick({ freshNews: [...fresh, { id: 'b', title: 'B' }] }));
+    await t.svc.runForUser(USER, new Date(t0.getTime() + 60_000));
+    expect(tripwireInput(t.evaluate, 1).newsUnseen).toEqual([]); // b is new but inside the cooldown
+    await t.svc.runForUser(USER, new Date(t0.getTime() + 5 * 60_000));
+    expect(tripwireInput(t.evaluate, 2).newsUnseen).toEqual([{ id: 'b', title: 'B' }]);
+  });
+
+  it('true: a news-hit / event-near fire swallowed by the agent backoff is NOT spent — it fires again once the backoff ends', async () => {
+    const peek = jest.fn().mockReturnValue(near(12));
+    const t = makeSvc(undefined, { cfg: cfg('true'), events: { peek } });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ structureSymbol: 'INFY', freshNews: fresh }));
+    const t0 = new Date('2026-10-16T05:00:00Z');
+    const state = (t.svc as unknown as { stateFor: (e: unknown) => { agentRetryAt: number } }).stateFor(watched('t1'));
+    state.agentRetryAt = t0.getTime() + 120_000; // the judge is in its failure backoff
+    t.evaluate.mockReturnValueOnce({
+      fires: [{ name: 'news-hit', detail: 'x' }, { name: 'event-near', detail: 'y' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE',
+    });
+    await t.svc.runForUser(USER, t0);
+    expect(t.judge).not.toHaveBeenCalled();
+    await t.svc.runForUser(USER, new Date(t0.getTime() + 180_000));
+    expect(tripwireInput(t.evaluate, 1).newsUnseen).toEqual(fresh);
+    expect(tripwireInput(t.evaluate, 1).eventNear).toMatchObject({ id: 'eia1' });
+  });
+
+  it('true: unseen ids that did NOT fire (sensor silent) stay unseen', async () => {
+    const t = makeSvc(undefined, { cfg: cfg('true') });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ freshNews: fresh }));
+    await t.svc.runForUser(USER);
+    await t.svc.runForUser(USER);
+    expect(tripwireInput(t.evaluate, 1).newsUnseen).toEqual(fresh);
+  });
+
+  it('true: a timed high-impact event ≤ 15 min away is passed once per (tracker, event); all-day and > 15 min never', async () => {
+    const peek = jest.fn().mockReturnValue(near(12));
+    const t = makeSvc(undefined, { cfg: cfg('true'), events: { peek } });
+    t.build.mockResolvedValue([watched('t1', { exchange: 'MCX' })]);
+    t.tickFor.mockResolvedValue(tick({ structureSymbol: 'CRUDEOILM', expiry: '2026-11-19' }));
+    t.evaluate.mockReturnValueOnce({ fires: [{ name: 'event-near', detail: 'x' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    await t.svc.runForUser(USER);
+    expect(peek.mock.calls[0][0]).toMatchObject({ kind: 'COMMODITY', key: 'CRUDEOIL' });
+    expect(tripwireInput(t.evaluate, 0).eventNear).toEqual({ id: 'eia1', title: 'EIA weekly petroleum status report', minutesAway: 12 });
+    await t.svc.runForUser(USER);
+    expect(tripwireInput(t.evaluate, 1).eventNear).toBeNull();
+    peek.mockReturnValue(near(20, { id: 'eia2' }));
+    await t.svc.runForUser(USER);
+    expect(tripwireInput(t.evaluate, 2).eventNear).toBeNull();
+    peek.mockReturnValue(near(5, { id: 'res', allDay: true }));
+    await t.svc.runForUser(USER);
+    expect(tripwireInput(t.evaluate, 3).eventNear).toBeNull();
+  });
+
+  it('true: a throwing events peek is no event, never a failed pass', async () => {
+    const peek = jest.fn(() => {
+      throw new Error('boom');
+    });
+    const t = makeSvc(undefined, { cfg: cfg('true'), events: { peek } });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ structureSymbol: 'INFY' }));
+    await t.svc.runForUser(USER);
+    expect(tripwireInput(t.evaluate, 0).eventNear).toBeNull();
+    expect(t.record).toHaveBeenCalledTimes(1);
+  });
+
+  it('observe: no new input keys; a would-fire line for the event, once', async () => {
+    const t = makeSvc(undefined, { cfg: cfg('observe'), events: { peek: jest.fn().mockReturnValue(near(12)) } });
+    const log = jest.spyOn((t.svc as unknown as { logger: { log: (m: string) => void } }).logger, 'log').mockImplementation(() => undefined);
+    t.build.mockResolvedValue([watched('t1', { exchange: 'MCX' })]);
+    t.tickFor.mockResolvedValue(tick({ structureSymbol: 'CRUDEOILM', expiry: '2026-11-19', freshNews: fresh }));
+    await t.svc.runForUser(USER);
+    await t.svc.runForUser(USER);
+    expect(tripwireInput(t.evaluate, 0)).not.toHaveProperty('eventNear');
+    expect(tripwireInput(t.evaluate, 0)).not.toHaveProperty('newsUnseen');
+    expect(log.mock.calls.filter((c) => String(c[0]).startsWith('[news-wake] observe: would fire event-near'))).toHaveLength(1);
+  });
+
+  it('feeds the news watch book for the wake service (computing modes only), and prunes it with the roster', async () => {
+    const watch = new NewsWatchBook();
+    const t = makeSvc(undefined, { cfg: cfg('observe'), watch });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ structureSymbol: 'INFY' }));
+    await t.svc.runForUser(USER);
+    expect(watch.matching(['I:INFY']).map((w) => w.trackerId)).toEqual(['t1']);
+    t.build.mockResolvedValue([]);
+    await t.svc.runForUser(USER);
+    expect(watch.size()).toBe(0);
   });
 });

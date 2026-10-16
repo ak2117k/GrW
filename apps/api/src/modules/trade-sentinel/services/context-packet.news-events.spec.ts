@@ -40,7 +40,7 @@ it('FLAG OFF IS MAIN, BYTE FOR BYTE (hashes recorded on main @ 7b976b3)', async 
   const out: Record<string, string> = {};
   for (const [name, e, t] of FIXTURES) {
     const svc = new ContextPacketService({ recentForTracker: jest.fn().mockResolvedValue([]) } as never, { levelsFor: jest.fn().mockResolvedValue(null) } as never, { recentFor: legacyRecentFor() } as never);
-    out[name] = sha(await svc.build(e as never, t));
+    out[name] = sha(await svc.build(e as never, t, null));
   }
   expect(out).toEqual(MAIN_PACKET_SHA256);
 });
@@ -77,7 +77,7 @@ describe('news & events v2 in the live packet', () => {
   it.each(['false', 'observe', 'ture'])('NEWS_EVENTS_V2_ENABLED=%s builds exactly the flag-off packet (main hashes) and never peeks', async (mode) => {
     for (const [name, e, t] of FIXTURES) {
       const m = make(mode, boom, boom);
-      expect(sha(await m.svc.build(e as never, t))).toBe(MAIN_PACKET_SHA256[name]);
+      expect(sha(await m.svc.build(e as never, t, null))).toBe(MAIN_PACKET_SHA256[name]);
       expect(m.index.peek).not.toHaveBeenCalled();
       expect(m.cal.peek).not.toHaveBeenCalled();
     }
@@ -85,7 +85,7 @@ describe('news & events v2 in the live packet', () => {
 
   it('true: layered news + events replace the legacy blocks; the legacy news shim is never called; key order', async () => {
     const m = make('true');
-    const p = await m.svc.build(FIXTURES[0][1] as never, FIXTURES[0][2]);
+    const p = await m.svc.build(FIXTURES[0][1] as never, FIXTURES[0][2], null);
     expect(m.recentFor).not.toHaveBeenCalled();
     expect(Object.keys(p)).toEqual(['position', 'money', 'thesis', 'structure', 'flow', 'macro', 'news', 'events', 'session', 'trigger', 'memory']);
     expect(Object.keys(p.news)).toEqual(['headlines', 'freshCount', 'asOf']);
@@ -93,24 +93,24 @@ describe('news & events v2 in the live packet', () => {
     expect(p.news.freshCount).toMatchObject({ available: true, value: 1 });
     expect(p.news.asOf).toMatchObject({ available: true, value: { lastIngestAt: '2026-10-16T04:55:00.000Z', downSources: [], stale: false } });
     expect(p.events?.upcoming).toMatchObject({ available: true, value: [{ kind: 'fomc', scope: 'market', title: 'FOMC rate decision', atIst: '2026-10-29 00:30 IST', minutesAway: 42, impact: 'high', source: 'config/market-events.json' }] });
-    expect((p.events?.upcoming as { value: Array<Record<string, unknown>> }).value[0]).not.toHaveProperty('id');
-    expect((p.events?.upcoming as { value: Array<Record<string, unknown>> }).value[0]).not.toHaveProperty('allDay');
+    expect((p.events?.upcoming as unknown as { value: Array<Record<string, unknown>> }).value[0]).not.toHaveProperty('id');
+    expect((p.events?.upcoming as unknown as { value: Array<Record<string, unknown>> }).value[0]).not.toHaveProperty('allDay');
     expect(p.events?.minutesToNextHighImpact).toMatchObject({ available: true, value: 42 });
   });
 
   it('true: the peeks get the resolved position (index option, MCX mini → benchmark)', async () => {
     const m = make('true');
-    await m.svc.build(FIXTURES[1][1] as never, FIXTURES[1][2]);
+    await m.svc.build(FIXTURES[1][1] as never, FIXTURES[1][2], null);
     expect(m.index.peek.mock.calls[0][0]).toEqual({ kind: 'INDEX', underlying: 'NIFTY', key: 'NIFTY', exchange: 'NFO', expiry: '2026-10-28' });
     expect(m.index.peek.mock.calls[0][1]).toEqual(T0);
     const c = make('true');
-    await c.svc.build(FIXTURES[2][1] as never, FIXTURES[2][2]);
+    await c.svc.build(FIXTURES[2][1] as never, FIXTURES[2][2], null);
     expect(c.cal.peek.mock.calls[0][0]).toMatchObject({ kind: 'COMMODITY', key: 'CRUDEOIL', expiry: '2026-11-19' });
   });
 
   it('true: an MCX underlying with no mapping → news absent WITH the reason (never 0), events still computed', async () => {
     const m = make('true');
-    const p = await m.svc.build(entry('MCX', 'STEELREBAR19NOV26FUT') as never, { ...baseTick, segment: 'FUT', structureSymbol: 'STEELREBAR', expiry: '2026-11-19' } as TickSnapshot);
+    const p = await m.svc.build(entry('MCX', 'STEELREBAR19NOV26FUT') as never, { ...baseTick, segment: 'FUT', structureSymbol: 'STEELREBAR', expiry: '2026-11-19' } as TickSnapshot, null);
     for (const b of [p.news.headlines, p.news.freshCount, p.news.asOf]) expect(b).toEqual({ available: false, reason: expect.stringMatching(/STEELREBAR.*NOT a finding/) });
     expect(m.index.peek).not.toHaveBeenCalled();
     expect(m.cal.peek.mock.calls[0][0]).toMatchObject({ kind: 'COMMODITY', key: 'STEELREBAR' });
@@ -118,7 +118,7 @@ describe('news & events v2 in the live packet', () => {
 
   it('true: an unresolved underlying → all five blocks absent, nothing peeked', async () => {
     const m = make('true');
-    const p = await m.svc.build(FIXTURES[3][1] as never, FIXTURES[3][2]);
+    const p = await m.svc.build(FIXTURES[3][1] as never, FIXTURES[3][2], null);
     for (const b of [p.news.headlines, p.news.freshCount, p.news.asOf, p.events?.upcoming, p.events?.minutesToNextHighImpact]) {
       expect(b).toEqual({ available: false, reason: expect.stringMatching(/could not be resolved/) });
     }
@@ -128,7 +128,7 @@ describe('news & events v2 in the live packet', () => {
 
   it('true: a warming index is "cannot see" on every news block — freshCount is NOT 0', async () => {
     const m = make('true', { status: 'warming', reason: 'the news index is still loading after a restart — headlines exist that this process cannot see yet; this is NOT a finding that nothing was published' });
-    const p = await m.svc.build(FIXTURES[0][1] as never, FIXTURES[0][2]);
+    const p = await m.svc.build(FIXTURES[0][1] as never, FIXTURES[0][2], null);
     expect(p.news.freshCount).toEqual({ available: false, reason: expect.stringMatching(/still loading/) });
     expect(p.news.headlines).toEqual({ available: false, reason: expect.stringMatching(/still loading/) });
     expect(p.news.asOf).toEqual({ available: false, reason: expect.stringMatching(/still loading/) });
@@ -136,7 +136,7 @@ describe('news & events v2 in the live packet', () => {
 
   it('true: a throwing peek becomes an absence naming the failed read', async () => {
     const m = make('true', boom, boom);
-    const p = await m.svc.build(FIXTURES[0][1] as never, FIXTURES[0][2]);
+    const p = await m.svc.build(FIXTURES[0][1] as never, FIXTURES[0][2], null);
     expect(p.news.headlines).toEqual({ available: false, reason: 'news index could not be read: must not be called' });
     expect(p.events?.upcoming).toEqual({ available: false, reason: 'events calendar could not be read: must not be called' });
   });
@@ -146,7 +146,7 @@ describe('news & events v2 in the live packet', () => {
       { recentForTracker: jest.fn().mockResolvedValue([]) } as never, { levelsFor: jest.fn().mockResolvedValue(null) } as never, { recentFor: legacyRecentFor() } as never,
       undefined, parseNewsEventsConfig({ NEWS_EVENTS_V2_ENABLED: 'true' }),
     );
-    const p = await svc.build(FIXTURES[0][1] as never, FIXTURES[0][2]);
+    const p = await svc.build(FIXTURES[0][1] as never, FIXTURES[0][2], null);
     expect(p.news.freshCount).toEqual({ available: false, reason: expect.stringMatching(/not wired/) });
     expect(p.events?.upcoming).toEqual({ available: false, reason: expect.stringMatching(/not wired/) });
   });

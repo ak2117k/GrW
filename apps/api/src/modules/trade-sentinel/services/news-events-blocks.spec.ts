@@ -51,7 +51,7 @@ it('warming / unavailable / not wired: every block absent with the reason', () =
 it('events: the packet carries the seven fields only (no id, no allDay); at most what the peek gave', () => {
   const b = eventsBlocks(events(2, 10), AT, 3);
   expect(b.upcoming).toMatchObject({ available: true });
-  const v = (b.upcoming as { value: Array<Record<string, unknown>> }).value;
+  const v = (b.upcoming as unknown as { value: Array<Record<string, unknown>> }).value;
   expect(Object.keys(v[0])).toEqual(['kind', 'scope', 'title', 'atIst', 'minutesAway', 'impact', 'source']);
   expect(b.upcoming).toMatchObject({ source: expect.stringMatching(/ — macro schedule ends 2026-11-01$/) });
 });

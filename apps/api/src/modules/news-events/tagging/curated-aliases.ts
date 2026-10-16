@@ -33,6 +33,30 @@ export const CURATED_ALIASES: Readonly<Record<string, string>> = {
   BEL: 'BEL',
   'Adani Ports': 'ADANIPORTS',
   'Adani Enterprises': 'ADANIENT',
+  // Tata Motors demerger (2025): the specific forms name ONE successor. The bare
+  // parent name is ambiguous — see AMBIGUOUS_ALIASES.
+  'Tata Motors Passenger Vehicles': 'TMPV',
+  'Tata Motors PV': 'TMPV',
+  'Jaguar Land Rover': 'TMPV',
+  JLR: 'TMPV',
+  'Tata Motors CV': 'TMCV',
+  'Tata Motors Commercial Vehicles': 'TMCV',
+};
+
+/**
+ * Parent names a demerger left AMBIGUOUS → EVERY successor symbol. Without this the
+ * name follows whichever company kept it in EQUITY_L: after the Tata Motors demerger
+ * the CV business (TMCV) is "Tata Motors Limited", so every "Tata Motors" headline —
+ * many of them about JLR and passenger cars (TMPV) — would land on TMCV alone and
+ * never reach a TMPV position. Tagging BOTH is the conservative choice: the judge
+ * reads the title and can tell them apart, a missed own-instrument headline cannot
+ * be recovered, and a headline alone is never a reason for EXIT_NOW (prompt v9; the
+ * exit-discipline gate is price-based). The longer specific forms in CURATED_ALIASES
+ * still win (longest match). Revisit when the media settles on the new names.
+ */
+export const AMBIGUOUS_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  'Tata Motors': ['TMCV', 'TMPV'],
+  'Tata Motors Limited': ['TMCV', 'TMPV'],
 };
 
 /** Single words that are company names AND ordinary words (spec §5.2 guard). Compared case-insensitively. */

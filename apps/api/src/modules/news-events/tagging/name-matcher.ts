@@ -1,7 +1,8 @@
 import { hasNoCaseSignal } from '../../news/services/extract-symbols';
 import type { AliasRow } from './alias-derivation';
 
-interface Node { next: Map<string, Node>; symbol?: string }
+/** `symbols` has more than one entry only for an AMBIGUOUS_ALIASES name (a demerged parent). */
+interface Node { next: Map<string, Node>; symbols?: string[] }
 const TOKEN_RE = /[A-Za-z0-9]+(?:[&'’.][A-Za-z0-9]+)*/g;
 
 function tokens(text: string): Array<{ t: string; start: number; end: number }> {
@@ -33,9 +34,15 @@ export class NameMatcher {
         }
         n = c;
       }
-      if (n !== this.root && !n.symbol) {
-        n.symbol = r.symbol;
+      if (n === this.root) continue;
+      if (!n.symbols) {
+        n.symbols = [r.symbol];
         this.count++;
+        this.bytes += r.symbol.length * 2;
+      } else if (r.kind === 'curated' && !n.symbols.includes(r.symbol)) {
+        // Only a curated row may add a second owner (AMBIGUOUS_ALIASES); deriveAliases
+        // already drops derived names two symbols share.
+        n.symbols.push(r.symbol);
         this.bytes += r.symbol.length * 2;
       }
     }
@@ -58,14 +65,14 @@ export class NameMatcher {
     let i = 0;
     while (i < tk.length) {
       let n: Node | undefined = this.root;
-      let best: { j: number; symbol: string } | null = null;
+      let best: { j: number; symbols: string[] } | null = null;
       for (let j = i; j < tk.length && n; j++) {
         n = n.next.get(tk[j].t);
-        if (n?.symbol) best = { j, symbol: n.symbol };
+        if (n?.symbols) best = { j, symbols: n.symbols };
       }
       if (best) {
         spans.push([tk[i].start, tk[best.j].end]);
-        if (!symbols.includes(best.symbol)) symbols.push(best.symbol);
+        for (const s of best.symbols) if (!symbols.includes(s)) symbols.push(s);
         i = best.j + 1;
       } else i++;
     }

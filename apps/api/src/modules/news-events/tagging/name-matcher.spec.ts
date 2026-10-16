@@ -19,7 +19,8 @@ const m = new NameMatcher(
 );
 
 it.each([
-  ['Tata Motors recalls 10,000 cars', ['TATAMOTORS']],
+  ['Tata Steel cuts European output', ['TATASTEEL']],
+  ['Tata Motors recalls 10,000 cars (a demerged parent name: both successors, see AMBIGUOUS_ALIASES)', ['TMCV', 'TMPV']],
   ['Tata group shares mixed', []],
   ['Senco Gold Q2 profit doubles', ['SENCO']],
   ['Hindustan Zinc raises output', ['HINDZINC']],
@@ -52,4 +53,24 @@ it('one pass regardless of alias count: 20k aliases match in < 2 ms per article'
   for (let i = 0; i < 100; i++) big.match(text);
   expect(Number(process.hrtime.bigint() - t0) / 1e6 / 100).toBeLessThan(2);
   expect(big.approxBytes()).toBeLessThan(2 * 1024 * 1024 * 2); // spec: ≤ 2 MB for ~2k real aliases; 20k synthetic stays < 4 MB
+});
+
+describe('an alias with several owners (Tata Motors demerger) tags every owner', () => {
+  const d = new NameMatcher(
+    deriveAliases(
+      [
+        { symbol: 'TMCV', name: 'Tata Motors Limited' },
+        { symbol: 'TMPV', name: 'Tata Motors Passenger Vehicles Limited' },
+      ],
+      CURATED_ALIASES,
+    ),
+  );
+  it.each([
+    ['Tata Motors shares slip 3%', ['TMCV', 'TMPV']],
+    ['Tata Motors Passenger Vehicles raises prices', ['TMPV']],
+    ['Tata Motors CV sales up 9% in September', ['TMCV']],
+    ['JLR wholesales fall after cyber attack', ['TMPV']],
+  ])('%s', (text, want) => {
+    expect([...d.match(text).symbols].sort()).toEqual(want);
+  });
 });

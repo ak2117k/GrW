@@ -4,7 +4,7 @@ import { AliasLoaderService, EQUITY_L_URL } from './alias-loader.service';
 import { parseEquityL } from './alias-derivation';
 import { parseNewsEventsConfig } from '../config';
 
-const csv = 'SYMBOL,NAME OF COMPANY, SERIES\nTATAMOTORS,Tata Motors Limited,EQ\nINFY,Infosys Limited,EQ\n';
+const csv = 'SYMBOL,NAME OF COMPANY, SERIES\nTATASTEEL,Tata Steel Limited,EQ\nINFY,Infosys Limited,EQ\n';
 
 function harness(getText: jest.Mock) {
   const tx = { instrumentNameAlias: { deleteMany: jest.fn(), createMany: jest.fn() } };
@@ -24,7 +24,7 @@ it('refresh: EQUITY_L → aliases replaced in one transaction → matcher rebuil
   expect(getText).toHaveBeenCalledWith('NSE EQUITY_L', EQUITY_L_URL);
   expect(tx.instrumentNameAlias.deleteMany).toHaveBeenCalledWith({ where: { source: { in: ['EQUITY_L', 'curated'] } } });
   expect(tx.instrumentNameAlias.createMany.mock.calls[0][0].data).toEqual(
-    expect.arrayContaining([expect.objectContaining({ symbol: 'TATAMOTORS', alias: 'Tata Motors', kind: 'derived', source: 'EQUITY_L' })]),
+    expect.arrayContaining([expect.objectContaining({ symbol: 'TATASTEEL', alias: 'Tata Steel', kind: 'derived', source: 'EQUITY_L' })]),
   );
   expect(tagger.rebuild).toHaveBeenCalled();
 });

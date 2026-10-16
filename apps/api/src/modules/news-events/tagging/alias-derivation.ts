@@ -1,4 +1,4 @@
-import { BLOCKED_ALIASES, COMMON_WORD_BLOCKLIST, CURATED_ALIASES } from './curated-aliases';
+import { AMBIGUOUS_ALIASES, BLOCKED_ALIASES, COMMON_WORD_BLOCKLIST, CURATED_ALIASES } from './curated-aliases';
 
 export type AliasKind = 'official' | 'derived' | 'curated' | 'blocked';
 export interface AliasRow { symbol: string; alias: string; kind: AliasKind }
@@ -28,7 +28,8 @@ function admissible(alias: string, blocklist: ReadonlySet<string>): boolean {
 /**
  * Spec §5.2: official name + suffix-stripped name per symbol; single words need ≥ 6
  * letters and must not be a common word; an alias two symbols share is dropped;
- * curated short forms are added last (and win over a derived twin); blocked text is removed.
+ * curated short forms are added last (and win over a derived twin); an ambiguous parent
+ * name maps to every successor (AMBIGUOUS_ALIASES, wins over both); blocked text is removed.
  * Sorted by symbol, then alias.
  */
 export function deriveAliases(
@@ -36,6 +37,7 @@ export function deriveAliases(
   curated: Readonly<Record<string, string>> = CURATED_ALIASES,
   blocklist: ReadonlySet<string> = COMMON_WORD_BLOCKLIST,
   blocked: ReadonlySet<string> = BLOCKED_ALIASES,
+  ambiguous: Readonly<Record<string, readonly string[]>> = AMBIGUOUS_ALIASES,
 ): AliasRow[] {
   const candidates: AliasRow[] = [];
   for (const r of rows) {
@@ -46,8 +48,14 @@ export function deriveAliases(
   }
   const owners = new Map<string, Set<string>>();
   for (const c of candidates) owners.set(c.alias, (owners.get(c.alias) ?? new Set<string>()).add(c.symbol));
-  const out = candidates.filter((c) => owners.get(c.alias)!.size === 1 && !blocked.has(c.alias) && curated[c.alias] === undefined);
-  for (const [alias, symbol] of Object.entries(curated)) if (!blocked.has(alias)) out.push({ symbol, alias, kind: 'curated' });
+  const out = candidates.filter((c) => owners.get(c.alias)!.size === 1 && !blocked.has(c.alias) && curated[c.alias] === undefined && ambiguous[c.alias] === undefined,
+  );
+  for (const [alias, symbol] of Object.entries(curated)) {
+    if (!blocked.has(alias) && ambiguous[alias] === undefined) out.push({ symbol, alias, kind: 'curated' });
+  }
+  for (const [alias, symbols] of Object.entries(ambiguous)) {
+    if (!blocked.has(alias)) for (const symbol of new Set(symbols)) out.push({ symbol, alias, kind: 'curated' });
+  }
   return out.sort((a, b) => (a.symbol === b.symbol ? a.alias.localeCompare(b.alias) : a.symbol.localeCompare(b.symbol)));
 }
 

@@ -18,7 +18,7 @@ const rows = [
 const aliasesOf = (sym: string, out = deriveAliases(rows)) => out.filter((a) => a.symbol === sym).map((a) => a.alias);
 
 it('official name and the suffix-stripped name', () => {
-  expect(aliasesOf('TATAMOTORS')).toEqual(['Tata Motors', 'Tata Motors Limited']);
+  expect(aliasesOf('TATASTEEL')).toEqual(['Tata Steel', 'Tata Steel Limited']);
   expect(aliasesOf('HINDZINC')).toEqual(['Hindustan Zinc', 'Hindustan Zinc Limited']);
 });
 it('single-word aliases need ≥ 6 letters and must not be a common word', () => {
@@ -39,7 +39,7 @@ it('curated short forms are added; blocked aliases are removed', () => {
   expect(aliasesOf('COALINDIA', out)).toEqual(['Coal India Limited']);
 });
 it('an all-caps name carries no case signal and yields no alias (tickers cover it)', () => {
-  expect(deriveAliases([{ symbol: '360ONE', name: '360 ONE WAM LIMITED' }], {})).toEqual([]);
+  expect(deriveAliases([{ symbol: '360ONE', name: '360 ONE WAM LIMITED' }], {}, undefined, undefined, {})).toEqual([]);
 });
 it('stripSuffixes removes "(India)", "Ltd." and "& Co" repeatedly', () => {
   expect(stripSuffixes('Bosch (India) Ltd.')).toBe('Bosch');
@@ -54,4 +54,28 @@ it('parseEquityL reads the NSE header (with its leading spaces) and quoted names
 });
 it('parseEquityL rejects a body that is not EQUITY_L (e.g. an HTML block page)', () => {
   expect(() => parseEquityL('<html><body>Access Denied</body></html>')).toThrow(/header not recognised/);
+});
+
+describe('ambiguous parent names (Tata Motors demerger: TMCV commercial, TMPV passenger)', () => {
+  // NSE after the demerger: the CV company kept the name "Tata Motors Limited"
+  // (TMCV); the old listed entity became "Tata Motors Passenger Vehicles Limited" (TMPV).
+  const demerged = [
+    { symbol: 'TMCV', name: 'Tata Motors Limited' },
+    { symbol: 'TMPV', name: 'Tata Motors Passenger Vehicles Limited' },
+  ];
+  const owners = (alias: string, out = deriveAliases(demerged)) => out.filter((a) => a.alias === alias).map((a) => a.symbol).sort();
+
+  it('the bare parent name maps to BOTH successors, never to whichever kept the name', () => {
+    expect(owners('Tata Motors')).toEqual(['TMCV', 'TMPV']);
+    expect(owners('Tata Motors Limited')).toEqual(['TMCV', 'TMPV']);
+  });
+  it('the specific names stay with their own company', () => {
+    expect(owners('Tata Motors Passenger Vehicles')).toEqual(['TMPV']);
+    expect(owners('Tata Motors PV')).toEqual(['TMPV']);
+    expect(owners('Tata Motors CV')).toEqual(['TMCV']);
+    expect(owners('Jaguar Land Rover')).toEqual(['TMPV']);
+  });
+  it('the ambiguity table is a parameter (empty ⇒ the derived single owner)', () => {
+    expect(owners('Tata Motors', deriveAliases(demerged, {}, undefined, undefined, {}))).toEqual(['TMCV']);
+  });
 });

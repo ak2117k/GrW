@@ -8,7 +8,7 @@ const ctx = {
     { symbol: 'SENCO', name: 'Senco Gold Limited' },
     { symbol: 'HINDZINC', name: 'Hindustan Zinc Limited' },
     { symbol: 'SBIN', name: 'State Bank of India' },
-  ], {})),
+  ], {}, undefined, undefined, {})),
   listed: new Set(['SBIN', 'TATAMOTORS', 'SENCO', 'HINDZINC', 'NMDC']),
   sectors: { sectorOf: (s: string) => ({ SBIN: 'NIFTY PSU BANK', TATAMOTORS: 'NIFTY AUTO' } as Record<string, string>)[s] ?? null },
 };

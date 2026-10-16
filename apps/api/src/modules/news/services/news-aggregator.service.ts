@@ -8,6 +8,10 @@ import { NewsArticle } from '@prisma/client';
 import { FUTURE_PUBDATE_TOLERANCE_MS, NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { NSE_BROWSER_UA } from '../../news-events/nse-client';
 import { SourceHealthBook } from '../../news-events/source-health';
+import { NEWS_INGEST_BUS, type NewsIngestBus } from '../../news-events/ingest-bus';
+import { toIndexedArticle } from '../../news-events/keys';
+import { NewsTaggerService } from '../../news-events/tagging/tagger.service';
+import type { ArticleTags } from '../../news-events/types';
 
 export interface RSSSource {
   name: string;
@@ -175,6 +179,8 @@ export class NewsAggregatorService {
     private readonly sentimentService: NewsSentimentService,
     @Optional() private readonly health?: SourceHealthBook,
     @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly cfg?: NewsEventsConfig,
+    @Optional() private readonly tagger?: NewsTaggerService,
+    @Optional() @Inject(NEWS_INGEST_BUS) private readonly bus?: NewsIngestBus,
   ) {}
 
   /**
@@ -243,7 +249,9 @@ export class NewsAggregatorService {
           article.summary,
         );
 
-        await this.prisma.newsArticle.create({
+        const v2 = this.cfg?.computing ? await this.tagV2(article) : null;
+
+        const saved = await this.prisma.newsArticle.create({
           data: {
             title: article.title,
             summary: article.summary || null,
@@ -254,10 +262,21 @@ export class NewsAggregatorService {
             sentimentScore: sentimentResult.score,
             relatedSymbols: sentimentResult.relatedSymbols,
             publishedAt: this.cfg?.computing ? article.guard.publishedAt : article.publishedAt,
-            ...(this.cfg?.computing ? { dateInferred: article.guard.dateInferred } : {}),
+            ...(v2
+              ? {
+                  dateInferred: article.guard.dateInferred,
+                  instruments: v2.tags.instruments,
+                  sectors: v2.tags.sectors,
+                  indices: v2.tags.indices,
+                  markets: v2.tags.markets,
+                  tagVersion: v2.version,
+                }
+              : {}),
           },
         });
 
+        // v2: push the saved row to the in-memory index right after its insert.
+        if (v2) this.bus?.publish([toIndexedArticle(saved)]);
         savedCount++;
       } catch (error) {
         // Skip duplicates or other insert errors
@@ -271,6 +290,18 @@ export class NewsAggregatorService {
 
     this.logger.log(`Saved ${savedCount} new articles`);
     return savedCount;
+  }
+
+  /** v2 tag-once (spec §5). A tagger failure never loses the article: it is saved untagged at version 0. */
+  private async tagV2(article: ParsedArticle): Promise<{ tags: ArticleTags; version: number }> {
+    const empty = { tags: { instruments: [], sectors: [], indices: [], markets: [] }, version: 0 };
+    if (!this.tagger) return empty;
+    try {
+      return await this.tagger.tag({ title: article.title, summary: article.summary, source: article.source, category: article.category });
+    } catch (err) {
+      this.logger.warn(`[news-tag] tagging failed for "${article.title.slice(0, 60)}": ${err instanceof Error ? err.message : String(err)}`);
+      return empty;
+    }
   }
 
   /**

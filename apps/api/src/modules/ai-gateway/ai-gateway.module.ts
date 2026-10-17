@@ -4,6 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { AI_GATEWAY, AiGatewayService } from './ai-gateway.service';
 import { AiCallRepository } from './audit/ai-call.repository';
+import { AiCallsSizeWatch } from './audit/ai-calls-size-watch.service';
 import { BudgetMeter, istDayKey } from './budget/budget-meter';
 import { loadPrices } from './budget/model-prices';
 import { AnthropicApiProvider } from './providers/anthropic-api.provider';
@@ -107,6 +108,8 @@ export function istMidnight(now: Date): Date {
     { provide: AI_GATEWAY, useExisting: AiGatewayService },
     // Node -> ai-engine /score at AI_SCORER_URL (not AI_ENGINE_URL). Fail-open; nothing calls it yet (SP3 M2).
     ScorerClient,
+    // Daily ai_calls size log + warning (no retention exists; the table is append-only).
+    AiCallsSizeWatch,
   ],
   exports: [AI_GATEWAY, AiGatewayService, ClaudeCliTransport, ScorerClient],
 })

@@ -47,6 +47,7 @@ import { SentinelOvernightService } from './services/sentinel-overnight.service'
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
 import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
+import { REJUDGE_CONFIG, parseRejudgeConfig } from './services/rejudge-suppression';
 import { MinuteBarsReader } from './adapters/minute-bars.reader';
 import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
 import { NewsWatchBook } from './services/news-watch-book';
@@ -181,6 +182,8 @@ import { MARKET_EVENTS } from './ports/events.port';
     // the parsed EXIT_DISCIPLINE_* config, and the candles_1m reader the tick
     // source measures the noise unit from — a DATABASE read, never a broker call.
     { provide: EXIT_DISCIPLINE_CONFIG, useFactory: () => parseExitDisciplineConfig(process.env) },
+    // Re-judge suppression (default ON; SENTINEL_REJUDGE_SUPPRESSION=false rolls back).
+    { provide: REJUDGE_CONFIG, useFactory: () => parseRejudgeConfig(process.env) },
     {
       provide: MinuteBarsReader,
       useFactory: (prisma: PrismaService) => new MinuteBarsReader(new PrismaCandleRepo(prisma as never)),

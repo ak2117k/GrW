@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { Test } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { AiGatewayModule, istMidnight } from './ai-gateway.module';
+import { AiGatewayModule, SENTINEL_MIN_CLI_CONCURRENCY, cliConcurrency, istMidnight } from './ai-gateway.module';
 import { AI_GATEWAY, AiGatewayService } from './ai-gateway.service';
 import { ClaudeCliTransport } from './providers/claude-cli.provider';
 import { ScorerClient } from './scorer/scorer.client';
@@ -43,5 +43,30 @@ describe('AiGatewayModule', () => {
   it('istMidnight is 00:00 IST (18:30 UTC the previous day)', () => {
     expect(istMidnight(new Date('2026-10-12T06:00:00Z')).toISOString()).toBe('2026-10-11T18:30:00.000Z');
     expect(istMidnight(new Date('2026-10-12T18:30:00Z')).toISOString()).toBe('2026-10-12T18:30:00.000Z');
+  });
+});
+
+describe('cliConcurrency', () => {
+  it('defaults to 2 with the sentinel flag off', () => {
+    expect(cliConcurrency(undefined, undefined)).toBe(2);
+    expect(cliConcurrency('', 'false')).toBe(2);
+  });
+
+  it('honours a configured value with the flag off', () => {
+    expect(cliConcurrency('4', 'false')).toBe(4);
+    expect(cliConcurrency('1', undefined)).toBe(1);
+  });
+
+  it('never yields 0 or garbage (a zero limit would queue every CLI call forever)', () => {
+    expect(cliConcurrency('0', undefined)).toBe(2);
+    expect(cliConcurrency('-3', undefined)).toBe(2);
+    expect(cliConcurrency('abc', undefined)).toBe(2);
+    expect(cliConcurrency('2.7', undefined)).toBe(2);
+  });
+
+  it('floors at 3 when AI_GATEWAY_SENTINEL=true (2 judges + a thesis call)', () => {
+    expect(cliConcurrency(undefined, 'true')).toBe(SENTINEL_MIN_CLI_CONCURRENCY);
+    expect(cliConcurrency('2', 'true')).toBe(3);
+    expect(cliConcurrency('5', 'true')).toBe(5);
   });
 });

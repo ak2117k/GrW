@@ -22,6 +22,27 @@ function positiveNumber(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+/**
+ * With `AI_GATEWAY_SENTINEL=true` every sentinel CLI call queues on the
+ * scheduler's `claude-cli` limit, and the sentinel alone runs up to
+ * `JUDGE_CONCURRENCY` (2) judgements plus thesis calls. Below 3 a thesis call
+ * waits behind both judges (a CLI call can run 180 s) — a delay the direct,
+ * unscheduled binding never had.
+ */
+export const SENTINEL_MIN_CLI_CONCURRENCY = 3;
+
+/**
+ * The `claude-cli` concurrency limit: `AI_CLI_CONCURRENCY` when it is a whole
+ * number ≥ 1 (else the default — a 0 limit would queue every call forever),
+ * floored at {@link SENTINEL_MIN_CLI_CONCURRENCY} while the sentinel is routed
+ * through the gateway.
+ */
+export function cliConcurrency(raw: string | undefined, gatewaySentinel: string | undefined): number {
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  const base = Number.isInteger(n) && n >= 1 ? n : DEFAULT_CLI_CONCURRENCY;
+  return gatewaySentinel?.trim() === 'true' ? Math.max(base, SENTINEL_MIN_CLI_CONCURRENCY) : base;
+}
+
 /** Midnight IST of the day containing `now`, as an instant. */
 export function istMidnight(now: Date): Date {
   return new Date(`${istDayKey(now)}T00:00:00+05:30`);
@@ -38,14 +59,8 @@ export function istMidnight(now: Date): Date {
  * Config files (`config/ai-routes.json`, `config/ai-model-prices.json`) are
  * read at module init; a missing or malformed file fails boot loudly.
  *
- * BEFORE SETTING `AI_GATEWAY_SENTINEL=true` (operational, not enforced here):
- * - `AI_CLI_CONCURRENCY` should be >= 3. Every sentinel CLI call then queues on
- *   this scheduler's `claude-cli` limit, and the sentinel alone runs up to
- *   `JUDGE_CONCURRENCY` (2) judgements plus thesis calls; at the default 2 a
- *   thesis call queues behind both judges (a CLI call can run 180 s) — a delay
- *   the direct, unscheduled binding never had.
- * - `ai_calls` stores each request and response in full and nothing prunes it
- *   yet: decide a retention policy (or at least watch its size) first.
+ * With `AI_GATEWAY_SENTINEL=true` the `claude-cli` limit is floored at 3 — see
+ * {@link cliConcurrency}.
  */
 @Module({
   imports: [PrismaModule],
@@ -68,7 +83,10 @@ export function istMidnight(now: Date): Date {
           now: () => new Date(),
         });
         const scheduler = new PriorityScheduler({
-          'claude-cli': positiveNumber(config.get<string>('AI_CLI_CONCURRENCY'), DEFAULT_CLI_CONCURRENCY),
+          'claude-cli': cliConcurrency(
+            config.get<string>('AI_CLI_CONCURRENCY'),
+            config.get<string>('AI_GATEWAY_SENTINEL'),
+          ),
         });
         return new AiGatewayService({
           routes,

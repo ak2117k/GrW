@@ -5,7 +5,9 @@ Deliberately does not import ``src.main`` (FinBERT, telethon, agent SDK...). Sta
 - SCORER_MODEL_ID — explicit model to serve, else the active ``xgb-entry`` row via AI_DB_URL;
   either way it is served only if its training gate was GO (artifact ``gate``, else the
   ``ai_models`` row when AI_DB_URL is set) — a NO_GO model falls back to rule scoring;
-- AI_DB_URL — registry lookup and the /corpus/similar index (all ENTRY_SETUP records).
+- AI_DB_URL — registry lookup and the /corpus/similar index (all ENTRY_SETUP records); when
+  unset it is built, percent-escaped, from AI_DB_PASSWORD + AI_DB_USER/HOST/PORT/NAME
+  (see src/scorer/db_url.py), so any password is safe.
 Any failure degrades to rule-only scoring / an empty index, logged; the app always starts.
 """
 from __future__ import annotations
@@ -18,6 +20,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from src.routes.scorer import router
+from src.scorer.db_url import ai_db_url
 from src.scorer.serve import ScorerHolder
 
 logger = logging.getLogger("scorer")
@@ -43,7 +46,7 @@ def _startup(app: FastAPI) -> None:
     models_dir = Path(os.environ.get("MODELS_DIR") or DEFAULT_MODELS_DIR)
     holder = ScorerHolder(models_dir)
     app.state.scorer, app.state.similar = holder, None
-    db_url = os.environ.get("AI_DB_URL")
+    db_url = ai_db_url(os.environ)
     model_id = os.environ.get("SCORER_MODEL_ID") or None
     conn = None
     try:

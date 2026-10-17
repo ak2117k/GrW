@@ -107,8 +107,13 @@ services:
     mem_limit: 384m
     environment:
       MODELS_DIR: /models
-      # AI_DB_PASSWORD is interpolated unescaped: it must be URL-safe (see compose.env.example).
-      AI_DB_URL: postgresql://grw_ai:${AI_DB_PASSWORD}@postgres:5432/${PG_DB}
+      # The scorer assembles its DB URL from these parts with every component
+      # percent-escaped (ai-engine/src/scorer/db_url.py), so any password works.
+      AI_DB_USER: grw_ai
+      AI_DB_PASSWORD: ${AI_DB_PASSWORD}
+      AI_DB_HOST: postgres
+      AI_DB_PORT: "5432"
+      AI_DB_NAME: ${PG_DB}
     volumes:
       - /opt/grw/models:/models:ro
     depends_on:

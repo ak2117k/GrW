@@ -128,9 +128,21 @@ can grow as data grows — but nothing is used until it passes the gate.
      expired contracts; if not, history starts from the contracts we can fetch and grows forward.
   3. Option-chain / OI snapshots exported from prod (`oi_snapshots`, OI walls) — daily export job so the
      45-day prune never loses data again.
-  4. Related markets already in the sentinel packet (market cues: US indices, WTI/Brent, USDINR) and
-     BANKNIFTY↔NIFTY cross features.
-  5. Later: FII/DII daily flows, India VIX, event calendar flags (from `market_events`).
+  4. **NIFTY drivers** (owner request, 2026-10-18 — to catch sudden trend shifts early). Each is
+     configured per instrument as a "driver list", so crude/BANKNIFTY get their own later:
+     - *Heavyweights* (1m, NSE via Angel): RELIANCE, HDFCBANK, ICICIBANK, INFY, TCS, BHARTIARTL, LT, ITC
+       — top index weights; list refreshed from NSE index weights each quarter.
+     - *BANKNIFTY* (1m) — banks are ~a third of NIFTY.
+     - *India VIX* (1m, NSE index via Angel) — the market's own fear gauge; key for move-size.
+     - *USDINR* (NSE currency futures via Angel if history is served; otherwise the market-cues source).
+     - *Global cues* already in the sentinel packet: US index futures, WTI/Brent; plus DXY / US 10-year
+       if the market-cues source provides history. Intraday history depth of these sources must be
+       checked in M0; where only daily history exists, they enter as daily features.
+     - Features from drivers: their returns over the same windows, breadth (how many heavyweights are up
+       vs down), divergence (heavyweights or BANKNIFTY moving while NIFTY hasn't yet — lead/lag), VIX
+       level and change, overnight global move into the open.
+  5. Later: FII/DII daily flows, event calendar flags (from `market_events`), GIFT Nifty pre-open if a
+     source with history is found.
 - Daily 1d bars derived from 1m. Backfill script reuses the spike's approach (30-day chunks for index 1m,
   0.5 s gap, retry on throttle), reading credentials from env, never printing them.
 
@@ -140,8 +152,14 @@ can grow as data grows — but nothing is used until it passes the gate.
 - All features are strictly causal (use only data up to the bar close). Feature set is versioned
   (`featureSet`, e.g. `mbm-fs1`), stamped on every model and prediction.
 - Starting set = the spike's features (returns, gap, position vs prior-day levels and opening range,
-  realised vol, vol ratio, EMA distances, RSI, candle shape, time of day, weekday), plus futures OI
-  change and chain features when available. Adding features = new `featureSet` version.
+  realised vol, vol ratio, EMA distances, RSI, candle shape, time of day, weekday), plus the driver
+  features of §5.1.4, futures OI change and chain features when available. Adding features = new
+  `featureSet` version.
+- Every driver is tested for value, not assumed: each monthly report shows the gate metric with and
+  without each driver group, and a group that adds nothing for 3 months is dropped (saves fetch calls).
+- Live serving needs the drivers live too: the §10.1 refresher pulls them alongside NIFTY (≈ 10–12
+  symbols per 5 min, still well inside the historical gate). A missing driver makes its features null;
+  the model must tolerate nulls rather than refuse to answer.
 
 ### 5.3 Model A — Move & Mood
 - Per instrument, per horizon: next 30m, next 60m, rest of session, next session.

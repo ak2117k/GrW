@@ -1,0 +1,5 @@
+# requirements-mbm.txt — PC-only deps for the Market Behaviour Model data store (M0+).
+# The scorer container keeps using requirements-scorer.txt unchanged.
+-r requirements-scorer.txt
+pyarrow>=17
+pyotp>=2.9

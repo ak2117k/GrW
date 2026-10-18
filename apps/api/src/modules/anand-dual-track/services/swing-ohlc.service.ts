@@ -1,7 +1,11 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
-import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
+import {
+  AngelOneAdapterService,
+  isNotAuthenticatedError,
+} from '../../market-data/services/angel-one-adapter.service';
+import { AngelOneAuthService, BOOT_SESSION_WAIT_MS } from '../../market-data/services/angel-one-auth.service';
 
 /** Max post-exit trading days recorded per closed swing trade (Angel only returns trading days). */
 const MAX_POST_EXIT_ROWS = 60;
@@ -24,6 +28,10 @@ interface SwingEntryForOhlc {
  * 'ONE_DAY', from, to)` — already TTL-cached and serially paced for the 3 req/sec
  * historical limit. Entries are processed serially; a single throttled/empty fetch
  * is logged and skipped (filled in on a later run), never crashing the run.
+ *
+ * Every run first waits (bounded) for the shared feed session: the boot pass used
+ * to start before the login landed and fail every entry with "Not authenticated".
+ * No session => ONE warning and the run is skipped; the next run catches up.
  */
 @Injectable()
 export class SwingOhlcService implements OnModuleInit {
@@ -32,6 +40,7 @@ export class SwingOhlcService implements OnModuleInit {
   constructor(
     private readonly repo: AnandDualTrackRepository,
     private readonly adapter: AngelOneAdapterService,
+    private readonly auth: AngelOneAuthService,
   ) {}
 
   // Backfill existing trades immediately on boot (fire-and-forget) so the
@@ -98,6 +107,14 @@ export class SwingOhlcService implements OnModuleInit {
    * try/catch so one failure (throttle/empty) is skipped, never crashing the run.
    */
   async runForAllInWindow(): Promise<void> {
+    if (!(await this.auth.whenAuthenticated(BOOT_SESSION_WAIT_MS))) {
+      this.logger.warn(
+        `[swing-ohlc] run skipped — no Angel One feed session within ${BOOT_SESSION_WAIT_MS / 1000}s. ` +
+          `Deferred to the next 16:00 IST run.`,
+      );
+      return;
+    }
+
     const entries = (await this.repo.listAllSwingEntries()) as SwingEntryForOhlc[];
 
     let processed = 0;
@@ -113,6 +130,11 @@ export class SwingOhlcService implements OnModuleInit {
         processed++;
         totalUpserted += upserted;
       } catch (err) {
+        if (isNotAuthenticatedError(err)) {
+          // The session dropped mid-run: every remaining entry would fail the same way.
+          this.logger.warn(`[swing-ohlc] run stopped — Angel One feed session lost at ${entry.symbol}`);
+          return;
+        }
         this.logger.warn(
           `[swing-ohlc] ${entry.id} (${entry.symbol}) skipped: ${err instanceof Error ? err.message : err}`,
         );

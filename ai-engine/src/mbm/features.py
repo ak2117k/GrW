@@ -207,7 +207,7 @@ def heavyweight_features(b: pd.DataFrame, eq5: dict[str, pd.DataFrame]) -> pd.Da
 
     f["hw_wret_open"] = wmean(RO)
     f["hw_wret_3"] = wmean(R3)
-    f["hw_frac_up"] = (RO > 0).where(RO.notna()).mean(axis=1)
+    f["hw_frac_up"] = (RO > 0).astype("float64").where(RO.notna()).mean(axis=1)
     f["hw_disp"] = RO.std(axis=1)
     f["hw_absret_3"] = R3.abs().mean(axis=1)
     f["hw_volratio"] = wmean(VR)
@@ -267,7 +267,10 @@ def build_features(inputs: dict, groups: tuple[str, ...] = DRIVER_GROUPS) -> pd.
         parts.append(heavyweight_features(b, eq))
     if "global_daily" in groups:
         parts.append(global_daily_features(b, inputs.get("global_daily") or {}))
-    return pd.concat(parts, axis=1)
+    out = pd.concat(parts, axis=1)
+    feats = [c for c in out.columns if c != "date"]
+    out[feats] = out[feats].astype("float64")
+    return out
 
 
 def feature_columns(df: pd.DataFrame, groups: tuple[str, ...] = DRIVER_GROUPS) -> list[str]:

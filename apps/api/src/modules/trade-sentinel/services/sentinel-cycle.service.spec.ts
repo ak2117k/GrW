@@ -26,6 +26,7 @@ import { TickSensorBook } from './tick-sensor-book';
 import { NEWS_EVENTS_CONFIG, parseNewsEventsConfig, type NewsEventsConfig } from '../../news-events/config';
 import { MARKET_EVENTS } from '../ports/events.port';
 import { NewsWatchBook } from './news-watch-book';
+import { REJUDGE_CONFIG, parseRejudgeConfig, type RejudgeConfig } from './rejudge-suppression';
 
 const USER = 'u1';
 
@@ -101,7 +102,7 @@ const verdictRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function makeSvc(discipline?: ExitDisciplineConfig, news?: { cfg?: NewsEventsConfig; events?: unknown; watch?: NewsWatchBook }) {
+function makeSvc(discipline?: ExitDisciplineConfig, news?: { cfg?: NewsEventsConfig; events?: unknown; watch?: NewsWatchBook }, rejudge?: RejudgeConfig) {
   const build = jest.fn().mockResolvedValue([]);
   const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
   const buildPacket = jest.fn();
@@ -148,6 +149,7 @@ function makeSvc(discipline?: ExitDisciplineConfig, news?: { cfg?: NewsEventsCon
     news?.watch,
     news?.cfg,
     news?.events as never,
+    rejudge,
   );
 
   return {
@@ -563,8 +565,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // 13: the eighth is the TickSource; the ninth the optional TickSensorBook (Part B,
     // memory only); the tenth the exit-discipline CONFIG (a plain parsed value object);
     // the 11th–13th news & events v2: NewsWatchBook (memory only), its CONFIG (a plain
-    // parsed value object) and the MARKET_EVENTS port (a synchronous peek, type-only).
-    expect(injected).toHaveLength(13);
+    // parsed value object) and the MARKET_EVENTS port (a synchronous peek, type-only);
+    // the 14th the re-judge suppression CONFIG (a plain parsed value object).
+    expect(injected).toHaveLength(14);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -579,6 +582,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         expect.objectContaining({ index: 9, param: EXIT_DISCIPLINE_CONFIG }),
         expect.objectContaining({ index: 11, param: NEWS_EVENTS_CONFIG }),
         expect.objectContaining({ index: 12, param: MARKET_EVENTS }),
+        expect.objectContaining({ index: 13, param: REJUDGE_CONFIG }),
       ]),
     );
 
@@ -2553,5 +2557,95 @@ describe('news & events v2 in the sensor pass', () => {
     t.build.mockResolvedValue([]);
     await t.svc.runForUser(USER);
     expect(watch.size()).toBe(0);
+  });
+});
+
+describe('SentinelCycleService — re-judge suppression of level-triggered repeats', () => {
+  const T0 = new Date('2026-08-14T06:00:00.000Z');
+  const at = (ms: number) => new Date(T0.getTime() + ms);
+  const givebackTick = (over: Partial<TickReading> = {}) => tick({ entryPrice: 100, holdingHigh: 120, ltp: 110, ...over });
+  const fire = (...names: string[]) => ({
+    fires: names.map((name) => ({ name, detail: name })),
+    heartbeat: false,
+    shouldEvaluate: true,
+    trigger: 'FIRE' as const,
+  });
+
+  /** `null` ⇒ no config bound at all (a module without the provider). */
+  function setup(cfg: RejudgeConfig | null = parseRejudgeConfig({})) {
+    const t = makeSvc(undefined, undefined, cfg ?? undefined);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(givebackTick());
+    t.evaluate.mockReturnValue(fire('giveback-off-peak'));
+    return t;
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('judges a giveback once, then suppresses unchanged repeats inside the cooldown (one aggregated log line per pass)', async () => {
+    const t = setup();
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    await t.svc.runForUser(USER, T0);
+    for (let i = 1; i <= 10; i += 1) await t.svc.runForUser(USER, at(i * 30_000));
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    const lines = log.mock.calls.filter((c) => String(c[0]).startsWith('[rejudge]'));
+    expect(lines).toHaveLength(10);
+    expect(lines[0][0]).toContain('giveback-off-peak=1');
+  });
+
+  it('re-judges once the cooldown elapses', async () => {
+    const t = setup();
+    await t.svc.runForUser(USER, T0);
+    await t.svc.runForUser(USER, at(10 * 60_000));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-judges when the giveback deepens materially', async () => {
+    const t = setup();
+    await t.svc.runForUser(USER, T0);
+    // excursion 20, 10 % ⇒ a 2-point deepening (a < 2 % price move) is material
+    t.tickFor.mockResolvedValue(givebackTick({ ltp: 107.9 }));
+    await t.svc.runForUser(USER, at(30_000));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('never suppresses when a level break fires alongside', async () => {
+    const t = setup();
+    await t.svc.runForUser(USER, T0);
+    t.evaluate.mockReturnValue(fire('giveback-off-peak', 'level-break'));
+    await t.svc.runForUser(USER, at(30_000));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+    expect(t.record.mock.calls[1][0].triggeredBy).toEqual(['giveback-off-peak', 'level-break']);
+  });
+
+  it('a failed judgement sets no baseline — the repeat wakes the judge after the backoff', async () => {
+    const t = setup();
+    t.judge.mockRejectedValueOnce(new Error('cli down'));
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    await t.svc.runForUser(USER, T0);
+    await t.svc.runForUser(USER, at(5 * 60_000)); // past the first backoff step
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('suppresses an unchanged volume-anomaly repeat until a new bar closes', async () => {
+    const t = setup();
+    t.evaluate.mockReturnValue(fire('volume-anomaly'));
+    t.tickFor.mockResolvedValue(givebackTick({ volumeRatio: 2.4 }));
+    await t.svc.runForUser(USER, T0);
+    await t.svc.runForUser(USER, at(30_000));
+    expect(t.judge).toHaveBeenCalledTimes(1);
+    t.tickFor.mockResolvedValue(givebackTick({ volumeRatio: 2.1 }));
+    await t.svc.runForUser(USER, at(60_000));
+    expect(t.judge).toHaveBeenCalledTimes(2);
+  });
+
+  it('SENTINEL_REJUDGE_SUPPRESSION=false (or no config bound) re-judges every repeat, as before', async () => {
+    for (const cfg of [parseRejudgeConfig({ SENTINEL_REJUDGE_SUPPRESSION: 'false' }), null]) {
+      const t = setup(cfg);
+      await t.svc.runForUser(USER, T0);
+      await t.svc.runForUser(USER, at(30_000));
+      expect(t.judge).toHaveBeenCalledTimes(2);
+    }
   });
 });

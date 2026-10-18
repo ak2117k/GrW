@@ -35,6 +35,14 @@ import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
 import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
 import type { TripwireInput } from '../tripwires/types';
 import { NewsWatchBook } from './news-watch-book';
+import {
+  REJUDGE_CONFIG,
+  SUPPRESSIBLE_FIRES,
+  rejudgeSnapshot,
+  suppressRepeatJudgements,
+  type RejudgeConfig,
+  type RejudgeSnapshot,
+} from './rejudge-suppression';
 
 export interface CycleReport {
   evaluated: number;
@@ -378,6 +386,11 @@ interface TrackerState {
   eventsFired?: Set<string>;
   /** News & events v2 edge-trigger memory (R4): epoch ms of the last news-hit fire, for the cooldown. */
   lastNewsFireAt?: number;
+  /**
+   * Re-judge suppression: per suppressible fire name, the state when a judgement
+   * on that fire was last RECORDED. See rejudge-suppression.ts.
+   */
+  rejudge?: Record<string, RejudgeSnapshot>;
 }
 
 /** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
@@ -395,6 +408,8 @@ interface JudgeCandidate {
   decision: TripwireResult;
   /** When the agent last judged it (its latest verdict row), or null if never. */
   lastJudgedAt: number | null;
+  /** This pass's re-judge baseline, stored for the fires judged once the verdict is recorded. */
+  rejudgeSnap: RejudgeSnapshot;
 }
 
 /** One judgement in flight: its promise, and the fire names it was asked about. */
@@ -470,6 +485,8 @@ export class SentinelCycleService {
     @Optional() private readonly newsWatch?: NewsWatchBook,
     @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly newsCfg?: NewsEventsConfig,
     @Optional() @Inject(MARKET_EVENTS) private readonly events?: EventsReader,
+    // Re-judge suppression. Optional: absent ⇒ off, every repeat fire wakes the judge as before.
+    @Optional() @Inject(REJUDGE_CONFIG) private readonly rejudgeCfg?: RejudgeConfig,
   ) {}
 
   /**
@@ -501,6 +518,7 @@ export class SentinelCycleService {
     const report: CycleReport = { evaluated: 0, skipped: 0, failed: 0, unwatched: 0 };
     const jobs: Array<Promise<JudgeOutcome>> = [];
     const candidates: JudgeCandidate[] = [];
+    const suppressed: Record<string, number> = {};
 
     for (const [index, entry] of entries.entries()) {
       if (!entry.watched) {
@@ -513,13 +531,20 @@ export class SentinelCycleService {
       // runner's per-sensor isolation is the inner layer of this; the whole of a
       // position's work — tick, walls, packet, agent, write — is the outer one.
       try {
-        const candidate = await this.evaluateOne(entry, index, now, report);
+        const candidate = await this.evaluateOne(entry, index, now, report, suppressed);
         if (candidate) candidates.push(candidate);
       } catch (err) {
         report.failed += 1;
         const message = err instanceof Error ? err.message : String(err);
         this.logger.error(`sentinel cycle failed for ${entry.symbol}: ${message}`);
       }
+    }
+
+    // Re-judge suppression: ONE aggregated line per pass, never one per position.
+    const suppressedTotal = Object.values(suppressed).reduce((a, b) => a + b, 0);
+    if (suppressedTotal > 0) {
+      const by = Object.entries(suppressed).map(([k, v]) => `${k}=${v}`).join(', ');
+      this.logger.log(`[rejudge] suppressed ${suppressedTotal} unchanged repeat wake(s) for user ${userId} (${by})`);
     }
 
     this.prune(
@@ -594,6 +619,7 @@ export class SentinelCycleService {
     index: number,
     now: Date,
     report: CycleReport,
+    suppressedTally: Record<string, number> = {},
   ): Promise<JudgeCandidate | null> {
     const raw = await this.ticks.tickFor(entry.trackerId);
     const tick = withCashUnderlying(raw);
@@ -728,10 +754,16 @@ export class SentinelCycleService {
     const confirm = this.discipline?.enabled
       ? exitConfirmFire({ recent, now, relookMs: this.discipline.persistMinSec * 1000, maxRelooks: EXIT_CONFIRM_MAX_RELOOKS })
       : null;
-    const decision = withExitConfirm(
-      withCarriedFires(suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey), state.carriedFires),
-      confirm,
-    );
+    // Re-judge suppression sits BEFORE carried fires and exit-confirm: a carried
+    // fire never reached the judge and an exit-confirm re-look is the EXIT_NOW
+    // confirmation path, so neither may be dropped here.
+    const rejudgeSnap = rejudgeSnapshot(tick, noiseInput?.n ?? null, now.getTime());
+    const deduped = suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey);
+    const rejudged = this.rejudgeCfg
+      ? suppressRepeatJudgements(deduped, state.rejudge ?? {}, rejudgeSnap, this.rejudgeCfg)
+      : { decision: deduped, suppressed: [] as string[] };
+    for (const name of rejudged.suppressed) suppressedTally[name] = (suppressedTally[name] ?? 0) + 1;
+    const decision = withExitConfirm(withCarriedFires(rejudged.decision, state.carriedFires), confirm);
 
     if (!decision.shouldEvaluate) {
       report.skipped += 1;
@@ -777,6 +809,7 @@ export class SentinelCycleService {
       greenFloorArmedLatched,
       decision,
       lastJudgedAt: last ? new Date(last.createdAt).getTime() : null,
+      rejudgeSnap,
     };
   }
 
@@ -806,7 +839,14 @@ export class SentinelCycleService {
     this.judging.set(entry.trackerId, inFlight);
     // `job` never rejects (see judgeDetached), so this cannot leave an
     // unhandled rejection behind; the entry is freed only by ITS OWN job.
-    void job.then(() => {
+    void job.then((outcome) => {
+      // Re-judge baseline: only a RECORDED judgement counts as "the judge was
+      // asked" — a failed one leaves the fire free to wake it after the backoff.
+      if (outcome === 'evaluated') {
+        for (const f of c.decision.fires) {
+          if (SUPPRESSIBLE_FIRES.has(f.name)) (state.rejudge ??= {})[f.name] = c.rejudgeSnap;
+        }
+      }
       if (this.judging.get(entry.trackerId) === inFlight) this.judging.delete(entry.trackerId);
       this.wakeSlotWaiters();
     });

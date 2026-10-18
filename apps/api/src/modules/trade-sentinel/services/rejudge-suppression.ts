@@ -45,6 +45,16 @@ export interface RejudgeConfig {
   givebackDeepenN: number;
   /** SENTINEL_REJUDGE_GIVEBACK_DEEPEN_FRAC (default 0.1): without a noise unit, deepening as a fraction of the peak excursion. */
   givebackDeepenFrac: number;
+  /**
+   * SENTINEL_REJUDGE_ROUTINE_TIER (default true): a repeat let through ONLY
+   * because the cooldown elapsed — nothing the verdict depends on moved — is
+   * asked at the ROUTINE tier. It is the heartbeat's question ("is this still
+   * the same trade?") with the same fire attached as context, not a new claim,
+   * so the FIRE tier's reason (a sensor asserting something new) does not apply.
+   * Any material change, any other sensor, a carried fire or an exit-confirm
+   * re-look keeps the FIRE tier. Rollback: `false`.
+   */
+  routineOnCooldown: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -62,6 +72,7 @@ export function parseRejudgeConfig(env: Env): RejudgeConfig {
     priceMovePct: positive(env.SENTINEL_REJUDGE_PRICE_MOVE_PCT, 0.02),
     givebackDeepenN: positive(env.SENTINEL_REJUDGE_GIVEBACK_DEEPEN_N, 0.5),
     givebackDeepenFrac: positive(env.SENTINEL_REJUDGE_GIVEBACK_DEEPEN_FRAC, 0.1),
+    routineOnCooldown: (env.SENTINEL_REJUDGE_ROUTINE_TIER ?? '').trim().toLowerCase() !== 'false',
   };
 }
 
@@ -162,7 +173,15 @@ export function suppressRepeatJudgements(
   const untouched = { decision, suppressed: [] as string[] };
   if (!cfg.enabled || decision.fires.length === 0) return untouched;
   if (decision.fires.some((f) => !SUPPRESSIBLE_FIRES.has(f.name))) return untouched;
-  if (decision.fires.some((f) => repeatIsMaterial(f.name, baselines[f.name], now, cfg))) return untouched;
+  if (decision.fires.some((f) => repeatIsMaterial(f.name, baselines[f.name], now, cfg))) {
+    // Material only because the cooldown elapsed? Then it is a re-check, not a
+    // new claim: same fires as context, ROUTINE tier (see routineOnCooldown).
+    const noCooldown = { ...cfg, cooldownMs: Number.POSITIVE_INFINITY };
+    const cooldownOnly =
+      cfg.routineOnCooldown &&
+      decision.fires.every((f) => baselines[f.name] !== undefined && !repeatIsMaterial(f.name, baselines[f.name], now, noCooldown));
+    return cooldownOnly ? { decision: { ...decision, trigger: 'HEARTBEAT' }, suppressed: [] } : untouched;
+  }
   return {
     decision: {
       ...decision,

@@ -26,7 +26,12 @@ describe('parseRejudgeConfig', () => {
       priceMovePct: 0.02,
       givebackDeepenN: 0.5,
       givebackDeepenFrac: 0.1,
+      routineOnCooldown: true,
     });
+  });
+
+  it('SENTINEL_REJUDGE_ROUTINE_TIER=false keeps cooldown re-asks on the FIRE tier', () => {
+    expect(parseRejudgeConfig({ SENTINEL_REJUDGE_ROUTINE_TIER: 'false' }).routineOnCooldown).toBe(false);
   });
 
   it('rollback: SENTINEL_REJUDGE_SUPPRESSION=false turns it off', () => {
@@ -155,5 +160,44 @@ describe('suppressRepeatJudgements', () => {
     const r = suppressRepeatJudgements(d, baselines, now, { ...cfg, enabled: false });
     expect(r.decision).toBe(d);
     expect(r.suppressed).toEqual([]);
+  });
+
+  describe('cooldown-only re-ask goes to the ROUTINE tier', () => {
+    const late = snap({ at: cfg.cooldownMs });
+
+    it('keeps the fires but asks at the HEARTBEAT (routine) tier when only the cooldown elapsed', () => {
+      const r = suppressRepeatJudgements(fired('giveback-off-peak'), baselines, late, cfg);
+      expect(r.suppressed).toEqual([]);
+      expect(r.decision.fires.map((f) => f.name)).toEqual(['giveback-off-peak']);
+      expect(r.decision.shouldEvaluate).toBe(true);
+      expect(r.decision.trigger).toBe('HEARTBEAT');
+    });
+
+    it('stays FIRE when something material changed as well (price move after the cooldown)', () => {
+      const d = fired('giveback-off-peak');
+      const r = suppressRepeatJudgements(d, baselines, snap({ at: cfg.cooldownMs, ltp: 103 }), cfg);
+      expect(r.decision).toBe(d);
+    });
+
+    it('stays FIRE for a deepening giveback after the cooldown', () => {
+      const d = fired('giveback-off-peak');
+      const r = suppressRepeatJudgements(d, baselines, snap({ at: cfg.cooldownMs, pullback: 23, ltp: 99 }), cfg);
+      expect(r.decision).toBe(d);
+    });
+
+    it('stays FIRE when any other sensor fired', () => {
+      const d = fired('giveback-off-peak', 'level-break');
+      expect(suppressRepeatJudgements(d, baselines, late, cfg).decision).toBe(d);
+    });
+
+    it('stays FIRE without a baseline (first time the judge hears this fire)', () => {
+      const d = fired('giveback-off-peak');
+      expect(suppressRepeatJudgements(d, {}, late, cfg).decision).toBe(d);
+    });
+
+    it('stays FIRE when SENTINEL_REJUDGE_ROUTINE_TIER is off', () => {
+      const d = fired('giveback-off-peak');
+      expect(suppressRepeatJudgements(d, baselines, late, { ...cfg, routineOnCooldown: false }).decision).toBe(d);
+    });
   });
 });

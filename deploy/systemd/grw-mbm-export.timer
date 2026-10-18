@@ -1,0 +1,9 @@
+[Unit]
+Description=GrW MBM export at 01:15 IST (before the 02:00 IST option-chain prune)
+
+[Timer]
+OnCalendar=*-*-* 19:45:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

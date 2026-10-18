@@ -114,3 +114,31 @@ before they expire or age out, and the PC must pull exports at least every 30 da
 schtasks /Create /SC WEEKLY /D SAT /ST 10:00 /TN GrW-MBM-build /TR "\"C:\Users\AryanKumar\AppData\Local\Python\pythoncore-3.14-64\python.exe\" C:\Users\AryanKumar\Desktop\GrW\ai-engine\scripts\mbm_data.py build --vps root@157.10.98.70 --ssh-key C:\Users\AryanKumar\.ssh\grw_oracle"
 schtasks /Query /TN GrW-MBM-build
 ```
+
+## M1 how-to: train Model A offline
+
+Install the training deps once: `py -3 -m pip install -r ai-engine/requirements-mbm.txt`
+(adds `lightgbm`). Then, with the store built:
+
+```powershell
+$env:PYTHONIOENCODING="utf-8"
+py -3 ai-engine/scripts/mbm_train.py train-a --instrument NIFTY            # full run, ~1 h on a 4-core laptop
+py -3 ai-engine/scripts/mbm_train.py train-a --instrument NIFTY --no-ablation --horizons 30m   # quick check
+```
+
+- **Features** (`ai-engine/src/mbm/features.py`, featureSet `mbm-fs1`): 5m bars built from
+  1m, row at t = bar ending at t. Price features plus driver groups `banknifty`, `vix`,
+  `heavyweights`, `global_daily` (Yahoo daily, only trading dates before the NSE session
+  date). A missing driver gives null columns. Changing features = new `featureSet`.
+- **Decision rows**: every 15 min 09:30–15:15 IST; the `next` horizon uses only 15:15.
+- **Labels** (`labels.py`): range over 1m bars starting in [t, t+h); "big" = above the
+  trailing 60-session median at the same minute of day (causal).
+- **Walk-forward** (`model_a.py`): expanding window, ≥ 12 months (last 2 = isotonic
+  calibration), retrained monthly; quantile models refit every 3 months.
+- **Outputs**: `grw-mbm\models\m1\nifty\` — `dataset.parquet` (feature cache; pass
+  `--rebuild` after new bars or a feature change), `preds_<h>.parquet` (blind predictions),
+  `<h>\classifier.txt`, `<h>\q25|q50|q75.txt` (LightGBM boosters), `<h>\meta.json`
+  (columns, isotonic table, regime bands), `metrics.json`. Report:
+  `grw-mbm\reports\m1-nifty-<date>.md` (gate, ablation, calibration, regimes, monthly AUC).
+- **Gate** per horizon: AUC ≥ 0.65 in each of the last 3 blind months, Brier over those
+  months below the trailing baseline, ≥ 300 blind observations in total.

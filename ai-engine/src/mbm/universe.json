@@ -1,0 +1,12 @@
+{"NIFTY": {
+   "primary": {"id": "NIFTY", "exchange": "NSE", "token": "99926000"},
+   "futures": [{"name": "NIFTY", "exch_seg": "NFO", "instrumenttype": "FUTIDX", "group": "futures"}],
+   "drivers": {
+     "heavyweights": {"equities": ["RELIANCE","HDFCBANK","ICICIBANK","INFY","TCS","BHARTIARTL","LT","ITC"]},
+     "banknifty": {"id": "BANKNIFTY", "exchange": "NSE", "token": "99926009"},
+     "vix": {"id": "INDIAVIX", "index_name": "India VIX"},
+     "usdinr": {"futures": {"name": "USDINR", "exch_seg": "CDS", "instrumenttype": "FUTCUR"}, "fallback_yahoo": "INR=X"},
+     "global": {"yahoo": ["ES=F","NQ=F","CL=F","BZ=F","DX-Y.NYB","^TNX","INR=X"]}
+   },
+   "probe_only_futures": [{"name": "CRUDEOIL", "exch_seg": "MCX", "instrumenttype": "FUTCOM"}]
+}}

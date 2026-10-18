@@ -1,0 +1,23 @@
+[
+{"token": "99926000", "symbol": "Nifty 50", "name": "NIFTY", "expiry": "", "exch_seg": "NSE", "instrumenttype": "AMXIDX"},
+{"token": "99926009", "symbol": "Nifty Bank", "name": "BANKNIFTY", "expiry": "", "exch_seg": "NSE", "instrumenttype": "AMXIDX"},
+{"token": "99926017", "symbol": "India VIX", "name": "INDIA VIX", "expiry": "", "exch_seg": "NSE", "instrumenttype": "AMXIDX"},
+{"token": "2885", "symbol": "RELIANCE-EQ", "name": "RELIANCE", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "500325", "symbol": "RELIANCE", "name": "RELIANCE", "expiry": "", "exch_seg": "BSE", "instrumenttype": ""},
+{"token": "1333", "symbol": "HDFCBANK-EQ", "name": "HDFCBANK", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "4963", "symbol": "ICICIBANK-EQ", "name": "ICICIBANK", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "1594", "symbol": "INFY-EQ", "name": "INFY", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "11536", "symbol": "TCS-EQ", "name": "TCS", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "10604", "symbol": "BHARTIARTL-EQ", "name": "BHARTIARTL", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "11483", "symbol": "LT-EQ", "name": "LT", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "1660", "symbol": "ITC-EQ", "name": "ITC", "expiry": "", "exch_seg": "NSE", "instrumenttype": ""},
+{"token": "2000", "symbol": "NIFTY29SEP26FUT", "name": "NIFTY", "expiry": "29SEP2026", "exch_seg": "NFO", "instrumenttype": "FUTIDX"},
+{"token": "2001", "symbol": "NIFTY27OCT26FUT", "name": "NIFTY", "expiry": "27OCT2026", "exch_seg": "NFO", "instrumenttype": "FUTIDX"},
+{"token": "2002", "symbol": "NIFTY24NOV26FUT", "name": "NIFTY", "expiry": "24NOV2026", "exch_seg": "NFO", "instrumenttype": "FUTIDX"},
+{"token": "2003", "symbol": "NIFTY29DEC26FUT", "name": "NIFTY", "expiry": "29DEC2026", "exch_seg": "NFO", "instrumenttype": "FUTIDX"},
+{"token": "2100", "symbol": "NIFTY27OCT2625000CE", "name": "NIFTY", "expiry": "27OCT2026", "exch_seg": "NFO", "instrumenttype": "OPTIDX"},
+{"token": "3001", "symbol": "USDINR28OCT26FUT", "name": "USDINR", "expiry": "28OCT2026", "exch_seg": "CDS", "instrumenttype": "FUTCUR"},
+{"token": "3002", "symbol": "USDINR26NOV26FUT", "name": "USDINR", "expiry": "26NOV2026", "exch_seg": "CDS", "instrumenttype": "FUTCUR"},
+{"token": "4001", "symbol": "CRUDEOIL19OCT26FUT", "name": "CRUDEOIL", "expiry": "19OCT2026", "exch_seg": "MCX", "instrumenttype": "FUTCOM"},
+{"token": "4002", "symbol": "CRUDEOIL19NOV26FUT", "name": "CRUDEOIL", "expiry": "19NOV2026", "exch_seg": "MCX", "instrumenttype": "FUTCOM"}
+]

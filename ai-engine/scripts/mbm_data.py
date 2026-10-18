@@ -96,6 +96,10 @@ def cmd_status(a) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:  # Windows consoles / Task Scheduler default to cp1252; reports contain non-ASCII
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     p = argparse.ArgumentParser(prog="mbm_data", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)

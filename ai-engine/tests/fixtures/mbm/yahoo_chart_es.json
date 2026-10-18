@@ -1,0 +1,8 @@
+{"chart": {"result": [{"meta": {"symbol": "ES=F", "gmtoffset": -14400},
+  "timestamp": [1760918400, 1760918460, 1760918520],
+  "indicators": {"quote": [{
+    "open": [6700.25, null, 6701.0],
+    "high": [6701.0, null, 6702.5],
+    "low": [6699.5, null, 6700.75],
+    "close": [6700.75, null, 6702.0],
+    "volume": [1200, null, 900]}]}}], "error": null}}

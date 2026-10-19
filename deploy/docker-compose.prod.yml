@@ -16,7 +16,11 @@ x-logging: &logging
 services:
   postgres:
     logging: *logging
-    image: timescale/timescaledb:latest-pg17
+    # Pinned by digest (2026-10-19) to the exact image prod runs: TimescaleDB 2.30.2 on PG 17.11.
+    # `latest-pg17` let any re-create silently pull a new Timescale (extension upgrade / breakage).
+    # To upgrade: pick the new digest deliberately, take a backup, run the restore test, then
+    # ALTER EXTENSION timescaledb UPDATE.
+    image: timescale/timescaledb:latest-pg17@sha256:b346edcdb51a1fd6020e3965e0bd1c9f3406fa6d5fbce1e28f4852587ef934e2
     container_name: grw-postgres
     # Docker's default 64 MB /dev/shm is too small for parallel query workers
     # ("could not resize shared memory segment").

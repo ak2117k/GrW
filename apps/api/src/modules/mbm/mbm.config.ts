@@ -20,6 +20,12 @@ export interface MbmConfig {
    */
   packet: MbmMode;
   exitShadow: MbmMode;
+  /**
+   * M3 trade-core entry gate `market-behaviour` (MBM_ENTRY_GATE, default off). observe: the gate always
+   * passes and records what it would have done; on: a regime the strategy version skips fails the gate.
+   * Inert whenever `mode` is off: read it through `mbmEntryGateMode`.
+   */
+  entryGate: MbmMode;
   /** Human-readable fallbacks taken while parsing; logged once at boot. */
   problems: string[];
 }
@@ -53,6 +59,11 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
     url = DEFAULT_URL;
   }
 
+  const rawGate = (env.MBM_ENTRY_GATE ?? '').trim().toLowerCase();
+  let entryGate: MbmMode = 'off';
+  if ((MODES as readonly string[]).includes(rawGate)) entryGate = rawGate as MbmMode;
+  else if (rawGate !== '') problems.push(`MBM_ENTRY_GATE=${rawGate} is not off|observe|on — using off`);
+
   const feedUserId = (env.MBM_FEED_USER_ID ?? '').trim() || csv(env.AI_AUTO_EXIT_USER_IDS)[0] || null;
   if (mode !== 'off' && !feedUserId) {
     problems.push('no MBM_FEED_USER_ID and AI_AUTO_EXIT_USER_IDS is empty — the bar refresher will not run');
@@ -72,7 +83,12 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
   const packet = consumer('MBM_PACKET');
   const exitShadow = consumer('MBM_EXIT_SHADOW');
 
-  return { mode, instruments, url, feedUserId, packet, exitShadow, problems };
+  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, problems };
+}
+
+/** The entry gate's effective mode: MBM_ENABLED=off makes every consumer inert (plan M3, global rule). */
+export function mbmEntryGateMode(c: Pick<MbmConfig, 'mode' | 'entryGate'> | null | undefined): MbmMode {
+  return !c || c.mode === 'off' ? 'off' : c.entryGate;
 }
 
 /** The single boot line: `[mbm] mode=… instruments=… url=… feedUser=…`. */

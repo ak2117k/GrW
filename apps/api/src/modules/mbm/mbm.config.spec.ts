@@ -1,10 +1,10 @@
-import { mbmBootLine, parseMbmConfig } from './mbm.config';
+import { mbmBootLine, mbmEntryGateMode, parseMbmConfig } from './mbm.config';
 import { MBM_UNIVERSE, universeFor } from './mbm-universe';
 
 describe('parseMbmConfig', () => {
   it('defaults to off / NIFTY / http://mbm:5100 / first auto-exit user', () => {
     const c = parseMbmConfig({ AI_AUTO_EXIT_USER_IDS: ' u1 , u2' });
-    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', problems: [] });
+    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', problems: [] });
   });
 
   it('parses explicit values, upper-cases and de-duplicates instruments, strips the trailing slash', () => {
@@ -59,6 +59,20 @@ describe('parseMbmConfig', () => {
         expect.stringContaining('MBM_EXIT_SHADOW=observe is ignored'),
       ]);
     });
+  });
+
+  it('parses MBM_ENTRY_GATE (off|observe|on, default off) and reports an unknown value', () => {
+    expect(parseMbmConfig({ MBM_ENTRY_GATE: ' Observe ' }).entryGate).toBe('observe');
+    expect(parseMbmConfig({ MBM_ENTRY_GATE: 'on' }).entryGate).toBe('on');
+    const bad = parseMbmConfig({ MBM_ENTRY_GATE: 'true' });
+    expect(bad.entryGate).toBe('off');
+    expect(bad.problems).toEqual([expect.stringContaining('MBM_ENTRY_GATE=true')]);
+  });
+
+  it('the entry gate is inert while MBM_ENABLED=off', () => {
+    expect(mbmEntryGateMode(parseMbmConfig({ MBM_ENTRY_GATE: 'on' }))).toBe('off');
+    expect(mbmEntryGateMode(parseMbmConfig({ MBM_ENABLED: 'observe', MBM_ENTRY_GATE: 'on', MBM_FEED_USER_ID: 'o' }))).toBe('on');
+    expect(mbmEntryGateMode(null)).toBe('off');
   });
 
   it('formats the single boot line', () => {

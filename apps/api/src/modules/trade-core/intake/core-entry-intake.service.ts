@@ -4,7 +4,7 @@ import type { InstrumentRef } from '../../market-hub/hub.types';
 import { marginFor } from '../execution/margin';
 import { CorePaperDefaultsService } from '../execution/services/core-paper-defaults.service';
 import { CORE_CORPUS, CORE_JOURNAL, CORE_TRADE_HISTORY, type CoreCorpusPort, type CoreJournalPort, type CoreTradeHistory } from '../journal/journal-ports';
-import type { SkipReason } from '../journal/journal.types';
+import type { CorpusSetup, SkipReason } from '../journal/journal.types';
 import { CoreLifecycleService } from '../lifecycle/core-lifecycle.service';
 import { resolveStopPct, round2 } from '../lifecycle/exit-plan';
 import type { CoreEntryIntent, RiskVerdict, RiskVerdictKind } from '../risk-wall/risk-wall.types';
@@ -14,7 +14,10 @@ import { setCoreAlertIntake, type ChartinkHit, type CoreAlertIntake } from './al
 import { CORE_ENTRY_CONFIG, type EntryConfig } from './entry-config';
 import { EntryMarket, intakeOwner } from './entry-market';
 import { cooldownActive, intentIdFor, lastLossVerdict, matchEntry, setupGroupKey, sizeQty, staleEntryFails, staleMovePct, stopPriceFor } from './entry-rules';
-import { runGates } from './gate-evaluators';
+import { MBM_GATE_KEY, runGates, type GateOutcome, type MbmGateAccess } from './gate-evaluators';
+import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
+import { mbmEntryGateMode } from '../../mbm/mbm.config';
+import type { MbmBehaviour } from '../../mbm/services/mbm-client.service';
 
 /** Load bound (Global Constraints): hits waiting for the sequential intake. */
 export const INTAKE_MAX_PENDING = 200;
@@ -33,6 +36,8 @@ interface Attempt {
   intentId: string;
   at: Date;
   evidence: Record<string, unknown>;
+  /** MBM M3: set when the market-behaviour gate applied (CorpusSetup.mbm). */
+  mbm?: CorpusSetup['mbm'];
 }
 
 const errorText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -62,6 +67,28 @@ export class CoreEntryIntake implements CoreAlertIntake, OnModuleInit, OnModuleD
     @Inject(CORE_JOURNAL) private readonly journal: CoreJournalPort,
     @Inject(CORE_CORPUS) private readonly corpus: CoreCorpusPort,
   ) {}
+
+  /** MBM M3 `market-behaviour` gate inputs; one MbmClient.behaviour call per attempt at most. */
+  private mbmGateAccess(hit: ChartinkHit): MbmGateAccess {
+    const m = this.market.mbm();
+    const mode = m ? mbmEntryGateMode(m.config) : 'off';
+    const instrument = m && mode !== 'off' ? mbmInstrumentFor({ symbol: hit.tradingSymbol, exchange: hit.exchange }, m.config.instruments) : null;
+    let fetched: Promise<MbmBehaviour> | null = null;
+    return {
+      mode,
+      instrument,
+      behaviour: (i) => (fetched ??= m ? m.client.behaviour(i) : Promise.resolve({ instrument: i, status: 'absent' as const })),
+    };
+  }
+
+  /** MBM M3: the gate's applied answer → the decision record's features / featureSet / mlScore. */
+  private static mbmRecord(outcomes: readonly GateOutcome[]): Attempt['mbm'] {
+    const d = outcomes.find((o) => o.key === MBM_GATE_KEY)?.detail;
+    if (!d || d.applies !== true || typeof d.p !== 'number') return undefined;
+    const { regime, p, rangeBp, q50Bp, asOf, modelId, horizon, instrument, wouldSkip, mode } = d;
+    const featureSet = typeof d.featureSet === 'string' && d.featureSet ? d.featureSet : 'mbm';
+    return { features: { instrument, horizon, regime, p, rangeBp, q50Bp, asOf, modelId, wouldSkip, mode }, featureSet, mlScore: p };
+  }
 
   onModuleInit(): void {
     if (this.config.mode === 'off') {
@@ -176,8 +203,9 @@ export class CoreEntryIntake implements CoreAlertIntake, OnModuleInit, OnModuleD
         return await this.skip(a, 'STALE_ENTRY', `moved ${moved}% past the alert price ₹${hit.hitPrice} (max ${b.filters.staleEntry?.maxMovePct}%)`);
       }
       if (b.filters.gates.length > 0) {
-        const g = await runGates(b.filters.gates, { entryPrice: p.ltp, now, candles: (tf, days) => this.market.candlesFor(ref, tf, days, now) });
+        const g = await runGates(b.filters.gates, { entryPrice: p.ltp, now, candles: (tf, days) => this.market.candlesFor(ref, tf, days, now), mbm: this.mbmGateAccess(hit) });
         a.evidence.gates = g.outcomes;
+        a.mbm = CoreEntryIntake.mbmRecord(g.outcomes);
         if (g.unknown) return await this.skip(a, 'GATE_UNKNOWN', `no evaluator is registered for ${g.unknown}`);
         if (!g.pass) return await this.skip(a, 'GATE', g.outcomes[g.outcomes.length - 1]?.reason ?? 'a gate failed');
       }
@@ -309,6 +337,7 @@ export class CoreEntryIntake implements CoreAlertIntake, OnModuleInit, OnModuleD
         evidence: a.evidence,
         ruleScore: a.hit.score,
         decision: { taken, reason },
+        ...(a.mbm ? { mbm: a.mbm } : {}),
       });
     } catch (err) {
       this.logger.warn(`corpus setup ${a.intentId} not written: ${errorText(err)}`);

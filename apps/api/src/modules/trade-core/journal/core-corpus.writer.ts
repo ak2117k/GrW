@@ -16,6 +16,10 @@ export class CoreCorpusWriter implements CoreCorpusPort {
   constructor(private readonly prisma: PrismaService) {}
 
   async entrySetup(s: CorpusSetup): Promise<void> {
+    // MBM M3: only when the market-behaviour gate applied; otherwise the row is byte-identical to before.
+    const mbm = s.mbm
+      ? { features: s.mbm.features as Prisma.InputJsonValue, featureSet: s.mbm.featureSet, mlScore: s.mbm.mlScore }
+      : {};
     await this.prisma.aiDecisionRecord.upsert({
       where: { source_sourceId: { source: 'core', sourceId: s.intentId } },
       create: {
@@ -34,6 +38,7 @@ export class CoreCorpusWriter implements CoreCorpusPort {
         evidence: s.evidence as Prisma.InputJsonValue,
         ruleScore: s.ruleScore,
         decision: s.decision as unknown as Prisma.InputJsonValue,
+        ...mbm,
       },
       // A skip never overwrites; a taken setup upgrades an earlier skip of the same intent.
       update: s.decision.taken
@@ -43,6 +48,7 @@ export class CoreCorpusWriter implements CoreCorpusPort {
             evidence: s.evidence as Prisma.InputJsonValue,
             ruleScore: s.ruleScore,
             decision: s.decision as unknown as Prisma.InputJsonValue,
+            ...mbm,
           }
         : {},
     });

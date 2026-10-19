@@ -203,8 +203,8 @@ under `/models` are missing, so check `verify`. During a session, `lastRun` shou
 **Rollback:**
 - API stops reading MBM: set `MBM_ENABLED=off` in `api.env` and recreate the api. Nothing in the
   trade path depends on MBM in M2, so this is always safe.
-- Bad service build: run `mbm-deploy.sh <previous-sha>` (the sha is in `/opt/grw/state/mbm_sha`
-  history and `docker image ls grw-mbm`).
+- Bad service build: run `mbm-deploy.sh <previous-sha>` (`docker image ls grw-mbm` lists the kept shas;
+  `/opt/grw/state/mbm_sha` is the running one).
 - Stop the service entirely: `docker compose -f /opt/grw/app/deploy/docker-compose.prod.yml --env-file /opt/grw/env/compose.env stop mbm`.
 - Bad model: re-ship the previous version, which reactivates its rows, then `docker restart grw-mbm`
   so it reloads the active rows.

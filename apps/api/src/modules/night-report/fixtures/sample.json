@@ -1,0 +1,439 @@
+{
+  "generatedAt": "2026-10-20T02:30:00.000Z",
+  "window": {
+    "from": "2026-10-19T10:00:00.000Z",
+    "to": "2026-10-20T02:30:00.000Z",
+    "nextOpen": "2026-10-21T03:45:00.000Z",
+    "holidayNote": "Today is an NSE holiday (Dussehra)"
+  },
+  "summary": {
+    "positions": 4,
+    "exitAtOpen": 1,
+    "tighten": 1,
+    "held": 1,
+    "newsOnPositions": 4,
+    "eventsToday": 1
+  },
+  "positions": [
+    {
+      "trackerId": "cm2trk001",
+      "instrument": {
+        "symbol": "NIFTY27OCT2625200CE",
+        "exchange": "NFO",
+        "token": "48213",
+        "chartHref": "/charts?symbol=NIFTY27OCT2625200CE&token=48213&exchange=NFO"
+      },
+      "underlying": {
+        "symbol": "NIFTY",
+        "exchange": "NSE",
+        "token": "99926000",
+        "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE"
+      },
+      "kind": "POSITION",
+      "qty": 75,
+      "entryPrice": 142.5,
+      "ltp": 118.3,
+      "pnl": -1815,
+      "pnlPct": -16.98,
+      "held": false,
+      "overnight": {
+        "verdict": "EXIT_AT_OPEN",
+        "confidence": "high",
+        "risk": "Two sessions of theta on a 7-day option over the holiday; NIFTY closed under the 25,250 pivot.",
+        "plan": "Exit in the first 5 minutes unless NIFTY opens above 25,250.",
+        "invalidation": "NIFTY above 25,250 at the open",
+        "at": "2026-10-19T10:16:04.000Z",
+        "window": "OVERNIGHT_REVIEW"
+      },
+      "preOpen": null,
+      "live": {
+        "verdict": "HOLD",
+        "confidence": "medium",
+        "risk": "Premium holding above the 15m swing low; thesis intact.",
+        "plan": null,
+        "invalidation": null,
+        "at": "2026-10-19T09:52:10.000Z",
+        "window": "LIVE"
+      }
+    },
+    {
+      "trackerId": "cm2trk002",
+      "instrument": {
+        "symbol": "KEI27OCT264000CE",
+        "exchange": "NFO",
+        "token": "55001",
+        "chartHref": "/charts?symbol=KEI27OCT264000CE&token=55001&exchange=NFO"
+      },
+      "underlying": {
+        "symbol": "KEI",
+        "exchange": "NSE",
+        "token": "13310",
+        "chartHref": "/charts?symbol=KEI&token=13310&exchange=NSE"
+      },
+      "kind": "POSITION",
+      "qty": 175,
+      "entryPrice": 120,
+      "ltp": 131.5,
+      "pnl": 2012.5,
+      "pnlPct": 9.58,
+      "held": false,
+      "overnight": {
+        "verdict": "TIGHTEN_AT_OPEN",
+        "confidence": "medium",
+        "risk": "Q2 results due Wednesday after the close.",
+        "plan": "Move the stop to 124 at the open; take half above 140.",
+        "invalidation": "KEI below 3,920",
+        "at": "2026-10-19T10:17:30.000Z",
+        "window": "OVERNIGHT_REVIEW"
+      },
+      "preOpen": null,
+      "live": {
+        "verdict": "HOLD",
+        "confidence": "high",
+        "risk": "Breakout retest held; volume above average.",
+        "plan": null,
+        "invalidation": "3,950",
+        "at": "2026-10-19T09:40:00.000Z",
+        "window": "LIVE"
+      }
+    },
+    {
+      "trackerId": "cm2trk003",
+      "instrument": {
+        "symbol": "CRUDEOIL19NOV26FUT",
+        "exchange": "MCX",
+        "token": "472790",
+        "chartHref": "/charts?symbol=CRUDEOIL19NOV26FUT&token=472790&exchange=MCX"
+      },
+      "underlying": {
+        "symbol": "CRUDEOIL",
+        "exchange": "MCX",
+        "token": null,
+        "chartHref": "/charts?symbol=CRUDEOIL&exchange=MCX"
+      },
+      "kind": "POSITION",
+      "qty": 100,
+      "entryPrice": 5604,
+      "ltp": 5651,
+      "pnl": 4700,
+      "pnlPct": 0.84,
+      "held": false,
+      "overnight": {
+        "verdict": "HOLD_OVERNIGHT",
+        "confidence": "medium",
+        "risk": "EIA inventory data Wednesday evening; Brent firm.",
+        "plan": "Hold; trail the stop to 5,580.",
+        "invalidation": "CRUDEOIL below 5,580",
+        "at": "2026-10-19T18:15:12.000Z",
+        "window": "OVERNIGHT_REVIEW"
+      },
+      "preOpen": null,
+      "live": null
+    },
+    {
+      "trackerId": "cm2trk004",
+      "instrument": {
+        "symbol": "RELIANCE-EQ",
+        "exchange": "NSE",
+        "token": "2885",
+        "chartHref": "/charts?symbol=RELIANCE-EQ&token=2885&exchange=NSE"
+      },
+      "underlying": null,
+      "kind": "HOLDING",
+      "qty": 20,
+      "entryPrice": 1388.4,
+      "ltp": 1412.1,
+      "pnl": 474,
+      "pnlPct": 1.71,
+      "held": true,
+      "overnight": null,
+      "preOpen": null,
+      "live": null
+    }
+  ],
+  "news": {
+    "onPositions": [
+      {
+        "symbol": {
+          "symbol": "CRUDEOIL",
+          "exchange": "MCX",
+          "token": null,
+          "chartHref": "/charts?symbol=CRUDEOIL&exchange=MCX"
+        },
+        "items": [
+          {
+            "id": "crude-opec",
+            "title": "Crude rises 1% as OPEC+ signals output discipline",
+            "summary": null,
+            "source": "Economic Times",
+            "url": "https://economictimes.indiatimes.com/markets/crude-opec",
+            "publishedAt": "2026-10-20T01:10:00.000Z",
+            "sentiment": "bullish",
+            "sentimentScore": 0.3,
+            "symbols": [
+              {
+                "symbol": "CRUDEOIL",
+                "exchange": "MCX",
+                "token": null,
+                "chartHref": "/charts?symbol=CRUDEOIL&exchange=MCX"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "symbol": {
+          "symbol": "KEI",
+          "exchange": "NSE",
+          "token": "13310",
+          "chartHref": "/charts?symbol=KEI&token=13310&exchange=NSE"
+        },
+        "items": [
+          {
+            "id": "kei-order-win",
+            "title": "KEI Industries bags Rs 1,200 crore EHV cable order",
+            "summary": "The order from a state transmission utility is to be executed over 18 months.",
+            "source": "Economic Times",
+            "url": "https://economictimes.indiatimes.com/markets/kei-order-win",
+            "publishedAt": "2026-10-19T12:40:00.000Z",
+            "sentiment": "bullish",
+            "sentimentScore": 0.62,
+            "symbols": [
+              {
+                "symbol": "KEI",
+                "exchange": "NSE",
+                "token": null,
+                "chartHref": "/charts?symbol=KEI&exchange=NSE"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "symbol": {
+          "symbol": "NIFTY",
+          "exchange": "NSE",
+          "token": "99926000",
+          "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE"
+        },
+        "items": [
+          {
+            "id": "gift-nifty",
+            "title": "GIFT Nifty flat ahead of Wednesday's reopen after Dussehra",
+            "summary": null,
+            "source": "Economic Times",
+            "url": "https://economictimes.indiatimes.com/markets/gift-nifty",
+            "publishedAt": "2026-10-20T01:45:00.000Z",
+            "sentiment": "neutral",
+            "sentimentScore": 0,
+            "symbols": [
+              {
+                "symbol": "NIFTY",
+                "exchange": "NSE",
+                "token": "99926000",
+                "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "symbol": {
+          "symbol": "RELIANCE-EQ",
+          "exchange": "NSE",
+          "token": "2885",
+          "chartHref": "/charts?symbol=RELIANCE-EQ&token=2885&exchange=NSE"
+        },
+        "items": [
+          {
+            "id": "ril-jio-ipo",
+            "title": "Reliance Jio IPO filing likely before Diwali, say bankers",
+            "summary": null,
+            "source": "Economic Times",
+            "url": "https://economictimes.indiatimes.com/markets/ril-jio-ipo",
+            "publishedAt": "2026-10-19T15:05:00.000Z",
+            "sentiment": "bullish",
+            "sentimentScore": 0.35,
+            "symbols": [
+              {
+                "symbol": "RELIANCE",
+                "exchange": "NSE",
+                "token": null,
+                "chartHref": "/charts?symbol=RELIANCE&exchange=NSE"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "market": [
+      {
+        "id": "fed-minutes",
+        "title": "Fed minutes show officials split on December cut",
+        "summary": null,
+        "source": "Economic Times",
+        "url": "https://economictimes.indiatimes.com/markets/fed-minutes",
+        "publishedAt": "2026-10-19T19:30:00.000Z",
+        "sentiment": "bearish",
+        "sentimentScore": -0.2,
+        "symbols": []
+      },
+      {
+        "id": "it-sector",
+        "title": "IT stocks may stay under pressure on weak deal pipeline: analysts",
+        "summary": null,
+        "source": "Economic Times",
+        "url": "https://economictimes.indiatimes.com/markets/it-sector",
+        "publishedAt": "2026-10-19T13:20:00.000Z",
+        "sentiment": "bearish",
+        "sentimentScore": -0.4,
+        "symbols": []
+      }
+    ]
+  },
+  "events": [
+    {
+      "id": "ev1",
+      "kind": "HOLIDAY",
+      "title": "NSE closed: Dussehra",
+      "startsAt": "2026-10-19T18:30:00.000Z",
+      "allDay": true,
+      "impact": "high",
+      "scope": "market",
+      "touchesPositions": []
+    },
+    {
+      "id": "ev2",
+      "kind": "RESULTS",
+      "title": "KEI Industries Q2 FY27 results",
+      "startsAt": "2026-10-21T10:30:00.000Z",
+      "allDay": false,
+      "impact": "high",
+      "scope": "company",
+      "touchesPositions": [
+        {
+          "symbol": "KEI",
+          "exchange": "NSE",
+          "token": "13310",
+          "chartHref": "/charts?symbol=KEI&token=13310&exchange=NSE"
+        }
+      ]
+    },
+    {
+      "id": "ev3",
+      "kind": "MACRO",
+      "title": "EIA crude inventories",
+      "startsAt": "2026-10-21T14:30:00.000Z",
+      "allDay": false,
+      "impact": "medium",
+      "scope": "commodity",
+      "touchesPositions": [
+        {
+          "symbol": "CRUDEOIL",
+          "exchange": "MCX",
+          "token": null,
+          "chartHref": "/charts?symbol=CRUDEOIL&exchange=MCX"
+        }
+      ]
+    },
+    {
+      "id": "ev4",
+      "kind": "EXPIRY",
+      "title": "NIFTY weekly expiry",
+      "startsAt": "2026-10-21T10:00:00.000Z",
+      "allDay": false,
+      "impact": "medium",
+      "scope": "expiry",
+      "touchesPositions": [
+        {
+          "symbol": "NIFTY",
+          "exchange": "NSE",
+          "token": "99926000",
+          "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE"
+        }
+      ]
+    }
+  ],
+  "dailySetups": [
+    {
+      "instrument": {
+        "symbol": "NIFTY",
+        "exchange": "NSE",
+        "token": "99926000",
+        "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE"
+      },
+      "setup": "RIBBON_DOWN_MACD_RED_12_26",
+      "action": "EXIT_OR_TIGHTEN_LONGS",
+      "signalDate": "2026-10-19",
+      "close": 25188.6,
+      "ret5dBp": null,
+      "ret10dBp": null,
+      "ret20dBp": null
+    },
+    {
+      "instrument": {
+        "symbol": "NIFTY",
+        "exchange": "NSE",
+        "token": "99926000",
+        "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE"
+      },
+      "setup": "BB_BREAKOUT_UP",
+      "action": "LONG_SETUP",
+      "signalDate": "2026-10-16",
+      "close": 25402.15,
+      "ret5dBp": null,
+      "ret10dBp": null,
+      "ret20dBp": null
+    }
+  ],
+  "mood": {
+    "status": "stale",
+    "asOf": "2026-10-19T10:00:00Z",
+    "horizons": {
+      "30m": {
+        "p": 0.27,
+        "regime": "QUIET",
+        "q25Bp": 9.5,
+        "q75Bp": 24.1
+      },
+      "60m": {
+        "p": 0.34,
+        "regime": "NORMAL",
+        "q25Bp": 14.2,
+        "q75Bp": 36.8
+      }
+    }
+  },
+  "jobs": [
+    {
+      "name": "News fetch",
+      "status": "ok",
+      "at": "2026-10-20T02:15:00.000Z",
+      "detail": "newest article fetched 2026-10-20T02:15:00.000Z"
+    },
+    {
+      "name": "Daily candles",
+      "status": "ok",
+      "at": "2026-10-18T18:30:00.000Z",
+      "detail": "214 instruments have the 2026-10-19 daily bar"
+    },
+    {
+      "name": "MBM predictions",
+      "status": "ok",
+      "at": "2026-10-19T09:55:00.000Z",
+      "detail": "newest NIFTY prediction 2026-10-19T09:55:00.000Z"
+    },
+    {
+      "name": "MBM chain snapshots",
+      "status": "ok",
+      "at": "2026-10-19T09:55:30.000Z",
+      "detail": "newest NIFTY chain capture 2026-10-19T09:55:30.000Z"
+    },
+    {
+      "name": "Sentinel overnight review",
+      "status": "ok",
+      "at": "2026-10-19T18:15:12.000Z",
+      "detail": "newest after-close verdict 2026-10-19T18:15:12.000Z"
+    }
+  ]
+}

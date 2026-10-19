@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  safeExternalUrl,
   bpPct,
   isSectionError,
   istDate,
@@ -101,5 +102,17 @@ describe('section errors and sentiment', () => {
     expect(sentimentTone(null, 0.5)).toBe('positive');
     expect(sentimentTone(null, -0.5)).toBe('negative');
     expect(sentimentTone(null, null)).toBe('neutral');
+  });
+});
+
+describe('safeExternalUrl (feed URLs are external input)', () => {
+  it('keeps absolute http(s) links', () => {
+    expect(safeExternalUrl('https://example.com/a?b=1')).toBe('https://example.com/a?b=1');
+    expect(safeExternalUrl('http://example.com/')).toBe('http://example.com/');
+  });
+  it('drops script, data, relative and garbage URLs', () => {
+    for (const u of ['javascript:alert(1)', ' JAVASCRIPT:alert(1)', 'data:text/html,<b>x</b>', '/charts', 'not a url', '', null, undefined]) {
+      expect(safeExternalUrl(u as string | null | undefined)).toBeNull();
+    }
   });
 });

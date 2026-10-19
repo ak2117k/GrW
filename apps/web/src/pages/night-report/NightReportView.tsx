@@ -26,6 +26,7 @@ import {
   istTime,
   jobVariant,
   rupees,
+  safeExternalUrl,
   sentenceCase,
   sentimentTone,
   setupActionLabel,
@@ -257,22 +258,33 @@ const SENTIMENT_DOT = {
 
 export function NewsItemRow({ item }: { item: NewsItem }) {
   const tone = sentimentTone(item.sentiment, item.sentimentScore);
+  // Feed URLs are external input: only http(s) becomes a link (a `javascript:` URL would run on click).
+  const href = safeExternalUrl(item.url);
+  const headline = (
+    <>
+      <span
+        className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SENTIMENT_DOT[tone])}
+        title={`Sentiment: ${item.sentiment ?? tone}`}
+        aria-label={`Sentiment ${tone}`}
+      />
+      <span className="flex-1">{item.title}</span>
+    </>
+  );
   return (
     <li className="space-y-1 py-2" data-testid="night-news-item">
-      <a
-        href={item.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={cn('flex min-h-10 items-start gap-2 text-sm font-medium hover:underline', PRIMARY)}
-      >
-        <span
-          className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SENTIMENT_DOT[tone])}
-          title={`Sentiment: ${item.sentiment ?? tone}`}
-          aria-label={`Sentiment ${tone}`}
-        />
-        <span className="flex-1">{item.title}</span>
-        <ExternalLink size={12} className="mt-1 shrink-0 opacity-60" />
-      </a>
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={cn('flex min-h-10 items-start gap-2 text-sm font-medium hover:underline', PRIMARY)}
+        >
+          {headline}
+          <ExternalLink size={12} className="mt-1 shrink-0 opacity-60" />
+        </a>
+      ) : (
+        <p className={cn('flex min-h-10 items-start gap-2 text-sm font-medium', PRIMARY)}>{headline}</p>
+      )}
       <p className={cn('pl-4 text-[11px]', MUTED)}>
         {item.source} · {agoLabel(item.publishedAt)}
       </p>

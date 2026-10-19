@@ -196,3 +196,15 @@ export function sentenceCase(code: string): string {
   const s = String(code ?? '').replace(/_/g, ' ').trim().toLowerCase();
   return s ? s[0].toUpperCase() + s.slice(1) : '';
 }
+
+
+/** An external link target only when it is an absolute http(s) URL; anything else (javascript:, data:, relative) is null. */
+export function safeExternalUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null;
+  } catch {
+    return null;
+  }
+}

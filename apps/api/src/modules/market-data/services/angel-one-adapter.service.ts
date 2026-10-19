@@ -207,6 +207,28 @@ const HISTORICAL_CACHE_LIVE_WINDOW_MS = 2 * 60 * 1000;
  * Exported for testing — the message is the contract, so it needs a test that
  * fails if the auth service ever rewords it.
  */
+/**
+ * Run `fn` with `console.log` muted (nested and concurrent calls share one depth
+ * counter, so the original is restored only when the last one finishes). For SDK
+ * calls that print their whole payload to stdout.
+ */
+let quietDepth = 0;
+let originalConsoleLog: typeof console.log | null = null;
+export async function withQuietConsole<T>(fn: () => Promise<T>): Promise<T> {
+  if (quietDepth++ === 0) {
+    originalConsoleLog = console.log;
+    console.log = () => undefined;
+  }
+  try {
+    return await fn();
+  } finally {
+    if (--quietDepth === 0 && originalConsoleLog) {
+      console.log = originalConsoleLog;
+      originalConsoleLog = null;
+    }
+  }
+}
+
 export function isNotAuthenticatedError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '');
   return /not authenticated/i.test(msg);
@@ -1299,11 +1321,16 @@ export class AngelOneAdapterService implements BrokerAdapter {
     try {
       const smartApi = this.authService.getSmartApi();
 
-      // SmartAPI searchScrip returns data.data directly (already extracted by SDK)
-      const result = await smartApi.searchScrip({
-        exchange,
-        searchscrip: query,
-      });
+      // SmartAPI searchScrip returns data.data directly (already extracted by SDK).
+      // The SDK console.logs EVERY match (thousands of lines for "GOLDM" on MCX): prod
+      // 2026-10-19 had 91 % of all log lines from it, so real logs rotated out within
+      // minutes. Silenced for this call only; our logging goes through Nest's logger.
+      const result: any = await withQuietConsole<any>(() =>
+        smartApi.searchScrip({
+          exchange,
+          searchscrip: query,
+        }),
+      );
 
       // The SDK may return the array directly, or wrapped in { data: [...] }
       if (Array.isArray(result)) return result;

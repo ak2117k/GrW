@@ -110,6 +110,18 @@ function unansweredDetail(envelope: unknown): string {
   if (e.status === true || e.success === true) parts.push('unreadable data');
   return (parts.length > 0 ? parts.join(' ') : 'no answer (empty)').slice(0, 200);
 }
+/** Angel's expired-session answer: `errorcode AG8001 "Invalid Token"`. */
+const isInvalidToken = (detail: string | undefined) => /AG8001|invalid token/i.test(detail ?? '');
+/** Consecutive auth failures for one user before the loud one-time ERROR. */
+const AUTH_ALERT_AFTER = 3;
+
+/**
+ * Thrown from inside the lease when the FIRST positions read answered AG8001 —
+ * before anything was cancelled or sent — so the lease is released and the
+ * attempt can be retried once on a re-logged-in session.
+ */
+class SessionTokenExpiredError extends Error {}
+
 /** A non-ok check's reason. `protective` only comes back from a check that may cancel; elsewhere it is an open order. */
 const refusal = (pre: Exclude<PreCheck, { kind: 'ok' }>) => (pre.kind === 'protective' ? 'OPEN_ORDER_EXISTS' : pre.reason);
 /** "SL1 (STOPLOSS_MARKET SELL 100), T1 (LIMIT SELL 100)" */
@@ -128,6 +140,8 @@ const describeProtective = (orders: ProtectiveOrder[]) =>
 export class SentinelExitExecutor {
   private readonly logger = new Logger(SentinelExitExecutor.name);
   private readonly capWarned = new Set<string>();
+  /** userId → consecutive AG8001 failures that survived a re-login. */
+  private readonly authFailStreak = new Map<string, number>();
 
   constructor(
     private readonly repo: AiExitExecutionRepository,
@@ -198,10 +212,12 @@ export class SentinelExitExecutor {
 
     // 3–7. BROKER — one session lease, tier chosen once (ruling R1).
     let outcome: AiExitOutcome;
-    try {
-      outcome = await this.sessions.withOwnerSession(v.userId, async (s, source) => {
+    const attempt = () => this.sessions.withOwnerSession<AiExitOutcome>(v.userId, async (s, source) => {
         await this.repo.update(id, { sessionSource: source });
         const first = await this.preOrderCheck(s, t, run, true);
+        if (first.kind === 'fail' && first.reason === 'BROKER_READ' && isInvalidToken(first.detail) && !run.sent && !run.cancelSent) {
+          throw new SessionTokenExpiredError(first.detail ?? 'AG8001');
+        }
         if (first.kind === 'skip' || first.kind === 'fail') {
           return first.kind === 'skip'
             ? this.finish(id, v, 'SKIPPED', first.reason)
@@ -254,6 +270,25 @@ export class SentinelExitExecutor {
         }
         return this.settleUnplaced(s, run, o, r, 'M');
       }, { allowEphemeralLogin: cfg.mode === 'live' });
+    try {
+      try {
+        outcome = await attempt();
+      } catch (err) {
+        if (!(err instanceof SessionTokenExpiredError)) throw err;
+        // Angel's ~6 AM reset kills the JWT while the feed socket keeps streaming
+        // (prod 2026-10-19: 419 exits failed AG8001 in one day). Re-login, retry ONCE.
+        this.logger.warn(`[ai-exit] broker session token rejected (${err.message}) — re-logging in and retrying once — ${v.symbol} verdict ${v.id}`);
+        if (!(await this.sessions.reloginOwner(v.userId))) {
+          return this.flagUnprotected(run, await this.authFailed(id, v, `${err.message}; re-login failed`));
+        }
+        try {
+          outcome = await attempt();
+        } catch (again) {
+          if (!(again instanceof SessionTokenExpiredError)) throw again;
+          return this.flagUnprotected(run, await this.authFailed(id, v, `${again.message}; still rejected after re-login`));
+        }
+      }
+      this.authFailStreak.delete(v.userId);
     } catch (err) {
       if (err instanceof FeedSessionNotReadyError) {
         // Owner decision: refuse rather than a second Angel login over the live feed.
@@ -267,6 +302,23 @@ export class SentinelExitExecutor {
       outcome = await this.finish(id, v, 'FAILED', run.sent ? 'ORDER_UNCERTAIN' : 'SESSION', { brokerMessage: errText(err) });
     }
     return this.flagUnprotected(run, outcome);
+  }
+
+  /**
+   * An attempt the broker refused with AG8001 even after a re-login (or whose
+   * re-login failed). After AUTH_ALERT_AFTER in a row for a user, ONE loud ERROR
+   * (there is no outbound notification channel yet) — never one per verdict.
+   */
+  private async authFailed(id: string, v: PendingVerdict, detail: string): Promise<AiExitOutcome> {
+    const n = (this.authFailStreak.get(v.userId) ?? 0) + 1;
+    this.authFailStreak.set(v.userId, n);
+    if (n === AUTH_ALERT_AFTER) {
+      this.logger.error(
+        `[ai-exit] BROKER SESSION DEAD for user ${v.userId}: ${n} exits in a row refused "Invalid Token" ` +
+          `even after re-login — AI exits are NOT reaching the broker. Reconnect Angel One. Last: ${v.symbol} (${detail})`,
+      );
+    }
+    return this.finish(id, v, 'FAILED', 'BROKER_AUTH', { brokerMessage: detail.slice(0, 200) });
   }
 
   /**

@@ -626,3 +626,76 @@ describe('streamAuth (the order-update stream rides the live session, never its 
     }
   });
 });
+
+describe('relogin (Angel 6 AM reset: the socket survives, the JWT does not)', () => {
+  function twoSockets() {
+    const d = makeDeps();
+    const sockets: any[] = [];
+    const wsFactory = jest.fn(() => {
+      const handlers: Record<string, (...args: any[]) => void> = {};
+      const ws = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        close: jest.fn(),
+        fetchData: jest.fn(),
+        on: jest.fn((event: string, cb: (...args: any[]) => void) => { handlers[event] = cb; }),
+        handlers,
+      };
+      sockets.push(ws);
+      return ws;
+    });
+    d.smartApi.generateSession
+      .mockResolvedValueOnce({ data: { jwtToken: 'jwt-old', feedToken: 'feed-old' } })
+      .mockResolvedValueOnce({ data: { jwtToken: 'jwt-new', feedToken: 'feed-new' } });
+    const s = new UserFeedSession('u1', {
+      withDecryptedCreds: d.withCreds,
+      smartApiFactory: () => d.smartApi as any,
+      wsFactory: wsFactory as any,
+    });
+    return { d, s, sockets, wsFactory };
+  }
+
+  it('logs in again, opens a new socket, closes the old one and restores subscriptions', async () => {
+    const { d, s, sockets } = twoSockets();
+    await s.subscribe([{ token: '99926000', exchange: 'NSE' } as any]);
+    expect(s.streamAuth()?.jwtToken).toBe('jwt-old');
+
+    await s.relogin();
+
+    expect(d.smartApi.generateSession).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0].close).toHaveBeenCalled();
+    expect(s.streamAuth()?.jwtToken).toBe('jwt-new');
+    expect(s.restClient()).not.toBeNull();
+    expect(sockets[1].fetchData).toHaveBeenCalled(); // subscription restored on the new socket
+  });
+
+  it('a late close event from the REPLACED socket does not trigger another login', async () => {
+    jest.useFakeTimers();
+    try {
+      const { d, s, sockets } = twoSockets();
+      await s.ensureConnected();
+      await s.relogin();
+      sockets[0].handlers['close']();       // the old socket's close arrives after the swap
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(d.smartApi.generateSession).toHaveBeenCalledTimes(2);
+      expect(s.restClient()).not.toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('concurrent relogins share ONE login', async () => {
+    const { d, s } = twoSockets();
+    await s.ensureConnected();
+    await Promise.all([s.relogin(), s.relogin()]);
+    expect(d.smartApi.generateSession).toHaveBeenCalledTimes(2); // initial + one relogin
+  });
+
+  it('is a no-op after dispose', async () => {
+    const { d, s } = twoSockets();
+    await s.ensureConnected();
+    await s.dispose();
+    await s.relogin();
+    expect(d.smartApi.generateSession).toHaveBeenCalledTimes(1);
+  });
+});

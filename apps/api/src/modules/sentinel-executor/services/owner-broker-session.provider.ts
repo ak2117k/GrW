@@ -70,6 +70,15 @@ export class OwnerBrokerSessionProvider {
     @Inject(CREDENTIAL_DECRYPTOR) private readonly decryptor: CredentialDecryptor,
   ) {}
 
+  /**
+   * Force a fresh login on the owner's registered feed session after its JWT
+   * answered AG8001 (Angel's ~6 AM reset outlives the socket, not the token).
+   * False when there is no registered session or the login failed. Never throws.
+   */
+  reloginOwner(userId: string): Promise<boolean> {
+    return this.userFeeds.reloginUser(userId);
+  }
+
   async withOwnerSession<T>(
     userId: string,
     fn: (session: UserBrokerSession, source: SessionSource) => Promise<T>,

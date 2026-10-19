@@ -21,4 +21,20 @@ describe('PremarketSessionCron', () => {
     await expect(cron.refreshPremarketSession()).resolves.toBeUndefined();
     expect(auth.login).toHaveBeenCalledTimes(1);
   });
+
+  it('then re-logs in every per-user feed session, AFTER the shared one', async () => {
+    const order: string[] = [];
+    const auth = { login: jest.fn(async () => { order.push('shared'); }) };
+    const feeds = { reloginAll: jest.fn(async () => { order.push('per-user'); return { ok: 1, failed: 0 }; }) };
+    const cron = new PremarketSessionCron(auth as never, feeds as never);
+    await cron.refreshPremarketSession();
+    expect(order).toEqual(['shared', 'per-user']);
+  });
+
+  it('a per-user refresh fault never throws out of the scheduler', async () => {
+    const auth = { login: jest.fn().mockResolvedValue(undefined) };
+    const feeds = { reloginAll: jest.fn().mockRejectedValue(new Error('vault down')) };
+    const cron = new PremarketSessionCron(auth as never, feeds as never);
+    await expect(cron.refreshPremarketSession()).resolves.toBeUndefined();
+  });
 });

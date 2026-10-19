@@ -96,6 +96,14 @@ export function parseAutoExitConfig(env: Record<string, string | undefined>): Au
       DEFAULTS.limitFallbackPct, (n) => n >= 0.5 && n <= 10, problems),
     qtyUnits: parseQtyUnits(env.AI_AUTO_EXIT_QTY_UNITS, problems),
     cancelProtective: env.AI_AUTO_EXIT_CANCEL_PROTECTIVE === 'true',
+    hold: [
+      ...new Set(
+        String(env.AI_AUTO_EXIT_HOLD ?? '')
+          .split(',')
+          .map((s) => s.trim().toUpperCase())
+          .filter(Boolean),
+      ),
+    ],
     problems,
   };
 }

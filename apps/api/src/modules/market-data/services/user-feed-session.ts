@@ -217,6 +217,27 @@ export class UserFeedSession implements UserFeedSessionLike {
     return this.activeTokens.size;
   }
 
+  /**
+   * Force a FRESH login on this session: new JWT, new feed socket, subscriptions
+   * restored. Angel kills every API session at its ~6 AM IST reset; the feed
+   * socket opened before it keeps streaming, so the session looks live while
+   * every REST call on its JWT answers AG8001 "Invalid Token" (prod 2026-10-19:
+   * 419 failed AI exits). Called by the pre-market refresh and by a caller that
+   * just got AG8001. Joins a login already in flight instead of starting a second
+   * generateSession. No-op on a disposed session.
+   */
+  async relogin(): Promise<void> {
+    if (this.disposed) return;
+    if (this.connectPromise && !this.connected) return this.connectPromise;
+    this.clearReconnectTimer();
+    this.connected = false;
+    this.connectPromise = null;
+    this.restReady = false;
+    this.auth = null;
+    this.setState('reconnecting');
+    await this.ensureConnectedInternal(true);
+  }
+
   /** See UserFeedSessionLike.restClient. Never logs in. */
   restClient(): WarmRestClient | null {
     if (this.disposed || !this.restReady || !this.smartApi || !this.clientId) return null;
@@ -626,6 +647,9 @@ export class UserFeedSession implements UserFeedSessionLike {
 
   private registerEventHandlers(): void {
     if (!this.ws) return;
+    // Events from a socket this session already replaced (relogin closes the old
+    // one) must not mark the NEW socket down and schedule another login.
+    const ws = this.ws;
 
     this.ws.on('tick', (data: any) => {
       try {
@@ -641,10 +665,12 @@ export class UserFeedSession implements UserFeedSessionLike {
     });
 
     this.ws.on('close', () => {
+      if (ws !== this.ws) return;
       this.onSocketDown('reconnecting');
     });
 
     this.ws.on('error', (error: any) => {
+      if (ws !== this.ws) return;
       this.logger.error(
         `WebSocket error: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
       );

@@ -276,3 +276,33 @@ it('streamAuth never creates a session, and returns the live session tokens', as
   await mgr.pin('u1', []);
   expect(mgr.streamAuth('u1')).toEqual(auth);
 });
+
+describe('reloginUser / reloginAll', () => {
+  function withSessions() {
+    const sessions: any[] = [];
+    const factory = jest.fn(() => {
+      const s: any = fakeSession();
+      s.relogin = jest.fn().mockResolvedValue(undefined);
+      sessions.push(s);
+      return s;
+    });
+    return { sessions, mgr: new UserFeedManager(factory as any, { idleMs: 120000, maxSessions: 40 }) };
+  }
+
+  it('re-logs in a registered session and never creates one', async () => {
+    const { sessions, mgr } = withSessions();
+    await expect(mgr.reloginUser('nobody')).resolves.toBe(false);
+    expect(sessions).toHaveLength(0);
+    await mgr.subscribe('u1', [{ token: '1', exchange: 'NSE' }]);
+    await expect(mgr.reloginUser('u1')).resolves.toBe(true);
+    expect(sessions[0].relogin).toHaveBeenCalledTimes(1);
+  });
+
+  it('reloginAll covers every session and counts failures without throwing', async () => {
+    const { sessions, mgr } = withSessions();
+    await mgr.subscribe('u1', [{ token: '1', exchange: 'NSE' }]);
+    await mgr.subscribe('u2', [{ token: '2', exchange: 'NSE' }]);
+    sessions[1].relogin.mockRejectedValueOnce(new Error('TOTP rejected'));
+    await expect(mgr.reloginAll()).resolves.toEqual({ ok: 1, failed: 1 });
+  });
+});

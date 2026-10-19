@@ -47,6 +47,7 @@ import { MarketHubModule } from './modules/market-hub/market-hub.module';
 import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.module';
 import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-executor.module';
 import { MbmModule } from './modules/mbm/mbm.module';
+import { NightReportModule } from './modules/night-report/night-report.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
@@ -246,6 +247,10 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // Market-behaviour model M2 (observe only): 1m bar refresher + fail-open proxy to the
     // MBM service. Inert unless MBM_ENABLED=observe|on.
     MbmModule,
+
+    // Night report: one read-only morning page (GET /api/night-report) over the
+    // night since the last NSE close. Reads only.
+    NightReportModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

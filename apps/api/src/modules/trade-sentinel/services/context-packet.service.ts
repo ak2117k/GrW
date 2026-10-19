@@ -21,6 +21,14 @@ import type { EventsPeek, FreshItem, NewsPeek, NewsPosition } from '../../news-e
 import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
 import { NEWS_INDEX, type NewsIndexReader } from '../ports/news-index.port';
 import { allEventsAbsent, allNewsAbsent, eventsBlocks, newsBlocksV2, type EventsBlocksV2, type NewsBlocksV2 } from './news-events-blocks';
+import { MBM_CONFIG, type MbmConfig } from '../../mbm/mbm.config';
+// A VALUE import: MbmClient is injected by class, so design:paramtypes must see it.
+import { MbmClient } from '../../mbm/services/mbm-client.service';
+import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
+import { MBM_BLOCK_SOURCE, marketBehaviourValue } from './market-behaviour-block';
+
+/** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
+export const MBM_PACKET_LOG_EVERY_MS = 15 * 60_000;
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -516,6 +524,13 @@ export type ContextPacket = {
     upcoming: Block<Prisma.InputJsonValue>;
     minutesToNextHighImpact: Block<number>;
   };
+  /**
+   * MBM M3 (MBM_PACKET=on only): the market-behaviour model's regime and expected range for a
+   * NIFTY-mapped position — a `MarketBehaviourValue`. Absent key ⇒ flag off/observe, a non-NIFTY
+   * position, or no usable (ok, finite) answer: never an `available:false` block, so the packet of
+   * every unmapped position stays byte-identical.
+   */
+  marketBehaviour?: Block<Prisma.InputJsonValue>;
   session: {
     nowIst: string;
     nowUtc: string;
@@ -824,7 +839,44 @@ export class ContextPacketService {
     @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly newsCfg?: NewsEventsConfig,
     @Optional() @Inject(NEWS_INDEX) private readonly newsIndex?: NewsIndexReader,
     @Optional() @Inject(MARKET_EVENTS) private readonly marketEvents?: EventsReader,
+    /** MBM M3 — both optional: absent, or `packet: 'off'`, ⇒ the client is never called. */
+    @Optional() @Inject(MBM_CONFIG) private readonly mbmCfg?: MbmConfig,
+    @Optional() private readonly mbm?: MbmClient,
   ) {}
+
+  /** trackerId → last `[mbm-packet] would add` log time (observe only). */
+  private readonly mbmLogged = new Map<string, number>();
+
+  /**
+   * The `marketBehaviour` block for this position, or null. Null whenever MBM_PACKET is off (no
+   * call made), the position does not map to an MBM instrument, or the answer is not usable.
+   * Under `observe` it logs what it would add (throttled) and ALWAYS returns null — the packet is
+   * unchanged. Never throws.
+   */
+  private async marketBehaviourBlock(entry: RosterEntry, now: Date, at: string): Promise<Block<Prisma.InputJsonValue> | null> {
+    const mode = this.mbmCfg?.packet ?? 'off';
+    if (mode === 'off' || !this.mbm || !this.mbmCfg) return null;
+    try {
+      const inst = mbmInstrumentFor({ symbol: entry.symbol, exchange: entry.exchange }, this.mbmCfg.instruments);
+      if (!inst) return null;
+      const left = minutesToSessionClose(now, entry.exchange);
+      const value = marketBehaviourValue(await this.mbm.behaviour(inst, now.getTime()), inst, left.available ? left.value : null);
+      if (!value) return null;
+      if (mode === 'on') return present(value, MBM_BLOCK_SOURCE, at);
+      const last = this.mbmLogged.get(entry.trackerId);
+      if (last === undefined || now.getTime() - last >= MBM_PACKET_LOG_EVERY_MS) {
+        if (this.mbmLogged.size > 500) {
+          for (const [k, t] of this.mbmLogged) if (now.getTime() - t >= MBM_PACKET_LOG_EVERY_MS) this.mbmLogged.delete(k);
+        }
+        this.mbmLogged.set(entry.trackerId, now.getTime());
+        this.logger.log(`[mbm-packet] would add marketBehaviour ${JSON.stringify(value)} — ${entry.symbol} tracker ${entry.trackerId}`);
+      }
+      return null;
+    } catch (err) {
+      this.logger.warn(`[mbm-packet] skipped: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
 
   private readMacro(now: Date): { snapshot: MarketCuesSnapshot | null; reason: string } {
     if (!this.macroCues) return { snapshot: null, reason: 'the market-cues service is not wired into this process' };
@@ -896,6 +948,8 @@ export class ContextPacketService {
   ): Promise<ContextPacket> {
     const now = new Date();
     const at = now.toISOString();
+    // MBM M3: started first so its (cached, ≤ 800 ms, fail-open) read overlaps the others. Never rejects.
+    const marketBehaviourP = this.marketBehaviourBlock(entry, now, at);
 
     const floor = computeGreenFloor({
       segment: tick.segment,
@@ -982,6 +1036,7 @@ export class ContextPacketService {
     );
 
     const v2b = v2 ? this.v2Blocks(entry, tick, now, at) : null;
+    const marketBehaviour = await marketBehaviourP;
 
     return {
       position: {
@@ -1127,6 +1182,7 @@ export class ContextPacketService {
                 ),
           },
       ...(v2b ? { events: v2b.events } : {}),
+      ...(marketBehaviour ? { marketBehaviour } : {}),
       session: {
         nowIst: istWallClock(now),
         nowUtc: at,

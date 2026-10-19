@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from src.mbm import model_a as A  # noqa: E402
@@ -164,6 +165,50 @@ def render_report(m: dict, ds: pd.DataFrame) -> str:
     return "\n".join(L)
 
 
+def predict_a(args) -> int:
+    """Forward test: score one session with the SAVED models and compare with what happened."""
+    from src.mbm.predict import HorizonModel, score_session
+
+    root = Path(args.store) if args.store else default_root()
+    inst = args.instrument.upper()
+    out = root / "models" / "m1" / inst.lower()
+    horizons = args.horizons.split(",") if args.horizons else ["30m", "60m"]
+    models = {h: HorizonModel.load(out / h) for h in horizons if (out / h / "meta.json").exists()}
+    day = pd.Timestamp(args.date)
+    # ~2 years of history covers every rolling window (ATR, 60-session thresholds, 20d stats).
+    inputs = load_inputs(root, inst, start=(day - pd.Timedelta(days=730)).tz_localize("Asia/Kolkata"))
+    ds = A.build_dataset(inputs)
+    if not (ds["date"] == day).any():
+        print(f"no {inst} bars for {day.date()} in the store — run `mbm_data.py build` after the close")
+        return 1
+    s = score_session(ds, models, day)
+    L = [f"# MBM forward test — {inst} {day.date()}", "",
+         "Models trained through: " + ", ".join(f"{h} {m.trained_through} ({m.feature_set})" for h, m in models.items())
+         + " — this session was never seen in training.", ""]
+    for h, g in s.groupby("horizon", sort=False):
+        known = g.dropna(subset=["big"])
+        L += [f"## {h}", "", "| time | P(big) | regime | p25–p75 bp | actual bp | big? | hit |", "|---|---|---|---|---|---|---|"]
+        for _, r in g.iterrows():
+            t = f"{r['mod'] // 60:02d}:{r['mod'] % 60:02d}"
+            if np.isnan(r["big"]):
+                act, big, hit = "—", "pending", ""
+            else:
+                act, big = f"{r['actual_bp']:.1f}", "YES" if r["big"] == 1 else "no"
+                hit = "✓" if (r["p"] >= 0.5) == (r["big"] == 1) else "✗"
+            L.append(f"| {t} | {r['p']:.2f} | {r['regime']} | {r['q25_bp']:.0f}–{r['q75_bp']:.0f} | {act} | {big} | {hit} |")
+        if len(known):
+            acc = float(((known["p"] >= 0.5) == (known["big"] == 1)).mean())
+            band = float(((known["actual_bp"] >= known["q25_bp"]) & (known["actual_bp"] <= known["q75_bp"])).mean())
+            L += ["", f"{len(known)} outcomes known · direction-of-call accuracy {acc:.0%} · "
+                  f"inside p25–p75 {band:.0%} (target 50%) · big moves {known['big'].mean():.0%}"]
+        L.append("")
+    rpt = root / "reports" / f"forward-{inst.lower()}-{day.date()}.md"
+    rpt.write_text("\n".join(L), encoding="utf-8")
+    print("\n".join(L))
+    print(f"report → {rpt}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -179,11 +224,18 @@ def main(argv=None) -> int:
     r.add_argument("--store", default=None)
     r.add_argument("--runtime", type=int, default=None, help="walk-forward runtime to record (s)")
     r.add_argument("--note", default=None)
+    f = sub.add_parser("predict-a", help="forward test: score one session with the saved models")
+    f.add_argument("--instrument", default="NIFTY")
+    f.add_argument("--store", default=None)
+    f.add_argument("--date", required=True, help="IST session date, YYYY-MM-DD")
+    f.add_argument("--horizons", default=None, help="comma list, default 30m,60m (the horizons near the gate)")
     args = ap.parse_args(argv)
     if args.cmd == "train-a":
         return train_a(args)
     if args.cmd == "report":
         return report_only(args)
+    if args.cmd == "predict-a":
+        return predict_a(args)
     return 2
 
 

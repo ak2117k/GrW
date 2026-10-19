@@ -14,7 +14,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from .model_a import NEXT_DECISION_MIN, QUANTILES, regime
+from .model_consts import NEXT_DECISION_MIN, QUANTILES, regime
 
 
 @dataclass

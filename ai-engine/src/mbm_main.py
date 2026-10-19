@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from src.mbm.service import clock
 from src.mbm.service.daily import fetch_global_daily
 from src.mbm.service.engine import Engine
+from src.mbm.service.setups import fetch_nsei_daily
 from src.mbm.service.repo import PgRepo
 from src.scorer.db_url import ai_db_url
 
@@ -33,18 +34,23 @@ def make_engine(env=os.environ) -> Engine:
     url = ai_db_url(env)
     instruments = [s.strip().upper() for s in (env.get("MBM_INSTRUMENTS") or "NIFTY").split(",") if s.strip()]
     return Engine(repo=PgRepo(url) if url else None, models_dir=Path(env.get("MODELS_DIR") or "/models"),
-                  instruments=instruments, now=utcnow, fetch_daily=fetch_global_daily)
+                  instruments=instruments, now=utcnow, fetch_daily=fetch_global_daily,
+                  fetch_index_daily=fetch_nsei_daily)
 
 
 async def run_loop(engine: Engine) -> None:
-    """Sleep to the next tick (run time or 08:30 daily refresh), then do it on a thread."""
+    """Sleep to the next tick (run time, 08:30 daily refresh or 15:50 daily setups), then do it on a thread."""
     while True:
         now = engine.now()
         nxt_run, nxt_daily = clock.next_run(now), clock.next_daily_refresh(now)
-        wake = min(nxt_run, nxt_daily)
+        nxt_setups = clock.next_daily_setups(now)
+        wake = min(nxt_run, nxt_daily, nxt_setups)
         await asyncio.sleep(max(0.0, (wake - now).total_seconds()))
         try:
-            if wake == nxt_daily and wake < nxt_run:
+            if wake == nxt_setups and wake < nxt_run:
+                res = await asyncio.to_thread(engine.run_daily_setups)
+                log.info("[mbm] daily setups: %s", res)
+            elif wake == nxt_daily and wake < nxt_run:
                 await asyncio.to_thread(engine.refresh_daily)
             else:
                 res = await asyncio.to_thread(engine.run_once)

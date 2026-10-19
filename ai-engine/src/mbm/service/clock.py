@@ -18,6 +18,7 @@ LAST_AS_OF = time(15, 30)
 SESSION_OPEN = time(9, 15)
 SESSION_END = time(15, 30)
 DAILY_REFRESH = time(8, 30)
+DAILY_SETUPS = time(15, 50)
 
 
 def to_ist(now: datetime) -> datetime:
@@ -73,6 +74,16 @@ def next_daily_refresh(now: datetime) -> datetime:
     n = to_ist(now)
     t = _at(n, DAILY_REFRESH)
     return t if t > n else t + timedelta(days=1)
+
+
+def next_daily_setups(now: datetime) -> datetime:
+    """Next 15:50 IST weekday run of the daily setups job, strictly after `now`. Holidays are
+    skipped by the job itself (no session bars for the day ⇒ nothing detected)."""
+    n = to_ist(now)
+    t = _at(n, DAILY_SETUPS)
+    while t <= n or not is_weekday(t):
+        t = _at(t + timedelta(days=1), DAILY_SETUPS)
+    return t
 
 
 def session_end(as_of: datetime) -> datetime:

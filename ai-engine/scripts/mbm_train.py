@@ -26,7 +26,8 @@ import pandas as pd  # noqa: E402
 from src.mbm import model_a as A  # noqa: E402
 from src.mbm.features import DRIVER_GROUPS, FEATURE_SET, load_inputs  # noqa: E402
 from src.mbm.labels import HORIZONS  # noqa: E402
-from src.mbm.store import default_root  # noqa: E402
+from src.mbm import patterns as PB  # noqa: E402
+from src.mbm.store import default_root, read_bars  # noqa: E402
 
 
 def _md_table(df: pd.DataFrame, floatfmt: str = "{:.4f}") -> str:
@@ -209,6 +210,107 @@ def predict_a(args) -> int:
     return 0
 
 
+def render_patterns_report(lib: dict) -> str:
+    c, nl, m = lib["meta"]["search"], lib["meta"]["null"], lib["meta"]
+    sig = nl["significant"]
+    n_rules = len(lib["rules"])
+    if n_rules == 0:
+        verdict = "**EMPTY LIBRARY.** No rule passed discovery + blind verification. This is a valid, honest result."
+    elif sig:
+        verdict = (f"**SIGNIFICANT.** {n_rules} verified rules; the real search beats the shuffled null "
+                   f"({c['blind_survivors']} > null p95 {nl['p95']:.1f}).")
+    else:
+        verdict = (f"**NOT SIGNIFICANT.** {n_rules} rules passed every per-rule check, but the shuffled null finds "
+                   f"as many by chance ({c['blind_survivors']} <= null p95 {nl['p95']:.1f}). Treat the whole "
+                   "library as noise; rules are listed but flagged.")
+    L = [f"# MBM M4 — Pattern Library (Model B) · {m['instrument']} · {m['verified_on']}", "",
+         f"Feature set `{m['featureSet']}` · discovery {m['windows']['discovery'][0]} … {m['windows']['discovery'][1]} · "
+         f"blind {m['windows']['blind'][0]} … {m['windows']['blind'][1]} · cost {m['cost_bp']} bp/trade · "
+         f"runtime {m['runtime_s']:.0f} s", "", "## Verdict", "", verdict, "",
+         "## Search counts", "",
+         f"- Conditions (bins fitted on discovery only): {c['conditions']}",
+         f"- Condition sets searched: singles {c['searched_sets']['singles']}, pairs {c['searched_sets']['pairs']}, "
+         f"triples {c['searched_sets']['triples']} (extensions of the top {c['top_pairs']} discovery pairs"
+         + (f", capped at {c['max_triples']} per search — cap HIT" if c["triples_capped"] else "") + ")",
+         f"- Condition sets with >= {PB.MIN_N_DISC} discovery setups (evaluated): singles {c['evaluated_sets']['singles']}, "
+         f"pairs {c['evaluated_sets']['pairs']}, triples {c['evaluated_sets']['triples']}",
+         f"- Candidates searched (sets x 2 sides x 4 barriers): {c['candidates_searched']:,}; evaluated: {c['candidates_evaluated']:,}",
+         f"- Discovery survivors (t >= {PB.MIN_T_DISC}, n >= {PB.MIN_N_DISC}): {c['discovery_survivors']:,}",
+         f"- Blind survivors (all checks): {c['blind_survivors']:,}",
+         f"- Rows {c['rows']:,} (discovery {c['discovery_rows']:,} over {c['discovery_days']} days; blind "
+         f"{c['blind_rows']:,} over {c['blind_days']} days)", "",
+         "## Shuffled null (whole days permuted within each window, identical search)", "",
+         f"- Permutations: {nl['permutations']} (seed {nl['seed']})",
+         f"- Discovery survivors per permutation: {nl['discovery_survivors_per_perm']}",
+         f"- Blind survivors per permutation: {nl['survivors_per_perm']}",
+         f"- Null 95th percentile: {nl['p95']:.1f} · real: {c['blind_survivors']} · significant: **{sig}**", ""]
+    if n_rules:
+        L += [f"## Rules (top 25 of {n_rules} by blind t)", "",
+              "| id | rule | side | stop/target ATR | disc n | disc hit | disc net bp | disc t | blind n | blind hit | blind net bp | blind t |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        for r in lib["rules"][:25]:
+            d, b = r["discovery"], r["blind"]
+            L.append(f"| {r['id']} | {r['label']} | {r['side']} | {r['stop_atr']}/{r['target_atr']} | {d['n']} | "
+                     f"{d['hit']:.3f} | {d['mean_net']:.2f} | {d['t']:.2f} | {b['n']} | {b['hit']:.3f} | "
+                     f"{b['mean_net']:.2f} | {b['t']:.2f} |")
+        L.append("")
+    L += ["## Method", "",
+          "Outcomes are trades from the decision-bar close on NIFTY 1m bars: long and short, stop/target in prior-day "
+          "ATR14 units (0.25/0.25, 0.25/0.5, 0.5/0.5, 0.5/1.0), first touch wins, same-bar double touch = stop, no "
+          "touch = exit at the session's last close. One setup per day (first trigger per rule per session). "
+          "Verification: discovery t >= 3 and >= 40 setups; blind mean net > 0, >= 30 setups, blind hit rate inside the "
+          "discovery 95 % CI; library significant only if real blind survivors exceed the null's 95th percentile.", ""]
+    return "\n".join(L)
+
+
+def mine_b(args) -> int:
+    root = Path(args.store) if args.store else default_root()
+    inst = args.instrument.upper()
+    t0 = time.time()
+    ds = pd.read_parquet(root / "models" / "m1" / inst.lower() / "dataset.parquet").sort_index()
+    if "month" in ds.columns:
+        ds = ds.drop(columns=["month"])
+    cols = A.model_columns(ds)
+    bars = read_bars(root, inst, "1m")
+    if bars.empty:
+        print(f"no 1m bars for {inst} in {root}", file=sys.stderr)
+        return 2
+    net, hit = PB.decision_outcomes(ds, bars, args.cost_bp)
+    print(f"outcomes: {np.isfinite(net).sum(1).tolist()} valid per combo ({time.time() - t0:.0f}s)", flush=True)
+    del bars
+    res = PB.mine(ds[cols], ds["date"], ds["mod"].to_numpy(), net, hit, n_perms=args.perms, seed=args.seed,
+                  top_pairs=args.top_pairs, max_triples=args.max_triples,
+                  log=lambda s: print(s, flush=True))
+    runtime = time.time() - t0
+    today = args.date or date.today().isoformat()
+    newest = pd.Timestamp(ds["date"].max()).date().isoformat()
+    for r in res.library:
+        r["verified_on"] = today
+        r["significant"] = res.null["significant"]
+    lib = {"meta": {
+        "kind": "mbm-patterns", "instrument": inst, "featureSet": FEATURE_SET, "verified_on": today,
+        "windows": {"discovery": [str(PB.DISCOVERY[0].date()), str(PB.DISCOVERY[1].date())],
+                    "blind": [str(PB.BLIND_START.date()), newest]},
+        "cost_bp": args.cost_bp, "barriers": [list(b) for b in PB.BARRIERS], "sides": list(PB.SIDES),
+        "thresholds": {"min_t_disc": PB.MIN_T_DISC, "min_n_disc": PB.MIN_N_DISC, "min_n_blind": PB.MIN_N_BLIND,
+                       "hit_ci_z": PB.CI_Z},
+        "search": res.counts, "null": res.null, "significant": res.null["significant"],
+        "runtime_s": round(runtime, 1), "timings": res.timings, "bin_edges": res.edges},
+        "rules": res.library}
+    out = root / "models" / "m4" / inst.lower()
+    out.mkdir(parents=True, exist_ok=True)
+    (root / "reports").mkdir(parents=True, exist_ok=True)
+    jp = out / f"library-{today}.json"
+    jp.write_text(json.dumps(lib, indent=1), encoding="utf-8")
+    rp = root / "reports" / f"m4-{inst.lower()}-{today}.md"
+    rp.write_text(render_patterns_report(lib), encoding="utf-8")
+    c = res.counts
+    print(f"library: {jp}\nreport: {rp}\nsearched {c['candidates_searched']:,} · disc survivors "
+          f"{c['discovery_survivors']} · blind survivors {c['blind_survivors']} · null {res.null['survivors_per_perm']} "
+          f"p95 {res.null['p95']:.1f} · significant {res.null['significant']} · {runtime:.0f}s")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -229,6 +331,15 @@ def main(argv=None) -> int:
     f.add_argument("--store", default=None)
     f.add_argument("--date", required=True, help="IST session date, YYYY-MM-DD")
     f.add_argument("--horizons", default=None, help="comma list, default 30m,60m (the horizons near the gate)")
+    m = sub.add_parser("mine-b", help="Model B: discover + verify the pattern library (with shuffled null)")
+    m.add_argument("--instrument", default="NIFTY")
+    m.add_argument("--store", default=None)
+    m.add_argument("--cost-bp", type=float, default=3.0, help="round-trip cost per trade in bp (futures-like 3)")
+    m.add_argument("--perms", type=int, default=5, help="shuffled-null permutations (>= 5)")
+    m.add_argument("--seed", type=int, default=7)
+    m.add_argument("--top-pairs", type=int, default=200, help="discovery pairs extended to triples")
+    m.add_argument("--max-triples", type=int, default=None, help="cap on triples searched per run (per null too)")
+    m.add_argument("--date", default=None, help="artefact date stamp, default today")
     args = ap.parse_args(argv)
     if args.cmd == "train-a":
         return train_a(args)
@@ -236,6 +347,8 @@ def main(argv=None) -> int:
         return report_only(args)
     if args.cmd == "predict-a":
         return predict_a(args)
+    if args.cmd == "mine-b":
+        return mine_b(args)
     return 2
 
 

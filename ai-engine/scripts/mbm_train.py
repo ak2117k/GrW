@@ -139,15 +139,15 @@ def render_report(m: dict, ds: pd.DataFrame) -> str:
          f"{m['decision_step_min']} min 09:30–15:15 IST (`next` horizon: 15:15 row only) · "
          f"walk-forward expanding window, ≥12 months train (last 2 months = isotonic calibration), "
          f"monthly retrain · runtime {m['runtime_s']} s.", "",
-         "Gate per horizon: AUC ≥ 0.65 in each of the last 3 blind months, Brier over those months "
-         "below the trailing-median baseline (trailing 60-session share of big outcomes at the same "
+         "Gate per horizon: pooled AUC ≥ 0.65 over the last 3 blind months, no one of them below 0.55, "
+         "Brier over those months below the trailing-median baseline (trailing 60-session share of big outcomes at the same "
          "minute), ≥ 300 blind observations in total.", ""] + ([f"> {m['note']}", ""] if m.get("note") else []) + [
          "## Gate", "",
-         "| horizon | gate | last 3 months | AUC | n | Brier | baseline | blind obs | AUC all months |",
-         "|---|---|---|---|---|---|---|---|---|"]
+         "| horizon | gate | last 3 months | AUC per month | pooled AUC | n | Brier | baseline | blind obs | AUC all months |",
+         "|---|---|---|---|---|---|---|---|---|---|"]
     for h, g in m["horizons"].items():
         L.append(f"| {h} | **{'PASS' if g['pass'] else 'FAIL'}** | {', '.join(g['last_months'])} | "
-                 f"{', '.join(f'{a:.3f}' for a in g['last_auc'])} | {', '.join(map(str, g['last_n']))} | "
+                 f"{', '.join(f'{a:.3f}' for a in g['last_auc'])} | {g.get('last_auc_pooled', float('nan')):.3f} | {', '.join(map(str, g['last_n']))} | "
                  f"{g['last_brier']:.4f} | {g['last_brier_base']:.4f} | {g['n_test']} | {g['auc_all']:.3f} |")
     if not m["ablation"]:
         L += ["", "## Driver ablation", "", "Not available for this run (see note above)."]

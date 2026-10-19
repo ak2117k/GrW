@@ -158,15 +158,23 @@ def summary(preds: pd.DataFrame, last: int = 3) -> dict:
         "last_months": tail["month"].tolist(), "last_auc": [round(float(a), 4) for a in tail["auc"]],
         "last_n": [int(n) for n in tail["n"]],
         "last_brier": _brier(lastp["y"], lastp["p"]), "last_brier_base": _brier(lastp["y"], lastp["base"]),
+        "last_auc_pooled": round(float(roc_auc_score(lastp["y"], lastp["p"])), 4) if lastp["y"].nunique() > 1 else float("nan"),
     }
 
 
-def gate(preds: pd.DataFrame, min_auc: float = 0.65, last: int = 3, min_obs: int = 300) -> dict:
-    """PASS iff AUC >= min_auc in each of the last `last` blind months, Brier over those months
-    below the trailing-median baseline, and >= min_obs blind observations in total."""
+def gate(preds: pd.DataFrame, min_auc: float = 0.65, last: int = 3, min_obs: int = 300,
+         month_floor: float = 0.55) -> dict:
+    """PASS iff the POOLED AUC over the last `last` blind months >= min_auc, no single one of
+    those months below `month_floor`, Brier over them below the trailing-median baseline, and
+    >= min_obs blind observations in total.
+
+    Owner decision 2026-10-19: one month is ~21 trading days, so a single month's AUC has a
+    90% interval of about +/-0.07; "each of the last 3 >= 0.65" passed a steady AUC-0.74 model
+    only ~57% of the time historically. The per-month floor keeps a within-month check."""
     s = summary(preds, last)
     checks = {
-        "auc_each_last_months": len(s["last_auc"]) == last and all(a >= min_auc for a in s["last_auc"]),
+        "auc_pooled_last_months": len(s["last_auc"]) == last and s["last_auc_pooled"] >= min_auc,
+        "auc_month_floor": len(s["last_auc"]) == last and all(a >= month_floor for a in s["last_auc"]),
         "brier_below_baseline": s["last_brier"] < s["last_brier_base"],
         "min_obs": s["n_test"] >= min_obs,
     }

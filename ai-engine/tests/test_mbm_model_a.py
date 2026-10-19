@@ -38,7 +38,7 @@ def test_gate_and_tables(ds):
     cols = A.model_columns(ds, ())
     p = A.walk_forward(ds, "60m", cols, A.WalkForward(min_train_months=3, cal_months=1))
     g = A.gate(p, last=2)
-    assert set(g["checks"]) == {"auc_each_last_months", "brier_below_baseline", "min_obs"}
+    assert set(g["checks"]) == {"auc_pooled_last_months", "auc_month_floor", "brier_below_baseline", "min_obs"}
     assert isinstance(g["pass"], bool)
     assert A.regime_table(p)["regime"].tolist() == ["QUIET", "NORMAL", "ACTIVE"]
     assert A.calibration_table(p)["n"].sum() == len(p)

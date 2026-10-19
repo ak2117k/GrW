@@ -17,7 +17,7 @@ from .. import labels as L
 from ..features import (BANKNIFTY, FEATURE_SET, HEAVYWEIGHTS, VIX, _annotate, build_features, to_5m)
 from ..predict import HorizonModel
 from ..store import BAR_COLUMNS, empty_bars, normalize
-from . import clock
+from . import clock, setups
 from .repo import Repo
 
 log = logging.getLogger("mbm.engine")
@@ -106,6 +106,7 @@ class Engine:
     instruments: list[str]
     now: Callable[[], datetime]
     fetch_daily: Callable[[datetime], dict[str, pd.DataFrame]] | None = None
+    fetch_index_daily: Callable[[datetime], pd.DataFrame] | None = None
     models: dict[str, dict[str, LoadedModel]] = field(default_factory=dict)
     global_daily: dict[str, pd.DataFrame] = field(default_factory=dict)
     daily_loaded_on: Any = None
@@ -260,13 +261,65 @@ class Engine:
         self.repo.write_outcomes(out)
         return len(out)
 
+    # ------------------------------------------------------------ daily setups (observe only)
+
+    def run_daily_setups(self) -> dict[str, int]:
+        """15:50 IST job: detect today's NIFTY daily-chart setups, then fill matured outcomes.
+        Holiday skip as elsewhere in the service: no NIFTY 1m bars for today ⇒ no session ⇒ no detection."""
+        inst = setups.INSTRUMENT
+        if self.repo is None or self.fetch_index_daily is None or inst not in self.instruments:
+            return {"signals": 0, "outcomes": 0}
+        now = self.now()
+        today = clock.to_ist(now).date()
+        try:
+            yahoo = self.fetch_index_daily(now)
+        except Exception as exc:
+            log.warning("[mbm] %s daily history failed: %s", setups.NSEI, exc)
+            yahoo = None
+        bars = self.repo.bars([inst], clock.day_start(now), now)
+        session_today = setups.session_from_1m(bars, today) is not None
+        d = setups.build_daily(yahoo, bars, today)
+        written = 0
+        if not session_today:
+            log.info("[mbm] daily setups %s: no session bars today (holiday?): skipped", today)
+        elif d.empty or d.index[-1] != today:
+            log.warning("[mbm] daily setups %s: no daily row for today: skipped", today)
+        else:
+            rows = [{"instrument": inst, "signal_date": today, **sig} for sig in setups.detect(d)]
+            if rows:
+                self.repo.upsert_daily_signals(rows)
+            written = len(rows)
+            log.info("[mbm] daily setups %s: %s", today, [r["setup"] for r in rows])
+        filled = 0
+        if not d.empty:
+            at = pd.Timestamp(now).tz_convert("UTC").to_pydatetime()
+            out = setups.fill_rows(self.repo.pending_daily_outcomes(inst), d, at)
+            if out:
+                self.repo.write_daily_outcomes(out)
+            filled = len(out)
+        return {"signals": written, "outcomes": filled}
+
+    def daily_signals(self, instrument: str) -> list[dict[str, Any]]:
+        """Signals of the last 5 sessions for `/behaviour`. Fail-open: any error ⇒ []."""
+        if self.repo is None:
+            return []
+        try:
+            since = setups.last_sessions_since(clock.to_ist(self.now()).date())
+            rows = self.repo.recent_daily_signals(instrument, since)
+            return [{"setup": r["setup"], "action": r["action"],
+                     "date": pd.Timestamp(r["signal_date"]).strftime("%Y-%m-%d")} for r in rows]
+        except Exception as exc:
+            log.error("[mbm] daily signals %s read failed: %s", instrument, exc)
+            return []
+
     # ------------------------------------------------------------ endpoint
 
     def behaviour(self, instrument: str) -> dict[str, Any]:
         inst = instrument.upper()
         now = self.now()
+        daily = self.daily_signals(inst)
         absent = {"instrument": inst, "status": "absent", "asOf": None, "horizons": {},
-                  "modelIds": {}, "featureSet": FEATURE_SET, "dataQuality": None}
+                  "modelIds": {}, "featureSet": FEATURE_SET, "dataQuality": None, "dailySignals": daily}
         n = clock.to_ist(now)
         in_session = (clock.is_weekday(n) and clock.SESSION_OPEN <= n.time()
                       and n <= clock.session_end(n) + FRESH)
@@ -292,6 +345,7 @@ class Engine:
             "modelIds": {r["horizon"]: r["model_id"] for r in rows},
             "featureSet": rows[0]["feature_set"],
             "dataQuality": next((q for q in rank if q in quality), "ok"),
+            "dailySignals": daily,
         }
 
     def health(self) -> dict[str, Any]:

@@ -12,8 +12,14 @@ describe('parseAutoExitConfig', () => {
       limitFallbackPct: 2,
       qtyUnits: { NFO: 'units', BFO: 'units' },
       cancelProtective: false,
+      hold: [],
       problems: [],
     });
+  });
+
+  it('AI_AUTO_EXIT_HOLD: comma list, trimmed, upper-cased, de-duplicated', () => {
+    expect(parseAutoExitConfig({ AI_AUTO_EXIT_HOLD: ' reliance27oct261270ce, ,RELIANCE27OCT261270CE,trk1 ' }).hold)
+      .toEqual(['RELIANCE27OCT261270CE', 'TRK1']);
   });
 
   it('enabled only on the exact string "true"', () => {

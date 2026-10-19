@@ -6,7 +6,7 @@ export interface GuardInput {
   config: AutoExitConfig;
   now: Date;
   verdict: { userId: string; createdAt: Date };
-  tracker: { userId: string; status: string; kind: string; exchange: string } | null;
+  tracker: { id?: string; symbol?: string; userId: string; status: string; kind: string; exchange: string } | null;
   isOpen: (exchange: string, at: Date) => boolean;
   countedToday: number;
   inFlight: boolean;
@@ -27,6 +27,13 @@ const no = (reason: string): GuardResult => ({ ok: false, reason });
  * Spec §5.3, in order. Pure: every input that needs I/O is resolved by the caller.
  * The first failing guard names the SKIPPED reason; nothing is sent on any failure.
  */
+/** The owner is holding this position against the AI (AI_AUTO_EXIT_HOLD, by symbol or tracker id). */
+function isHeld(hold: string[] | undefined, t: { id?: string; symbol?: string }): boolean {
+  if (!hold || hold.length === 0) return false;
+  const keys = [t.symbol, t.id].map((k) => String(k ?? '').trim().toUpperCase()).filter(Boolean);
+  return keys.some((k) => hold.includes(k));
+}
+
 export function evaluateGuards(i: GuardInput): GuardResult {
   const ai = i.trigger !== 'MANUAL';
   if (ai) {
@@ -41,6 +48,7 @@ export function evaluateGuards(i: GuardInput): GuardResult {
   if (t.userId !== i.verdict.userId) return no('TRACKER_USER_MISMATCH');
   if (t.status !== 'OPEN') return no('TRACKER_CLOSED');
   if (t.kind !== 'POSITION') return no('NOT_POSITION');
+  if (ai && isHeld(i.config.hold, t)) return no('OWNER_HOLD');
   const exchange = String(t.exchange ?? '').toUpperCase();
   if (!AUTO_EXIT_EXCHANGES.includes(exchange)) return no('EXCHANGE_NOT_FNO');
   if (!i.isOpen(exchange, i.now)) return no('EXCHANGE_CLOSED');

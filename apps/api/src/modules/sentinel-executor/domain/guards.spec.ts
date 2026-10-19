@@ -48,6 +48,16 @@ describe('evaluateGuards', () => {
     expect(isOpen).toHaveBeenCalledWith('NFO', NOW);
   });
 
+  it('OWNER_HOLD: a held symbol (or tracker id) blocks AI and price-trigger exits, never the owner manual exit', () => {
+    const held = { tracker: { id: 'trk1', symbol: 'RELIANCE27OCT261270CE', userId: 'owner', status: 'OPEN', kind: 'POSITION', exchange: 'MCX' } };
+    const cfg = (hold: string[]) => ({ config: { ...input().config, hold } });
+    expect(evaluateGuards(input({ ...held, ...cfg(['RELIANCE27OCT261270CE']) }))).toEqual({ ok: false, reason: 'OWNER_HOLD' });
+    expect(evaluateGuards(input({ ...held, ...cfg(['TRK1']) }))).toEqual({ ok: false, reason: 'OWNER_HOLD' });
+    expect(evaluateGuards(input({ ...held, ...cfg(['RELIANCE27OCT261270CE']), trigger: 'PRICE_TRIGGER' }))).toEqual({ ok: false, reason: 'OWNER_HOLD' });
+    expect(evaluateGuards(input({ ...held, ...cfg(['RELIANCE27OCT261270CE']), trigger: 'MANUAL' }))).toEqual({ ok: true });
+    expect(evaluateGuards(input({ ...held, ...cfg(['SBIN27OCT26960CE']) }))).toEqual({ ok: true });
+  });
+
   it('cap 0 skips everything', () => {
     const config = parseAutoExitConfig({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_DAILY_CAP: '0' });
     expect(evaluateGuards(input({ config }))).toEqual({ ok: false, reason: 'DAILY_CAP' });

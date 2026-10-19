@@ -82,7 +82,10 @@ function harness(opts: {
         : { tickSize: opts.tick === undefined ? 10 : opts.tick, lotSize: opts.lotSize ?? null })),
     },
   };
-  const sessions = { withOwnerSession: jest.fn(async (_u: string, fn: any) => fn(session, 'user-feed')) };
+  const sessions = {
+    withOwnerSession: jest.fn(async (_u: string, fn: any) => fn(session, 'user-feed')),
+    reloginOwner: jest.fn(async () => { calls.push('relogin'); return true; }),
+  };
   const gate = opts.gate ?? { enabled: () => false, load: jest.fn(), decide: jest.fn() };
   const clock = { isOpen: jest.fn(() => opts.open ?? true), minutesToClose: jest.fn(() => 419), tradingWindow: jest.fn(() => null) };
   const sleep = jest.fn(async () => undefined);
@@ -833,10 +836,51 @@ describe('SentinelExitExecutor — unanswered broker reads are retried, orders n
   });
 
   it('an Angel errorcode in the last envelope is recorded', async () => {
-    const h = harness({ positions: [{ status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null }] });
+    const h = harness({ positions: [{ status: false, message: 'Access denied', errorcode: 'AB1004', data: null }] });
     await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_READ' });
-    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('AG8001'));
-    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('Invalid Token'));
+    expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('AB1004'));
+    expect(h.sessions.reloginOwner).not.toHaveBeenCalled();
+  });
+
+  describe('AG8001 "Invalid Token" (prod 2026-10-19: the JWT died at the 6 AM reset, the socket did not)', () => {
+    const AG = { status: false, message: 'Invalid Token', errorcode: 'AG8001', data: null };
+
+    it('re-logs in once and retries: the second attempt exits normally', async () => {
+      const h = harness({
+        positions: [AG, AG, AG, env([posRow('100')]), env([posRow('0')])],
+        books: [env([]), filledBook],
+      });
+      await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FILLED' });
+      expect(h.sessions.reloginOwner).toHaveBeenCalledTimes(1);
+      expect(h.sessions.withOwnerSession).toHaveBeenCalledTimes(2);
+      expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+      expect(h.calls.indexOf('relogin')).toBeLessThan(h.calls.findIndex((c) => c.startsWith('place')));
+    });
+
+    it('still rejected after the re-login → FAILED: BROKER_AUTH, no order, no second re-login', async () => {
+      const h = harness({ positions: [AG] });
+      await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_AUTH' });
+      expect(h.sessions.reloginOwner).toHaveBeenCalledTimes(1);
+      expect(h.sessions.withOwnerSession).toHaveBeenCalledTimes(2);
+      expect(h.session.placeOrderClassified).not.toHaveBeenCalled();
+      expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('still rejected after re-login'));
+    });
+
+    it('a failed re-login → FAILED: BROKER_AUTH without a second attempt', async () => {
+      const h = harness({ positions: [AG] });
+      h.sessions.reloginOwner.mockResolvedValueOnce(false);
+      await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'BROKER_AUTH' });
+      expect(h.sessions.withOwnerSession).toHaveBeenCalledTimes(1);
+      expect(h.lastPatch().brokerMessage).toEqual(expect.stringContaining('re-login failed'));
+    });
+
+    it('logs ONE loud error after 3 refusals in a row, not one per verdict', async () => {
+      const h = harness({ positions: [AG] });
+      const error = jest.spyOn((h.ex as any).logger, 'error').mockImplementation(() => undefined);
+      for (let i = 0; i < 5; i++) await h.ex.process(V, LIVE, NOW);
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(error.mock.calls[0][0]).toContain('BROKER SESSION DEAD');
+    });
   });
 
   it('a thrown read counts as unanswered: order book throws thrice → FAILED: ORDER_BOOK_READ with the error and attempts=3', async () => {

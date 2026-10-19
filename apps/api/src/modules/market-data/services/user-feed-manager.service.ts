@@ -316,6 +316,38 @@ export class UserFeedManager {
     return this.registry.has(userId);
   }
 
+  /**
+   * Force a fresh login on the user's REGISTERED session (never creates one).
+   * For a caller whose REST call on the warm client just answered AG8001
+   * "Invalid Token": the socket outlives Angel's ~6 AM reset, the JWT does not.
+   * Resolves whether a session was re-logged in; never throws.
+   */
+  async reloginUser(userId: string): Promise<boolean> {
+    const session = this.registry.get(userId)?.session;
+    if (!session?.relogin) return false;
+    try {
+      await session.relogin();
+      this.logger.log(`[user-feed] re-logged in session for user ${userId}`);
+      return true;
+    } catch (err) {
+      this.logger.warn(
+        `[user-feed] re-login failed for user ${userId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return false;
+    }
+  }
+
+  /** {@link reloginUser} for every registered session, serially (one login at a time). */
+  async reloginAll(): Promise<{ ok: number; failed: number }> {
+    let ok = 0;
+    let failed = 0;
+    for (const userId of Array.from(this.registry.keys())) {
+      if (await this.reloginUser(userId)) ok++;
+      else failed++;
+    }
+    return { ok, failed };
+  }
+
   // ──────────────────────────────────────────────
   // Private
   // ──────────────────────────────────────────────

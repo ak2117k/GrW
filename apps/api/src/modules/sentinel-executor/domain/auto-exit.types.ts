@@ -56,6 +56,12 @@ export interface AutoExitConfig {
    * instead of refusing OPEN_ORDER_EXISTS. Applies to AI and MANUAL exits.
    */
   cancelProtective: boolean;
+  /**
+   * AI_AUTO_EXIT_HOLD (default empty): trading symbols (or tracker ids) the owner
+   * is holding against the AI — an AI or price-trigger exit on them is SKIPPED
+   * OWNER_HOLD. The owner's own "Exit now" is never held. Upper-cased.
+   */
+  hold?: string[];
   /** Human-readable notes about values that were ignored in favour of a safe default. */
   problems: string[];
 }

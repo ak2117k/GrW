@@ -53,6 +53,8 @@ export interface UserFeedSessionLike {
    */
   restClient?(): WarmRestClient | null;
   ensureConnected(): Promise<void>;
+  /** Force a fresh login (new JWT + socket, subscriptions kept). See UserFeedSession.relogin. */
+  relogin?(): Promise<void>;
   subscribe(tokens: TokenRef[]): Promise<void>;
   unsubscribe(tokens: TokenRef[]): Promise<void>;
   activeTokenCount(): number;

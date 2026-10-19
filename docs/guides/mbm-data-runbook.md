@@ -212,3 +212,72 @@ under `/models` are missing, so check `verify`. During a session, `lastRun` shou
 **RAM check** (2 GB box, `mem_limit: 300m`): run `docker stats --no-stream grw-mbm grw-api grw-postgres`
 and `free -m` after the first full session. If mbm sits above about 250 MiB, or if swap grows
 session after session, stop it and report before raising the limit.
+
+## M4: monthly self-learning loop (run, promote, demotion)
+
+Contract: `docs/superpowers/plans/2026-10-19-mbm-m4-patterns-loop.md` §Stream B; design §5.9.
+
+**Monthly run (PC, scheduled).** `mbm_monthly.py run` does five things in order. It runs
+`mbm_data.py build`; an exit 1 (partial) continues, an exit 2 stops. It runs
+`mbm_train.py train-a --rebuild` for all horizons. It runs `mbm_train.py mine-b` only when
+`src/mbm/patterns.py` exists, and a failure there is tolerated. It reads the active `ai_models` rows,
+recent demotions and 30 days of `mbm_predictions` outcomes from prod, read-only. Then it writes
+`grw-mbm/reports/report-YYYY-MM.md`, which compares each horizon's new gate with the active model's
+stored gate and its live AUC, says what would change, and lists new and retired patterns.
+
+Last, it ships every served horizon (30m/60m) whose new gate passed as an **inactive candidate**
+(`mbm_ship.py ship --candidate`), version `YYYYMMDD-monthly`. The run never activates anything. It
+ships nothing in three cases: prod could not be read, a candidate id is already active (same version
+date), or the gate failed.
+
+```powershell
+cd C:\Users\AryanKumar\Desktop\GrW\ai-engine
+# rehearsal: builds/trains nothing, READS prod, writes report-YYYY-MM-dryrun.md, prints the ship plan
+py -3 scripts\mbm_monthly.py run --dry-run --vps root@157.10.98.70 --ssh-key C:\Users\AryanKumar\.ssh\grw_oracle
+# by hand (the store is already fresh from the Saturday build):
+py -3 scripts\mbm_monthly.py run --skip-data --vps root@157.10.98.70 --ssh-key C:\Users\AryanKumar\.ssh\grw_oracle
+```
+
+Register the scheduled task once. It runs on the 1st Saturday at 11:00, an hour after `GrW-MBM-build`,
+and it runs `run` only, never `promote`. The script copies `ai-engine\scripts\windows\monthly-run.cmd`
+to `grw-mbm\_meta\` (it uses Git's ssh and logs to `_meta\monthly-run.log`) and then calls `schtasks`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\AryanKumar\Desktop\GrW\ai-engine\scripts\windows\register-monthly-task.ps1
+```
+
+**Promote (human, cycles 1-3).** Read the report first. `promote` prints the candidate and the row it
+replaces, and does nothing without `--yes`. With `--yes`, one transaction deactivates the active row
+of the same kind × instrument × horizon and activates the candidate. The candidate must be GO, and
+the transaction fails loudly if the activation did not take. `--restart` then restarts `grw-mbm` so the
+service loads the new model; without it, the change waits for the next restart.
+
+```powershell
+py -3 scripts\mbm_monthly.py promote --model-id mbm-move-nifty-30m-20261107 --dry-run   # SQL only
+py -3 scripts\mbm_monthly.py promote --model-id mbm-move-nifty-30m-20261107 --vps root@157.10.98.70 --ssh-key C:\Users\AryanKumar\.ssh\grw_oracle            # preview
+py -3 scripts\mbm_monthly.py promote --model-id mbm-move-nifty-30m-20261107 --restart --yes --vps root@157.10.98.70 --ssh-key C:\Users\AryanKumar\.ssh\grw_oracle
+```
+
+To roll back a promotion, promote the previous id again; its row and files are still there.
+
+**Automatic demotion (prod, in the MBM service).** Every weekday at 15:45 IST the service computes the
+live AUC of each loaded horizon. It uses that model's own `mbm_predictions` rows from the last 30
+calendar days with `outcome_quality='ok'` and a non-null `outcome_big`.
+
+- With **≥ 300** such rows and AUC **< 0.60**, it sets the `ai_models` row `active=false`, appends
+  `DEMOTED <date> live AUC x over n` to `gateReasons`, unloads the horizon and logs `[mbm] DEMOTED …`.
+- With fewer rows, a one-class window or an unreadable DB, it does nothing and logs `no action`.
+  Missing data never demotes.
+
+The demotion appears in the next monthly report. `/health` now carries the stats, which are also
+computed at startup:
+
+```json
+{"ok": true, "models": {"NIFTY": ["30m","60m"]}, "lastRun": "…",
+ "live": {"30m": {"auc": 0.71, "n": 412, "modelId": "mbm-move-nifty-30m-20261019", "checkedAt": "…"}}}
+```
+
+With several instruments, the `live` keys become `NIFTY:30m`. To bring a demoted horizon back, promote
+a candidate, or the same id once you have looked into it, and restart. Demotion needs `UPDATE` on
+`ai_models` for `grw_ai`, which `deploy/sql/grw-ai-role.sql` already grants. Pattern demotion is out
+of scope until a non-empty library is served.

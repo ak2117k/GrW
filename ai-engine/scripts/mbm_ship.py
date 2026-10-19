@@ -4,6 +4,8 @@
   py -3 scripts/mbm_ship.py seed-bars --days 60 --vps root@<ip> --ssh-key ~/.ssh/grw_oracle
   py -3 scripts/mbm_ship.py verify --vps root@<ip> --ssh-key ~/.ssh/grw_oracle
   add --dry-run to any of them: prints the SQL and the scp plan, touches nothing.
+  ship --candidate (M4): same files, but the ai_models rows land active=false; activation is
+  `mbm_monthly.py promote --model-id <id> --yes` (the human approval step).
 
 Contract: docs/superpowers/plans/2026-10-19-mbm-m2-serving.md §2 (registry rows) and §5 (ops).
 SQL goes to the VPS over ssh on stdin into `docker exec -i grw-postgres psql`, with the
@@ -101,17 +103,22 @@ def registry_row(instrument: str, version: str, horizon: str, metrics: dict, met
     }
 
 
-def registry_sql(rows: list[dict]) -> str:
+def registry_sql(rows: list[dict], candidate: bool = False) -> str:
     """One transaction: per horizon, deactivate other rows of kind x instrument x horizon, then upsert
-    this row active. Deactivate-then-activate keeps 'one active row' true at every statement."""
+    this row active. Deactivate-then-activate keeps 'one active row' true at every statement.
+
+    `candidate` (M4): upsert the row INACTIVE and leave every other row alone; the conflict branch
+    never touches a row that is currently active. Activation is `mbm_monthly.py promote`."""
     out = ["BEGIN;"]
+    active = "false" if candidate else "true"
     for r in rows:
         if r["gate"] != "GO":
             raise ValueError(f"{r['id']}: gate {r['gate']} cannot be active")
-        out.append(
-            f"UPDATE ai_models SET active = false WHERE kind = {lit(r['kind'])} "
-            f"AND instrument = {lit(r['instrument'])} AND horizon = {lit(r['horizon'])} "
-            f"AND active AND id <> {lit(r['id'])};")
+        if not candidate:
+            out.append(
+                f"UPDATE ai_models SET active = false WHERE kind = {lit(r['kind'])} "
+                f"AND instrument = {lit(r['instrument'])} AND horizon = {lit(r['horizon'])} "
+                f"AND active AND id <> {lit(r['id'])};")
         reasons = "ARRAY[" + ", ".join(lit(x) for x in r["gateReasons"]) + "]::text[]"
         out.append(
             'INSERT INTO ai_models (id, kind, "featureSet", "trainedAt", "dataWindow", "nTrain", "nHoldout", '
@@ -119,12 +126,13 @@ def registry_sql(rows: list[dict]) -> str:
             f"VALUES ({lit(r['id'])}, {lit(r['kind'])}, {lit(r['featureSet'])}, {lit(r['trainedAt'])}::timestamptz, "
             f"{lit(_json(r['dataWindow']))}::jsonb, {r['nTrain']}, {r['nHoldout']}, "
             f"{lit(_json(r['metrics']))}::jsonb, {lit(r['gate'])}, {reasons}, {lit(r['artifactPath'])}, "
-            f"true, {lit(r['instrument'])}, {lit(r['horizon'])})\n"
+            f"{active}, {lit(r['instrument'])}, {lit(r['horizon'])})\n"
             'ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, "featureSet" = EXCLUDED."featureSet", '
             '"trainedAt" = EXCLUDED."trainedAt", "dataWindow" = EXCLUDED."dataWindow", "nTrain" = EXCLUDED."nTrain", '
             '"nHoldout" = EXCLUDED."nHoldout", metrics = EXCLUDED.metrics, gate = EXCLUDED.gate, '
-            '"gateReasons" = EXCLUDED."gateReasons", "artifactPath" = EXCLUDED."artifactPath", active = true, '
-            "instrument = EXCLUDED.instrument, horizon = EXCLUDED.horizon;")
+            f'"gateReasons" = EXCLUDED."gateReasons", "artifactPath" = EXCLUDED."artifactPath", active = {active}, '
+            "instrument = EXCLUDED.instrument, horizon = EXCLUDED.horizon"
+            + (" WHERE NOT ai_models.active;" if candidate else ";"))
     out.append("COMMIT;")
     return "\n".join(out) + "\n"
 
@@ -173,6 +181,12 @@ def universe_series(manifest: dict) -> list[str]:
     """NIFTY universe = NIFTY, BANKNIFTY, INDIAVIX + EQ_* heavyweights that have 1m bars."""
     return sorted(s for s, iv in manifest.items()
                   if "1m" in iv and (s in FIXED_SERIES or s.startswith("EQ_")))
+
+
+def active_ids_sql(ids: list[str]) -> str:
+    """Read-only: which of `ids` are active right now (one id per output line)."""
+    return ("SET default_transaction_read_only = on;\n\\pset tuples_only on\n\\pset format unaligned\n"
+            f"SELECT id FROM ai_models WHERE id IN ({', '.join(lit(i) for i in ids)}) AND active;\n")
 
 
 def ship_plan(instrument: str, version: str, horizon: str) -> tuple[str, str]:
@@ -233,9 +247,12 @@ def cmd_ship(a, run: Runner = subprocess.run) -> int:
             return 2
         rows.append(row)
         plans.append((h, hdir, *ship_plan(a.instrument, a.version, h)))
-    sql = registry_sql(rows)
+    candidate = bool(getattr(a, "candidate", False))
+    sql = registry_sql(rows, candidate=candidate)
 
-    print(f"ship {a.instrument} {a.version} -> {a.vps or '<vps>'}")
+    print(f"ship {a.instrument} {a.version} -> {a.vps or '<vps>'}" + (" (CANDIDATE: inactive)" if candidate else ""))
+    if candidate:
+        print("  -- pre-flight (read-only): refuse if any target id is active (its files are live) --")
     for h, hdir, final, stage in plans:
         print(f"  [{h}] scp {hdir}/{{{','.join(MODEL_FILES)}}} -> {stage}/ ; sha256 check ; mv -> {final}/")
     if a.dry_run:
@@ -244,6 +261,16 @@ def cmd_ship(a, run: Runner = subprocess.run) -> int:
         return 0
     if not _need_remote(a):
         return 2
+    if candidate:
+        try:
+            live = [ln.strip() for ln in psql(a, active_ids_sql([r["id"] for r in rows]), run=run).splitlines()
+                    if ln.strip()]
+        except RuntimeError as exc:
+            print(f"ship FAILED (pre-flight): {exc}")
+            return 1
+        if live:
+            print(f"refusing candidate: {live} already active (would overwrite served files); use a new version")
+            return 2
     try:
         for h, hdir, final, stage in plans:  # files first: an active row must never point at nothing
             ssh(a, f"rm -rf '{stage}' && mkdir -p '{stage}'", run=run)
@@ -260,7 +287,8 @@ def cmd_ship(a, run: Runner = subprocess.run) -> int:
     except (RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"ship FAILED: {exc}")
         return 1
-    print(f"registry: {', '.join(r['id'] for r in rows)} active")
+    state = "INACTIVE candidates (activate with mbm_monthly.py promote)" if candidate else "active"
+    print(f"registry: {', '.join(r['id'] for r in rows)} {state}")
     return 0
 
 
@@ -337,6 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     sh.add_argument("--version", required=True, help="YYYYMMDD-tag, e.g. 20261019-fs2")
     sh.add_argument("--horizons", nargs="+", default=list(HORIZONS), choices=HORIZONS)
     sh.add_argument("--models-dir", type=Path, help="default <store>/models/m1/<instrument>")
+    sh.add_argument("--candidate", action="store_true",
+                    help="M4: register the rows INACTIVE (no sibling deactivation); promote activates")
     sd = sub.add_parser("seed-bars", parents=[common], help="upload last N days of universe 1m bars")
     sd.add_argument("--days", type=int, default=60)
     sd.add_argument("--series", nargs="+", help="default: NIFTY, BANKNIFTY, INDIAVIX, EQ_* from the manifest")

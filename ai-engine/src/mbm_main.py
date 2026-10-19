@@ -37,14 +37,18 @@ def make_engine(env=os.environ) -> Engine:
 
 
 async def run_loop(engine: Engine) -> None:
-    """Sleep to the next tick (run time or 08:30 daily refresh), then do it on a thread."""
+    """Sleep to the next tick (run time, 08:30 daily refresh or 15:45 demotion check), then do it
+    on a thread."""
     while True:
         now = engine.now()
         nxt_run, nxt_daily = clock.next_run(now), clock.next_daily_refresh(now)
-        wake = min(nxt_run, nxt_daily)
+        nxt_demote = clock.next_demotion_check(now)
+        wake = min(nxt_run, nxt_daily, nxt_demote)
         await asyncio.sleep(max(0.0, (wake - now).total_seconds()))
         try:
-            if wake == nxt_daily and wake < nxt_run:
+            if wake == nxt_demote and wake < nxt_run:
+                await asyncio.to_thread(engine.check_demotions)
+            elif wake == nxt_daily and wake < nxt_run:
                 await asyncio.to_thread(engine.refresh_daily)
             else:
                 res = await asyncio.to_thread(engine.run_once)

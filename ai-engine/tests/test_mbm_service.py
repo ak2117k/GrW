@@ -368,7 +368,7 @@ def test_health(monkeypatch):
     e = _engine(FakeRepo(EMPTY), AS_OF, _loaded(**{"30m": StubModel(), "60m": StubModel()}))
     e.last_run = AS_OF
     with _client(e, monkeypatch) as c:
-        assert c.get("/health").json() == {"ok": True, "models": {"NIFTY": ["30m", "60m"]},
+        assert c.get("/health").json() == {"ok": True, "models": {"NIFTY": ["30m", "60m"]}, "live": {},
                                            "lastRun": "2026-10-14T05:30:00Z"}
 
 

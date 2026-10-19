@@ -3,6 +3,8 @@ import { computeGreenFloor } from '../charges';
 import { RosterService, type RosterEntry } from './roster.service';
 import {
   TripwireService,
+  heartbeatDue,
+  type HeartbeatContext,
   type LastJudged,
   type TripwireResult,
 } from './tripwire.service';
@@ -28,7 +30,7 @@ import {
   parseExitDisciplineConfig,
   type ExitDisciplineConfig,
 } from '../../exit-discipline/config';
-import { exitConfirmFire, withExitConfirm } from '../tripwires/exit-confirm';
+import { exitConfirmFire } from '../tripwires/exit-confirm';
 import { solveCycleFloor } from './cycle-floor';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
@@ -43,6 +45,19 @@ import {
   type RejudgeConfig,
   type RejudgeSnapshot,
 } from './rejudge-suppression';
+import {
+  EXIT_ATTEMPTS,
+  FUTILE_REJUDGE_CONFIG,
+  HELD_LOG_EVERY_MS,
+  exitBlocked,
+  isHeldPosition,
+  suppressFutileJudgements,
+  type BlockedExitMemo,
+  type ExitAttempt,
+  type ExitAttemptReader,
+  type FutileCause,
+  type FutileRejudgeConfig,
+} from './futile-rejudge';
 
 export interface CycleReport {
   evaluated: number;
@@ -391,10 +406,20 @@ interface TrackerState {
    * on that fire was last RECORDED. See rejudge-suppression.ts.
    */
   rejudge?: Record<string, RejudgeSnapshot>;
+  /** Futile re-judge: the blocking exit attempt last seen and the qty then. See futile-rejudge.ts. */
+  blockedExit?: BlockedExitMemo;
+  /** Futile re-judge: epoch ms the held-position line was last logged (once per 30 min). */
+  heldLoggedAt?: number;
 }
 
 /** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
 const DISCIPLINE_OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
+
+/** Futile re-judge, per pass: the latest exit attempt per tracker (one read) and what was suppressed. */
+interface FutilePass {
+  attempts: Map<string, ExitAttempt>;
+  tally: Partial<Record<FutileCause, number>>;
+}
 
 /** A position the sensor pass decided to judge, waiting for the dispatch phase. */
 interface JudgeCandidate {
@@ -487,6 +512,10 @@ export class SentinelCycleService {
     @Optional() @Inject(MARKET_EVENTS) private readonly events?: EventsReader,
     // Re-judge suppression. Optional: absent ⇒ off, every repeat fire wakes the judge as before.
     @Optional() @Inject(REJUDGE_CONFIG) private readonly rejudgeCfg?: RejudgeConfig,
+    // Futile re-judge suppression (held positions, exits that cannot run). Optional:
+    // absent ⇒ off. The reader is a READ-ONLY view of ai_exit_executions.
+    @Optional() @Inject(FUTILE_REJUDGE_CONFIG) private readonly futileCfg?: FutileRejudgeConfig,
+    @Optional() @Inject(EXIT_ATTEMPTS) private readonly exitAttempts?: ExitAttemptReader,
   ) {}
 
   /**
@@ -519,6 +548,7 @@ export class SentinelCycleService {
     const jobs: Array<Promise<JudgeOutcome>> = [];
     const candidates: JudgeCandidate[] = [];
     const suppressed: Record<string, number> = {};
+    const futile: FutilePass = { attempts: await this.exitAttemptsFor(entries, now), tally: {} };
 
     for (const [index, entry] of entries.entries()) {
       if (!entry.watched) {
@@ -531,7 +561,7 @@ export class SentinelCycleService {
       // runner's per-sensor isolation is the inner layer of this; the whole of a
       // position's work — tick, walls, packet, agent, write — is the outer one.
       try {
-        const candidate = await this.evaluateOne(entry, index, now, report, suppressed);
+        const candidate = await this.evaluateOne(entry, index, now, report, suppressed, futile);
         if (candidate) candidates.push(candidate);
       } catch (err) {
         report.failed += 1;
@@ -545,6 +575,11 @@ export class SentinelCycleService {
     if (suppressedTotal > 0) {
       const by = Object.entries(suppressed).map(([k, v]) => `${k}=${v}`).join(', ');
       this.logger.log(`[rejudge] suppressed ${suppressedTotal} unchanged repeat wake(s) for user ${userId} (${by})`);
+    }
+    const futileTotal = Object.values(futile.tally).reduce((a, b) => a + b, 0);
+    if (futileTotal > 0) {
+      const by = Object.entries(futile.tally).map(([k, v]) => `${k}=${v}`).join(', ');
+      this.logger.log(`[rejudge] suppressed ${futileTotal} futile wake(s) for user ${userId} (${by})`);
     }
 
     this.prune(
@@ -620,6 +655,7 @@ export class SentinelCycleService {
     now: Date,
     report: CycleReport,
     suppressedTally: Record<string, number> = {},
+    futile: FutilePass = { attempts: new Map(), tally: {} },
   ): Promise<JudgeCandidate | null> {
     const raw = await this.ticks.tickFor(entry.trackerId);
     const tick = withCashUnderlying(raw);
@@ -694,8 +730,7 @@ export class SentinelCycleService {
 
     // News & events v2 sensor inputs: {} unless NEWS_EVENTS_V2_ENABLED=true.
     const newsIn = this.newsInputs(entry, tick, this.stateFor(entry), now);
-    const rawDecision = this.tripwires.evaluate(
-      {
+    const tripwireIn: TripwireInput = {
         trackerId: entry.trackerId,
         symbol: entry.symbol,
         segment: tick.segment,
@@ -726,10 +761,9 @@ export class SentinelCycleService {
         // News & events v2: present only with the flag `true` (edge-triggered
         // news-hit, event-near); otherwise no key — exactly today's input.
         ...newsIn,
-      },
-      last ? last.createdAt : null,
-      now,
-      {
+      };
+    const lastVerdictAt = last ? last.createdAt : null;
+    const heartbeatContext: HeartbeatContext = {
         // The LATCHED value, not `computeGreenFloor`'s per-tick snapshot — a
         // cadence that read the snapshot would oscillate with the market.
         greenFloorArmed: armedForCadence,
@@ -739,8 +773,8 @@ export class SentinelCycleService {
           qty: tick.qty,
           greenFloorArmed: armedForCadence,
         },
-      },
-    );
+      };
+    const rawDecision = this.tripwires.evaluate(tripwireIn, lastVerdictAt, now, heartbeatContext);
 
     // Edge-triggered fires are spent only when they can reach the judge: inside the
     // agent-failure backoff (checked below) this pass is dropped, not carried, so the
@@ -763,7 +797,26 @@ export class SentinelCycleService {
       ? suppressRepeatJudgements(deduped, state.rejudge ?? {}, rejudgeSnap, this.rejudgeCfg)
       : { decision: deduped, suppressed: [] as string[] };
     for (const name of rejudged.suppressed) suppressedTally[name] = (suppressedTally[name] ?? 0) + 1;
-    const decision = withExitConfirm(withCarriedFires(rejudged.decision, state.carriedFires), confirm);
+    // Futile re-judge suppression (futile-rejudge.ts): on a HELD position, or one
+    // whose last exit attempt hit a broker-auth/read wall or OWNER_HOLD, drop the
+    // fires and the exit-confirm re-look — unless a NEW-risk sensor fired — and
+    // keep only the heartbeat, at its normal cadence.
+    const cause = this.futileCause(entry, state, tick.qty, futile.attempts.get(entry.trackerId), now);
+    const futiled = suppressFutileJudgements(
+      withCarriedFires(rejudged.decision, state.carriedFires),
+      confirm,
+      cause,
+      this.futileCfg,
+      () => heartbeatDue(tripwireIn, lastVerdictAt, now, heartbeatContext),
+    );
+    if (cause && futiled.suppressed.length > 0) {
+      futile.tally[cause] = (futile.tally[cause] ?? 0) + 1;
+      if (cause === 'held' && now.getTime() - (state.heldLoggedAt ?? Number.NEGATIVE_INFINITY) >= HELD_LOG_EVERY_MS) {
+        state.heldLoggedAt = now.getTime();
+        this.logger.log(`[rejudge] held position — fires suppressed: ${entry.symbol} (tracker ${entry.trackerId}; ${futiled.suppressed.join(', ')}); heartbeat kept`);
+      }
+    }
+    const decision = futiled.decision;
 
     if (!decision.shouldEvaluate) {
       report.skipped += 1;
@@ -811,6 +864,42 @@ export class SentinelCycleService {
       lastJudgedAt: last ? new Date(last.createdAt).getTime() : null,
       rejudgeSnap,
     };
+  }
+
+  /**
+   * Futile re-judge: the latest exit attempt per open tracker, in ONE read per
+   * pass. Empty (⇒ no exit-blocked suppression) when the rule is off, no reader
+   * is bound, or the read fails — fails OPEN, never blocks the pass.
+   */
+  private async exitAttemptsFor(entries: RosterEntry[], now: Date): Promise<Map<string, ExitAttempt>> {
+    const watchedEntries = entries.filter((e) => e.watched);
+    if (!this.futileCfg?.enabled || !this.exitAttempts || watchedEntries.length === 0) return new Map();
+    try {
+      return await this.exitAttempts.latestSince(
+        [...new Set(watchedEntries.map((e) => e.userId))],
+        watchedEntries.map((e) => e.trackerId),
+        new Date(now.getTime() - this.futileCfg.cooldownMs),
+      );
+    } catch (err) {
+      this.logger.warn(`[rejudge] exit-attempt read failed; no exit-blocked suppression this pass: ${err instanceof Error ? err.message : String(err)}`);
+      return new Map();
+    }
+  }
+
+  /** Why judging this position again cannot change anything right now, or null. Updates the qty memo. */
+  private futileCause(
+    entry: RosterEntry,
+    state: TrackerState,
+    qty: number,
+    attempt: ExitAttempt | undefined,
+    now: Date,
+  ): FutileCause | null {
+    const cfg = this.futileCfg;
+    if (!cfg?.enabled) return null;
+    if (isHeldPosition(cfg.hold, entry)) return 'held';
+    const blocked = exitBlocked(attempt, state.blockedExit, qty, now.getTime(), cfg);
+    state.blockedExit = blocked.memo;
+    return blocked.blocked ? 'exit-blocked' : null;
   }
 
   /** Start one candidate's judgement detached, and register it as in flight. */

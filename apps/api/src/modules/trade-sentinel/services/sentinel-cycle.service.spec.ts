@@ -27,6 +27,14 @@ import { NEWS_EVENTS_CONFIG, parseNewsEventsConfig, type NewsEventsConfig } from
 import { MARKET_EVENTS } from '../ports/events.port';
 import { NewsWatchBook } from './news-watch-book';
 import { REJUDGE_CONFIG, parseRejudgeConfig, type RejudgeConfig } from './rejudge-suppression';
+import {
+  EXIT_ATTEMPTS,
+  FUTILE_REJUDGE_CONFIG,
+  parseFutileRejudgeConfig,
+  type ExitAttempt,
+  type ExitAttemptReader,
+  type FutileRejudgeConfig,
+} from './futile-rejudge';
 
 const USER = 'u1';
 
@@ -102,7 +110,12 @@ const verdictRow = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function makeSvc(discipline?: ExitDisciplineConfig, news?: { cfg?: NewsEventsConfig; events?: unknown; watch?: NewsWatchBook }, rejudge?: RejudgeConfig) {
+function makeSvc(
+  discipline?: ExitDisciplineConfig,
+  news?: { cfg?: NewsEventsConfig; events?: unknown; watch?: NewsWatchBook },
+  rejudge?: RejudgeConfig,
+  futile?: { cfg?: FutileRejudgeConfig; reader?: ExitAttemptReader },
+) {
   const build = jest.fn().mockResolvedValue([]);
   const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
   const buildPacket = jest.fn();
@@ -150,6 +163,8 @@ function makeSvc(discipline?: ExitDisciplineConfig, news?: { cfg?: NewsEventsCon
     news?.cfg,
     news?.events as never,
     rejudge,
+    futile?.cfg,
+    futile?.reader,
   );
 
   return {
@@ -567,7 +582,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // the 11th–13th news & events v2: NewsWatchBook (memory only), its CONFIG (a plain
     // parsed value object) and the MARKET_EVENTS port (a synchronous peek, type-only);
     // the 14th the re-judge suppression CONFIG (a plain parsed value object).
-    expect(injected).toHaveLength(14);
+    // The 15th the futile re-judge CONFIG (a plain parsed value object); the 16th the
+    // EXIT_ATTEMPTS port (a READ-ONLY ai_exit_executions view, type-only).
+    expect(injected).toHaveLength(16);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -583,6 +600,8 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         expect.objectContaining({ index: 11, param: NEWS_EVENTS_CONFIG }),
         expect.objectContaining({ index: 12, param: MARKET_EVENTS }),
         expect.objectContaining({ index: 13, param: REJUDGE_CONFIG }),
+        expect.objectContaining({ index: 14, param: FUTILE_REJUDGE_CONFIG }),
+        expect.objectContaining({ index: 15, param: EXIT_ATTEMPTS }),
       ]),
     );
 
@@ -2647,5 +2666,182 @@ describe('SentinelCycleService — re-judge suppression of level-triggered repea
       await t.svc.runForUser(USER, at(30_000));
       expect(t.judge).toHaveBeenCalledTimes(2);
     }
+  });
+});
+
+describe('SentinelCycleService — futile re-judge suppression (held positions, exits that cannot run)', () => {
+  const NOW = new Date('2026-10-19T06:00:00.000Z');
+  const at = (ms: number) => new Date(NOW.getTime() + ms);
+  const ago = (ms: number) => new Date(NOW.getTime() - ms);
+  const fire = (...names: string[]) => ({
+    fires: names.map((name) => ({ name, detail: name })),
+    heartbeat: false,
+    shouldEvaluate: true,
+    trigger: 'FIRE' as const,
+  });
+  const QUIET = { fires: [], heartbeat: false, shouldEvaluate: false, trigger: null };
+  const attempt = (over: Partial<ExitAttempt> = {}): ExitAttempt => ({
+    id: 'x1', trackerId: 't1', status: 'FAILED', reason: 'BROKER_AUTH', createdAt: ago(2 * 60_000), ...over,
+  });
+  const reader = (rows: ExitAttempt[] = []) => {
+    const latestSince = jest.fn().mockResolvedValue(new Map(rows.map((r) => [r.trackerId, r])));
+    return { latestSince } as ExitAttemptReader & { latestSince: jest.Mock };
+  };
+  const recentVerdict = (msAgo: number, verdict = 'EXIT_NOW') => verdictRow({ verdict, createdAt: ago(msAgo) });
+
+  function setup(env: Record<string, string> = {}, rows: ExitAttempt[] = [], cfg: FutileRejudgeConfig | null = parseFutileRejudgeConfig(env)) {
+    const r = reader(rows);
+    const t = makeSvc(undefined, undefined, undefined, cfg ? { cfg, reader: r } : undefined);
+    t.build.mockResolvedValue([watched('t1')]);
+    t.evaluate.mockReturnValue(fire('giveback-off-peak', 'context-factor-flip'));
+    // Judged 1 min ago: no heartbeat due on any cadence.
+    t.recentForTracker.mockResolvedValue([recentVerdict(60_000)]);
+    return { ...t, reader: r };
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  describe('held (AI_AUTO_EXIT_HOLD)', () => {
+    it('drops FIRE-triggered judgements on a held symbol, logging one line per position per 30 min', async () => {
+      const t = setup({ AI_AUTO_EXIT_HOLD: 'T1' });
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      for (let i = 0; i < 5; i += 1) await t.svc.runForUser(USER, at(i * 30_000));
+      expect(t.judge).not.toHaveBeenCalled();
+      const held = () => log.mock.calls.filter((c) => String(c[0]).startsWith('[rejudge] held position — fires suppressed'));
+      expect(held()).toHaveLength(1);
+      expect(held()[0][0]).toContain('T1');
+      await t.svc.runForUser(USER, at(30 * 60_000));
+      expect(held()).toHaveLength(2);
+      expect(log.mock.calls.some((c) => String(c[0]).includes('futile wake(s)') && String(c[0]).includes('held=1'))).toBe(true);
+    });
+
+    it('matches the tracker id too, case-insensitively', async () => {
+      const t = setup({ AI_AUTO_EXIT_HOLD: ' nifty , t1 ' });
+      t.build.mockResolvedValue([watched('t1', { symbol: 'SOMETHING' })]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+    });
+
+    it('keeps the heartbeat at its normal cadence: a fire on a long-unjudged held position becomes a HEARTBEAT', async () => {
+      const t = setup({ AI_AUTO_EXIT_HOLD: 'T1' });
+      t.recentForTracker.mockResolvedValue([recentVerdict(2 * 60 * 60_000)]); // past HEARTBEAT_MAX_MS
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(t.judge.mock.calls[0][1]).toBe('HEARTBEAT');
+      expect(t.buildPacket.mock.calls[0][3]).toEqual([]);
+    });
+
+    it('drops the exit-confirm re-look on a held position too', async () => {
+      const r = reader();
+      const t = makeSvc(parseExitDisciplineConfig({}), undefined, undefined, { cfg: parseFutileRejudgeConfig({ AI_AUTO_EXIT_HOLD: 'T1' }), reader: r });
+      t.build.mockResolvedValue([watched('t1')]);
+      t.evaluate.mockReturnValue(QUIET);
+      t.recentForTracker.mockResolvedValue([recentVerdict(130_000)]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+    });
+
+    it.each(['level-break', 'news-hit', 'event-near', 'oi-wall-shift'])('a %s fire still reaches the judge, whole', async (name) => {
+      const t = setup({ AI_AUTO_EXIT_HOLD: 'T1' });
+      t.evaluate.mockReturnValue(fire('giveback-off-peak', name));
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(t.judge.mock.calls[0][1]).toBe('FIRE');
+      expect(t.buildPacket.mock.calls[0][3].map((f: { name: string }) => f.name)).toEqual(['giveback-off-peak', name]);
+    });
+
+    it('an unheld position is judged as today', async () => {
+      const t = setup({ AI_AUTO_EXIT_HOLD: 'BANKNIFTY' });
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('exit blocked (last attempt FAILED BROKER_AUTH/BROKER_READ or SKIPPED OWNER_HOLD)', () => {
+    it.each([
+      ['FAILED', 'BROKER_AUTH'],
+      ['FAILED', 'BROKER_READ'],
+      ['SKIPPED', 'OWNER_HOLD'],
+    ])('%s %s within the cooldown ⇒ fires dropped', async (status, reason) => {
+      const t = setup({}, [attempt({ status, reason })]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['FAILED', 'BROKER_REJECT'],
+      ['SKIPPED', 'STALE_VERDICT'],
+      ['SKIPPED', 'AWAITING_CONFIRMATION'],
+      ['FILLED', null],
+    ])('%s %s ⇒ judged as today', async (status, reason) => {
+      const t = setup({}, [attempt({ status, reason })]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+
+    it('drops the exit-confirm re-look while the exit cannot run', async () => {
+      const r = reader([attempt()]);
+      const t = makeSvc(parseExitDisciplineConfig({}), undefined, undefined, { cfg: parseFutileRejudgeConfig({}), reader: r });
+      t.build.mockResolvedValue([watched('t1')]);
+      t.evaluate.mockReturnValue(QUIET);
+      t.recentForTracker.mockResolvedValue([recentVerdict(130_000)]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+    });
+
+    it('lifts once the cooldown (SENTINEL_FUTILE_REJUDGE_COOLDOWN_MIN) has passed', async () => {
+      const t = setup({ SENTINEL_FUTILE_REJUDGE_COOLDOWN_MIN: '5' }, [attempt({ createdAt: ago(2 * 60_000) })]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+      await t.svc.runForUser(USER, at(3 * 60_000));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+
+    it('lifts when the position quantity changes', async () => {
+      const t = setup({}, [attempt()]);
+      t.tickFor.mockResolvedValue(tick({ qty: 100 }));
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+      t.tickFor.mockResolvedValue(tick({ qty: 50 }));
+      await t.svc.runForUser(USER, at(30_000));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+
+    it('never drops a NEW-risk fire', async () => {
+      const t = setup({}, [attempt()]);
+      t.evaluate.mockReturnValue(fire('level-break'));
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads the executions ONCE per pass for all open trackers, since now − cooldown', async () => {
+      const t = setup({}, [attempt()]);
+      t.build.mockResolvedValue([watched('t1'), watched('t2', { userId: 'u2' }), watched('t3', { watched: false, reason: 'cap' })]);
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.reader.latestSince).toHaveBeenCalledTimes(1);
+      expect(t.reader.latestSince).toHaveBeenCalledWith([USER, 'u2'], ['t1', 't2'], ago(15 * 60_000));
+      expect(t.judge).toHaveBeenCalledTimes(1); // t2 only
+    });
+
+    it('fails OPEN when the read throws', async () => {
+      const t = setup({}, [attempt()]);
+      t.reader.latestSince.mockRejectedValue(new Error('db down'));
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('rollback', () => {
+    it('SENTINEL_FUTILE_REJUDGE_SUPPRESSION=false (or no config bound) judges every wake as today, without reading executions', async () => {
+      for (const cfg of [parseFutileRejudgeConfig({ SENTINEL_FUTILE_REJUDGE_SUPPRESSION: 'false', AI_AUTO_EXIT_HOLD: 'T1' }), null]) {
+        const t = setup({}, [attempt()], cfg);
+        await t.svc.runForUser(USER, NOW);
+        await t.svc.runForUser(USER, at(30_000));
+        expect(t.judge).toHaveBeenCalledTimes(2);
+        expect(t.reader.latestSince).not.toHaveBeenCalled();
+      }
+    });
   });
 });

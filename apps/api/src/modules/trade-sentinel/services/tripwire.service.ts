@@ -176,6 +176,32 @@ export interface HeartbeatContext {
   current: LastJudged;
 }
 
+/**
+ * Whether the routine heartbeat is due — the no-fire half of
+ * {@link TripwireService.evaluate}. Exported so a caller that drops fires (the
+ * futile re-judge rule) keeps the heartbeat at exactly its normal cadence.
+ */
+export function heartbeatDue(
+  input: Pick<TripwireInput, 'underlyingLtp' | 'nearestSupport' | 'nearestResistance'>,
+  lastVerdictAt: Date | null,
+  now: Date,
+  context?: HeartbeatContext,
+): boolean {
+  const sinceMs =
+    lastVerdictAt === null ? Number.POSITIVE_INFINITY : now.getTime() - lastVerdictAt.getTime();
+
+  if (!context) return sinceMs >= HEARTBEAT_INTERVAL_MS;
+
+  // The ceiling first: it outranks the gate on purpose. See HEARTBEAT_MAX_MS —
+  // the gate reasons only from prices, and the things it cannot see are exactly
+  // the ones worth a guaranteed look.
+  if (sinceMs >= HEARTBEAT_MAX_MS) return true;
+
+  const due = sinceMs >= heartbeatIntervalMs(input, context.greenFloorArmed);
+  const changed = materiallyChanged(context.lastJudged, context.current);
+  return due && changed;
+}
+
 @Injectable()
 export class TripwireService {
   private readonly logger = new Logger(TripwireService.name);
@@ -202,24 +228,7 @@ export class TripwireService {
       return { fires, heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' };
     }
 
-    const sinceMs =
-      lastVerdictAt === null ? Number.POSITIVE_INFINITY : now.getTime() - lastVerdictAt.getTime();
-
-    if (!context) {
-      const heartbeat = sinceMs >= HEARTBEAT_INTERVAL_MS;
-      return { fires, heartbeat, shouldEvaluate: heartbeat, trigger: heartbeat ? 'HEARTBEAT' : null };
-    }
-
-    // The ceiling first: it outranks the gate on purpose. See HEARTBEAT_MAX_MS —
-    // the gate reasons only from prices, and the things it cannot see are exactly
-    // the ones worth a guaranteed look.
-    if (sinceMs >= HEARTBEAT_MAX_MS) {
-      return { fires, heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' };
-    }
-
-    const due = sinceMs >= heartbeatIntervalMs(input, context.greenFloorArmed);
-    const changed = materiallyChanged(context.lastJudged, context.current);
-    const heartbeat = due && changed;
+    const heartbeat = heartbeatDue(input, lastVerdictAt, now, context);
     return { fires, heartbeat, shouldEvaluate: heartbeat, trigger: heartbeat ? 'HEARTBEAT' : null };
   }
 

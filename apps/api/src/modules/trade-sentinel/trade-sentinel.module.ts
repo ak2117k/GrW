@@ -48,6 +48,8 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
 import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
 import { REJUDGE_CONFIG, parseRejudgeConfig } from './services/rejudge-suppression';
+import { EXIT_ATTEMPTS, FUTILE_REJUDGE_CONFIG, parseFutileRejudgeConfig } from './services/futile-rejudge';
+import { PrismaExitAttemptReader } from './repositories/exit-attempt.reader';
 import { MinuteBarsReader } from './adapters/minute-bars.reader';
 import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
 import { NewsWatchBook } from './services/news-watch-book';
@@ -184,6 +186,11 @@ import { MARKET_EVENTS } from './ports/events.port';
     { provide: EXIT_DISCIPLINE_CONFIG, useFactory: () => parseExitDisciplineConfig(process.env) },
     // Re-judge suppression (default ON; SENTINEL_REJUDGE_SUPPRESSION=false rolls back).
     { provide: REJUDGE_CONFIG, useFactory: () => parseRejudgeConfig(process.env) },
+    // Futile re-judge suppression (default ON; SENTINEL_FUTILE_REJUDGE_SUPPRESSION=false rolls back):
+    // held positions (AI_AUTO_EXIT_HOLD) and exits that cannot run. The reader is a
+    // READ-ONLY view of ai_exit_executions — no executor dependency, no broker.
+    { provide: FUTILE_REJUDGE_CONFIG, useFactory: () => parseFutileRejudgeConfig(process.env) },
+    { provide: EXIT_ATTEMPTS, useClass: PrismaExitAttemptReader },
     {
       provide: MinuteBarsReader,
       useFactory: (prisma: PrismaService) => new MinuteBarsReader(new PrismaCandleRepo(prisma as never)),

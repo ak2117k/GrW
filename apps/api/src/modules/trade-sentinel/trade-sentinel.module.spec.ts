@@ -18,6 +18,7 @@ import {
 import { ThesisService } from './services/thesis.service';
 import { OiWallSnapshotService } from './services/oi-wall-snapshot.service';
 import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.service';
+import { EXIT_ATTEMPTS, FUTILE_REJUDGE_CONFIG } from './services/futile-rejudge';
 import { ANTHROPIC_CLIENT } from './services/sentinel-agent.service';
 import { SentinelOvernightService } from './services/sentinel-overnight.service';
 import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
@@ -49,6 +50,8 @@ const TOKEN_PARAMS: Array<[string, unknown, string]> = [
   ['OiWallSnapshotService.oiWall', OiWallSnapshotService, OI_WALL_SOURCE],
   ['SentinelCycleService.ticks', SentinelCycleService, TICK_SOURCE],
   ['SentinelCycleService.discipline', SentinelCycleService, EXIT_DISCIPLINE_CONFIG],
+  ['SentinelCycleService.futileCfg', SentinelCycleService, FUTILE_REJUDGE_CONFIG],
+  ['SentinelCycleService.exitAttempts', SentinelCycleService, EXIT_ATTEMPTS],
   ['SentinelOvernightService.ticks', SentinelOvernightService, TICK_SOURCE],
   ['SentinelOvernightService.evidence', SentinelOvernightService, OVERNIGHT_EVIDENCE],
   ['SentinelTickSource.discipline', SentinelTickSource, EXIT_DISCIPLINE_CONFIG],

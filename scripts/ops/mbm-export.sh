@@ -3,11 +3,12 @@
 # per (table, IST session day), BEFORE the in-app prunes delete them (chain 30 d at
 # 02:00 IST, OI 30 d at 02:45 IST, walls 45 d). Run by grw-mbm-export.timer at
 # 01:15 IST; catches up the last EXPORT_CATCHUP_DAYS so a missed night loses nothing.
+# mbm_chain_snapshots (the MBM NIFTY chain capture, never pruned) is exported the same way.
 # The PC pulls the files over ssh/scp (ai-engine/scripts/mbm_data.py pull-exports).
 #
 # Usage: mbm-export.sh [--since YYYY-MM-DD] [--today YYYY-MM-DD]
 # Exit: 0 ok · 1 a table/day failed (others still exported) · 2 bad args ·
-#       4 a newly written Mon–Fri day had zero rows in all three tables.
+#       4 a newly written Mon–Fri day had zero rows in every table.
 set -uo pipefail
 
 PG_CONTAINER="${PG_CONTAINER:-grw-postgres}"
@@ -36,11 +37,13 @@ query() { # $1 table, $2 utc_from, $3 utc_to
     oi_snapshots) echo "SELECT s.id, s.\"timestamp\" AS ts_utc, i.symbol, i.exchange, i.token, i.segment, i.expiry AS expiry_utc, i.strike, i.\"optionType\" AS option_type, s.oi, s.\"oiChange\" AS oi_change, s.volume FROM oi_snapshots s JOIN instruments i ON i.id = s.\"instrumentId\" WHERE s.\"timestamp\" >= '$2' AND s.\"timestamp\" < '$3' ORDER BY s.\"timestamp\", s.id" ;;
     oi_wall_snapshots) echo "SELECT id, \"capturedAt\" AS captured_at_utc, symbol, expiry, \"callWall\" AS call_wall, \"putWall\" AS put_wall, \"callWallOi\" AS call_wall_oi, \"putWallOi\" AS put_wall_oi FROM oi_wall_snapshots WHERE \"capturedAt\" >= '$2' AND \"capturedAt\" < '$3' ORDER BY \"capturedAt\", id" ;;
     option_chain_snapshots) echo "SELECT id, \"capturedAt\" AS captured_at_utc, underlying, \"expiryDate\" AS expiry_date, \"spotPrice\" AS spot_price, source, \"strikeCount\" AS strike_count, \"chainJson\" AS chain_json FROM option_chain_snapshots WHERE \"capturedAt\" >= '$2' AND \"capturedAt\" < '$3' ORDER BY \"capturedAt\", id" ;;
+    # timestamptz (not Prisma's zone-less timestamp): the window is pinned to UTC with +00.
+    mbm_chain_snapshots) echo "SELECT id, captured_at AS captured_at_utc, instrument, expiry, spot, pcr, max_pain, call_wall, put_wall, strikes FROM mbm_chain_snapshots WHERE captured_at >= '$2+00' AND captured_at < '$3+00' ORDER BY captured_at, id" ;;
   esac
 }
 rows_in() { local n; n=$(gzip -dc "$1" | wc -l); echo $(( n > 0 ? n - 1 : 0 )); }
 
-TABLES=(oi_snapshots oi_wall_snapshots option_chain_snapshots)
+TABLES=(oi_snapshots oi_wall_snapshots option_chain_snapshots mbm_chain_snapshots)
 failed=0; empty_days=()
 day="$since"
 while [[ "$day" < "$today" ]]; do

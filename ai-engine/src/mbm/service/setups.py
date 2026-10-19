@@ -4,7 +4,7 @@ Definitions match the offline test (NIFTY daily 2007–2026, learn 2007–2018, 
 the next session's open):
 
 - RIBBON_UP_MACD_GREEN_{10_30,12_26}: EMA fast crosses above EMA slow today AND MACD(12,26,9) hist > 0.
-- RETEST_20D_LOW_REBOUND: low within 0.5×ATR14 of the lowest low of the 20 sessions ending 3 sessions
+- RETEST_20D_LOW_REBOUND: low within 0.5×ATR14 (Wilder) of the lowest low of the 20 sessions ending 3 sessions
   earlier, AND close > open, close > previous close, close > that low.
 - BB_LOWER_TOUCH_UPTREND: low < SMA20 − 2·std20 AND close > EMA200.
 - BB_BREAKOUT_UP: close > SMA20 + 2·std20.
@@ -108,7 +108,7 @@ def indicators(d: pd.DataFrame) -> pd.DataFrame:
     x["hist"] = macd - x["macd_signal"]
     prev_c = c.shift(1)
     tr = pd.concat([h - l, (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-    x["atr14"] = tr.rolling(14).mean()
+    x["atr14"] = tr.ewm(alpha=1 / 14, adjust=False).mean()   # Wilder ATR14, as in the research that validated these setups
     x["ref_low20"] = l.rolling(20).min().shift(3)    # 20 sessions ending 3 sessions earlier
     x["sma20"] = c.rolling(20).mean()
     x["std20"] = c.rolling(20).std()

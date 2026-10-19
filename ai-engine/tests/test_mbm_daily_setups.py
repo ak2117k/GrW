@@ -61,7 +61,7 @@ def test_detectors_match_a_vectorised_oracle():
     hist = macd - macd.ewm(span=9, adjust=False).mean()
     pc = c.shift(1)
     tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean()
+    atr = tr.ewm(alpha=1 / 14, adjust=False).mean()
     ref = l.rolling(20).min().shift(3)
     sma, sd = c.rolling(20).mean(), c.rolling(20).std()
     want = {}

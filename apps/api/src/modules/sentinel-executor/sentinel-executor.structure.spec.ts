@@ -97,12 +97,29 @@ describe('exit gate shape (exit discipline, Review Focus 1)', () => {
 
 describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
   const all = () => files(MODULES).filter((f) => !f.endsWith('.spec.ts'));
+  /**
+   * The one sanctioned reader outside the executor: the sentinel's futile
+   * re-judge rule reads ONLY the latest attempt's status / reason / createdAt per
+   * open tracker, to stop asking the judge for exits that cannot run. It is not a
+   * corpus and never writes; the two modules still meet only in the database.
+   */
+  const SANCTIONED_READERS = ['trade-sentinel/repositories/exit-attempt.reader.ts'];
+
   it('only sentinel-executor reads ai_exit_executions — no corpus writer can mistake a manual exit for an AI decision', () => {
     const offenders = all()
       .filter((f) => !f.includes(`${join('modules', 'sentinel-executor')}`))
+      .filter((f) => !SANCTIONED_READERS.includes(relative(MODULES, f).replace(/\\/g, '/')))
       .filter((f) => /aiExitExecution|ai_exit_executions/.test(code(f)))
       .map((f) => relative(MODULES, f).replace(/\\/g, '/'));
     expect(offenders).toEqual([]);
+  });
+
+  it('the sanctioned reader stays read-only and selects no corpus fields', () => {
+    for (const rel of SANCTIONED_READERS) {
+      const src = code(join(MODULES, rel));
+      expect(src).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b|aiExitExecution\s*\.\s*(create|update|upsert|delete)/i);
+      expect(src).not.toMatch(/"(fillPrice|orderLtp|decisionLtp|verdictId|brokerOrderId)"/);
+    }
   });
 
   it('the executor never writes a sentinel_verdicts row (a manual exit is not fabricated as a verdict)', () => {

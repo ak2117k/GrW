@@ -2785,3 +2785,25 @@ model MbmChainSnapshot {
   @@index([instrument, capturedAt])
   @@map("mbm_chain_snapshots")
 }
+
+/// MBM daily setups monitor (OBSERVE only, touches no trade): NIFTY daily-chart signals detected at
+/// 15:50 IST and their later outcomes. ret_Nd_bp = next session's open → close N sessions later, gross bp.
+model MbmDailySignal {
+  id         BigInt    @id @default(autoincrement())
+  instrument String // NIFTY
+  signalDate DateTime  @map("signal_date") @db.Date // IST session the signal fired on
+  /// RIBBON_UP_MACD_GREEN_{10_30,12_26} | RIBBON_UP_TREND_{10_30,12_26} | RETEST_20D_LOW_REBOUND |
+  /// BB_LOWER_TOUCH_UPTREND | BB_BREAKOUT_UP | GAP_DOWN_REVERSAL | RIBBON_DOWN_MACD_RED_{10_30,12_26}
+  setup      String
+  action     String // LONG_SETUP | EXIT_OR_TIGHTEN_LONGS (never a short signal)
+  close      Float
+  details    Json // the indicator values that fired
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  ret5dBp    Float?    @map("ret_5d_bp")
+  ret10dBp   Float?    @map("ret_10d_bp")
+  ret20dBp   Float?    @map("ret_20d_bp")
+  outcomeAt  DateTime? @map("outcome_at") @db.Timestamptz(6) // set once all three returns are filled
+
+  @@unique([instrument, signalDate, setup])
+  @@map("mbm_daily_signals")
+}

@@ -3,6 +3,8 @@ import { ModuleRef } from '@nestjs/core';
 import type { HubCandle, Timeframe } from '../../market-hub/candles/candle.types';
 import { lookupHubPrices, type HubPrices } from '../../market-hub/hub-prices';
 import type { InstrumentRef } from '../../market-hub/hub.types';
+import { MBM_CONFIG, type MbmConfig } from '../../mbm/mbm.config';
+import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { atr } from '../../signal-generator/strategies/indicators';
 import { PRICE_MAX_AGE_MS } from '../execution/fill-model';
 import { CoreCandles } from '../market/core-candles';
@@ -51,6 +53,20 @@ export class EntryMarket {
   /** Test seam (the specs replace it to advance a fake clock). */
   protected sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * MBM M3: MbmClient and MBM_CONFIG from MbmModule, resolved lazily like the hub (TradeCoreModule
+   * imports nothing new); null when MbmModule is not loaded.
+   */
+  mbm(): { client: MbmClient; config: MbmConfig } | null {
+    try {
+      const client = this.moduleRef.get(MbmClient, { strict: false });
+      const config = this.moduleRef.get<MbmConfig>(MBM_CONFIG, { strict: false });
+      return client && config ? { client, config } : null;
+    } catch {
+      return null;
+    }
   }
 
   private hub(userId: string): HubPrices | null {

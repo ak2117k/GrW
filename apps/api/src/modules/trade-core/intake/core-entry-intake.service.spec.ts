@@ -16,6 +16,7 @@ import { CoreEntryIntake, INTAKE_MAX_PENDING } from './core-entry-intake.service
 import type { EntryMode } from './entry-config';
 import type { AtrRead, EntryMarket, PriceRead } from './entry-market';
 import { adaptiveSeedBlocks, hit, ist, plainBlocks } from './testing/intake-fixtures';
+import { parseMbmConfig, type MbmConfig } from '../../mbm/mbm.config';
 
 const NOW = ist('2026-10-13', '10:30');
 
@@ -38,6 +39,7 @@ interface SetupOptions {
   history?: Partial<CoreTradeHistory>;
   open?: jest.Mock;
   maxAlertAgeMs?: number;
+  mbm?: { config: MbmConfig; client: { behaviour: jest.Mock } };
 }
 
 function setup(o: SetupOptions = {}) {
@@ -60,6 +62,7 @@ function setup(o: SetupOptions = {}) {
     release: jest.fn(),
     atr: jest.fn().mockResolvedValue(o.atr ?? { atr: null, source: 'none', detail: 'fixed stop' }),
     candlesFor: jest.fn().mockResolvedValue(null),
+    mbm: jest.fn().mockReturnValue(o.mbm ?? null),
   };
   const history: CoreTradeHistory = {
     intentSeen: jest.fn(async (id: string) => opened.has(id)),
@@ -238,6 +241,56 @@ describe('CoreEntryIntake — the pipeline (J5)', () => {
     expect(s.wall.check.mock.calls[0][0]).toMatchObject({ refPrice: 500, stopPrice: 496, qty: 200 }); // 0.8 % floor; ₹800 ÷ ₹4
     const setupRow = s.corpus.entrySetup.mock.calls[0][0];
     expect(setupRow.evidence).toMatchObject({ atrSource: 'none', stopPct: 0.8, gates: [expect.objectContaining({ pass: true, skipped: true })] });
+  });
+
+  describe('market-behaviour gate (MBM M3)', () => {
+    const mbmBlocks = (skipRegimes = 'QUIET') => ({
+      ...plainBlocks(),
+      filters: { ...plainBlocks().filters, gates: [{ kind: 'evaluator' as const, evaluatorKey: 'market-behaviour', params: { skipRegimes, horizon: 'auto' } }] },
+    });
+    const quiet = {
+      instrument: 'NIFTY', status: 'ok', asOf: '2026-10-13T04:59:00Z', featureSet: 'fs1', modelIds: { '60m': 'm60' },
+      horizons: { '60m': { p: 0.12, regime: 'QUIET', q25Bp: 20, q50Bp: 28, q75Bp: 35 } },
+    };
+    const mbm = (gate: string, answer: unknown = quiet) => ({
+      config: parseMbmConfig({ MBM_ENABLED: 'observe', MBM_ENTRY_GATE: gate, MBM_FEED_USER_ID: 'o' }),
+      client: { behaviour: jest.fn().mockResolvedValue(answer) },
+    });
+    const niftyHit = () => hit({ symbol: 'NIFTY', tradingSymbol: 'NIFTY', exchange: 'NSE' });
+
+    it('observe: a QUIET NIFTY entry still opens; the corpus row carries features / featureSet / mlScore', async () => {
+      const m = mbm('observe');
+      const s = setup({ blocks: mbmBlocks(), mbm: m });
+      expect((await s.intake.process(niftyHit(), NOW))[0]).toMatchObject({ kind: 'OPENED' });
+      expect(m.client.behaviour).toHaveBeenCalledTimes(1);
+      expect(m.client.behaviour).toHaveBeenCalledWith('NIFTY');
+      const row = s.corpus.entrySetup.mock.calls[0][0];
+      expect(row.evidence.gates[0]).toMatchObject({ key: 'market-behaviour', pass: true, detail: { wouldSkip: true, regime: 'QUIET', p: 0.12 } });
+      expect(row.mbm).toEqual({
+        features: { instrument: 'NIFTY', horizon: '60m', regime: 'QUIET', p: 0.12, rangeBp: [20, 35], q50Bp: 28, asOf: '2026-10-13T04:59:00Z', modelId: 'm60', wouldSkip: true, mode: 'observe' },
+        featureSet: 'fs1',
+        mlScore: 0.12,
+      });
+    });
+
+    it('on: a QUIET NIFTY entry is skipped as GATE, and the skip row still carries the MBM answer', async () => {
+      const s = setup({ blocks: mbmBlocks(), mbm: mbm('on') });
+      expect((await s.intake.process(niftyHit(), NOW))[0]).toMatchObject({ kind: 'SKIPPED', reason: 'GATE' });
+      expect(s.corpus.entrySetup.mock.calls[0][0].mbm).toMatchObject({ mlScore: 0.12 });
+    });
+
+    it('a non-NIFTY entry, an absent answer, and MBM_ENABLED=off all open with no mbm on the row', async () => {
+      const cases = [
+        { m: mbm('on'), h: hit() },
+        { m: mbm('on', { status: 'absent' }), h: niftyHit() },
+        { m: { config: parseMbmConfig({ MBM_ENTRY_GATE: 'on' }), client: { behaviour: jest.fn() } }, h: niftyHit() },
+      ];
+      for (const c of cases) {
+        const s = setup({ blocks: mbmBlocks(), mbm: c.m });
+        expect((await s.intake.process(c.h, NOW))[0]).toMatchObject({ kind: 'OPENED' });
+        expect('mbm' in s.corpus.entrySetup.mock.calls[0][0]).toBe(false);
+      }
+    });
   });
 
   it('an unknown gate key is GATE_UNKNOWN; settings missing is PAPER_SETTINGS_MISSING; a tiny budget is SIZE_ZERO', async () => {

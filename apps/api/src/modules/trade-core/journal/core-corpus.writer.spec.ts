@@ -50,3 +50,17 @@ describe('CoreCorpusWriter — skip then open (review fix 2: corpus label)', () 
     expect(upsert.mock.calls[1][0].update).toEqual({});
   });
 });
+
+describe('CoreCorpusWriter — MBM M3 features', () => {
+  it('writes features / featureSet / mlScore only when the market-behaviour gate applied', async () => {
+    const upsert = jest.fn().mockResolvedValue({});
+    const w = new CoreCorpusWriter({ aiDecisionRecord: { upsert } } as unknown as PrismaService);
+    const mbm = { features: { regime: 'QUIET', p: 0.12, rangeBp: [20, 35], asOf: '2026-10-13T04:59:00Z', modelId: 'm60' }, featureSet: 'fs1', mlScore: 0.12 };
+    await w.entrySetup({ ...setup, decision: { taken: true, reason: 'opened' }, mbm });
+    expect(upsert.mock.calls[0][0].create).toMatchObject({ features: mbm.features, featureSet: 'fs1', mlScore: 0.12 });
+    expect(upsert.mock.calls[0][0].update).toMatchObject({ features: mbm.features, featureSet: 'fs1', mlScore: 0.12 });
+    await w.entrySetup(setup);
+    const create = upsert.mock.calls[1][0].create;
+    expect(['features', 'featureSet', 'mlScore'].some((k) => k in create)).toBe(false);
+  });
+});

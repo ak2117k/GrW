@@ -148,4 +148,6 @@ export interface CorpusSetup {
   evidence: Record<string, unknown>;
   ruleScore: number | null;
   decision: { taken: boolean; reason: string };
+  /** MBM M3: the market-behaviour gate's answer when it applied (→ features / featureSet / mlScore). */
+  mbm?: { features: Record<string, unknown>; featureSet: string; mlScore: number };
 }

@@ -5,6 +5,7 @@ import { FakeHub, fakeHubSource } from '../execution/testing/fake-hub';
 import type { CoreCandles } from '../market/core-candles';
 import { atrFrom, ENTRY_PRICE_WAIT_MS, EntryMarket, intakeOwner } from './entry-market';
 import { ist } from './testing/intake-fixtures';
+import { MBM_CONFIG } from '../../mbm/mbm.config';
 
 const NOW = ist('2026-10-13', '10:30');
 const REF = { exchange: 'NSE' as const, token: '2885', symbol: 'RELIANCE-EQ' };
@@ -82,5 +83,17 @@ describe('EntryMarket.atr (O7) and atrFrom', () => {
   it('atrFrom needs period + 1 bars', () => {
     expect(atrFrom(Array.from({ length: 14 }, (_, i) => bar(i, 500)), 14)).toBeNull();
     expect(atrFrom(Array.from({ length: 15 }, (_, i) => bar(i, 500)), 14)).toBeCloseTo(4, 5);
+  });
+});
+
+describe('EntryMarket.mbm (MBM M3)', () => {
+  const candles = {} as CoreCandles;
+  it('resolves MbmClient and MBM_CONFIG lazily (strict: false), and is null when MbmModule is absent', () => {
+    const client = { behaviour: jest.fn() };
+    const config = { mode: 'observe' };
+    const found = new EntryMarket({ get: jest.fn((t: unknown) => (t === MBM_CONFIG ? config : client)) } as unknown as ModuleRef, candles);
+    expect(found.mbm()).toEqual({ client, config });
+    const missing = new EntryMarket({ get: jest.fn(() => { throw new Error('not found'); }) } as unknown as ModuleRef, candles);
+    expect(missing.mbm()).toBeNull();
   });
 });

@@ -46,6 +46,7 @@ import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module
 import { MarketHubModule } from './modules/market-hub/market-hub.module';
 import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.module';
 import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-executor.module';
+import { MbmModule } from './modules/mbm/mbm.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
@@ -241,6 +242,10 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // Inert unless AI_AUTO_EXIT_ENABLED=true (no timer, no query, no broker call);
     // meets TradeSentinelModule only in the database.
     SentinelExecutorModule,
+
+    // Market-behaviour model M2 (observe only): 1m bar refresher + fail-open proxy to the
+    // MBM service. Inert unless MBM_ENABLED=observe|on.
+    MbmModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

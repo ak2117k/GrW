@@ -1,5 +1,6 @@
 // apps/api/src/modules/mbm/services/mbm-bar-refresher.service.ts
 import { Inject, Injectable, Logger, type OnModuleInit } from '@nestjs/common';
+import { runInBootLane } from '../../../common/utils/boot-lane';
 import { Cron } from '@nestjs/schedule';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
@@ -55,7 +56,7 @@ export class MbmBarRefresherService implements OnModuleInit {
       return;
     }
     // Not awaited: a 3-session catch-up of 11 series must never delay the port bind.
-    void this.catchUp();
+    void runInBootLane('mbm-bar-catch-up', 20, () => this.catchUp());
   }
 
   /** Every 5 min at second 20, Mon–Fri; the 09:15–15:35 IST window and holidays are checked inside. */

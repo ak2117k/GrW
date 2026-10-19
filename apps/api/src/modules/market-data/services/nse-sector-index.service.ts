@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { runInBootLane } from '../../../common/utils/boot-lane';
 import { HttpService } from '@nestjs/axios';
 import { Cron } from '@nestjs/schedule';
 import { firstValueFrom } from 'rxjs';
@@ -237,11 +238,13 @@ export class NseSectorIndexService implements OnModuleInit {
       return;
     }
     // Don't block startup — fetch async, fall back to static if it takes time.
-    this.refresh().catch((err) => {
-      this.logger.warn(
-        `Initial sector refresh failed: ${err instanceof Error ? err.message : err}`,
-      );
-    });
+    void runInBootLane('sector-index-refresh', 30, () =>
+      this.refresh().catch((err) => {
+        this.logger.warn(
+          `Initial sector refresh failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }),
+    );
   }
 
   /** Cron at 06:00 IST on weekdays — well before market open. */

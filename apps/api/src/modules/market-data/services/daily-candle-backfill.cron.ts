@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { runInBootLane } from '../../../common/utils/boot-lane';
 import { Cron } from '@nestjs/schedule';
 import {
   COMMODITIES,
@@ -142,11 +143,13 @@ export class DailyCandleBackfillCron implements OnModuleInit {
     // 350ms per instrument would put minutes in front of the port bind — and
     // Render fails a deploy that never opens a port. Detached, the server binds
     // immediately and the dailies land behind it.
-    void this.backfillOnBoot().catch((err) => {
-      this.logger.warn(
-        `Boot daily-candle backfill failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+    void runInBootLane('daily-candle-backfill', 50, () =>
+      this.backfillOnBoot().catch((err) => {
+        this.logger.warn(
+          `Boot daily-candle backfill failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }),
+    );
   }
 
   /**

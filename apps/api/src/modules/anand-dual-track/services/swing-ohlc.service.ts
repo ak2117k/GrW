@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { runInBootLane } from '../../../common/utils/boot-lane';
 import { Cron } from '@nestjs/schedule';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import {
@@ -46,8 +47,10 @@ export class SwingOhlcService implements OnModuleInit {
   // Backfill existing trades immediately on boot (fire-and-forget) so the
   // feature has data without waiting for the first EOD run.
   onModuleInit(): void {
-    this.runForAllInWindow().catch((err) =>
-      this.logger.error(`[swing-ohlc] boot backfill failed: ${err instanceof Error ? err.message : err}`),
+    void runInBootLane('swing-ohlc', 40, () =>
+      this.runForAllInWindow().catch((err) =>
+        this.logger.error(`[swing-ohlc] boot backfill failed: ${err instanceof Error ? err.message : err}`),
+      ),
     );
   }
 

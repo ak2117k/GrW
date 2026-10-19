@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { runInBootLane } from '../../../common/utils/boot-lane';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AngelOneAdapterService } from '../services/angel-one-adapter.service';
@@ -88,7 +89,7 @@ export class DailyBackfillWorker implements OnModuleInit {
       this.logger.log(BOOT_JOBS_DISABLED);
       return;
     }
-    void this.bootBackfill();
+    void runInBootLane('universe-daily-backfill', 10, () => this.bootBackfill());
   }
 
   /** The ONE boot universe pass, shared by every caller (see {@link bootBackfill}). */

@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
+import { runInBootLane } from '../../../common/utils/boot-lane';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AngelOneAdapterService } from './angel-one-adapter.service';
 import { MarketDataRepository } from '../repositories/market-data.repository';
@@ -18,8 +19,8 @@ const GAP_THRESHOLD_DAYS = 2;
 /** How many days back to fetch when filling a gap. 7 covers any normal week. */
 const BACKFILL_DAYS = 7;
 
-/** How long after onModuleInit to run the scan — defers off the boot critical path. */
-const BOOT_DEFER_MS = 10_000;
+
+
 
 export interface GapCheckResult {
   symbol: string;
@@ -50,7 +51,7 @@ export interface GapCheckResult {
  *      via the auto-chunked broker fetch and invalidate the level book.
  *   3. Skip silently if current — most boot scans should be no-ops.
  *
- * Runs once at boot (deferred BOOT_DEFER_MS so the API is responsive
+ * Runs once at boot (queued in the boot lane so the API is responsive
  * before the broker calls start). Also exposed via
  * POST /api/market-data/gap-check/trigger for ops.
  *
@@ -77,13 +78,15 @@ export class GapDetectorService implements OnModuleInit {
     // Defer the scan so the API binds + accepts requests immediately.
     // Broker calls happen in the background; per-instrument gaps are
     // rare so the wall-time impact on a typical boot is < 1 second.
-    setTimeout(() => {
+    // Queued in the boot lane (last: it is the biggest broker walk) instead of a
+    // fixed delay that still landed on top of the other boot jobs.
+    void runInBootLane('gap-scan', 60, () =>
       this.scanAndBackfill().catch((err) => {
         this.logger.error(
           `Boot-time gap scan failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-      });
-    }, BOOT_DEFER_MS);
+      }),
+    );
   }
 
   /**

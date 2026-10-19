@@ -2,6 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { UserFeedManager } from './user-feed-manager.service';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 
 /**
  * Pre-market Angel One session guard.
@@ -46,6 +47,12 @@ export class PremarketSessionCron {
       const { ok, failed } = await this.userFeeds.reloginAll();
       if (ok + failed > 0) {
         this.logger.log(`Pre-market per-user session refresh: ${ok} re-logged in, ${failed} failed`);
+      }
+      if (failed > 0) {
+        void sendOpsAlert(
+          'premarket-user-relogin',
+          `GrW: pre-market Angel re-login FAILED for ${failed} per-user session(s) — AI exits may fail today. Reconnect Angel One.`,
+        );
       }
     } catch (err) {
       this.logger.error(

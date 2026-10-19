@@ -12,6 +12,9 @@
 set -euo pipefail
 GRW_ROOT="${GRW_ROOT:-/opt/grw}"
 APP_DIR="$GRW_ROOT/app"
+# The app dir is owned by the deploy user; root git refuses it ("dubious ownership"). Trust it for
+# this script only (no global git config change).
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$APP_DIR"
 STATE_DIR="$GRW_ROOT/state"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-180}"
 COMPOSE=(docker compose -f "$APP_DIR/deploy/docker-compose.prod.yml" --env-file "$GRW_ROOT/env/compose.env")

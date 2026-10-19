@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { generateTOTP } from '../utils/angel-one-totp';
+import { withAngelLogin } from './angel-login-gate';
 import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import type { DecryptedBrokerCredentials } from '../../credential-vault/execution/credential-decryptor';
 import type {
@@ -534,8 +535,12 @@ export class UserFeedSession implements UserFeedSessionLike {
       this.restReady = false;
       this.auth = null;
       this.smartApi = this.deps.smartApiFactory(creds.apiKey);
-      const totp = generateTOTP(creds.totpSecret);
-      const session = await this.smartApi.generateSession(creds.clientId, creds.password, totp);
+      // Gated with the shared feed's login (same Angel user is common): one at a
+      // time per client code, never two in one TOTP step.
+      const api = this.smartApi;
+      const session: any = await withAngelLogin<any>(creds.clientId, () =>
+        api.generateSession(creds.clientId, creds.password, generateTOTP(creds.totpSecret)),
+      );
 
       const jwtToken: string | undefined = session?.data?.jwtToken;
       const feedToken: string | undefined = session?.data?.feedToken;

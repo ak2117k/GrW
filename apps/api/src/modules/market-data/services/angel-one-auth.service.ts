@@ -5,6 +5,8 @@ import { SmartAPI } from 'smartapi-javascript';
 // the per-user AngelOneValidator produce codes identically.
 import { generateTOTP } from '../utils/angel-one-totp';
 import { FeedCredentialProvider } from './feed-credential-provider';
+import { withAngelLogin } from './angel-login-gate';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 
 /**
  * How long a BOOT job waits for the shared feed session before giving up
@@ -49,6 +51,14 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
   private clientId = '';
 
   private static readonly MAX_LOGIN_RETRIES = 3;
+  /**
+   * After the boot login gives up, keep trying in the background instead of
+   * leaving the shared feed dead until the 08:45 IST cron (prod 2026-10-19: down
+   * ~10 min until a manual restart). Minutes; the last value repeats.
+   */
+  private static readonly BACKGROUND_RETRY_MIN = [1, 2, 5, 10, 15];
+  private backgroundRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private backgroundRetries = 0;
   private static readonly RETRY_DELAY_MS = 2000;
   /** Refresh 1 hour before expiry (tokens last ~24hrs) */
   private static readonly TOKEN_REFRESH_BUFFER_MS = 60 * 60 * 1000;
@@ -131,6 +141,9 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
       await this.login();
       this.logger.log('Auto-login succeeded');
     } catch (error) {
+      if (await this.feedCredentials.hasFeedCredentials().catch(() => false)) {
+        this.scheduleBackgroundLogin(error);
+      }
       // NEVER let feed-credential resolution or login crash app bootstrap — the
       // market feed is non-critical to boot and degrades to demo/REST data. This
       // also survives a not-yet-applied migration (a missing isFeedAccount column
@@ -144,6 +157,37 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     this.clearRefreshTimer();
+    if (this.backgroundRetryTimer) clearTimeout(this.backgroundRetryTimer);
+    this.backgroundRetryTimer = null;
+  }
+
+  /** Background re-login after a failed boot login: 1, 2, 5, 10, then every 15 min until it works. */
+  private scheduleBackgroundLogin(cause: unknown): void {
+    if (this.backgroundRetryTimer) return;
+    const steps = AngelOneAuthService.BACKGROUND_RETRY_MIN;
+    const minutes = steps[Math.min(this.backgroundRetries, steps.length - 1)];
+    if (this.backgroundRetries === 0) {
+      void sendOpsAlert(
+        'angel-shared-login',
+        `GrW: shared Angel market-data login FAILED at boot (${cause instanceof Error ? cause.message : cause}). Retrying in the background.`,
+      );
+    }
+    this.backgroundRetryTimer = setTimeout(() => {
+      this.backgroundRetryTimer = null;
+      this.backgroundRetries += 1;
+      this.login().then(
+        () => {
+          this.logger.log(`Background re-login succeeded after ${this.backgroundRetries} retr${this.backgroundRetries === 1 ? 'y' : 'ies'}`);
+          void sendOpsAlert('angel-shared-login-ok', 'GrW: shared Angel market-data login recovered.');
+          this.backgroundRetries = 0;
+        },
+        (err) => {
+          this.logger.warn(`Background re-login ${this.backgroundRetries} failed: ${err instanceof Error ? err.message : err}`);
+          this.scheduleBackgroundLogin(err);
+        },
+      );
+    }, minutes * 60_000);
+    this.backgroundRetryTimer.unref?.();
   }
 
   /**
@@ -170,11 +214,10 @@ export class AngelOneAuthService implements OnModuleInit, OnModuleDestroy {
         try {
           this.logger.log(`Login attempt ${attempt}/${AngelOneAuthService.MAX_LOGIN_RETRIES}`);
 
-          const totp = generateTOTP(creds.totpSecret);
-          const session = await this.smartApi.generateSession(
-            creds.clientId,
-            creds.password,
-            totp,
+          // Gated: never two logins of this client code at once or in one TOTP
+          // step (the per-user feed session may be the same Angel user).
+          const session: any = await withAngelLogin<any>(creds.clientId, () =>
+            this.smartApi.generateSession(creds.clientId, creds.password, generateTOTP(creds.totpSecret)),
           );
 
           if (!session?.data?.jwtToken) {

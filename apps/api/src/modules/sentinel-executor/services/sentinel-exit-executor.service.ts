@@ -1,5 +1,6 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-executor.service.ts
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 import type {
@@ -316,6 +317,11 @@ export class SentinelExitExecutor {
       this.logger.error(
         `[ai-exit] BROKER SESSION DEAD for user ${v.userId}: ${n} exits in a row refused "Invalid Token" ` +
           `even after re-login — AI exits are NOT reaching the broker. Reconnect Angel One. Last: ${v.symbol} (${detail})`,
+      );
+      void sendOpsAlert(
+        `broker-session-dead:${v.userId}`,
+        `GrW ALERT: AI exits are NOT reaching the broker — ${n} in a row refused "Invalid Token" even after re-login. ` +
+          `Reconnect Angel One. Last: ${v.symbol}.`,
       );
     }
     return this.finish(id, v, 'FAILED', 'BROKER_AUTH', { brokerMessage: detail.slice(0, 200) });

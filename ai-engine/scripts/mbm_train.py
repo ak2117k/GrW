@@ -47,6 +47,37 @@ def _save_models(out: Path, h: str, final: dict) -> None:
     (d / "meta.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
 
 
+def horizon_result(p: pd.DataFrame) -> dict:
+    g = A.gate(p)
+    g["monthly"] = A.monthly_metrics(p).round(5).to_dict("records")
+    g["quantile_coverage"] = A.quantile_coverage(p)
+    g["calibration"] = A.calibration_table(p).astype({"bucket": str}).round(4).to_dict("records")
+    g["regimes"] = A.regime_table(p).round(4).to_dict("records")
+    return g
+
+
+def report_only(args) -> int:
+    """Rebuild metrics.json + report from saved blind predictions (no retraining)."""
+    root = Path(args.store) if args.store else default_root()
+    inst = args.instrument.upper()
+    out = root / "models" / "m1" / inst.lower()
+    ds = pd.read_parquet(out / "dataset.parquet")
+    old = json.loads((out / "metrics.json").read_text(encoding="utf-8")) if (out / "metrics.json").exists() else {}
+    results = {h: horizon_result(pd.read_parquet(out / f"preds_{h}.parquet"))
+               for h in HORIZONS if (out / f"preds_{h}.parquet").exists()}
+    cols = A.model_columns(ds, DRIVER_GROUPS)
+    metrics = {"featureSet": FEATURE_SET, "instrument": inst, "built": date.today().isoformat(),
+               "decision_step_min": A.DECISION_STEP, "next_decision": "15:15 IST",
+               "regime_bands": list(A.REGIME_BANDS), "columns": cols,
+               "runtime_s": args.runtime or old.get("runtime_s"), "walk_forward_s": old.get("walk_forward_s"),
+               "horizons": results, "ablation": old.get("ablation") or {}, "note": args.note}
+    (out / "metrics.json").write_text(json.dumps(metrics, indent=1, default=str), encoding="utf-8")
+    rpt = root / "reports" / f"m1-{inst.lower()}-{date.today().isoformat()}.md"
+    rpt.write_text(render_report(metrics, ds), encoding="utf-8")
+    print(f"report → {rpt}")
+    return 0
+
+
 def train_a(args) -> int:
     root = Path(args.store) if args.store else default_root()
     inst = args.instrument.upper()
@@ -76,12 +107,7 @@ def train_a(args) -> int:
         p = A.walk_forward(ds, h, cols, cfg)
         p.to_parquet(out / f"preds_{h}.parquet")
         preds_all[h] = p
-        g = A.gate(p)
-        g["monthly"] = A.monthly_metrics(p).round(5).to_dict("records")
-        g["quantile_coverage"] = A.quantile_coverage(p)
-        g["calibration"] = A.calibration_table(p).astype({"bucket": str}).round(4).to_dict("records")
-        g["regimes"] = A.regime_table(p).round(4).to_dict("records")
-        results[h] = g
+        results[h] = g = horizon_result(p)
         print(f"{h}: gate {'PASS' if g['pass'] else 'FAIL'} last AUC {g['last_auc']} "
               f"brier {g['last_brier']:.4f} vs {g['last_brier_base']:.4f} ({cfg.timings[h]}s)", flush=True)
         _save_models(out, h, A.fit_final(ds, h, cols))
@@ -114,13 +140,16 @@ def render_report(m: dict, ds: pd.DataFrame) -> str:
          f"monthly retrain · runtime {m['runtime_s']} s.", "",
          "Gate per horizon: AUC ≥ 0.65 in each of the last 3 blind months, Brier over those months "
          "below the trailing-median baseline (trailing 60-session share of big outcomes at the same "
-         "minute), ≥ 300 blind observations in total.", "", "## Gate", "",
+         "minute), ≥ 300 blind observations in total.", ""] + ([f"> {m['note']}", ""] if m.get("note") else []) + [
+         "## Gate", "",
          "| horizon | gate | last 3 months | AUC | n | Brier | baseline | blind obs | AUC all months |",
          "|---|---|---|---|---|---|---|---|---|"]
     for h, g in m["horizons"].items():
         L.append(f"| {h} | **{'PASS' if g['pass'] else 'FAIL'}** | {', '.join(g['last_months'])} | "
                  f"{', '.join(f'{a:.3f}' for a in g['last_auc'])} | {', '.join(map(str, g['last_n']))} | "
                  f"{g['last_brier']:.4f} | {g['last_brier_base']:.4f} | {g['n_test']} | {g['auc_all']:.3f} |")
+    if not m["ablation"]:
+        L += ["", "## Driver ablation", "", "Not available for this run (see note above)."]
     if m["ablation"]:
         L += ["", "## Driver ablation (last 12 blind months, classifier only)", ""]
         for h, rows in m["ablation"].items():
@@ -145,9 +174,16 @@ def main(argv=None) -> int:
     t.add_argument("--ablation-months", type=int, default=12)
     t.add_argument("--no-ablation", action="store_true")
     t.add_argument("--rebuild", action="store_true", help="recompute the cached feature dataset")
+    r = sub.add_parser("report", help="rebuild metrics + report from saved blind predictions")
+    r.add_argument("--instrument", default="NIFTY")
+    r.add_argument("--store", default=None)
+    r.add_argument("--runtime", type=int, default=None, help="walk-forward runtime to record (s)")
+    r.add_argument("--note", default=None)
     args = ap.parse_args(argv)
     if args.cmd == "train-a":
         return train_a(args)
+    if args.cmd == "report":
+        return report_only(args)
     return 2
 
 

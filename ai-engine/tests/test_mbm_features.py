@@ -89,7 +89,7 @@ def test_feature_set_and_groups_present():
     cols = F.feature_columns(df)
     for prefix in F.GROUP_PREFIX.values():
         assert any(c.startswith(prefix) for c in cols)
-    assert F.FEATURE_SET == "mbm-fs2"
+    assert F.FEATURE_SET == "mbm-fs5"
     price_only = F.feature_columns(df, groups=())
     assert not any(c.startswith(tuple(F.GROUP_PREFIX.values())) for c in price_only)
     # late in the sample every group has real values
@@ -103,8 +103,12 @@ def test_missing_drivers_give_nulls_not_errors():
     full = F.build_features(inp)
     bare = F.build_features({"instrument": inp["instrument"]})
     assert list(bare.columns) == list(full.columns)
-    for prefix in F.GROUP_PREFIX.values():
-        assert bare[[c for c in bare.columns if c.startswith(prefix)]].isna().all().all()
+    for group, prefix in F.GROUP_PREFIX.items():
+        cols = [c for c in bare.columns if c.startswith(prefix)]
+        if group == "indicators":       # computed from the instrument's own bars, not an external driver
+            assert bare[cols].notna().any().any()
+            continue
+        assert bare[cols].isna().all().all()
     # partial heavyweights still work
     inp["heavyweights"] = {"EQ_TCS": inp["heavyweights"]["EQ_TCS"]}
     part = F.build_features(inp)

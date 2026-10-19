@@ -20,11 +20,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .indicators import indicator_features
 from .store import IST, read_bars
 
-FEATURE_SET = "mbm-fs2"
-DRIVER_GROUPS: tuple[str, ...] = ("banknifty", "vix", "heavyweights", "global_daily")
-GROUP_PREFIX = {"banknifty": "bn_", "vix": "vix_", "heavyweights": "hw_", "global_daily": "gd_"}
+FEATURE_SET = "mbm-fs5"
+DRIVER_GROUPS: tuple[str, ...] = ("banknifty", "vix", "heavyweights", "global_daily", "indicators")
+GROUP_PREFIX = {"banknifty": "bn_", "vix": "vix_", "heavyweights": "hw_", "global_daily": "gd_", "indicators": "ind_"}
 SESSION_OPEN_MIN = 9 * 60 + 15
 SESSION_END_MIN = 15 * 60 + 30
 # Approximate NIFTY index weights (renormalised over whichever stocks are present).
@@ -319,6 +320,8 @@ def build_features(inputs: dict, groups: tuple[str, ...] = DRIVER_GROUPS) -> pd.
         parts.append(heavyweight_features(b, eq))
     if "global_daily" in groups:
         parts.append(global_daily_features(b, inputs.get("global_daily") or {}))
+    if "indicators" in groups:
+        parts.append(indicator_features(b))       # fs5 (src/mbm/indicators.py)
     out = pd.concat(parts, axis=1)
     feats = [c for c in out.columns if c != "date"]
     out[feats] = out[feats].astype("float64")

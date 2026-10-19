@@ -89,7 +89,7 @@ def test_feature_set_and_groups_present():
     cols = F.feature_columns(df)
     for prefix in F.GROUP_PREFIX.values():
         assert any(c.startswith(prefix) for c in cols)
-    assert F.FEATURE_SET == "mbm-fs1"
+    assert F.FEATURE_SET == "mbm-fs2"
     price_only = F.feature_columns(df, groups=())
     assert not any(c.startswith(tuple(F.GROUP_PREFIX.values())) for c in price_only)
     # late in the sample every group has real values
@@ -138,3 +138,16 @@ def test_labels_window_and_trailing_threshold():
     sel = (dec["date"] <= d).values
     np.testing.assert_array_equal(bl.loc[sel, "threshold_bp"].to_numpy(), bl2.loc[sel, "threshold_bp"].to_numpy())
     assert set(np.unique(bl["big"].dropna())) <= {0.0, 1.0}
+
+
+def test_expiry_calendar_regimes_and_holiday_shift():
+    sessions = pd.bdate_range("2018-01-01", "2026-10-30")
+    sessions = sessions[sessions != pd.Timestamp("2023-03-30")]      # Ram Navami (Thursday)
+    e = F.expiry_dates(sessions)
+    assert pd.Timestamp("2018-01-25") in e and pd.Timestamp("2018-01-18") not in e   # monthly only
+    assert pd.Timestamp("2023-03-29") in e and pd.Timestamp("2023-03-30") not in e   # holiday → prior session
+    assert pd.Timestamp("2025-08-28") in e and pd.Timestamp("2025-09-02") in e       # Thu → Tue switch
+    oct26 = pd.Series(pd.bdate_range("2026-10-01", "2026-10-30"))
+    cal = F.expiry_calendar(oct26).set_index(oct26.dt.strftime("%m-%d"))
+    assert cal.loc[["10-12", "10-13", "10-14", "10-27"], "days_to_expiry"].tolist() == [1, 0, 4, 0]
+    assert cal.loc[["10-13", "10-27"], "is_monthly_expiry_week"].tolist() == [0.0, 1.0]

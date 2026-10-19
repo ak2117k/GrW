@@ -1,4 +1,4 @@
-"""MBM causal feature pipeline (featureSet "mbm-fs1").
+"""MBM causal feature pipeline (featureSet "mbm-fs2").
 
 One implementation for training and (M2) serving. Features are computed on 5-minute bars
 built from 1m bars and indexed by the bar's END time (UTC): the row at t uses only 1m bars
@@ -8,6 +8,10 @@ before the NSE session date (they all close before 09:15 IST of the next day).
 
 Driver groups are named and togglable. Every driver column carries its group prefix so a
 model can be ablated by dropping columns. A missing driver yields NaN columns, never errors.
+
+fs2 adds the NIFTY expiry calendar (days to expiry, expiry day, monthly expiry). The exchange
+holiday calendar is published in advance, so deriving expiry shifts from the session dates
+is not look-ahead.
 """
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ import pandas as pd
 
 from .store import IST, read_bars
 
-FEATURE_SET = "mbm-fs1"
+FEATURE_SET = "mbm-fs2"
 DRIVER_GROUPS: tuple[str, ...] = ("banknifty", "vix", "heavyweights", "global_daily")
 GROUP_PREFIX = {"banknifty": "bn_", "vix": "vix_", "heavyweights": "hw_", "global_daily": "gd_"}
 SESSION_OPEN_MIN = 9 * 60 + 15
@@ -35,6 +39,10 @@ GLOBAL_DAILY: dict[str, str] = {
 }
 BANKNIFTY = "BANKNIFTY"
 VIX = "INDIAVIX"
+# NIFTY expiry regimes: monthly-only (last Thursday) before weekly options; weekly Thursday;
+# weekly Tuesday from Sep 2025. A holiday moves the expiry to the previous session.
+WEEKLY_EXPIRY_FROM = pd.Timestamp("2019-02-11")
+TUESDAY_EXPIRY_FROM = pd.Timestamp("2025-09-01")
 
 
 # ---------------------------------------------------------------- bars
@@ -134,6 +142,9 @@ def price_features(b: pd.DataFrame) -> pd.DataFrame:
     f["minute_of_day"] = b["mod"]
     f["minutes_left"] = SESSION_END_MIN - b["mod"]
     f["dow"] = b.index.tz_convert(IST).dayofweek
+    cal = expiry_calendar(b["date"])
+    for col in cal.columns:
+        f[col] = cal[col].to_numpy()
     in_or = b["mod"] <= SESSION_OPEN_MIN + 30          # bars ending by 09:45 form the opening range
     or_hi = b["high"].where(in_or).groupby(date).cummax().groupby(date).ffill()
     or_lo = b["low"].where(in_or).groupby(date).cummin().groupby(date).ffill()
@@ -250,6 +261,47 @@ def global_daily_features(b: pd.DataFrame, daily: dict[str, pd.DataFrame]) -> pd
 
 
 # ---------------------------------------------------------------- assembly
+
+def expiry_dates(sessions: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """NIFTY expiry sessions for the given trading sessions (naive IST dates, sorted).
+    Sessions are padded 3 weeks past the data with plain weekdays so the live week has one."""
+    pad = pd.bdate_range(sessions[-1] + pd.Timedelta(days=1), periods=15)
+    s = sessions.append(pad)
+    is_session = pd.Series(True, index=s)
+    out = set()
+    for d in s:
+        if d < WEEKLY_EXPIRY_FROM:      # monthly: last Thursday of the month
+            month_end = d + pd.offsets.MonthEnd(0)
+            sched = month_end - pd.Timedelta(days=(month_end.weekday() - 3) % 7)
+        else:
+            wd = 1 if d >= TUESDAY_EXPIRY_FROM else 3
+            sched = d - pd.Timedelta(days=d.weekday()) + pd.Timedelta(days=wd)
+        # previous session on/before the scheduled day, within the same week (weekly) or month
+        cands = is_session.loc[:sched].index
+        floor = sched - pd.Timedelta(days=sched.weekday()) if d >= WEEKLY_EXPIRY_FROM else sched.replace(day=1)
+        cands = cands[cands >= floor]
+        if len(cands):
+            out.add(cands[-1])
+    return pd.DatetimeIndex(sorted(out))
+
+
+def expiry_calendar(dates: pd.Series) -> pd.DataFrame:
+    """Per-row: trading sessions until the next expiry (0 on expiry day), expiry-day flag and
+    monthly-expiry flag (the last expiry of its calendar month)."""
+    sessions = pd.DatetimeIndex(sorted(pd.to_datetime(dates.unique())))
+    exp = expiry_dates(sessions)
+    all_s = sessions.append(pd.bdate_range(sessions[-1] + pd.Timedelta(days=1), periods=15))
+    pos = pd.Series(np.arange(len(all_s)), index=all_s)
+    nxt = exp[np.minimum(exp.searchsorted(sessions), len(exp) - 1)]
+    monthly = pd.Series(exp).groupby(exp.to_period("M")).transform("max").to_numpy() == exp.to_numpy()
+    is_monthly = pd.Series(monthly, index=exp)
+    per = pd.DataFrame({
+        "days_to_expiry": pos.reindex(nxt).to_numpy() - pos.reindex(sessions).to_numpy(),
+        "is_expiry_day": (nxt == sessions).astype(float),
+        "is_monthly_expiry_week": is_monthly.reindex(nxt).to_numpy().astype(float),
+    }, index=sessions)
+    return per.reindex(pd.to_datetime(dates.to_numpy())).reset_index(drop=True)
+
 
 def build_features(inputs: dict, groups: tuple[str, ...] = DRIVER_GROUPS) -> pd.DataFrame:
     """inputs: {"instrument": 1m bars, "banknifty": 1m, "vix": 1m, "heavyweights": {sid: 1m},

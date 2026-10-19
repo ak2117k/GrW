@@ -19,6 +19,7 @@ SESSION_OPEN = time(9, 15)
 SESSION_END = time(15, 30)
 DAILY_REFRESH = time(8, 30)
 DAILY_SETUPS = time(15, 50)
+DEMOTION_CHECK = time(15, 45)      # after close: live-AUC demotion of Model A horizons (M4)
 
 
 def to_ist(now: datetime) -> datetime:
@@ -83,6 +84,17 @@ def next_daily_setups(now: datetime) -> datetime:
     t = _at(n, DAILY_SETUPS)
     while t <= n or not is_weekday(t):
         t = _at(t + timedelta(days=1), DAILY_SETUPS)
+    return t
+
+
+def next_demotion_check(now: datetime) -> datetime:
+    """Next weekday 15:45 IST strictly after `now` (no new outcomes land on weekends)."""
+    n = to_ist(now)
+    t = _at(n, DEMOTION_CHECK)
+    if t <= n:
+        t += timedelta(days=1)
+    while not is_weekday(t):
+        t += timedelta(days=1)
     return t
 
 

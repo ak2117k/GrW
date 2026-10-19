@@ -1,7 +1,8 @@
 """All MBM serving SQL, behind one small class (tests use `tests.test_mbm_service.FakeRepo`).
 
-Tables per the M2 contract: `mbm_bars_1m` (read), `ai_models` (read), `mbm_predictions`
-(read/insert/update), `mbm_daily_signals` (read/insert/update) — exactly the grants the `grw_ai` role has. One short-lived connection
+Tables per the M2 contract: `mbm_bars_1m` (read), `ai_models` (read; the M4 daily demotion
+updates `active` + `gateReasons`), `mbm_predictions` (read/insert/update), `mbm_daily_signals`
+(read/insert/update) — exactly the grants the `grw_ai` role has. One short-lived connection
 per call: the loop runs every 5 minutes, so pooling buys nothing and a dropped connection
 can never wedge the service.
 """
@@ -72,7 +73,22 @@ RECENT_DAILY_SIGNALS_SQL = '''
 SELECT signal_date, setup, action FROM mbm_daily_signals
 WHERE instrument = %(instrument)s AND signal_date >= %(since)s ORDER BY signal_date DESC, setup'''
 
-BAR_FRAME_COLUMNS =["series", "ts", "open", "high", "low", "close", "volume"]
+
+# M4 live tracking: realised outcomes of ONE served model over a window (plan M4 §B.2). Filtering on
+# model_id means a freshly promoted model is never judged on its predecessor's predictions.
+LIVE_OUTCOMES_SQL = '''
+SELECT p, outcome_big FROM mbm_predictions
+WHERE instrument = %(instrument)s AND horizon = %(horizon)s AND model_id = %(model_id)s
+  AND as_of >= %(since)s AND outcome_quality = 'ok' AND outcome_big IS NOT NULL'''
+
+# Only flips a row that is still active; RETURNING tells the caller whether it did.
+DEMOTE_SQL = '''
+UPDATE "ai_models" SET "active" = false,
+  "gateReasons" = array_append(COALESCE("gateReasons", ARRAY[]::text[]), %(reason)s::text)
+WHERE "id" = %(id)s AND "kind" = %(kind)s AND "active"
+RETURNING "id"'''
+
+BAR_FRAME_COLUMNS = ["series", "ts", "open", "high", "low", "close", "volume"]
 
 
 class Repo(Protocol):
@@ -87,6 +103,9 @@ class Repo(Protocol):
     def pending_daily_outcomes(self, instrument: str) -> list[dict[str, Any]]: ...
     def write_daily_outcomes(self, rows: list[dict[str, Any]]) -> None: ...
     def recent_daily_signals(self, instrument: str, since: date) -> list[dict[str, Any]]: ...
+    def live_outcomes(self, instrument: str, horizon: str, model_id: str,
+                      since: datetime) -> list[dict[str, Any]]: ...
+    def demote_model(self, model_id: str, reason: str) -> bool: ...
 
 
 class PgRepo:
@@ -144,3 +163,12 @@ class PgRepo:
 
     def recent_daily_signals(self, instrument: str, since: date) -> list[dict[str, Any]]:
         return self._fetch(RECENT_DAILY_SIGNALS_SQL, {"instrument": instrument, "since": since})
+
+    def live_outcomes(self, instrument: str, horizon: str, model_id: str,
+                      since: datetime) -> list[dict[str, Any]]:
+        return self._fetch(LIVE_OUTCOMES_SQL, {"instrument": instrument, "horizon": horizon,
+                                               "model_id": model_id, "since": since})
+
+    def demote_model(self, model_id: str, reason: str) -> bool:
+        """UPDATE … RETURNING inside one connection that commits on clean exit."""
+        return bool(self._fetch(DEMOTE_SQL, {"id": model_id, "kind": KIND, "reason": reason}))

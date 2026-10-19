@@ -23,6 +23,32 @@ from .repo import Repo
 log = logging.getLogger("mbm.engine")
 
 SERVED_HORIZONS: dict[str, int] = {"30m": 30, "60m": 60}
+
+# M4 automatic demotion (design §5.9.5, plan M4 §B.2): judged on the served model's own outcomes.
+LIVE_WINDOW = timedelta(days=30)   # calendar days
+LIVE_MIN_N = 300                   # fewer usable outcomes -> no action, ever
+LIVE_AUC_FLOOR = 0.60
+
+
+def live_auc(p: list[float], y: list[bool]) -> float | None:
+    """Rank AUC (Mann-Whitney, ties averaged). None when it is undefined (empty / one class)."""
+    if not p:
+        return None
+    s = pd.DataFrame({"p": p, "y": [bool(v) for v in y]})
+    n_pos = int(s["y"].sum())
+    n_neg = len(s) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return None
+    ranks = s["p"].rank(method="average")
+    return float((ranks[s["y"]].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
+
+
+def demotion_verdict(auc: float | None, n: int | None) -> str:
+    """'demote' only on enough data AND a defined AUC below the floor; anything else is 'keep'
+    or 'insufficient'. Missing data can never demote."""
+    if n is None or auc is None or n < LIVE_MIN_N or not math.isfinite(auc):
+        return "insufficient"
+    return "demote" if auc < LIVE_AUC_FLOOR else "keep"
 FEATURE_LOOKBACK = timedelta(days=45)      # calendar days of 1m bars the features need
 OUTCOME_LOOKBACK = timedelta(days=100)     # ≥ 60 prior sessions for the trailing-median threshold
 GAP_WINDOW = timedelta(minutes=30)
@@ -111,6 +137,8 @@ class Engine:
     global_daily: dict[str, pd.DataFrame] = field(default_factory=dict)
     daily_loaded_on: Any = None
     last_run: datetime | None = None
+    live: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    demotion_checked_on: Any = None
 
     # ------------------------------------------------------------ startup
 
@@ -141,6 +169,7 @@ class Engine:
             missing = sorted(set(SERVED_HORIZONS) - set(self.models[inst]))
             if missing:
                 log.warning("[mbm] %s horizons absent (no GO model): %s", inst, missing)
+        self.refresh_live(demote=False)
 
     def model_summary(self) -> dict[str, list[str]]:
         return {inst: sorted(ms) for inst, ms in self.models.items()}
@@ -155,6 +184,73 @@ class Engine:
             log.warning("[mbm] global daily refresh failed: %s", exc)
             self.global_daily = {}
         self.daily_loaded_on = clock.to_ist(now).date()
+
+    # ------------------------------------------------------------ live tracking + demotion
+
+    def refresh_live(self, demote: bool) -> dict[str, dict[str, dict[str, Any]]]:
+        """Live AUC per loaded (instrument, horizon) over the last LIVE_WINDOW. With `demote`,
+        a horizon with >= LIVE_MIN_N usable outcomes and AUC < LIVE_AUC_FLOOR is switched off in
+        the registry and unloaded. A read failure records no stats and never demotes."""
+        now = self.now()
+        since = now - LIVE_WINDOW
+        day = clock.to_ist(now).date()
+        live: dict[str, dict[str, dict[str, Any]]] = {}
+        for inst, models in self.models.items():
+            live[inst] = {}
+            for h, lm in list(models.items()):
+                entry: dict[str, Any] = {"auc": None, "n": None, "modelId": lm.model_id,
+                                         "checkedAt": _iso(now)}
+                live[inst][h] = entry
+                if self.repo is None:
+                    continue
+                try:
+                    rows = self.repo.live_outcomes(inst, h, lm.model_id, since)
+                except Exception as exc:
+                    log.error("[mbm] live outcomes %s %s unreadable: %s (no action)", inst, h, exc)
+                    entry["error"] = "unreadable"
+                    continue
+                p, y = [], []
+                for r in rows:
+                    pv = _num(r.get("p"))
+                    if pv is None or r.get("outcome_big") is None:
+                        continue
+                    p.append(pv)
+                    y.append(bool(r["outcome_big"]))
+                auc = live_auc(p, y)
+                entry.update({"auc": None if auc is None else round(auc, 4), "n": len(p)})
+                verdict = demotion_verdict(auc, len(p))
+                if not demote:
+                    continue
+                if verdict == "insufficient":
+                    log.info("[mbm] live %s %s: n=%d auc=%s < %d usable rows or undefined: no action",
+                             inst, h, len(p), entry["auc"], LIVE_MIN_N)
+                    continue
+                if verdict == "keep":
+                    log.info("[mbm] live %s %s: auc %.3f over %d: keep", inst, h, auc, len(p))
+                    continue
+                reason = f"DEMOTED {day.isoformat()} live AUC {auc:.3f} over {len(p)}"
+                try:
+                    done = self.repo.demote_model(lm.model_id, reason)
+                except Exception as exc:
+                    log.error("[mbm] demote %s %s (%s) failed: %s (still served)", inst, h, lm.model_id, exc)
+                    continue
+                if not done:
+                    log.warning("[mbm] demote %s %s: %s was no longer active in ai_models (still loaded; "
+                                "restart to pick up the registry)", inst, h, lm.model_id)
+                    continue
+                models.pop(h, None)
+                entry["demoted"] = reason
+                log.warning("[mbm] %s: %s %s %s unloaded", reason, inst, h, lm.model_id)
+        self.live = live
+        return live
+
+    def check_demotions(self) -> None:
+        """The once-a-day (after 15:45 IST) demotion pass; idempotent per IST date."""
+        n = clock.to_ist(self.now())
+        if self.demotion_checked_on == n.date() or n.time() < clock.DEMOTION_CHECK:
+            return
+        self.refresh_live(demote=True)
+        self.demotion_checked_on = n.date()
 
     # ------------------------------------------------------------ prediction
 
@@ -350,7 +446,15 @@ class Engine:
 
     def health(self) -> dict[str, Any]:
         return {"ok": True, "models": self.model_summary(),
-                "lastRun": None if self.last_run is None else _iso(self.last_run)}
+                "lastRun": None if self.last_run is None else _iso(self.last_run),
+                "live": self.live_summary()}
+
+    def live_summary(self) -> dict[str, dict[str, Any]]:
+        """`{"30m": {"auc", "n", ...}}` per the M4 contract; with several instruments the keys
+        become `"<INSTRUMENT>:<horizon>"`."""
+        multi = len(self.live) > 1
+        return {(f"{inst}:{h}" if multi else h): dict(v)
+                for inst, hs in self.live.items() for h, v in sorted(hs.items())}
 
 
 def _round(x) -> float | None:

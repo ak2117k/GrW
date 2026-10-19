@@ -169,9 +169,12 @@ can grow as data grows — but nothing is used until it passes the gate.
   - regime label `QUIET | NORMAL | ACTIVE` from the P(big move) bands.
 - Method: gradient boosting (LightGBM) with isotonic calibration; walk-forward training. Builder may
   swap the learner if it beats this on the gate.
-- **Gate (per instrument × horizon):** blind-month AUC ≥ 0.65 in each of the last 3 test months, Brier
-  below the "trailing median" baseline, ≥ 300 test observations. A horizon that fails is not served;
-  others still can be.
+- **Gate (per instrument × horizon):** pooled blind AUC ≥ 0.65 over the last 3 test months **and** no
+  one of those months below 0.55, Brier over them below the "trailing median" baseline, ≥ 300 test
+  observations. A horizon that fails is not served; others still can be.
+  *Changed 2026-10-19 (owner decision):* the original "AUC ≥ 0.65 in each of the last 3 months" rule
+  passed a steady AUC-0.74 model only ~57 % of the time historically (one month ≈ 21 trading days,
+  single-month AUC ±0.07 at 90 %). M1 result under the new rule: 30m and 60m PASS, rest and next FAIL.
 
 ### 5.4 Model B — Pattern Library (discovery engine)
 - Candidate rules: conjunctions of 1–3 binned conditions over the feature set (bins fixed on the

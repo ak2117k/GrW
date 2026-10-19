@@ -1,0 +1,10 @@
+# requirements-mbm-serve.txt — the MBM serving container only (Dockerfile.mbm, mem_limit 300m).
+# No sklearn / pyarrow / xgboost: serving loads LightGBM text models and reads bars from Postgres.
+fastapi==0.115.0
+uvicorn==0.32.0
+pydantic>=2.10.0
+numpy>=2.0
+pandas>=2.2,<3   # same major as training (pandas 3 changes copy/string semantics)
+lightgbm>=4.5
+psycopg[binary]>=3.2
+httpx==0.28.0

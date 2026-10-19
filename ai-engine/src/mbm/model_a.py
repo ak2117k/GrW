@@ -18,15 +18,13 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import roc_auc_score
 
 from . import labels as L
+from .model_consts import NEXT_DECISION_MIN, QUANTILES, REGIME_BANDS, regime  # noqa: F401 (re-exported)
 from .features import DRIVER_GROUPS, FEATURE_SET, _annotate, build_features, daily_context, feature_columns, to_5m
 
 DECISION_STEP = 15
 FIRST_DECISION_MIN = 9 * 60 + 30
 LAST_DECISION_MIN = 15 * 60 + 15
-NEXT_DECISION_MIN = 15 * 60 + 15
 MIN_BARS_PER_DAY = 60          # 5m bars; drops muhurat/special short sessions
-QUANTILES = (0.25, 0.5, 0.75)
-REGIME_BANDS = (0.35, 0.65)    # P(big) < 0.35 QUIET, > 0.65 ACTIVE
 CLS_PARAMS = dict(objective="binary", n_estimators=300, learning_rate=0.03, num_leaves=31,
                   min_child_samples=200, subsample=0.8, subsample_freq=1, colsample_bytree=0.8,
                   reg_lambda=1.0, n_jobs=4, verbose=-1)
@@ -89,11 +87,6 @@ def fit_classifier(X: pd.DataFrame, y: np.ndarray, Xc: pd.DataFrame, yc: np.ndar
 
 def fit_quantiles(X: pd.DataFrame, y: np.ndarray) -> dict:
     return {q: lgb.LGBMRegressor(alpha=q, **Q_PARAMS).fit(X, y) for q in QUANTILES}
-
-
-def regime(p: np.ndarray) -> np.ndarray:
-    lo, hi = REGIME_BANDS
-    return np.where(p < lo, "QUIET", np.where(p > hi, "ACTIVE", "NORMAL"))
 
 
 def walk_forward(ds: pd.DataFrame, h: str, cols: list[str], cfg: WalkForward | None = None) -> pd.DataFrame:

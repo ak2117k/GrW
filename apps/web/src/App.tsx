@@ -40,6 +40,7 @@ import LandingPage from '@/pages/landing/LandingPage';
 import SignupPage from '@/pages/signup/SignupPage';
 import VerifyEmailPage from '@/pages/verify-email/VerifyEmailPage';
 import TelegramSignalsPage from '@/pages/telegram/TelegramSignalsPage';
+import NightReportPage from '@/pages/night-report/NightReportPage';
 
 // Gate the authenticated app. While the stored session is being verified we
 // show a minimal loader; once resolved we either render children or bounce to
@@ -173,6 +174,7 @@ export default function App() {
         <Route path="auto-trade" element={<RequireRole role="ADMIN"><AutoTradePage /></RequireRole>} />
         <Route path="manual-trade" element={<RequireRole role="ADMIN"><ManualTradePage /></RequireRole>} />
         <Route path="positions" element={<PositionsPage />} />
+        <Route path="night-report" element={<RequireRole role="ADMIN"><NightReportPage /></RequireRole>} />
         <Route path="portfolio" element={<PortfolioPage />} />
         <Route path="monitor" element={<MonitorPage />} />
         <Route path="payments" element={<PaymentsPage />} />

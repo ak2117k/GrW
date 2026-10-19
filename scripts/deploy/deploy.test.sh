@@ -30,6 +30,7 @@ stub() {
   wait_healthy() { CALLS+=("health:$1"); }
   checkout() { CALLS+=("checkout:$1"); }
   record_success() { CALLS+=("record:$1"); }
+  ensure_disk_headroom() { :; }
 }
 
 check() { # name want_exit want_calls got_exit — runs in a subshell, so it RETURNS its verdict
@@ -177,6 +178,25 @@ ts_case "unreadable state counts as incomplete" 1 2 "" "" || failures=$((failure
   t() { if in_market_hours "$1" "$2"; then r=0; else r=1; fi
         if [[ $r == "$3" ]]; then echo "ok   in_market_hours $1 $2"; else echo "FAIL in_market_hours $1 $2 -> $r (want $3)"; exit 1; fi; }
   t 3 1000 0; t 3 0859 1; t 3 0900 0; t 5 1535 0; t 5 1536 1; t 6 1000 1; t 7 1000 1 ) || failures=$((failures + 1))
+
+# Disk guard: refusing to pull is a retryable stop (no mark_failed, no fetch).
+( stub; ensure_disk_headroom() { CALLS+=("disk:$1"); return 1; }
+  main; check "disk guard refuses the pull when space cannot be freed" 1 "disk:old" $? ) || failures=$((failures + 1))
+
+# ensure_disk_headroom itself, with df and docker stubbed.
+( stub; unset -f ensure_disk_headroom; source <(sed -n '/^ensure_disk_headroom() {/,/^}/p' "$here/deploy.sh")
+  FREE=(10); free_gb() { echo "${FREE[0]}"; FREE=("${FREE[@]:1}" "${FREE[-1]}"); }
+  docker() { CALLS+=("docker:$1:$2"); }
+  ensure_disk_headroom cur; check "enough space: nothing pruned" 0 "" $? ) || failures=$((failures + 1))
+( stub; unset -f ensure_disk_headroom; source <(sed -n '/^ensure_disk_headroom() {/,/^}/p' "$here/deploy.sh")
+  n="$(mktemp)"; echo 0 > "$n"   # call counter in a file: free_gb runs inside $(...), a subshell
+  free_gb() { local c; c=$(( $(cat "$n") + 1 )); echo "$c" > "$n"; (( c == 1 )) && echo 1 || echo 5; }
+  docker() { CALLS+=("docker:$1:$2"); }
+  ensure_disk_headroom cur; check "low space: prunes, then proceeds" 0 "docker:builder:prune docker:image:prune" $? ) || failures=$((failures + 1))
+( stub; unset -f ensure_disk_headroom; source <(sed -n '/^ensure_disk_headroom() {/,/^}/p' "$here/deploy.sh")
+  free_gb() { echo 1; }
+  docker() { CALLS+=("docker:$1:$2"); }
+  ensure_disk_headroom cur; check "still no space after pruning: refuses" 1 "docker:builder:prune docker:image:prune" $? ) || failures=$((failures + 1))
 
 if (( failures > 0 )); then echo "$failures test(s) failed"; exit 1; fi
 echo "all deploy tests passed"

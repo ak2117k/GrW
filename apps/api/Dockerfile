@@ -46,10 +46,17 @@ COPY . .
 #   2. build @td/shared (tsc) — @td/api imports its compiled dist
 #   3. prisma generate from REPO ROOT (schema + migrations live at ./prisma)
 #   4. build @td/api (nest build via SWC -> apps/api/dist)
-RUN pnpm install --frozen-lockfile \
+#
+# SLIM (2026-10-19): install ONLY @td/api and its workspace deps (`@td/api...`), not the web app's
+# React/Vite tree, and drop pnpm's content store in the same layer so it is not baked into the
+# image. The image was 2.25 GB with 3 kept on a 20 GB host (88 % full). Still single-stage, same
+# tree, so the symlink / Prisma-engine reasoning above is unchanged. `npx prisma` keeps resolving
+# from /app because pnpm publicly hoists *prisma* to the root node_modules.
+RUN pnpm install --frozen-lockfile --filter "@td/api..." \
   && pnpm --filter @td/shared build \
-  && npx prisma generate --schema prisma/schema.prisma \
-  && pnpm --filter @td/api build
+  && npx --no-install prisma generate --schema prisma/schema.prisma \
+  && pnpm --filter @td/api build \
+  && rm -rf "$(pnpm store path)" /root/.cache /root/.local/share/pnpm
 
 ENV NODE_ENV=production
 

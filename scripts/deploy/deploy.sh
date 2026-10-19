@@ -134,6 +134,31 @@ wait_healthy() {
   return 1
 }
 
+# DISK GUARD. Each grw-api image is large and three are kept; the 20 GB host reached 88 % on
+# 2026-10-19 (a full disk stops Postgres writes). Before pulling a new image: if free space on /
+# is under MIN_FREE_GB, drop every grw-api image except the running one, the build cache and
+# dangling layers. Still under HARD_MIN_FREE_GB afterwards => refuse the pull (not marked failed,
+# so the next timer run retries once space exists).
+MIN_FREE_GB="${MIN_FREE_GB:-3}"
+HARD_MIN_FREE_GB="${HARD_MIN_FREE_GB:-2}"
+free_gb() { df --output=avail -BG / | tail -1 | tr -dc '0-9'; }
+ensure_disk_headroom() {
+  local cur="$1" before after
+  before="$(free_gb)"
+  if (( before >= MIN_FREE_GB )); then return 0; fi
+  log "disk: ${before} GB free (< ${MIN_FREE_GB}); pruning old images before the pull"
+  docker image ls grw-api --format '{{.Tag}}' | grep -vx "$cur"     | xargs -r -I{} docker image rm "grw-api:{}" >/dev/null 2>&1 || true
+  docker builder prune -f >/dev/null 2>&1 || true
+  docker image prune -f >/dev/null 2>&1 || true
+  after="$(free_gb)"
+  log "disk: ${after} GB free after pruning"
+  if (( after < HARD_MIN_FREE_GB )); then
+    notify_once disk "server disk has only ${after} GB free even after pruning images; deploys paused"
+    return 1
+  fi
+  return 0
+}
+
 record_success() {
   mkdir -p "$STATE_DIR"
   echo "$1" > "$STATE_DIR/current_sha"
@@ -159,6 +184,7 @@ main() {
   if ! image_published "$new"; then note_waiting "$new"; return 0; fi
 
   log "deploying ${new:0:7} (current: ${cur:0:7})"
+  if ! ensure_disk_headroom "$cur"; then log "not enough disk to pull ${new:0:7}; will retry"; return 1; fi
   if ! fetch_image "$new"; then
     mark_failed "$new"; notify "image pull FAILED for ${new:0:7}; still on ${cur:0:7}"; return 1
   fi

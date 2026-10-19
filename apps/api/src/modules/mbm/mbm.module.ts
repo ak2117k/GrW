@@ -6,13 +6,16 @@ import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service
 import { SessionClock } from '../market-hub/session-clock';
 import { MBM_CONFIG, parseMbmConfig } from './mbm.config';
 import { MbmBarsRepository } from './repositories/mbm-bars.repository';
+import { MbmChainRepository } from './repositories/mbm-chain.repository';
+import { MbmChainCaptureService } from './services/mbm-chain-capture.service';
 import { MBM_CALENDAR, MBM_NOW, MbmBarRefresherService } from './services/mbm-bar-refresher.service';
 import { MBM_FETCH, MbmClient } from './services/mbm-client.service';
 import { MbmController } from './controllers/mbm.controller';
 
 /**
  * Market-behaviour model, M2 serving (docs/superpowers/plans/2026-10-19-mbm-m2-serving.md §4):
- * the 1m bar refresher feeding mbm_bars_1m and a fail-open proxy to the MBM service.
+ * the 1m bar refresher feeding mbm_bars_1m and a fail-open proxy to the MBM service, plus the NIFTY
+ * option-chain capture into mbm_chain_snapshots (MBM_CHAIN_CAPTURE, independent of MBM_ENABLED).
  * Inert while MBM_ENABLED=off (the default). Observe only — nothing trades on it.
  */
 @Module({
@@ -25,6 +28,8 @@ import { MbmController } from './controllers/mbm.controller';
     { provide: MBM_FETCH, useValue: (url: string, init: { signal: AbortSignal }) => fetch(url, init) },
     MbmBarsRepository,
     MbmBarRefresherService,
+    MbmChainRepository,
+    MbmChainCaptureService,
     MbmClient,
   ],
   exports: [MbmClient, MBM_CONFIG],

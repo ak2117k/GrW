@@ -26,6 +26,12 @@ export interface MbmConfig {
    * Inert whenever `mode` is off: read it through `mbmEntryGateMode`.
    */
   entryGate: MbmMode;
+  /**
+   * NIFTY option-chain capture into mbm_chain_snapshots (MBM_CHAIN_CAPTURE, off|on, default off).
+   * A PRODUCER of training data, not a consumer: independent of MBM_ENABLED (every missed session is
+   * lost for good, Angel serves nothing for expired contracts). Needs `feedUserId`.
+   */
+  chainCapture: 'off' | 'on';
   /** Human-readable fallbacks taken while parsing; logged once at boot. */
   problems: string[];
 }
@@ -64,7 +70,15 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
   if ((MODES as readonly string[]).includes(rawGate)) entryGate = rawGate as MbmMode;
   else if (rawGate !== '') problems.push(`MBM_ENTRY_GATE=${rawGate} is not off|observe|on — using off`);
 
+  const rawCapture = (env.MBM_CHAIN_CAPTURE ?? '').trim().toLowerCase();
+  let chainCapture: 'off' | 'on' = 'off';
+  if (rawCapture === 'on' || rawCapture === 'off') chainCapture = rawCapture;
+  else if (rawCapture !== '') problems.push(`MBM_CHAIN_CAPTURE=${rawCapture} is not off|on — using off`);
+
   const feedUserId = (env.MBM_FEED_USER_ID ?? '').trim() || csv(env.AI_AUTO_EXIT_USER_IDS)[0] || null;
+  if (chainCapture === 'on' && !feedUserId) {
+    problems.push('MBM_CHAIN_CAPTURE=on but no MBM_FEED_USER_ID / AI_AUTO_EXIT_USER_IDS — the chain capture will not run');
+  }
   if (mode !== 'off' && !feedUserId) {
     problems.push('no MBM_FEED_USER_ID and AI_AUTO_EXIT_USER_IDS is empty — the bar refresher will not run');
   }
@@ -83,7 +97,7 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
   const packet = consumer('MBM_PACKET');
   const exitShadow = consumer('MBM_EXIT_SHADOW');
 
-  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, problems };
+  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, chainCapture, problems };
 }
 
 /** The entry gate's effective mode: MBM_ENABLED=off makes every consumer inert (plan M3, global rule). */
@@ -91,7 +105,10 @@ export function mbmEntryGateMode(c: Pick<MbmConfig, 'mode' | 'entryGate'> | null
   return !c || c.mode === 'off' ? 'off' : c.entryGate;
 }
 
-/** The single boot line: `[mbm] mode=… instruments=… url=… feedUser=…`. */
+/** The single boot line: `[mbm] mode=… instruments=… url=… feedUser=… chainCapture=…`. */
 export function mbmBootLine(c: MbmConfig): string {
-  return `[mbm] mode=${c.mode} instruments=${c.instruments.join(',')} url=${c.url} feedUser=${c.feedUserId ?? 'none'}`;
+  return (
+    `[mbm] mode=${c.mode} instruments=${c.instruments.join(',')} url=${c.url} feedUser=${c.feedUserId ?? 'none'}` +
+    ` chainCapture=${c.chainCapture}`
+  );
 }

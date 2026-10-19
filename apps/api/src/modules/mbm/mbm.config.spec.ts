@@ -4,7 +4,7 @@ import { MBM_UNIVERSE, universeFor } from './mbm-universe';
 describe('parseMbmConfig', () => {
   it('defaults to off / NIFTY / http://mbm:5100 / first auto-exit user', () => {
     const c = parseMbmConfig({ AI_AUTO_EXIT_USER_IDS: ' u1 , u2' });
-    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', problems: [] });
+    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', chainCapture: 'off', problems: [] });
   });
 
   it('parses explicit values, upper-cases and de-duplicates instruments, strips the trailing slash', () => {
@@ -77,7 +77,26 @@ describe('parseMbmConfig', () => {
 
   it('formats the single boot line', () => {
     const c = parseMbmConfig({ MBM_ENABLED: 'observe', MBM_FEED_USER_ID: 'o' });
-    expect(mbmBootLine(c)).toBe('[mbm] mode=observe instruments=NIFTY url=http://mbm:5100 feedUser=o');
+    expect(mbmBootLine(c)).toBe('[mbm] mode=observe instruments=NIFTY url=http://mbm:5100 feedUser=o chainCapture=off');
+    expect(mbmBootLine(parseMbmConfig({ MBM_CHAIN_CAPTURE: 'on', MBM_FEED_USER_ID: 'o' }))).toContain('chainCapture=on');
+  });
+
+  it('parses MBM_CHAIN_CAPTURE: default off, on/off case-insensitive, independent of MBM_ENABLED', () => {
+    expect(parseMbmConfig({}).chainCapture).toBe('off');
+    expect(parseMbmConfig({ MBM_CHAIN_CAPTURE: ' ON ', MBM_FEED_USER_ID: 'o' }).chainCapture).toBe('on');
+    expect(parseMbmConfig({ MBM_CHAIN_CAPTURE: 'off' }).chainCapture).toBe('off');
+    const c = parseMbmConfig({ MBM_ENABLED: 'off', MBM_CHAIN_CAPTURE: 'on', MBM_FEED_USER_ID: 'o' });
+    expect(c.chainCapture).toBe('on');
+    expect(c.problems).toEqual([]);
+  });
+
+  it('a bad MBM_CHAIN_CAPTURE falls back to off; on without a feed user is reported', () => {
+    const bad = parseMbmConfig({ MBM_CHAIN_CAPTURE: 'observe', MBM_FEED_USER_ID: 'o' });
+    expect(bad.chainCapture).toBe('off');
+    expect(bad.problems).toEqual(['MBM_CHAIN_CAPTURE=observe is not off|on — using off']);
+    const noUser = parseMbmConfig({ MBM_CHAIN_CAPTURE: 'on' });
+    expect(noUser.chainCapture).toBe('on');
+    expect(noUser.problems.join()).toMatch(/chain capture will not run/);
   });
 });
 

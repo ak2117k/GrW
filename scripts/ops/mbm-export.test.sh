@@ -30,19 +30,22 @@ run() { # $1 = export dir; rest = script args; env via the caller. Prints exit c
   echo $?
 }
 files() { (cd "$1" && find . -name '*.csv.gz' | sed 's#^\./##' | sort | tr '\n' ' '); }
-TABLES="oi_snapshots oi_wall_snapshots option_chain_snapshots"
+TABLES="oi_snapshots oi_wall_snapshots option_chain_snapshots mbm_chain_snapshots"
 
 d="$work/a"
 rc=$(EXPORT_CATCHUP_DAYS=1 run "$d" --today 2026-10-20)
 expect "exports each table for yesterday: exit" "$rc" 0
 expect "exports each table for yesterday: files" "$(files "$d")" \
-  "oi_snapshots/oi_snapshots-2026-10-19.csv.gz oi_wall_snapshots/oi_wall_snapshots-2026-10-19.csv.gz option_chain_snapshots/option_chain_snapshots-2026-10-19.csv.gz "
+  "mbm_chain_snapshots/mbm_chain_snapshots-2026-10-19.csv.gz oi_snapshots/oi_snapshots-2026-10-19.csv.gz oi_wall_snapshots/oi_wall_snapshots-2026-10-19.csv.gz option_chain_snapshots/option_chain_snapshots-2026-10-19.csv.gz "
 ok=0; for t in $TABLES; do gzip -t "$d/$t/$t-2026-10-19.csv.gz" && ok=$((ok+1)); done
-expect "exported files are valid gzip" "$ok" 3
-expect "summary line per new file" "$(grep -c 'rows=2' "$work/stdout")" 3
+expect "exported files are valid gzip" "$ok" 4
+expect "summary line per new file" "$(grep -c 'rows=2' "$work/stdout")" 4
 expect "window is IST day in UTC" \
   "$(grep 'FROM oi_snapshots ' "$work/docker.log" | grep -c "'2026-10-18 18:30:00'.*'2026-10-19 18:30:00'")" 1
-expect "queries stream with COPY TO STDOUT" "$(grep -c 'COPY (' "$work/docker.log")" 3
+expect "mbm chain window is pinned to UTC (timestamptz)" \
+  "$(grep 'FROM mbm_chain_snapshots ' "$work/docker.log" | grep -c "captured_at >= '2026-10-18 18:30:00+00' AND captured_at < '2026-10-19 18:30:00+00'")" 1
+expect "mbm chain export carries the strikes json" "$(grep 'FROM mbm_chain_snapshots ' "$work/docker.log" | grep -c 'pcr, max_pain, call_wall, put_wall, strikes')" 1
+expect "queries stream with COPY TO STDOUT" "$(grep -c 'COPY (' "$work/docker.log")" 4
 
 rc=$(EXPORT_CATCHUP_DAYS=1 run "$d" --today 2026-10-20)
 expect "skips existing files: exit" "$rc" 0
@@ -55,13 +58,22 @@ expect "catch-up covers missed nights" "$(files "$d" | tr ' ' '\n' | grep -o '20
 
 d="$work/c"
 rc=$(run "$d" --since 2026-10-10 --today 2026-10-20)
-expect "--since backfills 10 days x 3 tables" "$(files "$d" | wc -w | tr -d ' ')" 30
+expect "--since backfills 10 days x 4 tables" "$(files "$d" | wc -w | tr -d ' ')" 40
+
+d="$work/d"   # a server that already exported the three older tables: only the new one is backfilled
+for t in oi_snapshots oi_wall_snapshots option_chain_snapshots; do
+  mkdir -p "$d/$t"; printf 'id\n' | gzip > "$d/$t/$t-2026-10-19.csv.gz"
+done
+rc=$(EXPORT_CATCHUP_DAYS=1 run "$d" --today 2026-10-20)
+expect "new table backfills beside existing files: exit" "$rc" 0
+expect "new table backfills beside existing files: one query" "$(grep -c 'FROM mbm_chain_snapshots ' "$work/docker.log")" 1
+expect "new table backfills beside existing files: only it queried" "$(wc -l < "$work/docker.log" | tr -d ' ')" 1
 
 d="$work/e"
 rc=$(STUB_FAIL_TABLE=option_chain_snapshots EXPORT_CATCHUP_DAYS=1 run "$d" --today 2026-10-20)
 expect "failed table exits 1" "$rc" 1
 expect "failed table leaves no partial" "$(find "$d" -name '*.partial' | wc -l | tr -d ' ')" 0
-expect "failed table: other two written" "$(files "$d" | wc -w | tr -d ' ')" 2
+expect "failed table: other three written" "$(files "$d" | wc -w | tr -d ' ')" 3
 expect "failed table is named on stderr" "$(grep -c 'option_chain_snapshots' "$work/stderr")" 1
 
 d="$work/f"   # 2026-10-19 is a Monday

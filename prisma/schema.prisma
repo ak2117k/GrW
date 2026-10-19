@@ -2765,3 +2765,23 @@ model MbmPrediction {
   @@index([instrument, asOf(sort: Desc)])
   @@map("mbm_predictions")
 }
+
+/// One option-chain capture per instrument × expiry × 5-min tick (MBM_CHAIN_CAPTURE): the training set
+/// for chain/OI features. Never pruned: Angel serves nothing for expired contracts, so a lost row is gone.
+model MbmChainSnapshot {
+  id         BigInt   @id @default(autoincrement())
+  instrument String // NIFTY
+  capturedAt DateTime @map("captured_at") @db.Timestamptz(6) // when the quotes returned, UTC, whole seconds
+  expiry     DateTime @db.Date
+  spot       Float
+  pcr        Float? // Σ PE OI / Σ CE OI over the captured strikes
+  maxPain    Float?   @map("max_pain")
+  callWall   Float?   @map("call_wall") // strike with the max CE OI
+  putWall    Float?   @map("put_wall") // strike with the max PE OI
+  /// [{strike, ce:{ltp,oi,oi_chg,vol,iv,delta,gamma,theta,vega}, pe:{…}}], ascending strike; null = not quoted.
+  strikes    Json
+
+  @@unique([instrument, expiry, capturedAt])
+  @@index([instrument, capturedAt])
+  @@map("mbm_chain_snapshots")
+}

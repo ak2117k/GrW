@@ -2481,6 +2481,20 @@ describe('news & events v2 in the sensor pass', () => {
     expect(watch.size()).toBe(0);
   });
 
+  it('observe: the same headline fires news-hit once, not on every pass (prod 2026-10-19: 45 calls in 25 min)', async () => {
+    const t = makeSvc(undefined, { cfg: cfg('observe') });
+    t.build.mockResolvedValue([watched('t1')]);
+    t.tickFor.mockResolvedValue(tick({ freshNews: fresh }));
+    t.evaluate.mockReturnValueOnce({ fires: [{ name: 'news-hit', detail: 'x' }], heartbeat: false, shouldEvaluate: true, trigger: 'FIRE' });
+    const t0 = new Date('2026-10-16T05:00:00Z');
+    await t.svc.runForUser(USER, t0);
+    expect(tripwireInput(t.evaluate, 0).newsUnseen).toEqual(fresh);
+    for (const [i, min] of [[1, 6], [2, 12], [3, 20]] as const) {
+      await t.svc.runForUser(USER, new Date(t0.getTime() + min * 60_000));
+      expect(tripwireInput(t.evaluate, i).newsUnseen).toEqual([]); // already fired on 'a', even after the cooldown
+    }
+  });
+
   it('true: unseen ids go in; after a news-hit fire they are seen; the next fire waits out the 5-min cooldown', async () => {
     const t = makeSvc(undefined, { cfg: cfg('true') });
     t.build.mockResolvedValue([watched('t1')]);
@@ -2554,7 +2568,7 @@ describe('news & events v2 in the sensor pass', () => {
     expect(t.record).toHaveBeenCalledTimes(1);
   });
 
-  it('observe: no new input keys; a would-fire line for the event, once', async () => {
+  it('observe: no eventNear input (not rendered), but news-hit stays edge-triggered; a would-fire line for the event, once', async () => {
     const t = makeSvc(undefined, { cfg: cfg('observe'), events: { peek: jest.fn().mockReturnValue(near(12)) } });
     const log = jest.spyOn((t.svc as unknown as { logger: { log: (m: string) => void } }).logger, 'log').mockImplementation(() => undefined);
     t.build.mockResolvedValue([watched('t1', { exchange: 'MCX' })]);
@@ -2562,7 +2576,8 @@ describe('news & events v2 in the sensor pass', () => {
     await t.svc.runForUser(USER);
     await t.svc.runForUser(USER);
     expect(tripwireInput(t.evaluate, 0)).not.toHaveProperty('eventNear');
-    expect(tripwireInput(t.evaluate, 0)).not.toHaveProperty('newsUnseen');
+    // prod 2026-10-19: in observe the legacy sensor re-fired every pass while a headline was fresh
+    expect(tripwireInput(t.evaluate, 0)).toHaveProperty('newsUnseen');
     expect(log.mock.calls.filter((c) => String(c[0]).startsWith('[news-wake] observe: would fire event-near'))).toHaveLength(1);
   });
 

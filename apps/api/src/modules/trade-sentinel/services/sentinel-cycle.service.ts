@@ -1344,7 +1344,11 @@ export class SentinelCycleService {
     const cfg = this.newsCfg;
     if (!cfg?.computing) return {};
     const out: Pick<TripwireInput, 'newsUnseen' | 'eventNear'> = {};
-    if (cfg.rendering && tick.freshNews) {
+    // Edge-trigger news-hit whenever v2 computes, not only when it renders: in `observe`
+    // the legacy sensor re-fired every pass while any headline was < 30 min old (prod
+    // 2026-10-19: 45 judge calls in 25 min on one position, which the futile-rejudge rule
+    // must let through because news-hit is a new-risk fire). New headlines still fire at once.
+    if (tick.freshNews) {
       const seen = (st.newsSeen ??= new Set<string>());
       const live = new Set(tick.freshNews.map((f) => f.id));
       for (const id of [...seen]) if (!live.has(id)) seen.delete(id);

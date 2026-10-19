@@ -142,3 +142,73 @@ py -3 ai-engine/scripts/mbm_train.py train-a --instrument NIFTY --no-ablation --
   `grw-mbm\reports\m1-nifty-<date>.md` (gate, ablation, calibration, regimes, monthly AUC).
 - **Gate** per horizon: AUC ≥ 0.65 in each of the last 3 blind months, Brier over those
   months below the trailing baseline, ≥ 300 blind observations in total.
+
+## M2: ship, seed, deploy, check, rollback
+
+Contract: `docs/superpowers/plans/2026-10-19-mbm-m2-serving.md`. M2 is **observe only**: no trade
+path reads the predictions. Run the steps in order, outside market hours. Every PC-side command
+takes `--dry-run`, which prints the SQL and scp plan and touches nothing; run it first.
+
+**Before step 1:** the M2 migration (`mbm_bars_1m`, `mbm_predictions`, `ai_models.instrument/horizon`,
+the `grw_ai` grants) must already be deployed by the normal API deploy. Also, `ai_models` has
+the SP3 partial unique index `ai_models_one_active_per_kind` on `(kind) WHERE active`. With it in
+place, two active `mbm-move` rows (30m and 60m) cannot coexist, and the ship transaction fails
+and rolls back. The migration has to widen that index to `kind × instrument × horizon`.
+
+PC side, from `ai-engine/` (`MBM_VPS` / `MBM_SSH_KEY` env vars can replace the flags):
+
+```powershell
+# 1. Ship the M1 artefacts (grw-mbm/models/m1/nifty/{30m,60m}) and upsert the GO registry rows.
+#    Files go to <h>.partial, are checked with sha256 and then moved into place. Only after that does
+#    one transaction deactivate older rows of kind x instrument x horizon and activate the new ones.
+#    A horizon whose M1 gate did not pass is refused (exit 2).
+py -3 scripts/mbm_ship.py ship --instrument NIFTY --version 20261019-fs2 --vps root@<vps-ip> --ssh-key ~/.ssh/grw_oracle --dry-run
+py -3 scripts/mbm_ship.py ship --instrument NIFTY --version 20261019-fs2 --vps root@<vps-ip> --ssh-key ~/.ssh/grw_oracle
+
+# 2. Seed broker 1m bars (NIFTY, BANKNIFTY, INDIAVIX, EQ_*) for the last 60 days from the PC store.
+#    Run `mbm_data.py build` first so the store is current. The script loads each series into a
+#    temp table with COPY and then upserts. It is idempotent, so a re-run is safe.
+py -3 scripts/mbm_ship.py seed-bars --days 60 --vps root@<vps-ip> --ssh-key ~/.ssh/grw_oracle
+```
+
+VPS side:
+
+```bash
+# 3. Build + start the service. It builds grw-mbm:<sha> from `git archive <sha>:ai-engine`,
+#    runs `up -d --no-deps mbm`, waits for the Docker healthcheck, then tags :current and keeps
+#    3 images. If the new build is unhealthy, it rolls back to the previous sha, or stops mbm on
+#    a first deploy. The API deploy timer never touches mbm.
+sudo bash /opt/grw/app/scripts/deploy/mbm-deploy.sh            # HEAD of /opt/grw/app
+sudo bash /opt/grw/app/scripts/deploy/mbm-deploy.sh <sha>      # a specific commit (also manual rollback)
+
+# 4. Turn the API side on: in /opt/grw/env/api.env set
+#      MBM_ENABLED=observe  MBM_INSTRUMENTS=NIFTY  MBM_URL=http://mbm:5100
+#    then recreate the api (next deploy, or: docker compose ... up -d --no-deps api).
+```
+
+**Check:**
+
+```powershell
+py -3 scripts/mbm_ship.py verify --vps root@<vps-ip> --ssh-key ~/.ssh/grw_oracle   # read-only
+```
+It prints the model dirs under `/opt/grw/models/mbm`, the `mbm-move` registry rows (exactly one
+active row per horizon), the per-series `mbm_bars_1m` counts with first and last bar, and the
+`mbm_predictions` counts. On the VPS:
+`docker logs --tail 50 grw-mbm`;
+`docker exec grw-mbm python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:5100/health').read())"`.
+`/health` should list `{"NIFTY":["30m","60m"]}`. If it lists none, the registry rows or the files
+under `/models` are missing, so check `verify`. During a session, `lastRun` should advance every
+5 minutes.
+
+**Rollback:**
+- API stops reading MBM: set `MBM_ENABLED=off` in `api.env` and recreate the api. Nothing in the
+  trade path depends on MBM in M2, so this is always safe.
+- Bad service build: run `mbm-deploy.sh <previous-sha>` (the sha is in `/opt/grw/state/mbm_sha`
+  history and `docker image ls grw-mbm`).
+- Stop the service entirely: `docker compose -f /opt/grw/app/deploy/docker-compose.prod.yml --env-file /opt/grw/env/compose.env stop mbm`.
+- Bad model: re-ship the previous version, which reactivates its rows, then `docker restart grw-mbm`
+  so it reloads the active rows.
+
+**RAM check** (2 GB box, `mem_limit: 300m`): run `docker stats --no-stream grw-mbm grw-api grw-postgres`
+and `free -m` after the first full session. If mbm sits above about 250 MiB, or if swap grows
+session after session, stop it and report before raising the limit.

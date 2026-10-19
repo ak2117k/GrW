@@ -1,0 +1,135 @@
+{
+  "generatedAt": "2026-10-20T02:30:00.000Z",
+  "window": {
+    "from": "2026-10-19T10:00:00.000Z",
+    "to": "2026-10-20T02:30:00.000Z",
+    "nextOpen": "2026-10-20T03:45:00.000Z",
+    "holidayNote": null
+  },
+  "summary": { "positions": 2, "exitAtOpen": 1, "tighten": 0, "held": 1, "newsOnPositions": 3, "eventsToday": 2 },
+  "positions": [
+    {
+      "trackerId": "trk-1",
+      "instrument": { "symbol": "NIFTY28OCT2625000CE", "exchange": "NFO", "token": "45001", "chartHref": "/charts?symbol=NIFTY28OCT2625000CE&token=45001&exchange=NFO" },
+      "underlying": { "symbol": "NIFTY", "exchange": "NSE", "token": "99926000", "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE" },
+      "kind": "OPTION",
+      "qty": 75,
+      "entryPrice": 182.5,
+      "ltp": 150.25,
+      "pnl": -2418.75,
+      "pnlPct": -17.67,
+      "held": false,
+      "overnight": {
+        "verdict": "EXIT_AT_OPEN",
+        "confidence": "high",
+        "risk": "US futures down 1.2% overnight and GIFT Nifty indicates a gap-down below the 25,000 strike; theta decay on a weekly expiry compounds any flat open.",
+        "plan": "Exit at the open if NIFTY opens below 24,950.",
+        "invalidation": "NIFTY reclaims 25,080 in the first 15 minutes",
+        "at": "2026-10-19T16:30:00.000Z",
+        "window": "OVERNIGHT_REVIEW"
+      },
+      "preOpen": {
+        "verdict": "EXIT_AT_OPEN",
+        "confidence": "medium",
+        "risk": "GIFT Nifty still 0.6% lower.",
+        "plan": null,
+        "invalidation": null,
+        "at": "2026-10-20T02:00:00.000Z",
+        "window": "PRE_OPEN_REVIEW"
+      },
+      "live": null
+    },
+    {
+      "trackerId": "trk-2",
+      "instrument": { "symbol": "RELIANCE", "exchange": "NSE", "token": "2885", "chartHref": "/charts?symbol=RELIANCE&token=2885&exchange=NSE" },
+      "underlying": null,
+      "kind": "EQUITY",
+      "qty": 10,
+      "entryPrice": 2850,
+      "ltp": 2901.4,
+      "pnl": 514,
+      "pnlPct": 1.8,
+      "held": true,
+      "overnight": {
+        "verdict": "HOLD_OVERNIGHT",
+        "confidence": "medium",
+        "risk": "Results on Friday.",
+        "plan": "Hold; trail the stop to 2,870.",
+        "invalidation": "Close below 2,840",
+        "at": "2026-10-19T16:35:00.000Z",
+        "window": "OVERNIGHT_REVIEW"
+      },
+      "preOpen": null,
+      "live": null
+    }
+  ],
+  "news": {
+    "onPositions": [
+      {
+        "symbol": { "symbol": "RELIANCE", "exchange": "NSE", "token": "2885", "chartHref": "/charts?symbol=RELIANCE&token=2885&exchange=NSE" },
+        "items": [
+          {
+            "id": "n1",
+            "title": "Reliance Jio raises tariffs by 10%",
+            "summary": "The telecom arm announced a tariff hike effective next month.",
+            "source": "Economic Times",
+            "url": "https://example.com/reliance-jio-tariffs",
+            "publishedAt": "2026-10-19T18:00:00.000Z",
+            "sentiment": "positive",
+            "sentimentScore": 0.6,
+            "symbols": [{ "symbol": "RELIANCE", "exchange": "NSE", "token": "2885", "chartHref": "/charts?symbol=RELIANCE&token=2885&exchange=NSE" }]
+          }
+        ]
+      }
+    ],
+    "market": [
+      {
+        "id": "m1",
+        "title": "US stocks slide as yields jump",
+        "summary": null,
+        "source": "Reuters",
+        "url": "https://example.com/us-stocks-slide",
+        "publishedAt": "2026-10-19T21:00:00.000Z",
+        "sentiment": "negative",
+        "sentimentScore": -0.5,
+        "symbols": [{ "symbol": "CRUDEOIL", "exchange": "MCX", "token": null, "chartHref": "/charts?symbol=CRUDEOIL&exchange=MCX" }]
+      }
+    ]
+  },
+  "events": [
+    {
+      "id": "e1",
+      "kind": "EARNINGS",
+      "title": "Infosys Q2 results",
+      "startsAt": "2026-10-20T10:30:00.000Z",
+      "allDay": false,
+      "impact": "HIGH",
+      "scope": "STOCK",
+      "touchesPositions": []
+    },
+    {
+      "id": "e2",
+      "kind": "MACRO",
+      "title": "RBI policy minutes",
+      "startsAt": "2026-10-20T00:00:00.000Z",
+      "allDay": true,
+      "impact": "MEDIUM",
+      "scope": "MARKET",
+      "touchesPositions": [{ "symbol": "NIFTY", "exchange": "NSE", "token": "99926000", "chartHref": "/charts?symbol=NIFTY&token=99926000&exchange=NSE" }]
+    }
+  ],
+  "dailySetups": { "error": "ai-engine unreachable" },
+  "mood": {
+    "status": "stale",
+    "asOf": "2026-10-18T16:00:00.000Z",
+    "horizons": {
+      "1d": { "p": 0.42, "regime": "HIGH_VOL", "q25Bp": -45, "q75Bp": 60 },
+      "5d": { "p": 0.3, "regime": "NORMAL", "q25Bp": null, "q75Bp": null }
+    }
+  },
+  "jobs": [
+    { "name": "overnight-review", "status": "ok", "at": "2026-10-19T16:30:00.000Z", "detail": "2 positions reviewed" },
+    { "name": "news-fetch", "status": "stale", "at": "2026-10-19T20:00:00.000Z", "detail": "last run 6h ago" },
+    { "name": "mbm-daily-setups", "status": "missing", "at": null, "detail": "no run recorded" }
+  ]
+}

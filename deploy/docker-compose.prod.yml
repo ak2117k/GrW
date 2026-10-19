@@ -126,6 +126,40 @@ services:
       retries: 3
     profiles: ["ai"]
 
+  # MBM (market behaviour model) serving, M2 observe-only: NIFTY 30m/60m move predictions every
+  # 5 min into mbm_predictions; the API reaches it at http://mbm:5100 (MBM_URL). Internal only.
+  # Image is built ON the VPS by scripts/deploy/mbm-deploy.sh (not CI, not the API deploy timer),
+  # which also sets GRW_MBM_TAG. No profile: `up -d mbm` starts it. deploy.sh only ever touches
+  # `api` (--no-deps), so API deploys never start, pull or recreate this service. A bare full-stack
+  # `up -d` before the first mbm-deploy.sh run would fail to pull grw-mbm:current; mbm-deploy.sh
+  # tags every healthy build as :current so that path works afterwards.
+  mbm:
+    logging: *logging
+    image: grw-mbm:${GRW_MBM_TAG:-current}
+    container_name: grw-mbm
+    restart: unless-stopped
+    mem_limit: 300m
+    environment:
+      MODELS_DIR: /models
+      MBM_INSTRUMENTS: ${MBM_INSTRUMENTS:-NIFTY}
+      # Same percent-escaped URL assembly as the scorer (ai-engine/src/scorer/db_url.py).
+      AI_DB_USER: grw_ai
+      AI_DB_PASSWORD: ${AI_DB_PASSWORD}
+      AI_DB_HOST: postgres
+      AI_DB_PORT: "5432"
+      AI_DB_NAME: ${PG_DB}
+    volumes:
+      - /opt/grw/models:/models:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5100/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
   caddy:
     logging: *logging
     image: caddy:2-alpine

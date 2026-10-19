@@ -4,7 +4,7 @@ import { MBM_UNIVERSE, universeFor } from './mbm-universe';
 describe('parseMbmConfig', () => {
   it('defaults to off / NIFTY / http://mbm:5100 / first auto-exit user', () => {
     const c = parseMbmConfig({ AI_AUTO_EXIT_USER_IDS: ' u1 , u2' });
-    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', problems: [] });
+    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', problems: [] });
   });
 
   it('parses explicit values, upper-cases and de-duplicates instruments, strips the trailing slash', () => {
@@ -33,6 +33,32 @@ describe('parseMbmConfig', () => {
     expect(parseMbmConfig({ MBM_ENABLED: 'observe' }).problems).toEqual([expect.stringContaining('MBM_FEED_USER_ID')]);
     expect(parseMbmConfig({}).feedUserId).toBeNull();
     expect(parseMbmConfig({}).problems).toEqual([]);
+  });
+
+  describe('M3 consumer flags (MBM_PACKET, MBM_EXIT_SHADOW)', () => {
+    const on = { MBM_ENABLED: 'observe', MBM_FEED_USER_ID: 'o' };
+    it.each(['off', 'observe', 'on'] as const)('parses %s for both flags', (m) => {
+      const c = parseMbmConfig({ ...on, MBM_PACKET: ` ${m.toUpperCase()} `, MBM_EXIT_SHADOW: m });
+      expect([c.packet, c.exitShadow]).toEqual([m, m]);
+      expect(c.problems).toEqual([]);
+    });
+    it('defaults both to off', () => {
+      const c = parseMbmConfig(on);
+      expect([c.packet, c.exitShadow]).toEqual(['off', 'off']);
+    });
+    it('an unknown value falls back to off and is reported', () => {
+      const c = parseMbmConfig({ ...on, MBM_PACKET: 'yes', MBM_EXIT_SHADOW: 'true' });
+      expect([c.packet, c.exitShadow]).toEqual(['off', 'off']);
+      expect(c.problems).toEqual([expect.stringContaining('MBM_PACKET=yes'), expect.stringContaining('MBM_EXIT_SHADOW=true')]);
+    });
+    it('MBM_ENABLED=off forces both off (the global rule) and says so', () => {
+      const c = parseMbmConfig({ MBM_PACKET: 'on', MBM_EXIT_SHADOW: 'observe' });
+      expect([c.packet, c.exitShadow]).toEqual(['off', 'off']);
+      expect(c.problems).toEqual([
+        expect.stringContaining('MBM_PACKET=on is ignored'),
+        expect.stringContaining('MBM_EXIT_SHADOW=observe is ignored'),
+      ]);
+    });
   });
 
   it('formats the single boot line', () => {

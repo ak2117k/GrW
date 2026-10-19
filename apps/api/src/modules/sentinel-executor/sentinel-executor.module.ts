@@ -28,6 +28,7 @@ import { TriggerWatchService } from './services/trigger-watch.service';
 import { SentinelExecutorController } from './controllers/sentinel-executor.controller';
 import { ExitGateRepository } from './repositories/exit-gate.repository';
 import { ExitGateService } from './services/exit-gate.service';
+import { MbmModule } from '../mbm/mbm.module';
 
 /**
  * Sentinel auto-exit (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md).
@@ -36,7 +37,8 @@ import { ExitGateService } from './services/exit-gate.service';
  * this module has no runtime dependency on AutoExecutionModule.
  */
 @Module({
-  imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule],
+  // MbmModule: MBM_EXIT_SHADOW's fail-open, cached client (inert while the flags are off).
+  imports: [PrismaModule, MarketDataModule, CredentialDecryptorModule, MbmModule],
   controllers: [SentinelExecutorController],
   providers: [
     AiExitExecutionRepository,

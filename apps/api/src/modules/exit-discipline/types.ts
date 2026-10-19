@@ -74,6 +74,12 @@ export interface GateRecordV1 {
   facts: GateFactsSnapshot | null;
   cfg: { floorArmN: number; floorTrailN: number; gateCloseMin: number; gateUnderlyingN: number; persistWindowSec: number; persistMinSec: number };
   evaluatedAt: string;
+  /**
+   * MBM M3 (MBM_EXIT_SHADOW observe|on, MBM-mapped positions only): what an MBM-sized trail would
+   * have looked like beside this decision (sentinel-executor/domain/mbm-exit-shadow.ts). A record,
+   * never an input — absent with the flag off, so off-records are unchanged.
+   */
+  mbmShadow?: { v: 1; usable: boolean; [k: string]: unknown };
 }
 
 export type OutcomeKind = 'EXECUTED' | 'DRY_RUN' | 'GATED' | 'AWAITING';

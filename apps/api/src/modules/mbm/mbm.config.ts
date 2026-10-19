@@ -12,6 +12,14 @@ export interface MbmConfig {
   url: string;
   /** The owner whose OWN Angel session fetches the 1m bars (MBM_FEED_USER_ID, else first AI_AUTO_EXIT_USER_IDS). */
   feedUserId: string | null;
+  /**
+   * M3 stream A consumers (docs/superpowers/plans/2026-10-19-mbm-m3-consumers.md). EFFECTIVE values:
+   * forced to `off` while `mode` is off (the global rule: every consumer inert, every output unchanged).
+   * packet (MBM_PACKET): the sentinel packet block `marketBehaviour`. observe logs it, on adds it.
+   * exitShadow (MBM_EXIT_SHADOW): the exit-gate shadow. observe and on both only RECORD, never decide.
+   */
+  packet: MbmMode;
+  exitShadow: MbmMode;
   /** Human-readable fallbacks taken while parsing; logged once at boot. */
   problems: string[];
 }
@@ -50,7 +58,21 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
     problems.push('no MBM_FEED_USER_ID and AI_AUTO_EXIT_USER_IDS is empty — the bar refresher will not run');
   }
 
-  return { mode, instruments, url, feedUserId, problems };
+  const consumer = (name: string): MbmMode => {
+    const raw = (env[name] ?? '').trim().toLowerCase();
+    let m: MbmMode = 'off';
+    if ((MODES as readonly string[]).includes(raw)) m = raw as MbmMode;
+    else if (raw !== '') problems.push(`${name}=${raw} is not off|observe|on — using off`);
+    if (m !== 'off' && mode === 'off') {
+      problems.push(`${name}=${m} is ignored while MBM_ENABLED=off`);
+      m = 'off';
+    }
+    return m;
+  };
+  const packet = consumer('MBM_PACKET');
+  const exitShadow = consumer('MBM_EXIT_SHADOW');
+
+  return { mode, instruments, url, feedUserId, packet, exitShadow, problems };
 }
 
 /** The single boot line: `[mbm] mode=… instruments=… url=… feedUser=…`. */

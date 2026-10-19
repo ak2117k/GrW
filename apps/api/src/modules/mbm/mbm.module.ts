@@ -27,6 +27,6 @@ import { MbmController } from './controllers/mbm.controller';
     MbmBarRefresherService,
     MbmClient,
   ],
-  exports: [MbmClient],
+  exports: [MbmClient, MBM_CONFIG],
 })
 export class MbmModule {}

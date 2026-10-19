@@ -56,6 +56,7 @@ import { NewsIndexModule } from '../news-events/index/news-index.module';
 import { NewsIndexService } from '../news-events/index/news-index.service';
 import { MarketEventsModule } from '../news-events/events/market-events.module';
 import { EventsService } from '../news-events/events/events.service';
+import { MbmModule } from '../mbm/mbm.module';
 import { NEWS_INDEX } from './ports/news-index.port';
 import { MARKET_EVENTS } from './ports/events.port';
 
@@ -114,6 +115,8 @@ import { MARKET_EVENTS } from './ports/events.port';
     // live there; the cycle sees only the two ports below (NEWS_INDEX, MARKET_EVENTS).
     NewsIndexModule,
     MarketEventsModule,
+    // MBM M3 (MBM_PACKET): the fail-open, cached market-behaviour client for the packet block.
+    MbmModule,
   ],
   controllers: [SentinelController],
   providers: [

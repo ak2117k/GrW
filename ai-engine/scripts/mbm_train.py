@@ -245,6 +245,15 @@ def render_patterns_report(lib: dict) -> str:
          f"- Blind survivors per permutation: {nl['survivors_per_perm']}",
          f"- Null 95th percentile: {nl['p95']:.1f} · real: {c['blind_survivors']} · significant: **{sig}**", ""]
     if n_rules:
+        from collections import Counter
+        sides = Counter(r["side"] for r in lib["rules"])
+        feats = Counter(cd["feature"] for r in lib["rules"] for cd in r["conditions"])
+        L += ["## Concentration (rules overlap heavily; they are not independent findings)", "",
+              f"- By side: {dict(sides)}",
+              f"- Most-used features: {', '.join(f'{f} ({n})' for f, n in feats.most_common(8))}",
+              "- The day-shuffle null breaks serial (regime) dependence, so a library dominated by day-level "
+              "features can partly reflect regime persistence rather than a tradable intraday pattern; "
+              "forward-test before serving.", ""]
         L += [f"## Rules (top 25 of {n_rules} by blind t)", "",
               "| id | rule | side | stop/target ATR | disc n | disc hit | disc net bp | disc t | blind n | blind hit | blind net bp | blind t |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|"]

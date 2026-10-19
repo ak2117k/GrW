@@ -47,6 +47,19 @@ Runner = Callable[..., subprocess.CompletedProcess]
 
 # ── SQL helpers (pure: tested in tests/test_mbm_ship.py) ───────────────────────
 
+
+def _json(v) -> str:
+    """JSON for a jsonb literal: NaN/inf (e.g. a month whose outcomes were all one class) → null."""
+    def clean(x):
+        if isinstance(x, float) and (x != x or x in (float("inf"), float("-inf"))):
+            return None
+        if isinstance(x, dict):
+            return {k: clean(w) for k, w in x.items()}
+        if isinstance(x, (list, tuple)):
+            return [clean(w) for w in x]
+        return x
+    return json.dumps(clean(v), allow_nan=False)
+
 def lit(v) -> str:
     """SQL literal. Strings are single-quote escaped; standard_conforming_strings is on."""
     if v is None:
@@ -104,8 +117,8 @@ def registry_sql(rows: list[dict]) -> str:
             'INSERT INTO ai_models (id, kind, "featureSet", "trainedAt", "dataWindow", "nTrain", "nHoldout", '
             'metrics, gate, "gateReasons", "artifactPath", active, instrument, horizon)\n'
             f"VALUES ({lit(r['id'])}, {lit(r['kind'])}, {lit(r['featureSet'])}, {lit(r['trainedAt'])}::timestamptz, "
-            f"{lit(json.dumps(r['dataWindow']))}::jsonb, {r['nTrain']}, {r['nHoldout']}, "
-            f"{lit(json.dumps(r['metrics']))}::jsonb, {lit(r['gate'])}, {reasons}, {lit(r['artifactPath'])}, "
+            f"{lit(_json(r['dataWindow']))}::jsonb, {r['nTrain']}, {r['nHoldout']}, "
+            f"{lit(_json(r['metrics']))}::jsonb, {lit(r['gate'])}, {reasons}, {lit(r['artifactPath'])}, "
             f"true, {lit(r['instrument'])}, {lit(r['horizon'])})\n"
             'ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, "featureSet" = EXCLUDED."featureSet", '
             '"trainedAt" = EXCLUDED."trainedAt", "dataWindow" = EXCLUDED."dataWindow", "nTrain" = EXCLUDED."nTrain", '

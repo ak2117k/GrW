@@ -133,3 +133,10 @@ def test_ship_copies_files_before_registry_and_checks_sha(tmp_path):
     kinds = [c[0] if c[0] == "scp" else c[-1].split()[0] for c in calls]
     assert kinds == ["rm", "scp", "cd", "rm", "cd"]  # stage, copy, checksum, swap, psql
     assert "BatchMode=yes" in calls[1] and calls[-1][-1] == S.REMOTE_PSQL
+
+
+def test_json_literal_turns_nan_into_null():
+    import importlib.util, pathlib
+    spec = importlib.util.spec_from_file_location("mbm_ship", pathlib.Path(__file__).parents[1] / "scripts" / "mbm_ship.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    assert m._json({"monthly": [{"auc": float("nan")}, {"auc": 0.7}]}) == '{"monthly": [{"auc": null}, {"auc": 0.7}]}'

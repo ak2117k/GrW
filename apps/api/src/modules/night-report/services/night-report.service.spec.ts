@@ -107,7 +107,7 @@ describe('NightReportService', () => {
       'Sentinel overnight review': 'ok',
     });
 
-    expect(r.summary).toEqual({ positions: 2, exitAtOpen: 1, tighten: 0, held: 1, newsOnPositions: 2, eventsToday: 1 });
+    expect(r.summary).toEqual({ positions: 1, exitAtOpen: 1, tighten: 0, held: 0, newsOnPositions: 2, eventsToday: 1 });
   });
 
   it('a failing section returns {error} and the rest still render', async () => {

@@ -295,7 +295,8 @@ function summarise(
   news: Section<NewsSection>,
   events: Section<EventItem[]>,
 ): NightSummary {
-  const rows = isError(positions) ? [] : positions;
+  // Delivery holdings are not reviewed overnight; the strip counts the F&O positions the page leads with.
+  const rows = (isError(positions) ? [] : positions).filter((r) => r.kind !== 'HOLDING');
   const plans = rows.map((r) => planInForce(r)?.verdict ?? null);
   const today = istYmd(now);
   return {

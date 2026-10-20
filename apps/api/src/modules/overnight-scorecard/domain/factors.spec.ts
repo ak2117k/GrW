@@ -1,0 +1,189 @@
+import type { ChainSnapshotRow, ChainStrikeRow } from '../../mbm/domain/chain-snapshot';
+import type { CueRecord, FiiDerivatives, FiiDiiCash } from '../../market-cues/market-cues.types';
+import {
+  scoreExpiry,
+  scoreFiiDii,
+  scoreIndicators,
+  scoreMood,
+  scoreNews,
+  scoreOi,
+  scoreVix,
+  timeframeVote,
+} from './factors';
+import { assemble, bandOf, clampPoints, compactScorecard } from './scoring';
+
+const leg = (oi: number, oi_chg: number | null) => ({ ltp: 1, oi, oi_chg, vol: 0, iv: null, delta: null, gamma: null, theta: null, vega: null });
+const strikes = (spot: number, ce: (k: number) => [number, number | null], pe: (k: number) => [number, number | null]): ChainStrikeRow[] =>
+  [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5].map((i) => {
+    const k = spot + i * 20;
+    return { strike: k, ce: leg(...ce(k)), pe: leg(...pe(k)) };
+  });
+const chain = (over: Partial<ChainSnapshotRow>): ChainSnapshotRow => ({
+  instrument: 'RELIANCE', expiry: '2026-10-28', capturedAt: new Date('2026-10-19T10:00:00Z'), spot: 1260, pcr: 1.0,
+  maxPain: 1260, callWall: 1300, putWall: 1200, strikes: strikes(1260, () => [1000, 0], () => [1000, 0]), ...over,
+});
+
+describe('bands and points', () => {
+  it.each([
+    [-7, 'STRONG_AGAINST'], [-4, 'STRONG_AGAINST'], [-3, 'AGAINST'], [-1, 'AGAINST'], [0, 'NEUTRAL'],
+    [1, 'SUPPORTS'], [3, 'SUPPORTS'], [4, 'STRONG_SUPPORTS'], [9, 'STRONG_SUPPORTS'],
+  ])('total %i ⇒ %s', (t, b) => expect(bandOf(t)).toBe(b));
+
+  it('clamps to −2…+2 and maps NaN to 0', () => {
+    expect([clampPoints(5), clampPoints(-3), clampPoints(1.4), clampPoints(NaN), clampPoints(-0.2)]).toEqual([2, -2, 1, 0, 0]);
+  });
+
+  it('assemble orders all seven factors, counts only available ones, and compacts to ≤400 chars', () => {
+    const sc = assemble({
+      userId: 'u', symbol: 'X', exchange: 'NFO', underlying: 'X', side: 'BULLISH', window: 'OVERNIGHT', computedAt: new Date(0),
+      factors: [{ name: 'news', points: 2, value: 'v'.repeat(500), reason: 'r', available: true }, { name: 'oi', points: 2, value: 'p', reason: 'r', available: true }],
+    });
+    expect(sc.factors.map((f) => f.name)).toEqual(['oi', 'fii_dii', 'vix', 'expiry', 'news', 'indicators', 'mood']);
+    expect(sc.factors.filter((f) => !f.available)).toHaveLength(5);
+    expect(sc.total).toBe(4);
+    expect(sc.band).toBe('STRONG_SUPPORTS');
+    expect(compactScorecard(sc).length).toBeLessThanOrEqual(400);
+  });
+});
+
+describe('OI factor', () => {
+  it('missing chain ⇒ unavailable, 0 points', () => {
+    const f = scoreOi({ latest: null, history: [] }, 'BULLISH');
+    expect(f).toMatchObject({ available: false, points: 0 });
+    expect(f.reason).toMatch(/unavailable/);
+  });
+
+  it('PCR far above its 5-session median + put writing near spot = +2 for a bull, −2 for a bear (RELIANCE case)', () => {
+    const latest = chain({ pcr: 2.1, strikes: strikes(1260, () => [1000, 10], () => [3000, 900]) });
+    const history = [1.2, 1.3, 1.3, 1.4, 1.2].map((pcr) => chain({ pcr }));
+    const bull = scoreOi({ latest, history }, 'BULLISH');
+    expect(bull.points).toBe(2);
+    expect(bull.value).toMatch(/PCR 2\.10 \(5d med 1\.30\)/);
+    expect(bull.value).toMatch(/put build/);
+    expect(scoreOi({ latest, history }, 'BEARISH').points).toBe(-2);
+  });
+
+  it('no history: absolute PCR bands; call writing and spot under the put wall are bearish', () => {
+    const latest = chain({ pcr: 0.6, spot: 1190, strikes: strikes(1190, () => [3000, 900], () => [1000, 0]) });
+    expect(scoreOi({ latest, history: [] }, 'BULLISH').points).toBe(-2);
+  });
+
+  it('neutral chain ⇒ 0 but available', () => {
+    expect(scoreOi({ latest: chain({}), history: [] }, 'BULLISH')).toMatchObject({ points: 0, available: true });
+  });
+});
+
+const rec = <T>(values: T | null, status: 'ok' | 'stale' | 'unavailable' = 'ok'): CueRecord<T> => ({
+  values, sourceTime: '2026-10-19', fetchedAt: null, basis: 'session', source: 'nse', status,
+});
+const cash = (fii: number, dii: number | null): FiiDiiCash => ({
+  date: '2026-10-19', fii: { buy: 0, sell: 0, net: fii }, dii: dii == null ? null : { buy: 0, sell: 0, net: dii }, unit: '₹ crore',
+});
+const fo = (long: number, short: number, dLong: number, dShort: number): FiiDerivatives => ({
+  date: '2026-10-19', unit: 'contracts', indexFutures: { long, short }, indexCalls: { long: 0, short: 0 }, indexPuts: { long: 0, short: 0 },
+  change: { previousDate: '2026-10-16', indexFutures: { long: dLong, short: dShort }, indexCalls: { long: 0, short: 0 }, indexPuts: { long: 0, short: 0 } },
+});
+
+describe('FII/DII factor', () => {
+  it('no readings ⇒ unavailable', () => {
+    expect(scoreFiiDii({ fiiDii: null, fiiOi: null }, 'BULLISH')).toMatchObject({ available: false, points: 0 });
+    expect(scoreFiiDii({ fiiDii: rec<FiiDiiCash>(null, 'unavailable'), fiiOi: null }, 'BULLISH').available).toBe(false);
+  });
+  it('FII buying + adding index longs = +2 bull / −2 bear', () => {
+    const input = { fiiDii: rec(cash(2500, -300)), fiiOi: rec(fo(60000, 40000, 8000, -2000)) };
+    expect(scoreFiiDii(input, 'BULLISH').points).toBe(2);
+    expect(scoreFiiDii(input, 'BEARISH').points).toBe(-2);
+  });
+  it('FII selling absorbed by DII is not a bearish vote', () => {
+    expect(scoreFiiDii({ fiiDii: rec(cash(-2000, 2500)), fiiOi: null }, 'BULLISH').points).toBe(0);
+    expect(scoreFiiDii({ fiiDii: rec(cash(-2000, 500)), fiiOi: null }, 'BULLISH').points).toBe(-1);
+  });
+});
+
+describe('VIX factor', () => {
+  const flat = Array(20).fill(14);
+  it('fewer than 5 closes ⇒ unavailable', () => {
+    expect(scoreVix({ closes: [14, 15], isLongOption: true, isIndex: true }, 'BULLISH')).toMatchObject({ available: false, points: 0 });
+    expect(scoreVix({ closes: null, isLongOption: true, isIndex: true }, 'BULLISH').available).toBe(false);
+  });
+  it('rich + rising VIX penalises a long stock option buyer on both sides', () => {
+    const closes = [...flat, 16.5];
+    expect(scoreVix({ closes, isLongOption: true, isIndex: false }, 'BULLISH').points).toBe(-2);
+    expect(scoreVix({ closes, isLongOption: true, isIndex: false }, 'BEARISH').points).toBe(-2);
+  });
+  it('rising VIX is directional for the index: helps an index put, hurts an index call', () => {
+    const closes = [...flat, 14.8]; // +5.7%, not elevated (< +10% over avg)
+    expect(scoreVix({ closes, isLongOption: false, isIndex: true }, 'BEARISH').points).toBe(1);
+    expect(scoreVix({ closes, isLongOption: false, isIndex: true }, 'BULLISH').points).toBe(-1);
+  });
+  it('calm VIX on a cash stock ⇒ 0, available', () => {
+    expect(scoreVix({ closes: [...flat, 14], isLongOption: false, isIndex: false }, 'BULLISH')).toMatchObject({ points: 0, available: true });
+  });
+});
+
+describe('expiry factor', () => {
+  const base = { isOption: true, isLongOption: true, expiry: '2026-10-28' };
+  it('never positive; scales with sessions left and a holiday gap', () => {
+    expect(scoreExpiry({ ...base, dte: { calendarDays: 2, tradingSessionsLeft: 2 }, gapDays: 0.7 }).points).toBe(-2);
+    expect(scoreExpiry({ ...base, dte: { calendarDays: 6, tradingSessionsLeft: 5 }, gapDays: 0.7 }).points).toBe(-1);
+    expect(scoreExpiry({ ...base, dte: { calendarDays: 20, tradingSessionsLeft: 14 }, gapDays: 0.7 }).points).toBe(0);
+    expect(scoreExpiry({ ...base, dte: { calendarDays: 9, tradingSessionsLeft: 6 }, gapDays: 2.7 }).points).toBe(-1);
+    expect(scoreExpiry({ ...base, dte: { calendarDays: 6, tradingSessionsLeft: 4 }, gapDays: 2.7 }).points).toBe(-2);
+  });
+  it('unknown expiry ⇒ unavailable; short options, futures and cash ⇒ 0', () => {
+    expect(scoreExpiry({ ...base, dte: null, gapDays: 1 })).toMatchObject({ available: false, points: 0 });
+    expect(scoreExpiry({ ...base, isLongOption: false, dte: { calendarDays: 1, tradingSessionsLeft: 1 }, gapDays: 1 }).points).toBe(0);
+    expect(scoreExpiry({ isOption: false, isLongOption: false, expiry: null, dte: null, gapDays: 1 })).toMatchObject({ points: 0, available: true });
+  });
+});
+
+describe('news factor', () => {
+  const a = (score: number, source = 'ET') => ({ id: 'n', title: 'Big news', source, sentiment: null, sentimentScore: score, publishedAt: new Date() });
+  it('read failure ⇒ unavailable; no news ⇒ 0 available', () => {
+    expect(scoreNews(null, 'BULLISH')).toMatchObject({ available: false, points: 0 });
+    expect(scoreNews([], 'BULLISH')).toMatchObject({ available: true, points: 0 });
+  });
+  it('strongest headline decides; NSE announcements weigh 1.5×', () => {
+    expect(scoreNews([a(0.2), a(-0.7)], 'BULLISH').points).toBe(-2);
+    expect(scoreNews([a(0.2), a(-0.7)], 'BEARISH').points).toBe(2);
+    expect(scoreNews([a(0.45)], 'BULLISH').points).toBe(1);
+    expect(scoreNews([a(0.45, 'NSE Announcements')], 'BULLISH').points).toBe(2);
+    expect(scoreNews([a(0.1)], 'BULLISH').points).toBe(0);
+  });
+});
+
+describe('indicators factor', () => {
+  const up = Array.from({ length: 60 }, (_, i) => 100 + i + (i % 3 === 0 ? -0.6 : 0));
+  const down = up.map((x) => 300 - x);
+  it('fewer than 35 daily bars ⇒ unavailable', () => {
+    expect(scoreIndicators({ dailyCloses: up.slice(0, 20), m15Closes: null, setups: [] }, 'BULLISH')).toMatchObject({ available: false, points: 0 });
+    expect(scoreIndicators({ dailyCloses: null, m15Closes: null, setups: [] }, 'BULLISH').available).toBe(false);
+  });
+  it('an uptrend supports a bull and opposes a bear; a downtrend the reverse', () => {
+    expect(timeframeVote(up)!.vote).toBeGreaterThanOrEqual(1);
+    expect(scoreIndicators({ dailyCloses: up, m15Closes: up, setups: [] }, 'BULLISH').points).toBeGreaterThan(0);
+    expect(scoreIndicators({ dailyCloses: up, m15Closes: up, setups: [] }, 'BEARISH').points).toBeLessThan(0);
+    expect(scoreIndicators({ dailyCloses: down, m15Closes: null, setups: [] }, 'BULLISH').points).toBeLessThan(0);
+  });
+  it('a validated daily setup adds its vote', () => {
+    const flat = Array.from({ length: 60 }, () => 100);
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: [] }, 'BULLISH').points).toBe(0);
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: [{ setup: 'BB_BREAKOUT_UP', action: 'LONG_SETUP' }] }, 'BULLISH').points).toBe(1);
+  });
+});
+
+describe('mood factor', () => {
+  const b = (regime: string) => ({ status: 'ok' as const, horizons: { '30m': { p: 0.2, regime: 'QUIET' }, '1d': { p: 0.6, regime } } });
+  it('absent / stale MBM ⇒ unavailable for an index position', () => {
+    expect(scoreMood({ behaviour: { status: 'absent' }, isIndex: true, isLongOption: true })).toMatchObject({ available: false, points: 0 });
+    expect(scoreMood({ behaviour: null, isIndex: true, isLongOption: true }).available).toBe(false);
+  });
+  it('uses the longest horizon, move-size only (same points for CE and PE buyers)', () => {
+    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: true, isLongOption: true }).points).toBe(1);
+    expect(scoreMood({ behaviour: b('QUIET'), isIndex: true, isLongOption: true }).points).toBe(-1);
+    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: true, isLongOption: false }).points).toBe(0);
+  });
+  it('stocks: context only, 0', () => {
+    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: false, isLongOption: true })).toMatchObject({ points: 0, available: true });
+  });
+});

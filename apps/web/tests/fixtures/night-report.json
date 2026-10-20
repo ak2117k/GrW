@@ -6,7 +6,7 @@
     "nextOpen": "2026-10-20T03:45:00.000Z",
     "holidayNote": null
   },
-  "summary": { "positions": 2, "exitAtOpen": 1, "tighten": 0, "held": 1, "newsOnPositions": 3, "eventsToday": 2 },
+  "summary": { "positions": 2, "exitAtOpen": 2, "tighten": 0, "held": 1, "newsOnPositions": 3, "eventsToday": 2 },
   "positions": [
     {
       "trackerId": "trk-1",
@@ -37,7 +37,27 @@
         "at": "2026-10-20T02:00:00.000Z",
         "window": "PRE_OPEN_REVIEW"
       },
-      "live": null
+      "live": null,
+      "scorecard": {
+        "id": "sc-1",
+        "userId": "u-1",
+        "symbol": "NIFTY28OCT2625000CE",
+        "exchange": "NFO",
+        "underlying": "NIFTY",
+        "side": "BULLISH",
+        "window": "PRE_OPEN",
+        "computedAt": "2026-10-20T03:20:00.000Z",
+        "factors": [
+          { "name": "oi", "points": -1, "value": "PCR 0.8, call build +12% @25000", "reason": "Call writers defending 25,000", "available": true },
+          { "name": "fii_dii", "points": 0, "value": "", "reason": "FII/DII data for 19 Oct not published", "available": false },
+          { "name": "vix", "points": -1, "value": "VIX 15.8 (+1.1)", "reason": "Rising VIX before expiry", "available": true },
+          { "name": "expiry", "points": -2, "value": "2 days to expiry, OTM", "reason": "Theta eats a flat open", "available": true },
+          { "name": "news", "points": 0, "value": "no items", "reason": "No NIFTY-specific news", "available": true },
+          { "name": "indicators", "points": 1, "value": "EMA9>EMA20, RSI 55", "reason": "15m trend still up", "available": true }
+        ],
+        "total": -3,
+        "band": "AGAINST"
+      }
     },
     {
       "trackerId": "trk-2",
@@ -51,16 +71,37 @@
       "pnlPct": 1.8,
       "held": true,
       "overnight": {
-        "verdict": "HOLD_OVERNIGHT",
+        "verdict": "EXIT_AT_OPEN",
         "confidence": "medium",
         "risk": "Results on Friday.",
-        "plan": "Hold; trail the stop to 2,870.",
+        "plan": "Book the gain at the open ahead of results.",
         "invalidation": "Close below 2,840",
         "at": "2026-10-19T16:35:00.000Z",
         "window": "OVERNIGHT_REVIEW"
       },
       "preOpen": null,
-      "live": null
+      "live": null,
+      "scorecard": {
+        "id": "sc-2",
+        "userId": "u-1",
+        "symbol": "RELIANCE",
+        "exchange": "NSE",
+        "underlying": "RELIANCE",
+        "side": "BULLISH",
+        "window": "OVERNIGHT",
+        "computedAt": "2026-10-19T10:10:00.000Z",
+        "factors": [
+          { "name": "oi", "points": 2, "value": "PCR 2.1 (5d med 1.3), put build +18% @2860", "reason": "Heavy put writing under spot", "available": true },
+          { "name": "fii_dii", "points": 1, "value": "FII +1,240 cr, DII +860 cr", "reason": "Both net buyers", "available": true },
+          { "name": "vix", "points": 0, "value": "VIX 12.4 (−0.3)", "reason": "Calm, no edge", "available": true },
+          { "name": "expiry", "points": 0, "value": "Equity, no expiry", "reason": "Not an option", "available": true },
+          { "name": "news", "points": 1, "value": "sentiment +0.6 (1 item)", "reason": "Jio tariff hike is positive", "available": true },
+          { "name": "indicators", "points": 1, "value": "EMA9>EMA20, MACD +, RSI 61", "reason": "Daily uptrend intact", "available": true },
+          { "name": "mood", "points": -1, "value": "P(big move) 42%, HIGH_VOL", "reason": "Volatile tape tomorrow", "available": true }
+        ],
+        "total": 4,
+        "band": "STRONG_SUPPORTS"
+      }
     }
   ],
   "news": {
@@ -119,6 +160,58 @@
     }
   ],
   "dailySetups": { "error": "ai-engine unreachable" },
+  "newsIdeas": [
+    {
+      "id": "idea-1",
+      "createdAt": "2026-10-19T18:00:00.000Z",
+      "symbol": "TATAMOTORS",
+      "exchange": "NSE",
+      "newsIds": ["n9"],
+      "headline": "Tata Motors JLR wholesales jump 22% in Q2",
+      "url": "https://example.com/jlr-q2",
+      "idea": "CE_IDEA",
+      "rationale": "Strong volume beat with call writers covering at 720; indicators turning up on the daily.",
+      "invalidation": "Opens below 705 or gives up the gap in the first 30 minutes",
+      "whatToDo": "Watch the first 15 minutes; consider the 720 CE only above 715.",
+      "scorecardId": "sc-3",
+      "nextOpen": 716.2,
+      "nextClose": 731.5,
+      "moveBp": 214,
+      "filledAt": "2026-10-20T10:05:00.000Z",
+      "scorecard": {
+        "id": "sc-3",
+        "userId": null,
+        "symbol": "TATAMOTORS",
+        "exchange": "NSE",
+        "underlying": "TATAMOTORS",
+        "side": "BULLISH",
+        "window": "NEWS_IDEA",
+        "computedAt": "2026-10-19T17:55:00.000Z",
+        "factors": [
+          { "name": "oi", "points": 1, "value": "PCR 1.4, call unwind −9% @720", "reason": "Call writers covering", "available": true },
+          { "name": "news", "points": 2, "value": "sentiment +0.8 (2 items)", "reason": "Strong positive results headline", "available": true },
+          { "name": "indicators", "points": 1, "value": "EMA9>EMA20, MACD up, RSI 58", "reason": "Daily trend turning up", "available": true }
+        ],
+        "total": 4,
+        "band": "STRONG_SUPPORTS"
+      }
+    },
+    {
+      "id": "idea-2",
+      "createdAt": "2026-10-20T03:10:00.000Z",
+      "symbol": "PAYTM",
+      "exchange": "NSE",
+      "newsIds": ["n10"],
+      "headline": "Paytm gets RBI observation on payments bank",
+      "url": "javascript:alert(1)",
+      "idea": "NO_TRADE",
+      "rationale": "Headline is old news restated; option chain shows no fresh positioning.",
+      "invalidation": "A formal RBI order",
+      "whatToDo": "Nothing; revisit if volume spikes at the open.",
+      "scorecardId": null,
+      "scorecard": null
+    }
+  ],
   "mood": {
     "status": "stale",
     "asOf": "2026-10-18T16:00:00.000Z",

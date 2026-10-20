@@ -1,4 +1,17 @@
-import type { NightReportSummary, Section, SectionError } from '@/types/nightReport.types';
+import type {
+  Band,
+  FactorName,
+  FactorScore,
+  IdeaKind,
+  NewsIdea,
+  NewsIdeaOutcome,
+  NightReportSummary,
+  PositionRow,
+  Section,
+  SectionError,
+  SymbolRef,
+  VerdictView,
+} from '@/types/nightReport.types';
 
 /**
  * Pure view logic for the Night Report page. No React, no DOM: Vitest runs it in node.
@@ -207,4 +220,150 @@ export function safeExternalUrl(url: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------- scorecard
+
+type BadgeVariant = 'success' | 'warning' | 'danger' | 'neutral' | 'info';
+
+/** Display order of the scorecard table; also the set of factors a scorecard should carry. */
+export const FACTOR_ORDER: FactorName[] = ['oi', 'fii_dii', 'vix', 'expiry', 'news', 'indicators', 'mood'];
+
+const FACTOR_LABEL: Record<FactorName, string> = {
+  oi: 'Option chain (OI)',
+  fii_dii: 'FII / DII',
+  vix: 'India VIX',
+  expiry: 'Expiry / time decay',
+  news: 'News',
+  indicators: 'Indicators (EMA 9/20, MACD, RSI)',
+  mood: 'Market mood',
+};
+
+export function factorLabel(name: string): string {
+  return FACTOR_LABEL[name as FactorName] ?? sentenceCase(name);
+}
+
+/**
+ * Factors in table order. A factor the API left out is filled in as unavailable (greyed), so
+ * the table always shows what was and was not looked at; unknown extra factors go last.
+ */
+export function orderedFactors(factors: FactorScore[] | null | undefined): FactorScore[] {
+  const list = factors ?? [];
+  const byName = new Map(list.map((f) => [f.name, f]));
+  const known = FACTOR_ORDER.map(
+    (name) => byName.get(name) ?? { name, points: 0 as const, value: '', reason: 'Not computed', available: false },
+  );
+  return [...known, ...list.filter((f) => !FACTOR_ORDER.includes(f.name))];
+}
+
+/** −2…+2 as a signed number with a real minus sign; 0 stays "0". */
+export function signedPoints(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  if (n === 0) return '0';
+  return n > 0 ? `+${n}` : `−${Math.abs(n)}`;
+}
+
+export type PointsTone = 'pos' | 'neg' | 'zero';
+export function pointsTone(n: number | null | undefined): PointsTone {
+  return n == null || !Number.isFinite(n) || n === 0 ? 'zero' : n > 0 ? 'pos' : 'neg';
+}
+
+const BAND_LABEL: Record<Band, string> = {
+  STRONG_AGAINST: 'Strongly against',
+  AGAINST: 'Against',
+  NEUTRAL: 'Neutral',
+  SUPPORTS: 'Supports',
+  STRONG_SUPPORTS: 'Strongly supports',
+};
+const BAND_VARIANT: Record<Band, BadgeVariant> = {
+  STRONG_AGAINST: 'danger',
+  AGAINST: 'warning',
+  NEUTRAL: 'neutral',
+  SUPPORTS: 'info',
+  STRONG_SUPPORTS: 'success',
+};
+
+export function bandLabel(band: string | null | undefined): string {
+  if (!band) return 'No score';
+  return BAND_LABEL[band as Band] ?? sentenceCase(band);
+}
+export function bandVariant(band: string | null | undefined): BadgeVariant {
+  return (band && BAND_VARIANT[band as Band]) || 'neutral';
+}
+
+/** Which way a band leans for the position: +1 supports, −1 against, 0 neutral/unknown. */
+export function bandLean(band: string | null | undefined): -1 | 0 | 1 {
+  if (band === 'SUPPORTS' || band === 'STRONG_SUPPORTS') return 1;
+  if (band === 'AGAINST' || band === 'STRONG_AGAINST') return -1;
+  return 0;
+}
+
+/**
+ * Which way an agent verdict leans for the position: keeping it (+1) or getting out / cutting
+ * risk (−1). Unknown verdicts and ESCALATE lean nowhere (0) and never raise a disagreement.
+ */
+export function verdictLean(verdict: string | null | undefined): -1 | 0 | 1 {
+  const v = (verdict ?? '').toUpperCase();
+  if (v === 'HOLD_OVERNIGHT' || v === 'HOLD') return 1;
+  if (v.startsWith('EXIT') || v.startsWith('TIGHTEN')) return -1;
+  return 0;
+}
+
+/**
+ * True when the agent's verdict points the other way from the scorecard band: an exit/tighten
+ * while the band supports the position, or a hold while the band is against it. Neutral bands
+ * and unknown verdicts never disagree.
+ */
+export function verdictDisagreesWithBand(verdict: string | null | undefined, band: string | null | undefined): boolean {
+  const v = verdictLean(verdict);
+  const b = bandLean(band);
+  return v !== 0 && b !== 0 && v !== b;
+}
+
+/** The verdict a scorecard should be compared against: pre-open card → pre-open verdict (else overnight). */
+export function verdictForScorecard(p: Pick<PositionRow, 'overnight' | 'preOpen' | 'scorecard'>): VerdictView | null {
+  if (p.scorecard?.window === 'PRE_OPEN') return p.preOpen ?? p.overnight;
+  return p.overnight ?? p.preOpen;
+}
+
+// ---------------------------------------------------------------- news ideas
+
+const IDEA_BADGE: Record<IdeaKind, { label: string; variant: BadgeVariant }> = {
+  CE_IDEA: { label: 'CE idea', variant: 'success' },
+  PE_IDEA: { label: 'PE idea', variant: 'danger' },
+  NO_TRADE: { label: 'No trade', variant: 'neutral' },
+};
+
+export function ideaBadge(idea: string | null | undefined): { label: string; variant: BadgeVariant } {
+  return IDEA_BADGE[idea as IdeaKind] ?? { label: idea ? sentenceCase(idea) : 'No idea', variant: 'neutral' };
+}
+
+/** A news idea names only symbol + exchange; the chip resolves the token on click. */
+export function ideaSymbolRef(row: Pick<NewsIdea, 'symbol' | 'exchange'>): SymbolRef {
+  const q = new URLSearchParams({ symbol: row.symbol, exchange: row.exchange });
+  return { symbol: row.symbol, exchange: row.exchange, token: null, chartHref: `/charts?${q.toString()}` };
+}
+
+/** Newest first; unparseable dates sink to the bottom. */
+export function sortIdeasNewestFirst<T extends Pick<NewsIdea, 'createdAt'>>(rows: T[]): T[] {
+  const t = (s: string) => {
+    const n = Date.parse(s);
+    return Number.isFinite(n) ? n : -Infinity;
+  };
+  return [...rows].sort((a, b) => t(b.createdAt) - t(a.createdAt));
+}
+
+/**
+ * The idea's outcome once the next session filled it: the underlying's move, judged against the
+ * idea's direction (CE wants up, PE wants down; No trade is never right or wrong). Null until filled.
+ */
+export function ideaOutcome(
+  row: Pick<NewsIdea, 'idea'> & NewsIdeaOutcome,
+): { label: string; verdict: 'right' | 'wrong' | 'flat' | 'none' } | null {
+  if (!row.filledAt || row.moveBp == null || !Number.isFinite(row.moveBp)) return null;
+  const label = `Next session ${bpPct(row.moveBp)}`;
+  const dir = row.idea === 'CE_IDEA' ? 1 : row.idea === 'PE_IDEA' ? -1 : 0;
+  if (dir === 0) return { label, verdict: 'none' };
+  if (row.moveBp === 0) return { label, verdict: 'flat' };
+  return { label, verdict: Math.sign(row.moveBp) === dir ? 'right' : 'wrong' };
 }

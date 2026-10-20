@@ -45,7 +45,70 @@ export interface PositionRow {
   overnight: VerdictView | null;
   preOpen: VerdictView | null;
   live: VerdictView | null;
+  /** Latest overnight/pre-open scorecard for this position; null until one is computed. */
+  scorecard: Scorecard | null;
 }
+
+// ---- Overnight scorecard + news ideas, copied from
+// apps/api/src/modules/overnight-scorecard/scorecard.types.ts
+// (docs/superpowers/plans/2026-10-20-overnight-scorecard-build.md).
+
+export type FactorName = 'oi' | 'fii_dii' | 'vix' | 'expiry' | 'news' | 'indicators' | 'mood';
+export interface FactorScore {
+  name: FactorName;
+  /** + supports the position's direction (long CE/long fut = bullish; long PE = bearish). */
+  points: -2 | -1 | 0 | 1 | 2;
+  /** Compact raw reading, e.g. "PCR 2.1 (5d med 1.3), put build +18% @1260". */
+  value: string;
+  reason: string;
+  /** false ⇒ points 0 and reason says what was missing. */
+  available: boolean;
+}
+/** ≤-4 | -3..-1 | 0 | 1..3 | ≥4 */
+export type Band = 'STRONG_AGAINST' | 'AGAINST' | 'NEUTRAL' | 'SUPPORTS' | 'STRONG_SUPPORTS';
+export type ScoreWindow = 'OVERNIGHT' | 'PRE_OPEN' | 'NEWS_IDEA';
+export interface Scorecard {
+  id?: string;
+  userId: string | null;
+  symbol: string;
+  exchange: string;
+  underlying: string;
+  /** The direction the position/idea needs. */
+  side: 'BULLISH' | 'BEARISH';
+  window: ScoreWindow;
+  computedAt: string;
+  factors: FactorScore[];
+  total: number;
+  band: Band;
+}
+export type IdeaKind = 'CE_IDEA' | 'PE_IDEA' | 'NO_TRADE';
+export interface NewsIdea {
+  id?: string;
+  createdAt: string;
+  symbol: string;
+  exchange: string;
+  newsIds: string[];
+  headline: string;
+  idea: IdeaKind;
+  rationale: string;
+  invalidation: string;
+  whatToDo: string;
+  scorecardId: string | null;
+}
+/**
+ * Outcome columns of `news_ideas` (next_open, next_close, move_bp, filled_at), filled the next
+ * session. Not in the shared contract type, so all optional: the page shows an outcome only
+ * when `filledAt` is set.
+ */
+export interface NewsIdeaOutcome {
+  nextOpen?: number | null;
+  nextClose?: number | null;
+  moveBp?: number | null;
+  filledAt?: string | null;
+  /** Source article URL if the API sends one; linked only when it is http(s). */
+  url?: string | null;
+}
+export type NewsIdeaRow = NewsIdea & NewsIdeaOutcome & { scorecard: Scorecard | null };
 
 export interface NewsItem {
   id: string;
@@ -123,6 +186,8 @@ export interface NightReport {
   news: Section<{ onPositions: NewsGroup[]; market: NewsItem[] }>;
   events: Section<EventItem[]>;
   dailySetups: Section<SetupItem[]>;
+  /** Absent from responses built before the scorecard stream shipped; the page treats that as empty. */
+  newsIdeas: Section<NewsIdeaRow[]>;
   mood: Section<MoodView>;
   jobs: Section<JobItem[]>;
 }

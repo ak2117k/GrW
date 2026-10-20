@@ -206,7 +206,27 @@ describe('ScorecardEngine: short candles + after-hours mood', () => {
     const engine = new ScorecardEngine(f.repo, UNAVAILABLE_CHAINS, null, mood, clock);
     const sc = await engine.score(await engine.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
     expect(storedMood).toHaveBeenCalledWith('NIFTY', NOW, STORED_MOOD_MAX_AGE_MS);
-    expect(sc.factors.find((x) => x.name === 'mood')).toMatchObject({ points: 0, available: true, value: 'NIFTY ACTIVE (60m, p 0.71, as of 2026-10-19 15:25 IST)' });
+    expect(sc.factors.find((x) => x.name === 'mood')).toMatchObject({
+      points: 0, available: true, value: 'NIFTY 60m: p(big) 0.71 → big move (beta n/a, as of 2026-10-19 15:25 IST)',
+    });
+  });
+
+  it('a stock long option gets its beta to NIFTY from the daily bars, and the expected move votes', async () => {
+    const series = (k: number) => {
+      let x = 100;
+      return Array.from({ length: 61 }, (_, i) => ({ day: `2026-07-${i}`, open: x, close: (x *= Math.exp(k * 0.01 * Math.sin(i * 1.3))) }));
+    };
+    const bars = jest.fn(async (name: string, _tf?: string) => (name === 'NIFTY' ? series(1) : series(1.5)));
+    const f = fakeRepo({ bars, storedMood: async () => ({ asOf: ist('2026-10-19T15:29:00'), horizons: { '60m': { p: 0.71, regime: 'ACTIVE' } } }) });
+    const engine = new ScorecardEngine(f.repo, UNAVAILABLE_CHAINS, null, null, clock);
+    const ctx = await engine.context('OVERNIGHT', NOW);
+    const sc = await engine.score(ctx, { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
+    expect(sc.factors.find((x) => x.name === 'mood')).toMatchObject({
+      points: 1, value: 'NIFTY 60m: p(big) 0.71 → big move (beta 1.50, as of 2026-10-19 15:29 IST)',
+    });
+    // NIFTY's dailies are read once per run, however many stocks are scored.
+    await engine.score(ctx, { userId: 'owner', symbol: 'Y', exchange: 'NFO', shape: shapeOf('TCS28OCT263000CE', 'NFO', 100), window: 'OVERNIGHT' });
+    expect(bars.mock.calls.filter((c) => c[0] === 'NIFTY' && c[1] === '1d')).toHaveLength(1);
   });
 
   it('live MBM behaviour ok ⇒ stored predictions are not read', async () => {

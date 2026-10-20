@@ -20,6 +20,8 @@ import {
   DAILY_MIN_BARS,
   type MoodInput,
 } from './domain/factors';
+import { betaTo } from './domain/indicators';
+import type { DailyBar } from './domain/outcome';
 import type { PositionShape } from './domain/positions';
 import { assemble } from './domain/scoring';
 import { istYmd } from './domain/windows';
@@ -48,12 +50,15 @@ export interface RunContext {
   cues: MarketCuesSnapshot | null;
   mood: MoodInput['behaviour'];
   perUnderlying: Map<string, Promise<UnderlyingData>>;
+  /** NIFTY daily bars for stock betas, read once per run on first need. */
+  niftyDaily?: Promise<DailyBar[] | null>;
 }
 
 interface UnderlyingData {
   chain: Awaited<ReturnType<ChainReader['latest']>>;
   history: Awaited<ReturnType<ChainReader['history']>>;
   chainFailed: boolean;
+  dailyBars: DailyBar[] | null;
   daily: number[] | null;
   m15: number[] | null;
   setups: Array<{ setup: string; action: string }>;
@@ -115,11 +120,11 @@ export class ScorecardEngine {
   }
 
   /**
-   * Closes of `timeframe` from `candles`; when fewer than the indicators need, one on-demand broker
+   * Bars of `timeframe` from `candles`; when fewer than the indicators need, one on-demand broker
    * backfill (persisted) and a re-read. A failed backfill leaves what was read (fail-soft).
    */
-  private async closes(name: string, timeframe: '1d' | '15m', limit: number): Promise<number[] | null> {
-    const read = async () => (await this.repo.bars(name, timeframe, limit))?.map((b) => b.close) ?? null;
+  private async bars(name: string, timeframe: '1d' | '15m', limit: number): Promise<DailyBar[] | null> {
+    const read = () => this.repo.bars(name, timeframe, limit);
     const first = await read();
     if (!this.backfill || (first && first.length >= DAILY_MIN_BARS)) return first;
     try {
@@ -138,22 +143,31 @@ export class ScorecardEngine {
         const [chain, history, daily, m15, setups] = await Promise.all([
           soft(() => this.chains.latest(name), null),
           soft(() => this.chains.history(name, 5), []),
-          soft(() => this.closes(name, '1d', DAILY_BARS), null),
-          soft(() => this.closes(name, '15m', M15_BARS), null),
+          soft(() => this.bars(name, '1d', DAILY_BARS), null),
+          soft(() => this.bars(name, '15m', M15_BARS), null),
           soft(() => (lastClose ? this.repo.dailySetups(name, istYmd(lastClose)) : Promise.resolve([])), []),
         ]);
         return {
           chain: chain.v,
           history: history.v,
           chainFailed: chain.failed,
-          daily: daily.v,
-          m15: m15.v,
+          dailyBars: daily.v,
+          daily: daily.v?.map((b) => b.close) ?? null,
+          m15: m15.v?.map((b) => b.close) ?? null,
           setups: setups.v,
         };
       })();
       ctx.perUnderlying.set(name, p);
     }
     return p;
+  }
+
+  /** A stock long option's beta to NIFTY from the daily bars (null for indices, non-long-options, or too little data). */
+  private async beta(ctx: RunContext, shape: PositionShape, u: UnderlyingData): Promise<number | null> {
+    if (shape.isIndex || !shape.isLongOption || !u.dailyBars) return null;
+    ctx.niftyDaily ??= soft(() => this.bars('NIFTY', '1d', DAILY_BARS), null).then((r) => r.v);
+    const nifty = await ctx.niftyDaily;
+    return nifty ? betaTo(u.dailyBars, nifty) : null;
   }
 
   articlesFor(ctx: RunContext, underlying: string, exchange: string): NewsRow[] | null {
@@ -192,8 +206,17 @@ export class ScorecardEngine {
         })) ?? null,
         side,
       ),
-      scoreIndicators({ dailyCloses: u.daily, m15Closes: u.m15, setups: u.setups }, side),
-      scoreMood({ behaviour: ctx.mood, isIndex: shape.isIndex, isLongOption: shape.isLongOption }),
+      scoreIndicators(
+        {
+          dailyCloses: u.daily,
+          m15Closes: u.m15,
+          setups: u.setups,
+          isIndex: shape.isIndex,
+          isLongCe: shape.isLongOption && shape.optionType === 'CE',
+        },
+        side,
+      ),
+      scoreMood({ behaviour: ctx.mood, isIndex: shape.isIndex, isLongOption: shape.isLongOption, beta: await this.beta(ctx, shape, u) }),
     ];
     return assemble({
       userId: input.userId,

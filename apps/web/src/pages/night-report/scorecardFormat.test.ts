@@ -25,7 +25,7 @@ describe('factor labels and order', () => {
       'Expiry / time decay',
       'News',
       'Indicators (EMA 9/20, MACD, RSI)',
-      'Market mood',
+      'Expected move',
     ]);
     expect(factorLabel('gift_nifty')).toBe('Gift nifty');
   });

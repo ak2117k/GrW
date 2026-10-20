@@ -35,7 +35,7 @@ export const NEWS_IDEAS_SCHEMA = {
 export const NEWS_IDEAS_SYSTEM_PROMPT = [
   'You review overnight news on Indian F&O stocks for a discretionary options trader.',
   'For each candidate you get: the news (headline, source, sentiment) and a deterministic scorecard',
-  '(factors oi, fii_dii, vix, expiry, news, indicators, mood; each -2..+2 for the stated side; n/a = missing data).',
+  '(factors oi, fii_dii, vix, expiry, news, indicators, mood = expected NIFTY move size via beta, never direction; each -2..+2 for the stated side; n/a = missing data).',
   'For EACH candidate write exactly one idea:',
   '- idea: CE_IDEA (bullish options idea), PE_IDEA (bearish), or NO_TRADE when news and scorecard disagree, data is thin, or the move is likely priced in.',
   '- rationale: one or two sentences reading the news against the scorecard; name the factors that decide it.',

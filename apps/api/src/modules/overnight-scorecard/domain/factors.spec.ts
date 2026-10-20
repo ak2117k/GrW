@@ -10,6 +10,7 @@ import {
   scoreVix,
   timeframeVote,
 } from './factors';
+import { betaTo } from './indicators';
 import { assemble, bandOf, clampPoints, compactScorecard } from './scoring';
 
 const leg = (oi: number, oi_chg: number | null) => ({ ltp: 1, oi, oi_chg, vol: 0, iv: null, delta: null, gamma: null, theta: null, vega: null });
@@ -185,35 +186,86 @@ describe('indicators factor', () => {
     expect(scoreIndicators({ dailyCloses: up, m15Closes: up, setups: [] }, 'BEARISH').points).toBeLessThan(0);
     expect(scoreIndicators({ dailyCloses: down, m15Closes: null, setups: [] }, 'BULLISH').points).toBeLessThan(0);
   });
-  it('a validated daily setup adds its vote', () => {
+  it('daily setups vote for INDEX positions only: long setup +1 oriented to the side', () => {
     const flat = Array.from({ length: 60 }, () => 100);
+    const long = [{ setup: 'BB_BREAKOUT_UP', action: 'LONG_SETUP' }];
     expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: [] }, 'BULLISH').points).toBe(0);
-    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: [{ setup: 'BB_BREAKOUT_UP', action: 'LONG_SETUP' }] }, 'BULLISH').points).toBe(1);
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: long, isIndex: true, isLongCe: true }, 'BULLISH')).toMatchObject({
+      points: 1, value: expect.stringContaining('setup BB_BREAKOUT_UP'), reason: expect.stringContaining('daily setup +1'),
+    });
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: long, isIndex: true }, 'BEARISH').points).toBe(-1);
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: long, isIndex: false }, 'BULLISH').points).toBe(0);
+  });
+  it('a tighten-longs warning is −1 for a long CE only (never supports a PE)', () => {
+    const flat = Array.from({ length: 60 }, () => 100);
+    const warn = [{ setup: 'EMA_DOWNCROSS', action: 'EXIT_OR_TIGHTEN_LONGS' }];
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: warn, isIndex: true, isLongCe: true }, 'BULLISH').points).toBe(-1);
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: warn, isIndex: true, isLongCe: false }, 'BEARISH').points).toBe(0);
+    expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: warn, isIndex: true, isLongCe: false }, 'BULLISH').points).toBe(0);
+  });
+  it('technicals + setup clamp to −2…+2', () => {
+    expect(scoreIndicators({ dailyCloses: up, m15Closes: up, setups: [{ setup: 'S', action: 'LONG_SETUP' }], isIndex: true, isLongCe: true }, 'BULLISH').points).toBe(2);
   });
 });
 
-describe('mood factor', () => {
-  const b = (regime: string) => ({ status: 'ok' as const, horizons: { '30m': { p: 0.2, regime: 'QUIET' }, '1d': { p: 0.6, regime } } });
-  it('absent / stale MBM ⇒ unavailable for an index position', () => {
+describe('expected-move factor (key mood)', () => {
+  const b = (regime: string, p = 0.71) => ({ status: 'ok' as const, horizons: { '30m': { p: 0.2, regime: 'QUIET' }, '60m': { p, regime } } });
+  it('absent / stale MBM ⇒ unavailable for an index position; 0 with a note for a stock', () => {
     expect(scoreMood({ behaviour: { status: 'absent' }, isIndex: true, isLongOption: true })).toMatchObject({ available: false, points: 0 });
     expect(scoreMood({ behaviour: null, isIndex: true, isLongOption: true }).available).toBe(false);
+    expect(scoreMood({ behaviour: { status: 'absent' }, isIndex: false, isLongOption: true })).toMatchObject({
+      points: 0, available: true, value: 'NIFTY expected move n/a (no live or stored prediction)',
+    });
   });
-  it('uses the longest horizon, move-size only (same points for CE and PE buyers)', () => {
-    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: true, isLongOption: true }).points).toBe(1);
-    expect(scoreMood({ behaviour: b('QUIET'), isIndex: true, isLongOption: true }).points).toBe(-1);
-    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: true, isLongOption: false }).points).toBe(0);
+  it('index long option: big move +1, quiet −1, normal 0 — longest horizon, size never direction', () => {
+    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: true, isLongOption: true })).toMatchObject({
+      points: 1, value: 'NIFTY 60m: p(big) 0.71 → big move', reason: 'big move expected: can outrun theta',
+    });
+    expect(scoreMood({ behaviour: b('QUIET', 0.1), isIndex: true, isLongOption: true })).toMatchObject({
+      points: -1, reason: 'quiet session expected: theta dominates',
+    });
+    expect(scoreMood({ behaviour: b('NORMAL', 0.4), isIndex: true, isLongOption: true }).points).toBe(0);
   });
-  it('stocks: context only, 0', () => {
-    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: false, isLongOption: true })).toMatchObject({ points: 0, available: true });
+  it('futures / cash / short options: context only, 0', () => {
+    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: true, isLongOption: false })).toMatchObject({ points: 0, available: true });
+    expect(scoreMood({ behaviour: b('QUIET'), isIndex: false, isLongOption: false, beta: 1.2 }).points).toBe(0);
   });
-  it('stored (after-hours) predictions are labelled with their IST as-of; stocks still 0, index scores normally', () => {
-    const stored = { ...b('ACTIVE'), storedAsOf: new Date('2026-10-19T09:55:00Z') };
-    const s = scoreMood({ behaviour: stored, isIndex: false, isLongOption: true });
-    expect(s).toMatchObject({ points: 0, available: true, value: 'NIFTY ACTIVE (1d, p 0.60, as of 2026-10-19 15:25 IST)' });
-    const i = scoreMood({ behaviour: stored, isIndex: true, isLongOption: true });
-    expect(i).toMatchObject({ points: 1, value: 'ACTIVE (1d, p 0.60, as of 2026-10-19 15:25 IST)' });
+  it('stock long option rides NIFTY through its beta: ≥ 0.5 votes, < 0.5 or unknown does not', () => {
+    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: false, isLongOption: true, beta: 1.1 })).toMatchObject({
+      points: 1, value: 'NIFTY 60m: p(big) 0.71 → big move (beta 1.10)',
+    });
+    expect(scoreMood({ behaviour: b('QUIET'), isIndex: false, isLongOption: true, beta: 0.9 }).points).toBe(-1);
+    const low = scoreMood({ behaviour: b('ACTIVE'), isIndex: false, isLongOption: true, beta: 0.3 });
+    expect(low).toMatchObject({ points: 0, value: 'NIFTY 60m: p(big) 0.71 → big move (beta 0.30)' });
+    expect(low.reason).toContain('beta 0.30 < 0.5');
+    expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: false, isLongOption: true, beta: null })).toMatchObject({
+      points: 0, value: 'NIFTY 60m: p(big) 0.71 → big move (beta n/a)', reason: 'beta to NIFTY unavailable: no vote',
+    });
   });
-  it('stocks with neither live nor stored mood ⇒ n/a, 0', () => {
-    expect(scoreMood({ behaviour: { status: 'absent' }, isIndex: false, isLongOption: true }).value).toBe('NIFTY mood n/a (model runs in session)');
+  it('stored (after-hours) predictions carry their IST as-of in the label and score normally', () => {
+    const stored = { ...b('ACTIVE'), storedAsOf: new Date('2026-10-19T09:59:00Z') };
+    expect(scoreMood({ behaviour: stored, isIndex: false, isLongOption: true, beta: 1.1 })).toMatchObject({
+      points: 1, value: 'NIFTY 60m: p(big) 0.71 → big move (beta 1.10, as of 2026-10-19 15:29 IST)',
+    });
+    expect(scoreMood({ behaviour: stored, isIndex: true, isLongOption: true })).toMatchObject({
+      points: 1, value: 'NIFTY 60m: p(big) 0.71 → big move (as of 2026-10-19 15:29 IST)',
+    });
+  });
+});
+
+describe('betaTo', () => {
+  const days = (n: number) => Array.from({ length: n }, (_, i) => `2026-07-${String(i + 1).padStart(2, '0')}`);
+  const walk = (n: number, f: (i: number) => number) => {
+    let x = 100;
+    return days(n).map((day, i) => ({ day, close: (x *= Math.exp(f(i))) }));
+  };
+  const idx = walk(31, (i) => 0.01 * Math.sin(i * 1.7));
+  it('recovers a known beta from day-aligned closes', () => {
+    const stock = walk(31, (i) => 2 * 0.01 * Math.sin(i * 1.7));
+    expect(betaTo(stock, idx)).toBeCloseTo(2, 6);
+  });
+  it('too little overlap, or a flat index ⇒ null', () => {
+    expect(betaTo(idx.slice(0, 10), idx)).toBeNull();
+    expect(betaTo(idx, idx.map((b) => ({ ...b, close: 100 })))).toBeNull();
   });
 });

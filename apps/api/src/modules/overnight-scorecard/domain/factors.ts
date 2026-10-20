@@ -291,8 +291,12 @@ export const M15_WEIGHT = 0.5;
 export interface IndicatorInput {
   dailyCloses: readonly number[] | null;
   m15Closes: readonly number[] | null;
-  /** Validated MBM daily setups that fired on the last session (NIFTY only today). */
+  /** Validated MBM daily setups that fired on the close day for the underlying (NIFTY; BANKNIFTY if present). */
   setups: ReadonlyArray<{ setup: string; action: string }>;
+  /** Setups vote only for INDEX positions (they are index-only signals). */
+  isIndex?: boolean;
+  /** A long CE: the only position an EXIT_OR_TIGHTEN_LONGS warning counts against. */
+  isLongCe?: boolean;
 }
 
 /** One timeframe's vote in −3…+3: EMA9 vs EMA20, MACD histogram sign (+slope), RSI14 zone. */
@@ -313,23 +317,47 @@ export function timeframeVote(closes: readonly number[]): { vote: number; text: 
   return { vote, text };
 }
 
+/**
+ * The daily-setup component (index positions only), already in POSITION terms: a LONG_SETUP on the
+ * close day is a bullish vote oriented to the side (+1 a CE/bullish, −1 a PE/bearish); an
+ * EXIT_OR_TIGHTEN_LONGS (down-cross) warning is −1 for a long CE only — it is never a short signal,
+ * so it never supports a PE.
+ */
+export function setupPoints(input: Pick<IndicatorInput, 'setups' | 'isIndex' | 'isLongCe'>, side: Side): { points: number; fired: string[] } {
+  if (!input.isIndex) return { points: 0, fired: [] };
+  let points = 0;
+  const fired: string[] = [];
+  const longs = input.setups.filter((s) => s.action === 'LONG_SETUP');
+  if (longs.length) {
+    points += orient(1, side);
+    fired.push(...longs.map((s) => s.setup));
+  }
+  const warn = input.setups.filter((s) => s.action === 'EXIT_OR_TIGHTEN_LONGS');
+  if (warn.length) {
+    fired.push(...warn.map((s) => `${s.setup}(tighten longs)`));
+    if (input.isLongCe) points -= 1;
+  }
+  return { points, fired };
+}
+
 export function scoreIndicators(input: IndicatorInput, side: Side): FactorScore {
   const daily = input.dailyCloses && input.dailyCloses.length >= DAILY_MIN_BARS ? timeframeVote(input.dailyCloses) : null;
   if (!daily) return unavailable('indicators', `fewer than ${DAILY_MIN_BARS} daily candles`);
   const m15 = input.m15Closes && input.m15Closes.length >= DAILY_MIN_BARS ? timeframeVote(input.m15Closes) : null;
-  let raw = daily.vote + (m15 ? M15_WEIGHT * m15.vote : 0);
-  const fired: string[] = [];
-  for (const s of input.setups) {
-    if (s.action === 'LONG_SETUP') { raw += 1; fired.push(s.setup); }
-    else if (s.action === 'EXIT_OR_TIGHTEN_LONGS') { raw -= 1; fired.push(s.setup); }
-  }
+  const raw = daily.vote + (m15 ? M15_WEIGHT * m15.vote : 0);
   const vote = raw >= 2.5 ? 2 : raw >= 1 ? 1 : raw <= -2.5 ? -2 : raw <= -1 ? -1 : 0;
-  const value = [`D: ${daily.text}`, m15 ? `15m: ${m15.text}` : '15m n/a', ...(fired.length ? [`setup ${fired.join(',')}`] : [])].join('; ');
+  const setup = setupPoints(input, side);
+  const value = [`D: ${daily.text}`, m15 ? `15m: ${m15.text}` : '15m n/a', ...(setup.fired.length ? [`setup ${setup.fired.join(',')}`] : [])].join('; ');
   const tilt = vote > 0 ? 'bullish' : vote < 0 ? 'bearish' : 'mixed';
-  return factor('indicators', orient(vote, side), value, `${tilt} technicals (raw ${raw >= 0 ? '+' : ''}${raw})`);
+  const setupNote = setup.fired.length ? `; daily setup ${setup.points > 0 ? '+' : ''}${setup.points} for this side` : '';
+  // factor() clamps the technical vote + the setup component to −2…+2.
+  return factor('indicators', orient(vote, side) + setup.points, value, `${tilt} technicals (raw ${raw >= 0 ? '+' : ''}${raw})${setupNote}`);
 }
 
-// ─── Market mood (MBM) ───────────────────────────────────────────────────────
+// ─── Expected move (MBM move-size model; factor key `mood`) ─────────────────
+
+/** Below this beta to NIFTY a stock's option does not ride NIFTY's move: no vote. */
+export const BETA_MIN = 0.5;
 
 export interface MoodInput {
   behaviour: {
@@ -343,6 +371,8 @@ export interface MoodInput {
   } | null;
   isIndex: boolean;
   isLongOption: boolean;
+  /** Stock vs NIFTY beta from ~60 daily closes; null when it could not be computed. Ignored for indices. */
+  beta?: number | null;
 }
 
 /** 'YYYY-MM-DD HH:MM IST' for a stored prediction's as-of. */
@@ -351,9 +381,6 @@ export function istLabel(at: Date): string {
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} IST`;
 }
 
-const moodValue = (b: NonNullable<MoodInput['behaviour']>, k: string, hz: { p: number; regime: string }, prefix: string): string =>
-  `${prefix}${hz.regime} (${k}, p ${f2(hz.p)}${b.storedAsOf ? `, as of ${istLabel(b.storedAsOf)}` : ''})`;
-
 /** Horizon key → minutes, for picking the longest ('30m', '2h', '1d'). */
 function horizonMinutes(k: string): number {
   const m = /^(\d+)\s*(m|h|d)$/i.exec(k.trim());
@@ -361,23 +388,36 @@ function horizonMinutes(k: string): number {
   return Number(m[1]) * (m[2].toLowerCase() === 'm' ? 1 : m[2].toLowerCase() === 'h' ? 60 : 1440);
 }
 
+/** The model's own calibrated call (its regime): ACTIVE = big move, QUIET = quiet session, else normal. */
+function moveCall(regime: string): 'big move' | 'quiet' | 'normal' {
+  return regime === 'ACTIVE' ? 'big move' : regime === 'QUIET' ? 'quiet' : 'normal';
+}
+
+/**
+ * Expected move: the MBM model predicts NIFTY's move SIZE (never direction). For a LONG option a big
+ * move can outrun theta (+1); a quiet session lets theta dominate (−1). Stocks ride it through their
+ * beta to NIFTY: below BETA_MIN, or unknown, no vote. Anything that is not a long option: context only.
+ */
 export function scoreMood(input: MoodInput): FactorScore {
   const b = input.behaviour;
-  if (!input.isIndex) {
-    // Stocks get NIFTY's mood as context (shown, never a vote): the model is index-only.
-    const ok = b && b.status === 'ok' && b.horizons && Object.keys(b.horizons).length > 0;
-    if (!ok) return factor('mood', 0, 'NIFTY mood n/a (model runs in session)', 'stock position: index context only');
-    const [k, hz] = Object.entries(b.horizons!).sort((a, c) => horizonMinutes(c[0]) - horizonMinutes(a[0]))[0];
-    return factor('mood', 0, moodValue(b!, k, hz, 'NIFTY '), 'stock position: index context only, no vote');
-  }
   if (!b || b.status !== 'ok' || !b.horizons || Object.keys(b.horizons).length === 0) {
-    return unavailable('mood', `MBM behaviour ${b?.status ?? 'absent'}`);
+    if (input.isIndex) return unavailable('mood', `MBM behaviour ${b?.status ?? 'absent'}`);
+    return factor('mood', 0, 'NIFTY expected move n/a (no live or stored prediction)', 'stock position: no NIFTY move-size read');
   }
   const [key, h] = Object.entries(b.horizons).sort((a, c) => horizonMinutes(c[0]) - horizonMinutes(a[0]))[0];
-  const value = moodValue(b, key, h, '');
-  if (!input.isLongOption) return factor('mood', 0, value, 'volatility context only (not a long option)');
-  // Move-size, never direction: a long option needs a move; a QUIET tape is decay with no move.
-  if (h.regime === 'ACTIVE') return factor('mood', 1, value, 'ACTIVE tape: a move is likely (either way)');
-  if (h.regime === 'QUIET') return factor('mood', -1, value, 'QUIET tape: decay without a move');
-  return factor('mood', 0, value, 'normal tape');
+  const call = moveCall(h.regime);
+  const beta = input.isIndex ? null : (input.beta ?? null);
+  const extras = [
+    ...(input.isIndex ? [] : [beta == null ? 'beta n/a' : `beta ${f2(beta)}`]),
+    ...(b.storedAsOf ? [`as of ${istLabel(b.storedAsOf)}`] : []),
+  ];
+  const value = `NIFTY ${key}: p(big) ${f2(h.p)} → ${call}${extras.length ? ` (${extras.join(', ')})` : ''}`;
+  if (!input.isLongOption) return factor('mood', 0, value, 'not a long option: expected move is context only');
+  if (!input.isIndex) {
+    if (beta == null) return factor('mood', 0, value, 'beta to NIFTY unavailable: no vote');
+    if (beta < BETA_MIN) return factor('mood', 0, value, `beta ${f2(beta)} < ${BETA_MIN}: the stock does not ride NIFTY's move`);
+  }
+  if (call === 'big move') return factor('mood', 1, value, 'big move expected: can outrun theta');
+  if (call === 'quiet') return factor('mood', -1, value, 'quiet session expected: theta dominates');
+  return factor('mood', 0, value, 'normal-size move expected');
 }

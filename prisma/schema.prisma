@@ -2807,3 +2807,54 @@ model MbmDailySignal {
   @@unique([instrument, signalDate, setup])
   @@map("mbm_daily_signals")
 }
+
+/// Overnight scorecard (docs/superpowers/specs/2026-10-20-overnight-scorecard-design.md §6): one
+/// deterministic per-factor scorecard per (symbol, side, window). OBSERVE data, places nothing.
+/// user_id null = a NEWS_IDEA scorecard (no position). Outcome fields are filled the next session:
+/// next_open / next_close of the UNDERLYING, move_bp = (close - open) / open x 1e4, gross.
+model AnalysisScorecard {
+  id         String    @id @default(cuid())
+  userId     String?   @map("user_id")
+  symbol     String // the scored instrument (the position's tradingsymbol, or the idea's underlying)
+  exchange   String
+  underlying String
+  side       String // BULLISH | BEARISH: the direction the position/idea needs
+  window     String // OVERNIGHT | PRE_OPEN | NEWS_IDEA
+  computedAt DateTime  @map("computed_at") @db.Timestamptz(6)
+  factors    Json // FactorScore[]: {name, points, value, reason, available}
+  total      Int
+  band       String // STRONG_AGAINST | AGAINST | NEUTRAL | SUPPORTS | STRONG_SUPPORTS
+  verdictId  String?   @map("verdict_id")
+  nextOpen   Float?    @map("next_open")
+  nextClose  Float?    @map("next_close")
+  moveBp     Float?    @map("move_bp")
+  filledAt   DateTime? @map("filled_at") @db.Timestamptz(6)
+
+  @@index([userId, window, computedAt(sort: Desc)])
+  @@index([symbol, computedAt(sort: Desc)])
+  @@map("analysis_scorecards")
+}
+
+/// News ideas (design §4): one Sonnet call per batch marks a CE/PE/no-trade IDEA per shortlisted
+/// F&O stock. Ideas only: never an order, never a paper trade. Outcome as on analysis_scorecards.
+model NewsIdea {
+  id           String    @id @default(cuid())
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  symbol       String
+  exchange     String
+  newsIds      String[]  @map("news_ids")
+  headline     String
+  idea         String // CE_IDEA | PE_IDEA | NO_TRADE
+  rationale    String
+  invalidation String
+  whatToDo     String    @map("what_to_do")
+  scorecardId  String?   @map("scorecard_id")
+  aiCallId     String?   @map("ai_call_id")
+  nextOpen     Float?    @map("next_open")
+  nextClose    Float?    @map("next_close")
+  moveBp       Float?    @map("move_bp")
+  filledAt     DateTime? @map("filled_at") @db.Timestamptz(6)
+
+  @@index([createdAt(sort: Desc)])
+  @@map("news_ideas")
+}

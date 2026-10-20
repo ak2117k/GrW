@@ -94,11 +94,15 @@ export class ScorecardRepository {
 
   /** Daily India VIX closes (last 1m close of each IST day) from mbm_bars_1m, oldest first. */
   async vixCloses(days: number): Promise<number[]> {
+    // The cutoff is computed here, not with make_interval(days => $1): Prisma binds the number with a
+    // type make_interval rejects, the query threw, and the fail-soft read reported "fewer than 5
+    // closes" with 40 sessions in the table (prod 2026-10-20).
+    const since = new Date(Date.now() - (Math.ceil(days * 1.6) + 5) * 86_400_000);
     const rows = await this.prisma.$queryRaw<Array<{ close: number }>>(Prisma.sql`
       SELECT close FROM (
         SELECT DISTINCT ON ((ts AT TIME ZONE 'Asia/Kolkata')::date) (ts AT TIME ZONE 'Asia/Kolkata')::date AS d, close
         FROM mbm_bars_1m
-        WHERE series = 'INDIAVIX' AND ts >= now() - make_interval(days => ${Math.ceil(days * 1.6) + 5})
+        WHERE series = 'INDIAVIX' AND ts >= ${since}
         ORDER BY (ts AT TIME ZONE 'Asia/Kolkata')::date, ts DESC
       ) t ORDER BY d DESC LIMIT ${days}`);
     return rows.map((r) => Number(r.close)).reverse();

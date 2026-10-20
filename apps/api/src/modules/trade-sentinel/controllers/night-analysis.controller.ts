@@ -4,6 +4,7 @@ import { ScorecardService } from '../../overnight-scorecard/scorecard.service';
 import { NewsIdeasService } from '../../overnight-scorecard/news-ideas.service';
 import { SentinelOvernightService } from '../services/sentinel-overnight.service';
 import { AFTER_CLOSE_EQUITY } from '../overnight/overnight-calendar';
+import { MbmStockChainCaptureService } from '../../mbm/services/mbm-stock-chain-capture.service';
 
 const IST_OFFSET_MIN = 330;
 
@@ -34,6 +35,7 @@ export class NightAnalysisController {
     private readonly scorecards: ScorecardService,
     private readonly newsIdeas: NewsIdeasService,
     private readonly overnight: SentinelOvernightService,
+    private readonly chains: MbmStockChainCaptureService,
   ) {}
 
   @Post('rerun')
@@ -53,6 +55,8 @@ export class NightAnalysisController {
 
   /** Walks back to the newest NSE session whose 15:45 IST scorecard window is due, then runs the night. */
   async run(now: Date): Promise<Record<string, unknown>> {
+    // Fresh option chains for the held underlyings first, so the OI factor is not "n/a".
+    const chainCapture = await this.chains.captureNow().catch((e) => ({ error: String(e) }));
     let closeDay: Date | null = null;
     let scorecards: unknown = null;
     for (let back = 0; back <= 7 && !closeDay; back++) {
@@ -65,13 +69,17 @@ export class NightAnalysisController {
       scorecards = res;
     }
     if (!closeDay) return { started: false, reason: 'no NSE session found in the last 7 days' };
-    const news = await this.newsIdeas.run('NIGHT', istAt(closeDay, 23, 30));
+    // The night batch runs on the EVE of the next session (a holiday eve is skipped on purpose, so a
+    // long weekend makes one batch, not three). Re-running: use now when it is that eve, else the
+    // close day's 23:30.
+    let news = await this.newsIdeas.run('NIGHT', now);
+    if (!news.ran) news = await this.newsIdeas.run('NIGHT', istAt(closeDay, 23, 30));
     const tag = `rerun-${now.toISOString().slice(0, 16).replace(/[-:T]/g, '')}`;
     const review = await this.overnight.runWindow(AFTER_CLOSE_EQUITY, istAt(closeDay, 15, 48), { rerunTag: tag });
     const session = closeDay.toISOString().slice(0, 10);
     this.logger.log(
-      `[night-analysis] re-run of ${session}: scorecards ${JSON.stringify(scorecards)} | news ${JSON.stringify(news)} | review ${JSON.stringify(review)}`,
+      `[night-analysis] re-run of ${session}: chains ${JSON.stringify(chainCapture)} | scorecards ${JSON.stringify(scorecards)} | news ${JSON.stringify(news)} | review ${JSON.stringify(review)}`,
     );
-    return { started: true, session, scorecards, newsIdeas: news, overnightReview: review };
+    return { started: true, session, chainCapture, scorecards, newsIdeas: news, overnightReview: review };
   }
 }

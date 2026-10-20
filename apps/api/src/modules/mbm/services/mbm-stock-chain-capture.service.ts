@@ -101,6 +101,28 @@ export class MbmStockChainCaptureService {
     }
   }
 
+  /**
+   * One capture of the watchlist NOW, outside the session-window gate — for the owner's
+   * "re-run night analysis", so the OI factor has the last session's chains (Angel quotes keep
+   * the last OI out of hours). Same owner session, no login; still needs the flag on.
+   */
+  async captureNow(): Promise<StockCaptureSummary> {
+    const idle: StockCaptureSummary = { ran: false, tick: 'NONE', stored: 0, calls: 0, captured: [], skipped: [] };
+    if (!this.active || this.running) return idle;
+    this.running = true;
+    const counter = { calls: 0 };
+    const skipped = new Set<string>();
+    try {
+      const { stored, captured } = await this.capture(counter, skipped);
+      return { ran: true, tick: 'NONE', stored, calls: counter.calls, captured, skipped: [...skipped] };
+    } catch (e) {
+      this.logger.warn(`[mbm] on-demand chain capture failed: ${errText(e)}`);
+      return { ran: true, tick: 'NONE', stored: 0, calls: counter.calls, captured: [], skipped: [...skipped], error: errText(e) };
+    } finally {
+      this.running = false;
+    }
+  }
+
   private skipOnce(day: string, name: string, why: string, skipped: Set<string>): void {
     skipped.add(name);
     if (this.loggedSkipsDay !== day) {

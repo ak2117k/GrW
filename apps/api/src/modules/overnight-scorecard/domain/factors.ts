@@ -345,8 +345,14 @@ function horizonMinutes(k: string): number {
 }
 
 export function scoreMood(input: MoodInput): FactorScore {
-  if (!input.isIndex) return factor('mood', 0, 'NIFTY-only model', 'stock position: market mood is index context only');
   const b = input.behaviour;
+  if (!input.isIndex) {
+    // Stocks get NIFTY's mood as context (shown, never a vote): the model is index-only.
+    const ok = b && b.status === 'ok' && b.horizons && Object.keys(b.horizons).length > 0;
+    if (!ok) return factor('mood', 0, 'NIFTY mood n/a (model runs in session)', 'stock position: index context only');
+    const [k, hz] = Object.entries(b.horizons!).sort((a, c) => horizonMinutes(c[0]) - horizonMinutes(a[0]))[0];
+    return factor('mood', 0, `NIFTY ${hz.regime} (${k}, p ${f2(hz.p)})`, 'stock position: index context only, no vote');
+  }
   if (!b || b.status !== 'ok' || !b.horizons || Object.keys(b.horizons).length === 0) {
     return unavailable('mood', `MBM behaviour ${b?.status ?? 'absent'}`);
   }

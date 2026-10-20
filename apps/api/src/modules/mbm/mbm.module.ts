@@ -40,6 +40,6 @@ import { MbmStockChainCaptureService } from './services/mbm-stock-chain-capture.
     MbmChainReader,
     MbmClient,
   ],
-  exports: [MbmClient, MBM_CONFIG, ChainWatchlistService, CHAIN_WATCHLIST, MbmChainReader],
+  exports: [MbmClient, MBM_CONFIG, ChainWatchlistService, CHAIN_WATCHLIST, MbmChainReader, MbmStockChainCaptureService],
 })
 export class MbmModule {}

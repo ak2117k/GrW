@@ -48,6 +48,7 @@ import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.mod
 import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-executor.module';
 import { MbmModule } from './modules/mbm/mbm.module';
 import { NightReportModule } from './modules/night-report/night-report.module';
+import { OvernightScorecardModule } from './modules/overnight-scorecard/overnight-scorecard.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
@@ -251,6 +252,8 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // Night report: one read-only morning page (GET /api/night-report) over the
     // night since the last NSE close. Reads only.
     NightReportModule,
+    // Overnight scorecard + news ideas (SCORECARD_ENABLED / NEWS_IDEAS_ENABLED, default off).
+    OvernightScorecardModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

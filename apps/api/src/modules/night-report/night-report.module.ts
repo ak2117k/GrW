@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MbmModule } from '../mbm/mbm.module';
 import { MbmClient } from '../mbm/services/mbm-client.service';
+import { OvernightScorecardModule } from '../overnight-scorecard/overnight-scorecard.module';
+import { ScorecardService } from '../overnight-scorecard/scorecard.service';
 import { parseAutoExitConfig } from '../sentinel-executor/domain/auto-exit.config';
 import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
 import { NightReportController } from './controllers/night-report.controller';
@@ -9,6 +11,7 @@ import { NIGHT_REPORT_STORE, NightReportRepository } from './repositories/night-
 import {
   NIGHT_REPORT_MOOD,
   NIGHT_REPORT_OPTIONS,
+  NIGHT_REPORT_SCORECARDS,
   NightReportService,
   type NightReportOptions,
 } from './services/night-report.service';
@@ -19,12 +22,13 @@ import {
  * freshness). Reads only; places nothing, writes nothing.
  */
 @Module({
-  imports: [PrismaModule, MbmModule],
+  imports: [PrismaModule, MbmModule, OvernightScorecardModule],
   controllers: [NightReportController],
   providers: [
     NightReportRepository,
     { provide: NIGHT_REPORT_STORE, useExisting: NightReportRepository },
     { provide: NIGHT_REPORT_MOOD, useExisting: MbmClient },
+    { provide: NIGHT_REPORT_SCORECARDS, useExisting: ScorecardService },
     {
       provide: NIGHT_REPORT_OPTIONS,
       useFactory: (): NightReportOptions => ({

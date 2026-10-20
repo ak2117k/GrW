@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import type { Block, ContextPacket } from '../services/context-packet.service';
 import type { ReviewKind } from './overnight-calendar';
 import type { Cue, OvernightDecay } from './overnight-evidence';
+import type { ScorecardBrief } from './scorecard-block';
 
 /**
  * The overnight half of the packet. `type`, not `interface`, throughout — the
@@ -58,6 +59,13 @@ export type OvernightSection = {
     sectorStrength: Block<Prisma.InputJsonValue>;
     underlyingChange: Block<Cue>;
   };
+  /**
+   * The position's deterministic scorecard (factor points, total, band). The key
+   * is ABSENT — not an absent block — unless SENTINEL_SCORECARD=on and a
+   * scorecard exists, so the packet is byte-identical to before otherwise, and
+   * its presence is what selects the scorecard prompt (see overnightPromptFor).
+   */
+  scorecard?: Block<ScorecardBrief>;
 };
 
 export type OvernightPacket = ContextPacket & { overnight: OvernightSection };

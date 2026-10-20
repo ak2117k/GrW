@@ -42,7 +42,9 @@ import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
 import { SentinelTickSource } from './adapters/tick-source.adapter';
 import { SentinelOvernightEvidenceAdapter } from './adapters/overnight-evidence.adapter';
 import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
-import { NULL_SCORECARD_PROVIDER, SCORECARD_PROVIDER } from './ports/scorecard.port';
+import { SCORECARD_PROVIDER } from './ports/scorecard.port';
+import { OvernightScorecardModule } from '../overnight-scorecard/overnight-scorecard.module';
+import { ScorecardService } from '../overnight-scorecard/scorecard.service';
 import { MACRO_CUES } from './ports/market-cues.port';
 import { SentinelOvernightService } from './services/sentinel-overnight.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -96,6 +98,7 @@ import { MARKET_EVENTS } from './ports/events.port';
  */
 @Module({
   imports: [
+    OvernightScorecardModule,
     PrismaModule,
     // Instrument master (token/expiry/underlying resolution) for the tick source.
     MarketDataModule,
@@ -207,7 +210,8 @@ import { MARKET_EVENTS } from './ports/events.port';
     // A position's latest scorecard for the overnight packet (SENTINEL_SCORECARD=on).
     // The no-op default answers "none" until the overnight-scorecard module's
     // ScorecardService is bound here instead (useExisting).
-    { provide: SCORECARD_PROVIDER, useValue: NULL_SCORECARD_PROVIDER },
+    // Overnight scorecard engine (stream B); latest() returns null unless SCORECARD_ENABLED=on.
+    { provide: SCORECARD_PROVIDER, useExisting: ScorecardService },
     // The live packet's macro reads the market-cues CACHE through this port —
     // `peek`, no I/O. The overnight adapter reaches the same instance lazily.
     { provide: MACRO_CUES, useExisting: MarketCuesService },

@@ -1,4 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { MbmChainReader } from '../mbm/services/mbm-chain-reader.service';
+import { ChainWatchlistService } from '../mbm/chain-watchlist';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
@@ -15,7 +17,7 @@ import { judgeTransportFrom } from '../trade-sentinel/services/llm-transport';
 import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
 import type { SessionClock } from '../market-hub/session-clock';
 import { NewsIdeasService } from './news-ideas.service';
-import { NOOP_WATCHLIST, SCORECARD_CHAINS, SCORECARD_LLM, SCORECARD_WATCHLIST, UNAVAILABLE_CHAINS, type ChainReader } from './ports';
+import { SCORECARD_CHAINS, SCORECARD_LLM, SCORECARD_WATCHLIST, type ChainReader, type WatchlistWriter } from './ports';
 import { ScorecardEngine } from './scorecard-engine';
 import { parseScorecardConfig, SCORECARD_CONFIG } from './scorecard.config';
 import { ScorecardRepository } from './scorecard.repository';
@@ -34,8 +36,24 @@ import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW, ScorecardService } fr
     { provide: SCORECARD_CLOCK, useFactory: () => makeSentinelClock(process.env.HUB_MCX_LATE_CLOSE) },
     { provide: SCORECARD_NOW, useValue: () => new Date() },
     // Stream A's per-symbol chain reader / watchlist: stubs until mbm/chain-watchlist.ts is merged.
-    { provide: SCORECARD_CHAINS, useValue: UNAVAILABLE_CHAINS },
-    { provide: SCORECARD_WATCHLIST, useValue: NOOP_WATCHLIST },
+    // Stream A (per-symbol chain capture): real chain reads + news-scan watchlist registrations.
+    {
+      provide: SCORECARD_CHAINS,
+      useFactory: (r: MbmChainReader): ChainReader => ({
+        latest: (symbol) => r.latestChain(symbol),
+        history: (symbol, sessions) => r.chainHistory(symbol, sessions),
+      }),
+      inject: [MbmChainReader],
+    },
+    {
+      provide: SCORECARD_WATCHLIST,
+      useFactory: (w: ChainWatchlistService): WatchlistWriter => ({
+        add: async (symbols, ttlHours) => {
+          w.add(symbols, ttlHours);
+        },
+      }),
+      inject: [ChainWatchlistService],
+    },
     {
       provide: SCORECARD_ENGINE,
       useFactory: (repo: ScorecardRepository, chains: ChainReader, cues: MarketCuesService, mood: MbmClient, clock: SessionClock) =>

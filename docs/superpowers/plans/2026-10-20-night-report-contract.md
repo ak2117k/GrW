@@ -18,6 +18,7 @@ interface NightReport {
   mood: Section<{ status: 'ok' | 'stale' | 'absent'; asOf: string | null;
                   horizons: Record<string, { p: number; regime: string; q25Bp: number | null; q75Bp: number | null }> }>;
   jobs: Section<JobItem[]>;
+  newsIdeas: Section<NewsIdeaItem[]>;  // overnight-scorecard: ideas since the last close, newest first
 }
 type Section<T> = T | { error: string };
 
@@ -33,7 +34,22 @@ interface PositionRow {
   kind: string; qty: number; entryPrice: number; ltp: number | null; pnl: number | null; pnlPct: number | null;
   held: boolean;                       // in AI_AUTO_EXIT_HOLD
   overnight: VerdictView | null; preOpen: VerdictView | null; live: VerdictView | null;
+  scorecard: Scorecard | null;         // newest OVERNIGHT/PRE_OPEN scorecard since the last close; null when none
+                                       // or when the scorecard read failed (fail-soft: never errors the section)
 }
+
+// Scorecard, FactorScore, NewsIdea: exactly as in
+// apps/api/src/modules/overnight-scorecard/scorecard.types.ts (docs/superpowers/plans/2026-10-20-overnight-scorecard-build.md).
+// Every Scorecard carries all seven factors in the order oi, fii_dii, vix, expiry, news, indicators, mood;
+// a factor with available:false has 0 points and its reason starts "unavailable:".
+type NewsIdeaItem = NewsIdea & {
+  scorecard: Scorecard | null;
+  nextOpen: number | null; nextClose: number | null;   // outcome: the next session's open/close of the underlying
+  moveBp: number | null;                               // (close − open) / open × 1e4, gross; null until filled
+  filledAt: string | null;                             // ISO, when the outcome was filled
+  url: string | null;                                  // the headline article's url (first of newsIds); null when unknown
+};
+// newsIdeas is [] when the scorecard module is absent or NEWS_IDEAS_ENABLED is off and nothing was stored.
 
 interface NewsItem { id: string; title: string; summary: string | null; source: string; url: string;
                      publishedAt: string; sentiment: string | null; sentimentScore: number | null; symbols: SymbolRef[] }

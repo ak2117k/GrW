@@ -7,6 +7,8 @@
  * source never blanks the page. Times are ISO UTC strings.
  */
 
+import type { NewsIdea, Scorecard } from '../../overnight-scorecard/scorecard.types';
+
 export type Section<T> = T | { error: string };
 
 /**
@@ -71,7 +73,22 @@ export interface PositionRow {
   overnight: VerdictView | null;
   preOpen: VerdictView | null;
   live: VerdictView | null;
+  /** The newest OVERNIGHT / PRE_OPEN scorecard since the last close; null when none or the read failed. */
+  scorecard: Scorecard | null;
 }
+
+/**
+ * One news idea (overnight-scorecard). The outcome fields and `url` (the headline article's url)
+ * are null until known.
+ */
+export type NewsIdeaItem = NewsIdea & {
+  scorecard: Scorecard | null;
+  nextOpen: number | null;
+  nextClose: number | null;
+  moveBp: number | null;
+  filledAt: string | null;
+  url: string | null;
+};
 
 export interface NewsItem {
   id: string;
@@ -142,4 +159,6 @@ export interface NightReport {
   dailySetups: Section<SetupItem[]>;
   mood: Section<MoodView>;
   jobs: Section<JobItem[]>;
+  /** News ideas created since the last NSE close, newest first. */
+  newsIdeas: Section<NewsIdeaItem[]>;
 }

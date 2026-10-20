@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { baseSymbol } from '../../news-events/keys';
 import {
@@ -24,6 +24,7 @@ import type {
   EventItem,
   JobItem,
   MoodView,
+  NewsIdeaItem,
   NewsSection,
   NightReport,
   NightSummary,
@@ -32,6 +33,7 @@ import type {
   Section,
   SetupItem,
 } from '../domain/night-report.types';
+import type { Scorecard } from '../../overnight-scorecard/scorecard.types';
 import { NIGHT_REPORT_STORE, type NightReportStore } from '../repositories/night-report.repository';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
@@ -51,6 +53,17 @@ export interface NightReportOptions {
 
 export const NIGHT_REPORT_OPTIONS = Symbol('NIGHT_REPORT_OPTIONS');
 export const NIGHT_REPORT_MOOD = Symbol('NIGHT_REPORT_MOOD');
+export const NIGHT_REPORT_SCORECARDS = Symbol('NIGHT_REPORT_SCORECARDS');
+
+/** The part of ScorecardService the report reads (overnight-scorecard module). */
+export interface ScorecardSource {
+  forTrackers(
+    userId: string,
+    trackers: ReadonlyArray<{ id: string; symbol: string; exchange: string }>,
+    now: Date,
+  ): Promise<Map<string, Scorecard>>;
+  newsIdeasSince(since: Date): Promise<NewsIdeaItem[]>;
+}
 
 /** At most this many articles are read for one window (a long holiday weekend). */
 const NEWS_CAP = 600;
@@ -77,21 +90,23 @@ export class NightReportService {
     @Inject(NIGHT_REPORT_STORE) private readonly store: NightReportStore,
     @Inject(NIGHT_REPORT_MOOD) private readonly moodSource: MoodSource,
     @Inject(NIGHT_REPORT_OPTIONS) private readonly opts: NightReportOptions,
+    @Optional() @Inject(NIGHT_REPORT_SCORECARDS) private readonly scorecards?: ScorecardSource,
   ) {}
 
   async build(userId: string, now: Date = new Date()): Promise<NightReport> {
     const window = nightWindow(now, this.opts.clock);
     const from = new Date(window.from);
 
-    const positions = await this.safe('positions', () => this.positions(userId, from));
+    const positions = await this.safe('positions', () => this.positions(userId, from, now));
     const held = isError(positions) ? [] : heldKeys(positions);
 
-    const [news, events, dailySetups, mood, jobs] = await Promise.all([
+    const [news, events, dailySetups, mood, jobs, newsIdeas] = await Promise.all([
       this.safe('news', () => this.news(from, now, held)),
       this.safe('events', () => this.events(now, window, held)),
       this.safe('dailySetups', () => this.dailySetups(now)),
       this.safe('mood', () => this.mood()),
       this.safe('jobs', () => this.jobs(userId, now, from)),
+      this.safe('newsIdeas', () => (this.scorecards ? this.scorecards.newsIdeasSince(from) : Promise.resolve([]))),
     ]);
 
     return {
@@ -104,7 +119,19 @@ export class NightReportService {
       dailySetups,
       mood,
       jobs,
+      newsIdeas,
     };
+  }
+
+  /** Fail-soft: a scorecard read failure leaves every row's scorecard null, never the section an error. */
+  private async scorecardsFor(userId: string, trackers: ReadonlyArray<{ id: string; symbol: string; exchange: string }>, now: Date) {
+    if (!this.scorecards) return new Map<string, Scorecard>();
+    try {
+      return await this.scorecards.forTrackers(userId, trackers, now);
+    } catch (e) {
+      this.logger.warn(`[night-report] scorecards failed: ${e instanceof Error ? e.message : String(e)}`);
+      return new Map<string, Scorecard>();
+    }
   }
 
   private async safe<T>(name: string, fn: () => Promise<T>): Promise<Section<T>> {
@@ -117,7 +144,7 @@ export class NightReportService {
     }
   }
 
-  private async positions(userId: string, from: Date): Promise<PositionRow[]> {
+  private async positions(userId: string, from: Date, now: Date): Promise<PositionRow[]> {
     const trackers = await this.store.openTrackers(userId);
     if (trackers.length === 0) return [];
 
@@ -140,6 +167,7 @@ export class NightReportService {
     );
     const byTracker = new Map<string, VerdictRow[]>();
     for (const r of rows) byTracker.set(r.trackerId, [...(byTracker.get(r.trackerId) ?? []), r]);
+    const scorecards = await this.scorecardsFor(userId, trackers, now);
 
     return trackers.map((t) => {
       const name = names.get(t.id) ?? null;
@@ -155,6 +183,7 @@ export class NightReportService {
         pnlPct: t.pnlPercent,
         held: isHeld(this.opts.hold, t),
         ...pickVerdicts(byTracker.get(t.id) ?? []),
+        scorecard: scorecards.get(t.id) ?? null,
       };
     });
   }

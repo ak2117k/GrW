@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
-import type { NightReport } from '@/types/nightReport.types';
+import type { NightReport, PositionRow } from '@/types/nightReport.types';
 import fixture from '../../../tests/fixtures/night-report.json';
 import { NightReportView } from './NightReportView';
 
@@ -103,5 +103,53 @@ describe('NightReportView', () => {
     expect(html).toContain('No daily setups fired');
     expect(html).toContain('Market mood is absent');
     expect(html).not.toContain('load this section');
+  });
+
+  it('shelves HOLDINGs in a collapsed section at the bottom, compact and without a verdict badge', () => {
+    const rows = report.positions as PositionRow[];
+    const option = rows[0];
+    const holding = (id: string, symbol: string, pnl: number | null): PositionRow => ({
+      ...rows[1],
+      trackerId: id,
+      instrument: { symbol, exchange: 'NSE', token: null, chartHref: `/charts?symbol=${symbol}&exchange=NSE` },
+      kind: 'HOLDING',
+      qty: 12,
+      pnl,
+      pnlPct: pnl == null ? null : 2.5,
+      overnight: null,
+      preOpen: null,
+      live: null,
+      scorecard: null,
+    });
+    const html = render({ ...report, positions: [option, holding('h1', 'TCS', 1200), holding('h2', 'ITC', null)] });
+
+    // The reviewed position stays on top; the Positions count is F&O only.
+    expect(html.match(/data-testid="night-position"/g)?.length).toBe(1);
+    expect(html).toContain('Positions<span class="text-xs font-normal normal-case text-[var(--color-text-muted)]">(1)</span>');
+
+    const shelf = html.slice(html.indexOf('data-testid="night-holdings"'));
+    expect(html.indexOf('data-testid="night-holdings"')).toBeGreaterThan(html.indexOf('aria-label="Night jobs"'));
+    expect(shelf).toMatch(/^data-testid="night-holdings"><details class="[^"]*"><summary/); // collapsed: no `open`
+    expect(shelf).toContain('Long-term holdings — not reviewed overnight (F&amp;O positions only)');
+    expect(shelf).toContain('(2)');
+    expect(shelf.match(/data-testid="night-holding"/g)?.length).toBe(2);
+    expect(shelf).toContain('Open TCS chart');
+    expect(shelf).toContain('Qty 12');
+    expect(shelf).toContain('+₹1,200.00');
+    expect(shelf).toContain('(+2.50%)');
+    expect(shelf).not.toContain('Not judged');
+    expect(html).not.toContain('Not judged');
+  });
+
+  it('only holdings: no F&O positions line, holdings still shelved', () => {
+    const rows = report.positions as PositionRow[];
+    const html = render({ ...report, positions: [{ ...rows[1], kind: 'HOLDING', overnight: null }] });
+    expect(html).toContain('No open F&amp;O positions overnight');
+    expect(html.match(/data-testid="night-holding"/g)?.length).toBe(1);
+  });
+
+  it('no holdings section without holdings, or when positions failed', () => {
+    expect(render(report)).not.toContain('night-holdings');
+    expect(render({ ...report, positions: { error: 'db down' } })).not.toContain('night-holdings');
   });
 });

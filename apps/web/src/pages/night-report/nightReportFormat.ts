@@ -77,6 +77,27 @@ export function windowLabel(window: string): string {
   return WINDOW_LABEL[window] ?? sentenceCase(window);
 }
 
+// ---------------------------------------------------------------- holdings
+
+/** A delivery holding (tracker kind `HOLDING`): the overnight review skips these by design. */
+export function isHolding(p: Pick<PositionRow, 'kind'>): boolean {
+  return String(p.kind ?? '').trim().toUpperCase() === 'HOLDING';
+}
+
+/**
+ * Splits the open trackers into the positions the overnight review judges (F&O,
+ * kind `POSITION`, and anything not a holding) and the long-term holdings it never
+ * reviews. Order within each list is kept.
+ */
+export function splitHoldings<T extends Pick<PositionRow, 'kind'>>(rows: T[]): { positions: T[]; holdings: T[] } {
+  const positions: T[] = [];
+  const holdings: T[] = [];
+  for (const r of rows) (isHolding(r) ? holdings : positions).push(r);
+  return { positions, holdings };
+}
+
+export const HOLDINGS_TITLE = 'Long-term holdings — not reviewed overnight (F&O positions only)';
+
 // ---------------------------------------------------------------- setups
 
 const RIBBON_TAG: Record<string, string> = { '10_30': 'EMA 10/30', '12_26': 'EMA 12/26' };

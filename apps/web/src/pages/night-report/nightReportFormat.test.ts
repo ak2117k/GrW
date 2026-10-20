@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  HOLDINGS_TITLE,
+  isHolding,
+  splitHoldings,
   safeExternalUrl,
   bpPct,
   isSectionError,
@@ -114,5 +117,28 @@ describe('safeExternalUrl (feed URLs are external input)', () => {
     for (const u of ['javascript:alert(1)', ' JAVASCRIPT:alert(1)', 'data:text/html,<b>x</b>', '/charts', 'not a url', '', null, undefined]) {
       expect(safeExternalUrl(u as string | null | undefined)).toBeNull();
     }
+  });
+});
+
+describe('holdings vs reviewed positions', () => {
+  const rows = [
+    { trackerId: 'a', kind: 'POSITION' },
+    { trackerId: 'b', kind: 'HOLDING' },
+    { trackerId: 'c', kind: 'holding' },
+    { trackerId: 'd', kind: 'OPTION' },
+  ];
+  it('recognises the HOLDING kind only', () => {
+    expect(isHolding({ kind: 'HOLDING' })).toBe(true);
+    expect(isHolding({ kind: ' holding ' })).toBe(true);
+    expect(isHolding({ kind: 'POSITION' })).toBe(false);
+    expect(isHolding({ kind: '' })).toBe(false);
+  });
+  it('splits holdings out and keeps the order of each list', () => {
+    const { positions, holdings } = splitHoldings(rows);
+    expect(positions.map((r) => r.trackerId)).toEqual(['a', 'd']);
+    expect(holdings.map((r) => r.trackerId)).toEqual(['b', 'c']);
+  });
+  it('names the section for what it is', () => {
+    expect(HOLDINGS_TITLE).toBe('Long-term holdings — not reviewed overnight (F&O positions only)');
   });
 });

@@ -79,6 +79,50 @@ import { overnightPromptFor } from '../prompts/sentinel-overnight-prompt';
  */
 export const OVERNIGHT_FAILURE_LIMIT = 3;
 
+/** Env: how many positions one window works on at once (judge calls in flight from this window). */
+export const SENTINEL_OVERNIGHT_CONCURRENCY_KEY = 'SENTINEL_OVERNIGHT_CONCURRENCY';
+export const DEFAULT_OVERNIGHT_CONCURRENCY = 3;
+/** The VPS is 1 vCPU / 2 GB; each CLI judge is its own process. */
+export const MAX_OVERNIGHT_CONCURRENCY = 4;
+
+/**
+ * `SENTINEL_OVERNIGHT_CONCURRENCY` as a whole number clamped to 1..4; unset or
+ * not a number is the default (3).
+ *
+ * This is the WINDOW's own cap. Every job still goes through
+ * `SentinelCycleService.runShared`, whose global `JUDGE_CONCURRENCY` (minus the
+ * live reservation) is shared with the live judges and is NOT raised here — the
+ * effective overnight parallelism is the smaller of the two.
+ */
+export function overnightConcurrency(raw: string | undefined): number {
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_OVERNIGHT_CONCURRENCY;
+  return Math.min(MAX_OVERNIGHT_CONCURRENCY, Math.max(1, Math.floor(n)));
+}
+
+/**
+ * Runs `tasks` with at most `limit` in flight, in order. A task that throws is
+ * handed to `onError` and never stops the others.
+ */
+export async function runBounded(
+  tasks: ReadonlyArray<() => Promise<void>>,
+  limit: number,
+  onError: (err: unknown, index: number) => void,
+): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < tasks.length) {
+      const i = next++;
+      try {
+        await tasks[i]();
+      } catch (err) {
+        onError(err, i);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, tasks.length)) }, worker));
+}
+
 /** A source call's outcome: its value, or the error it threw. */
 export type Sourced<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -276,7 +320,9 @@ export function assembleOvernightSection(input: SectionInputs): OvernightSection
  * THE SAME CAP AS THE LIVE JUDGES. Every judgement runs inside
  * `SentinelCycleService.runShared`, so the overnight calls share
  * `JUDGE_CONCURRENCY` and the one-in-flight-per-position rule with the live
- * ones, and queue for a slot rather than racing them.
+ * ones, and queue for a slot rather than racing them. On top of that, a window
+ * works on at most `SENTINEL_OVERNIGHT_CONCURRENCY` (1..4, default 3) positions
+ * at once — see {@link overnightConcurrency}.
  *
  * ONCE PER POSITION PER WINDOW, durably: the window tag is written into the
  * row's `triggeredBy` and checked before judging (a restart finds it), and an
@@ -442,7 +488,11 @@ export class SentinelOvernightService {
     // rule (and helper) the runner's tick uses. Outside that, the live slot is
     // not reserved and overnight reviews may use every slot.
     const heldVenues = [...new Set(book.map((r) => r.exchange))];
-    const jobs: Array<Promise<void>> = [];
+    // The wall clock at dispatch: a job that waits for a pool slot has that wait
+    // counted by its venue-open check and its failure backoff, exactly as when
+    // every job was started at once.
+    const dispatchedWall = Date.now();
+    const jobs: Array<{ entry: RosterEntry; run: () => Promise<void> }> = [];
     for (const userId of users) {
       let entries: RosterEntry[];
       try {
@@ -487,11 +537,32 @@ export class SentinelOvernightService {
         claims.add(entry.trackerId);
         const pre: PreOpenInput | undefined =
           window.kind === 'PRE_OPEN_CHECK' ? { match, reason: preOpen?.reason ?? null } : undefined;
-        jobs.push(this.reviewOne(entry, window, tag, now, claims, report, heldVenues, pre));
+        jobs.push({
+          entry,
+          run: () => this.reviewOne(entry, window, tag, now, claims, report, heldVenues, pre, dispatchedWall),
+        });
       }
     }
-    await Promise.all(jobs);
+    // Bounded: at most SENTINEL_OVERNIGHT_CONCURRENCY positions in flight from this
+    // window (the shared judge cap in runShared still applies on top).
+    await runBounded(
+      jobs.map((j) => j.run),
+      this.concurrency,
+      (err, i) => {
+        // reviewOne handles its own failures; this is the backstop so one
+        // unexpected throw cannot abort the rest of the window.
+        const e = jobs[i].entry;
+        claims.delete(e.trackerId);
+        report.failed += 1;
+        this.logger.error(`overnight review: unexpected failure for ${e.symbol} (${e.trackerId}) in ${tag}: ${describe(err)}`);
+      },
+    );
     return report;
+  }
+
+  /** SENTINEL_OVERNIGHT_CONCURRENCY, clamped 1..4 (default 3). */
+  private get concurrency(): number {
+    return overnightConcurrency(this.config.get<string>(SENTINEL_OVERNIGHT_CONCURRENCY_KEY));
   }
 
   private async reviewOne(
@@ -503,6 +574,7 @@ export class SentinelOvernightService {
     report: WindowReport,
     heldVenues: string[] = [],
     preOpen?: PreOpenInput,
+    dispatchedWall: number = Date.now(),
   ): Promise<void> {
     const failKey = `${entry.trackerId}|${tag}`;
     try {
@@ -519,7 +591,7 @@ export class SentinelOvernightService {
       return;
     }
 
-    const startedWall = Date.now();
+    const startedWall = dispatchedWall;
     const current = () => (this.clockNow ? this.clockNow() : new Date(now.getTime() + (Date.now() - startedWall)));
     try {
       await this.cycle.runShared(entry.trackerId, () => this.judgeAndRecord(entry, window, tag, now, preOpen), {

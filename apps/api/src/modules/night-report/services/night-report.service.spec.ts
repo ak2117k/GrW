@@ -84,6 +84,8 @@ describe('NightReportService', () => {
     expect(opt.held).toBe(false);
     expect(cash.underlying).toBeNull();
     expect(cash.held).toBe(true);
+    // The tracker kind passes through: the web shelves HOLDINGs (not reviewed overnight) apart.
+    expect(positions.map((p) => p.kind)).toEqual(['POSITION', 'HOLDING']);
 
     const news = ok(r.news);
     expect(news.onPositions.map((g) => g.symbol.symbol).sort()).toEqual(['KEI', 'RELIANCE-EQ']); // a cash group links to the held instrument itself

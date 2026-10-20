@@ -34,6 +34,7 @@ export interface PositionRow {
   instrument: SymbolRef;
   /** The underlying for options and futures. */
   underlying: SymbolRef | null;
+  /** Tracker kind: `POSITION` (F&O, reviewed overnight) or `HOLDING` (delivery, never reviewed overnight). */
   kind: string;
   qty: number;
   entryPrice: number;

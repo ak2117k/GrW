@@ -51,6 +51,8 @@ import {
   verdictLabel,
   verdictTone,
   windowLabel,
+  HOLDINGS_TITLE,
+  splitHoldings,
 } from './nightReportFormat';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
@@ -388,6 +390,43 @@ function PositionCard({ p }: { p: PositionRow }) {
   );
 }
 
+/** One delivery holding, compact: symbol, qty, P&L. No verdict — the overnight review never judges these. */
+function HoldingRow({ p }: { p: PositionRow }) {
+  const pnlCls = p.pnl == null ? MUTED : p.pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
+  return (
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 py-1.5 text-xs" data-testid="night-holding">
+      <SymbolChip symbol={p.instrument} subtle />
+      <span className={cn('tabular-nums', SECONDARY)}>Qty {p.qty}</span>
+      <span className={cn('ml-auto tabular-nums font-medium', pnlCls)}>
+        {rupees(p.pnl, true)}
+        {p.pnlPct != null && Number.isFinite(p.pnlPct) && (
+          <span className="ml-1 text-[11px]">({p.pnlPct >= 0 ? '+' : '−'}{Math.abs(p.pnlPct).toFixed(2)}%)</span>
+        )}
+      </span>
+    </li>
+  );
+}
+
+/** Long-term holdings, collapsed at the bottom of the page: the overnight review covers F&O positions only. */
+function HoldingsSection({ rows }: { rows: PositionRow[] }) {
+  return (
+    <section aria-label={HOLDINGS_TITLE} data-testid="night-holdings">
+      <details className={cn(CARD, 'group')}>
+        <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 text-sm [&::-webkit-details-marker]:hidden">
+          <ChevronRight size={14} className={cn('shrink-0 transition-transform group-open:rotate-90', MUTED)} />
+          <span className={cn('font-semibold', SECONDARY)}>{HOLDINGS_TITLE}</span>
+          <span className={cn('text-xs', MUTED)}>({rows.length})</span>
+        </summary>
+        <ul className="divide-y divide-[var(--color-border-subtle)] pt-1">
+          {rows.map((p) => (
+            <HoldingRow key={p.trackerId} p={p} />
+          ))}
+        </ul>
+      </details>
+    </section>
+  );
+}
+
 // ---------------------------------------------------------------- news
 
 const SENTIMENT_DOT = {
@@ -685,18 +724,22 @@ export function NightReportView({
   const count = <T,>(v: Section<T[]>) => (isSectionError(v) ? undefined : (v as T[]).length);
   // An API from before the scorecard build sends no `newsIdeas`; show it as empty, not failed.
   const newsIdeas: Section<NewsIdeaRow[]> = report.newsIdeas ?? [];
+  // Delivery holdings are never reviewed overnight: shelved at the bottom, not shown as "Not judged".
+  const split = isSectionError(report.positions) ? null : splitHoldings(report.positions as PositionRow[]);
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-4">
       <Header report={report} onRefresh={onRefresh} refreshing={refreshing} onRerun={onRerun} rerunning={rerunning} rerunNote={rerunNote} />
 
-      <SectionShell title="Positions" count={count(report.positions)}>
+      <SectionShell title="Positions" count={split ? split.positions.length : undefined}>
         <Guard value={report.positions}>
-          {(rows) =>
-            rows.length === 0 ? (
-              <Empty text="No open positions overnight" />
+          {() =>
+            !split || split.positions.length === 0 ? (
+              <Empty
+                text={split && split.holdings.length > 0 ? 'No open F&O positions overnight' : 'No open positions overnight'}
+              />
             ) : (
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                {rows.map((p) => (
+                {split.positions.map((p) => (
                   <PositionCard key={p.trackerId} p={p} />
                 ))}
               </div>
@@ -742,6 +785,8 @@ export function NightReportView({
       <SectionShell title="Night jobs">
         <Guard value={report.jobs}>{(j) => <JobsStrip jobs={j} />}</Guard>
       </SectionShell>
+
+      {split && split.holdings.length > 0 && <HoldingsSection rows={split.holdings} />}
 
       <p className={cn('text-[11px]', MUTED)}>Generated {istDateTime(report.generatedAt)} IST</p>
     </div>

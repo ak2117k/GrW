@@ -1,6 +1,8 @@
 import { Logger } from '@nestjs/common';
 import {
+  DEFAULT_OVERNIGHT_CONCURRENCY,
   OVERNIGHT_FAILURE_LIMIT,
+  overnightConcurrency,
   SentinelOvernightService,
   assembleOvernightSection,
   formatOvernightReason,
@@ -409,6 +411,8 @@ function makeSvc(
     scorecardFlag?: string;
     /** The 11th constructor argument; undefined = not passed (the @Optional default). */
     scorecards?: ScorecardProvider;
+    /** SENTINEL_OVERNIGHT_CONCURRENCY's raw value; undefined = unset. */
+    concurrency?: string;
   } = {},
 ) {
   const book: RosterEntry[] = opts.book ?? [
@@ -453,7 +457,9 @@ function makeSvc(
         ? (opts.lateClose ?? '')
         : key === 'SENTINEL_SCORECARD'
           ? opts.scorecardFlag
-          : opts.enabled === false
+          : key === 'SENTINEL_OVERNIGHT_CONCURRENCY'
+            ? opts.concurrency
+            : opts.enabled === false
             ? 'false'
             : 'true',
     ),
@@ -617,6 +623,117 @@ describe('SentinelOvernightService.runWindow', () => {
     t.judgeOvernight.mockRejectedValueOnce(new Error('bad reply'));
     await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:50'));
     expect(t.record).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('overnightConcurrency (SENTINEL_OVERNIGHT_CONCURRENCY)', () => {
+  it('defaults to 3 when unset or not a number, and clamps to 1..4', () => {
+    expect(overnightConcurrency(undefined)).toBe(DEFAULT_OVERNIGHT_CONCURRENCY);
+    expect(DEFAULT_OVERNIGHT_CONCURRENCY).toBe(3);
+    expect(overnightConcurrency('')).toBe(3);
+    expect(overnightConcurrency('lots')).toBe(3);
+    expect(overnightConcurrency('0')).toBe(1);
+    expect(overnightConcurrency('-2')).toBe(1);
+    expect(overnightConcurrency('2')).toBe(2);
+    expect(overnightConcurrency(' 4 ')).toBe(4);
+    expect(overnightConcurrency('9')).toBe(4);
+    expect(overnightConcurrency('2.7')).toBe(2);
+  });
+});
+
+describe('SentinelOvernightService — bounded concurrency within a window', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const PRE = ist('2026-10-13', '08:50');
+  const six = () => ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'].map((id) => entry(id));
+
+  /** A judge that takes a few ms and records the most calls ever in flight at once. */
+  function slowJudge(t: ReturnType<typeof makeSvc>, failFor: string[] = []) {
+    const seen = { inFlight: 0, max: 0, order: [] as string[] };
+    t.judgeOvernight.mockImplementation(async (packet: { position: { symbol: string } }) => {
+      seen.inFlight += 1;
+      seen.max = Math.max(seen.max, seen.inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      seen.inFlight -= 1;
+      seen.order.push(packet.position.symbol);
+      if (failFor.includes(packet.position.symbol)) throw new Error('claude CLI: timed out');
+      return VERDICT;
+    });
+    return seen;
+  }
+
+  it.each([
+    [undefined, 3],
+    ['1', 1],
+    ['2', 2],
+    ['9', 4],
+  ])('SENTINEL_OVERNIGHT_CONCURRENCY=%s runs up to %i judgements at once, and judges every position', async (raw, cap) => {
+    const t = makeSvc({ book: six(), concurrency: raw });
+    const seen = slowJudge(t);
+    const report = await t.svc.runWindow(PRE_OPEN, PRE);
+    expect(seen.max).toBe(cap);
+    expect(report).toEqual(expect.objectContaining({ picked: 6, judged: 6, failed: 0, alreadyDone: 0 }));
+    expect(t.record).toHaveBeenCalledTimes(6);
+  });
+
+  it('one failure does not stop the rest; picked / judged / failed / alreadyDone / deferred and the tag stay exact', async () => {
+    const book = six().map((e) => ({ ...e, symbol: e.trackerId }));
+    const done = new Set<string>(['p4|window:PRE_OPEN_REVIEW:ALL:2026-10-13']);
+    const t = makeSvc({ book, done });
+    const seen = slowJudge(t, ['p2']);
+    const first = await t.svc.runWindow(PRE_OPEN, PRE);
+    expect(first).toEqual({
+      window: 'window:PRE_OPEN_REVIEW:ALL:2026-10-13',
+      picked: 6,
+      judged: 4,
+      alreadyDone: 1,
+      failed: 1,
+      deferred: 0,
+      droppedAtOpen: 0,
+      skippedNoInput: 0,
+    });
+    expect(seen.max).toBe(3);
+    expect(t.record.mock.calls.map((c) => c[0].trackerId).sort()).toEqual(['p1', 'p3', 'p5', 'p6']);
+    expect(t.record.mock.calls.every((c) => c[0].triggeredBy[1] === first.window)).toBe(true);
+
+    // Ten seconds later: the failed one is in backoff, the rest are claimed.
+    const again = await t.svc.runWindow(PRE_OPEN, new Date(PRE.getTime() + 10_000));
+    expect(again).toEqual(expect.objectContaining({ picked: 6, judged: 0, alreadyDone: 5, deferred: 1, failed: 0 }));
+    expect(t.judgeOvernight).toHaveBeenCalledTimes(5);
+  });
+
+  it('jobs still waiting for a pool slot at the open are dropped and counted, never judged', async () => {
+    const t = makeSvc({ book: six(), concurrency: '1' });
+    t.svc.clockNow = () => ist('2026-10-13', '09:01');
+    const report = await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:56'));
+    expect(report).toEqual(expect.objectContaining({ picked: 6, droppedAtOpen: 6, judged: 0, failed: 0 }));
+    expect(t.judgeOvernight).not.toHaveBeenCalled();
+  });
+
+  it('a job that waited in the pool has the wait counted by its open check', async () => {
+    // 08:56:00 start, MCX opens 09:00 and a job needs CLI_TIMEOUT_MS (3 min) before
+    // it: the last start is 08:57:00. With one slot and a 40 s judge, the later
+    // jobs reach their turn past 08:57 and are dropped rather than started.
+    jest.useFakeTimers({ now: ist('2026-10-13', '08:56') });
+    try {
+      const book = ['m1', 'm2', 'm3'].map((id) => entry(id, { exchange: 'MCX', symbol: 'CRUDEOIL16OCT265600CE' }));
+      const t = makeSvc({ book, concurrency: '1' });
+      t.judgeOvernight.mockImplementation(async () => {
+        await new Promise((r) => setTimeout(r, 40_000));
+        return VERDICT;
+      });
+      const run = t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:56'));
+      await jest.advanceTimersByTimeAsync(200_000);
+      const report = await run;
+      expect(report).toEqual(expect.objectContaining({ picked: 3, judged: 2, droppedAtOpen: 1 }));
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

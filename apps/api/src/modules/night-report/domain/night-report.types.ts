@@ -62,6 +62,7 @@ export interface PositionRow {
   instrument: SymbolRef;
   /** The contract's underlying; null for a cash position. */
   underlying: SymbolRef | null;
+  /** Tracker kind: `POSITION` (F&O, reviewed overnight) or `HOLDING` (delivery, never reviewed overnight). */
   kind: string;
   qty: number;
   entryPrice: number;

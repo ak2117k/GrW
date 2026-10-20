@@ -11,11 +11,15 @@ import { MbmChainCaptureService } from './services/mbm-chain-capture.service';
 import { MBM_CALENDAR, MBM_NOW, MbmBarRefresherService } from './services/mbm-bar-refresher.service';
 import { MBM_FETCH, MbmClient } from './services/mbm-client.service';
 import { MbmController } from './controllers/mbm.controller';
+import { CHAIN_WATCHLIST, ChainWatchlistService } from './chain-watchlist';
+import { MbmChainReader } from './services/mbm-chain-reader.service';
+import { MbmStockChainCaptureService } from './services/mbm-stock-chain-capture.service';
 
 /**
  * Market-behaviour model, M2 serving (docs/superpowers/plans/2026-10-19-mbm-m2-serving.md §4):
  * the 1m bar refresher feeding mbm_bars_1m and a fail-open proxy to the MBM service, plus the NIFTY
- * option-chain capture into mbm_chain_snapshots (MBM_CHAIN_CAPTURE, independent of MBM_ENABLED).
+ * option-chain capture into mbm_chain_snapshots (MBM_CHAIN_CAPTURE, independent of MBM_ENABLED), and
+ * the per-symbol capture of the chain watchlist (MBM_CHAIN_CAPTURE_STOCKS) with its read helpers.
  * Inert while MBM_ENABLED=off (the default). Observe only — nothing trades on it.
  */
 @Module({
@@ -30,8 +34,12 @@ import { MbmController } from './controllers/mbm.controller';
     MbmBarRefresherService,
     MbmChainRepository,
     MbmChainCaptureService,
+    ChainWatchlistService,
+    { provide: CHAIN_WATCHLIST, useExisting: ChainWatchlistService },
+    MbmStockChainCaptureService,
+    MbmChainReader,
     MbmClient,
   ],
-  exports: [MbmClient, MBM_CONFIG],
+  exports: [MbmClient, MBM_CONFIG, ChainWatchlistService, CHAIN_WATCHLIST, MbmChainReader],
 })
 export class MbmModule {}

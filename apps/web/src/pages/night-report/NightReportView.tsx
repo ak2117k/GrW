@@ -131,7 +131,21 @@ function Guard<T>({ value, children }: { value: Section<T>; children: (v: T) => 
 
 // ---------------------------------------------------------------- header
 
-function Header({ report, onRefresh, refreshing }: { report: NightReport; onRefresh?: () => void; refreshing?: boolean }) {
+function Header({
+  report,
+  onRefresh,
+  refreshing,
+  onRerun,
+  rerunning,
+  rerunNote,
+}: {
+  report: NightReport;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  onRerun?: () => void;
+  rerunning?: boolean;
+  rerunNote?: string | null;
+}) {
   const w = report.window;
   return (
     <header className="space-y-2">
@@ -144,6 +158,17 @@ function Header({ report, onRefresh, refreshing }: { report: NightReport; onRefr
             {w.nextOpen && <> · next open {istDateTime(w.nextOpen)}</>}
           </p>
         </div>
+        {onRerun && (
+          <button
+            type="button"
+            onClick={onRerun}
+            disabled={rerunning}
+            className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded border border-[var(--color-border-default)] px-3 text-sm text-[var(--color-text-secondary)] disabled:opacity-50"
+          >
+            <Moon size={14} className={cn(rerunning && 'animate-pulse')} />
+            <span>{rerunning ? 'Re-running…' : 'Re-run analysis'}</span>
+          </button>
+        )}
         {onRefresh && (
           <button
             type="button"
@@ -157,6 +182,11 @@ function Header({ report, onRefresh, refreshing }: { report: NightReport; onRefr
           </button>
         )}
       </div>
+      {rerunNote && (
+        <p data-testid="night-rerun-note" className={cn('rounded border border-[var(--color-border-subtle)] px-3 py-2 text-xs', MUTED)}>
+          {rerunNote}
+        </p>
+      )}
       {w.holidayNote && (
         <p className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">{w.holidayNote}</p>
       )}
@@ -641,17 +671,23 @@ export function NightReportView({
   report,
   onRefresh,
   refreshing,
+  onRerun,
+  rerunning,
+  rerunNote,
 }: {
   report: NightReport;
   onRefresh?: () => void;
   refreshing?: boolean;
+  onRerun?: () => void;
+  rerunning?: boolean;
+  rerunNote?: string | null;
 }) {
   const count = <T,>(v: Section<T[]>) => (isSectionError(v) ? undefined : (v as T[]).length);
   // An API from before the scorecard build sends no `newsIdeas`; show it as empty, not failed.
   const newsIdeas: Section<NewsIdeaRow[]> = report.newsIdeas ?? [];
   return (
     <div className="mx-auto max-w-5xl space-y-5 p-4">
-      <Header report={report} onRefresh={onRefresh} refreshing={refreshing} />
+      <Header report={report} onRefresh={onRefresh} refreshing={refreshing} onRerun={onRerun} rerunning={rerunning} rerunNote={rerunNote} />
 
       <SectionShell title="Positions" count={count(report.positions)}>
         <Guard value={report.positions}>

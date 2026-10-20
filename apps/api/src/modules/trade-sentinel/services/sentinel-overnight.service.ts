@@ -396,8 +396,14 @@ export class SentinelOvernightService {
     }
   }
 
-  async runWindow(window: ReviewWindow, now: Date = new Date()): Promise<WindowReport> {
-    const tag = windowTag(window, now, this.clock);
+  /**
+   * `opts.rerunTag` (owner's "re-run night analysis"): judge every position again under
+   * `<window tag>:<rerunTag>`, so the original verdicts stay as history and the durable
+   * once-per-window check does not skip the re-run.
+   */
+  async runWindow(window: ReviewWindow, now: Date = new Date(), opts: { rerunTag?: string } = {}): Promise<WindowReport> {
+    const base = windowTag(window, now, this.clock);
+    const tag = opts.rerunTag ? `${base}:${opts.rerunTag}` : base;
     const report: WindowReport = {
       window: tag,
       picked: 0,

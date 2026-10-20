@@ -116,7 +116,7 @@ describe('TradeSentinelModule — every token is actually provided', () => {
   });
 
   it('registers the controller and the runner, the two things nothing else reaches', () => {
-    expect(moduleMeta<unknown>('controllers')).toHaveLength(1);
+    expect(moduleMeta<{ name: string }>('controllers').map((c) => c.name)).toEqual(['SentinelController', 'NightAnalysisController']);
     expect(providedTokens().map((t) => (t as { name?: string })?.name)).toContain(
       'SentinelRunnerService',
     );

@@ -43,6 +43,7 @@ import { SentinelTickSource } from './adapters/tick-source.adapter';
 import { SentinelOvernightEvidenceAdapter } from './adapters/overnight-evidence.adapter';
 import { OVERNIGHT_EVIDENCE } from './ports/overnight-evidence.port';
 import { SCORECARD_PROVIDER } from './ports/scorecard.port';
+import { NightAnalysisController } from './controllers/night-analysis.controller';
 import { OvernightScorecardModule } from '../overnight-scorecard/overnight-scorecard.module';
 import { ScorecardService } from '../overnight-scorecard/scorecard.service';
 import { MACRO_CUES } from './ports/market-cues.port';
@@ -124,7 +125,7 @@ import { MARKET_EVENTS } from './ports/events.port';
     // MBM M3 (MBM_PACKET): the fail-open, cached market-behaviour client for the packet block.
     MbmModule,
   ],
-  controllers: [SentinelController],
+  controllers: [SentinelController, NightAnalysisController],
   providers: [
     {
       provide: ANTHROPIC_CLIENT,

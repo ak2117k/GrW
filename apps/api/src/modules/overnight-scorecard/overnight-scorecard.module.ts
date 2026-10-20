@@ -76,6 +76,6 @@ import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW, ScorecardService } fr
     ScorecardService,
     NewsIdeasService,
   ],
-  exports: [ScorecardService],
+  exports: [ScorecardService, NewsIdeasService],
 })
 export class OvernightScorecardModule {}

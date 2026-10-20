@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -61,6 +61,15 @@ import {
   type RawCues,
   type RawOiEvidence,
 } from '../ports/overnight-evidence.port';
+import {
+  NULL_SCORECARD_PROVIDER,
+  SCORECARD_PROVIDER,
+  SENTINEL_SCORECARD_KEY,
+  scorecardFlagOn,
+  type ScorecardProvider,
+} from '../ports/scorecard.port';
+import { scorecardBlock } from '../overnight/scorecard-block';
+import { overnightPromptFor } from '../prompts/sentinel-overnight-prompt';
 
 /**
  * How many failed judgements one position may cost one window before it is
@@ -310,8 +319,30 @@ export class SentinelOvernightService {
     @Inject(OVERNIGHT_EVIDENCE) private readonly evidence: OvernightEvidenceSource,
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    @Optional() @Inject(SCORECARD_PROVIDER) private readonly scorecards: ScorecardProvider = NULL_SCORECARD_PROVIDER,
   ) {
     this.clock = makeSentinelClock(this.config.get<string>('hub.mcxLateClose'));
+  }
+
+  /** SENTINEL_SCORECARD=on lets a position's scorecard into the overnight packet (and the o5 prompt). */
+  private get scorecardOn(): boolean {
+    return scorecardFlagOn(this.config.get<string>(SENTINEL_SCORECARD_KEY));
+  }
+
+  /**
+   * The `overnight.scorecard` entry to spread into the section: empty — no key
+   * at all — when the flag is off, there is no scorecard, or the read fails, so
+   * the packet is then exactly what it was before scorecards existed.
+   */
+  private async scorecardEntry(entry: RosterEntry): Promise<Pick<OvernightSection, 'scorecard'>> {
+    if (!this.scorecardOn) return {};
+    try {
+      const sc = await (this.scorecards ?? NULL_SCORECARD_PROVIDER).latest(entry.userId, entry.trackerId);
+      return sc ? { scorecard: scorecardBlock(sc) } : {};
+    } catch (err) {
+      this.logger.warn(`overnight review: scorecard read failed for ${entry.symbol} (${entry.trackerId}): ${describe(err)}`);
+      return {};
+    }
   }
 
   private get enabled(): boolean {
@@ -577,10 +608,11 @@ export class SentinelOvernightService {
       since: lastSessionClose(entry.exchange, now, this.clock) ?? new Date(now.getTime() - 24 * HOUR_MS),
       now,
     };
-    const [news, oi, cues] = await Promise.all([
+    const [news, oi, cues, scorecard] = await Promise.all([
       sourced(() => this.evidence.news(q)),
       sourced(() => this.evidence.oi(q)),
       sourced(() => this.evidence.cues(q)),
+      this.scorecardEntry(entry),
     ]);
 
     const packet: OvernightPacket = {
@@ -591,7 +623,10 @@ export class SentinelOvernightService {
         // in overnight.oi. Without this the packet would claim "no options chain".
         oiWalls: absent('not captured for the overnight review — see overnight.oi.walls for the end-of-day walls'),
       },
-      overnight: assembleOvernightSection({ entry, tick, window, tag, now, news, oi, cues, preOpen, clock: this.clock }),
+      overnight: {
+        ...assembleOvernightSection({ entry, tick, window, tag, now, news, oi, cues, preOpen, clock: this.clock }),
+        ...scorecard,
+      },
     };
 
     const verdict = await this.agent.judgeOvernight(packet);
@@ -609,7 +644,8 @@ export class SentinelOvernightService {
       invalidationPoint: verdict.changeMindLevel,
       reviewInSec: nextOpen ? Math.max(60, Math.round((nextOpen.getTime() - now.getTime()) / 1000)) : 24 * 3600,
       packet: packetAsJson(packet),
-      promptVersion: this.agent.overnightPromptVersion,
+      // The scorecard prompt's own stamp (o5) when the packet carried a scorecard.
+      promptVersion: packet.overnight.scorecard ? overnightPromptFor(packet).version : this.agent.overnightPromptVersion,
       triggeredBy: [window.kind, tag],
       netPnl: packet.money.netPnl,
       greenFloor: packet.money.greenFloorPrice,

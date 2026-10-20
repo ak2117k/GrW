@@ -14,6 +14,9 @@ import type { TickReading } from './sentinel-cycle.service';
 import type { RawCues, RawOiEvidence } from '../ports/overnight-evidence.port';
 import type { NewsEvidence } from '../overnight/overnight-evidence';
 import { SharedJobExpired } from './sentinel-cycle.service';
+import type { ScorecardProvider } from '../ports/scorecard.port';
+import type { Scorecard } from '../../overnight-scorecard/scorecard.types';
+import { SCORECARD_BLOCK_MAX_CHARS } from '../overnight/scorecard-block';
 
 const ist = (ymd: string, hhmm: string) => new Date(`${ymd}T${hhmm}:00+05:30`);
 const MON_CLOSE = ist('2026-10-12', '15:45');
@@ -396,7 +399,17 @@ const VERDICT = {
 };
 
 function makeSvc(
-  opts: { enabled?: boolean; done?: Set<string>; lateClose?: string; book?: RosterEntry[]; preOpen?: CueRecord<PreOpenBook> } = {},
+  opts: {
+    enabled?: boolean;
+    done?: Set<string>;
+    lateClose?: string;
+    book?: RosterEntry[];
+    preOpen?: CueRecord<PreOpenBook>;
+    /** SENTINEL_SCORECARD's raw value; undefined = unset. */
+    scorecardFlag?: string;
+    /** The 11th constructor argument; undefined = not passed (the @Optional default). */
+    scorecards?: ScorecardProvider;
+  } = {},
 ) {
   const book: RosterEntry[] = opts.book ?? [
     entry('nfo'),
@@ -436,7 +449,13 @@ function makeSvc(
   ]);
   const config = {
     get: jest.fn().mockImplementation((key: string) =>
-      key === 'hub.mcxLateClose' ? (opts.lateClose ?? '') : opts.enabled === false ? 'false' : 'true',
+      key === 'hub.mcxLateClose'
+        ? (opts.lateClose ?? '')
+        : key === 'SENTINEL_SCORECARD'
+          ? opts.scorecardFlag
+          : opts.enabled === false
+            ? 'false'
+            : 'true',
     ),
   };
 
@@ -451,6 +470,7 @@ function makeSvc(
     evidence as never,
     { tradeTracker: { findMany } } as never,
     config as never,
+    opts.scorecards,
   );
   return { svc, build, buildPacket, judgeOvernight, record, hasWindowVerdict, runShared, tickFor, evidence, findMany, done };
 }
@@ -884,5 +904,124 @@ describe('SentinelOvernightService — the 09:10 pre-open check', () => {
     await t.svc.runWindow(PRE_OPEN_CHECK, ist('2026-10-20', '09:10'));
     expect(t.evidence.preOpen).not.toHaveBeenCalled();
     expect(t.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// ─── SENTINEL_SCORECARD: the scorecard block in the overnight packet ─────────
+
+const SCORECARD: Scorecard = {
+  id: 'sc1',
+  userId: 'u1',
+  symbol: 'NIFTY13OCT2625000CE',
+  exchange: 'NFO',
+  underlying: 'NIFTY',
+  side: 'BULLISH',
+  window: 'OVERNIGHT',
+  computedAt: '2026-10-12T10:10:00.000Z',
+  factors: [
+    { name: 'oi', points: 2, value: 'PCR 2.1 (5d med 1.3), put build +18% @25000', reason: 'heavy put writing', available: true },
+    { name: 'fii_dii', points: 0, value: 'FII cash -120cr, idx fut L/S 0.42', reason: 'flat', available: true },
+    { name: 'vix', points: -1, value: '13.4 vs 20d 12.1', reason: 'rising VIX', available: true },
+    { name: 'expiry', points: -2, value: '1 session left', reason: 'theta', available: true },
+    { name: 'news', points: 0, value: '', reason: 'no news store rows', available: false },
+    { name: 'indicators', points: 1, value: 'D: EMA9>EMA20, MACD+, RSI 58', reason: 'trend up', available: true },
+    { name: 'mood', points: 0, value: 'ACTIVE', reason: 'context only', available: true },
+  ],
+  total: 0,
+  band: 'NEUTRAL',
+};
+
+describe('SentinelOvernightService — the scorecard block (SENTINEL_SCORECARD)', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  const provider = (sc: Scorecard | null | Error) => ({
+    latest: jest.fn().mockImplementation(async () => {
+      if (sc instanceof Error) throw sc;
+      return sc;
+    }),
+  });
+
+  /** The packet and stamp for the NFO position at the 15:45 window. */
+  async function judged(opts: Parameters<typeof makeSvc>[0]) {
+    const t = makeSvc(opts);
+    await t.svc.runWindow(AFTER_CLOSE_EQUITY, MON_CLOSE);
+    return { t, packet: t.judgeOvernight.mock.calls[0][0], row: t.record.mock.calls[0][0] };
+  }
+
+  it('flag unset, "off" or anything but "on": the provider is never asked and the packet is byte-identical to no provider at all', async () => {
+    const baseline = await judged({});
+    for (const scorecardFlag of [undefined, 'off', 'true', 'ON-ish', '']) {
+      const p = provider(SCORECARD);
+      const r = await judged({ scorecardFlag, scorecards: p });
+      expect(p.latest).not.toHaveBeenCalled();
+      expect(JSON.stringify(r.packet)).toBe(JSON.stringify(baseline.packet));
+      expect('scorecard' in r.packet.overnight).toBe(false);
+      expect(r.row.promptVersion).toBe('o1/t1');
+    }
+  });
+
+  it('flag on but no scorecard (or no provider bound, or a failed read): no key, same packet, same stamp', async () => {
+    const baseline = await judged({});
+    for (const scorecards of [provider(null), undefined, provider(new Error('db down'))]) {
+      const r = await judged({ scorecardFlag: 'on', scorecards });
+      expect(JSON.stringify(r.packet)).toBe(JSON.stringify(baseline.packet));
+      expect(r.row.promptVersion).toBe('o1/t1');
+    }
+  });
+
+  it('flag on with a scorecard: overnight.scorecard is a compact present block, asked by user and tracker, and the row is stamped o5', async () => {
+    const p = provider(SCORECARD);
+    const r = await judged({ scorecardFlag: ' On ', scorecards: p });
+    expect(p.latest).toHaveBeenCalledWith('u1', 'nfo');
+    const block = r.packet.overnight.scorecard;
+    expect(block).toEqual(
+      expect.objectContaining({
+        available: true,
+        at: SCORECARD.computedAt,
+        value: expect.objectContaining({ side: 'BULLISH', total: 0, band: 'NEUTRAL', window: 'OVERNIGHT' }),
+      }),
+    );
+    expect(block.value.factors).toMatch(/^oi:\+2 PCR 2\.1/);
+    expect(block.value.factors).toContain('news:n/a');
+    expect(block.value.factors).toContain('expiry:-2 1 session left');
+    expect(JSON.stringify(block.value).length).toBeLessThanOrEqual(SCORECARD_BLOCK_MAX_CHARS);
+    expect(r.row.promptVersion).toBe('o5/t1');
+    // Stored with the packet, so the verdict row shows what the judge saw.
+    expect(r.row.packet.overnight.scorecard).toEqual(block);
+  });
+
+  it('reaches the pre-open review and the 09:10 check too', async () => {
+    const t = makeSvc({ scorecardFlag: 'on', scorecards: provider(SCORECARD) });
+    await t.svc.runWindow(PRE_OPEN, ist('2026-10-13', '08:50'));
+    expect(t.judgeOvernight.mock.calls.every((c) => c[0].overnight.scorecard?.available === true)).toBe(true);
+
+    const at = (hms: string) => new Date(`2026-10-13T${hms}+05:30`);
+    const book: CueRecord<PreOpenBook> = {
+      values: {
+        date: '2026-10-13',
+        entries: { RELIANCE: { symbol: 'RELIANCE', instrument: 'CASH', iep: 1420, previousClose: 1400, change: 20, changePercent: 1.43, at: at('09:08:00').toISOString() } },
+      },
+      sourceTime: '2026-10-13',
+      fetchedAt: at('09:10:00').toISOString(),
+      basis: 'x',
+      source: 'x',
+      status: 'ok',
+    };
+    const c = makeSvc({
+      scorecardFlag: 'on',
+      scorecards: provider(SCORECARD),
+      book: [entry('rel-fut', { symbol: 'RELIANCE27OCT26FUT' })],
+      preOpen: book,
+    });
+    c.svc.clockNow = () => at('09:10:30');
+    await c.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'));
+    expect(c.judgeOvernight).toHaveBeenCalledTimes(1);
+    expect(c.judgeOvernight.mock.calls[0][0].overnight.scorecard.available).toBe(true);
+    expect(c.record.mock.calls[0][0].promptVersion).toBe('o5/t1');
   });
 });

@@ -17,7 +17,7 @@ import { parseNewsEventsConfig } from '../../news-events/config';
 import type { WakeTrigger } from './tripwire.service';
 import {
   SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION,
-  SENTINEL_OVERNIGHT_SYSTEM_PROMPT,
+  overnightPromptFor,
 } from '../prompts/sentinel-overnight-prompt';
 import type { OvernightPacket } from '../overnight/overnight-packet.types';
 import { parseExitTriggerProposal, type ExitTriggerProposal } from './exit-trigger-proposal';
@@ -286,6 +286,11 @@ export class SentinelAgentService {
     return SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION;
   }
 
+  /** The stamp for THIS packet's prompt: the scorecard variant when it carries overnight.scorecard. */
+  overnightPromptVersionFor(packet: OvernightPacket): string {
+    return overnightPromptFor(packet).version;
+  }
+
   /**
    * The model and effort for this wake, chosen by WHY the agent was woken.
    *
@@ -383,7 +388,8 @@ export class SentinelAgentService {
         system: [
           {
             type: 'text',
-            text: SENTINEL_OVERNIGHT_SYSTEM_PROMPT,
+            // o4 unless the packet carries overnight.scorecard (then o5).
+            text: overnightPromptFor(packet).text,
             cache_control: { type: 'ephemeral' },
           },
         ],

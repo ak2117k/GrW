@@ -86,3 +86,65 @@ Rules for your answer:
 - "changeMindLevel" states the level or event that would change your mind, concretely.
 - "openPlan" is the plan for the first minutes of the next session, with concrete levels: what to do on a gap down, on a gap up, and where the stop sits.
 - EXIT_AT_OPEN requires medium or high confidence. Use high only when the evidence is unambiguous.`;
+
+/**
+ * The scorecard variant (o5): the o4 text above, unchanged, plus overnight.scorecard
+ * in the field list, one reading line for it and one weighing rule. Used only for a
+ * packet that carries overnight.scorecard (SENTINEL_SCORECARD=on and a scorecard
+ * exists); every other packet still gets o4, byte for byte.
+ */
+export const SENTINEL_OVERNIGHT_SCORECARD_PROMPT_VERSION = 'o5';
+export const SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION = `${SENTINEL_OVERNIGHT_SCORECARD_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`;
+
+const FIELD_LIST_O4 = '\n- overnight: review, expiry, decay, greeks, preOpenPrice, preOpenGap, news, oi, marketCues.\n';
+const FIELD_LIST_O5 = '\n- overnight: review, expiry, decay, greeks, preOpenPrice, preOpenGap, news, oi, marketCues, scorecard.\n';
+
+const SCORECARD_READING_ANCHOR = '\n- overnight.oi: ';
+const SCORECARD_READING_LINE =
+  '\n- overnight.scorecard: the position\'s deterministic scorecard, computed by code before this review. side is the direction the position needs (BULLISH or BEARISH). Each entry in "factors" is scored -2..+2 for that side (positive supports the position, negative is against it) and written "name:points value", or "name:n/a" when that factor had no data. total is their sum and band reads it (STRONG_AGAINST <= -4, AGAINST -3..-1, NEUTRAL 0, SUPPORTS 1..3, STRONG_SUPPORTS >= 4). computedAt says when it was scored.';
+
+const SCORECARD_WEIGHING_ANCHOR = '\n\nRules for your answer:';
+const SCORECARD_WEIGHING_LINE =
+  '\n- SCORECARD: base the verdict on overnight.scorecard. A total against the position argues for EXIT_AT_OPEN or TIGHTEN_AT_OPEN; a total for it argues for HOLD_OVERNIGHT. If your verdict goes against the scorecard total, name the factor (or the packet input the scorecard does not cover) that overrides it, and why, in overnightRisk, and cite overnight.scorecard in evidence.';
+
+function replaceOnce(text: string, from: string, to: string): string {
+  const at = text.indexOf(from);
+  if (at < 0 || text.indexOf(from, at + 1) >= 0) {
+    throw new Error(`sentinel overnight prompt: ${JSON.stringify(from)} is not in the text exactly once`);
+  }
+  return `${text.slice(0, at)}${to}${text.slice(at + from.length)}`;
+}
+
+function insertAfterLineStarting(text: string, anchor: string, addition: string): string {
+  const at = text.indexOf(anchor);
+  if (at < 0) throw new Error(`sentinel overnight prompt: anchor ${JSON.stringify(anchor)} not found`);
+  const end = text.indexOf('\n', at + anchor.length);
+  return `${text.slice(0, end)}${addition}${text.slice(end)}`;
+}
+
+function insertBefore(text: string, anchor: string, addition: string): string {
+  const at = text.indexOf(anchor);
+  if (at < 0) throw new Error(`sentinel overnight prompt: anchor ${JSON.stringify(anchor)} not found`);
+  return `${text.slice(0, at)}${addition}${text.slice(at)}`;
+}
+
+export const SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT = insertBefore(
+  insertAfterLineStarting(
+    replaceOnce(SENTINEL_OVERNIGHT_SYSTEM_PROMPT, FIELD_LIST_O4, FIELD_LIST_O5),
+    SCORECARD_READING_ANCHOR,
+    SCORECARD_READING_LINE,
+  ),
+  SCORECARD_WEIGHING_ANCHOR,
+  SCORECARD_WEIGHING_LINE,
+);
+
+/**
+ * The overnight prompt and its stamp for this packet: the scorecard variant
+ * exactly when the packet carries overnight.scorecard, o4 otherwise. The packet
+ * decides, so the prompt can never describe a block the packet does not have.
+ */
+export function overnightPromptFor(packet: { overnight?: { scorecard?: unknown } }): { text: string; version: string } {
+  return packet.overnight?.scorecard !== undefined
+    ? { text: SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT, version: SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION }
+    : { text: SENTINEL_OVERNIGHT_SYSTEM_PROMPT, version: SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION };
+}

@@ -4,7 +4,7 @@ import { MBM_UNIVERSE, universeFor } from './mbm-universe';
 describe('parseMbmConfig', () => {
   it('defaults to off / NIFTY / http://mbm:5100 / first auto-exit user', () => {
     const c = parseMbmConfig({ AI_AUTO_EXIT_USER_IDS: ' u1 , u2' });
-    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', chainCapture: 'off', problems: [] });
+    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', chainCapture: 'off', chainCaptureStocks: 'off', problems: [] });
   });
 
   it('parses explicit values, upper-cases and de-duplicates instruments, strips the trailing slash', () => {
@@ -77,7 +77,7 @@ describe('parseMbmConfig', () => {
 
   it('formats the single boot line', () => {
     const c = parseMbmConfig({ MBM_ENABLED: 'observe', MBM_FEED_USER_ID: 'o' });
-    expect(mbmBootLine(c)).toBe('[mbm] mode=observe instruments=NIFTY url=http://mbm:5100 feedUser=o chainCapture=off');
+    expect(mbmBootLine(c)).toBe('[mbm] mode=observe instruments=NIFTY url=http://mbm:5100 feedUser=o chainCapture=off chainCaptureStocks=off');
     expect(mbmBootLine(parseMbmConfig({ MBM_CHAIN_CAPTURE: 'on', MBM_FEED_USER_ID: 'o' }))).toContain('chainCapture=on');
   });
 
@@ -97,6 +97,18 @@ describe('parseMbmConfig', () => {
     const noUser = parseMbmConfig({ MBM_CHAIN_CAPTURE: 'on' });
     expect(noUser.chainCapture).toBe('on');
     expect(noUser.problems.join()).toMatch(/chain capture will not run/);
+  });
+
+  it('parses MBM_CHAIN_CAPTURE_STOCKS: default off, independent of MBM_ENABLED / MBM_CHAIN_CAPTURE, bad → off', () => {
+    expect(parseMbmConfig({}).chainCaptureStocks).toBe('off');
+    const on = parseMbmConfig({ MBM_CHAIN_CAPTURE_STOCKS: ' On ', MBM_FEED_USER_ID: 'o' });
+    expect(on.chainCaptureStocks).toBe('on');
+    expect(on.chainCapture).toBe('off');
+    expect(on.problems).toEqual([]);
+    const bad = parseMbmConfig({ MBM_CHAIN_CAPTURE_STOCKS: 'yes', MBM_FEED_USER_ID: 'o' });
+    expect(bad.chainCaptureStocks).toBe('off');
+    expect(bad.problems).toEqual(['MBM_CHAIN_CAPTURE_STOCKS=yes is not off|on — using off']);
+    expect(parseMbmConfig({ MBM_CHAIN_CAPTURE_STOCKS: 'on' }).problems.join()).toMatch(/per-symbol chain capture will not run/);
   });
 });
 

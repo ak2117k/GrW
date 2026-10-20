@@ -32,6 +32,12 @@ export interface MbmConfig {
    * lost for good, Angel serves nothing for expired contracts). Needs `feedUserId`.
    */
   chainCapture: 'off' | 'on';
+  /**
+   * Per-symbol chain capture (MBM_CHAIN_CAPTURE_STOCKS, off|on, default off): the chain watchlist's
+   * symbols (owner's open NFO position underlyings + registered news symbols), nearest expiry ATM ±10,
+   * every 15 min 09:15–15:15 IST + a 15:30 EOD snapshot. Independent of MBM_ENABLED; needs `feedUserId`.
+   */
+  chainCaptureStocks: 'off' | 'on';
   /** Human-readable fallbacks taken while parsing; logged once at boot. */
   problems: string[];
 }
@@ -79,6 +85,13 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
   if (chainCapture === 'on' && !feedUserId) {
     problems.push('MBM_CHAIN_CAPTURE=on but no MBM_FEED_USER_ID / AI_AUTO_EXIT_USER_IDS — the chain capture will not run');
   }
+  const rawStocks = (env.MBM_CHAIN_CAPTURE_STOCKS ?? '').trim().toLowerCase();
+  let chainCaptureStocks: 'off' | 'on' = 'off';
+  if (rawStocks === 'on' || rawStocks === 'off') chainCaptureStocks = rawStocks;
+  else if (rawStocks !== '') problems.push(`MBM_CHAIN_CAPTURE_STOCKS=${rawStocks} is not off|on — using off`);
+  if (chainCaptureStocks === 'on' && !feedUserId) {
+    problems.push('MBM_CHAIN_CAPTURE_STOCKS=on but no MBM_FEED_USER_ID / AI_AUTO_EXIT_USER_IDS — the per-symbol chain capture will not run');
+  }
   if (mode !== 'off' && !feedUserId) {
     problems.push('no MBM_FEED_USER_ID and AI_AUTO_EXIT_USER_IDS is empty — the bar refresher will not run');
   }
@@ -97,7 +110,7 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
   const packet = consumer('MBM_PACKET');
   const exitShadow = consumer('MBM_EXIT_SHADOW');
 
-  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, chainCapture, problems };
+  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, chainCapture, chainCaptureStocks, problems };
 }
 
 /** The entry gate's effective mode: MBM_ENABLED=off makes every consumer inert (plan M3, global rule). */
@@ -109,6 +122,6 @@ export function mbmEntryGateMode(c: Pick<MbmConfig, 'mode' | 'entryGate'> | null
 export function mbmBootLine(c: MbmConfig): string {
   return (
     `[mbm] mode=${c.mode} instruments=${c.instruments.join(',')} url=${c.url} feedUser=${c.feedUserId ?? 'none'}` +
-    ` chainCapture=${c.chainCapture}`
+    ` chainCapture=${c.chainCapture} chainCaptureStocks=${c.chainCaptureStocks}`
   );
 }

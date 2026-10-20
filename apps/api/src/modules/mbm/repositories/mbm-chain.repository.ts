@@ -3,6 +3,8 @@ import { Injectable } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { PrismaChainRepo } from '../../market-hub/chain/chain-repository';
+import type { InstrumentRef } from '../../market-hub/hub.types';
+import { derivativeUnderlying } from '../../trade-sentinel/overnight/pre-open-check';
 import type { CaptureContract, ChainSnapshotRow, ChainStrikeRow } from '../domain/chain-snapshot';
 
 /**
@@ -68,5 +70,67 @@ export class MbmChainRepository {
       select: { strikes: true },
     });
     return row && Array.isArray(row.strikes) ? (row.strikes as unknown as ChainStrikeRow[]) : null;
+  }
+
+  /** Where `name`'s price lives (index map, else the NSE cash row); null when the master has neither. */
+  underlyingRef(name: string, expiry: string): Promise<InstrumentRef | null> {
+    return this.master.underlyingRef(name, 'NFO', expiry);
+  }
+
+  /**
+   * Underlying names of `userId`'s OPEN broker-synced NFO positions (trade_trackers kind POSITION): the
+   * instrument master's `name` for the contract token, else parsed from the trading symbol. Distinct.
+   */
+  async openFnoUnderlyings(userId: string): Promise<string[]> {
+    const open = await this.prisma.tradeTracker.findMany({
+      where: { userId, status: 'OPEN', kind: 'POSITION', exchange: 'NFO' },
+      select: { symbol: true, token: true },
+    });
+    if (open.length === 0) return [];
+    const master = await this.prisma.instrument.findMany({
+      where: { exchange: 'NFO', token: { in: open.map((t) => t.token) } },
+      select: { token: true, name: true },
+    });
+    const byToken = new Map<string, string>();
+    for (const m of master) if (m.name) byToken.set(m.token, m.name.trim().toUpperCase());
+    const out = new Set<string>();
+    for (const t of open) {
+      const name = byToken.get(t.token) || derivativeUnderlying(t.symbol);
+      if (name) out.add(name);
+    }
+    return [...out];
+  }
+
+  /** (capturedAt, expiry) keys of `instrument`'s snapshots at/after `since`, newest capture first (expiry ascending within), ≤ `take`. Light: no strikes. */
+  async captureKeys(instrument: string, since: Date, take: number): Promise<Array<{ capturedAt: Date; expiry: string }>> {
+    const rows = await this.prisma.mbmChainSnapshot.findMany({
+      where: { instrument, capturedAt: { gte: since } },
+      orderBy: [{ capturedAt: 'desc' }, { expiry: 'asc' }],
+      select: { capturedAt: true, expiry: true },
+      take,
+    });
+    return rows.map((r) => ({ capturedAt: r.capturedAt, expiry: r.expiry.toISOString().slice(0, 10) }));
+  }
+
+  /** The full snapshot rows of `instrument` at exactly these keys, in the keys' order (missing ones dropped). */
+  async snapshotsAt(instrument: string, keys: ReadonlyArray<{ capturedAt: Date; expiry: string }>): Promise<ChainSnapshotRow[]> {
+    if (keys.length === 0) return [];
+    const rows = await this.prisma.mbmChainSnapshot.findMany({
+      where: { instrument, OR: keys.map((k) => ({ capturedAt: k.capturedAt, expiry: new Date(`${k.expiry}T00:00:00Z`) })) },
+    });
+    const mapped = rows.map((r) => ({
+      instrument: r.instrument,
+      expiry: r.expiry.toISOString().slice(0, 10),
+      capturedAt: r.capturedAt,
+      spot: r.spot,
+      pcr: r.pcr,
+      maxPain: r.maxPain,
+      callWall: r.callWall,
+      putWall: r.putWall,
+      strikes: Array.isArray(r.strikes) ? (r.strikes as unknown as ChainStrikeRow[]) : [],
+    }));
+    const key = (k: { capturedAt: Date; expiry: string }) => `${k.capturedAt.getTime()}|${k.expiry}`;
+    const byKey = new Map(mapped.map((r) => [key(r), r] as const));
+    return keys.map((k) => byKey.get(key(k))).filter((r): r is ChainSnapshotRow => !!r);
   }
 }

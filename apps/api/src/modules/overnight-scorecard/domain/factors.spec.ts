@@ -106,10 +106,30 @@ describe('VIX factor', () => {
     expect(scoreVix({ closes: [14, 15], isLongOption: true, isIndex: true }, 'BULLISH')).toMatchObject({ available: false, points: 0 });
     expect(scoreVix({ closes: null, isLongOption: true, isIndex: true }, 'BULLISH').available).toBe(false);
   });
-  it('rich + rising VIX penalises a long stock option buyer on both sides', () => {
-    const closes = [...flat, 16.5];
-    expect(scoreVix({ closes, isLongOption: true, isIndex: false }, 'BULLISH').points).toBe(-2);
-    expect(scoreVix({ closes, isLongOption: true, isIndex: false }, 'BEARISH').points).toBe(-2);
+  it('long stock option: rich VIX −1 (crush if it mean-reverts), rising +1 (vega tailwind), same both sides', () => {
+    const richRising = [...flat, 16.5]; // elevated AND +18% d/d ⇒ −1 + 1 = 0
+    for (const side of ['BULLISH', 'BEARISH'] as const) {
+      const f = scoreVix({ closes: richRising, isLongOption: true, isIndex: false }, side);
+      expect(f.points).toBe(0);
+      expect(f.reason).toContain('rich VIX: crush risk if it mean-reverts');
+      expect(f.reason).toContain('rising VIX: vega tailwind for a long option');
+    }
+    const risingOnly = [...flat, 14.8]; // +5.7%, not elevated
+    expect(scoreVix({ closes: risingOnly, isLongOption: true, isIndex: false }, 'BEARISH').points).toBe(1);
+    const richFlat = [...flat, 16.5, 16.5]; // elevated, unchanged d/d
+    expect(scoreVix({ closes: richFlat, isLongOption: true, isIndex: false }, 'BULLISH').points).toBe(-1);
+  });
+  it('rich VIX that is falling ⇒ −2 for a long option ("VIX deflating")', () => {
+    const closes = [...flat, 18, 16.5]; // −8% d/d, still ≥ 10% over the 20d mean
+    const f = scoreVix({ closes, isLongOption: true, isIndex: false }, 'BULLISH');
+    expect(f.points).toBe(-2);
+    expect(f.reason).toContain('VIX deflating');
+  });
+  it('clamps to −2…+2 when the index direction stacks on the long-option read', () => {
+    // index long put, rich + falling VIX: −1 −1 (option) −1 (falling VIX bullish ⇒ against a put) = −3 ⇒ −2
+    expect(scoreVix({ closes: [...flat, 18, 16.5], isLongOption: true, isIndex: true }, 'BEARISH').points).toBe(-2);
+    // index long put, rising (not rich) VIX: +1 vega + 1 bearish direction = +2
+    expect(scoreVix({ closes: [...flat, 14.8], isLongOption: true, isIndex: true }, 'BEARISH').points).toBe(2);
   });
   it('rising VIX is directional for the index: helps an index put, hurts an index call', () => {
     const closes = [...flat, 14.8]; // +5.7%, not elevated (< +10% over avg)
@@ -185,5 +205,15 @@ describe('mood factor', () => {
   });
   it('stocks: context only, 0', () => {
     expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: false, isLongOption: true })).toMatchObject({ points: 0, available: true });
+  });
+  it('stored (after-hours) predictions are labelled with their IST as-of; stocks still 0, index scores normally', () => {
+    const stored = { ...b('ACTIVE'), storedAsOf: new Date('2026-10-19T09:55:00Z') };
+    const s = scoreMood({ behaviour: stored, isIndex: false, isLongOption: true });
+    expect(s).toMatchObject({ points: 0, available: true, value: 'NIFTY ACTIVE (1d, p 0.60, as of 2026-10-19 15:25 IST)' });
+    const i = scoreMood({ behaviour: stored, isIndex: true, isLongOption: true });
+    expect(i).toMatchObject({ points: 1, value: 'ACTIVE (1d, p 0.60, as of 2026-10-19 15:25 IST)' });
+  });
+  it('stocks with neither live nor stored mood ⇒ n/a, 0', () => {
+    expect(scoreMood({ behaviour: { status: 'absent' }, isIndex: false, isLongOption: true }).value).toBe('NIFTY mood n/a (model runs in session)');
   });
 });

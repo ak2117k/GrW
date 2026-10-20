@@ -198,15 +198,18 @@ export function scoreVix(input: VixInput, side: Side): FactorScore {
   let points = 0;
   const reasons: string[] = [];
   if (input.isLongOption) {
-    // Buyers on either side pay up into a rich or rising VIX and face the crush.
-    const p = (elevated ? 1 : 0) + (rising ? 1 : 0);
-    if (p) { points -= p; reasons.push('rich/rising VIX: premium-crush risk for an option buyer'); }
+    // A HELD long option (either side): the crush risk is a RICH VIX mean-reverting; a rising VIX
+    // lifts the premium (vega tailwind); an elevated VIX already falling is the crush under way.
+    if (elevated) { points -= 1; reasons.push('rich VIX: crush risk if it mean-reverts'); }
+    if (rising) { points += 1; reasons.push('rising VIX: vega tailwind for a long option'); }
+    else if (falling && elevated) { points -= 1; reasons.push('VIX deflating'); }
   }
   if (input.isIndex && (rising || falling)) {
     // Directional for the index: rising VIX is bearish, falling bullish.
     points += orient(rising ? -1 : 1, side);
     reasons.push(rising ? 'rising VIX leans bearish for the index' : 'falling VIX leans bullish for the index');
   }
+  // factor() clamps to −2…+2 (a rich, deflating VIX on an index long option can sum past it).
   return factor('vix', points, value, reasons.length ? reasons.join('; ') : 'VIX context only (no vote for this position)');
 }
 
@@ -332,10 +335,24 @@ export interface MoodInput {
   behaviour: {
     status: 'ok' | 'stale' | 'absent';
     horizons?: Record<string, { p: number; regime: string }>;
+    /**
+     * Set only when the horizons are the last session's STORED predictions (mbm_predictions), used
+     * because the live model is not running (after hours): the as-of instant of the newest one.
+     */
+    storedAsOf?: Date | null;
   } | null;
   isIndex: boolean;
   isLongOption: boolean;
 }
+
+/** 'YYYY-MM-DD HH:MM IST' for a stored prediction's as-of. */
+export function istLabel(at: Date): string {
+  const iso = new Date(at.getTime() + 5.5 * 3600_000).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} IST`;
+}
+
+const moodValue = (b: NonNullable<MoodInput['behaviour']>, k: string, hz: { p: number; regime: string }, prefix: string): string =>
+  `${prefix}${hz.regime} (${k}, p ${f2(hz.p)}${b.storedAsOf ? `, as of ${istLabel(b.storedAsOf)}` : ''})`;
 
 /** Horizon key → minutes, for picking the longest ('30m', '2h', '1d'). */
 function horizonMinutes(k: string): number {
@@ -351,13 +368,13 @@ export function scoreMood(input: MoodInput): FactorScore {
     const ok = b && b.status === 'ok' && b.horizons && Object.keys(b.horizons).length > 0;
     if (!ok) return factor('mood', 0, 'NIFTY mood n/a (model runs in session)', 'stock position: index context only');
     const [k, hz] = Object.entries(b.horizons!).sort((a, c) => horizonMinutes(c[0]) - horizonMinutes(a[0]))[0];
-    return factor('mood', 0, `NIFTY ${hz.regime} (${k}, p ${f2(hz.p)})`, 'stock position: index context only, no vote');
+    return factor('mood', 0, moodValue(b!, k, hz, 'NIFTY '), 'stock position: index context only, no vote');
   }
   if (!b || b.status !== 'ok' || !b.horizons || Object.keys(b.horizons).length === 0) {
     return unavailable('mood', `MBM behaviour ${b?.status ?? 'absent'}`);
   }
   const [key, h] = Object.entries(b.horizons).sort((a, c) => horizonMinutes(c[0]) - horizonMinutes(a[0]))[0];
-  const value = `${h.regime} (${key}, p ${f2(h.p)})`;
+  const value = moodValue(b, key, h, '');
   if (!input.isLongOption) return factor('mood', 0, value, 'volatility context only (not a long option)');
   // Move-size, never direction: a long option needs a move; a QUIET tape is decay with no move.
   if (h.regime === 'ACTIVE') return factor('mood', 1, value, 'ACTIVE tape: a move is likely (either way)');

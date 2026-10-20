@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import type { MessagesTransport, TransportMessage } from '../ai-gateway/transport.types';
 import type { SessionClock } from '../market-hub/session-clock';
@@ -15,7 +15,7 @@ import { shapeOf } from './domain/positions';
 import { shortlist, type Candidate } from './domain/shortlist';
 import { newsBatchDue, istYmd, type NewsBatch } from './domain/windows';
 import { baseSymbol } from '../news-events/keys';
-import { SCORECARD_LLM, SCORECARD_WATCHLIST, type WatchlistWriter } from './ports';
+import { SCORECARD_CHAIN_CAPTURE, SCORECARD_LLM, SCORECARD_WATCHLIST, type ChainCapturer, type WatchlistWriter } from './ports';
 import type { ScorecardEngine } from './scorecard-engine';
 import { SCORECARD_CONFIG, type ScorecardConfig } from './scorecard.config';
 import { ScorecardRepository } from './scorecard.repository';
@@ -52,6 +52,7 @@ export class NewsIdeasService {
     @Inject(SCORECARD_NOW) private readonly now: () => Date,
     @Inject(SCORECARD_LLM) private readonly llm: MessagesTransport,
     @Inject(SCORECARD_WATCHLIST) private readonly watchlist: WatchlistWriter,
+    @Optional() @Inject(SCORECARD_CHAIN_CAPTURE) private readonly chainCapture: ChainCapturer | null = null,
   ) {}
 
   @Cron('0 30 23 * * *', { name: 'news-ideas-night', timeZone: 'Asia/Kolkata' })
@@ -98,6 +99,16 @@ export class NewsIdeasService {
       already,
     );
     if (candidates.length === 0) return { ran: true, candidates: 0, stored: 0 };
+
+    // Fresh chains for the (F&O) candidates first, so their OI factor has a snapshot to read: they
+    // are usually not on the capture watchlist yet. Best effort; a failure leaves OI unavailable.
+    if (this.chainCapture) {
+      try {
+        await this.chainCapture.captureFor(candidates.map((c) => c.symbol));
+      } catch (e) {
+        this.logger.warn(`[news-ideas] candidate chain capture failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
 
     const ctx = await this.engine.context('NEWS_IDEA', now);
     const scored: Array<{ candidate: Candidate; scorecard: Scorecard }> = [];

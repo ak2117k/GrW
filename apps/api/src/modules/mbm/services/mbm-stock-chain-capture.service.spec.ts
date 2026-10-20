@@ -4,7 +4,7 @@ import { SessionClock } from '../../market-hub/session-clock';
 import type { ChainSnapshotRow } from '../domain/chain-snapshot';
 import { parseMbmConfig } from '../mbm.config';
 import { CALL_GAP_MS, QUOTE_BATCH_MAX } from './mbm-chain-capture.service';
-import { MbmStockChainCaptureService } from './mbm-stock-chain-capture.service';
+import { MAX_ON_DEMAND_SYMBOLS, MbmStockChainCaptureService } from './mbm-stock-chain-capture.service';
 
 const cal = new SessionClock({ holidays: MARKET_HOLIDAYS });
 const TICK = '2026-10-19T04:00:55Z'; // Mon 09:30:55 IST
@@ -199,5 +199,38 @@ describe('MbmStockChainCaptureService', () => {
     const { svc, fns } = build([]);
     expect(await svc.onTick()).toMatchObject({ ran: true, stored: 0, calls: 0 });
     expect(fns.fetchQuotes).not.toHaveBeenCalled();
+  });
+
+  describe('captureNow(symbols): on-demand capture of given symbols (news-idea candidates)', () => {
+    const NIGHT = '2026-10-19T18:00:00Z'; // 23:30 IST, out of session
+
+    it('captures exactly those symbols (normalised, de-duplicated, NIFTY excluded), not the watchlist', async () => {
+      const { svc, watchlist } = build(['RELIANCE'], { nowIso: NIGHT });
+      const r = await svc.captureNow(['tcs-EQ', 'TCS', 'NIFTY', 'INFY']);
+      expect(r).toMatchObject({ ran: true, stored: 2, captured: ['TCS', 'INFY'], skipped: [] });
+      expect(watchlist.symbols).not.toHaveBeenCalled();
+    });
+
+    it('caps the list at MAX_ON_DEMAND_SYMBOLS', async () => {
+      const { svc, repo } = build([], { nowIso: NIGHT });
+      const many = Array.from({ length: MAX_ON_DEMAND_SYMBOLS + 5 }, (_, i) => `BADSYM${i}`);
+      await svc.captureNow(many);
+      expect(repo.expiries).toHaveBeenCalledTimes(MAX_ON_DEMAND_SYMBOLS);
+    });
+
+    it('same flag rule: off ⇒ idle, no broker call; an empty list ⇒ idle', async () => {
+      const off = build([], { nowIso: NIGHT, env: {} });
+      expect(await off.svc.captureNow(['TCS'])).toMatchObject({ ran: false });
+      expect(off.fns.fetchQuotes).not.toHaveBeenCalled();
+      const on = build([], { nowIso: NIGHT });
+      expect(await on.svc.captureNow(['NIFTY'])).toMatchObject({ ran: false });
+      expect(on.fns.fetchQuotes).not.toHaveBeenCalled();
+    });
+
+    it('no argument keeps the watchlist behaviour', async () => {
+      const { svc, watchlist } = build(['RELIANCE'], { nowIso: NIGHT });
+      expect(await svc.captureNow()).toMatchObject({ ran: true, captured: ['RELIANCE'] });
+      expect(watchlist.symbols).toHaveBeenCalled();
+    });
   });
 });

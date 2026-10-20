@@ -65,18 +65,52 @@ export class ScorecardRepository {
     });
   }
 
-  /** The `instruments.id` whose candles describe an underlying (index token, else the NSE cash line). */
-  private async underlyingInstrumentId(name: string): Promise<string | null> {
+  /** The instrument whose candles describe an underlying (index token, else the NSE cash line). */
+  async underlyingInstrument(name: string): Promise<{ id: string; token: string; exchange: string } | null> {
     const idx = INDEX_UNDERLYINGS[name];
     if (idx) {
-      const r = await this.prisma.instrument.findFirst({ where: { token: idx.token, exchange: idx.exchange }, select: { id: true } });
-      return r?.id ?? null;
+      return this.prisma.instrument.findFirst({
+        where: { token: idx.token, exchange: idx.exchange },
+        select: { id: true, token: true, exchange: true },
+      });
     }
     const rows = await this.prisma.instrument.findMany({
       where: { exchange: 'NSE', symbol: { in: [`${name}-EQ`, name] } },
-      select: { id: true, symbol: true },
+      select: { id: true, symbol: true, token: true, exchange: true },
     });
-    return (rows.find((r) => r.symbol === `${name}-EQ`) ?? rows[0])?.id ?? null;
+    const r = rows.find((x) => x.symbol === `${name}-EQ`) ?? rows[0];
+    return r ? { id: r.id, token: r.token, exchange: r.exchange } : null;
+  }
+
+  private async underlyingInstrumentId(name: string): Promise<string | null> {
+    return (await this.underlyingInstrument(name))?.id ?? null;
+  }
+
+  /**
+   * The newest stored MBM prediction per horizon for `instrument`, from the last session it ran
+   * (rows within 12 h of the newest), or null when none is younger than `maxAgeMs`. The fallback
+   * for the mood factor while the live model is not running (after hours).
+   */
+  async storedMood(
+    instrument: string,
+    now: Date,
+    maxAgeMs: number,
+  ): Promise<{ asOf: Date; horizons: Record<string, { p: number; regime: string }> } | null> {
+    const newest = await this.prisma.mbmPrediction.findFirst({
+      where: { instrument, asOf: { gte: new Date(now.getTime() - maxAgeMs), lte: now } },
+      orderBy: { asOf: 'desc' },
+      select: { asOf: true },
+    });
+    if (!newest) return null;
+    const rows = await this.prisma.mbmPrediction.findMany({
+      where: { instrument, asOf: { gte: new Date(newest.asOf.getTime() - 12 * 3600_000), lte: newest.asOf } },
+      orderBy: { asOf: 'desc' },
+      select: { horizon: true, p: true, regime: true },
+      take: 500,
+    });
+    const horizons: Record<string, { p: number; regime: string }> = {};
+    for (const r of rows) if (!horizons[r.horizon]) horizons[r.horizon] = { p: r.p, regime: r.regime };
+    return Object.keys(horizons).length ? { asOf: newest.asOf, horizons } : null;
   }
 
   /** Newest `limit` bars of `timeframe` ('1d' | '15m') from `candles`, oldest first. */

@@ -7,10 +7,10 @@ import { UserFeedManager } from '../../market-data/services/user-feed-manager.se
 import type { TokenRef } from '../../market-data/services/user-feed.types';
 import type { OptionGreekRow } from '../../market-hub/chain/chain.types';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
-import { CHAIN_WATCHLIST, type ChainWatchlist } from '../chain-watchlist';
+import { CHAIN_WATCHLIST, INDEX_CAPTURED_ELSEWHERE, type ChainWatchlist } from '../chain-watchlist';
 import type { NseCalendar } from '../domain/bar-window';
 import { baselineFrom, buildChainSnapshot, istYmd, strikesAround, type CaptureContract, type ChainSnapshotRow } from '../domain/chain-snapshot';
-import { STOCK_STRIKES_AROUND, packBatches, stockChainTick, type StockTick } from '../domain/stock-chain';
+import { STOCK_STRIKES_AROUND, normaliseUnderlying, packBatches, stockChainTick, type StockTick } from '../domain/stock-chain';
 import { MBM_CONFIG, type MbmConfig } from '../mbm.config';
 import { MbmChainRepository } from '../repositories/mbm-chain.repository';
 import { MBM_CALENDAR, MBM_NOW } from './mbm-bar-refresher.service';
@@ -18,6 +18,8 @@ import { CALL_GAP_MS, MBM_CHAIN_SLEEP, QUOTE_BATCH_MAX } from './mbm-chain-captu
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** Most symbols one on-demand `captureNow(symbols)` takes (news ideas shortlist ≤ 5). */
+export const MAX_ON_DEMAND_SYMBOLS = 10;
 
 export interface StockCaptureSummary {
   ran: boolean;
@@ -105,15 +107,27 @@ export class MbmStockChainCaptureService {
    * One capture of the watchlist NOW, outside the session-window gate — for the owner's
    * "re-run night analysis", so the OI factor has the last session's chains (Angel quotes keep
    * the last OI out of hours). Same owner session, no login; still needs the flag on.
+   *
+   * With `symbols`: those underlyings instead of the watchlist (the news-ideas candidates, scored
+   * right after), de-duplicated, NIFTY excluded (its own capture), at most MAX_ON_DEMAND_SYMBOLS.
+   * Same flag, session, call pacing and single-flight guard as the tick.
    */
-  async captureNow(): Promise<StockCaptureSummary> {
+  async captureNow(symbols?: readonly string[]): Promise<StockCaptureSummary> {
     const idle: StockCaptureSummary = { ran: false, tick: 'NONE', stored: 0, calls: 0, captured: [], skipped: [] };
     if (!this.active || this.running) return idle;
+    let only: string[] | undefined;
+    if (symbols) {
+      only = [...new Set(symbols.map((s) => normaliseUnderlying(s)).filter((s): s is string => !!s && !INDEX_CAPTURED_ELSEWHERE.has(s)))].slice(
+        0,
+        MAX_ON_DEMAND_SYMBOLS,
+      );
+      if (only.length === 0) return idle;
+    }
     this.running = true;
     const counter = { calls: 0 };
     const skipped = new Set<string>();
     try {
-      const { stored, captured } = await this.capture(counter, skipped);
+      const { stored, captured } = await this.capture(counter, skipped, only);
       return { ran: true, tick: 'NONE', stored, calls: counter.calls, captured, skipped: [...skipped] };
     } catch (e) {
       this.logger.warn(`[mbm] on-demand chain capture failed: ${errText(e)}`);
@@ -134,7 +148,11 @@ export class MbmStockChainCaptureService {
     this.logger.warn(`[mbm] chain ${name} skipped (${why}) — logged once today`);
   }
 
-  private async capture(counter: { calls: number }, skipped: Set<string>): Promise<{ stored: number; captured: string[] }> {
+  private async capture(
+    counter: { calls: number },
+    skipped: Set<string>,
+    only?: readonly string[],
+  ): Promise<{ stored: number; captured: string[] }> {
     const user = this.config.feedUserId as string;
     const startedAt = this.now();
     const day = istYmd(startedAt);
@@ -146,7 +164,8 @@ export class MbmStockChainCaptureService {
 
     // 1. Resolve every symbol from the DB (no broker calls): nearest expiry, its contracts, the spot ref.
     const resolved: Resolved[] = [];
-    for (const { symbol } of await this.watchlist.symbols()) {
+    const list = only ?? (await this.watchlist.symbols()).map((s) => s.symbol);
+    for (const symbol of list) {
       try {
         const r = await this.resolve(symbol, day);
         if (typeof r === 'string') this.skipOnce(day, symbol, r, skipped);

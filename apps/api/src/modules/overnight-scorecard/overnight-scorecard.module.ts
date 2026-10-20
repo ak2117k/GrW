@@ -10,16 +10,31 @@ import { SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gatewa
 import type { MessagesTransport } from '../ai-gateway/transport.types';
 import { MarketCuesModule } from '../market-cues/market-cues.module';
 import { MarketCuesService } from '../market-cues/market-cues.service';
+import { MarketDataModule } from '../market-data/market-data.module';
+import { MarketDataRepository } from '../market-data/repositories/market-data.repository';
+import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MbmModule } from '../mbm/mbm.module';
+import { MBM_CONFIG, type MbmConfig } from '../mbm/mbm.config';
+import { MbmStockChainCaptureService } from '../mbm/services/mbm-stock-chain-capture.service';
 import { MbmClient } from '../mbm/services/mbm-client.service';
 import { ClaudeCliTransport } from '../trade-sentinel/adapters/claude-cli.transport';
 import { judgeTransportFrom } from '../trade-sentinel/services/llm-transport';
 import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
 import type { SessionClock } from '../market-hub/session-clock';
 import { NewsIdeasService } from './news-ideas.service';
-import { SCORECARD_CHAINS, SCORECARD_LLM, SCORECARD_WATCHLIST, type ChainReader, type WatchlistWriter } from './ports';
+import {
+  SCORECARD_CHAIN_CAPTURE,
+  SCORECARD_CHAINS,
+  SCORECARD_LLM,
+  SCORECARD_WATCHLIST,
+  type BarBackfill,
+  type ChainCapturer,
+  type ChainReader,
+  type WatchlistWriter,
+} from './ports';
+import { ScorecardBarBackfill } from './scorecard-bar-backfill';
 import { ScorecardEngine } from './scorecard-engine';
-import { parseScorecardConfig, SCORECARD_CONFIG } from './scorecard.config';
+import { parseScorecardConfig, SCORECARD_CONFIG, type ScorecardConfig } from './scorecard.config';
 import { ScorecardRepository } from './scorecard.repository';
 import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW, ScorecardService } from './scorecard.service';
 
@@ -29,7 +44,7 @@ import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW, ScorecardService } fr
  * existing tables; writes only analysis_scorecards / news_ideas. Places nothing.
  */
 @Module({
-  imports: [PrismaModule, MbmModule, MarketCuesModule, AiGatewayModule],
+  imports: [PrismaModule, MarketDataModule, MbmModule, MarketCuesModule, AiGatewayModule],
   providers: [
     ScorecardRepository,
     { provide: SCORECARD_CONFIG, useFactory: () => parseScorecardConfig(process.env) },
@@ -55,10 +70,40 @@ import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW, ScorecardService } fr
       inject: [ChainWatchlistService],
     },
     {
+      // News-idea candidates' chains captured on demand before scoring (same flag/session as stream A's tick).
+      provide: SCORECARD_CHAIN_CAPTURE,
+      useFactory: (c: MbmStockChainCaptureService): ChainCapturer => ({ captureFor: (symbols) => c.captureNow(symbols) }),
+      inject: [MbmStockChainCaptureService],
+    },
+    {
       provide: SCORECARD_ENGINE,
-      useFactory: (repo: ScorecardRepository, chains: ChainReader, cues: MarketCuesService, mood: MbmClient, clock: SessionClock) =>
-        new ScorecardEngine(repo, chains, cues, mood, clock),
-      inject: [ScorecardRepository, SCORECARD_CHAINS, MarketCuesService, MbmClient, SCORECARD_CLOCK],
+      useFactory: (
+        repo: ScorecardRepository,
+        chains: ChainReader,
+        cues: MarketCuesService,
+        mood: MbmClient,
+        clock: SessionClock,
+        feeds: UserFeedManager,
+        candles: MarketDataRepository,
+        mbm: MbmConfig,
+        cfg: ScorecardConfig,
+      ) => {
+        // Short `candles` history is fetched on demand over the owner's own Angel session (the MBM
+        // feed user, as the chain capture uses) and persisted into `candles`.
+        const backfill: BarBackfill = new ScorecardBarBackfill(repo, feeds, candles, mbm.feedUserId ?? cfg.ownerUserId);
+        return new ScorecardEngine(repo, chains, cues, mood, clock, backfill);
+      },
+      inject: [
+        ScorecardRepository,
+        SCORECARD_CHAINS,
+        MarketCuesService,
+        MbmClient,
+        SCORECARD_CLOCK,
+        UserFeedManager,
+        MarketDataRepository,
+        MBM_CONFIG,
+        SCORECARD_CONFIG,
+      ],
     },
     {
       // The same transport choice as the sentinel's ANTHROPIC_CLIENT (trade-sentinel.module.ts):

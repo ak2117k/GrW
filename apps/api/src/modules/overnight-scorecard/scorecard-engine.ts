@@ -17,12 +17,13 @@ import {
   scoreNews,
   scoreOi,
   scoreVix,
+  DAILY_MIN_BARS,
   type MoodInput,
 } from './domain/factors';
 import type { PositionShape } from './domain/positions';
 import { assemble } from './domain/scoring';
 import { istYmd } from './domain/windows';
-import type { ChainReader } from './ports';
+import type { BarBackfill, ChainReader } from './ports';
 import type { ScorecardRepository } from './scorecard.repository';
 import type { FactorScore, Scorecard, ScoreWindow } from './scorecard.types';
 
@@ -30,6 +31,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DAILY_BARS = 80;
 const M15_BARS = 80;
 const VIX_DAYS = 21;
+/** A stored NIFTY prediction older than this is not used as the after-hours mood (covers a long weekend). */
+export const STORED_MOOD_MAX_AGE_MS = 5 * DAY_MS;
 
 export interface CuesSource {
   snapshot(now?: Date): MarketCuesSnapshot;
@@ -73,6 +76,7 @@ export class ScorecardEngine {
     private readonly cues: CuesSource | null,
     private readonly mood: MoodSource | null,
     private readonly clock: SessionClock,
+    private readonly backfill: BarBackfill | null = null,
   ) {}
 
   /** The news window: the last 24 h after the close, else since the last NSE close (covers weekends). */
@@ -96,7 +100,34 @@ export class ScorecardEngine {
       cues = null;
     }
     if (news.failed) this.logger.warn('[scorecard] news read failed; news factor unavailable this run');
-    return { now, news: news.v, vix: vix.v, cues, mood: mood.v, perUnderlying: new Map() };
+    return { now, news: news.v, vix: vix.v, cues, mood: await this.moodOrStored(mood.v, now), perUnderlying: new Map() };
+  }
+
+  /**
+   * The live MBM behaviour when it has horizons; else (the model only runs in session) the last
+   * session's stored NIFTY predictions, flagged with their as-of so the factor labels them.
+   */
+  private async moodOrStored(live: MoodInput['behaviour'], now: Date): Promise<MoodInput['behaviour']> {
+    if (live && live.status === 'ok' && live.horizons && Object.keys(live.horizons).length > 0) return live;
+    const stored = await soft(() => this.repo.storedMood('NIFTY', now, STORED_MOOD_MAX_AGE_MS), null);
+    if (!stored.v) return live;
+    return { status: 'ok', horizons: stored.v.horizons, storedAsOf: stored.v.asOf };
+  }
+
+  /**
+   * Closes of `timeframe` from `candles`; when fewer than the indicators need, one on-demand broker
+   * backfill (persisted) and a re-read. A failed backfill leaves what was read (fail-soft).
+   */
+  private async closes(name: string, timeframe: '1d' | '15m', limit: number): Promise<number[] | null> {
+    const read = async () => (await this.repo.bars(name, timeframe, limit))?.map((b) => b.close) ?? null;
+    const first = await read();
+    if (!this.backfill || (first && first.length >= DAILY_MIN_BARS)) return first;
+    try {
+      if ((await this.backfill.fill(name, timeframe)) > 0) return await read();
+    } catch (e) {
+      this.logger.warn(`[scorecard] ${name} ${timeframe} backfill failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return first;
   }
 
   private underlying(ctx: RunContext, name: string): Promise<UnderlyingData> {
@@ -107,8 +138,8 @@ export class ScorecardEngine {
         const [chain, history, daily, m15, setups] = await Promise.all([
           soft(() => this.chains.latest(name), null),
           soft(() => this.chains.history(name, 5), []),
-          soft(async () => (await this.repo.bars(name, '1d', DAILY_BARS))?.map((b) => b.close) ?? null, null),
-          soft(async () => (await this.repo.bars(name, '15m', M15_BARS))?.map((b) => b.close) ?? null, null),
+          soft(() => this.closes(name, '1d', DAILY_BARS), null),
+          soft(() => this.closes(name, '15m', M15_BARS), null),
           soft(() => (lastClose ? this.repo.dailySetups(name, istYmd(lastClose)) : Promise.resolve([])), []),
         ]);
         return {

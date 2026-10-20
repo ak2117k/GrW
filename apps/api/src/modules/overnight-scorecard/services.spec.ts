@@ -4,7 +4,9 @@ import type { MessagesTransport } from '../ai-gateway/transport.types';
 import type { NewsRow } from '../night-report/domain/night-report.logic';
 import { NewsIdeasService } from './news-ideas.service';
 import { UNAVAILABLE_CHAINS, type WatchlistWriter } from './ports';
-import { ScorecardEngine } from './scorecard-engine';
+import { ScorecardEngine, STORED_MOOD_MAX_AGE_MS } from './scorecard-engine';
+import { ScorecardBarBackfill } from './scorecard-bar-backfill';
+import { shapeOf } from './domain/positions';
 import type { ScorecardConfig } from './scorecard.config';
 import { parseScorecardConfig } from './scorecard.config';
 import type { ScorecardRepository } from './scorecard.repository';
@@ -143,5 +145,115 @@ describe('NewsIdeasService', () => {
     expect((await new NewsIdeasService(f.repo, engineFor(f.repo), cfg({ newsIdeas: false }), clock, () => NOW, l.t, watch()).run('NIGHT', NOW)).ran).toBe(false);
     expect((await new NewsIdeasService(f.repo, engineFor(f.repo), cfg(), clock, () => NOW, l.t, watch()).run('NIGHT', ist('2026-10-19T23:30:00'))).ran).toBe(false);
     expect(l.calls).toHaveLength(0);
+  });
+
+  it('captures the F&O candidates\' chains BEFORE scoring them, so OI reads a snapshot', async () => {
+    const f = fakeRepo();
+    const order: string[] = [];
+    const chains = {
+      latest: async (s: string) => { order.push(`read:${s}`); return null; },
+      history: async () => [],
+    };
+    const capture = { captureFor: jest.fn(async (s: readonly string[]) => { order.push(`capture:${s.join(',')}`); }) };
+    const engine = new ScorecardEngine(f.repo, chains, null, null, clock);
+    const svc = new NewsIdeasService(f.repo, engine, cfg(), clock, () => NOW, llm(ideaJson).t, watch(), capture);
+    expect((await svc.run('NIGHT', NOW)).stored).toBe(1);
+    expect(capture.captureFor).toHaveBeenCalledWith(['INFY']);
+    expect(order).toEqual(['capture:INFY', 'read:INFY']);
+  });
+
+  it('a failed candidate capture is soft: the batch still scores and stores', async () => {
+    const f = fakeRepo();
+    const capture = { captureFor: jest.fn(async () => { throw new Error('throttled'); }) };
+    const svc = new NewsIdeasService(f.repo, engineFor(f.repo), cfg(), clock, () => NOW, llm(ideaJson).t, watch(), capture);
+    expect(await svc.run('NIGHT', NOW)).toEqual({ ran: true, candidates: 1, stored: 1 });
+  });
+});
+
+describe('ScorecardEngine: short candles + after-hours mood', () => {
+  const NOW = ist('2026-10-19T15:45:00');
+  const shape = shapeOf('RELIANCE28OCT261400CE', 'NFO', 500);
+  const rising = (n: number) => Array.from({ length: n }, (_, i) => ({ day: `d${i}`, open: 100 + i, close: 100 + i + Math.sin(i) }));
+
+  it('fewer than 35 daily bars ⇒ one backfill per timeframe, then re-read: indicators available', async () => {
+    let filled = false;
+    const f = fakeRepo({ bars: async () => (filled ? rising(60) : rising(3)) });
+    const backfill = { fill: jest.fn(async (_name: string, _tf: '1d' | '15m') => { filled = true; return 60; }) };
+    const engine = new ScorecardEngine(f.repo, UNAVAILABLE_CHAINS, null, null, clock, backfill);
+    const sc = await engine.score(await engine.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
+    expect(backfill.fill.mock.calls.map((c) => c[1]).sort()).toEqual(['15m', '1d']);
+    expect(sc.factors.find((x) => x.name === 'indicators')).toMatchObject({ available: true });
+  });
+
+  it('enough stored bars ⇒ no backfill; a failing backfill keeps "unavailable"', async () => {
+    const deep = fakeRepo({ bars: async () => rising(60) });
+    const noCall = { fill: jest.fn(async () => 0) };
+    const e1 = new ScorecardEngine(deep.repo, UNAVAILABLE_CHAINS, null, null, clock, noCall);
+    await e1.score(await e1.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
+    expect(noCall.fill).not.toHaveBeenCalled();
+
+    const short = fakeRepo({ bars: async () => rising(3) });
+    const failing = { fill: jest.fn(async () => { throw new Error('no session'); }) };
+    const e2 = new ScorecardEngine(short.repo, UNAVAILABLE_CHAINS, null, null, clock, failing);
+    const sc = await e2.score(await e2.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
+    expect(sc.factors.find((x) => x.name === 'indicators')).toMatchObject({ available: false, reason: 'unavailable: fewer than 35 daily candles' });
+  });
+
+  it('live MBM behaviour absent ⇒ the last session\'s stored NIFTY predictions, labelled with their as-of', async () => {
+    const storedMood = jest.fn(async () => ({ asOf: ist('2026-10-19T15:25:00'), horizons: { '30m': { p: 0.3, regime: 'NORMAL' }, '60m': { p: 0.71, regime: 'ACTIVE' } } }));
+    const f = fakeRepo({ storedMood });
+    const mood = { behaviour: async () => ({ status: 'absent' as const }) };
+    const engine = new ScorecardEngine(f.repo, UNAVAILABLE_CHAINS, null, mood, clock);
+    const sc = await engine.score(await engine.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
+    expect(storedMood).toHaveBeenCalledWith('NIFTY', NOW, STORED_MOOD_MAX_AGE_MS);
+    expect(sc.factors.find((x) => x.name === 'mood')).toMatchObject({ points: 0, available: true, value: 'NIFTY ACTIVE (60m, p 0.71, as of 2026-10-19 15:25 IST)' });
+  });
+
+  it('live MBM behaviour ok ⇒ stored predictions are not read', async () => {
+    const storedMood = jest.fn();
+    const f = fakeRepo({ storedMood });
+    const mood = { behaviour: async () => ({ status: 'ok' as const, horizons: { '30m': { p: 0.2, regime: 'QUIET' } } }) };
+    const engine = new ScorecardEngine(f.repo, UNAVAILABLE_CHAINS, null, mood, clock);
+    const ctx = await engine.context('OVERNIGHT', NOW);
+    expect(storedMood).not.toHaveBeenCalled();
+    expect(ctx.mood).toMatchObject({ status: 'ok', horizons: { '30m': { regime: 'QUIET' } } });
+  });
+});
+
+describe('ScorecardBarBackfill', () => {
+  const inst = { id: 'i1', token: '2885', exchange: 'NSE' };
+  const bar = (iso: string, close: number) => ({ timestamp: new Date(iso), open: close, high: close, low: close, close, volume: 10 });
+  const build = (now: Date, rows: ReturnType<typeof bar>[], user: string | null = 'owner') => {
+    const fetchCandles = jest.fn(async () => rows);
+    const saveCandles = jest.fn(async (r: unknown[]) => r.length);
+    const repo = { underlyingInstrument: jest.fn(async () => inst) };
+    return { b: new ScorecardBarBackfill(repo as never, { fetchCandles } as never, { saveCandles }, user, () => now), fetchCandles, saveCandles, repo };
+  };
+
+  it('fetches ~95 days of 1d over the owner session, persists into candles, once per IST day', async () => {
+    const now = ist('2026-10-19T23:30:00');
+    const t = build(now, [bar('2026-10-16T00:00:00+05:30', 1), bar('2026-10-19T00:00:00+05:30', 2)]);
+    expect(await t.b.fill('RELIANCE', '1d')).toBe(2);
+    expect(t.fetchCandles).toHaveBeenCalledWith('owner', '2885', 'NSE', '1d', new Date(now.getTime() - 95 * 86_400_000), now);
+    expect(t.saveCandles.mock.calls[0][0]).toEqual([
+      expect.objectContaining({ instrumentId: 'i1', timeframe: '1d', close: 1 }),
+      expect.objectContaining({ instrumentId: 'i1', timeframe: '1d', close: 2 }),
+    ]);
+    expect(await t.b.fill('RELIANCE', '1d')).toBe(0);
+    expect(t.fetchCandles).toHaveBeenCalledTimes(1);
+  });
+
+  it('never stores a still-forming bar (today\'s daily before 16:00 IST, the open 15m bar)', async () => {
+    const now = ist('2026-10-19T11:07:00');
+    const d = build(now, [bar('2026-10-16T00:00:00+05:30', 1), bar('2026-10-19T00:00:00+05:30', 2)]);
+    expect(await d.b.fill('RELIANCE', '1d')).toBe(1);
+    const m = build(now, [bar('2026-10-19T10:45:00+05:30', 1), bar('2026-10-19T11:00:00+05:30', 2)]);
+    expect(await m.b.fill('RELIANCE', '15m')).toBe(1);
+  });
+
+  it('no owner session configured ⇒ no broker call', async () => {
+    const t = build(ist('2026-10-19T23:30:00'), [], null);
+    expect(await t.b.fill('RELIANCE', '1d')).toBe(0);
+    expect(t.fetchCandles).not.toHaveBeenCalled();
   });
 });

@@ -20,7 +20,19 @@ export interface WatchlistWriter {
   add(symbols: ReadonlyArray<{ symbol: string; exchange: string }>, ttlHours: number): Promise<void>;
 }
 
+/** On-demand broker history for an underlying whose stored `candles` are too short (indicators factor). */
+export interface BarBackfill {
+  /** Fetch and persist recent bars of `timeframe`; resolves to the bars fetched (0 = nothing). Throws on failure. */
+  fill(name: string, timeframe: '1d' | '15m'): Promise<number>;
+}
+
+/** Fresh option chains for specific symbols (news-idea candidates) before they are scored. */
+export interface ChainCapturer {
+  captureFor(symbols: readonly string[]): Promise<unknown>;
+}
+
 export const SCORECARD_CHAINS = Symbol('SCORECARD_CHAINS');
+export const SCORECARD_CHAIN_CAPTURE = Symbol('SCORECARD_CHAIN_CAPTURE');
 export const SCORECARD_WATCHLIST = Symbol('SCORECARD_WATCHLIST');
 
 /** Pre-merge stub: no per-symbol chain data yet ⇒ OI unavailable. */

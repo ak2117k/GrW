@@ -198,5 +198,14 @@ ts_case "unreadable state counts as incomplete" 1 2 "" "" || failures=$((failure
   docker() { CALLS+=("docker:$1:$2"); }
   ensure_disk_headroom cur; check "still no space after pruning: refuses" 1 "docker:builder:prune docker:image:prune" $? ) || failures=$((failures + 1))
 
+# NSE holidays from the app's calendar are not market hours (2026-10-20 Dussehra deferred all day).
+( source "$here/deploy.sh"; set +e
+  HOLIDAYS_TS="$(mktemp)"; printf "  { date: '2026-10-20', name: 'Dussehra', exchanges: ['NSE', 'BSE', 'NFO'] },
+" > "$HOLIDAYS_TS"
+  in_market_hours 2 1200 2026-10-20; r1=$?
+  in_market_hours 3 1200 2026-10-21; r2=$?
+  rm -f "$HOLIDAYS_TS"
+  if [[ $r1 -ne 0 && $r2 -eq 0 ]]; then echo "ok   holiday is not market hours; next session is"; else echo "FAIL holiday check ($r1,$r2)"; exit 1; fi ) || failures=$((failures + 1))
+
 if (( failures > 0 )); then echo "$failures test(s) failed"; exit 1; fi
 echo "all deploy tests passed"

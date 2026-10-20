@@ -35,9 +35,19 @@ notify_once() {
 }
 
 # NSE session guard. Args are optional (day-of-week 1-7, HHMM) so tests need no clock.
+# NSE holidays come from the app's own calendar (one source of truth): a line like
+#   { date: '2026-10-20', name: 'Dussehra', exchanges: ['NSE', 'BSE', 'NFO'] },
+# 2026-10-20 (Dussehra) deferred every deploy all day because this check did not know it.
+HOLIDAYS_TS="${HOLIDAYS_TS:-$APP_DIR/apps/api/src/modules/market-data/services/market-holidays.service.ts}"
+is_nse_holiday() {
+  local day="${1:-$(TZ=Asia/Kolkata date +%F)}"
+  [[ -f "$HOLIDAYS_TS" ]] && grep -qE "date: '${day}'.*'NSE'" "$HOLIDAYS_TS"
+}
+
 in_market_hours() {
-  local dow="${1:-$(TZ=Asia/Kolkata date +%u)}" hm="${2:-$(TZ=Asia/Kolkata date +%H%M)}"
+  local dow="${1:-$(TZ=Asia/Kolkata date +%u)}" hm="${2:-$(TZ=Asia/Kolkata date +%H%M)}" day="${3:-$(TZ=Asia/Kolkata date +%F)}"
   local start="${DEPLOY_BLOCK_START:-0900}" end="${DEPLOY_BLOCK_END:-1535}"
+  is_nse_holiday "$day" && return 1
   (( dow <= 5 )) && (( 10#$hm >= 10#$start && 10#$hm <= 10#$end ))
 }
 

@@ -1,4 +1,5 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { TUNING_READER, type TuningReader } from '../self-review/tuning/tunables';
 import { Cron } from '@nestjs/schedule';
 import type { SessionClock } from '../market-hub/session-clock';
 import { lastSessionClose } from '../trade-sentinel/overnight/overnight-calendar';
@@ -41,7 +42,11 @@ export class ScorecardService {
     @Inject(SCORECARD_CONFIG) private readonly config: ScorecardConfig,
     @Inject(SCORECARD_CLOCK) private readonly clock: SessionClock,
     @Inject(SCORECARD_NOW) private readonly now: () => Date,
-  ) {}
+    /** Self-review overrides (@Global SelfReviewTuningModule); absent ⇒ untuned scorecards. */
+    @Optional() @Inject(TUNING_READER) tuning?: TuningReader,
+  ) {
+    this.engine.useTuning?.(tuning);
+  }
 
   @Cron('0 40 15 * * 1-5', { name: 'scorecard-overnight', timeZone: 'Asia/Kolkata' })
   onOvernight(): Promise<RunSummary> {

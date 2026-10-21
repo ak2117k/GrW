@@ -83,3 +83,24 @@ export function describeExitDiscipline(c: ExitDisciplineConfig): string {
     `gateCloseMin=${c.gateCloseMin} gateUnderlyingN=${c.gateUnderlyingN} ` +
     `persist=${c.persistWindowSec}s/${c.persistMinSec}s openingGuard=${c.openingGuardMin}m outcomeWindow=${c.outcomeWindowMin}m`;
 }
+
+/**
+ * Self-review overrides (docs/superpowers/plans/2026-10-21-self-review-contract.md): an approved
+ * `exit.openingGuardMin` (0–30) / `exit.persistMinSec` (60–600) wins over the env value. Bounded
+ * again here: an out-of-range or non-integer answer keeps the env value. Nothing else is tunable.
+ */
+export function withExitTuning(cfg: ExitDisciplineConfig, tuning: { get<T extends number | boolean>(target: string, fallback: T): T } | null | undefined): ExitDisciplineConfig {
+  if (!tuning) return cfg;
+  const bounded = (target: string, current: number, lo: number, hi: number): number => {
+    let v: number;
+    try {
+      v = tuning.get(target, current);
+    } catch {
+      return current;
+    }
+    return Number.isInteger(v) && v >= lo && v <= hi ? v : current;
+  };
+  const openingGuardMin = bounded('exit.openingGuardMin', cfg.openingGuardMin, 0, 30);
+  const persistMinSec = bounded('exit.persistMinSec', cfg.persistMinSec, 60, 600);
+  return openingGuardMin === cfg.openingGuardMin && persistMinSec === cfg.persistMinSec ? cfg : { ...cfg, openingGuardMin, persistMinSec };
+}

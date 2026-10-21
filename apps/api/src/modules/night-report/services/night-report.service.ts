@@ -37,6 +37,7 @@ import type {
 } from '../domain/night-report.types';
 import type { Scorecard } from '../../overnight-scorecard/scorecard.types';
 import { NIGHT_REPORT_STORE, type NightReportStore } from '../repositories/night-report.repository';
+import { SELF_REVIEW_REPORT, type SelfReviewReportSource } from '../../self-review/self-review.ports';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
@@ -93,6 +94,8 @@ export class NightReportService {
     @Inject(NIGHT_REPORT_MOOD) private readonly moodSource: MoodSource,
     @Inject(NIGHT_REPORT_OPTIONS) private readonly opts: NightReportOptions,
     @Optional() @Inject(NIGHT_REPORT_SCORECARDS) private readonly scorecards?: ScorecardSource,
+    /** The @Global self-review module's latest run; absent ⇒ the section is null. */
+    @Optional() @Inject(SELF_REVIEW_REPORT) private readonly selfReview?: SelfReviewReportSource,
   ) {}
 
   async build(userId: string, now: Date = new Date()): Promise<NightReport> {
@@ -102,7 +105,8 @@ export class NightReportService {
     const positions = await this.safe('positions', () => this.positions(userId, from, now));
     const held = isError(positions) ? [] : heldKeys(positions);
 
-    const [news, events, dailySetups, mood, modelScorecardSection, jobs, newsIdeas] = await Promise.all([
+    const selfReview = this.selfReview;
+    const [news, events, dailySetups, mood, modelScorecardSection, jobs, newsIdeas, selfReviewSection] = await Promise.all([
       this.safe('news', () => this.news(from, now, held)),
       this.safe('events', () => this.events(now, window, held)),
       this.safe('dailySetups', () => this.dailySetups(now)),
@@ -110,6 +114,7 @@ export class NightReportService {
       this.safe('modelScorecard', () => this.modelScorecard(now)),
       this.safe('jobs', () => this.jobs(userId, now, from)),
       this.safe('newsIdeas', () => (this.scorecards ? this.scorecards.newsIdeasSince(from) : Promise.resolve([]))),
+      selfReview ? this.safe('selfReview', () => selfReview.latest()) : Promise.resolve(null),
     ]);
 
     return {
@@ -124,6 +129,7 @@ export class NightReportService {
       modelScorecard: modelScorecardSection,
       jobs,
       newsIdeas,
+      selfReview: selfReviewSection,
     };
   }
 

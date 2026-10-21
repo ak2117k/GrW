@@ -1,0 +1,114 @@
+import { decide, isExpired, proposeTuning, type EvidenceRow } from './proposals';
+import { TUNABLES, type TunableValue } from '../tuning/tunables';
+
+const factorRows = (name: string, right: number, wrong: number, details: Record<string, unknown> = {}): EvidenceRow[] => [
+  ...Array.from({ length: right }, (_, i) => ({ kind: 'SCORECARD_FACTOR', refId: `${name}-r${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: name, correct: true, details })),
+  ...Array.from({ length: wrong }, (_, i) => ({ kind: 'SCORECARD_FACTOR', refId: `${name}-w${i}`, symbol: 'X', sessionDate: '2026-10-20', subject: name, correct: false, details })),
+];
+const exitRows = (right: number, wrong: number, minutesSinceOpen: number | null = 60): EvidenceRow[] => [
+  ...Array.from({ length: right }, (_, i) => ({ kind: 'LIVE_EXIT', refId: `e-r${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: 'LONG', correct: true, details: { minutesSinceOpen } })),
+  ...Array.from({ length: wrong }, (_, i) => ({ kind: 'LIVE_EXIT', refId: `e-w${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: 'LONG', correct: false, details: { minutesSinceOpen } })),
+];
+const defaults = (over: Record<string, TunableValue> = {}) => (t: string): TunableValue => over[t] ?? (TUNABLES[t].default as TunableValue);
+
+describe('proposeTuning (deterministic)', () => {
+  it('weak factor (rolling-20 hit < 45 %, n ≥ 5) → weight × 0.5', () => {
+    const { drafts } = proposeTuning({ rows: factorRows('news', 1, 5), current: defaults(), pendingKeys: new Set() });
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0]).toMatchObject({ key: 'scorecard.factor.news.weight', target: 'scorecard.factor.news.weight', currentValue: 1, proposedValue: 0.5 });
+    expect(drafts[0].evidence).toMatchObject({ n: 6, right: 1, wrong: 5 });
+    expect(drafts[0].evidence.examples.length).toBeLessThanOrEqual(5);
+  });
+
+  it('too little evidence → nothing', () => {
+    expect(proposeTuning({ rows: factorRows('news', 0, 4), current: defaults(), pendingKeys: new Set() }).drafts).toEqual([]);
+  });
+
+  it('strong factor (> 65 %, n ≥ 20) → weight × 1.25, bounded at 1.5', () => {
+    expect(proposeTuning({ rows: factorRows('oi', 18, 2), current: defaults(), pendingKeys: new Set() }).drafts[0]).toMatchObject({ proposedValue: 1.25 });
+    expect(proposeTuning({ rows: factorRows('oi', 18, 2), current: defaults({ 'scorecard.factor.oi.weight': 1.4 }), pendingKeys: new Set() }).drafts[0]).toMatchObject({ proposedValue: 1.5 });
+    // already at the bound → no proposal
+    expect(proposeTuning({ rows: factorRows('oi', 18, 2), current: defaults({ 'scorecard.factor.oi.weight': 1.5 }), pendingKeys: new Set() }).drafts).toEqual([]);
+    // > 65 % but n < 20 → nothing
+    expect(proposeTuning({ rows: factorRows('oi', 9, 1), current: defaults(), pendingKeys: new Set() }).drafts).toEqual([]);
+  });
+
+  it('a silenced factor (weight 0) can earn weight back', () => {
+    expect(proposeTuning({ rows: factorRows('vix', 18, 2), current: defaults({ 'scorecard.factor.vix.weight': 0 }), pendingKeys: new Set() }).drafts[0]).toMatchObject({ proposedValue: 0.5 });
+  });
+
+  it('one PENDING per key', () => {
+    const out = proposeTuning({ rows: factorRows('news', 1, 5), current: defaults(), pendingKeys: new Set(['scorecard.factor.news.weight']) });
+    expect(out.drafts).toEqual([]);
+    expect(out.rejected[0].reason).toMatch(/pending/);
+  });
+
+  it('unconfirmed positive news losing → requireConfirmation = true', () => {
+    const rows = factorRows('news', 1, 5, { newsConfirmed: false, points: 1 });
+    const t = proposeTuning({ rows, current: defaults(), pendingKeys: new Set() }).drafts.find((d) => d.target === 'scorecard.factor.news.requireConfirmation');
+    expect(t).toMatchObject({ currentValue: false, proposedValue: true });
+  });
+
+  it('early exits losing → openingGuardMin + 5 (≤ 30); all exits losing → persistMinSec × 1.5 (≤ 600)', () => {
+    const early = proposeTuning({ rows: exitRows(1, 5, 4), current: defaults({ 'exit.openingGuardMin': 28 }), pendingKeys: new Set() }).drafts;
+    expect(early.find((d) => d.target === 'exit.openingGuardMin')).toMatchObject({ currentValue: 28, proposedValue: 30 });
+    expect(early.find((d) => d.target === 'exit.persistMinSec')).toMatchObject({ currentValue: 120, proposedValue: 180 });
+    const late = proposeTuning({ rows: exitRows(1, 5, 120), current: defaults({ 'exit.persistMinSec': 500 }), pendingKeys: new Set() }).drafts;
+    expect(late.find((d) => d.target === 'exit.openingGuardMin')).toBeUndefined();
+    expect(late.find((d) => d.target === 'exit.persistMinSec')).toMatchObject({ proposedValue: 600 });
+  });
+
+  describe('LLM suggestions: the code decides', () => {
+    const rows = [...factorRows('mood', 3, 3)]; // 50 %: no rule fires
+    it('accepts an allow-listed, in-bounds suggestion with ≥ 5 judged cases', () => {
+      const out = proposeTuning({ rows, current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: 'scorecard.factor.mood.weight', proposedValue: 0.8, cause: 'mood lags gaps' }] });
+      expect(out.drafts[0]).toMatchObject({ target: 'scorecard.factor.mood.weight', proposedValue: 0.8 });
+      expect(out.drafts[0].rationale).toMatch(/diagnosis/);
+    });
+    it.each([
+      ['risk.maxDailyLoss', 1],
+      ['killSwitch', true],
+      ['exit.dailyExitCap', 3],
+      ['autoExit.mode', 'live'],
+      ['broker.apiKey', 'x'],
+    ])('rejects %s', (target, value) => {
+      const out = proposeTuning({ rows, current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: target, proposedValue: value }] });
+      expect(out.drafts).toEqual([]);
+      expect(out.rejected).toEqual([{ target, reason: 'not allow-listed' }]);
+    });
+    it('rejects out-of-bounds values and thin evidence', () => {
+      const oob = proposeTuning({ rows, current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: 'scorecard.factor.mood.weight', proposedValue: 3 }] });
+      expect(oob.drafts).toEqual([]);
+      expect(oob.rejected[0].reason).toMatch(/outside/);
+      const thin = proposeTuning({ rows: factorRows('mood', 1, 1), current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: 'scorecard.factor.mood.weight', proposedValue: 0.8 }] });
+      expect(thin.drafts).toEqual([]);
+      expect(thin.rejected[0].reason).toMatch(/judged cases/);
+    });
+  });
+});
+
+describe('decide (apply / reject state machine)', () => {
+  const now = new Date('2026-10-21T12:00:00Z');
+  const p = { status: 'PENDING', target: 'scorecard.factor.oi.weight', proposedValue: 0.5 as unknown, createdAt: new Date('2026-10-20T12:00:00Z') };
+
+  it('PENDING → APPROVED with the validated value; → REJECTED', () => {
+    expect(decide(p, 'approve', now)).toEqual({ ok: true, status: 'APPROVED', value: 0.5 });
+    expect(decide(p, 'reject', now)).toEqual({ ok: true, status: 'REJECTED' });
+  });
+
+  it.each(['APPROVED', 'APPLIED', 'REJECTED', 'EXPIRED'])('refuses a %s proposal', (status) => {
+    expect(decide({ ...p, status }, 'approve', now).ok).toBe(false);
+    expect(decide({ ...p, status }, 'reject', now).ok).toBe(false);
+  });
+
+  it('a PENDING older than 14 days is EXPIRED, not approvable', () => {
+    const old = { ...p, createdAt: new Date('2026-10-01T00:00:00Z') };
+    expect(isExpired(old, now)).toBe(true);
+    expect(decide(old, 'approve', now)).toMatchObject({ ok: false, status: 'EXPIRED' });
+  });
+
+  it('re-validates the target and bounds at approval', () => {
+    expect(decide({ ...p, target: 'risk.maxDailyLoss' }, 'approve', now).ok).toBe(false);
+    expect(decide({ ...p, proposedValue: 2 }, 'approve', now).ok).toBe(false);
+  });
+});

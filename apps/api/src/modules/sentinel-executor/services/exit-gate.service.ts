@@ -4,7 +4,8 @@ import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
 // A VALUE import: MbmClient is injected by class.
 import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { mbmExitShadow, mbmExitShadowLine, type MbmShadowSlot } from '../domain/mbm-exit-shadow';
-import { EXIT_DISCIPLINE_CONFIG, GATE_LOAD_TIMEOUT_MS, STREAK_LOOKBACK_MIN, type ExitDisciplineConfig } from '../../exit-discipline/config';
+import { EXIT_DISCIPLINE_CONFIG, GATE_LOAD_TIMEOUT_MS, STREAK_LOOKBACK_MIN, withExitTuning, type ExitDisciplineConfig } from '../../exit-discipline/config';
+import { TUNING_READER, type TuningReader } from '../../self-review/tuning/tunables';
 import { buildGateFacts, bypassRecord, decideExit, istDate } from '../../exit-discipline/decision';
 import { readPacketFacts, type PacketFacts } from '../../exit-discipline/packet-facts';
 import type { HistoryVerdict } from '../../exit-discipline/persistence';
@@ -40,7 +41,14 @@ export class ExitGateService {
     /** MBM M3 shadow — both optional: absent, or `exitShadow: 'off'`, ⇒ MBM is never asked. */
     @Optional() @Inject(MBM_CONFIG) private readonly mbmCfg?: MbmConfig,
     @Optional() private readonly mbm?: MbmClient,
+    /** Self-review overrides of openingGuardMin / persistMinSec (bounded; absent ⇒ env config). */
+    @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
   ) {}
+
+  /** The config in force for this decision: env, with any approved self-review override on top. */
+  private effective(): ExitDisciplineConfig {
+    return withExitTuning(this.cfg, this.tuning);
+  }
 
   /**
    * MBM_EXIT_SHADOW observe|on: start the (cached, fail-open) MBM read for this verdict's symbol.
@@ -117,10 +125,11 @@ export class ExitGateService {
   }
 
   decide(ctx: GateContext, live: { ltpNow: number; productType: string | null; exchange: string; now: Date }): GateRecordV1 {
-    if (!this.cfg.enabled) return bypassRecord('DISABLED', this.cfg, live.now);
+    const cfg = this.effective();
+    if (!cfg.enabled) return bypassRecord('DISABLED', cfg, live.now);
     if (ctx.kind === 'unreadable') {
       this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${ctx.reason}`);
-      return bypassRecord('FACTS_UNREADABLE', this.cfg, live.now, ctx.reason);
+      return bypassRecord('FACTS_UNREADABLE', cfg, live.now, ctx.reason);
     }
     try {
       const w = this.clock.tradingWindow?.(live.exchange, live.now) ?? null;
@@ -130,12 +139,12 @@ export class ExitGateService {
         minutesToClose: this.clock.minutesToClose(live.exchange, live.now),
         maxLossPerTrade: ctx.maxLossPerTrade, dailyLossLatched: ctx.dailyLossLatched, history: ctx.history, now: live.now,
       });
-      const record = decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg: this.cfg, now: live.now });
+      const record = decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg, now: live.now });
       if (record.outcome === 'BYPASS') this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${record.error ?? record.bypassReason}`);
       return this.withMbmShadow(ctx, live, record);
     } catch (err) {
       this.logger.warn(`[exit-gate] evaluation threw — failing OPEN: ${errText(err)}`);
-      return bypassRecord('FACTS_UNREADABLE', this.cfg, live.now, errText(err));
+      return bypassRecord('FACTS_UNREADABLE', cfg, live.now, errText(err));
     }
   }
 }

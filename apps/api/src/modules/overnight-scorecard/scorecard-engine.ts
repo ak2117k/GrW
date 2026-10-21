@@ -24,6 +24,8 @@ import { betaTo } from './domain/indicators';
 import type { DailyBar } from './domain/outcome';
 import type { PositionShape } from './domain/positions';
 import { assemble } from './domain/scoring';
+import { applyTuning } from './domain/tuning';
+import { DEFAULT_TUNING, type TuningReader } from '../self-review/tuning/tunables';
 import { istYmd } from './domain/windows';
 import type { BarBackfill, ChainReader } from './ports';
 import type { ScorecardRepository } from './scorecard.repository';
@@ -74,6 +76,13 @@ const soft = async <T>(fn: () => Promise<T>, fallback: T): Promise<{ v: T; faile
 
 export class ScorecardEngine {
   private readonly logger = new Logger('ScorecardEngine');
+  /** Self-review overrides (factor weights, news confirmation). Default: none (every factor ×1). */
+  private tuning: TuningReader = DEFAULT_TUNING;
+
+  /** Bound by ScorecardService from the @Global TUNING_READER when the self-review module is loaded. */
+  useTuning(tuning: TuningReader | null | undefined): void {
+    this.tuning = tuning ?? DEFAULT_TUNING;
+  }
 
   constructor(
     private readonly repo: ScorecardRepository,
@@ -226,7 +235,17 @@ export class ScorecardEngine {
       side,
       window: input.window,
       computedAt: ctx.now,
-      factors,
+      factors: this.tuned(factors),
     });
+  }
+
+  /** Fail-soft: a tuning read that throws leaves the factors untuned. */
+  private tuned(factors: FactorScore[]): FactorScore[] {
+    try {
+      return applyTuning(factors, this.tuning);
+    } catch (e) {
+      this.logger.warn(`[scorecard] tuning skipped: ${e instanceof Error ? e.message : String(e)}`);
+      return factors;
+    }
   }
 }

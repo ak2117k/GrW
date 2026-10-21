@@ -221,4 +221,10 @@ export interface NightReport {
   jobs: Section<JobItem[]>;
   /** News ideas created since the last NSE close, newest first. */
   newsIdeas: Section<NewsIdeaItem[]>;
+  /**
+   * The latest self-review run — the same shape as GET /api/self-review/latest
+   * (`{ run, summary, misses, lessonsAdded, proposalsPending }`), `{ error }` on failure, null
+   * when the self-review module is not loaded.
+   */
+  selfReview: Section<unknown> | null;
 }

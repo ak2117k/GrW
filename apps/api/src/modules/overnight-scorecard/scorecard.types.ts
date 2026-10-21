@@ -5,6 +5,9 @@ export interface FactorScore {
   value: string;                 // compact raw reading, e.g. "PCR 2.1 (5d med 1.3), put build +18% @1260"
   reason: string;                // one line
   available: boolean;            // false ⇒ points 0 and reason says what was missing
+  /** Self-review tuning only: the points before the weight / news-confirmation rule, and the weight. */
+  rawPoints?: -2 | -1 | 0 | 1 | 2;
+  weight?: number;
 }
 export type Band = 'STRONG_AGAINST' | 'AGAINST' | 'NEUTRAL' | 'SUPPORTS' | 'STRONG_SUPPORTS'; // ≤-4 | -3..-1 | 0 | 1..3 | ≥4
 export type ScoreWindow = 'OVERNIGHT' | 'PRE_OPEN' | 'NEWS_IDEA';

@@ -49,6 +49,7 @@ import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-exe
 import { MbmModule } from './modules/mbm/mbm.module';
 import { NightReportModule } from './modules/night-report/night-report.module';
 import { OvernightScorecardModule } from './modules/overnight-scorecard/overnight-scorecard.module';
+import { SelfReviewModule } from './modules/self-review/self-review.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
@@ -254,6 +255,9 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     NightReportModule,
     // Overnight scorecard + news ideas (SCORECARD_ENABLED / NEWS_IDEAS_ENABLED, default off).
     OvernightScorecardModule,
+    // Self-review loop: nightly verification of every call, bounded owner-approved tuning
+    // (SELF_REVIEW_ENABLED, default true). @Global: serves TUNING_READER + the night-report section.
+    SelfReviewModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

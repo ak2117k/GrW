@@ -2944,3 +2944,31 @@ model TuningOverride {
 
   @@map("tuning_overrides")
 }
+
+/// Stock big-move model (docs/superpowers/plans/2026-10-22-stock-move-contract.md): one row per F&O stock per
+/// scoring date. Written by the MBM service (grw_ai), read by the API. SHADOW until the owner approves points.
+model StockMoveScore {
+  id               BigInt    @id @default(autoincrement())
+  asOf             DateTime  @map("as_of") @db.Date // IST session whose close the features use
+  symbol           String // NSE cash symbol (RELIANCE, not RELIANCE-EQ)
+  horizonDays      Int       @default(5) @map("horizon_days")
+  thresholdAtr     Float     @default(1.5) @map("threshold_atr")
+  pBig             Float     @map("p_big") // calibrated P(|ret over horizon| > threshold × ATR-equivalent)
+  rankPct          Float     @map("rank_pct") // 0..1 within that day's scored book (1 = most likely)
+  bucket           String // TOP20 | MID | BOTTOM20 (by rank_pct within the day)
+  resultsDate      DateTime? @map("results_date") @db.Date // next announced results/board-meeting date, if known
+  resultsInWindow  Boolean   @default(false) @map("results_in_window")
+  atrPct           Float?    @map("atr_pct")
+  close            Float?
+  features         Json? // small: the top drivers for display
+  modelId          String    @map("model_id")
+  dataQuality      String    @default("ok") @map("data_quality")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  outcomeRetBp     Float?    @map("outcome_ret_bp") // |ret| over the horizon, filled after horizon sessions
+  outcomeBig       Boolean?  @map("outcome_big")
+  outcomeAt        DateTime? @map("outcome_at") @db.Timestamptz(6)
+
+  @@unique([asOf, symbol, horizonDays, thresholdAtr])
+  @@index([symbol, asOf(sort: Desc)])
+  @@map("stock_move_scores")
+}

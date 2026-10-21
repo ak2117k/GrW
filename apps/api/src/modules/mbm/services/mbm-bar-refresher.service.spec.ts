@@ -10,7 +10,11 @@ function build(nowIso: string, env: NodeJS.ProcessEnv = { MBM_ENABLED: 'observe'
   const feeds = { fetchCandleWindow: jest.fn() };
   const bars = { lastTs: jest.fn().mockResolvedValue(null), upsert: jest.fn(async (_s: string, b: unknown[]) => b.length) };
   const svc = new MbmBarRefresherService(parseMbmConfig(env), cal, () => new Date(nowIso), feeds as never, bars as never);
-  return { svc, feeds, bars };
+  const pauses: number[] = [];
+  (svc as unknown as { pause: (ms: number) => Promise<void> }).pause = async (ms) => {
+    pauses.push(ms);
+  };
+  return { svc, feeds, bars, pauses };
 }
 
 describe('MbmBarRefresherService', () => {
@@ -59,6 +63,19 @@ describe('MbmBarRefresherService', () => {
     });
     const r = await svc.onTick();
     expect(r).toEqual({ ran: true, stored: 10, failed: ['INDIAVIX'] });
+  });
+
+  it('retries throttled series after a pause, so one rejected burst does not stale the prediction', async () => {
+    const { svc, feeds, pauses } = build('2026-10-19T04:00:20Z');
+    let niftyCalls = 0;
+    feeds.fetchCandleWindow.mockImplementation(async (_u: string, ref: { token: string }) => {
+      if (ref.token === '99926000' && ++niftyCalls === 1) throw new Error('throttled: data:null');
+      return [bar('2026-10-19T03:58:00Z')];
+    });
+    const r = await svc.onTick();
+    expect(r).toEqual({ ran: true, stored: 11, failed: [] });
+    expect(niftyCalls).toBe(2);
+    expect(pauses).toEqual([3000]);
   });
 
   it('boot catch-up starts at the open three sessions back (holiday skipped)', async () => {

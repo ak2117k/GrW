@@ -6,7 +6,7 @@ describe('parseExitDisciplineConfig', () => {
     expect(c).toEqual({ enabled: true, ...EXIT_DISCIPLINE_DEFAULTS, problems: [] });
     expect(EXIT_DISCIPLINE_DEFAULTS).toEqual({
       floorArmN: 1.5, floorTrailN: 2.0, givebackN: 1.5, gateCloseMin: 10, gateUnderlyingN: 1.0,
-      persistWindowSec: 300, persistMinSec: 120, outcomeWindowMin: 60,
+      persistWindowSec: 300, persistMinSec: 120, outcomeWindowMin: 60, openingGuardMin: 15,
     });
   });
 
@@ -49,7 +49,7 @@ describe('parseExitDisciplineConfig', () => {
 
   it('describeExitDiscipline names every multiplier (the boot log)', () => {
     expect(describeExitDiscipline(parseExitDisciplineConfig({}))).toBe(
-      'ON floorArmN=1.5 floorTrailN=2 givebackN=1.5 gateCloseMin=10 gateUnderlyingN=1 persist=300s/120s outcomeWindow=60m',
+      'ON floorArmN=1.5 floorTrailN=2 givebackN=1.5 gateCloseMin=10 gateUnderlyingN=1 persist=300s/120s openingGuard=15m outcomeWindow=60m',
     );
     expect(describeExitDiscipline(parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' }))).toMatch(/^OFF /);
   });

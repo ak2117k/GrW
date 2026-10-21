@@ -60,6 +60,8 @@ export interface GateFactsSnapshot {
   productType: string | null;
   isExpiryDay: boolean;
   dailyLossLatched: boolean;
+  /** Minutes since the position's session opened (null/absent when unknown: the opening guard is skipped). */
+  minutesSinceOpen?: number | null;
 }
 
 /** `ai_exit_executions.gate` (E7). */
@@ -74,6 +76,8 @@ export interface GateRecordV1 {
   facts: GateFactsSnapshot | null;
   cfg: { floorArmN: number; floorTrailN: number; gateCloseMin: number; gateUnderlyingN: number; persistWindowSec: number; persistMinSec: number };
   evaluatedAt: string;
+  /** Set when a non-hard-risk exit was held because the session opened less than openingGuardMin ago. */
+  openingGuard?: { minutesSinceOpen: number; guardMin: number };
   /**
    * MBM M3 (MBM_EXIT_SHADOW observe|on, MBM-mapped positions only): what an MBM-sized trail would
    * have looked like beside this decision (sentinel-executor/domain/mbm-exit-shadow.ts). A record,

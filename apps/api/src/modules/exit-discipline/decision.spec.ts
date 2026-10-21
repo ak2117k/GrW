@@ -56,9 +56,46 @@ describe('decideExit', () => {
     const r = decideExit({ facts: { ...FACTS, dailyLossLatched: true }, current: CUR, history: HIST, cfg: CFG, now: NOW });
     expect(r).toMatchObject({ outcome: 'PASS', justification: 'HARD_RISK', persistence: { rule: 'BYPASS' } });
   });
-  it('clear invalidation break on the FIRST EXIT_NOW ⇒ PASS', () => {
+  it('clear invalidation break on the FIRST EXIT_NOW ⇒ AWAITING_CONFIRMATION (only hard risk bypasses)', () => {
     const r = decideExit({ facts: { ...FACTS, underlying: 8925 }, current: CUR, history: HIST, cfg: CFG, now: NOW });
-    expect(r).toMatchObject({ outcome: 'PASS', justification: 'THESIS_BROKEN', persistence: { rule: 'BYPASS' } });
+    expect(r).toMatchObject({ outcome: 'AWAITING_CONFIRMATION', justification: 'THESIS_BROKEN', persistence: { confirmed: false, rule: null } });
+  });
+  it('clear invalidation break confirmed by the previous EXIT_NOW ⇒ PASS', () => {
+    const hist = [hv('EXIT_NOW', '2026-10-14T11:00:30Z'), ...HIST];
+    const r = decideExit({ facts: { ...FACTS, underlying: 8925 }, current: CUR, history: hist, cfg: CFG, now: NOW });
+    expect(r).toMatchObject({ outcome: 'PASS', justification: 'THESIS_BROKEN', persistence: { rule: 'CONSECUTIVE' } });
+  });
+
+  describe('opening guard', () => {
+    const confirmed = [hv('EXIT_NOW', '2026-10-14T11:00:30Z'), ...HIST];
+    it('holds a confirmed thesis break inside the first 15 min of the session', () => {
+      const r = decideExit({ facts: { ...FACTS, underlying: 8925, minutesSinceOpen: 3 }, current: CUR, history: confirmed, cfg: CFG, now: NOW });
+      expect(r).toMatchObject({ outcome: 'AWAITING_CONFIRMATION', justification: 'THESIS_BROKEN', openingGuard: { minutesSinceOpen: 3, guardMin: 15 } });
+      expect(isBlocking(r)).toBe(true);
+    });
+    it('holds a confirmed floor breach inside the guard too', () => {
+      const r = decideExit({
+        facts: { ...FACTS, ltpNow: 500, underlying: 8995, holdRef: null, minutesSinceOpen: 13 },
+        current: CUR, history: confirmed, cfg: CFG, now: NOW,
+      });
+      expect(r).toMatchObject({ outcome: 'AWAITING_CONFIRMATION', justification: 'CONFIRMED_FLOOR_BREACH', openingGuard: { guardMin: 15 } });
+    });
+    it('lets hard risk sell at once, even at the open', () => {
+      const r = decideExit({ facts: { ...FACTS, dailyLossLatched: true, minutesSinceOpen: 0.5 }, current: CUR, history: HIST, cfg: CFG, now: NOW });
+      expect(r).toMatchObject({ outcome: 'PASS', justification: 'HARD_RISK', persistence: { rule: 'BYPASS' } });
+      expect(r.openingGuard).toBeUndefined();
+    });
+    it('releases at the guard boundary and when the session age is unknown', () => {
+      for (const minutesSinceOpen of [15, null, undefined]) {
+        const r = decideExit({ facts: { ...FACTS, underlying: 8925, minutesSinceOpen }, current: CUR, history: confirmed, cfg: CFG, now: NOW });
+        expect(r.outcome).toBe('PASS');
+      }
+    });
+    it('EXIT_OPENING_GUARD_MIN=0 switches it off', () => {
+      const cfg = parseExitDisciplineConfig({ EXIT_OPENING_GUARD_MIN: '0' });
+      const r = decideExit({ facts: { ...FACTS, underlying: 8925, minutesSinceOpen: 1 }, current: CUR, history: confirmed, cfg, now: NOW });
+      expect(r.outcome).toBe('PASS');
+    });
   });
   it('disabled config ⇒ BYPASS DISABLED, nothing evaluated', () => {
     const off = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });

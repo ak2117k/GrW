@@ -15,6 +15,7 @@ export const EXIT_DISCIPLINE_DEFAULTS = {
   persistWindowSec: 300,
   persistMinSec: 120,
   outcomeWindowMin: 60,
+  openingGuardMin: 15,
 } as const;
 
 /** Spec text, not tunables. */
@@ -37,6 +38,8 @@ export interface ExitDisciplineConfig {
   persistWindowSec: number;
   persistMinSec: number;
   outcomeWindowMin: number;
+  /** Minutes after the session open in which only HARD_RISK may sell (the opening spike is noise). */
+  openingGuardMin: number;
   problems: string[];
 }
 
@@ -70,6 +73,7 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
     persistWindowSec: num(env, 'PERSIST_WINDOW_SEC', d.persistWindowSec, int(30, 1800), problems),
     persistMinSec: num(env, 'PERSIST_MIN_SEC', d.persistMinSec, int(0, 900), problems),
     outcomeWindowMin: num(env, 'EXIT_OUTCOME_WINDOW_MIN', d.outcomeWindowMin, int(15, 240), problems),
+    openingGuardMin: num(env, 'EXIT_OPENING_GUARD_MIN', d.openingGuardMin, int(0, 60), problems),
     problems,
   };
 }
@@ -77,5 +81,5 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
 export function describeExitDiscipline(c: ExitDisciplineConfig): string {
   return `${c.enabled ? 'ON' : 'OFF'} floorArmN=${c.floorArmN} floorTrailN=${c.floorTrailN} givebackN=${c.givebackN} ` +
     `gateCloseMin=${c.gateCloseMin} gateUnderlyingN=${c.gateUnderlyingN} ` +
-    `persist=${c.persistWindowSec}s/${c.persistMinSec}s outcomeWindow=${c.outcomeWindowMin}m`;
+    `persist=${c.persistWindowSec}s/${c.persistMinSec}s openingGuard=${c.openingGuardMin}m outcomeWindow=${c.outcomeWindowMin}m`;
 }

@@ -38,11 +38,11 @@ describe('spec §12 replay — synthetic CRUDEOIL17NOV269000CE, 2026-10-14', () 
     expect(gateSummary(at1631.record)).toMatch(/^GATED_THESIS_INTACT: u 9003, inv 8932/);
   });
 
-  it('package ON + a break below 8932 at 16:45: the breaking EXIT_NOW executes IMMEDIATELY (no confirmation wait)', () => {
+  it('package ON + a break below 8932 at 16:45: the breaking EXIT_NOW waits for confirmation (only hard risk bypasses)', () => {
     const r = replayExits(buildSyntheticCrudeFixture({ breakAt: '16:45', breakTo: 8925 }), { cfg: ON, breakeven: be });
-    expect(r.executed).toMatchObject({ verdictId: 'v-break', record: { outcome: 'PASS', justification: 'THESIS_BROKEN', persistence: { rule: 'BYPASS' } } });
-    expect(r.pnl).toMatchObject({ basis: 'executed', exitAt: '2026-10-14T11:15:00.000Z' });
-    expect(r.decisions.at(-1)!.verdictId).toBe('v-break');
+    const atBreak = r.decisions.find((d) => d.verdictId === 'v-break')!;
+    expect(atBreak.record).toMatchObject({ outcome: 'AWAITING_CONFIRMATION', justification: 'THESIS_BROKEN', persistence: { confirmed: false } });
+    expect(r.executed?.verdictId).not.toBe('v-break');
   });
 
   it('package OFF reproduces today: the first EXIT_NOW executes', () => {

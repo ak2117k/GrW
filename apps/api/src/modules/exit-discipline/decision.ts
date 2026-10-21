@@ -52,7 +52,18 @@ export function decideExit(i: {
     }
     return { ...base, outcome: 'GATED_THESIS_INTACT', persistence: null };
   }
-  const p = evaluatePersistence({ current: i.current, history: i.history, bypass: g.hardRisk || g.thesisClearMargin, cfg: i.cfg });
+  // Only HARD_RISK skips confirmation. A thesis break by a "clear margin" used to bypass too, and on
+  // 2026-10-21 three long puts were sold into the 09:15 spike that reversed minutes later.
+  const p = evaluatePersistence({ current: i.current, history: i.history, bypass: g.hardRisk, cfg: i.cfg });
+  // Opening guard: in the first minutes of the session only HARD_RISK may sell; a thesis break or a
+  // floor breach must outlast the opening print.
+  const since = i.facts.minutesSinceOpen;
+  if (!g.hardRisk && typeof since === 'number' && Number.isFinite(since) && since >= 0 && since < i.cfg.openingGuardMin) {
+    return {
+      ...base, outcome: 'AWAITING_CONFIRMATION', persistence: { ...p, confirmed: false, rule: null },
+      openingGuard: { minutesSinceOpen: Math.round(since * 10) / 10, guardMin: i.cfg.openingGuardMin },
+    };
+  }
   return { ...base, outcome: p.confirmed ? 'PASS' : 'AWAITING_CONFIRMATION', persistence: p };
 }
 
@@ -94,6 +105,9 @@ export function buildGateFacts(p: PacketFacts, ctx: {
   const fresh = Number.isFinite(ctx.ltpNow) && p.charges !== null ? (ctx.ltpNow - p.entryPrice) * p.qty * dir - p.charges : null;
   const netPnlNow = p.netPnl === null ? fresh : fresh === null ? p.netPnl : Math.min(p.netPnl, fresh);
   const scaled = scaledUnderlyingNoise(p.levelBookAtr15m, '', ctx.underlyingSessionMinutes)?.n ?? null;
+  const mtc = ctx.minutesToClose ?? p.minutesToClose;
+  const minutesSinceOpen = ctx.underlyingSessionMinutes !== undefined && typeof mtc === 'number' && Number.isFinite(mtc)
+    ? ctx.underlyingSessionMinutes - mtc : null;
   return {
     exposure: p.symbol ? exposureOf(p.symbol, p.side) : null,
     positionSide: p.side,
@@ -111,5 +125,6 @@ export function buildGateFacts(p: PacketFacts, ctx: {
     productType: ctx.productType,
     isExpiryDay: p.expiry !== null && p.expiry === istDate(ctx.now),
     dailyLossLatched: ctx.dailyLossLatched,
+    minutesSinceOpen,
   };
 }

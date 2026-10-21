@@ -725,8 +725,8 @@ export class SentinelOvernightService {
       invalidationPoint: verdict.changeMindLevel,
       reviewInSec: nextOpen ? Math.max(60, Math.round((nextOpen.getTime() - now.getTime()) / 1000)) : 24 * 3600,
       packet: packetAsJson(packet),
-      // The scorecard prompt's own stamp (o5) when the packet carried a scorecard.
-      promptVersion: packet.overnight.scorecard ? overnightPromptFor(packet).version : this.agent.overnightPromptVersion,
+      // The packet decides the variant: o5 with a scorecard, +l1 with self-review lessons in memory.
+      promptVersion: packet.overnight.scorecard || packet.memory?.lessons?.length ? overnightPromptFor(packet).version : this.agent.overnightPromptVersion,
       triggeredBy: [window.kind, tag],
       netPnl: packet.money.netPnl,
       greenFloor: packet.money.greenFloorPrice,

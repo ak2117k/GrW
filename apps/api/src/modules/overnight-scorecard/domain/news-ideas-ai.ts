@@ -2,6 +2,7 @@
  * The one Sonnet call per news-ideas batch (design §4): the prompt, the JSON schema it must answer
  * in, and the strict validator. Any deviation rejects the WHOLE batch (the caller stores nothing).
  */
+import type { InjectedLesson } from '../../self-review/lessons/types';
 import type { IdeaKind, Scorecard } from '../scorecard.types';
 import { compactScorecard } from './scoring';
 import type { Candidate } from './shortlist';
@@ -45,7 +46,28 @@ export const NEWS_IDEAS_SYSTEM_PROMPT = [
   `Answer ONLY with JSON: {"ideas":[{"symbol","idea","rationale","invalidation","whatToDo"}]}, one entry per candidate symbol, each text under ${IDEA_TEXT_MAX} characters.`,
 ].join('\n');
 
-export function buildNewsIdeasUserMessage(items: ReadonlyArray<{ candidate: Candidate; scorecard: Scorecard }>): string {
+/**
+ * Self-review lessons (SELF_REVIEW_LESSONS=on, scope NEWS_IDEAS): the line the system prompt
+ * gains exactly when the user message carries `lessons`. Without lessons the prompt is
+ * {@link NEWS_IDEAS_SYSTEM_PROMPT}, byte for byte.
+ */
+export const NEWS_IDEAS_LESSONS_LINE =
+  'The input may carry "lessons" from the nightly self-review of past ideas, each with key, text, right and wrong (past cases where following it would have been right or wrong). They are evidence-counted guidance to weigh against the news and scorecards of this batch, never rules: a lesson never outweighs the data in front of you.';
+
+/** The news-ideas system prompt: the lessons line goes before the "ideas, never orders" line. */
+export function newsIdeasSystemPrompt(withLessons: boolean): string {
+  if (!withLessons) return NEWS_IDEAS_SYSTEM_PROMPT;
+  const anchor = '\nThese are ideas for a human to analyse';
+  const at = NEWS_IDEAS_SYSTEM_PROMPT.indexOf(anchor);
+  return at < 0
+    ? `${NEWS_IDEAS_SYSTEM_PROMPT}\n${NEWS_IDEAS_LESSONS_LINE}`
+    : `${NEWS_IDEAS_SYSTEM_PROMPT.slice(0, at)}\n${NEWS_IDEAS_LESSONS_LINE}${NEWS_IDEAS_SYSTEM_PROMPT.slice(at)}`;
+}
+
+export function buildNewsIdeasUserMessage(
+  items: ReadonlyArray<{ candidate: Candidate; scorecard: Scorecard }>,
+  lessons: readonly InjectedLesson[] = [],
+): string {
   return JSON.stringify({
     candidates: items.map(({ candidate, scorecard }) => ({
       symbol: candidate.symbol,
@@ -59,6 +81,7 @@ export function buildNewsIdeasUserMessage(items: ReadonlyArray<{ candidate: Cand
       scorecardSide: scorecard.side,
       scorecard: compactScorecard(scorecard, 600),
     })),
+    ...(lessons.length > 0 ? { lessons: lessons.map((l) => ({ key: l.key, text: l.text, right: l.right, wrong: l.wrong })) } : {}),
   });
 }
 

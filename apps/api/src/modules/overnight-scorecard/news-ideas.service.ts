@@ -9,7 +9,7 @@ import {
   buildNewsIdeasUserMessage,
   extractJsonText,
   NEWS_IDEAS_SCHEMA,
-  NEWS_IDEAS_SYSTEM_PROMPT,
+  newsIdeasSystemPrompt,
   validateIdeas,
 } from './domain/news-ideas-ai';
 import { shapeOf } from './domain/positions';
@@ -22,6 +22,7 @@ import { SCORECARD_CONFIG, type ScorecardConfig } from './scorecard.config';
 import { ScorecardRepository } from './scorecard.repository';
 import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW } from './scorecard.service';
 import type { Scorecard } from './scorecard.types';
+import { LESSONS_READER, type InjectedLesson, type LessonsReader } from '../self-review/lessons/types';
 
 const MAX_TOKENS = 4000;
 /** The `ai_calls.job` label of the news-ideas batch call. */
@@ -56,7 +57,18 @@ export class NewsIdeasService {
     @Inject(SCORECARD_LLM) private readonly llm: MessagesTransport,
     @Inject(SCORECARD_WATCHLIST) private readonly watchlist: WatchlistWriter,
     @Optional() @Inject(SCORECARD_CHAIN_CAPTURE) private readonly chainCapture: ChainCapturer | null = null,
+    /** Self-review lessons (scope NEWS_IDEAS), from an in-memory cache. Absent ⇒ none. */
+    @Optional() @Inject(LESSONS_READER) private readonly lessons: LessonsReader | null = null,
   ) {}
+
+  /** The lessons for this batch's prompt; [] when off/observe/unwired. Never throws. */
+  private batchLessons(): InjectedLesson[] {
+    try {
+      return this.lessons?.inject('NEWS_IDEAS') ?? [];
+    } catch {
+      return [];
+    }
+  }
 
   @Cron('0 30 23 * * *', { name: 'news-ideas-night', timeZone: 'Asia/Kolkata' })
   onNight(): Promise<BatchSummary> {
@@ -127,6 +139,7 @@ export class NewsIdeasService {
       this.logger.warn(`[news-ideas] watchlist add failed: ${e instanceof Error ? e.message : String(e)}`),
     );
 
+    const lessons = this.batchLessons();
     let reply: TransportMessage;
     try {
       // The owner is who the batch is for; it has no position. Recorded on the `ai_calls` row.
@@ -135,8 +148,8 @@ export class NewsIdeasService {
           model: this.config.model,
           max_tokens: MAX_TOKENS,
           output_config: { effort: 'medium', format: { type: 'json_schema', schema: NEWS_IDEAS_SCHEMA as unknown as Record<string, unknown> } },
-          system: [{ type: 'text', text: NEWS_IDEAS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-          messages: [{ role: 'user', content: buildNewsIdeasUserMessage(scored) }],
+          system: [{ type: 'text', text: newsIdeasSystemPrompt(lessons.length > 0), cache_control: { type: 'ephemeral' } }],
+          messages: [{ role: 'user', content: buildNewsIdeasUserMessage(scored, lessons) }],
         }),
       );
     } catch (e) {

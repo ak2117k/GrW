@@ -130,6 +130,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -309,6 +310,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -496,6 +498,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -676,6 +679,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -866,6 +870,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -1058,6 +1063,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -1253,6 +1259,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -1448,6 +1455,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -1645,6 +1653,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -1845,6 +1854,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -2043,6 +2053,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -2236,6 +2247,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -2424,6 +2436,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -2614,6 +2627,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -2807,6 +2821,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -3000,6 +3015,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -3195,6 +3211,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -3393,6 +3410,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -3580,6 +3598,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -3776,6 +3795,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -3967,6 +3987,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -4146,6 +4167,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -5054,6 +5076,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -5235,6 +5258,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -5416,6 +5440,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -5597,6 +5622,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -5776,6 +5802,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -5857,6 +5884,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -6440,6 +6468,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -6514,6 +6543,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -6795,6 +6825,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -6869,6 +6900,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -7152,6 +7184,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -7218,6 +7251,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -7499,6 +7533,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
@@ -7565,6 +7600,7 @@ Your mandate:
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
+- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:

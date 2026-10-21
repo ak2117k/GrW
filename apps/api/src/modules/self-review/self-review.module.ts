@@ -12,6 +12,7 @@ import { SelfReviewCron } from './services/self-review.cron';
 import { SelfReviewService } from './services/self-review.service';
 import { OPENING_GUARD_TARGET, PERSIST_MIN_TARGET } from './tuning/tunables';
 import { SelfReviewTuningModule } from './tuning/tuning.module';
+import { SelfReviewLearningModule } from './lessons/self-review-learning.module';
 
 /**
  * Self-review loop (docs/superpowers/plans/2026-10-21-self-review-contract.md), stream A: verify →
@@ -26,7 +27,7 @@ import { SelfReviewTuningModule } from './tuning/tuning.module';
  */
 @Global()
 @Module({
-  imports: [PrismaModule, SelfReviewTuningModule],
+  imports: [PrismaModule, SelfReviewTuningModule, SelfReviewLearningModule],
   controllers: [SelfReviewController],
   providers: [
     SelfReviewRepository,

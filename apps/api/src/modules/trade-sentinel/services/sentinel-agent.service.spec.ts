@@ -155,8 +155,9 @@ describe('SentinelAgentService', () => {
     // No config here = market cues off, exit discipline on (its default), triggers off.
     expect(svc.promptVersion).toBe('v2.4/t1');
     const on = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'true' : undefined) } as never);
-    expect(on.promptVersion).toBe('v7/t1');
-    expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}/${THESIS_PROMPT_VERSION}`);
+    // A ConfigService with SELF_REVIEW_LESSONS unset = lessons on (its default): the +l1 suffix.
+    expect(on.promptVersion).toBe('v7+l1/t1');
+    expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}+l1/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');
   });
@@ -259,8 +260,9 @@ describe('SentinelAgentService', () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const on = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'TRUE' : undefined) } as never);
     await on.judge(packet());
-    expect(c.mock.calls[0][0].system[0].text).toBe(SENTINEL_SYSTEM_PROMPT);
-    expect(on.promptVersion).toBe('v7/t1');
+    // SELF_REVIEW_LESSONS unset = on: SENTINEL_SYSTEM_PROMPT plus the +l1 memory.lessons line.
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: true, triggers: false, discipline: true, lessons: true }));
+    expect(on.promptVersion).toBe('v7+l1/t1');
   });
 
   it('sends the packet as the user turn and caches the system prompt', async () => {
@@ -733,8 +735,9 @@ describe('prompt v7 / v2.4 (exit discipline) and the two switches', () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const agent = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (env as Record<string, string>)[k] } as never);
     await agent.judge(packet());
-    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt(o));
-    expect(agent.promptVersion).toBe(`${stamp}/${THESIS_PROMPT_VERSION}`);
+    // SELF_REVIEW_LESSONS unset = on: every stamp carries +l1 (sentinel-lessons-prompt.spec.ts covers off).
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ ...o, lessons: true }));
+    expect(agent.promptVersion).toBe(`${stamp}+l1/${THESIS_PROMPT_VERSION}`);
   });
 
   it('a verdict citing flow.noiseUnit and money.floorBasis validates; an invented child of money is still rejected', async () => {
@@ -837,6 +840,6 @@ describe('prompt v9–v12 / v2.6–v2.9 (news & events v2)', () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const agent = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (env as Record<string, string>)[k] } as never);
     await agent.judge(packet());
-    expect(agent.promptVersion).toBe(`${stamp}/${THESIS_PROMPT_VERSION}`);
+    expect(agent.promptVersion).toBe(`${stamp}+l1/${THESIS_PROMPT_VERSION}`); // SELF_REVIEW_LESSONS unset = on
   });
 });

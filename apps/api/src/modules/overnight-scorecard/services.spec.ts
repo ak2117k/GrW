@@ -3,6 +3,7 @@ import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service
 import type { MessagesTransport } from '../ai-gateway/transport.types';
 import type { NewsRow } from '../night-report/domain/night-report.logic';
 import { NewsIdeasService } from './news-ideas.service';
+import { NEWS_IDEAS_SYSTEM_PROMPT, newsIdeasSystemPrompt } from './domain/news-ideas-ai';
 import { UNAVAILABLE_CHAINS, type WatchlistWriter } from './ports';
 import { ScorecardEngine, STORED_MOOD_MAX_AGE_MS } from './scorecard-engine';
 import { ScorecardBarBackfill } from './scorecard-bar-backfill';
@@ -137,6 +138,26 @@ describe('NewsIdeasService', () => {
     const r = await svc.run('NIGHT', NOW);
     expect(r.stored).toBe(0);
     expect(f.ideas).toHaveLength(0);
+  });
+
+  it('self-review lessons (scope NEWS_IDEAS) ride in the user message and add one system line; none ⇒ the prompt is unchanged', async () => {
+    const lesson = { key: 'wait-for-oi', text: 'Wait for OI to confirm a results gap.', right: 3, wrong: 0 };
+    const inject = jest.fn(() => [lesson]);
+    const f = fakeRepo();
+    const l = llm(ideaJson);
+    await new NewsIdeasService(f.repo, engineFor(f.repo), cfg(), clock, () => NOW, l.t, watch(), null, { inject }).run('NIGHT', NOW);
+    expect(inject).toHaveBeenCalledWith('NEWS_IDEAS');
+    const p = l.calls[0] as { system: Array<{ text: string }>; messages: Array<{ content: string }> };
+    expect(JSON.parse(p.messages[0].content).lessons).toEqual([lesson]);
+    expect(p.system[0].text).toBe(newsIdeasSystemPrompt(true));
+    expect(p.system[0].text).toContain('never rules');
+
+    const f2 = fakeRepo();
+    const l2 = llm(ideaJson);
+    await new NewsIdeasService(f2.repo, engineFor(f2.repo), cfg(), clock, () => NOW, l2.t, watch(), null, { inject: () => [] }).run('NIGHT', NOW);
+    const p2 = l2.calls[0] as { system: Array<{ text: string }>; messages: Array<{ content: string }> };
+    expect(p2.system[0].text).toBe(NEWS_IDEAS_SYSTEM_PROMPT);
+    expect('lessons' in JSON.parse(p2.messages[0].content)).toBe(false);
   });
 
   it('skips when off, or the night before the holiday', async () => {

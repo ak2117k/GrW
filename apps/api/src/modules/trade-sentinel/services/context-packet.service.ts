@@ -26,6 +26,7 @@ import { MBM_CONFIG, type MbmConfig } from '../../mbm/mbm.config';
 import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
 import { MBM_BLOCK_SOURCE, marketBehaviourValue } from './market-behaviour-block';
+import { LESSONS_READER, type InjectedLesson, type InjectionScope, type LessonsReader } from '../../self-review/lessons/types';
 
 /** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
 export const MBM_PACKET_LOG_EVERY_MS = 15 * 60_000;
@@ -538,7 +539,12 @@ export type ContextPacket = {
     expiry: string | null;
   };
   trigger: Block<Prisma.InputJsonValue>;
-  memory: Block<Prisma.InputJsonValue>;
+  /**
+   * This trade's own recent verdicts, plus — only when SELF_REVIEW_LESSONS=on and at least one
+   * applies — `lessons`: the self-review's evidence-counted lessons for this agent (ACTIVE,
+   * right ≥ 2, max 8). Absent key ⇒ no lessons, so the packet is byte-identical to before.
+   */
+  memory: Block<Prisma.InputJsonValue> & { lessons?: InjectedLesson[] };
 };
 
 /**
@@ -550,6 +556,17 @@ export type ContextPacket = {
  */
 export function packetAsJson(packet: ContextPacket): Prisma.InputJsonValue {
   return packet;
+}
+
+/** The fire names the overnight review builds its packet with (overnight-calendar window kinds). */
+const OVERNIGHT_FIRE_NAMES: ReadonlySet<string> = new Set(['OVERNIGHT_REVIEW', 'PRE_OPEN_REVIEW', 'PRE_OPEN_CHECK']);
+
+/** `memory` with the lessons attached — the key only when there is at least one. */
+export function withLessons(
+  memory: Block<Prisma.InputJsonValue>,
+  lessons: readonly InjectedLesson[],
+): ContextPacket['memory'] {
+  return lessons.length > 0 ? { ...memory, lessons: [...lessons] } : memory;
 }
 
 /** How many of this trade's own prior verdicts the agent is shown. */
@@ -842,7 +859,21 @@ export class ContextPacketService {
     /** MBM M3 — both optional: absent, or `packet: 'off'`, ⇒ the client is never called. */
     @Optional() @Inject(MBM_CONFIG) private readonly mbmCfg?: MbmConfig,
     @Optional() private readonly mbm?: MbmClient,
+    /** Self-review lessons — an in-memory cache read (no I/O). Absent ⇒ no lessons. */
+    @Optional() @Inject(LESSONS_READER) private readonly lessons?: LessonsReader,
   ) {}
+
+  /** The lessons for this packet's agent (live, or the overnight review). Never throws. */
+  private lessonsFor(fires: readonly TripwireFire[]): InjectedLesson[] {
+    if (!this.lessons) return [];
+    try {
+      const scope: InjectionScope = fires.some((f) => OVERNIGHT_FIRE_NAMES.has(f.name)) ? 'SENTINEL_OVERNIGHT' : 'SENTINEL_LIVE';
+      return this.lessons.inject(scope);
+    } catch (err) {
+      this.logger.warn(`[lessons] skipped: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
 
   /** trackerId → last `[mbm-packet] would add` log time (observe only). */
   private readonly mbmLogged = new Map<string, number>();
@@ -1205,7 +1236,7 @@ export class ContextPacketService {
               'tripwire.service',
               at,
             ),
-      memory:
+      memory: withLessons(
         priorVerdicts.length > 0
           ? present(
               priorVerdicts.map((v) => ({
@@ -1217,6 +1248,8 @@ export class ContextPacketService {
               at,
             )
           : absent('no prior verdicts for this position — this is the first look'),
+        this.lessonsFor(fires),
+      ),
     };
   }
 

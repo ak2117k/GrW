@@ -51,8 +51,15 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  *   off         on         v11       v2.8
  *   on          on         v12       v2.9
  *
+ * FROM +l1 A FOURTH SWITCH, SELF_REVIEW_LESSONS (self-review lessons; ON unless
+ * `off`/`observe`, parsed by `lessonsModeFrom`): one reading line saying that
+ * memory.lessons, when present, is evidence-counted guidance and never an override
+ * of hard risk. Rather than doubling the table, it is a SUFFIX on every stamp above:
+ * `v9` becomes `v9+l1`, `v2.4` becomes `v2.4+l1`. Lessons off, every text and stamp
+ * above is byte-identical.
+ *
  * {@link SENTINEL_PROMPT_VERSION} / {@link SENTINEL_SYSTEM_PROMPT} name the
- * default (discipline on, triggers off, news off).
+ * default (discipline on, triggers off, news off, lessons off).
  */
 export const SENTINEL_PROMPT_VERSION = 'v7';
 
@@ -78,6 +85,8 @@ export interface SentinelPromptOptions {
   discipline: boolean;
   /** NEWS_EVENTS_V2_ENABLED === 'true' (observe and typos are off): the v9 news & events lines. */
   news?: boolean;
+  /** SELF_REVIEW_LESSONS resolves to `on` (lessonsModeFrom): the +l1 memory.lessons line. */
+  lessons?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -99,7 +108,7 @@ const VERSIONS_NEWS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noC
 export function sentinelPromptVersion(o: SentinelPromptOptions): string {
   const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
   const table = o.news ? VERSIONS_NEWS : VERSIONS;
-  return o.cues ? table[key].cues : table[key].noCues;
+  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}`;
 }
 
 /** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
@@ -225,6 +234,13 @@ export const V9_NEWS_EXIT_LINE_TRIGGERS =
 /** v9 blocks-line insert: replaces 'news.freshCount, ' in the blocks line with news on. */
 export const V9_BLOCKS_INSERT = 'news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, ';
 
+/** The stamp suffix for the self-review lessons line (see the note on {@link SENTINEL_PROMPT_VERSION}). */
+export const LESSONS_VERSION_SUFFIX = '+l1';
+
+/** The +l1 line, inserted after the memory line with lessons on. Ends with a newline. */
+export const LESSONS_MEMORY_LINE =
+  '- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.\n';
+
 const withNewsBlocks = (line: string, on: boolean): string => (on ? line.replace('news.freshCount, ', V9_BLOCKS_INSERT) : line);
 
 /**
@@ -236,7 +252,7 @@ const withNewsBlocks = (line: string, on: boolean): string => (on ? line.replace
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news'>): string {
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons'>): string {
   return `You are a trade sentinel watching a single open position in the Indian market.
 
 You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
@@ -248,7 +264,7 @@ ${o.discipline ? V7_MANDATE_LINES : `${PRE_V7_MANDATE_LINE}\n`}- When the trade 
 How to read the packet:
 - Most fields are a block: either {available: true, value, source, at} or {available: false, reason}. An unavailable block means you CANNOT SEE that information. Say so in your reasoning rather than inferring it. Never treat an absent block as neutral, zero, or benign.
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
-- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+${o.lessons ? LESSONS_MEMORY_LINE : ''}- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.

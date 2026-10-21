@@ -1,4 +1,5 @@
 import { THESIS_PROMPT_VERSION } from './thesis-prompt';
+import { LESSONS_VERSION_SUFFIX } from './sentinel-system-prompt';
 
 /**
  * The OVERNIGHT prompt — a separate prompt with its own version and its own
@@ -13,7 +14,7 @@ export const SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION = `${SENTINEL_OVERNIGHT
 
 /** True for a prompt version stamped by the overnight review (replay must not judge these with the live prompt). */
 export function isOvernightPromptVersion(version: string): boolean {
-  return /^o\d+\//.test(String(version ?? ''));
+  return /^o\d+(?:\+l\d+)?\//.test(String(version ?? ''));
 }
 
 /**
@@ -143,8 +144,32 @@ export const SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT = insertBefore(
  * exactly when the packet carries overnight.scorecard, o4 otherwise. The packet
  * decides, so the prompt can never describe a block the packet does not have.
  */
-export function overnightPromptFor(packet: { overnight?: { scorecard?: unknown } }): { text: string; version: string } {
-  return packet.overnight?.scorecard !== undefined
-    ? { text: SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT, version: SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION }
-    : { text: SENTINEL_OVERNIGHT_SYSTEM_PROMPT, version: SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION };
+export function overnightPromptFor(packet: {
+  overnight?: { scorecard?: unknown };
+  memory?: { lessons?: readonly unknown[] };
+}): { text: string; version: string } {
+  const base =
+    packet.overnight?.scorecard !== undefined
+      ? { text: SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT, version: SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION }
+      : { text: SENTINEL_OVERNIGHT_SYSTEM_PROMPT, version: SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION };
+  if (!packet.memory?.lessons || packet.memory.lessons.length === 0) return base;
+  return {
+    text: insertAfterLineStarting(base.text, OVERNIGHT_MEMORY_ANCHOR, OVERNIGHT_LESSONS_LINE),
+    version: withLessonsSuffix(base.version),
+  };
+}
+
+/**
+ * Self-review lessons (+l1): exactly when the packet's memory carries `lessons`, the line
+ * below follows the memory line and the stamp gains the suffix before the thesis part —
+ * `o4/t1` → `o4+l1/t1`, `o5/t1` → `o5+l1/t1`. No lessons, text and stamp are unchanged.
+ * Restated rather than shared with the live prompt, like the field list above.
+ */
+const OVERNIGHT_MEMORY_ANCHOR = '\n- The "memory" block holds your own recent verdicts';
+export const OVERNIGHT_LESSONS_LINE =
+  '\n- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.';
+
+function withLessonsSuffix(version: string): string {
+  const slash = version.indexOf('/');
+  return slash < 0 ? `${version}${LESSONS_VERSION_SUFFIX}` : `${version.slice(0, slash)}${LESSONS_VERSION_SUFFIX}${version.slice(slash)}`;
 }

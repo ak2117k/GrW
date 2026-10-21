@@ -14,6 +14,7 @@ import {
 } from '../prompts/sentinel-system-prompt';
 import { parseExitDisciplineConfig } from '../../exit-discipline/config';
 import { parseNewsEventsConfig } from '../../news-events/config';
+import { lessonsModeFrom } from '../../self-review/lessons/lessons.logic';
 import type { WakeTrigger } from './tripwire.service';
 import {
   SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION,
@@ -258,6 +259,9 @@ export class SentinelAgentService {
    *    the cycle and the executor's gate parse it (ON unless exactly 'false').
    *  - news: NEWS_EVENTS_V2_ENABLED exactly 'true' (parseNewsEventsConfig().rendering);
    *    'observe' and typos are off — the news-off text and stamp.
+   *  - lessons: SELF_REVIEW_LESSONS resolves to 'on' (lessonsModeFrom — the default when
+   *    unset), the same parse LessonsService uses to decide whether memory.lessons is
+   *    filled. No ConfigService at all ⇒ off (no lessons reader is wired either).
    */
   private get promptOptions(): SentinelPromptOptions {
     return {
@@ -269,6 +273,7 @@ export class SentinelAgentService {
       news: parseNewsEventsConfig({
         NEWS_EVENTS_V2_ENABLED: this.config?.get<string>('NEWS_EVENTS_V2_ENABLED') ?? undefined,
       }).rendering,
+      lessons: !!this.config && lessonsModeFrom(this.config.get<string>('SELF_REVIEW_LESSONS')) === 'on',
     };
   }
 

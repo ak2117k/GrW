@@ -77,7 +77,7 @@ def test_outcome_window_counts_nse_sessions_across_holidays():
     assert out[0]["big"] is True and out[0]["ret_bp"] == pytest.approx(1000.0)
     from src.mbm.stock_move.sessions import SessionCalendar
     cal = SessionCalendar()
-    assert cal.add_sessions(date(2026, 11, 6), 5) == date(2026, 11, 17)      # Diwali 11-09/10 skipped
+    assert cal.add_sessions(date(2026, 11, 6), 5) == date(2026, 11, 16)      # 11-10 Balipratipada skipped
     # inside the index's range its bars decide (a listed holiday NSE traded on, an unlisted closure)
     idx = pd.bdate_range("2026-10-12", "2026-10-23").drop(pd.Timestamp("2026-10-14"))
     cal = SessionCalendar(idx)

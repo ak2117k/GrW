@@ -8,6 +8,9 @@
  */
 
 import type { NewsIdea, Scorecard } from '../../overnight-scorecard/scorecard.types';
+import type { BigMoveWatchView } from '../../stock-move/stock-move.service';
+
+export type { BigMoveWatchRow, BigMoveWatchView } from '../../stock-move/stock-move.service';
 
 export type Section<T> = T | { error: string };
 
@@ -227,4 +230,10 @@ export interface NightReport {
    * when the self-review module is not loaded.
    */
   selfReview: Section<unknown> | null;
+  /**
+   * Big-move watch (stock big-move model, shadow): held stocks + news-idea stocks + the day's top 10
+   * TOP20 names, each with p, bucket, results date and last outcome. `{ error }` on failure, null
+   * when the stock-move module is not loaded. A row with `reading: null` has no stock-move score yet.
+   */
+  bigMoveWatch: Section<BigMoveWatchView> | null;
 }

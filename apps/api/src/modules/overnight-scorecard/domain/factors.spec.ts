@@ -251,6 +251,47 @@ describe('expected-move factor (key mood)', () => {
       points: 1, value: 'NIFTY 60m: p(big) 0.71 → big move (as of 2026-10-19 15:29 IST)',
     });
   });
+
+  describe('stock big-move reading (shadow by default)', () => {
+    const r = (bucket: string, resultsDate: string | null = '2026-10-24') => ({
+      symbol: 'RELIANCE', asOf: '2026-10-21', horizonDays: 5, pBig: 0.712, rankPct: 0.95, bucket,
+      resultsDate, resultsInWindow: resultsDate !== null, modelId: 'stock-move-20261021',
+    });
+    it('shows the stock line next to the NIFTY one, 0 points while shadow', () => {
+      const f = scoreMood({ behaviour: b('NORMAL', 0.4), isIndex: false, isLongOption: true, beta: 1.1, stock: r('TOP20'), stockPoints: 0 });
+      expect(f).toMatchObject({
+        points: 0,
+        value: 'NIFTY 60m: p(big) 0.40 → normal (beta 1.10) · RELIANCE p(big 5d) 0.71 · TOP20 · results 2026-10-24 in window · as of 2026-10-21',
+      });
+      expect(f.reason).toContain('shadow (0 points)');
+    });
+    it('no score yet ⇒ says so, 0 points; omitted ⇒ no stock line at all', () => {
+      const f = scoreMood({ behaviour: b('NORMAL', 0.4), isIndex: false, isLongOption: true, beta: 1.1, stock: null, stockPoints: 1 });
+      expect(f.points).toBe(0);
+      expect(f.value).toContain('stock: no stock-move score yet');
+      expect(scoreMood({ behaviour: b('NORMAL', 0.4), isIndex: false, isLongOption: true, beta: 1.1 }).value).not.toContain('stock');
+    });
+    it('points 1: long option +1 on TOP20, −1 on BOTTOM20, MID 0; never for a non-long-option', () => {
+      const at = (bucket: string, isLongOption = true) =>
+        scoreMood({ behaviour: b('NORMAL', 0.4), isIndex: false, isLongOption, beta: 1.1, stock: r(bucket), stockPoints: 1 }).points;
+      expect(at('TOP20')).toBe(1);
+      expect(at('BOTTOM20')).toBe(-1);
+      expect(at('MID')).toBe(0);
+      expect(at('TOP20', false)).toBe(0);
+    });
+    it('stays inside −2..+2 with the NIFTY part, and works without a NIFTY read', () => {
+      expect(scoreMood({ behaviour: b('ACTIVE'), isIndex: false, isLongOption: true, beta: 1.1, stock: r('TOP20'), stockPoints: 1 }).points).toBe(2);
+      expect(scoreMood({ behaviour: b('QUIET'), isIndex: false, isLongOption: true, beta: 1.1, stock: r('BOTTOM20'), stockPoints: 1 }).points).toBe(-2);
+      const noNifty = scoreMood({ behaviour: { status: 'absent' }, isIndex: false, isLongOption: true, stock: r('TOP20', null), stockPoints: 1 });
+      expect(noNifty).toMatchObject({ points: 1, available: true });
+      expect(noNifty.value).toBe('NIFTY expected move n/a (no live or stored prediction) · RELIANCE p(big 5d) 0.71 · TOP20 · as of 2026-10-21');
+    });
+    it('an index never shows or counts a stock line', () => {
+      const f = scoreMood({ behaviour: b('NORMAL', 0.4), isIndex: true, isLongOption: true, stock: r('TOP20'), stockPoints: 1 });
+      expect(f.points).toBe(0);
+      expect(f.value).not.toContain('RELIANCE');
+    });
+  });
 });
 
 describe('betaTo', () => {

@@ -112,3 +112,35 @@ describe('decide (apply / reject state machine)', () => {
     expect(decide({ ...p, proposedValue: 2 }, 'approve', now).ok).toBe(false);
   });
 });
+
+describe('stock big-move points rule', () => {
+  const rows = (bucket: string, big: number, small: number): EvidenceRow[] =>
+    [...Array.from({ length: big }, () => true), ...Array.from({ length: small }, () => false)].map((outcomeBig, i) => ({
+      kind: 'STOCK_MOVE', refId: `${bucket}-${i}`, symbol: `S${i}`, sessionDate: '2026-10-21', subject: bucket,
+      correct: (bucket === 'TOP20') === outcomeBig, details: { bucket, outcomeBig },
+    }));
+  const target = 'scorecard.stockMove.points';
+  const run = (r: EvidenceRow[], cur: Record<string, TunableValue> = {}) =>
+    proposeTuning({ rows: r, current: defaults(cur), pendingKeys: new Set() }).drafts.filter((d) => d.target === target);
+
+  it('≥ 20 judged, TOP20 big ≥ 60 %, BOTTOM20 big ≤ 35 % → propose 1', () => {
+    const d = run([...rows('TOP20', 7, 3), ...rows('BOTTOM20', 3, 7)]);
+    expect(d).toHaveLength(1);
+    expect(d[0]).toMatchObject({ currentValue: 0, proposedValue: 1, evidence: { n: 20, right: 14, wrong: 6 } });
+    expect(d[0].rationale).toContain('TOP20 moved big 70% of 10');
+  });
+  it('below the bars, too few rows, or already on → nothing', () => {
+    expect(run([...rows('TOP20', 5, 5), ...rows('BOTTOM20', 2, 8)])).toEqual([]); // TOP20 50 %
+    expect(run([...rows('TOP20', 8, 2), ...rows('BOTTOM20', 4, 6)])).toEqual([]); // BOTTOM20 40 %
+    expect(run([...rows('TOP20', 7, 2), ...rows('BOTTOM20', 2, 8)])).toEqual([]); // 19 judged
+    expect(run([...rows('TOP20', 18, 2), ...rows('BOTTOM20', 1, 3)])).toEqual([]); // BOTTOM20 < 5 rows
+    expect(run([...rows('TOP20', 7, 3), ...rows('BOTTOM20', 3, 7)], { [target]: 1 })).toEqual([]);
+  });
+  it('MID rows are not evidence, and a diagnosis suggestion cannot turn it on', () => {
+    const mid: EvidenceRow[] = Array.from({ length: 30 }, (_, i) => ({ kind: 'STOCK_MOVE', refId: `m${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: 'MID', correct: null, details: {} }));
+    expect(run([...mid, ...rows('TOP20', 6, 4), ...rows('BOTTOM20', 3, 6)])).toEqual([]); // 19 judged
+    const out = proposeTuning({ rows: [], current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: target, proposedValue: 1 }] });
+    expect(out.drafts).toEqual([]);
+    expect(out.rejected[0]).toMatchObject({ target });
+  });
+});

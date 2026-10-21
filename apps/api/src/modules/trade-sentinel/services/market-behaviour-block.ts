@@ -60,3 +60,40 @@ export function marketBehaviourValue(
     asOf: istHhmm(b?.asOf ?? null),
   };
 }
+
+// ─── Stock big-move model (2026-10-22 stock-move contract, stream W) ─────────
+
+/**
+ * The stock big-move model's reading for a STOCK position, the same expected-move area as
+ * `marketBehaviour` (which covers NIFTY-mapped positions): `{"s":"RELIANCE","h":"5d","p":0.71,
+ * "b":"TOP20","results":"2026-10-24","inWindow":true,"asOf":"2026-10-21"}` — the stock, the
+ * horizon, P(|5-session move| > 1.5 × ATR), its bucket in the day's book, the next results date,
+ * and the book's IST date. Move SIZE only, never direction. Read from the in-memory nightly book.
+ */
+export type StockMoveValue = {
+  s: string;
+  h: string;
+  p: number;
+  b: string;
+  results: string | null;
+  inWindow: boolean;
+  asOf: string;
+};
+
+export const STOCK_MOVE_BLOCK_SOURCE = 'stock-move';
+
+export function stockMoveValue(
+  r: { symbol: string; horizonDays: number; pBig: number; bucket: string; resultsDate: string | null; resultsInWindow: boolean; asOf: string } | null | undefined,
+): StockMoveValue | null {
+  if (!r || !Number.isFinite(r.pBig)) return null;
+  return {
+    s: r.symbol,
+    h: `${r.horizonDays}d`,
+    p: Math.round(r.pBig * 100) / 100,
+    // Bounded: a model-supplied string must not blow the block's size.
+    b: String(r.bucket ?? '').slice(0, 10),
+    results: r.resultsDate,
+    inWindow: r.resultsInWindow === true,
+    asOf: r.asOf,
+  };
+}

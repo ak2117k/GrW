@@ -12,6 +12,7 @@ import type { CueRecord, FiiDerivatives, FiiDiiCash } from '../../market-cues/ma
 import type { FactorScore } from '../scorecard.types';
 import { lastEma, macdHistogram, median, rsi } from './indicators';
 import { factor, orient, unavailable, type Side } from './scoring';
+import { stockMovePart, type StockMoveReading } from '../../stock-move/stock-move.logic';
 
 const f1 = (n: number) => (Math.abs(n) >= 100 ? n.toFixed(0) : n.toFixed(1));
 const f2 = (n: number) => n.toFixed(2);
@@ -371,6 +372,13 @@ export interface MoodInput {
   } | null;
   isIndex: boolean;
   isLongOption: boolean;
+  /**
+   * Stock positions / news ideas only: the stock big-move model's reading (null = no score yet).
+   * Omitted (undefined) ⇒ no stock line at all (indices, and callers that predate the model).
+   */
+  stock?: StockMoveReading | null;
+  /** The tuned `scorecard.stockMove.points` (0 = shadow, the default). */
+  stockPoints?: 0 | 1;
   /** Stock vs NIFTY beta from ~60 daily closes; null when it could not be computed. Ignored for indices. */
   beta?: number | null;
 }
@@ -392,17 +400,30 @@ function horizonMinutes(k: string): number {
 function moveCall(regime: string): 'big move' | 'quiet' | 'normal' {
   return regime === 'ACTIVE' ? 'big move' : regime === 'QUIET' ? 'quiet' : 'normal';
 }
-
 /**
  * Expected move: the MBM model predicts NIFTY's move SIZE (never direction). For a LONG option a big
  * move can outrun theta (+1); a quiet session lets theta dominate (−1). Stocks ride it through their
  * beta to NIFTY: below BETA_MIN, or unknown, no vote. Anything that is not a long option: context only.
+ *
+ * For a STOCK position (or news idea) given `stock` (the stock big-move model's reading, null = none
+ * yet), the stock line is shown next to the NIFTY one. It counts only with `stockPoints` 1 (the tuned
+ * `scorecard.stockMove.points`; default 0 = shadow): a long option +1 on TOP20, −1 on BOTTOM20. The
+ * factor stays inside −2..+2 (factor() clamps) and is never a direction vote.
  */
 export function scoreMood(input: MoodInput): FactorScore {
+  const nifty = niftyMood(input);
+  if (!nifty) return unavailable('mood', `MBM behaviour ${input.behaviour?.status ?? 'absent'}`);
+  if (input.isIndex || input.stock === undefined) return factor('mood', nifty.points, nifty.value, nifty.reason);
+  const s = stockMovePart(input.stock, input.isLongOption, input.stockPoints ?? 0);
+  return factor('mood', nifty.points + s.points, `${nifty.value} · ${s.text}`, s.note ? `${nifty.reason}; ${s.note}` : nifty.reason);
+}
+
+/** The NIFTY part of the factor; null only for an index with no usable read (the factor is then unavailable). */
+function niftyMood(input: MoodInput): { points: number; value: string; reason: string } | null {
   const b = input.behaviour;
   if (!b || b.status !== 'ok' || !b.horizons || Object.keys(b.horizons).length === 0) {
-    if (input.isIndex) return unavailable('mood', `MBM behaviour ${b?.status ?? 'absent'}`);
-    return factor('mood', 0, 'NIFTY expected move n/a (no live or stored prediction)', 'stock position: no NIFTY move-size read');
+    if (input.isIndex) return null;
+    return { points: 0, value: 'NIFTY expected move n/a (no live or stored prediction)', reason: 'stock position: no NIFTY move-size read' };
   }
   const [key, h] = Object.entries(b.horizons).sort((a, c) => horizonMinutes(c[0]) - horizonMinutes(a[0]))[0];
   const call = moveCall(h.regime);
@@ -412,12 +433,13 @@ export function scoreMood(input: MoodInput): FactorScore {
     ...(b.storedAsOf ? [`as of ${istLabel(b.storedAsOf)}`] : []),
   ];
   const value = `NIFTY ${key}: p(big) ${f2(h.p)} → ${call}${extras.length ? ` (${extras.join(', ')})` : ''}`;
-  if (!input.isLongOption) return factor('mood', 0, value, 'not a long option: expected move is context only');
+  const at = (points: number, reason: string) => ({ points, value, reason });
+  if (!input.isLongOption) return at(0, 'not a long option: expected move is context only');
   if (!input.isIndex) {
-    if (beta == null) return factor('mood', 0, value, 'beta to NIFTY unavailable: no vote');
-    if (beta < BETA_MIN) return factor('mood', 0, value, `beta ${f2(beta)} < ${BETA_MIN}: the stock does not ride NIFTY's move`);
+    if (beta == null) return at(0, 'beta to NIFTY unavailable: no vote');
+    if (beta < BETA_MIN) return at(0, `beta ${f2(beta)} < ${BETA_MIN}: the stock does not ride NIFTY's move`);
   }
-  if (call === 'big move') return factor('mood', 1, value, 'big move expected: can outrun theta');
-  if (call === 'quiet') return factor('mood', -1, value, 'quiet session expected: theta dominates');
-  return factor('mood', 0, value, 'normal-size move expected');
+  if (call === 'big move') return at(1, 'big move expected: can outrun theta');
+  if (call === 'quiet') return at(-1, 'quiet session expected: theta dominates');
+  return at(0, 'normal-size move expected');
 }

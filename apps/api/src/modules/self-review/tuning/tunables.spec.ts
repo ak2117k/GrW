@@ -13,8 +13,16 @@ describe('self-review allow-list', () => {
       'scorecard.factor.news.weight',
       'scorecard.factor.oi.weight',
       'scorecard.factor.vix.weight',
+      'scorecard.stockMove.points',
     ]);
     for (const t of Object.keys(TUNABLES)) expect(isForbiddenTarget(t)).toBe(false);
+  });
+
+  it('scorecard.stockMove.points is 0 by default and only ever 0 or 1', () => {
+    expect(TUNABLES['scorecard.stockMove.points']).toMatchObject({ default: 0, min: 0, max: 1, integer: true });
+    expect(validateTunable('scorecard.stockMove.points', 1)).toEqual({ ok: true, value: 1 });
+    expect(validateTunable('scorecard.stockMove.points', 0.5).ok).toBe(false);
+    expect(validateTunable('scorecard.stockMove.points', 2).ok).toBe(false);
   });
 
   it.each([

@@ -33,6 +33,11 @@ export const weightTarget = (f: WeightFactor): string => `scorecard.factor.${f}.
 export const NEWS_CONFIRMATION_TARGET = 'scorecard.factor.news.requireConfirmation';
 export const OPENING_GUARD_TARGET = 'exit.openingGuardMin';
 export const PERSIST_MIN_TARGET = 'exit.persistMinSec';
+/**
+ * Stock big-move model points in the expected-move (mood) factor (2026-10-22 stock-move contract):
+ * 0 = shadow (shown, never counted); 1 = a long option +1 on TOP20, −1 on BOTTOM20. Never direction.
+ */
+export const STOCK_MOVE_POINTS_TARGET = 'scorecard.stockMove.points';
 
 /** Exit defaults are the env-parsed config (15 / 120 when unset); the bounds are tighter than env's. */
 export const EXIT_OPENING_GUARD_DEFAULT = 15;
@@ -45,6 +50,7 @@ export const TUNABLES: Readonly<Record<string, Tunable>> = Object.freeze({
   [NEWS_CONFIRMATION_TARGET]: { kind: 'boolean', default: false },
   [OPENING_GUARD_TARGET]: { kind: 'number', default: EXIT_OPENING_GUARD_DEFAULT, min: 0, max: 30, integer: true },
   [PERSIST_MIN_TARGET]: { kind: 'number', default: EXIT_PERSIST_MIN_DEFAULT, min: 60, max: 600, integer: true },
+  [STOCK_MOVE_POINTS_TARGET]: { kind: 'number', default: 0, min: 0, max: 1, integer: true },
 });
 
 /** Words no self-modifiable target may contain, whatever the allow-list says. */

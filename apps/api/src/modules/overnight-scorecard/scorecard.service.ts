@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { TUNING_READER, type TuningReader } from '../self-review/tuning/tunables';
+import { STOCK_MOVE_READER, type StockMoveReader } from '../stock-move/stock-move.service';
 import { Cron } from '@nestjs/schedule';
 import type { SessionClock } from '../market-hub/session-clock';
 import { lastSessionClose } from '../trade-sentinel/overnight/overnight-calendar';
@@ -44,8 +45,11 @@ export class ScorecardService {
     @Inject(SCORECARD_NOW) private readonly now: () => Date,
     /** Self-review overrides (@Global SelfReviewTuningModule); absent ⇒ untuned scorecards. */
     @Optional() @Inject(TUNING_READER) tuning?: TuningReader,
+    /** The stock big-move book (@Global StockMoveModule); absent ⇒ stock lines read "no stock-move score yet". */
+    @Optional() @Inject(STOCK_MOVE_READER) stockMove?: StockMoveReader,
   ) {
     this.engine.useTuning?.(tuning);
+    this.engine.useStockMove?.(stockMove);
   }
 
   @Cron('0 40 15 * * 1-5', { name: 'scorecard-overnight', timeZone: 'Asia/Kolkata' })

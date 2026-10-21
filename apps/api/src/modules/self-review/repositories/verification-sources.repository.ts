@@ -3,6 +3,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { MANUAL_VERDICT_PREFIX } from '../../sentinel-executor/domain/manual-exit';
 import { OVERNIGHT_TAGS } from '../domain/scorers';
+import { STOCK_MOVE_HORIZON_DAYS, STOCK_MOVE_THRESHOLD_ATR } from '../../stock-move/stock-move.logic';
 
 /**
  * Read-only access to the rows the scorers judge. Every query is bounded by a time range the run
@@ -134,6 +135,24 @@ export class VerificationSourcesRepository {
       where: { outcomeBig: { not: null }, asOf: { gte: from, lt: to } },
       select: { id: true, instrument: true, horizon: true, asOf: true, p: true, regime: true, outcomeBig: true, outcomeQuality: true, outcomeRangeBp: true, outcomeThresholdBp: true },
       take: 2000,
+    });
+    return rows.map((r) => ({ ...r, id: String(r.id), outcomeBig: r.outcomeBig === true }));
+  }
+
+  /** Resolved stock big-move rows scored on `asOf` (IST 'YYYY-MM-DD'; a DATE column, read as UTC midnight). */
+  async stockMoves(asOf: string) {
+    const rows = await this.prisma.stockMoveScore.findMany({
+      where: {
+        asOf: new Date(`${asOf}T00:00:00.000Z`),
+        horizonDays: STOCK_MOVE_HORIZON_DAYS,
+        thresholdAtr: STOCK_MOVE_THRESHOLD_ATR,
+        outcomeBig: { not: null },
+      },
+      select: {
+        id: true, symbol: true, asOf: true, horizonDays: true, pBig: true, rankPct: true, bucket: true,
+        resultsInWindow: true, modelId: true, outcomeBig: true, outcomeRetBp: true,
+      },
+      take: 1000,
     });
     return rows.map((r) => ({ ...r, id: String(r.id), outcomeBig: r.outcomeBig === true }));
   }

@@ -79,7 +79,7 @@ export function buildSummary(
     };
   }
 
-  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION'), 5).map((r) => ({
+  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'STOCK_MOVE'), 5).map((r) => ({
     kind: r.kind,
     refId: r.refId,
     symbol: r.symbol,

@@ -24,7 +24,9 @@ import { betaTo } from './domain/indicators';
 import type { DailyBar } from './domain/outcome';
 import type { PositionShape } from './domain/positions';
 import { assemble } from './domain/scoring';
-import { applyTuning } from './domain/tuning';
+import { applyTuning, stockMovePointsSetting } from './domain/tuning';
+import type { StockMoveReader } from '../stock-move/stock-move.service';
+import type { StockMoveReading } from '../stock-move/stock-move.logic';
 import { DEFAULT_TUNING, type TuningReader } from '../self-review/tuning/tunables';
 import { istYmd } from './domain/windows';
 import type { BarBackfill, ChainReader } from './ports';
@@ -82,6 +84,35 @@ export class ScorecardEngine {
   /** Bound by ScorecardService from the @Global TUNING_READER when the self-review module is loaded. */
   useTuning(tuning: TuningReader | null | undefined): void {
     this.tuning = tuning ?? DEFAULT_TUNING;
+  }
+
+  /** The stock big-move book (@Global StockMoveModule, in-memory). Default: none ⇒ "no stock-move score yet". */
+  private stockMove: StockMoveReader | null = null;
+
+  /** Bound by ScorecardService from STOCK_MOVE_READER when the stock-move module is loaded. */
+  useStockMove(reader: StockMoveReader | null | undefined): void {
+    this.stockMove = reader ?? null;
+  }
+
+  /**
+   * The stock part's inputs for a stock position / news idea. No `stock` key (no stock line) for an
+   * index or when the stock-move module is not loaded. Never throws.
+   */
+  private stockMoveFor(shape: PositionShape): { stock?: StockMoveReading | null; stockPoints: 0 | 1 } {
+    if (shape.isIndex || !this.stockMove) return { stockPoints: 0 };
+    let stock: StockMoveReading | null = null;
+    let stockPoints: 0 | 1 = 0;
+    try {
+      stock = this.stockMove?.get(shape.underlying) ?? null;
+    } catch (e) {
+      this.logger.warn(`[scorecard] stock-move read skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    try {
+      stockPoints = stockMovePointsSetting(this.tuning);
+    } catch {
+      stockPoints = 0;
+    }
+    return { stock, stockPoints };
   }
 
   constructor(
@@ -225,7 +256,13 @@ export class ScorecardEngine {
         },
         side,
       ),
-      scoreMood({ behaviour: ctx.mood, isIndex: shape.isIndex, isLongOption: shape.isLongOption, beta: await this.beta(ctx, shape, u) }),
+      scoreMood({
+        behaviour: ctx.mood,
+        isIndex: shape.isIndex,
+        isLongOption: shape.isLongOption,
+        beta: await this.beta(ctx, shape, u),
+        ...this.stockMoveFor(shape),
+      }),
     ];
     return assemble({
       userId: input.userId,

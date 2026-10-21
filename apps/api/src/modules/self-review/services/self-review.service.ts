@@ -41,7 +41,7 @@ export class SelfReviewService {
           const first = bySubject.get(m.refIds[0] ?? '');
           return { ...m, kind: first?.kind ?? null, symbol: first?.symbol ?? null };
         })
-      : topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION').map(toDraft), MISS_CAP).map((r) => ({
+      : topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'STOCK_MOVE').map(toDraft), MISS_CAP).map((r) => ({
           refIds: [r.refId],
           cause: `${r.predicted} → ${r.actual}`,
           kind: r.kind,

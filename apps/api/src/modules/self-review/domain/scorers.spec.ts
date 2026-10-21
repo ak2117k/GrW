@@ -10,6 +10,7 @@ import {
   scoreOvernightVerdict,
   scoreScorecardFactors,
   scoreScorecardTotal,
+  scoreStockMove,
   type ScorecardRow,
   type VerdictRow,
 } from './scorers';
@@ -171,5 +172,25 @@ describe('MBM_PREDICTION', () => {
   });
   it('a gap outcome is not judged', () => {
     expect(scoreMbmPrediction({ ...r, outcomeQuality: 'gap' }).correct).toBeNull();
+  });
+});
+
+describe('scoreStockMove', () => {
+  const r = {
+    id: '7', symbol: 'RELIANCE', asOf: new Date('2026-10-14T00:00:00Z'), horizonDays: 5, pBig: 0.71, rankPct: 0.97,
+    bucket: 'TOP20', resultsInWindow: true, modelId: 'm1', outcomeBig: true, outcomeRetBp: 412.4, sessionDate: S,
+  };
+  it('(bucket = TOP20) == outcome_big for TOP20 / BOTTOM20; MID is not judged', () => {
+    expect(scoreStockMove(r)).toMatchObject({
+      kind: 'STOCK_MOVE', refId: '7', subject: 'TOP20', symbol: 'RELIANCE', correct: true, score: null,
+      predicted: 'TOP20 p(big 5d)=0.71 (results in window)', actual: 'BIG move |ret| 412 bp over 5 sessions',
+    });
+    expect(scoreStockMove({ ...r, outcomeBig: false }).correct).toBe(false);
+    expect(scoreStockMove({ ...r, bucket: 'BOTTOM20', outcomeBig: false }).correct).toBe(true);
+    expect(scoreStockMove({ ...r, bucket: 'BOTTOM20', outcomeBig: true }).correct).toBe(false);
+    expect(scoreStockMove({ ...r, bucket: 'MID' }).correct).toBeNull();
+  });
+  it('carries the bucket and outcome for the proposal rule', () => {
+    expect(scoreStockMove(r).details).toMatchObject({ bucket: 'TOP20', outcomeBig: true, asOf: '2026-10-14', horizonDays: 5 });
   });
 });

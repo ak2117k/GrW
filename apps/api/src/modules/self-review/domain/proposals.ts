@@ -11,6 +11,7 @@ import {
   OPENING_GUARD_TARGET,
   PERSIST_MIN_TARGET,
   SCORECARD_WEIGHT_FACTORS,
+  STOCK_MOVE_POINTS_TARGET,
   validateTunable,
   weightTarget,
   type TunableValue,
@@ -84,6 +85,7 @@ export function evidenceRowsFor(target: string, rows: readonly EvidenceRow[]): E
     });
   }
   if (target === PERSIST_MIN_TARGET) return rows.filter((r) => r.kind === 'LIVE_EXIT');
+  if (target === STOCK_MOVE_POINTS_TARGET) return rows.filter((r) => r.kind === 'STOCK_MOVE');
   return [];
 }
 
@@ -114,11 +116,41 @@ function ruleValue(target: string, cur: TunableValue, ev: { n: number; hitRate: 
   return null;
 }
 
+/** Stock big-move points (2026-10-22 stock-move contract): judged rows needed, and the bucket bars. */
+export const STOCK_MOVE_MIN_JUDGED = 20;
+export const STOCK_MOVE_TOP_MIN = 0.6;
+export const STOCK_MOVE_BOTTOM_MAX = 0.35;
+
+/**
+ * `scorecard.stockMove.points` 0 → 1 once the shadow model has proved itself over the rolling window:
+ * ≥ 20 judged STOCK_MOVE rows, TOP20 names moved big ≥ 60 % of the time and BOTTOM20 names ≤ 35 %
+ * (each bucket with ≥ MIN_EVIDENCE judged rows). Only ever proposes turning it ON; the owner approves.
+ */
+export function stockMoveRule(cur: TunableValue, rows: readonly EvidenceRow[]): { value: TunableValue; why: string } | null {
+  if (cur === 1) return null;
+  const judged = rows.filter((r) => r.kind === 'STOCK_MOVE' && r.correct !== null);
+  if (judged.length < STOCK_MOVE_MIN_JUDGED) return null;
+  const bigRate = (bucket: string) => {
+    const b = judged.filter((r) => r.subject === bucket);
+    return b.length >= MIN_EVIDENCE ? { n: b.length, rate: b.filter((r) => det(r).outcomeBig === true).length / b.length } : null;
+  };
+  const top = bigRate('TOP20');
+  const bottom = bigRate('BOTTOM20');
+  if (!top || !bottom || top.rate < STOCK_MOVE_TOP_MIN || bottom.rate > STOCK_MOVE_BOTTOM_MAX) return null;
+  return {
+    value: 1,
+    why:
+      `stock big-move model: TOP20 moved big ${pct(top.rate)} of ${top.n}, BOTTOM20 ${pct(bottom.rate)} of ${bottom.n} ` +
+      `(${judged.length} judged) → count it (+1 TOP20 / −1 BOTTOM20 for long options)`,
+  };
+}
+
 export const RULE_TARGETS: readonly string[] = [
   ...SCORECARD_WEIGHT_FACTORS.map(weightTarget),
   NEWS_CONFIRMATION_TARGET,
   OPENING_GUARD_TARGET,
   PERSIST_MIN_TARGET,
+  STOCK_MOVE_POINTS_TARGET,
 ];
 
 export function proposeTuning(input: EngineInput): EngineOutput {
@@ -144,7 +176,7 @@ export function proposeTuning(input: EngineInput): EngineOutput {
 
   for (const target of RULE_TARGETS) {
     const ev = evidenceOf(evidenceRowsFor(target, input.rows));
-    const r = ruleValue(target, input.current(target), ev);
+    const r = target === STOCK_MOVE_POINTS_TARGET ? stockMoveRule(input.current(target), input.rows) : ruleValue(target, input.current(target), ev);
     if (r) add(target, r.value, r.why, ev);
   }
 
@@ -159,6 +191,11 @@ export function proposeTuning(input: EngineInput): EngineOutput {
     const v = validateTunable(target, s.proposedValue);
     if (!v.ok) {
       rejected.push({ target, reason: v.reason });
+      continue;
+    }
+    if (target === STOCK_MOVE_POINTS_TARGET) {
+      // Only the deterministic bucket rule (above) may turn the stock model's points on or off.
+      rejected.push({ target, reason: 'stock-move points are rule-only (not a diagnosis suggestion)' });
       continue;
     }
     const ev = evidenceOf(evidenceRowsFor(target, input.rows));

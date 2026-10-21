@@ -38,6 +38,8 @@ import type {
 import type { Scorecard } from '../../overnight-scorecard/scorecard.types';
 import { NIGHT_REPORT_STORE, type NightReportStore } from '../repositories/night-report.repository';
 import { SELF_REVIEW_REPORT, type SelfReviewReportSource } from '../../self-review/self-review.ports';
+import { STOCK_MOVE_WATCH, type BigMoveWatchSource } from '../../stock-move/stock-move.service';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
@@ -96,6 +98,8 @@ export class NightReportService {
     @Optional() @Inject(NIGHT_REPORT_SCORECARDS) private readonly scorecards?: ScorecardSource,
     /** The @Global self-review module's latest run; absent ⇒ the section is null. */
     @Optional() @Inject(SELF_REVIEW_REPORT) private readonly selfReview?: SelfReviewReportSource,
+    /** The @Global stock-move module's big-move watch; absent ⇒ the section is null. */
+    @Optional() @Inject(STOCK_MOVE_WATCH) private readonly stockMove?: BigMoveWatchSource,
   ) {}
 
   async build(userId: string, now: Date = new Date()): Promise<NightReport> {
@@ -117,6 +121,16 @@ export class NightReportService {
       selfReview ? this.safe('selfReview', () => selfReview.latest()) : Promise.resolve(null),
     ]);
 
+    const stockMove = this.stockMove;
+    const bigMoveWatch = stockMove
+      ? await this.safe('bigMoveWatch', () =>
+          stockMove.watch({
+            held: isError(positions) ? [] : heldStocks(positions),
+            newsIdeas: isError(newsIdeas) ? [] : newsIdeas.map((i) => i.symbol),
+          }),
+        )
+      : null;
+
     return {
       generatedAt: now.toISOString(),
       window,
@@ -130,6 +144,7 @@ export class NightReportService {
       jobs,
       newsIdeas,
       selfReview: selfReviewSection,
+      bigMoveWatch,
     };
   }
 
@@ -294,6 +309,18 @@ export class NightReportService {
       }),
     ]);
   }
+}
+
+/** NSE stock names the owner holds (an option's / future's underlying, or the cash symbol); no indices, no MCX. */
+function heldStocks(rows: PositionRow[]): string[] {
+  const out = new Set<string>();
+  for (const r of rows) {
+    const ref = r.underlying ?? r.instrument;
+    if (!['NSE', 'BSE'].includes(ref.exchange.toUpperCase())) continue;
+    const name = r.underlying ? r.underlying.symbol : baseSymbol(r.instrument.symbol);
+    if (name && !INDEX_UNDERLYINGS[name]) out.add(name);
+  }
+  return [...out];
 }
 
 /** What the news and events matchers key on: each position's underlying, or its own cash symbol. */

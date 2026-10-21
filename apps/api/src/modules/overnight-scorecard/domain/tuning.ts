@@ -6,7 +6,7 @@
  * A tuned factor keeps its pre-tuning points in `rawPoints` (and its `weight`), so the self-review
  * keeps judging the factor itself, not the knob. Untuned factors are returned unchanged.
  */
-import { NEWS_CONFIRMATION_TARGET, weightTarget, type TuningReader } from '../../self-review/tuning/tunables';
+import { NEWS_CONFIRMATION_TARGET, STOCK_MOVE_POINTS_TARGET, weightTarget, type TuningReader } from '../../self-review/tuning/tunables';
 import type { FactorScore } from '../scorecard.types';
 import { clampPoints } from './scoring';
 
@@ -30,4 +30,12 @@ export function applyTuning(factors: readonly FactorScore[], tuning: TuningReade
     if (points === f.points && weight === 1) return f;
     return { ...f, points: clampPoints(points), reason, rawPoints: f.points, weight };
   });
+}
+
+/**
+ * `scorecard.stockMove.points` (0–1, default 0): whether the stock big-move model's bucket counts in
+ * the expected-move (mood) factor. Anything but exactly 1 is shadow (0).
+ */
+export function stockMovePointsSetting(tuning: TuningReader): 0 | 1 {
+  return tuning.get<number>(STOCK_MOVE_POINTS_TARGET, 0) === 1 ? 1 : 0;
 }

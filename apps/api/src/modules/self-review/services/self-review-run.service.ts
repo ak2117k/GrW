@@ -14,6 +14,7 @@ import {
   scoreOvernightVerdict,
   scoreScorecardFactors,
   scoreScorecardTotal,
+  scoreStockMove,
   type ScorecardRow,
 } from '../domain/scorers';
 import { buildSummary, topMisses } from '../domain/summary';
@@ -24,6 +25,7 @@ import { DIAGNOSIS_MISS_CAP, SELF_REVIEW_DIAGNOSIS, type DiagnosisOutput, type D
 import type { RunSummary, VerificationDraft, VerificationKind } from '../self-review.types';
 import { TUNABLES, type TunableValue } from '../tuning/tunables';
 import { TuningService } from '../tuning/tuning.service';
+import { STOCK_MOVE_HORIZON_DAYS } from '../../stock-move/stock-move.logic';
 
 export const SELF_REVIEW_CLOCK = Symbol('SELF_REVIEW_CLOCK');
 /** The consumers' own defaults for targets whose code default is env-derived (exit-discipline). */
@@ -111,8 +113,9 @@ export class SelfReviewRunService {
       await this.repo.upsertResults(run.id, drafts);
 
       const sessionRows = (await this.repo.results({ sessionDate: S })).map(toDraft);
-      const history = await this.repo.results({ sessions, kinds: ['SCORECARD_FACTOR', 'LIVE_EXIT'] }, 20_000);
-      const summary = buildSummary(S, sessionRows, history, sessions);
+      const history = await this.repo.results({ sessions, kinds: ['SCORECARD_FACTOR', 'LIVE_EXIT', 'STOCK_MOVE'] }, 20_000);
+      // STOCK_MOVE history is proposal evidence only; its bucket subjects are not scorecard factors.
+      const summary = buildSummary(S, sessionRows, history.filter((h) => h.kind !== 'STOCK_MOVE'), sessions);
 
       const diagnosis = await this.diagnose(run.id, S, sessionRows, summary, errors);
       const proposals = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors);
@@ -188,7 +191,20 @@ export class SelfReviewRunService {
         (await this.sources.mbmPredictions(b.midnight, new Date(b.midnight.getTime() + DAY_MS))).map((r) => scoreMbmPrediction({ ...r, sessionDate: s })),
       )),
     );
+    out.push(...(await this.soft('STOCK_MOVE', errors, () => this.stockMoves(s, b.closeAt))));
     return out;
+  }
+
+  /**
+   * Stock big-move rows whose 5-session horizon closes at s: scored on the session STOCK_MOVE_HORIZON_DAYS
+   * sessions before s. Their outcome is filled by the writer after s's close (20:15 IST, after this run),
+   * so a horizon is judged by the next night's re-verification (VERIFY_SESSIONS).
+   */
+  private async stockMoves(s: string, closeAt: Date): Promise<VerificationDraft[]> {
+    const back = lastSessionDates(new Date(closeAt.getTime() + 60_000), this.clock, STOCK_MOVE_HORIZON_DAYS + 1);
+    if (back[0] !== s || back.length <= STOCK_MOVE_HORIZON_DAYS) return [];
+    const asOf = back[STOCK_MOVE_HORIZON_DAYS];
+    return (await this.sources.stockMoves(asOf)).map((r) => scoreStockMove({ ...r, sessionDate: s }));
   }
 
   private async overnight(

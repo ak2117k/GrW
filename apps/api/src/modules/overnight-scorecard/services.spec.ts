@@ -250,6 +250,29 @@ describe('ScorecardEngine: short candles + after-hours mood', () => {
     expect(bars.mock.calls.filter((c) => c[0] === 'NIFTY' && c[1] === '1d')).toHaveLength(1);
   });
 
+  it('stock positions show the stock big-move reading (0 points by default; +1 on TOP20 with points tuned to 1)', async () => {
+    const f = fakeRepo({ storedMood: async () => null });
+    const reading = {
+      symbol: 'RELIANCE', asOf: '2026-10-21', horizonDays: 5, pBig: 0.71, rankPct: 0.97, bucket: 'TOP20',
+      resultsDate: '2026-10-24', resultsInWindow: true, modelId: 'm1',
+    };
+    const get = jest.fn((s: string) => (s === 'RELIANCE' ? reading : null));
+    const engine = new ScorecardEngine(f.repo, UNAVAILABLE_CHAINS, null, null, clock);
+    engine.useStockMove({ get });
+    const ctx = await engine.context('OVERNIGHT', NOW);
+    const mood = async (sym: string) =>
+      (await engine.score(ctx, { userId: 'owner', symbol: sym, exchange: 'NFO', shape: shapeOf(sym, 'NFO', 100), window: 'OVERNIGHT' })).factors.find((x) => x.name === 'mood')!;
+    const shadow = await mood('RELIANCE28OCT261400CE');
+    expect(get).toHaveBeenCalledWith('RELIANCE');
+    expect(shadow.points).toBe(0);
+    expect(shadow.value).toContain('RELIANCE p(big 5d) 0.71 · TOP20 · results 2026-10-24 in window');
+    expect((await mood('TCS28OCT263000CE')).value).toContain('stock: no stock-move score yet');
+    expect((await mood('NIFTY28OCT2625000CE')).value).not.toContain('stock');
+
+    engine.useTuning({ get: (t, d) => (t === 'scorecard.stockMove.points' ? (1 as typeof d) : d) });
+    expect((await mood('RELIANCE28OCT261400CE')).points).toBe(1);
+  });
+
   it('live MBM behaviour ok ⇒ stored predictions are not read', async () => {
     const storedMood = jest.fn();
     const f = fakeRepo({ storedMood });

@@ -396,3 +396,51 @@ export function scoreMbmPrediction(r: MbmRow): VerificationDraft {
     details: { p: r.p, regime: r.regime, horizon: r.horizon, asOf: r.asOf.toISOString(), quality: r.outcomeQuality, brier: r2((r.p - (r.outcomeBig ? 1 : 0)) ** 2) },
   };
 }
+
+// ─── Stock big-move model ────────────────────────────────────────────────────
+
+export interface StockMoveVerifyRow {
+  id: string;
+  symbol: string;
+  asOf: Date;
+  horizonDays: number;
+  pBig: number;
+  rankPct: number;
+  bucket: string;
+  resultsInWindow: boolean;
+  modelId: string;
+  outcomeBig: boolean;
+  outcomeRetBp: number | null;
+  /** IST 'YYYY-MM-DD' of the session that closes the row's horizon (its outcome session). */
+  sessionDate: string;
+}
+
+/**
+ * Stock big-move model (2026-10-22 stock-move contract): correct = (bucket = TOP20) == outcome_big
+ * for TOP20 and BOTTOM20 rows; MID makes no call (null). Never direction.
+ */
+export function scoreStockMove(r: StockMoveVerifyRow): VerificationDraft {
+  const call = r.bucket === 'TOP20' || r.bucket === 'BOTTOM20';
+  return {
+    sessionDate: r.sessionDate,
+    kind: 'STOCK_MOVE',
+    refId: r.id,
+    subject: r.bucket,
+    symbol: r.symbol,
+    predicted: `${r.bucket} p(big ${r.horizonDays}d)=${r2(r.pBig)}${r.resultsInWindow ? ' (results in window)' : ''}`,
+    actual: `${r.outcomeBig ? 'BIG' : 'small'} move${r.outcomeRetBp !== null ? ` |ret| ${Math.round(r.outcomeRetBp)} bp` : ''} over ${r.horizonDays} sessions`,
+    correct: call ? (r.bucket === 'TOP20') === r.outcomeBig : null,
+    score: null,
+    details: {
+      bucket: r.bucket,
+      pBig: r.pBig,
+      rankPct: r.rankPct,
+      outcomeBig: r.outcomeBig,
+      outcomeRetBp: r.outcomeRetBp,
+      asOf: r.asOf.toISOString().slice(0, 10),
+      horizonDays: r.horizonDays,
+      resultsInWindow: r.resultsInWindow,
+      modelId: r.modelId,
+    },
+  };
+}

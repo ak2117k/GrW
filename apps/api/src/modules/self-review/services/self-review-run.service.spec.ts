@@ -54,6 +54,14 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     articleSentiments: jest.fn(async () => new Map()),
     dailyRangeBp: jest.fn(async () => null),
     mbmPredictions: jest.fn(async () => []),
+    stockMoves: jest.fn(async (asOf: string) =>
+      asOf === '2026-10-13'
+        ? [
+            { id: '41', symbol: 'RELIANCE', asOf: new Date('2026-10-13T00:00:00Z'), horizonDays: 5, pBig: 0.7, rankPct: 0.98, bucket: 'TOP20', resultsInWindow: false, modelId: 'm1', outcomeBig: true, outcomeRetBp: 380 },
+            { id: '42', symbol: 'TCS', asOf: new Date('2026-10-13T00:00:00Z'), horizonDays: 5, pBig: 0.3, rankPct: 0.5, bucket: 'MID', resultsInWindow: false, modelId: 'm1', outcomeBig: false, outcomeRetBp: 90 },
+          ]
+        : [],
+    ),
   };
   const tuning = new TuningService({ overrides: async () => [] });
   const svc = new SelfReviewRunService(
@@ -81,7 +89,7 @@ describe('SelfReviewRunService', () => {
     expect(out).toMatchObject({ started: true, runId: 'run1', session: '2026-10-21' });
     const forS = stored.filter((r) => r.sessionDate === '2026-10-21');
     expect(forS.map((r) => `${r.kind}:${r.refId}`).sort()).toEqual([
-      'OVERNIGHT_VERDICT:v1', 'SCORECARD_FACTOR:sc1:news', 'SCORECARD_FACTOR:sc1:oi', 'SCORECARD_TOTAL:sc1',
+      'OVERNIGHT_VERDICT:v1', 'SCORECARD_FACTOR:sc1:news', 'SCORECARD_FACTOR:sc1:oi', 'SCORECARD_TOTAL:sc1', 'STOCK_MOVE:41', 'STOCK_MOVE:42',
     ]);
     expect(forS.find((r) => r.kind === 'SCORECARD_TOTAL')).toMatchObject({ correct: false });
     expect(forS.find((r) => r.kind === 'OVERNIGHT_VERDICT')).toMatchObject({ correct: false, details: expect.objectContaining({ proxy: 'underlying-move' }) });
@@ -89,6 +97,19 @@ describe('SelfReviewRunService', () => {
     const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; summary: { byKind: Record<string, unknown> } }];
     expect(finish[1].status).toBe('DONE');
     expect(finish[1].summary.byKind.SCORECARD_TOTAL).toMatchObject({ n: 1, wrong: 1 });
+  });
+
+  it('STOCK_MOVE: rows whose 5-session horizon closes at S (scored 5 sessions earlier) are judged; MID is null; not a factor', async () => {
+    const { svc, sources, stored, repo } = make();
+    await svc.run(NOW);
+    // S = 10-21 → back over 10-19, 10-16, 10-15, 10-14 (10-20 holiday, weekend) → as-of 10-13.
+    expect(sources.stockMoves).toHaveBeenCalledWith('2026-10-13');
+    const forS = stored.filter((r) => r.sessionDate === '2026-10-21' && r.kind === 'STOCK_MOVE');
+    expect(forS.find((r) => r.refId === '41')).toMatchObject({ subject: 'TOP20', correct: true });
+    expect(forS.find((r) => r.refId === '42')).toMatchObject({ subject: 'MID', correct: null });
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { byKind: Record<string, unknown>; byFactor: Record<string, unknown> } }];
+    expect(finish[1].summary.byKind.STOCK_MOVE).toMatchObject({ n: 2, right: 1, wrong: 0, nullCount: 1 });
+    expect(Object.keys(finish[1].summary.byFactor)).not.toContain('TOP20');
   });
 
   it('is idempotent: a re-run upserts the same (kind, refId) rows', async () => {

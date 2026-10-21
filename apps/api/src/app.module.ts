@@ -50,6 +50,7 @@ import { MbmModule } from './modules/mbm/mbm.module';
 import { NightReportModule } from './modules/night-report/night-report.module';
 import { OvernightScorecardModule } from './modules/overnight-scorecard/overnight-scorecard.module';
 import { SelfReviewModule } from './modules/self-review/self-review.module';
+import { StockMoveModule } from './modules/stock-move/stock-move.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { HealthModule } from './modules/health/health.module';
@@ -258,6 +259,9 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // Self-review loop: nightly verification of every call, bounded owner-approved tuning
     // (SELF_REVIEW_ENABLED, default true). @Global: serves TUNING_READER + the night-report section.
     SelfReviewModule,
+    // Stock big-move model, read side (shadow): the nightly stock_move_scores book for the scorecard,
+    // the night report and the sentinel packet. @Global, read-only, empty until the writer ships.
+    StockMoveModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

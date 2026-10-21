@@ -25,7 +25,10 @@ import { MBM_CONFIG, type MbmConfig } from '../../mbm/mbm.config';
 // A VALUE import: MbmClient is injected by class, so design:paramtypes must see it.
 import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
-import { MBM_BLOCK_SOURCE, marketBehaviourValue } from './market-behaviour-block';
+import { MBM_BLOCK_SOURCE, STOCK_MOVE_BLOCK_SOURCE, marketBehaviourValue, stockMoveValue } from './market-behaviour-block';
+import { STOCK_MOVE_READER, type StockMoveReader } from '../../stock-move/stock-move.service';
+import { underlyingName } from '../../night-report/domain/night-report.logic';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { LESSONS_READER, type InjectedLesson, type InjectionScope, type LessonsReader } from '../../self-review/lessons/types';
 
 /** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
@@ -532,6 +535,13 @@ export type ContextPacket = {
    * every unmapped position stays byte-identical.
    */
   marketBehaviour?: Block<Prisma.InputJsonValue>;
+  /**
+   * Stock big-move model (MBM_PACKET=on only, the same gate as `marketBehaviour`): for a STOCK
+   * position, the nightly model's P(big 5-session move), its bucket and the next results date — a
+   * `StockMoveValue`. Read from an in-memory book (no I/O on this path). Absent key ⇒ flag
+   * off/observe, an index/MCX position, or no score for the stock: the packet stays byte-identical.
+   */
+  stockMove?: Block<Prisma.InputJsonValue>;
   session: {
     nowIst: string;
     nowUtc: string;
@@ -861,6 +871,8 @@ export class ContextPacketService {
     @Optional() private readonly mbm?: MbmClient,
     /** Self-review lessons — an in-memory cache read (no I/O). Absent ⇒ no lessons. */
     @Optional() @Inject(LESSONS_READER) private readonly lessons?: LessonsReader,
+    /** Stock big-move book — an in-memory read (no I/O), refreshed ≤ 30 min. Absent ⇒ no block. */
+    @Optional() @Inject(STOCK_MOVE_READER) private readonly stockMove?: StockMoveReader,
   ) {}
 
   /** The lessons for this packet's agent (live, or the overnight review). Never throws. */
@@ -905,6 +917,38 @@ export class ContextPacketService {
       return null;
     } catch (err) {
       this.logger.warn(`[mbm-packet] skipped: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * The `stockMove` block for a stock position, or null. Same gate as `marketBehaviour`: off ⇒ not
+   * read; observe ⇒ logs what it would add (throttled) and returns null; on ⇒ the block. Index and
+   * MCX positions, and stocks the model has not scored, get no block. Synchronous, never throws.
+   */
+  private stockMoveBlock(entry: RosterEntry, now: Date, at: string): Block<Prisma.InputJsonValue> | null {
+    const mode = this.mbmCfg?.packet ?? 'off';
+    if (mode === 'off' || !this.stockMove) return null;
+    try {
+      const ex = String(entry.exchange ?? '').toUpperCase();
+      if (ex === 'MCX') return null;
+      const name = underlyingName(entry.symbol, ex) ?? baseSymbol(entry.symbol);
+      if (!name || INDEX_UNDERLYINGS[name]) return null;
+      const value = stockMoveValue(this.stockMove.get(name));
+      if (!value) return null;
+      if (mode === 'on') return present(value, STOCK_MOVE_BLOCK_SOURCE, at);
+      const key = `${entry.trackerId}:stock-move`;
+      const last = this.mbmLogged.get(key);
+      if (last === undefined || now.getTime() - last >= MBM_PACKET_LOG_EVERY_MS) {
+        if (this.mbmLogged.size > 500) {
+          for (const [k, t] of this.mbmLogged) if (now.getTime() - t >= MBM_PACKET_LOG_EVERY_MS) this.mbmLogged.delete(k);
+        }
+        this.mbmLogged.set(key, now.getTime());
+        this.logger.log(`[mbm-packet] would add stockMove ${JSON.stringify(value)} — ${entry.symbol} tracker ${entry.trackerId}`);
+      }
+      return null;
+    } catch (err) {
+      this.logger.warn(`[mbm-packet] stockMove skipped: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
   }
@@ -1068,6 +1112,7 @@ export class ContextPacketService {
 
     const v2b = v2 ? this.v2Blocks(entry, tick, now, at) : null;
     const marketBehaviour = await marketBehaviourP;
+    const stockMove = this.stockMoveBlock(entry, now, at);
 
     return {
       position: {
@@ -1214,6 +1259,7 @@ export class ContextPacketService {
           },
       ...(v2b ? { events: v2b.events } : {}),
       ...(marketBehaviour ? { marketBehaviour } : {}),
+      ...(stockMove ? { stockMove } : {}),
       session: {
         nowIst: istWallClock(now),
         nowUtc: at,

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { INDICES } from '@td/shared/constants';
 import { JobRunnerService } from '../../common/job-registry';
+import { retentionCutoff, retentionDaysFromEnv } from '../../common/utils/retention';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { MarketDataRepository } from '../market-data/repositories/market-data.repository';
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
@@ -37,7 +38,6 @@ export const CANDLE_FIXUP_JOB = 'hub-candle-fixup';
 const CANDLE_FIXUP_LEASE_MS = 2 * 60 * 60 * 1000;
 /** Job name in job_runs and /healthz/detail (health-detail.service.ts EXPECTED_JOBS). */
 export const OI_PRUNE_JOB = 'hub-oi-prune';
-const OI_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const OI_PRUNE_LEASE_MS = 10 * 60 * 1000;
 
 // Lives in session-clock.ts (pure) so the trade sentinel can parse the same
@@ -244,15 +244,22 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     }
   }
 
-  /** 02:45 IST daily: drop oi_snapshots older than 30 days (spec §4). A no-op success without chains. */
+  /**
+   * 02:45 IST daily: drop oi_snapshots older than OI_SNAPSHOT_RETENTION_DAYS. Unset / 0 (the
+   * default) keeps them forever (owner decision 2026-10-21: OI history is training data). The
+   * job still runs, as a no-op success, so /healthz/detail keeps seeing it; also a no-op without chains.
+   */
   @Cron('0 45 2 * * *', { name: OI_PRUNE_JOB, timeZone: 'Asia/Kolkata' })
   async pruneOiSnapshots(): Promise<void> {
     try {
       await this.jobs.run(OI_PRUNE_JOB, { ttlMs: OI_PRUNE_LEASE_MS, onRedisError: 'run-anyway' }, async () => {
         const chains = this.engine?.chains;
         if (!chains) return;
-        const removed = await chains.pruneOi(new Date(Date.now() - OI_RETENTION_MS));
-        this.logger.log(`OI snapshot prune: ${removed} row(s) older than 30 days removed`);
+        const days = retentionDaysFromEnv(process.env.OI_SNAPSHOT_RETENTION_DAYS);
+        const cutoff = retentionCutoff(days);
+        if (!cutoff) return;
+        const removed = await chains.pruneOi(cutoff);
+        this.logger.log(`OI snapshot prune: ${removed} row(s) older than ${days} days removed`);
       });
     } catch (err) {
       this.logger.error(`OI snapshot prune failed: ${(err as Error)?.message ?? err}`);

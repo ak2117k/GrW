@@ -1,7 +1,8 @@
 -- Verdict on candles_1m's TimescaleDB setup, read by scripts/deploy/deploy.sh in a FRESH
 -- session after deploy/sql/candles-timescale.sql ran. Prints exactly one word:
 --   skip     setup does not apply here (no table yet, no timescaledb, or Apache-only build)
---   ok       hypertable with compression on, plus compression and retention jobs
+--   ok       hypertable with compression on, a compression job and NO retention job
+--            (candles_1m is kept forever: owner decision 2026-10-21)
 --   missing  should be set up but is not (deploy.sh retries once, then alerts)
 -- timescaledb_information.* only exists once the extension is installed, so it is read
 -- through query_to_xml: that query is parsed only when its CASE branch is reached.
@@ -16,8 +17,12 @@ SELECT CASE
         $q$, FALSE, TRUE, '')))[1]::text::int = 1
    AND (xpath('/row/n/text()', query_to_xml($q$
           SELECT count(*) AS n FROM timescaledb_information.jobs
-          WHERE hypertable_name = 'candles_1m' AND proc_name IN ('policy_compression', 'policy_retention')
-        $q$, FALSE, TRUE, '')))[1]::text::int = 2
+          WHERE hypertable_name = 'candles_1m' AND proc_name = 'policy_compression'
+        $q$, FALSE, TRUE, '')))[1]::text::int = 1
+   AND (xpath('/row/n/text()', query_to_xml($q$
+          SELECT count(*) AS n FROM timescaledb_information.jobs
+          WHERE hypertable_name = 'candles_1m' AND proc_name = 'policy_retention'
+        $q$, FALSE, TRUE, '')))[1]::text::int = 0
   THEN 'ok'
   ELSE 'missing'
 END;

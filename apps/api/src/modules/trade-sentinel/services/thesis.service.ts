@@ -23,6 +23,7 @@ import {
 } from './context-packet.service';
 import type { Side } from '../charges';
 import type { RosterEntry } from './roster.service';
+import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
 
 /**
  * A price the model may decline to give.
@@ -144,7 +145,9 @@ export class ThesisService {
 
     if (existing && !isRetryable(existing)) return existing;
 
-    const { draft, directionDisagreed } = await this.infer(entry, tick, userId);
+    const { draft, directionDisagreed } = await withAiCallContext({ userId, positionId: entry.trackerId }, () =>
+      this.infer(entry, tick, userId),
+    );
     let saved: StoredThesis;
     try {
       saved = await this.repo.upsertInferred(entry.trackerId, draft);

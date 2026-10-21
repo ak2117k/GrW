@@ -379,17 +379,41 @@ describe('MarketHubService', () => {
     setPositions.mockRestore();
   });
 
-  it('prunes OI snapshots older than 30 days through the job runner, as a no-op without a hub', async () => {
-    const svc = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
-    svc.onModuleInit();
-    const prune = jest.fn().mockResolvedValue(12);
-    (svc as any).engine.chains.pruneOi = prune;
-    await svc.pruneOiSnapshots();
-    expect(runner.run).toHaveBeenCalledWith('hub-oi-prune', expect.anything(), expect.any(Function));
-    expect(prune).toHaveBeenCalledWith(expect.any(Date));
-    const cutoff = prune.mock.calls[0][0] as Date;
-    expect(Date.now() - cutoff.getTime()).toBeGreaterThanOrEqual(30 * 24 * 3600_000 - 1000);
-    svc.onModuleDestroy();
+  it('keeps every OI snapshot by default: the prune job runs (health sees it) but deletes nothing', async () => {
+    const saved = process.env.OI_SNAPSHOT_RETENTION_DAYS;
+    delete process.env.OI_SNAPSHOT_RETENTION_DAYS;
+    try {
+      const svc = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+      svc.onModuleInit();
+      const prune = jest.fn().mockResolvedValue(12);
+      (svc as any).engine.chains.pruneOi = prune;
+      await svc.pruneOiSnapshots();
+      expect(runner.run).toHaveBeenCalledWith('hub-oi-prune', expect.anything(), expect.any(Function));
+      expect(prune).not.toHaveBeenCalled();
+      svc.onModuleDestroy();
+    } finally {
+      if (saved !== undefined) process.env.OI_SNAPSHOT_RETENTION_DAYS = saved;
+    }
+  });
+
+  it('with OI_SNAPSHOT_RETENTION_DAYS=30, prunes OI snapshots older than 30 days through the job runner', async () => {
+    const saved = process.env.OI_SNAPSHOT_RETENTION_DAYS;
+    process.env.OI_SNAPSHOT_RETENTION_DAYS = '30';
+    try {
+      const svc = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
+      svc.onModuleInit();
+      const prune = jest.fn().mockResolvedValue(12);
+      (svc as any).engine.chains.pruneOi = prune;
+      await svc.pruneOiSnapshots();
+      expect(runner.run).toHaveBeenCalledWith('hub-oi-prune', expect.anything(), expect.any(Function));
+      expect(prune).toHaveBeenCalledWith(expect.any(Date));
+      const cutoff = prune.mock.calls[0][0] as Date;
+      expect(Date.now() - cutoff.getTime()).toBeGreaterThanOrEqual(30 * 24 * 3600_000 - 1000);
+      svc.onModuleDestroy();
+    } finally {
+      if (saved === undefined) delete process.env.OI_SNAPSHOT_RETENTION_DAYS;
+      else process.env.OI_SNAPSHOT_RETENTION_DAYS = saved;
+    }
   });
 });
 

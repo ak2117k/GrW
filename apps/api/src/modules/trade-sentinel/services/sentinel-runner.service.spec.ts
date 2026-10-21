@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import { SCHEDULE_CRON_OPTIONS } from '@nestjs/schedule/dist/schedule.constants';
 import {
   OI_SNAPSHOT_CLEANUP_CRON,
-  OI_SNAPSHOT_RETENTION_DAYS,
+  oiWallSnapshotRetentionDays,
   SENTINEL_ENABLED_KEY,
   SENTINEL_TICK_CRON,
   SentinelRunnerService,
@@ -337,9 +337,28 @@ describe('isWithinSession', () => {
 });
 
 describe('SentinelRunnerService — OI snapshot retention', () => {
-  afterEach(() => jest.restoreAllMocks());
+  const saved = process.env.OI_WALL_SNAPSHOT_RETENTION_DAYS;
+  beforeEach(() => {
+    process.env.OI_WALL_SNAPSHOT_RETENTION_DAYS = '45';
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (saved === undefined) delete process.env.OI_WALL_SNAPSHOT_RETENTION_DAYS;
+    else process.env.OI_WALL_SNAPSHOT_RETENTION_DAYS = saved;
+  });
 
-  it('deletes only rows older than the retention window', async () => {
+  it('keeps every row by default (owner decision: OI history is training data)', async () => {
+    for (const raw of [undefined, '', '0', '-5', 'abc']) {
+      if (raw === undefined) delete process.env.OI_WALL_SNAPSHOT_RETENTION_DAYS;
+      else process.env.OI_WALL_SNAPSHOT_RETENTION_DAYS = raw;
+      expect(oiWallSnapshotRetentionDays()).toBe(0);
+      const t = make();
+      await expect(t.svc.pruneOiSnapshots()).resolves.toBe(0);
+      expect(t.deleteMany).not.toHaveBeenCalled();
+    }
+  });
+
+  it('with OI_WALL_SNAPSHOT_RETENTION_DAYS set, deletes only rows older than that window', async () => {
     const t = make();
     jest.useFakeTimers().setSystemTime(new Date('2026-08-14T00:00:00Z'));
 
@@ -349,11 +368,7 @@ describe('SentinelRunnerService — OI snapshot retention', () => {
     const where = t.deleteMany.mock.calls[0][0].where;
     const cutoff: Date = where.capturedAt.lt;
     expect(cutoff.toISOString()).toBe('2026-06-30T00:00:00.000Z');
-    // The whole point is that it is bounded AND that it does not wipe the
-    // series the shift sensor's `prev` and Task 13's replay both read.
-    expect(Date.UTC(2026, 7, 14) - cutoff.getTime()).toBe(
-      OI_SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-    );
+    expect(Date.UTC(2026, 7, 14) - cutoff.getTime()).toBe(45 * 24 * 60 * 60 * 1000);
   });
 
   it('reports how many it removed', async () => {

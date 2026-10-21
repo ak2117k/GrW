@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Nightly backup: dump → verify readable and non-trivial → keep 7 locally → copy
 # to every configured rclone remote → prune remote dumps older than KEEP_REMOTE_DAYS (30).
-# Exit codes: 1 bad dump, 2 no remotes, 3 copy failed (a failed prune is only reported).
+# Exit codes: 1 bad dump, 2 no remotes, 3 copy failed (a failed prune is only reported),
+# 4 research copy failed (only with RESEARCH_BACKUP_DIR set; see the end).
 # A backup that never left the box is reported as a failure, not a success.
 set -euo pipefail
 PG_CONTAINER="${PG_CONTAINER:-grw-postgres}"
@@ -44,3 +45,19 @@ for r in $REMOTES; do
   rclone delete --min-age "${KEEP_REMOTE_DAYS}d" --include 'grw-*.dump' "$r" \
     || echo "backup: pruning dumps older than ${KEEP_REMOTE_DAYS}d on $r FAILED (the new backup is fine)" >&2
 done
+
+# The owner's ML research store, pushed here nightly from his PC by
+# scripts/research-backup/backup-research.ps1. Opt-in: only when RESEARCH_BACKUP_DIR
+# is set (ops.env). `rclone copy`, never `sync`: a file deleted on the PC stays in
+# R2, and the dump prune above never matches it (it only deletes grw-*.dump). A
+# failed copy fails the unit (exit 4, Telegram alert) AFTER the dump is safe off-site.
+if [[ -n "${RESEARCH_BACKUP_DIR:-}" ]]; then
+  if [[ ! -d "$RESEARCH_BACKUP_DIR" ]]; then
+    echo "backup: RESEARCH_BACKUP_DIR=$RESEARCH_BACKUP_DIR is not a directory — research not copied" >&2; exit 4
+  fi
+  for r in $REMOTES; do
+    rclone copy --exclude '.incoming/**' "$RESEARCH_BACKUP_DIR" "${r%/}/research-backup" \
+      || { echo "backup: research copy to $r FAILED (the dump is fine)" >&2; exit 4; }
+  done
+  echo "backup: research $RESEARCH_BACKUP_DIR → $REMOTES (research-backup/)"
+fi

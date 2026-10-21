@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import Anthropic from '@anthropic-ai/sdk';
 import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
@@ -35,7 +34,9 @@ import { SentinelChartContextAdapter } from './adapters/chart-context.adapter';
 import { ClaudeCliTransport } from './adapters/claude-cli.transport';
 import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AI_GATEWAY, type AiGateway } from '../ai-gateway/ai-gateway.service';
-import { SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
+import { jobFor, SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
+import { AiCallRepository } from '../ai-gateway/audit/ai-call.repository';
+import { aiCallsRecordingOn, directRecordedTransport } from '../ai-gateway/audit/recorded-transport';
 import { judgeTransportFrom, type MessagesTransport } from './services/llm-transport';
 import { SentinelNewsAdapter } from './adapters/news.adapter';
 import { SentinelOiWallSource } from './adapters/oi-wall.adapter';
@@ -168,14 +169,30 @@ import { MARKET_EVENTS } from './ports/events.port';
        * `golden/sentinel-golden.spec.ts` proves the sentinel's observable
        * behaviour is otherwise identical. Any value other than `true` binds
        * exactly the pre-gateway factory, unchanged.
+       *
+       * RAW CALL LEDGER (flag off). The direct transport is wrapped in a
+       * `RecordedTransport` that writes one `ai_calls` row per call (request and
+       * reply text capped at ~60 KB each, CLI/API token usage, latency, error),
+       * fire-and-forget: the provider, request and reply objects are unchanged.
+       * `AI_CALLS_RECORD=off` binds exactly the unwrapped transport.
        */
-      useFactory: (config: ConfigService, cli: ClaudeCliTransport, gateway: AiGateway): MessagesTransport =>
+      useFactory: (
+        config: ConfigService,
+        cli: ClaudeCliTransport,
+        gateway: AiGateway,
+        calls: AiCallRepository,
+      ): MessagesTransport =>
         config.get<string>('AI_GATEWAY_SENTINEL')?.trim().toLowerCase() === 'true'
           ? new SentinelGatewayTransport(gateway)
-          : judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')) === 'cli'
-            ? cli
-            : new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }),
-      inject: [ConfigService, ClaudeCliTransport, AI_GATEWAY],
+          : directRecordedTransport({
+              judge: judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')),
+              cli,
+              apiKey: config.get<string>('ANTHROPIC_API_KEY'),
+              record: aiCallsRecordingOn(config.get<string>('AI_CALLS_RECORD')),
+              audit: calls,
+              jobOf: jobFor,
+            }),
+      inject: [ConfigService, ClaudeCliTransport, AI_GATEWAY, AiCallRepository],
     },
 
     // Adapters — the narrow ports, bound to the real services.

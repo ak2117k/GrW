@@ -50,8 +50,9 @@ export const TABLE_MAX_DAYS: Record<CandleTable, number> = { '1m': 1, '1h': 365,
 
 /**
  * How far back a read based on candles_1m may reach (1m/5m/15m/30m, and today's part of
- * 1h/1d). Equals the candles_1m retention policy in deploy/sql/candles-timescale.sql: older
- * minutes are dropped, so a fill there would be thrown away again.
+ * 1h/1d). It used to equal the candles_1m retention policy; that policy is removed (owner
+ * decision 2026-10-21: keep all market data), so older stored minutes now stay. This still
+ * bounds how far back a read BACKFILLS from the broker, which is the expensive part.
  */
 export const ONE_MINUTE_HORIZON_DAYS = 180;
 /** Background fills one read may queue. Further windows are reported `deferred` but not queued. */

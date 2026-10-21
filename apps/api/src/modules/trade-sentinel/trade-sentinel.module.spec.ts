@@ -7,6 +7,7 @@ import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AiGatewayService } from '../ai-gateway/ai-gateway.service';
 import { SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
 import { ClaudeCliTransport } from './adapters/claude-cli.transport';
+import { RecordedTransport } from '../ai-gateway/audit/recorded-transport';
 import { TradeSentinelModule } from './trade-sentinel.module';
 import { OI_WALL_SOURCE, OPEN_POSITIONS } from './ports/open-positions.port';
 import { ENGINE_OWNERSHIP_PROBE, RosterService } from './services/roster.service';
@@ -228,19 +229,29 @@ describe('TradeSentinelModule — ANTHROPIC_CLIENT binding (AI_GATEWAY_SENTINEL)
     expect(moduleMeta<{ name?: string }>('imports').map((m) => m?.name)).toContain('AiGatewayModule');
   });
 
-  it('flag unset, SENTINEL_JUDGE unset → a new Anthropic SDK client (exactly today)', async () => {
+  /** The provider behind a recorded direct binding (flag off, AI_CALLS_RECORD on). */
+  const adapterOf = (client: unknown) => (client as RecordedTransport).deps.adapter as unknown as { cli?: unknown; client?: unknown };
+
+  it('flag unset, SENTINEL_JUDGE unset → a new Anthropic SDK client, recorded to ai_calls', async () => {
     const { client } = await boot({});
-    expect(client).toBeInstanceOf(Anthropic);
+    expect(client).toBeInstanceOf(RecordedTransport);
+    expect(adapterOf(client).client).toBeInstanceOf(Anthropic);
+  });
+
+  it('AI_CALLS_RECORD=off → exactly the pre-ledger binding (a bare Anthropic client / the CLI)', async () => {
+    expect((await boot({ AI_CALLS_RECORD: 'off' })).client).toBeInstanceOf(Anthropic);
+    const { client, cli } = await boot({ AI_CALLS_RECORD: 'off', SENTINEL_JUDGE: 'cli' });
+    expect(client).toBe(cli);
   });
 
   it.each(['false', 'FALSE', '1', 'yes', ''])('AI_GATEWAY_SENTINEL=%p → the pre-gateway binding', async (flag) => {
     const { client } = await boot({ AI_GATEWAY_SENTINEL: flag });
-    expect(client).toBeInstanceOf(Anthropic);
+    expect(adapterOf(client).client).toBeInstanceOf(Anthropic);
   });
 
   it('flag unset, SENTINEL_JUDGE=cli → the CLI transport, the SAME instance the gateway holds', async () => {
     const { client, cli, mod } = await boot({ SENTINEL_JUDGE: 'cli' });
-    expect(client).toBe(cli);
+    expect(adapterOf(client).cli).toBe(cli);
     const gw = mod.get(AiGatewayService) as unknown as {
       deps: { adapters: { 'claude-cli': { cli: unknown } } };
     };

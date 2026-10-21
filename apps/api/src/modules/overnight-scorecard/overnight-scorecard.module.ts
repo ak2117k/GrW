@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { MbmChainReader } from '../mbm/services/mbm-chain-reader.service';
 import { ChainWatchlistService } from '../mbm/chain-watchlist';
 import { Module } from '@nestjs/common';
@@ -7,6 +6,8 @@ import { PrismaModule } from '../../common/prisma/prisma.module';
 import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { AI_GATEWAY, type AiGateway } from '../ai-gateway/ai-gateway.service';
 import { SentinelGatewayTransport } from '../ai-gateway/sentinel/sentinel-gateway.transport';
+import { AiCallRepository } from '../ai-gateway/audit/ai-call.repository';
+import { aiCallsRecordingOn, directRecordedTransport } from '../ai-gateway/audit/recorded-transport';
 import type { MessagesTransport } from '../ai-gateway/transport.types';
 import { MarketCuesModule } from '../market-cues/market-cues.module';
 import { MarketCuesService } from '../market-cues/market-cues.service';
@@ -21,7 +22,7 @@ import { ClaudeCliTransport } from '../trade-sentinel/adapters/claude-cli.transp
 import { judgeTransportFrom } from '../trade-sentinel/services/llm-transport';
 import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
 import type { SessionClock } from '../market-hub/session-clock';
-import { NewsIdeasService } from './news-ideas.service';
+import { NEWS_IDEAS_JOB, NewsIdeasService } from './news-ideas.service';
 import {
   SCORECARD_CHAIN_CAPTURE,
   SCORECARD_CHAINS,
@@ -108,15 +109,22 @@ import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW, ScorecardService } fr
     {
       // The same transport choice as the sentinel's ANTHROPIC_CLIENT (trade-sentinel.module.ts):
       // AI_GATEWAY_SENTINEL=true → the gateway (labelled `sentinel.unknown`, routed by SENTINEL_JUDGE);
-      // else SENTINEL_JUDGE=cli → the local claude CLI; else the Anthropic API.
+      // else SENTINEL_JUDGE=cli → the local claude CLI; else the Anthropic API. Flag off, the direct
+      // transport writes one `ai_calls` row per call (job `news.ideas`), fire-and-forget;
+      // AI_CALLS_RECORD=off binds the bare transport.
       provide: SCORECARD_LLM,
-      useFactory: (config: ConfigService, cli: ClaudeCliTransport, gateway: AiGateway): MessagesTransport =>
+      useFactory: (config: ConfigService, cli: ClaudeCliTransport, gateway: AiGateway, calls: AiCallRepository): MessagesTransport =>
         config.get<string>('AI_GATEWAY_SENTINEL')?.trim().toLowerCase() === 'true'
           ? new SentinelGatewayTransport(gateway)
-          : judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')) === 'cli'
-            ? cli
-            : (new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }) as unknown as MessagesTransport),
-      inject: [ConfigService, ClaudeCliTransport, AI_GATEWAY],
+          : directRecordedTransport({
+              judge: judgeTransportFrom(config.get<string>('SENTINEL_JUDGE')),
+              cli,
+              apiKey: config.get<string>('ANTHROPIC_API_KEY'),
+              record: aiCallsRecordingOn(config.get<string>('AI_CALLS_RECORD')),
+              audit: calls,
+              jobOf: () => NEWS_IDEAS_JOB,
+            }),
+      inject: [ConfigService, ClaudeCliTransport, AI_GATEWAY, AiCallRepository],
     },
     ScorecardService,
     NewsIdeasService,

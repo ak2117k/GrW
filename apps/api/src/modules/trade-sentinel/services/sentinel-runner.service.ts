@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { retentionCutoff, retentionDaysFromEnv } from '../../../common/utils/retention';
 import { SentinelCycleService, type CycleReport } from './sentinel-cycle.service';
 import { isExchangeOpen } from '../market-sessions';
 import type { SessionClock } from '../../market-hub/session-clock';
@@ -44,11 +45,18 @@ export const SENTINEL_TICK_CRON = '*/30 * * * * *';
  * sensor's `prev` is the last STORED row and because Task 13's replay reads the
  * series — but neither needs history beyond a couple of expiry cycles.
  *
- * 45 days covers two monthly rollovers. `daily-housekeeping` does NOT exist in
+ * 45 days covered two monthly rollovers. `daily-housekeeping` does NOT exist in
  * this repo despite CLAUDE.md §4 listing it, so the cron lives here; when that
  * queue is built, this method is what moves into it.
+ *
+ * OWNER DECISION 2026-10-21: keep all market / analysis data until the models
+ * and the agent are trained, so the retention is now
+ * `OI_WALL_SNAPSHOT_RETENTION_DAYS` and unset / 0 (the default) keeps every
+ * row. Set it to e.g. 45 to restore the old bound.
  */
-export const OI_SNAPSHOT_RETENTION_DAYS = 45;
+export function oiWallSnapshotRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
+  return retentionDaysFromEnv(env.OI_WALL_SNAPSHOT_RETENTION_DAYS);
+}
 
 /** Nightly, well after the session and before the pre-market crons. */
 export const OI_SNAPSHOT_CLEANUP_CRON = '0 30 2 * * *';
@@ -269,18 +277,18 @@ export class SentinelRunnerService {
     });
   }
 
-  /** See {@link OI_SNAPSHOT_RETENTION_DAYS}. Runs regardless of the enable flag. */
+  /** See {@link oiWallSnapshotRetentionDays}. Runs regardless of the enable flag; 0 days = keep all. */
   @Cron(OI_SNAPSHOT_CLEANUP_CRON, { timeZone: 'Asia/Kolkata' })
   async pruneOiSnapshots(): Promise<number> {
-    const cutoff = new Date(Date.now() - OI_SNAPSHOT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const days = oiWallSnapshotRetentionDays();
+    const cutoff = retentionCutoff(days);
+    if (!cutoff) return 0;
     try {
       const { count } = await this.prisma.oiWallSnapshot.deleteMany({
         where: { capturedAt: { lt: cutoff } },
       });
       if (count > 0) {
-        this.logger.log(
-          `pruned ${count} OI wall snapshots older than ${OI_SNAPSHOT_RETENTION_DAYS} days`,
-        );
+        this.logger.log(`pruned ${count} OI wall snapshots older than ${days} days`);
       }
       return count;
     } catch (err) {

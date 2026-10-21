@@ -70,6 +70,7 @@ import {
 } from '../ports/scorecard.port';
 import { scorecardBlock } from '../overnight/scorecard-block';
 import { overnightPromptFor } from '../prompts/sentinel-overnight-prompt';
+import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
 
 /**
  * How many failed judgements one position may cost one window before it is
@@ -707,7 +708,9 @@ export class SentinelOvernightService {
       },
     };
 
-    const verdict = await this.agent.judgeOvernight(packet);
+    const verdict = await withAiCallContext({ userId: entry.userId, positionId: entry.trackerId }, () =>
+      this.agent.judgeOvernight(packet),
+    );
     const nextOpen = nextSessionOpen(entry.exchange, now, this.clock);
     await this.verdicts.record({
       userId: entry.userId,

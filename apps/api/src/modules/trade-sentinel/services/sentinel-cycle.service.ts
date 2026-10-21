@@ -37,6 +37,7 @@ import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
 import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
 import type { TripwireInput } from '../tripwires/types';
 import { NewsWatchBook } from './news-watch-book';
+import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
 import {
   REJUDGE_CONFIG,
   SUPPRESSIBLE_FIRES,
@@ -1088,7 +1089,9 @@ export class SentinelCycleService {
     // as the fallback: a decision that somehow reached here without saying why
     // it woke the agent must not be quietly downgraded — see `judge`. A throw
     // here (or anywhere in this method) is backed off in `judgeDetached`.
-    const verdict = await this.agent.judge(packet, decision.trigger ?? 'FIRE');
+    const verdict = await withAiCallContext({ userId: entry.userId, positionId: entry.trackerId }, () =>
+      this.agent.judge(packet, decision.trigger ?? 'FIRE'),
+    );
     // A verdict came back and passed validation, so whatever was wrong has
     // cleared. Reset before the write; if the write then fails, `judgeDetached`
     // counts that as one fresh failure and backs off from 30 s.

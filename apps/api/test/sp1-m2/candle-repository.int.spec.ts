@@ -119,6 +119,7 @@ describe('PrismaCandleRepo (real database)', () => {
        WHERE hypertable_name = 'candles_1m' AND proc_name IN ('policy_compression', 'policy_retention')
        ORDER BY proc_name`,
     );
-    expect(jobs.map((j) => j.proc_name)).toEqual(['policy_compression', 'policy_retention']);
+    // No retention: candles_1m is kept forever (owner decision 2026-10-21); the SQL removes any old policy.
+    expect(jobs.map((j) => j.proc_name)).toEqual(['policy_compression']);
   });
 });

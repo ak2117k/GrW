@@ -3,6 +3,7 @@ import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { retentionCutoff, retentionDaysFromEnv } from '../../../common/utils/retention';
 import {
   BrokerAdapter,
   TickData,
@@ -793,19 +794,22 @@ export class OptionsChainService {
   }
 
   /**
-   * Daily at 02:00 IST: prune snapshots older than 30 days. The 7-day read-
-   * fallback window means anything older than a week is never read; we keep
-   * an extra 23 days as a buffer for historical review / debugging.
+   * Daily at 02:00 IST: prune snapshots older than OPTION_CHAIN_RETENTION_DAYS.
+   * Unset / 0 (the default) keeps them forever: the snapshots are the OI
+   * history the models and the agent are trained on (owner decision
+   * 2026-10-21). The 7-day read fallback above never reads further back.
    */
   @Cron('0 2 * * *', { timeZone: 'Asia/Kolkata' })
   async cleanupOldSnapshots(): Promise<void> {
-    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const days = retentionDaysFromEnv(process.env.OPTION_CHAIN_RETENTION_DAYS);
+    const cutoff = retentionCutoff(days);
+    if (!cutoff) return;
     try {
       const { count } = await this.prisma.optionChainSnapshot.deleteMany({
         where: { capturedAt: { lt: cutoff } },
       });
       if (count > 0) {
-        this.logger.log(`Pruned ${count} option-chain snapshots older than 30 days`);
+        this.logger.log(`Pruned ${count} option-chain snapshots older than ${days} days`);
       }
     } catch (error) {
       this.logger.warn(

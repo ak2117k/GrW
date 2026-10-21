@@ -111,6 +111,6 @@ export function istMidnight(now: Date): Date {
     // Daily ai_calls size log + warning (no retention exists; the table is append-only).
     AiCallsSizeWatch,
   ],
-  exports: [AI_GATEWAY, AiGatewayService, ClaudeCliTransport, ScorerClient],
+  exports: [AI_GATEWAY, AiGatewayService, ClaudeCliTransport, ScorerClient, AiCallRepository],
 })
 export class AiGatewayModule {}

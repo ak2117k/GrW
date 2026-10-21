@@ -20,6 +20,7 @@ cat > "$bin/rclone" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "$RCLONE_LOG"
 [[ "$1" == copy && -n "${RCLONE_FAIL_COPY:-}" ]] && exit 1
+[[ "$1" == copy && "$*" == *research-backup* && -n "${RCLONE_FAIL_RESEARCH:-}" ]] && exit 1
 [[ "$1" == delete && -n "${RCLONE_FAIL_DELETE:-}" ]] && exit 1
 exit 0
 EOF
@@ -51,6 +52,19 @@ expect "a failed copy never prunes the remote" "$(log | grep -c '^delete')" 0
 rc=$(run BACKUP_REMOTES="r2:bucket" RCLONE_FAIL_DELETE=1)
 expect "a failed prune does not fail the backup" "$rc" 0
 expect "a failed prune is reported" "$(grep -c 'prun' "$work/stderr")" 1
+
+# Research store (RESEARCH_BACKUP_DIR): opt-in, copied after the dump is safe, never synced.
+research="$work/research"; mkdir -p "$research"
+rc=$(run BACKUP_REMOTES="r2:bucket" RESEARCH_BACKUP_DIR="$research")
+expect "research backup succeeds" "$rc" 0
+expect "research is copied (not synced) to research-backup/ after the dump prune"   "$(log | tail -n 1)" "copy --exclude .incoming/** $research r2:bucket/research-backup"
+rc=$(run BACKUP_REMOTES="r2:bucket")
+expect "no RESEARCH_BACKUP_DIR: no research copy" "$(log | grep -c research-backup)" 0
+rc=$(run BACKUP_REMOTES="r2:bucket" RESEARCH_BACKUP_DIR="$work/missing")
+expect "a missing research dir fails the unit after the dump" "$rc" 4
+expect "  ...but the dump was still copied" "$(log | grep -c "^copy .*grw-")" 1
+rc=$(run BACKUP_REMOTES="r2:bucket" RESEARCH_BACKUP_DIR="$research" RCLONE_FAIL_RESEARCH=1)
+expect "a failed research copy is exit 4" "$rc" 4
 
 rm -rf "$work"
 if (( failures > 0 )); then echo "$failures test(s) failed"; exit 1; fi

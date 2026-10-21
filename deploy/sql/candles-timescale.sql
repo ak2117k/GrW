@@ -9,13 +9,17 @@
 --   * candles_1m missing (migrations not applied yet)      -> nothing, no error
 --   * no timescaledb, or the Apache-only build (Neon)      -> nothing: we want
 --     compression + retention or a plain table, never a bare Apache hypertable
---   * full licence ('timescale', the VPS image)            -> hypertable,
---     compression and 180-day retention, each step skipped when already done
+--   * full licence ('timescale', the VPS image)            -> hypertable and
+--     compression, each step skipped when already done; NO retention policy
 --   * anything unexpected                                  -> WARNING, never an abort
 --
 -- create_default_indexes => FALSE: the primary key (exchange, token, ts) already
 -- serves every query, and an extra ts index would show up as Prisma schema drift.
--- 180 days matches ONE_MINUTE_HORIZON_DAYS in candle.types.ts (reads clamp to it).
+-- RETENTION REMOVED (owner decision 2026-10-21): keep all market data until the
+-- application, models and agent are trained. The former 180-day policy is dropped
+-- here, on every deploy, because this file (not a migration) owns the Timescale setup:
+-- a migration would run once and this file would re-add the policy on the next deploy.
+-- remove_retention_policy(if_exists) is a no-op once it is gone.
 -- One DO block on purpose: the integration test executes this file as one statement.
 DO $$
 BEGIN
@@ -50,7 +54,7 @@ BEGIN
       timescaledb.compress_orderby = 'ts');
   END IF;
   PERFORM add_compression_policy('candles_1m', INTERVAL '7 days', if_not_exists => TRUE);
-  PERFORM add_retention_policy('candles_1m', INTERVAL '180 days', if_not_exists => TRUE);
+  PERFORM remove_retention_policy('candles_1m', if_exists => TRUE);
 EXCEPTION WHEN OTHERS THEN
   RAISE WARNING 'candles_1m TimescaleDB setup failed (%): left as it was', SQLERRM;
 END

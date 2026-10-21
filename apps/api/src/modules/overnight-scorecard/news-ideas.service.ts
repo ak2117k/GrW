@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import type { MessagesTransport, TransportMessage } from '../ai-gateway/transport.types';
+import { withAiCallContext } from '../ai-gateway/audit/ai-call-context';
 import type { SessionClock } from '../market-hub/session-clock';
 import { underlyingName } from '../night-report/domain/night-report.logic';
 import { lastSessionClose } from '../trade-sentinel/overnight/overnight-calendar';
@@ -23,6 +24,8 @@ import { SCORECARD_CLOCK, SCORECARD_ENGINE, SCORECARD_NOW } from './scorecard.se
 import type { Scorecard } from './scorecard.types';
 
 const MAX_TOKENS = 4000;
+/** The `ai_calls.job` label of the news-ideas batch call. */
+export const NEWS_IDEAS_JOB = 'news.ideas';
 /** How long a news symbol stays on stream A's chain-capture watchlist. */
 export const WATCHLIST_TTL_HOURS = 36;
 
@@ -126,13 +129,16 @@ export class NewsIdeasService {
 
     let reply: TransportMessage;
     try {
-      reply = await this.llm.messages.create({
-        model: this.config.model,
-        max_tokens: MAX_TOKENS,
-        output_config: { effort: 'medium', format: { type: 'json_schema', schema: NEWS_IDEAS_SCHEMA as unknown as Record<string, unknown> } },
-        system: [{ type: 'text', text: NEWS_IDEAS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: buildNewsIdeasUserMessage(scored) }],
-      });
+      // The owner is who the batch is for; it has no position. Recorded on the `ai_calls` row.
+      reply = await withAiCallContext({ userId: this.config.ownerUserId ?? undefined }, () =>
+        this.llm.messages.create({
+          model: this.config.model,
+          max_tokens: MAX_TOKENS,
+          output_config: { effort: 'medium', format: { type: 'json_schema', schema: NEWS_IDEAS_SCHEMA as unknown as Record<string, unknown> } },
+          system: [{ type: 'text', text: NEWS_IDEAS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+          messages: [{ role: 'user', content: buildNewsIdeasUserMessage(scored) }],
+        }),
+      );
     } catch (e) {
       throw new Error(`Sonnet call failed: ${e instanceof Error ? e.message : String(e)}`);
     }

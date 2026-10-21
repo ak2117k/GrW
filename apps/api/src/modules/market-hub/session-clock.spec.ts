@@ -101,9 +101,9 @@ describe('SessionClock — MCX holiday sessions', () => {
       holidays: MARKET_HOLIDAYS,
       mcxLateClose: [{ from: '2026-11-02', to: '2027-03-08' }],
     });
-    // 2026-11-27 Guru Nanak Jayanti (NSE holiday), inside the late season.
-    expect(late.isOpen('MCX', ist('2026-11-27T23:45:00'))).toBe(true);
-    expect(late.isOpen('MCX', ist('2026-11-27T10:00:00'))).toBe(false);
+    // 2026-11-24 Guru Nanak Jayanti (NSE holiday), inside the late season.
+    expect(late.isOpen('MCX', ist('2026-11-24T23:45:00'))).toBe(true);
+    expect(late.isOpen('MCX', ist('2026-11-24T10:00:00'))).toBe(false);
   });
 
   it('nextOpen on an evening-session holiday is 17:00 that day', () => {

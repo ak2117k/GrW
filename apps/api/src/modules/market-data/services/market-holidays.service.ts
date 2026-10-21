@@ -35,48 +35,23 @@ export interface TradingDayInfo {
  * Update this list annually.
  */
 const HOLIDAYS_2026: MarketHoliday[] = [
-  // January
+  // Weekday NSE closures per the NSE 2026 circular (corrected 2026-10-22: the earlier list had 9 days NSE
+  // traded and missed 7 closures). Weekend holidays (Feb 15, Mar 21, Aug 15, Nov 8 Muhurat) cost no session.
+  { date: '2026-01-15', name: 'Maharashtra municipal elections', exchanges: ['NSE', 'BSE', 'NFO'] },
   { date: '2026-01-26', name: 'Republic Day', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // February
-  { date: '2026-02-17', name: 'Mahashivratri', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // March
-  { date: '2026-03-10', name: 'Holi', exchanges: ['NSE', 'BSE', 'NFO'] },
-  { date: '2026-03-17', name: 'Id-ul-Fitr (Eid)', exchanges: ['NSE', 'BSE', 'NFO'] },
-  { date: '2026-03-30', name: 'Ram Navami', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // April
+  { date: '2026-03-03', name: 'Holi', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-03-26', name: 'Shri Ram Navami', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-03-31', name: 'Shri Mahavir Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
   { date: '2026-04-03', name: 'Good Friday', exchanges: ['NSE', 'BSE', 'NFO'] },
-  { date: '2026-04-14', name: 'Dr. Ambedkar Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // May
-  { date: '2026-05-01', name: 'Maharashtra Day / May Day', exchanges: ['NSE', 'BSE', 'NFO'] },
-  { date: '2026-05-25', name: 'Buddha Purnima', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // June
-  { date: '2026-06-24', name: 'Eid-ul-Adha (Bakrid)', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // July
-  { date: '2026-07-10', name: 'Muharram', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // August
-  { date: '2026-08-15', name: 'Independence Day', exchanges: ['NSE', 'BSE', 'NFO'] },
-  { date: '2026-08-18', name: 'Janmashtami', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // September
-  { date: '2026-09-08', name: 'Milad-un-Nabi', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // October
+  { date: '2026-04-14', name: 'Dr. Baba Saheb Ambedkar Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-05-01', name: 'Maharashtra Day', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-05-28', name: 'Bakri Id', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-06-26', name: 'Muharram', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-09-14', name: 'Ganesh Chaturthi', exchanges: ['NSE', 'BSE', 'NFO'] },
   { date: '2026-10-02', name: 'Mahatma Gandhi Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
   { date: '2026-10-20', name: 'Dussehra', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // November
-  { date: '2026-11-09', name: 'Diwali (Laxmi Puja)', exchanges: ['NSE', 'BSE', 'NFO'] },
-  { date: '2026-11-10', name: 'Diwali (Balipratipada)', exchanges: ['NSE', 'BSE', 'NFO'] },
-  { date: '2026-11-27', name: 'Guru Nanak Jayanti', exchanges: ['NSE', 'BSE', 'NFO'] },
-
-  // December
+  { date: '2026-11-10', name: 'Diwali Balipratipada', exchanges: ['NSE', 'BSE', 'NFO'] },
+  { date: '2026-11-24', name: 'Prakash Gurpurb Sri Guru Nanak Dev', exchanges: ['NSE', 'BSE', 'NFO'] },
   { date: '2026-12-25', name: 'Christmas', exchanges: ['NSE', 'BSE', 'NFO'] },
 ];
 

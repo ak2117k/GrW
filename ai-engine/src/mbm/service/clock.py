@@ -20,6 +20,7 @@ SESSION_END = time(15, 30)
 DAILY_REFRESH = time(8, 30)
 DAILY_SETUPS = time(15, 50)
 DEMOTION_CHECK = time(15, 45)      # after close: live-AUC demotion of Model A horizons (M4)
+STOCK_MOVE = time(20, 15)          # stock big-move nightly (after the 18:45 self-review), weekdays
 
 
 def to_ist(now: datetime) -> datetime:
@@ -96,6 +97,26 @@ def next_demotion_check(now: datetime) -> datetime:
     while not is_weekday(t):
         t += timedelta(days=1)
     return t
+
+
+def next_stock_move(now: datetime) -> datetime:
+    """Next weekday 20:15 IST strictly after `now`. Holidays are skipped by the job itself (no new NIFTY
+    daily bar ⇒ the latest session is already scored ⇒ nothing to do)."""
+    n = to_ist(now)
+    t = _at(n, STOCK_MOVE)
+    while t <= n or not is_weekday(t):
+        t = _at(t + timedelta(days=1), STOCK_MOVE)
+    return t
+
+
+def expected_stock_move_session(now: datetime):
+    """The latest weekday whose 20:15 IST run should have happened by `now` (a date). Holidays make this
+    an over-estimate, which only costs a redundant catch-up run that finds nothing new to score."""
+    t = to_ist(now)
+    d = t.date() if t.time() >= STOCK_MOVE else t.date() - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
 
 def session_end(as_of: datetime) -> datetime:

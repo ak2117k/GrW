@@ -2,6 +2,8 @@
 
 Env: MBM_INSTRUMENTS (default NIFTY), MODELS_DIR (default /models), AI_DB_* parts or
 AI_DB_URL (see src/scorer/db_url.py), MBM_LOOP=off disables the loop (tests/local).
+Stock big-move nightly (SHADOW): STOCK_MOVE_ENABLED=observe|off (default observe), STOCK_MOVE_CACHE
+(default /cache/stock-move; a writable volume). Runs on its own task, never inside the 5-min loop.
 Never imports src/main.py or sklearn.
 """
 from __future__ import annotations
@@ -20,6 +22,8 @@ from src.mbm.service.daily import fetch_global_daily
 from src.mbm.service.engine import Engine
 from src.mbm.service.setups import fetch_nsei_daily
 from src.mbm.service.repo import PgRepo
+from src.mbm.stock_move.job import StockMoveJob, mode_from
+from src.mbm.stock_move.repo import PgStockMoveRepo
 from src.scorer.db_url import ai_db_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -36,6 +40,33 @@ def make_engine(env=os.environ) -> Engine:
     return Engine(repo=PgRepo(url) if url else None, models_dir=Path(env.get("MODELS_DIR") or "/models"),
                   instruments=instruments, now=utcnow, fetch_daily=fetch_global_daily,
                   fetch_index_daily=fetch_nsei_daily)
+
+
+def make_stock_move_job(env=os.environ) -> StockMoveJob:
+    url = ai_db_url(env)
+    return StockMoveJob(repo=PgStockMoveRepo(url) if url else None,
+                        models_dir=Path(env.get("MODELS_DIR") or "/models"),
+                        cache_dir=Path(env.get("STOCK_MOVE_CACHE") or "/cache/stock-move"),
+                        now=utcnow, mode=mode_from(env))
+
+
+async def stock_move_loop(job: StockMoveJob) -> None:
+    """Catch-up on boot if the latest expected session has no rows, then weekdays 20:15 IST. Each run is
+    a thread of its own: minutes of Yahoo pacing never delay the Model A ticks."""
+    try:
+        if await asyncio.to_thread(job.needs_catch_up):
+            log.info("[stock-move] catch-up run on boot")
+            await asyncio.to_thread(job.run)
+    except Exception as exc:
+        log.exception("[stock-move] catch-up failed: %s", exc)
+    while True:
+        now = job.now()
+        wake = clock.next_stock_move(now)
+        await asyncio.sleep(max(0.0, (wake - now).total_seconds()))
+        try:
+            await asyncio.to_thread(job.run)
+        except Exception as exc:  # the loop must never die
+            log.exception("[stock-move] nightly failed: %s", exc)
 
 
 async def run_loop(engine: Engine) -> None:
@@ -68,24 +99,32 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(engine.load_models)
     log.info("[mbm] instruments=%s models=%s db=%s", engine.instruments, engine.model_summary(),
              "on" if engine.repo else "off")
-    task = None
+    tasks = []
     if (os.environ.get("MBM_LOOP") or "on").lower() != "off":
         await asyncio.to_thread(engine.refresh_daily)
-        task = asyncio.create_task(run_loop(engine))
+        tasks.append(asyncio.create_task(run_loop(engine)))
+        job = getattr(app.state, "stock_move", None)
+        if job is not None and job.mode != "off":
+            tasks.append(asyncio.create_task(stock_move_loop(job)))
     try:
         yield
     finally:
-        if task:
-            task.cancel()
+        for t in tasks:
+            t.cancel()
 
 
-def create_app(engine: Engine | None = None) -> FastAPI:
+def create_app(engine: Engine | None = None, stock_move: StockMoveJob | None = None) -> FastAPI:
     app = FastAPI(title="GrW MBM", lifespan=lifespan)
     app.state.engine = engine or make_engine()
+    app.state.stock_move = stock_move if stock_move is not None or engine is not None else make_stock_move_job()
 
     @app.get("/health")
     def health():
-        return app.state.engine.health()
+        h = app.state.engine.health()
+        job = app.state.stock_move
+        if job is not None:
+            h["stockMove"] = {"mode": job.mode, "last": job.last_summary or None}
+        return h
 
     @app.get("/behaviour/{instrument}")
     def behaviour(instrument: str):

@@ -10,6 +10,7 @@
 --
 -- Granted:  SELECT on ai_calls; SELECT/INSERT/UPDATE on ai_decision_records, ai_models;
 --           MBM: SELECT on mbm_bars_1m, mbm_chain_snapshots; SELECT/INSERT/UPDATE on mbm_predictions, mbm_daily_signals (+ id sequences);
+--           stock-move: SELECT on instruments (F&O universe); SELECT/INSERT/UPDATE on stock_move_scores (+ id sequence);
 --           SELECT on sentinel_verdicts, sentinel_theses; legacy silo tables (trades, watch_entries,
 --           ungated_*, adaptive_stop_*); candle tables (candles, candles_1m, candles_1h, candles_1d);
 --           core journal tables when present (core_journal, core_trade_summaries).
@@ -54,6 +55,12 @@ GRANT SELECT ON "mbm_chain_snapshots" TO grw_ai;
 -- MBM daily setups monitor: signals + outcomes the service writes (20261020160000_mbm_daily_signals).
 GRANT SELECT, INSERT, UPDATE ON "mbm_daily_signals" TO grw_ai;
 GRANT USAGE, SELECT ON SEQUENCE "mbm_daily_signals_id_seq" TO grw_ai;
+-- Stock big-move nightly (SHADOW; docs/superpowers/plans/2026-10-22-stock-move-contract.md): reads the
+-- instrument master for the F&O universe (symbols/tokens/expiries only — no user data) and writes its own
+-- scores + outcomes (20261022010000_stock_move_scores; BIGSERIAL id ⇒ sequence too).
+GRANT SELECT ON "instruments" TO grw_ai;
+GRANT SELECT, INSERT, UPDATE ON "stock_move_scores" TO grw_ai;
+GRANT USAGE, SELECT ON SEQUENCE "stock_move_scores_id_seq" TO grw_ai;
 
 -- Read-only inputs: allow-list by name/prefix; missing tables are simply not in pg_tables.
 SELECT format('GRANT SELECT ON %I.%I TO grw_ai', schemaname, tablename)

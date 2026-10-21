@@ -137,15 +137,20 @@ services:
   # `api` (--no-deps), so API deploys never start, pull or recreate this service. A bare full-stack
   # `up -d` before the first mbm-deploy.sh run would fail to pull grw-mbm:current; mbm-deploy.sh
   # tags every healthy build as :current so that path works afterwards.
+  # Stock big-move nightly (SHADOW, docs/superpowers/plans/2026-10-22-stock-move-contract.md): 20:15 IST
+  # weekdays, Yahoo daily prices + NSE calendar cached on the mbmcache volume. Inert until an ai_models
+  # row of kind stock-move is ACTIVE; STOCK_MOVE_ENABLED=off disables it entirely.
   mbm:
     logging: *logging
     image: grw-mbm:${GRW_MBM_TAG:-current}
     container_name: grw-mbm
     restart: unless-stopped
-    mem_limit: 300m
+    mem_limit: 400m
     environment:
       MODELS_DIR: /models
       MBM_INSTRUMENTS: ${MBM_INSTRUMENTS:-NIFTY}
+      STOCK_MOVE_ENABLED: ${STOCK_MOVE_ENABLED:-observe}
+      STOCK_MOVE_CACHE: /cache/stock-move
       # Same percent-escaped URL assembly as the scorer (ai-engine/src/scorer/db_url.py).
       AI_DB_USER: grw_ai
       AI_DB_PASSWORD: ${AI_DB_PASSWORD}
@@ -154,6 +159,7 @@ services:
       AI_DB_NAME: ${PG_DB}
     volumes:
       - /opt/grw/models:/models:ro
+      - mbmcache:/cache
     depends_on:
       postgres:
         condition: service_healthy
@@ -184,3 +190,4 @@ volumes:
   pgdata: {}
   redisdata: {}
   caddydata: {}
+  mbmcache: {}

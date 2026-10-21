@@ -31,6 +31,7 @@ import {
   ShieldAlert,
   Moon,
   ScrollText,
+  ListChecks,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -55,6 +56,7 @@ export const navItems: NavItem[] = [
   { path: '/auto-trade', label: 'Auto-Trade', icon: Bot },
   { path: '/positions', label: 'Positions', icon: Briefcase },
   { path: '/night-report', label: 'Night Report', icon: Moon },
+  { path: '/self-review', label: 'Self-review', icon: ListChecks },
   { path: '/portfolio', label: 'Portfolio', icon: PieChart },
   { path: '/monitor', label: 'Monitor', icon: Target },
   { path: '/payments', label: 'Payments', icon: CreditCard },

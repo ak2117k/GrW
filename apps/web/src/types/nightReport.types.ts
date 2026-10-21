@@ -4,6 +4,8 @@
  * against this contract only, never against API internals. Times are ISO UTC.
  */
 
+import type { SelfReviewLatest } from './selfReview.types';
+
 /** Every section is its payload or `{ error }`; the page renders the rest when one fails. */
 export interface SectionError {
   error: string;
@@ -234,5 +236,7 @@ export interface NightReport {
   mood: Section<MoodView>;
   /** Absent from responses built before the ML model scorecard shipped. */
   modelScorecard?: Section<ModelScorecardView>;
+  /** Absent from responses built before the self-review loop shipped (2026-10-21 contract). */
+  selfReview?: Section<SelfReviewLatest> | null;
   jobs: Section<JobItem[]>;
 }

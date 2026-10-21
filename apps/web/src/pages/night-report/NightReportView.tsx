@@ -70,6 +70,7 @@ import {
   signedSkill,
   windowHeading,
 } from './modelScorecardFormat';
+import { SelfReviewPanel } from './SelfReviewSection';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -880,6 +881,14 @@ export function NightReportView({
           <Empty text="The model scorecard is not in this API build yet." />
         ) : (
           <Guard value={report.modelScorecard}>{(c) => <ModelScorecardPanel card={c} />}</Guard>
+        )}
+      </SectionShell>
+
+      <SectionShell title="Self-review">
+        {report.selfReview == null ? (
+          <Empty text="The self-review is not in this API build yet." />
+        ) : (
+          <Guard value={report.selfReview}>{(s) => <SelfReviewPanel data={s} />}</Guard>
         )}
       </SectionShell>
 

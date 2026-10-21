@@ -3,6 +3,8 @@ import { NavLink } from 'react-router-dom';
 import { clsx } from 'clsx';
 import { ChevronLeft, ChevronRight, X } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
+import { usePendingProposalCount } from '@/hooks/useSelfReview';
+import { pendingBadge } from '@/pages/self-review/selfReviewFormat';
 import { visibleNavItems } from './navItems';
 
 interface SidebarProps {
@@ -23,6 +25,8 @@ export default function Sidebar({
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const role = useAuthStore((s) => s.user?.role);
   const items = visibleNavItems(role);
+  // Pending self-review proposals: owner-only, polled every few minutes, no badge on error.
+  const pending = pendingBadge(usePendingProposalCount(role === 'ADMIN').data);
 
   return (
     <aside
@@ -92,7 +96,16 @@ export default function Sidebar({
                   )
                 }
               >
-                <item.icon size={20} className="shrink-0" />
+                <span className="relative shrink-0">
+                  <item.icon size={20} className="shrink-0" />
+                  {/* Pending-proposal dot on the icon, so it shows on the collapsed rail too. */}
+                  {item.path === '/self-review' && pending && (
+                    <span
+                      className={clsx('absolute -right-1.5 -top-1.5 h-2.5 w-2.5 rounded-full bg-amber-400', !collapsed && 'md:hidden')}
+                      aria-hidden="true"
+                    />
+                  )}
+                </span>
                 {/* Label: always on mobile; on desktop hidden when collapsed. */}
                 <span
                   className={clsx(
@@ -104,6 +117,14 @@ export default function Sidebar({
                   {item.badge && (
                     <span className="text-[9px] px-1 py-0.5 rounded bg-amber-500/20 text-amber-300 leading-none">
                       {item.badge}
+                    </span>
+                  )}
+                  {item.path === '/self-review' && pending && (
+                    <span
+                      className="min-w-[18px] rounded-full bg-amber-500 px-1.5 py-0.5 text-center text-[10px] font-semibold leading-none text-black"
+                      aria-label={`${pending} pending proposals`}
+                    >
+                      {pending}
                     </span>
                   )}
                 </span>

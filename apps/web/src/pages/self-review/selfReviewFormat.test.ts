@@ -5,6 +5,7 @@ import {
   hitLine,
   hitRateOf,
   hitTone,
+  kindLabel,
   kindRows,
   lessonInjected,
   lessonsAddedCount,
@@ -56,6 +57,7 @@ describe('kindRows / totals', () => {
   it('orders known kinds first, unknown after, drops empty kinds', () => {
     expect(kindRows(summary).map((r) => r.kind)).toEqual(['SCORECARD_TOTAL', 'MBM_PREDICTION', 'SCORECARD_FACTOR', 'CUSTOM_THING']);
     expect(kindRows(summary)[0].label).toBe('Scorecard calls');
+    expect(kindLabel('STOCK_MOVE')).toBe('Stock big-move model');
     expect(kindRows(summary)[3].label).toBe('Custom thing');
   });
   it('is empty for a missing summary', () => {
@@ -100,6 +102,7 @@ describe('proposal values', () => {
     expect(targetLabel('scorecard.factor.oi.weight')).toBe('Option chain (OI) factor weight');
     expect(targetLabel('scorecard.factor.news.requireConfirmation')).toBe('News factor needs confirmation');
     expect(targetLabel('exit.openingGuardMin')).toBe('Exit opening guard (minutes)');
+    expect(targetLabel('scorecard.stockMove.points')).toBe('Stock big-move model points (0 = shadow, 1 = counted)');
     expect(targetLabel('something.else')).toBe('something.else');
   });
   it('formats numbers, booleans, wrapped and raw JSON', () => {

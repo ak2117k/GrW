@@ -71,6 +71,7 @@ import {
   windowHeading,
 } from './modelScorecardFormat';
 import { SelfReviewPanel } from './SelfReviewSection';
+import { BigMoveWatchPanel } from './BigMoveWatchSection';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -891,6 +892,16 @@ export function NightReportView({
           <Guard value={report.selfReview}>{(s) => <SelfReviewPanel data={s} />}</Guard>
         )}
       </SectionShell>
+
+      {report.bigMoveWatch !== undefined && (
+        <SectionShell title="Big-move watch">
+          {report.bigMoveWatch === null ? (
+            <Empty text="The stock big-move model is not in this API build yet." />
+          ) : (
+            <Guard value={report.bigMoveWatch}>{(v) => <BigMoveWatchPanel view={v} />}</Guard>
+          )}
+        </SectionShell>
+      )}
 
       <SectionShell title="Night jobs">
         <Guard value={report.jobs}>{(j) => <JobsStrip jobs={j} />}</Guard>

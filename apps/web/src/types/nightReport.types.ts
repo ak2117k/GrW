@@ -238,5 +238,39 @@ export interface NightReport {
   modelScorecard?: Section<ModelScorecardView>;
   /** Absent from responses built before the self-review loop shipped (2026-10-21 contract). */
   selfReview?: Section<SelfReviewLatest> | null;
+  /**
+   * Big-move watch (stock big-move model, shadow, 2026-10-22 contract). Absent from responses built
+   * before it shipped; null when the API runs without the stock-move module.
+   */
+  bigMoveWatch?: Section<BigMoveWatchView> | null;
   jobs: Section<JobItem[]>;
+}
+
+/** One stock's 5-session big-move reading (move SIZE only, never direction). */
+export interface StockMoveReading {
+  symbol: string;
+  /** IST 'YYYY-MM-DD' of the session whose close the features use. */
+  asOf: string;
+  horizonDays: number;
+  pBig: number;
+  rankPct: number;
+  bucket: 'TOP20' | 'MID' | 'BOTTOM20' | string;
+  resultsDate: string | null;
+  resultsInWindow: boolean;
+  modelId: string;
+}
+
+export interface BigMoveWatchRow {
+  symbol: string;
+  sources: Array<'HELD' | 'NEWS_IDEA' | 'TOP'>;
+  /** Null = no stock-move score yet for this name. */
+  reading: StockMoveReading | null;
+  lastOutcome: { asOf: string; big: boolean; retBp: number | null } | null;
+}
+
+export interface BigMoveWatchView {
+  asOf: string | null;
+  modelId: string | null;
+  scored: number;
+  rows: BigMoveWatchRow[];
 }

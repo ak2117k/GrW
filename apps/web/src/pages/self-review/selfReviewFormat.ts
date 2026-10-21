@@ -14,6 +14,7 @@ export const KIND_ORDER = [
   'LIVE_EXIT',
   'NEWS_IDEA',
   'MBM_PREDICTION',
+  'STOCK_MOVE',
   'SCORECARD_FACTOR',
 ] as const;
 
@@ -24,6 +25,7 @@ const KIND_LABELS: Record<string, string> = {
   LIVE_EXIT: 'Live AI exits',
   NEWS_IDEA: 'News ideas',
   MBM_PREDICTION: 'Move-size model',
+  STOCK_MOVE: 'Stock big-move model',
 };
 
 export function kindLabel(kind: string): string {
@@ -138,6 +140,7 @@ export function targetLabel(target: string): string {
   }
   if (target === 'exit.openingGuardMin') return 'Exit opening guard (minutes)';
   if (target === 'exit.persistMinSec') return 'Exit persistence (seconds)';
+  if (target === 'scorecard.stockMove.points') return 'Stock big-move model points (0 = shadow, 1 = counted)';
   return target;
 }
 

@@ -12,7 +12,8 @@ export type VerificationKind =
   | 'OVERNIGHT_VERDICT'
   | 'LIVE_EXIT'
   | 'NEWS_IDEA'
-  | 'MBM_PREDICTION';
+  | 'MBM_PREDICTION'
+  | 'STOCK_MOVE';
 
 export interface KindStats {
   n: number;

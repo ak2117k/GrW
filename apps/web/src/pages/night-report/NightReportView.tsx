@@ -6,6 +6,9 @@ import { cn } from '@/utils/cn';
 import type {
   EventItem,
   JobItem,
+  ModelHorizonScorecard,
+  ModelScorecardView,
+  ModelWindowStats,
   MoodView,
   NewsGroup,
   FactorScore,
@@ -54,6 +57,19 @@ import {
   HOLDINGS_TITLE,
   splitHoldings,
 } from './nightReportFormat';
+import {
+  aucCell,
+  brierCell,
+  coverageCell,
+  insideIqrCell,
+  modelLine,
+  modelVerdict,
+  rangeCell,
+  rate,
+  regimeCell,
+  signedSkill,
+  windowHeading,
+} from './modelScorecardFormat';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -683,6 +699,83 @@ function MoodPanel({ mood }: { mood: MoodView }) {
   );
 }
 
+// ---------------------------------------------------------------- ML model scorecard
+
+function ModelHorizonTable({ name, h }: { name: string; h: ModelHorizonScorecard }) {
+  const verdict = modelVerdict(h);
+  const th = cn('px-2 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide', MUTED);
+  const td = 'px-2 py-1 align-middle tabular-nums whitespace-nowrap';
+  const rows: Array<{ label: string; cell: (w: ModelWindowStats) => string; quiet?: boolean }> = [
+    { label: 'Predictions / expected', cell: coverageCell },
+    { label: 'Resolved', cell: (w) => String(w.resolved) },
+    { label: 'Hit rate (p ≥ 0.5)', cell: (w) => rate(w.hitRate) },
+    { label: 'Base rate (big move)', cell: (w) => rate(w.baseRate) },
+    { label: 'Brier', cell: brierCell },
+    { label: 'Skill', cell: (w) => signedSkill(w.skill) },
+    { label: 'AUC', cell: aucCell },
+    ...['ACTIVE', 'NORMAL', 'QUIET'].map((g) => ({
+      label: sentenceCase(g),
+      cell: (w: ModelWindowStats) => regimeCell(w.regimes[g]),
+      quiet: g === 'QUIET',
+    })),
+    { label: 'Range: actual vs q50', cell: rangeCell },
+    { label: 'Inside q25–q75', cell: insideIqrCell },
+  ];
+  return (
+    <div className="space-y-1.5" data-testid={`model-scorecard-${name}`}>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className={cn('font-semibold', PRIMARY)}>{name}</span>
+        <Badge label={verdict.text} variant={verdict.variant} size="sm" />
+        <span className={MUTED}>{modelLine(h)}</span>
+      </div>
+      <div className="overflow-x-auto rounded border border-[var(--color-border-subtle)]">
+        <table className="w-full min-w-[520px] text-xs">
+          <thead className="border-b border-[var(--color-border-subtle)]">
+            <tr>
+              <th className={th} />
+              {h.windows.map((w) => (
+                <th key={w.requestedSessions} className={cn(th, 'text-right')}>
+                  {windowHeading(w)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[var(--color-border-subtle)]">
+            {rows.map((r) => (
+              <tr key={r.label} className={cn(r.quiet && 'bg-[var(--color-bg-tertiary)] font-medium')}>
+                <td className={cn(td, r.quiet ? PRIMARY : SECONDARY)}>{r.label}</td>
+                {h.windows.map((w) => (
+                  <td key={w.requestedSessions} className={cn(td, 'text-right', PRIMARY)}>
+                    {r.cell(w)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ModelScorecardPanel({ card }: { card: ModelScorecardView }) {
+  const horizons = Object.entries(card.horizons ?? {});
+  if (horizons.length === 0) {
+    return <Empty text={`No ${card.instrument} model predictions in the last 20 sessions.`} />;
+  }
+  return (
+    <div className={cn(CARD, 'space-y-3')}>
+      <p className={cn('text-xs', MUTED)}>
+        {card.instrument} move-size model · last session {istDate(card.lastSession)}
+        {card.liveSince && ` · live since ${istDate(card.liveSince)}`} · {card.runsPerSession} runs expected per session
+      </p>
+      {horizons.map(([name, h]) => (
+        <ModelHorizonTable key={name} name={name} h={h} />
+      ))}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- jobs
 
 function JobsStrip({ jobs }: { jobs: JobItem[] }) {
@@ -780,6 +873,14 @@ export function NightReportView({
 
       <SectionShell title="Market mood">
         <Guard value={report.mood}>{(m) => <MoodPanel mood={m} />}</Guard>
+      </SectionShell>
+
+      <SectionShell title="ML model scorecard">
+        {report.modelScorecard === undefined ? (
+          <Empty text="The model scorecard is not in this API build yet." />
+        ) : (
+          <Guard value={report.modelScorecard}>{(c) => <ModelScorecardPanel card={c} />}</Guard>
+        )}
       </SectionShell>
 
       <SectionShell title="Night jobs">

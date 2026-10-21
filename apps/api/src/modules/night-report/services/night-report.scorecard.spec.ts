@@ -22,6 +22,7 @@ const store: NightReportStore = {
   dailyCandles: async () => ({ newest: null, countAtDay: 0 }),
   newestMbmPredictionAt: async () => null,
   newestMbmChainAt: async () => null,
+  mbmPredictionsBetween: async () => [],
   lastOvernightReviewAt: async () => null,
 };
 const mood: MoodSource = { behaviour: async () => ({ status: 'absent' }) };

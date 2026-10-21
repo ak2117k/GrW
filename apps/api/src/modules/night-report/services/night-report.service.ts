@@ -20,9 +20,11 @@ import {
   type HeldKey,
   type VerdictRow,
 } from '../domain/night-report.logic';
+import { modelScorecard, SCORECARD_WINDOWS } from '../domain/model-scorecard.logic';
 import type {
   EventItem,
   JobItem,
+  ModelScorecardView,
   MoodView,
   NewsIdeaItem,
   NewsSection,
@@ -100,11 +102,12 @@ export class NightReportService {
     const positions = await this.safe('positions', () => this.positions(userId, from, now));
     const held = isError(positions) ? [] : heldKeys(positions);
 
-    const [news, events, dailySetups, mood, jobs, newsIdeas] = await Promise.all([
+    const [news, events, dailySetups, mood, modelScorecardSection, jobs, newsIdeas] = await Promise.all([
       this.safe('news', () => this.news(from, now, held)),
       this.safe('events', () => this.events(now, window, held)),
       this.safe('dailySetups', () => this.dailySetups(now)),
       this.safe('mood', () => this.mood()),
+      this.safe('modelScorecard', () => this.modelScorecard(now)),
       this.safe('jobs', () => this.jobs(userId, now, from)),
       this.safe('newsIdeas', () => (this.scorecards ? this.scorecards.newsIdeasSince(from) : Promise.resolve([]))),
     ]);
@@ -118,6 +121,7 @@ export class NightReportService {
       events,
       dailySetups,
       mood,
+      modelScorecard: modelScorecardSection,
       jobs,
       newsIdeas,
     };
@@ -233,6 +237,15 @@ export class NightReportService {
       horizons[k] = { p: h.p, regime: h.regime, q25Bp: h.q25Bp ?? null, q75Bp: h.q75Bp ?? null };
     }
     return { status: b.status, asOf: b.asOf ?? null, horizons };
+  }
+
+  /** The live NIFTY move-size model against its base rate, over the last 1 / 5 / 20 closed NSE sessions. */
+  private async modelScorecard(now: Date): Promise<ModelScorecardView> {
+    const sessions = lastSessionDates(now, this.opts.clock, Math.max(...SCORECARD_WINDOWS));
+    if (sessions.length === 0) return modelScorecard([], []);
+    const from = istMidnightOf(sessions[sessions.length - 1]);
+    const to = new Date(istMidnightOf(sessions[0]).getTime() + DAY_MS);
+    return modelScorecard(await this.store.mbmPredictionsBetween('NIFTY', from, to), sessions);
   }
 
   private async jobs(userId: string, now: Date, from: Date): Promise<JobItem[]> {

@@ -141,6 +141,63 @@ export interface MoodView {
   horizons: Record<string, { p: number; regime: string; q25Bp: number | null; q75Bp: number | null }>;
 }
 
+/** One regime's slice of a scorecard window. Rates are 0..1; null when nothing resolved. */
+export interface ModelRegimeStats {
+  predictions: number;
+  resolved: number;
+  /** Share of resolved calls right at p ≥ 0.5 (a QUIET hit is "said small, was small"). */
+  hitRate: number | null;
+  /** Share of resolved outcomes that were big moves: the regime's own base rate. */
+  bigRate: number | null;
+}
+
+/** The MBM move-size model over one window of sessions, for one horizon. */
+export interface ModelWindowStats {
+  /** 1, 5 or 20: what the window asks for. */
+  requestedSessions: number;
+  /** Sessions actually covered (fewer while the model is younger than the window). */
+  sessions: number;
+  fromDate: string | null;
+  toDate: string | null;
+  predictions: number;
+  /** sessions × runs per session. */
+  expected: number;
+  /** predictions / expected × 100; below 100 means skipped (stale) runs. */
+  coveragePct: number | null;
+  resolved: number;
+  hitRate: number | null;
+  baseRate: number | null;
+  brier: number | null;
+  /** Brier of always predicting the window's base rate: baseRate × (1 − baseRate). */
+  brierBase: number | null;
+  /** 1 − brier / brierBase; > 0 beats the base rate. Null on one class. */
+  skill: number | null;
+  auc: number | null;
+  /** Why `auc` is null ("n/a: one class only"); null when it is a number. */
+  aucNote: string | null;
+  /** ACTIVE / NORMAL / QUIET always; any unknown regime seen too. */
+  regimes: Record<string, ModelRegimeStats>;
+  /** Range calibration on resolved rows: median actual range vs median q50, share inside [q25, q75]. */
+  range: { n: number; medianActualBp: number | null; medianQ50Bp: number | null; insideIqrPct: number | null };
+  /** Models that wrote the window's rows, most rows first. */
+  models: Array<{ modelId: string; featureSet: string; predictions: number }>;
+}
+
+export interface ModelHorizonScorecard {
+  /** Last session, rolling 5, rolling 20 — in that order. */
+  windows: ModelWindowStats[];
+}
+
+export interface ModelScorecardView {
+  instrument: string;
+  runsPerSession: number;
+  /** IST date of the last closed NSE session. */
+  lastSession: string | null;
+  /** IST date of the first session with a prediction inside the widest window. */
+  liveSince: string | null;
+  horizons: Record<string, ModelHorizonScorecard>;
+}
+
 export type JobStatus = 'ok' | 'stale' | 'missing';
 
 export interface JobItem {
@@ -159,6 +216,8 @@ export interface NightReport {
   events: Section<EventItem[]>;
   dailySetups: Section<SetupItem[]>;
   mood: Section<MoodView>;
+  /** Is the live NIFTY move-size model skilful? Last session + rolling 5 / 20, per horizon. */
+  modelScorecard: Section<ModelScorecardView>;
   jobs: Section<JobItem[]>;
   /** News ideas created since the last NSE close, newest first. */
   newsIdeas: Section<NewsIdeaItem[]>;

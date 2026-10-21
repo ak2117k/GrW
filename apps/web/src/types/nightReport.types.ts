@@ -163,6 +163,48 @@ export interface MoodView {
   horizons: Record<string, MoodHorizon>;
 }
 
+/** Copied from apps/api night-report.types.ts (ModelRegimeStats … ModelScorecardView). Rates are 0..1. */
+export interface ModelRegimeStats {
+  predictions: number;
+  resolved: number;
+  hitRate: number | null;
+  bigRate: number | null;
+}
+
+export interface ModelWindowStats {
+  requestedSessions: number;
+  sessions: number;
+  fromDate: string | null;
+  toDate: string | null;
+  predictions: number;
+  expected: number;
+  coveragePct: number | null;
+  resolved: number;
+  hitRate: number | null;
+  baseRate: number | null;
+  brier: number | null;
+  brierBase: number | null;
+  skill: number | null;
+  auc: number | null;
+  aucNote: string | null;
+  regimes: Record<string, ModelRegimeStats>;
+  range: { n: number; medianActualBp: number | null; medianQ50Bp: number | null; insideIqrPct: number | null };
+  models: Array<{ modelId: string; featureSet: string; predictions: number }>;
+}
+
+export interface ModelHorizonScorecard {
+  /** Last session, rolling 5, rolling 20. */
+  windows: ModelWindowStats[];
+}
+
+export interface ModelScorecardView {
+  instrument: string;
+  runsPerSession: number;
+  lastSession: string | null;
+  liveSince: string | null;
+  horizons: Record<string, ModelHorizonScorecard>;
+}
+
 export interface JobItem {
   name: string;
   status: 'ok' | 'stale' | 'missing';
@@ -190,5 +232,7 @@ export interface NightReport {
   /** Absent from responses built before the scorecard stream shipped; the page treats that as empty. */
   newsIdeas: Section<NewsIdeaRow[]>;
   mood: Section<MoodView>;
+  /** Absent from responses built before the ML model scorecard shipped. */
+  modelScorecard?: Section<ModelScorecardView>;
   jobs: Section<JobItem[]>;
 }

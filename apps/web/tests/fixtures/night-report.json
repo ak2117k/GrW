@@ -220,6 +220,57 @@
       "5d": { "p": 0.3, "regime": "NORMAL", "q25Bp": null, "q75Bp": null }
     }
   },
+  "modelScorecard": {
+    "instrument": "NIFTY",
+    "runsPerSession": 75,
+    "lastSession": "2026-10-19",
+    "liveSince": "2026-10-19",
+    "horizons": {
+      "30m": {
+        "windows": [
+          {
+            "requestedSessions": 1, "sessions": 1, "fromDate": "2026-10-19", "toDate": "2026-10-19",
+            "predictions": 70, "expected": 75, "coveragePct": 93.33, "resolved": 64,
+            "hitRate": 1, "baseRate": 1, "brier": 0.04, "brierBase": 0, "skill": null,
+            "auc": null, "aucNote": "n/a: one class only",
+            "regimes": {
+              "ACTIVE": { "predictions": 70, "resolved": 64, "hitRate": 1, "bigRate": 1 },
+              "NORMAL": { "predictions": 0, "resolved": 0, "hitRate": null, "bigRate": null },
+              "QUIET": { "predictions": 0, "resolved": 0, "hitRate": null, "bigRate": null }
+            },
+            "range": { "n": 64, "medianActualBp": 41.2, "medianQ50Bp": 33.8, "insideIqrPct": 47.5 },
+            "models": [{ "modelId": "mbm-m2", "featureSet": "mbm-fs2", "predictions": 70 }]
+          },
+          {
+            "requestedSessions": 5, "sessions": 1, "fromDate": "2026-10-19", "toDate": "2026-10-19",
+            "predictions": 70, "expected": 75, "coveragePct": 93.33, "resolved": 64,
+            "hitRate": 1, "baseRate": 1, "brier": 0.04, "brierBase": 0, "skill": null,
+            "auc": null, "aucNote": "n/a: one class only",
+            "regimes": {
+              "ACTIVE": { "predictions": 70, "resolved": 64, "hitRate": 1, "bigRate": 1 },
+              "NORMAL": { "predictions": 0, "resolved": 0, "hitRate": null, "bigRate": null },
+              "QUIET": { "predictions": 0, "resolved": 0, "hitRate": null, "bigRate": null }
+            },
+            "range": { "n": 64, "medianActualBp": 41.2, "medianQ50Bp": 33.8, "insideIqrPct": 47.5 },
+            "models": [{ "modelId": "mbm-m2", "featureSet": "mbm-fs2", "predictions": 70 }]
+          },
+          {
+            "requestedSessions": 20, "sessions": 1, "fromDate": "2026-10-19", "toDate": "2026-10-19",
+            "predictions": 70, "expected": 75, "coveragePct": 93.33, "resolved": 64,
+            "hitRate": 1, "baseRate": 1, "brier": 0.04, "brierBase": 0, "skill": null,
+            "auc": null, "aucNote": "n/a: one class only",
+            "regimes": {
+              "ACTIVE": { "predictions": 70, "resolved": 64, "hitRate": 1, "bigRate": 1 },
+              "NORMAL": { "predictions": 0, "resolved": 0, "hitRate": null, "bigRate": null },
+              "QUIET": { "predictions": 0, "resolved": 0, "hitRate": null, "bigRate": null }
+            },
+            "range": { "n": 64, "medianActualBp": 41.2, "medianQ50Bp": 33.8, "insideIqrPct": 47.5 },
+            "models": [{ "modelId": "mbm-m2", "featureSet": "mbm-fs2", "predictions": 70 }]
+          }
+        ]
+      }
+    }
+  },
   "jobs": [
     { "name": "overnight-review", "status": "ok", "at": "2026-10-19T16:30:00.000Z", "detail": "2 positions reviewed" },
     { "name": "news-fetch", "status": "stale", "at": "2026-10-19T20:00:00.000Z", "detail": "last run 6h ago" },

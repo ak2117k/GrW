@@ -55,6 +55,13 @@ function fakeStore(over: Partial<NightReportStore> = {}): NightReportStore & { c
     dailyCandles: async () => ({ newest: new Date('2026-10-18T18:30:00Z'), countAtDay: 212 }),
     newestMbmPredictionAt: async () => new Date('2026-10-19T09:55:00Z'),
     newestMbmChainAt: async () => null,
+    mbmPredictionsBetween: async (instrument, from, to) => {
+      calls.push(`mbm:${instrument}:${from.toISOString()}:${to.toISOString()}`);
+      return [
+        { horizon: '30m', asOf: new Date('2026-10-19T04:00:00Z'), p: 0.7, regime: 'ACTIVE', q25Bp: 10, q50Bp: 20, q75Bp: 30, modelId: 'm1', featureSet: 'mbm-fs2', outcomeRangeBp: 25, outcomeBig: true },
+        { horizon: '30m', asOf: new Date('2026-10-19T04:05:00Z'), p: 0.2, regime: 'QUIET', q25Bp: 5, q50Bp: 10, q75Bp: 15, modelId: 'm1', featureSet: 'mbm-fs2', outcomeRangeBp: 8, outcomeBig: false },
+      ];
+    },
     lastOvernightReviewAt: async () => new Date('2026-10-19T10:16:00Z'),
     ...over,
   };
@@ -72,7 +79,8 @@ const ok = <T>(s: T | { error: string }): T => {
 
 describe('NightReportService', () => {
   it('builds every section over the holiday night', async () => {
-    const r = await service(fakeStore()).build('u1', NOW);
+    const store = fakeStore();
+    const r = await service(store).build('u1', NOW);
     expect(r.window).toMatchObject({ from: '2026-10-19T10:00:00.000Z', nextOpen: '2026-10-21T03:45:00.000Z' });
 
     const positions = ok(r.positions) as PositionRow[];
@@ -98,6 +106,16 @@ describe('NightReportService', () => {
     expect(ok(r.dailySetups)[0]).toMatchObject({ signalDate: '2026-10-19', instrument: { symbol: 'NIFTY', token: '99926000' } });
     expect(ok(r.mood)).toMatchObject({ status: 'ok', horizons: { '30m': { p: 0.31 } } });
 
+    // Model scorecard: 20 closed sessions read (Dussehra skipped), clipped to the model's first live session.
+    const msc = ok(r.modelScorecard);
+    expect(msc).toMatchObject({ instrument: 'NIFTY', lastSession: '2026-10-19', liveSince: '2026-10-19' });
+    expect(msc.horizons['30m'].windows.map((w) => [w.requestedSessions, w.sessions, w.predictions, w.expected])).toEqual([
+      [1, 1, 2, 75], [5, 1, 2, 75], [20, 1, 2, 75],
+    ]);
+    expect(msc.horizons['30m'].windows[0]).toMatchObject({ resolved: 2, hitRate: 1, baseRate: 0.5, auc: 1 });
+    const mbmCall = store.calls.find((c) => c.startsWith('mbm:'))!;
+    expect(mbmCall.endsWith(':2026-10-19T18:30:00.000Z')).toBe(true); // through the end of Mon 19 Oct IST
+
     const jobs = ok(r.jobs);
     expect(Object.fromEntries(jobs.map((j) => [j.name, j.status]))).toEqual({
       'News fetch': 'ok',
@@ -114,9 +132,12 @@ describe('NightReportService', () => {
     const store = fakeStore({
       newsPublishedBetween: async () => { throw new Error('relation "news_articles" does not exist'); },
       newestMbmChainAt: async () => { throw new Error('timeout'); },
+      mbmPredictionsBetween: async () => { throw new Error('mbm_predictions unreadable'); },
     });
     const r = await service(store).build('u1', NOW);
     expect(r.news).toEqual({ error: 'relation "news_articles" does not exist' });
+    expect(r.modelScorecard).toEqual({ error: 'mbm_predictions unreadable' });
+    expect(ok(r.mood)).toMatchObject({ status: 'ok' });
     expect(ok(r.positions)).toHaveLength(2);
     expect(ok(r.events)).toHaveLength(2);
     expect(r.summary.newsOnPositions).toBe(0);
@@ -135,6 +156,7 @@ describe('NightReportService', () => {
     const store = fakeStore();
     const r = await service(store).build('u2', NOW);
     expect((ok(r.positions) as PositionRow[]).map((p) => p.trackerId)).toEqual(['other']);
-    expect(store.calls).toEqual(['trackers:u2', 'verdicts:u2:other']);
+    // The model scorecard read is market-wide (NIFTY), not per user.
+    expect(store.calls.filter((c) => !c.startsWith('mbm:'))).toEqual(['trackers:u2', 'verdicts:u2:other']);
   });
 });

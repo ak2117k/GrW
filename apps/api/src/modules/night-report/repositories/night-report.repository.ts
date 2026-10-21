@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import type { MbmPredictionRow } from '../domain/model-scorecard.logic';
 import type { NewsRow, VerdictRow } from '../domain/night-report.logic';
 
 export interface TrackerRow {
@@ -57,6 +58,8 @@ export interface NightReportStore {
   dailyCandles(day: Date): Promise<DailyCandleFreshness>;
   newestMbmPredictionAt(): Promise<Date | null>;
   newestMbmChainAt(): Promise<Date | null>;
+  /** One instrument's MBM predictions with `asOf` in [from, to), oldest first. */
+  mbmPredictionsBetween(instrument: string, from: Date, to: Date): Promise<MbmPredictionRow[]>;
   lastOvernightReviewAt(userId: string): Promise<Date | null>;
 }
 
@@ -159,6 +162,19 @@ export class NightReportRepository implements NightReportStore {
   async newestMbmChainAt(): Promise<Date | null> {
     const r = await this.prisma.mbmChainSnapshot.findFirst({ where: { instrument: 'NIFTY' }, orderBy: { capturedAt: 'desc' }, select: { capturedAt: true } });
     return r?.capturedAt ?? null;
+  }
+
+  mbmPredictionsBetween(instrument: string, from: Date, to: Date): Promise<MbmPredictionRow[]> {
+    // 20 sessions × 75 runs × 2 horizons ≈ 3,000 rows; the cap only guards a runaway writer.
+    return this.prisma.mbmPrediction.findMany({
+      where: { instrument, asOf: { gte: from, lt: to } },
+      select: {
+        horizon: true, asOf: true, p: true, regime: true, q25Bp: true, q50Bp: true, q75Bp: true,
+        modelId: true, featureSet: true, outcomeRangeBp: true, outcomeBig: true,
+      },
+      orderBy: { asOf: 'asc' },
+      take: 20_000,
+    });
   }
 
   async lastOvernightReviewAt(userId: string): Promise<Date | null> {

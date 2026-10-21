@@ -148,6 +148,31 @@ describe('NightReportView', () => {
     expect(html.match(/data-testid="night-holding"/g)?.length).toBe(1);
   });
 
+  it('renders the ML model scorecard per horizon with a plain verdict and the QUIET row', () => {
+    const html = render(report);
+    const sec = html.slice(html.indexOf('aria-label="ML model scorecard"'), html.indexOf('aria-label="Night jobs"'));
+    expect(sec).toContain('data-testid="model-scorecard-30m"');
+    expect(sec).toContain('Too early: 1 session, one class only · no QUIET calls yet');
+    expect(sec).toContain('mbm-m2 / mbm-fs2');
+    expect(sec).toContain('70/75 (93%)');
+    expect(sec).toContain('20 sessions (1 live)');
+    expect(sec).toContain('n/a: one class only');
+    expect(sec).toContain('41 vs 34 bp');
+    expect(sec).toMatch(/<tr class="[^"]*font-medium[^"]*"><td[^>]*>Quiet</);
+  });
+
+  it('model scorecard: failed is one muted line, missing from an older API is an empty note', () => {
+    const failed = render({ ...report, modelScorecard: { error: 'db down' } });
+    const sec = failed.slice(failed.indexOf('aria-label="ML model scorecard"'), failed.indexOf('aria-label="Night jobs"'));
+    expect(sec).toContain('Couldn&#x27;t load this section');
+    expect(failed).toContain('P(big move) 42%'); // the rest of the page still renders
+    const { modelScorecard: _drop, ...older } = report;
+    expect(render(older as NightReport)).toContain('The model scorecard is not in this API build yet.');
+    expect(render({ ...report, modelScorecard: { ...(report.modelScorecard as object), horizons: {} } as NightReport['modelScorecard'] })).toContain(
+      'No NIFTY model predictions in the last 20 sessions.',
+    );
+  });
+
   it('no holdings section without holdings, or when positions failed', () => {
     expect(render(report)).not.toContain('night-holdings');
     expect(render({ ...report, positions: { error: 'db down' } })).not.toContain('night-holdings');

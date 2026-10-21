@@ -2858,3 +2858,89 @@ model NewsIdea {
   @@index([createdAt(sort: Desc)])
   @@map("news_ideas")
 }
+
+// ─── Self-review loop (docs/superpowers/plans/2026-10-21-self-review-contract.md) ───────────────
+
+/// One scored call: what the engine said vs what happened next session.
+model VerificationResult {
+  id          String   @id @default(cuid())
+  runId       String   @map("run_id")
+  sessionDate String   @map("session_date") // IST 'YYYY-MM-DD' of the session whose outcome is scored
+  kind        String // SCORECARD_FACTOR | SCORECARD_TOTAL | OVERNIGHT_VERDICT | LIVE_EXIT | NEWS_IDEA | MBM_PREDICTION
+  refId       String   @map("ref_id") // id of the scored row (scorecard id[:factor], verdict id, ai_exit id, idea id, prediction id)
+  subject     String? // factor name, verdict value, horizon …
+  symbol      String?
+  predicted   String // what was said, short text
+  actual      String // what happened, short text
+  correct     Boolean? // null = not judgeable (neutral call, missing outcome)
+  score       Float? // signed value where meaningful (bp moved in the called direction, ₹ saved by an exit …)
+  details     Json?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([kind, refId])
+  @@index([sessionDate, kind])
+  @@map("verification_results")
+}
+
+/// One nightly self-review pass.
+model SelfReviewRun {
+  id          String    @id @default(cuid())
+  sessionDate String    @map("session_date")
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt  DateTime? @map("finished_at") @db.Timestamptz(6)
+  status      String // RUNNING | DONE | FAILED
+  summary     Json? // hit rates per kind / factor / window (rolling 1, 5, 20 sessions)
+  diagnosis   Json? // LLM diagnosis of misses: [{refIds, cause, lessonKey?, proposalKey?}]
+  aiCallId    String?   @map("ai_call_id")
+  error       String?
+
+  @@index([sessionDate])
+  @@map("self_review_runs")
+}
+
+/// A lesson the agent reads before judging (auto, evidence-counted).
+model AgentLesson {
+  id         String   @id @default(cuid())
+  key        String   @unique // slug, e.g. 'theta-exit-on-supported-put'
+  text       String // one or two sentences, imperative
+  scope      String // SENTINEL_LIVE | SENTINEL_OVERNIGHT | NEWS_IDEAS | ALL
+  rightCount Int      @default(0) @map("right_count") // cases where following the lesson would have been right
+  wrongCount Int      @default(0) @map("wrong_count")
+  status     String   @default("ACTIVE") // ACTIVE | RETIRED
+  firstSeen  DateTime @default(now()) @map("first_seen") @db.Timestamptz(6)
+  lastSeen   DateTime @default(now()) @map("last_seen") @db.Timestamptz(6)
+  sourceRun  String?  @map("source_run")
+
+  @@index([status, scope])
+  @@map("agent_lessons")
+}
+
+/// A bounded rule/weight change that needs the owner's approval in the app.
+model TuningProposal {
+  id            String    @id @default(cuid())
+  key           String // slug; one PENDING per key
+  target        String // allow-listed tunable, e.g. 'scorecard.factor.news.maxPoints'
+  currentValue  Json      @map("current_value")
+  proposedValue Json      @map("proposed_value")
+  rationale     String
+  evidence      Json // {n, right, wrong, examples:[{refId, symbol, sessionDate}]}
+  status        String    @default("PENDING") // PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  decidedAt     DateTime? @map("decided_at") @db.Timestamptz(6)
+  decidedBy     String?   @map("decided_by")
+  sourceRun     String?   @map("source_run")
+
+  @@index([status, createdAt(sort: Desc)])
+  @@map("tuning_proposals")
+}
+
+/// The applied value of an allow-listed tunable (consumers read this, else their code default).
+model TuningOverride {
+  target     String   @id
+  value      Json
+  proposalId String?  @map("proposal_id")
+  appliedAt  DateTime @default(now()) @map("applied_at") @db.Timestamptz(6)
+  appliedBy  String?  @map("applied_by")
+
+  @@map("tuning_overrides")
+}

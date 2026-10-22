@@ -103,7 +103,12 @@ describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
    * open tracker, to stop asking the judge for exits that cannot run. It is not a
    * corpus and never writes; the two modules still meet only in the database.
    */
-  const SANCTIONED_READERS = ['trade-sentinel/repositories/exit-attempt.reader.ts'];
+  /*
+   * Second sanctioned reader (2026-10-22): the live dashboard / journal. Read-only display of the
+   * owner's own live exits (PLACED/FILLED) for "who closed it". It labels `man_` verdict ids Manual
+   * and `trg_` Price trigger, so a manual exit is never shown as an AI decision, and it feeds no corpus.
+   */
+  const SANCTIONED_READERS = ['trade-sentinel/repositories/exit-attempt.reader.ts', 'portfolio/repositories/live-trades.repository.ts'];
 
   it('only sentinel-executor reads ai_exit_executions — no corpus writer can mistake a manual exit for an AI decision', () => {
     const offenders = all()

@@ -3,10 +3,11 @@
  * and value; this code decides: allow-listed target, value inside the hard bounds, ≥ 5 judged cases
  * of evidence over the rolling window, one PENDING per key. Anything else is rejected with a reason.
  */
-import type { ProposalDraft, ProposalEvidence, ProposalStatus } from '../self-review.types';
+import type { ProposalDraft, ProposalEvidence, ProposalStatus, SkillStats } from '../self-review.types';
 import {
   clampTunable,
   isAllowedTarget,
+  MBM_PACKET_TARGET,
   NEWS_CONFIRMATION_TARGET,
   OPENING_GUARD_TARGET,
   PERSIST_MIN_TARGET,
@@ -49,6 +50,8 @@ export interface EngineInput {
   /** Keys that already have a PENDING proposal. */
   pendingKeys: ReadonlySet<string>;
   suggestions?: readonly Suggestion[];
+  /** MBM rolling-20 skill of this run and the previous runs, newest first (the `mbm.packet` rule). */
+  mbmSkill?: readonly RunSkill[];
 }
 
 export interface EngineOutput {
@@ -145,6 +148,42 @@ export function stockMoveRule(cur: TunableValue, rows: readonly EvidenceRow[]): 
   };
 }
 
+/** The rolling-20 MBM skill of one self-review run (its summary's `skill.MBM_PREDICTION.rolling20`). */
+export interface RunSkill {
+  session: string;
+  skill: SkillStats;
+}
+
+/** Consecutive runs whose rolling-20 verdict must agree before `mbm.packet` is proposed. */
+export const MBM_PACKET_RUNS = 2;
+
+/**
+ * `mbm.packet` from the MBM move-size model's skill (domain/skill.ts), newest run first: EDGE in the last
+ * two runs while off → propose on; NO_EDGE in the last two while on → propose off. NOT_TESTABLE (or a
+ * mix, or fewer than two runs) proposes nothing. The owner approves in the app; this never applies.
+ */
+export function mbmPacketRule(cur: TunableValue, runs: readonly RunSkill[]): { value: TunableValue; why: string; ev: ProposalEvidence } | null {
+  if (runs.length < MBM_PACKET_RUNS) return null;
+  const last = runs.slice(0, MBM_PACKET_RUNS);
+  const all = (v: SkillStats['verdict']) => last.every((r) => r.skill.verdict === v);
+  let value: boolean;
+  if (cur !== true && all('EDGE')) value = true;
+  else if (cur === true && all('NO_EDGE')) value = false;
+  else return null;
+  const s = last[0].skill;
+  const fmt = (x: number | null) => (x === null ? '—' : x.toFixed(2));
+  const per = last.map((r) => `${r.session}: ${r.skill.verdict} AUC ${fmt(r.skill.auc)}, Brier skill ${fmt(r.skill.brierSkill)}, n ${r.skill.n}`).join('; ');
+  const right = s.hitRate === null ? 0 : Math.round(s.hitRate * s.n);
+  return {
+    value,
+    why:
+      `MBM move-size model rolling-20 skill ${value ? 'EDGE' : 'NO_EDGE'} in ${MBM_PACKET_RUNS} consecutive runs (${per}; ` +
+      `base rate ${pct(s.baseRate)}, hit ${pct(s.hitRate)} vs always-majority ${pct(s.majorityHitRate)}) → ` +
+      (value ? 'feed it to the sentinel packet' : 'take it out of the sentinel packet'),
+    ev: { n: s.n, right, wrong: s.n - right, examples: [] },
+  };
+}
+
 export const RULE_TARGETS: readonly string[] = [
   ...SCORECARD_WEIGHT_FACTORS.map(weightTarget),
   NEWS_CONFIRMATION_TARGET,
@@ -179,6 +218,8 @@ export function proposeTuning(input: EngineInput): EngineOutput {
     const r = target === STOCK_MOVE_POINTS_TARGET ? stockMoveRule(input.current(target), input.rows) : ruleValue(target, input.current(target), ev);
     if (r) add(target, r.value, r.why, ev);
   }
+  const mbm = mbmPacketRule(input.current(MBM_PACKET_TARGET), input.mbmSkill ?? []);
+  if (mbm) add(MBM_PACKET_TARGET, mbm.value, mbm.why, mbm.ev);
 
   for (const s of input.suggestions ?? []) {
     const target = typeof s.proposalTarget === 'string' ? s.proposalTarget.trim() : '';
@@ -196,6 +237,11 @@ export function proposeTuning(input: EngineInput): EngineOutput {
     if (target === STOCK_MOVE_POINTS_TARGET) {
       // Only the deterministic bucket rule (above) may turn the stock model's points on or off.
       rejected.push({ target, reason: 'stock-move points are rule-only (not a diagnosis suggestion)' });
+      continue;
+    }
+    if (target === MBM_PACKET_TARGET) {
+      // Only the rolling-20 skill verdict rule (above) may turn the model input on or off.
+      rejected.push({ target, reason: 'mbm.packet is rule-only (not a diagnosis suggestion)' });
       continue;
     }
     const ev = evidenceOf(evidenceRowsFor(target, input.rows));

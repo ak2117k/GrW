@@ -5,6 +5,7 @@ describe('self-review allow-list', () => {
     expect(Object.keys(TUNABLES).sort()).toEqual([
       'exit.openingGuardMin',
       'exit.persistMinSec',
+      'mbm.packet',
       'scorecard.factor.expiry.weight',
       'scorecard.factor.fii_dii.weight',
       'scorecard.factor.indicators.weight',

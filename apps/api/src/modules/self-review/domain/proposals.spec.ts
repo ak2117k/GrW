@@ -1,5 +1,6 @@
-import { decide, isExpired, proposeTuning, type EvidenceRow } from './proposals';
+import { decide, isExpired, mbmPacketRule, proposeTuning, type EvidenceRow, type RunSkill } from './proposals';
 import { TUNABLES, type TunableValue } from '../tuning/tunables';
+import type { SkillStats } from '../self-review.types';
 
 const factorRows = (name: string, right: number, wrong: number, details: Record<string, unknown> = {}): EvidenceRow[] => [
   ...Array.from({ length: right }, (_, i) => ({ kind: 'SCORECARD_FACTOR', refId: `${name}-r${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: name, correct: true, details })),
@@ -142,5 +143,53 @@ describe('stock big-move points rule', () => {
     const out = proposeTuning({ rows: [], current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: target, proposedValue: 1 }] });
     expect(out.drafts).toEqual([]);
     expect(out.rejected[0]).toMatchObject({ target });
+  });
+});
+
+describe('mbm.packet rule (rolling-20 skill verdict, 2 consecutive runs)', () => {
+  const target = 'mbm.packet';
+  const skill = (verdict: SkillStats['verdict']): SkillStats => ({
+    n: 400, positives: 120, baseRate: 0.3, hitRate: 0.78, majorityHitRate: 0.7, auc: verdict === 'EDGE' ? 0.71 : 0.52,
+    brier: 0.16, brierBaseline: 0.21, brierSkill: verdict === 'EDGE' ? 0.24 : -0.02, verdict, note: '',
+  });
+  const runs = (...v: Array<SkillStats['verdict']>): RunSkill[] => v.map((x, i) => ({ session: `2026-10-${22 - i}`, skill: skill(x) }));
+  const run = (r: RunSkill[], cur: Record<string, TunableValue> = {}) =>
+    proposeTuning({ rows: [], current: defaults(cur), pendingKeys: new Set(), mbmSkill: r }).drafts.filter((d) => d.target === target);
+
+  it('EDGE twice while off → propose false → true with the skill numbers as evidence', () => {
+    const d = run(runs('EDGE', 'EDGE'));
+    expect(d).toHaveLength(1);
+    expect(d[0]).toMatchObject({ key: target, currentValue: false, proposedValue: true, evidence: { n: 400, right: 312, wrong: 88 } });
+    expect(d[0].rationale).toContain('2026-10-22: EDGE AUC 0.71, Brier skill 0.24, n 400; 2026-10-21: EDGE');
+    expect(d[0].rationale).toContain('vs always-majority 70%');
+  });
+
+  it('NO_EDGE twice while on → propose true → false; NO_EDGE while off says nothing', () => {
+    const d = run(runs('NO_EDGE', 'NO_EDGE'), { [target]: true });
+    expect(d).toHaveLength(1);
+    expect(d[0]).toMatchObject({ currentValue: true, proposedValue: false });
+    expect(run(runs('NO_EDGE', 'NO_EDGE'))).toEqual([]);
+    expect(run(runs('EDGE', 'EDGE'), { [target]: true })).toEqual([]);
+  });
+
+  it('NOT_TESTABLE never proposes; nor does one run, a mixed pair, or a pending key', () => {
+    expect(run(runs('NOT_TESTABLE', 'NOT_TESTABLE'))).toEqual([]);
+    expect(run(runs('NOT_TESTABLE', 'NOT_TESTABLE'), { [target]: true })).toEqual([]);
+    expect(run(runs('EDGE', 'NOT_TESTABLE'))).toEqual([]);
+    expect(run(runs('NOT_TESTABLE', 'EDGE'))).toEqual([]);
+    expect(run(runs('NO_EDGE', 'NOT_TESTABLE'), { [target]: true })).toEqual([]);
+    expect(run(runs('EDGE'))).toEqual([]);
+    expect(run(runs('EDGE', 'NO_EDGE'))).toEqual([]);
+    expect(run([])).toEqual([]);
+    expect(mbmPacketRule(false, runs('NOT_TESTABLE', 'NOT_TESTABLE', 'EDGE'))).toBeNull();
+    const pending = proposeTuning({ rows: [], current: defaults(), pendingKeys: new Set([target]), mbmSkill: runs('EDGE', 'EDGE') });
+    expect(pending.drafts).toEqual([]);
+    expect(pending.rejected).toContainEqual({ target, reason: 'a proposal for this key is already pending' });
+  });
+
+  it('a diagnosis suggestion cannot set it', () => {
+    const out = proposeTuning({ rows: [], current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: target, proposedValue: true }] });
+    expect(out.drafts).toEqual([]);
+    expect(out.rejected).toEqual([{ target, reason: 'mbm.packet is rule-only (not a diagnosis suggestion)' }]);
   });
 });

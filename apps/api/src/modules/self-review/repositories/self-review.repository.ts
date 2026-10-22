@@ -50,6 +50,14 @@ export class SelfReviewRepository {
     return this.prisma.selfReviewRun.findMany({ where: { sessionDate, status: 'DONE' }, orderBy: { startedAt: 'desc' }, take: 10 });
   }
 
+  /** The newest DONE run of the latest session before `sessionDate` (the previous night's run). */
+  previousDoneRun(sessionDate: string) {
+    return this.prisma.selfReviewRun.findFirst({
+      where: { status: 'DONE', sessionDate: { lt: sessionDate } },
+      orderBy: [{ sessionDate: 'desc' }, { startedAt: 'desc' }],
+    });
+  }
+
   runById(id: string) {
     return this.prisma.selfReviewRun.findUnique({ where: { id } });
   }

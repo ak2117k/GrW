@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean } = {}) {
+function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[] } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -24,6 +24,7 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
       stored.filter((r) => (!w.sessionDate || r.sessionDate === w.sessionDate) && (!w.sessions || w.sessions.includes(r.sessionDate as string)) && (!w.kinds || w.kinds.includes(r.kind as string))),
     ),
     doneRunsFor: jest.fn(async () => []),
+    previousDoneRun: jest.fn(async () => o.prevRun ?? null),
     setDiagnosisIfEmpty: jest.fn(async () => undefined),
     proposals: jest.fn(async () => o.pending ?? []),
     expire: jest.fn(async () => ({ count: 0 })),
@@ -53,7 +54,7 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     scorecardTotals: jest.fn(async () => []),
     articleSentiments: jest.fn(async () => new Map()),
     dailyRangeBp: jest.fn(async () => null),
-    mbmPredictions: jest.fn(async () => []),
+    mbmPredictions: jest.fn(async () => o.mbm ?? []),
     tradeSetups: jest.fn(async () => []),
     stockMoves: jest.fn(async (asOf: string) =>
       asOf === '2026-10-13'
@@ -148,6 +149,40 @@ describe('SelfReviewRunService', () => {
     const { svc, repo } = make({ pending: [{ id: 'p-old', key: 'k', status: 'PENDING', createdAt: new Date('2026-09-01T00:00:00Z') }] });
     await svc.run(NOW);
     expect(repo.expire).toHaveBeenCalledWith(['p-old']);
+  });
+
+  describe('mbm.packet proposal from two consecutive runs', () => {
+    // 15 BIG at p 0.8 + 15 small at p 0.2: AUC 1, Brier skill > 0 → rolling-20 EDGE.
+    const mbm = Array.from({ length: 30 }, (_, i) => ({
+      id: `m${i}`, instrument: 'NIFTY', horizon: '30m', asOf: new Date('2026-10-21T05:00:00Z'), p: i < 15 ? 0.8 : 0.2,
+      regime: 'ACTIVE', outcomeBig: i < 15, outcomeQuality: 'ok', outcomeRangeBp: 30, outcomeThresholdBp: 20,
+    }));
+    const prev = (verdict: string) => ({ id: 'run0', sessionDate: '2026-10-19', summary: { skill: { MBM_PREDICTION: { rolling20: { n: 25, verdict, auc: 0.7, brierSkill: 0.2, hitRate: 0.8, baseRate: 0.5, majorityHitRate: 0.5 } } } } });
+    const mbmDrafts = (repo: { createProposal: jest.Mock }) =>
+      repo.createProposal.mock.calls.map((c) => c[0] as { target: string; currentValue: unknown; proposedValue: unknown; rationale: string }).filter((d) => d.target === 'mbm.packet');
+
+    it('EDGE this run and the previous session’s run → PENDING false → true (never applied)', async () => {
+      const { svc, repo } = make({ mbm, prevRun: prev('EDGE') });
+      await svc.run(NOW);
+      expect(repo.previousDoneRun).toHaveBeenCalledWith('2026-10-21');
+      const d = mbmDrafts(repo);
+      expect(d).toHaveLength(1);
+      expect(d[0]).toMatchObject({ currentValue: false, proposedValue: true });
+      expect(d[0].rationale).toContain('2026-10-21: EDGE AUC 1.00');
+      expect(d[0].rationale).toContain('2026-10-19: EDGE');
+      expect(svc.currentValue('mbm.packet')).toBe(false);
+    });
+
+    it('previous run NOT_TESTABLE, missing, or unreadable → no proposal', async () => {
+      for (const prevRun of [prev('NOT_TESTABLE'), null, { id: 'r', sessionDate: '2026-10-19', summary: {} }]) {
+        const { svc, repo } = make({ mbm, prevRun });
+        await svc.run(NOW);
+        expect(mbmDrafts(repo)).toEqual([]);
+      }
+      const { svc, repo } = make({ prevRun: prev('EDGE') }); // no MBM rows this run → NOT_TESTABLE
+      await svc.run(NOW);
+      expect(mbmDrafts(repo)).toEqual([]);
+    });
   });
 
   it('currentValue: override, else the env-derived default, else the code default', () => {

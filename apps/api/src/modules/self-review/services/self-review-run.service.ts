@@ -3,7 +3,7 @@ import type { SessionClock } from '../../market-hub/session-clock';
 import { istMidnightOf, istYmd, lastSessionDates } from '../../night-report/domain/night-report.logic';
 import { shapeOf } from '../../overnight-scorecard/domain/positions';
 import { outcomeSession } from '../../overnight-scorecard/domain/windows';
-import { isExpired, proposeTuning, type EvidenceRow, type Suggestion } from '../domain/proposals';
+import { isExpired, proposeTuning, type EvidenceRow, type RunSkill, type Suggestion } from '../domain/proposals';
 import {
   latestPerWindowSymbol,
   openClose,
@@ -130,7 +130,8 @@ export class SelfReviewRunService {
       });
 
       const diagnosis = await this.diagnose(run.id, S, sessionRows, summary, errors);
-      const proposals = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors);
+      const mbmSkill = await this.mbmSkillRuns(S, summary, errors);
+      const proposals = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors, mbmSkill);
 
       await this.repo.finishRun(run.id, { status: 'DONE', summary, error: errors.length ? errors.join('; ').slice(0, 2000) : null });
       this.logger.log(
@@ -338,7 +339,33 @@ export class SelfReviewRunService {
 
   // ─── Propose ───────────────────────────────────────────────────────────────
 
-  private async propose(runId: string, history: EvidenceRow[], suggestions: Suggestion[], now: Date, errors: string[]): Promise<number> {
+  /**
+   * This run's MBM rolling-20 skill, then the previous session's last DONE run's (newest first) — the
+   * `mbm.packet` rule needs two consecutive runs. A missing or unreadable one just means fewer runs.
+   */
+  private async mbmSkillRuns(S: string, summary: RunSummary, errors: string[]): Promise<RunSkill[]> {
+    const out: RunSkill[] = [];
+    const mine = summary.skill?.MBM_PREDICTION?.rolling20;
+    if (!mine) return out;
+    out.push({ session: S, skill: mine });
+    try {
+      const prev = await this.repo.previousDoneRun(S);
+      const skill = (prev?.summary as RunSummary | null | undefined)?.skill?.MBM_PREDICTION?.rolling20;
+      if (prev && skill && typeof skill.verdict === 'string') out.push({ session: prev.sessionDate, skill });
+    } catch (e) {
+      errors.push(`previous MBM skill: ${errText(e)}`);
+    }
+    return out;
+  }
+
+  private async propose(
+    runId: string,
+    history: EvidenceRow[],
+    suggestions: Suggestion[],
+    now: Date,
+    errors: string[],
+    mbmSkill: RunSkill[] = [],
+  ): Promise<number> {
     try {
       const pending = await this.repo.proposals('PENDING', 500);
       const stale = pending.filter((p) => isExpired(p, now));
@@ -348,7 +375,7 @@ export class SelfReviewRunService {
       }
       const staleIds = new Set(stale.map((p) => p.id));
       const pendingKeys = new Set(pending.filter((p) => !staleIds.has(p.id)).map((p) => p.key));
-      const { drafts, rejected } = proposeTuning({ rows: history, current: (t) => this.currentValue(t), pendingKeys, suggestions });
+      const { drafts, rejected } = proposeTuning({ rows: history, current: (t) => this.currentValue(t), pendingKeys, suggestions, mbmSkill });
       for (const r of rejected) this.logger.log(`[self-review] proposal for ${r.target} not raised: ${r.reason}`);
       for (const d of drafts) {
         await this.repo.createProposal(d, runId);

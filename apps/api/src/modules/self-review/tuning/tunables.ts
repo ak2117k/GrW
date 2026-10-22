@@ -38,6 +38,11 @@ export const PERSIST_MIN_TARGET = 'exit.persistMinSec';
  * 0 = shadow (shown, never counted); 1 = a long option +1 on TOP20, −1 on BOTTOM20. Never direction.
  */
 export const STOCK_MOVE_POINTS_TARGET = 'scorecard.stockMove.points';
+/**
+ * The MBM move-size model as an input to the sentinel's packet (read by the sentinel, default false).
+ * Rule-only: proposed from the run summary's rolling-20 skill verdict (EDGE twice → on, NO_EDGE twice → off).
+ */
+export const MBM_PACKET_TARGET = 'mbm.packet';
 
 /** Exit defaults are the env-parsed config (15 / 120 when unset); the bounds are tighter than env's. */
 export const EXIT_OPENING_GUARD_DEFAULT = 15;
@@ -51,6 +56,7 @@ export const TUNABLES: Readonly<Record<string, Tunable>> = Object.freeze({
   [OPENING_GUARD_TARGET]: { kind: 'number', default: EXIT_OPENING_GUARD_DEFAULT, min: 0, max: 30, integer: true },
   [PERSIST_MIN_TARGET]: { kind: 'number', default: EXIT_PERSIST_MIN_DEFAULT, min: 60, max: 600, integer: true },
   [STOCK_MOVE_POINTS_TARGET]: { kind: 'number', default: 0, min: 0, max: 1, integer: true },
+  [MBM_PACKET_TARGET]: { kind: 'boolean', default: false },
 });
 
 /** Words no self-modifiable target may contain, whatever the allow-list says. */

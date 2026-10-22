@@ -89,7 +89,9 @@ export const useAdvisorStore = create<AdvisorState>((set, get) => ({
     }));
 
     try {
-      const res = await api.post('/advisor/ask', { question });
+      // Claude-backed answers can take a while: up to ~20 s waiting for a free
+      // (non-reserved) model slot plus the CLI's own 180 s ceiling.
+      const res = await api.post('/advisor/ask', { question }, { timeout: 210_000 });
       const data = res.data;
 
       const assistantMessage: ChatMessage = {

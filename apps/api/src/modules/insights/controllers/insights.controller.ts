@@ -2,6 +2,7 @@ import { Controller, Post, Get, Body, Param } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { InsightsService } from '../services/insights.service';
 import { RequestInsightDto } from '../dto/request-insight.dto';
+import { CurrentUser, type AuthenticatedUser } from '../../../common/decorators/current-user.decorator';
 
 @ApiTags('insights')
 @Controller('api/insights')
@@ -10,22 +11,25 @@ export class InsightsController {
 
   @Post('request')
   @ApiOperation({ summary: 'Request an AI insight for a section (idempotent)' })
-  async request(@Body() dto: RequestInsightDto) {
+  async request(@Body() dto: RequestInsightDto, @CurrentUser() user?: AuthenticatedUser) {
     const row = await this.service.requestInsight(
       dto.sectionKey,
       dto.contextKey,
       dto.contextData as object,
+      user ? { userId: user.userId, role: user.role } : undefined,
     );
     return row;
   }
 
   @Get(':sectionKey/:contextKey')
-  @ApiOperation({ summary: 'Get latest insight for a section + context' })
+  @ApiOperation({ summary: 'Get latest insight for a section + context (empty 200 body when none was ever requested)' })
   async getLatest(
     @Param('sectionKey') sectionKey: string,
     @Param('contextKey') contextKey: string,
+    @CurrentUser() user?: AuthenticatedUser,
   ) {
-    return this.service.getLatest(sectionKey, contextKey);
+    // User-scoped sections (news-feed) resolve to the caller's own row only.
+    return this.service.findLatest(sectionKey, contextKey, user ? { userId: user.userId, role: user.role } : undefined);
   }
 
   @Post('mcp/claim-pending')

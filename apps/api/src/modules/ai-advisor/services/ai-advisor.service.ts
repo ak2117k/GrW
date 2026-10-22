@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { AdvisorChatService, type AdvisorChatAnswer } from '../../ai-assist/advisor-chat.service';
+import type { AssistPrincipal } from '../../ai-assist/assist-llm.service';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -39,6 +41,15 @@ export interface TradingSuggestion {
   category: string;
 }
 
+function toAIResponse(a: AdvisorChatAnswer): AIResponse {
+  return {
+    answer: a.answer,
+    confidence: a.confidence,
+    relatedInsights: a.relatedInsights,
+    suggestedActions: a.suggestedActions,
+  };
+}
+
 @Injectable()
 export class AIAdvisorService {
   private readonly logger = new Logger(AIAdvisorService.name);
@@ -48,6 +59,9 @@ export class AIAdvisorService {
     private readonly prisma: PrismaService,
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
+    // Claude-session chat + the advisor guardrail (ai-assist). Optional so
+    // specs and a module without it keep the pre-existing behaviour.
+    @Optional() private readonly claudeChat?: AdvisorChatService,
   ) {
     this.aiEngineUrl =
       this.configService.get<string>('AI_ENGINE_URL') ||
@@ -55,9 +69,23 @@ export class AIAdvisorService {
   }
 
   /**
-   * Send a question to the Python AI engine with trading context
+   * Answer an advisor question.
+   *
+   * 1. The guardrail pre-check (every asker) refuses clearly off-topic or
+   *    prompt-injection questions without any model call.
+   * 2. The owner is answered by Claude over the sentinel's transport, in the
+   *    shared non-reserved slot ("busy, try again" when none frees up).
+   * 3. Anyone else — or a failed Claude call — falls back to the Python AI
+   *    engine, then the built-in rule-based advisor, as before.
    */
-  async askQuestion(question: string): Promise<AIResponse> {
+  async askQuestion(question: string, user?: AssistPrincipal): Promise<AIResponse> {
+    if (this.claudeChat) {
+      const blocked = this.claudeChat.guard(question);
+      if (blocked) return toAIResponse(blocked);
+      const viaClaude = await this.claudeChat.ask(question, user);
+      if (viaClaude) return toAIResponse(viaClaude);
+    }
+
     const context = await this.buildTradingContext();
 
     try {

@@ -29,9 +29,10 @@ export async function getLatestInsight(
 ): Promise<AIInsight | null> {
   try {
     const res = await api.get(`/insights/${sectionKey}/${encodeURIComponent(contextKey)}`);
-    return res.data;
+    // No insight yet = empty 200 body (axios gives ''), never a crash.
+    return res.data ? (res.data as AIInsight) : null;
   } catch (err: unknown) {
-    // 404 = no insight yet
+    // 404 = no insight yet (older API builds answered "never asked" with 404)
     if (
       typeof err === 'object' &&
       err !== null &&

@@ -33,7 +33,9 @@ export default function NewsPage() {
   const totalSentiment = sentimentCounts.bullish + sentimentCounts.bearish + sentimentCounts.neutral;
 
   // Batch-analysis context for the feed: send the top 20 filtered articles
-  // to Claude (via MCP /insights pipeline) so the analysis sees a full
+  // to Claude (answered in-app by the API's Claude session for the owner —
+  // apps/api/src/modules/ai-assist; others fall back to the MCP /insights
+  // loop) so the analysis sees a full
   // cross-section of today's headlines rather than one article at a time.
   // contextKey hashes the article IDs so re-renders with the same feed share
   // a completed insight (idempotent on the backend); a feed refresh that
@@ -114,6 +116,7 @@ export default function NewsPage() {
           contextKey={newsInsight.contextKey}
           contextData={newsInsight.contextData}
           title="AI Feed Analysis"
+          servedInApp
         />
       )}
 

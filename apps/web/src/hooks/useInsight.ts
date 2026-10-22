@@ -2,7 +2,9 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { AIInsight, getLatestInsight, requestInsight } from '@/services/insights';
 
 const POLL_INTERVAL_MS = 3_000;
-const MAX_POLL_ATTEMPTS = 60; // ~3 minutes
+// ~3.75 minutes: an in-app Claude answer may wait ~20 s for a free model slot,
+// then take up to the CLI's 180 s ceiling.
+const MAX_POLL_ATTEMPTS = 75;
 
 interface UseInsightResult {
   insight: AIInsight | null;

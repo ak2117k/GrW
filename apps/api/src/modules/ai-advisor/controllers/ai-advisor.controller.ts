@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AIAdvisorService } from '../services/ai-advisor.service';
+import { CurrentUser, type AuthenticatedUser } from '../../../common/decorators/current-user.decorator';
 import { WeeklyReportService } from '../services/weekly-report.service';
 import {
   AskQuestionDto,
@@ -29,8 +30,11 @@ export class AIAdvisorController {
   @Post('ask')
   @ApiOperation({ summary: 'Ask the AI advisor a question' })
   @ApiResponse({ status: 200, description: 'AI response returned' })
-  async askQuestion(@Body() dto: AskQuestionDto) {
-    return this.advisorService.askQuestion(dto.question);
+  async askQuestion(@Body() dto: AskQuestionDto, @CurrentUser() user?: AuthenticatedUser) {
+    return this.advisorService.askQuestion(
+      dto.question,
+      user ? { userId: user.userId, role: user.role } : undefined,
+    );
   }
 
   @Get('insights')

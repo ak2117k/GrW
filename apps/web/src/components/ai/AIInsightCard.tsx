@@ -7,6 +7,8 @@ interface AIInsightCardProps {
   contextKey: string;
   contextData: Record<string, unknown>;
   title?: string;
+  /** The API answers this section itself (no Claude Code /loop needed) — hides the /loop hint. */
+  servedInApp?: boolean;
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -25,6 +27,7 @@ export default function AIInsightCard({
   contextKey,
   contextData,
   title = 'AI Analysis',
+  servedInApp = false,
 }: AIInsightCardProps) {
   const { insight, isLoading, isWaiting, error, ask } = useInsight(
     sectionKey,
@@ -74,9 +77,11 @@ export default function AIInsightCard({
         <div className="flex flex-col items-center gap-2 py-4">
           <Loader2 size={20} className="animate-spin text-[var(--color-accent-purple,#a78bfa)]" />
           <p className="text-xs text-[var(--color-text-muted)]">Claude is analyzing...</p>
-          <p className="text-[10px] text-[var(--color-text-muted)]">
-            (Make sure /loop is running in your Claude Code session)
-          </p>
+          {!servedInApp && (
+            <p className="text-[10px] text-[var(--color-text-muted)]">
+              (Make sure /loop is running in your Claude Code session)
+            </p>
+          )}
         </div>
       )}
 

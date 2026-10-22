@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, type OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { CronLeaseService } from '../../../common/cron-lease/cron-lease.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
@@ -17,9 +17,22 @@ export const TRADE_SETUPS_MARGIN_CRON = '0 0 15 * * 1-5';
 /** Outcomes after the close, before the 18:45 self-review run. */
 export const TRADE_SETUPS_OUTCOME_CRON = '0 15 16 * * 1-5';
 const LEASE_TTL_MS = 20 * 60_000;
+/** A restart inside the night window re-runs the build after this delay (feeds warm up first). */
+export const BOOT_CATCH_UP_DELAY_MS = 120_000;
+
+/**
+ * True between the night build (23:50 IST) and the morning rebuild (08:50 IST): a process that boots
+ * then (a deploy at 23:51 skipped the 2026-10-22 night build) must build itself. build() is an upsert
+ * of the plan, so a second run is harmless.
+ */
+export function inNightWindow(now: Date): boolean {
+  const ist = new Date(now.getTime() + 330 * 60_000);
+  const min = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  return min >= 23 * 60 + 50 || min < 8 * 60 + 50;
+}
 
 @Injectable()
-export class TradeSetupCron {
+export class TradeSetupCron implements OnApplicationBootstrap {
   private readonly logger = new Logger(TradeSetupCron.name);
 
   constructor(
@@ -27,6 +40,15 @@ export class TradeSetupCron {
     @Inject(TRADE_SETUP_CLOCK) private readonly clock: SessionClock,
     @Optional() private readonly lease?: CronLeaseService,
   ) {}
+
+  onApplicationBootstrap(): void {
+    if (!inNightWindow(new Date())) return;
+    const t = setTimeout(() => {
+      this.logger.log('[trade-setups] boot inside the night window: catch-up build');
+      void this.fire('trade-setups-build', () => this.setups.build());
+    }, BOOT_CATCH_UP_DELAY_MS);
+    t.unref?.();
+  }
 
   @Cron(TRADE_SETUPS_NIGHT_CRON, { name: 'trade-setups-night', timeZone: 'Asia/Kolkata' })
   onNight(): Promise<void> {

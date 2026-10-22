@@ -173,8 +173,9 @@ record_success() {
   mkdir -p "$STATE_DIR"
   echo "$1" > "$STATE_DIR/current_sha"
   rm -f "$STATE_DIR/failed_sha" "$STATE_DIR"/waiting-*
-  # Keep the three newest images (current + two rollback targets).
-  docker image ls grw-api --format '{{.CreatedAt}}\t{{.Tag}}' | sort -r | tail -n +4 | cut -f2 \
+  # Keep the KEEP_IMAGES newest images (default 2: current + one rollback target; each is ~1.6 GB
+  # on a 20 GB disk).
+  docker image ls grw-api --format '{{.CreatedAt}}\t{{.Tag}}' | sort -r | tail -n +"$(( ${KEEP_IMAGES:-2} + 1 ))" | cut -f2 \
     | xargs -r -I{} docker image rm "grw-api:{}" >/dev/null 2>&1 || true
 }
 

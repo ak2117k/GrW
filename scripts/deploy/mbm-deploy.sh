@@ -49,9 +49,12 @@ record_success() {
   echo "$1" > "$STATE_DIR/mbm_sha"
   # :current makes a plain `up -d mbm` (no GRW_MBM_TAG) run the last good build.
   docker tag "grw-mbm:$1" grw-mbm:current
-  # Keep the three newest sha images (running + two rollback targets); :current is an alias.
+  # Keep the KEEP_IMAGES newest sha images (default 2: running + one rollback target); :current is
+  # an alias.
   docker image ls grw-mbm --format '{{.CreatedAt}}\t{{.Tag}}' | grep -v $'\tcurrent$' | sort -r \
-    | tail -n +4 | cut -f2 | xargs -r -I{} docker image rm "grw-mbm:{}" >/dev/null 2>&1 || true
+    | tail -n +"$(( ${KEEP_IMAGES:-2} + 1 ))" | cut -f2 | xargs -r -I{} docker image rm "grw-mbm:{}" >/dev/null 2>&1 || true
+  # The host build leaves ~1 GB of BuildKit cache per build; the next build only loses its layer cache.
+  docker builder prune -af >/dev/null 2>&1 || true
 }
 
 main() {

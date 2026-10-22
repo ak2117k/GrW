@@ -1,6 +1,8 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PortfolioService } from '../services/portfolio.service';
+import { LivePerformanceService } from '../services/live-performance.service';
+import { CurrentUser } from '../../../common/decorators';
 import {
   DateRangeDto,
   JournalFilterDto,
@@ -11,7 +13,29 @@ import {
 @ApiTags('Portfolio')
 @Controller('api/portfolio')
 export class PortfolioController {
-  constructor(private readonly portfolioService: PortfolioService) {}
+  constructor(
+    private readonly portfolioService: PortfolioService,
+    private readonly livePerformance: LivePerformanceService,
+  ) {}
+
+  /**
+   * LIVE (real-money) dashboard for the caller: broker trackers (manual + model
+   * positions) with AI-agent / manual / trigger exit attribution, realised P&L by
+   * IST exit day, open unrealised P&L. Paper trades are not included.
+   */
+  @Get('live/dashboard')
+  @ApiOperation({ summary: 'Live trading dashboard (real broker trades, no paper)' })
+  async getLiveDashboard(@CurrentUser('userId') userId: string) {
+    return this.livePerformance.getDashboard(userId);
+  }
+
+  /** LIVE trade journal for the caller (newest activity first). */
+  @Get('live/journal')
+  @ApiOperation({ summary: 'Live trade journal (real broker trades, with who closed each)' })
+  async getLiveJournal(@CurrentUser('userId') userId: string) {
+    const trades = await this.livePerformance.listLiveTrades(userId);
+    return { trades, total: trades.length };
+  }
 
   @Get('summary')
   @ApiOperation({ summary: 'Get overall portfolio summary' })

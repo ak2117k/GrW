@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback } from 'react';
 import { BookOpen, Download, ChevronLeft, ChevronRight } from 'lucide-react';
-import { DataTable, Badge, PnLDisplay, EmptyState, LoadingSkeleton } from '@/components/common';
+import { DataTable, Badge, PnLDisplay, EmptyState, LoadingSkeleton, Tabs } from '@/components/common';
+import LiveJournal from './LiveJournal';
 import type { Column } from '@/components/common';
 import TradeFilters from '@/components/trading/TradeFilters';
 import TradeStats from '@/components/trading/TradeStats';
@@ -68,7 +69,33 @@ function statusVariant(
 
 const STRATEGIES = ['rsi-reversal', 'ema-crossover', 'vwap-deviation', 'breakout', 'momentum'];
 
+type JournalTab = 'live' | 'paper';
+
+const JOURNAL_TABS: Array<{ key: JournalTab; label: string }> = [
+  { key: 'live', label: 'Live' },
+  { key: 'paper', label: 'Paper' },
+];
+
+/**
+ * Trade Journal: "Live" (default) = real broker trades with who closed each
+ * (AI agent / manual / model / price trigger); "Paper" = the simulated trades
+ * table journal as before. Each tab fetches only while it is shown.
+ */
 export default function JournalPage() {
+  const [tab, setTab] = useState<JournalTab>('live');
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <BookOpen size={24} className="text-[var(--color-accent-blue)]" />
+        <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">Trade Journal</h1>
+      </div>
+      <Tabs tabs={JOURNAL_TABS} activeTab={tab} onChange={(k) => setTab(k as JournalTab)} />
+      {tab === 'live' ? <LiveJournal /> : <PaperJournal />}
+    </div>
+  );
+}
+
+function PaperJournal() {
   const {
     trades,
     totalCount,
@@ -413,15 +440,9 @@ export default function JournalPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <BookOpen size={24} className="text-[var(--color-accent-blue)]" />
-          <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">
-            Trade Journal
-          </h1>
-          {totalCount > 0 && (
-            <span className="text-xs text-gray-500 mt-1">
-              {totalCount} trade{totalCount !== 1 ? 's' : ''}
-            </span>
-          )}
+          <span className="text-xs text-gray-500">
+            Paper trades{totalCount > 0 ? ` · ${totalCount} trade${totalCount !== 1 ? 's' : ''}` : ''}
+          </span>
         </div>
         <button
           onClick={handleExportCSV}

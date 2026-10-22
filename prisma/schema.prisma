@@ -2787,6 +2787,50 @@ model MbmChainSnapshot {
   @@map("mbm_chain_snapshots")
 }
 
+/// Past intraday open interest of LIVE NIFTY futures + options, backfilled from Angel getOIData
+/// (OiHistoryBackfillService). Broker APIs serve nothing for expired contracts, so a contract's rows
+/// stop growing once it expires. OI only (no price): the NIFTY 1m bars are in mbm_bars_1m.
+model NiftyOiHistory {
+  token    String
+  symbol   String
+  kind     String // FUT | CE | PE
+  expiry   DateTime @db.Date
+  strike   Float? // null for FUT
+  interval String // Angel interval: ONE_MINUTE | THREE_MINUTE | FIVE_MINUTE
+  ts       DateTime @db.Timestamptz(6) // bar start, UTC
+  oi       Float
+
+  @@id([token, interval, ts])
+  @@index([expiry, kind, ts])
+  @@map("nifty_oi_history")
+}
+
+/// Per contract × interval: how far the nifty_oi_history backfill has walked (resumable across runs).
+model NiftyOiBackfillProgress {
+  token       String
+  interval    String
+  symbol      String
+  kind        String // FUT | CE | PE
+  expiry      DateTime  @db.Date
+  strike      Float?
+  /// Backward walk: everything from here to coveredTo has been asked; older not yet (null = not started).
+  cursor      DateTime? @db.Timestamptz(6)
+  /// Forward edge: everything up to here has been asked.
+  coveredTo   DateTime? @map("covered_to") @db.Timestamptz(6)
+  /// Consecutive backward windows (with an NSE session in them) that came back empty.
+  emptyStreak Int       @default(0) @map("empty_streak")
+  /// Backward walk finished (2 empty windows in a row, or the lookback floor reached).
+  done        Boolean   @default(false)
+  earliestTs  DateTime? @map("earliest_ts") @db.Timestamptz(6)
+  latestTs    DateTime? @map("latest_ts") @db.Timestamptz(6)
+  rows        Int       @default(0)
+  calls       Int       @default(0)
+  updatedAt   DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([token, interval])
+  @@map("nifty_oi_backfill_progress")
+}
+
 /// MBM daily setups monitor (OBSERVE only, touches no trade): NIFTY daily-chart signals detected at
 /// 15:50 IST and their later outcomes. ret_Nd_bp = next session's open → close N sessions later, gross bp.
 model MbmDailySignal {

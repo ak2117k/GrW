@@ -457,6 +457,53 @@ it('getCandleWindow reports a body-level errorcode (AG8001) as an error, not a t
   expect(err).not.toBeInstanceOf(AngelThrottleError);
 });
 
+describe('getOIWindow', () => {
+  const withOi = (resp: unknown) => {
+    const d = makeDeps();
+    (d.smartApi as any).getOIData = jest.fn().mockResolvedValue(resp);
+    return { ...makeSession(d), getOIData: (d.smartApi as any).getOIData as jest.Mock };
+  };
+
+  it('sends ONE getOIData call with the Angel window format and maps {time, oi} rows', async () => {
+    const { s, getOIData } = withOi({
+      status: true,
+      data: [
+        { time: '2026-10-22T09:15:00+05:30', oi: 1200 },
+        { time: '2026-10-22T09:16:00+05:30', oi: '1250' },
+      ],
+    });
+    const pts = await s.getOIWindow('59001', 'NFO', 'ONE_MINUTE', new Date('2026-10-22T03:45:00Z'), new Date('2026-10-22T10:00:00Z'));
+    expect(getOIData).toHaveBeenCalledTimes(1);
+    expect(getOIData).toHaveBeenCalledWith({
+      exchange: 'NFO',
+      symboltoken: '59001',
+      interval: 'ONE_MINUTE',
+      fromdate: '2026-10-22 09:15',
+      todate: '2026-10-22 15:30',
+    });
+    expect(pts).toEqual([
+      { ts: new Date('2026-10-22T03:45:00Z'), oi: 1200 },
+      { ts: new Date('2026-10-22T03:46:00Z'), oi: 1250 },
+    ]);
+  });
+
+  it('SDK-empty shapes: data:[] and status:true data:null are empty; a bare data:null is a throttle', async () => {
+    await expect(withOi({ status: true, data: [] }).s.getOIWindow('1', 'NFO', 'ONE_MINUTE', new Date(0), new Date(1))).resolves.toEqual([]);
+    await expect(withOi({ status: true, message: 'SUCCESS', errorcode: '', data: null }).s.getOIWindow('1', 'NFO', 'ONE_MINUTE', new Date(0), new Date(1))).resolves.toEqual([]);
+    await expect(withOi({ data: null }).s.getOIWindow('1', 'NFO', 'ONE_MINUTE', new Date(0), new Date(1))).rejects.toBeInstanceOf(AngelThrottleError);
+  });
+
+  it('a resolved HTTP error or body errorcode is a plain error, and rows in an unknown shape are loud', async () => {
+    for (const resp of [{ status: 401, message: 'Unauthorized' }, { status: false, errorcode: 'AB1004', message: 'Something Went Wrong', data: null }]) {
+      const err = await withOi(resp).s.getOIWindow('1', 'NFO', 'ONE_MINUTE', new Date(0), new Date(1)).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(AngelThrottleError);
+    }
+    const odd = await withOi({ status: true, data: [{ x: 1 }] }).s.getOIWindow('1', 'NFO', 'ONE_MINUTE', new Date(0), new Date(1)).catch((e) => e);
+    expect(String(odd)).toMatch(/unknown shape \(x\)/);
+  });
+});
+
 describe('getOptionGreeks', () => {
   it('sends ONE optionGreek call with the name upper-cased and expirydate as DDMMMYYYY', async () => {
     const { s, d } = makeSession();

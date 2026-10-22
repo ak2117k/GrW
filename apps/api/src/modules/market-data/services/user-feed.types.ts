@@ -1,5 +1,6 @@
 import type { TickData } from '../../../common/interfaces/broker-adapter.interface';
 import type { Candle } from './user-historical.util';
+import type { OiPoint } from './oi-data.util';
 import type { OptionGreekRow } from '../../market-hub/chain/chain.types';
 
 /** A single instrument to subscribe on the broker feed. */
@@ -74,6 +75,11 @@ export interface UserFeedSessionLike {
    * AngelThrottleError when throttled; [] means genuinely no bars.
    */
   getCandleWindow(token: string, exchange: string, interval: string, from: Date, to: Date): Promise<Candle[]>;
+  /**
+   * ONE getOIData window (past open interest of a LIVE F&O contract), paced like getCandleWindow.
+   * Rejects with AngelThrottleError when throttled; [] means no OI in the window. Optional: fakes omit it.
+   */
+  getOIWindow?(token: string, exchange: string, interval: string, from: Date, to: Date): Promise<OiPoint[]>;
   /** One-shot FULL-mode quote over the user's own Angel session (null if unquotable). */
   getQuote(token: string, exchange: string): Promise<TickData | null>;
   /**

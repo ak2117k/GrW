@@ -15,12 +15,16 @@ import { MbmController } from './controllers/mbm.controller';
 import { CHAIN_WATCHLIST, ChainWatchlistService } from './chain-watchlist';
 import { MbmChainReader } from './services/mbm-chain-reader.service';
 import { MbmStockChainCaptureService } from './services/mbm-stock-chain-capture.service';
+import { parseOiHistoryConfig } from './domain/oi-history';
+import { OiHistoryRepository } from './repositories/oi-history.repository';
+import { OI_HISTORY_CONFIG, OiHistoryBackfillService } from './services/oi-history-backfill.service';
 
 /**
  * Market-behaviour model, M2 serving (docs/superpowers/plans/2026-10-19-mbm-m2-serving.md §4):
  * the 1m bar refresher feeding mbm_bars_1m and a fail-open proxy to the MBM service, plus the NIFTY
  * option-chain capture into mbm_chain_snapshots (MBM_CHAIN_CAPTURE, independent of MBM_ENABLED), and
- * the per-symbol capture of the chain watchlist (MBM_CHAIN_CAPTURE_STOCKS) with its read helpers.
+ * the per-symbol capture of the chain watchlist (MBM_CHAIN_CAPTURE_STOCKS) with its read helpers, and the
+ * nightly backfill of past intraday NIFTY OI from Angel getOIData into nifty_oi_history (OI_BACKFILL_ENABLED).
  * Inert while MBM_ENABLED=off (the default). Observe only — nothing trades on it.
  */
 @Module({
@@ -41,6 +45,9 @@ import { MbmStockChainCaptureService } from './services/mbm-stock-chain-capture.
     MbmStockChainCaptureService,
     MbmChainReader,
     MbmClient,
+    { provide: OI_HISTORY_CONFIG, useFactory: () => parseOiHistoryConfig(process.env) },
+    OiHistoryRepository,
+    OiHistoryBackfillService,
   ],
   exports: [MbmClient, MBM_CONFIG, ChainWatchlistService, CHAIN_WATCHLIST, MbmChainReader, MbmStockChainCaptureService],
 })

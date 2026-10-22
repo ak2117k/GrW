@@ -236,6 +236,13 @@ export class UserFeedManager {
     return entry.session.getCandleWindow(ref.token, ref.exchange, interval, from, to);
   }
 
+  /** ONE getOIData window (past OI of a live F&O contract) over the user's OWN session; never a second login. */
+  async fetchOIWindow(userId: string, ref: TokenRef, interval: string, from: Date, to: Date) {
+    const entry = this.getOrCreateEntry(userId);
+    if (!entry.session.getOIWindow) throw new Error('feed session has no getOIWindow');
+    return entry.session.getOIWindow(ref.token, ref.exchange, interval, from, to);
+  }
+
   /** One-shot FULL-mode quote over the user's OWN Angel session (null if unquotable). */
   async fetchQuote(userId: string, token: string, exchange: string) {
     const entry = this.getOrCreateEntry(userId);

@@ -24,6 +24,7 @@ import {
   mapFullQuote,
   type Candle,
 } from './user-historical.util';
+import { mapOiRows, type OiPoint } from './oi-data.util';
 import { groupTokensByExchange, mapFullQuotes } from './user-quotes.util';
 import { greekExpiry, mapOptionGreeks } from './user-option-greeks.util';
 import type { OptionGreekRow } from '../../market-hub/chain/chain.types';
@@ -88,6 +89,8 @@ export interface UserFeedSessionDeps {
     generateSession: Function;
     logout: Function;
     getCandleData: Function;
+    /** historical/v1/getOIData; optional so fakes without it still type-check. */
+    getOIData?: Function;
     marketData: Function;
     optionGreek: Function;
   };
@@ -117,6 +120,7 @@ export class UserFeedSession implements UserFeedSessionLike {
     generateSession: Function;
     logout: Function;
     getCandleData: Function;
+    getOIData?: Function;
     marketData: Function;
     optionGreek: Function;
   } | null = null;
@@ -374,6 +378,49 @@ export class UserFeedSession implements UserFeedSessionLike {
       throwForMissingData(response, `getCandleData token=${token} interval=${interval}`);
     }
     return mapCandleRows(response.data);
+  }
+
+  /**
+   * ONE getOIData call (POST historical/v1/getOIData) for one window: the contract's past open interest
+   * per bar. Same session-wide pacing as getCandleData (HISTORICAL_MIN_GAP_MS); no chunking or retry
+   * here, the caller sizes windows. Angel serves it for LIVE (unexpired) F&O contracts only.
+   *
+   * SDK-never-rejects: errors RESOLVE. A `data` array → rows ([] = no OI in the window). `data:null` →
+   * throttle / broker error via throwForMissingData, except `status:true` with no errorcode, which is a
+   * successful answer carrying no rows and is read as [].
+   */
+  async getOIWindow(token: string, exchange: string, interval: string, from: Date, to: Date): Promise<OiPoint[]> {
+    await this.ensureConnected();
+    if (!this.smartApi) {
+      throw new Error('UserFeedSession has no SmartAPI client after connect');
+    }
+    const getOIData = this.smartApi.getOIData;
+    if (typeof getOIData !== 'function') {
+      throw new Error('smartapi-javascript client has no getOIData');
+    }
+    const smartApi = this.smartApi;
+    const response: any = await this.paceHistorical(() =>
+      getOIData.call(smartApi, {
+        exchange,
+        symboltoken: token,
+        interval,
+        fromdate: formatAngelDateTime(from),
+        todate: formatAngelDateTime(to),
+      }),
+    );
+    if (response?.data == null) {
+      const code = response?.errorcode == null ? '' : String(response.errorcode).trim();
+      if (response?.status === true && !code) return [];
+      throwForMissingData(response, `getOIData token=${token} interval=${interval}`);
+    }
+    const points = mapOiRows(response.data);
+    if (points.length === 0 && Array.isArray(response.data) && response.data.length > 0) {
+      // Rows came back but none parsed: an unknown shape must be loud, not read as "no OI".
+      const first = response.data[0];
+      const shape = first && typeof first === 'object' ? Object.keys(first).join(',') : typeof first;
+      throw new Error(`getOIData token=${token}: ${response.data.length} rows in an unknown shape (${shape})`);
+    }
+    return points;
   }
 
   /**

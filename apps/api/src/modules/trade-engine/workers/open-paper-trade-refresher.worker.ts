@@ -4,6 +4,23 @@ import { TradeRepository } from '../repositories/trade.repository';
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
 
+/** IST calendar date (YYYY-MM-DD) of an instant. */
+function istYmd(d: Date): string {
+  return new Date(d.getTime() + 330 * 60_000).toISOString().slice(0, 10);
+}
+
+/**
+ * True once the contract's expiry DATE (in IST) is before today (in IST).
+ *
+ * Uses the IST date of the raw instrument timestamp, not `toISOString()`:
+ * the instrument master stores some expiries at IST midnight (= the previous
+ * day in UTC), which would otherwise make a contract look expired on its own
+ * expiry day.
+ */
+export function isContractExpired(expiry: Date | string, now: Date = new Date()): boolean {
+  return istYmd(new Date(expiry)) < istYmd(now);
+}
+
 const UNDERLYING_TOKEN: Record<string, string> = {
   NIFTY: '99926000',
   BANKNIFTY: '99926009',
@@ -37,6 +54,8 @@ const UNDERLYING_TOKEN: Record<string, string> = {
 @Injectable()
 export class OpenPaperTradeRefresherWorker {
   private readonly logger = new Logger(OpenPaperTradeRefresherWorker.name);
+  /** Trade ids already warned about as expired — warn once, not every 30 s. */
+  private readonly warnedExpired = new Set<string>();
 
   constructor(
     private readonly tradeRepository: TradeRepository,
@@ -71,6 +90,23 @@ export class OpenPaperTradeRefresherWorker {
       for (const trade of paperOptionTrades) {
         const inst = (trade as any).instrument;
         const underlying: string = inst.name;
+
+        // An expired contract has no chain and no live quote: asking for one
+        // every 30 s only produced "No MCX contracts for CRUDEOIL expiry
+        // 2026-10-15" and a stale persisted snapshot. It must NOT be rolled to
+        // the next expiry either — that is a different contract, so its LTP
+        // would be a wrong mark for this position. Skip it; settling an
+        // expired-but-open paper trade is a separate concern.
+        if (isContractExpired(inst.expiry)) {
+          if (!this.warnedExpired.has(trade.id)) {
+            this.warnedExpired.add(trade.id);
+            this.logger.warn(
+              `Paper trade ${trade.id} (${underlying} ${istYmd(new Date(inst.expiry))} ${inst.strike}${inst.optionType}) ` +
+                'is still OPEN past its contract expiry — skipping mark-to-market; it needs settling',
+            );
+          }
+          continue;
+        }
         const expiryIso: string = new Date(inst.expiry).toISOString().slice(0, 10);
         const strike: number = Number(inst.strike);
         const optionType: 'CE' | 'PE' = inst.optionType;

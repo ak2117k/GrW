@@ -87,7 +87,7 @@ export interface SetupAnalysis {
   setupType: 'BREAKOUT' | 'REVERSAL';
   grade: 'A' | 'B' | 'C';
   atr14: number;
-  volumeRatio: number;
+  volumeRatio: number | null;
   levels: LevelsSnapshot;
   reason: string;
   indicators?: IndicatorReadings;

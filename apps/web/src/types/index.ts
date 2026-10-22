@@ -204,7 +204,7 @@ export interface SetupContext {
     vwap: number; todayHigh: number; todayLow: number;
   };
   atr14: number;
-  volumeRatio: number;
+  volumeRatio: number | null;
   timeOfDayWindow: TimeOfDayWindow;
   expiryDayWarning?: boolean;
   // Adaptive-invalidation surface. Populated only when the locked setup

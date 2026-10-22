@@ -9,6 +9,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
+import { fixedOrDash } from '@/utils/fixedOrDash';
 import { Badge } from '@/components/common';
 import { formatINR } from '@td/shared';
 import type { CombinedTier, TradeSignal } from '@/types';
@@ -227,11 +228,11 @@ export default function SignalCard({
             <div className="grid grid-cols-3 gap-2 text-[11px] text-gray-300">
               <div>
                 <div className="text-[9px] uppercase text-gray-500">Level</div>
-                <div className="font-mono">{signal.setupContext.levelValue.toFixed(2)}</div>
+                <div className="font-mono">{fixedOrDash(signal.setupContext.levelValue)}</div>
               </div>
               <div>
                 <div className="text-[9px] uppercase text-gray-500">Vol vs MA</div>
-                <div className="font-mono">{signal.setupContext.volumeRatio.toFixed(2)}×</div>
+                <div className="font-mono">{signal.setupContext.volumeRatio == null ? '—' : `${fixedOrDash(signal.setupContext.volumeRatio)}×`}</div>
               </div>
               <div>
                 <div className="text-[9px] uppercase text-gray-500">Window</div>

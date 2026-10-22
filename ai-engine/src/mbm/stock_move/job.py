@@ -27,6 +27,7 @@ import pandas as pd
 from . import HORIZON_DAYS, THRESHOLD_ATR
 from . import calendar as C
 from . import nse as N
+from . import nse_eod as E
 from . import prices as P
 from .model import StockMoveModel
 from .panel import NoSession, build_panel
@@ -125,6 +126,7 @@ class StockMoveJob:
     mode: str = "observe"
     yahoo_get: Callable | None = None           # injected in tests (prices.Getter)
     nse_fetch: Callable | None = None           # injected in tests (nse.Fetcher)
+    eod_get: Callable | None = None             # injected in tests (nse_eod.EodGetter)
     sleep: Callable[[float], None] = _time.sleep
     model: StockMoveModel | None = None
     model_path: Path | None = None
@@ -211,6 +213,11 @@ class StockMoveJob:
         s.update(prices_ok=st["ok"], prices_failed=len(st["failed"]))
         if st["readjusted"]:
             s["readjusted"] = ",".join(st["readjusted"][:10])
+        g = E.fill_gaps(self.prices, [*P.INDEX_YAHOO, *names], now, get=self.eod_get or E.http_get, sleep=self.sleep)
+        if g["days"] or g["failed"]:
+            s["gap_filled"] = f"{','.join(g['days']) or '-'}({g['rows']})"
+            if g["failed"]:
+                s["gap_failed"] = ",".join(g["failed"])
         if model is not None:
             self._score(s, model, names, now, as_of, force)
         filled = outcome_rows(pending, self.prices.read, now)

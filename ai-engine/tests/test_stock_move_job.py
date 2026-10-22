@@ -264,7 +264,8 @@ def make_job(tmp_path, repo, now, until, mode="observe", nse=None):
     clock_now = {"t": now}
     job = StockMoveJob(repo=repo, models_dir=tmp_path / "models", cache_dir=tmp_path / "cache",
                        now=lambda: clock_now["t"], mode=mode, yahoo_get=y,
-                       nse_fetch=nse or (lambda n: ([], [])), sleep=lambda s: None)
+                       nse_fetch=nse or (lambda n: ([], [])), eod_get=lambda url: None,
+                       sleep=lambda s: None)
     return job, y, clock_now
 
 

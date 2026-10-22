@@ -1,7 +1,8 @@
 /**
  * The deterministic proposal engine (contract "Proposals"). The LLM diagnosis may SUGGEST a target
  * and value; this code decides: allow-listed target, value inside the hard bounds, ≥ 5 judged cases
- * of evidence over the rolling window, one PENDING per key. Anything else is rejected with a reason.
+ * of evidence over the rolling window (only from sessions after the key's last APPLIED decision, or
+ * its last REJECTED one in the same direction), one PENDING per key. Anything else is rejected with a reason.
  */
 import type { ProposalDraft, ProposalEvidence, ProposalStatus, SkillStats } from '../self-review.types';
 import {
@@ -52,7 +53,47 @@ export interface EngineInput {
   suggestions?: readonly Suggestion[];
   /** MBM rolling-20 skill of this run and the previous runs, newest first (the `mbm.packet` rule). */
   mbmSkill?: readonly RunSkill[];
+  /**
+   * Past owner decisions (APPLIED proposals / overrides, REJECTED proposals). Evidence from sessions on
+   * or before a decision is stale for that key: see {@link evidenceCutoff}.
+   */
+  decisions?: readonly PastDecision[];
 }
+
+/** An owner decision on a key; `session` is the IST date it was made, `direction` from {@link directionOf}. */
+export interface PastDecision {
+  key: string;
+  status: 'APPLIED' | 'REJECTED';
+  session: string;
+  direction?: string | null;
+}
+
+/** 'up' / 'down' for a numeric change, the target value for a boolean; null when nothing moves. */
+export function directionOf(from: unknown, to: unknown): string | null {
+  if (typeof from === 'number' && typeof to === 'number') return to > from ? 'up' : to < from ? 'down' : null;
+  if (typeof to === 'boolean') return from === to ? null : String(to);
+  return null;
+}
+
+/**
+ * The newest session whose evidence is stale for `key` (rows must be strictly AFTER it), or null.
+ * An APPLIED change resets the key's evidence whatever the direction: the old rows were judged under
+ * the old value (and a factor's hit rate is judged on its raw vote, so a weight change cannot move it),
+ * so without this the same rule fires again every night on the same cases. A REJECTED proposal cools
+ * down only the same direction: the owner said no to that move on that evidence.
+ */
+export function evidenceCutoff(key: string, decisions: readonly PastDecision[], direction: string | null): string | null {
+  let cut: string | null = null;
+  for (const d of decisions) {
+    if (d.key !== key) continue;
+    if (d.status === 'REJECTED' && (direction === null || d.direction !== direction)) continue;
+    if (cut === null || d.session > cut) cut = d.session;
+  }
+  return cut;
+}
+
+const after = <T extends { sessionDate: string }>(rows: readonly T[], cut: string | null): readonly T[] =>
+  cut === null ? rows : rows.filter((r) => r.sessionDate > cut);
 
 export interface EngineOutput {
   drafts: ProposalDraft[];
@@ -213,12 +254,36 @@ export function proposeTuning(input: EngineInput): EngineOutput {
     });
   };
 
+  const decisions = input.decisions ?? [];
+  /**
+   * Run `rule` on the evidence after the key's cutoff. The cutoff depends on the direction of the
+   * result (a REJECTED cool-down is per direction), so re-run on the stricter window until it settles.
+   */
+  const fresh = <R extends { value: TunableValue }>(target: string, rule: (cut: string | null) => R | null): R | null => {
+    const cur = input.current(target);
+    let cut = evidenceCutoff(target, decisions, null);
+    for (let i = 0; i < 3; i++) {
+      const r = rule(cut);
+      if (!r) return null;
+      const next = evidenceCutoff(target, decisions, directionOf(cur, r.value));
+      if (next === cut) return r;
+      cut = next;
+    }
+    return null;
+  };
+
   for (const target of RULE_TARGETS) {
-    const ev = evidenceOf(evidenceRowsFor(target, input.rows));
-    const r = target === STOCK_MOVE_POINTS_TARGET ? stockMoveRule(input.current(target), input.rows) : ruleValue(target, input.current(target), ev);
+    let ev = evidenceOf([]);
+    const r = fresh(target, (cut) => {
+      const rows = after(input.rows, cut);
+      ev = evidenceOf(evidenceRowsFor(target, rows));
+      return target === STOCK_MOVE_POINTS_TARGET ? stockMoveRule(input.current(target), rows) : ruleValue(target, input.current(target), ev);
+    });
     if (r) add(target, r.value, r.why, ev);
   }
-  const mbm = mbmPacketRule(input.current(MBM_PACKET_TARGET), input.mbmSkill ?? []);
+  const mbm = fresh(MBM_PACKET_TARGET, (cut) =>
+    mbmPacketRule(input.current(MBM_PACKET_TARGET), (input.mbmSkill ?? []).filter((x) => cut === null || x.session > cut)),
+  );
   if (mbm) add(MBM_PACKET_TARGET, mbm.value, mbm.why, mbm.ev);
 
   for (const s of input.suggestions ?? []) {
@@ -244,9 +309,10 @@ export function proposeTuning(input: EngineInput): EngineOutput {
       rejected.push({ target, reason: 'mbm.packet is rule-only (not a diagnosis suggestion)' });
       continue;
     }
-    const ev = evidenceOf(evidenceRowsFor(target, input.rows));
+    const cut = evidenceCutoff(target, decisions, directionOf(input.current(target), v.value));
+    const ev = evidenceOf(evidenceRowsFor(target, after(input.rows, cut)));
     if (ev.n < MIN_EVIDENCE) {
-      rejected.push({ target, reason: `only ${ev.n} judged cases (need ${MIN_EVIDENCE})` });
+      rejected.push({ target, reason: `only ${ev.n} judged cases${cut ? ` after the ${cut} decision` : ''} (need ${MIN_EVIDENCE})` });
       continue;
     }
     add(target, v.value, `diagnosis: ${(s.cause ?? 'suggested').slice(0, 200)} (hit ${pct(ev.hitRate)} over ${ev.n} cases)`, ev);

@@ -3,7 +3,7 @@ import type { SessionClock } from '../../market-hub/session-clock';
 import { istMidnightOf, istYmd, lastSessionDates } from '../../night-report/domain/night-report.logic';
 import { shapeOf } from '../../overnight-scorecard/domain/positions';
 import { outcomeSession } from '../../overnight-scorecard/domain/windows';
-import { isExpired, proposeTuning, type EvidenceRow, type RunSkill, type Suggestion } from '../domain/proposals';
+import { directionOf, isExpired, proposeTuning, type EvidenceRow, type PastDecision, type RunSkill, type Suggestion } from '../domain/proposals';
 import {
   latestPerWindowSymbol,
   openClose,
@@ -358,6 +358,23 @@ export class SelfReviewRunService {
     return out;
   }
 
+  /**
+   * The owner's past decisions per key: APPLIED / REJECTED proposals (IST date of the decision) and the
+   * overrides in force (their applied_at, which also covers an override written outside a proposal).
+   * A read failure throws: proposing on stale evidence is exactly what this guards against.
+   */
+  private async pastDecisions(): Promise<PastDecision[]> {
+    const [decided, overrides] = await Promise.all([this.repo.decidedProposals(500), this.repo.overrides()]);
+    const out: PastDecision[] = decided.map((p) => ({
+      key: p.key,
+      status: p.status === 'APPLIED' ? 'APPLIED' : 'REJECTED',
+      session: istYmd(p.decidedAt ?? p.createdAt),
+      direction: directionOf(p.currentValue, p.proposedValue),
+    }));
+    for (const o of overrides) out.push({ key: o.target, status: 'APPLIED', session: istYmd(o.appliedAt) });
+    return out;
+  }
+
   private async propose(
     runId: string,
     history: EvidenceRow[],
@@ -375,7 +392,8 @@ export class SelfReviewRunService {
       }
       const staleIds = new Set(stale.map((p) => p.id));
       const pendingKeys = new Set(pending.filter((p) => !staleIds.has(p.id)).map((p) => p.key));
-      const { drafts, rejected } = proposeTuning({ rows: history, current: (t) => this.currentValue(t), pendingKeys, suggestions, mbmSkill });
+      const decisions = await this.pastDecisions();
+      const { drafts, rejected } = proposeTuning({ rows: history, current: (t) => this.currentValue(t), pendingKeys, suggestions, mbmSkill, decisions });
       for (const r of rejected) this.logger.log(`[self-review] proposal for ${r.target} not raised: ${r.reason}`);
       for (const d of drafts) {
         await this.repo.createProposal(d, runId);

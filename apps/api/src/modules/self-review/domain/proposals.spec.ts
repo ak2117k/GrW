@@ -193,3 +193,48 @@ describe('mbm.packet rule (rolling-20 skill verdict, 2 consecutive runs)', () =>
     expect(out.rejected).toEqual([{ target, reason: 'mbm.packet is rule-only (not a diagnosis suggestion)' }]);
   });
 });
+
+describe('fresh evidence after an owner decision', () => {
+  const NEWS = 'scorecard.factor.news.weight';
+  /** `right` / `wrong` news-factor votes on one session. */
+  const on = (sessionDate: string, right: number, wrong: number): EvidenceRow[] =>
+    factorRows('news', right, wrong).map((r) => ({ ...r, sessionDate, refId: `${sessionDate}-${r.refId}` }));
+  // Prod 2026-10-22: 16 judged cases, 44 % hit, almost all before the 10-22 APPLIED 1 → 0.5.
+  const before = [...on('2026-10-15', 3, 4), ...on('2026-10-16', 2, 3), ...on('2026-10-21', 2, 2)];
+  const applied = [{ key: NEWS, status: 'APPLIED' as const, session: '2026-10-22', direction: 'down' }];
+  const at05 = defaults({ [NEWS]: 0.5 });
+
+  it('no re-proposal on evidence from before (or on the day of) an APPLIED change', () => {
+    // Without the decision the rule would halve again.
+    expect(proposeTuning({ rows: before, current: at05, pendingKeys: new Set() }).drafts.find((d) => d.target === NEWS)).toMatchObject({ proposedValue: 0.25 });
+    const out = proposeTuning({ rows: [...before, ...on('2026-10-22', 0, 3)], current: at05, pendingKeys: new Set(), decisions: applied });
+    expect(out.drafts.find((d) => d.target === NEWS)).toBeUndefined();
+  });
+
+  it('re-proposes once MIN_EVIDENCE judged cases accrue from later sessions', () => {
+    const thin = proposeTuning({ rows: [...before, ...on('2026-10-23', 1, 3)], current: at05, pendingKeys: new Set(), decisions: applied });
+    expect(thin.drafts.find((d) => d.target === NEWS)).toBeUndefined();
+    const enough = proposeTuning({ rows: [...before, ...on('2026-10-23', 1, 3), ...on('2026-10-26', 0, 2)], current: at05, pendingKeys: new Set(), decisions: applied });
+    const d = enough.drafts.find((x) => x.target === NEWS);
+    expect(d).toMatchObject({ currentValue: 0.5, proposedValue: 0.25 });
+    expect(d!.evidence).toMatchObject({ n: 6, right: 1, wrong: 5 });
+  });
+
+  it('a REJECTED proposal cools down the same direction only, until fresh evidence accrues', () => {
+    const rejected = [{ key: NEWS, status: 'REJECTED' as const, session: '2026-10-21', direction: 'down' }];
+    const stale = proposeTuning({ rows: before, current: defaults(), pendingKeys: new Set(), decisions: rejected });
+    expect(stale.drafts.find((d) => d.target === NEWS)).toBeUndefined();
+    const fresh = proposeTuning({ rows: [...before, ...on('2026-10-22', 1, 2), ...on('2026-10-23', 0, 3)], current: defaults(), pendingKeys: new Set(), decisions: rejected });
+    expect(fresh.drafts.find((d) => d.target === NEWS)).toMatchObject({ currentValue: 1, proposedValue: 0.5 });
+    // A rejected "up" does not hold back a "down".
+    const other = proposeTuning({ rows: before, current: defaults(), pendingKeys: new Set(), decisions: [{ ...rejected[0], direction: 'up' }] });
+    expect(other.drafts.find((d) => d.target === NEWS)).toMatchObject({ proposedValue: 0.5 });
+  });
+
+  it('a diagnosis suggestion needs the same fresh evidence', () => {
+    const s = [{ proposalTarget: NEWS, proposedValue: 0.25, cause: 'news misleads' }];
+    const out = proposeTuning({ rows: before, current: at05, pendingKeys: new Set(), decisions: applied, suggestions: s });
+    expect(out.drafts).toEqual([]);
+    expect(out.rejected.find((r) => r.target === NEWS)?.reason).toMatch(/0 judged cases after the 2026-10-22 decision/);
+  });
+});

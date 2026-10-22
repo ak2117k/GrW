@@ -115,6 +115,15 @@ export class SelfReviewRepository {
     });
   }
 
+  /** APPLIED / REJECTED proposals, newest decision first (the proposal engine's evidence cut-offs). */
+  decidedProposals(limit = 500) {
+    return this.prisma.tuningProposal.findMany({
+      where: { status: { in: ['APPLIED', 'REJECTED'] } },
+      orderBy: { decidedAt: 'desc' },
+      take: limit,
+    });
+  }
+
   countPending() {
     return this.prisma.tuningProposal.count({ where: { status: 'PENDING' } });
   }

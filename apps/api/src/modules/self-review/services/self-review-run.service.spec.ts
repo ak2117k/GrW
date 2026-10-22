@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[] } = {}) {
+function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[] } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -27,6 +27,8 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     previousDoneRun: jest.fn(async () => o.prevRun ?? null),
     setDiagnosisIfEmpty: jest.fn(async () => undefined),
     proposals: jest.fn(async () => o.pending ?? []),
+    decidedProposals: jest.fn(async () => o.decided ?? []),
+    overrides: jest.fn(async () => []),
     expire: jest.fn(async () => ({ count: 0 })),
     createProposal: jest.fn(async () => ({})),
   };
@@ -171,6 +173,14 @@ describe('SelfReviewRunService', () => {
       expect(d[0].rationale).toContain('2026-10-21: EDGE AUC 1.00');
       expect(d[0].rationale).toContain('2026-10-19: EDGE');
       expect(svc.currentValue('mbm.packet')).toBe(false);
+    });
+
+    it('a REJECTED false → true decided after both runs’ sessions → no re-proposal (cool-down)', async () => {
+      const decided = [{ id: 'p1', key: 'mbm.packet', status: 'REJECTED', currentValue: false, proposedValue: true, createdAt: new Date('2026-10-20T13:00:00Z'), decidedAt: new Date('2026-10-21T05:00:00Z') }];
+      const { svc, repo } = make({ mbm, prevRun: prev('EDGE'), decided });
+      await svc.run(NOW);
+      expect(repo.decidedProposals).toHaveBeenCalled();
+      expect(mbmDrafts(repo)).toEqual([]);
     });
 
     it('previous run NOT_TESTABLE, missing, or unreadable → no proposal', async () => {

@@ -81,7 +81,7 @@ describe('RecordedTransport', () => {
       userId: 'u1',
       positionId: 'trk1',
       stopReason: 'end_turn',
-      inputTokens: 1200,
+      inputTokens: 2150, // 1200 uncached + 50 cache write + 900 cache read
       outputTokens: 300,
       costInr: 0, // CLI: subscription, never metered
       latencyMs: 250,
@@ -99,13 +99,15 @@ describe('RecordedTransport', () => {
       content: [{ type: 'text', text: '{"verdict":"HOLD"}' }],
       stop_reason: 'end_turn',
       truncated: false,
-      usage: { cache_creation_input_tokens: 50, cache_read_input_tokens: 900 },
+      usage: { input_tokens: 1200, cache_creation_input_tokens: 50, cache_read_input_tokens: 900, total_input_tokens: 2150 },
     });
   });
 
   it('records NULL tokens when the provider did not report them (never invented)', async () => {
     const { transport, insert } = make({
-      send: jest.fn().mockResolvedValue(result({ inputTokens: null, outputTokens: null })),
+      send: jest.fn().mockResolvedValue(
+        result({ inputTokens: null, outputTokens: null, cacheCreationInputTokens: null, cacheReadInputTokens: null }),
+      ),
     });
     await transport.messages.create(REQ);
     await flush();
@@ -126,6 +128,42 @@ describe('RecordedTransport', () => {
     // (1200*1000 + 300*5000 + 50*1250 + 900*100) / 1e6
     expect(insert.mock.calls[0][0].costInr).toBeCloseTo(2.8525, 6);
     expect(insert.mock.calls[0][0].provider).toBe('anthropic-api');
+    expect(insert.mock.calls[0][0].inputTokens).toBe(2150);
+    expect((insert.mock.calls[0][0].response as any).usage.notional_cost_inr).toBeNull();
+  });
+
+  it('CLI-shaped usage (input ~2, prompt in the cache) records the WHOLE prompt, cost 0, notional cost in the response', async () => {
+    const prices = new Map([
+      ['claude-opus-5', { inputPerMTokInr: 1000, outputPerMTokInr: 5000, cacheWritePerMTokInr: 1250, cacheReadPerMTokInr: 100 }],
+    ]);
+    const { transport, insert } = make({
+      prices,
+      send: jest.fn().mockResolvedValue(
+        result({ inputTokens: 2, outputTokens: 400, cacheCreationInputTokens: 3000, cacheReadInputTokens: 9000 }),
+      ),
+    });
+    await transport.messages.create(REQ);
+    await flush();
+    const row: AiCallRow = insert.mock.calls[0][0];
+    expect(row.inputTokens).toBe(12002);
+    expect(row.costInr).toBe(0); // unbilled: never counted against the API budget
+    // (2*1000 + 400*5000 + 3000*1250 + 9000*100) / 1e6
+    expect((row.response as any).usage).toMatchObject({
+      input_tokens: 2,
+      cache_creation_input_tokens: 3000,
+      cache_read_input_tokens: 9000,
+      total_input_tokens: 12002,
+      notional_cost_inr: 6.652,
+    });
+  });
+
+  it('a partial report sums only what was reported (missing cache parts are not invented)', async () => {
+    const { transport, insert } = make({
+      send: jest.fn().mockResolvedValue(result({ inputTokens: 5, cacheCreationInputTokens: null, cacheReadInputTokens: null })),
+    });
+    await transport.messages.create(REQ);
+    await flush();
+    expect(insert.mock.calls[0][0].inputTokens).toBe(5);
   });
 
   it('records a failed call and rethrows the ORIGINAL error instance', async () => {
@@ -242,5 +280,40 @@ describe('aiCallsRecordingOn / directRecordedTransport', () => {
     expect(directRecordedTransport({ judge: 'api', cli, apiKey: 'k', record: false, audit, jobOf: () => 'x' })).toBeInstanceOf(
       Anthropic,
     );
+  });
+});
+
+/**
+ * EVERY SENTINEL LLM PATH IS RECORDED. The live judge, the overnight review and
+ * the thesis inference all reach the model through the one `ANTHROPIC_CLIENT`
+ * binding (trade-sentinel.module.ts → `directRecordedTransport`), labelled by
+ * `jobFor` from the identity of their output schema. One `ai_calls` row per call,
+ * on the CLI path, with the whole prompt counted.
+ */
+describe('directRecordedTransport over the CLI: one row per sentinel job', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { jobFor } = require('../sentinel/sentinel-gateway.transport');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { VERDICT_SCHEMA, OVERNIGHT_VERDICT_SCHEMA } = require('../../trade-sentinel/services/sentinel-agent.service');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { THESIS_SCHEMA } = require('../../trade-sentinel/services/thesis.service');
+
+  it.each([
+    ['sentinel.judge', () => VERDICT_SCHEMA],
+    ['sentinel.overnight', () => OVERNIGHT_VERDICT_SCHEMA],
+    ['sentinel.thesis', () => THESIS_SCHEMA],
+  ])('%s', async (job, schema) => {
+    const createWithMeta = jest.fn().mockResolvedValue(
+      result({ inputTokens: 2, cacheCreationInputTokens: 0, cacheReadInputTokens: 7000 }),
+    );
+    const cli = { createWithMeta } as unknown as ClaudeCliTransport;
+    const insert = jest.fn().mockResolvedValue(undefined);
+    const t = directRecordedTransport({ judge: 'cli', cli, apiKey: undefined, record: true, audit: { insert }, jobOf: jobFor });
+    const req = { ...REQ, output_config: { effort: 'high' as const, format: { type: 'json_schema' as const, schema: schema() } } };
+    await withAiCallContext({ userId: 'u1', positionId: 'trk1' }, () => t.messages.create(req));
+    await flush();
+    expect(createWithMeta).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(insert.mock.calls[0][0]).toMatchObject({ job, provider: 'claude-cli', inputTokens: 7002, positionId: 'trk1' });
   });
 });

@@ -38,3 +38,20 @@ export interface ProviderAdapter {
   readonly name: ProviderName;
   send(request: TransportRequest): Promise<ProviderResult>;
 }
+
+/**
+ * The WHOLE prompt the call consumed: uncached input + cache writes + cache reads.
+ *
+ * This is what the `ai_calls.inputTokens` column records. `inputTokens` alone is
+ * only the uncached remainder — with the sentinel's cached system prompt it is a
+ * handful of tokens (the CLI reported ~2 per call on a ~10 k-char packet), which
+ * made the ledger read as if no prompt had been sent at all. The three parts stay
+ * separately in `response.usage`; cost is still priced per part (`costInr`).
+ *
+ * `null` only when the provider reported NONE of the three — never invented.
+ */
+export function totalInputTokens(meta: CallMeta): number | null {
+  const parts = [meta.inputTokens, meta.cacheCreationInputTokens, meta.cacheReadInputTokens];
+  if (parts.every((p) => p === null || p === undefined)) return null;
+  return parts.reduce<number>((sum, p) => sum + (p ?? 0), 0);
+}

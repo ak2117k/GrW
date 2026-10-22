@@ -139,6 +139,13 @@ describe('AiGatewayService', () => {
     expect(row.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
+  it('records the WHOLE prompt as inputTokens: uncached + cache write + cache read', async () => {
+    const { gateway, rows } = build({ sentinelJudge: 'cli', cli: jest.fn().mockResolvedValue(okResult([2, 300], false, [40, 9000])) });
+    await gateway.call('sentinel.judge', request());
+    await flush();
+    expect(rows()[0]).toEqual(expect.objectContaining({ inputTokens: 9042, outputTokens: 300 }));
+  });
+
   it('CLI usage missing → tokens null, cost 0', async () => {
     const { gateway, rows } = build({ sentinelJudge: 'cli', cli: jest.fn().mockResolvedValue(okResult([null, null])) });
     await gateway.call('sentinel.judge', request());

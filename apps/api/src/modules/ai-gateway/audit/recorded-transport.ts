@@ -4,7 +4,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { costInr, loadPrices, type ModelPrice } from '../budget/model-prices';
 import { AnthropicApiProvider } from '../providers/anthropic-api.provider';
 import { ClaudeCliProvider, type ClaudeCliTransport } from '../providers/claude-cli.provider';
-import type { ProviderAdapter, ProviderResult } from '../providers/provider.types';
+import { totalInputTokens, type ProviderAdapter, type ProviderResult } from '../providers/provider.types';
 import { readAiConfig } from '../routes/route-config';
 import type { MessagesTransport, TransportMessage, TransportRequest } from '../transport.types';
 import type { AiCallRow } from './ai-call.repository';
@@ -82,7 +82,11 @@ export function requestRecord(
 }
 
 /** The stored response: the reply text (capped), its stop reason and the reported usage. */
-export function responseRecord(result: ProviderResult, cap = AI_CALL_TEXT_CAP_BYTES): Record<string, unknown> {
+export function responseRecord(
+  result: ProviderResult,
+  cap = AI_CALL_TEXT_CAP_BYTES,
+  notionalCostInr: number | null = null,
+): Record<string, unknown> {
   const text = (result.message.content ?? [])
     .filter((b) => b.type === 'text')
     .map((b) => b.text ?? '')
@@ -98,6 +102,12 @@ export function responseRecord(result: ProviderResult, cap = AI_CALL_TEXT_CAP_BY
       output_tokens: result.meta.outputTokens,
       cache_creation_input_tokens: result.meta.cacheCreationInputTokens,
       cache_read_input_tokens: result.meta.cacheReadInputTokens,
+      // The sum the `inputTokens` column records (see totalInputTokens).
+      total_input_tokens: totalInputTokens(result.meta),
+      // What the call WOULD have cost on the API at the configured price, for
+      // unbilled (CLI subscription) calls. Never in the `costInr` column: that
+      // column feeds the API budget meter, which must count real spend only.
+      notional_cost_inr: notionalCostInr,
     },
   };
 }
@@ -174,17 +184,18 @@ export class RecordedTransport implements MessagesTransport {
       const request = requestRecord(req, AI_CALL_TEXT_CAP_BYTES, !this.systemsStored.has(sysHash));
       const storedWhole = request.systemStored === 'full' && !(request.truncated as { system: boolean }).system;
       let cost = 0;
-      if (ok?.meta.billed) {
-        const price = this.deps.prices?.get(req.model);
-        if (price) {
-          cost = costInr(
-            price,
-            ok.meta.inputTokens ?? 0,
-            ok.meta.outputTokens ?? 0,
-            ok.meta.cacheCreationInputTokens ?? 0,
-            ok.meta.cacheReadInputTokens ?? 0,
-          );
-        }
+      let notional: number | null = null;
+      const price = ok ? this.deps.prices?.get(req.model) : undefined;
+      if (ok && price) {
+        const priced = costInr(
+          price,
+          ok.meta.inputTokens ?? 0,
+          ok.meta.outputTokens ?? 0,
+          ok.meta.cacheCreationInputTokens ?? 0,
+          ok.meta.cacheReadInputTokens ?? 0,
+        );
+        if (ok.meta.billed) cost = priced;
+        else notional = Math.round(priced * 10_000) / 10_000;
       }
       const row: AiCallRow = {
         job: this.deps.jobOf(req),
@@ -198,11 +209,12 @@ export class RecordedTransport implements MessagesTransport {
         decisionRecordId: ctx.decisionRecordId ?? null,
         requestHash: createHash('sha256').update(JSON.stringify(req)).digest('hex'),
         request,
-        response: ok ? responseRecord(ok) : null,
+        response: ok ? responseRecord(ok, AI_CALL_TEXT_CAP_BYTES, notional) : null,
         errorClass: err === null ? null : errorClass(err),
         errorMessage: err === null ? null : errorMessage(err),
         stopReason: ok ? (ok.message.stop_reason ?? null) : null,
-        inputTokens: ok ? ok.meta.inputTokens : null,
+        // Whole prompt (uncached + cache write + cache read); the parts are in response.usage.
+        inputTokens: ok ? totalInputTokens(ok.meta) : null,
         outputTokens: ok ? ok.meta.outputTokens : null,
         costInr: cost,
         latencyMs: Math.round(latencyMs),

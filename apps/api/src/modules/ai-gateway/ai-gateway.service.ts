@@ -6,7 +6,7 @@ import { costInr, worstCaseInr, type ModelPrice } from './budget/model-prices';
 import { AiBudgetExceeded, type BudgetMeter, type BudgetReservation } from './budget/budget-meter';
 import { AiQueueTimeout, type PriorityScheduler } from './scheduler/priority-scheduler';
 import type { AiCallRow } from './audit/ai-call.repository';
-import type { ProviderAdapter, ProviderName, ProviderResult } from './providers/provider.types';
+import { totalInputTokens, type ProviderAdapter, type ProviderName, type ProviderResult } from './providers/provider.types';
 import type { TransportMessage, TransportRequest } from './transport.types';
 
 export const AI_GATEWAY = 'AI_GATEWAY';
@@ -203,7 +203,8 @@ export class AiGatewayService implements AiGateway {
         errorClass: err === null ? null : errorClass(err),
         errorMessage: err === null ? null : errorMessage(err),
         stopReason: ok ? ok.message.stop_reason : null,
-        inputTokens: ok ? ok.meta.inputTokens : null,
+        // Whole prompt (uncached + cache write + cache read) — see totalInputTokens.
+        inputTokens: ok ? totalInputTokens(ok.meta) : null,
         outputTokens: ok ? ok.meta.outputTokens : null,
         costInr: ok && 'cost' in outcome ? outcome.cost : 0,
         latencyMs: Math.round(outcome.latencyMs),

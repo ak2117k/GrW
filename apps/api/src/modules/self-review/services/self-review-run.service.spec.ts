@@ -54,6 +54,7 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     articleSentiments: jest.fn(async () => new Map()),
     dailyRangeBp: jest.fn(async () => null),
     mbmPredictions: jest.fn(async () => []),
+    tradeSetups: jest.fn(async () => []),
     stockMoves: jest.fn(async (asOf: string) =>
       asOf === '2026-10-13'
         ? [

@@ -9,8 +9,10 @@
 
 import type { NewsIdea, Scorecard } from '../../overnight-scorecard/scorecard.types';
 import type { BigMoveWatchView } from '../../stock-move/stock-move.service';
+import type { TradeSetupsView } from '../../trade-setup/services/trade-setup.service';
 
 export type { BigMoveWatchRow, BigMoveWatchView } from '../../stock-move/stock-move.service';
+export type { TradeSetupView, TradeSetupsView } from '../../trade-setup/services/trade-setup.service';
 
 export type Section<T> = T | { error: string };
 
@@ -236,4 +238,10 @@ export interface NightReport {
    * when the stock-move module is not loaded. A row with `reading: null` has no stock-move score yet.
    */
   bigMoveWatch: Section<BigMoveWatchView> | null;
+  /**
+   * Next-morning trade setups (advisory only — the owner places any order): news idea + big-move model
+   * agree → a futures or intraday-cash plan for the next NSE session. `{ error }` on failure, null when
+   * the trade-setup module is not loaded.
+   */
+  tradeSetups: Section<TradeSetupsView> | null;
 }

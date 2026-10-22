@@ -15,6 +15,7 @@ import {
   scoreScorecardFactors,
   scoreScorecardTotal,
   scoreStockMove,
+  scoreTradeSetup,
   type ScorecardRow,
 } from '../domain/scorers';
 import { buildSummary, topMisses } from '../domain/summary';
@@ -192,6 +193,8 @@ export class SelfReviewRunService {
       )),
     );
     out.push(...(await this.soft('STOCK_MOVE', errors, () => this.stockMoves(s, b.closeAt))));
+    // Outcomes are filled by the trade-setup module's 16:15 IST job, before this run.
+    out.push(...(await this.soft('TRADE_SETUP', errors, async () => (await this.sources.tradeSetups(s)).map(scoreTradeSetup))));
     return out;
   }
 

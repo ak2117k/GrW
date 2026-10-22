@@ -72,6 +72,7 @@ import {
 } from './modelScorecardFormat';
 import { SelfReviewPanel } from './SelfReviewSection';
 import { BigMoveWatchPanel } from './BigMoveWatchSection';
+import { TradeSetupsPanel } from './TradeSetupsSection';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -899,6 +900,19 @@ export function NightReportView({
             <Empty text="The stock big-move model is not in this API build yet." />
           ) : (
             <Guard value={report.bigMoveWatch}>{(v) => <BigMoveWatchPanel view={v} />}</Guard>
+          )}
+        </SectionShell>
+      )}
+
+      {report.tradeSetups !== undefined && (
+        <SectionShell
+          title="Trade setups"
+          count={report.tradeSetups && !isSectionError(report.tradeSetups) ? report.tradeSetups.setups.length : undefined}
+        >
+          {report.tradeSetups === null ? (
+            <Empty text="Trade setups are not in this API build yet." />
+          ) : (
+            <Guard value={report.tradeSetups}>{(v) => <TradeSetupsPanel view={v} />}</Guard>
           )}
         </SectionShell>
       )}

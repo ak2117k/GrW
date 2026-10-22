@@ -243,6 +243,11 @@ export interface NightReport {
    * before it shipped; null when the API runs without the stock-move module.
    */
   bigMoveWatch?: Section<BigMoveWatchView> | null;
+  /**
+   * Next-morning trade setups (news idea + big-move model agree), advisory only. Absent on an API
+   * from before it shipped; null when the API runs without the trade-setup module.
+   */
+  tradeSetups?: Section<TradeSetupsView> | null;
   jobs: Section<JobItem[]>;
 }
 
@@ -273,4 +278,66 @@ export interface BigMoveWatchView {
   modelId: string | null;
   scored: number;
   rows: BigMoveWatchRow[];
+}
+
+/** One context line of a trade setup; `available: false` lines say why ("unavailable …"). */
+export interface TradeSetupContextLine {
+  label: string;
+  text: string;
+  available: boolean;
+}
+
+/** A next-morning trade setup (advisory only — the owner places any order). Levels are on the underlying's chart. */
+export interface TradeSetupView {
+  id: string;
+  sessionDate: string;
+  symbol: string;
+  exchange: string;
+  instrument: string;
+  instrumentKind: 'FUTURES' | 'CASH_MIS' | string;
+  expiry: string | null;
+  lotSize: number | null;
+  side: 'LONG' | 'SHORT' | string;
+  entryRule: string;
+  entryRef: number;
+  stop: number;
+  stopDistance: number;
+  target1: number;
+  target2: number;
+  atr: number;
+  qty: number;
+  lots: number | null;
+  riskRs: number;
+  riskPct: number;
+  rewardT1Rs: number;
+  rewardT2Rs: number;
+  marginUsed: number;
+  marginAvailable: number | null;
+  marginAsOf: string | null;
+  marginSource: 'LIVE' | 'LAST_KNOWN' | 'PER_LAKH' | string;
+  exceedsRisk: boolean;
+  inputs: {
+    trigger: string;
+    direction: string;
+    priceAsOf: string | null;
+    sizingBasis: string;
+    sizingNotes: string[];
+    stopRule: string;
+    targetsRule: string;
+    timeExit: string | null;
+    levelsNote: string;
+    context: TradeSetupContextLine[];
+    skipIf: string[];
+    headlines: string[];
+    advisory: string;
+  };
+  outcome: { status: string; r: number | null; hitT1: boolean | null } | null;
+  updatedAt: string;
+}
+
+export interface TradeSetupsView {
+  /** IST date of the next NSE session the setups are for. */
+  sessionDate: string | null;
+  setups: TradeSetupView[];
+  advisory: string;
 }

@@ -444,3 +444,54 @@ export function scoreStockMove(r: StockMoveVerifyRow): VerificationDraft {
     },
   };
 }
+
+// ─── Next-morning trade setups (advisory) ────────────────────────────────────
+
+export interface TradeSetupVerifyRow {
+  id: string;
+  sessionDate: string;
+  symbol: string;
+  side: string;
+  instrument: string;
+  entryRef: number;
+  stopDistance: number;
+  outcomeStatus: string;
+  outcomeR: number | null;
+  outcomeHitT1: boolean | null;
+  outcomeEntryPrice: number | null;
+  outcomeExitPrice: number | null;
+}
+
+/**
+ * Trade setup (stream T): did the entry trigger next session, and did it reach target 1 (1.5R)
+ * before the stop? correct = hit T1 first; stop or the 15:10 time exit without T1 = wrong; not
+ * triggered / no bars = null. `score` = the R multiple realised by the plan.
+ */
+export function scoreTradeSetup(r: TradeSetupVerifyRow): VerificationDraft {
+  const judged = r.outcomeStatus === 'TARGET1' || r.outcomeStatus === 'STOP' || r.outcomeStatus === 'TIME_EXIT';
+  const actual =
+    r.outcomeStatus === 'NOT_TRIGGERED'
+      ? 'entry never triggered'
+      : r.outcomeStatus === 'NO_DATA'
+        ? 'no intraday bars to judge'
+        : `${r.outcomeStatus === 'TARGET1' ? 'hit T1' : r.outcomeStatus === 'STOP' ? 'stopped out' : 'time exit 15:10'}${r.outcomeR !== null ? ` (${r.outcomeR >= 0 ? '+' : ''}${r2(r.outcomeR)}R)` : ''}`;
+  return {
+    sessionDate: r.sessionDate,
+    kind: 'TRADE_SETUP',
+    refId: r.id,
+    subject: r.side,
+    symbol: r.symbol,
+    predicted: `${r.side} ${r.instrument}: opening-range break, T1 1.5R before stop`,
+    actual,
+    correct: judged ? r.outcomeStatus === 'TARGET1' : null,
+    score: judged && r.outcomeR !== null ? r2(r.outcomeR) : null,
+    details: {
+      status: r.outcomeStatus,
+      entryRef: r.entryRef,
+      stopDistance: r.stopDistance,
+      entryPrice: r.outcomeEntryPrice,
+      exitPrice: r.outcomeExitPrice,
+      hitT1: r.outcomeHitT1,
+    },
+  };
+}

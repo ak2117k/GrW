@@ -39,6 +39,7 @@ import type { Scorecard } from '../../overnight-scorecard/scorecard.types';
 import { NIGHT_REPORT_STORE, type NightReportStore } from '../repositories/night-report.repository';
 import { SELF_REVIEW_REPORT, type SelfReviewReportSource } from '../../self-review/self-review.ports';
 import { STOCK_MOVE_WATCH, type BigMoveWatchSource } from '../../stock-move/stock-move.service';
+import { TRADE_SETUPS_REPORT, type TradeSetupsReportSource } from '../../trade-setup/services/trade-setup.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
@@ -100,6 +101,8 @@ export class NightReportService {
     @Optional() @Inject(SELF_REVIEW_REPORT) private readonly selfReview?: SelfReviewReportSource,
     /** The @Global stock-move module's big-move watch; absent ⇒ the section is null. */
     @Optional() @Inject(STOCK_MOVE_WATCH) private readonly stockMove?: BigMoveWatchSource,
+    /** Next-morning trade setups (advisory); absent ⇒ the section is null. */
+    @Optional() @Inject(TRADE_SETUPS_REPORT) private readonly tradeSetupSource?: TradeSetupsReportSource,
   ) {}
 
   async build(userId: string, now: Date = new Date()): Promise<NightReport> {
@@ -131,6 +134,9 @@ export class NightReportService {
         )
       : null;
 
+    const setupSource = this.tradeSetupSource;
+    const tradeSetups = setupSource ? await this.safe('tradeSetups', () => setupSource.forNextSession(userId, now)) : null;
+
     return {
       generatedAt: now.toISOString(),
       window,
@@ -145,6 +151,7 @@ export class NightReportService {
       newsIdeas,
       selfReview: selfReviewSection,
       bigMoveWatch,
+      tradeSetups,
     };
   }
 

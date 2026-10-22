@@ -8,6 +8,7 @@ export const VERIFICATION_KINDS = [
   'NEWS_IDEA',
   'MBM_PREDICTION',
   'STOCK_MOVE',
+  'TRADE_SETUP',
 ] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 

@@ -156,4 +156,17 @@ export class VerificationSourcesRepository {
     });
     return rows.map((r) => ({ ...r, id: String(r.id), outcomeBig: r.outcomeBig === true }));
   }
+
+  /** Trade setups for session `session` (IST 'YYYY-MM-DD') whose outcome has been filled. */
+  async tradeSetups(session: string) {
+    const rows = await this.prisma.tradeSetup.findMany({
+      where: { sessionDate: session, filledAt: { not: null }, outcomeStatus: { not: null } },
+      select: {
+        id: true, sessionDate: true, symbol: true, side: true, instrument: true, entryRef: true, stopDistance: true,
+        outcomeStatus: true, outcomeR: true, outcomeHitT1: true, outcomeEntryPrice: true, outcomeExitPrice: true,
+      },
+      take: 200,
+    });
+    return rows.map((r) => ({ ...r, outcomeStatus: r.outcomeStatus as string }));
+  }
 }

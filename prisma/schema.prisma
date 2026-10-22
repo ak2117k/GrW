@@ -2972,3 +2972,67 @@ model StockMoveScore {
   @@index([symbol, asOf(sort: Desc)])
   @@map("stock_move_scores")
 }
+
+/// Next-morning trade setups (stream T): built nightly from a news idea + the stock big-move model (or the NIFTY
+/// MBM regime for an index). ADVISORY ONLY: never places an order, never a paper trade, never auto-trade.
+/// Levels are on the underlying's cash / index chart. Outcome columns are filled after the session.
+model TradeSetup {
+  id                String    @id @default(cuid())
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  userId            String    @map("user_id") // whose margin sized it; only this user ever sees the row
+  sessionDate       String    @map("session_date") // IST 'YYYY-MM-DD' of the session the setup is for
+  symbol            String // underlying (RELIANCE, NIFTY)
+  exchange          String // NFO (futures) | NSE (intraday cash)
+  instrument        String // futures trading symbol, or "<SYM> intraday cash (MIS)"
+  instrumentKind    String    @map("instrument_kind") // FUTURES | CASH_MIS
+  instrumentToken   String?   @map("instrument_token")
+  expiry            String? // IST 'YYYY-MM-DD' (futures)
+  lotSize           Int?      @map("lot_size")
+  side              String // LONG | SHORT (from the news idea)
+  newsIdeaId        String?   @map("news_idea_id")
+  entryRule         String    @map("entry_rule")
+  entryRef          Float     @map("entry_ref")
+  stop              Float
+  stopDistance      Float     @map("stop_distance")
+  target1           Float
+  target2           Float
+  atr               Float // daily ATR(14) of the underlying
+  qty               Int // shares / units (lots × lot size)
+  lots              Int?
+  riskRs            Float     @map("risk_rs")
+  riskPct           Float     @map("risk_pct")
+  rewardT1Rs        Float     @map("reward_t1_rs")
+  rewardT2Rs        Float     @map("reward_t2_rs")
+  marginUsed        Float     @map("margin_used")
+  marginAvailable   Float?    @map("margin_available")
+  marginAsOf        DateTime? @map("margin_as_of") @db.Timestamptz(6)
+  marginSource      String    @map("margin_source") // LIVE | LAST_KNOWN | PER_LAKH
+  exceedsRisk       Boolean   @default(false) @map("exceeds_risk")
+  inputs            Json // context lines, skip-if list, trigger, headlines, rules
+  outcomeStatus     String?   @map("outcome_status") // NOT_TRIGGERED | TARGET1 | STOP | TIME_EXIT | NO_DATA
+  outcomeEntryAt    DateTime? @map("outcome_entry_at") @db.Timestamptz(6)
+  outcomeEntryPrice Float?    @map("outcome_entry_price")
+  outcomeExitPrice  Float?    @map("outcome_exit_price")
+  outcomeR          Float?    @map("outcome_r")
+  outcomeHitT1      Boolean?  @map("outcome_hit_t1")
+  outcomeDetails    Json?     @map("outcome_details")
+  filledAt          DateTime? @map("filled_at") @db.Timestamptz(6)
+
+  @@unique([userId, sessionDate, symbol])
+  @@index([userId, sessionDate])
+  @@map("trade_setups")
+}
+
+/// The owner's Angel RMS funds, snapshotted when a broker read succeeds: the "last known" margin trade setups size
+/// against when the broker cannot be read at night.
+model AccountMarginSnapshot {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  asOf          DateTime @default(now()) @map("as_of") @db.Timestamptz(6)
+  availableCash Float    @map("available_cash")
+  net           Float?
+
+  @@index([userId, asOf(sort: Desc)])
+  @@map("account_margin_snapshots")
+}

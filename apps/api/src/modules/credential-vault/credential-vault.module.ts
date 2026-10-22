@@ -34,6 +34,7 @@ import { PerUserBrokerSessionFactory } from '../auto-execution/services/per-user
   ],
   // Re-export the isolated decryptor module so TDA-010/011 depend on the vault
   // module alone for the CREDENTIAL_DECRYPTOR seam.
-  exports: [CredentialVaultService, CredentialRewrapJob, CredentialDecryptorModule],
+  // BrokerOverviewService is exported for the trade-setup sizing (the owner's RMS funds, read-only).
+  exports: [CredentialVaultService, CredentialRewrapJob, CredentialDecryptorModule, BrokerOverviewService],
 })
 export class CredentialVaultModule {}

@@ -6,6 +6,7 @@ import { OvernightScorecardModule } from '../overnight-scorecard/overnight-score
 import { ScorecardService } from '../overnight-scorecard/scorecard.service';
 import { parseAutoExitConfig } from '../sentinel-executor/domain/auto-exit.config';
 import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
+import { TradeSetupModule } from '../trade-setup/trade-setup.module';
 import { NightReportController } from './controllers/night-report.controller';
 import { NIGHT_REPORT_STORE, NightReportRepository } from './repositories/night-report.repository';
 import {
@@ -22,7 +23,7 @@ import {
  * freshness). Reads only; places nothing, writes nothing.
  */
 @Module({
-  imports: [PrismaModule, MbmModule, OvernightScorecardModule],
+  imports: [PrismaModule, MbmModule, OvernightScorecardModule, TradeSetupModule],
   controllers: [NightReportController],
   providers: [
     NightReportRepository,

@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { WarnLimiter } from '../../../common/utils/warn-limiter';
 import { TradeEventType } from '@prisma/client';
 import {
   BrokerAdapter,
@@ -77,6 +78,8 @@ interface VirtualPosition {
 @Injectable()
 export class PaperTradeService implements OnModuleInit {
   private readonly logger = new Logger(PaperTradeService.name);
+  /** Identical per-cycle warnings log once per key per hour (with a suppressed count). */
+  private readonly warnOnce = new WarnLimiter();
 
   /** Pending limit/SL orders waiting for price triggers. */
   private readonly pendingOrders = new Map<string, PendingPaperOrder>();
@@ -624,7 +627,9 @@ export class PaperTradeService implements OnModuleInit {
       return ltp;
     }
     this.quoteBackoffUntil.set(token, Date.now() + QUOTE_FAILURE_BACKOFF_MS);
-    this.logger.warn(
+    this.warnOnce.warn(
+      this.logger,
+      `noprice:${exchange}:${token}:${failure}`,
       `No live price for paper position ${exchange}:${token} (${failure}) — ` +
         `keeping last value, retrying in ${QUOTE_FAILURE_BACKOFF_MS / 60_000} min`,
     );

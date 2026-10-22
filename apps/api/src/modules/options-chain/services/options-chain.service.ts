@@ -1,6 +1,7 @@
 import { Injectable, Logger, Inject, Optional } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
+import { WarnLimiter } from '../../../common/utils/warn-limiter';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { retentionCutoff, retentionDaysFromEnv } from '../../../common/utils/retention';
@@ -101,6 +102,8 @@ export interface OISummary {
 @Injectable()
 export class OptionsChainService {
   private readonly logger = new Logger(OptionsChainService.name);
+  /** Identical per-cycle warnings log once per key per hour (with a suppressed count). */
+  private readonly warnOnce = new WarnLimiter();
 
   /** In-memory cache for option contracts by underlying. */
   private contractsCache = new Map<string, CachedContracts>();
@@ -442,9 +445,7 @@ export class OptionsChainService {
   ): Promise<OptionsChainEntry[]> {
     const contracts = await this.getOptionContracts(underlying);
     if (contracts.length === 0) {
-      this.logger.warn(
-        `MCX master returned 0 option contracts for ${underlying}`,
-      );
+      this.warnOnce.warn(this.logger, `mcx-empty:${underlying}`, `MCX master returned 0 option contracts for ${underlying}`);
       return [];
     }
 
@@ -459,9 +460,7 @@ export class OptionsChainService {
     };
     const forExpiry = contracts.filter((c) => localYmd(c.expiry) === expiryYmd);
     if (forExpiry.length === 0) {
-      this.logger.warn(
-        `No MCX contracts for ${underlying} expiry ${expiryYmd}`,
-      );
+      this.warnOnce.warn(this.logger, `mcx-expiry:${underlying}:${expiryYmd}`, `No MCX contracts for ${underlying} expiry ${expiryYmd}`);
       return [];
     }
 
@@ -654,7 +653,7 @@ export class OptionsChainService {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<null>((resolve) => {
       timer = setTimeout(() => {
-        this.logger.warn(`${label} timed out after ${ms}ms`);
+        this.warnOnce.warn(this.logger, `timeout:${label}`, `${label} timed out after ${ms}ms`);
         resolve(null);
       }, ms);
     });
@@ -1107,9 +1106,7 @@ export class OptionsChainService {
         );
         spotPrice = quote.ltp;
       } catch {
-        this.logger.warn(
-          `Could not get live spot price for ${underlying}, using 0`,
-        );
+        this.warnOnce.warn(this.logger, `spot0:${underlying}`, `Could not get live spot price for ${underlying}, using 0`);
       }
     }
 
@@ -1222,7 +1219,7 @@ export class OptionsChainService {
         const quote = await this.brokerAdapter.getLiveQuote(indexInfo.token, indexInfo.exchange);
         spotPrice = quote.ltp;
       } catch {
-        this.logger.warn(`Could not get spot price for ${underlying}`);
+        this.warnOnce.warn(this.logger, `spot:${underlying}`, `Could not get spot price for ${underlying}`);
       }
     }
 
@@ -1241,12 +1238,12 @@ export class OptionsChainService {
     try {
       // Use Angel One's optionGreek API — returns full chain in one call
       if (!this.authService.isAuthenticated()) {
-        this.logger.warn('AngelOneAuthService not available or not authenticated — cannot call optionGreek');
+        this.warnOnce.warn(this.logger, 'greek-noauth', 'AngelOneAuthService not available or not authenticated — cannot call optionGreek');
         return this.buildSyntheticChain(underlying, expiry, spotPrice);
       }
       const smartApi = this.authService.getSmartApi();
       if (!smartApi?.optionGreek) {
-        this.logger.warn('optionGreek API not available on SmartAPI instance');
+        this.warnOnce.warn(this.logger, 'greek-missing', 'optionGreek API not available on SmartAPI instance');
         return this.buildSyntheticChain(underlying, expiry, spotPrice);
       }
 
@@ -1260,7 +1257,9 @@ export class OptionsChainService {
       // Angel One may return data directly or nested under response.data
       const rawData = response?.data;
       if (!rawData || !Array.isArray(rawData) || rawData.length === 0) {
-        this.logger.warn(
+        this.warnOnce.warn(
+          this.logger,
+          `greek-nodata:${underlying}:${expiryTag}:${String(response?.message ?? '')}`,
           `optionGreek returned no data for ${underlying} ${expiryTag}. ` +
           `Response: ${JSON.stringify({ status: response?.status, message: response?.message, dataType: typeof rawData, dataIsArray: Array.isArray(rawData) })}`,
         );

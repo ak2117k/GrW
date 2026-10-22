@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { EventEmitter } from 'events';
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { TickData } from '../../../common/interfaces/broker-adapter.interface';
+import { WsTickSummary, wsTickDebugOn } from './ws-tick-summary';
 
 /**
  * WebSocket feed modes supported by Angel One.
@@ -46,6 +47,10 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionalDisconnect = false;
+  /** Per-minute tick summary (replaces the per-tick debug line). */
+  private readonly tickSummary = new WsTickSummary();
+  /** WS_TICK_DEBUG=1 restores the per-tick line; default off. */
+  private readonly tickDebug = wsTickDebugOn(process.env.WS_TICK_DEBUG);
 
   constructor(private readonly authService: AngelOneAuthService) {
     super();
@@ -277,11 +282,13 @@ export class AngelOneWebSocketService extends EventEmitter implements OnModuleDe
 
     this.ws.on('tick', (data: any) => {
       try {
-        this.logger.debug(`WS tick: ${JSON.stringify(data).substring(0, 300)}`);
+        if (this.tickDebug) this.logger.debug(`WS tick: ${JSON.stringify(data).substring(0, 300)}`);
         const tick = this.parseTickData(data);
+        const summary = this.tickSummary.record(tick ? String(tick.token) : null);
+        if (summary) this.logger.debug(summary);
         if (tick) {
           this.emit('tick', tick);
-        } else {
+        } else if (this.tickDebug) {
           this.logger.debug('parseTickData returned null');
         }
       } catch (error) {

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { WarnLimiter } from '../../../common/utils/warn-limiter';
 import { AnandDualTrackRepository } from '../repositories/anand-dual-track.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { supertrend } from '../../signal-generator/strategies/indicators';
@@ -9,6 +10,8 @@ import { ExitPriceService, type ExitPrice } from '../../signal-generator/service
 @Injectable()
 export class AnandPriceMonitorService {
   private readonly logger = new Logger(AnandPriceMonitorService.name);
+  /** Identical per-cycle warnings log once per key per hour (with a suppressed count). */
+  private readonly warnOnce = new WarnLimiter();
 
   constructor(
     private readonly repo: AnandDualTrackRepository,
@@ -263,7 +266,7 @@ export class AnandPriceMonitorService {
     for (const entry of withToken) {
       const r = priceMap.get(entry.token as string);
       if (!r || !r.fresh) {
-        this.logger.warn(`[anand-intraday] ${entry.id} unmonitored — no fresh price, stop not evaluated`);
+        this.warnOnce.warn(this.logger, `nofresh:intraday:${entry.id}`, `[anand-intraday] ${entry.id} unmonitored — no fresh price, stop not evaluated`);
         continue;
       }
       const ltp = r.price;
@@ -323,7 +326,7 @@ export class AnandPriceMonitorService {
     for (const entry of withToken) {
       const r = priceMap.get(entry.token as string);
       if (!r || !r.fresh) {
-        this.logger.warn(`[anand-${track}] ${entry.symbol} unmonitored — no fresh price, stop not evaluated`);
+        this.warnOnce.warn(this.logger, `nofresh:${track}:${entry.symbol}`, `[anand-${track}] ${entry.symbol} unmonitored — no fresh price, stop not evaluated`);
         continue;
       }
       const ltp = r.price;
@@ -366,7 +369,7 @@ export class AnandPriceMonitorService {
       const token = tokenMap.get(lot.symbol);
       const r = token ? priceMap.get(token) : undefined;
       if (!r || !r.fresh) {
-        this.logger.warn(`[anand-reinvest] ${lot.symbol} unmonitored — no fresh price, stop not evaluated`);
+        this.warnOnce.warn(this.logger, `nofresh:reinvest:${lot.symbol}`, `[anand-reinvest] ${lot.symbol} unmonitored — no fresh price, stop not evaluated`);
         continue;
       }
       const ltp = r.price;

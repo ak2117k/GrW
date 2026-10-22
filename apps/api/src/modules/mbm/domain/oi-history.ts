@@ -49,6 +49,12 @@ export interface OiHistoryConfig {
   maxContracts: number;
   /** OI_BACKFILL_CHUNK_DAYS: widest request window the chunk probe tries (default 30). */
   maxChunkDays: number;
+  /**
+   * OI_BACKFILL_INTERVAL (default FIVE_MINUTE, the cadence of our own chain capture): used when the probe
+   * shows it answers; otherwise the finest interval that answered. 1-minute OI for ~800 contracts is
+   * ~2–3 GB on a VPS with ~5 GB free; 5-minute is a fifth of that. Optional so tests can leave it unset.
+   */
+  preferredInterval?: (typeof PROBE_INTERVALS)[number];
 }
 
 const int = (raw: string | undefined, dflt: number, min: number, max: number): number => {
@@ -67,6 +73,9 @@ export function parseOiHistoryConfig(env: NodeJS.ProcessEnv): OiHistoryConfig {
     spotRangeDays: int(env.OI_BACKFILL_SPOT_DAYS, 120, 1, 2000),
     maxContracts: int(env.OI_BACKFILL_MAX_CONTRACTS, 1500, 1, 20_000),
     maxChunkDays: int(env.OI_BACKFILL_CHUNK_DAYS, 30, 1, 100),
+    preferredInterval: (PROBE_INTERVALS as readonly string[]).includes((env.OI_BACKFILL_INTERVAL ?? '').trim().toUpperCase())
+      ? ((env.OI_BACKFILL_INTERVAL ?? '').trim().toUpperCase() as (typeof PROBE_INTERVALS)[number])
+      : 'FIVE_MINUTE',
   };
 }
 

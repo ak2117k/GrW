@@ -20,6 +20,9 @@ describe('oi-history domain', () => {
     const d = parseOiHistoryConfig({});
     expect(d).toMatchObject({ enabled: true, maxCalls: 2000, strikesAround: 10, maxChunkDays: 30 });
     expect(parseOiHistoryConfig({ OI_BACKFILL_ENABLED: 'off' }).enabled).toBe(false);
+    expect(d.preferredInterval).toBe('FIVE_MINUTE');
+    expect(parseOiHistoryConfig({ OI_BACKFILL_INTERVAL: 'one_minute' }).preferredInterval).toBe('ONE_MINUTE');
+    expect(parseOiHistoryConfig({ OI_BACKFILL_INTERVAL: 'bogus' }).preferredInterval).toBe('FIVE_MINUTE');
     expect(parseOiHistoryConfig({ OI_BACKFILL_MAX_CALLS: '0', OI_BACKFILL_CHUNK_DAYS: 'x' })).toMatchObject({ maxCalls: 1, maxChunkDays: 30 });
   });
 

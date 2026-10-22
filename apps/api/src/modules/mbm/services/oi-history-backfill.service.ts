@@ -189,10 +189,12 @@ export class OiHistoryBackfillService implements OnModuleInit {
       //    run (an unknown answer must not downgrade the interval for good).
       const session = lastCompletedSession(this.calendar, started);
       if (!session) throw new StopRun('no-interval');
+      const answered: string[] = [];
       for (const iv of PROBE_INTERVALS) {
         try {
           const pts = await this.oiCall(st, probeRef, iv, session.from, session.to);
           probe.push(`${iv}:${pts.length ? pts.length : 'empty'}`);
+          if (pts.length > 0) answered.push(iv);
           if (pts.length > 0 && !interval) interval = iv;
         } catch (e) {
           if (e instanceof ThrottledOut || e instanceof StopRun) throw e;
@@ -200,6 +202,8 @@ export class OiHistoryBackfillService implements OnModuleInit {
         }
       }
       if (!interval) throw new StopRun('no-interval');
+      const pref = this.cfg.preferredInterval;
+      if (pref && answered.includes(pref)) interval = pref;
 
       // 2. Chunk probe: the widest window Angel answers IN FULL for the nearest future (listed ≥ ~2 months).
       chunkDays = 1;

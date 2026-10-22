@@ -93,7 +93,7 @@ function build(opts: { now?: () => Date; env?: NodeJS.ProcessEnv; world?: World 
   };
   const now = opts.now ?? (() => new Date(NIGHT));
   const svc = new OiHistoryBackfillService(
-    parseOiHistoryConfig(opts.env ?? {}),
+    parseOiHistoryConfig({ OI_BACKFILL_INTERVAL: 'ONE_MINUTE', ...(opts.env ?? {}) }),
     parseMbmConfig({ MBM_FEED_USER_ID: 'owner' }),
     cal,
     now,
@@ -136,6 +136,15 @@ describe('OiHistoryBackfillService', () => {
     expect(r.line).toMatch(/contracts=4 \(FUT 2, CE 1, PE 1/);
     expect(r.line).toMatch(/earliest=2026-07-27/);
     expect(r.line).toMatch(/per-kind=\{CE: 2026-09-01.*FUT: 2026-07-27.*PE: 2026-09-01/);
+  });
+
+  it('uses the preferred FIVE_MINUTE (the default) when it answers, finest-first otherwise', async () => {
+    const five = build({ env: { OI_BACKFILL_INTERVAL: 'FIVE_MINUTE' } });
+    const r = await five.svc.run('test');
+    expect(r.line).toContain('interval=FIVE_MINUTE');
+    expect(five.repo.prog.has('F1|FIVE_MINUTE')).toBe(true);
+    const noFive = build({ env: { OI_BACKFILL_INTERVAL: 'FIVE_MINUTE' }, world: { intervals: ['ONE_MINUTE'] } });
+    expect((await noFive.svc.run('test')).line).toContain('interval=ONE_MINUTE');
   });
 
   it('falls back to the next interval when the finest returns nothing, and logs which worked', async () => {

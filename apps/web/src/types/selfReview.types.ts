@@ -45,6 +45,22 @@ export interface SelfReviewSummary {
   byKind: Partial<Record<VerificationKind | string, KindStats>>;
   byFactor?: Record<string, FactorStats>;
   notable?: NotableCall[];
+  /** Probability models (MBM_PREDICTION): skill vs always guessing the common outcome. */
+  skill?: Partial<Record<VerificationKind | string, { session: SkillStats; rolling20: SkillStats }>>;
+}
+
+export interface SkillStats {
+  n: number;
+  positives: number;
+  baseRate: number | null;
+  hitRate: number | null;
+  majorityHitRate: number | null;
+  auc: number | null;
+  brier: number | null;
+  brierBaseline: number | null;
+  brierSkill: number | null;
+  verdict: 'NOT_TESTABLE' | 'EDGE' | 'NO_EDGE';
+  note: string;
 }
 
 export type RunStatus = 'RUNNING' | 'DONE' | 'FAILED';

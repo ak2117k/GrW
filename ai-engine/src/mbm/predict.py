@@ -16,6 +16,8 @@ import pandas as pd
 
 from .model_consts import NEXT_DECISION_MIN, QUANTILES, regime
 
+P_BOUNDS = (0.03, 0.97)
+
 
 @dataclass
 class HorizonModel:
@@ -43,7 +45,9 @@ class HorizonModel:
         """Calibrated P(big), regime and range quantiles (bp) for each row. Missing feature
         columns are NaN (LightGBM routes them like training-time nulls), never an error."""
         X = rows.reindex(columns=self.columns).astype("float64")
-        p = np.interp(self.classifier.predict(X), self.iso_x, self.iso_y)
+        # The isotonic map's end steps reach 0.0 / 1.0 (2026-10-21: 20 live rows at p = 1.00). A
+        # 5-minute move is never certain, so cap at P_BOUNDS; the regime bands (0.35 / 0.65) are inside.
+        p = np.clip(np.interp(self.classifier.predict(X), self.iso_x, self.iso_y), *P_BOUNDS)
         out = pd.DataFrame({"p": p, "regime": regime(p)}, index=rows.index)
         for q, b in self.quantiles.items():
             out[f"q{int(q * 100)}_bp"] = b.predict(X)

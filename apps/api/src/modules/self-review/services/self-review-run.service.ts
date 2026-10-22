@@ -19,6 +19,7 @@ import {
   type ScorecardRow,
 } from '../domain/scorers';
 import { buildSummary, topMisses } from '../domain/summary';
+import { probabilitySkill } from '../domain/skill';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -117,6 +118,16 @@ export class SelfReviewRunService {
       const history = await this.repo.results({ sessions, kinds: ['SCORECARD_FACTOR', 'LIVE_EXIT', 'STOCK_MOVE'] }, 20_000);
       // STOCK_MOVE history is proposal evidence only; its bucket subjects are not scorecard factors.
       const summary = buildSummary(S, sessionRows, history.filter((h) => h.kind !== 'STOCK_MOVE'), sessions);
+      await this.soft('MBM skill', errors, async () => {
+        const mbm = await this.repo.results({ sessions, kinds: ['MBM_PREDICTION'] }, 20_000);
+        summary.skill = {
+          MBM_PREDICTION: {
+            session: probabilitySkill(sessionRows.filter((r) => r.kind === 'MBM_PREDICTION')),
+            rolling20: probabilitySkill(mbm),
+          },
+        };
+        return [];
+      });
 
       const diagnosis = await this.diagnose(run.id, S, sessionRows, summary, errors);
       const proposals = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors);

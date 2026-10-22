@@ -228,3 +228,25 @@ export function pendingBadge(n: number | null | undefined): string {
   if (!n || n <= 0) return '';
   return n > 9 ? '9+' : String(n);
 }
+
+const SKILL_VERDICT: Record<string, string> = {
+  NOT_TESTABLE: 'not testable yet',
+  EDGE: 'real edge',
+  NO_EDGE: 'no edge',
+};
+
+/** The probability models' skill line (last 20 sessions), or null when the run has none. */
+export function skillLines(summary: SelfReviewSummary | null | undefined): Array<{ kind: string; label: string; verdict: string; tone: 'good' | 'bad' | 'neutral'; note: string }> {
+  return Object.entries(summary?.skill ?? {})
+    .filter(([, s]) => s?.rolling20)
+    .map(([kind, s]) => {
+      const r = s!.rolling20;
+      return {
+        kind,
+        label: kindLabel(kind),
+        verdict: SKILL_VERDICT[r.verdict] ?? r.verdict,
+        tone: r.verdict === 'EDGE' ? 'good' : r.verdict === 'NO_EDGE' ? 'bad' : 'neutral',
+        note: r.note,
+      };
+    });
+}

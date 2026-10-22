@@ -57,6 +57,26 @@ export interface RunSummary {
   byKind: Partial<Record<VerificationKind, KindStats>>;
   byFactor: Record<string, FactorStats>;
   notable: NotableItem[];
+  /** Probability models only (MBM_PREDICTION): skill vs the majority baseline, session and rolling 20. */
+  skill?: Partial<Record<VerificationKind, { session: SkillStats; rolling20: SkillStats }>>;
+}
+
+/** domain/skill.ts — hit rate alone is not evidence when one outcome dominates. */
+export interface SkillStats {
+  n: number;
+  positives: number;
+  baseRate: number | null;
+  hitRate: number | null;
+  /** Hit rate of always predicting the more common outcome. */
+  majorityHitRate: number | null;
+  auc: number | null;
+  brier: number | null;
+  /** Brier of always forecasting the base rate. */
+  brierBaseline: number | null;
+  /** 1 − brier / brierBaseline; > 0 = better probabilities than the base rate. */
+  brierSkill: number | null;
+  verdict: 'NOT_TESTABLE' | 'EDGE' | 'NO_EDGE';
+  note: string;
 }
 
 export type ProposalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED' | 'EXPIRED';

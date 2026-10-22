@@ -7,6 +7,7 @@ import {
   hitTone,
   kindLabel,
   kindRows,
+  skillLines,
   lessonInjected,
   lessonsAddedCount,
   lessonsAddedList,
@@ -150,5 +151,25 @@ describe('misc', () => {
     expect(pendingBadge(undefined)).toBe('');
     expect(pendingBadge(3)).toBe('3');
     expect(pendingBadge(12)).toBe('9+');
+  });
+});
+
+describe('skillLines', () => {
+  const stats = (verdict: 'NOT_TESTABLE' | 'EDGE' | 'NO_EDGE', note: string) => ({
+    n: 79, positives: 78, baseRate: 0.987, hitRate: 0.987, majorityHitRate: 0.987, auc: null,
+    brier: 0.01, brierBaseline: 0.013, brierSkill: 0.2, verdict, note,
+  });
+
+  it('shows the 20-session verdict in words, with a neutral tone when not testable', () => {
+    const s = { session: '2026-10-22', byKind: {}, skill: { MBM_PREDICTION: { session: stats('NOT_TESTABLE', 'x'), rolling20: stats('NOT_TESTABLE', 'only 1 small window(s) of 79') } } } as SelfReviewSummary;
+    expect(skillLines(s)).toEqual([{ kind: 'MBM_PREDICTION', label: 'Move-size model', verdict: 'not testable yet', tone: 'neutral', note: 'only 1 small window(s) of 79' }]);
+  });
+
+  it('maps EDGE / NO_EDGE to good / bad and is empty for older runs without skill', () => {
+    const mk = (v: 'EDGE' | 'NO_EDGE') => ({ session: '', byKind: {}, skill: { MBM_PREDICTION: { session: stats(v, ''), rolling20: stats(v, '') } } }) as SelfReviewSummary;
+    expect(skillLines(mk('EDGE'))[0].tone).toBe('good');
+    expect(skillLines(mk('NO_EDGE'))[0].tone).toBe('bad');
+    expect(skillLines({ session: '', byKind: {} })).toEqual([]);
+    expect(skillLines(null)).toEqual([]);
   });
 });

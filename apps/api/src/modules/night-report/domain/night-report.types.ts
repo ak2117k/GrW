@@ -9,10 +9,10 @@
 
 import type { NewsIdea, Scorecard } from '../../overnight-scorecard/scorecard.types';
 import type { BigMoveWatchView } from '../../stock-move/stock-move.service';
-import type { TradeSetupsView } from '../../trade-setup/services/trade-setup.service';
+import type { TradeSetupsView } from '../../trade-setup/domain/trade-setup.view';
 
 export type { BigMoveWatchRow, BigMoveWatchView } from '../../stock-move/stock-move.service';
-export type { TradeSetupView, TradeSetupsView } from '../../trade-setup/services/trade-setup.service';
+export type { TradeSetupView, TradeSetupsView } from '../../trade-setup/domain/trade-setup.view';
 
 export type Section<T> = T | { error: string };
 

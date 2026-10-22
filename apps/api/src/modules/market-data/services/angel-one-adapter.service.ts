@@ -10,6 +10,7 @@ import {
 import { AngelOneAuthService } from './angel-one-auth.service';
 import { AngelOneWebSocketService, WsFeedMode, ExchangeType } from './angel-one-websocket.service';
 import { matchSymbolToken } from './symbol-token-match';
+import { WarnLimiter } from '../../../common/utils/warn-limiter';
 import { rankSymbolMatches } from '../utils/rank-symbol-matches';
 import { COMMODITIES, INDICES } from '@td/shared/constants';
 import { MarketDepth, MarketDepthLevel } from '@td/shared/types';
@@ -23,6 +24,11 @@ import {
 // ./angel-throttle so the per-user UserFeedSession shares the SAME class —
 // `instanceof` must agree across both broker paths.
 export { AngelThrottleError };
+
+/** Consecutive "no quote" replies (an unknown token: expired / dead contract) before an instrument is skipped. */
+export const DEAD_QUOTE_MISSES = 3;
+/** How long a dead instrument is skipped before one probe is allowed again. */
+export const DEAD_QUOTE_BACKOFF_MS = 30 * 60_000;
 
 /**
  * Tokens that live on BSE (not NSE). SENSEX and other BSE-listed indices
@@ -766,7 +772,63 @@ export class AngelOneAdapterService implements BrokerAdapter {
     return out;
   }
 
+  /**
+   * `exchange:token` → consecutive "no quote" misses and the time until which
+   * the instrument is skipped. Prod 2026-10-22: expired MCX CRUDEOIL options and
+   * a dead NFO contract logged "Failed to get live quote … no quote returned" at
+   * ERROR every few minutes (×112 for one token in 3 h) from callers still
+   * holding them. Bounded: entries go on success and the map is cleared at 5k.
+   */
+  private readonly deadQuotes = new Map<string, { misses: number; until: number }>();
+  /** Dead-instrument lines: once per instrument per hour, at WARN. */
+  private readonly deadQuoteWarn = new WarnLimiter();
+
+  /**
+   * While `exchange:token` is backed off as dead: its WS tick if one exists,
+   * else throws — no broker call either way. Null when not backed off.
+   */
+  private skipDeadQuote(exchange: string, token: string): TickData | null {
+    const d = this.deadQuotes.get(this.cacheKey(exchange, token));
+    if (!d || d.until <= Date.now()) return null;
+    const cached = this.wsTickCache.get(this.cacheKey(exchange, token));
+    if (cached) return cached;
+    const msg =
+      `no quote returned for ${exchange}:${token} (${d.misses} misses in a row — expired or dead contract; ` +
+      `skipped until ${new Date(d.until).toISOString()})`;
+    this.deadQuoteWarn.warn(this.logger, `dead:${exchange}:${token}`, `Live quote skipped: ${msg}`);
+    throw new Error(`Get live quote failed: ${msg}`);
+  }
+
+  /**
+   * One more "no quote" for `exchange:token`. The first {@link DEAD_QUOTE_MISSES} − 1
+   * are genuine failures (logged at ERROR by the caller); from the
+   * {@link DEAD_QUOTE_MISSES}th on the instrument is skipped for
+   * {@link DEAD_QUOTE_BACKOFF_MS} and logged here at WARN, at most once an hour.
+   * Returns whether the miss was handled (backed off) here.
+   */
+  private recordQuoteMiss(exchange: string, token: string, msg: string): boolean {
+    const key = this.cacheKey(exchange, token);
+    if (!this.deadQuotes.has(key) && this.deadQuotes.size >= 5_000) this.deadQuotes.clear();
+    const d = this.deadQuotes.get(key) ?? { misses: 0, until: 0 };
+    d.misses++;
+    this.deadQuotes.set(key, d);
+    if (d.misses < DEAD_QUOTE_MISSES) return false;
+    d.until = Date.now() + DEAD_QUOTE_BACKOFF_MS;
+    this.deadQuoteWarn.warn(
+      this.logger,
+      `dead:${exchange}:${token}`,
+      `Failed to get live quote for ${exchange}:${token}: ${msg} — ${d.misses} misses in a row, ` +
+        `treating it as an expired/dead contract and skipping it for ${DEAD_QUOTE_BACKOFF_MS / 60_000} min`,
+    );
+    return true;
+  }
+
   async getLiveQuote(token: string, exchange: string): Promise<TickData> {
+    const skipped = this.skipDeadQuote(exchange, token);
+    if (skipped) return skipped;
+    // Set only for Angel's empty SUCCESS reply (an unknown token), never for a
+    // failed / throttled call: only that counts towards the dead-instrument back-off.
+    let unknownToken = false;
     // Try the REST quote endpoint first. It returns the freshest snapshot
     // (with proper prev-close) for any token the API key is entitled to.
     try {
@@ -779,6 +841,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
 
       if (response?.data?.fetched?.length) {
         const d = response.data.fetched[0];
+        this.deadQuotes.delete(this.cacheKey(exchange, token));
         return {
           token: String(d.symbolToken ?? d.symboltoken ?? token),
           symbol: d.tradingSymbol ?? d.tradingsymbol ?? '',
@@ -811,6 +874,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
       // comes back status=true / "SUCCESS" with an empty list, so the reply's
       // message is only worth surfacing when the call itself failed.
       const reason = restStatus === false && restMessage ? ` (${restMessage})` : '';
+      unknownToken = restStatus !== false;
       throw new Error(`no quote returned for ${exchange}:${token}${reason}`);
     } catch (error) {
       // Any error (network, 403, parse, etc.): try the WS cache before giving up.
@@ -819,7 +883,9 @@ export class AngelOneAdapterService implements BrokerAdapter {
         return cached;
       }
       const msg = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Failed to get live quote for ${exchange}:${token}: ${msg}`);
+      if (!(unknownToken && this.recordQuoteMiss(exchange, token, msg))) {
+        this.logger.error(`Failed to get live quote for ${exchange}:${token}: ${msg}`);
+      }
       throw new Error(`Get live quote failed: ${msg}`);
     }
   }

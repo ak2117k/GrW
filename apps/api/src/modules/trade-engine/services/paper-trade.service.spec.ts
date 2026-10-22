@@ -7,6 +7,7 @@ import {
 } from '../../market-data/services/market-feed.service';
 import { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
+import { expiryFromSymbol, isPastExpiry } from '../../../common/utils/contract-expiry';
 
 /** Stub repo for the service constructor — onModuleInit isn't called in these tests. */
 const mockTradeRepository = {
@@ -782,7 +783,7 @@ describe('PaperTradeService.refreshOpenPositions — synthetic option tokens and
   }
 
   const syntheticOrder: OrderRequest = {
-    symbol: 'COPPER2610231420PE', token: 'PAPER-COPPER-261023-1420-PE', exchange: 'NFO',
+    symbol: 'COPPER2610231420PE', token: 'PAPER-COPPER-991023-1420-PE', exchange: 'NFO',
     side: 'BUY', orderType: 'MARKET', quantity: 2500, price: 10, positionType: 'INTRADAY',
   };
 
@@ -794,7 +795,7 @@ describe('PaperTradeService.refreshOpenPositions — synthetic option tokens and
 
     await service.refreshOpenPositions();
 
-    expect(optionsChain.getLiveOptionLtp).toHaveBeenCalledWith('COPPER', '2026-10-23', 1420, 'PE');
+    expect(optionsChain.getLiveOptionLtp).toHaveBeenCalledWith('COPPER', '2099-10-23', 1420, 'PE');
     expect(broker.getLiveQuote).not.toHaveBeenCalled();
     expect(service.getVirtualPositions()[0].ltp).toBe(12.5);
   });
@@ -812,7 +813,7 @@ describe('PaperTradeService.refreshOpenPositions — synthetic option tokens and
 
     expect(broker.getLiveQuote).not.toHaveBeenCalled();
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('PAPER-COPPER-261023-1420-PE'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('PAPER-COPPER-991023-1420-PE'));
   });
 
   it('backs off a real token whose REST quote keeps failing — one warning, no per-cycle broker call', async () => {
@@ -827,5 +828,53 @@ describe('PaperTradeService.refreshOpenPositions — synthetic option tokens and
 
     expect(broker.getLiveQuote).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('never asks the broker for a contract past its expiry (IST date) — one warning, not one per cycle', async () => {
+    const broker = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 50 }) };
+    const optionsChain = { getLiveOptionLtp: jest.fn().mockResolvedValue(50) };
+    const service = await build(broker, optionsChain);
+    const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+    // Prod 2026-10-22: expired 15-Oct CRUDEOIL options still OPEN; and an expired synthetic contract.
+    await service.simulateOrder({ ...syntheticOrder, symbol: 'CRUDEOIL15OCT205800CE', token: '578706', exchange: 'MCX' });
+    await service.simulateOrder({ ...syntheticOrder, symbol: 'X', token: 'PAPER-COPPER-201023-1420-PE', exchange: 'MCX' });
+
+    await service.refreshOpenPositions();
+    await service.refreshOpenPositions();
+
+    expect(broker.getLiveQuote).not.toHaveBeenCalled();
+    expect(optionsChain.getLiveOptionLtp).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('past its contract expiry 2020-10-15'));
+  });
+
+  it('a live (unexpired) option contract is still quoted', async () => {
+    const broker = { getLiveQuote: jest.fn().mockResolvedValue({ ltp: 50 }) };
+    const service = await build(broker, { getLiveOptionLtp: jest.fn() });
+    await service.simulateOrder({ ...syntheticOrder, symbol: 'CRUDEOIL15OCT995800CE', token: '578706', exchange: 'MCX' });
+
+    await service.refreshOpenPositions();
+
+    expect(broker.getLiveQuote).toHaveBeenCalledWith('578706', 'MCX');
+    expect(service.getVirtualPositions()[0].ltp).toBe(50);
+  });
+});
+
+describe('contract expiry helpers', () => {
+  it('reads the expiry from option / future tradingsymbols, not from cash symbols', () => {
+    expect(expiryFromSymbol('CRUDEOIL15OCT265800CE')).toBe('2026-10-15');
+    expect(expiryFromSymbol('NIFTY28OCT2625000PE')).toBe('2026-10-28');
+    expect(expiryFromSymbol('NIFTY28OCT26FUT')).toBe('2026-10-28');
+    expect(expiryFromSymbol('RELIANCE-EQ')).toBeNull();
+    expect(expiryFromSymbol('COPPER2610231420PE')).toBeNull();
+  });
+
+  it('is past expiry only after the IST expiry date (not on the day)', () => {
+    const now = new Date('2026-10-22T10:00:00Z');
+    expect(isPastExpiry('2026-10-21', now)).toBe(true);
+    expect(isPastExpiry('2026-10-22', now)).toBe(false);
+    // Instrument master stores expiry at IST midnight (= previous day in UTC).
+    expect(isPastExpiry(new Date('2026-10-21T18:30:00Z'), now)).toBe(false);
+    expect(isPastExpiry(null, now)).toBe(false);
   });
 });

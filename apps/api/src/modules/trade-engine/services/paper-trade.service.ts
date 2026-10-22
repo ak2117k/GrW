@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { WarnLimiter } from '../../../common/utils/warn-limiter';
+import { expiryFromSymbol, istDateOf, isPastExpiry } from '../../../common/utils/contract-expiry';
 import { TradeEventType } from '@prisma/client';
 import {
   BrokerAdapter,
@@ -73,6 +74,20 @@ interface VirtualPosition {
   averagePrice: number;
   ltp: number;
   pnl: number;
+  /** The contract's expiry (instrument row) for a derivative; absent for cash or a fresh fill. */
+  expiry?: Date | string | null;
+}
+
+/**
+ * The expiry date of a position's contract: the instrument's, else the one in
+ * its tradingsymbol, else the one in a synthetic `PAPER-…` token. Null for cash.
+ */
+export function positionExpiry(pos: Pick<VirtualPosition, 'symbol' | 'token' | 'expiry'>): Date | string | null {
+  if (pos.expiry) return pos.expiry;
+  const fromSymbol = expiryFromSymbol(pos.symbol);
+  if (fromSymbol) return fromSymbol;
+  const synthetic = SYNTHETIC_OPTION_TOKEN.exec(pos.token);
+  return synthetic ? `20${synthetic[2]}-${synthetic[3]}-${synthetic[4]}` : null;
 }
 
 @Injectable()
@@ -213,6 +228,7 @@ export class PaperTradeService implements OnModuleInit {
             averagePrice: t.entryPrice,
             ltp: t.entryPrice,
             pnl: 0,
+            expiry: inst.expiry ?? null,
           });
         }
       }
@@ -573,6 +589,20 @@ export class PaperTradeService implements OnModuleInit {
   async refreshOpenPositions(): Promise<void> {
     for (const pos of this.virtualPositions.values()) {
       if (!pos.token) continue;
+      // A contract past its expiry (IST date) has no live quote: asking every
+      // 15 s only produced "no quote returned" ERRORs (prod 2026-10-22, expired
+      // MCX CRUDEOIL options still OPEN). It keeps its last value; settling it
+      // is a separate concern.
+      const expiry = positionExpiry(pos);
+      if (isPastExpiry(expiry)) {
+        this.warnOnce.warn(
+          this.logger,
+          `expired:${pos.exchange}:${pos.token}`,
+          `Paper position ${pos.symbol} (${pos.exchange}:${pos.token}) is OPEN past its contract expiry ` +
+            `${typeof expiry === 'string' ? expiry : istDateOf(new Date(expiry!))} — skipping its live quote; it needs settling`,
+        );
+        continue;
+      }
       // Prefer the WebSocket quote cache. When the token isn't on the WS —
       // Angel One caps the socket at ~50 tokens, so open-position tokens are
       // routinely squeezed out by indices + the scanner — fall back to a REST

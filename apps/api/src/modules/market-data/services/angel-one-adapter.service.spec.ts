@@ -1034,3 +1034,78 @@ describe('AngelOneAdapterService — no feed session yet (null client)', () => {
     if (err) expect(err.message).not.toMatch(NULL_DEREF);
   });
 });
+
+/**
+ * Prod 2026-10-22: expired MCX CRUDEOIL options / a dead NFO contract logged
+ * "Failed to get live quote … no quote returned" at ERROR every few minutes.
+ * After DEAD_QUOTE_MISSES empty SUCCESS replies in a row the instrument is
+ * skipped for DEAD_QUOTE_BACKOFF_MS and logged at WARN, once an hour.
+ */
+describe('AngelOneAdapterService — dead-instrument back-off', () => {
+  const empty = { status: true, message: 'SUCCESS', data: { fetched: [], unfetched: [] } };
+  const live = { data: { fetched: [{ symbolToken: '578706', ltp: 42 }] } };
+  function build(marketData: jest.Mock) {
+    const fakeAuth = { getSmartApi: () => ({ marketData }) } as unknown as AngelOneAuthService;
+    const fakeWs = { on: jest.fn(), subscribe: jest.fn().mockResolvedValue(undefined), removeListener: jest.fn() } as unknown as AngelOneWebSocketService;
+    const adapter = new AngelOneAdapterService(fakeAuth, fakeWs);
+    const error = jest.spyOn((adapter as any).logger, 'error').mockImplementation(() => {});
+    const warn = jest.spyOn((adapter as any).logger, 'warn').mockImplementation(() => {});
+    return { adapter, error, warn };
+  }
+
+  afterEach(() => jest.useRealTimers());
+
+  it('first misses log at ERROR; the 3rd backs off — no broker call, WARN once, for 30 min', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-22T12:00:00Z') });
+    const marketData = jest.fn().mockResolvedValue(empty);
+    const { adapter, error, warn } = build(marketData);
+
+    for (let i = 0; i < 3; i++) await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow('no quote returned for MCX:578706');
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('skipping it for 30 min'));
+
+    for (let i = 0; i < 10; i++) await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow(/expired or dead contract/);
+    expect(marketData).toHaveBeenCalledTimes(3);
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledTimes(1); // the skips stay inside the hour
+
+    // After 30 min one probe goes out; still dead → backed off again, still no new log inside the hour.
+    jest.setSystemTime(new Date('2026-10-22T12:31:00Z'));
+    await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow();
+    expect(marketData).toHaveBeenCalledTimes(4);
+    expect(error).toHaveBeenCalledTimes(2);
+    await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow();
+    expect(marketData).toHaveBeenCalledTimes(4);
+
+    // Other instruments are unaffected.
+    await expect(adapter.getLiveQuote('49463', 'NFO')).rejects.toThrow();
+    expect(error).toHaveBeenCalledTimes(3);
+  });
+
+  it('a quote in between resets the count', async () => {
+    const marketData = jest.fn()
+      .mockResolvedValueOnce(empty).mockResolvedValueOnce(empty).mockResolvedValueOnce(live)
+      .mockResolvedValue(empty);
+    const { adapter, warn } = build(marketData);
+    await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow();
+    await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow();
+    expect((await adapter.getLiveQuote('578706', 'MCX')).ltp).toBe(42);
+    await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow();
+    await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow();
+    expect(warn).not.toHaveBeenCalled();
+    expect(marketData).toHaveBeenCalledTimes(5);
+  });
+
+  it('failed / throttled calls (status=false) and thrown errors never count as dead', async () => {
+    const marketData = jest.fn()
+      .mockResolvedValueOnce({ status: false, message: 'Access denied because of exceeding access rate', data: null })
+      .mockRejectedValueOnce(new Error('socket hang up'))
+      .mockResolvedValue({ status: false, message: 'rate', data: null });
+    const { adapter, error, warn } = build(marketData);
+    for (let i = 0; i < 5; i++) await expect(adapter.getLiveQuote('578706', 'MCX')).rejects.toThrow();
+    expect(marketData).toHaveBeenCalledTimes(5);
+    expect(error).toHaveBeenCalledTimes(5);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});

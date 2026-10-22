@@ -1,6 +1,7 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-executor.service.ts
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
+import { ExitFailureAlerts, exitFailStreakFrom } from '../domain/exit-failure-alert';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 import type {
@@ -143,6 +144,8 @@ export class SentinelExitExecutor {
   private readonly capWarned = new Set<string>();
   /** userId → consecutive AG8001 failures that survived a re-login. */
   private readonly authFailStreak = new Map<string, number>();
+  /** One Telegram ops alert per tracker per 30 min when an exit ends FAILED (prod 10-14..19: 471 silent FAILED rows). */
+  private readonly failureAlerts = new ExitFailureAlerts(exitFailStreakFrom(process.env.AI_EXIT_FAIL_ALERT_STREAK));
 
   constructor(
     private readonly repo: AiExitExecutionRepository,
@@ -680,7 +683,29 @@ export class SentinelExitExecutor {
     const line = `[ai-exit] ${status}${reason ? `: ${reason}` : ''} — ${v.symbol} verdict ${v.id}`;
     if (warn || status === 'FAILED' || status === 'REJECTED') this.logger.warn(line);
     else this.logger.log(line);
+    this.alertOnFailure(v, status, reason, extra.brokerMessage);
     return reason ? { status, reason } : { status };
+  }
+
+  /**
+   * FAILED ⇒ one ops alert per tracker per 30 min (symbol, reason, scrubbed broker
+   * message — never credentials). A placed/filled/dry-run exit ends the streak.
+   * Never throws: an alert problem must not change the attempt's outcome.
+   */
+  private alertOnFailure(v: PendingVerdict, status: AiExitStatus, reason: string | undefined, brokerMessage: string | null | undefined): void {
+    try {
+      if (status !== 'FAILED') {
+        if (status === 'PLACED' || status === 'FILLED' || status === 'DRY_RUN') this.failureAlerts.succeeded(v.trackerId);
+        return;
+      }
+      const alert = this.failureAlerts.failed(
+        { trackerId: v.trackerId, symbol: v.symbol, reason: reason ?? null, brokerMessage },
+        Date.now(),
+      );
+      if (alert) void sendOpsAlert(alert.key, alert.text).catch(() => undefined);
+    } catch (err) {
+      this.logger.warn(`[ai-exit] failure alert could not be built: ${errText(err)}`);
+    }
   }
 
   private warnCapOnce(userId: string, now: Date): void {

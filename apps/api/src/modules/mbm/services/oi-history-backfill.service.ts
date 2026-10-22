@@ -73,6 +73,8 @@ interface RunState {
   empty: number;
   throttled: number;
   errors: number;
+  /** Backward windows Angel refused with AB1012 (= before the contract's history), counted as empty. */
+  badRequestEnd: number;
   /** Consecutive contract-level broker errors. */
   errorRun: number;
   lastError?: string;
@@ -171,7 +173,7 @@ export class OiHistoryBackfillService implements OnModuleInit {
 
   private async backfill(trigger: string): Promise<BackfillSummary> {
     const started = this.now();
-    const st: RunState = { calls: 0, rows: 0, empty: 0, throttled: 0, errors: 0, errorRun: 0 };
+    const st: RunState = { calls: 0, rows: 0, empty: 0, throttled: 0, errors: 0, errorRun: 0, badRequestEnd: 0 };
     const probe: string[] = [];
     let interval: string | null = null;
     let chunkDays = 0;
@@ -297,7 +299,7 @@ export class OiHistoryBackfillService implements OnModuleInit {
         if (!p.latestTs || x.ts > p.latestTs) p.latestTs = x.ts;
       }
     };
-    const fetch = async (from: Date, to: Date): Promise<OiPoint[] | null> => {
+    const fetch = async (from: Date, to: Date, backward = false): Promise<OiPoint[] | null> => {
       try {
         const pts = await this.oiCall(st, ref, interval, from, to);
         p.calls++;
@@ -308,6 +310,14 @@ export class OiHistoryBackfillService implements OnModuleInit {
         return pts;
       } catch (e) {
         if (e instanceof ThrottledOut || e instanceof StopRun) throw e;
+        // Prod 2026-10-23: walking back past a contract's history Angel answers AB1012 "Invalid Bad
+        // Request" (875 of 883 contracts) instead of an empty list. Going back, that is the end of the
+        // history: count it as an empty window so the 2-empty rule finishes the contract.
+        if (backward && /AB1012/.test(errText(e))) {
+          p.calls++;
+          st.badRequestEnd++;
+          return [];
+        }
         st.errors++;
         st.lastError = `${c.symbol}: ${errText(e).slice(0, 160)}`;
         // A session that cannot answer at all must not burn the whole budget one contract at a time.
@@ -340,7 +350,7 @@ export class OiHistoryBackfillService implements OnModuleInit {
         }
         const from = new Date(Math.max(cursor.getTime() - chunkMs, floor.getTime()));
         if (sessionsIn(this.calendar, from, cursor).length > 0) {
-          const pts = await fetch(from, cursor);
+          const pts = await fetch(from, cursor, true);
           if (pts === null) return;
           if (pts.length === 0) {
             p.emptyStreak++;
@@ -417,7 +427,7 @@ export class OiHistoryBackfillService implements OnModuleInit {
       ` contracts=${n} (FUT ${kinds.FUT}, CE ${kinds.CE}, PE ${kinds.PE}; expiries ${r.selection?.expiries ?? 0}; capped ${r.selection?.capped ?? 0}; walked ${r.walked})` +
       ` calls=${st.calls}/${this.cfg.maxCalls} rows=${st.rows} interval=${r.interval ?? 'none'} probe={${r.probe.join(', ')}}` +
       ` chunk=${r.chunkDays}d earliest=${earliest} per-kind={${perKind}}${done}` +
-      ` empty=${st.empty} throttled=${st.throttled} errors=${st.errors} spot=${r.spot || 'n/a'}` +
+      ` empty=${st.empty} endAB1012=${st.badRequestEnd} throttled=${st.throttled} errors=${st.errors} spot=${r.spot || 'n/a'}` +
       ` elapsed=${Math.round((this.now().getTime() - started.getTime()) / 1000)}s` +
       (st.lastError ? ` lastError="${st.lastError}"` : '')
     );

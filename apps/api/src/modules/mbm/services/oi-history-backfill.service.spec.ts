@@ -24,6 +24,8 @@ interface World {
   /** Keep only the newest N session days of any window (Angel silently truncating). */
   truncateTo?: number;
   throttle?: boolean;
+  /** Angel's prod answer (2026-10-23) for a window wholly before the contract's history. */
+  badRequestBeforeListing?: boolean;
 }
 
 function memRepo() {
@@ -86,6 +88,9 @@ function build(opts: { now?: () => Date; env?: NodeJS.ProcessEnv; world?: World 
     fetchOIWindow: jest.fn(async (_u: string, ref: { token: string }, iv: string, from: Date, to: Date): Promise<OiPoint[]> => {
       if (world.throttle) throw new AngelThrottleError('Angel One getOIData throttled');
       if (!(world.intervals ?? ['ONE_MINUTE', 'THREE_MINUTE', 'FIVE_MINUTE']).includes(iv)) return [];
+      if (world.badRequestBeforeListing && sessionsIn(cal, from, to).every((d) => d < LISTED[ref.token])) {
+        throw new Error('Angel One getOIData token=x interval=y failed: status false Invalid Bad Request errorcode=AB1012');
+      }
       let days = sessionsIn(cal, from, to).filter((d) => d >= LISTED[ref.token]);
       if (world.truncateTo) days = days.slice(-world.truncateTo);
       return days.map((d) => ({ ts: new Date(Date.parse(`${d}T03:45:00Z`)), oi: 100 }));
@@ -136,6 +141,15 @@ describe('OiHistoryBackfillService', () => {
     expect(r.line).toMatch(/contracts=4 \(FUT 2, CE 1, PE 1/);
     expect(r.line).toMatch(/earliest=2026-07-27/);
     expect(r.line).toMatch(/per-kind=\{CE: 2026-09-01.*FUT: 2026-07-27.*PE: 2026-09-01/);
+  });
+
+  it('AB1012 on a window before the history ends the walk (done), not an error; forward AB1012 stays an error', async () => {
+    const { svc, repo } = build({ world: { badRequestBeforeListing: true } });
+    const r = await svc.run('test');
+    expect(r.line).toMatch(/errors=0/);
+    expect(r.line).toMatch(/endAB1012=[1-9]/);
+    expect(repo.prog.get('F1|ONE_MINUTE')).toMatchObject({ done: true });
+    expect(repo.prog.get('F1|ONE_MINUTE')?.earliestTs).toEqual(new Date('2026-07-27T03:45:00Z'));
   });
 
   it('uses the preferred FIVE_MINUTE (the default) when it answers, finest-first otherwise', async () => {

@@ -3,6 +3,7 @@ import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.serv
 import { SessionClock } from '../../market-hub/session-clock';
 import type { ChainSnapshotRow } from '../domain/chain-snapshot';
 import { parseMbmConfig } from '../mbm.config';
+import { MbmCaptureLane } from './mbm-capture-lane';
 import { CALL_GAP_MS, QUOTE_BATCH_MAX } from './mbm-chain-capture.service';
 import { MAX_ON_DEMAND_SYMBOLS, MbmStockChainCaptureService } from './mbm-stock-chain-capture.service';
 
@@ -21,7 +22,7 @@ const BOOK: Record<string, [number, number, number, number]> = {
   NOCASH: [100, 5, 40, 150],
 };
 
-function build(symbols: string[], opts: { nowIso?: string; env?: NodeJS.ProcessEnv } = {}) {
+function build(symbols: string[], opts: { nowIso?: string; env?: NodeJS.ProcessEnv; lane?: MbmCaptureLane } = {}) {
   const repo = {
     expiries: jest.fn(async (name: string) => (name === 'BADSYM' ? [] : ['2026-10-27', '2026-11-24'])),
     contracts: jest.fn(async (name: string, expiry: string) => {
@@ -73,6 +74,7 @@ function build(symbols: string[], opts: { nowIso?: string; env?: NodeJS.ProcessE
     repo as never,
     watchlist,
     sleep,
+    opts.lane,
   );
   const warn = jest.fn();
   (svc as unknown as { logger: { warn: jest.Mock; debug: jest.Mock } }).logger = { warn, debug: jest.fn() };
@@ -80,6 +82,31 @@ function build(symbols: string[], opts: { nowIso?: string; env?: NodeJS.ProcessE
 }
 
 describe('MbmStockChainCaptureService', () => {
+  it('index first: waits for a running index tick before every broker call', async () => {
+    const lane = new MbmCaptureLane();
+    const { svc, fns } = build(['RELIANCE'], { lane });
+    lane.enterIndex();
+    const p = svc.onTick();
+    await new Promise((r) => setImmediate(r));
+    expect(fns.fetchQuotes).not.toHaveBeenCalled();
+    lane.leaveIndex();
+    expect((await p).stored).toBe(1);
+  });
+
+  it('an overlapping tick is logged (rate-limited), not silent', async () => {
+    const { svc, fns, warn } = build(['RELIANCE']);
+    let release!: () => void;
+    const impl = fns.fetchQuotes.getMockImplementation()!;
+    fns.fetchQuotes.mockImplementationOnce((...a: unknown[]) => new Promise((res) => (release = () => res(impl(...(a as [string, never[]]))))));
+    const first = svc.onTick();
+    await new Promise((r) => setImmediate(r));
+    expect((await svc.onTick()).ran).toBe(false);
+    expect((await svc.onTick()).ran).toBe(false);
+    expect(warn.mock.calls.filter((c) => /still running/.test(c[0]))).toHaveLength(1);
+    release();
+    await first;
+  });
+
   it('3 stocks: 1 spot batch + 3 packed leg batches + 3 greek calls, nearest expiry ATM ±10', async () => {
     const { svc, repo, fns, sleep, touched } = build(['RELIANCE', 'TCS', 'INFY']);
     const r = await svc.onTick();

@@ -7,6 +7,7 @@ import { SessionClock } from '../market-hub/session-clock';
 import { MBM_CONFIG, parseMbmConfig } from './mbm.config';
 import { MbmBarsRepository } from './repositories/mbm-bars.repository';
 import { MbmChainRepository } from './repositories/mbm-chain.repository';
+import { MbmCaptureLane } from './services/mbm-capture-lane';
 import { MbmChainCaptureService } from './services/mbm-chain-capture.service';
 import { MBM_CALENDAR, MBM_NOW, MbmBarRefresherService } from './services/mbm-bar-refresher.service';
 import { MBM_FETCH, MbmClient } from './services/mbm-client.service';
@@ -33,6 +34,7 @@ import { MbmStockChainCaptureService } from './services/mbm-stock-chain-capture.
     MbmBarsRepository,
     MbmBarRefresherService,
     MbmChainRepository,
+    MbmCaptureLane,
     MbmChainCaptureService,
     ChainWatchlistService,
     { provide: CHAIN_WATCHLIST, useExisting: ChainWatchlistService },

@@ -14,6 +14,8 @@ import { STOCK_STRIKES_AROUND, normaliseUnderlying, packBatches, stockChainTick,
 import { MBM_CONFIG, type MbmConfig } from '../mbm.config';
 import { MbmChainRepository } from '../repositories/mbm-chain.repository';
 import { MBM_CALENDAR, MBM_NOW } from './mbm-bar-refresher.service';
+import { WarnLimiter } from '../../../common/utils/warn-limiter';
+import { MbmCaptureLane } from './mbm-capture-lane';
 import { CALL_GAP_MS, MBM_CHAIN_SLEEP, QUOTE_BATCH_MAX } from './mbm-chain-capture.service';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -64,6 +66,7 @@ export class MbmStockChainCaptureService {
   private readonly baselineCache = new Map<string, { day: string; value: Map<string, number> | null }>();
   private readonly loggedSkips = new Set<string>();
   private loggedSkipsDay = '';
+  private readonly limiter = new WarnLimiter(30 * 60_000);
 
   constructor(
     @Inject(MBM_CONFIG) private readonly config: MbmConfig,
@@ -73,6 +76,7 @@ export class MbmStockChainCaptureService {
     private readonly repo: MbmChainRepository,
     @Inject(CHAIN_WATCHLIST) private readonly watchlist: ChainWatchlist,
     @Optional() @Inject(MBM_CHAIN_SLEEP) sleep?: (ms: number) => Promise<void>,
+    @Optional() private readonly lane?: MbmCaptureLane,
   ) {
     this.sleep = sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
@@ -88,7 +92,10 @@ export class MbmStockChainCaptureService {
     if (!this.active) return idle('NONE');
     const tick = stockChainTick(this.calendar, this.now());
     if (tick === 'NONE') return idle(tick);
-    if (this.running) return idle(tick);
+    if (this.running) {
+      this.limiter.warn(this.logger, 'overlap', `[mbm] per-symbol chain capture ${tick} tick skipped: the previous one is still running`);
+      return idle(tick);
+    }
     this.running = true;
     const counter = { calls: 0 };
     const skipped = new Set<string>();
@@ -157,6 +164,8 @@ export class MbmStockChainCaptureService {
     const startedAt = this.now();
     const day = istYmd(startedAt);
     const call = async <T>(fn: () => Promise<T>): Promise<T> => {
+      // Index first: while the index chain tick runs, stocks wait (they never delay the index).
+      await this.lane?.whenIndexIdle();
       if (counter.calls > 0) await this.sleep(CALL_GAP_MS);
       counter.calls++;
       return fn();

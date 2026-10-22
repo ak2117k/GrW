@@ -5,7 +5,8 @@ import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.serv
 import { SessionClock } from '../../market-hub/session-clock';
 import type { ChainSnapshotRow } from '../domain/chain-snapshot';
 import { parseMbmConfig } from '../mbm.config';
-import { CALL_GAP_MS, MbmChainCaptureService, QUOTE_BATCH_MAX } from './mbm-chain-capture.service';
+import { MbmCaptureLane } from './mbm-capture-lane';
+import { CALL_GAP_MS, CALL_TIMEOUT_MS, MbmChainCaptureService, QUOTE_BATCH_MAX, THROTTLE_RETRY_MS } from './mbm-chain-capture.service';
 
 const cal = new SessionClock({ holidays: MARKET_HOLIDAYS });
 const TICK = '2026-10-19T04:00:40Z'; // Mon 09:30:40 IST
@@ -20,7 +21,7 @@ const contractsOf = (expiry: string) =>
     { token: `${expiry}:${s}:PE`, strike: s, optionType: 'PE' as const },
   ]);
 
-function build(nowIso = TICK, env: NodeJS.ProcessEnv = ON) {
+function build(nowIso = TICK, env: NodeJS.ProcessEnv = ON, extra: { timer?: (ms: number) => Promise<void>; lane?: MbmCaptureLane; now?: () => Date } = {}) {
   const repo = {
     expiries: jest.fn().mockResolvedValue(EXPIRIES),
     contracts: jest.fn(async (_n: string, e: string) => contractsOf(e)),
@@ -55,7 +56,8 @@ function build(nowIso = TICK, env: NodeJS.ProcessEnv = ON) {
     },
   });
   const sleep = jest.fn().mockResolvedValue(undefined);
-  const svc = new MbmChainCaptureService(parseMbmConfig(env), cal, () => new Date(nowIso), feeds as never, repo as never, sleep);
+  const never = () => new Promise<void>(() => undefined);
+  const svc = new MbmChainCaptureService(parseMbmConfig(env), cal, extra.now ?? (() => new Date(nowIso)), feeds as never, repo as never, sleep, extra.lane, extra.timer ?? never);
   return { svc, repo, fns, sleep, touched };
 }
 
@@ -121,11 +123,17 @@ describe('MbmChainCaptureService', () => {
     expect((await build(TICK, { ...ON, MBM_ENABLED: 'off' }).svc.onTick()).stored).toBe(2); // independent of MBM_ENABLED
   });
 
-  it('a throttled quote batch skips the whole tick (logged, nothing stored, never throws); the next tick runs', async () => {
-    const { svc, repo, fns } = build();
-    fns.fetchQuotes.mockImplementationOnce(fns.fetchQuotes.getMockImplementation()!).mockRejectedValueOnce(new AngelThrottleError('AB1004'));
+  it('a quote batch throttled 3 times (1 + 2 retries) skips the whole tick (counted, never throws); the next tick runs', async () => {
+    const { svc, repo, fns, sleep } = build();
+    fns.fetchQuotes
+      .mockImplementationOnce(fns.fetchQuotes.getMockImplementation()!)
+      .mockRejectedValueOnce(new AngelThrottleError('AB1004'))
+      .mockRejectedValueOnce(new AngelThrottleError('AB1004'))
+      .mockRejectedValueOnce(new AngelThrottleError('AB1004'));
     const r = await svc.onTick();
-    expect(r).toMatchObject({ ran: true, stored: 0, error: 'AB1004' });
+    expect(r).toMatchObject({ ran: true, stored: 0, calls: 4, error: 'AB1004' });
+    expect(sleep.mock.calls.map((c) => c[0])).toEqual([CALL_GAP_MS, THROTTLE_RETRY_MS, CALL_GAP_MS, 2 * THROTTLE_RETRY_MS, CALL_GAP_MS]);
+    expect(svc.skipCounts('2026-10-19', 'NIFTY')).toEqual({ throttled: 1 });
     expect(repo.insert).not.toHaveBeenCalled();
     expect(fns.fetchOptionGreeks).not.toHaveBeenCalled();
     expect((await svc.onTick()).stored).toBe(2);
@@ -208,9 +216,11 @@ describe('MbmChainCaptureService', () => {
     expect(ra).toMatchObject({ ran: true, stored: 2, error: 'no NIFTY option expiries in the instrument master' });
 
     const b = build(TICK, both);
-    b.fns.fetchQuotes.mockRejectedValueOnce(new AngelThrottleError('AB1004'));
-    expect(await b.svc.onTick()).toMatchObject({ stored: 0, calls: 1, error: 'AB1004' });
-    expect(b.fns.fetchQuotes).toHaveBeenCalledTimes(1);
+    const thr = new AngelThrottleError('AB1004');
+    b.fns.fetchQuotes.mockRejectedValueOnce(thr).mockRejectedValueOnce(thr).mockRejectedValueOnce(thr);
+    expect(await b.svc.onTick()).toMatchObject({ stored: 0, calls: 3, error: 'AB1004' });
+    expect(b.fns.fetchQuotes).toHaveBeenCalledTimes(3);
+    expect(b.svc.skipCounts('2026-10-19', 'BANKNIFTY')).toEqual({ 'not-tried': 1 });
   });
 
   it('day summary: ticks stored vs 76 per instrument, WARN when short, never throws', async () => {
@@ -226,6 +236,114 @@ describe('MbmChainCaptureService', () => {
     await expect(svc.daySummary()).resolves.toEqual([]);
     expect(await build('2026-10-18T10:10:00Z').svc.daySummary()).toEqual([]); // Sunday
     expect(await build('2026-10-19T10:10:00Z', { MBM_FEED_USER_ID: 'owner' }).svc.daySummary()).toEqual([]); // capture off
+  });
+
+  describe('no silent skips: every due tick that stores nothing is counted and logged', () => {
+    const DAY = '2026-10-19';
+
+    it('a throttle that clears on retry stores the tick (retry after 3 s), no skip counted', async () => {
+      const { svc, fns, sleep } = build();
+      fns.fetchQuotes.mockRejectedValueOnce(new AngelThrottleError('AB1004'));
+      expect(await svc.onTick()).toEqual({ ran: true, stored: 2, calls: 6 });
+      expect(sleep.mock.calls[0]).toEqual([THROTTLE_RETRY_MS]);
+      expect(svc.skipCounts(DAY, 'NIFTY')).toEqual({});
+    });
+
+    it('a broker call that never answers (session re-login wait) times out instead of eating later ticks', async () => {
+      let fire!: () => void;
+      const timer = jest.fn(() => new Promise<void>((r) => (fire = r)));
+      const both = { ...ON, MBM_CHAIN_CAPTURE_INSTRUMENTS: 'NIFTY,BANKNIFTY' };
+      const { svc, fns } = build(TICK, both, { timer });
+      fns.fetchQuotes.mockImplementationOnce(() => new Promise(() => undefined)); // hangs forever
+      const first = svc.onTick();
+      await new Promise((r) => setImmediate(r));
+      expect(timer).toHaveBeenCalledWith(CALL_TIMEOUT_MS);
+      fire();
+      const r = await first;
+      expect(r).toMatchObject({ ran: true, stored: 0, error: expect.stringMatching(/NIFTY quote batch 1: no answer/) });
+      expect(svc.skipCounts(DAY, 'NIFTY')).toEqual({ timeout: 1 });
+      expect(svc.skipCounts(DAY, 'BANKNIFTY')).toEqual({ 'not-tried': 1 });
+      // the single-flight guard is released: the next tick runs and stores
+      expect(await svc.onTick()).toMatchObject({ ran: true, stored: 4 });
+    });
+
+    it('an overlapping tick is counted as overlap; one stuck past 4 min is overtaken (stuck)', async () => {
+      let clock = new Date(TICK);
+      const { svc, fns } = build(TICK, ON, { now: () => clock });
+      let release!: () => void;
+      const impl = fns.fetchQuotes.getMockImplementation()!;
+      fns.fetchQuotes.mockImplementationOnce((...a: unknown[]) => new Promise((res) => (release = () => res(impl(...(a as [string, never[]]))))));
+      const first = svc.onTick();
+      await new Promise((r) => setImmediate(r));
+      clock = new Date(clock.getTime() + 5 * 60_000 - 1000); // 4 min 59 s later: past TICK_STALE_MS
+      const second = await svc.onTick();
+      expect(second.ran).toBe(true); // stuck → overtaken
+      expect(svc.skipCounts(DAY, '*')).toEqual({ stuck: 1 });
+      release();
+      await first;
+
+      const o = build();
+      let rel!: () => void;
+      const impl2 = o.fns.fetchQuotes.getMockImplementation()!;
+      o.fns.fetchQuotes.mockImplementationOnce((...a: unknown[]) => new Promise((res) => (rel = () => res(impl2(...(a as [string, never[]]))))));
+      const p = o.svc.onTick();
+      await new Promise((r) => setImmediate(r));
+      expect(await o.svc.onTick()).toEqual({ ran: false, stored: 0, calls: 0, reason: 'overlap' });
+      expect(o.svc.skipCounts(DAY, '*')).toEqual({ overlap: 1 });
+      rel();
+      await p;
+    });
+
+    it('no quoted leg, no spot, no expiries and duplicate rows are each counted', async () => {
+      const a = build();
+      a.fns.fetchQuotes.mockImplementation(async () => new Map());
+      expect(await a.svc.onTick()).toMatchObject({ stored: 0, error: 'NIFTY: no expiry had a quoted leg' });
+      expect(a.svc.skipCounts(DAY, 'NIFTY')).toEqual({ 'no-legs': 3 }); // 2 expiries + the instrument
+
+      const b = build();
+      b.repo.latestClose.mockResolvedValue(null);
+      b.fns.fetchCandleWindow.mockResolvedValue([]);
+      await b.svc.onTick();
+      const c = build();
+      c.repo.expiries.mockResolvedValue([]);
+      await c.svc.onTick();
+      const d = build();
+      d.repo.insert.mockResolvedValue(1);
+      expect((await d.svc.onTick()).stored).toBe(1);
+      expect([b.svc.skipCounts(DAY, 'NIFTY'), c.svc.skipCounts(DAY, 'NIFTY'), d.svc.skipCounts(DAY, 'NIFTY')]).toEqual([
+        { 'no-spot': 1 },
+        { 'no-expiries': 1 },
+        { duplicate: 1 },
+      ]);
+    });
+
+    it('the 15:40 summary prints the skip counts', async () => {
+      let clock = new Date(TICK);
+      const { svc, fns, repo } = build(TICK, ON, { now: () => clock });
+      const thr = new AngelThrottleError('AB1004');
+      fns.fetchQuotes.mockRejectedValueOnce(thr).mockRejectedValueOnce(thr).mockRejectedValueOnce(thr);
+      await svc.onTick();
+      await svc.onTick();
+      clock = new Date('2026-10-19T10:10:00Z');
+      repo.captureCounts.mockResolvedValue([{ instrument: 'NIFTY', ticks: 1, rows: 2, newest: new Date() }]);
+      expect(await svc.daySummary()).toEqual([
+        '[mbm] chain capture 2026-10-19 NIFTY: 1/76 ticks, 2 rows stored (this process: 1 ok, 1 failed; skips: throttled 1; last error: AB1004)',
+      ]);
+    });
+
+    it('holds the capture lane for the whole index tick', async () => {
+      const lane = new MbmCaptureLane();
+      const { svc, fns } = build(TICK, ON, { lane });
+      const seen: boolean[] = [];
+      const impl = fns.fetchQuotes.getMockImplementation()!;
+      fns.fetchQuotes.mockImplementation(async (...a: unknown[]) => {
+        seen.push(lane.indexBusy);
+        return impl(...(a as [string, never[]]));
+      });
+      await svc.onTick();
+      expect(seen).toEqual([true, true, true]);
+      expect(lane.indexBusy).toBe(false);
+    });
   });
 
   it('never logs in: only the per-user fetch methods are used, and the source has no login path', () => {

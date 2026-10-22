@@ -2774,6 +2774,7 @@ model MbmChainSnapshot {
   capturedAt DateTime @map("captured_at") @db.Timestamptz(6) // when the quotes returned, UTC, whole seconds
   expiry     DateTime @db.Date
   spot       Float
+  fut        Float? // nearest-month index future LTP at the same tick (null before 2026-10-22 / not quoted)
   pcr        Float? // Σ PE OI / Σ CE OI over the captured strikes
   maxPain    Float?   @map("max_pain")
   callWall   Float?   @map("call_wall") // strike with the max CE OI

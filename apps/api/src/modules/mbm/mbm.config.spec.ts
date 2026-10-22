@@ -4,7 +4,7 @@ import { MBM_UNIVERSE, universeFor } from './mbm-universe';
 describe('parseMbmConfig', () => {
   it('defaults to off / NIFTY / http://mbm:5100 / first auto-exit user', () => {
     const c = parseMbmConfig({ AI_AUTO_EXIT_USER_IDS: ' u1 , u2' });
-    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', chainCapture: 'off', chainCaptureStocks: 'off', problems: [] });
+    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', chainCapture: 'off', chainCaptureStocks: 'off', chainCaptureInstruments: ['NIFTY', 'BANKNIFTY'], problems: [] });
   });
 
   it('parses explicit values, upper-cases and de-duplicates instruments, strips the trailing slash', () => {
@@ -109,6 +109,16 @@ describe('parseMbmConfig', () => {
     expect(bad.chainCaptureStocks).toBe('off');
     expect(bad.problems).toEqual(['MBM_CHAIN_CAPTURE_STOCKS=yes is not off|on — using off']);
     expect(parseMbmConfig({ MBM_CHAIN_CAPTURE_STOCKS: 'on' }).problems.join()).toMatch(/per-symbol chain capture will not run/);
+  });
+
+  it('parses MBM_CHAIN_CAPTURE_INSTRUMENTS: default NIFTY,BANKNIFTY; unknown names ignored with a problem', () => {
+    expect(parseMbmConfig({}).chainCaptureInstruments).toEqual(['NIFTY', 'BANKNIFTY']);
+    expect(parseMbmConfig({ MBM_CHAIN_CAPTURE_INSTRUMENTS: ' nifty ' }).chainCaptureInstruments).toEqual(['NIFTY']);
+    const bad = parseMbmConfig({ MBM_CHAIN_CAPTURE_INSTRUMENTS: 'FINNIFTY,banknifty' });
+    expect(bad.chainCaptureInstruments).toEqual(['BANKNIFTY']);
+    expect(bad.problems).toEqual(['MBM_CHAIN_CAPTURE_INSTRUMENTS: FINNIFTY is not one of NIFTY|BANKNIFTY — ignored']);
+    expect(parseMbmConfig({ MBM_CHAIN_CAPTURE_INSTRUMENTS: 'X' }).chainCaptureInstruments).toEqual(['NIFTY', 'BANKNIFTY']);
+    expect(mbmBootLine(parseMbmConfig({ MBM_CHAIN_CAPTURE: 'on', MBM_FEED_USER_ID: 'o' }))).toContain('chainCapture=on(NIFTY,BANKNIFTY)');
   });
 });
 

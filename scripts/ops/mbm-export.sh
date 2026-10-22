@@ -38,7 +38,7 @@ query() { # $1 table, $2 utc_from, $3 utc_to
     oi_wall_snapshots) echo "SELECT id, \"capturedAt\" AS captured_at_utc, symbol, expiry, \"callWall\" AS call_wall, \"putWall\" AS put_wall, \"callWallOi\" AS call_wall_oi, \"putWallOi\" AS put_wall_oi FROM oi_wall_snapshots WHERE \"capturedAt\" >= '$2' AND \"capturedAt\" < '$3' ORDER BY \"capturedAt\", id" ;;
     option_chain_snapshots) echo "SELECT id, \"capturedAt\" AS captured_at_utc, underlying, \"expiryDate\" AS expiry_date, \"spotPrice\" AS spot_price, source, \"strikeCount\" AS strike_count, \"chainJson\" AS chain_json FROM option_chain_snapshots WHERE \"capturedAt\" >= '$2' AND \"capturedAt\" < '$3' ORDER BY \"capturedAt\", id" ;;
     # timestamptz (not Prisma's zone-less timestamp): the window is pinned to UTC with +00.
-    mbm_chain_snapshots) echo "SELECT id, captured_at AS captured_at_utc, instrument, expiry, spot, pcr, max_pain, call_wall, put_wall, strikes FROM mbm_chain_snapshots WHERE captured_at >= '$2+00' AND captured_at < '$3+00' ORDER BY captured_at, id" ;;
+    mbm_chain_snapshots) echo "SELECT id, captured_at AS captured_at_utc, instrument, expiry, spot, pcr, max_pain, call_wall, put_wall, strikes, fut FROM mbm_chain_snapshots WHERE captured_at >= '$2+00' AND captured_at < '$3+00' ORDER BY captured_at, id" ;;
   esac
 }
 rows_in() { local n; n=$(gzip -dc "$1" | wc -l); echo $(( n > 0 ? n - 1 : 0 )); }

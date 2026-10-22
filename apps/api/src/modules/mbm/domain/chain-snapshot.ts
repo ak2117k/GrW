@@ -80,7 +80,12 @@ export interface ChainSnapshotRow {
   callWall: number | null;
   putWall: number | null;
   strikes: ChainStrikeRow[];
+  /** Nearest-month index future LTP at the same tick; null/absent when not listed, not quoted, or an older row. */
+  fut?: number | null;
 }
+
+/** Capture ticks in a full session: 09:15, 09:20, …, 15:30 IST. */
+export const SESSION_TICKS = (CAPTURE_TO_MIN - CAPTURE_FROM_MIN) / 5 + 1;
 
 /** One option contract of the expiry (from the instrument master). */
 export interface CaptureContract {

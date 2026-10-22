@@ -22,6 +22,7 @@ const store: NightReportStore = {
   dailyCandles: async () => ({ newest: null, countAtDay: 0 }),
   newestMbmPredictionAt: async () => null,
   newestMbmChainAt: async () => null,
+  mbmChainCaptures: async () => [],
   mbmPredictionsBetween: async () => [],
   lastOvernightReviewAt: async () => null,
 };

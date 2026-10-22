@@ -41,6 +41,7 @@ import { SELF_REVIEW_REPORT, type SelfReviewReportSource } from '../../self-revi
 import { STOCK_MOVE_WATCH, type BigMoveWatchSource } from '../../stock-move/stock-move.service';
 import { TRADE_SETUPS_REPORT, type TradeSetupsReportSource } from '../../trade-setup/services/trade-setup.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+import { SESSION_TICKS } from '../../mbm/domain/chain-snapshot';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
@@ -307,8 +308,14 @@ export class NightReportService {
         return { status: freshness(at, mbmSince), at, detail: since(at, 'NIFTY prediction') };
       }),
       item('MBM chain snapshots', async () => {
+        // Count, not just freshness: a capture that stored 3 of 76 ticks is not "ok" (silent-absence rule).
+        const dayStart = istMidnightOf(lastDay);
+        const counts = await this.store.mbmChainCaptures(dayStart, new Date(dayStart.getTime() + DAY_MS));
         const at = await this.store.newestMbmChainAt();
-        return { status: freshness(at, mbmSince), at, detail: since(at, 'NIFTY chain capture') };
+        const nifty = counts.find((c) => c.instrument === 'NIFTY')?.ticks ?? 0;
+        const status: JobItem['status'] = nifty >= SESSION_TICKS * 0.9 ? 'ok' : nifty > 0 ? 'stale' : at ? 'stale' : 'missing';
+        const perInst = counts.map((c) => `${c.instrument} ${c.ticks}/${SESSION_TICKS} ticks (${c.rows} rows)`).join(', ');
+        return { status, at, detail: `${lastDay}: ${perInst || 'no chain capture'}; ${since(at, 'capture')}` };
       }),
       item('Sentinel overnight review', async () => {
         const at = await this.store.lastOvernightReviewAt(userId);

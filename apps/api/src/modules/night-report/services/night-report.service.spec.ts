@@ -55,6 +55,7 @@ function fakeStore(over: Partial<NightReportStore> = {}): NightReportStore & { c
     dailyCandles: async () => ({ newest: new Date('2026-10-18T18:30:00Z'), countAtDay: 212 }),
     newestMbmPredictionAt: async () => new Date('2026-10-19T09:55:00Z'),
     newestMbmChainAt: async () => null,
+    mbmChainCaptures: async () => [],
     mbmPredictionsBetween: async (instrument, from, to) => {
       calls.push(`mbm:${instrument}:${from.toISOString()}:${to.toISOString()}`);
       return [
@@ -143,6 +144,26 @@ describe('NightReportService', () => {
     expect(r.summary.newsOnPositions).toBe(0);
     // One unreadable job is a row, not a failed section.
     expect(ok(r.jobs).find((j) => j.name === 'MBM chain snapshots')).toMatchObject({ status: 'missing', detail: 'read failed: timeout' });
+  });
+
+  it('MBM chain snapshots: ok only with ≥90% of the 76 NIFTY ticks on the last session; a thin day is stale', async () => {
+    const ranges: string[] = [];
+    const job = async (ticks: number) => {
+      const store = fakeStore({
+        newestMbmChainAt: async () => new Date('2026-10-19T10:00:40Z'),
+        mbmChainCaptures: async (from, to) => {
+          ranges.push(`${from.toISOString()}|${to.toISOString()}`);
+          return [{ instrument: 'BANKNIFTY', ticks: 76, rows: 152 }, { instrument: 'NIFTY', ticks, rows: ticks * 2 }];
+        },
+      });
+      return ok((await service(store).build('u1', NOW)).jobs).find((j) => j.name === 'MBM chain snapshots')!;
+    };
+    const full = await job(76);
+    expect(full).toMatchObject({ status: 'ok' });
+    expect(full.detail).toBe('2026-10-19: BANKNIFTY 76/76 ticks (152 rows), NIFTY 76/76 ticks (152 rows); newest capture 2026-10-19T10:00:40.000Z');
+    expect(ranges[0]).toBe('2026-10-18T18:30:00.000Z|2026-10-19T18:30:00.000Z');
+    expect((await job(20)).status).toBe('stale');
+    expect((await job(0)).status).toBe('stale'); // rows exist from earlier days only
   });
 
   it('a failing positions section still lets news render unmatched', async () => {

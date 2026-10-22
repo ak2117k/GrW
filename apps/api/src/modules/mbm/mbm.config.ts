@@ -38,6 +38,11 @@ export interface MbmConfig {
    * every 15 min 09:15–15:15 IST + a 15:30 EOD snapshot. Independent of MBM_ENABLED; needs `feedUserId`.
    */
   chainCaptureStocks: 'off' | 'on';
+  /**
+   * Indices the 5-min chain capture covers (MBM_CHAIN_CAPTURE_INSTRUMENTS, default NIFTY,BANKNIFTY). Only
+   * index underlyings whose 1m bar the refresher stores are accepted (the stored close centres the window).
+   */
+  chainCaptureInstruments: string[];
   /** Human-readable fallbacks taken while parsing; logged once at boot. */
   problems: string[];
 }
@@ -46,6 +51,8 @@ export const MBM_CONFIG = Symbol('MBM_CONFIG');
 
 const MODES: readonly MbmMode[] = ['off', 'observe', 'on'];
 const DEFAULT_URL = 'http://mbm:5100';
+/** Indices the chain capture accepts (and its default): each has an index token AND a stored 1m bar series. */
+export const CHAIN_CAPTURE_INDICES = ['NIFTY', 'BANKNIFTY'] as const;
 
 const csv = (raw: string | undefined): string[] =>
   String(raw ?? '')
@@ -92,6 +99,13 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
   if (chainCaptureStocks === 'on' && !feedUserId) {
     problems.push('MBM_CHAIN_CAPTURE_STOCKS=on but no MBM_FEED_USER_ID / AI_AUTO_EXIT_USER_IDS — the per-symbol chain capture will not run');
   }
+  const rawCaptureInst = csv(env.MBM_CHAIN_CAPTURE_INSTRUMENTS).map((s) => s.toUpperCase());
+  const accepted = CHAIN_CAPTURE_INDICES as readonly string[];
+  const chainCaptureInstruments = [...new Set(rawCaptureInst.filter((s) => accepted.includes(s)))];
+  for (const s of rawCaptureInst) {
+    if (!accepted.includes(s)) problems.push(`MBM_CHAIN_CAPTURE_INSTRUMENTS: ${s} is not one of ${accepted.join('|')} — ignored`);
+  }
+  if (chainCaptureInstruments.length === 0) chainCaptureInstruments.push(...CHAIN_CAPTURE_INDICES);
   if (mode !== 'off' && !feedUserId) {
     problems.push('no MBM_FEED_USER_ID and AI_AUTO_EXIT_USER_IDS is empty — the bar refresher will not run');
   }
@@ -110,7 +124,7 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
   const packet = consumer('MBM_PACKET');
   const exitShadow = consumer('MBM_EXIT_SHADOW');
 
-  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, chainCapture, chainCaptureStocks, problems };
+  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, chainCapture, chainCaptureStocks, chainCaptureInstruments, problems };
 }
 
 /** The entry gate's effective mode: MBM_ENABLED=off makes every consumer inert (plan M3, global rule). */
@@ -122,6 +136,7 @@ export function mbmEntryGateMode(c: Pick<MbmConfig, 'mode' | 'entryGate'> | null
 export function mbmBootLine(c: MbmConfig): string {
   return (
     `[mbm] mode=${c.mode} instruments=${c.instruments.join(',')} url=${c.url} feedUser=${c.feedUserId ?? 'none'}` +
-    ` chainCapture=${c.chainCapture} chainCaptureStocks=${c.chainCaptureStocks}`
+    ` chainCapture=${c.chainCapture}${c.chainCapture === 'on' ? `(${c.chainCaptureInstruments.join(',')})` : ''}` +
+    ` chainCaptureStocks=${c.chainCaptureStocks}`
   );
 }

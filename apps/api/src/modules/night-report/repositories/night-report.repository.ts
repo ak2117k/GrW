@@ -58,6 +58,8 @@ export interface NightReportStore {
   dailyCandles(day: Date): Promise<DailyCandleFreshness>;
   newestMbmPredictionAt(): Promise<Date | null>;
   newestMbmChainAt(): Promise<Date | null>;
+  /** Per instrument: distinct chain-capture ticks and rows in [from, to). */
+  mbmChainCaptures(from: Date, to: Date): Promise<Array<{ instrument: string; ticks: number; rows: number }>>;
   /** One instrument's MBM predictions with `asOf` in [from, to), oldest first. */
   mbmPredictionsBetween(instrument: string, from: Date, to: Date): Promise<MbmPredictionRow[]>;
   lastOvernightReviewAt(userId: string): Promise<Date | null>;
@@ -162,6 +164,13 @@ export class NightReportRepository implements NightReportStore {
   async newestMbmChainAt(): Promise<Date | null> {
     const r = await this.prisma.mbmChainSnapshot.findFirst({ where: { instrument: 'NIFTY' }, orderBy: { capturedAt: 'desc' }, select: { capturedAt: true } });
     return r?.capturedAt ?? null;
+  }
+
+  mbmChainCaptures(from: Date, to: Date): Promise<Array<{ instrument: string; ticks: number; rows: number }>> {
+    return this.prisma.$queryRaw<Array<{ instrument: string; ticks: number; rows: number }>>`
+      SELECT instrument, COUNT(DISTINCT captured_at)::int AS ticks, COUNT(*)::int AS rows
+      FROM mbm_chain_snapshots WHERE captured_at >= ${from} AND captured_at < ${to}
+      GROUP BY instrument ORDER BY instrument`;
   }
 
   mbmPredictionsBetween(instrument: string, from: Date, to: Date): Promise<MbmPredictionRow[]> {

@@ -12,7 +12,7 @@ const TICK = '2026-10-19T04:00:40Z'; // Mon 09:30:40 IST
 const EXPIRIES = ['2026-10-20', '2026-10-27', '2026-11-03'];
 const STRIKES = Array.from({ length: 81 }, (_, i) => 23000 + i * 50); // 23000 … 27000
 const INDEX_TOKEN = '99926000';
-const ON = { MBM_CHAIN_CAPTURE: 'on', MBM_FEED_USER_ID: 'owner' };
+const ON = { MBM_CHAIN_CAPTURE: 'on', MBM_FEED_USER_ID: 'owner', MBM_CHAIN_CAPTURE_INSTRUMENTS: 'NIFTY' };
 
 const contractsOf = (expiry: string) =>
   STRIKES.flatMap((s) => [
@@ -27,6 +27,8 @@ function build(nowIso = TICK, env: NodeJS.ProcessEnv = ON) {
     latestClose: jest.fn().mockResolvedValue(25012),
     insert: jest.fn(async (rows: ChainSnapshotRow[]) => rows.length),
     strikesBefore: jest.fn().mockResolvedValue(null),
+    nearestFutureToken: jest.fn().mockResolvedValue(null),
+    captureCounts: jest.fn().mockResolvedValue([]),
   };
   const quoteFn = jest.fn(async (_u: string, refs: Array<{ token: string }>) => {
     const m = new Map<string, { token: string; ltp: number; oi?: number; volume: number }>();
@@ -174,6 +176,56 @@ describe('MbmChainCaptureService', () => {
     expect((await svc.onTick()).ran).toBe(false);
     release();
     expect((await first).stored).toBe(2);
+  });
+
+  it('NIFTY + BANKNIFTY: the future rides in the quote batches (no extra call), each instrument stored with fut', async () => {
+    const { svc, repo, fns } = build(TICK, { ...ON, MBM_CHAIN_CAPTURE_INSTRUMENTS: 'NIFTY,BANKNIFTY' });
+    repo.nearestFutureToken.mockImplementation(async (n: string) => `${n}-FUT`);
+    const impl = fns.fetchQuotes.getMockImplementation()!;
+    fns.fetchQuotes.mockImplementation(async (u: string, refs: Array<{ token: string }>) => {
+      const m = (await impl(u, refs)) as Map<string, { token: string; ltp: number; volume: number }>;
+      for (const r of refs) if (r.token.endsWith('-FUT')) m.set(r.token, { token: r.token, ltp: 25100, volume: 9 });
+      return m;
+    });
+    const r = await svc.onTick();
+    // per instrument: 1 index + 1 future + 124 legs = 126 tokens → 3 batches; + 2 greek calls.
+    expect(r).toEqual({ ran: true, stored: 4, calls: 10 });
+    expect(fns.fetchQuotes.mock.calls.map((c) => c[1].length)).toEqual([50, 50, 26, 50, 50, 26]);
+    expect(fns.fetchQuotes.mock.calls[0][1][1]).toEqual({ token: 'NIFTY-FUT', exchange: 'NFO' });
+    expect(fns.fetchQuotes.mock.calls[3][1][0]).toEqual({ token: '99926009', exchange: 'NSE' });
+    expect(fns.fetchOptionGreeks.mock.calls.map((c) => c[1])).toEqual(['NIFTY', 'NIFTY', 'BANKNIFTY', 'BANKNIFTY']);
+    const rows: ChainSnapshotRow[] = repo.insert.mock.calls.flatMap((c) => c[0]);
+    expect(rows.map((x) => [x.instrument, x.fut])).toEqual([['NIFTY', 25100], ['NIFTY', 25100], ['BANKNIFTY', 25100], ['BANKNIFTY', 25100]]);
+    await svc.onTick();
+    expect(repo.nearestFutureToken).toHaveBeenCalledTimes(2); // once per instrument per day
+  });
+
+  it('one instrument failing does not cost the other; a throttle leaves the rest of the tick', async () => {
+    const both = { ...ON, MBM_CHAIN_CAPTURE_INSTRUMENTS: 'NIFTY,BANKNIFTY' };
+    const a = build(TICK, both);
+    a.repo.expiries.mockImplementation(async (n: string) => (n === 'NIFTY' ? [] : EXPIRIES));
+    const ra = await a.svc.onTick();
+    expect(ra).toMatchObject({ ran: true, stored: 2, error: 'no NIFTY option expiries in the instrument master' });
+
+    const b = build(TICK, both);
+    b.fns.fetchQuotes.mockRejectedValueOnce(new AngelThrottleError('AB1004'));
+    expect(await b.svc.onTick()).toMatchObject({ stored: 0, calls: 1, error: 'AB1004' });
+    expect(b.fns.fetchQuotes).toHaveBeenCalledTimes(1);
+  });
+
+  it('day summary: ticks stored vs 76 per instrument, WARN when short, never throws', async () => {
+    const { svc, repo } = build('2026-10-19T10:10:00Z', { ...ON, MBM_CHAIN_CAPTURE_INSTRUMENTS: 'NIFTY,BANKNIFTY' }); // 15:40 IST
+    repo.captureCounts.mockResolvedValue([{ instrument: 'NIFTY', ticks: 76, rows: 152, newest: new Date() }]);
+    const lines = await svc.daySummary();
+    expect(repo.captureCounts.mock.calls[0]).toEqual([new Date('2026-10-18T18:30:00Z'), new Date('2026-10-19T18:30:00Z')]);
+    expect(lines).toEqual([
+      '[mbm] chain capture 2026-10-19 NIFTY: 76/76 ticks, 152 rows stored (this process: 0 ok, 0 failed)',
+      '[mbm] chain capture 2026-10-19 BANKNIFTY: 0/76 ticks, 0 rows stored (this process: 0 ok, 0 failed)',
+    ]);
+    repo.captureCounts.mockRejectedValue(new Error('db down'));
+    await expect(svc.daySummary()).resolves.toEqual([]);
+    expect(await build('2026-10-18T10:10:00Z').svc.daySummary()).toEqual([]); // Sunday
+    expect(await build('2026-10-19T10:10:00Z', { MBM_FEED_USER_ID: 'owner' }).svc.daySummary()).toEqual([]); // capture off
   });
 
   it('never logs in: only the per-user fetch methods are used, and the source has no login path', () => {

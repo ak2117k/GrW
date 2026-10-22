@@ -2,6 +2,7 @@
 import { Injectable } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { localMidnight } from '../../market-hub/chain/chain-dates';
 import { PrismaChainRepo } from '../../market-hub/chain/chain-repository';
 import type { InstrumentRef } from '../../market-hub/hub.types';
 import { derivativeUnderlying } from '../../trade-sentinel/overnight/pre-open-check';
@@ -51,6 +52,7 @@ export class MbmChainRepository {
         capturedAt: r.capturedAt,
         expiry: new Date(`${r.expiry}T00:00:00Z`),
         spot: r.spot,
+        fut: r.fut ?? null,
         pcr: r.pcr,
         maxPain: r.maxPain,
         callWall: r.callWall,
@@ -60,6 +62,24 @@ export class MbmChainRepository {
       skipDuplicates: true,
     });
     return res.count;
+  }
+
+  /** NFO token of `name`'s nearest unexpired index/stock future (optionType null, symbol …FUT); null when unlisted. */
+  async nearestFutureToken(name: string, todayIst: string): Promise<string | null> {
+    const fut = await this.prisma.instrument.findFirst({
+      where: { name: name.toUpperCase(), exchange: 'NFO', isActive: true, optionType: null, symbol: { endsWith: 'FUT' }, expiry: { gte: localMidnight(todayIst) } },
+      orderBy: { expiry: 'asc' },
+      select: { token: true },
+    });
+    return fut?.token ?? null;
+  }
+
+  /** Per instrument: distinct capture ticks, rows and the newest capture in [from, to). */
+  async captureCounts(from: Date, to: Date): Promise<Array<{ instrument: string; ticks: number; rows: number; newest: Date }>> {
+    return this.prisma.$queryRaw<Array<{ instrument: string; ticks: number; rows: number; newest: Date }>>`
+      SELECT instrument, COUNT(DISTINCT captured_at)::int AS ticks, COUNT(*)::int AS rows, MAX(captured_at) AS newest
+      FROM mbm_chain_snapshots WHERE captured_at >= ${from} AND captured_at < ${to}
+      GROUP BY instrument ORDER BY instrument`;
   }
 
   /** Strikes of the newest snapshot of (instrument, expiry) captured before `before`; null when none. */
@@ -118,11 +138,12 @@ export class MbmChainRepository {
     const rows = await this.prisma.mbmChainSnapshot.findMany({
       where: { instrument, OR: keys.map((k) => ({ capturedAt: k.capturedAt, expiry: new Date(`${k.expiry}T00:00:00Z`) })) },
     });
-    const mapped = rows.map((r) => ({
+    const mapped: ChainSnapshotRow[] = rows.map((r) => ({
       instrument: r.instrument,
       expiry: r.expiry.toISOString().slice(0, 10),
       capturedAt: r.capturedAt,
       spot: r.spot,
+      fut: r.fut,
       pcr: r.pcr,
       maxPain: r.maxPain,
       callWall: r.callWall,

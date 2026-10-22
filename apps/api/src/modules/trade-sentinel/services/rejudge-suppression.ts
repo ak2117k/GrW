@@ -17,10 +17,15 @@ import type { TripwireResult } from './tripwire.service';
  * the contract's price moved by `priceMovePct`, the giveback found a new peak or
  * deepened by a noise-unit fraction, or a new volume bar closed.
  *
+ * From 2026-10-22 `news-hit` (a headline id not yet shown to the judge) and
+ * `level-break` (a different level) are gated the same way, and the flat
+ * cooldown is replaced by the latest verdict's own `reviewIn` when one is known;
+ * an armed-floor breach, an exitTrigger cross or a hard-risk window appearing
+ * since the last judgement is always material (see repeatIsMaterial).
+ *
  * What it can NEVER suppress: any wake that carries another sensor's fire
- * (level-break, exit-confirm, news-hit, event-near, oi-wall-shift, a factor
- * flip, carried fires) — the decision then passes through whole, these two
- * fires included as context. Heartbeats are untouched. Hard exits are not on
+ * (exit-confirm, event-near, oi-wall-shift, a factor flip, carried fires) — the
+ * decision then passes through whole, the gated fires included as context. Heartbeats are untouched. Hard exits are not on
  * this path at all: they live in the exit-discipline gate and the executor.
  *
  * Baselines are in-process memory (recorded only after a judgement on that fire
@@ -30,7 +35,17 @@ import type { TripwireResult } from './tripwire.service';
 
 export const GIVEBACK_OFF_PEAK = 'giveback-off-peak';
 export const VOLUME_ANOMALY = 'volume-anomaly';
-export const SUPPRESSIBLE_FIRES: ReadonlySet<string> = new Set([GIVEBACK_OFF_PEAK, VOLUME_ANOMALY]);
+/**
+ * Material-change gating (2026-10-22, owner-approved): the legacy news sensor is
+ * level-triggered too (it fires on every pass while ANY headline is < 30 min old —
+ * prod 2026-10-19..21: 802 news-hit wakes), and level-break keeps firing while the
+ * underlying sits beyond the same level. A repeat of either is material only when
+ * something new arrived — a headline id the judge has not been shown, or a
+ * DIFFERENT broken level — or on any of the generic rules in repeatIsMaterial.
+ */
+export const NEWS_HIT = 'news-hit';
+export const LEVEL_BREAK = 'level-break';
+export const SUPPRESSIBLE_FIRES: ReadonlySet<string> = new Set([GIVEBACK_OFF_PEAK, VOLUME_ANOMALY, NEWS_HIT, LEVEL_BREAK]);
 
 export const REJUDGE_CONFIG = 'REJUDGE_CONFIG';
 
@@ -91,7 +106,22 @@ export interface RejudgeSnapshot {
   volumeRatio: number | null;
   /** The contract's noise unit when exit discipline measured one. */
   noiseN: number | null;
+  /** level-break: the level the underlying is beyond (support for a long, resistance for a short); null when none / unknown. */
+  level?: number | null;
+  /** news-hit: fresh own-instrument headline ids the judge has NOT been shown yet; null when the feed gave no ids. */
+  newsUnjudged?: number | null;
+  /** news-hit fallback when no ids are known: the 30-minute headline count. */
+  newsCount?: number | null;
+  /** The armed floor (noise or fixed) is breached by ltp. Edge-material: false → true. */
+  floorBreached?: boolean;
+  /** The price is beyond the latest verdict's exitTrigger. Edge-material: false → true. */
+  triggerCrossed?: boolean;
+  /** A hard-risk window the cycle can see (intraday / expiry-day close). Edge-material: false → true. */
+  hardRisk?: boolean;
 }
+
+/** Flags whose false → true transition since the last judgement is always new. */
+const EDGE_FLAGS = ['floorBreached', 'triggerCrossed', 'hardRisk'] as const;
 
 export function rejudgeSnapshot(
   t: {
@@ -124,18 +154,40 @@ export function rejudgeSnapshot(
 /**
  * Whether a repeat of `fire` against `last` (the state when the judge was last
  * asked about it) is worth another call. Fails OPEN: anything unreadable is material.
+ *
+ * `reviewDue` (material-change gating): whether the `reviewIn` the latest live
+ * verdict asked for has elapsed. When given it REPLACES the flat cooldown — the
+ * judge, not a constant, says when an unchanged picture deserves another look.
+ * Omitted (no verdict, or no usable reviewIn) the cooldown applies as before.
  */
 export function repeatIsMaterial(
   fire: string,
   last: RejudgeSnapshot | undefined,
   now: RejudgeSnapshot,
   cfg: RejudgeConfig,
+  reviewDue?: boolean,
 ): boolean {
   if (!last) return true;
-  if (now.at - last.at >= cfg.cooldownMs) return true;
+  if (reviewDue !== undefined ? reviewDue : now.at - last.at >= cfg.cooldownMs) return true;
   if (last.qty !== now.qty) return true;
   if (!Number.isFinite(last.ltp) || last.ltp <= 0 || !Number.isFinite(now.ltp)) return true;
+  // The P&L step: the contract price IS the per-unit P&L, so a priceMovePct move
+  // is a P&L move of that fraction of the position's notional, either way.
   if (Math.abs(now.ltp - last.ltp) / last.ltp >= cfg.priceMovePct) return true;
+  for (const k of EDGE_FLAGS) if (now[k] === true && last[k] !== true) return true;
+
+  if (fire === NEWS_HIT) {
+    // Ids known: new iff a fresh headline has never been put in front of the judge.
+    if (now.newsUnjudged !== undefined && now.newsUnjudged !== null) return now.newsUnjudged > 0;
+    // No ids: a higher 30-minute count means at least one new headline.
+    if (now.newsCount == null || last.newsCount == null) return true;
+    return now.newsCount > last.newsCount;
+  }
+
+  if (fire === LEVEL_BREAK) {
+    if (now.level == null || last.level == null) return true;
+    return now.level !== last.level;
+  }
 
   if (fire === GIVEBACK_OFF_PEAK) {
     if (last.peak === null || now.peak === null || last.pullback === null || now.pullback === null) return true;
@@ -169,17 +221,21 @@ export function suppressRepeatJudgements(
   baselines: Readonly<Record<string, RejudgeSnapshot>>,
   now: RejudgeSnapshot,
   cfg: RejudgeConfig,
+  reviewDue?: boolean,
 ): { decision: TripwireResult; suppressed: string[] } {
   const untouched = { decision, suppressed: [] as string[] };
   if (!cfg.enabled || decision.fires.length === 0) return untouched;
   if (decision.fires.some((f) => !SUPPRESSIBLE_FIRES.has(f.name))) return untouched;
-  if (decision.fires.some((f) => repeatIsMaterial(f.name, baselines[f.name], now, cfg))) {
-    // Material only because the cooldown elapsed? Then it is a re-check, not a
-    // new claim: same fires as context, ROUTINE tier (see routineOnCooldown).
+  if (decision.fires.some((f) => repeatIsMaterial(f.name, baselines[f.name], now, cfg, reviewDue))) {
+    // Material only because the cooldown / the verdict's review time elapsed? Then
+    // it is a re-check, not a new claim: same fires as context, ROUTINE tier.
     const noCooldown = { ...cfg, cooldownMs: Number.POSITIVE_INFINITY };
+    const noReview = reviewDue === undefined ? undefined : false;
     const cooldownOnly =
       cfg.routineOnCooldown &&
-      decision.fires.every((f) => baselines[f.name] !== undefined && !repeatIsMaterial(f.name, baselines[f.name], now, noCooldown));
+      decision.fires.every(
+        (f) => baselines[f.name] !== undefined && !repeatIsMaterial(f.name, baselines[f.name], now, noCooldown, noReview),
+      );
     return cooldownOnly ? { decision: { ...decision, trigger: 'HEARTBEAT' }, suppressed: [] } : untouched;
   }
   return {

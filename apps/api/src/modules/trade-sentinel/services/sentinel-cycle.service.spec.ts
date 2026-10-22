@@ -35,6 +35,7 @@ import {
   type ExitAttemptReader,
   type FutileRejudgeConfig,
 } from './futile-rejudge';
+import { JUDGE_GATE_CONFIG, parseJudgeGateConfig, type JudgeGateConfig } from './judge-gate';
 
 const USER = 'u1';
 
@@ -115,6 +116,7 @@ function makeSvc(
   news?: { cfg?: NewsEventsConfig; events?: unknown; watch?: NewsWatchBook },
   rejudge?: RejudgeConfig,
   futile?: { cfg?: FutileRejudgeConfig; reader?: ExitAttemptReader },
+  gate?: JudgeGateConfig,
 ) {
   const build = jest.fn().mockResolvedValue([]);
   const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
@@ -165,6 +167,7 @@ function makeSvc(
     rejudge,
     futile?.cfg,
     futile?.reader,
+    gate,
   );
 
   return {
@@ -583,8 +586,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // parsed value object) and the MARKET_EVENTS port (a synchronous peek, type-only);
     // the 14th the re-judge suppression CONFIG (a plain parsed value object).
     // The 15th the futile re-judge CONFIG (a plain parsed value object); the 16th the
-    // EXIT_ATTEMPTS port (a READ-ONLY ai_exit_executions view, type-only).
-    expect(injected).toHaveLength(16);
+    // EXIT_ATTEMPTS port (a READ-ONLY ai_exit_executions view, type-only); the 17th the
+    // judge-gate CONFIG (a plain parsed value object).
+    expect(injected).toHaveLength(17);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -602,6 +606,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         expect.objectContaining({ index: 13, param: REJUDGE_CONFIG }),
         expect.objectContaining({ index: 14, param: FUTILE_REJUDGE_CONFIG }),
         expect.objectContaining({ index: 15, param: EXIT_ATTEMPTS }),
+        expect.objectContaining({ index: 16, param: JUDGE_GATE_CONFIG }),
       ]),
     );
 
@@ -2857,6 +2862,247 @@ describe('SentinelCycleService — futile re-judge suppression (held positions, 
         expect(t.judge).toHaveBeenCalledTimes(2);
         expect(t.reader.latestSince).not.toHaveBeenCalled();
       }
+    });
+  });
+});
+
+describe('SentinelCycleService — judge gate (held heartbeat-only, 15-min cap + bypasses, tiering, packet delta)', () => {
+  // Monday 2026-10-12 11:30 IST: an NSE session, far from the close.
+  const NOW = new Date('2026-10-12T06:00:00.000Z');
+  const at = (ms: number) => new Date(NOW.getTime() + ms);
+  const MIN = 60_000;
+  const fire = (...names: string[]) => ({
+    fires: names.map((name) => ({ name, detail: name })),
+    heartbeat: false,
+    shouldEvaluate: true,
+    trigger: 'FIRE' as const,
+  });
+  const QUIET = { fires: [], heartbeat: false, shouldEvaluate: false, trigger: null };
+  const HEARTBEAT = { fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'HEARTBEAT' as const };
+  const row = (msAgo: number, over: Record<string, unknown> = {}, from: Date = NOW) =>
+    verdictRow({
+      createdAt: new Date(from.getTime() - msAgo),
+      reviewInSec: 300,
+      netPnl: 40,
+      triggeredBy: ['heartbeat'],
+      packet: {
+        position: { ltp: 100, qty: 10, entryPrice: 100, underlyingLtp: { available: true, value: 100 } },
+        money: { greenFloorArmed: false },
+        macro: { realFactors: { available: false } },
+      },
+      ...over,
+    });
+
+  function setup(env: Record<string, string> = {}, discipline?: ExitDisciplineConfig) {
+    const t = makeSvc(
+      discipline,
+      undefined,
+      parseRejudgeConfig({}),
+      { cfg: parseFutileRejudgeConfig(env), reader: { latestSince: jest.fn().mockResolvedValue(new Map()) } },
+      parseJudgeGateConfig(env),
+    );
+    t.build.mockResolvedValue([watched('t1')]);
+    t.evaluate.mockReturnValue(fire('context-factor-flip'));
+    return t;
+  }
+
+  const names = (call: unknown[]) => (call[3] as Array<{ name: string }>).map((f) => f.name);
+
+  afterEach(() => jest.restoreAllMocks());
+
+  describe('the rate cap (SENTINEL_MIN_JUDGE_INTERVAL_SEC, default 900)', () => {
+    it('a material fire 5 min after the last verdict waits; at 15 min it is judged; the summary line counts it', async () => {
+      const t = setup();
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+      t.recentForTracker.mockResolvedValue([row(5 * MIN)]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+      expect(log.mock.calls.some((c) => String(c[0]).startsWith('[rejudge] suppressed') && String(c[0]).includes('rate-cap=1'))).toBe(true);
+      expect(debug.mock.calls.some((c) => String(c[0]).startsWith('[judge-gate] cap — T1'))).toBe(true);
+      t.recentForTracker.mockResolvedValue([row(15 * MIN, {}, at(10 * MIN))]);
+      await t.svc.runForUser(USER, at(10 * MIN));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+
+    it('SENTINEL_MIN_JUDGE_INTERVAL_SEC is read; SENTINEL_JUDGE_GATE=false rolls the whole gate back', async () => {
+      const short = setup({ SENTINEL_MIN_JUDGE_INTERVAL_SEC: '120' });
+      short.recentForTracker.mockResolvedValue([row(5 * MIN)]);
+      await short.svc.runForUser(USER, NOW);
+      expect(short.judge).toHaveBeenCalledTimes(1);
+      const off = setup({ SENTINEL_JUDGE_GATE: 'false' });
+      off.recentForTracker.mockResolvedValue([row(1 * MIN)]);
+      await off.svc.runForUser(USER, NOW);
+      expect(off.judge).toHaveBeenCalledTimes(1);
+      expect(off.buildPacket.mock.calls[0]).toHaveLength(4); // no review argument: the build call is as before
+    });
+
+    it('a capped edge-triggered fire (event-near) is carried and judged once the cap lifts', async () => {
+      const t = setup();
+      t.evaluate.mockReturnValue(fire('event-near'));
+      t.recentForTracker.mockResolvedValue([row(5 * MIN)]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+      t.evaluate.mockReturnValue(QUIET);
+      t.recentForTracker.mockResolvedValue([row(16 * MIN, {}, at(11 * MIN))]);
+      await t.svc.runForUser(USER, at(11 * MIN));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(names(t.buildPacket.mock.calls[0])).toEqual(['event-near']);
+    });
+
+    describe('bypasses (safety beats savings)', () => {
+      it('the first judgement of a new position', async () => {
+        const t = setup();
+        t.recentForTracker.mockResolvedValue([]);
+        await t.svc.runForUser(USER, NOW);
+        expect(t.judge).toHaveBeenCalledTimes(1);
+      });
+
+      it('the exit-confirm re-look (exit discipline: CONSECUTIVE needs it inside PERSIST_WINDOW_SEC)', async () => {
+        const t = setup({}, parseExitDisciplineConfig({}));
+        t.evaluate.mockReturnValue(QUIET);
+        t.recentForTracker.mockResolvedValue([row(130_000, { verdict: 'EXIT_NOW' })]);
+        await t.svc.runForUser(USER, NOW);
+        expect(t.judge).toHaveBeenCalledTimes(1);
+        expect(t.judge.mock.calls[0][1]).toBe('FIRE');
+        expect(names(t.buildPacket.mock.calls[0])).toEqual(['exit-confirm']);
+      });
+
+      it('an exit candidate (latest verdict EXIT_ARMED)', async () => {
+        const t = setup();
+        t.recentForTracker.mockResolvedValue([row(3 * MIN, { verdict: 'EXIT_ARMED' })]);
+        await t.svc.runForUser(USER, NOW);
+        expect(t.judge).toHaveBeenCalledTimes(1);
+      });
+
+      it('an armed green floor breached by ltp', async () => {
+        const t = setup();
+        t.tickFor.mockResolvedValue(tick({ ltp: 110 })); // the fixed floor for entry 100 x 10 sits above 110
+        t.recentForTracker.mockResolvedValue([
+          row(3 * MIN, { packet: { position: { ltp: 112, qty: 10, entryPrice: 100 }, money: { greenFloorArmed: true }, macro: { realFactors: { available: false } } } }),
+        ]);
+        await t.svc.runForUser(USER, NOW);
+        expect(t.judge).toHaveBeenCalledTimes(1);
+      });
+
+      it('the price beyond the latest verdict exitTrigger (and not before it)', async () => {
+        const trigger = { v: 1, instrument: 'PREMIUM', op: 'BELOW', price: 99.5 };
+        const t = setup();
+        t.tickFor.mockResolvedValue(tick({ ltp: 99 }));
+        t.recentForTracker.mockResolvedValue([row(3 * MIN, { exitTrigger: trigger })]);
+        await t.svc.runForUser(USER, NOW);
+        expect(t.judge).toHaveBeenCalledTimes(1);
+        const u = setup();
+        u.tickFor.mockResolvedValue(tick({ ltp: 99.6 }));
+        u.recentForTracker.mockResolvedValue([row(3 * MIN, { exitTrigger: trigger })]);
+        await u.svc.runForUser(USER, NOW);
+        expect(u.judge).not.toHaveBeenCalled();
+      });
+
+      it('a hard-risk window: the last minutes of the session', async () => {
+        const t = setup();
+        const nearClose = new Date('2026-10-12T09:52:00.000Z'); // 15:22 IST
+        t.recentForTracker.mockResolvedValue([row(3 * MIN, {}, nearClose)]);
+        await t.svc.runForUser(USER, nearClose);
+        expect(t.judge).toHaveBeenCalledTimes(1);
+      });
+
+      it('an adverse move of >= 4 % since the last judgement while losing', async () => {
+        const t = setup();
+        t.tickFor.mockResolvedValue(tick({ entryPrice: 105, ltp: 100 }));
+        t.recentForTracker.mockResolvedValue([
+          row(3 * MIN, { packet: { position: { ltp: 105, qty: 10 }, money: { greenFloorArmed: false }, macro: { realFactors: { available: false } } } }),
+        ]);
+        await t.svc.runForUser(USER, NOW);
+        expect(t.judge).toHaveBeenCalledTimes(1);
+      });
+    });
+  });
+
+  describe('held positions (AI_AUTO_EXIT_HOLD): heartbeat only, at most every 30 min, marked held', () => {
+    it('no tripwire judgement at all, not even a news-hit (a new-risk fire the futile rule lets through)', async () => {
+      const t = setup({ AI_AUTO_EXIT_HOLD: 'T1' });
+      t.evaluate.mockReturnValue(fire('news-hit', 'level-break'));
+      t.recentForTracker.mockResolvedValue([row(20 * MIN)]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+    });
+
+    it('a due heartbeat waits for 30 min since the last verdict, then goes out on the routine tier marked held', async () => {
+      const t = setup({ AI_AUTO_EXIT_HOLD: 'T1' });
+      t.evaluate.mockReturnValue(HEARTBEAT);
+      t.recentForTracker.mockResolvedValue([row(20 * MIN, { verdict: 'EXIT_NOW' })]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).not.toHaveBeenCalled();
+      t.recentForTracker.mockResolvedValue([row(31 * MIN, { verdict: 'EXIT_NOW' })]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(t.judge.mock.calls[0][1]).toBe('HEARTBEAT'); // held: never upgraded, even after an EXIT_NOW
+      expect(t.buildPacket.mock.calls[0][3]).toEqual([]);
+      expect(t.buildPacket.mock.calls[0][4]).toMatchObject({ held: true });
+    });
+  });
+
+  describe('model tier: routine for "nothing material changed", strong for exit candidates and risk', () => {
+    it('a heartbeat after a HOLD stays routine; after an EXIT_ARMED it is raised to the strong tier', async () => {
+      const t = setup();
+      t.evaluate.mockReturnValue(HEARTBEAT);
+      t.recentForTracker.mockResolvedValue([row(20 * MIN)]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge.mock.calls[0][1]).toBe('HEARTBEAT');
+      const u = setup();
+      u.evaluate.mockReturnValue(HEARTBEAT);
+      u.recentForTracker.mockResolvedValue([row(20 * MIN, { verdict: 'EXIT_ARMED' })]);
+      await u.svc.runForUser(USER, NOW);
+      expect(u.judge.mock.calls[0][1]).toBe('FIRE');
+    });
+
+    it('a giveback repeat let through only by the verdict review time is routine; the review time replaces the 10-min cooldown', async () => {
+      const t = setup();
+      t.evaluate.mockReturnValue(fire('giveback-off-peak'));
+      t.tickFor.mockResolvedValue(tick({ entryPrice: 100, holdingHigh: 120, ltp: 110 }));
+      t.recentForTracker.mockResolvedValue([]);
+      await t.svc.runForUser(USER, NOW); // first look: judged, baseline set
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      // 16 min later, unchanged, the verdict asked for an hour: no call (the old 10-min cooldown re-asked).
+      t.recentForTracker.mockResolvedValue([row(16 * MIN, { reviewInSec: 3600 }, at(16 * MIN))]);
+      await t.svc.runForUser(USER, at(16 * MIN));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      // Its review time has passed: asked again, on the routine tier.
+      t.recentForTracker.mockResolvedValue([row(16 * MIN, { reviewInSec: 600 }, at(16 * MIN))]);
+      await t.svc.runForUser(USER, at(16 * MIN + 30_000));
+      expect(t.judge).toHaveBeenCalledTimes(2);
+      expect(t.judge.mock.calls[1][1]).toBe('HEARTBEAT');
+    });
+  });
+
+  describe('news dedup per headline id (legacy news path)', () => {
+    it('the same headline does not re-wake the judge; a new id does, and the delta names it', async () => {
+      const t = setup();
+      t.evaluate.mockReturnValue(fire('news-hit'));
+      t.tickFor.mockResolvedValue(tick({ freshNewsCount: 1, freshNewsItems: [{ id: 'a', title: 'Old news' }] }));
+      t.recentForTracker.mockResolvedValue([]);
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      // Past the cap, review not due: the same id is not new.
+      t.recentForTracker.mockResolvedValue([row(16 * MIN, { reviewInSec: 3600, triggeredBy: ['news-hit'] }, at(16 * MIN))]);
+      await t.svc.runForUser(USER, at(16 * MIN));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      t.tickFor.mockResolvedValue(
+        tick({ freshNewsCount: 2, freshNewsItems: [{ id: 'b', title: 'Fresh news' }, { id: 'a', title: 'Old news' }] }),
+      );
+      await t.svc.runForUser(USER, at(16 * MIN + 30_000));
+      expect(t.judge).toHaveBeenCalledTimes(2);
+      expect(t.judge.mock.calls[1][1]).toBe('FIRE');
+      expect(t.buildPacket.mock.calls[1][4].since).toMatchObject({
+        verdict: 'HOLD',
+        reviewInSec: 3600,
+        ltp: 100,
+        underlyingLtp: 100,
+        netPnl: 40,
+        triggersThen: ['news-hit'],
+        newHeadlines: ['Fresh news'],
+      });
     });
   });
 });

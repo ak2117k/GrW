@@ -12,10 +12,20 @@ import type { TripwireFire } from '../tripwires/types';
 import {
   ContextPacketService,
   SPOT_SOURCE_CASH,
+  istWallClock,
+  minutesToSessionClose,
   packetAsJson,
   type ContextPacket,
+  type PacketReview,
   type TickSnapshot,
 } from './context-packet.service';
+import {
+  JUDGE_GATE_CONFIG,
+  exitTriggerCrossed,
+  gateJudgement,
+  type GateFacts,
+  type JudgeGateConfig,
+} from './judge-gate';
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
@@ -411,6 +421,12 @@ interface TrackerState {
   blockedExit?: BlockedExitMemo;
   /** Futile re-judge: epoch ms the held-position line was last logged (once per 30 min). */
   heldLoggedAt?: number;
+  /**
+   * Judge gate: fresh headline ids already put in front of the judge (recorded
+   * once a judgement is RECORDED). Pruned to the currently fresh ids each pass, so
+   * it stays small. Memory only: a restart costs at most one repeat look.
+   */
+  newsJudged?: Set<string>;
 }
 
 /** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
@@ -436,6 +452,10 @@ interface JudgeCandidate {
   lastJudgedAt: number | null;
   /** This pass's re-judge baseline, stored for the fires judged once the verdict is recorded. */
   rejudgeSnap: RejudgeSnapshot;
+  /** Judge gate: the packet's held marker / sinceLastVerdict delta (undefined ⇒ the build call is unchanged). */
+  review?: PacketReview;
+  /** Judge gate: the fresh headline ids this judgement shows, marked judged once it is recorded. */
+  newsIds?: string[];
 }
 
 /** One judgement in flight: its promise, and the fire names it was asked about. */
@@ -517,6 +537,9 @@ export class SentinelCycleService {
     // absent ⇒ off. The reader is a READ-ONLY view of ai_exit_executions.
     @Optional() @Inject(FUTILE_REJUDGE_CONFIG) private readonly futileCfg?: FutileRejudgeConfig,
     @Optional() @Inject(EXIT_ATTEMPTS) private readonly exitAttempts?: ExitAttemptReader,
+    // Judge gate (held heartbeat-only, the 15-min rate cap + its bypasses, tier
+    // upgrade, the packet delta). Optional: absent ⇒ off, exactly as before.
+    @Optional() @Inject(JUDGE_GATE_CONFIG) private readonly gateCfg?: JudgeGateConfig,
   ) {}
 
   /**
@@ -792,10 +815,17 @@ export class SentinelCycleService {
     // Re-judge suppression sits BEFORE carried fires and exit-confirm: a carried
     // fire never reached the judge and an exit-confirm re-look is the EXIT_NOW
     // confirmation path, so neither may be dropped here.
-    const rejudgeSnap = rejudgeSnapshot(tick, noiseInput?.n ?? null, now.getTime());
+    // Judge gate facts (null when the gate is off ⇒ every input below is exactly as before).
+    const gate = this.gateCfg?.enabled
+      ? this.gateFactsFor(entry, state, tickF, floorSolve.noiseFloor, greenFloorArmedLatched, last, now)
+      : null;
+    const rejudgeSnap: RejudgeSnapshot = {
+      ...rejudgeSnapshot(tick, noiseInput?.n ?? null, now.getTime()),
+      ...(gate ? gate.snap : {}),
+    };
     const deduped = suppressRepeatWallShift(rawDecision, wallKey(walls), state.oiEvaluatedKey);
     const rejudged = this.rejudgeCfg
-      ? suppressRepeatJudgements(deduped, state.rejudge ?? {}, rejudgeSnap, this.rejudgeCfg)
+      ? suppressRepeatJudgements(deduped, state.rejudge ?? {}, rejudgeSnap, this.rejudgeCfg, gate?.reviewDue)
       : { decision: deduped, suppressed: [] as string[] };
     for (const name of rejudged.suppressed) suppressedTally[name] = (suppressedTally[name] ?? 0) + 1;
     // Futile re-judge suppression (futile-rejudge.ts): on a HELD position, or one
@@ -817,7 +847,28 @@ export class SentinelCycleService {
         this.logger.log(`[rejudge] held position — fires suppressed: ${entry.symbol} (tracker ${entry.trackerId}; ${futiled.suppressed.join(', ')}); heartbeat kept`);
       }
     }
-    const decision = futiled.decision;
+    // Judge gate (judge-gate.ts): held ⇒ heartbeat only, ≤ 1 per 30 min; the rate
+    // cap with its safety bypasses; a routine wake on an exit candidate or under
+    // risk is raised to the strong tier.
+    const gated = gate
+      ? gateJudgement(
+          futiled.decision,
+          { ...gate.facts, carried: new Set(state.carriedFires.map((f) => f.name)) },
+          this.gateCfg,
+          () => heartbeatDue(tripwireIn, lastVerdictAt, now, heartbeatContext),
+        )
+      : null;
+    if (gated?.dropped) {
+      const key = gated.dropped === 'cap' ? 'rate-cap' : 'held-gate';
+      suppressedTally[key] = (suppressedTally[key] ?? 0) + 1;
+      // Carried fires were merged into this wake; what is still owed the judge stays carried.
+      state.carriedFires = gated.carry;
+      this.logger.debug(
+        `[judge-gate] ${gated.dropped} — ${entry.symbol} (tracker ${entry.trackerId}): dropped ${gated.suppressed.join(', ')}` +
+          (gated.carry.length > 0 ? `; carried ${gated.carry.map((f) => f.name).join(', ')}` : ''),
+      );
+    }
+    const decision = gated ? gated.decision : futiled.decision;
 
     if (!decision.shouldEvaluate) {
       report.skipped += 1;
@@ -864,6 +915,118 @@ export class SentinelCycleService {
       decision,
       lastJudgedAt: last ? new Date(last.createdAt).getTime() : null,
       rejudgeSnap,
+      ...(gate ? { review: gate.review, newsIds: gate.newsIds } : {}),
+    };
+  }
+
+  /**
+   * The judge gate's view of this position on this pass: the cap's bypass facts,
+   * the extra material-change fields for the re-judge snapshot, the verdict's
+   * review time, and the packet's held marker / delta. Never throws on odd data —
+   * an unreadable stored packet or trigger simply contributes nothing.
+   */
+  private gateFactsFor(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    noiseFloor: TickSnapshot['noiseFloor'] | null | undefined,
+    greenFloorArmedLatched: boolean,
+    last: SentinelVerdictLike | undefined,
+    now: Date,
+  ): {
+    facts: Omit<GateFacts, 'carried'>;
+    snap: Partial<RejudgeSnapshot>;
+    reviewDue: boolean | undefined;
+    review: PacketReview | undefined;
+    newsIds: string[];
+  } {
+    const cfg = this.gateCfg!;
+    const nowMs = now.getTime();
+    const dir = tick.side === 'LONG' ? 1 : -1;
+    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side });
+
+    // Armed floor breached: the noise floor when it is in charge, else the latched fixed floor.
+    const floorLevel = noiseFloor ? (noiseFloor.armed ? noiseFloor.level : null) : greenFloorArmedLatched ? green.floorPrice : null;
+    const floorBreached =
+      floorLevel !== null && Number.isFinite(floorLevel) && Number.isFinite(tick.ltp) && (tick.ltp - floorLevel) * dir < 0;
+
+    // The latest live verdict's machine-readable exit level.
+    const triggerCrossed = exitTriggerCrossed(last?.exitTrigger, tick);
+
+    // Hard-risk windows the cycle can see: the last minutes of the session (not for
+    // delivery holdings) and of expiry day. Max-loss and the daily-loss latch live
+    // in the executor's gate and the core risk manager, mechanically.
+    const mtc = minutesToSessionClose(now, entry.exchange);
+    const left = mtc.available ? mtc.value : null;
+    const expiryToday = tick.expiry !== null && tick.expiry === istWallClock(now).slice(0, 10);
+    const hardRisk =
+      left !== null && tick.segment !== 'EQ_DELIVERY' && (left <= cfg.closeGuardMin || (expiryToday && left <= cfg.expiryCloseMin));
+
+    // An adverse move since the last judgement, while losing.
+    const prev = previousJudged(last);
+    const adverseMove =
+      prev !== null && prev.ltp > 0 && green.netPnl < 0 && ((tick.ltp - prev.ltp) / prev.ltp) * dir <= -cfg.adverseMovePct;
+
+    // News: which fresh headline ids the judge has not been shown yet.
+    const items = tick.freshNews ?? tick.freshNewsItems ?? null;
+    const judged = (state.newsJudged ??= new Set<string>());
+    if (items) {
+      const live = new Set(items.map((i) => i.id));
+      for (const id of [...judged]) if (!live.has(id)) judged.delete(id);
+    }
+    const unjudged = items ? items.filter((i) => !judged.has(i.id)) : [];
+
+    // level-break: the level the underlying is beyond.
+    const u = tick.underlyingLtp;
+    const lvl = tick.side === 'LONG' ? tick.nearestSupport : tick.nearestResistance;
+    const level = u !== null && lvl !== null && Number.isFinite(u) && Number.isFinite(lvl) && (u - lvl) * dir < 0 ? lvl : null;
+
+    const lastAt = last ? new Date(last.createdAt) : null;
+    const reviewInSec = typeof last?.reviewInSec === 'number' && last.reviewInSec > 0 ? last.reviewInSec : null;
+    const reviewDue = lastAt && reviewInSec !== null ? nowMs - lastAt.getTime() >= reviewInSec * 1000 : undefined;
+
+    const held = isHeldPosition(cfg.hold, entry);
+    const stored = last?.packet as
+      | { position?: { ltp?: unknown; underlyingLtp?: { available?: unknown; value?: unknown } } }
+      | undefined;
+    const num = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+    const since =
+      cfg.packetDelta && last && lastAt
+        ? {
+            verdict: String(last.verdict),
+            at: lastAt,
+            reviewInSec,
+            ltp: num(stored?.position?.ltp),
+            underlyingLtp: stored?.position?.underlyingLtp?.available === true ? num(stored.position.underlyingLtp.value) : null,
+            netPnl: num(last.netPnl),
+            triggersThen: Array.isArray(last.triggeredBy) ? (last.triggeredBy as unknown[]).map(String) : [],
+            newHeadlines: unjudged.map((i) => i.title),
+          }
+        : null;
+    const review: PacketReview | undefined =
+      held || since ? { ...(held ? { held: true } : {}), ...(since ? { since } : {}) } : undefined;
+
+    return {
+      facts: {
+        nowMs,
+        last: last && lastAt ? { verdict: String(last.verdict), createdAt: lastAt } : null,
+        held,
+        hardRisk,
+        floorBreached,
+        triggerCrossed,
+        adverseMove,
+      },
+      snap: {
+        level,
+        newsUnjudged: items ? unjudged.length : null,
+        newsCount: tick.freshNewsCount,
+        floorBreached,
+        triggerCrossed,
+        hardRisk,
+      },
+      reviewDue,
+      review,
+      newsIds: unjudged.map((i) => i.id),
     };
   }
 
@@ -924,6 +1087,7 @@ export class SentinelCycleService {
       c.greenFloorArmedLatched,
       c.decision,
       now,
+      c.review,
     );
     const inFlight: InFlight = { job, fires: new Set(c.decision.fires.map((f) => f.name)) };
     this.judging.set(entry.trackerId, inFlight);
@@ -936,6 +1100,8 @@ export class SentinelCycleService {
         for (const f of c.decision.fires) {
           if (SUPPRESSIBLE_FIRES.has(f.name)) (state.rejudge ??= {})[f.name] = c.rejudgeSnap;
         }
+        // Judge gate: these headlines have now been in front of the judge.
+        if (c.newsIds?.length) for (const id of c.newsIds) (state.newsJudged ??= new Set<string>()).add(id);
       }
       if (this.judging.get(entry.trackerId) === inFlight) this.judging.delete(entry.trackerId);
       this.wakeSlotWaiters();
@@ -1020,12 +1186,13 @@ export class SentinelCycleService {
     greenFloorArmedLatched: boolean,
     decision: TripwireResult,
     now: Date,
+    review?: PacketReview,
   ): Promise<JudgeOutcome> {
     // The wall clock at dispatch, so a failure can be dated by when it HAPPENED.
     const dispatchedWall = Date.now();
     const progress = { stage: 'thesis' };
     try {
-      await this.judgeAndRecord(entry, state, tick, walls, wallsAt, greenFloorArmedLatched, decision, now, progress);
+      await this.judgeAndRecord(entry, state, tick, walls, wallsAt, greenFloorArmedLatched, decision, now, progress, review);
       return 'evaluated';
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1067,6 +1234,7 @@ export class SentinelCycleService {
     decision: TripwireResult,
     now: Date,
     progress: { stage: string },
+    review?: PacketReview,
   ): Promise<void> {
     const thesis = await this.thesisFor(entry, state, tick, now);
     progress.stage = 'packet';
@@ -1078,7 +1246,10 @@ export class SentinelCycleService {
       oiWallsAt: wallsAt,
       greenFloorArmedLatched,
     };
-    const packet: ContextPacket = await this.packets.build(entry, packetTick, thesis, decision.fires);
+    // The 5th argument only when the judge gate supplies one: absent ⇒ the call is exactly as before.
+    const packet: ContextPacket = review
+      ? await this.packets.build(entry, packetTick, thesis, decision.fires, review)
+      : await this.packets.build(entry, packetTick, thesis, decision.fires);
     // News & events v2 OBSERVE: what the packet WOULD carry — stored beside the
     // verdict, never shown to the judge. Optional call: a packets double without it
     // is "off". It must never cost the verdict, so a throw is logged and dropped.
@@ -1402,6 +1573,17 @@ export class SentinelCycleService {
     if (newsIn.eventNear && fires.some((f) => f.name === 'event-near')) (st.eventsFired ??= new Set<string>()).add(newsIn.eventNear.id);
   }
 }
+
+/** The verdict-row fields the judge gate reads (a structural subset of the Prisma row). */
+type SentinelVerdictLike = {
+  verdict: string;
+  createdAt: Date;
+  reviewInSec?: number | null;
+  netPnl?: number | null;
+  triggeredBy?: unknown;
+  packet?: unknown;
+  exitTrigger?: unknown;
+};
 
 /** How one detached judgement ended, as the report bucket it lands in. */
 type JudgeOutcome = 'evaluated' | 'failed';

@@ -274,6 +274,9 @@ export class SentinelAgentService {
         NEWS_EVENTS_V2_ENABLED: this.config?.get<string>('NEWS_EVENTS_V2_ENABLED') ?? undefined,
       }).rendering,
       lessons: !!this.config && lessonsModeFrom(this.config.get<string>('SELF_REVIEW_LESSONS')) === 'on',
+      // The judge gate's packet delta + held marker: on unless SENTINEL_PACKET_DELTA is exactly
+      // 'false' (parsed as parseJudgeGateConfig parses it). No ConfigService at all ⇒ off.
+      delta: !!this.config && String(this.config.get<string>('SENTINEL_PACKET_DELTA') ?? '').trim().toLowerCase() !== 'false',
     };
   }
 
@@ -316,7 +319,8 @@ export class SentinelAgentService {
           effort: effortOr(raw('SENTINEL_EFFORT_TRIGGERED'), SENTINEL_EFFORT_TRIGGERED),
         }
       : {
-          model: pick('SENTINEL_MODEL_ROUTINE', SENTINEL_MODEL_ROUTINE),
+          // SENTINEL_ROUTINE_MODEL (judge gate, 2026-10-22) wins over the older SENTINEL_MODEL_ROUTINE.
+          model: pick('SENTINEL_ROUTINE_MODEL', pick('SENTINEL_MODEL_ROUTINE', SENTINEL_MODEL_ROUTINE)),
           effort: effortOr(raw('SENTINEL_EFFORT_ROUTINE'), SENTINEL_EFFORT_ROUTINE),
         };
   }

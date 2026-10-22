@@ -403,7 +403,7 @@ export class SentinelTickSource implements TickSource {
 
     // News & events v2 (`true` only): a synchronous peek, never a DB read.
     const v2News = this.newsCfg?.rendering === true && structureSymbol ? this.freshFromIndex(structureSymbol, row.exchange) : null;
-    const [structure, freshNewsCount] = await Promise.all([
+    const [structure, legacyNews] = await Promise.all([
       structureSymbol
         ? structureInstrument
           ? this.charts.structureFor(structureSymbol, underlyingLtp, row.userId, structureInstrument)
@@ -412,9 +412,9 @@ export class SentinelTickSource implements TickSource {
       // Null, not 0 — "no reading" and "nothing published" must stay apart.
       structureSymbol
         ? v2News
-          ? Promise.resolve(v2News.count)
-          : this.freshNewsCount(structureSymbol, row.exchange)
-        : Promise.resolve(null),
+          ? Promise.resolve({ count: v2News.count, items: null })
+          : this.freshNewsLegacy(structureSymbol, row.exchange)
+        : Promise.resolve({ count: null, items: null }),
     ]);
 
     const noise = opts.closedSession ? null : await this.noiseFor(row, isCash, underlying);
@@ -467,8 +467,11 @@ export class SentinelTickSource implements TickSource {
       entryTime: row.entryTime,
       expiry: await this.expiryFor(row.token, row.exchange, segment),
       volumeRatio: structure.volumeRatio,
-      freshNewsCount,
+      freshNewsCount: legacyNews.count,
       ...(v2News?.fresh ? { freshNews: v2News.fresh } : {}),
+      // Legacy news path: the ids behind the count, so the cycle can tell a NEW
+      // headline from a repeat (material-change gating). Only when there is one.
+      ...(legacyNews.items && legacyNews.items.length > 0 ? { freshNewsItems: legacyNews.items } : {}),
       // Both come off the SAME `analyze()` the levels above did — the factors
       // are computed as part of scoring a setup, so there is no second call and
       // no window in which the levels and the factors describe different bars.
@@ -814,17 +817,25 @@ export class SentinelTickSource implements TickSource {
    * `underlying-news-aliases.ts`). Counting there always returns 0, and a 0
    * is a claim that nothing was published when the truth is that we cannot see.
    */
-  private async freshNewsCount(symbol: string, exchange?: string | null): Promise<number | null> {
+  private async freshNewsLegacy(
+    symbol: string,
+    exchange?: string | null,
+  ): Promise<{ count: number | null; items: FreshItem[] | null }> {
     const news = newsKeyFor(symbol, exchange);
-    if (news.key === null) return null;
+    if (news.key === null) return { count: null, items: null };
     try {
       const articles = await this.news.getNewsForSymbol(news.key);
       const cutoff = Date.now() - FRESH_NEWS_WINDOW_MS;
-      return articles.filter((a) => a.publishedAt.getTime() >= cutoff).length;
+      const fresh = articles.filter((a) => a.publishedAt.getTime() >= cutoff);
+      // Ids only when the rows carry them (a test double may not): no id, no dedup — the count fallback applies.
+      const items = fresh
+        .filter((a) => typeof (a as { id?: unknown }).id === 'string')
+        .map((a) => ({ id: (a as { id: string }).id, title: String(a.title ?? '') }));
+      return { count: fresh.length, items: items.length === fresh.length ? items : null };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn(`fresh-news count failed for ${symbol}: ${message}`);
-      return null;
+      return { count: null, items: null };
     }
   }
 

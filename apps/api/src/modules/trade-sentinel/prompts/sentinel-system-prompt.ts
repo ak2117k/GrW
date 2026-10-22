@@ -58,6 +58,12 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * `v9` becomes `v9+l1`, `v2.4` becomes `v2.4+l1`. Lessons off, every text and stamp
  * above is byte-identical.
  *
+ * FROM +d1 A FIFTH SWITCH, SENTINEL_PACKET_DELTA (judge gate; ON unless exactly
+ * `false`, OFF without a ConfigService): the two optional top-level fields
+ * sinceLastVerdict and ownerHold in the field list, and one reading line for each.
+ * Another SUFFIX, after +l1: `v9+l1+d1`. Delta off, every text and stamp above is
+ * byte-identical.
+ *
  * {@link SENTINEL_PROMPT_VERSION} / {@link SENTINEL_SYSTEM_PROMPT} name the
  * default (discipline on, triggers off, news off, lessons off).
  */
@@ -87,6 +93,8 @@ export interface SentinelPromptOptions {
   news?: boolean;
   /** SELF_REVIEW_LESSONS resolves to `on` (lessonsModeFrom): the +l1 memory.lessons line. */
   lessons?: boolean;
+  /** SENTINEL_PACKET_DELTA not exactly 'false' (judge gate): the +d1 sinceLastVerdict / ownerHold lines. */
+  delta?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -108,7 +116,7 @@ const VERSIONS_NEWS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noC
 export function sentinelPromptVersion(o: SentinelPromptOptions): string {
   const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
   const table = o.news ? VERSIONS_NEWS : VERSIONS;
-  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}`;
+  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}`;
 }
 
 /** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
@@ -241,7 +249,25 @@ export const LESSONS_VERSION_SUFFIX = '+l1';
 export const LESSONS_MEMORY_LINE =
   '- memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.\n';
 
-const withNewsBlocks = (line: string, on: boolean): string => (on ? line.replace('news.freshCount, ', V9_BLOCKS_INSERT) : line);
+/**
+ * The stamp suffix for the judge gate's packet delta (SENTINEL_PACKET_DELTA, on unless
+ * exactly `false`): `v9+l1` becomes `v9+l1+d1`. Delta off, every text and stamp is
+ * byte-identical.
+ */
+export const DELTA_VERSION_SUFFIX = '+d1';
+
+/** The +d1 reading lines, inserted after the trigger line with delta on. Ends with a newline. */
+export const DELTA_READING_LINES = [
+  '- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.',
+  '- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.',
+].join('\n') + '\n';
+
+/** The field-list line the +d1 switch extends (the two optional top-level fields). */
+const TOP_LEVEL_LINE = '- The remaining top-level fields are thesis, trigger and memory. There are no other fields;';
+const TOP_LEVEL_LINE_DELTA =
+  '- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields;';
+
+const withNewsBlocks =(line: string, on: boolean): string => (on ? line.replace('news.freshCount, ', V9_BLOCKS_INSERT) : line);
 
 /**
  * The prompt describes the packet AS IT IS, field path by field path.
@@ -252,7 +278,20 @@ const withNewsBlocks = (line: string, on: boolean): string => (on ? line.replace
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons'>): string {
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta'>): string {
+  const text = renderBase(o);
+  if (!o.delta) return text;
+  if (!text.includes(TOP_LEVEL_LINE) || !text.includes(TRIGGER_LINE)) {
+    throw new Error('sentinel-system-prompt: the top-level / trigger lines moved — rebuild the +d1 prompt');
+  }
+  return text.replace(TOP_LEVEL_LINE, TOP_LEVEL_LINE_DELTA).replace(TRIGGER_LINE, `${TRIGGER_LINE}${DELTA_READING_LINES}`);
+}
+
+/** The trigger reading line (ends with its newline); the +d1 lines follow it. */
+const TRIGGER_LINE =
+  '- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.\n';
+
+function renderBase(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons'>): string {
   return `You are a trade sentinel watching a single open position in the Indian market.
 
 You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.

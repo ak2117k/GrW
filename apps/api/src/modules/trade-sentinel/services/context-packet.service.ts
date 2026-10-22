@@ -22,6 +22,7 @@ import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
 import { NEWS_INDEX, type NewsIndexReader } from '../ports/news-index.port';
 import { allEventsAbsent, allNewsAbsent, eventsBlocks, newsBlocksV2, type EventsBlocksV2, type NewsBlocksV2 } from './news-events-blocks';
 import { MBM_CONFIG, type MbmConfig } from '../../mbm/mbm.config';
+import { TUNING_READER, type TuningReader } from '../../self-review/tuning/tunables';
 // A VALUE import: MbmClient is injected by class, so design:paramtypes must see it.
 import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
@@ -33,6 +34,8 @@ import { LESSONS_READER, type InjectedLesson, type InjectionScope, type LessonsR
 
 /** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
 export const MBM_PACKET_LOG_EVERY_MS = 15 * 60_000;
+/** The self-review tunable that may clear the MBM readings for the judge (see mbmPacketMode). */
+export const MBM_PACKET_TUNABLE = 'mbm.packet';
 
 /**
  * Every packet field is either present WITH provenance, or explicitly absent
@@ -375,6 +378,12 @@ export interface TickSnapshot {
    * of the last 30 minutes by id, for the edge-triggered `news-hit`. Absent otherwise.
    */
   freshNews?: FreshItem[] | null;
+  /**
+   * The legacy (non-v2) news path: the ids and titles behind `freshNewsCount`, so
+   * the cycle's material-change gate can tell a NEW headline from a repeat. Never
+   * rendered into the packet as such and never read by a sensor. Absent when none.
+   */
+  freshNewsItems?: FreshItem[] | null;
   factorValues: Record<string, number>;
   /**
    * Why {@link factorValues} is empty, or null when it is populated. Carried so
@@ -529,14 +538,14 @@ export type ContextPacket = {
     minutesToNextHighImpact: Block<number>;
   };
   /**
-   * MBM M3 (MBM_PACKET=on only): the market-behaviour model's regime and expected range for a
+   * MBM M3 (MBM_PACKET=on, or the self-review tunable mbm.packet=true): the market-behaviour model's regime and expected range for a
    * NIFTY-mapped position — a `MarketBehaviourValue`. Absent key ⇒ flag off/observe, a non-NIFTY
    * position, or no usable (ok, finite) answer: never an `available:false` block, so the packet of
    * every unmapped position stays byte-identical.
    */
   marketBehaviour?: Block<Prisma.InputJsonValue>;
   /**
-   * Stock big-move model (MBM_PACKET=on only, the same gate as `marketBehaviour`): for a STOCK
+   * Stock big-move model (the same gate as `marketBehaviour`): for a STOCK
    * position, the nightly model's P(big 5-session move), its bucket and the next results date — a
    * `StockMoveValue`. Read from an in-memory book (no I/O on this path). Absent key ⇒ flag
    * off/observe, an index/MCX position, or no score for the stock: the packet stays byte-identical.
@@ -555,7 +564,80 @@ export type ContextPacket = {
    * right ≥ 2, max 8). Absent key ⇒ no lessons, so the packet is byte-identical to before.
    */
   memory: Block<Prisma.InputJsonValue> & { lessons?: InjectedLesson[] };
+  /**
+   * Material-change gating (SENTINEL_PACKET_DELTA, default on): on a RE-judgement
+   * of the same tracker, a compact then/now of what moved since the previous live
+   * verdict. A summary only — every full block above is still present, because the
+   * judge is stateless and the exit gate reads the stored packets. Absent key ⇒
+   * first look (or delta off): the packet is byte-identical to before.
+   */
+  sinceLastVerdict?: SinceLastVerdict;
+  /**
+   * The owner holds this position against automatic exits (AI_AUTO_EXIT_HOLD):
+   * the executor skips every exit on it, so the verdict is informational. Only
+   * ever `true`; absent otherwise.
+   */
+  ownerHold?: true;
 };
+
+/** See {@link ContextPacket.sinceLastVerdict}. A `type` so it stays assignable to Prisma JSON. */
+export type SinceLastVerdict = {
+  verdict: string;
+  at: string;
+  ageMin: number;
+  /** The reviewIn that verdict asked for, and whether it has elapsed. */
+  reviewInSec: number | null;
+  reviewDue: boolean;
+  ltp: { then: number | null; now: number };
+  underlyingLtp: { then: number | null; now: number | null };
+  netPnl: { then: number | null; now: number };
+  /** What woke the judge then (its triggeredBy). */
+  triggersThen: string[];
+  /** Own-instrument headlines (titles) the judge has not been shown before; [] when none / unknown. */
+  newHeadlines: string[];
+};
+
+/** What the cycle hands the packet builder about the previous live verdict (the `then` side). */
+export interface PacketReview {
+  held?: boolean;
+  since?: {
+    verdict: string;
+    at: Date;
+    reviewInSec: number | null;
+    ltp: number | null;
+    underlyingLtp: number | null;
+    netPnl: number | null;
+    triggersThen: string[];
+    newHeadlines: string[];
+  } | null;
+}
+
+/** Bounds on the delta block, so it stays a few hundred characters. */
+const DELTA_MAX_HEADLINES = 3;
+const DELTA_MAX_TITLE = 120;
+
+/** The `sinceLastVerdict` block from the review's `then` side and this packet's `now` side. Pure. */
+export function sinceLastVerdictBlock(
+  since: NonNullable<PacketReview['since']>,
+  now: { at: Date; ltp: number; underlyingLtp: number | null; netPnl: number },
+): SinceLastVerdict {
+  const ageMs = Math.max(0, now.at.getTime() - since.at.getTime());
+  const fin = (x: number | null) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+  const r2 = (x: number) => Math.round(x * 100) / 100;
+  const review = fin(since.reviewInSec);
+  return {
+    verdict: since.verdict,
+    at: since.at.toISOString(),
+    ageMin: Math.round(ageMs / 60_000),
+    reviewInSec: review,
+    reviewDue: review !== null && review > 0 ? ageMs >= review * 1000 : true,
+    ltp: { then: fin(since.ltp), now: now.ltp },
+    underlyingLtp: { then: fin(since.underlyingLtp), now: fin(now.underlyingLtp) },
+    netPnl: { then: fin(since.netPnl) === null ? null : r2(since.netPnl as number), now: r2(now.netPnl) },
+    triggersThen: since.triggersThen.slice(0, 8),
+    newHeadlines: since.newHeadlines.slice(0, DELTA_MAX_HEADLINES).map((t) => t.slice(0, DELTA_MAX_TITLE)),
+  };
+}
 
 /**
  * Compile-time proof that a packet is storable in the `jsonb` column as-is.
@@ -873,7 +955,29 @@ export class ContextPacketService {
     @Optional() @Inject(LESSONS_READER) private readonly lessons?: LessonsReader,
     /** Stock big-move book — an in-memory read (no I/O), refreshed ≤ 30 min. Absent ⇒ no block. */
     @Optional() @Inject(STOCK_MOVE_READER) private readonly stockMove?: StockMoveReader,
+    /**
+     * Self-review tunables (@Global TUNING_READER). Read for ONE key, `mbm.packet`
+     * (boolean, default false): the owner's rule is that the MBM readings stay hidden
+     * from the judge until the self-review says the model has a real edge. Absent ⇒
+     * the env alone (MBM_PACKET) decides, exactly as before.
+     */
+    @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
   ) {}
+
+  /**
+   * The effective MBM packet mode: `on` when MBM_PACKET=on OR the self-review
+   * tunable `mbm.packet` is true; otherwise the env's mode (off / observe). Never throws.
+   */
+  private mbmPacketMode(): 'off' | 'observe' | 'on' {
+    const env = this.mbmCfg?.packet ?? 'off';
+    if (env === 'on') return 'on';
+    try {
+      if (this.tuning?.get<boolean>(MBM_PACKET_TUNABLE, false) === true) return 'on';
+    } catch {
+      // A broken tuning read must never show the judge a model it was not cleared to see.
+    }
+    return env;
+  }
 
   /** The lessons for this packet's agent (live, or the overnight review). Never throws. */
   private lessonsFor(fires: readonly TripwireFire[]): InjectedLesson[] {
@@ -897,7 +1001,7 @@ export class ContextPacketService {
    * unchanged. Never throws.
    */
   private async marketBehaviourBlock(entry: RosterEntry, now: Date, at: string): Promise<Block<Prisma.InputJsonValue> | null> {
-    const mode = this.mbmCfg?.packet ?? 'off';
+    const mode = this.mbmPacketMode();
     if (mode === 'off' || !this.mbm || !this.mbmCfg) return null;
     try {
       const inst = mbmInstrumentFor({ symbol: entry.symbol, exchange: entry.exchange }, this.mbmCfg.instruments);
@@ -927,7 +1031,7 @@ export class ContextPacketService {
    * MCX positions, and stocks the model has not scored, get no block. Synchronous, never throws.
    */
   private stockMoveBlock(entry: RosterEntry, now: Date, at: string): Block<Prisma.InputJsonValue> | null {
-    const mode = this.mbmCfg?.packet ?? 'off';
+    const mode = this.mbmPacketMode();
     if (mode === 'off' || !this.stockMove) return null;
     try {
       const ex = String(entry.exchange ?? '').toUpperCase();
@@ -1020,6 +1124,7 @@ export class ContextPacketService {
     tick: TickSnapshot,
     thesis: StoredThesis | null,
     fires: TripwireFire[] = [],
+    review?: PacketReview,
   ): Promise<ContextPacket> {
     const now = new Date();
     const at = now.toISOString();
@@ -1296,6 +1401,18 @@ export class ContextPacketService {
           : absent('no prior verdicts for this position — this is the first look'),
         this.lessonsFor(fires),
       ),
+      // Material-change gating: both keys only when the cycle supplies them.
+      ...(review?.since
+        ? {
+            sinceLastVerdict: sinceLastVerdictBlock(review.since, {
+              at: now,
+              ltp: tick.ltp,
+              underlyingLtp: tick.underlyingLtp,
+              netPnl: floor.netPnl,
+            }),
+          }
+        : {}),
+      ...(review?.held ? { ownerHold: true as const } : {}),
     };
   }
 

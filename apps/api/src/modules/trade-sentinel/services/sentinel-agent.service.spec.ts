@@ -156,8 +156,8 @@ describe('SentinelAgentService', () => {
     expect(svc.promptVersion).toBe('v2.4/t1');
     const on = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'true' : undefined) } as never);
     // A ConfigService with SELF_REVIEW_LESSONS unset = lessons on (its default): the +l1 suffix.
-    expect(on.promptVersion).toBe('v7+l1/t1');
-    expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}+l1/${THESIS_PROMPT_VERSION}`);
+    expect(on.promptVersion).toBe('v7+l1+d1/t1');
+    expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}+l1+d1/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');
   });
@@ -261,8 +261,8 @@ describe('SentinelAgentService', () => {
     const on = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'TRUE' : undefined) } as never);
     await on.judge(packet());
     // SELF_REVIEW_LESSONS unset = on: SENTINEL_SYSTEM_PROMPT plus the +l1 memory.lessons line.
-    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: true, triggers: false, discipline: true, lessons: true }));
-    expect(on.promptVersion).toBe('v7+l1/t1');
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: true, triggers: false, discipline: true, lessons: true, delta: true }));
+    expect(on.promptVersion).toBe('v7+l1+d1/t1');
   });
 
   it('sends the packet as the user turn and caches the system prompt', async () => {
@@ -735,9 +735,9 @@ describe('prompt v7 / v2.4 (exit discipline) and the two switches', () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const agent = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (env as Record<string, string>)[k] } as never);
     await agent.judge(packet());
-    // SELF_REVIEW_LESSONS unset = on: every stamp carries +l1 (sentinel-lessons-prompt.spec.ts covers off).
-    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ ...o, lessons: true }));
-    expect(agent.promptVersion).toBe(`${stamp}+l1/${THESIS_PROMPT_VERSION}`);
+    // SELF_REVIEW_LESSONS / SENTINEL_PACKET_DELTA unset = on: every stamp carries +l1+d1.
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ ...o, lessons: true, delta: true }));
+    expect(agent.promptVersion).toBe(`${stamp}+l1+d1/${THESIS_PROMPT_VERSION}`);
   });
 
   it('a verdict citing flow.noiseUnit and money.floorBasis validates; an invented child of money is still rejected', async () => {
@@ -840,6 +840,64 @@ describe('prompt v9–v12 / v2.6–v2.9 (news & events v2)', () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const agent = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (env as Record<string, string>)[k] } as never);
     await agent.judge(packet());
-    expect(agent.promptVersion).toBe(`${stamp}+l1/${THESIS_PROMPT_VERSION}`); // SELF_REVIEW_LESSONS unset = on
+    expect(agent.promptVersion).toBe(`${stamp}+l1+d1/${THESIS_PROMPT_VERSION}`); // SELF_REVIEW_LESSONS unset = on
+  });
+});
+
+describe('judge gate: model tiering and the +d1 packet-delta prompt', () => {
+  const validVerdictLocal = {
+    verdict: 'HOLD', confidence: 'medium', thesisStatus: 'INTACT', recoveryAvailable: true, reason: 'ok',
+    evidence: ['money.netPnl'], invalidationPoint: 'x', reviewIn: 300, exitTrigger: null,
+  };
+  const agentWith = (env: Record<string, string>) => {
+    const c = jest.fn().mockResolvedValue(reply(validVerdictLocal));
+    return { c, agent: new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => env[k] } as never) };
+  };
+
+  it('routine (HEARTBEAT) goes to SENTINEL_ROUTINE_MODEL, then SENTINEL_MODEL_ROUTINE, then claude-sonnet-5; FIRE stays on the strong model', async () => {
+    for (const [env, routine] of [
+      [{}, 'claude-sonnet-5'],
+      [{ SENTINEL_MODEL_ROUTINE: 'old-routine' }, 'old-routine'],
+      [{ SENTINEL_MODEL_ROUTINE: 'old-routine', SENTINEL_ROUTINE_MODEL: 'new-routine' }, 'new-routine'],
+      [{ SENTINEL_ROUTINE_MODEL: '  ' }, 'claude-sonnet-5'],
+    ] as Array<[Record<string, string>, string]>) {
+      const { c, agent } = agentWith(env);
+      await agent.judge(packet(), 'HEARTBEAT');
+      await agent.judge(packet(), 'FIRE');
+      expect(c.mock.calls[0][0].model).toBe(routine);
+      expect(c.mock.calls[1][0].model).toBe('claude-opus-5');
+    }
+  });
+
+  it('delta on (the default with config): the two reading lines, the field list names both keys, +d1 stamp', async () => {
+    const { c, agent } = agentWith({});
+    await agent.judge(packet());
+    const text: string = c.mock.calls[0][0].system[0].text;
+    expect(text).toContain('- sinceLastVerdict, present when you have judged this trade before');
+    expect(text).toContain('- ownerHold, when present, is always true');
+    expect(text).toContain('plus sinceLastVerdict and ownerHold when present. There are no other fields;');
+    expect(agent.promptVersion).toBe(`v2.4+l1+d1/${THESIS_PROMPT_VERSION}`);
+  });
+
+  it('SENTINEL_PACKET_DELTA=false: byte-identical to the pre-delta prompt and stamp', async () => {
+    const { c, agent } = agentWith({ SENTINEL_PACKET_DELTA: 'false' });
+    await agent.judge(packet());
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: false, triggers: false, discipline: true, lessons: true }));
+    expect(agent.promptVersion).toBe(`v2.4+l1/${THESIS_PROMPT_VERSION}`);
+  });
+
+  it('a verdict citing sinceLastVerdict / ownerHold validates when the packet carries them', async () => {
+    const { c, agent } = agentWith({});
+    const p = {
+      ...packet(),
+      sinceLastVerdict: {
+        verdict: 'HOLD', at: '2026-10-16T04:40:00.000Z', ageMin: 20, reviewInSec: 600, reviewDue: true,
+        ltp: { then: 118, now: 120 }, underlyingLtp: { then: null, now: null }, netPnl: { then: 1, now: 2 },
+        triggersThen: ['heartbeat'], newHeadlines: [],
+      },
+      ownerHold: true as const,
+    };
+    c.mockResolvedValue(reply({ ...validVerdictLocal, evidence: ['sinceLastVerdict.ltp', 'ownerHold', 'money.netPnl'] }));
+    await expect(agent.judge(p)).resolves.toMatchObject({ verdict: 'HOLD' });
   });
 });

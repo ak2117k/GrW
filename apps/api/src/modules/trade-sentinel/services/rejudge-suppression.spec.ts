@@ -122,8 +122,8 @@ describe('suppressRepeatJudgements', () => {
   const baselines = { 'giveback-off-peak': snap(), 'volume-anomaly': snap() };
   const now = snap({ at: 60_000 });
 
-  it('only the two level-triggered sensors are suppressible', () => {
-    expect([...SUPPRESSIBLE_FIRES].sort()).toEqual(['giveback-off-peak', 'volume-anomaly']);
+  it('the four level-triggered sensors are suppressible (news-hit and level-break since 2026-10-22)', () => {
+    expect([...SUPPRESSIBLE_FIRES].sort()).toEqual(['giveback-off-peak', 'level-break', 'news-hit', 'volume-anomaly']);
   });
 
   it('drops an unchanged repeat and stops the wake', () => {
@@ -135,7 +135,7 @@ describe('suppressRepeatJudgements', () => {
   });
 
   it('never suppresses when any other sensor fired — the whole decision passes through', () => {
-    for (const other of ['level-break', 'exit-confirm', 'news-hit', 'event-near', 'oi-wall-shift', 'context-factor-flip']) {
+    for (const other of ['exit-confirm', 'event-near', 'oi-wall-shift', 'context-factor-flip']) {
       const d = fired('giveback-off-peak', other);
       const r = suppressRepeatJudgements(d, baselines, now, cfg);
       expect(r.suppressed).toEqual([]);
@@ -186,7 +186,7 @@ describe('suppressRepeatJudgements', () => {
     });
 
     it('stays FIRE when any other sensor fired', () => {
-      const d = fired('giveback-off-peak', 'level-break');
+      const d = fired('giveback-off-peak', 'event-near');
       expect(suppressRepeatJudgements(d, baselines, late, cfg).decision).toBe(d);
     });
 
@@ -199,5 +199,59 @@ describe('suppressRepeatJudgements', () => {
       const d = fired('giveback-off-peak');
       expect(suppressRepeatJudgements(d, baselines, late, { ...cfg, routineOnCooldown: false }).decision).toBe(d);
     });
+  });
+});
+
+describe('material-change gating (2026-10-22): news ids, broken levels, edge flags, review time', () => {
+  const base = snap({ at: 0 });
+
+  it('news-hit: dedup per headline id — a repeat with no unseen id is not material, one unseen id is', () => {
+    const b = snap({ newsUnjudged: 0, newsCount: 2 });
+    expect(repeatIsMaterial('news-hit', b, snap({ at: 1, newsUnjudged: 0, newsCount: 2 }), cfg)).toBe(false);
+    expect(repeatIsMaterial('news-hit', b, snap({ at: 1, newsUnjudged: 1, newsCount: 3 }), cfg)).toBe(true);
+    // ids known: the count alone moving (an old headline aging out, or in) is not new.
+    expect(repeatIsMaterial('news-hit', b, snap({ at: 1, newsUnjudged: 0, newsCount: 5 }), cfg)).toBe(false);
+  });
+
+  it('news-hit without ids falls back to a higher 30-minute count; unknown counts fail open', () => {
+    const b = snap({ newsUnjudged: null, newsCount: 2 });
+    expect(repeatIsMaterial('news-hit', b, snap({ at: 1, newsUnjudged: null, newsCount: 2 }), cfg)).toBe(false);
+    expect(repeatIsMaterial('news-hit', b, snap({ at: 1, newsUnjudged: null, newsCount: 1 }), cfg)).toBe(false);
+    expect(repeatIsMaterial('news-hit', b, snap({ at: 1, newsUnjudged: null, newsCount: 3 }), cfg)).toBe(true);
+    expect(repeatIsMaterial('news-hit', b, snap({ at: 1, newsUnjudged: null, newsCount: null }), cfg)).toBe(true);
+  });
+
+  it('level-break: the same broken level is not new; a different one is', () => {
+    const b = snap({ level: 24000 });
+    expect(repeatIsMaterial('level-break', b, snap({ at: 1, level: 24000 }), cfg)).toBe(false);
+    expect(repeatIsMaterial('level-break', b, snap({ at: 1, level: 23900 }), cfg)).toBe(true);
+    expect(repeatIsMaterial('level-break', b, snap({ at: 1, level: null }), cfg)).toBe(true);
+  });
+
+  it('a floor breach, an exitTrigger cross or a hard-risk window APPEARING is material; persisting is not', () => {
+    for (const k of ['floorBreached', 'triggerCrossed', 'hardRisk'] as const) {
+      expect(repeatIsMaterial('giveback-off-peak', base, snap({ at: 1, [k]: true }), cfg)).toBe(true);
+      expect(repeatIsMaterial('giveback-off-peak', snap({ [k]: true }), snap({ at: 1, [k]: true }), cfg)).toBe(false);
+    }
+  });
+
+  it('reviewDue replaces the flat cooldown: not due ⇒ an old repeat stays unchanged; due ⇒ material', () => {
+    const late = snap({ at: cfg.cooldownMs * 3 });
+    expect(repeatIsMaterial('giveback-off-peak', base, late, cfg, false)).toBe(false);
+    expect(repeatIsMaterial('giveback-off-peak', base, snap({ at: 1 }), cfg, true)).toBe(true);
+    // Omitted: the cooldown as before.
+    expect(repeatIsMaterial('giveback-off-peak', base, late, cfg)).toBe(true);
+  });
+
+  it('a news repeat material only because the review time elapsed is asked at the routine tier', () => {
+    const b = { 'news-hit': snap({ newsUnjudged: 0, newsCount: 1 }) };
+    const r = suppressRepeatJudgements(fired('news-hit'), b, snap({ at: 1, newsUnjudged: 0, newsCount: 1 }), cfg, true);
+    expect(r.suppressed).toEqual([]);
+    expect(r.decision.trigger).toBe('HEARTBEAT');
+    expect(r.decision.fires.map((f) => f.name)).toEqual(['news-hit']);
+    // ... and is dropped while the review time has not come.
+    expect(suppressRepeatJudgements(fired('news-hit'), b, snap({ at: 1, newsUnjudged: 0, newsCount: 1 }), cfg, false).suppressed).toEqual(['news-hit']);
+    // A NEW headline keeps the strong tier.
+    expect(suppressRepeatJudgements(fired('news-hit'), b, snap({ at: 1, newsUnjudged: 1, newsCount: 2 }), cfg, false).decision.trigger).toBe('FIRE');
   });
 });

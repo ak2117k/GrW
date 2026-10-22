@@ -54,6 +54,7 @@ import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
 import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
 import { REJUDGE_CONFIG, parseRejudgeConfig } from './services/rejudge-suppression';
 import { EXIT_ATTEMPTS, FUTILE_REJUDGE_CONFIG, parseFutileRejudgeConfig } from './services/futile-rejudge';
+import { JUDGE_GATE_CONFIG, parseJudgeGateConfig } from './services/judge-gate';
 import { PrismaExitAttemptReader } from './repositories/exit-attempt.reader';
 import { MinuteBarsReader } from './adapters/minute-bars.reader';
 import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
@@ -216,6 +217,11 @@ import { MARKET_EVENTS } from './ports/events.port';
     // READ-ONLY view of ai_exit_executions — no executor dependency, no broker.
     { provide: FUTILE_REJUDGE_CONFIG, useFactory: () => parseFutileRejudgeConfig(process.env) },
     { provide: EXIT_ATTEMPTS, useClass: PrismaExitAttemptReader },
+    // Judge gate (default ON; SENTINEL_JUDGE_GATE=false rolls back): held positions
+    // heartbeat-only (≤ 1 / 30 min), ≤ 1 judgement per position per
+    // SENTINEL_MIN_JUDGE_INTERVAL_SEC (900) with safety bypasses, routine-wake tier
+    // upgrade under risk, and the sinceLastVerdict packet delta (SENTINEL_PACKET_DELTA).
+    { provide: JUDGE_GATE_CONFIG, useFactory: () => parseJudgeGateConfig(process.env) },
     {
       provide: MinuteBarsReader,
       useFactory: (prisma: PrismaService) => new MinuteBarsReader(new PrismaCandleRepo(prisma as never)),

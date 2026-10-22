@@ -132,6 +132,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -141,7 +143,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -312,6 +314,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -321,7 +325,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -500,6 +504,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -509,7 +515,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -681,6 +687,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -690,7 +698,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -872,6 +880,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -881,7 +891,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -1065,6 +1075,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -1074,7 +1086,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -1261,6 +1273,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -1271,7 +1285,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -1457,6 +1471,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -1467,7 +1483,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -1655,6 +1671,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -1665,7 +1683,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -1856,6 +1874,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -1866,7 +1886,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -2055,6 +2075,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -2064,7 +2086,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -2249,6 +2271,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -2258,7 +2282,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -2438,6 +2462,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -2447,7 +2473,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -2629,6 +2655,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -2638,7 +2666,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -2823,6 +2851,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -2833,7 +2863,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -3017,6 +3047,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -3027,7 +3059,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -3213,6 +3245,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -3223,7 +3257,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, flow.noiseUnit, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -3412,6 +3446,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -3421,7 +3457,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -3600,6 +3636,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -3610,7 +3648,7 @@ The packet's fields, exactly:
 - news: headlines, freshCount, asOf.
 - events: upcoming, minutesToNextHighImpact.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -3797,6 +3835,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -3806,7 +3846,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -3989,6 +4029,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -3998,7 +4040,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -4169,6 +4211,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -4178,7 +4222,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -5078,6 +5122,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -5087,7 +5133,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -5260,6 +5306,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -5269,7 +5317,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -5442,6 +5490,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -5451,7 +5501,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -5624,6 +5674,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -5633,7 +5685,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -5804,6 +5856,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -5813,7 +5867,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -5886,6 +5940,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -5895,7 +5951,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -6470,6 +6526,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -6479,7 +6537,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -6545,6 +6603,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -6554,7 +6614,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -6827,6 +6887,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -6836,7 +6898,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -6902,6 +6964,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -6911,7 +6975,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -7186,6 +7250,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -7195,7 +7261,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -7253,6 +7319,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -7262,7 +7330,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -7535,6 +7603,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -7544,7 +7614,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.
@@ -7602,6 +7672,8 @@ How to read the packet:
 - The "memory" block holds your own recent verdicts on this same trade. Stay consistent with them, or state explicitly what changed.
 - memory.lessons, when present, lists lessons from the nightly self-review of past calls, each with key, text, right and wrong — right and wrong count the past cases where following it would have been right or wrong. They are evidence-counted guidance to weigh against this packet, never rules: a lesson never overrides the hard risk limits, the green floor or the code gate, and never outweighs what this packet itself shows. When a lesson shapes your verdict, cite memory.lessons.
 - The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.
+- sinceLastVerdict, present when you have judged this trade before, compares this packet with the one behind your previous verdict (the newest entry in memory): that verdict, its time and ageMin, the reviewIn you asked for and whether it has elapsed (reviewDue), then/now pairs for position.ltp, position.underlyingLtp and money.netPnl, the triggers that woke you then (triggersThen), and the own-instrument headlines that are new since then (newHeadlines). It is a summary of what changed; the full blocks above remain the evidence, so cite them. Nothing new since your previous verdict is a reason to stay consistent with it.
+- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.
 
 The packet's fields, exactly:
 - position: symbol, kind, ownership, segment, side, qty, entryPrice, ltp, underlyingLtp, entryTime, expiry.
@@ -7611,7 +7683,7 @@ The packet's fields, exactly:
 - macro: fiiDii, sector, globalCues, realFactors.
 - news: headlines, freshCount.
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+- The remaining top-level fields are thesis, trigger and memory, plus sinceLastVerdict and ownerHold when present. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 - Blocks are position.underlyingLtp, thesis, structure.levelBook, structure.nearestSupport, structure.nearestResistance, flow.volumeRatio, flow.oiWalls, macro.fiiDii, macro.sector, macro.globalCues, macro.realFactors, news.headlines, news.freshCount, session.minutesToClose, trigger and memory. Everything else listed above is a plain value.

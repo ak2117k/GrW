@@ -1,5 +1,5 @@
 import { of, throwError } from 'rxjs';
-import { NewsAggregatorService, pubDateGuard, RSS_FETCH_TIMEOUT_MS } from './news-aggregator.service';
+import { NewsAggregatorService, pubDateGuard, RSS_FETCH_TIMEOUT_MS, rssBackoffMs } from './news-aggregator.service';
 import { SourceHealthBook } from '../../news-events/source-health';
 import { parseNewsEventsConfig } from '../../news-events/config';
 
@@ -120,5 +120,68 @@ describe('NewsAggregatorService — A5 tag once at ingestion', () => {
     (svc as unknown as { prisma: { newsArticle: { create: jest.Mock } } }).prisma.newsArticle.create.mockRejectedValueOnce(new Error('P2002'));
     await svc.fetchAllNews();
     expect(bus.publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('NewsAggregatorService — refused-source back-off (ET Auto HTTP 403, 2026-10-22)', () => {
+  const refused = (status: number) => Object.assign(new Error(`Request failed with status code ${status}`), { response: { status } });
+
+  function setup(bodyA: () => string | Error) {
+    const h = harness('false', {});
+    const http = (h.svc as unknown as { httpService: { get: jest.Mock } }).httpService;
+    http.get.mockImplementation((url: string) => {
+      if (url !== 'https://a.test/rss') return of({ data: rss(item('Gold rises', 'https://b.test/1', 'Thu, 16 Oct 2026 04:00:00 GMT')) });
+      const b = bodyA();
+      return b instanceof Error ? throwError(() => b) : of({ data: b });
+    });
+    let now = NOW.getTime();
+    h.svc.clock = () => new Date(now);
+    const logger = (h.svc as unknown as { logger: Record<string, (...a: unknown[]) => void> }).logger;
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const calls = () => http.get.mock.calls.filter((c) => c[0] === 'https://a.test/rss').length;
+    return { ...h, error, warn, calls, advance: (ms: number) => (now += ms) };
+  }
+
+  it('rssBackoffMs: 0 below 3, then 30 min doubling, capped at 6 h', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8, 20].map((n) => rssBackoffMs(n) / 60_000)).toEqual([0, 0, 30, 60, 120, 240, 360, 360, 360]);
+  });
+
+  it('3 refusals in a row → skipped for 30 min with ONE warning; the next refusal doubles it', async () => {
+    let body: string | Error = refused(403);
+    const t = setup(() => body);
+    for (let i = 0; i < 3; i++) {
+      await t.svc.fetchAllNews();
+      t.advance(5 * 60_000);
+    }
+    expect(t.error.mock.calls.filter((c) => String(c[0]).includes('from A:'))).toHaveLength(2); // genuine first failures still at ERROR
+    expect(t.warn.mock.calls.filter((c) => String(c[0]).includes('RSS source A refused (HTTP 403) 3 times'))).toHaveLength(1);
+
+    for (let i = 0; i < 4; i++) {
+      await t.svc.fetchAllNews(); // inside the 30 min: no fetch, no log
+      t.advance(5 * 60_000);
+    }
+    expect(t.calls()).toBe(3);
+    t.advance(15 * 60_000);
+    await t.svc.fetchAllNews(); // the probe: still 403 → 60 min
+    expect(t.calls()).toBe(4);
+    expect(t.warn.mock.calls.filter((c) => String(c[0]).includes('not fetching it for 60 min'))).toHaveLength(1);
+    expect(t.error.mock.calls.filter((c) => String(c[0]).includes('from A:'))).toHaveLength(2);
+
+    // Recovers on its own once the feed answers.
+    body = rss(item('Auto sales jump', 'https://a.test/9', 'Thu, 16 Oct 2026 04:00:00 GMT'));
+    t.advance(61 * 60_000);
+    await t.svc.fetchAllNews();
+    await t.svc.fetchAllNews();
+    expect(t.calls()).toBe(6);
+    expect(t.health.all().find((x) => x.source === 'A')).toMatchObject({ consecutiveFailures: 0 });
+  });
+
+  it('timeouts / 5xx never back a source off, and break a run of refusals', async () => {
+    const seq: Array<Error> = [refused(404), refused(404), refused(503), refused(404), refused(404), new Error('timeout of 15000ms exceeded')];
+    const t = setup(() => seq.shift() ?? refused(500));
+    for (let i = 0; i < 8; i++) await t.svc.fetchAllNews();
+    expect(t.calls()).toBe(8);
+    expect(t.warn.mock.calls.filter((c) => String(c[0]).includes('refused'))).toHaveLength(0);
   });
 });

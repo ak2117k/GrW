@@ -61,8 +61,13 @@ const RSS_SOURCES: RSSSource[] = [
   },
   // Sector-specific sources
   {
+    // Was https://auto.economictimes.indiatimes.com/rss/topstories — since ~2026-10-22 the whole
+    // auto.economictimes subdomain answers HTTP 403 (prod: ×36 in 3 h; the dev machine too, while
+    // the energy/health/bfsi/realty siblings still answer 200). ET's own Industry › Auto feed,
+    // checked 2026-10-22: HTTP 200, text/xml, channel "Auto-Industry-Economic Times", 50 items, fresh
+    // pubDates. Name kept: the sector tagger keys on 'ET Auto'.
     name: 'ET Auto',
-    url: 'https://auto.economictimes.indiatimes.com/rss/topstories',
+    url: 'https://economictimes.indiatimes.com/industry/auto/rssfeeds/13359412.cms',
     category: 'sector',
   },
   {
@@ -136,6 +141,28 @@ const RSS_SOURCES: RSSSource[] = [
 export const REMOVED_SOURCES: readonly string[] = ['MoneyControl', 'Reuters Business', 'ET Earnings'];
 export const RSS_FETCH_TIMEOUT_MS = 15_000;
 
+/**
+ * A source answering 401 / 403 / 404 this many fetches in a row is backed off
+ * (a blocked or moved feed does not fix itself in 5 minutes). The back-off
+ * starts at {@link RSS_BACKOFF_BASE_MS} and doubles per further refusal up to
+ * {@link RSS_BACKOFF_MAX_MS}; one success clears it.
+ */
+export const RSS_BACKOFF_AFTER = 3;
+export const RSS_BACKOFF_BASE_MS = 30 * 60_000;
+export const RSS_BACKOFF_MAX_MS = 6 * 60 * 60_000;
+const RSS_DEAD_STATUSES: ReadonlySet<number> = new Set([401, 403, 404]);
+
+/** The back-off after the `refusals`-th refusal in a row (0 below the threshold). */
+export function rssBackoffMs(refusals: number): number {
+  if (refusals < RSS_BACKOFF_AFTER) return 0;
+  return Math.min(RSS_BACKOFF_BASE_MS * 2 ** (refusals - RSS_BACKOFF_AFTER), RSS_BACKOFF_MAX_MS);
+}
+
+function httpStatusOf(error: unknown): number | null {
+  const s = (error as { response?: { status?: unknown } } | null)?.response?.status;
+  return typeof s === 'number' ? s : null;
+}
+
 const ZONE_RE = /(?:[+-]\d{2}:?\d{2}|\b(?:GMT|UTC|UT|Z|[ECMP][SD]T|IST))\s*$/i;
 
 /** R6: a pubDate we cannot place in time (missing, unparseable, zone-less, > 10 min ahead) is `fetchedAt` + inferred. */
@@ -172,6 +199,8 @@ export class NewsAggregatorService {
   sourcesForTest?: RSSSource[];
   /** Test seam: the fetch clock. */
   clock: () => Date = () => new Date();
+  /** Per source: 401/403/404 replies in a row, and the time until which it is not fetched. */
+  private readonly refusals = new Map<string, { count: number; until: number }>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -378,6 +407,8 @@ export class NewsAggregatorService {
    * Fetch and parse RSS XML from a single source.
    */
   private async fetchFromSource(source: RSSSource, fetchedAt: Date): Promise<ParsedArticle[]> {
+    const backedOff = this.refusals.get(source.name);
+    if (backedOff && backedOff.until > this.clock().getTime()) return [];
     try {
       const response = await firstValueFrom(
         this.httpService.get<any>(source.url, {
@@ -396,15 +427,45 @@ export class NewsAggregatorService {
 
       const articles = this.parseRSS(xml, source, fetchedAt);
       this.health?.ok(source.name, articles.length, this.clock());
+      const prev = this.refusals.get(source.name);
+      if (prev) {
+        this.refusals.delete(source.name);
+        if (prev.count >= RSS_BACKOFF_AFTER) this.logger.log(`RSS source ${source.name} answering again (${articles.length} items) — back-off cleared`);
+      }
       return articles;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.health?.fail(source.name, message, this.clock());
+      const status = httpStatusOf(error);
+      if (status !== null && RSS_DEAD_STATUSES.has(status)) {
+        if (this.recordRefusal(source, status, message)) return [];
+      } else {
+        this.refusals.delete(source.name); // a timeout / 5xx breaks the run of refusals
+      }
       this.logger.error(
         `Failed to fetch RSS from ${source.name}: ${message}`,
       );
       return [];
     }
+  }
+
+  /**
+   * One more 401/403/404 from `source`. Below {@link RSS_BACKOFF_AFTER} in a row it is an ordinary
+   * failure (the caller logs it at ERROR); from then on the source is skipped for {@link rssBackoffMs}
+   * and this logs ONE warning per back-off. Returns whether it backed off.
+   */
+  private recordRefusal(source: RSSSource, status: number, message: string): boolean {
+    const r = this.refusals.get(source.name) ?? { count: 0, until: 0 };
+    r.count++;
+    this.refusals.set(source.name, r);
+    const ms = rssBackoffMs(r.count);
+    if (ms === 0) return false;
+    r.until = this.clock().getTime() + ms;
+    this.logger.warn(
+      `RSS source ${source.name} refused (HTTP ${status}) ${r.count} times in a row — not fetching it for ` +
+        `${ms / 60_000} min (until ${new Date(r.until).toISOString()}): ${message}`,
+    );
+    return true;
   }
 
   /**

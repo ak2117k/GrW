@@ -28,6 +28,9 @@ export const BACKOFF_MAX_MS = 5 * 60_000;
 const WATCHDOG_MS = 60_000;
 /** Every 10 min, so a deaf listener shows quickly (2026-10-23: 28 quiet minutes were indistinguishable from no feed). */
 const SUMMARY_MS = 10 * 60_000;
+/** Polling safety net: newest posts of every ticked channel this often (TELEGRAM_POLL_SEC, 0 = off). */
+const DEFAULT_POLL_SEC = 60;
+const POLL_LIMIT = 5;
 
 /** Exponential backoff for attempt n (0-based), capped. */
 export function backoffMs(attempt: number): number {
@@ -56,6 +59,10 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   private counts = new Map<string, number>(); // channel title -> messages this period
   /** Every update the client delivered this period, ticked channel or not — proves the feed is alive. */
   private received = 0;
+  /** Messages found by the poller that push had not delivered (stored this period). */
+  private polledNew = 0;
+  private poller: NodeJS.Timeout | null = null;
+  private polling = false;
   private stateValue: ListenerState = 'idle';
   private lastError: string | null = null;
   private lastMessageAt: Date | null = null;
@@ -129,6 +136,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       );
       client.onMessage((m) => void this.handle(m));
       await client.connect();
+      await client.subscribeUpdates?.();
       if (gen !== this.generation) {
         await client.disconnect().catch(() => undefined);
         return;
@@ -139,12 +147,47 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       this.attempt = 0;
       if (meta.status !== 'connected') await this.store.markStatus(meta.userId, 'connected', null);
       this.logger.log(`telegram-reader: listening (${this.enabled.size} channel(s))`);
+      this.startPoller();
     } catch (err) {
       await this.onFailure(err, gen);
     }
   }
 
+  private startPoller(): void {
+    const sec = Number(this.config.get<string>('TELEGRAM_POLL_SEC') ?? DEFAULT_POLL_SEC);
+    if (this.poller) clearInterval(this.poller);
+    this.poller = null;
+    if (!Number.isFinite(sec) || sec <= 0) return;
+    this.poller = setInterval(() => void this.pollOnce(), Math.max(15, sec) * 1000);
+    this.poller.unref?.();
+  }
+
+  /** Fetch the newest posts of every ticked channel; handle() stores only what is new. Public for tests. */
+  async pollOnce(): Promise<number> {
+    const c = this.client;
+    if (!c?.recentMessages || this.polling || this.stateValue !== 'listening') return 0;
+    this.polling = true;
+    let found = 0;
+    try {
+      for (const chatId of this.enabled.keys()) {
+        try {
+          const msgs = await c.recentMessages(chatId, POLL_LIMIT);
+          for (const m of msgs.reverse()) if (await this.handle(m, 'poll')) found++;
+        } catch (err) {
+          const wait = floodWaitSeconds(err);
+          if (wait) break; // Telegram asked us to slow down: skip this round
+        }
+      }
+    } finally {
+      this.polling = false;
+    }
+    this.polledNew += found;
+    return found;
+  }
+
   async stop(): Promise<void> {
+    if (this.poller) clearInterval(this.poller);
+    this.poller = null;
     this.generation++;
     this.clearRetry();
     const c = this.client;
@@ -177,11 +220,15 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     this.enabled = new Map(rows.map((r) => [r.tgChannelId, { id: r.id, title: r.title }]));
   }
 
-  /** Persist, then emit. Public for tests. */
-  async handle(m: TgIncomingMessage): Promise<void> {
-    this.received++;
+  /**
+   * Persist, then emit. `source` = 'push' (live update) or 'poll' (the safety net); only pushes count
+   * as "received" so the summary still shows whether live updates flow. Returns true when something
+   * new was stored (a new message or a changed edit). Public for tests.
+   */
+  async handle(m: TgIncomingMessage, source: 'push' | 'poll' = 'push'): Promise<boolean> {
+    if (source === 'push') this.received++;
     const ch = this.enabled.get(m.chatId);
-    if (!ch) return;
+    if (!ch) return false;
     try {
       const postedAt = new Date(m.date * 1000);
       const editedAt = m.editDate ? new Date(m.editDate * 1000) : null;
@@ -193,7 +240,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       let messageId: string;
       let edited = false;
       if (existing) {
-        if (existing.rawText === m.text) return; // duplicate delivery or a no-op edit
+        if (existing.rawText === m.text) return false; // duplicate delivery or a no-op edit
         await this.prisma.telegramMessage.update({
           where: { id: existing.id },
           data: { rawText: m.text, hasMedia: m.hasMedia, editedAt: editedAt ?? new Date(), rawPayload: raw },
@@ -217,7 +264,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
           });
           messageId = row.id;
         } catch (err) {
-          if ((err as { code?: string }).code === 'P2002') return; // raced a duplicate delivery
+          if ((err as { code?: string }).code === 'P2002') return false; // raced a duplicate delivery
           throw err;
         }
       }
@@ -232,8 +279,10 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
         edited,
       };
       this.events.emit(TELEGRAM_MESSAGE_EVENT, evt);
+      return true;
     } catch (err) {
       this.logger.warn(`telegram-reader: could not store a message from "${ch.title}": ${describe(err)}`);
+      return false;
     }
   }
 
@@ -243,10 +292,11 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     const parts = [...this.counts.entries()].map(([t, n]) => `${t}=${n}`);
     const stored = [...this.counts.values()].reduce((a, b) => a + b, 0);
     const line =
-      `telegram-reader: last 10 min received=${this.received} (any chat) stored=${stored} from ${this.enabled.size} ticked channel(s)` +
+      `telegram-reader: last 10 min received=${this.received} (live push, any chat) polled_new=${this.polledNew} stored=${stored} from ${this.enabled.size} ticked channel(s)` +
       `${parts.length ? ': ' + parts.join(', ') : ''} (state ${this.stateValue})`;
     this.counts.clear();
     this.received = 0;
+    this.polledNew = 0;
     this.logger.log(line);
     return line;
   }

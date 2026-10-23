@@ -152,7 +152,24 @@ describe('TelegramListenerService', () => {
     expect(first).toContain('received=3');
     expect(first).toContain('stored=2');
     expect(first).toContain('Alpha=2');
-    expect(svc.logSummary()).toContain('received=0 (any chat) stored=0');
+    expect(svc.logSummary()).toContain('received=0 (live push, any chat) polled_new=0 stored=0');
+  });
+
+  it('subscribes for live updates on connect, and the poller stores posts push missed exactly once', async () => {
+    const { svc, client, events } = build();
+    const c = client as any;
+    c.subscribeUpdates = jest.fn(async () => undefined);
+    c.recentMessages = jest.fn(async () => [msg({ tgMessageId: 21, text: 'b' }), msg({ tgMessageId: 20, text: 'a' })]);
+    await svc.start();
+    expect(c.subscribeUpdates).toHaveBeenCalledTimes(1);
+    expect(await svc.pollOnce()).toBe(2);
+    expect(await svc.pollOnce()).toBe(0);              // dedup: already stored
+    expect(events.emit).toHaveBeenCalledTimes(2);
+    expect(c.recentMessages).toHaveBeenCalledWith('-1001', 5);
+    const line = svc.logSummary();
+    expect(line).toContain('received=0 (live push');    // polled posts do not count as live pushes
+    expect(line).toContain('polled_new=2');
+    await svc.stop();
   });
 
   it('flag parsing and backoff', () => {

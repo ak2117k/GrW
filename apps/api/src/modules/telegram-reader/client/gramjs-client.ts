@@ -94,6 +94,17 @@ class GramJsClient implements TgClient {
     return out;
   }
 
+  async subscribeUpdates(): Promise<void> {
+    await this.client.getMe();
+    await this.client.invoke(new Api.updates.GetState());
+    await this.client.getDialogs({ limit: 200 });
+  }
+
+  async recentMessages(chatId: string, limit: number): Promise<TgIncomingMessage[]> {
+    const msgs = await this.client.getMessages(chatId, { limit });
+    return msgs.filter((m): m is Api.Message => m instanceof Api.Message).map((m) => toIncoming(m, false));
+  }
+
   onMessage(handler: (m: TgIncomingMessage) => void): void {
     this.client.addEventHandler((e: NewMessageEvent) => handler(toIncoming(e.message, false)), new NewMessage({}));
     this.client.addEventHandler(

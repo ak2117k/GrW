@@ -103,6 +103,7 @@ def gdaily():
 
 def _engine(repo, now, models=None, gd=None):
     e = Engine(repo=repo, models_dir=__import__("pathlib").Path("."), instruments=["NIFTY"], now=lambda: now)
+    e.sleep = lambda s: None   # the stale-bar retry never really waits in tests
     e.models = {"NIFTY": models if models is not None else {}}
     e.global_daily = gd or {}
     return e
@@ -342,7 +343,9 @@ def test_behaviour_status(now, status, monkeypatch):
     assert body["status"] == status and body["instrument"] == "NIFTY"
     if status != "absent":
         assert body["asOf"] == "2026-10-14T05:30:00Z"
-        assert body["horizons"]["30m"] == {"p": 0.8912, "regime": "ACTIVE", "q25Bp": 34.0, "q50Bp": 45.0, "q75Bp": 59.0}
+        assert body["horizons"]["30m"] == {"p": 0.8912, "regime": "ACTIVE", "q25Bp": 34.0, "q50Bp": 45.0, "q75Bp": 59.0,
+                                           "relRatio": None, "relLabel": None, "refRangeBp": None,
+                                           "rangePts": [None, None, None]}
         assert body["modelIds"] == {"30m": "mbm-move-nifty-30m-x", "60m": "mbm-move-nifty-60m-x"}
         assert body["featureSet"] == "mbm-fs2" and body["dataQuality"] == "gap"
     else:

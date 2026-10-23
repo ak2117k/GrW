@@ -29,13 +29,15 @@ NEWEST_BAR_SQL = "SELECT max(ts) AS ts FROM mbm_bars_1m WHERE series = %(series)
 
 UPSERT_PREDICTION_SQL = '''
 INSERT INTO mbm_predictions (instrument, horizon, as_of, p, regime, q25_bp, q50_bp, q75_bp,
-  model_id, feature_set, data_quality)
+  model_id, feature_set, data_quality, rel_ratio, rel_label, ref_range_bp)
 VALUES (%(instrument)s, %(horizon)s, %(as_of)s, %(p)s, %(regime)s, %(q25_bp)s, %(q50_bp)s,
-  %(q75_bp)s, %(model_id)s, %(feature_set)s, %(data_quality)s)
+  %(q75_bp)s, %(model_id)s, %(feature_set)s, %(data_quality)s, %(rel_ratio)s, %(rel_label)s,
+  %(ref_range_bp)s)
 ON CONFLICT (instrument, horizon, as_of) DO UPDATE SET
   p = EXCLUDED.p, regime = EXCLUDED.regime, q25_bp = EXCLUDED.q25_bp, q50_bp = EXCLUDED.q50_bp,
   q75_bp = EXCLUDED.q75_bp, model_id = EXCLUDED.model_id, feature_set = EXCLUDED.feature_set,
-  data_quality = EXCLUDED.data_quality'''
+  data_quality = EXCLUDED.data_quality, rel_ratio = EXCLUDED.rel_ratio, rel_label = EXCLUDED.rel_label,
+  ref_range_bp = EXCLUDED.ref_range_bp'''
 
 PENDING_OUTCOMES_SQL = '''
 SELECT id, horizon, as_of FROM mbm_predictions
@@ -47,7 +49,8 @@ UPDATE mbm_predictions SET outcome_range_bp = %(range_bp)s, outcome_threshold_bp
 WHERE id = %(id)s AND outcome_at IS NULL'''
 
 LATEST_SQL = '''
-SELECT horizon, as_of, p, regime, q25_bp, q50_bp, q75_bp, model_id, feature_set, data_quality
+SELECT horizon, as_of, p, regime, q25_bp, q50_bp, q75_bp, model_id, feature_set, data_quality,
+  rel_ratio, rel_label, ref_range_bp
 FROM mbm_predictions
 WHERE instrument = %(instrument)s AND as_of = (
   SELECT max(as_of) FROM mbm_predictions WHERE instrument = %(instrument)s AND as_of >= %(since)s)
@@ -140,7 +143,9 @@ class PgRepo:
         return rows[0]["ts"] if rows else None
 
     def upsert_predictions(self, rows: list[dict[str, Any]]) -> None:
-        self._execmany(UPSERT_PREDICTION_SQL, rows)
+        # Rows from before the relative reading (or a test) may lack its keys: NULL, not a KeyError.
+        rel = {"rel_ratio": None, "rel_label": None, "ref_range_bp": None}
+        self._execmany(UPSERT_PREDICTION_SQL, [{**rel, **r} for r in rows])
 
     def pending_outcomes(self, instrument: str) -> list[dict[str, Any]]:
         return self._fetch(PENDING_OUTCOMES_SQL, {"instrument": instrument})

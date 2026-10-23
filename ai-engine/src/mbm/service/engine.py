@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from .. import labels as L
+from .. import relative as R
 from ..features import (BANKNIFTY, FEATURE_SET, HEAVYWEIGHTS, VIX, _annotate, build_features, to_5m)
 from ..predict import HorizonModel
 from ..store import BAR_COLUMNS, empty_bars, normalize
@@ -55,6 +57,10 @@ GAP_WINDOW = timedelta(minutes=30)
 MAX_GAP = timedelta(minutes=2)
 FRESH = timedelta(minutes=10)
 ONE_MIN = timedelta(minutes=1)
+# Stale-bar retry (prod 2026-10-23: the API's 1m refresh was throttled and 8 runs were skipped, two
+# during a 180-point spike). A run whose newest bar is at most this far behind waits once and re-reads.
+STALE_RETRY_WITHIN = timedelta(minutes=10)
+STALE_RETRY_WAIT_S = 30.0
 
 
 def universe(instrument: str) -> list[str]:
@@ -139,6 +145,7 @@ class Engine:
     last_run: datetime | None = None
     live: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     demotion_checked_on: Any = None
+    sleep: Callable[[float], None] = time.sleep
 
     # ------------------------------------------------------------ startup
 
@@ -255,37 +262,72 @@ class Engine:
     # ------------------------------------------------------------ prediction
 
     def predict_once(self, instrument: str, as_of: datetime) -> list[dict[str, Any]]:
-        """Build features up to `as_of` and return the prediction rows (empty if stale/no models)."""
+        """Build features up to `as_of` and return the prediction rows (empty if stale/no models).
+        When the newest 1m bar is behind by at most STALE_RETRY_WITHIN, waits STALE_RETRY_WAIT_S once
+        and re-reads (the API's bar refresh retries a throttled fetch within seconds) before skipping."""
         models = self.models.get(instrument) or {}
         if not models or self.repo is None:
             return []
         as_of_ts = pd.Timestamp(as_of).tz_convert("UTC")
+        rows, newest = self._predict_attempt(instrument, as_of_ts, models)
+        if rows is not None:
+            return rows
+        lag = None if newest is None else (as_of_ts - ONE_MIN) - newest
+        if lag is None or lag > STALE_RETRY_WITHIN:
+            log.info("[mbm] %s %s stale: newest 1m bar %s (%s): skipped", instrument, _iso(as_of_ts),
+                     None if newest is None else _iso(newest),
+                     "no bars" if newest is None else f"{int(lag.total_seconds() // 60)} min behind, > "
+                     f"{int(STALE_RETRY_WITHIN.total_seconds() // 60)}: no retry")
+            return []
+        log.info("[mbm] %s %s stale: newest 1m bar %s: retrying once in %.0f s", instrument, _iso(as_of_ts),
+                 _iso(newest), STALE_RETRY_WAIT_S)
+        self.sleep(STALE_RETRY_WAIT_S)
+        rows, newest2 = self._predict_attempt(instrument, as_of_ts, models)
+        if rows is not None:
+            log.info("[mbm] %s %s: fresh after the retry", instrument, _iso(as_of_ts))
+            return rows
+        log.info("[mbm] %s %s stale after a %.0f s retry: newest 1m bar %s: skipped", instrument,
+                 _iso(as_of_ts), STALE_RETRY_WAIT_S, None if newest2 is None else _iso(newest2))
+        return []
+
+    def _predict_attempt(self, instrument: str, as_of_ts: pd.Timestamp,
+                         models: dict[str, LoadedModel]) -> tuple[list[dict[str, Any]] | None, pd.Timestamp | None]:
+        """(rows, newest bar ts). rows is None when the instrument's 1m bars are stale (retryable);
+        [] when the bars are fresh but no feature row could be built."""
         bars = self.repo.bars(universe(instrument), (as_of_ts - FEATURE_LOOKBACK).to_pydatetime(),
                               as_of_ts.to_pydatetime())   # ts < as_of: never a bar still forming
         inputs = build_inputs(bars, instrument, self.global_daily)
         inst = inputs["instrument"]
-        if inst.empty or inst["ts"].iloc[-1] != as_of_ts - ONE_MIN:
-            log.info("[mbm] %s %s stale: newest 1m bar %s", instrument, _iso(as_of_ts),
-                     None if inst.empty else _iso(inst["ts"].iloc[-1]))
-            return []
+        newest = None if inst.empty else pd.Timestamp(inst["ts"].iloc[-1]).tz_convert("UTC")
+        if newest is None or newest != as_of_ts - ONE_MIN:
+            return None, newest
         feats = build_features(inputs)
         if feats.empty or feats.index[-1] != as_of_ts:
             log.info("[mbm] %s %s stale: newest feature row %s", instrument, _iso(as_of_ts),
                      None if feats.empty else _iso(feats.index[-1]))
-            return []
+            return [], newest
         row = feats.iloc[[-1]]
         quality = "gap" if has_gap(inst, as_of_ts) else ("drivers_missing" if _drivers_missing(inputs, as_of_ts) else "ok")
         out = []
         for h, lm in sorted(models.items()):
             pr = lm.model.predict(row).iloc[0]
+            q50 = _num(pr.get("q50_bp"))
+            try:
+                ref = R.ref_range_bp(inst, as_of_ts, h)
+            except Exception as exc:   # the relative reading is an add-on: never costs the prediction
+                log.warning("[mbm] %s %s %s reference range failed: %s", instrument, _iso(as_of_ts), h, exc)
+                ref = None
+            ratio, label = R.relative(q50, ref)
             out.append({
                 "instrument": instrument, "horizon": h, "as_of": as_of_ts.to_pydatetime(),
                 "p": float(pr["p"]), "regime": str(pr["regime"]),
-                "q25_bp": _num(pr.get("q25_bp")), "q50_bp": _num(pr.get("q50_bp")), "q75_bp": _num(pr.get("q75_bp")),
+                "q25_bp": _num(pr.get("q25_bp")), "q50_bp": q50, "q75_bp": _num(pr.get("q75_bp")),
                 "model_id": lm.model_id, "feature_set": lm.model.feature_set or FEATURE_SET,
                 "data_quality": quality,
+                "rel_ratio": None if ratio is None else round(ratio, 4), "rel_label": label,
+                "ref_range_bp": None if ref is None else round(ref, 2),
             })
-        return out
+        return out, newest
 
     def run_once(self) -> dict[str, int]:
         """One loop tick: predict for the current decision time, then fill closed outcomes."""
@@ -432,17 +474,38 @@ class Engine:
         status = "ok" if pd.Timestamp(now).tz_convert("UTC") - as_of <= FRESH else "stale"
         quality = {r["data_quality"] for r in rows}
         rank = ["gap", "drivers_missing", "ok"]
+        spot = self._spot(inst, as_of)
+
+        def pts(bp):
+            v = R.points(_num(bp), spot)
+            return None if v is None else round(v)
         return {
             "instrument": inst, "status": status, "asOf": _iso(as_of),
             "horizons": {r["horizon"]: {
                 "p": round(float(r["p"]), 4), "regime": r["regime"],
                 "q25Bp": _round(r["q25_bp"]), "q50Bp": _round(r["q50_bp"]), "q75Bp": _round(r["q75_bp"]),
+                # Relative reading (vs the last 10 sessions at this minute) and the range in index points.
+                "relRatio": _round2(r.get("rel_ratio")), "relLabel": r.get("rel_label"),
+                "refRangeBp": _round(r.get("ref_range_bp")),
+                "rangePts": [pts(r["q25_bp"]), pts(r["q50_bp"]), pts(r["q75_bp"])],
             } for r in rows},
+            "spot": None if spot is None else round(spot, 2),
             "modelIds": {r["horizon"]: r["model_id"] for r in rows},
             "featureSet": rows[0]["feature_set"],
             "dataQuality": next((q for q in rank if q in quality), "ok"),
             "dailySignals": daily,
         }
+
+    def _spot(self, instrument: str, as_of: pd.Timestamp) -> float | None:
+        """The instrument's close of the 1m bar just before `as_of` (the spot the prediction saw)."""
+        try:
+            bars = self.repo.bars([instrument], (as_of - FRESH).to_pydatetime(), as_of.to_pydatetime())
+            if bars is None or bars.empty:
+                return None
+            return _num(bars.sort_values("ts")["close"].iloc[-1])
+        except Exception as exc:
+            log.warning("[mbm] behaviour %s spot read failed: %s", instrument, exc)
+            return None
 
     def health(self) -> dict[str, Any]:
         return {"ok": True, "models": self.model_summary(),
@@ -460,3 +523,8 @@ class Engine:
 def _round(x) -> float | None:
     v = _num(x)
     return None if v is None else round(v, 1)
+
+
+def _round2(x) -> float | None:
+    v = _num(x)
+    return None if v is None else round(v, 2)

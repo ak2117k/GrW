@@ -11,6 +11,7 @@ import { MbmCaptureLane } from './services/mbm-capture-lane';
 import { MbmChainCaptureService } from './services/mbm-chain-capture.service';
 import { MBM_CALENDAR, MBM_NOW, MbmBarRefresherService } from './services/mbm-bar-refresher.service';
 import { MBM_FETCH, MbmClient } from './services/mbm-client.service';
+import { MbmTickBarsService } from './services/mbm-tick-bars.service';
 import { MbmController } from './controllers/mbm.controller';
 import { CHAIN_WATCHLIST, ChainWatchlistService } from './chain-watchlist';
 import { MbmChainReader } from './services/mbm-chain-reader.service';
@@ -37,6 +38,7 @@ import { OI_HISTORY_CONFIG, OiHistoryBackfillService } from './services/oi-histo
     { provide: MBM_FETCH, useValue: (url: string, init: { signal: AbortSignal }) => fetch(url, init) },
     MbmBarsRepository,
     MbmBarRefresherService,
+    MbmTickBarsService,
     MbmChainRepository,
     MbmCaptureLane,
     MbmChainCaptureService,

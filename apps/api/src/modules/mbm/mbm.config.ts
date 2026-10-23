@@ -43,6 +43,12 @@ export interface MbmConfig {
    * index underlyings whose 1m bar the refresher stores are accepted (the stored close centres the window).
    */
   chainCaptureInstruments: string[];
+  /**
+   * Live-tick fallback for NIFTY/INDIAVIX/BANKNIFTY 1m bars (MBM_TICK_BARS, off|listen|pin, default listen).
+   * listen: build bars from index ticks already on the owner's socket (no new subscription); pin: also pin
+   * the three index tokens on the owner's session. Optional so hand-built configs in specs stay valid.
+   */
+  tickBars?: 'off' | 'listen' | 'pin';
   /** Human-readable fallbacks taken while parsing; logged once at boot. */
   problems: string[];
 }
@@ -121,10 +127,15 @@ export function parseMbmConfig(env: NodeJS.ProcessEnv): MbmConfig {
     }
     return m;
   };
+  const rawTick = (env.MBM_TICK_BARS ?? '').trim().toLowerCase();
+  let tickBars: 'off' | 'listen' | 'pin' = 'listen';
+  if (rawTick === 'off' || rawTick === 'listen' || rawTick === 'pin') tickBars = rawTick;
+  else if (rawTick !== '') problems.push(`MBM_TICK_BARS=${rawTick} is not off|listen|pin — using listen`);
+
   const packet = consumer('MBM_PACKET');
   const exitShadow = consumer('MBM_EXIT_SHADOW');
 
-  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, chainCapture, chainCaptureStocks, chainCaptureInstruments, problems };
+  return { mode, instruments, url, feedUserId, packet, exitShadow, entryGate, chainCapture, chainCaptureStocks, chainCaptureInstruments, tickBars, problems };
 }
 
 /** The entry gate's effective mode: MBM_ENABLED=off makes every consumer inert (plan M3, global rule). */
@@ -137,6 +148,6 @@ export function mbmBootLine(c: MbmConfig): string {
   return (
     `[mbm] mode=${c.mode} instruments=${c.instruments.join(',')} url=${c.url} feedUser=${c.feedUserId ?? 'none'}` +
     ` chainCapture=${c.chainCapture}${c.chainCapture === 'on' ? `(${c.chainCaptureInstruments.join(',')})` : ''}` +
-    ` chainCaptureStocks=${c.chainCaptureStocks}`
+    ` chainCaptureStocks=${c.chainCaptureStocks} tickBars=${c.tickBars ?? 'listen'}`
   );
 }

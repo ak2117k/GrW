@@ -2735,6 +2735,9 @@ model MbmBar1m {
   low    Float
   close  Float
   volume Float    @default(0)
+  /// NULL = the broker's historical 1m bar (source of truth). 'tick' = built from the owner's live
+  /// ticks only because the historical fetch had no bar yet; the next historical upsert overwrites it.
+  source String?
 
   @@id([series, ts])
   @@map("mbm_bars_1m")
@@ -2760,6 +2763,11 @@ model MbmPrediction {
   outcomeBig         Boolean?  @map("outcome_big")
   outcomeQuality     String?   @map("outcome_quality") // ok | gap
   outcomeAt          DateTime? @map("outcome_at") @db.Timestamptz(6)
+  /// Relative reading (2026-10-23): q50_bp ÷ ref_range_bp, where ref_range_bp is the median realised range
+  /// (bp) of the same horizon at the same IST minute over the previous 10 sessions (causal).
+  relRatio           Float?    @map("rel_ratio")
+  relLabel           String?   @map("rel_label") // QUIETER | NORMAL | BUSIER | MUCH_BUSIER
+  refRangeBp         Float?    @map("ref_range_bp")
 
   @@unique([instrument, horizon, asOf])
   @@index([instrument, asOf(sort: Desc)])

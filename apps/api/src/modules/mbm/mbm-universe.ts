@@ -13,13 +13,20 @@ export interface MbmSeries {
   series: string;
   token: string;
   exchange: string;
+  /**
+   * The prediction cannot be made without this series (the instrument itself) or its features read it
+   * every run (India VIX). Refreshed first and retried first; the rest (BANKNIFTY, the EQ_* heavyweights
+   * behind the hw_* driver features, which degrade to `drivers_missing` rather than skip) come after and
+   * are the ones skipped when a pass runs long.
+   */
+  priority?: true;
 }
 
 export const MBM_UNIVERSE: Readonly<Record<string, readonly MbmSeries[]>> = {
   NIFTY: [
-    { series: 'NIFTY', token: '99926000', exchange: 'NSE' },
+    { series: 'NIFTY', token: '99926000', exchange: 'NSE', priority: true },
     { series: 'BANKNIFTY', token: '99926009', exchange: 'NSE' },
-    { series: 'INDIAVIX', token: '99926017', exchange: 'NSE' },
+    { series: 'INDIAVIX', token: '99926017', exchange: 'NSE', priority: true },
     { series: 'EQ_RELIANCE', token: '2885', exchange: 'NSE' },
     { series: 'EQ_HDFCBANK', token: '1333', exchange: 'NSE' },
     { series: 'EQ_ICICIBANK', token: '4963', exchange: 'NSE' },
@@ -48,5 +55,6 @@ export function universeFor(instruments: readonly string[]): { series: MbmSeries
       series.push(s);
     }
   }
-  return { series, unknown };
+  // Priority series first (stable within each group), so a throttled burst hits the optional ones.
+  return { series: [...series.filter((s) => s.priority), ...series.filter((s) => !s.priority)], unknown };
 }

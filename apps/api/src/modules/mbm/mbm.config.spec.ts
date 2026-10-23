@@ -4,7 +4,7 @@ import { MBM_UNIVERSE, universeFor } from './mbm-universe';
 describe('parseMbmConfig', () => {
   it('defaults to off / NIFTY / http://mbm:5100 / first auto-exit user', () => {
     const c = parseMbmConfig({ AI_AUTO_EXIT_USER_IDS: ' u1 , u2' });
-    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', chainCapture: 'off', chainCaptureStocks: 'off', chainCaptureInstruments: ['NIFTY', 'BANKNIFTY'], problems: [] });
+    expect(c).toEqual({ mode: 'off', instruments: ['NIFTY'], url: 'http://mbm:5100', feedUserId: 'u1', packet: 'off', exitShadow: 'off', entryGate: 'off', chainCapture: 'off', chainCaptureStocks: 'off', chainCaptureInstruments: ['NIFTY', 'BANKNIFTY'], tickBars: 'listen', problems: [] });
   });
 
   it('parses explicit values, upper-cases and de-duplicates instruments, strips the trailing slash', () => {
@@ -77,7 +77,7 @@ describe('parseMbmConfig', () => {
 
   it('formats the single boot line', () => {
     const c = parseMbmConfig({ MBM_ENABLED: 'observe', MBM_FEED_USER_ID: 'o' });
-    expect(mbmBootLine(c)).toBe('[mbm] mode=observe instruments=NIFTY url=http://mbm:5100 feedUser=o chainCapture=off chainCaptureStocks=off');
+    expect(mbmBootLine(c)).toBe('[mbm] mode=observe instruments=NIFTY url=http://mbm:5100 feedUser=o chainCapture=off chainCaptureStocks=off tickBars=listen');
     expect(mbmBootLine(parseMbmConfig({ MBM_CHAIN_CAPTURE: 'on', MBM_FEED_USER_ID: 'o' }))).toContain('chainCapture=on');
   });
 
@@ -135,5 +135,9 @@ describe('MBM universe', () => {
     const u = universeFor(['NIFTY', 'SENSEX']);
     expect(u.series).toHaveLength(11);
     expect(u.unknown).toEqual(['SENSEX']);
+  });
+
+  it('puts the priority series (NIFTY, INDIAVIX) first, the rest in contract order', () => {
+    expect(universeFor(['NIFTY']).series.map((s) => s.series).slice(0, 4)).toEqual(['NIFTY', 'INDIAVIX', 'BANKNIFTY', 'EQ_RELIANCE']);
   });
 });

@@ -636,10 +636,16 @@ model TelegramChannel {
   inviteLink    String?
   isActive      Boolean           @default(true)
   lastSeenMsgId Int               @default(0)
+  // Telegram reader (owner MTProto account): owner who picked it, reader subscription flag (isActive is the
+  // legacy scorecard flag), member count at pick time.
+  userId        String?
+  enabled       Boolean           @default(false)
+  memberCount   Int?
   joinedAt      DateTime?
   addedAt       DateTime          @default(now())
   messages      TelegramMessage[]
   signals       TelegramSignal[]
+  @@index([userId, enabled])
   @@map("telegram_channels")
 }
 
@@ -653,6 +659,9 @@ model TelegramMessage {
   receivedAt  DateTime         @default(now())
   parseStatus String
   rawPayload  Json
+  // Telegram reader: media present (bytes never stored), last edit time.
+  hasMedia    Boolean          @default(false)
+  editedAt    DateTime?
   signal      TelegramSignal?
   @@unique([channelId, tgMessageId])
   @@index([channelId, postedAt])
@@ -717,6 +726,26 @@ enum TelegramSignalStatus {
   EXPIRED
   UNTRACKABLE
   INVALIDATED
+}
+
+/// The owner's Telegram USER-account (MTProto) session for the in-app channel reader. Secrets are envelope-encrypted
+/// with the credential-vault field cipher (per-row DEK wrapped by the KMS provider); nothing here is plaintext.
+model TelegramSession {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  apiId        Int
+  encApiHash   String
+  encSession   String
+  encDataKey   String
+  keyVersion   String
+  phoneMasked  String
+  status       String    @default("connected") // connected | error | revoked
+  lastError    String?
+  connectedAt  DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@map("telegram_sessions")
 }
 
 // ============================================

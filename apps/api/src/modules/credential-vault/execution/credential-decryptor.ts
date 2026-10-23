@@ -19,7 +19,8 @@ export interface DecryptContext {
   // 'FEED' is used by the vault->market-feed bridge: the shared market-data feed
   // leases the designated account's credentials to log in, distinct from an
   // order-time ('ORDER') or revalidation ('REVALIDATE') decrypt in the audit log.
-  reason: 'ORDER' | 'REVALIDATE' | 'FEED';
+  // 'TELEGRAM' is the Telegram reader opening the owner's MTProto session.
+  reason: 'ORDER' | 'REVALIDATE' | 'FEED' | 'TELEGRAM';
   signalId?: string;
 }
 
@@ -72,6 +73,38 @@ export class CredentialDecryptor {
     } finally {
       dk.fill(0); // reliably scrub the DEK buffer
       if (plain) zeroizeStrings(plain);
+    }
+  }
+
+  /**
+   * Lease for a NON-broker secret sealed with the same envelope (a DEK wrapped by the KMS
+   * provider, fields under `encryptWithDataKey`) — e.g. the owner's Telegram MTProto session.
+   * The caller passes the sealed row; this boundary still owns unwrap -> decrypt -> use() ->
+   * zeroize and writes one CREDENTIAL_DECRYPT audit row (metadata only, never plaintext).
+   */
+  async withDecryptedSecrets<K extends string, T>(
+    userId: string,
+    target: string,
+    sealed: { encDataKey: string; keyVersion: string; fields: Record<K, string> },
+    ctx: DecryptContext,
+    use: (plain: Record<K, string>) => Promise<T>,
+  ): Promise<T> {
+    const dk = await this.kms.unwrapKey(sealed.encDataKey);
+    const plain = {} as Record<K, string>;
+    try {
+      for (const k of Object.keys(sealed.fields) as K[]) {
+        plain[k] = decryptWithDataKey(sealed.fields[k], dk);
+      }
+      await this.audit.append({
+        action: 'CREDENTIAL_DECRYPT',
+        userId,
+        target,
+        meta: { reason: ctx.reason, keyVersion: sealed.keyVersion },
+      });
+      return await use(plain);
+    } finally {
+      dk.fill(0);
+      for (const k of Object.keys(plain) as K[]) plain[k] = '';
     }
   }
 }

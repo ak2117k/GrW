@@ -15,6 +15,7 @@ import {
   FileText,
   Mail,
   LogOut,
+  Send,
 } from 'lucide-react';
 import { Toggle, Modal, Badge, LoadingSkeleton } from '@/components/common';
 import { cn } from '@/utils/cn';
@@ -32,6 +33,7 @@ import api from '@/services/api';
 import toast from 'react-hot-toast';
 import { formatINR } from '@td/shared';
 import { ConnectAngelOne } from '@/components/broker';
+import { TelegramSignalsSection } from './TelegramSignalsSection';
 
 // ---- Types ----
 
@@ -420,6 +422,15 @@ function UserAccountHub() {
         description="Connect your broker account to enable auto-execution"
       >
         <ConnectAngelOne />
+      </SectionCard>
+
+      {/* Owner only (server-enforced): read chosen Telegram channels through the owner's own account. */}
+      <SectionCard
+        icon={<Send size={18} />}
+        title="Telegram signals"
+        description="Read up to 10 Telegram channels through your own Telegram account"
+      >
+        <TelegramSignalsSection />
       </SectionCard>
 
       {/* Section 3: Consent & disclaimer */}

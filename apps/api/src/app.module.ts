@@ -53,6 +53,8 @@ import { SelfReviewModule } from './modules/self-review/self-review.module';
 import { StockMoveModule } from './modules/stock-move/stock-move.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
+import { TelegramReaderModule } from './modules/telegram-reader/telegram-reader.module';
+import { EventEmitterModule } from '@nestjs/event-emitter';
 import { HealthModule } from './modules/health/health.module';
 import { TradeCoreModule } from './modules/trade-core/trade-core.module';
 
@@ -123,6 +125,9 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // the @Global TenantModule's TenantContextService (without it the app fails to
     // boot with "ClsService not available in TenantModule").
     ClsModule.forRoot({ global: true, middleware: { mount: true } }),
+
+    // In-process domain events (Telegram signals: telegram.message -> signal.ready).
+    EventEmitterModule.forRoot(),
 
     // Shared tenant context (TDA-003) — provides/exports TenantContextService
     // for PrismaService and others to inject.
@@ -273,6 +278,10 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // each outcome against market data, and serves an admin-only win-rate
     // scorecard. Read-only: never imports trade-engine (no order placement).
     TelegramModule,
+
+    // Telegram READER: the owner's chosen channels via the owner's own Telegram account (MTProto).
+    // Persists every message and emits telegram.message. TELEGRAM_READER=on|off; inert without a session.
+    TelegramReaderModule,
 
     // SP2 trade core — M1: strategy catalogue, immutable versions, per-user
     // selections. M2: Risk Wall, per-user limits, persistent kill switch (its

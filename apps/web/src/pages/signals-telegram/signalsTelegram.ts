@@ -19,7 +19,8 @@ export interface SignalDecisionRow {
   underlying: string | null;
   agreeCount: number | null;
   conflict: boolean | null;
-  decision: 'TAKE' | 'SKIP' | null;
+  /** PAPER = TAKE the account could not fund → a paper trade instead (when paper-on-no-funds is on). */
+  decision: 'TAKE' | 'SKIP' | 'PAPER' | null;
   skipReason: string | null;
   gate: GateCheckRow[] | null;
   judge: { verdict?: string; confidence?: number; effectiveConfidence?: number; reasons?: string[]; unavailable?: string; detail?: string; tightened?: string[] } | null;
@@ -45,8 +46,36 @@ export interface SignalOrderRow {
   createdAt: string;
 }
 
+export interface TradeOutcomeSummary {
+  n: number;
+  open: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  noTrade: number;
+  pnl: number;
+  realised: number;
+  winRate: number | null;
+}
+
+export interface PaperRow {
+  decisionId: string;
+  decidedAt: string;
+  channel: string | null;
+  underlying: string | null;
+  plan: { tradingsymbol?: string; side?: string; qty?: number; limitPrice?: number; sl?: number; targets?: number[] } | null;
+  funds: { available: number | null; required: number; ok: boolean | null; method: string } | null;
+  trigger: 'funds_check' | 'broker_reject' | null;
+  paperError: string | null;
+  trade: { id: string; status: string; entryPrice: number | null; exitPrice: number | null; pnl: number | null; exitReasonTag: string | null; exitTime: string | null } | null;
+}
+
 export interface SignalOverview {
   mode: 'off' | 'shadow' | 'live';
+  /** Owner toggle, stored on the app settings row (user_settings.signalPaperOnNoFunds). */
+  paperOnNoFunds?: { enabled: boolean; store: string };
+  /** PAPER (no funds) decisions of the last `lookbackDays` with their outcomes, and live over the same window. */
+  paper?: { lookbackDays: number; rows: PaperRow[]; summary: TradeOutcomeSummary; live: TradeOutcomeSummary };
   caps: { maxLots: number; maxLossPerTrade: number; maxTradesPerDay: number; dailyLossStop: number; entryTolerancePct: number; product: string };
   slEnforcement: { ok: boolean; detail: string };
   decisions: SignalDecisionRow[];
@@ -56,6 +85,12 @@ export interface SignalOverview {
 
 export async function getSignalOverview(): Promise<SignalOverview> {
   const { data } = await api.get<SignalOverview>('/signal-trader/overview');
+  return data;
+}
+
+/** POST /api/signal-trader/settings/paper-on-no-funds (owner only). */
+export async function setPaperOnNoFunds(enabled: boolean): Promise<{ enabled: boolean }> {
+  const { data } = await api.post<{ enabled: boolean }>('/signal-trader/settings/paper-on-no-funds', { enabled });
   return data;
 }
 
@@ -88,6 +123,7 @@ const REASON_LABEL: Record<string, string> = {
   sl_enforceable: 'SL could not be enforced',
   live_trading_enabled: 'live trading disabled',
   side_allowed: 'option writing refused',
+  insufficient_funds: 'not enough funds',
 };
 
 export function skipLabel(reason: string | null): string {
@@ -97,6 +133,10 @@ export function skipLabel(reason: string | null): string {
 
 /** The one-line "why" for a decision: the failed check's detail, or the judge's top reasons. */
 export function decisionWhy(d: SignalDecisionRow): string {
+  if (d.decision === 'PAPER') {
+    const f = (d.gate ?? []).find((c) => c.name === 'broker_funds_reject') ?? (d.gate ?? []).find((c) => c.name === 'funds');
+    return f ? `paper trade instead — ${f.detail}` : 'paper trade instead — not enough funds';
+  }
   if (d.decision === 'SKIP') {
     const failed = (d.gate ?? []).find((c) => c.name === d.skipReason);
     if (failed) return failed.detail;
@@ -128,4 +168,32 @@ export function channelStatsLine(stats: unknown): string {
   if (n !== null) parts.push(`n ${n}`);
   if (typeof s.right === 'number' && typeof s.wrong === 'number') parts.push(`${s.right}✓ ${s.wrong}✗`);
   return parts.length ? parts.join(' · ') : 'no stats yet';
+}
+
+const rupee = (n: number) => `${n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
+
+/** "7 closed · 4W/3L · 1 open · P&L ₹1,250" — the same line for live and paper so they compare. */
+export function outcomeLine(s: TradeOutcomeSummary | null | undefined): string {
+  if (!s || s.n === 0) return 'none yet';
+  const parts = [`${s.closed} closed`, `${s.wins}W/${s.losses}L`];
+  if (s.open) parts.push(`${s.open} open`);
+  parts.push(`P&L ${rupee(s.pnl)}`);
+  return parts.join(' · ');
+}
+
+/** One paper row's state: open with its mark, closed with its exit, or why it never opened. */
+export function paperState(r: PaperRow): { label: string; tone: 'good' | 'bad' | 'neutral' } {
+  if (!r.trade) return { label: r.paperError ? `not opened: ${r.paperError}` : 'no paper trade', tone: 'neutral' };
+  const pnl = r.trade.pnl ?? 0;
+  const tone = pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'neutral';
+  if (r.trade.status === 'CLOSED') {
+    const why = r.trade.exitReasonTag === 'HIT_TARGET' ? 'target' : r.trade.exitReasonTag === 'STOPPED_OUT' ? 'SL' : r.trade.exitReasonTag === 'TIME_EXIT' ? 'EOD' : 'closed';
+    return { label: `${why} @ ${r.trade.exitPrice ?? '?'} · ${rupee(pnl)}`, tone };
+  }
+  return { label: `open @ ${r.trade.entryPrice ?? '?'} · ${rupee(pnl)}`, tone };
+}
+
+export function fundsLine(f: PaperRow['funds']): string {
+  if (!f) return '';
+  return `need ${rupee(f.required)}, available ${f.available === null ? '?' : rupee(f.available)}${f.method === 'estimate' ? ' (margin estimate)' : ''}`;
 }

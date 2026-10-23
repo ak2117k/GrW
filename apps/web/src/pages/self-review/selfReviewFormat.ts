@@ -252,3 +252,19 @@ export function skillLines(summary: SelfReviewSummary | null | undefined): Array
       };
     });
 }
+
+const rupees = (n: number) => `${n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
+
+/** Telegram signal trades, live vs paper (no funds), last 20 sessions — one line each, or [] when none. */
+export function signalTradeLines(summary: SelfReviewSummary | null | undefined): Array<{ key: 'live' | 'paperNoFunds'; label: string; text: string; tone: 'good' | 'bad' | 'neutral' }> {
+  const r = summary?.signalTrades?.rolling20;
+  if (!r) return [];
+  const line = (key: 'live' | 'paperNoFunds', label: string) => {
+    const s = r[key];
+    const parts = [`${s.closed} closed`, `${s.wins}W/${s.losses}L`];
+    if (s.open) parts.push(`${s.open} open`);
+    parts.push(`P&L ${rupees(s.pnl)}`);
+    return { key, label, text: parts.join(' · '), tone: (s.pnl > 0 ? 'good' : s.pnl < 0 ? 'bad' : 'neutral') as 'good' | 'bad' | 'neutral' };
+  };
+  return [line('live', 'Telegram signals — live'), line('paperNoFunds', 'Telegram signals — paper (no funds)')];
+}

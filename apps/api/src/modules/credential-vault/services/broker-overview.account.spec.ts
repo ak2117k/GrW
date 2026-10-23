@@ -92,3 +92,19 @@ describe('BrokerOverviewService — whose account is read', () => {
     expect(h.ephemeral.generateSession).not.toHaveBeenCalled();
   });
 });
+
+describe('BrokerOverviewService.getFunds (signal trader funds check)', () => {
+  it('one getRMS on the warm own-account session, no login; availablecash as a number', async () => {
+    const h = build({ sharedClientId: 'ENV999', warm: true });
+    expect(await h.service.getFunds('user_1')).toEqual({ availableCash: 1000, net: 1000, utilisedMargin: 0 });
+    expect(h.warm.getRMS).toHaveBeenCalledTimes(1);
+    expect(h.warm.getPosition).not.toHaveBeenCalled();
+    expect(h.warm.generateSession).not.toHaveBeenCalled();
+  });
+
+  it('no availablecash in the answer → null (unknown), never ₹0', async () => {
+    const h = build({ sharedClientId: 'ENV999', warm: true });
+    h.warm.getRMS.mockResolvedValueOnce({ status: false, data: null } as never);
+    expect(await h.service.getFunds('user_1')).toBeNull();
+  });
+});

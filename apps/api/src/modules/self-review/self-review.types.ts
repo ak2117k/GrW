@@ -68,6 +68,8 @@ export interface RunSummary {
   skill?: Partial<Record<VerificationKind, { session: SkillStats; rolling20: SkillStats }>>;
   /** CHANNEL_SIGNAL per Telegram channel id: this session + rolling 20 sessions (shown on stream X's page). */
   byChannel?: Record<string, ChannelStats>;
+  /** Telegram signal trades: live vs PAPER (no funds), session S and rolling 20 (domain/signal-trades.ts). */
+  signalTrades?: import('./domain/signal-trades').SignalTradesSummary;
 }
 
 export interface ChannelStats {

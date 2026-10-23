@@ -22,6 +22,7 @@ import {
 } from '../domain/scorers';
 import { buildSummary, channelStats, topMisses } from '../domain/summary';
 import { probabilitySkill, relativeSkill } from '../domain/skill';
+import { signalTradeStats } from '../domain/signal-trades';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -139,6 +140,14 @@ export class SelfReviewRunService {
       await this.soft('CHANNEL_SIGNAL stats', errors, async () => {
         const ch = await this.repo.results({ sessions, kinds: ['CHANNEL_SIGNAL'] }, 20_000);
         if (ch.length || sessionRows.some((r) => r.kind === 'CHANNEL_SIGNAL')) summary.byChannel = channelStats(sessionRows, ch, sessions);
+        return [];
+      });
+
+      await this.soft('SIGNAL_TRADES (live vs paper no-funds)', errors, async () => {
+        const from = istMidnightOf(sessions[sessions.length - 1]);
+        const to = new Date(istMidnightOf(S).getTime() + DAY_MS);
+        const rows = await this.sources.signalTradeOutcomes(from, to);
+        if (rows.paper.length || rows.live.length) summary.signalTrades = signalTradeStats(rows, sessions);
         return [];
       });
 

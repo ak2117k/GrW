@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { RiskManagerService } from '../../trade-engine/services/risk-manager.service';
 import type { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
@@ -17,6 +17,9 @@ import type { SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService } from './signal-context.service';
 import { SignalExecutorService } from './signal-executor.service';
+import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
+import { fundsCheck, isFundsRejection, requiredFunds, type FundsCheck } from '../domain/funds';
+import { SIGNAL_PAPER_SKIP_REASON, paperAlert } from '../domain/paper';
 
 export const SIGNAL_TRADER_CONFIG = Symbol('SIGNAL_TRADER_CONFIG');
 export const SIGNAL_TRADER_ENV = Symbol('SIGNAL_TRADER_ENV');
@@ -37,15 +40,40 @@ export interface InstrumentMasterLike {
 export interface QuotesLike {
   ltp(userId: string, token: string, exchange: string): Promise<number | null>;
 }
+/** The owner's broker RMS available cash (₹), or null when it cannot be read. */
+export const SIGNAL_FUNDS = Symbol('SIGNAL_FUNDS');
+export interface FundsLike {
+  available(userId: string): Promise<number | null>;
+}
+/** Opens the PAPER (no funds) trade (SignalPaperService). */
+export const SIGNAL_PAPER = Symbol('SIGNAL_PAPER');
+export interface PaperLike {
+  open(i: PaperOpenInput): Promise<PaperOpenResult>;
+}
+
+/** What the funds → PAPER path needs about one live TAKE. */
+interface NoFundsContext {
+  decisionId: string;
+  signal: SignalView;
+  plan: EntryPlan;
+  expiry: string | null;
+  channel: string;
+  what: string;
+  required: number;
+  available: number | null;
+  method: FundsCheck['funds']['method'];
+}
 
 /** Re-evaluations allowed for one signal (a low-confidence SKIP upgraded by corroboration). */
 const MAX_EVALUATIONS = 3;
 
 export interface EvaluationResult {
   decisionId: string;
-  decision: 'TAKE' | 'SKIP';
+  decision: 'TAKE' | 'SKIP' | 'PAPER';
   skipReason: string | null;
   placed?: string;
+  /** PAPER: the paper trade id, or why it could not be opened. */
+  paper?: PaperOpenResult;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -78,6 +106,8 @@ export class SignalTraderService implements OnApplicationBootstrap {
     @Inject(SIGNAL_SESSION_CLOCK) private readonly clock: SessionClockLike,
     @Inject(SIGNAL_INSTRUMENT_MASTER) private readonly master: InstrumentMasterLike,
     @Inject(SIGNAL_QUOTES) private readonly quotes: QuotesLike,
+    @Optional() @Inject(SIGNAL_FUNDS) private readonly funds?: FundsLike,
+    @Optional() @Inject(SIGNAL_PAPER) private readonly paper?: PaperLike,
   ) {}
 
   get config(): SignalTraderConfig {
@@ -118,7 +148,7 @@ export class SignalTraderService implements OnApplicationBootstrap {
     const prior = await this.repo.decisionsFor(e.signalId);
     let evaluation = 1;
     if (prior.length > 0) {
-      if (prior.some((d) => d.decision === 'TAKE' || d.status === 'PENDING')) return null;
+      if (prior.some((d) => d.decision === 'TAKE' || d.decision === 'PAPER' || d.status === 'PENDING')) return null;
       const last = prior[prior.length - 1];
       const corroborated = last.skipReason === 'low_confidence' && e.agreeCount > (last.agreeCount ?? 0);
       if (!corroborated || prior.length >= MAX_EVALUATIONS) return null;
@@ -273,10 +303,21 @@ export class SignalTraderService implements OnApplicationBootstrap {
     const inBand = fresh !== null && fresh >= finalPlan.bandLow - 1e-9 && fresh <= finalPlan.bandHigh + 1e-9;
     const stillProtective = fresh !== null && (finalPlan.side === 'BUY' ? finalPlan.sl < fresh : finalPlan.sl > fresh);
     const recheck: GateCheck = { name: 'pre_send_price', ok: inBand && stillProtective, required: true, detail: fresh === null ? 'no fresh quote before sending' : `LTP ${fresh} vs band [${finalPlan.bandLow}, ${finalPlan.bandHigh}], SL ${finalPlan.sl}` };
-    const checks = [...gate.checks, recheck];
+    const checks: GateCheck[] = [...gate.checks, recheck];
     if (!recheck.ok) {
       return this.skip(decisionId, 'price_moved', recheck.detail, checks, judgeWithChanges, finalPlan, channel, what);
     }
+
+    // ---- live: enough funds for this entry? (unknown → sent as before; short → PAPER / SKIP) ----
+    const need = requiredFunds(finalPlan, s, cfg);
+    const available = await this.readFunds(owner as string);
+    const funds = fundsCheck(available, need);
+    checks.push(funds);
+    const noFunds: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: c?.expiry ?? null, channel, what, required: need.required, available, method: need.method };
+    if (funds.ok === false) {
+      return this.paperOrSkip(noFunds, funds, checks, judgeWithChanges);
+    }
+
     await this.repo.finishDecision(decisionId, { gate: checks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
     void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: 'live', channel, plan: finalPlan, agreeCount, conflict, confidence: verdict.effectiveConfidence, reasons: v.reasons }));
     const placed = await this.executor.place({
@@ -288,8 +329,81 @@ export class SignalTraderService implements OnApplicationBootstrap {
       channel,
       signalSummary: what,
       fillWaitSec: cfg.fillWaitSec,
+      onRejected: (reason) => this.onBrokerReject(noFunds, reason),
     });
     return { decisionId, decision: 'TAKE', skipReason: null, placed: placed.kind };
+  }
+
+  /** The owner's RMS available cash; null (= 'unknown') on any failure. Never throws. */
+  private async readFunds(owner: string): Promise<number | null> {
+    if (!this.funds) return null;
+    try {
+      const v = await this.funds.available(owner);
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    } catch (err) {
+      this.logger.warn(`[signal-trader] funds read failed (recorded unknown): ${errText(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Every check and the judge said TAKE, the account is short: a PAPER trade when the owner's
+   * `paperOnNoFunds` is on (decision PAPER — not a TAKE, so no live cap counts it), else a plain
+   * SKIP('insufficient_funds'). No broker call either way.
+   */
+  private async paperOrSkip(n: NoFundsContext, check: FundsCheck, checks: GateCheck[], judge: unknown): Promise<EvaluationResult> {
+    const on = this.paper ? await this.repo.paperOnNoFunds() : false;
+    if (!on) {
+      const why = this.paper ? 'paper-on-no-funds is OFF' : 'paper path not wired';
+      return this.skip(n.decisionId, SIGNAL_PAPER_SKIP_REASON, `${check.detail} — ${why}`, checks, judge, n.plan, n.channel, n.what);
+    }
+    await this.repo.finishDecision(n.decisionId, { gate: checks, judge, plan: n.plan, decision: 'PAPER', skipReason: SIGNAL_PAPER_SKIP_REASON });
+    const paper = await this.openPaper(n, 'funds_check');
+    return { decisionId: n.decisionId, decision: 'PAPER', skipReason: SIGNAL_PAPER_SKIP_REASON, paper };
+  }
+
+  /**
+   * The broker rejected a live entry: when the text says funds/margin and the setting is on, the
+   * decision becomes PAPER — at most once (claimPaperFallback is a conditional update on 'TAKE').
+   */
+  async onBrokerReject(n: NoFundsContext, reason: string): Promise<PaperOpenResult | null> {
+    if (!isFundsRejection(reason) || !this.paper) return null;
+    if (!(await this.repo.paperOnNoFunds())) return null;
+    const check = {
+      name: 'broker_funds_reject',
+      ok: false,
+      required: true,
+      detail: `broker rejected the entry for funds/margin: ${reason.slice(0, 300)}`,
+      funds: { available: n.available, required: n.required, ok: false, method: n.method },
+    };
+    if (!(await this.repo.claimPaperFallback(n.decisionId, check))) return null;
+    return this.openPaper(n, 'broker_reject', reason);
+  }
+
+  private async openPaper(n: NoFundsContext, trigger: PaperOpenInput['trigger'], brokerReason?: string): Promise<PaperOpenResult> {
+    const why = trigger === 'broker_reject' ? 'broker rejected the live entry for funds/margin' : 'account funds short of the entry';
+    let res: PaperOpenResult;
+    try {
+      res = await (this.paper as PaperLike).open({
+        decisionId: n.decisionId,
+        plan: n.plan,
+        signal: n.signal,
+        expiry: n.expiry,
+        product: this.cfg.product,
+        channel: n.channel,
+        what: n.what,
+        why,
+        trigger,
+      });
+    } catch (err) {
+      res = { ok: false, reason: errText(err) };
+    }
+    const p = n.plan;
+    const result = res.ok
+      ? `Paper trade ${res.tradeId}${res.duplicate ? ' (already open)' : ''}: ${p.side} ${p.tradingsymbol} x${p.qty} @ ${res.entryPrice ?? p.limitPrice} | SL ${p.sl} | T1 ${p.targets[0] ?? 'none'} — no live order.`
+      : `Paper trade could NOT be opened: ${res.reason}`;
+    void sendOpsAlert(`signal-paper:${n.decisionId}`, paperAlert({ required: n.required, available: n.available, what: n.what, channel: n.channel, result, brokerReason }));
+    return res;
   }
 
   private async skip(

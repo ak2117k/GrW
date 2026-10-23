@@ -48,6 +48,23 @@ export interface SelfReviewSummary {
   notable?: NotableCall[];
   /** MBM_PREDICTION: skill vs always guessing the common outcome; MBM_RELATIVE: vs always making the same relative call. */
   skill?: Partial<Record<VerificationKind | string, { session: SkillStats; rolling20: SkillStats }>>;
+  /** Telegram signal trades: live vs PAPER (made when the account lacked funds), session + last 20 sessions. */
+  signalTrades?: {
+    session: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome };
+    rolling20: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome };
+  };
+}
+
+export interface SignalTradeOutcome {
+  n: number;
+  open: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  noTrade: number;
+  pnl: number;
+  realised: number;
+  winRate: number | null;
 }
 
 export interface SkillStats {

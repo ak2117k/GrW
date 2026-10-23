@@ -338,6 +338,21 @@ export class BrokerOverviewService {
   }
 
   /**
+   * The caller's RMS funds only (one `getRMS` call), through the same own-account session as
+   * {@link getOverview} — never a second login over a live feed. `null` when the broker did not
+   * answer with an `availablecash` (so "could not read" is never mistaken for ₹0). Used by the
+   * Telegram signal trader's funds check before a live entry.
+   */
+  async getFunds(userId: string): Promise<BrokerOverview['funds'] | null> {
+    const row = await this.prisma.brokerCredential.findUnique({ where: { userId } });
+    if (!row) throw new NotFoundException('No Angel One account connected');
+    const rms = await this.readOwnAccount(userId, (session) => session.getFunds());
+    const raw = rms?.availablecash;
+    if (raw === null || raw === undefined || String(raw).trim() === '' || !Number.isFinite(parseFloat(String(raw)))) return null;
+    return mapFunds(rms);
+  }
+
+  /**
    * Fills in each position's `underlyingToken` from the instrument master.
    *
    * WHY THE UI NEEDS IT: the dashboard links a position's symbol to the

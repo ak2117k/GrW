@@ -46,6 +46,13 @@ export interface SignalTraderConfig {
   product: SignalProduct;
   /** Option WRITING (SELL CE/PE) is refused unless explicitly allowed. */
   allowOptionSell: boolean;
+  /** % added to the required funds for charges (funds check before a live entry). */
+  fundsBufferPct: number;
+  /**
+   * % of notional assumed as margin for futures / option writing — a CONSERVATIVE ESTIMATE: the
+   * codebase has no broker margin-calculator call wired.
+   */
+  futMarginPct: number;
   problems: string[];
 }
 
@@ -66,6 +73,8 @@ export const SIGNAL_DEFAULTS = {
   strongClusterBoost: 10,
   strongChannels: 3,
   fillWaitSec: 60,
+  fundsBufferPct: 1,
+  futMarginPct: 25,
 } as const;
 
 type Env = Record<string, string | undefined>;
@@ -123,6 +132,9 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     fillWaitSec: num(env, 'SIGNAL_FILL_WAIT_SEC', SIGNAL_DEFAULTS.fillWaitSec, (n) => int(n) && n >= 5 && n <= 900, problems),
     product: product === 'CARRYFORWARD' ? 'CARRYFORWARD' : 'INTRADAY',
     allowOptionSell: env.SIGNAL_ALLOW_OPTION_SELL === 'true',
+    fundsBufferPct: num(env, 'SIGNAL_FUNDS_BUFFER_PCT', SIGNAL_DEFAULTS.fundsBufferPct, (n) => n >= 0 && n <= 10, problems),
+    // The lower bound keeps a typo from under-estimating margin.
+    futMarginPct: num(env, 'SIGNAL_FUT_MARGIN_PCT', SIGNAL_DEFAULTS.futMarginPct, (n) => n >= 5 && n <= 100, problems),
     problems,
   };
 }

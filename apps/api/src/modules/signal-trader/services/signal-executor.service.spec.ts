@@ -117,4 +117,19 @@ describe('SignalExecutorService', () => {
     expect(t.orders.get('o1')?.status).toBe('CANCELLED');
     expect(t.repo.recordSlVerdict).not.toHaveBeenCalled();
   });
+  it('a definitive REJECTED (at placement or later in the book) reaches onRejected with the broker reason', async () => {
+    const onRejected = jest.fn(async () => undefined);
+    const t = make({ placement: { status: 'REJECTED', orderId: '', message: 'RMS:Margin Exceeds,Required:15377, Available:900' } });
+    expect(await t.svc.place({ ...input, onRejected })).toMatchObject({ kind: 'REJECTED' });
+    expect(onRejected).toHaveBeenCalledWith('RMS:Margin Exceeds,Required:15377, Available:900');
+
+    const later = jest.fn(async () => { throw new Error('hook failure is logged, not propagated'); });
+    const t2 = make({ book: [[{ orderid: 'B1', ordertag: 'sgdec1', status: 'rejected', text: 'Insufficient Funds', filledshares: '0' }]] });
+    t2.svc.followUp = jest.fn(async () => undefined);
+    await t2.svc.place(input);
+    const real = SignalExecutorService.prototype.followUp.bind(t2.svc);
+    await real('o1', 'B1', 'sgdec1', { ...input, onRejected: later });
+    expect(later).toHaveBeenCalledWith('Insufficient Funds');
+    expect(t2.orders.get('o1')?.status).toBe('REJECTED');
+  });
 });

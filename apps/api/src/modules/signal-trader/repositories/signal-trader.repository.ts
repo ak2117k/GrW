@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { ClusterView, EntryType, InstrumentKind, SignalView } from '../domain/signal.types';
 import { SIGNAL_ENTRY_VERDICT_TAG, istDayStart } from '../domain/execution';
+import { SIGNAL_PAPER_STRATEGY, decisionTag } from '../domain/paper';
 
 const isUnique = (err: unknown) => err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 type Row = Record<string, unknown>;
@@ -87,8 +88,39 @@ export interface DecisionFinish {
   gate: unknown;
   judge: unknown;
   plan: unknown;
-  decision: 'TAKE' | 'SKIP';
+  /** PAPER = every check + the judge said TAKE but the account could not fund it (paper trade instead). */
+  decision: 'TAKE' | 'SKIP' | 'PAPER';
   skipReason: string | null;
+}
+
+/** What became of a PAPER decision's paper trade (merged into SignalDecision.plan.paper). */
+export interface PaperRecord {
+  status: 'OPEN' | 'PENDING' | 'FAILED';
+  tradeId: string | null;
+  at: string;
+  trigger: 'funds_check' | 'broker_reject';
+  reason?: string;
+  entryPrice?: number | null;
+}
+
+export interface PaperTradeRow {
+  id: string;
+  status: string;
+  side: string;
+  quantity: number;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  stoploss: number | null;
+  target: number | null;
+  pnl: number | null;
+  pnlPercent: number | null;
+  positionType: string;
+  exitReasonTag: string | null;
+  entryTags: string[];
+  entryTime: Date | null;
+  exitTime: Date | null;
+  createdAt: Date;
+  instrument: { token: string; exchange: string; symbol: string } | null;
 }
 
 export interface OrderClaim {
@@ -327,6 +359,87 @@ export class SignalTraderRepository {
     const decisions = await this.prisma.signalDecision.findMany({ where: { signalId, decision: 'TAKE' }, select: { id: true } });
     if (decisions.length === 0) return null;
     return this.prisma.signalOrder.findFirst({ where: { decisionId: { in: decisions.map((d) => d.id) } }, orderBy: { createdAt: 'desc' } });
+  }
+
+  // ---- PAPER (no funds) ----
+
+  /**
+   * The owner's `paperOnNoFunds` setting, stored on the app's settings row (user_settings — the
+   * same row SettingsService.getSettings serves). Default ON when the row is absent or unreadable.
+   */
+  async paperOnNoFunds(): Promise<boolean> {
+    try {
+      const row = await this.prisma.userSettings.findFirst({ select: { signalPaperOnNoFunds: true } });
+      return row ? row.signalPaperOnNoFunds !== false : true;
+    } catch {
+      return true;
+    }
+  }
+
+  /** Persist the toggle on the existing settings row (never creates a second row). false = no row yet. */
+  async setPaperOnNoFunds(enabled: boolean): Promise<boolean> {
+    const row = await this.prisma.userSettings.findFirst({ select: { id: true } });
+    if (!row) return false;
+    await this.prisma.userSettings.update({ where: { id: row.id }, data: { signalPaperOnNoFunds: enabled } });
+    return true;
+  }
+
+  /**
+   * Broker rejected a TAKE's entry for funds → turn the decision into PAPER, at most once: the
+   * conditional update (decision still 'TAKE') is the claim. The rejection is appended to the gate.
+   */
+  async claimPaperFallback(decisionId: string, check: Record<string, unknown>): Promise<boolean> {
+    const row = await this.prisma.signalDecision.findUnique({ where: { id: decisionId }, select: { decision: true, gate: true } });
+    if (!row || row.decision !== 'TAKE') return false;
+    const gate = [...(Array.isArray(row.gate) ? (row.gate as unknown[]) : []), check];
+    const r = await this.prisma.signalDecision.updateMany({
+      where: { id: decisionId, decision: 'TAKE' },
+      data: { decision: 'PAPER', skipReason: 'insufficient_funds', gate: gate as Prisma.InputJsonValue },
+    });
+    return r.count === 1;
+  }
+
+  /** Merge the paper outcome into the decision's plan JSON (`plan.paper`). */
+  async recordPaper(decisionId: string, paper: PaperRecord): Promise<void> {
+    const row = await this.prisma.signalDecision.findUnique({ where: { id: decisionId }, select: { plan: true } });
+    const plan = row?.plan && typeof row.plan === 'object' && !Array.isArray(row.plan) ? (row.plan as Record<string, unknown>) : {};
+    await this.prisma.signalDecision.update({ where: { id: decisionId }, data: { plan: { ...plan, paper } as unknown as Prisma.InputJsonValue } });
+  }
+
+  private readonly paperSelect = {
+    id: true, status: true, side: true, quantity: true, entryPrice: true, exitPrice: true, stoploss: true, target: true,
+    pnl: true, pnlPercent: true, positionType: true, exitReasonTag: true, entryTags: true, entryTime: true, exitTime: true, createdAt: true,
+    instrument: { select: { token: true, exchange: true, symbol: true } },
+  } as const;
+
+  /** The paper trade already opened for a decision (idempotency backstop). */
+  paperTradeFor(decisionId: string): Promise<PaperTradeRow | null> {
+    return this.prisma.trade.findFirst({
+      where: { strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, entryTags: { has: decisionTag(decisionId) } },
+      select: this.paperSelect,
+    }) as Promise<PaperTradeRow | null>;
+  }
+
+  paperTradesFor(decisionIds: string[]): Promise<PaperTradeRow[]> {
+    if (decisionIds.length === 0) return Promise.resolve([]);
+    return this.prisma.trade.findMany({
+      where: { strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, entryTags: { hasSome: decisionIds.map(decisionTag) } },
+      select: this.paperSelect,
+      take: 500,
+    }) as Promise<PaperTradeRow[]>;
+  }
+
+  /** Open tagged paper trades — the paper SL/target watch. */
+  openPaperTrades(): Promise<PaperTradeRow[]> {
+    return this.prisma.trade.findMany({
+      where: { strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, status: 'OPEN' },
+      select: this.paperSelect,
+      take: 200,
+    }) as Promise<PaperTradeRow[]>;
+  }
+
+  paperDecisionsSince(since: Date) {
+    return this.prisma.signalDecision.findMany({ where: { decision: 'PAPER', createdAt: { gte: since } }, orderBy: { createdAt: 'desc' }, take: 200 });
   }
 
   // ---- read model for the page ----

@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>> } = {}) {
+function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] } } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -58,6 +58,7 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     dailyRangeBp: jest.fn(async () => null),
     mbmPredictions: jest.fn(async () => o.mbm ?? []),
     tradeSetups: jest.fn(async () => []),
+    signalTradeOutcomes: jest.fn(async () => o.signalTrades ?? { paper: [], live: [] }),
     channelSignals: jest.fn(async (s: string) => (o.channel ?? []).filter((r) => r.sessionDate === s)),
     stockMoves: jest.fn(async (asOf: string) =>
       asOf === '2026-10-13'
@@ -120,6 +121,30 @@ describe('SelfReviewRunService', () => {
     expect(finish[1].summary.byChannel.chA).toMatchObject({ n: 2, right: 1, wrong: 1, hitRate: 0.5, rolling20: 0.667, rolling20Right: 2, rolling20Wrong: 1 });
     expect(finish[1].summary.byChannel.chB).toMatchObject({ n: 1, right: 0, wrong: 0, hitRate: null, rolling20: null });
     expect(finish[1].summary.notable.every((x) => x.kind !== 'CHANNEL_SIGNAL')).toBe(true);
+  });
+
+  it('SIGNAL_TRADES: live vs PAPER (no funds) outcomes, session S and rolling 20; absent when there are none', async () => {
+    const at = (d: string) => new Date(`${d}T05:00:00Z`);
+    const { svc, repo } = make({
+      signalTrades: {
+        paper: [
+          { createdAt: at('2026-10-21'), status: 'CLOSED', pnl: 900 },
+          { createdAt: at('2026-10-21'), status: 'OPEN', pnl: -100 },
+          { createdAt: at('2026-10-19'), status: 'CLOSED', pnl: -400 },
+        ],
+        live: [{ createdAt: at('2026-10-21'), status: 'FILLED', trackerStatus: 'CLOSED', pnl: -250 }, { createdAt: at('2026-10-21'), status: 'REJECTED', trackerStatus: null, pnl: null }],
+      },
+    });
+    await svc.run(NOW);
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { signalTrades: any } }];
+    const st = finish[1].summary.signalTrades;
+    expect(st.session.paperNoFunds).toMatchObject({ n: 2, open: 1, closed: 1, wins: 1, losses: 0, pnl: 800, realised: 900 });
+    expect(st.rolling20.paperNoFunds).toMatchObject({ n: 3, closed: 2, wins: 1, losses: 1, realised: 500, winRate: 0.5 });
+    expect(st.session.live).toMatchObject({ n: 2, closed: 1, losses: 1, noTrade: 1, realised: -250 });
+    const none = make();
+    await none.svc.run(NOW);
+    const f2 = none.repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: Record<string, unknown> }];
+    expect(f2[1].summary.signalTrades).toBeUndefined();
   });
 
   it('STOCK_MOVE: rows whose 5-session horizon closes at S (scored 5 sessions earlier) are judged; MID is null; not a factor', async () => {

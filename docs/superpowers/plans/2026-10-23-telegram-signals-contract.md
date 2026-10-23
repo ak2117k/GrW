@@ -59,3 +59,15 @@ The legacy scorecard module (`apps/api/src/modules/telegram`) already owns Prism
 - Event `telegram.message` payload: `{ messageId: TelegramMessage.id, channelId: TelegramChannel.id, postedAt: Date,
   text, hasMedia, edited: boolean }` — `edited: true` on an edit re-emit (S dedups). Constant + type exported from
   `apps/api/src/modules/telegram-reader/telegram-reader.events.ts`. EventEmitterModule.forRoot() is registered in app.module by R.
+
+## X addendum (2026-10-23) — PAPER when the account lacks funds
+Owner request: "if there is a lack of funds in the account, create a paper trade of that so that we can analyze it later".
+- LIVE only, after the judge + pre-send price check: funds check `funds` in `SignalDecision.gate` = `{available, required, ok, method}`.
+  Available = Angel RMS `availablecash` via `BrokerOverviewService.getFunds` (own-account session, no second login).
+  Required: option BUY = limit × qty + `SIGNAL_FUNDS_BUFFER_PCT` (1 %); cash = notional + buffer; futures / option SELL =
+  ESTIMATE `SIGNAL_FUT_MARGIN_PCT` (25 %) of notional + buffer (no broker margin API wired). Unreadable → `ok: null`, order sent as before.
+- Short (or broker rejects with a funds/margin text) and `user_settings.signalPaperOnNoFunds` (default ON, owner toggle on the page)
+  → `decision = 'PAPER'`, `skipReason = 'insufficient_funds'`; a paper trade through `TradeExecutionService.executeTrade(isPaper)`,
+  strategy `TELEGRAM_SIGNAL_NO_FUNDS`, source `telegram-signal / no-funds`, tags `decision:<id>`; SL + T1 exits by
+  `SignalPaperWatchService` (30 s). Never a broker order, never a tracker, never counted by the caps (they count TAKE / live orders).
+  Setting OFF → plain SKIP `insufficient_funds`. Self-review summary `signalTrades` = live vs paper (no funds), session + rolling 20.

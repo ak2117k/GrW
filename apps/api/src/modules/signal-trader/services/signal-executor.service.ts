@@ -38,6 +38,12 @@ export interface PlaceInput {
   channel: string;
   signalSummary: string;
   fillWaitSec: number;
+  /**
+   * Called once with the broker's reason when the entry is definitively REJECTED (at placement or
+   * later in the order book). The signal trader uses it for the funds/margin → PAPER fallback.
+   * A throw is logged, never propagated into the order path.
+   */
+  onRejected?: (reason: string) => Promise<unknown> | void;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -135,11 +141,21 @@ export class SignalExecutorService {
       return { kind: 'PLACED', orderRowId: rowId, brokerOrderId: settled.orderId };
     }
     await this.repo.updateOrder(rowId, { status: settled.kind, statusReason: settled.reason });
+    if (settled.kind === 'REJECTED') await this.notifyRejected(i, settled.reason);
     void sendOpsAlert(
       `signal-order:${rowId}`,
       rejectAlert({ symbol: i.plan.tradingsymbol, status: settled.kind, reason: settled.kind === 'UNCERTAIN' ? `${settled.reason} — the order MAY exist, check the broker` : settled.reason }),
     );
     return { kind: settled.kind, orderRowId: rowId, reason: settled.reason };
+  }
+
+  private async notifyRejected(i: Pick<PlaceInput, 'onRejected' | 'plan'>, reason: string): Promise<void> {
+    if (!i.onRejected) return;
+    try {
+      await i.onRejected(reason);
+    } catch (err) {
+      this.logger.error(`[signal-exec] rejection hook for ${i.plan.tradingsymbol} failed: ${errText(err)}`);
+    }
   }
 
   /** Classified answer → settlement; only a non-definitive answer reads the book, by OUR tag. Never re-sends. */
@@ -161,7 +177,7 @@ export class SignalExecutorService {
   }
 
   /** Read our order from the book until it fills, dies, or the wait ends (then cancel it). */
-  async followUp(rowId: string, brokerOrderId: string, tag: string, i: Pick<PlaceInput, 'ownerUserId' | 'plan' | 'channel' | 'signalSummary' | 'fillWaitSec'>): Promise<void> {
+  async followUp(rowId: string, brokerOrderId: string, tag: string, i: Pick<PlaceInput, 'ownerUserId' | 'plan' | 'channel' | 'signalSummary' | 'fillWaitSec' | 'onRejected'>): Promise<void> {
     const deadline = Date.now() + i.fillWaitSec * 1000;
     let cancelSent = false;
     for (let n = 0; n < 400; n++) {
@@ -189,6 +205,7 @@ export class SignalExecutorService {
             const reason = byId?.text || byTag?.text || (cancelSent ? `unfilled after ${i.fillWaitSec} s — cancelled` : status);
             await this.repo.updateOrder(rowId, { status: st, statusReason: reason });
             void sendOpsAlert(`signal-order:${rowId}`, rejectAlert({ symbol: i.plan.tradingsymbol, status: st, reason }));
+            if (st === 'REJECTED') await this.notifyRejected(i, reason);
           }
           return;
         }

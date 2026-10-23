@@ -33,7 +33,14 @@ function makeRepo() {
     finishDecision: jest.fn(async (id: string, f: Record<string, any>) => {
       Object.assign(decisions.find((d) => d.id === id)!, f, { status: 'DONE' });
     }),
-    tradesToday: jest.fn(async () => 0),
+    tradesToday: jest.fn(async (_mode?: string, _now?: Date) => decisions.filter((d) => d.decision === 'TAKE').length),
+    paperOnNoFunds: jest.fn(async () => true),
+    claimPaperFallback: jest.fn(async (id: string, check: Record<string, any>) => {
+      const d = decisions.find((x) => x.id === id);
+      if (!d || d.decision !== 'TAKE') return false;
+      Object.assign(d, { decision: 'PAPER', skipReason: 'insufficient_funds', gate: [...(d.gate ?? []), check] });
+      return true;
+    }),
     signalLossToday: jest.fn(async () => 0),
     clusterTaken: jest.fn(async () => false),
     holding: jest.fn(async () => false),
@@ -45,19 +52,25 @@ function makeRepo() {
 
 const takeVerdict = { verdict: 'TAKE', confidence: 80, reasons: ['OI supports'], entry: null, sl: null, targets: [], lots: null };
 
-function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null } = {}) {
+function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any } = {}) {
   const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), ...over.cfg };
   const repo = makeRepo();
   const judge = { judge: jest.fn(over.judge ?? (async () => ({ ok: true, verdict: takeVerdict, latencyMs: 10 }))) };
   const context = { build: jest.fn(async () => ({})), nearestLevels: jest.fn(async () => null) };
-  const executor = { place: jest.fn(async () => ({ kind: 'PLACED', orderRowId: 'o1', brokerOrderId: 'b1' })), resume: jest.fn() };
+  const executor = { place: jest.fn(over.place ?? (async () => ({ kind: 'PLACED', orderRowId: 'o1', brokerOrderId: 'b1' }))), resume: jest.fn() };
   const risk = { validateTrade: jest.fn(async () => ({ allowed: true })) };
   const clock = { isOpen: () => true, minutesToClose: () => 200 };
   const master = { getInstrumentMaster: async () => masterRows };
   const ltp = over.ltp === undefined ? 101 : over.ltp;
   const quotes = { ltp: jest.fn(async () => ltp) };
-  const svc = new SignalTraderService(cfg, over.env ?? LIVE_ENV, repo as never, judge as never, context as never, executor as never, risk as never, clock, master, quotes);
-  return { svc, repo, judge, executor, risk, quotes };
+  const fundsVal = over.funds === undefined ? 1_000_000 : over.funds;
+  const funds = { available: jest.fn(async () => {
+    if (fundsVal === 'throw') throw new Error('RMS down');
+    return fundsVal;
+  }) };
+  const paper = { open: jest.fn(async () => ({ ok: true as const, tradeId: 'pt1', entryPrice: 101.5, duplicate: false })) };
+  const svc = new SignalTraderService(cfg, over.env ?? LIVE_ENV, repo as never, judge as never, context as never, executor as never, risk as never, clock, master, quotes, funds, paper);
+  return { svc, repo, judge, executor, risk, quotes, funds, paper };
 }
 
 const ev = { signalId: 'sig1', clusterId: 'cl1', agreeCount: 1, conflict: false };
@@ -180,5 +193,91 @@ describe('SignalTraderService', () => {
     await t.svc.onUpdate({ signalId: 'sig1', kind: 'EXIT_NOW', text: 'exit now guys' });
     expect(t.repo.appendThesisNote).toHaveBeenCalledWith('tr1', 'owner', expect.stringMatching(/EXIT_NOW.*information only/));
     expect(t.executor.place).not.toHaveBeenCalled();
+  });
+
+  describe('funds check + PAPER (no funds)', () => {
+    const fundsOf = (d: Record<string, any>) => (d.gate as any[]).find((c) => c.name === 'funds');
+
+    it('funds ok → the live order goes out; the funds check is recorded with available / required', async () => {
+      const t = build({ cfg: { mode: 'live' }, funds: 50_000 });
+      expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'TAKE', placed: 'PLACED' });
+      expect(t.executor.place).toHaveBeenCalledTimes(1);
+      expect(t.paper.open).not.toHaveBeenCalled();
+      expect(fundsOf(t.repo.decisions[0]).funds).toEqual({ available: 50_000, required: 15377.25, ok: true, method: 'premium' });
+    });
+
+    it('funds short → a PAPER trade, NO broker call, decision PAPER (never counted as a TAKE), alert', async () => {
+      const t = build({ cfg: { mode: 'live' }, funds: 9_000 });
+      const r = await t.svc.evaluate(ev);
+      expect(r).toMatchObject({ decision: 'PAPER', skipReason: 'insufficient_funds', paper: { ok: true, tradeId: 'pt1' } });
+      expect(t.executor.place).not.toHaveBeenCalled();
+      expect(t.paper.open).toHaveBeenCalledTimes(1);
+      const arg = (t.paper.open.mock.calls[0] as any[])[0];
+      expect(arg).toMatchObject({ decisionId: 'd1', trigger: 'funds_check', plan: { limitPrice: 101.5, qty: 150, sl: 90, targets: [120] } });
+      const d = t.repo.decisions[0];
+      expect(d).toMatchObject({ decision: 'PAPER', skipReason: 'insufficient_funds' });
+      expect(fundsOf(d).funds).toMatchObject({ available: 9000, ok: false });
+      // caps untouched: nothing counts as a TAKE
+      expect(await t.repo.tradesToday('live', new Date())).toBe(0);
+      const texts = (sendOpsAlert as jest.Mock).mock.calls.map((c) => c[1]);
+      expect(texts.some((x: string) => /^PAPER \(insufficient funds\): need ₹15,377, available ₹9,000 — BUY NIFTY 25000 CE/.test(x))).toBe(true);
+      expect(texts.some((x: string) => /Signal TAKE/.test(x))).toBe(false);
+    });
+
+    it('a PAPER decision is never re-evaluated', async () => {
+      const t = build({ cfg: { mode: 'live' }, funds: 9_000 });
+      await t.svc.evaluate(ev);
+      expect(await t.svc.evaluate({ ...ev, agreeCount: 3 })).toBeNull();
+      expect(t.paper.open).toHaveBeenCalledTimes(1);
+    });
+
+    it('funds unreadable → no paper; recorded unknown; the order goes as before', async () => {
+      for (const funds of [null, 'throw'] as const) {
+        const t = build({ cfg: { mode: 'live' }, funds });
+        expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'TAKE', placed: 'PLACED' });
+        expect(t.paper.open).not.toHaveBeenCalled();
+        const c = fundsOf(t.repo.decisions[0]);
+        expect(c).toMatchObject({ ok: null, required: false, funds: { available: null, ok: null } });
+      }
+    });
+
+    it('setting off → plain SKIP insufficient_funds, no paper, no order', async () => {
+      const t = build({ cfg: { mode: 'live' }, funds: 9_000 });
+      t.repo.paperOnNoFunds.mockResolvedValue(false);
+      expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'SKIP', skipReason: 'insufficient_funds' });
+      expect(t.paper.open).not.toHaveBeenCalled();
+      expect(t.executor.place).not.toHaveBeenCalled();
+    });
+
+    it('shadow mode never reads funds', async () => {
+      const t = build({ cfg: { mode: 'shadow' }, funds: 1 });
+      expect((await t.svc.evaluate(ev))?.decision).toBe('TAKE');
+      expect(t.funds.available).not.toHaveBeenCalled();
+    });
+
+    it('broker rejects for funds → paper fallback ONCE per decision (idempotent); TAKE becomes PAPER', async () => {
+      const t = build({
+        cfg: { mode: 'live' },
+        place: async (i: any) => {
+          await i.onRejected('RMS:Margin Exceeds,Required:15377.00, Available:900.00');
+          await i.onRejected('RMS:Margin Exceeds,Required:15377.00, Available:900.00');
+          return { kind: 'REJECTED', orderRowId: 'o1', reason: 'RMS:Margin Exceeds' };
+        },
+      });
+      await t.svc.evaluate(ev);
+      expect(t.paper.open).toHaveBeenCalledTimes(1);
+      expect((t.paper.open.mock.calls[0] as any[])[0]).toMatchObject({ trigger: 'broker_reject' });
+      const d = t.repo.decisions[0];
+      expect(d).toMatchObject({ decision: 'PAPER', skipReason: 'insufficient_funds' });
+      expect((d.gate as any[]).some((c) => c.name === 'broker_funds_reject' && c.ok === false)).toBe(true);
+      expect(await t.repo.tradesToday('live', new Date())).toBe(0);
+    });
+
+    it('a non-funds broker rejection stays a plain rejection (no paper)', async () => {
+      const t = build({ cfg: { mode: 'live' }, place: async (i: any) => (await i.onRejected('Price out of circuit limit'), { kind: 'REJECTED', orderRowId: 'o1', reason: 'x' }) });
+      await t.svc.evaluate(ev);
+      expect(t.paper.open).not.toHaveBeenCalled();
+      expect(t.repo.decisions[0].decision).toBe('TAKE');
+    });
   });
 });

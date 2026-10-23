@@ -3,7 +3,10 @@ import { cn } from '@/utils/cn';
 import {
   channelStatsLine,
   decisionWhy,
+  fundsLine,
   modeBadge,
+  outcomeLine,
+  paperState,
   openOrders,
   planLine,
   skipLabel,
@@ -24,10 +27,11 @@ const time = (iso: string) => {
 
 function DecisionCard({ d }: { d: SignalDecisionRow }) {
   const take = d.decision === 'TAKE';
+  const paper = d.decision === 'PAPER';
   return (
     <div className={CARD} data-testid="signal-decision">
       <div className="flex flex-wrap items-center gap-2">
-        <Badge label={d.decision ?? d.status} variant={take ? 'success' : d.decision === 'SKIP' ? 'neutral' : 'info'} size="sm" />
+        <Badge label={d.decision ?? d.status} variant={take ? 'success' : paper ? 'warning' : d.decision === 'SKIP' ? 'neutral' : 'info'} size="sm" />
         <span className={cn('text-sm font-medium', PRIMARY)}>{d.underlying ?? '—'}</span>
         <span className={cn('text-xs', MUTED)}>{d.channel ?? 'unknown channel'}</span>
         {d.conflict && <Badge label="CONFLICT" variant="warning" size="sm" />}
@@ -39,7 +43,7 @@ function DecisionCard({ d }: { d: SignalDecisionRow }) {
       </div>
       {d.plan?.tradingsymbol && <p className={cn('mt-2 text-sm', SECONDARY)}>{planLine(d.plan)}</p>}
       <p className={cn('mt-1 text-xs', MUTED)}>
-        {d.decision === 'SKIP' && <span className="font-medium text-amber-400">{skipLabel(d.skipReason)}: </span>}
+        {(d.decision === 'SKIP' || paper) && <span className="font-medium text-amber-400">{skipLabel(d.skipReason)}: </span>}
         {decisionWhy(d)}
         {typeof d.judge?.effectiveConfidence === 'number' && ` (AI confidence ${d.judge.effectiveConfidence})`}
       </p>
@@ -62,7 +66,75 @@ function DecisionCard({ d }: { d: SignalDecisionRow }) {
   );
 }
 
-export function SignalsTelegramView({ data }: { data: SignalOverview }) {
+const TONE = { good: 'text-emerald-400', bad: 'text-red-400', neutral: SECONDARY } as const;
+
+/** Owner toggle: a TAKE the account cannot fund becomes a paper trade (on) or a plain skip (off). */
+function PaperToggle({ data, onToggle, busy }: { data: SignalOverview; onToggle?: (enabled: boolean) => void; busy?: boolean }) {
+  const s = data.paperOnNoFunds;
+  if (!s) return null;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="paper-toggle">
+      <span className={cn('text-xs', SECONDARY)}>
+        Not enough funds → <span className={cn('font-semibold', PRIMARY)}>{s.enabled ? 'paper trade' : 'skip'}</span>
+      </span>
+      {onToggle && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onToggle(!s.enabled)}
+          className="inline-flex min-h-10 items-center rounded border border-[var(--color-border-default)] px-3 text-xs text-[var(--color-text-secondary)] disabled:opacity-50"
+          aria-pressed={s.enabled}
+        >
+          {s.enabled ? 'Turn off (skip instead)' : 'Turn on (paper trade)'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PaperSection({ paper }: { paper: NonNullable<SignalOverview['paper']> }) {
+  return (
+    <section data-testid="paper-section">
+      <h2 className={cn('mb-2 text-sm font-semibold', PRIMARY)}>Paper (no funds)</h2>
+      <div className={CARD}>
+        <p className={cn('text-xs', MUTED)}>Last {paper.lookbackDays} days — signals taken on paper because the account lacked funds, next to the live ones.</p>
+        <p className={cn('mt-1 text-sm', SECONDARY)} data-testid="paper-summary">
+          Paper: <span className={TONE[paper.summary.pnl > 0 ? 'good' : paper.summary.pnl < 0 ? 'bad' : 'neutral']}>{outcomeLine(paper.summary)}</span>
+        </p>
+        <p className={cn('text-sm', SECONDARY)} data-testid="live-summary">
+          Live: <span className={TONE[paper.live.pnl > 0 ? 'good' : paper.live.pnl < 0 ? 'bad' : 'neutral']}>{outcomeLine(paper.live)}</span>
+        </p>
+      </div>
+      {paper.rows.length > 0 && (
+        <ul className="mt-2 space-y-2">
+          {paper.rows.map((r) => {
+            const st = paperState(r);
+            return (
+              <li key={r.decisionId} className={CARD} data-testid="paper-row">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge label="PAPER" variant="warning" size="sm" />
+                  <span className={cn('text-sm font-medium', PRIMARY)}>
+                    {r.plan?.side} {r.plan?.tradingsymbol ?? r.underlying ?? '—'} x{r.plan?.qty ?? '?'}
+                  </span>
+                  <span className={cn('text-xs', MUTED)}>{r.channel ?? 'unknown channel'}</span>
+                  <span className={cn('ml-auto text-xs', TONE[st.tone])}>{st.label}</span>
+                </div>
+                <p className={cn('mt-1 text-xs', MUTED)}>
+                  entry {r.plan?.limitPrice ?? '?'} · SL {r.plan?.sl ?? '?'}
+                  {r.plan?.targets?.length ? ` · T ${r.plan.targets.join('/')}` : ''}
+                  {r.funds ? ` · ${fundsLine(r.funds)}` : ''}
+                  {r.trigger === 'broker_reject' ? ' · broker rejected for funds' : ''}
+                </p>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+export function SignalsTelegramView({ data, onTogglePaper, toggleBusy }: { data: SignalOverview; onTogglePaper?: (enabled: boolean) => void; toggleBusy?: boolean }) {
   const badge = modeBadge(data.mode);
   const open = openOrders(data.orders);
   const takes = data.decisions.filter((d) => d.decision === 'TAKE').length;
@@ -82,6 +154,7 @@ export function SignalsTelegramView({ data }: { data: SignalOverview }) {
         <p className={cn('mt-1 text-xs', data.slEnforcement.ok ? 'text-emerald-400' : 'text-amber-400')}>
           SL execution: {data.slEnforcement.ok ? 'enforced' : 'NOT enforced'} — {data.slEnforcement.detail}
         </p>
+        <PaperToggle data={data} onToggle={onTogglePaper} busy={toggleBusy} />
       </div>
 
       <section>
@@ -122,6 +195,8 @@ export function SignalsTelegramView({ data }: { data: SignalOverview }) {
           </div>
         )}
       </section>
+
+      {data.paper && <PaperSection paper={data.paper} />}
 
       <section>
         <h2 className={cn('mb-2 text-sm font-semibold', PRIMARY)}>Channels</h2>

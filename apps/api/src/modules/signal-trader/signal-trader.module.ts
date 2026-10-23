@@ -6,6 +6,8 @@ import { AngelOneAdapterService } from '../market-data/services/angel-one-adapte
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { CredentialDecryptorModule } from '../credential-vault/execution/credential-decryptor.module';
+import { CredentialVaultModule } from '../credential-vault/credential-vault.module';
+import { BrokerOverviewService } from '../credential-vault/services/broker-overview.service';
 import { PerUserBrokerSessionFactory } from '../auto-execution/services/per-user-broker-session.factory';
 import { OwnerBrokerSessionProvider } from '../sentinel-executor/services/owner-broker-session.provider';
 import { SessionClock, parseLateClose } from '../market-hub/session-clock';
@@ -19,13 +21,18 @@ import { SignalTraderRepository } from './repositories/signal-trader.repository'
 import { SignalJudgeService } from './services/signal-judge.service';
 import { SignalContextService } from './services/signal-context.service';
 import { SignalExecutorService } from './services/signal-executor.service';
+import { SignalPaperService } from './services/signal-paper.service';
+import { SignalPaperWatchService } from './services/signal-paper-watch.service';
 import {
+  SIGNAL_FUNDS,
   SIGNAL_INSTRUMENT_MASTER,
+  SIGNAL_PAPER,
   SIGNAL_QUOTES,
   SIGNAL_SESSION_CLOCK,
   SIGNAL_TRADER_CONFIG,
   SIGNAL_TRADER_ENV,
   SignalTraderService,
+  type FundsLike,
   type QuotesLike,
 } from './services/signal-trader.service';
 import { SignalTraderController } from './controllers/signal-trader.controller';
@@ -41,6 +48,7 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
     PrismaModule,
     MarketDataModule,
     CredentialDecryptorModule,
+    CredentialVaultModule,
     TradeEngineModule,
     TradeTrackerModule,
     TradeSentinelModule,
@@ -54,6 +62,18 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
     SignalContextService,
     SignalExecutorService,
     SignalTraderService,
+    SignalPaperService,
+    SignalPaperWatchService,
+    { provide: SIGNAL_PAPER, useExisting: SignalPaperService },
+    {
+      // The owner's RMS available cash — the same sanitized funds read trade-setup sizes with
+      // (BrokerOverviewService, own-account session: never a second login over the live feed).
+      provide: SIGNAL_FUNDS,
+      useFactory: (overview: BrokerOverviewService): FundsLike => ({
+        available: async (userId) => (await overview.getFunds(userId))?.availableCash ?? null,
+      }),
+      inject: [BrokerOverviewService],
+    },
     // The owner's broker session, exactly as the sentinel executor borrows it (no second login).
     PerUserBrokerSessionFactory,
     OwnerBrokerSessionProvider,

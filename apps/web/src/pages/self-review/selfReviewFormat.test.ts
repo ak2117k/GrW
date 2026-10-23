@@ -8,6 +8,7 @@ import {
   kindLabel,
   kindRows,
   skillLines,
+  signalTradeLines,
   lessonInjected,
   lessonsAddedCount,
   lessonsAddedList,
@@ -172,5 +173,21 @@ describe('skillLines', () => {
     expect(skillLines(mk('NO_EDGE'))[0].tone).toBe('bad');
     expect(skillLines({ session: '', byKind: {} })).toEqual([]);
     expect(skillLines(null)).toEqual([]);
+  });
+});
+
+describe('signalTradeLines', () => {
+  it('live vs paper (no funds), last 20 sessions', () => {
+    const o = (pnl: number, wins: number, losses: number, open = 0) => ({ n: wins + losses + open, open, closed: wins + losses, wins, losses, noTrade: 0, pnl, realised: pnl, winRate: null });
+    const s: SelfReviewSummary = {
+      session: '2026-10-23',
+      byKind: {},
+      signalTrades: { session: { live: o(0, 0, 0), paperNoFunds: o(0, 0, 0) }, rolling20: { live: o(-500, 0, 1), paperNoFunds: o(2775, 1, 0, 1) } },
+    };
+    expect(signalTradeLines(s)).toEqual([
+      { key: 'live', label: 'Telegram signals — live', text: '1 closed · 0W/1L · P&L −₹500', tone: 'bad' },
+      { key: 'paperNoFunds', label: 'Telegram signals — paper (no funds)', text: '1 closed · 1W/0L · 1 open · P&L ₹2,775', tone: 'good' },
+    ]);
+    expect(signalTradeLines({ session: '', byKind: {} })).toEqual([]);
   });
 });

@@ -4,6 +4,7 @@ import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { MANUAL_VERDICT_PREFIX } from '../../sentinel-executor/domain/manual-exit';
 import { OVERNIGHT_TAGS } from '../domain/scorers';
 import { STOCK_MOVE_HORIZON_DAYS, STOCK_MOVE_THRESHOLD_ATR } from '../../stock-move/stock-move.logic';
+import { SIGNAL_PAPER_STRATEGY } from '../../signal-trader/domain/paper';
 
 /**
  * Read-only access to the rows the scorers judge. Every query is bounded by a time range the run
@@ -171,6 +172,28 @@ export class VerificationSourcesRepository {
       take: 200,
     });
     return rows.map((r) => ({ ...r, outcomeStatus: r.outcomeStatus as string }));
+  }
+
+  /** Telegram signal trades opened in [from, to): PAPER (no funds) Trade rows and live SignalOrders + trackers. */
+  async signalTradeOutcomes(from: Date, to: Date) {
+    const [paper, orders] = await Promise.all([
+      this.prisma.trade.findMany({
+        where: { strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, createdAt: { gte: from, lt: to } },
+        select: { createdAt: true, status: true, pnl: true },
+        take: 2000,
+      }),
+      this.prisma.signalOrder.findMany({ where: { createdAt: { gte: from, lt: to } }, select: { createdAt: true, status: true, trackerId: true }, take: 2000 }),
+    ]);
+    const ids = [...new Set(orders.map((o) => o.trackerId).filter((x): x is string => !!x))];
+    const trackers = ids.length ? await this.prisma.tradeTracker.findMany({ where: { id: { in: ids } }, select: { id: true, status: true, pnl: true } }) : [];
+    const byId = new Map(trackers.map((t) => [t.id, t]));
+    return {
+      paper,
+      live: orders.map((o) => {
+        const t = o.trackerId ? byId.get(o.trackerId) : undefined;
+        return { createdAt: o.createdAt, status: o.status, trackerStatus: t ? String(t.status) : null, pnl: t?.pnl ?? null };
+      }),
+    };
   }
 
   /** Telegram channel signals whose outcome is scored on `session` (signal-intake fills it at 16:20 IST). */

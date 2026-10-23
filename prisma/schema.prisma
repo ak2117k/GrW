@@ -460,6 +460,8 @@ model UserSettings {
   tradingHoursOnly       Boolean  @default(true)
   notificationsEnabled   Boolean  @default(true)
   mlConfig               Json?
+  /// Telegram signal trader (owner toggle): a TAKE the account cannot fund becomes a PAPER trade.
+  signalPaperOnNoFunds   Boolean  @default(true)
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
@@ -3147,7 +3149,7 @@ model SignalDecision {
   judge       Json?
   /// The resolved contract + sizing: {exchange, token, tradingsymbol, lotSize, tickSize, lots, qty, limitPrice, sl, targets, riskRupees}
   plan        Json?
-  decision    String? // TAKE | SKIP
+  decision    String? // TAKE | SKIP | PAPER (TAKE the account could not fund → paper trade; plan.paper)
   skipReason  String?   @map("skip_reason")
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)

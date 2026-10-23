@@ -16,6 +16,7 @@ import {
   runStatusVariant,
   scopeLabel,
   sessionLabel,
+  signalTradeLines,
   skillLines,
   targetLabel,
 } from './selfReviewFormat';
@@ -246,6 +247,11 @@ export function RunCard({ run }: { run: SelfReviewRun }) {
       {skillLines(run.summary).map((s) => (
         <p key={s.kind} className={cn('text-[11px]', MUTED)} data-testid="skill-line">
           {s.label}, last 20 sessions: <span className={cn('font-semibold', TONE_TEXT[s.tone])}>{s.verdict}</span> — {s.note}
+        </p>
+      ))}
+      {signalTradeLines(run.summary).map((s) => (
+        <p key={s.key} className={cn('text-[11px]', MUTED)} data-testid="signal-trade-line">
+          {s.label}, last 20 sessions: <span className={cn('font-semibold', TONE_TEXT[s.tone])}>{s.text}</span>
         </p>
       ))}
     </article>

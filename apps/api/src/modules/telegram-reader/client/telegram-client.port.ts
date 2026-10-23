@@ -26,6 +26,31 @@ export interface TgIncomingMessage {
   edited: boolean;
   /** Minimal, media-free metadata kept as rawPayload. */
   raw: Record<string, unknown>;
+  /** What media the post carries (no bytes); null / absent for text posts. */
+  media?: TgMediaInfo | null;
+  /**
+   * Download the media: a photo at the given size `type` (from `media.sizes`), or the whole document
+   * (`sizeType` null). Absent in fakes / when the client cannot download.
+   */
+  download?: (sizeType: string | null) => Promise<Buffer | null>;
+}
+
+export type TgMediaKind = 'photo' | 'image-document' | 'video' | 'sticker' | 'gif' | 'document' | 'other';
+
+export interface TgPhotoSize {
+  type: string;
+  w: number;
+  h: number;
+  bytes: number;
+}
+
+export interface TgMediaInfo {
+  kind: TgMediaKind;
+  mimeType: string | null;
+  /** Document size in bytes (null for photos: see `sizes`). */
+  sizeBytes: number | null;
+  /** Photo sizes Telegram offers (stripped / path previews excluded). */
+  sizes: TgPhotoSize[];
 }
 
 export type SignInResult = 'ok' | 'password_needed';

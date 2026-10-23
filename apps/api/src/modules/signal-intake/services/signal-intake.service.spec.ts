@@ -1,10 +1,11 @@
 import { AssistBusyError } from '../../ai-assist/assist-slot';
 import type { ClusterRow } from '../domain/cluster';
-import type { LlmParseReply } from '../domain/llm-schema';
+import type { LlmParseReply, VisionReply } from '../domain/llm-schema';
 import { buildVocabulary } from '../domain/vocabulary';
 import type { ClassRow, NewSignal } from '../repositories/signal-intake.repository';
 import { parseSignalIntakeConfig } from '../signal-intake.config';
 import { SignalIntakeService, textHash, type IntakeStore } from './signal-intake.service';
+import type { SignalVision } from './signal-vision.service';
 
 /** In-memory stand-in for SignalIntakeRepository. */
 function memStore() {
@@ -17,6 +18,7 @@ function memStore() {
     classOf: async (id) => (classes.get(id) ?? null) as never,
     saveClass: async (row) => void classes.set(row.messageId, { ...row, updatedAt: seq++ }),
     cachedLlm: async (hash) => [...classes.values()].reverse().find((c) => c.textHash === hash && c.llmResult)?.llmResult ?? null,
+    cachedVision: async (sha) => [...classes.values()].reverse().find((c) => (c.llmResult as { imageSha256?: string } | undefined)?.imageSha256 === sha)?.llmResult ?? null,
     llmPending: async (since) => [...classes.values()].filter((c) => c.status === 'LLM_PENDING' && c.postedAt >= since).map((c) => ({ ...c, attempts: c.attempts ?? 0 })) as never,
     messageText: async (id) => texts.get(id) ?? null,
     duplicateOf: async (key, since) => signals.filter((s) => s.dedupKey === key && s.receivedAt >= since).at(-1)?.id ?? null,
@@ -47,7 +49,7 @@ function memStore() {
 const vocab = buildVocabulary(['RELIANCE-EQ', 'TATAMOTORS-EQ', 'SBIN-EQ']);
 const T0 = new Date('2026-10-23T04:30:00Z'); // Fri 10:00 IST
 
-function make(o: { llm?: jest.Mock; master?: unknown[] | null; now?: Date; env?: Record<string, string> } = {}) {
+function make(o: { llm?: jest.Mock; master?: unknown[] | null; now?: Date; env?: Record<string, string>; vision?: SignalVision } = {}) {
   const mem = memStore();
   const emitted: Array<[string, Record<string, unknown>]> = [];
   const llm = o.llm ?? jest.fn(async (): Promise<LlmParseReply> => ({ isSignal: false, signals: [] }));
@@ -60,6 +62,7 @@ function make(o: { llm?: jest.Mock; master?: unknown[] | null; now?: Date; env?:
     parseSignalIntakeConfig(o.env ?? {}),
     { emit: (e: string, p: unknown) => emitted.push([e, p as Record<string, unknown>]) },
     () => now,
+    o.vision,
   );
   const msg = (id: string, channelId: string, text: string, atMin = 0) => ({
     messageId: id, channelId, text, postedAt: new Date(T0.getTime() + atMin * 60_000), hasMedia: false,
@@ -249,5 +252,143 @@ describe('SignalIntakeService', () => {
     const { svc, mem, msg } = make({ env: { SIGNAL_INTAKE: 'off' } });
     await svc.handle(msg('m1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
     expect(mem.classes.size).toBe(0);
+  });
+
+  it('commentary is VIEW: stored, no LLM, no event (prod 2026-10-23 Nifty IT post)', async () => {
+    const { svc, mem, emitted, llm, msg } = make();
+    await svc.handle(msg('m1', 'A', 'Nifty IT near resistance area. A monthly close above 33000- 33400 levels needed! Volatile time ahead!'));
+    await svc.handle(msg('m2', 'A', 'NIFTY near resistance 26200, weekly close above 26200-26300 needed', 1));
+    expect(mem.classes.get('m1')).toMatchObject({ status: 'VIEW', reason: 'sector index (no derivatives)' });
+    expect(mem.classes.get('m2')).toMatchObject({ status: 'VIEW', reason: expect.stringContaining('analysis') });
+    expect(mem.signals).toHaveLength(0);
+    expect(llm).not.toHaveBeenCalled();
+    expect(emitted).toEqual([]);
+  });
+});
+
+describe('SignalIntakeService — image posts (vision)', () => {
+  const IMG = { kind: 'photo' as const, path: '/data/x.jpg', sha256: 'a'.repeat(64), mimeType: 'image/jpeg', bytes: 90_000 };
+  const call = { underlying: 'CRUDEOIL', instrumentKind: 'CE', strike: 5600, expiry: null, side: 'BUY', entryType: 'ABOVE', entryLow: 142, entryHigh: 142, sl: 120, targets: [160, 180], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
+
+  function fakeVision(reply: VisionReply | (() => Promise<VisionReply>), o: { used?: number; unavailable?: string | null } = {}) {
+    const classify = jest.fn(typeof reply === 'function' ? reply : async () => reply);
+    const v = { unavailable: () => o.unavailable ?? null, usedSince: jest.fn(async () => o.used ?? 0), classify };
+    return { v: v as SignalVision & typeof v, classify };
+  }
+  const img = (m: ReturnType<typeof make>, id: string, ch: string, text = '', atMin = 0, media = IMG) => ({ ...m.msg(id, ch, text, atMin), hasMedia: true, media });
+
+  it('an image-only call → vision SIGNAL → TradeSignal (tag VISION) + signal.ready', async () => {
+    const { v, classify } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [call] });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1)); // drain the chain
+    expect(classify).toHaveBeenCalledWith('', IMG);
+    expect(m.mem.signals[0]).toMatchObject({ parser: 'llm', underlying: 'CRUDEOIL', strike: 5600, sl: 120, tags: ['LLM', 'VISION'] });
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', llmResult: expect.objectContaining({ kind: 'SIGNAL', imageSha256: IMG.sha256 }) });
+    expect(m.emitted[0]).toEqual(['signal.ready', expect.objectContaining({ signalId: 'sig1' })]);
+  });
+
+  it.each([
+    ['VIEW', 'VIEW'],
+    ['NOISE', 'NOISE'],
+    ['UPDATE', 'UPDATE_ORPHAN'],
+  ] as const)('kind %s is stored as %s and never emitted', async (kind, status) => {
+    const { v } = fakeVision({ kind, isSignal: false, signals: [] });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A', 'Crude chart for today'));
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(m.mem.classes.get('m1')).toMatchObject({ status, parser: 'vision' });
+    expect(m.mem.signals).toHaveLength(0);
+    expect(m.emitted).toEqual([]);
+  });
+
+  it('a caption that is itself a call is parsed by the rules; the image is not sent', async () => {
+    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+    expect(classify).not.toHaveBeenCalled();
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', parser: 'rule' });
+  });
+
+  it('cached by image sha256: the same image in another channel costs no second call', async () => {
+    const { v, classify } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [call] });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    await flush();
+    await m.svc.handle(img(m, 'm2', 'B', '', 2));
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(m.mem.classes.get('m2')).toMatchObject({ status: 'SIGNAL' });
+    expect(m.mem.clusters[0]).toMatchObject({ agreeCount: 2 });
+  });
+
+  it('daily cap counts ai_calls signal.vision rows since IST midnight; at the cap the image is skipped', async () => {
+    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }, { used: 40 });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    expect(v.usedSince).toHaveBeenCalledWith(new Date('2026-10-22T18:30:00Z'));
+    expect(classify).not.toHaveBeenCalled();
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: 'daily vision cap 40 reached' });
+  });
+
+  it('the in-process count caps too when ai_calls lags (SIGNAL_VISION_DAILY_CAP=1)', async () => {
+    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+    const m = make({ vision: v, env: { SIGNAL_VISION_DAILY_CAP: '1' } });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    await flush();
+    await m.svc.handle(img(m, 'm2', 'A', '', 1, { ...IMG, sha256: 'b'.repeat(64) }));
+    expect(classify).toHaveBeenCalledTimes(1);
+    expect(m.mem.classes.get('m2')).toMatchObject({ status: 'LLM_SKIPPED', reason: expect.stringContaining('daily vision cap') });
+  });
+
+  it('images older than 60 min are never sent', async () => {
+    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+    const m = make({ vision: v, now: new Date(T0.getTime() + 61 * 60_000) });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    expect(classify).not.toHaveBeenCalled();
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: expect.stringContaining('too old') });
+  });
+
+  it('transport unavailable: the image is skipped with the reason; the caption is still classified', async () => {
+    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }, { unavailable: 'SENTINEL_JUDGE=api but no ANTHROPIC_API_KEY' });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    await m.svc.handle(img(m, 'm2', 'A', 'Nifty IT near resistance, monthly close above 33000 needed', 1));
+    expect(classify).not.toHaveBeenCalled();
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: expect.stringContaining('no ANTHROPIC_API_KEY') });
+    expect(m.mem.classes.get('m2')).toMatchObject({ status: 'VIEW' });
+  });
+
+  it('SIGNAL_VISION=off and no vision port behave like unavailable', async () => {
+    const a = make({ env: { SIGNAL_VISION: 'off' }, vision: fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }).v });
+    await a.svc.handle(img(a, 'm1', 'A'));
+    expect(a.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: 'image not read: SIGNAL_VISION=off' });
+    const b = make();
+    await b.svc.handle(img(b, 'm1', 'A'));
+    expect(b.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: 'image not read: no vision transport' });
+  });
+
+  it('a failed read is LLM_FAILED (parser vision) and is never retried as a text parse', async () => {
+    const { v } = fakeVision(async () => {
+      throw new Error('claude CLI: timed out');
+    });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_FAILED', parser: 'vision', reason: expect.stringContaining('timed out') });
+    expect(await m.svc.retryPending()).toBe(0);
+    expect(m.llm).not.toHaveBeenCalled();
+  });
+
+  it('an invalid extraction from the image is refused', async () => {
+    const { v } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [{ ...call, sl: 150 }] });
+    const m = make({ vision: v });
+    await m.svc.handle(img(m, 'm1', 'A'));
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_NOT_SIGNAL', reason: expect.stringContaining('sl on the wrong side') });
+    expect(m.emitted).toEqual([]);
   });
 });

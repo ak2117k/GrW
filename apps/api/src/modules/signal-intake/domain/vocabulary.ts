@@ -10,6 +10,9 @@
 
 export type UnderlyingClass = 'INDEX' | 'STOCK' | 'COMMODITY';
 
+/** The token `normalise` puts in place of a non-tradeable sector / broad index ("NIFTY IT"). */
+export const SECTOR_INDEX_TOKEN = 'SECTORINDEX';
+
 export interface Vocabulary {
   /** Upper-case token → canonical underlying name. */
   readonly names: ReadonlyMap<string, string>;
@@ -17,12 +20,18 @@ export interface Vocabulary {
   readonly classOf: ReadonlyMap<string, UnderlyingClass>;
 }
 
-/** Index underlyings (the instrument master's `name`) and the aliases tip channels use for them. */
+/**
+ * Index underlyings WITH listed derivatives (the instrument master's `name`) and the aliases tip
+ * channels use for them. Sector / broad indices without derivatives (Nifty IT, Pharma, Auto, Metal,
+ * Realty, FMCG, PSU Bank, Midcap 100 …) are deliberately absent: `normalise` turns them into
+ * {@link SECTOR_INDEX_TOKEN}, so "Nifty IT" can never resolve to NIFTY (prod 2026-10-23 false positive).
+ */
 export const INDEX_ALIASES: Readonly<Record<string, readonly string[]>> = {
   NIFTY: ['NIFTY', 'NIFTY50', 'NF'],
   BANKNIFTY: ['BANKNIFTY', 'BNF', 'BN', 'BANK NIFTY', 'NIFTYBANK', 'NIFTY BANK', 'BANKNIFT'],
-  FINNIFTY: ['FINNIFTY', 'FN', 'FIN NIFTY', 'FINIFTY'],
-  MIDCPNIFTY: ['MIDCPNIFTY', 'MIDCAPNIFTY', 'MIDCAP NIFTY', 'MIDCP NIFTY', 'MIDCPNIFTY'],
+  FINNIFTY: ['FINNIFTY', 'FN', 'FIN NIFTY', 'FINIFTY', 'NIFTY FIN SERVICE', 'NIFTY FIN SERVICES', 'NIFTY FINANCIAL SERVICES', 'NIFTY FIN', 'NIFTYFIN'],
+  MIDCPNIFTY: ['MIDCPNIFTY', 'MIDCAPNIFTY', 'MIDCAP NIFTY', 'MIDCP NIFTY', 'NIFTY MIDCAP SELECT', 'NIFTY MID SELECT', 'MIDCAP SELECT', 'MIDCAPSELECT'],
+  NIFTYNXT50: ['NIFTYNXT50', 'NIFTY NEXT 50', 'NIFTY NEXT50', 'NIFTYNEXT50', 'NIFTY NXT 50', 'NIFTY JUNIOR'],
   SENSEX: ['SENSEX', 'SX', 'BSE SENSEX'],
   BANKEX: ['BANKEX'],
 };

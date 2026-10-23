@@ -5,7 +5,17 @@ import { NewMessage, NewMessageEvent } from 'telegram/events';
 import { EditedMessage, EditedMessageEvent } from 'telegram/events/EditedMessage';
 import { Logger as GramLogger, LogLevel } from 'telegram/extensions/Logger';
 import { computeCheck } from 'telegram/Password';
-import { SignInResult, TgClient, TgClientFactory, TgDialog, TgIncomingMessage, rpcCode } from './telegram-client.port';
+import {
+  SignInResult,
+  TgClient,
+  TgClientFactory,
+  TgDialog,
+  TgIncomingMessage,
+  TgMediaInfo,
+  TgMediaKind,
+  TgPhotoSize,
+  rpcCode,
+} from './telegram-client.port';
 
 /**
  * GramJS (MTProto, the owner's USER account — not a bot) behind the TgClient port.
@@ -102,13 +112,13 @@ class GramJsClient implements TgClient {
 
   async recentMessages(chatId: string, limit: number): Promise<TgIncomingMessage[]> {
     const msgs = await this.client.getMessages(chatId, { limit });
-    return msgs.filter((m): m is Api.Message => m instanceof Api.Message).map((m) => toIncoming(m, false));
+    return msgs.filter((m): m is Api.Message => m instanceof Api.Message).map((m) => toIncoming(m, false, this.client));
   }
 
   onMessage(handler: (m: TgIncomingMessage) => void): void {
-    this.client.addEventHandler((e: NewMessageEvent) => handler(toIncoming(e.message, false)), new NewMessage({}));
+    this.client.addEventHandler((e: NewMessageEvent) => handler(toIncoming(e.message, false, this.client)), new NewMessage({}));
     this.client.addEventHandler(
-      (e: EditedMessageEvent) => handler(toIncoming(e.message, true)),
+      (e: EditedMessageEvent) => handler(toIncoming(e.message, true, this.client)),
       new EditedMessage({}),
     );
   }
@@ -118,7 +128,7 @@ class GramJsClient implements TgClient {
   }
 }
 
-function toIncoming(m: Api.Message, edited: boolean): TgIncomingMessage {
+function toIncoming(m: Api.Message, edited: boolean, client: TelegramClient): TgIncomingMessage {
   const media = m.media;
   const hasMedia =
     !!media && !(media instanceof Api.MessageMediaEmpty) && !(media instanceof Api.MessageMediaWebPage);
@@ -143,7 +153,54 @@ function toIncoming(m: Api.Message, edited: boolean): TgIncomingMessage {
       forwarded: !!m.fwdFrom,
       mediaType: media ? media.className : null,
     },
+    media: hasMedia ? mediaInfo(media) : null,
+    download: hasMedia ? (sizeType) => downloadOf(client, m, sizeType) : undefined,
   };
+}
+
+/** Photo sizes with dimensions and a byte count (stripped / path / empty previews are skipped). */
+function photoSizes(photo: Api.Photo): TgPhotoSize[] {
+  const out: TgPhotoSize[] = [];
+  for (const s of photo.sizes ?? []) {
+    if (s instanceof Api.PhotoSize) out.push({ type: s.type, w: s.w, h: s.h, bytes: s.size });
+    else if (s instanceof Api.PhotoCachedSize) out.push({ type: s.type, w: s.w, h: s.h, bytes: s.bytes?.length ?? 0 });
+    else if (s instanceof Api.PhotoSizeProgressive) out.push({ type: s.type, w: s.w, h: s.h, bytes: Math.max(0, ...(s.sizes ?? [])) });
+  }
+  return out;
+}
+
+function mediaInfo(media: Api.TypeMessageMedia | undefined): TgMediaInfo | null {
+  if (!media) return null;
+  if (media instanceof Api.MessageMediaPhoto) {
+    const photo = media.photo instanceof Api.Photo ? media.photo : null;
+    return { kind: 'photo', mimeType: 'image/jpeg', sizeBytes: null, sizes: photo ? photoSizes(photo) : [] };
+  }
+  if (media instanceof Api.MessageMediaDocument) {
+    const doc = media.document instanceof Api.Document ? media.document : null;
+    if (!doc) return { kind: 'other', mimeType: null, sizeBytes: null, sizes: [] };
+    const mime = doc.mimeType ?? null;
+    const size = Number(String(doc.size ?? '0'));
+    const attrs = doc.attributes ?? [];
+    let kind: TgMediaKind = 'document';
+    if (attrs.some((a) => a instanceof Api.DocumentAttributeSticker)) kind = 'sticker';
+    else if (attrs.some((a) => a instanceof Api.DocumentAttributeAnimated) || mime === 'image/gif') kind = 'gif';
+    else if (attrs.some((a) => a instanceof Api.DocumentAttributeVideo) || (mime ?? '').startsWith('video/')) kind = 'video';
+    else if ((mime ?? '').startsWith('image/')) kind = 'image-document';
+    return { kind, mimeType: mime, sizeBytes: Number.isFinite(size) ? size : null, sizes: [] };
+  }
+  return { kind: 'other', mimeType: null, sizeBytes: null, sizes: [] };
+}
+
+/** Bytes of the photo at size `sizeType`, or of the whole document; null when Telegram returns none. */
+async function downloadOf(client: TelegramClient, m: Api.Message, sizeType: string | null): Promise<Buffer | null> {
+  let thumb: Api.TypePhotoSize | undefined;
+  if (sizeType !== null) {
+    const photo = m.media instanceof Api.MessageMediaPhoto && m.media.photo instanceof Api.Photo ? m.media.photo : null;
+    thumb = photo?.sizes?.find((s) => 'type' in s && s.type === sizeType);
+    if (!thumb) return null;
+  }
+  const out = await client.downloadMedia(m, thumb ? { thumb } : {});
+  return Buffer.isBuffer(out) ? out : null;
 }
 
 @Injectable()

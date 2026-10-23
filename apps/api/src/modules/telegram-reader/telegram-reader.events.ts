@@ -12,4 +12,18 @@ export interface TelegramMessageEvent {
   text: string;
   hasMedia: boolean;
   edited: boolean;
+  /** Set when the post carried a photo / small image document that was saved (S may read it with vision). */
+  media?: TelegramMediaRef | null;
+}
+
+/**
+ * The post's image as R saved it on disk (TELEGRAM_MEDIA_DIR), present only when one was downloaded:
+ * a photo (best readable size ≤ ~1 MB) or a small image document (≤ 2 MB). Kept forever (keep-all-data).
+ */
+export interface TelegramMediaRef {
+  kind: 'photo' | 'image-document';
+  path: string;
+  sha256: string;
+  mimeType: string;
+  bytes: number;
 }

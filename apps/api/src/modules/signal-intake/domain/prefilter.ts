@@ -1,5 +1,5 @@
 import { isNumber, isPriceLike, normalise, type Normalised } from './text';
-import { AMBIGUOUS_SYMBOLS, type Vocabulary } from './vocabulary';
+import { AMBIGUOUS_SYMBOLS, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
 
 /**
  * Contract §S rule 1 — the FREE deterministic pre-filter. A message can only be a trade signal when it
@@ -18,7 +18,7 @@ const AD_RE = /\b(JOIN|SUBSCRIBE|SUBSCRIPTION|WHATSAPP|WATSAPP|CONTACT|DM|INBOX|
 /** P&L recaps and accuracy brags — they name instruments and prices but are not calls. */
 export const RECAP_RE = /\b(PNL|P&L|P\/L|TOTAL\s+PROFIT|TODAY'?S?\s+PROFIT|NET\s+PROFIT|PROFIT\s+OF|PROFIT\s+\+?\d{3,}|\d{3,}\s*\+?\s*PROFIT|ACCURACY|SCREENSHOT|TESTIMONIAL|MONTHLY\s+REPORT|WEEKLY\s+REPORT|POINTS\s+CAPTURED|PTS\s+CAPTURED)\b/;
 
-export type PrefilterReason = 'ok' | 'empty' | 'no-instrument' | 'no-action' | 'too-few-prices' | 'ad' | 'recap';
+export type PrefilterReason = 'ok' | 'empty' | 'sector-index' | 'no-instrument' | 'no-action' | 'too-few-prices' | 'ad' | 'recap';
 
 export interface PrefilterResult {
   pass: boolean;
@@ -60,7 +60,7 @@ export function prefilter(raw: string, vocab: Vocabulary): PrefilterResult {
 
   const hits = instrumentHits(t, vocab);
   const underlyings = [...new Set(hits.map((h) => h.name))];
-  if (hits.length === 0 && !hasStrikePair(t)) return fail('no-instrument');
+  if (hits.length === 0 && !hasStrikePair(t)) return fail(t.includes(SECTOR_INDEX_TOKEN) ? 'sector-index' : 'no-instrument');
   if (!t.some((w) => ACTION_WORDS.has(w))) return fail('no-action', underlyings);
   let prices = 0;
   for (let i = 0; i < t.length; i++) if (isPriceLike(t, i)) prices++;

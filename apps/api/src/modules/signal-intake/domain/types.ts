@@ -54,7 +54,9 @@ export type MessageStatus =
   | 'LLM_PENDING'
   | 'LLM_NOT_SIGNAL'
   | 'LLM_FAILED'
-  | 'LLM_SKIPPED';
+  | 'LLM_SKIPPED'
+  /** Market commentary / a sector index: stored, never emitted, never sent to the LLM. */
+  | 'VIEW';
 
 export const directionOf = (kind: InstrumentKind, side: Side): Direction => {
   const bullish = kind === 'PE' ? side === 'SELL' : side === 'BUY';
@@ -72,6 +74,17 @@ export interface TelegramMessageEvent {
   postedAt: Date | string;
   text: string;
   hasMedia?: boolean;
+  /** The post's image as stream R saved it (photo / small image document), when there is one. */
+  media?: TelegramMediaRef | null;
+}
+
+/** Mirrors stream R's `TelegramMediaRef` (telegram-reader.events.ts). */
+export interface TelegramMediaRef {
+  kind: 'photo' | 'image-document';
+  path: string;
+  sha256: string;
+  mimeType: string;
+  bytes: number;
 }
 
 export interface SignalReadyEvent {

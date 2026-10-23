@@ -145,6 +145,10 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   if (entry.length === 0) return null;
   // Two loose numbers in the entry ("120 … 100 ka stop") are ambiguous: only an explicit range counts.
   if (entry.length === 2 && !rangeExplicit) return null;
+  // An explicit action verb (BUY / SELL / LONG / SHORT, KHARIDO / BECHO folded to them, BTST / STBT).
+  const verb = side !== null || t.includes('BTST') || t.includes('STBT');
+  if (!side && t.includes('BTST')) side = 'BUY';
+  if (!side && t.includes('STBT')) side = 'SELL';
   if (!side) {
     if (entryType === 'ABOVE') side = 'BUY';
     else if (entryType === 'BELOW' && (kind === 'FUT' || kind === 'EQ')) side = 'SELL';
@@ -166,6 +170,12 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   const tgts = [...new Set(targets)];
   if (tgts.some((x) => (side === 'BUY' ? x <= entryHigh : x >= entryLow))) return null;
   tgts.sort((a, b) => (side === 'BUY' ? a - b : b - a));
+
+  // ─── A trade instruction, not a level (prod 2026-10-23: "a monthly close above 33000-33400 needed") ──
+  // An explicit verb needs an SL or a target; a bare "ABOVE / BELOW x" counts as an instruction only in
+  // the complete tip line "X 24000 PE ABOVE 60 SL 45 TGT 75" (both an SL and a target).
+  const hasSl = sl !== null;
+  if (verb ? !(hasSl || tgts.length > 0) : !(hasSl && tgts.length > 0)) return null;
 
   const horizon: Horizon = t.includes('BTST') || t.includes('STBT') ? 'BTST' : t.some((w) => POSITIONAL_WORDS.has(w)) ? 'POSITIONAL' : 'INTRADAY';
   const tags: string[] = [];

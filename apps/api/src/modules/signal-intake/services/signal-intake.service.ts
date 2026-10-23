@@ -5,7 +5,7 @@ import { AssistBusyError } from '../../ai-assist/assist-slot';
 import { dedupKey, planCluster } from '../domain/cluster';
 import { findContract, listedExpiries, segmentOf } from '../domain/contract';
 import { inferExpiry } from '../domain/expiry';
-import { validateLlmSignal, type LlmParseReply } from '../domain/llm-schema';
+import { validateLlmSignal, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
 import { prefilter } from '../domain/prefilter';
 import { parseSignal } from '../domain/rule-parser';
 import {
@@ -18,13 +18,16 @@ import {
   type ParsedUpdate,
   type SignalReadyEvent,
   type SignalUpdateEvent,
+  type TelegramMediaRef,
   type TelegramMessageEvent,
 } from '../domain/types';
 import { detectUpdate } from '../domain/updates';
+import { viewReason } from '../domain/view';
 import type { Vocabulary } from '../domain/vocabulary';
 import type { ClassRow, SignalIntakeRepository } from '../repositories/signal-intake.repository';
 import { SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from '../signal-intake.config';
 import { SIGNAL_LLM, type SignalLlm } from './signal-parse-llm.service';
+import { SIGNAL_VISION, type SignalVision } from './signal-vision.service';
 
 export const SIGNAL_INTAKE_REPO = Symbol('SIGNAL_INTAKE_REPO');
 export const SIGNAL_VOCAB = Symbol('SIGNAL_VOCAB');
@@ -34,7 +37,7 @@ export const SIGNAL_NOW = Symbol('SIGNAL_NOW');
 
 export type IntakeStore = Pick<
   SignalIntakeRepository,
-  | 'classOf' | 'saveClass' | 'cachedLlm' | 'llmPending' | 'duplicateOf' | 'signalByMessage' | 'createSignal' | 'updateSignal'
+  | 'classOf' | 'saveClass' | 'cachedLlm' | 'cachedVision' | 'llmPending' | 'duplicateOf' | 'signalByMessage' | 'createSignal' | 'updateSignal'
   | 'setSignalCluster' | 'messageText' | 'clusters' | 'recentSignals' | 'createCluster' | 'updateCluster' | 'flagConflict' | 'signalsByIds' | 'latestInChannel'
 >;
 export interface VocabularySource {
@@ -73,6 +76,10 @@ export class SignalIntakeService {
   private llmDay = '';
   private llmUsed = 0;
   private readonly inflight = new Set<string>();
+  /** In-process count of vision calls today: a floor under the ai_calls count (recording can be off / lag). */
+  private visionDay = '';
+  private visionUsed = 0;
+  private visionInflight = 0;
 
   constructor(
     @Inject(SIGNAL_INTAKE_REPO) private readonly repo: IntakeStore,
@@ -82,6 +89,7 @@ export class SignalIntakeService {
     @Inject(SIGNAL_INTAKE_CONFIG) private readonly config: SignalIntakeConfig,
     @Optional() @Inject(SIGNAL_EMITTER) private readonly emitter?: Emitter,
     @Optional() @Inject(SIGNAL_NOW) private readonly nowFn?: () => Date,
+    @Optional() @Inject(SIGNAL_VISION) private readonly vision?: SignalVision,
   ) {}
 
   private now(): Date {
@@ -110,7 +118,8 @@ export class SignalIntakeService {
     if (!this.config.enabled || !evt?.messageId || !evt.channelId) return;
     const text = String(evt.text ?? '');
     const postedAt = new Date(evt.postedAt);
-    const hash = textHash(text);
+    // An image post's identity is its caption AND its image (an image swap is a different post).
+    const hash = evt.media ? textHash(`${text}\n#img:${evt.media.sha256}`) : textHash(text);
     const base = { messageId: evt.messageId, channelId: evt.channelId, postedAt, textHash: hash };
 
     const prior = await this.repo.classOf(evt.messageId);
@@ -132,11 +141,124 @@ export class SignalIntakeService {
       await this.linkUpdate(evt, postedAt, upd, base);
       return;
     }
+    const view = viewReason(pf);
+    // An image post whose caption alone is not a call: the image may be the call (MCX / tip channels).
+    if (evt.media) {
+      const blocked = this.visionBlocked();
+      if (!blocked) {
+        await this.startVision(evt, postedAt, evt.media, base);
+        return;
+      }
+      if (!pf.pass && view === null) {
+        await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: `image not read: ${blocked}` });
+        return;
+      }
+    }
+    if (view) {
+      await this.repo.saveClass({ ...base, status: 'VIEW', reason: view });
+      return;
+    }
     if (!pf.pass) {
       await this.repo.saveClass({ ...base, status: 'NOISE', reason: pf.reason });
       return;
     }
     await this.startLlm(evt, postedAt, base);
+  }
+
+  // ─── Vision (image posts) ──────────────────────────────────────────────────
+
+  private visionBlocked(): string | null {
+    if (!this.config.visionEnabled) return 'SIGNAL_VISION=off';
+    if (!this.vision) return 'no vision transport';
+    return this.vision.unavailable();
+  }
+
+  private async visionUsedToday(): Promise<number> {
+    const now = this.now();
+    const day = istYmd(now);
+    if (day !== this.visionDay) {
+      this.visionDay = day;
+      this.visionUsed = 0;
+    }
+    const midnight = new Date(`${day}T00:00:00+05:30`);
+    let recorded = 0;
+    try {
+      recorded = (await this.vision?.usedSince(midnight)) ?? 0;
+    } catch (e) {
+      this.logger.warn(`[signal-intake] vision cap count failed (using the in-process count): ${errText(e)}`);
+    }
+    return Math.max(recorded + this.visionInflight, this.visionUsed);
+  }
+
+  private async startVision(evt: TelegramMessageEvent, postedAt: Date, media: TelegramMediaRef, base: Omit<ClassRow, 'status'>): Promise<void> {
+    const cached = await this.repo.cachedVision(media.sha256);
+    if (cached) {
+      await this.applyVision(evt, postedAt, media, cached as VisionReply, base, 'cache');
+      return;
+    }
+    if (this.now().getTime() - postedAt.getTime() > this.config.visionMaxAgeMs) {
+      await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: 'image too old for the model (history)' });
+      return;
+    }
+    if (this.inflight.has(evt.messageId)) return;
+    const used = await this.visionUsedToday();
+    if (used >= this.config.visionDailyCap) {
+      await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: `daily vision cap ${this.config.visionDailyCap} reached` });
+      return;
+    }
+    this.visionUsed = used + 1;
+    this.visionInflight++;
+    this.inflight.add(evt.messageId);
+    await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
+    // Outside the serial chain, like the text fallback.
+    void (this.vision as SignalVision)
+      .classify(String(evt.text ?? ''), media)
+      .then(
+        (reply) => this.serial(() => this.applyVision(evt, postedAt, media, reply, base, 'llm')),
+        (e) =>
+          this.serial(async () => {
+            if (e instanceof AssistBusyError) this.visionUsed = Math.max(0, this.visionUsed - 1); // never started: no spend
+            await this.repo.saveClass({ ...base, status: 'LLM_FAILED', parser: 'vision', attempts: 1, reason: `vision: ${errText(e)}`.slice(0, 500) });
+          }),
+      )
+      .catch((e) => this.logger.warn(`[signal-intake] vision read of ${evt.messageId} failed: ${errText(e)}`))
+      .finally(() => {
+        this.inflight.delete(evt.messageId);
+        this.visionInflight = Math.max(0, this.visionInflight - 1);
+      });
+  }
+
+  /**
+   * Only kind SIGNAL can become a TradeSignal (and so `signal.ready`, under the same age rule as text);
+   * UPDATE / VIEW / NOISE are stored and never emitted. The reply is kept with the image's sha256 —
+   * that is the cache.
+   */
+  private async applyVision(
+    evt: TelegramMessageEvent,
+    postedAt: Date,
+    media: TelegramMediaRef,
+    reply: VisionReply,
+    base: Omit<ClassRow, 'status'>,
+    via: 'llm' | 'cache',
+  ): Promise<void> {
+    const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, imageSha256: media.sha256 };
+    const save = (status: MessageStatus, reason: string) =>
+      this.repo.saveClass({ ...base, status, parser: 'vision', llmResult: stored, reason: `vision (${via}): ${reason}`.slice(0, 500) });
+    if (reply.kind === 'VIEW') return save('VIEW', 'image is a view');
+    if (reply.kind === 'NOISE') return save('NOISE', 'image is noise');
+    if (reply.kind === 'UPDATE') return save('UPDATE_ORPHAN', 'image is an update (not linked)');
+    if (!reply.isSignal || reply.signals.length === 0) return save('LLM_NOT_SIGNAL', 'no call in the image');
+    const vocab = await this.vocab.get();
+    const reasons: string[] = [];
+    for (const raw of reply.signals) {
+      const v = validateLlmSignal(raw, vocab);
+      if (v.ok) {
+        await this.createFromParsed(evt, postedAt, { ...v.signal, tags: [...v.signal.tags, 'VISION'] }, 'llm', base, stored);
+        return;
+      }
+      reasons.push(v.reason);
+    }
+    await save('LLM_NOT_SIGNAL', `invalid: ${reasons.join('; ')}`);
   }
 
   // ─── Edits ─────────────────────────────────────────────────────────────────
@@ -374,6 +496,7 @@ export class SignalIntakeService {
     const rows = await this.repo.llmPending(new Date(this.now().getTime() - this.config.llmMaxAgeMs));
     let n = 0;
     for (const r of rows) {
+      if (r.parser === 'vision') continue; // image reads are never retried as a text parse
       if (this.inflight.has(r.messageId) || r.attempts >= LLM_MAX_ATTEMPTS) continue;
       const msg = await this.repo.messageText(r.messageId);
       if (msg === null) continue;

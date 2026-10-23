@@ -11,6 +11,7 @@ export const SIGNAL_PARSE_SYSTEM = [
   'You extract trade calls from Indian stock-market Telegram posts (NSE/BSE/MCX; English, Hinglish, emoji).',
   'Return ONLY JSON matching the schema. Extract what the post states; never invent a stop-loss, target, strike or expiry.',
   'isSignal=false for chatter, news, P&L recaps, ads, results of earlier calls (\"target done\", \"SL hit\") and anything without a clear entry.',
+  'isSignal=false for market commentary / views / levels (support, resistance, "a monthly close above X needed") without an explicit buy/sell instruction, and for sector indices without derivatives (Nifty IT, Pharma, Auto, Metal, Realty, FMCG, PSU Bank): those are never NIFTY.',
   'underlying: the exchange name (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, CRUDEOIL, NATURALGAS, GOLD, SILVER, or the NSE cash symbol such as RELIANCE, TATAMOTORS).',
   'instrumentKind: CE or PE for options (needs strike), FUT for futures (index or commodity calls without CE/PE are FUT), EQ for cash stocks.',
   'side: BUY or SELL of that instrument (buying a put is BUY with kind PE).',
@@ -127,4 +128,51 @@ export function validateLlmSignal(raw: unknown, vocab: Vocabulary): { ok: true; 
       confidence: Math.max(0, Math.min(0.85, conf ?? 0.5)),
     },
   };
+}
+
+// ─── Vision (image posts) ────────────────────────────────────────────────────
+
+export type VisionKind = 'SIGNAL' | 'UPDATE' | 'VIEW' | 'NOISE';
+const VISION_KINDS = new Set<VisionKind>(['SIGNAL', 'UPDATE', 'VIEW', 'NOISE']);
+
+export const SIGNAL_VISION_SYSTEM = [
+  'You read ONE image posted in an Indian stock-market Telegram channel (NSE/BSE/MCX), plus its caption if any.',
+  'First decide kind: SIGNAL = a fresh trade call with an explicit buy/sell instruction AND an entry AND a stop-loss or a target;',
+  'UPDATE = a follow-up on an earlier call ("target done", "SL hit", "exit", "trail SL"); VIEW = analysis, a chart with levels,',
+  'support/resistance, an outlook or a "close above X needed" without an explicit trade instruction; NOISE = P&L or broker',
+  'screenshots, results of earlier calls, ads, memes, greetings, anything else. When unsure between SIGNAL and VIEW, choose VIEW.',
+  'Sector indices without derivatives (Nifty IT, Pharma, Auto, Metal, Realty, FMCG, PSU Bank, Midcap 100 …) are VIEW, never NIFTY.',
+  'For kind=SIGNAL set isSignal=true and fill signals[] exactly as for a text post; for every other kind isSignal=false and signals=[].',
+  '',
+  SIGNAL_PARSE_SYSTEM,
+].join('\n');
+
+export const SIGNAL_VISION_SCHEMA = {
+  ...SIGNAL_PARSE_SCHEMA,
+  required: ['kind', ...SIGNAL_PARSE_SCHEMA.required],
+  properties: { kind: { type: 'string', enum: ['SIGNAL', 'UPDATE', 'VIEW', 'NOISE'] }, ...SIGNAL_PARSE_SCHEMA.properties },
+} as const;
+
+export interface VisionReply extends LlmParseReply {
+  kind: VisionKind;
+}
+
+/**
+ * The model's text → a vision reply, or null when it is not the schema's JSON. A non-SIGNAL kind
+ * always carries no signals (a "VIEW" with a filled signals[] is a VIEW); a SIGNAL with no signals
+ * is not a signal.
+ */
+export function readVisionReply(text: string): VisionReply | null {
+  const base = readLlmReply(text);
+  if (!base) return null;
+  let kind: unknown;
+  try {
+    kind = (JSON.parse(text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')) as Record<string, unknown>).kind;
+  } catch {
+    return null;
+  }
+  if (!VISION_KINDS.has(kind as VisionKind)) return null;
+  const k = kind as VisionKind;
+  if (k !== 'SIGNAL') return { kind: k, isSignal: false, signals: [] };
+  return { kind: k, isSignal: base.isSignal && base.signals.length > 0, signals: base.signals };
 }

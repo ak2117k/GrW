@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Injectable, Logger } from '@nestjs/common';
-import type { MessagesTransport, TransportMessage, TransportRequest } from '../transport.types';
+import { hasImages, userContentBlocks, type MessagesTransport, type TransportMessage, type TransportRequest } from '../transport.types';
 import type { ProviderAdapter, ProviderName, ProviderResult } from './provider.types';
 
 /**
@@ -47,7 +47,7 @@ const LEAN_FLAGS = [
  * the failure. `stop_reason` is the model's, and is passed through unchanged
  * rather than re-derived — the callers branch on `refusal` and `max_tokens`.
  */
-interface CliEnvelope {
+export interface CliEnvelope {
   is_error?: boolean;
   result?: string;
   stop_reason?: string | null;
@@ -113,6 +113,28 @@ export function schemaInstruction(schema: Record<string, unknown>): string {
     '',
     JSON.stringify(schema, null, 2),
   ].join('\n');
+}
+
+/**
+ * The single stream-json user message for a request with images: every user turn's images, then
+ * its text, as Messages-API content blocks. One line, newline-terminated. Exported for the test.
+ */
+export function streamJsonInput(params: TransportRequest): string {
+  const content = params.messages.flatMap((m) => userContentBlocks(m));
+  return `${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`;
+}
+
+/**
+ * The `result` line of a stream-json run (the same envelope `--output-format json` prints).
+ * Throws when there is none — never a guessed envelope. Exported for the test.
+ */
+export function streamJsonResult(stdout: string): CliEnvelope {
+  const lines = stdout.split(/\r?\n/).filter((l) => l.trim().startsWith('{'));
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const o = JSON.parse(lines[i]) as CliEnvelope & { type?: string };
+    if (o.type === 'result') return o;
+  }
+  throw new Error('no result line');
 }
 
 /**
@@ -216,10 +238,14 @@ export class ClaudeCliTransport implements MessagesTransport {
     const schema = params.output_config.format.schema;
     const promptFile = this.promptFileFor(system + schemaInstruction(schema));
 
+    // Images ride on a stream-json user message (image content blocks) — the only way `claude -p`
+    // takes an image with every tool disabled. Text-only calls keep the plain-stdin path unchanged.
+    const streaming = hasImages(params);
     const args = [
       '-p',
-      '--output-format',
-      'json',
+      ...(streaming
+        ? ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose']
+        : ['--output-format', 'json']),
       '--model',
       params.model,
       '--system-prompt-file',
@@ -227,14 +253,15 @@ export class ClaudeCliTransport implements MessagesTransport {
       ...LEAN_FLAGS,
     ];
 
-    const stdout = await this.run(args, params.messages.map((m) => m.content).join('\n\n'));
+    const input = streaming ? streamJsonInput(params) : params.messages.map((m) => m.content).join('\n\n');
+    const stdout = await this.run(args, input);
 
     let envelope: CliEnvelope;
     try {
-      envelope = JSON.parse(stdout) as CliEnvelope;
+      envelope = streaming ? streamJsonResult(stdout) : (JSON.parse(stdout) as CliEnvelope);
     } catch {
       throw new Error(
-        `claude CLI: could not parse the --output-format json envelope: ${stdout.slice(0, 300)}`,
+        `claude CLI: could not parse the --output-format ${streaming ? 'stream-json result' : 'json envelope'}: ${stdout.slice(0, 300)}`,
       );
     }
 

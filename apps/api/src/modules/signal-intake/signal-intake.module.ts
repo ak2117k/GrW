@@ -20,6 +20,7 @@ import {
 } from './services/signal-intake.service';
 import { SIGNAL_CLOCK, SIGNAL_OUTCOME_BARS, SIGNAL_OUTCOME_REPO, SignalOutcomeService, type OutcomeBars } from './services/signal-outcome.service';
 import { SIGNAL_LLM, SignalParseLlmService } from './services/signal-parse-llm.service';
+import { SIGNAL_VISION, SignalVisionService } from './services/signal-vision.service';
 import { SignalVocabularyService } from './services/signal-vocabulary.service';
 import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from './signal-intake.config';
 
@@ -49,6 +50,8 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
     },
     SignalParseLlmService,
     { provide: SIGNAL_LLM, useExisting: SignalParseLlmService },
+    SignalVisionService,
+    { provide: SIGNAL_VISION, useExisting: SignalVisionService },
     { provide: SIGNAL_EMITTER, useFactory: (ee: EventEmitter2) => eventEmitterAdapter(ee), inject: [EventEmitter2] },
     {
       // 5-minute bars over the OWNER's own Angel session (paced by the session's historical gate).

@@ -22,10 +22,20 @@ export interface SignalIntakeConfig {
   outcomesEnabled: boolean;
   /** Whose Angel session fetches the outcome bars (the scorecard / MBM owner). */
   ownerUserId: string | null;
+  /** SIGNAL_VISION=off stops reading post images with the model. Default on (inert when the transport cannot take images). */
+  visionEnabled: boolean;
+  /** SIGNAL_VISION_MODEL — the model for image posts (default: the cheapest image-capable one, haiku). */
+  visionModel: string;
+  /** SIGNAL_VISION_DAILY_CAP — images per IST day, counted from ai_calls job 'signal.vision' (cache hits are free). */
+  visionDailyCap: number;
+  /** SIGNAL_VISION_MAX_AGE_MIN — older image posts are never sent to the model. */
+  visionMaxAgeMs: number;
 }
 
 export const SIGNAL_INTAKE_CONFIG = Symbol('SIGNAL_INTAKE_CONFIG');
 export const SIGNAL_PARSE_DEFAULT_MODEL = 'claude-haiku-5-5';
+/** Haiku 5.5 reads images (verified over the CLI transport 2026-10-23) and is the cheapest priced model. */
+export const SIGNAL_VISION_DEFAULT_MODEL = 'claude-haiku-5-5';
 
 const off = (v: string | undefined) => ['off', 'false', '0', 'no'].includes(String(v ?? '').trim().toLowerCase());
 const int = (v: string | undefined, d: number, min: number, max: number) => {
@@ -51,5 +61,9 @@ export function parseSignalIntakeConfig(env: Record<string, string | undefined>)
     readyMaxAgeMs: int(env.SIGNAL_READY_MAX_AGE_MIN, 15, 1, 24 * 60) * 60_000,
     outcomesEnabled: !off(env.SIGNAL_OUTCOMES),
     ownerUserId: owner,
+    visionEnabled: !off(env.SIGNAL_VISION),
+    visionModel: (env.SIGNAL_VISION_MODEL ?? '').trim() || SIGNAL_VISION_DEFAULT_MODEL,
+    visionDailyCap: int(env.SIGNAL_VISION_DAILY_CAP, 40, 0, 10_000),
+    visionMaxAgeMs: int(env.SIGNAL_VISION_MAX_AGE_MIN, 60, 1, 7 * 24 * 60) * 60_000,
   };
 }

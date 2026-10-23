@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { TELEGRAM_MESSAGE_EVENT } from '../telegram-reader.events';
 import { TelegramListenerService, backoffMs, readerEnabled } from '../services/telegram-listener.service';
 import { TgIncomingMessage } from '../client/telegram-client.port';
@@ -17,7 +20,7 @@ function msg(over: Partial<TgIncomingMessage> = {}): TgIncomingMessage {
   };
 }
 
-function build(opts: { flag?: string; session?: boolean } = {}) {
+function build(opts: { flag?: string; session?: boolean; env?: Record<string, string> } = {}) {
   const messages = new Map<string, any>();
   let seq = 0;
   const prisma = {
@@ -54,7 +57,7 @@ function build(opts: { flag?: string; session?: boolean } = {}) {
   const client = new FakeTgClient();
   const factory = { create: jest.fn(() => client) };
   const config = {
-    get: (k: string) => (k === 'TELEGRAM_READER' ? opts.flag : k === 'HUB_OWNER_USER_ID' ? 'u1' : undefined),
+    get: (k: string) => (k === 'TELEGRAM_READER' ? opts.flag : k === 'HUB_OWNER_USER_ID' ? 'u1' : opts.env?.[k]),
   };
   const svc = new TelegramListenerService(config as any, prisma as any, events as any, store as any, factory as any);
   return { svc, prisma, events, store, client, factory, messages };
@@ -178,5 +181,81 @@ describe('TelegramListenerService', () => {
     expect(readerEnabled('OFF')).toBe(false);
     expect(backoffMs(0)).toBe(5_000);
     expect(backoffMs(20)).toBe(300_000);
+  });
+});
+
+describe('TelegramListenerService — post images (2026-10-23)', () => {
+  const photo = {
+    kind: 'photo' as const,
+    mimeType: 'image/jpeg',
+    sizeBytes: null,
+    sizes: [
+      { type: 'x', w: 800, h: 600, bytes: 60_000 },
+      { type: 'y', w: 1280, h: 960, bytes: 140_000 },
+      { type: 'w', w: 2560, h: 1920, bytes: 1_500_000 },
+    ],
+  };
+  const tmp = () => mkdtempSync(join(tmpdir(), 'tg-media-'));
+
+  it('downloads the smallest readable photo size, saves it, keeps path + sha256 in rawPayload, emits media', async () => {
+    const { svc, prisma, events } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    await svc.start();
+    const download = jest.fn(async () => Buffer.from('jpeg-bytes'));
+    await svc.handle(msg({ text: '', hasMedia: true, media: photo, download }));
+    expect(download).toHaveBeenCalledWith('y');
+    const data = (prisma.telegramMessage.create.mock.calls[0] as any[])[0].data;
+    expect(data.rawPayload.media).toMatchObject({ kind: 'photo', sizeType: 'y', width: 1280, mimeType: 'image/jpeg', bytes: 10 });
+    expect(data.rawPayload.media.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(readFileSync(data.rawPayload.media.path, 'utf8')).toBe('jpeg-bytes');
+    expect(events.emit.mock.calls[0][1].media).toMatchObject({ kind: 'photo', path: data.rawPayload.media.path, sha256: data.rawPayload.media.sha256 });
+  });
+
+  it.each([
+    ['video', { kind: 'video' as const, mimeType: 'video/mp4', sizeBytes: 900_000, sizes: [] }],
+    ['sticker', { kind: 'sticker' as const, mimeType: 'image/webp', sizeBytes: 30_000, sizes: [] }],
+    ['gif', { kind: 'gif' as const, mimeType: 'video/mp4', sizeBytes: 200_000, sizes: [] }],
+    ['a 3 MB image document', { kind: 'image-document' as const, mimeType: 'image/png', sizeBytes: 3_000_000, sizes: [] }],
+    ['a pdf', { kind: 'document' as const, mimeType: 'application/pdf', sizeBytes: 100_000, sizes: [] }],
+  ])('%s is not downloaded; the skip reason is kept, the text still stored and emitted', async (_why, media) => {
+    const { svc, prisma, events } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    await svc.start();
+    const download = jest.fn(async () => Buffer.from('x'));
+    await svc.handle(msg({ hasMedia: true, media, download }));
+    expect(download).not.toHaveBeenCalled();
+    expect((prisma.telegramMessage.create.mock.calls[0] as any[])[0].data.rawPayload.media).toMatchObject({ kind: media.kind, skipped: expect.any(String) });
+    expect(events.emit.mock.calls[0][1].media).toBeUndefined();
+  });
+
+  it('a failed download never loses the message', async () => {
+    const { svc, prisma, events } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    await svc.start();
+    const download = jest.fn(async (): Promise<Buffer> => {
+      throw new Error('FILE_REFERENCE_EXPIRED');
+    });
+    await svc.handle(msg({ hasMedia: true, media: photo, download }));
+    expect(prisma.telegramMessage.create).toHaveBeenCalledTimes(1);
+    expect((prisma.telegramMessage.create.mock.calls[0] as any[])[0].data.rawPayload.media).toMatchObject({ error: expect.stringContaining('FILE_REFERENCE_EXPIRED') });
+    expect(events.emit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a caption edit keeps the saved image (no second download)', async () => {
+    const { svc, prisma, events } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    await svc.start();
+    const download = jest.fn(async () => Buffer.from('jpeg'));
+    await svc.handle(msg({ text: 'crude', hasMedia: true, media: photo, download }));
+    await svc.handle(msg({ text: 'crude call', hasMedia: true, media: photo, download, edited: true, editDate: 1_760_000_100 }));
+    expect(download).toHaveBeenCalledTimes(1);
+    const upd = (prisma.telegramMessage.update.mock.calls[0] as any[])[0].data;
+    expect(upd.rawPayload.media.path).toBe(events.emit.mock.calls[0][1].media.path);
+    expect(events.emit.mock.calls[1][1]).toMatchObject({ edited: true, media: expect.objectContaining({ kind: 'photo' }) });
+  });
+
+  it('TELEGRAM_MEDIA_DOWNLOAD=off records the media kind only', async () => {
+    const { svc, prisma } = build({ env: { TELEGRAM_MEDIA_DOWNLOAD: 'off' } });
+    await svc.start();
+    const download = jest.fn(async () => Buffer.from('x'));
+    await svc.handle(msg({ hasMedia: true, media: photo, download }));
+    expect(download).not.toHaveBeenCalled();
+    expect((prisma.telegramMessage.create.mock.calls[0] as any[])[0].data.rawPayload.media).toMatchObject({ skipped: 'TELEGRAM_MEDIA_DOWNLOAD=off' });
   });
 });

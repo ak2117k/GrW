@@ -211,3 +211,69 @@ describe('ClaudeCliProvider', () => {
     });
   });
 });
+
+describe('images (signal vision, 2026-10-23)', () => {
+  const withImage = (): TransportRequest => ({
+    ...request(),
+    messages: [{ role: 'user', content: 'caption', images: [{ mediaType: 'image/jpeg', data: 'QUJD', sha256: 'f'.repeat(64) }] }],
+  });
+
+  it('API: an image becomes an SDK image block before the text; a text-only request is still passed by reference', async () => {
+    const reply = { content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn', usage: { input_tokens: 5, output_tokens: 1 } };
+    const create = jest.fn().mockResolvedValue(reply);
+    const provider = new AnthropicApiProvider({ messages: { create } });
+    await provider.send(withImage());
+    expect(create.mock.calls[0][0].messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } },
+          { type: 'text', text: 'caption' },
+        ],
+      },
+    ]);
+    const plain = request();
+    await provider.send(plain);
+    expect(create.mock.calls[1][0]).toBe(plain);
+  });
+
+  it('CLI: an image request goes over stream-json (tools still disabled) and reads the result line', async () => {
+    const lines = [
+      { type: 'system', subtype: 'init' },
+      { type: 'assistant', message: { content: [{ type: 'text', text: '{"kind":"NOISE"}' }] } },
+      { type: 'result', is_error: false, result: '{"kind":"NOISE"}', stop_reason: 'end_turn', usage: { input_tokens: 2, output_tokens: 41, cache_creation_input_tokens: 912 } },
+    ];
+    const child = fakeChild(lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    spawnMock.mockReturnValueOnce(child);
+    const r = await new ClaudeCliProvider(new ClaudeCliTransport()).send(withImage());
+    const cmd = spawnMock.mock.calls.at(-1)[0] as string;
+    expect(cmd).toContain('"--input-format" "stream-json" "--output-format" "stream-json" "--verbose"');
+    expect(cmd).toContain('"--tools" ""');
+    const stdin = JSON.parse(child.stdin.end.mock.calls[0][0]);
+    expect(stdin).toEqual({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } },
+          { type: 'text', text: 'caption' },
+        ],
+      },
+    });
+    expect(r.message).toEqual({ stop_reason: 'end_turn', content: [{ type: 'text', text: '{"kind":"NOISE"}' }] });
+    expect(r.meta).toMatchObject({ inputTokens: 2, outputTokens: 41, cacheCreationInputTokens: 912, billed: false });
+  });
+
+  it('CLI: a text-only request keeps the plain --output-format json path', async () => {
+    spawnMock.mockReturnValueOnce(fakeChild({ is_error: false, result: '{}', stop_reason: 'end_turn' }));
+    await new ClaudeCliProvider(new ClaudeCliTransport()).send(request());
+    const cmd = spawnMock.mock.calls.at(-1)[0] as string;
+    expect(cmd).toContain('"--output-format" "json"');
+    expect(cmd).not.toContain('stream-json');
+  });
+
+  it('CLI: stream-json output without a result line is an error, never a guessed envelope', async () => {
+    spawnMock.mockReturnValueOnce(fakeChild(JSON.stringify({ type: 'system' }) + '\n'));
+    await expect(new ClaudeCliProvider(new ClaudeCliTransport()).send(withImage())).rejects.toThrow(/stream-json result/);
+  });
+});

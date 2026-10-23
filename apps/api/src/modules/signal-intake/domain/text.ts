@@ -1,5 +1,5 @@
 import type { ExpiryHint } from './types';
-import { multiWordAliases, type Vocabulary } from './vocabulary';
+import { multiWordAliases, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
 
 /**
  * Text normalisation shared by the pre-filter, the rule parser and the update detector. Everything
@@ -45,7 +45,23 @@ export interface Normalised {
   expiry: ExpiryHint | null;
 }
 
-const monthIdx = (m: string) => MONTHS.indexOf(m.slice(0, 3)) + 1;
+/**
+ * Non-tradeable NSE sector / broad indices (no F&O). Tradeable ones (NIFTY BANK, NIFTY FIN SERVICE,
+ * NIFTY MIDCAP SELECT, NIFTY NEXT 50) are vocabulary aliases instead. "BANK NIFTY IT …" is not one.
+ */
+export const SECTOR_INDEX_RE = new RegExp(
+  '(?<!(BANK|FIN|MIDCAP|MIDCP)\\s*)\\b(NIFTY|CNX)\\s*(' +
+    [
+      'IT', 'PHARMA', 'AUTO', 'METALS?', 'REALTY', 'FMCG', 'PSU\\s*BANK', 'PVT\\s*BANK', 'PRIVATE\\s*BANK', 'MEDIA', 'ENERGY',
+      'INFRA(STRUCTURE)?', 'C?PSE', 'COMMODITIES', 'CONSUMPTION', 'HEALTH\\s*CARE', 'OIL\\s*(&|AND)?\\s*GAS', 'MNC',
+      'SERVICES\\s+SECTOR', 'DEFENCE', 'INDIA\\s+DEFENCE', 'CHEMICALS', 'CONSUMER\\s+DURABLES', 'TOURISM', 'DIGITAL', 'MANUFACTURING',
+      'MIDCAP(?!\\s*SELECT)(\\s*(50|100|150))?', 'SMALL\\s*CAP(\\s*(50|100|250))?', 'MID\\s*SMALL\\s*CAP(\\s*400)?', 'ALPHA\\s*50',
+    ].join('|') +
+    ')\\b',
+  'g',
+);
+
+const monthIdx =(m: string) => MONTHS.indexOf(m.slice(0, 3)) + 1;
 
 function yearOf(y: string | undefined): number | null {
   if (!y) return null;
@@ -61,6 +77,9 @@ export function normalise(raw: string, vocab: Vocabulary): Normalised {
   // URLs, @handles and long digit runs (phones, order ids) carry no price.
   s = s.replace(/HTTPS?:\/\/\S+|T\.ME\/\S+|WWW\.\S+/g, ' LINK ');
   s = s.replace(/₹|\bRS\.?(?=\s*\d)|\bINR(?=\s*\d)/g, ' ');
+  // Sector / broad indices with no derivatives ("NIFTY IT", "NIFTY PSU BANK") are one non-instrument
+  // token, BEFORE the alias join, so their "NIFTY" never reads as the NIFTY index.
+  s = s.replace(SECTOR_INDEX_RE, ` ${SECTOR_INDEX_TOKEN} `);
   // Indian thousands separator inside a strike ("24,000 CE") — only next to CE/PE/FUT so "TGT 140,160" survives.
   s = s.replace(/\b(\d{1,2}),(\d{3})(?=\s*(CE|PE|FUT)\b)/g, '$1$2');
 

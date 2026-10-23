@@ -128,6 +128,21 @@ export class SignalIntakeRepository {
     return hit?.llmResult ?? null;
   }
 
+  /** A previous vision reply for exactly this image (sha256 of the bytes; the vision cache). */
+  async cachedVision(imageSha256: string): Promise<unknown | null> {
+    const hit = await this.prisma.signalMessageClass.findFirst({
+      where: { llmResult: { path: ['imageSha256'], equals: imageSha256 } },
+      select: { llmResult: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    return hit?.llmResult ?? null;
+  }
+
+  /** ai_calls rows of `job` since `since` (the vision daily cap). */
+  async aiCallsSince(job: string, since: Date): Promise<number> {
+    return this.prisma.aiCall.count({ where: { job, createdAt: { gte: since } } });
+  }
+
   /** LLM_PENDING rows (busy slot) younger than `since`, oldest first. */
   async llmPending(since: Date, take = 20) {
     return await this.prisma.signalMessageClass.findMany({

@@ -50,7 +50,32 @@ export interface TransportRequest {
     text: string;
     cache_control?: { type: 'ephemeral' };
   }>;
-  messages: Array<{ role: 'user'; content: string }>;
+  messages: Array<{ role: 'user'; content: string; images?: TransportImage[] }>;
+}
+
+/**
+ * An image sent with a user turn (signal-intake vision, 2026-10-23). ADDITIVE: a request without
+ * `images` is byte-for-byte what it always was. Each transport maps it to its own wire shape (the API
+ * provider to an `image` content block, the CLI to a stream-json `image` block); the ai_calls recorder
+ * stores only its type, size and sha256 — never the bytes.
+ */
+export interface TransportImage {
+  mediaType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+  /** Base64 of the image bytes. */
+  data: string;
+  sha256?: string;
+}
+
+/** The Messages-API content of one user turn: images first, then the text. */
+export function userContentBlocks(m: { content: string; images?: TransportImage[] }): Array<Record<string, unknown>> {
+  return [
+    ...(m.images ?? []).map((i) => ({ type: 'image', source: { type: 'base64', media_type: i.mediaType, data: i.data } })),
+    { type: 'text', text: m.content },
+  ];
+}
+
+export function hasImages(req: Pick<TransportRequest, 'messages'>): boolean {
+  return (req.messages ?? []).some((m) => (m.images?.length ?? 0) > 0);
 }
 
 export interface MessagesTransport {

@@ -12,7 +12,8 @@ import {
   floodWaitSeconds,
   rpcCode,
 } from '../client/telegram-client.port';
-import { TELEGRAM_MESSAGE_EVENT, TelegramMessageEvent } from '../telegram-reader.events';
+import { TELEGRAM_MESSAGE_EVENT, TelegramMediaRef, TelegramMessageEvent } from '../telegram-reader.events';
+import { DEFAULT_MEDIA_DIR, DOCUMENT_MAX_BYTES, chooseMedia, saveMedia } from './telegram-media';
 import { TelegramSessionStore } from './telegram-session.store';
 
 export type ListenerState = 'off' | 'idle' | 'connecting' | 'listening' | 'backoff' | 'revoked';
@@ -61,6 +62,8 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   private received = 0;
   /** Messages found by the poller that push had not delivered (stored this period). */
   private polledNew = 0;
+  /** Images saved to TELEGRAM_MEDIA_DIR this period. */
+  private mediaSaved = 0;
   private poller: NodeJS.Timeout | null = null;
   private polling = false;
   private stateValue: ListenerState = 'idle';
@@ -232,15 +235,20 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     try {
       const postedAt = new Date(m.date * 1000);
       const editedAt = m.editDate ? new Date(m.editDate * 1000) : null;
-      const raw = m.raw as Prisma.InputJsonValue;
       const existing = await this.prisma.telegramMessage.findUnique({
         where: { channelId_tgMessageId: { channelId: ch.id, tgMessageId: m.tgMessageId } },
-        select: { id: true, rawText: true },
+        select: { id: true, rawText: true, rawPayload: true },
       });
       let messageId: string;
       let edited = false;
+      let media: TelegramMediaRef | null = null;
+      let raw: Prisma.InputJsonValue;
       if (existing) {
         if (existing.rawText === m.text) return false; // duplicate delivery or a no-op edit
+        // A caption edit keeps the image saved with the original post (never re-downloaded).
+        const prev = (existing.rawPayload ?? {}) as { media?: { path?: string } & Record<string, unknown> };
+        if (prev.media?.path) media = prev.media as unknown as TelegramMediaRef;
+        raw = (prev.media ? { ...m.raw, media: prev.media } : m.raw) as Prisma.InputJsonValue;
         await this.prisma.telegramMessage.update({
           where: { id: existing.id },
           data: { rawText: m.text, hasMedia: m.hasMedia, editedAt: editedAt ?? new Date(), rawPayload: raw },
@@ -248,6 +256,9 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
         messageId = existing.id;
         edited = true;
       } else {
+        const fetched = m.hasMedia ? await this.fetchMedia(m, ch.id, postedAt) : null;
+        media = fetched?.ref ?? null;
+        raw = (fetched ? { ...m.raw, media: fetched.stored } : m.raw) as Prisma.InputJsonValue;
         try {
           const row = await this.prisma.telegramMessage.create({
             data: {
@@ -277,6 +288,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
         text: m.text,
         hasMedia: m.hasMedia,
         edited,
+        ...(media ? { media } : {}),
       };
       this.events.emit(TELEGRAM_MESSAGE_EVENT, evt);
       return true;
@@ -286,17 +298,52 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     }
   }
 
+  /**
+   * Download a photo / small image document and save it under TELEGRAM_MEDIA_DIR (kept forever). Never
+   * throws: a skipped or failed download is recorded in rawPayload.media with the reason, the text is
+   * stored either way. TELEGRAM_MEDIA_DOWNLOAD=off records the media kind only.
+   */
+  private async fetchMedia(
+    m: TgIncomingMessage,
+    channelId: string,
+    postedAt: Date,
+  ): Promise<{ ref: TelegramMediaRef | null; stored: Record<string, unknown> } | null> {
+    const info = m.media ?? null;
+    if (!info) return null;
+    const choice = chooseMedia(info);
+    const base = { kind: info.kind, mimeType: info.mimeType };
+    if (!choice.fetch) return { ref: null, stored: { ...base, skipped: choice.reason } };
+    if (!readerEnabled(this.config.get<string>('TELEGRAM_MEDIA_DOWNLOAD'))) return { ref: null, stored: { ...base, skipped: 'TELEGRAM_MEDIA_DOWNLOAD=off' } };
+    if (!m.download) return { ref: null, stored: { ...base, skipped: 'client cannot download' } };
+    try {
+      const bytes = await m.download(choice.sizeType);
+      if (!bytes || bytes.length === 0) return { ref: null, stored: { ...base, skipped: 'empty download' } };
+      if (bytes.length > DOCUMENT_MAX_BYTES) return { ref: null, stored: { ...base, skipped: `downloaded ${bytes.length} bytes > 2 MB` } };
+      const dir = this.config.get<string>('TELEGRAM_MEDIA_DIR')?.trim() || DEFAULT_MEDIA_DIR;
+      const ref = await saveMedia(dir, bytes, { channelId, tgMessageId: m.tgMessageId, postedAt, kind: choice.kind, mimeType: choice.mimeType });
+      this.mediaSaved++;
+      return {
+        ref,
+        stored: { ...ref, ...(choice.kind === 'photo' ? { sizeType: choice.sizeType, width: choice.w, height: choice.h } : {}), savedAt: new Date().toISOString() },
+      };
+    } catch (err) {
+      this.logger.warn(`telegram-reader: media download failed (${describe(err)}) — text stored without the image`);
+      return { ref: null, stored: { ...base, error: describe(err) } };
+    }
+  }
+
   /** One line per period: updates received (any chat) and stored messages per ticked channel. Public for tests. */
   logSummary(): string | null {
     if (this.stateValue !== 'listening' && this.counts.size === 0) return null;
     const parts = [...this.counts.entries()].map(([t, n]) => `${t}=${n}`);
     const stored = [...this.counts.values()].reduce((a, b) => a + b, 0);
     const line =
-      `telegram-reader: last 10 min received=${this.received} (live push, any chat) polled_new=${this.polledNew} stored=${stored} from ${this.enabled.size} ticked channel(s)` +
+      `telegram-reader: last 10 min received=${this.received} (live push, any chat) polled_new=${this.polledNew} stored=${stored} images=${this.mediaSaved} from ${this.enabled.size} ticked channel(s)` +
       `${parts.length ? ': ' + parts.join(', ') : ''} (state ${this.stateValue})`;
     this.counts.clear();
     this.received = 0;
     this.polledNew = 0;
+    this.mediaSaved = 0;
     this.logger.log(line);
     return line;
   }

@@ -62,6 +62,12 @@ export function requestRecord(
   const u = capUtf8(user, cap);
   const s = includeSystem ? capUtf8(system, Math.max(0, cap - Buffer.byteLength(u.text, 'utf8'))) : null;
   const schema = req.output_config?.format?.schema;
+  // Images (signal vision): type, size and hash only — the bytes are on disk, never in the ledger.
+  const images = (req.messages ?? []).flatMap((m) => m.images ?? []).map((i) => ({
+    mediaType: i.mediaType,
+    bytes: Buffer.byteLength(i.data, 'base64'),
+    sha256: i.sha256 ?? sha256(i.data),
+  }));
   // Messages-API shaped (`system[]`, `messages[].content`), as the gateway stores it, so the
   // corpus importer (ai-engine/src/corpus/sentinel_records.py) reads both kinds of row alike.
   // The output schema is a code constant: stored by hash only.
@@ -78,6 +84,7 @@ export function requestRecord(
     systemStored: s ? 'full' : 'by-hash',
     bytes: { system: Buffer.byteLength(system, 'utf8'), user: u.bytes },
     truncated: { system: s ? s.truncated : false, user: u.truncated },
+    ...(images.length ? { images } : {}),
   };
 }
 

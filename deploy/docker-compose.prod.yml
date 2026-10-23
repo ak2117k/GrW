@@ -93,6 +93,10 @@ services:
       REDIS_ALLOW_PLAINTEXT: "true"
     ports:
       - "127.0.0.1:3001:3001"
+    # Telegram signal images (telegram-reader, TELEGRAM_MEDIA_DIR default). Kept across redeploys:
+    # the owner's keep-all-data rule; nothing deletes them.
+    volumes:
+      - telegrammedia:/app/data/telegram-media
     depends_on:
       postgres:
         condition: service_healthy
@@ -191,3 +195,4 @@ volumes:
   redisdata: {}
   caddydata: {}
   mbmcache: {}
+  telegrammedia: {}

@@ -3118,3 +3118,95 @@ model AccountMarginSnapshot {
   @@index([userId, asOf(sort: Desc)])
   @@map("account_margin_snapshots")
 }
+
+// ============================================
+// Signal intake (stream S, contract 2026-10-23): Telegram tips → TradeSignal + SignalCluster.
+// No FK to telegram_messages / telegram_channels (stream R owns those): ids are kept as plain text.
+// ============================================
+
+/// One parsed tip (rule parser or LLM fallback). X reads it on `signal.ready`.
+model TradeSignal {
+  id              String    @id @default(cuid())
+  messageId       String    @unique @map("message_id") // telegram_messages.id
+  channelId       String    @map("channel_id") // telegram_channels.id
+  receivedAt      DateTime  @map("received_at") @db.Timestamptz(6) // the message's postedAt
+  sessionDate     String    @map("session_date") // IST 'YYYY-MM-DD' of receivedAt
+  parser          String // rule | llm
+  underlying      String
+  instrumentKind  String    @map("instrument_kind") // FUT | CE | PE | EQ
+  strike          Float?
+  expiry          String? // IST 'YYYY-MM-DD'; null for EQ or when unknown (MCX without the master)
+  expirySource    String?   @map("expiry_source") // message | master | rule | none
+  exchange        String? // NFO | BFO | MCX | NSE — the contract resolved from the instrument master at intake (null = unresolved)
+  token           String?
+  tradingsymbol   String?
+  side            String // BUY | SELL
+  direction       String // BULL | BEAR (the market view; BUY PE = BEAR)
+  entryLow        Float     @map("entry_low")
+  entryHigh       Float     @map("entry_high")
+  entryType       String    @map("entry_type") // ABOVE | BELOW | AT | RANGE
+  sl              Float?
+  targets         Json // number[] in order of distance from the entry
+  qty             Int?
+  horizon         String    @default("INTRADAY") // INTRADAY | BTST | POSITIONAL
+  tags            String[]  @default([])
+  confidence      Float
+  rawText         String    @map("raw_text")
+  dedupKey        String    @map("dedup_key")
+  clusterId       String?   @map("cluster_id")
+  outcomeStatus   String?   @map("outcome_status") // TARGET1 | SL | NEITHER | NOT_TRIGGERED | NO_DATA | NO_LEVELS | UNRESOLVED
+  outcomeSession  String?   @map("outcome_session") // IST 'YYYY-MM-DD' the outcome is scored on (self-review CHANNEL_SIGNAL)
+  outcomeEntryAt  DateTime? @map("outcome_entry_at") @db.Timestamptz(6)
+  outcomeExitAt   DateTime? @map("outcome_exit_at") @db.Timestamptz(6)
+  outcomeDetails  Json?     @map("outcome_details")
+  outcomeFilledAt DateTime? @map("outcome_filled_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([underlying, receivedAt])
+  @@index([channelId, receivedAt])
+  @@index([dedupKey, receivedAt])
+  @@index([outcomeFilledAt, sessionDate])
+  @@index([outcomeSession])
+  @@map("trade_signals")
+}
+
+/// Signals on the same underlying + direction inside SIGNAL_CLUSTER_MIN.
+model SignalCluster {
+  id          String   @id @default(cuid())
+  underlying  String
+  direction   String // BULL | BEAR
+  windowStart DateTime @map("window_start") @db.Timestamptz(6)
+  channelIds  String[] @default([]) @map("channel_ids")
+  signalIds   String[] @default([]) @map("signal_ids")
+  agreeCount  Int      @default(1) @map("agree_count") // distinct channels, same direction
+  conflict    Boolean  @default(false) // an opposite-direction signal in the window
+  status      String   @default("OPEN") // OPEN | CLOSED
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([underlying, windowStart])
+  @@map("signal_clusters")
+}
+
+/// Stream S's classification of EVERY Telegram message (keep-all-data): noise / signal / update / LLM state.
+model SignalMessageClass {
+  messageId  String   @id @map("message_id") // telegram_messages.id
+  channelId  String   @map("channel_id")
+  postedAt   DateTime @map("posted_at") @db.Timestamptz(6)
+  textHash   String   @map("text_hash") // sha256 of the trimmed text: the LLM-parse cache key
+  status     String // NOISE | SIGNAL | UPDATE | UPDATE_ORPHAN | DUPLICATE | LLM_PENDING | LLM_NOT_SIGNAL | LLM_FAILED | LLM_SKIPPED
+  reason     String? // pre-filter reason, parse failure, LLM error
+  parser     String? // rule | llm
+  llmResult  Json?    @map("llm_result") // the validated LLM reply (cache)
+  signalId   String?  @map("signal_id")
+  updateKind String?  @map("update_kind")
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([textHash])
+  @@index([status, postedAt])
+  @@index([channelId, postedAt])
+  @@map("signal_message_classes")
+}

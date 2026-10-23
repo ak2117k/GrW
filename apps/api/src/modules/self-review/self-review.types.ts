@@ -11,6 +11,8 @@ export const VERIFICATION_KINDS = [
   'MBM_RELATIVE',
   'STOCK_MOVE',
   'TRADE_SETUP',
+  /** A parsed Telegram channel tip (signal-intake, stream S, 2026-10-23): target 1 before the SL. */
+  'CHANNEL_SIGNAL',
 ] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 
@@ -64,6 +66,19 @@ export interface RunSummary {
    * MBM_RELATIVE (the relative reading vs always making the same relative call).
    */
   skill?: Partial<Record<VerificationKind, { session: SkillStats; rolling20: SkillStats }>>;
+  /** CHANNEL_SIGNAL per Telegram channel id: this session + rolling 20 sessions (shown on stream X's page). */
+  byChannel?: Record<string, ChannelStats>;
+}
+
+export interface ChannelStats {
+  n: number;
+  right: number;
+  wrong: number;
+  hitRate: number | null;
+  /** Hit rate over the last 20 closed sessions (this one included); null when nothing was judgeable. */
+  rolling20: number | null;
+  rolling20Right: number;
+  rolling20Wrong: number;
 }
 
 /** domain/skill.ts — hit rate alone is not evidence when one outcome dominates. */

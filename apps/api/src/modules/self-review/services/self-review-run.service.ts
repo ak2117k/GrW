@@ -17,9 +17,10 @@ import {
   scoreScorecardTotal,
   scoreStockMove,
   scoreTradeSetup,
+  scoreChannelSignal,
   type ScorecardRow,
 } from '../domain/scorers';
-import { buildSummary, topMisses } from '../domain/summary';
+import { buildSummary, channelStats, topMisses } from '../domain/summary';
 import { probabilitySkill, relativeSkill } from '../domain/skill';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
@@ -135,6 +136,12 @@ export class SelfReviewRunService {
         return [];
       });
 
+      await this.soft('CHANNEL_SIGNAL stats', errors, async () => {
+        const ch = await this.repo.results({ sessions, kinds: ['CHANNEL_SIGNAL'] }, 20_000);
+        if (ch.length || sessionRows.some((r) => r.kind === 'CHANNEL_SIGNAL')) summary.byChannel = channelStats(sessionRows, ch, sessions);
+        return [];
+      });
+
       const diagnosis = await this.diagnose(run.id, S, sessionRows, summary, errors);
       const mbmSkill = await this.mbmSkillRuns(S, summary, errors);
       const proposals = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors, mbmSkill);
@@ -215,6 +222,8 @@ export class SelfReviewRunService {
     out.push(...(await this.soft('STOCK_MOVE', errors, () => this.stockMoves(s, b.closeAt))));
     // Outcomes are filled by the trade-setup module's 16:15 IST job, before this run.
     out.push(...(await this.soft('TRADE_SETUP', errors, async () => (await this.sources.tradeSetups(s)).map(scoreTradeSetup))));
+    // Telegram channel tips: outcomes filled by signal-intake's 16:20 IST replay, before this run.
+    out.push(...(await this.soft('CHANNEL_SIGNAL', errors, async () => (await this.sources.channelSignals(s)).map(scoreChannelSignal))));
     return out;
   }
 

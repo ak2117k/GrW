@@ -53,6 +53,7 @@ import { SelfReviewModule } from './modules/self-review/self-review.module';
 import { StockMoveModule } from './modules/stock-move/stock-move.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
+import { SignalIntakeModule } from './modules/signal-intake/signal-intake.module';
 import { TelegramReaderModule } from './modules/telegram-reader/telegram-reader.module';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { HealthModule } from './modules/health/health.module';
@@ -278,6 +279,11 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // each outcome against market data, and serves an admin-only win-rate
     // scorecard. Read-only: never imports trade-engine (no order placement).
     TelegramModule,
+
+    // Telegram signal INTAKE (stream S): telegram.message → pre-filter → rule parser (LLM fallback on the
+    // shared, never the live, model slot) → trade_signals + signal_clusters → signal.ready / signal.update.
+    // Places nothing. SIGNAL_INTAKE=off disables it.
+    SignalIntakeModule,
 
     // Telegram READER: the owner's chosen channels via the owner's own Telegram account (MTProto).
     // Persists every message and emits telegram.message. TELEGRAM_READER=on|off; inert without a session.

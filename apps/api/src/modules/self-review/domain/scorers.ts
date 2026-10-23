@@ -530,3 +530,58 @@ export function scoreTradeSetup(r: TradeSetupVerifyRow): VerificationDraft {
     },
   };
 }
+
+// ─── Telegram channel tips (signal-intake, stream S) ─────────────────────────
+
+export interface ChannelSignalVerifyRow {
+  id: string;
+  /** The session the outcome is scored on (signal-intake's outcomeSession). */
+  sessionDate: string;
+  channelId: string;
+  underlying: string;
+  instrumentKind: string;
+  strike: number | null;
+  side: string;
+  entryType: string;
+  entryLow: number;
+  entryHigh: number;
+  sl: number | null;
+  targets: number[];
+  horizon: string;
+  parser: string;
+  outcomeStatus: string;
+}
+
+const CHANNEL_ACTUAL: Record<string, string> = {
+  TARGET1: 'target 1 before the SL',
+  SL: 'SL before target 1',
+  NEITHER: 'neither by the horizon end',
+  NOT_TRIGGERED: 'entry never triggered',
+  NO_DATA: 'no bars to judge',
+  NO_LEVELS: 'no SL and no target in the call',
+  UNRESOLVED: 'contract not resolved',
+};
+
+/**
+ * CHANNEL_SIGNAL (contract 2026-10-23 §Self-review): every parsed tip, traded or not, replayed on its
+ * own contract's bars by signal-intake after the close. Target 1 before the SL → right; SL first →
+ * wrong; neither by the horizon end, never triggered, no levels / bars / contract → null.
+ * subject = channel id (the per-channel stats key), score = +1 / −1 / null.
+ */
+export function scoreChannelSignal(r: ChannelSignalVerifyRow): VerificationDraft {
+  const correct = r.outcomeStatus === 'TARGET1' ? true : r.outcomeStatus === 'SL' ? false : null;
+  const contract = `${r.underlying}${r.strike !== null ? ` ${r.strike}` : ''} ${r.instrumentKind}`;
+  const entry = r.entryLow === r.entryHigh ? `${r.entryLow}` : `${r.entryLow}-${r.entryHigh}`;
+  return {
+    sessionDate: r.sessionDate,
+    kind: 'CHANNEL_SIGNAL',
+    refId: r.id,
+    subject: r.channelId,
+    symbol: r.underlying,
+    predicted: `${r.side} ${contract} ${r.entryType} ${entry} SL ${r.sl ?? '-'} T1 ${r.targets[0] ?? '-'}`,
+    actual: CHANNEL_ACTUAL[r.outcomeStatus] ?? r.outcomeStatus,
+    correct,
+    score: correct === null ? null : correct ? 1 : -1,
+    details: { status: r.outcomeStatus, horizon: r.horizon, parser: r.parser, channelId: r.channelId },
+  };
+}

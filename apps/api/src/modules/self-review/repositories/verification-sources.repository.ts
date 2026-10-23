@@ -172,4 +172,22 @@ export class VerificationSourcesRepository {
     });
     return rows.map((r) => ({ ...r, outcomeStatus: r.outcomeStatus as string }));
   }
+
+  /** Telegram channel signals whose outcome is scored on `session` (signal-intake fills it at 16:20 IST). */
+  async channelSignals(session: string) {
+    const rows = await this.prisma.tradeSignal.findMany({
+      where: { outcomeSession: session, outcomeFilledAt: { not: null }, outcomeStatus: { not: null } },
+      select: {
+        id: true, channelId: true, underlying: true, instrumentKind: true, strike: true, side: true, entryType: true,
+        entryLow: true, entryHigh: true, sl: true, targets: true, horizon: true, parser: true, outcomeStatus: true, outcomeSession: true,
+      },
+      take: 1000,
+    });
+    return rows.map(({ outcomeSession, targets, ...r }) => ({
+      ...r,
+      sessionDate: outcomeSession as string,
+      outcomeStatus: r.outcomeStatus as string,
+      targets: Array.isArray(targets) ? (targets as unknown[]).map(Number).filter((x) => Number.isFinite(x)) : [],
+    }));
+  }
 }

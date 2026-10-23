@@ -1,5 +1,5 @@
 /** A run's `summary` JSON (contract §Data): hit rates per kind and factor, rolling 5 / 20 sessions. */
-import type { FactorStats, KindStats, NotableItem, RunSummary, VerificationDraft, VerificationKind } from '../self-review.types';
+import type { ChannelStats, FactorStats, KindStats, NotableItem, RunSummary, VerificationDraft, VerificationKind } from '../self-review.types';
 
 const rate = (right: number, wrong: number): number | null =>
   right + wrong === 0 ? null : Math.round((right / (right + wrong)) * 1000) / 1000;
@@ -79,7 +79,7 @@ export function buildSummary(
     };
   }
 
-  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'MBM_RELATIVE' && r.kind !== 'STOCK_MOVE'), 5).map((r) => ({
+  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'MBM_RELATIVE' && r.kind !== 'STOCK_MOVE' && r.kind !== 'CHANNEL_SIGNAL'), 5).map((r) => ({
     kind: r.kind,
     refId: r.refId,
     symbol: r.symbol,
@@ -87,4 +87,21 @@ export function buildSummary(
   }));
 
   return { session, byKind, byFactor, notable };
+}
+
+/**
+ * CHANNEL_SIGNAL per channel (subject = channel id): the session's calls and the rolling 20-session
+ * hit rate. A channel with only history (no call today) still appears, with n = 0.
+ */
+export function channelStats(sessionRows: readonly VerificationDraft[], history: readonly HistoryRow[], sessions: readonly string[]): Record<string, ChannelStats> {
+  const today = sessionRows.filter((r) => r.kind === 'CHANNEL_SIGNAL');
+  const ids = new Set<string>([...today.map((r) => r.subject), ...history.map((h) => h.subject)].filter((s): s is string => !!s));
+  const last20 = sessions.slice(0, 20);
+  const out: Record<string, ChannelStats> = {};
+  for (const id of [...ids].sort()) {
+    const k = kindStats(today.filter((r) => r.subject === id));
+    const r20 = rollingRate(history, id, last20);
+    out[id] = { n: k.n, right: k.right, wrong: k.wrong, hitRate: k.hitRate, rolling20: r20.hitRate, rolling20Right: r20.right, rolling20Wrong: r20.wrong };
+  }
+  return out;
 }

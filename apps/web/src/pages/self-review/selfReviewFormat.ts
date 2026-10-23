@@ -14,6 +14,7 @@ export const KIND_ORDER = [
   'LIVE_EXIT',
   'NEWS_IDEA',
   'MBM_PREDICTION',
+  'MBM_RELATIVE',
   'STOCK_MOVE',
   'SCORECARD_FACTOR',
 ] as const;
@@ -25,6 +26,7 @@ const KIND_LABELS: Record<string, string> = {
   LIVE_EXIT: 'Live AI exits',
   NEWS_IDEA: 'News ideas',
   MBM_PREDICTION: 'Move-size model',
+  MBM_RELATIVE: 'Move size vs recent days',
   STOCK_MOVE: 'Stock big-move model',
 };
 

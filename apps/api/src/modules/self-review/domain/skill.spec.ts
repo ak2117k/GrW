@@ -1,4 +1,4 @@
-import { auc, probabilitySkill, probOutcome } from './skill';
+import { MIN_RELATIVE_N, auc, probabilitySkill, probOutcome, relativeSkill } from './skill';
 
 /** A stored MBM verification row: correct = (p ≥ 0.5) === actual big. */
 const row = (p: number, big: boolean) => ({ correct: p >= 0.5 === big, details: { p } });
@@ -61,5 +61,39 @@ describe('probabilitySkill', () => {
 
   it('empty input is NOT_TESTABLE with nulls', () => {
     expect(probabilitySkill([])).toMatchObject({ n: 0, verdict: 'NOT_TESTABLE', auc: null, hitRate: null });
+  });
+});
+
+describe('relativeSkill (MBM_RELATIVE)', () => {
+  /** A stored relative verification: the call, its ratio, the realised ratio; correct by the scorer's rule. */
+  const rel = (label: string, relRatio: number, realisedRatio: number) => {
+    const correct = label === 'QUIETER' ? realisedRatio < 1 : label === 'NORMAL' ? realisedRatio >= 0.8 && realisedRatio <= 1.25 : realisedRatio > 1;
+    return { correct, details: { relLabel: label, relRatio, realisedRatio } };
+  };
+
+  it('nothing judged → NOT_TESTABLE', () => {
+    expect(relativeSkill([{ correct: null, details: {} }])).toMatchObject({ n: 0, verdict: 'NOT_TESTABLE' });
+  });
+
+  it('too few calls → NOT_TESTABLE, with the best constant call named', () => {
+    const s = relativeSkill(Array.from({ length: 10 }, () => rel('BUSIER', 1.5, 1.6)));
+    expect(s).toMatchObject({ n: 10, verdict: 'NOT_TESTABLE', hitRate: 1, majorityHitRate: 1 });
+    expect(s.note).toContain(`< ${MIN_RELATIVE_N}`);
+  });
+
+  it('always saying BUSIER in a busy regime scores no better than the constant call → NO_EDGE', () => {
+    const rows = [...Array.from({ length: 36 }, () => rel('BUSIER', 1.6, 1.4)), ...Array.from({ length: 4 }, () => rel('BUSIER', 1.6, 0.7))];
+    const s = relativeSkill(rows);
+    expect(s).toMatchObject({ n: 40, hitRate: 0.9, majorityHitRate: 0.9, positives: 36, verdict: 'NO_EDGE' });
+  });
+
+  it('separating quiet drifts from spikes beats every constant call and ranks them → EDGE', () => {
+    const rows = [
+      ...Array.from({ length: 20 }, () => rel('QUIETER', 0.6, 0.7)),
+      ...Array.from({ length: 20 }, () => rel('MUCH_BUSIER', 2.0, 2.4)),
+    ];
+    const s = relativeSkill(rows);
+    expect(s).toMatchObject({ n: 40, hitRate: 1, majorityHitRate: 0.5, auc: 1, verdict: 'EDGE', brier: null });
+    expect(s.note).toContain('AUC 1.00');
   });
 });

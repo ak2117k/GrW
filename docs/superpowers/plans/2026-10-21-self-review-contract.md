@@ -19,6 +19,7 @@ models' comments. Do not change these models without updating this file.
 | `LIVE_EXIT` | `ai_exit_executions` FILLED + `ai_exit_outcomes` | right if the option was lower (for a long) 60 min after the fill (use the existing outcome rows) |
 | `NEWS_IDEA` | `news_ideas` with outcome filled | CE_IDEA/PE_IDEA → move in the idea's direction; NO_TRADE → right when |move| < 1×ATR-equivalent OR the scorecard total was ≤ 0 and the move went against the headline sentiment; record but treat `NO_TRADE` as `correct=null` if unsure |
 | `MBM_PREDICTION` | `mbm_predictions` with outcome | `(p ≥ 0.5) == outcome_big` |
+| `MBM_RELATIVE` | `mbm_predictions` with outcome and a relative reading (`rel_label`, `ref_range_bp`; 2026-10-23+) | realised range vs `ref_range_bp`: QUIETER → below, BUSIER / MUCH_BUSIER → above, NORMAL → within 0.8–1.25×; gap outcome = null. Skill: hit rate vs the best constant call + AUC of `rel_ratio` (summary `skill.MBM_RELATIVE`) |
 | `TRADE_SETUP` | `trade_setups` with outcome filled (16:15 IST job, 15-min replay) | entry triggered and T1 (1.5R) hit before the stop; stop / 15:10 time exit = wrong; not triggered / no bars = null. `score` = R |
 
 Idempotent: `@@unique([kind, refId])` — re-runs upsert.

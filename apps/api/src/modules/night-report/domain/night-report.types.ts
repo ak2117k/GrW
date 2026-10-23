@@ -140,10 +140,26 @@ export interface SetupItem {
   ret20dBp: number | null;
 }
 
+export interface MoodHorizonView {
+  p: number;
+  regime: string;
+  q25Bp: number | null;
+  q75Bp: number | null;
+  q50Bp?: number | null;
+  /** Relative reading (2026-10-23): q50 ÷ the last 10 sessions' realised range at this minute. */
+  relRatio?: number | null;
+  relLabel?: string | null;
+  refRangeBp?: number | null;
+  /** "Next 30 min: ~80 pts (60–105) · busier than recent days" (null when the model gave no range). */
+  headline?: string | null;
+  /** "vs 60-day norm: BIG / ACTIVE p=0.97" — the model's own call, kept visible. */
+  norm?: string;
+}
+
 export interface MoodView {
   status: 'ok' | 'stale' | 'absent';
   asOf: string | null;
-  horizons: Record<string, { p: number; regime: string; q25Bp: number | null; q75Bp: number | null }>;
+  horizons: Record<string, MoodHorizonView>;
 }
 
 /** One regime's slice of a scorecard window. Rates are 0..1; null when nothing resolved. */

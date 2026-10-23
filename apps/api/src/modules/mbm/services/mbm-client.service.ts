@@ -9,6 +9,12 @@ export interface MbmHorizon {
   q25Bp: number | null;
   q50Bp: number | null;
   q75Bp: number | null;
+  /** Relative reading (2026-10-23; absent on older MBM builds): q50 ÷ the last 10 sessions' range at this minute. */
+  relRatio?: number | null;
+  relLabel?: 'QUIETER' | 'NORMAL' | 'BUSIER' | 'MUCH_BUSIER' | string | null;
+  refRangeBp?: number | null;
+  /** [q25, q50, q75] in index points at `spot`. */
+  rangePts?: Array<number | null> | null;
 }
 
 /** The MBM service's behaviour response; `absent` is also what every failure becomes here. */
@@ -20,6 +26,8 @@ export interface MbmBehaviour {
   modelIds?: Record<string, string>;
   featureSet?: string;
   dataQuality?: string;
+  /** The instrument's 1m close just before `asOf` (the points conversion's spot). */
+  spot?: number | null;
 }
 
 export const MBM_FETCH = Symbol('MBM_FETCH');

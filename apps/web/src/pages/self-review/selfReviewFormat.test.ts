@@ -59,6 +59,7 @@ describe('kindRows / totals', () => {
     expect(kindRows(summary).map((r) => r.kind)).toEqual(['SCORECARD_TOTAL', 'MBM_PREDICTION', 'SCORECARD_FACTOR', 'CUSTOM_THING']);
     expect(kindRows(summary)[0].label).toBe('Scorecard calls');
     expect(kindLabel('STOCK_MOVE')).toBe('Stock big-move model');
+    expect(kindLabel('MBM_RELATIVE')).toBe('Move size vs recent days');
     expect(kindRows(summary)[3].label).toBe('Custom thing');
   });
   it('is empty for a missing summary', () => {

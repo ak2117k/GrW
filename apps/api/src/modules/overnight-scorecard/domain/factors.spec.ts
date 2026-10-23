@@ -252,6 +252,27 @@ describe('expected-move factor (key mood)', () => {
     });
   });
 
+  it('leads with the expected range in points and the relative reading; the 60-day call stays as "vs 60-day norm"', () => {
+    const rel = {
+      status: 'ok' as const,
+      spot: 25_000,
+      horizons: { '60m': { p: 0.97, regime: 'ACTIVE', q25Bp: 24, q50Bp: 32, q75Bp: 42, relRatio: 1.52, relLabel: 'BUSIER', refRangeBp: 21 } },
+    };
+    expect(scoreMood({ behaviour: rel, isIndex: true, isLongOption: true })).toMatchObject({
+      points: 1, // scoring unchanged: still the model's own (60-day) call
+      value: 'NIFTY Next 60 min: ~80 pts (60–105) · busier than recent days; vs 60-day norm p(big) 0.97 → big move',
+    });
+    const quiet = { ...rel, horizons: { '60m': { ...rel.horizons['60m'], relRatio: 0.6, relLabel: 'QUIETER' } } };
+    expect(scoreMood({ behaviour: quiet, isIndex: false, isLongOption: true, beta: 1.1 }).value).toBe(
+      'NIFTY Next 60 min: ~80 pts (60–105) · quieter than recent days; vs 60-day norm p(big) 0.97 → big move (beta 1.10)',
+    );
+    // No spot (stored row without a bar): basis points; no relative reading (pre-2026-10-23 row): range only.
+    const old = { status: 'ok' as const, horizons: { '60m': { p: 0.97, regime: 'ACTIVE', q25Bp: 24, q50Bp: 32, q75Bp: 42 } } };
+    expect(scoreMood({ behaviour: old, isIndex: true, isLongOption: true }).value).toBe(
+      'NIFTY Next 60 min: ~32 bp (24–42 bp); vs 60-day norm p(big) 0.97 → big move',
+    );
+  });
+
   describe('stock big-move reading (shadow by default)', () => {
     const r = (bucket: string, resultsDate: string | null = '2026-10-24') => ({
       symbol: 'RELIANCE', asOf: '2026-10-21', horizonDays: 5, pBig: 0.712, rankPct: 0.95, bucket,

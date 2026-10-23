@@ -686,17 +686,26 @@ function MoodPanel({ mood }: { mood: MoodView }) {
         {mood.status === 'stale' && <Badge label="Stale" variant="warning" size="sm" />}
       </p>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-        {horizons.map(([h, v]) => (
-          <div key={h} className="rounded border border-[var(--color-border-subtle)] p-2 text-xs">
-            <p className={cn('font-semibold', PRIMARY)}>
-              {h} · {sentenceCase(v.regime)}
-            </p>
-            <p className={SECONDARY}>P(big move) {(v.p * 100).toFixed(0)}%</p>
-            <p className={MUTED}>
-              Range {bpPct(v.q25Bp)} to {bpPct(v.q75Bp)}
-            </p>
-          </div>
-        ))}
+        {horizons.map(([h, v]) =>
+          v.headline ? (
+            // Relative reading first: p sits near its cap all day in a high-volatility regime, so the
+            // 60-day call cannot tell a quiet drift from a spike; "vs recent days" can.
+            <div key={h} className="rounded border border-[var(--color-border-subtle)] p-2 text-xs">
+              <p className={cn('font-semibold', PRIMARY)}>{v.headline}</p>
+              <p className={MUTED}>{v.norm ?? `vs 60-day norm: ${sentenceCase(v.regime)} p=${v.p.toFixed(2)}`}</p>
+            </div>
+          ) : (
+            <div key={h} className="rounded border border-[var(--color-border-subtle)] p-2 text-xs">
+              <p className={cn('font-semibold', PRIMARY)}>
+                {h} · {sentenceCase(v.regime)}
+              </p>
+              <p className={SECONDARY}>P(big move) {(v.p * 100).toFixed(0)}%</p>
+              <p className={MUTED}>
+                Range {bpPct(v.q25Bp)} to {bpPct(v.q75Bp)}
+              </p>
+            </div>
+          ),
+        )}
       </div>
     </div>
   );

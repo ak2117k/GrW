@@ -156,7 +156,7 @@ export class ScorecardEngine {
     if (live && live.status === 'ok' && live.horizons && Object.keys(live.horizons).length > 0) return live;
     const stored = await soft(() => this.repo.storedMood('NIFTY', now, STORED_MOOD_MAX_AGE_MS), null);
     if (!stored.v) return live;
-    return { status: 'ok', horizons: stored.v.horizons, storedAsOf: stored.v.asOf };
+    return { status: 'ok', horizons: stored.v.horizons, storedAsOf: stored.v.asOf, spot: stored.v.spot ?? null };
   }
 
   /**

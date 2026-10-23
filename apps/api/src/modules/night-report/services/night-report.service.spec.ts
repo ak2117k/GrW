@@ -73,6 +73,24 @@ const mood: MoodSource = {
 };
 
 const service = (store: NightReportStore, hold: string[] = ['RELIANCE-EQ']) => new NightReportService(store, mood, { clock, hold });
+
+describe('NightReportService mood: relative reading headline', () => {
+  it('leads with points and the relative reading, keeps the 60-day call as the norm line', async () => {
+    const rel: MoodSource = {
+      behaviour: async () => ({
+        status: 'ok', asOf: '2026-10-23T08:00:00Z', spot: 25_000,
+        horizons: { '30m': { p: 0.97, regime: 'ACTIVE', q25Bp: 24, q50Bp: 32, q75Bp: 42, relRatio: 1.9, relLabel: 'MUCH_BUSIER', refRangeBp: 17 } },
+      }),
+    };
+    const svc = new NightReportService(fakeStore(), rel, { clock, hold: [] });
+    const m = ok((await svc.build('u1', NOW)).mood);
+    expect(m.horizons['30m']).toMatchObject({
+      headline: 'Next 30 min: ~80 pts (60–105) · much busier than recent days',
+      norm: 'vs 60-day norm: BIG / ACTIVE p=0.97',
+      relRatio: 1.9, relLabel: 'MUCH_BUSIER', refRangeBp: 17, q50Bp: 32,
+    });
+  });
+});
 const ok = <T>(s: T | { error: string }): T => {
   if (s && typeof s === 'object' && 'error' in s) throw new Error(`section failed: ${(s as { error: string }).error}`);
   return s as T;
@@ -105,7 +123,10 @@ describe('NightReportService', () => {
     expect(events.find((e) => e.id === 'e2')!.touchesPositions).toEqual([]);
 
     expect(ok(r.dailySetups)[0]).toMatchObject({ signalDate: '2026-10-19', instrument: { symbol: 'NIFTY', token: '99926000' } });
-    expect(ok(r.mood)).toMatchObject({ status: 'ok', horizons: { '30m': { p: 0.31 } } });
+    expect(ok(r.mood)).toMatchObject({
+      status: 'ok',
+      horizons: { '30m': { p: 0.31, headline: null, norm: 'vs 60-day norm: small / QUIET p=0.31', relLabel: null } },
+    });
 
     // Model scorecard: 20 closed sessions read (Dussehra skipped), clipped to the model's first live session.
     const msc = ok(r.modelScorecard);

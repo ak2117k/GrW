@@ -7,6 +7,8 @@ export const VERIFICATION_KINDS = [
   'LIVE_EXIT',
   'NEWS_IDEA',
   'MBM_PREDICTION',
+  /** The MBM relative reading (QUIETER / NORMAL / BUSIER / MUCH_BUSIER vs the last 10 sessions), 2026-10-23. */
+  'MBM_RELATIVE',
   'STOCK_MOVE',
   'TRADE_SETUP',
 ] as const;
@@ -57,7 +59,10 @@ export interface RunSummary {
   byKind: Partial<Record<VerificationKind, KindStats>>;
   byFactor: Record<string, FactorStats>;
   notable: NotableItem[];
-  /** Probability models only (MBM_PREDICTION): skill vs the majority baseline, session and rolling 20. */
+  /**
+   * Skill vs the majority baseline, session and rolling 20: MBM_PREDICTION (probability model) and
+   * MBM_RELATIVE (the relative reading vs always making the same relative call).
+   */
   skill?: Partial<Record<VerificationKind, { session: SkillStats; rolling20: SkillStats }>>;
 }
 

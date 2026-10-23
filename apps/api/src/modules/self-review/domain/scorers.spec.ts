@@ -6,6 +6,7 @@ import {
   readFactors,
   scoreLiveExit,
   scoreMbmPrediction,
+  scoreMbmRelative,
   scoreNewsIdea,
   scoreOvernightVerdict,
   scoreScorecardFactors,
@@ -172,6 +173,34 @@ describe('MBM_PREDICTION', () => {
   });
   it('a gap outcome is not judged', () => {
     expect(scoreMbmPrediction({ ...r, outcomeQuality: 'gap' }).correct).toBeNull();
+  });
+});
+
+describe('MBM_RELATIVE', () => {
+  const r = {
+    id: '7', instrument: 'NIFTY', horizon: '30m', asOf: new Date('2026-10-21T08:00:00Z'), p: 0.97, regime: 'ACTIVE', outcomeBig: true,
+    outcomeQuality: 'ok' as string | null, outcomeRangeBp: 30, outcomeThresholdBp: 21, sessionDate: S,
+    q50Bp: 32, relRatio: 1.52, relLabel: 'BUSIER' as string | null, refRangeBp: 21 as number | null,
+  };
+  it('BUSIER / MUCH_BUSIER: right when the realised range beat the reference', () => {
+    expect(scoreMbmRelative(r)).toMatchObject({
+      kind: 'MBM_RELATIVE', refId: '7', subject: '30m', symbol: 'NIFTY', correct: true,
+      predicted: 'BUSIER (q50 32 bp = 1.52× ref 21 bp)', actual: 'range 30 bp = 1.43× ref',
+      details: expect.objectContaining({ relLabel: 'BUSIER', realisedRatio: 1.43, refRangeBp: 21 }),
+    });
+    expect(scoreMbmRelative({ ...r, relLabel: 'MUCH_BUSIER', outcomeRangeBp: 18 })!.correct).toBe(false);
+  });
+  it('QUIETER: right below the reference; NORMAL: right within 0.8–1.25×', () => {
+    expect(scoreMbmRelative({ ...r, relLabel: 'QUIETER', outcomeRangeBp: 15 })!.correct).toBe(true);
+    expect(scoreMbmRelative({ ...r, relLabel: 'QUIETER', outcomeRangeBp: 25 })!.correct).toBe(false);
+    expect(scoreMbmRelative({ ...r, relLabel: 'NORMAL', outcomeRangeBp: 17 })!.correct).toBe(true);
+    expect(scoreMbmRelative({ ...r, relLabel: 'NORMAL', outcomeRangeBp: 21 * 1.25 })!.correct).toBe(true);
+    expect(scoreMbmRelative({ ...r, relLabel: 'NORMAL', outcomeRangeBp: 30 })!.correct).toBe(false);
+  });
+  it('no draft without a relative reading; a gap outcome is not judged', () => {
+    expect(scoreMbmRelative({ ...r, relLabel: null })).toBeNull();
+    expect(scoreMbmRelative({ ...r, refRangeBp: null })).toBeNull();
+    expect(scoreMbmRelative({ ...r, outcomeQuality: 'gap' })!.correct).toBeNull();
   });
 });
 

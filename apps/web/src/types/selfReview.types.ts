@@ -13,6 +13,7 @@ export type VerificationKind =
   | 'LIVE_EXIT'
   | 'NEWS_IDEA'
   | 'MBM_PREDICTION'
+  | 'MBM_RELATIVE'
   | 'STOCK_MOVE';
 
 export interface KindStats {
@@ -45,7 +46,7 @@ export interface SelfReviewSummary {
   byKind: Partial<Record<VerificationKind | string, KindStats>>;
   byFactor?: Record<string, FactorStats>;
   notable?: NotableCall[];
-  /** Probability models (MBM_PREDICTION): skill vs always guessing the common outcome. */
+  /** MBM_PREDICTION: skill vs always guessing the common outcome; MBM_RELATIVE: vs always making the same relative call. */
   skill?: Partial<Record<VerificationKind | string, { session: SkillStats; rolling20: SkillStats }>>;
 }
 

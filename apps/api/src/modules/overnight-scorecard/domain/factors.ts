@@ -13,6 +13,7 @@ import type { FactorScore } from '../scorecard.types';
 import { lastEma, macdHistogram, median, rsi } from './indicators';
 import { factor, orient, unavailable, type Side } from './scoring';
 import { stockMovePart, type StockMoveReading } from '../../stock-move/stock-move.logic';
+import { mbmHeadline, type RelativeHorizon } from '../../mbm/domain/relative-reading';
 
 const f1 = (n: number) => (Math.abs(n) >= 100 ? n.toFixed(0) : n.toFixed(1));
 const f2 = (n: number) => n.toFixed(2);
@@ -363,7 +364,10 @@ export const BETA_MIN = 0.5;
 export interface MoodInput {
   behaviour: {
     status: 'ok' | 'stale' | 'absent';
-    horizons?: Record<string, { p: number; regime: string }>;
+    /** p / regime (vs the 60-day norm) and, when the MBM service supplied them, the range + relative reading. */
+    horizons?: Record<string, RelativeHorizon>;
+    /** NIFTY spot for the points conversion (live: the service's; stored: the 1m close before the as-of). */
+    spot?: number | null;
     /**
      * Set only when the horizons are the last session's STORED predictions (mbm_predictions), used
      * because the live model is not running (after hours): the as-of instant of the newest one.
@@ -432,7 +436,12 @@ function niftyMood(input: MoodInput): { points: number; value: string; reason: s
     ...(input.isIndex ? [] : [beta == null ? 'beta n/a' : `beta ${f2(beta)}`]),
     ...(b.storedAsOf ? [`as of ${istLabel(b.storedAsOf)}`] : []),
   ];
-  const value = `NIFTY ${key}: p(big) ${f2(h.p)} → ${call}${extras.length ? ` (${extras.join(', ')})` : ''}`;
+  // Headline first ("Next 60 min: ~80 pts (60–105) · busier than recent days"): p sits near its cap
+  // in a high-volatility regime, so the old call is kept only as the "vs 60-day norm" part.
+  const head = mbmHeadline(key, h, b.spot ?? null);
+  const norm = `p(big) ${f2(h.p)} → ${call}`;
+  const tail = extras.length ? ` (${extras.join(', ')})` : '';
+  const value = head ? `NIFTY ${head}; vs 60-day norm ${norm}${tail}` : `NIFTY ${key}: ${norm}${tail}`;
   const at = (points: number, reason: string) => ({ points, value, reason });
   if (!input.isLongOption) return at(0, 'not a long option: expected move is context only');
   if (!input.isIndex) {

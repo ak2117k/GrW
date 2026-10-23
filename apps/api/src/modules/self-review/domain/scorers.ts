@@ -4,6 +4,8 @@
  */
 import type { VerificationDraft } from '../self-review.types';
 
+import { relativeCallCorrect } from '../../mbm/domain/relative-reading';
+
 const r1 = (x: number) => Math.round(x * 10) / 10;
 const r2 = (x: number) => Math.round(x * 100) / 100;
 const signText = (x: number) => (x > 0 ? `+${r1(x)}` : `${r1(x)}`);
@@ -378,6 +380,11 @@ export interface MbmRow {
   outcomeRangeBp: number | null;
   outcomeThresholdBp: number | null;
   sessionDate: string;
+  /** Relative reading columns (null on rows before 2026-10-23). */
+  q50Bp?: number | null;
+  relRatio?: number | null;
+  relLabel?: string | null;
+  refRangeBp?: number | null;
 }
 
 export function scoreMbmPrediction(r: MbmRow): VerificationDraft {
@@ -394,6 +401,34 @@ export function scoreMbmPrediction(r: MbmRow): VerificationDraft {
     correct: ok ? callBig === r.outcomeBig : null,
     score: null,
     details: { p: r.p, regime: r.regime, horizon: r.horizon, asOf: r.asOf.toISOString(), quality: r.outcomeQuality, brier: r2((r.p - (r.outcomeBig ? 1 : 0)) ** 2) },
+  };
+}
+
+/**
+ * MBM_RELATIVE: was the realised range on the side of the 10-session reference the relative call said?
+ * QUIETER → realised < ref; BUSIER / MUCH_BUSIER → realised > ref; NORMAL → realised within 0.8–1.25 × ref.
+ * Null (no draft) for a row without a relative reading; a gap outcome is not judged. The realised range is
+ * the outcome filler's (the same definition as the reference), so the comparison is like for like.
+ */
+export function scoreMbmRelative(r: MbmRow): VerificationDraft | null {
+  if (!r.relLabel || r.refRangeBp == null || !Number.isFinite(r.refRangeBp) || r.refRangeBp <= 0) return null;
+  const ok = (r.outcomeQuality ?? 'ok') === 'ok';
+  const realised = r.outcomeRangeBp;
+  const realisedRatio = realised != null && Number.isFinite(realised) ? realised / r.refRangeBp : null;
+  return {
+    sessionDate: r.sessionDate,
+    kind: 'MBM_RELATIVE',
+    refId: r.id,
+    subject: r.horizon,
+    symbol: r.instrument,
+    predicted: `${r.relLabel} (q50 ${r.q50Bp == null ? '?' : r1(r.q50Bp)} bp = ${r.relRatio == null ? '?' : r2(r.relRatio)}× ref ${r1(r.refRangeBp)} bp)`,
+    actual: `range ${realised == null ? '?' : r1(realised)} bp = ${realisedRatio == null ? '?' : r2(realisedRatio)}× ref`,
+    correct: ok ? relativeCallCorrect(r.relLabel, realised, r.refRangeBp) : null,
+    score: null,
+    details: {
+      relLabel: r.relLabel, relRatio: r.relRatio ?? null, refRangeBp: r.refRangeBp, realisedBp: realised,
+      realisedRatio: realisedRatio === null ? null : r2(realisedRatio), horizon: r.horizon, asOf: r.asOf.toISOString(), quality: r.outcomeQuality,
+    },
   };
 }
 

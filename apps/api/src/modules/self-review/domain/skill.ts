@@ -80,3 +80,73 @@ export function probabilitySkill(rows: readonly ProbRow[]): SkillStats {
     brierSkill: brierSkill === null ? null : r3(brierSkill), verdict, note,
   };
 }
+
+// ─── MBM relative reading (MBM_RELATIVE) ─────────────────────────────────────
+
+/** Fewer judged relative calls than this → not testable. */
+export const MIN_RELATIVE_N = 30;
+/** The constant calls the majority baseline tries (MUCH_BUSIER is judged exactly like BUSIER). */
+const CONSTANT_CALLS = ['QUIETER', 'NORMAL', 'BUSIER'] as const;
+
+interface RelPoint {
+  label: string;
+  ratio: number | null;
+  realisedRatio: number;
+  correct: boolean;
+}
+
+function relPoint(r: ProbRow): RelPoint | null {
+  if (r.correct === null) return null;
+  const d = (r.details ?? {}) as { relLabel?: unknown; relRatio?: unknown; realisedRatio?: unknown };
+  if (typeof d.relLabel !== 'string' || typeof d.realisedRatio !== 'number' || !Number.isFinite(d.realisedRatio)) return null;
+  const ratio = typeof d.relRatio === 'number' && Number.isFinite(d.relRatio) ? d.relRatio : null;
+  return { label: d.relLabel, ratio, realisedRatio: d.realisedRatio, correct: r.correct };
+}
+
+/** Would the constant call `c` have been right for a window whose realised range was `x` × the reference? */
+function constantRight(c: (typeof CONSTANT_CALLS)[number], x: number): boolean {
+  if (c === 'QUIETER') return x < 1;
+  if (c === 'NORMAL') return x >= 0.8 && x <= 1.25;
+  return x > 1;
+}
+
+/**
+ * Skill of the relative reading. Hit rate alone flatters a reading that always says the same thing in a
+ * one-sided regime, so it is compared with the best CONSTANT call (always QUIETER / NORMAL / BUSIER,
+ * judged by the same rule), and ranking is measured as the AUC of rel_ratio for "realised > reference".
+ * `positives` / `baseRate` = windows that were busier than their reference. No probabilities → no Brier.
+ */
+export function relativeSkill(rows: readonly ProbRow[]): SkillStats {
+  const pts = rows.map(relPoint).filter((x): x is RelPoint => x !== null);
+  const n = pts.length;
+  const empty = { auc: null, brier: null, brierBaseline: null, brierSkill: null };
+  if (n === 0) {
+    return { n: 0, positives: 0, baseRate: null, hitRate: null, majorityHitRate: null, ...empty, verdict: 'NOT_TESTABLE', note: 'no judged relative calls' };
+  }
+  const positives = pts.filter((x) => x.realisedRatio > 1).length;
+  const hitRate = pts.filter((x) => x.correct).length / n;
+  let best: { call: string; rate: number } = { call: CONSTANT_CALLS[0], rate: -1 };
+  for (const c of CONSTANT_CALLS) {
+    const rate = pts.filter((x) => constantRight(c, x.realisedRatio)).length / n;
+    if (rate > best.rate) best = { call: c, rate };
+  }
+  const ranked = pts.filter((x) => x.ratio !== null).map((x) => ({ p: x.ratio as number, y: (x.realisedRatio > 1 ? 1 : 0) as 0 | 1 }));
+  const a = auc(ranked);
+  let verdict: SkillStats['verdict'];
+  let note: string;
+  const pct = (x: number) => `${Math.round(x * 100)}%`;
+  if (n < MIN_RELATIVE_N) {
+    verdict = 'NOT_TESTABLE';
+    note = `only ${n} judged relative call(s) (< ${MIN_RELATIVE_N}); always "${best.call}" would score ${pct(best.rate)}`;
+  } else if (hitRate > best.rate && a !== null && a >= EDGE_AUC) {
+    verdict = 'EDGE';
+    note = `hit ${pct(hitRate)} vs always "${best.call}" ${pct(best.rate)}; ranks busier windows (AUC ${a.toFixed(2)})`;
+  } else {
+    verdict = 'NO_EDGE';
+    note = `hit ${pct(hitRate)} vs always "${best.call}" ${pct(best.rate)}, AUC ${a === null ? '—' : a.toFixed(2)}: not more informative than a constant call`;
+  }
+  return {
+    n, positives, baseRate: r3(positives / n), hitRate: r3(hitRate), majorityHitRate: r3(best.rate),
+    auc: a === null ? null : r3(a), brier: null, brierBaseline: null, brierSkill: null, verdict, note,
+  };
+}

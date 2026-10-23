@@ -147,6 +147,32 @@ describe('MBM_PACKET=on: the block is added for NIFTY-mapped positions only', ()
     expect(JSON.stringify(p.marketBehaviour).length).toBeLessThanOrEqual(MBM_BLOCK_MAX_CHARS);
   });
 
+  it('carries the relative reading and the range in points when the MBM service supplies them', async () => {
+    const rel: MbmBehaviour = {
+      ...OK,
+      spot: 25_100,
+      horizons: { '60m': { ...OK.horizons!['60m'], relRatio: 1.52, relLabel: 'BUSIER', refRangeBp: 33.6, rangePts: [94, 128, 171] } },
+    };
+    const { svc } = make(env, rel);
+    const p = (await svc.build(NIFTY[1] as never, NIFTY[2], null)) as unknown as Record<string, { value: unknown }>;
+    expect(p.marketBehaviour.value).toEqual({ i: 'NIFTY', h: '60m', regime: 'ACTIVE', p: 0.86, rangeBp: [37, 68], asOf: '09:45', rel: 'BUSIER', pts: [94, 128, 171] });
+    // Worst case of every field still fits the budget.
+    const worst: MbmBehaviour = {
+      ...OK,
+      spot: 99_999,
+      horizons: { '60m': { p: 0.123456, regime: 'X'.repeat(500), q25Bp: -12345.6, q50Bp: 1, q75Bp: 98765.4, relLabel: 'MUCH_BUSIER', rangePts: [-99_999, 99_999, 99_999] } },
+    };
+    const w = await make(env, worst).svc.build(NIFTY[1] as never, NIFTY[2], null);
+    expect(JSON.stringify(w.marketBehaviour).length).toBeLessThanOrEqual(MBM_BLOCK_MAX_CHARS);
+  });
+
+  it('computes points from bp × spot when the service sent no rangePts; an unknown label is dropped', async () => {
+    const { svc } = make(env, { ...OK, spot: 25_000, horizons: { '60m': { ...OK.horizons!['60m'], relLabel: 'WILD' } } });
+    const p = (await svc.build(NIFTY[1] as never, NIFTY[2], null)) as unknown as Record<string, { value: Record<string, unknown> }>;
+    expect(p.marketBehaviour.value.pts).toEqual([94, 128, 171]);
+    expect(p.marketBehaviour.value).not.toHaveProperty('rel');
+  });
+
   it('unmapped fixtures are untouched and never ask MBM', async () => {
     const { svc, behaviour } = make(env);
     const h = await hashes(svc);

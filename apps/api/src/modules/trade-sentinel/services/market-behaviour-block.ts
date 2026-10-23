@@ -4,6 +4,7 @@
 // the block, and the system prompt is a hash-versioned matrix (sentinel-system-prompt.ts) that one more
 // switch would double. Add the reading line, with its own prompt version, when MBM_PACKET=on is planned.
 import { mbmHorizonFor, usableHorizon } from '../../mbm/domain/mbm-applies';
+import { expectedPoints, isRelLabel } from '../../mbm/domain/relative-reading';
 import type { MbmBehaviour } from '../../mbm/services/mbm-client.service';
 
 /**
@@ -11,6 +12,12 @@ import type { MbmBehaviour } from '../../mbm/services/mbm-client.service';
  * `{"i":"NIFTY","h":"60m","regime":"ACTIVE","p":0.86,"rangeBp":[37,68],"asOf":"09:45"}` —
  * instrument, horizon (from session minutes left), the model's regime and its probability, the
  * q25–q75 expected range in basis points of the underlying, and the model's IST hh:mm as-of.
+ *
+ * Since 2026-10-23, when the MBM service supplies them: `rel` — the RELATIVE reading (the model's median
+ * range vs the realised range at this minute over the last 10 sessions: QUIETER | NORMAL | BUSIER |
+ * MUCH_BUSIER), and `pts` — [q25, q50, q75] in index points. `regime`/`p` are vs the 60-day norm and sit
+ * near ACTIVE/0.97 all day in a high-volatility regime; `rel` is what separates a drift from a spike.
+ * Keys are omitted (not null) when missing, so older readings keep their exact shape.
  */
 export type MarketBehaviourValue = {
   i: string;
@@ -19,12 +26,14 @@ export type MarketBehaviourValue = {
   p: number;
   rangeBp: [number | null, number | null];
   asOf: string | null;
+  rel?: string;
+  pts?: [number, number, number];
 };
 
 /** The `source` of the block. Short on purpose: it is repeated in every packet the judge reads. */
 export const MBM_BLOCK_SOURCE = 'mbm';
 /** Budget for JSON.stringify of the whole Block (value + source + at). */
-export const MBM_BLOCK_MAX_CHARS = 200;
+export const MBM_BLOCK_MAX_CHARS = 260;
 
 const bp = (x: number | null | undefined): number | null => (typeof x === 'number' && Number.isFinite(x) ? Math.round(x) : null);
 
@@ -50,7 +59,7 @@ export function marketBehaviourValue(
   const h = mbmHorizonFor(minutesLeftInSession);
   const hz = usableHorizon(b, h);
   if (!hz) return null;
-  return {
+  const value: MarketBehaviourValue = {
     i: instrument,
     h,
     // Bounded: a model-supplied string must not blow the block's character budget.
@@ -59,6 +68,11 @@ export function marketBehaviourValue(
     rangeBp: [bp(hz.q25Bp), bp(hz.q75Bp)],
     asOf: istHhmm(b?.asOf ?? null),
   };
+  if (isRelLabel(hz.relLabel)) value.rel = hz.relLabel;
+  const pts = expectedPoints(hz, b?.spot ?? null);
+  // Bounded too: a garbage range must not blow the budget (NIFTY points are 3–4 digits).
+  if (pts && pts.every((x) => Math.abs(x) < 100_000)) value.pts = pts;
+  return value;
 }
 
 // ─── Stock big-move model (2026-10-22 stock-move contract, stream W) ─────────

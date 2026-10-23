@@ -116,6 +116,24 @@ describe('SelfReviewRunService', () => {
     expect(Object.keys(finish[1].summary.byFactor)).not.toContain('TOP20');
   });
 
+  it('MBM rows with a relative reading also yield MBM_RELATIVE, with its skill in the summary; not diagnosed', async () => {
+    const mbm = [
+      { id: 'r1', instrument: 'NIFTY', horizon: '30m', asOf: new Date('2026-10-21T05:00:00Z'), p: 0.97, regime: 'ACTIVE', outcomeBig: true, outcomeQuality: 'ok', outcomeRangeBp: 30, outcomeThresholdBp: 20, q50Bp: 32, relRatio: 1.52, relLabel: 'BUSIER', refRangeBp: 21 },
+      { id: 'r2', instrument: 'NIFTY', horizon: '30m', asOf: new Date('2026-10-21T05:05:00Z'), p: 0.97, regime: 'ACTIVE', outcomeBig: true, outcomeQuality: 'ok', outcomeRangeBp: 30, outcomeThresholdBp: 20, q50Bp: 15, relRatio: 0.7, relLabel: 'QUIETER', refRangeBp: 21 },
+      { id: 'r3', instrument: 'NIFTY', horizon: '30m', asOf: new Date('2026-10-21T05:10:00Z'), p: 0.97, regime: 'ACTIVE', outcomeBig: true, outcomeQuality: 'ok', outcomeRangeBp: 30, outcomeThresholdBp: 20 },
+    ];
+    const { svc, stored, repo, sources } = make();
+    // Only S's window (IST midnight of 2026-10-21) has these rows; older sessions have none.
+    (sources.mbmPredictions as jest.Mock).mockImplementation(async (from: Date) => (from.toISOString() === '2026-10-20T18:30:00.000Z' ? mbm : []));
+    await svc.run(NOW);
+    const rel = stored.filter((r) => r.sessionDate === '2026-10-21' && r.kind === 'MBM_RELATIVE');
+    expect(rel.map((r) => [r.refId, r.correct])).toEqual([['r1', true], ['r2', false]]);
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { byKind: Record<string, unknown>; skill: Record<string, { session: { n: number; verdict: string } }>; notable: Array<{ kind: string }> } }];
+    expect(finish[1].summary.byKind.MBM_RELATIVE).toMatchObject({ n: 2, right: 1, wrong: 1 });
+    expect(finish[1].summary.skill.MBM_RELATIVE.session).toMatchObject({ n: 2, verdict: 'NOT_TESTABLE' });
+    expect(finish[1].summary.notable.every((x) => x.kind !== 'MBM_RELATIVE')).toBe(true);
+  });
+
   it('is idempotent: a re-run upserts the same (kind, refId) rows', async () => {
     const { svc, stored } = make();
     await svc.run(NOW);

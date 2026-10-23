@@ -42,13 +42,15 @@ import { STOCK_MOVE_WATCH, type BigMoveWatchSource } from '../../stock-move/stoc
 import { TRADE_SETUPS_REPORT, type TradeSetupsReportSource } from '../../trade-setup/services/trade-setup.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { SESSION_TICKS } from '../../mbm/domain/chain-snapshot';
+import { mbmHeadline, normLine, type RelativeHorizon } from '../../mbm/domain/relative-reading';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
   behaviour(instrument: string): Promise<{
     status: 'ok' | 'stale' | 'absent';
     asOf?: string | null;
-    horizons?: Record<string, { p: number; regime: string; q25Bp: number | null; q75Bp: number | null }>;
+    horizons?: Record<string, RelativeHorizon & { q25Bp: number | null; q75Bp: number | null }>;
+    spot?: number | null;
   }>;
 }
 
@@ -263,7 +265,11 @@ export class NightReportService {
     const b = await this.moodSource.behaviour('NIFTY');
     const horizons: MoodView['horizons'] = {};
     for (const [k, h] of Object.entries(b.horizons ?? {})) {
-      horizons[k] = { p: h.p, regime: h.regime, q25Bp: h.q25Bp ?? null, q75Bp: h.q75Bp ?? null };
+      horizons[k] = {
+        p: h.p, regime: h.regime, q25Bp: h.q25Bp ?? null, q75Bp: h.q75Bp ?? null, q50Bp: h.q50Bp ?? null,
+        relRatio: h.relRatio ?? null, relLabel: h.relLabel ?? null, refRangeBp: h.refRangeBp ?? null,
+        headline: mbmHeadline(k, h, b.spot ?? null), norm: normLine(h),
+      };
     }
     return { status: b.status, asOf: b.asOf ?? null, horizons };
   }

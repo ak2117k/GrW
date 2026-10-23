@@ -10,6 +10,7 @@ import {
   pickNightVerdicts,
   scoreLiveExit,
   scoreMbmPrediction,
+  scoreMbmRelative,
   scoreNewsIdea,
   scoreOvernightVerdict,
   scoreScorecardFactors,
@@ -19,7 +20,7 @@ import {
   type ScorecardRow,
 } from '../domain/scorers';
 import { buildSummary, topMisses } from '../domain/summary';
-import { probabilitySkill } from '../domain/skill';
+import { probabilitySkill, relativeSkill } from '../domain/skill';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -120,10 +121,15 @@ export class SelfReviewRunService {
       const summary = buildSummary(S, sessionRows, history.filter((h) => h.kind !== 'STOCK_MOVE'), sessions);
       await this.soft('MBM skill', errors, async () => {
         const mbm = await this.repo.results({ sessions, kinds: ['MBM_PREDICTION'] }, 20_000);
+        const rel = await this.repo.results({ sessions, kinds: ['MBM_RELATIVE'] }, 20_000);
         summary.skill = {
           MBM_PREDICTION: {
             session: probabilitySkill(sessionRows.filter((r) => r.kind === 'MBM_PREDICTION')),
             rolling20: probabilitySkill(mbm),
+          },
+          MBM_RELATIVE: {
+            session: relativeSkill(sessionRows.filter((r) => r.kind === 'MBM_RELATIVE')),
+            rolling20: relativeSkill(rel),
           },
         };
         return [];
@@ -200,9 +206,11 @@ export class SelfReviewRunService {
     );
     out.push(...(await this.soft('NEWS_IDEA', errors, () => this.newsIdeas(s, b.openAt, lookFrom, inS))));
     out.push(
-      ...(await this.soft('MBM_PREDICTION', errors, async () =>
-        (await this.sources.mbmPredictions(b.midnight, new Date(b.midnight.getTime() + DAY_MS))).map((r) => scoreMbmPrediction({ ...r, sessionDate: s })),
-      )),
+      ...(await this.soft('MBM_PREDICTION', errors, async () => {
+        const rows = (await this.sources.mbmPredictions(b.midnight, new Date(b.midnight.getTime() + DAY_MS))).map((r) => ({ ...r, sessionDate: s }));
+        // The same rows judge the relative reading (MBM_RELATIVE) where they carry one.
+        return [...rows.map(scoreMbmPrediction), ...rows.map(scoreMbmRelative).filter((d): d is VerificationDraft => d !== null)];
+      })),
     );
     out.push(...(await this.soft('STOCK_MOVE', errors, () => this.stockMoves(s, b.closeAt))));
     // Outcomes are filled by the trade-setup module's 16:15 IST job, before this run.

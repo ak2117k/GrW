@@ -133,7 +133,10 @@ export class VerificationSourcesRepository {
   async mbmPredictions(from: Date, to: Date) {
     const rows = await this.prisma.mbmPrediction.findMany({
       where: { outcomeBig: { not: null }, asOf: { gte: from, lt: to } },
-      select: { id: true, instrument: true, horizon: true, asOf: true, p: true, regime: true, outcomeBig: true, outcomeQuality: true, outcomeRangeBp: true, outcomeThresholdBp: true },
+      select: {
+        id: true, instrument: true, horizon: true, asOf: true, p: true, regime: true, outcomeBig: true, outcomeQuality: true, outcomeRangeBp: true, outcomeThresholdBp: true,
+        q50Bp: true, relRatio: true, relLabel: true, refRangeBp: true,
+      },
       take: 2000,
     });
     return rows.map((r) => ({ ...r, id: String(r.id), outcomeBig: r.outcomeBig === true }));

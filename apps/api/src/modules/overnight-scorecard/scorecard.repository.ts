@@ -46,6 +46,18 @@ const SC_SELECT = {
 } as const;
 
 /** Every DB read/write of the scorecard module. */
+/** One stored MBM horizon for the after-hours mood (the relative fields are null on rows before 2026-10-23). */
+export interface StoredMoodHorizon {
+  p: number;
+  regime: string;
+  q25Bp?: number | null;
+  q50Bp?: number | null;
+  q75Bp?: number | null;
+  relRatio?: number | null;
+  relLabel?: string | null;
+  refRangeBp?: number | null;
+}
+
 @Injectable()
 export class ScorecardRepository {
   constructor(private readonly prisma: PrismaService) {}
@@ -95,7 +107,7 @@ export class ScorecardRepository {
     instrument: string,
     now: Date,
     maxAgeMs: number,
-  ): Promise<{ asOf: Date; horizons: Record<string, { p: number; regime: string }> } | null> {
+  ): Promise<{ asOf: Date; horizons: Record<string, StoredMoodHorizon>; spot?: number | null } | null> {
     const newest = await this.prisma.mbmPrediction.findFirst({
       where: { instrument, asOf: { gte: new Date(now.getTime() - maxAgeMs), lte: now } },
       orderBy: { asOf: 'desc' },
@@ -105,12 +117,25 @@ export class ScorecardRepository {
     const rows = await this.prisma.mbmPrediction.findMany({
       where: { instrument, asOf: { gte: new Date(newest.asOf.getTime() - 12 * 3600_000), lte: newest.asOf } },
       orderBy: { asOf: 'desc' },
-      select: { horizon: true, p: true, regime: true },
+      select: { horizon: true, p: true, regime: true, q25Bp: true, q50Bp: true, q75Bp: true, relRatio: true, relLabel: true, refRangeBp: true },
       take: 500,
     });
-    const horizons: Record<string, { p: number; regime: string }> = {};
-    for (const r of rows) if (!horizons[r.horizon]) horizons[r.horizon] = { p: r.p, regime: r.regime };
-    return Object.keys(horizons).length ? { asOf: newest.asOf, horizons } : null;
+    const horizons: Record<string, StoredMoodHorizon> = {};
+    for (const r of rows) {
+      if (horizons[r.horizon]) continue;
+      horizons[r.horizon] = {
+        p: r.p, regime: r.regime, q25Bp: r.q25Bp, q50Bp: r.q50Bp, q75Bp: r.q75Bp,
+        relRatio: r.relRatio, relLabel: r.relLabel, refRangeBp: r.refRangeBp,
+      };
+    }
+    if (!Object.keys(horizons).length) return null;
+    // The spot the prediction saw: the instrument's last 1m close before its as-of (points conversion).
+    const bar = await this.prisma.mbmBar1m.findFirst({
+      where: { series: instrument, ts: { lt: newest.asOf, gte: new Date(newest.asOf.getTime() - 15 * 60_000) } },
+      orderBy: { ts: 'desc' },
+      select: { close: true },
+    });
+    return { asOf: newest.asOf, horizons, spot: bar?.close ?? null };
   }
 
   /** Newest `limit` bars of `timeframe` ('1d' | '15m') from `candles`, oldest first. */

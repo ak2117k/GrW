@@ -2919,7 +2919,7 @@ model VerificationResult {
   id          String   @id @default(cuid())
   runId       String   @map("run_id")
   sessionDate String   @map("session_date") // IST 'YYYY-MM-DD' of the session whose outcome is scored
-  kind        String // SCORECARD_FACTOR | SCORECARD_TOTAL | OVERNIGHT_VERDICT | LIVE_EXIT | NEWS_IDEA | MBM_PREDICTION
+  kind        String // SCORECARD_FACTOR | SCORECARD_TOTAL | OVERNIGHT_VERDICT | LIVE_EXIT | NEWS_IDEA | MBM_PREDICTION | MBM_RELATIVE | ...
   refId       String   @map("ref_id") // id of the scored row (scorecard id[:factor], verdict id, ai_exit id, idea id, prediction id)
   subject     String? // factor name, verdict value, horizon …
   symbol      String?

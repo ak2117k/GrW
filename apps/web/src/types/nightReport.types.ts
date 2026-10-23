@@ -157,6 +157,15 @@ export interface MoodHorizon {
   regime: string;
   q25Bp: number | null;
   q75Bp: number | null;
+  q50Bp?: number | null;
+  /** Relative reading (2026-10-23): the model's median range vs the last 10 sessions at this minute. */
+  relRatio?: number | null;
+  relLabel?: 'QUIETER' | 'NORMAL' | 'BUSIER' | 'MUCH_BUSIER' | string | null;
+  refRangeBp?: number | null;
+  /** "Next 30 min: ~80 pts (60–105) · busier than recent days" (API-formatted; null without a range). */
+  headline?: string | null;
+  /** "vs 60-day norm: BIG / ACTIVE p=0.97" — the model's own call. */
+  norm?: string;
 }
 
 export interface MoodView {

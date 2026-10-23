@@ -105,6 +105,26 @@ describe('NightReportView', () => {
     expect(html).not.toContain('load this section');
   });
 
+  it('mood: leads with the relative headline and keeps the 60-day call as the norm line', () => {
+    const html = render({
+      ...report,
+      mood: {
+        status: 'ok',
+        asOf: '2026-10-23T08:00:00Z',
+        horizons: {
+          '30m': {
+            p: 0.97, regime: 'ACTIVE', q25Bp: 24, q75Bp: 42, q50Bp: 32, relRatio: 1.52, relLabel: 'BUSIER', refRangeBp: 21,
+            headline: 'Next 30 min: ~80 pts (60–105) · busier than recent days', norm: 'vs 60-day norm: BIG / ACTIVE p=0.97',
+          },
+          '60m': { p: 0.9, regime: 'ACTIVE', q25Bp: 30, q75Bp: 60 }, // a pre-2026-10-23 reading: old card
+        },
+      },
+    });
+    expect(html).toContain('Next 30 min: ~80 pts (60–105) · busier than recent days');
+    expect(html).toContain('vs 60-day norm: BIG / ACTIVE p=0.97');
+    expect(html).toContain('P(big move) 90%');
+  });
+
   it('shelves HOLDINGs in a collapsed section at the bottom, compact and without a verdict badge', () => {
     const rows = report.positions as PositionRow[];
     const option = rows[0];

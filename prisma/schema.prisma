@@ -3120,6 +3120,82 @@ model AccountMarginSnapshot {
 }
 
 // ============================================
+// Telegram signal trading — stream X (signal-trader)
+// docs/superpowers/plans/2026-10-23-telegram-signals-contract.md
+// ============================================
+
+/// One evaluation of one parsed Telegram signal (contract §X). Inserted as PENDING before any work:
+/// UNIQUE(signalId, evaluation) is the claim, so a duplicate `signal.ready` evaluates once. A later
+/// corroborating re-emit may add evaluation n+1 only to upgrade a low-confidence SKIP.
+/// No FK to trade_signals / signal_clusters (stream S owns those).
+model SignalDecision {
+  id          String    @id @default(cuid())
+  signalId    String    @map("signal_id")
+  evaluation  Int       @default(1)
+  clusterId   String?   @map("cluster_id")
+  channelId   String?   @map("channel_id")
+  userId      String?   @map("user_id")
+  underlying  String?
+  decidedAt   DateTime  @default(now()) @map("decided_at") @db.Timestamptz(6)
+  mode        String // shadow | live
+  status      String    @default("PENDING") // PENDING | DONE
+  agreeCount  Int?      @map("agree_count")
+  conflict    Boolean?
+  /// Every hard check, in order: [{name, ok, required, detail}]
+  gate        Json?
+  /// {verdict, confidence, reasons[], entry, sl, targets, lots, packet, latencyMs} or {unavailable}
+  judge       Json?
+  /// The resolved contract + sizing: {exchange, token, tradingsymbol, lotSize, tickSize, lots, qty, limitPrice, sl, targets, riskRupees}
+  plan        Json?
+  decision    String? // TAKE | SKIP
+  skipReason  String?   @map("skip_reason")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([signalId, evaluation])
+  @@index([decidedAt])
+  @@index([clusterId])
+  @@map("signal_decisions")
+}
+
+/// The live entry order for one TAKE decision. Inserted CLAIMED before the broker call:
+/// UNIQUE(decisionId) makes placement at-most-once. Always a LIMIT order.
+model SignalOrder {
+  id            String    @id @default(cuid())
+  decisionId    String    @unique @map("decision_id")
+  userId        String    @map("user_id")
+  exchange      String
+  token         String
+  tradingsymbol String
+  qty           Int
+  lots          Int?
+  side          String // BUY | SELL
+  orderType     String    @map("order_type") // LIMIT (never MARKET)
+  productType   String    @map("product_type")
+  limitPrice    Float     @map("limit_price")
+  sl            Float
+  targets       Json
+  orderTag      String    @map("order_tag")
+  brokerOrderId String?   @map("broker_order_id")
+  /// CLAIMED | PLACED | FILLED | PARTIAL | REJECTED | CANCELLED | UNCERTAIN | FAILED
+  status        String
+  statusReason  String?   @map("status_reason")
+  fillPrice     Float?    @map("fill_price")
+  fillQty       Int?      @map("fill_qty")
+  filledAt      DateTime? @map("filled_at") @db.Timestamptz(6)
+  trackerId     String?   @map("tracker_id")
+  /// The synthetic sentinel_verdicts row carrying the signal SL as an exitTrigger.
+  slVerdictId   String?   @map("sl_verdict_id")
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@index([status])
+  @@index([token, status])
+  @@map("signal_orders")
+}
+
+// ============================================
 // Signal intake (stream S, contract 2026-10-23): Telegram tips → TradeSignal + SignalCluster.
 // No FK to telegram_messages / telegram_channels (stream R owns those): ids are kept as plain text.
 // ============================================

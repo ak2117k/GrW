@@ -15,7 +15,8 @@ export type GuardedEntry =
   | 'auto-execution'
   | 'auto-trade'
   | 'universe-scanner'
-  | 'trade-engine';
+  | 'trade-engine'
+  | 'signal-trader';
 
 export interface KillSwitchReadPort {
   /** This user's core kill switch is in force on. */

@@ -132,6 +132,8 @@ export class SentinelVerdictRepository {
               { triggeredBy: { array_contains: ['OVERNIGHT_REVIEW'] } },
               { triggeredBy: { array_contains: ['PRE_OPEN_REVIEW'] } },
               { triggeredBy: { array_contains: ['PRE_OPEN_CHECK'] } },
+              // signal-trader's entry-plan row (carries the signal SL as an exitTrigger): a plan, not a look.
+              { triggeredBy: { array_contains: ['SIGNAL_ENTRY'] } },
             ],
           }
         : { trackerId },

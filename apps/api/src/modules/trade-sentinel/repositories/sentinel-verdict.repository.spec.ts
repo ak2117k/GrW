@@ -131,6 +131,8 @@ describe('SentinelVerdictRepository — the live cycle never mistakes an overnig
           { triggeredBy: { array_contains: ['OVERNIGHT_REVIEW'] } },
           { triggeredBy: { array_contains: ['PRE_OPEN_REVIEW'] } },
           { triggeredBy: { array_contains: ['PRE_OPEN_CHECK'] } },
+          // signal-trader's entry-plan row (the signal SL as an exitTrigger) is not a live look either.
+          { triggeredBy: { array_contains: ['SIGNAL_ENTRY'] } },
         ],
       },
       orderBy: { createdAt: 'desc' },

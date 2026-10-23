@@ -269,6 +269,7 @@ import { MARKET_EVENTS } from './ports/events.port';
     NewsWatchBook,
     NewsWakeService,
   ],
-  exports: [SentinelCycleService, SentinelRunnerService],
+  // SentinelChartContextAdapter + NEWS_SHIM: read-only context blocks for the signal-trader judge.
+  exports: [SentinelCycleService, SentinelRunnerService, SentinelChartContextAdapter, NEWS_SHIM],
 })
 export class TradeSentinelModule {}

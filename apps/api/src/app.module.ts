@@ -58,6 +58,7 @@ import { TelegramReaderModule } from './modules/telegram-reader/telegram-reader.
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { HealthModule } from './modules/health/health.module';
 import { TradeCoreModule } from './modules/trade-core/trade-core.module';
+import { SignalTraderModule } from './modules/signal-trader/signal-trader.module';
 
 @Module({
   imports: [
@@ -293,6 +294,10 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
     // selections. M2: Risk Wall, per-user limits, persistent kill switch (its
     // "on" also calls the silos' square-off paths). Paper only; nothing trades until M5.
     TradeCoreModule,
+
+    // Telegram signal TRADING (stream X): signal.ready → hard-cap gate → AI judge → LIMIT entry.
+    // SIGNAL_TRADING=off|shadow|live (default shadow: no order). Live also needs LIVE_TRADING_ENABLED.
+    SignalTraderModule,
 
     // Liveness + keep-warm probe (/healthz) — pinged by the keep-warm cron so
     // the free-tier stack rarely cold-starts and logins stay fast.

@@ -424,15 +424,6 @@ function UserAccountHub() {
         <ConnectAngelOne />
       </SectionCard>
 
-      {/* Owner only (server-enforced): read chosen Telegram channels through the owner's own account. */}
-      <SectionCard
-        icon={<Send size={18} />}
-        title="Telegram signals"
-        description="Read up to 10 Telegram channels through your own Telegram account"
-      >
-        <TelegramSignalsSection />
-      </SectionCard>
-
       {/* Section 3: Consent & disclaimer */}
       <SectionCard
         icon={<FileText size={18} />}
@@ -675,6 +666,16 @@ function AdminSettings() {
         description="Connect your broker account to enable auto-execution"
       >
         <ConnectAngelOne />
+      </SectionCard>
+
+      {/* Owner only (server-enforced; the owner is an ADMIN): read chosen Telegram channels through the
+          owner's own account. It was first placed in UserAccountHub, which ADMINs never see. */}
+      <SectionCard
+        icon={<Send size={18} />}
+        title="Telegram signals"
+        description="Read up to 10 Telegram channels through your own Telegram account"
+      >
+        <TelegramSignalsSection />
       </SectionCard>
 
       {/* Section 1: Trading Configuration */}

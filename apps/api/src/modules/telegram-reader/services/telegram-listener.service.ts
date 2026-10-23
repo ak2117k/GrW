@@ -26,7 +26,8 @@ export function readerEnabled(raw: string | undefined): boolean {
 export const BACKOFF_MIN_MS = 5_000;
 export const BACKOFF_MAX_MS = 5 * 60_000;
 const WATCHDOG_MS = 60_000;
-const SUMMARY_MS = 60 * 60_000;
+/** Every 10 min, so a deaf listener shows quickly (2026-10-23: 28 quiet minutes were indistinguishable from no feed). */
+const SUMMARY_MS = 10 * 60_000;
 
 /** Exponential backoff for attempt n (0-based), capped. */
 export function backoffMs(attempt: number): number {
@@ -52,7 +53,9 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   private client: TgClient | null = null;
   private userId: string | null = null;
   private enabled = new Map<string, EnabledChannel>(); // tgChannelId -> channel
-  private counts = new Map<string, number>(); // channel title -> messages this hour
+  private counts = new Map<string, number>(); // channel title -> messages this period
+  /** Every update the client delivered this period, ticked channel or not — proves the feed is alive. */
+  private received = 0;
   private stateValue: ListenerState = 'idle';
   private lastError: string | null = null;
   private lastMessageAt: Date | null = null;
@@ -176,6 +179,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
 
   /** Persist, then emit. Public for tests. */
   async handle(m: TgIncomingMessage): Promise<void> {
+    this.received++;
     const ch = this.enabled.get(m.chatId);
     if (!ch) return;
     try {
@@ -233,12 +237,16 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     }
   }
 
-  /** One line per hour: messages per channel. Public for tests. */
+  /** One line per period: updates received (any chat) and stored messages per ticked channel. Public for tests. */
   logSummary(): string | null {
     if (this.stateValue !== 'listening' && this.counts.size === 0) return null;
     const parts = [...this.counts.entries()].map(([t, n]) => `${t}=${n}`);
-    const line = `telegram-reader: last hour ${parts.length ? parts.join(', ') : 'no messages'} (state ${this.stateValue})`;
+    const stored = [...this.counts.values()].reduce((a, b) => a + b, 0);
+    const line =
+      `telegram-reader: last 10 min received=${this.received} (any chat) stored=${stored} from ${this.enabled.size} ticked channel(s)` +
+      `${parts.length ? ': ' + parts.join(', ') : ''} (state ${this.stateValue})`;
     this.counts.clear();
+    this.received = 0;
     this.logger.log(line);
     return line;
   }

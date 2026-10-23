@@ -142,13 +142,17 @@ describe('TelegramListenerService', () => {
     expect(store.markStatus).toHaveBeenCalledWith('u1', 'revoked', 'AUTH_KEY_UNREGISTERED');
   });
 
-  it('hourly summary lists messages per channel then resets', async () => {
+  it('10-min summary counts every update received (any chat) and stored messages per ticked channel, then resets', async () => {
     const { svc } = build();
     await svc.start();
     await svc.handle(msg());
     await svc.handle(msg({ tgMessageId: 11, text: 'x' }));
-    expect(svc.logSummary()).toContain('Alpha=2');
-    expect(svc.logSummary()).toContain('no messages');
+    await svc.handle(msg({ chatId: '-100999', tgMessageId: 12, text: 'not ticked' }));
+    const first = svc.logSummary();
+    expect(first).toContain('received=3');
+    expect(first).toContain('stored=2');
+    expect(first).toContain('Alpha=2');
+    expect(svc.logSummary()).toContain('received=0 (any chat) stored=0');
   });
 
   it('flag parsing and backoff', () => {

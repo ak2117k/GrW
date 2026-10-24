@@ -3528,3 +3528,46 @@ model AdvisorChatTurn {
   @@index([userId, createdAt])
   @@map("advisor_chat_turns")
 }
+
+/// Research log (NOT a signal): every NIFTY S/R zone break the app's zone detector sees, the front-month
+/// futures OI around it, and the follow-through filled later — to re-test the OI-confirmed-break effect
+/// on unseen breaks (grw-mbm research/oi-pattern, 2026-10-23). Nothing in trading reads this table.
+model LevelBreakLog {
+  id              String    @id @default(cuid())
+  instrument      String // NIFTY
+  timeframe       String // 15m | 60m
+  direction       String // UP | DOWN
+  /// Break bar END (UTC) — the moment the break is known.
+  ts              DateTime  @db.Timestamptz(6)
+  /// The broken edge (resistance upper / support lower).
+  level           Float
+  zoneType        String    @map("zone_type") // resistance | support
+  zoneUpper       Float     @map("zone_upper")
+  zoneLower       Float     @map("zone_lower")
+  classification  String // STRONG | MEDIUM | WEAK
+  touchCount      Int       @map("touch_count")
+  /// Timeframe ATR(14) at the break.
+  atr             Float
+  /// Break bar close.
+  price           Float
+  /// nifty_oi_history FIVE_MINUTE front-month FUT.
+  futToken        String?   @map("fut_token")
+  futOiNow        Float?    @map("fut_oi_now")
+  futOi15mBefore  Float?    @map("fut_oi_15m_before")
+  futOiChange     Float?    @map("fut_oi_change")
+  priceAt15m      Float?    @map("price_at_15m")
+  priceAt60m      Float?    @map("price_at_60m")
+  priceEod        Float?    @map("price_eod")
+  /// Signed in the break direction (positive = followed through), points.
+  move15mPts      Float?    @map("move_15m_pts")
+  move60mPts      Float?    @map("move_60m_pts")
+  moveEodPts      Float?    @map("move_eod_pts")
+  mfeEodPts       Float?    @map("mfe_eod_pts")
+  maeEodPts       Float?    @map("mae_eod_pts")
+  outcomeFilledAt DateTime? @map("outcome_filled_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([instrument, timeframe, ts, direction, level])
+  @@index([outcomeFilledAt, ts])
+  @@map("level_break_log")
+}

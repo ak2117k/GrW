@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState } from 'react';
+import { useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Code2,
@@ -8,7 +8,6 @@ import {
   FlaskConical,
   Trash2,
   FolderOpen,
-  MessageSquare,
 } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import {
@@ -23,7 +22,6 @@ import { ValidationPanel } from '@/components/strategy/ValidationPanel';
 import { StrategyTemplates } from '@/components/strategy/StrategyTemplates';
 import { StrategyAssistant } from '@/components/strategy/StrategyAssistant';
 import { StrategyRiskSettings } from '@/components/strategy/StrategyRiskSettings';
-import { StrategyChat } from '@/components/strategy/StrategyChat';
 
 // Intervals the data feed serves (no 4h candles from Angel One).
 const TIMEFRAMES = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '1d'];
@@ -33,7 +31,6 @@ export default function StrategyBuilderPage() {
   const store = useStrategyBuilderStore();
   const navigate = useNavigate();
   const updateBacktestConfig = useBacktestStore((s) => s.updateConfig);
-  const [chatOpen, setChatOpen] = useState(false);
 
   /**
    * Quick Backtest pre-fills the backtest page with whatever we know from
@@ -142,16 +139,6 @@ export default function StrategyBuilderPage() {
               Visual
             </button>
           </div>
-
-          {/* Chat toggle */}
-          <button
-            onClick={() => setChatOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg border border-[var(--color-accent-purple,#a78bfa)]/40 bg-[var(--color-accent-purple,#a78bfa)]/10 px-3 py-1.5 text-xs font-medium text-[var(--color-accent-purple,#a78bfa)] hover:bg-[var(--color-accent-purple,#a78bfa)]/20 transition-colors"
-            title="Open chat with Claude"
-          >
-            <MessageSquare size={14} />
-            Ask Claude
-          </button>
         </div>
       </div>
 
@@ -350,26 +337,6 @@ export default function StrategyBuilderPage() {
           )}
         </div>
       </div>
-
-      {/* Chat drawer (slides in from the right) */}
-      <StrategyChat
-        open={chatOpen}
-        onClose={() => setChatOpen(false)}
-        sectionKey="strategy-chat"
-        title="Strategy Chat"
-        placeholder="Ask about your strategy..."
-        snapshot={{
-          mode: store.mode,
-          name: store.name || '(untitled)',
-          description: store.description || '',
-          timeframe: store.timeframe,
-          segment: store.segment,
-          code: store.mode === 'script' ? store.code : '',
-          indicators: store.mode === 'visual' ? store.indicators : [],
-          entryRules: store.mode === 'visual' ? store.entryRules : [],
-          exitRules: store.mode === 'visual' ? store.exitRules : [],
-        }}
-      />
     </div>
   );
 }

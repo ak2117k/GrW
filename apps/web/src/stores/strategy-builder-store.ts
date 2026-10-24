@@ -52,6 +52,87 @@ export interface SavedStrategy {
   segment: string;
   createdAt: string;
   updatedAt: string;
+  /** Visual-mode / settings snapshot saved alongside the strategy (opaque to the API). */
+  builder?: SavedBuilderState;
+}
+
+/** Builder-only state round-tripped through the API's free-form `parameters` object. */
+export interface SavedBuilderState {
+  instrument?: string;
+  settings?: StrategySettings;
+  indicators?: IndicatorConfig[];
+  entryRules?: RuleConfig[];
+  exitRules?: RuleConfig[];
+}
+
+/**
+ * Wire contract of `POST /api/strategies/save` (UserStrategyDto, apps/api
+ * signal-generator). The API names the editor mode `type` and takes arrays for
+ * timeframes/segments. The visual builder's indicator/rule shapes differ from
+ * the API's validated visual DTO, so they ride in the free-form `parameters`
+ * object rather than the strictly-validated `indicators`/`entryRules` fields.
+ */
+export interface StrategySavePayload {
+  id?: string;
+  name: string;
+  description?: string;
+  code?: string;
+  type: 'script' | 'visual';
+  timeframes: string[];
+  segments: string[];
+  parameters: { builder: SavedBuilderState };
+}
+
+export function toSavePayload(s: {
+  id?: string;
+  name: string;
+  description: string;
+  code: string;
+  mode: 'script' | 'visual';
+  timeframe: string;
+  segment: string;
+  instrument?: string;
+  settings?: StrategySettings;
+  indicators?: IndicatorConfig[];
+  entryRules?: RuleConfig[];
+  exitRules?: RuleConfig[];
+}): StrategySavePayload {
+  return {
+    ...(s.id ? { id: s.id } : {}),
+    name: s.name.trim(),
+    description: s.description,
+    code: s.code,
+    type: s.mode,
+    timeframes: s.timeframe ? [s.timeframe] : [],
+    segments: s.segment ? [s.segment] : [],
+    parameters: {
+      builder: {
+        instrument: s.instrument,
+        settings: s.settings,
+        indicators: s.indicators,
+        entryRules: s.entryRules,
+        exitRules: s.exitRules,
+      },
+    },
+  };
+}
+
+/** Map one row of `GET /api/strategies` (UserStrategyDto) to the builder's list shape. */
+export function fromApiStrategy(row: Record<string, any>): SavedStrategy {
+  const mode: 'script' | 'visual' = row?.type === 'visual' || row?.mode === 'visual' ? 'visual' : 'script';
+  const builder = row?.parameters?.builder;
+  return {
+    id: String(row?.id ?? ''),
+    name: String(row?.name ?? ''),
+    description: String(row?.description ?? ''),
+    code: String(row?.code ?? ''),
+    mode,
+    timeframe: String(row?.timeframes?.[0] ?? row?.timeframe ?? '15m'),
+    segment: String(row?.segments?.[0] ?? row?.segment ?? 'OPTIONS'),
+    createdAt: String(row?.createdAt ?? ''),
+    updatedAt: String(row?.updatedAt ?? ''),
+    ...(builder && typeof builder === 'object' ? { builder } : {}),
+  };
 }
 
 // ---- Indicator definitions ----
@@ -402,7 +483,7 @@ export const useStrategyBuilderStore = create<StrategyBuilderState>((set, get) =
 
       // Try server-side validation (graceful fallback)
       try {
-        const res = await api.post('/strategies/validate', { code });
+        const res = await api.post('/strategies/validate', { code, type: 'script' });
         const serverResult: ParseResult = res.data?.data ?? res.data;
         set({ validationResult: serverResult, isValidating: false });
       } catch {
@@ -422,21 +503,14 @@ export const useStrategyBuilderStore = create<StrategyBuilderState>((set, get) =
   },
 
   saveStrategy: async () => {
-    const { code, name, description, timeframe, segment, mode } = get();
-    if (!name.trim()) {
+    const st = get();
+    if (!st.name.trim()) {
       toast.error('Strategy name is required');
       return;
     }
     set({ isSaving: true });
     try {
-      await api.post('/strategies', {
-        name,
-        description,
-        code,
-        mode,
-        timeframe,
-        segment,
-      });
+      await api.post('/strategies/save', toSavePayload(st));
       toast.success('Strategy saved');
       get().fetchSavedStrategies();
     } catch {
@@ -467,7 +541,8 @@ export const useStrategyBuilderStore = create<StrategyBuilderState>((set, get) =
     set({ isLoadingStrategies: true });
     try {
       const res = await api.get('/strategies');
-      const list: SavedStrategy[] = res.data?.data ?? res.data ?? [];
+      const rows: unknown = res.data?.data ?? res.data ?? [];
+      const list = Array.isArray(rows) ? rows.map((r) => fromApiStrategy(r as Record<string, any>)) : [];
       set({ savedStrategies: list, isLoadingStrategies: false });
     } catch {
       set({ isLoadingStrategies: false });
@@ -494,6 +569,11 @@ export const useStrategyBuilderStore = create<StrategyBuilderState>((set, get) =
       timeframe: strategy.timeframe,
       segment: strategy.segment,
       mode: strategy.mode,
+      ...(strategy.builder?.instrument ? { instrument: strategy.builder.instrument } : {}),
+      ...(strategy.builder?.settings ? { settings: strategy.builder.settings } : {}),
+      ...(strategy.builder?.indicators ? { indicators: strategy.builder.indicators } : {}),
+      ...(strategy.builder?.entryRules ? { entryRules: strategy.builder.entryRules } : {}),
+      ...(strategy.builder?.exitRules ? { exitRules: strategy.builder.exitRules } : {}),
       validationResult: null,
     });
   },

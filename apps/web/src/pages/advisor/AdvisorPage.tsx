@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
-import { Brain, FileText, RefreshCw } from 'lucide-react';
+import { Brain, FileText, MessageSquarePlus, RefreshCw } from 'lucide-react';
 import { useAdvisor } from '@/hooks/useAdvisor';
 import { ChatMessage } from '@/components/ai/ChatMessage';
 import { ChatInput } from '@/components/ai/ChatInput';
@@ -18,6 +18,7 @@ export default function AdvisorPage() {
     isTyping,
     sendMessage,
     generateReport,
+    newChat,
   } = useAdvisor();
 
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -59,6 +60,16 @@ export default function AdvisorPage() {
           </div>
         </div>
 
+        <div className="flex items-center gap-2">
+        <button
+          onClick={() => newChat()}
+          disabled={isTyping}
+          title="Start a new chat (the advisor forgets this conversation)"
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border border-[var(--color-border-subtle)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] disabled:opacity-50 transition-all"
+        >
+          <MessageSquarePlus size={16} />
+          New chat
+        </button>
         <button
           onClick={handleGenerateReport}
           disabled={generatingReport || isLoading}
@@ -76,6 +87,7 @@ export default function AdvisorPage() {
           )}
           {generatingReport ? 'Generating...' : 'Generate Report'}
         </button>
+        </div>
       </div>
 
       {/* Main content: Two-column layout */}

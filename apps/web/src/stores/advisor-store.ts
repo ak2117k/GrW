@@ -57,6 +57,8 @@ interface AdvisorState {
   fetchSuggestions: () => Promise<void>;
   generateReport: () => Promise<void>;
   clearMessages: () => void;
+  /** "New chat": clears the server-side advisor memory and the visible thread. */
+  newChat: () => Promise<void>;
 }
 
 let messageIdCounter = 0;
@@ -172,4 +174,13 @@ export const useAdvisorStore = create<AdvisorState>((set, get) => ({
   },
 
   clearMessages: () => set({ messages: [] }),
+
+  newChat: async () => {
+    try {
+      await api.delete('/advisor/conversation');
+    } catch (err) {
+      console.error('Failed to clear advisor conversation:', err);
+    }
+    set({ messages: [] });
+  },
 }));

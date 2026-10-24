@@ -16,6 +16,7 @@ import {
   NightReportService,
   type NightReportOptions,
 } from './services/night-report.service';
+import { NightReportSummaryService } from './services/night-report-summary.service';
 
 /**
  * Night report: one read-only aggregation of the night since the last NSE close
@@ -38,6 +39,9 @@ import {
       }),
     },
     NightReportService,
+    NightReportSummaryService,
   ],
+  // Read-only digest for the AI advisor (ai-assist). Nothing in this module imports ai-assist.
+  exports: [NightReportSummaryService],
 })
 export class NightReportModule {}

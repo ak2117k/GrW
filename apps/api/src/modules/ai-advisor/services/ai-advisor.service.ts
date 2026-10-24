@@ -68,6 +68,12 @@ export class AIAdvisorService {
       'http://localhost:5000';
   }
 
+  /** "New chat": clears the caller's server-side advisor memory (own rows only). */
+  async clearConversation(userId: string): Promise<{ cleared: number }> {
+    if (!this.claudeChat) return { cleared: 0 };
+    return this.claudeChat.clearConversation(userId);
+  }
+
   /**
    * Answer an advisor question.
    *

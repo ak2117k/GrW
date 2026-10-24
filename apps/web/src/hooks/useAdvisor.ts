@@ -16,6 +16,7 @@ export function useAdvisor() {
   const sendMessage = useAdvisorStore((s) => s.sendMessage);
   const generateReport = useAdvisorStore((s) => s.generateReport);
   const clearMessages = useAdvisorStore((s) => s.clearMessages);
+  const newChat = useAdvisorStore((s) => s.newChat);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -45,5 +46,6 @@ export function useAdvisor() {
     sendMessage,
     generateReport,
     clearMessages,
+    newChat,
   };
 }

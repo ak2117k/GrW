@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
+import { NightReportSummaryService } from '../night-report/services/night-report-summary.service';
+import { AdvisorMemoryRepository, renderAdvisorHistory } from './advisor-memory';
 import { ADVISOR_SYSTEM_PROMPT, advisorUserTurn, classifyAdvisorQuestion } from './advisor-guardrail';
 import { AssistContextService, renderAssistContext } from './assist-context.service';
 import { AssistLlmService, type AssistPrincipal } from './assist-llm.service';
@@ -30,7 +32,14 @@ export class AdvisorChatService {
   constructor(
     private readonly llm: AssistLlmService,
     private readonly context: AssistContextService,
+    private readonly memory: AdvisorMemoryRepository,
+    @Optional() private readonly nightReport?: NightReportSummaryService,
   ) {}
+
+  /** "New chat": forget the user's advisor conversation. */
+  async clearConversation(userId: string): Promise<{ cleared: number }> {
+    return { cleared: await this.memory.clear(userId) };
+  }
 
   /** Layer (a): a refusal answer when the question is blocked, else null. */
   guard(question: string): AdvisorChatAnswer | null {
@@ -44,13 +53,21 @@ export class AdvisorChatService {
     if (blocked) return blocked;
     if (!user || !this.llm.allowed(user)) return null;
     try {
-      const ctx = await this.context.forUser(user.userId);
+      const [ctx, history, night] = await Promise.all([
+        this.context.forUser(user.userId),
+        this.memory.recent(user.userId),
+        this.nightReport ? this.nightReport.summaryFor(user.userId) : Promise.resolve(null),
+      ]);
       const reply = await this.llm.complete(
         'assist.advisor',
         ADVISOR_SYSTEM_PROMPT,
-        advisorUserTurn(question, renderAssistContext(ctx)),
+        advisorUserTurn(question, renderAssistContext(ctx), {
+          nightReport: night,
+          history: history.length ? renderAdvisorHistory(history) : null,
+        }),
         { userId: user.userId },
       );
+      if (!reply.offTopic) await this.memory.append(user.userId, question, reply.answer);
       return {
         answer: reply.answer,
         confidence: reply.confidence,

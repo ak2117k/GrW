@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Delete,
   Body,
   Param,
   Query,
@@ -35,6 +36,13 @@ export class AIAdvisorController {
       dto.question,
       user ? { userId: user.userId, role: user.role } : undefined,
     );
+  }
+
+  @Delete('conversation')
+  @ApiOperation({ summary: 'New chat: forget the advisor conversation memory of the caller' })
+  async clearConversation(@CurrentUser() user?: AuthenticatedUser) {
+    if (!user) return { cleared: 0 };
+    return this.advisorService.clearConversation(user.userId);
   }
 
   @Get('insights')

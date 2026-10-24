@@ -3427,3 +3427,16 @@ model ChannelInfo {
   @@index([outcomeFilledAt, postedAt])
   @@map("channel_infos")
 }
+
+/// AI advisor multi-turn memory (owner's Claude chat). Last few turns per user, trimmed server-side;
+/// cleared by "New chat". Read-only context for the advisor; never drives trading.
+model AdvisorChatTurn {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  role      String // user | assistant
+  content   String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt])
+  @@map("advisor_chat_turns")
+}

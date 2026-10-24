@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { MbmPredictionRow } from '../domain/model-scorecard.logic';
 import type { NewsRow, VerdictRow } from '../domain/night-report.logic';
+import type { ChannelInfoAccuracy, InfoRowLite } from '../../signal-intake/domain/sentiment';
 
 export interface TrackerRow {
   id: string;
@@ -63,6 +64,8 @@ export interface NightReportStore {
   /** One instrument's MBM predictions with `asOf` in [from, to), oldest first. */
   mbmPredictionsBetween(instrument: string, from: Date, to: Date): Promise<MbmPredictionRow[]>;
   lastOvernightReviewAt(userId: string): Promise<Date | null>;
+  /** Telegram INFO rows posted in [from, to] with channel titles, and the latest self-review byChannel (INFO accuracy). */
+  channelInfosBetween?(from: Date, to: Date): Promise<{ rows: InfoRowLite[]; accuracy: Record<string, ChannelInfoAccuracy> | null }>;
 }
 
 export const NIGHT_REPORT_STORE = Symbol('NIGHT_REPORT_STORE');
@@ -193,5 +196,23 @@ export class NightReportRepository implements NightReportStore {
       select: { createdAt: true },
     });
     return r?.createdAt ?? null;
+  }
+
+  async channelInfosBetween(from: Date, to: Date): Promise<{ rows: InfoRowLite[]; accuracy: Record<string, ChannelInfoAccuracy> | null }> {
+    const rows = await this.prisma.channelInfo.findMany({
+      where: { postedAt: { gte: from, lte: to } },
+      select: { messageId: true, channelId: true, postedAt: true, items: true },
+      orderBy: { postedAt: 'desc' },
+      take: 300,
+    });
+    const ids = [...new Set(rows.map((x) => x.channelId))];
+    const channels = ids.length ? await this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true } }) : [];
+    const title = new Map(channels.map((c) => [c.id, c.title]));
+    const run = await this.prisma.selfReviewRun.findFirst({ where: { status: 'DONE' }, orderBy: { startedAt: 'desc' }, select: { summary: true } });
+    const byChannel = (run?.summary as { byChannel?: unknown } | null)?.byChannel;
+    return {
+      rows: rows.map((x) => ({ ...x, channelTitle: title.get(x.channelId) ?? null })),
+      accuracy: byChannel && typeof byChannel === 'object' ? (byChannel as Record<string, ChannelInfoAccuracy>) : null,
+    };
   }
 }

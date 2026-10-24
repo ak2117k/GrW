@@ -55,7 +55,11 @@ export type MessageStatus =
   | 'LLM_NOT_SIGNAL'
   | 'LLM_FAILED'
   | 'LLM_SKIPPED'
-  /** Market commentary / a sector index: stored, never emitted, never sent to the LLM. */
+  /** Market information (views, levels, OI notes, macro links, scenarios): items in channel_infos, never emitted. */
+  | 'INFO'
+  /** The channel's own results of past calls (kept to score its claims; never a signal). */
+  | 'RECAP'
+  /** Legacy name of INFO (rows before 2026-10-24; the one-off re-classification migrates them). */
   | 'VIEW';
 
 export const directionOf = (kind: InstrumentKind, side: Side): Direction => {

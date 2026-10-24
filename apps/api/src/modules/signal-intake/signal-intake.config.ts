@@ -30,6 +30,14 @@ export interface SignalIntakeConfig {
   visionDailyCap: number;
   /** SIGNAL_VISION_MAX_AGE_MIN — older image posts are never sent to the model. */
   visionMaxAgeMs: number;
+  /** SIGNAL_INFO_LLM=off disables the cheap-LLM fallback for INFO posts the rule extractor found no bias in. Default on. */
+  infoLlmEnabled: boolean;
+  /** SIGNAL_INFO_LLM_DAILY_CAP — INFO extractions per IST day (job 'signal.info'; cache hits are free). */
+  infoLlmDailyCap: number;
+  /** SIGNAL_INFO_LLM_MAX_AGE_MIN — older INFO posts are never sent to the model (default 6 h). */
+  infoLlmMaxAgeMs: number;
+  /** SIGNAL_INFO_RECLASSIFY=off skips the one-off boot re-classification of stored NOISE / VIEW rows. Default on (idempotent). */
+  infoReclassify: boolean;
 }
 
 export const SIGNAL_INTAKE_CONFIG = Symbol('SIGNAL_INTAKE_CONFIG');
@@ -65,5 +73,9 @@ export function parseSignalIntakeConfig(env: Record<string, string | undefined>)
     visionModel: (env.SIGNAL_VISION_MODEL ?? '').trim() || SIGNAL_VISION_DEFAULT_MODEL,
     visionDailyCap: int(env.SIGNAL_VISION_DAILY_CAP, 40, 0, 10_000),
     visionMaxAgeMs: int(env.SIGNAL_VISION_MAX_AGE_MIN, 60, 1, 7 * 24 * 60) * 60_000,
+    infoLlmEnabled: !off(env.SIGNAL_INFO_LLM),
+    infoLlmDailyCap: int(env.SIGNAL_INFO_LLM_DAILY_CAP, 60, 0, 10_000),
+    infoLlmMaxAgeMs: int(env.SIGNAL_INFO_LLM_MAX_AGE_MIN, 360, 1, 7 * 24 * 60) * 60_000,
+    infoReclassify: !off(env.SIGNAL_INFO_RECLASSIFY),
   };
 }

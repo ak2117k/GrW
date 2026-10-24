@@ -13,6 +13,8 @@ export const VERIFICATION_KINDS = [
   'TRADE_SETUP',
   /** A parsed Telegram channel tip (signal-intake, stream S, 2026-10-23): target 1 before the SL. */
   'CHANNEL_SIGNAL',
+  /** A Telegram INFO item (market view of a channel, 2026-10-24): its bias vs the next session's / 5 sessions' close-to-close move. */
+  'CHANNEL_INFO',
 ] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 
@@ -81,6 +83,14 @@ export interface ChannelStats {
   rolling20: number | null;
   rolling20Right: number;
   rolling20Wrong: number;
+  /** CHANNEL_INFO (the channel's market views): this session and rolling 20 sessions. Absent when it has none. */
+  infoN?: number;
+  infoRight?: number;
+  infoWrong?: number;
+  infoHitRate?: number | null;
+  infoRolling20?: number | null;
+  infoRolling20Right?: number;
+  infoRolling20Wrong?: number;
 }
 
 /** domain/skill.ts — hit rate alone is not evidence when one outcome dominates. */

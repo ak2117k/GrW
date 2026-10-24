@@ -43,6 +43,8 @@ import { TRADE_SETUPS_REPORT, type TradeSetupsReportSource } from '../../trade-s
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { SESSION_TICKS } from '../../mbm/domain/chain-snapshot';
 import { mbmHeadline, normLine, type RelativeHorizon } from '../../mbm/domain/relative-reading';
+import { channelSentiment, infoList } from '../../signal-intake/domain/sentiment';
+import type { ChannelViewsView } from '../domain/night-report.types';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
@@ -139,6 +141,7 @@ export class NightReportService {
 
     const setupSource = this.tradeSetupSource;
     const tradeSetups = setupSource ? await this.safe('tradeSetups', () => setupSource.forNextSession(userId, now)) : null;
+    const channelViews = this.store.channelInfosBetween ? await this.safe('channelViews', () => this.channelViews(from, now)) : null;
 
     return {
       generatedAt: now.toISOString(),
@@ -155,6 +158,19 @@ export class NightReportService {
       selfReview: selfReviewSection,
       bigMoveWatch,
       tradeSetups,
+      channelViews,
+    };
+  }
+
+  /** The day's Telegram INFO items + the weighted sentiment per underlying (read-only; never a trigger). */
+  private async channelViews(from: Date, now: Date): Promise<ChannelViewsView> {
+    const since = new Date(Math.min(from.getTime(), now.getTime() - DAY_MS));
+    const { rows, accuracy } = await (this.store.channelInfosBetween as NonNullable<NightReportStore['channelInfosBetween']>)(since, now);
+    return {
+      since: since.toISOString(),
+      note: "Telegram channels' market views (INFO posts), weighted by each channel's view accuracy where known. Context only — never a trade trigger.",
+      items: infoList(rows, 60),
+      sentiment: channelSentiment(rows, accuracy),
     };
   }
 

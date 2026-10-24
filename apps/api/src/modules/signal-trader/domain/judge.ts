@@ -34,6 +34,8 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'Hard caps (max lots, max loss per trade, trades per day, daily loss stop) are enforced in code and you',
   'cannot raise them. You MAY tighten: a stop closer to entry (still on the protective side of the current',
   'price) and/or fewer lots. Never propose a wider stop or more lots — such values are ignored.',
+  'channelViews = Telegram channels\' market views (BULL/BEAR item counts on this underlying over 24 h, weighted by each',
+  'channel\'s view accuracy): weak, crowd sentiment — context only, never a reason on its own.',
   'A block marked unavailable means we failed to look — not that the market is quiet.',
   'Reply with ONLY a JSON object: {"verdict":"TAKE"|"SKIP","confidence":1-100,"reasons":[short strings,',
   'most important first],"entry":number|null,"sl":number|null,"targets":[numbers],"lots":integer|null}.',

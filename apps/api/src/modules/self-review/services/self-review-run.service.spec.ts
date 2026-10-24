@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] } } = {}) {
+function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] } } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -60,6 +60,7 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     tradeSetups: jest.fn(async () => []),
     signalTradeOutcomes: jest.fn(async () => o.signalTrades ?? { paper: [], live: [] }),
     channelSignals: jest.fn(async (s: string) => (o.channel ?? []).filter((r) => r.sessionDate === s)),
+    channelInfos: jest.fn(async (s: string) => (o.infos ?? []).filter((r) => r.sessionDate === s)),
     stockMoves: jest.fn(async (asOf: string) =>
       asOf === '2026-10-13'
         ? [
@@ -121,6 +122,31 @@ describe('SelfReviewRunService', () => {
     expect(finish[1].summary.byChannel.chA).toMatchObject({ n: 2, right: 1, wrong: 1, hitRate: 0.5, rolling20: 0.667, rolling20Right: 2, rolling20Wrong: 1 });
     expect(finish[1].summary.byChannel.chB).toMatchObject({ n: 1, right: 0, wrong: 0, hitRate: null, rolling20: null });
     expect(finish[1].summary.notable.every((x) => x.kind !== 'CHANNEL_SIGNAL')).toBe(true);
+  });
+
+  it('CHANNEL_INFO: one result per directional item (refId id:index); byChannel gets infoN / infoHitRate; never notable', async () => {
+    const item = (underlying: string, bias: string | null, horizon: string | null = null) => ({
+      underlying, bias, levels: [22000], targetLevel: null, condition: bias === 'BEAR' ? { driver: 'CRUDE', direction: 'UP' } : null, horizon,
+    });
+    const out = (status: string, ret: number | null = null) => ({ status, session: '2026-10-21', ret, band: 40, levelHit: false });
+    const { svc, repo, stored } = make({
+      channel: [{ id: 'a1', sessionDate: '2026-10-21', channelId: 'chA', underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, side: 'BUY', entryType: 'ABOVE', entryLow: 120, entryHigh: 120, sl: 100, targets: [140], horizon: 'INTRADAY', parser: 'rule', outcomeStatus: 'TARGET1' }],
+      infos: [
+        // crude BULL + NIFTY BEAR (conditional) + a NEUTRAL item (not scored) + a MONTHS view (recorded, null)
+        { id: 'i1', sessionDate: '2026-10-21', channelId: 'chA', messageId: 'm1', extractor: 'rule',
+          items: [item('CRUDEOIL', 'BULL'), item('NIFTY', 'BEAR'), item('BANKNIFTY', 'NEUTRAL')], outcomes: [out('WRONG', -80), out('RIGHT', -120), out('NO_BIAS')] },
+        { id: 'i2', sessionDate: '2026-10-21', channelId: 'chC', messageId: 'm2', extractor: 'llm', items: [item('NIFTY', 'BEAR', 'MONTHS')], outcomes: [out('NOT_JUDGED_MONTHS')] },
+      ],
+    });
+    await svc.run(NOW);
+    const forS = stored.filter((r) => r.kind === 'CHANNEL_INFO' && r.sessionDate === '2026-10-21');
+    expect(forS.map((r) => `${r.refId}:${r.subject}:${r.correct}`).sort()).toEqual(['i1:0:chA:false', 'i1:1:chA:true', 'i2:0:chC:null']);
+    expect(forS.find((r) => r.refId === 'i1:1')).toMatchObject({ symbol: 'NIFTY', predicted: 'BEAR NIFTY levels 22000 if CRUDE UP (next session)' });
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { byKind: Record<string, unknown>; byChannel: Record<string, unknown>; notable: Array<{ kind: string }> } }];
+    expect(finish[1].summary.byKind.CHANNEL_INFO).toMatchObject({ n: 3, right: 1, wrong: 1, nullCount: 1 });
+    expect(finish[1].summary.byChannel.chA).toMatchObject({ n: 1, right: 1, infoN: 2, infoRight: 1, infoWrong: 1, infoHitRate: 0.5 });
+    expect(finish[1].summary.byChannel.chC).toMatchObject({ n: 0, infoN: 1, infoHitRate: null });
+    expect(finish[1].summary.notable.every((x) => x.kind !== 'CHANNEL_INFO')).toBe(true);
   });
 
   it('SIGNAL_TRADES: live vs PAPER (no funds) outcomes, session S and rolling 20; absent when there are none', async () => {

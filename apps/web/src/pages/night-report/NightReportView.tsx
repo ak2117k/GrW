@@ -73,6 +73,7 @@ import {
 import { SelfReviewPanel } from './SelfReviewSection';
 import { BigMoveWatchPanel } from './BigMoveWatchSection';
 import { TradeSetupsPanel } from './TradeSetupsSection';
+import { ChannelViewsPanel } from './ChannelViewsSection';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -923,6 +924,15 @@ export function NightReportView({
           ) : (
             <Guard value={report.tradeSetups}>{(v) => <TradeSetupsPanel view={v} />}</Guard>
           )}
+        </SectionShell>
+      )}
+
+      {report.channelViews != null && (
+        <SectionShell
+          title="Telegram channel views"
+          count={!isSectionError(report.channelViews) ? report.channelViews.items.length : undefined}
+        >
+          <Guard value={report.channelViews}>{(v) => <ChannelViewsPanel view={v} />}</Guard>
         </SectionShell>
       )}
 

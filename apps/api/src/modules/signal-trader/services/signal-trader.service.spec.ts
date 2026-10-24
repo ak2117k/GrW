@@ -24,6 +24,7 @@ function makeRepo() {
     cluster: jest.fn(async () => null),
     channelTitle: jest.fn(async () => 'Chan One'),
     channelStats: jest.fn(async () => ({ hitRate: 0.4, n: 20 })),
+    channelViews: jest.fn(async (u: string) => ({ status: 'present', source: 'telegram INFO', underlying: { underlying: u, bull: 1, bear: 3, lean: 'BEAR' }, others: [] })),
     claimDecision: jest.fn(async (c: Record<string, any>) => {
       if (decisions.some((d) => d.signalId === c.signalId && d.evaluation === c.evaluation)) return null;
       const id = `d${decisions.length + 1}`;
@@ -161,6 +162,12 @@ describe('SignalTraderService', () => {
     expect(await conflict.svc.evaluate({ ...ev, agreeCount: 3, conflict: true })).toMatchObject({ decision: 'SKIP', skipReason: 'low_confidence' });
     const packet = (conflict.judge.judge.mock.calls[0] as any[])[0];
     expect(packet.cluster).toMatchObject({ conflict: true, strong: false });
+    // Telegram channels' market views on the underlying: read-only context in the packet.
+    expect(packet.channelViews).toMatchObject({ status: 'present', underlying: { lean: 'BEAR' } });
+    const t3 = build({ cfg: { mode: 'shadow' }, judge: weak });
+    (t3.repo.channelViews as jest.Mock).mockRejectedValueOnce(new Error('relation "channel_infos" does not exist'));
+    await t3.svc.evaluate({ ...ev, agreeCount: 3, conflict: true });
+    expect(((t3.judge.judge.mock.calls[0] as any[])[0]).channelViews).toMatchObject({ status: 'unavailable', reason: expect.stringContaining('channel_infos') });
   });
 
   it('a low-confidence SKIP may be upgraded once corroborated; a TAKE is never re-evaluated', async () => {

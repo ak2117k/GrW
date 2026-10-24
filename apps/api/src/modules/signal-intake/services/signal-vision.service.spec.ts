@@ -8,16 +8,22 @@ import { SIGNAL_VISION_JOB, SignalVisionService, visionTransportState } from './
 describe('readVisionReply — strict schema', () => {
   const sig = { underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, expiry: null, side: 'BUY', entryType: 'AT', entryLow: 120, entryHigh: 120, sl: 100, targets: [150], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
 
-  it('the schema requires kind (SIGNAL | UPDATE | VIEW | NOISE) on top of the text schema', () => {
-    expect(SIGNAL_VISION_SCHEMA.required).toEqual(['kind', 'isSignal', 'signals']);
-    expect(SIGNAL_VISION_SCHEMA.properties.kind.enum).toEqual(['SIGNAL', 'UPDATE', 'VIEW', 'NOISE']);
+  it('the schema requires kind (SIGNAL | UPDATE | INFO | NOISE) and INFO items on top of the text schema', () => {
+    expect(SIGNAL_VISION_SCHEMA.required).toEqual(['kind', 'isSignal', 'signals', 'items']);
+    expect(SIGNAL_VISION_SCHEMA.properties.kind.enum).toEqual(['SIGNAL', 'UPDATE', 'INFO', 'NOISE']);
+  });
+
+  it('INFO (and the legacy VIEW of cached replies) carries its items, never a signal', () => {
+    const item = { underlying: 'NIFTY', bias: 'BULL', levels: [22400] };
+    expect(readVisionReply(JSON.stringify({ kind: 'INFO', isSignal: true, signals: [sig], items: [item] }))).toEqual({ kind: 'INFO', isSignal: false, signals: [], items: [item] });
+    expect(readVisionReply(JSON.stringify({ kind: 'VIEW', isSignal: false, signals: [] }))).toEqual({ kind: 'INFO', isSignal: false, signals: [], items: [] });
   });
 
   it('a SIGNAL keeps its signals (fences tolerated)', () => {
     expect(readVisionReply('```json\n' + JSON.stringify({ kind: 'SIGNAL', isSignal: true, signals: [sig] }) + '\n```')).toEqual({ kind: 'SIGNAL', isSignal: true, signals: [sig] });
   });
 
-  it.each(['VIEW', 'NOISE', 'UPDATE'])('%s never carries a signal, even when the model filled one', (kind) => {
+  it.each(['NOISE', 'UPDATE'])('%s never carries a signal, even when the model filled one', (kind) => {
     expect(readVisionReply(JSON.stringify({ kind, isSignal: true, signals: [sig] }))).toEqual({ kind, isSignal: false, signals: [] });
   });
 

@@ -18,8 +18,18 @@ import {
   SignalIntakeService,
   type MasterSource,
 } from './services/signal-intake.service';
-import { SIGNAL_CLOCK, SIGNAL_OUTCOME_BARS, SIGNAL_OUTCOME_REPO, SignalOutcomeService, type OutcomeBars } from './services/signal-outcome.service';
-import { SIGNAL_LLM, SignalParseLlmService } from './services/signal-parse-llm.service';
+import {
+  SIGNAL_CLOCK,
+  SIGNAL_INFO_BARS,
+  SIGNAL_INFO_MASTER,
+  SIGNAL_INFO_VOCAB,
+  SIGNAL_OUTCOME_BARS,
+  SIGNAL_OUTCOME_REPO,
+  SignalOutcomeService,
+  type InfoBars,
+  type OutcomeBars,
+} from './services/signal-outcome.service';
+import { SIGNAL_INFO_LLM, SIGNAL_LLM, SignalParseLlmService } from './services/signal-parse-llm.service';
 import { SIGNAL_VISION, SignalVisionService } from './services/signal-vision.service';
 import { SignalVocabularyService } from './services/signal-vocabulary.service';
 import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from './signal-intake.config';
@@ -50,6 +60,7 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
     },
     SignalParseLlmService,
     { provide: SIGNAL_LLM, useExisting: SignalParseLlmService },
+    { provide: SIGNAL_INFO_LLM, useExisting: SignalParseLlmService },
     SignalVisionService,
     { provide: SIGNAL_VISION, useExisting: SignalVisionService },
     { provide: SIGNAL_EMITTER, useFactory: (ee: EventEmitter2) => eventEmitterAdapter(ee), inject: [EventEmitter2] },
@@ -65,6 +76,25 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
       }),
       inject: [UserFeedManager, SIGNAL_INTAKE_CONFIG],
     },
+    {
+      // Daily bars for the CHANNEL_INFO outcome (index / NSE cash / nearest MCX future), owner's own session.
+      provide: SIGNAL_INFO_BARS,
+      useFactory: (feeds: UserFeedManager, cfg: SignalIntakeConfig): InfoBars => ({
+        daily: async (exchange, token, from, to) => {
+          if (!cfg.ownerUserId) return [];
+          const rows = await feeds.fetchCandles(cfg.ownerUserId, token, exchange, '1d', from, to);
+          return (rows ?? []).map((c) => ({
+            day: new Date(c.timestamp.getTime() + 330 * 60_000).toISOString().slice(0, 10),
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          }));
+        },
+      }),
+      inject: [UserFeedManager, SIGNAL_INTAKE_CONFIG],
+    },
+    { provide: SIGNAL_INFO_MASTER, useExisting: SIGNAL_MASTER },
+    { provide: SIGNAL_INFO_VOCAB, useExisting: SignalVocabularyService },
     SignalIntakeService,
     SignalOutcomeService,
     SignalIntakeCron,

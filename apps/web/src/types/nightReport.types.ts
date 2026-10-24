@@ -257,7 +257,46 @@ export interface NightReport {
    * from before it shipped; null when the API runs without the trade-setup module.
    */
   tradeSetups?: Section<TradeSetupsView> | null;
+  /**
+   * Telegram channel views (INFO posts) of the last day + the weighted lean per underlying. Absent on an
+   * API from before it shipped (2026-10-24); null when the API cannot read them. Context only.
+   */
+  channelViews?: Section<ChannelViewsView> | null;
   jobs: Section<JobItem[]>;
+}
+
+export interface ChannelViewItem {
+  channelId: string;
+  channel: string;
+  postedAt: string;
+  underlying: string;
+  bias: 'BULL' | 'BEAR' | 'NEUTRAL' | null;
+  levels: number[];
+  targetLevel: number | null;
+  oi: { strike: number; side: 'CE' | 'PE'; note: string } | null;
+  condition: { driver: string; direction: 'UP' | 'DOWN' | null } | null;
+  horizon: 'INTRADAY' | 'DAYS' | 'WEEKS' | 'MONTHS' | null;
+}
+
+export interface ChannelSentimentRow {
+  underlying: string;
+  items: number;
+  bull: number;
+  bear: number;
+  neutral: number;
+  weightedBull: number;
+  weightedBear: number;
+  net: number | null;
+  lean: 'BULL' | 'BEAR' | 'MIXED' | 'NONE';
+  channels: number;
+  latestAt: string;
+}
+
+export interface ChannelViewsView {
+  since: string;
+  note: string;
+  items: ChannelViewItem[];
+  sentiment: ChannelSentimentRow[];
 }
 
 /** One stock's 5-session big-move reading (move SIZE only, never direction). */

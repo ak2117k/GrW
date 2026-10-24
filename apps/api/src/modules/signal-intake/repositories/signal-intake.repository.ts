@@ -1,7 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import type { ClusterRow, RecentSignal } from '../domain/cluster';
+import type { InfoItem } from '../domain/info';
 import type { Direction, MessageStatus } from '../domain/types';
 
 export interface ClassRow {
@@ -82,6 +84,44 @@ export interface OutcomeWrite {
   details: Record<string, unknown>;
 }
 
+/** Written on every classification; rows without it predate INFO / RECAP (2026-10-24) and are re-classified once. */
+export const CLASS_VERSION = 2;
+
+export interface InfoRow {
+  messageId: string;
+  channelId: string;
+  postedAt: Date;
+  sessionDate: string;
+  textHash: string;
+  items: InfoItem[];
+  extractor: 'rule' | 'llm';
+  confidence: number;
+  llmReply?: unknown;
+}
+
+/** A stored classification the one-off re-classification may revisit. */
+export interface ReclassRow {
+  messageId: string;
+  channelId: string;
+  postedAt: Date;
+  textHash: string;
+  status: string;
+  reason: string | null;
+  parser: string | null;
+  llmResult: unknown;
+  signalId: string | null;
+  updateKind: string | null;
+  attempts: number;
+}
+
+export interface UnfilledInfo {
+  id: string;
+  channelId: string;
+  postedAt: Date;
+  items: unknown;
+  extractor: string;
+}
+
 const json = (v: unknown) => (v === undefined || v === null ? Prisma.DbNull : (v as Prisma.InputJsonValue));
 
 /** All of stream S's Postgres access (trade_signals, signal_clusters, signal_message_classes, instruments read). */
@@ -114,6 +154,7 @@ export class SignalIntakeRepository {
       signalId: row.signalId ?? null,
       updateKind: row.updateKind ?? null,
       attempts: row.attempts ?? 0,
+      classVersion: CLASS_VERSION,
     };
     await this.prisma.signalMessageClass.upsert({ where: { messageId: row.messageId }, create: { messageId: row.messageId, ...data }, update: data });
   }
@@ -126,6 +167,83 @@ export class SignalIntakeRepository {
       orderBy: { updatedAt: 'desc' },
     });
     return hit?.llmResult ?? null;
+  }
+
+  // ─── INFO (channel_infos) ──────────────────────────────────────────────────
+
+  /** One row per message; a re-extraction (edit, LLM fallback) replaces the items and clears any outcome. */
+  async saveInfo(r: InfoRow): Promise<void> {
+    const data = {
+      channelId: r.channelId,
+      postedAt: r.postedAt,
+      sessionDate: r.sessionDate,
+      textHash: r.textHash,
+      items: r.items as unknown as Prisma.InputJsonValue,
+      extractor: r.extractor,
+      confidence: r.confidence,
+      ...(r.llmReply !== undefined ? { llmReply: json(r.llmReply) } : {}),
+    };
+    await this.prisma.channelInfo.upsert({
+      where: { messageId: r.messageId },
+      create: { messageId: r.messageId, ...data },
+      update: { ...data, outcomes: Prisma.DbNull, outcomeSession: null, outcomeFilledAt: null },
+    });
+  }
+
+  /** A previous cheap-LLM INFO reply for exactly this text (the 'signal.info' cache). */
+  async cachedInfoLlm(textHash: string): Promise<unknown | null> {
+    const hit = await this.prisma.channelInfo.findFirst({
+      where: { textHash, NOT: { llmReply: { equals: Prisma.DbNull } } },
+      select: { llmReply: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    return hit?.llmReply ?? null;
+  }
+
+  /** The last daily close strictly before `at` of each derivative index (candles_1d; "X se dur nahi" reference). */
+  async refCloses(at: Date): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    await Promise.all(
+      Object.entries(INDEX_UNDERLYINGS).map(async ([name, ref]) => {
+        const bar = await this.prisma.hubCandle1d.findFirst({
+          where: { exchange: ref.exchange, token: ref.token, ts: { lt: at } },
+          orderBy: { ts: 'desc' },
+          select: { close: true },
+        });
+        if (bar && Number.isFinite(bar.close) && bar.close > 0) out.set(name, bar.close);
+      }),
+    );
+    return out;
+  }
+
+  /** Rows written before the INFO classifier (classVersion null) that it may change: NOISE, VIEW, unread images. */
+  async reclassCandidates(take = 200): Promise<ReclassRow[]> {
+    return this.prisma.signalMessageClass.findMany({
+      where: { classVersion: null, OR: [{ status: { in: ['NOISE', 'VIEW'] } }, { status: 'LLM_SKIPPED', parser: 'vision' }] },
+      orderBy: { postedAt: 'asc' },
+      take,
+      select: {
+        messageId: true, channelId: true, postedAt: true, textHash: true, status: true, reason: true, parser: true, llmResult: true,
+        signalId: true, updateKind: true, attempts: true,
+      },
+    });
+  }
+
+  /** INFO rows posted since `since` with no outcome yet (oldest first). */
+  unfilledInfos(since: Date, take = 300): Promise<UnfilledInfo[]> {
+    return this.prisma.channelInfo.findMany({
+      where: { outcomeFilledAt: null, postedAt: { gte: since } },
+      select: { id: true, channelId: true, postedAt: true, items: true, extractor: true },
+      orderBy: { postedAt: 'asc' },
+      take,
+    });
+  }
+
+  async fillInfoOutcome(id: string, outcomes: unknown[], session: string | null, now: Date): Promise<void> {
+    await this.prisma.channelInfo.update({
+      where: { id },
+      data: { outcomes: outcomes as Prisma.InputJsonValue, outcomeSession: session, outcomeFilledAt: now },
+    });
   }
 
   /** A previous vision reply for exactly this image (sha256 of the bytes; the vision cache). */

@@ -71,3 +71,22 @@ Owner request: "if there is a lack of funds in the account, create a paper trade
   strategy `TELEGRAM_SIGNAL_NO_FUNDS`, source `telegram-signal / no-funds`, tags `decision:<id>`; SL + T1 exits by
   `SignalPaperWatchService` (30 s). Never a broker order, never a tracker, never counted by the caps (they count TAKE / live orders).
   Setting OFF → plain SKIP `insufficient_funds`. Self-review summary `signalTrades` = live vs paper (no funds), session + rolling 20.
+
+## S addendum (2026-10-24) — INFO / RECAP (information vs noise)
+Owner: "these contain information about NIFTY and crude, and OI — differentiate messages which contain info from actual noise".
+- Classes: SIGNAL, UPDATE, **INFO** (views, levels, OI/PCR notes, macro links, conditional scenarios; replaces VIEW — legacy
+  `VIEW` rows are migrated by the one-off re-classification), **RECAP** (the channel's own results of past calls: a recap header
+  or P&L words + a named contract with a price move; kept, never a signal), NOISE (greetings, ads, membership, P&L brags without
+  calls, links/emoji-only, empty). Ad vocabulary wins unless the post also has concrete market content (entity + level + bias/OI).
+- Deterministic first (`domain/info.ts`): entity (vocabulary + Hinglish aliases: crude / US oil / WTI / Brent; an OI note on an
+  index-range strike; an un-named 15k–35k level = NIFTY) AND content (level, OI words, bias words EN+Hinglish, "agar/if … toh/then").
+  A pre-filter positive with an explicit buy/sell verb stays on the parse path.
+- Items → `channel_infos` (one row per message; items `{underlying, bias, levels, targetLevel, oi, condition, horizon}`, extractor
+  rule|llm). Cheap-LLM fallback (job `signal.info`, parse transport + shared slot, cached by text hash) ONLY when the detector says
+  INFO and no item has a bias; `SIGNAL_INFO_LLM_DAILY_CAP` 60, never for posts > `SIGNAL_INFO_LLM_MAX_AGE_MIN` 360. Vision kind INFO
+  carries the same items.
+- Self-review kind `CHANNEL_INFO`: BULL/BEAR items judged on daily bars (index / NSE cash / nearest MCX future): next session
+  (5 for WEEKS; MONTHS recorded, not judged), right beyond ±0.3×ATR, FLAT inside; `levelHit` separate. `byChannel` gains info*.
+- Channel sentiment (24 h, weighted by channel INFO accuracy) in the signal judge packet (`channelViews`) and the Night Report
+  ("Telegram channel views"). Read-only; never triggers a trade.
+- One-off boot re-classification (`SIGNAL_INFO_RECLASSIFY`, default on, idempotent via `signal_message_classes.class_version`).

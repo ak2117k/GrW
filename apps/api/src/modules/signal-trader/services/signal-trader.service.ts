@@ -263,9 +263,13 @@ export class SignalTraderService implements OnApplicationBootstrap {
     const cluster = await this.repo.cluster(e.clusterId ?? null).catch(() => null);
     const agreeCount = e.agreeCount ?? cluster?.agreeCount ?? 1;
     const conflict = e.conflict === true || cluster?.conflict === true;
-    const [market, channelStats] = await Promise.all([
+    const [market, channelStats, channelViews] = await Promise.all([
       this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now }),
       this.repo.channelStats(s.channelId).catch(() => null),
+      // Telegram channels' market views on this underlying (read-only context; never a trigger).
+      Promise.resolve()
+        .then(() => this.repo.channelViews(s.underlying, now))
+        .catch((err: unknown) => ({ status: 'unavailable', reason: `channel views: ${err instanceof Error ? err.message : String(err)}` })),
     ]);
     const packet = {
       promptVersion: SIGNAL_JUDGE_PROMPT_VERSION,
@@ -273,6 +277,7 @@ export class SignalTraderService implements OnApplicationBootstrap {
       signal: { text: s.rawText.slice(0, 1500), parsed: what, channel, receivedAt: s.receivedAt?.toISOString() ?? null },
       cluster: { agreeCount, conflict, channels: cluster?.channelIds.length ?? null, strong: !conflict && agreeCount >= cfg.strongChannels },
       channelStats: channelStats ?? { status: 'unavailable', reason: 'no self-review byChannel stats yet' },
+      channelViews,
       plan: { contract: plan.tradingsymbol, side: plan.side, ltp: plan.ltp, limit: plan.limitPrice, sl: plan.sl, slSource: plan.slSource, targets: plan.targets, lots: plan.lots, qty: plan.qty, riskRupees: plan.riskRupees },
       caps: { maxLots: cfg.maxLots, maxLossPerTrade: cfg.maxLossPerTrade, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
       market,

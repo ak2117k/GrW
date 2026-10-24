@@ -5,6 +5,7 @@ import { MANUAL_VERDICT_PREFIX } from '../../sentinel-executor/domain/manual-exi
 import { OVERNIGHT_TAGS } from '../domain/scorers';
 import { STOCK_MOVE_HORIZON_DAYS, STOCK_MOVE_THRESHOLD_ATR } from '../../stock-move/stock-move.logic';
 import { SIGNAL_PAPER_STRATEGY } from '../../signal-trader/domain/paper';
+import { asInfoItems } from '../../signal-intake/domain/info';
 
 /**
  * Read-only access to the rows the scorers judge. Every query is bounded by a time range the run
@@ -194,6 +195,24 @@ export class VerificationSourcesRepository {
         return { createdAt: o.createdAt, status: o.status, trackerStatus: t ? String(t.status) : null, pnl: t?.pnl ?? null };
       }),
     };
+  }
+
+  /** Telegram INFO rows whose outcome is scored on `session` (signal-intake fills it at 16:20 IST). */
+  async channelInfos(session: string) {
+    const rows = await this.prisma.channelInfo.findMany({
+      where: { outcomeSession: session, outcomeFilledAt: { not: null } },
+      select: { id: true, channelId: true, messageId: true, extractor: true, items: true, outcomes: true, outcomeSession: true },
+      take: 2000,
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      sessionDate: r.outcomeSession as string,
+      channelId: r.channelId,
+      messageId: r.messageId,
+      extractor: r.extractor,
+      items: asInfoItems(r.items),
+      outcomes: Array.isArray(r.outcomes) ? (r.outcomes as Array<{ status: string; session: string | null; ret: number | null; band: number | null; levelHit: boolean | null } | null>) : [],
+    }));
   }
 
   /** Telegram channel signals whose outcome is scored on `session` (signal-intake fills it at 16:20 IST). */

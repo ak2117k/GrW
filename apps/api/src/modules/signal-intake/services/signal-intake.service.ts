@@ -5,8 +5,9 @@ import { AssistBusyError } from '../../ai-assist/assist-slot';
 import { dedupKey, planCluster } from '../domain/cluster';
 import { findContract, listedExpiries, segmentOf } from '../domain/contract';
 import { inferExpiry } from '../domain/expiry';
-import { validateLlmSignal, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
-import { prefilter } from '../domain/prefilter';
+import { classifyCommentary, hasBias, recapReason, type CommentaryClass, type InfoItem, type RefPrices } from '../domain/info';
+import { validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
+import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { parseSignal } from '../domain/rule-parser';
 import {
   directionOf,
@@ -22,11 +23,10 @@ import {
   type TelegramMessageEvent,
 } from '../domain/types';
 import { detectUpdate } from '../domain/updates';
-import { viewReason } from '../domain/view';
 import type { Vocabulary } from '../domain/vocabulary';
-import type { ClassRow, SignalIntakeRepository } from '../repositories/signal-intake.repository';
+import type { ClassRow, ReclassRow, SignalIntakeRepository } from '../repositories/signal-intake.repository';
 import { SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from '../signal-intake.config';
-import { SIGNAL_LLM, type SignalLlm } from './signal-parse-llm.service';
+import { SIGNAL_INFO_LLM, SIGNAL_LLM, type SignalInfoLlm, type SignalLlm } from './signal-parse-llm.service';
 import { SIGNAL_VISION, type SignalVision } from './signal-vision.service';
 
 export const SIGNAL_INTAKE_REPO = Symbol('SIGNAL_INTAKE_REPO');
@@ -39,6 +39,7 @@ export type IntakeStore = Pick<
   SignalIntakeRepository,
   | 'classOf' | 'saveClass' | 'cachedLlm' | 'cachedVision' | 'llmPending' | 'duplicateOf' | 'signalByMessage' | 'createSignal' | 'updateSignal'
   | 'setSignalCluster' | 'messageText' | 'clusters' | 'recentSignals' | 'createCluster' | 'updateCluster' | 'flagConflict' | 'signalsByIds' | 'latestInChannel'
+  | 'saveInfo' | 'cachedInfoLlm' | 'refCloses' | 'reclassCandidates'
 >;
 export interface VocabularySource {
   get(): Promise<Vocabulary>;
@@ -58,6 +59,9 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const UPDATE_LOOKBACK_MS = 4 * 86_400_000;
 /** A busy-slot parse is retried at most this many times. */
 const LLM_MAX_ATTEMPTS = 3;
+/** The one-off re-classification reads at most this many stored rows per boot. */
+const RECLASS_MAX_ROWS = 20_000;
+const RECLASS_PAGE = 200;
 
 export const textHash = (text: string) => createHash('sha256').update(String(text ?? '').trim()).digest('hex');
 
@@ -80,6 +84,12 @@ export class SignalIntakeService {
   private visionDay = '';
   private visionUsed = 0;
   private visionInflight = 0;
+  /** In-process count of INFO extractions today (a floor under the ai_calls count). */
+  private infoDay = '';
+  private infoUsed = 0;
+  private infoInflight = 0;
+  /** Reference closes per IST day of the post ("X se dur nahi"), read once per day. */
+  private readonly refCache = new Map<string, Promise<RefPrices>>();
 
   constructor(
     @Inject(SIGNAL_INTAKE_REPO) private readonly repo: IntakeStore,
@@ -90,6 +100,7 @@ export class SignalIntakeService {
     @Optional() @Inject(SIGNAL_EMITTER) private readonly emitter?: Emitter,
     @Optional() @Inject(SIGNAL_NOW) private readonly nowFn?: () => Date,
     @Optional() @Inject(SIGNAL_VISION) private readonly vision?: SignalVision,
+    @Optional() @Inject(SIGNAL_INFO_LLM) private readonly infoLlm?: SignalInfoLlm,
   ) {}
 
   private now(): Date {
@@ -136,26 +147,37 @@ export class SignalIntakeService {
       await this.createFromParsed(evt, postedAt, parsed, 'rule', base, null);
       return;
     }
+    // The channel's own results of past calls: kept to score its claims later, never a signal or an update.
+    const recap = recapReason(text, pf.norm, vocab);
+    if (recap) {
+      await this.repo.saveClass({ ...base, status: 'RECAP', reason: recap });
+      return;
+    }
     const upd = detectUpdate(text, vocab, pf.norm);
     if (upd) {
       await this.linkUpdate(evt, postedAt, upd, base);
       return;
     }
-    const view = viewReason(pf);
+    const info = await this.commentary(text, pf, vocab, postedAt);
     // An image post whose caption alone is not a call: the image may be the call (MCX / tip channels).
-    if (evt.media) {
+    // A caption that already carries a directional view is the post's information: no image read.
+    if (evt.media && !(info?.kind === 'INFO' && info.items.some(hasBias))) {
       const blocked = this.visionBlocked();
       if (!blocked) {
         await this.startVision(evt, postedAt, evt.media, base);
         return;
       }
-      if (!pf.pass && view === null) {
+      if (info?.kind !== 'INFO') {
         await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: `image not read: ${blocked}` });
         return;
       }
     }
-    if (view) {
-      await this.repo.saveClass({ ...base, status: 'VIEW', reason: view });
+    if (info?.kind === 'INFO') {
+      await this.saveInfo(evt, postedAt, base, info);
+      return;
+    }
+    if (info) {
+      await this.repo.saveClass({ ...base, status: info.kind, reason: info.reason });
       return;
     }
     if (!pf.pass) {
@@ -230,7 +252,7 @@ export class SignalIntakeService {
 
   /**
    * Only kind SIGNAL can become a TradeSignal (and so `signal.ready`, under the same age rule as text);
-   * UPDATE / VIEW / NOISE are stored and never emitted. The reply is kept with the image's sha256 —
+   * UPDATE / INFO (legacy VIEW) / NOISE are stored and never emitted; INFO items go to channel_infos. The reply is kept with the image's sha256 —
    * that is the cache.
    */
   private async applyVision(
@@ -241,10 +263,20 @@ export class SignalIntakeService {
     base: Omit<ClassRow, 'status'>,
     via: 'llm' | 'cache',
   ): Promise<void> {
-    const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, imageSha256: media.sha256 };
+    const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), imageSha256: media.sha256 };
     const save = (status: MessageStatus, reason: string) =>
       this.repo.saveClass({ ...base, status, parser: 'vision', llmResult: stored, reason: `vision (${via}): ${reason}`.slice(0, 500) });
-    if (reply.kind === 'VIEW') return save('VIEW', 'image is a view');
+    if (reply.kind === 'INFO' || reply.kind === 'VIEW') {
+      const vocab = await this.vocab.get();
+      const items = validateInfoItems(reply.items ?? [], vocab);
+      await save('INFO', `image is market information (${items.length} item${items.length === 1 ? '' : 's'})`);
+      if (items.length) {
+        await this.repo.saveInfo({
+          messageId: evt.messageId, channelId: evt.channelId, postedAt, sessionDate: istYmd(postedAt), textHash: base.textHash, items, extractor: 'llm', confidence: 0.6,
+        });
+      }
+      return;
+    }
     if (reply.kind === 'NOISE') return save('NOISE', 'image is noise');
     if (reply.kind === 'UPDATE') return save('UPDATE_ORPHAN', 'image is an update (not linked)');
     if (!reply.isSignal || reply.signals.length === 0) return save('LLM_NOT_SIGNAL', 'no call in the image');
@@ -259,6 +291,170 @@ export class SignalIntakeService {
       reasons.push(v.reason);
     }
     await save('LLM_NOT_SIGNAL', `invalid: ${reasons.join('; ')}`);
+  }
+
+  // ─── INFO (market information) ─────────────────────────────────────────────
+
+  /** The commentary class, re-run with reference closes when an index target would decide the bias. */
+  private async commentary(text: string, pf: PrefilterResult, vocab: Vocabulary, postedAt: Date): Promise<CommentaryClass | null> {
+    const c = classifyCommentary(text, pf, vocab);
+    if (c?.kind !== 'INFO' || !c.wantsRefs) return c;
+    return classifyCommentary(text, pf, vocab, await this.refs(postedAt));
+  }
+
+  private refs(at: Date): Promise<RefPrices> {
+    const day = istYmd(at);
+    let hit = this.refCache.get(day);
+    if (!hit) {
+      hit = this.repo.refCloses(at).catch((e) => {
+        this.logger.warn(`[signal-intake] reference closes unavailable: ${errText(e)}`);
+        this.refCache.delete(day);
+        return new Map<string, number>();
+      });
+      if (this.refCache.size > 40) this.refCache.clear();
+      this.refCache.set(day, hit);
+    }
+    return hit;
+  }
+
+  /** INFO: the class row, the items (channel_infos), and — only when no item got a bias — the cheap-LLM fallback. */
+  private async saveInfo(
+    evt: TelegramMessageEvent,
+    postedAt: Date,
+    base: Omit<ClassRow, 'status'>,
+    info: CommentaryClass,
+    opts: { llm?: boolean; keep?: Partial<ClassRow> } = {},
+  ): Promise<void> {
+    await this.repo.saveClass({ ...base, ...opts.keep, status: 'INFO', parser: opts.keep?.parser ?? 'rule', reason: info.reason });
+    if (info.items.length) {
+      await this.repo.saveInfo({
+        messageId: evt.messageId, channelId: evt.channelId, postedAt, sessionDate: istYmd(postedAt), textHash: base.textHash, items: info.items, extractor: 'rule', confidence: info.confidence,
+      });
+    }
+    if (info.needsLlm && opts.llm !== false) await this.startInfoLlm(evt, postedAt, base, info);
+  }
+
+  private async infoUsedToday(): Promise<number> {
+    const day = istYmd(this.now());
+    if (day !== this.infoDay) {
+      this.infoDay = day;
+      this.infoUsed = 0;
+    }
+    let recorded = 0;
+    try {
+      recorded = (await this.infoLlm?.usedSince?.(new Date(`${day}T00:00:00+05:30`))) ?? 0;
+    } catch (e) {
+      this.logger.warn(`[signal-intake] info cap count failed (using the in-process count): ${errText(e)}`);
+    }
+    return Math.max(recorded + this.infoInflight, this.infoUsed);
+  }
+
+  /**
+   * The cheap-LLM INFO extraction (job 'signal.info', the parse fallback's transport and shared slot):
+   * cached by text hash, never for posts older than SIGNAL_INFO_LLM_MAX_AGE_MIN, at most
+   * SIGNAL_INFO_LLM_DAILY_CAP a day. A busy slot or a failure keeps the rule items; nothing is retried.
+   */
+  private async startInfoLlm(evt: TelegramMessageEvent, postedAt: Date, base: Omit<ClassRow, 'status'>, info: CommentaryClass): Promise<void> {
+    const cached = await this.repo.cachedInfoLlm(base.textHash);
+    if (cached) {
+      await this.applyInfoLlm(evt, postedAt, base, info, cached as InfoLlmReply, 'cache');
+      return;
+    }
+    if (!this.config.infoLlmEnabled || !this.infoLlm) return;
+    if (this.now().getTime() - postedAt.getTime() > this.config.infoLlmMaxAgeMs) return;
+    const key = `info:${evt.messageId}`;
+    if (this.inflight.has(key)) return;
+    const used = await this.infoUsedToday();
+    if (used >= this.config.infoLlmDailyCap) return;
+    this.infoUsed = used + 1;
+    this.infoInflight++;
+    this.inflight.add(key);
+    const llm = this.infoLlm;
+    void llm
+      .info(String(evt.text ?? ''))
+      .then(
+        (reply) => this.serial(() => this.applyInfoLlm(evt, postedAt, base, info, reply, 'llm')),
+        (e) => {
+          if (e instanceof AssistBusyError) this.infoUsed = Math.max(0, this.infoUsed - 1); // never started: no spend
+          this.logger.warn(`[signal-intake] info extraction of ${evt.messageId} failed (rule items kept): ${errText(e)}`);
+        },
+      )
+      .catch((e) => this.logger.warn(`[signal-intake] info extraction of ${evt.messageId} failed: ${errText(e)}`))
+      .finally(() => {
+        this.inflight.delete(key);
+        this.infoInflight = Math.max(0, this.infoInflight - 1);
+      });
+  }
+
+  private async applyInfoLlm(
+    evt: TelegramMessageEvent,
+    postedAt: Date,
+    base: Omit<ClassRow, 'status'>,
+    info: CommentaryClass,
+    reply: InfoLlmReply,
+    via: 'llm' | 'cache',
+  ): Promise<void> {
+    const vocab = await this.vocab.get();
+    const items: InfoItem[] = reply?.isInfo ? validateInfoItems(reply.items, vocab) : [];
+    const useLlm = items.some(hasBias);
+    await this.repo.saveInfo({
+      messageId: evt.messageId, channelId: evt.channelId, postedAt, sessionDate: istYmd(postedAt), textHash: base.textHash,
+      items: useLlm ? items : info.items, extractor: useLlm ? 'llm' : 'rule', confidence: useLlm ? 0.6 : info.confidence, llmReply: reply,
+    });
+    const what = useLlm ? `${items.length} item(s)` : 'no bias';
+    await this.repo.saveClass({ ...base, status: 'INFO', parser: useLlm ? 'llm' : 'rule', reason: `${info.reason}; llm (${via}): ${what}`.slice(0, 500) });
+  }
+
+  /**
+   * One-off (boot, idempotent, SIGNAL_INFO_RECLASSIFY): stored NOISE / VIEW / unread-image rows written
+   * before the INFO classifier are classified again with the free rules only — INFO (+ items), RECAP or
+   * unchanged. No LLM, no event, no signal. Every visited row gets the class version, so a second run
+   * finds nothing.
+   */
+  async reclassifyStored(): Promise<{ scanned: number; info: number; recap: number; noise: number; kept: number }> {
+    const out = { scanned: 0, info: 0, recap: 0, noise: 0, kept: 0 };
+    if (!this.config.enabled || !this.config.infoReclassify) return out;
+    const vocab = await this.vocab.get();
+    while (out.scanned < RECLASS_MAX_ROWS) {
+      const rows = await this.repo.reclassCandidates(RECLASS_PAGE);
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        out.scanned++;
+        const text = (await this.repo.messageText(r.messageId)) ?? '';
+        const res = await this.serial(() => this.reclassOne(r, text, vocab));
+        out[res]++;
+      }
+    }
+    if (out.scanned) this.logger.log(`[signal-intake] re-classified ${out.scanned} stored rows: ${out.info} INFO, ${out.recap} RECAP, ${out.noise} NOISE, ${out.kept} unchanged`);
+    return out;
+  }
+
+  private async reclassOne(r: ReclassRow, text: string, vocab: Vocabulary): Promise<'info' | 'recap' | 'noise' | 'kept'> {
+    const base = { messageId: r.messageId, channelId: r.channelId, postedAt: r.postedAt, textHash: r.textHash };
+    const keep: Partial<ClassRow> = { parser: r.parser, llmResult: r.llmResult, signalId: r.signalId, updateKind: r.updateKind, attempts: r.attempts };
+    const pf = prefilter(text, vocab);
+    const info = await this.commentary(text, pf, vocab, r.postedAt);
+    const evt: TelegramMessageEvent = { messageId: r.messageId, channelId: r.channelId, postedAt: r.postedAt, text };
+    if (info?.kind === 'INFO') {
+      await this.saveInfo(evt, r.postedAt, base, info, { llm: false, keep });
+      return 'info';
+    }
+    if (info?.kind === 'RECAP') {
+      await this.repo.saveClass({ ...base, ...keep, status: 'RECAP', reason: info.reason });
+      return 'recap';
+    }
+    if (r.status === 'VIEW') {
+      // Legacy VIEW is INFO by definition (an image the model called a view stays INFO whatever its caption);
+      // a text VIEW that is now an ad / a P&L brag is NOISE.
+      if (info?.kind === 'NOISE' && r.parser !== 'vision') {
+        await this.repo.saveClass({ ...base, ...keep, status: 'NOISE', reason: info.reason });
+        return 'noise';
+      }
+      await this.repo.saveClass({ ...base, ...keep, status: 'INFO', reason: `${r.reason ?? 'view'} (migrated from VIEW)`.slice(0, 500) });
+      return 'info';
+    }
+    await this.repo.saveClass({ ...base, ...keep, status: r.status as MessageStatus, reason: r.reason });
+    return 'kept';
   }
 
   // ─── Edits ─────────────────────────────────────────────────────────────────

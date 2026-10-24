@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { channelSentiment, type ChannelInfoAccuracy } from '../../signal-intake/domain/sentiment';
 import type { ClusterView, EntryType, InstrumentKind, SignalView } from '../domain/signal.types';
 import { SIGNAL_ENTRY_VERDICT_TAG, istDayStart } from '../domain/execution';
 import { SIGNAL_PAPER_STRATEGY, decisionTag } from '../domain/paper';
@@ -61,6 +62,9 @@ export function normaliseSignal(r: Row | null): SignalView | null {
 }
 
 /** The first `byChannel` object anywhere in a self-review summary (stream S's CHANNEL_SIGNAL). */
+/** The judge's channel-views window. */
+export const CHANNEL_VIEWS_WINDOW_MS = 24 * 3_600_000;
+
 export function findByChannel(summary: unknown, depth = 0): Record<string, unknown> | null {
   if (!summary || typeof summary !== 'object' || depth > 4) return null;
   const o = summary as Record<string, unknown>;
@@ -193,6 +197,29 @@ export class SignalTraderRepository {
       .findFirst({ where: { status: 'DONE' }, orderBy: { startedAt: 'desc' }, select: { summary: true } })
       .catch(() => null);
     return findByChannel(run?.summary ?? null);
+  }
+
+  /**
+   * Telegram channels' market views (INFO items, signal-intake) on `underlying` over the last 24 h,
+   * weighted by each channel's CHANNEL_INFO accuracy from the latest self-review. Read-only judge context.
+   */
+  async channelViews(underlying: string, now: Date): Promise<Record<string, unknown>> {
+    const since = new Date(now.getTime() - CHANNEL_VIEWS_WINDOW_MS);
+    const rows = await this.prisma.channelInfo.findMany({
+      where: { postedAt: { gte: since, lte: now } },
+      select: { channelId: true, postedAt: true, items: true },
+      orderBy: { postedAt: 'desc' },
+      take: 500,
+    });
+    if (rows.length === 0) return { status: 'unavailable', reason: 'no Telegram INFO posts in the last 24 h' };
+    const accuracy = (await this.allChannelStats().catch(() => null)) as Record<string, ChannelInfoAccuracy> | null;
+    const all = channelSentiment(rows, accuracy);
+    return {
+      status: 'present',
+      source: 'telegram INFO items (signal-intake channel_infos), last 24 h, weighted by channel INFO accuracy',
+      underlying: all.find((x) => x.underlying === underlying) ?? null,
+      others: all.filter((x) => x.underlying !== underlying).slice(0, 5),
+    };
   }
 
   decisionsFor(signalId: string) {

@@ -10,6 +10,15 @@
 import type { NewsIdea, Scorecard } from '../../overnight-scorecard/scorecard.types';
 import type { BigMoveWatchView } from '../../stock-move/stock-move.service';
 import type { TradeSetupsView } from '../../trade-setup/domain/trade-setup.view';
+import type { InfoListItem, UnderlyingSentiment } from '../../signal-intake/domain/sentiment';
+
+/** "Telegram channel views": the INFO items of the last day (newest first) and the per-underlying sentiment. */
+export interface ChannelViewsView {
+  since: string;
+  note: string;
+  items: InfoListItem[];
+  sentiment: UnderlyingSentiment[];
+}
 
 export type { BigMoveWatchRow, BigMoveWatchView } from '../../stock-move/stock-move.service';
 export type { TradeSetupView, TradeSetupsView } from '../../trade-setup/domain/trade-setup.view';
@@ -260,4 +269,10 @@ export interface NightReport {
    * the trade-setup module is not loaded.
    */
   tradeSetups: Section<TradeSetupsView> | null;
+  /**
+   * Telegram channel views (INFO posts: channel, underlying, bias, levels, condition) since the earlier of
+   * the last NSE close and 24 h ago, plus the weighted sentiment per underlying. Read-only context.
+   * `{ error }` on failure, null when the store cannot read channel_infos.
+   */
+  channelViews?: Section<ChannelViewsView> | null;
 }

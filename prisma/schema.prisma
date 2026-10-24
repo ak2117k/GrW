@@ -3273,13 +3273,15 @@ model SignalMessageClass {
   channelId  String   @map("channel_id")
   postedAt   DateTime @map("posted_at") @db.Timestamptz(6)
   textHash   String   @map("text_hash") // sha256 of the trimmed text: the LLM-parse cache key
-  status     String // NOISE | SIGNAL | UPDATE | UPDATE_ORPHAN | DUPLICATE | LLM_PENDING | LLM_NOT_SIGNAL | LLM_FAILED | LLM_SKIPPED
+  status     String // NOISE | SIGNAL | UPDATE | UPDATE_ORPHAN | DUPLICATE | LLM_PENDING | LLM_NOT_SIGNAL | LLM_FAILED | LLM_SKIPPED | INFO | RECAP (VIEW = legacy INFO)
   reason     String? // pre-filter reason, parse failure, LLM error
   parser     String? // rule | llm
   llmResult  Json?    @map("llm_result") // the validated LLM reply (cache)
   signalId   String?  @map("signal_id")
   updateKind String?  @map("update_kind")
   attempts   Int      @default(0)
+  /// Classifier version that wrote the row (null = before INFO/RECAP, 2026-10-24); the one-off re-classification picks up nulls.
+  classVersion Int?   @map("class_version")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
@@ -3287,4 +3289,31 @@ model SignalMessageClass {
   @@index([status, postedAt])
   @@index([channelId, postedAt])
   @@map("signal_message_classes")
+}
+
+/// Structured market information from INFO posts (views, levels, OI notes, macro links) — 2026-10-24.
+/// One row per message; one post can carry several items. Read-only context: never triggers a trade.
+model ChannelInfo {
+  id              String    @id @default(cuid())
+  messageId       String    @unique @map("message_id") // telegram_messages.id
+  channelId       String    @map("channel_id") // telegram_channels.id
+  postedAt        DateTime  @map("posted_at") @db.Timestamptz(6)
+  sessionDate     String    @map("session_date") // IST 'YYYY-MM-DD' of postedAt
+  textHash        String    @map("text_hash") // the LLM-info cache key
+  items           Json // InfoItem[]: {underlying, bias, levels, targetLevel, oi, condition, horizon}
+  extractor       String // rule | llm
+  confidence      Float
+  llmReply        Json?     @map("llm_reply") // the cheap-LLM reply (cache), when the fallback ran
+  outcomes        Json? // per item: {status, session, ret, band, levelHit} (self-review CHANNEL_INFO)
+  outcomeSession  String?   @map("outcome_session")
+  outcomeFilledAt DateTime? @map("outcome_filled_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([postedAt])
+  @@index([channelId, postedAt])
+  @@index([textHash])
+  @@index([outcomeSession])
+  @@index([outcomeFilledAt, postedAt])
+  @@map("channel_infos")
 }

@@ -18,9 +18,10 @@ import {
   scoreStockMove,
   scoreTradeSetup,
   scoreChannelSignal,
+  scoreChannelInfo,
   type ScorecardRow,
 } from '../domain/scorers';
-import { buildSummary, channelStats, topMisses } from '../domain/summary';
+import { buildSummary, channelStats, mergeChannelInfoStats, topMisses } from '../domain/summary';
 import { probabilitySkill, relativeSkill } from '../domain/skill';
 import { signalTradeStats } from '../domain/signal-trades';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
@@ -143,6 +144,12 @@ export class SelfReviewRunService {
         return [];
       });
 
+      await this.soft('CHANNEL_INFO stats', errors, async () => {
+        const inf = await this.repo.results({ sessions, kinds: ['CHANNEL_INFO'] }, 20_000);
+        if (inf.length || sessionRows.some((r) => r.kind === 'CHANNEL_INFO')) summary.byChannel = mergeChannelInfoStats(summary.byChannel, sessionRows, inf, sessions);
+        return [];
+      });
+
       await this.soft('SIGNAL_TRADES (live vs paper no-funds)', errors, async () => {
         const from = istMidnightOf(sessions[sessions.length - 1]);
         const to = new Date(istMidnightOf(S).getTime() + DAY_MS);
@@ -233,6 +240,8 @@ export class SelfReviewRunService {
     out.push(...(await this.soft('TRADE_SETUP', errors, async () => (await this.sources.tradeSetups(s)).map(scoreTradeSetup))));
     // Telegram channel tips: outcomes filled by signal-intake's 16:20 IST replay, before this run.
     out.push(...(await this.soft('CHANNEL_SIGNAL', errors, async () => (await this.sources.channelSignals(s)).map(scoreChannelSignal))));
+    // Telegram INFO items (channel market views): outcomes filled by signal-intake after the close, before this run.
+    out.push(...(await this.soft('CHANNEL_INFO', errors, async () => (await this.sources.channelInfos(s)).flatMap(scoreChannelInfo))));
     return out;
   }
 

@@ -79,7 +79,7 @@ export function buildSummary(
     };
   }
 
-  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'MBM_RELATIVE' && r.kind !== 'STOCK_MOVE' && r.kind !== 'CHANNEL_SIGNAL'), 5).map((r) => ({
+  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'MBM_RELATIVE' && r.kind !== 'STOCK_MOVE' && r.kind !== 'CHANNEL_SIGNAL' && r.kind !== 'CHANNEL_INFO'), 5).map((r) => ({
     kind: r.kind,
     refId: r.refId,
     symbol: r.symbol,
@@ -102,6 +102,38 @@ export function channelStats(sessionRows: readonly VerificationDraft[], history:
     const k = kindStats(today.filter((r) => r.subject === id));
     const r20 = rollingRate(history, id, last20);
     out[id] = { n: k.n, right: k.right, wrong: k.wrong, hitRate: k.hitRate, rolling20: r20.hitRate, rolling20Right: r20.right, rolling20Wrong: r20.wrong };
+  }
+  return out;
+}
+
+/**
+ * CHANNEL_INFO per channel merged into `byChannel` (additive: info* fields). A channel with only INFO
+ * items gets zeroed signal fields.
+ */
+export function mergeChannelInfoStats(
+  byChannel: Record<string, ChannelStats> | undefined,
+  sessionRows: readonly VerificationDraft[],
+  history: readonly HistoryRow[],
+  sessions: readonly string[],
+): Record<string, ChannelStats> {
+  const out: Record<string, ChannelStats> = { ...(byChannel ?? {}) };
+  const today = sessionRows.filter((r) => r.kind === 'CHANNEL_INFO');
+  const ids = new Set<string>([...today.map((r) => r.subject), ...history.map((h) => h.subject)].filter((s): s is string => !!s));
+  const last20 = sessions.slice(0, 20);
+  for (const id of [...ids].sort()) {
+    const k = kindStats(today.filter((r) => r.subject === id));
+    const r20 = rollingRate(history, id, last20);
+    const base: ChannelStats = out[id] ?? { n: 0, right: 0, wrong: 0, hitRate: null, rolling20: null, rolling20Right: 0, rolling20Wrong: 0 };
+    out[id] = {
+      ...base,
+      infoN: k.n,
+      infoRight: k.right,
+      infoWrong: k.wrong,
+      infoHitRate: k.hitRate,
+      infoRolling20: r20.hitRate,
+      infoRolling20Right: r20.right,
+      infoRolling20Wrong: r20.wrong,
+    };
   }
   return out;
 }

@@ -562,6 +562,63 @@ const CHANNEL_ACTUAL: Record<string, string> = {
   UNRESOLVED: 'contract not resolved',
 };
 
+export interface ChannelInfoVerifyRow {
+  id: string;
+  /** The session the row's outcome is scored on (signal-intake's channel_infos.outcomeSession). */
+  sessionDate: string;
+  channelId: string;
+  messageId: string;
+  extractor: string;
+  items: Array<{
+    underlying: string;
+    bias: string | null;
+    levels: number[];
+    targetLevel: number | null;
+    condition: { driver: string; direction: string | null } | null;
+    horizon: string | null;
+  }>;
+  outcomes: Array<{ status: string; session: string | null; ret: number | null; band: number | null; levelHit: boolean | null } | null>;
+}
+
+const INFO_ACTUAL: Record<string, string> = {
+  NOT_JUDGED_MONTHS: 'horizon months: recorded, not judged',
+  NO_DATA: 'no bars to judge',
+};
+
+/**
+ * CHANNEL_INFO (2026-10-24): every directional (BULL / BEAR) item of a Telegram INFO post, judged by
+ * signal-intake on the underlying's daily bars: the close-to-close move beyond ±0.3×ATR in the item's
+ * direction → right, against → wrong, inside the band / not judgeable / MONTHS → null. refId =
+ * `<channel_infos.id>:<item index>`, subject = channel id, details.levelHit = a level / target traded.
+ */
+export function scoreChannelInfo(r: ChannelInfoVerifyRow): VerificationDraft[] {
+  const out: VerificationDraft[] = [];
+  r.items.forEach((it, i) => {
+    if (it.bias !== 'BULL' && it.bias !== 'BEAR') return;
+    const o = r.outcomes[i] ?? null;
+    const status = o?.status ?? 'NO_DATA';
+    const correct = status === 'RIGHT' ? true : status === 'WRONG' ? false : null;
+    const lv = it.levels.length ? ` levels ${it.levels.join('/')}` : '';
+    const cond = it.condition ? ` if ${it.condition.driver} ${it.condition.direction ?? '?'}` : '';
+    const actual =
+      INFO_ACTUAL[status] ??
+      (o && o.ret !== null && o.band !== null ? `close-to-close ${signText(o.ret)} vs band ±${r1(o.band)} (${status.toLowerCase()})` : status.toLowerCase());
+    out.push({
+      sessionDate: r.sessionDate,
+      kind: 'CHANNEL_INFO',
+      refId: `${r.id}:${i}`,
+      subject: r.channelId,
+      symbol: it.underlying,
+      predicted: `${it.bias} ${it.underlying}${lv}${cond} (${it.horizon ?? 'next session'})`,
+      actual,
+      correct,
+      score: correct === null ? null : correct ? 1 : -1,
+      details: { status, ret: o?.ret ?? null, band: o?.band ?? null, levelHit: o?.levelHit ?? null, horizon: it.horizon, extractor: r.extractor, messageId: r.messageId, channelId: r.channelId },
+    });
+  });
+  return out;
+}
+
 /**
  * CHANNEL_SIGNAL (contract 2026-10-23 §Self-review): every parsed tip, traded or not, replayed on its
  * own contract's bars by signal-intake after the close. Target 1 before the SL → right; SL first →

@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { InsightsService } from '../services/insights.service';
 import { RequestInsightDto } from '../dto/request-insight.dto';
 import { CurrentUser, type AuthenticatedUser } from '../../../common/decorators/current-user.decorator';
+import { AdminOnly } from '../../../common/decorators';
 
 @ApiTags('insights')
 @Controller('api/insights')
@@ -32,6 +33,9 @@ export class InsightsController {
     return this.service.findLatest(sectionKey, contextKey, user ? { userId: user.userId, role: user.role } : undefined);
   }
 
+  // The MCP worker routes act on EVERY user's queued insights (claim, write
+  // content, fail), so they are owner/ADMIN-only like other operator routes.
+  @AdminOnly()
   @Post('mcp/claim-pending')
   @ApiOperation({ summary: '[MCP] Claim up to 10 pending insights, marking them in_progress' })
   async claimPending() {
@@ -39,6 +43,7 @@ export class InsightsController {
     return { insights: claimed };
   }
 
+  @AdminOnly()
   @Post('mcp/:id/complete')
   @ApiOperation({ summary: '[MCP] Mark an insight completed with content' })
   async completeMcp(
@@ -48,6 +53,7 @@ export class InsightsController {
     return this.service.completeInsight(id, body.content, body.confidence);
   }
 
+  @AdminOnly()
   @Post('mcp/:id/fail')
   @ApiOperation({ summary: '[MCP] Mark an insight failed with error message' })
   async failMcp(

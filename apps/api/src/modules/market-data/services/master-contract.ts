@@ -21,7 +21,7 @@ import type { UpsertInstrumentInput } from '../repositories/market-data.reposito
 /**
  * Angel's segment labels for derivatives we persist.
  *
- * NFO AND MCX ONLY, and the omissions are a sizing decision rather than an
+ * NFO AND MCX (plus the BOUNDED BFO index set — see keepMasterRow), and the omissions are a sizing decision rather than an
  * oversight. Measured against the live master: NFO 35,282 and MCX 16,699 live
  * contracts, against BFO 40,880 and CDS 9,703. Including all four would take
  * the table from 23,239 rows to 102,564 — and every active row is boot memory,
@@ -31,7 +31,31 @@ import type { UpsertInstrumentInput } from '../repositories/market-data.reposito
  * ever been held in either. Add a segment here the day that stops being true —
  * nothing else needs to change.
  */
-export const DERIVATIVE_SEGMENTS = new Set(['NFO', 'MCX']);
+export const DERIVATIVE_SEGMENTS = new Set(['NFO', 'MCX', 'BFO']);
+
+/**
+ * BFO (BSE F&O) is retained ONLY for the index derivatives Telegram signals trade (SENSEX / BANKEX /
+ * SENSEX50, 2026-10-24) and only within BFO_MAX_EXPIRY_DAYS: the full segment is ~41k rows, these are
+ * a few thousand. Bounded here, in the cached master itself, so the instruments table (and its boot
+ * token cache) only ever sees the same bounded set.
+ */
+export const BFO_INDEX_NAMES = new Set(['SENSEX', 'BANKEX', 'SENSEX50']);
+export const BFO_MAX_EXPIRY_DAYS = 70;
+
+/** The segments the cached scrip master keeps in full. */
+export const MASTER_FULL_SEGMENTS = new Set(['NSE', 'BSE', 'NFO', 'MCX']);
+
+/** Does the cached scrip master keep this raw row? Full NSE/BSE/NFO/MCX + bounded BFO index F&O. */
+export function keepMasterRow(row: Record<string, unknown> | null | undefined, today: Date = new Date()): boolean {
+  const seg = String(row?.exch_seg ?? '');
+  if (MASTER_FULL_SEGMENTS.has(seg)) return true;
+  if (seg !== 'BFO') return false;
+  if (!BFO_INDEX_NAMES.has(String(row?.name ?? '').trim().toUpperCase())) return false;
+  const expiry = parseMasterExpiry(row?.expiry);
+  if (!expiry) return false;
+  const start = startOfLocalDay(today).getTime();
+  return expiry.getTime() >= start && expiry.getTime() <= start + BFO_MAX_EXPIRY_DAYS * 86_400_000;
+}
 
 const MONTHS: Record<string, number> = {
   JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
@@ -109,6 +133,8 @@ export function toDerivativeInput(
 ): UpsertInstrumentInput | null {
   const exchange = String(row?.exch_seg ?? '').trim().toUpperCase();
   if (!DERIVATIVE_SEGMENTS.has(exchange)) return null;
+  // BFO: only the bounded index set (keepMasterRow) — never BSE stock derivatives.
+  if (exchange === 'BFO' && !BFO_INDEX_NAMES.has(String(row?.name ?? '').trim().toUpperCase())) return null;
 
   const symbol = String(row?.symbol ?? '').trim();
   const token = String(row?.token ?? '').trim();

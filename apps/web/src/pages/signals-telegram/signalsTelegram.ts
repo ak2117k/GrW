@@ -19,12 +19,50 @@ export interface SignalDecisionRow {
   underlying: string | null;
   agreeCount: number | null;
   conflict: boolean | null;
-  /** PAPER = TAKE the account could not fund → a paper trade instead (when paper-on-no-funds is on). */
-  decision: 'TAKE' | 'SKIP' | 'PAPER' | null;
+  /** PAPER = TAKE the account could not fund → a paper trade instead; PENDING = waiting for its ABOVE/BELOW trigger. */
+  decision: 'TAKE' | 'SKIP' | 'PAPER' | 'PENDING' | null;
   skipReason: string | null;
   gate: GateCheckRow[] | null;
   judge: { verdict?: string; confidence?: number; effectiveConfidence?: number; reasons?: string[]; unavailable?: string; detail?: string; tightened?: string[] } | null;
-  plan: { tradingsymbol?: string; side?: string; qty?: number; lots?: number; limitPrice?: number; sl?: number; targets?: number[]; riskRupees?: number } | null;
+  plan: {
+    tradingsymbol?: string;
+    side?: string;
+    qty?: number;
+    lots?: number;
+    limitPrice?: number;
+    sl?: number;
+    slSource?: string;
+    /** Present when the channel hid its SL and the engine derived one. */
+    engineSl?: { method: string; detail: string };
+    trigger?: TriggerState;
+    targets?: number[];
+    riskRupees?: number;
+  } | null;
+}
+
+export interface TriggerState {
+  price: number;
+  op: 'ABOVE' | 'BELOW';
+  bandLow: number;
+  bandHigh: number;
+  armedAt: string;
+  expiresAt: string;
+  judgedAt: string | null;
+  lastLtp: number | null;
+  lastCheckAt: string | null;
+}
+
+/** An armed BUY ABOVE / SELL BELOW trigger. */
+export interface PendingTriggerRow {
+  id: string;
+  channel: string | null;
+  underlying: string | null;
+  tradingsymbol: string | null;
+  side: string | null;
+  sl: number | null;
+  slSource: string | null;
+  engineSl: { method: string; detail: string } | null;
+  trigger: TriggerState | null;
 }
 
 export interface SignalOrderRow {
@@ -76,7 +114,9 @@ export interface SignalOverview {
   paperOnNoFunds?: { enabled: boolean; store: string };
   /** PAPER (no funds) decisions of the last `lookbackDays` with their outcomes, and live over the same window. */
   paper?: { lookbackDays: number; rows: PaperRow[]; summary: TradeOutcomeSummary; live: TradeOutcomeSummary };
-  caps: { maxLots: number; maxLossPerTrade: number; maxTradesPerDay: number; dailyLossStop: number; entryTolerancePct: number; product: string };
+  caps: { maxLots: number; maxLossPerTrade: number; maxTradesPerDay: number; dailyLossStop: number; entryTolerancePct: number; product: string; triggerWaitMin?: number; triggerMaxPending?: number; engineSl?: boolean };
+  /** Armed triggers waiting for their price. */
+  pending?: PendingTriggerRow[];
   slEnforcement: { ok: boolean; detail: string };
   decisions: SignalDecisionRow[];
   orders: SignalOrderRow[];
@@ -124,6 +164,7 @@ const REASON_LABEL: Record<string, string> = {
   live_trading_enabled: 'live trading disabled',
   side_allowed: 'option writing refused',
   insufficient_funds: 'not enough funds',
+  trigger_expired: 'trigger price never reached',
 };
 
 export function skipLabel(reason: string | null): string {
@@ -195,5 +236,32 @@ export function paperState(r: PaperRow): { label: string; tone: 'good' | 'bad' |
 
 export function fundsLine(f: PaperRow['funds']): string {
   if (!f) return '';
-  return `need ${rupee(f.required)}, available ${f.available === null ? '?' : rupee(f.available)}${f.method === 'estimate' ? ' (margin estimate)' : ''}`;
+  return `need ${rupee(f.required)}, available ${f.available === null ? '?' : rupee(f.available)}${f.method === 'estimate' ? ' (margin estimate)' : f.method === 'broker' ? ' (broker margin)' : ''}`;
+}
+
+/** "12:05 left" until an armed trigger expires; "expiring" once past. */
+export function countdown(expiresAt: string | null | undefined, nowMs: number): string {
+  const t = expiresAt ? Date.parse(expiresAt) : NaN;
+  if (!Number.isFinite(t)) return '';
+  const left = Math.floor((t - nowMs) / 1000);
+  if (left <= 0) return 'expiring';
+  const m = Math.floor(left / 60);
+  const sec = String(left % 60).padStart(2, '0');
+  return `${m}:${sec} left`;
+}
+
+const FUNDS_METHOD: Record<string, string> = { broker: 'broker margin', estimate: 'margin estimate', premium: 'premium', notional: 'notional' };
+
+/** How the live funds check sized this decision (from the gate's funds record), or ''. */
+export function fundsMethod(d: Pick<SignalDecisionRow, 'gate'>): string {
+  const f = (d.gate ?? []).find((c) => c.name === 'funds' || c.name === 'broker_funds_reject') as (GateCheckRow & { funds?: { method?: string } }) | undefined;
+  const m = f?.funds?.method;
+  return m ? (FUNDS_METHOD[m] ?? m) : '';
+}
+
+/** Short label for the engine SL badge. */
+export function engineSlLabel(e: { method: string } | null | undefined): string {
+  if (!e) return '';
+  const m: Record<string, string> = { level: 'level', level_fut: 'level', level_delta: 'level × delta', premium_pct: 'premium %', atr: 'ATR' };
+  return `ENGINE SL · ${m[e.method] ?? e.method}`;
 }

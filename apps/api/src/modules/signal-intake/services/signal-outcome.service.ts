@@ -82,7 +82,8 @@ export class SignalOutcomeService {
     for (const s of rows) {
       try {
         const exchange = s.exchange ?? (s.instrumentKind === 'EQ' ? 'NSE' : 'NFO');
-        const venue = exchange === 'MCX' ? 'MCX' : 'NSE';
+        // BFO follows BSE's calendar (SessionClock maps it); everything else non-MCX trades NSE hours.
+        const venue = exchange === 'MCX' ? 'MCX' : exchange === 'BFO' ? 'BFO' : 'NSE';
         const start = closed.findIndex((d) => {
           const c = this.closeOf(d, venue);
           return c !== null && c.getTime() > s.receivedAt.getTime();

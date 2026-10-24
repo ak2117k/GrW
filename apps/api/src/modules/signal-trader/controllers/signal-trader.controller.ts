@@ -5,6 +5,7 @@ import { SignalTraderService } from '../services/signal-trader.service';
 import { istDayStart, slEnforceability } from '../domain/execution';
 import { decisionIdFromTags } from '../domain/paper';
 import { paperSummary, liveSummary } from '../domain/paper-summary';
+import { readTrigger } from '../domain/trigger';
 
 /** How far back the Paper (no funds) section looks (analysis needs more than today). */
 const PAPER_LOOKBACK_DAYS = 30;
@@ -56,7 +57,28 @@ export class SignalTraderController {
         dailyLossStop: cfg.dailyLossStop,
         entryTolerancePct: cfg.entryTolerancePct,
         product: cfg.product,
+        triggerWaitMin: cfg.triggerWaitMin,
+        triggerMaxPending: cfg.triggerMaxPending,
+        engineSl: cfg.engineSl,
       },
+      // Armed BUY ABOVE / SELL BELOW triggers (decision PENDING) with their countdown data.
+      pending: decisions
+        .filter((d) => d.decision === 'PENDING' && d.status === 'PENDING')
+        .map((d) => {
+          const t = readTrigger(d.plan);
+          const plan = (d.plan ?? {}) as Record<string, unknown>;
+          return {
+            id: d.id,
+            channel: d.channelId ? (titles.get(d.channelId) ?? d.channelId) : null,
+            underlying: d.underlying,
+            tradingsymbol: typeof plan.tradingsymbol === 'string' ? plan.tradingsymbol : null,
+            side: typeof plan.side === 'string' ? plan.side : null,
+            sl: typeof plan.sl === 'number' ? plan.sl : null,
+            slSource: typeof plan.slSource === 'string' ? plan.slSource : null,
+            engineSl: (plan.engineSl ?? null) as { method: string; detail: string } | null,
+            trigger: t,
+          };
+        }),
       slEnforcement: { ok: sl.ok, detail: sl.detail },
       decisions: decisions.map((d) => ({
         id: d.id,

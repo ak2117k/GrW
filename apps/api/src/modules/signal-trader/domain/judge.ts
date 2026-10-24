@@ -4,7 +4,7 @@ import type { SignalTraderConfig } from './signal-trader.config';
 
 /** `ai_calls.job` label of the signal judge. */
 export const SIGNAL_JUDGE_JOB = 'signal.judge';
-export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v1';
+export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v2';
 
 const NULLABLE_NUMBER = { anyOf: [{ type: 'number' }, { type: 'null' }] } as const;
 
@@ -36,6 +36,9 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'price) and/or fewer lots. Never propose a wider stop or more lots — such values are ignored.',
   'channelViews = Telegram channels\' market views (BULL/BEAR item counts on this underlying over 24 h, weighted by each',
   'channel\'s view accuracy): weak, crowd sentiment — context only, never a reason on its own.',
+  'plan.slSource = "engine" means the CHANNEL GAVE NO USABLE STOP (e.g. "SL paid") and our engine derived one (plan.engineSl',
+  'says how: level book + delta, premium %, or ATR); judge that stop on its merits, and a hidden stop is itself a weak sign.',
+  'plan.trigger present = the entry waits for the price to reach plan.trigger.price (not reached yet); judge the trade as if entered there.',
   'A block marked unavailable means we failed to look — not that the market is quiet.',
   'Reply with ONLY a JSON object: {"verdict":"TAKE"|"SKIP","confidence":1-100,"reasons":[short strings,',
   'most important first],"entry":number|null,"sl":number|null,"targets":[numbers],"lots":integer|null}.',

@@ -1,8 +1,12 @@
+import { useEffect, useState } from 'react';
 import { Badge } from '@/components/common';
 import { cn } from '@/utils/cn';
 import {
   channelStatsLine,
+  countdown,
   decisionWhy,
+  engineSlLabel,
+  fundsMethod,
   fundsLine,
   modeBadge,
   outcomeLine,
@@ -10,6 +14,7 @@ import {
   openOrders,
   planLine,
   skipLabel,
+  type PendingTriggerRow,
   type SignalDecisionRow,
   type SignalOverview,
 } from './signalsTelegram';
@@ -35,6 +40,8 @@ function DecisionCard({ d }: { d: SignalDecisionRow }) {
         <span className={cn('text-sm font-medium', PRIMARY)}>{d.underlying ?? '—'}</span>
         <span className={cn('text-xs', MUTED)}>{d.channel ?? 'unknown channel'}</span>
         {d.conflict && <Badge label="CONFLICT" variant="warning" size="sm" />}
+        {d.plan?.engineSl && <Badge label={engineSlLabel(d.plan.engineSl)} variant="warning" size="sm" />}
+        {fundsMethod(d) && <span className={cn('text-xs', SECONDARY)} data-testid="funds-method">funds: {fundsMethod(d)}</span>}
         {(d.agreeCount ?? 0) > 1 && <span className={cn('text-xs', SECONDARY)}>{d.agreeCount} channels agree</span>}
         <span className={cn('ml-auto text-xs', MUTED)}>
           {time(d.decidedAt)} · {d.mode}
@@ -42,6 +49,7 @@ function DecisionCard({ d }: { d: SignalDecisionRow }) {
         </span>
       </div>
       {d.plan?.tradingsymbol && <p className={cn('mt-2 text-sm', SECONDARY)}>{planLine(d.plan)}</p>}
+      {d.plan?.engineSl && <p className={cn('mt-1 text-xs', MUTED)}>Engine SL (channel gave none): {d.plan.engineSl.detail}</p>}
       <p className={cn('mt-1 text-xs', MUTED)}>
         {(d.decision === 'SKIP' || paper) && <span className="font-medium text-amber-400">{skipLabel(d.skipReason)}: </span>}
         {decisionWhy(d)}
@@ -63,6 +71,48 @@ function DecisionCard({ d }: { d: SignalDecisionRow }) {
         </details>
       )}
     </div>
+  );
+}
+
+/** Re-renders every second while mounted (trigger countdowns). */
+function useNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
+}
+
+function PendingSection({ rows }: { rows: PendingTriggerRow[] }) {
+  const now = useNow();
+  return (
+    <section data-testid="pending-section">
+      <h2 className={cn('mb-2 text-sm font-semibold', PRIMARY)}>Waiting for trigger</h2>
+      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+        {rows.map((p) => (
+          <div key={p.id} className={CARD} data-testid="pending-trigger">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge label="PENDING" variant="info" size="sm" />
+              <span className={cn('text-sm font-medium', PRIMARY)}>
+                {p.side} {p.tradingsymbol ?? p.underlying ?? '—'}
+              </span>
+              <span className={cn('text-xs', MUTED)}>{p.channel ?? 'unknown channel'}</span>
+              {p.engineSl && <Badge label={engineSlLabel(p.engineSl)} variant="warning" size="sm" />}
+              <span className={cn('ml-auto text-xs font-medium tabular-nums', SECONDARY)} data-testid="pending-countdown">
+                {countdown(p.trigger?.expiresAt, now)}
+              </span>
+            </div>
+            {p.trigger && (
+              <p className={cn('mt-1 text-xs', MUTED)}>
+                entry when {p.trigger.op} {p.trigger.price} (band {p.trigger.bandLow}–{p.trigger.bandHigh}) · LTP {p.trigger.lastLtp ?? '?'}
+                {p.sl !== null ? ` · SL ${p.sl}` : ''}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -156,6 +206,8 @@ export function SignalsTelegramView({ data, onTogglePaper, toggleBusy }: { data:
         </p>
         <PaperToggle data={data} onToggle={onTogglePaper} busy={toggleBusy} />
       </div>
+
+      {data.pending && data.pending.length > 0 && <PendingSection rows={data.pending} />}
 
       <section>
         <h2 className={cn('mb-2 text-sm font-semibold', PRIMARY)}>Open signal trades</h2>

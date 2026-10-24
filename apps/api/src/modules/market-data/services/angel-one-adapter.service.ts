@@ -14,6 +14,7 @@ import { WarnLimiter } from '../../../common/utils/warn-limiter';
 import { rankSymbolMatches } from '../utils/rank-symbol-matches';
 import { COMMODITIES, INDICES } from '@td/shared/constants';
 import { MarketDepth, MarketDepthLevel } from '@td/shared/types';
+import { keepMasterRow, MASTER_FULL_SEGMENTS } from './master-contract';
 import {
   AngelThrottleError,
   HISTORICAL_MIN_GAP_MS,
@@ -356,6 +357,8 @@ export class AngelOneAdapterService implements BrokerAdapter {
         return 'MCX';
       case 'NSE_FO':
         return 'NFO';
+      case 'BSE_FO':
+        return 'BFO';
       default:
         return e;
     }
@@ -454,7 +457,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
       // Collision detection: if this token has already been cached under a
       // DIFFERENT segment, it's an ambiguous (reused) token — warn once so
       // the collision is visible, then keep both prices separate.
-      for (const seg of ['NSE', 'BSE', 'MCX', 'NFO', 'CDS', 'NCDEX']) {
+      for (const seg of ['NSE', 'BSE', 'MCX', 'NFO', 'BFO', 'CDS', 'NCDEX']) {
         if (seg !== exchange && this.wsTickCache.has(`${seg}:${token}`)) {
           this.warnAmbiguousToken(token, seg, exchange);
           break;
@@ -1511,6 +1514,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
       case 'BSE': return ExchangeType.BSE_CM;
       case 'MCX': return ExchangeType.MCX_FO;
       case 'NFO': return ExchangeType.NSE_FO;
+      case 'BFO': return ExchangeType.BSE_FO;
       default: return null;
     }
   }
@@ -1562,7 +1566,7 @@ export class AngelOneAdapterService implements BrokerAdapter {
    * If a segment is ever traded here, add it — the failure mode is a symbol that
    * will not resolve, which is loud, not a wrong price, which is not.
    */
-  private static readonly MASTER_SEGMENTS = new Set(['NSE', 'BSE', 'NFO', 'MCX']);
+  private static readonly MASTER_SEGMENTS = new Set([...MASTER_FULL_SEGMENTS, 'BFO(SENSEX/BANKEX ≤70d)']);
 
   private async ensureMasterCache(): Promise<any[]> {
     const fresh =
@@ -1585,9 +1589,10 @@ export class AngelOneAdapterService implements BrokerAdapter {
       // the parse peak is transient rather than the resting cost. `all = null`
       // is not decoration: without it the whole 155k-row array stays reachable
       // from this closure's scope for as long as the promise is retained.
-      const kept = all!.filter((i: any) =>
-        AngelOneAdapterService.MASTER_SEGMENTS.has(String(i?.exch_seg ?? '')),
-      );
+      // Plus BFO, bounded to the SENSEX/BANKEX index F&O within 70 days (keepMasterRow): Telegram
+      // signals trade them; the rest of BFO (~41k rows) is still dropped.
+      const today = new Date();
+      const kept = all!.filter((i: any) => keepMasterRow(i, today));
       all = null;
       this.logger.log(
         `Downloaded ${total} instruments from Angel One; retained ${kept.length} across ` +

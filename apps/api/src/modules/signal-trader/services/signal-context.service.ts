@@ -8,6 +8,10 @@ import { TUNING_READER, type TuningReader } from '../../self-review/tuning/tunab
 import { SentinelChartContextAdapter } from '../../trade-sentinel/adapters/chart-context.adapter';
 import { NEWS_SHIM, type NewsShim } from '../../trade-sentinel/services/context-packet.service';
 import { MBM_PACKET_TUNABLE } from '../../trade-sentinel/services/context-packet.service';
+import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
+import { deriveEngineSl, type EngineSl } from '../domain/engine-sl';
+import type { ResolvedContract } from '../domain/contract-resolver';
+import type { SignalView } from '../domain/signal.types';
 
 /** A block that is either present with its source, or stated unavailable WITH the reason (never silent). */
 export type CtxBlock = { status: 'present'; source: string; value: unknown } | { status: 'unavailable'; reason: string };
@@ -41,6 +45,7 @@ export class SignalContextService {
     @Optional() private readonly mbm?: MbmClient,
     @Optional() @Inject(MBM_CONFIG) private readonly mbmCfg?: MbmConfig,
     @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
+    @Optional() private readonly feeds?: UserFeedManager,
   ) {}
 
   async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date }): Promise<Record<string, CtxBlock>> {
@@ -90,6 +95,84 @@ export class SignalContextService {
     }
   }
 
+  /**
+   * Engine SL when the channel hides it (domain/engine-sl). I/O here, the rule there: the underlying's
+   * spot (fresh chain snapshot ≤ 10 min, else the feed via market-context; EQ / MCX futures are their
+   * own underlying), the level book at that spot, the option delta from the chain snapshot's greeks
+   * (same expiry, ≤ 30 min old) and — futures only, when no level works — the contract's daily ATR(14).
+   * Never throws: any failed read just drops to the next fallback.
+   */
+  async engineSl(i: {
+    signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'side' | 'strike'>;
+    contract: ResolvedContract;
+    price: number;
+    ownerUserId: string | null;
+    now: Date;
+    optionPct: number;
+    bufferPct: number;
+  }): Promise<EngineSl> {
+    const s = i.signal;
+    const kind = s.instrumentKind;
+    const option = kind === 'CE' || kind === 'PE';
+    const ownUnderlying = kind === 'EQ' || (kind === 'FUT' && i.contract.exchange === 'MCX');
+    let spot: number | null = ownUnderlying ? i.price : null;
+    let delta: number | null = null;
+    if (!ownUnderlying && this.chain) {
+      try {
+        const c = await withTimeout(this.chain.latestChain(s.underlying), BLOCK_TIMEOUT_MS);
+        const age = c ? i.now.getTime() - c.capturedAt.getTime() : Infinity;
+        if (c && age <= 10 * 60_000 && c.spot > 0) spot = c.spot;
+        if (c && option && age <= 30 * 60_000 && c.expiry === i.contract.expiry && s.strike !== null) {
+          const row = c.strikes.find((r) => Math.abs(r.strike - (s.strike as number)) < 1e-6);
+          const leg = kind === 'CE' ? row?.ce : row?.pe;
+          delta = typeof leg?.delta === 'number' && Number.isFinite(leg.delta) ? leg.delta : null;
+        }
+      } catch (err) {
+        this.logger.warn(`[signal-context] chain snapshot for engine SL (${s.underlying}): ${errText(err)}`);
+      }
+    }
+    if (spot === null && !ownUnderlying && this.marketCtx) {
+      try {
+        const snap = await withTimeout(this.marketCtx.snapshot(s.underlying), BLOCK_TIMEOUT_MS);
+        spot = typeof snap.spot === 'number' && snap.spot > 0 ? snap.spot : null;
+      } catch (err) {
+        this.logger.warn(`[signal-context] spot for engine SL (${s.underlying}): ${errText(err)}`);
+      }
+    }
+    const lv = spot !== null ? await this.nearestLevels(s.underlying, kind, spot, i.ownerUserId) : null;
+    const base = {
+      kind,
+      side: s.side,
+      price: i.price,
+      tick: i.contract.tickSize,
+      spot,
+      support: lv?.support ?? null,
+      resistance: lv?.resistance ?? null,
+      delta,
+      atr: null as number | null,
+      optionPct: i.optionPct,
+      bufferPct: i.bufferPct,
+    };
+    const first = deriveEngineSl(base);
+    if (first.sl !== null || kind !== 'FUT') return first;
+    // Futures with no usable level: 1 × the contract's own daily ATR(14).
+    const atr = await this.dailyAtr(i.ownerUserId, i.contract, i.now);
+    return atr ? deriveEngineSl({ ...base, atr }) : first;
+  }
+
+  /** ATR(14) of the contract's daily bars over the owner's own session; null when unreadable. */
+  private async dailyAtr(ownerUserId: string | null, c: ResolvedContract, now: Date): Promise<number | null> {
+    if (!this.feeds || !ownerUserId) return null;
+    try {
+      const from = new Date(now.getTime() - 40 * 86_400_000);
+      const bars = await withTimeout(this.feeds.fetchCandles(ownerUserId, c.token, c.exchange, '1d', from, now), BLOCK_TIMEOUT_MS);
+      return atr14((bars ?? []).map((b) => ({ high: b.high, low: b.low, close: b.close })));
+    } catch (err) {
+      this.logger.warn(`[signal-context] daily ATR for ${c.tradingsymbol}: ${errText(err)}`);
+      return null;
+    }
+  }
+
   private mbmVisible(): boolean {
     if (this.mbmCfg?.packet === 'on') return true;
     try {
@@ -118,4 +201,19 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       t = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
     }),
   ]).finally(() => clearTimeout(t));
+}
+
+/** Simple (unsmoothed) ATR(14) over daily bars (oldest first); null with fewer than 2 bars. */
+export function atr14(bars: ReadonlyArray<{ high: number; low: number; close: number }>, n = 14): number | null {
+  const ok = bars.filter((b) => [b.high, b.low, b.close].every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0));
+  if (ok.length < 2) return null;
+  const tr: number[] = [];
+  for (let k = 1; k < ok.length; k++) {
+    const b = ok[k];
+    const pc = ok[k - 1].close;
+    tr.push(Math.max(b.high - b.low, Math.abs(b.high - pc), Math.abs(b.low - pc)));
+  }
+  const last = tr.slice(-n);
+  const v = last.reduce((a, x) => a + x, 0) / last.length;
+  return v > 0 ? Math.round(v * 100) / 100 : null;
 }

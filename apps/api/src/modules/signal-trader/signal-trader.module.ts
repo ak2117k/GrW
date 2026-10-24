@@ -69,10 +69,26 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
       // The owner's RMS available cash — the same sanitized funds read trade-setup sizes with
       // (BrokerOverviewService, own-account session: never a second login over the live feed).
       provide: SIGNAL_FUNDS,
-      useFactory: (overview: BrokerOverviewService): FundsLike => ({
+      useFactory: (overview: BrokerOverviewService, feeds: UserFeedManager): FundsLike => ({
         available: async (userId) => (await overview.getFunds(userId))?.availableCash ?? null,
+        // Angel margin calculator (SmartAPI marginApi) over the owner's LIVE feed session: leased, never a
+        // fresh login (leaseRestClient returns null instead). Any failure → the caller uses the estimate.
+        margin: async (userId, position) => {
+          const lease = feeds.leaseRestClient(userId);
+          if (!lease) throw new Error('no live owner session to ask the margin calculator');
+          try {
+            const client = lease.client as { marginApi?: (p: unknown) => Promise<unknown> };
+            if (typeof client.marginApi !== 'function') throw new Error('SDK has no marginApi');
+            return await Promise.race([
+              client.marginApi({ positions: [position] }),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('marginApi timed out after 7 s')), 7_000).unref?.()),
+            ]);
+          } finally {
+            lease.release();
+          }
+        },
       }),
-      inject: [BrokerOverviewService],
+      inject: [BrokerOverviewService, UserFeedManager],
     },
     // The owner's broker session, exactly as the sentinel executor borrows it (no second login).
     PerUserBrokerSessionFactory,

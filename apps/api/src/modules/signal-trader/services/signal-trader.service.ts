@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap, type OnModuleDestroy } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { RiskManagerService } from '../../trade-engine/services/risk-manager.service';
 import type { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
@@ -7,18 +7,19 @@ import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
-import { resolveContract, segmentFor, type ResolveResult } from '../domain/contract-resolver';
-import { applyJudgeTightening, evaluateGate, planEntry, type EntryPlan, type GateCheck, type GateFacts } from '../domain/gate';
-import { judgeDecision, SIGNAL_JUDGE_PROMPT_VERSION } from '../domain/judge';
+import { resolveContract, segmentFor, type ResolvedContract, type ResolveResult } from '../domain/contract-resolver';
+import { applyJudgeTightening, evaluateGate, planEntry, type EntryPlan, type GateCheck, type GateFacts, type GateResult, type TriggerState } from '../domain/gate';
+import { judgeDecision, SIGNAL_JUDGE_PROMPT_VERSION, type JudgeVerdict } from '../domain/judge';
 import { slEnforceability } from '../domain/execution';
-import { skipAlert, takeAlert, updateAlert } from '../domain/alerts';
+import { skipAlert, takeAlert, triggerArmedAlert, triggerFiredAlert, updateAlert } from '../domain/alerts';
+import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, triggerOf } from '../domain/trigger';
 import { SIGNAL_READY, SIGNAL_UPDATE, type SignalReadyEvent, type SignalUpdateEvent, type SignalView } from '../domain/signal.types';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService } from './signal-context.service';
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
-import { fundsCheck, isFundsRejection, requiredFunds, type FundsCheck } from '../domain/funds';
+import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
 import { SIGNAL_PAPER_SKIP_REASON, paperAlert } from '../domain/paper';
 
 export const SIGNAL_TRADER_CONFIG = Symbol('SIGNAL_TRADER_CONFIG');
@@ -44,6 +45,11 @@ export interface QuotesLike {
 export const SIGNAL_FUNDS = Symbol('SIGNAL_FUNDS');
 export interface FundsLike {
   available(userId: string): Promise<number | null>;
+  /**
+   * Raw SmartAPI marginApi answer for one position over the owner's LIVE session (never a second
+   * login); parsed by parseMarginResponse. Optional: absent → the estimate is used.
+   */
+  margin?(userId: string, position: Record<string, unknown>): Promise<unknown>;
 }
 /** Opens the PAPER (no funds) trade (SignalPaperService). */
 export const SIGNAL_PAPER = Symbol('SIGNAL_PAPER');
@@ -64,12 +70,71 @@ interface NoFundsContext {
   method: FundsCheck['funds']['method'];
 }
 
+/** Facts that do not depend on the entry price. */
+interface BaseFacts {
+  contract: ResolveResult;
+  c: ResolvedContract | null;
+  marketOpen: boolean | null;
+  minutesToClose: number | null;
+  ltp: number | null;
+  tradesToday: number | null;
+  signalLossToday: number | null;
+  clusterTaken: boolean | null;
+  holding: boolean | null;
+  coreOff: boolean | null;
+  slEnf: ReturnType<typeof slEnforceability>;
+}
+
+export interface JudgeTake {
+  ok: true;
+  verdict: JudgeVerdict;
+  effectiveConfidence: number;
+  agreeCount: number;
+  conflict: boolean;
+  record: unknown;
+  judgedAt: string;
+}
+export type JudgeOutcome = JudgeTake | { ok: false; reason: string; detail: string; record: unknown };
+
+/** One armed trigger in the watch (rebuilt from the DB after a restart). */
+export interface PendingTrigger {
+  decisionId: string;
+  signal: SignalView;
+  event: SignalReadyEvent;
+  channel: string;
+  trigger: TriggerState;
+  gate: GateCheck[];
+  judge: JudgeOutcome;
+  plan: EntryPlan;
+  nextPollAt: number;
+  persistedAt: number;
+}
+
+/** A stored judge record (SignalDecision.judge of an armed trigger) back into a TAKE outcome. */
+export function judgeFromRecord(rec: unknown, agreeCount: number, conflict: boolean): JudgeTake | null {
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return null;
+  const r = rec as Record<string, unknown>;
+  if (r.verdict !== 'TAKE') return null;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const verdict: JudgeVerdict = {
+    verdict: 'TAKE',
+    confidence: n(r.confidence) ?? 0,
+    reasons: Array.isArray(r.reasons) ? r.reasons.filter((x): x is string => typeof x === 'string') : [],
+    entry: n(r.entry),
+    sl: n(r.sl),
+    targets: Array.isArray(r.targets) ? r.targets.filter((x): x is number => typeof x === 'number') : [],
+    lots: n(r.lots),
+  };
+  return { ok: true, verdict, effectiveConfidence: n(r.effectiveConfidence) ?? verdict.confidence, agreeCount, conflict, record: rec, judgedAt: typeof r.judgedAt === 'string' ? r.judgedAt : '' };
+}
+
 /** Re-evaluations allowed for one signal (a low-confidence SKIP upgraded by corroboration). */
 const MAX_EVALUATIONS = 3;
 
 export interface EvaluationResult {
   decisionId: string;
-  decision: 'TAKE' | 'SKIP' | 'PAPER';
+  /** PENDING = BUY ABOVE / SELL BELOW not reached yet: armed, the LTP is being watched. */
+  decision: 'TAKE' | 'SKIP' | 'PAPER' | 'PENDING';
   skipReason: string | null;
   placed?: string;
   /** PAPER: the paper trade id, or why it could not be opened. */
@@ -91,9 +156,13 @@ export function describeSignal(s: SignalView): string {
  * (unique decision per signal+evaluation, unique order per decision) are the durable backstop.
  */
 @Injectable()
-export class SignalTraderService implements OnApplicationBootstrap {
+export class SignalTraderService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(SignalTraderService.name);
   private chain: Promise<unknown> = Promise.resolve();
+  /** Armed triggers (the DB is the source of truth; this is the watch list). */
+  private readonly pending = new Map<string, PendingTrigger>();
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private ticking = false;
 
   constructor(
     @Inject(SIGNAL_TRADER_CONFIG) private readonly cfg: SignalTraderConfig,
@@ -122,6 +191,9 @@ export class SignalTraderService implements OnApplicationBootstrap {
         .pendingOrders(new Date())
         .then((rows) => this.executor.resume(rows, this.cfg.fillWaitSec))
         .catch((err) => this.logger.error(`[signal-trader] resuming open orders failed: ${errText(err)}`));
+    }
+    if (this.cfg.mode !== 'off' && bootJobsEnabled()) {
+      void this.resumeTriggers().catch((err) => this.logger.error(`[signal-trader] resuming pending triggers failed: ${errText(err)}`));
     }
   }
 
@@ -188,13 +260,11 @@ export class SignalTraderService implements OnApplicationBootstrap {
     }
   }
 
-  private async pipeline(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date): Promise<EvaluationResult> {
+  /** Facts that do not depend on the entry price (one read per evaluation / trigger fire). */
+  private async gatherBase(s: SignalView, e: Pick<SignalReadyEvent, 'clusterId'>, now: Date): Promise<BaseFacts> {
     const cfg = this.cfg;
     const owner = cfg.ownerUserId;
-    const what = describeSignal(s);
     const exchange = segmentFor(s);
-
-    // ---- facts ----
     let contract: ResolveResult | null = null;
     try {
       contract = resolveContract(await this.master.getInstrumentMaster(), s, now);
@@ -211,55 +281,89 @@ export class SignalTraderService implements OnApplicationBootstrap {
       marketOpen = null;
     }
     const ltp = c && owner ? await this.quotes.ltp(owner, c.token, c.exchange).catch(() => null) : null;
-    let engineSl: number | null = null;
-    if (s.sl === null && s.instrumentKind === 'EQ' && ltp) {
-      const lv = await this.context.nearestLevels(s.underlying, s.instrumentKind, ltp, owner);
-      engineSl = s.side === 'BUY' ? (lv?.support ?? null) : (lv?.resistance ?? null);
-    }
-    const planned = planEntry({ signal: s, contract, ltp, engineSl }, cfg);
-    const plan = planned.plan;
-
-    const safe = async <T>(fn: () => Promise<T>): Promise<T | null> => {
-      try {
-        return await fn();
-      } catch (err) {
-        this.logger.warn(`[signal-trader] fact read failed: ${errText(err)}`);
-        return null;
-      }
-    };
-    const [tradesToday, signalLossToday, clusterTaken, holding, coreOff, riskManager] = await Promise.all([
-      safe(() => this.repo.tradesToday(cfg.mode, now)),
-      safe(() => this.repo.signalLossToday(now)),
-      safe(() => this.repo.clusterTaken(e.clusterId ?? null)),
-      c && owner ? safe(() => this.repo.holding(owner, c.token, now)) : Promise.resolve(null),
-      owner ? safe(() => coreEntryAllowed('signal-trader', { userId: owner, ref: c?.tradingsymbol ?? s.underlying })) : Promise.resolve(false),
-      plan ? safe(() => this.risk.validateTrade(this.riskDto(plan, decisionId))) : Promise.resolve(null),
+    const [tradesToday, signalLossToday, clusterTaken, holding, coreOff] = await Promise.all([
+      this.safe(() => this.repo.tradesToday(cfg.mode, now)),
+      this.safe(() => this.repo.signalLossToday(now)),
+      this.safe(() => this.repo.clusterTaken(e.clusterId ?? null)),
+      c && owner ? this.safe(() => this.repo.holding(owner, c.token, now)) : Promise.resolve(null),
+      owner ? this.safe(() => coreEntryAllowed('signal-trader', { userId: owner, ref: c?.tradingsymbol ?? s.underlying })) : Promise.resolve(false),
     ]);
     const slEnf = slEnforceability(this.env, owner, c?.exchange ?? null, c?.tradingsymbol ?? null);
+    return { contract, c, marketOpen, minutesToClose, ltp, tradesToday, signalLossToday, clusterTaken, holding, coreOff, slEnf };
+  }
+
+  private async safe<T>(fn: () => Promise<T>): Promise<T | null> {
+    try {
+      return await fn();
+    } catch (err) {
+      this.logger.warn(`[signal-trader] fact read failed: ${errText(err)}`);
+      return null;
+    }
+  }
+
+  /** Engine SL (when the signal has none) + plan + risk manager + the full gate, at entry price `price`. */
+  private async planAndGate(decisionId: string, s: SignalView, base: BaseFacts, price: number | null, now: Date): Promise<{ gate: GateResult; plan: EntryPlan | null }> {
+    const cfg = this.cfg;
+    const owner = cfg.ownerUserId;
+    let engineSl: number | null = null;
+    let engineSlInfo: GateFacts['engineSlInfo'] = null;
+    if (s.sl === null && base.c && price !== null && price > 0) {
+      if (!cfg.engineSl) {
+        engineSlInfo = { method: null, detail: 'SIGNAL_ENGINE_SL=off' };
+      } else {
+        try {
+          const r = await this.context.engineSl({ signal: s, contract: base.c, price, ownerUserId: owner, now, optionPct: cfg.engineSlOptionPct, bufferPct: cfg.engineSlBufferPct });
+          engineSl = r.sl;
+          engineSlInfo = { method: r.method, detail: r.detail };
+        } catch (err) {
+          engineSlInfo = { method: null, detail: `engine SL failed: ${errText(err)}` };
+        }
+      }
+    }
+    const planned = planEntry({ signal: s, contract: base.contract, ltp: price, engineSl, engineSlInfo }, cfg);
+    const plan = planned.plan;
+    const riskManager = plan ? await this.safe(() => this.risk.validateTrade(this.riskDto(plan, decisionId))) : null;
     const facts: GateFacts = {
       signal: s,
       ownerUserId: owner,
-      marketOpen,
-      minutesToClose,
-      contract,
-      ltp,
+      marketOpen: base.marketOpen,
+      minutesToClose: base.minutesToClose,
+      contract: base.contract,
+      ltp: price,
       engineSl,
-      tradesToday,
-      signalLossToday,
-      clusterTaken,
-      holding,
-      coreKillSwitchOff: coreOff,
+      engineSlInfo,
+      tradesToday: base.tradesToday,
+      signalLossToday: base.signalLossToday,
+      clusterTaken: base.clusterTaken,
+      holding: base.holding,
+      coreKillSwitchOff: base.coreOff,
       riskManager: riskManager ? { allowed: riskManager.allowed, reason: riskManager.reason } : null,
       liveTradingEnabled: isLiveTradingEnabled(),
-      slEnforceable: { ok: slEnf.ok, detail: slEnf.detail },
+      slEnforceable: { ok: base.slEnf.ok, detail: base.slEnf.detail },
     };
-    const gate = evaluateGate(facts, planned.checks, cfg);
-    if (!gate.pass || !plan) {
-      const failed = gate.checks.find((x) => x.name === gate.skipReason);
-      return this.skip(decisionId, gate.skipReason ?? 'gate', failed?.detail ?? '', gate.checks, null, plan, channel, what);
-    }
+    return { gate: evaluateGate(facts, planned.checks, cfg), plan };
+  }
 
-    // ---- AI judge ----
+  private async pipeline(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date): Promise<EvaluationResult> {
+    const what = describeSignal(s);
+    const base = await this.gatherBase(s, e, now);
+    const pg = await this.planAndGate(decisionId, s, base, base.ltp, now);
+    if (!pg.gate.pass || !pg.plan) {
+      const armed = await this.maybeArm(decisionId, s, e, channel, now, base, pg.gate);
+      if (armed) return armed;
+      const failed = pg.gate.checks.find((x) => x.name === pg.gate.skipReason);
+      return this.skip(decisionId, pg.gate.skipReason ?? 'gate', failed?.detail ?? '', pg.gate.checks, null, pg.plan, channel, what);
+    }
+    const j = await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday);
+    if (!j.ok) return this.skip(decisionId, j.reason, j.detail, pg.gate.checks, j.record, pg.plan, channel, what);
+    return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, j, base);
+  }
+
+  /** The AI judge on a plan. Never throws (an unavailable judge = SKIP). */
+  private async runJudge(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date, plan: EntryPlan, tradesToday: number | null): Promise<JudgeOutcome> {
+    const cfg = this.cfg;
+    const owner = cfg.ownerUserId;
+    const what = describeSignal(s);
     const cluster = await this.repo.cluster(e.clusterId ?? null).catch(() => null);
     const agreeCount = e.agreeCount ?? cluster?.agreeCount ?? 1;
     const conflict = e.conflict === true || cluster?.conflict === true;
@@ -278,28 +382,49 @@ export class SignalTraderService implements OnApplicationBootstrap {
       cluster: { agreeCount, conflict, channels: cluster?.channelIds.length ?? null, strong: !conflict && agreeCount >= cfg.strongChannels },
       channelStats: channelStats ?? { status: 'unavailable', reason: 'no self-review byChannel stats yet' },
       channelViews,
-      plan: { contract: plan.tradingsymbol, side: plan.side, ltp: plan.ltp, limit: plan.limitPrice, sl: plan.sl, slSource: plan.slSource, targets: plan.targets, lots: plan.lots, qty: plan.qty, riskRupees: plan.riskRupees },
+      plan: {
+        contract: plan.tradingsymbol,
+        side: plan.side,
+        ltp: plan.ltp,
+        limit: plan.limitPrice,
+        sl: plan.sl,
+        slSource: plan.slSource,
+        engineSl: plan.engineSl ?? null,
+        trigger: plan.trigger ? { price: plan.trigger.price, op: plan.trigger.op, expiresAt: plan.trigger.expiresAt } : null,
+        targets: plan.targets,
+        lots: plan.lots,
+        qty: plan.qty,
+        riskRupees: plan.riskRupees,
+      },
       caps: { maxLots: cfg.maxLots, maxLossPerTrade: cfg.maxLossPerTrade, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
       market,
     };
     const out = await this.judge.judge(packet, { model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs, slotWaitMs: cfg.judgeSlotWaitMs, userId: owner });
     if (!out.ok) {
-      return this.skip(decisionId, out.reason, out.detail, gate.checks, { unavailable: out.reason, detail: out.detail, latencyMs: out.latencyMs, packet }, plan, channel, what);
+      return { ok: false, reason: out.reason, detail: out.detail, record: { unavailable: out.reason, detail: out.detail, latencyMs: out.latencyMs, packet } };
     }
     const v = out.verdict;
     const verdict = judgeDecision(v, { agreeCount, conflict }, cfg);
-    const judgeRecord = { ...v, effectiveConfidence: verdict.effectiveConfidence, latencyMs: out.latencyMs, model: cfg.judgeModel, packet };
-    if (!verdict.take) {
-      return this.skip(decisionId, verdict.reason ?? 'judge_skip', v.reasons[0] ?? '', gate.checks, judgeRecord, plan, channel, what);
-    }
+    const record = { ...v, effectiveConfidence: verdict.effectiveConfidence, latencyMs: out.latencyMs, model: cfg.judgeModel, judgedAt: now.toISOString(), packet };
+    if (!verdict.take) return { ok: false, reason: verdict.reason ?? 'judge_skip', detail: v.reasons[0] ?? '', record };
+    return { ok: true, verdict: v, effectiveConfidence: verdict.effectiveConfidence, agreeCount, conflict, record, judgedAt: now.toISOString() };
+  }
+
+  /** After the gate and a TAKE verdict: shadow record, or live pre-send check → funds → LIMIT order. */
+  private async act(decisionId: string, s: SignalView, channel: string, now: Date, gateChecks: GateCheck[], plan: EntryPlan, j: JudgeTake, base: BaseFacts): Promise<EvaluationResult> {
+    const cfg = this.cfg;
+    const owner = cfg.ownerUserId;
+    const what = describeSignal(s);
+    const v = j.verdict;
     const tightened = applyJudgeTightening(plan, { sl: v.sl, lots: v.lots }, s.instrumentKind);
     const finalPlan = tightened.plan;
-    const judgeWithChanges = { ...judgeRecord, tightened: tightened.changed };
+    const judgeWithChanges = { ...(j.record as Record<string, unknown>), tightened: tightened.changed };
+    const { agreeCount, conflict } = j;
 
     // ---- shadow: identical pipeline, no order ----
     if (cfg.mode !== 'live') {
-      await this.repo.finishDecision(decisionId, { gate: gate.checks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
-      void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: cfg.mode, channel, plan: finalPlan, agreeCount, conflict, confidence: verdict.effectiveConfidence, reasons: v.reasons }));
+      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
+      void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: cfg.mode, channel, plan: finalPlan, agreeCount, conflict, confidence: j.effectiveConfidence, reasons: v.reasons }));
       return { decisionId, decision: 'TAKE', skipReason: null };
     }
 
@@ -308,35 +433,237 @@ export class SignalTraderService implements OnApplicationBootstrap {
     const inBand = fresh !== null && fresh >= finalPlan.bandLow - 1e-9 && fresh <= finalPlan.bandHigh + 1e-9;
     const stillProtective = fresh !== null && (finalPlan.side === 'BUY' ? finalPlan.sl < fresh : finalPlan.sl > fresh);
     const recheck: GateCheck = { name: 'pre_send_price', ok: inBand && stillProtective, required: true, detail: fresh === null ? 'no fresh quote before sending' : `LTP ${fresh} vs band [${finalPlan.bandLow}, ${finalPlan.bandHigh}], SL ${finalPlan.sl}` };
-    const checks: GateCheck[] = [...gate.checks, recheck];
+    const checks: GateCheck[] = [...gateChecks, recheck];
     if (!recheck.ok) {
       return this.skip(decisionId, 'price_moved', recheck.detail, checks, judgeWithChanges, finalPlan, channel, what);
     }
 
     // ---- live: enough funds for this entry? (unknown → sent as before; short → PAPER / SKIP) ----
-    const need = requiredFunds(finalPlan, s, cfg);
+    const broker = needsMargin(finalPlan.side, s.instrumentKind) ? await this.brokerMargin(owner as string, finalPlan, base.slEnf.qtyUnit) : null;
+    const need = requiredFunds(finalPlan, s, cfg, broker);
     const available = await this.readFunds(owner as string);
     const funds = fundsCheck(available, need);
     checks.push(funds);
-    const noFunds: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: c?.expiry ?? null, channel, what, required: need.required, available, method: need.method };
+    const noFunds: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: need.required, available, method: need.method };
     if (funds.ok === false) {
       return this.paperOrSkip(noFunds, funds, checks, judgeWithChanges);
     }
 
     await this.repo.finishDecision(decisionId, { gate: checks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
-    void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: 'live', channel, plan: finalPlan, agreeCount, conflict, confidence: verdict.effectiveConfidence, reasons: v.reasons }));
+    void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: 'live', channel, plan: finalPlan, agreeCount, conflict, confidence: j.effectiveConfidence, reasons: v.reasons }));
     const placed = await this.executor.place({
       decisionId,
       ownerUserId: owner as string,
       plan: finalPlan,
       product: cfg.product,
-      qtyUnit: slEnf.qtyUnit,
+      qtyUnit: base.slEnf.qtyUnit,
       channel,
       signalSummary: what,
       fillWaitSec: cfg.fillWaitSec,
       onRejected: (reason) => this.onBrokerReject(noFunds, reason),
     });
+    void now;
     return { decisionId, decision: 'TAKE', skipReason: null, placed: placed.kind };
+  }
+
+  /** Broker margin calculator (SmartAPI marginApi over the owner's live session). Never throws. */
+  private async brokerMargin(owner: string, plan: EntryPlan, qtyUnit: 'units' | 'lots' | null): Promise<BrokerMargin> {
+    if (!this.funds?.margin) return { ok: false, reason: 'margin calculator not wired' };
+    try {
+      return parseMarginResponse(await this.funds.margin(owner, marginPosition(plan, this.cfg.product, qtyUnit)));
+    } catch (err) {
+      return { ok: false, reason: errText(err).slice(0, 160) };
+    }
+  }
+
+  // ───────────────────────── pending triggers (BUY ABOVE / SELL BELOW) ─────────────────────────
+
+  /**
+   * The gate failed only because "ABOVE/BELOW x" is not reached yet: re-run the whole gate as if the
+   * entry were at x; when that passes (and the judge says TAKE), keep the decision PENDING and watch.
+   * null = not a waiting case (the caller SKIPs as before).
+   */
+  private async maybeArm(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date, base: BaseFacts, gate: GateResult): Promise<EvaluationResult | null> {
+    const cfg = this.cfg;
+    if (cfg.triggerWaitMin <= 0 || gate.skipReason !== 'entry_tolerance' || !entryNotReached(s, base.ltp, cfg.entryTolerancePct)) return null;
+    const trig = triggerOf(s, cfg.entryTolerancePct);
+    if (!trig) return null;
+    const what = describeSignal(s);
+    const expiresAt = triggerExpiry(now, cfg.triggerWaitMin, base.minutesToClose, cfg.minMinutesToClose);
+    if (!expiresAt) return null;
+    const hyp = await this.planAndGate(decisionId, s, base, trig.price, now);
+    if (!hyp.gate.pass || !hyp.plan) {
+      const failed = hyp.gate.checks.find((x) => x.name === hyp.gate.skipReason);
+      return this.skip(decisionId, hyp.gate.skipReason ?? 'gate', `entry not reached (LTP ${base.ltp} vs ${trig.op} ${trig.price}); at the trigger: ${failed?.detail ?? ''}`, hyp.gate.checks, null, hyp.plan, channel, what);
+    }
+    const pendingNow = await this.safe(() => this.repo.pendingTriggerCount());
+    if (pendingNow === null || pendingNow >= cfg.triggerMaxPending) {
+      const real = gate.checks.find((x) => x.name === 'entry_tolerance');
+      return this.skip(decisionId, 'entry_tolerance', `${real?.detail ?? 'entry not reached'} — trigger watch full (${pendingNow ?? '?'}/${cfg.triggerMaxPending})`, gate.checks, null, null, channel, what);
+    }
+    const trigger: TriggerState = { ...trig, armedAt: now.toISOString(), expiresAt: expiresAt.toISOString(), judgedAt: null, lastLtp: base.ltp, lastCheckAt: now.toISOString() };
+    const planAtTrigger: EntryPlan = { ...hyp.plan, trigger };
+    const j = await this.runJudge(decisionId, s, e, channel, now, planAtTrigger, base.tradesToday);
+    if (!j.ok) return this.skip(decisionId, j.reason, j.detail, hyp.gate.checks, j.record, planAtTrigger, channel, what);
+    trigger.judgedAt = j.judgedAt;
+    const checks: GateCheck[] = [
+      ...hyp.gate.checks.map((c) => (c.name === 'entry_tolerance' ? { ...c, ok: null, required: true, detail: `waiting for ${trig.op} ${trig.price} (LTP ${base.ltp}); band [${trig.bandLow}, ${trig.bandHigh}]` } : c)),
+    ];
+    if (!(await this.repo.armTrigger(decisionId, { gate: checks, judge: j.record, plan: planAtTrigger }))) return null;
+    this.pending.set(decisionId, { decisionId, signal: s, event: e, channel, trigger, gate: checks, judge: j, plan: planAtTrigger, nextPollAt: 0, persistedAt: now.getTime() });
+    this.ensureTimer();
+    void sendOpsAlert(
+      `signal-arm:${decisionId}`,
+      triggerArmedAlert({ mode: cfg.mode, channel, what, symbol: hyp.plan.tradingsymbol, op: trig.op, price: trig.price, ltp: base.ltp, expiresAt: trigger.expiresAt, slSource: hyp.plan.engineSl ? `engine ${hyp.plan.engineSl.method}` : hyp.plan.slSource }),
+    );
+    return { decisionId, decision: 'PENDING', skipReason: null };
+  }
+
+  private ensureTimer(): void {
+    if (this.timer || this.pending.size === 0) return;
+    this.timer = setInterval(() => void this.checkTriggers(new Date()), Math.min(this.cfg.triggerPollSec, 5) * 1000);
+    (this.timer as { unref?: () => void }).unref?.();
+  }
+
+  private stopTimerIfIdle(): void {
+    if (this.timer && this.pending.size === 0) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  /** Armed triggers held in memory (the page reads the DB; this is for tests / diagnostics). */
+  pendingIds(): string[] {
+    return [...this.pending.keys()];
+  }
+
+  /**
+   * One watch pass: expire what is due, poll each armed trigger's LTP at most every
+   * SIGNAL_TRIGGER_POLL_SEC (≥ 5 s), and fire the ones inside their no-chase band. Never throws.
+   */
+  async checkTriggers(now: Date = new Date()): Promise<void> {
+    if (this.ticking) return;
+    this.ticking = true;
+    try {
+      for (const p of [...this.pending.values()]) {
+        try {
+          await this.checkOne(p, now);
+        } catch (err) {
+          this.logger.warn(`[signal-trader] trigger ${p.decisionId} check failed: ${errText(err)}`);
+        }
+      }
+    } finally {
+      this.ticking = false;
+      this.stopTimerIfIdle();
+    }
+  }
+
+  private async checkOne(p: PendingTrigger, now: Date): Promise<void> {
+    const t = p.trigger;
+    if (now.getTime() >= Date.parse(t.expiresAt)) {
+      this.pending.delete(p.decisionId);
+      await this.enqueue(() => this.expire(p));
+      return;
+    }
+    if (now.getTime() < p.nextPollAt) return;
+    p.nextPollAt = now.getTime() + this.cfg.triggerPollSec * 1000;
+    const owner = this.cfg.ownerUserId;
+    const ltp = owner ? await this.quotes.ltp(owner, p.plan.token, p.plan.exchange).catch(() => null) : null;
+    t.lastLtp = ltp;
+    t.lastCheckAt = now.toISOString();
+    if (!triggerHit(t, ltp)) {
+      if (now.getTime() - p.persistedAt >= 30_000) {
+        p.persistedAt = now.getTime();
+        await this.repo.touchTrigger(p.decisionId, { ...p.plan, trigger: t }).catch(() => undefined);
+      }
+      return;
+    }
+    void sendOpsAlert(`signal-trigger:${p.decisionId}:${t.lastCheckAt}`, triggerFiredAlert({ mode: this.cfg.mode, symbol: p.plan.tradingsymbol, op: t.op, price: t.price, ltp: ltp as number }));
+    const r = await this.enqueue(() => this.fire(p, new Date(now.getTime())));
+    if (r !== 'WAIT') this.pending.delete(p.decisionId);
+  }
+
+  /**
+   * The trigger price was reached: the FULL gate again on a fresh read (caps, kill switch, risk
+   * manager, holding…); the judge again only when its verdict is older than SIGNAL_JUDGE_REUSE_MIN;
+   * then the normal shadow / live path (pre-send price, funds, LIMIT order). Price back out of the
+   * band by now → keep waiting.
+   */
+  async fire(p: PendingTrigger, now: Date): Promise<EvaluationResult | 'WAIT'> {
+    const s = p.signal;
+    const what = describeSignal(s);
+    try {
+      const base = await this.gatherBase(s, p.event, now);
+      const pg = await this.planAndGate(p.decisionId, s, base, base.ltp, now);
+      if (!pg.gate.pass || !pg.plan) {
+        if (pg.gate.skipReason === 'entry_tolerance' && now.getTime() < Date.parse(p.trigger.expiresAt)) return 'WAIT';
+        const failed = pg.gate.checks.find((x) => x.name === pg.gate.skipReason);
+        return this.skip(p.decisionId, pg.gate.skipReason ?? 'gate', `at the trigger: ${failed?.detail ?? ''}`, pg.gate.checks, p.judge.record, pg.plan ?? p.plan, p.channel, what);
+      }
+      const plan: EntryPlan = { ...pg.plan, trigger: { ...p.trigger } };
+      let j: JudgeOutcome = p.judge;
+      if (!judgeFresh(p.trigger.judgedAt, now, this.cfg.judgeReuseMin)) {
+        j = await this.runJudge(p.decisionId, s, p.event, p.channel, now, plan, base.tradesToday);
+      } else {
+        j = { ...p.judge, record: { ...(p.judge.record as Record<string, unknown>), reused: true } };
+      }
+      if (!j.ok) return this.skip(p.decisionId, j.reason, j.detail, pg.gate.checks, j.record, plan, p.channel, what);
+      return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, j, base);
+    } catch (err) {
+      this.logger.error(`[signal-trader] trigger fire for ${p.decisionId} failed: ${errText(err)}`);
+      return this.skip(p.decisionId, 'internal_error', errText(err), p.gate, p.judge.record, p.plan, p.channel, what);
+    }
+  }
+
+  private expire(p: PendingTrigger): Promise<EvaluationResult> {
+    const t = p.trigger;
+    const mins = Math.round((Date.parse(t.expiresAt) - Date.parse(t.armedAt)) / 60_000);
+    return this.skip(p.decisionId, 'trigger_expired', `waited ${mins} min for ${t.op} ${t.price}; last LTP ${t.lastLtp ?? '?'}`, p.gate, p.judge.record, { ...p.plan, trigger: t }, p.channel, describeSignal(p.signal));
+  }
+
+  /** After a restart: every PENDING trigger back into the watch (expired ones SKIPped at once). */
+  async resumeTriggers(now: Date = new Date()): Promise<number> {
+    const rows = await this.repo.pendingTriggers();
+    let n = 0;
+    for (const r of rows) {
+      if (this.pending.has(r.id)) continue;
+      const trigger = readTrigger(r.plan);
+      const signal = await this.repo.signal(r.signalId).catch(() => null);
+      const channel = await this.repo.channelTitle(r.channelId ?? null).catch(() => r.channelId ?? 'unknown channel');
+      const gate = Array.isArray(r.gate) ? (r.gate as unknown as GateCheck[]) : [];
+      const plan = (r.plan ?? null) as unknown as EntryPlan | null;
+      const judge = judgeFromRecord(r.judge, r.agreeCount ?? 1, r.conflict === true);
+      if (!trigger || !signal || !plan || !judge) {
+        await this.skip(r.id, 'internal_error', 'pending trigger unreadable after a restart', gate, r.judge, plan, channel, signal ? describeSignal(signal) : r.signalId);
+        continue;
+      }
+      const p: PendingTrigger = {
+        decisionId: r.id,
+        signal,
+        event: { signalId: r.signalId, clusterId: r.clusterId ?? null, agreeCount: r.agreeCount ?? 1, conflict: r.conflict === true },
+        channel,
+        trigger,
+        gate,
+        judge,
+        plan,
+        nextPollAt: 0,
+        persistedAt: now.getTime(),
+      };
+      if (now.getTime() >= Date.parse(trigger.expiresAt)) {
+        await this.enqueue(() => this.expire(p));
+        continue;
+      }
+      this.pending.set(r.id, p);
+      n++;
+    }
+    this.ensureTimer();
+    if (n) this.logger.warn(`[signal-trader] resumed ${n} pending trigger(s)`);
+    return n;
   }
 
   /** The owner's RMS available cash; null (= 'unknown') on any failure. Never throws. */

@@ -137,7 +137,11 @@ describe('toDerivativeInput', () => {
     expect(toDerivativeInput(row({ name: '' }), TODAY)?.name).toBe('KEI29SEP265800CE');
   });
 
-  it('excludes BFO and CDS — a sizing decision, measured', () => {
+  it('keeps BFO index F&O (SENSEX/BANKEX) only', () => {
+    expect(toDerivativeInput(row({ exch_seg: 'BFO', name: 'SENSEX' }), TODAY)).toMatchObject({ exchange: 'BFO', name: 'SENSEX' });
+  });
+
+  it('excludes BFO stock derivatives and CDS — a sizing decision, measured', () => {
     // Against the live master: NFO 35,282 + MCX 16,699 live contracts, versus
     // BFO 40,880 + CDS 9,703. All four would take the table from 23,239 rows
     // to 102,564, and every active row is boot memory. No position has ever

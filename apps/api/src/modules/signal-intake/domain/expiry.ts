@@ -8,8 +8,8 @@ import type { ExpiryHint, InstrumentKind } from './types';
  * month's LAST listed expiry; with a full date hint, that date if listed (else the nearest listed on
  * or after it).
  *
- * Fallback when the master is unavailable (BFO is not in the cached segments, or the download
- * failed): the exchange calendar rule as of the 2025 SEBI changes — NIFTY weekly (Tuesday), SENSEX
+ * Fallback when the master is unavailable (the download failed, or a BFO expiry beyond the cached
+ * 70-day BFO window): the exchange calendar rule as of the 2025 SEBI changes — NIFTY weekly (Tuesday), SENSEX
  * weekly (Thursday), every other NSE index / stock monthly on the last Tuesday, BANKEX monthly on the
  * last Thursday, MCX left unknown (contract-specific). Holidays shift the real date one trading day
  * earlier; the fallback does not know holidays and says so with `source: 'rule'`.

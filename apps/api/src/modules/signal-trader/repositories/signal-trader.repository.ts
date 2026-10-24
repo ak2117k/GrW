@@ -273,6 +273,43 @@ export class SignalTraderRepository {
     return net < 0 ? -net : 0;
   }
 
+  // ---- pending triggers (BUY ABOVE / SELL BELOW not reached yet) ----
+
+  /**
+   * Arm a trigger: decision 'PENDING', status stays 'PENDING' (not DONE) so a re-emitted signal.ready
+   * never evaluates it twice; plan.trigger carries the restart-safe watch state. Conditional on the
+   * row still being an unfinished claim.
+   */
+  async armTrigger(id: string, f: { gate: unknown; judge: unknown; plan: unknown }): Promise<boolean> {
+    const r = await this.prisma.signalDecision.updateMany({
+      where: { id, status: 'PENDING', decision: null },
+      data: {
+        decision: 'PENDING',
+        gate: (f.gate ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+        judge: (f.judge ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+        plan: (f.plan ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+      },
+    });
+    return r.count === 1;
+  }
+
+  /** Persist the latest watch state (last LTP / check time) of an armed trigger. */
+  async touchTrigger(id: string, plan: unknown): Promise<void> {
+    await this.prisma.signalDecision.updateMany({
+      where: { id, status: 'PENDING', decision: 'PENDING' },
+      data: { plan: plan as Prisma.InputJsonValue },
+    });
+  }
+
+  /** Every armed trigger (resumed after a restart). */
+  pendingTriggers() {
+    return this.prisma.signalDecision.findMany({ where: { status: 'PENDING', decision: 'PENDING' }, orderBy: { createdAt: 'asc' }, take: 50 });
+  }
+
+  pendingTriggerCount(): Promise<number> {
+    return this.prisma.signalDecision.count({ where: { status: 'PENDING', decision: 'PENDING' } });
+  }
+
   async clusterTaken(clusterId: string | null): Promise<boolean> {
     if (!clusterId) return false;
     const n = await this.prisma.signalDecision.count({ where: { clusterId, decision: 'TAKE' } });

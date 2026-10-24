@@ -49,10 +49,28 @@ export interface SignalTraderConfig {
   /** % added to the required funds for charges (funds check before a live entry). */
   fundsBufferPct: number;
   /**
-   * % of notional assumed as margin for futures / option writing — a CONSERVATIVE ESTIMATE: the
-   * codebase has no broker margin-calculator call wired.
+   * % of notional assumed as margin for futures / option writing — the FALLBACK estimate, used only
+   * when the broker margin calculator (SmartAPI marginApi) cannot be read.
    */
   futMarginPct: number;
+  /**
+   * "BUY ABOVE x / SELL BELOW x" not reached yet: minutes a signal that passes every other check
+   * waits (decision PENDING) for its trigger before SKIP('trigger_expired'). 0 = no waiting (SKIP at
+   * once, the old behaviour). Never past the min-minutes-to-close cutoff.
+   */
+  triggerWaitMin: number;
+  /** At most this many armed triggers at once (owner cap: 5). */
+  triggerMaxPending: number;
+  /** Seconds between LTP polls of one armed trigger (never below 5). */
+  triggerPollSec: number;
+  /** When a trigger fires, a judge verdict older than this (minutes) is asked again. */
+  judgeReuseMin: number;
+  /** Engine-derived SL when the channel hides it (level book → delta / premium % / ATR). */
+  engineSl: boolean;
+  /** Engine SL for options without level+delta: % of the premium. */
+  engineSlOptionPct: number;
+  /** Buffer beyond the protective level, % of the underlying price. */
+  engineSlBufferPct: number;
   problems: string[];
 }
 
@@ -75,7 +93,22 @@ export const SIGNAL_DEFAULTS = {
   fillWaitSec: 60,
   fundsBufferPct: 1,
   futMarginPct: 25,
+  triggerWaitMin: 30,
+  triggerMaxPending: 5,
+  triggerPollSec: 5,
+  judgeReuseMin: 10,
+  engineSlOptionPct: 25,
+  engineSlBufferPct: 0.15,
 } as const;
+
+function parseOnOff(raw: string | undefined, fallback: boolean, name: string, problems: string[]): boolean {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (v === '') return fallback;
+  if (v === 'on' || v === 'true' || v === '1') return true;
+  if (v === 'off' || v === 'false' || v === '0') return false;
+  problems.push(`${name}=${raw} is not on|off — using ${fallback ? 'on' : 'off'}`);
+  return fallback;
+}
 
 type Env = Record<string, string | undefined>;
 
@@ -135,6 +168,15 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     fundsBufferPct: num(env, 'SIGNAL_FUNDS_BUFFER_PCT', SIGNAL_DEFAULTS.fundsBufferPct, (n) => n >= 0 && n <= 10, problems),
     // The lower bound keeps a typo from under-estimating margin.
     futMarginPct: num(env, 'SIGNAL_FUT_MARGIN_PCT', SIGNAL_DEFAULTS.futMarginPct, (n) => n >= 5 && n <= 100, problems),
+    triggerWaitMin: num(env, 'SIGNAL_TRIGGER_WAIT_MIN', SIGNAL_DEFAULTS.triggerWaitMin, (n) => int(n) && n >= 0 && n <= 120, problems),
+    // Owner cap: never more than 5 watched at once.
+    triggerMaxPending: num(env, 'SIGNAL_TRIGGER_MAX_PENDING', SIGNAL_DEFAULTS.triggerMaxPending, (n) => int(n) && n >= 1 && n <= 5, problems),
+    triggerPollSec: num(env, 'SIGNAL_TRIGGER_POLL_SEC', SIGNAL_DEFAULTS.triggerPollSec, (n) => int(n) && n >= 5 && n <= 60, problems),
+    judgeReuseMin: num(env, 'SIGNAL_JUDGE_REUSE_MIN', SIGNAL_DEFAULTS.judgeReuseMin, (n) => n >= 0 && n <= 10, problems),
+    engineSl: parseOnOff(env.SIGNAL_ENGINE_SL, true, 'SIGNAL_ENGINE_SL', problems),
+    // Bounds: a typo can make the % stop neither absurdly wide nor zero.
+    engineSlOptionPct: num(env, 'SIGNAL_ENGINE_SL_OPTION_PCT', SIGNAL_DEFAULTS.engineSlOptionPct, (n) => n >= 5 && n <= 50, problems),
+    engineSlBufferPct: num(env, 'SIGNAL_ENGINE_SL_BUFFER_PCT', SIGNAL_DEFAULTS.engineSlBufferPct, (n) => n >= 0 && n <= 2, problems),
     problems,
   };
 }

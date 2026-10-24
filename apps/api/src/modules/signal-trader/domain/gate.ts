@@ -36,6 +36,26 @@ export interface EntryPlan {
   qty: number;
   /** ₹ (limit − SL) × qty — the worst-case planned loss. */
   riskRupees: number;
+  /** slSource 'engine': how the engine derived the SL (the channel gave none usable). */
+  engineSl?: { method: string; detail: string };
+  /** A pending trigger (BUY ABOVE / SELL BELOW not reached yet): the plan is sized at the trigger price. */
+  trigger?: TriggerState;
+}
+
+/** An armed trigger, persisted on SignalDecision.plan.trigger (restart-safe). */
+export interface TriggerState {
+  /** The price the entry waits for. */
+  price: number;
+  /** ABOVE: LTP must rise into [price, price·(1+t)]; BELOW: fall into [price·(1−t), price]. No chasing. */
+  op: 'ABOVE' | 'BELOW';
+  bandLow: number;
+  bandHigh: number;
+  armedAt: string;
+  expiresAt: string;
+  /** When the judge's verdict (reused at fire time if fresh) was given. */
+  judgedAt: string | null;
+  lastLtp: number | null;
+  lastCheckAt: string | null;
 }
 
 export interface GateResult {
@@ -143,8 +163,10 @@ export interface GateFacts {
   minutesToClose: number | null;
   contract: { ok: true; contract: ResolvedContract } | { ok: false; reason: string } | null;
   ltp: number | null;
-  /** Level-book SL for FUT/EQ when the signal has none (null otherwise). */
+  /** Engine-derived SL when the signal has none (null otherwise). */
   engineSl: number | null;
+  /** How the engine SL was derived, or why it could not be. */
+  engineSlInfo?: { method: string | null; detail: string } | null;
   tradesToday: number | null;
   /** ₹ loss (positive) of today's signal trades, realised + open. */
   signalLossToday: number | null;
@@ -160,7 +182,7 @@ export interface GateFacts {
 
 /** Phase 1 (pure): tolerance, SL and sizing → the plan the risk manager is asked about. */
 export function planEntry(
-  f: Pick<GateFacts, 'signal' | 'contract' | 'ltp' | 'engineSl'>,
+  f: Pick<GateFacts, 'signal' | 'contract' | 'ltp' | 'engineSl' | 'engineSlInfo'>,
   cfg: SignalTraderConfig,
 ): { checks: GateCheck[]; plan: EntryPlan | null } {
   const s = f.signal;
@@ -192,9 +214,11 @@ export function planEntry(
   const sl = s.sl ?? f.engineSl;
   const slSource: EntryPlan['slSource'] = s.sl !== null ? 'signal' : 'engine';
   if (sl === null || !(sl > 0)) {
-    checks.push(check('sl_present', false, 'no SL in the signal and no engine SL from the level book'));
+    const why = f.engineSlInfo?.detail ? ` (engine: ${f.engineSlInfo.detail})` : '';
+    checks.push(check('sl_present', false, `no SL in the signal and no engine-derived SL${why}`));
   } else {
-    checks.push(check('sl_present', true, `SL ${sl} (${slSource})`));
+    const how = slSource === 'engine' && f.engineSlInfo?.method ? ` — engine_sl ${f.engineSlInfo.method}: ${f.engineSlInfo.detail}` : '';
+    checks.push(check('sl_present', true, `SL ${sl} (${slSource})${how}`));
   }
 
   let plan: EntryPlan | null = null;
@@ -223,6 +247,7 @@ export function planEntry(
           lots: size.lots,
           qty: size.qty,
           riskRupees: size.riskRupees,
+          ...(slSource === 'engine' && f.engineSlInfo?.method ? { engineSl: { method: f.engineSlInfo.method, detail: f.engineSlInfo.detail } } : {}),
         };
       } else {
         checks.push(check('risk_cap', false, `${size.reason}: ${size.detail}`));

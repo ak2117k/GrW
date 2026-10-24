@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { channelStatsLine, decisionWhy, fundsLine, modeBadge, openOrders, outcomeLine, paperState, planLine, skipLabel, type SignalOverview } from './signalsTelegram';
+import { channelStatsLine, countdown, decisionWhy, engineSlLabel, fundsLine, fundsMethod, modeBadge, openOrders, outcomeLine, paperState, planLine, skipLabel, type SignalOverview } from './signalsTelegram';
 import { SignalsTelegramView } from './SignalsTelegramView';
 
 const overview: SignalOverview = {
@@ -120,5 +120,50 @@ describe('SignalsTelegramView', () => {
     expect(html).toContain('risk above cap');
     expect(html.match(/data-testid="signal-open-trade"/g)).toHaveLength(1);
     expect(html).toContain('hit 42%');
+  });
+});
+
+describe('pending triggers, engine SL, funds method', () => {
+  const withPending: SignalOverview = {
+    ...overview,
+    pending: [
+      {
+        id: 'd9', channel: 'Gamma', underlying: 'SENSEX', tradingsymbol: 'SENSEX2610308000CE', side: 'BUY', sl: 80, slSource: 'engine',
+        engineSl: { method: 'premium_pct', detail: '25% premium stop from 101' },
+        trigger: { price: 100, op: 'ABOVE', bandLow: 100, bandHigh: 103, armedAt: '2026-10-26T05:00:00Z', expiresAt: '2099-01-01T00:00:00Z', judgedAt: null, lastLtp: 95, lastCheckAt: null },
+      },
+    ],
+    decisions: [
+      {
+        ...overview.decisions[0],
+        gate: [{ name: 'funds', ok: true, required: true, detail: 'enough', funds: { method: 'broker' } } as never],
+        plan: { ...overview.decisions[0].plan, slSource: 'engine', engineSl: { method: 'level_delta', detail: 'support 24900' } },
+      },
+    ],
+  };
+  it('countdown', () => {
+    const now = Date.parse('2026-10-26T05:00:00Z');
+    expect(countdown('2026-10-26T05:12:05Z', now)).toBe('12:05 left');
+    expect(countdown('2026-10-26T04:59:00Z', now)).toBe('expiring');
+    expect(countdown(null, now)).toBe('');
+  });
+  it('labels', () => {
+    expect(engineSlLabel({ method: 'premium_pct' })).toBe('ENGINE SL · premium %');
+    expect(engineSlLabel(null)).toBe('');
+    expect(fundsMethod(withPending.decisions[0])).toBe('broker margin');
+    expect(fundsMethod({ gate: null })).toBe('');
+    expect(fundsLine({ available: 1000, required: 500, ok: true, method: 'broker' })).toMatch(/broker margin/);
+  });
+  it('renders the pending trigger with a countdown, the engine-SL badge and the funds method', () => {
+    const html = renderToStaticMarkup(<SignalsTelegramView data={withPending} />);
+    expect(html).toContain('Waiting for trigger');
+    expect(html).toContain('entry when ABOVE 100');
+    expect(html).toMatch(/data-testid="pending-countdown">[0-9]+:[0-9]{2} left/);
+    expect(html).toContain('ENGINE SL · level × delta');
+    expect(html).toContain('ENGINE SL · premium %');
+    expect(html).toContain('funds: broker margin');
+  });
+  it('no pending section when nothing waits', () => {
+    expect(renderToStaticMarkup(<SignalsTelegramView data={overview} />)).not.toContain('Waiting for trigger');
   });
 });

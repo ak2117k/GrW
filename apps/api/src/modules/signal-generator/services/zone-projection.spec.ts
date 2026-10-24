@@ -302,8 +302,10 @@ describe('buildProjectionZones — box geometry', () => {
   });
 
   it('leaves a reachable barrier alone', () => {
+    // Stop is BREAKOUT_SL_ATR (1 x ATR = 10) behind the 1000 line, so the
+    // barrier must sit >= 2R (20) past the break to clear the R:R floor.
     const near = up({
-      evidence: [ev(1012, 90, ['OI_CALL'])],
+      evidence: [ev(1025, 90, ['OI_CALL'])],
       now: new Date('2026-08-10T04:00:00Z'), // 09:30 IST, session barely begun
       exchange: 'NSE',
       dailyAtr: 60,
@@ -312,7 +314,7 @@ describe('buildProjectionZones — box geometry', () => {
 
     const box = buildProjectionZones(near).up!;
     expect(box.cappedBySession).toBe(false);
-    expect(box.target).toBe(1012);
+    expect(box.target).toBe(1025);
   });
 
   /**
@@ -330,8 +332,8 @@ describe('buildProjectionZones — box geometry', () => {
   /**
    * The boundary that made projections flicker between timeframes.
    *
-   * A LEVEL anchor is a line, so risk is SL_BUFFER_ATR (0.25) x ATR, while the
-   * barrier noise filter admits targets from 0.5 x ATR — exactly 2 x risk. Entry
+   * A LEVEL anchor is a line, so risk is BREAKOUT_SL_ATR (1) x ATR (was 0.25),
+   * and a target exactly 2 x risk away (here 2 x ATR) leaves zero room. Entry
    * room is (n - 2) / 3 x risk, so a barrier sitting right at that threshold
    * produced EXACTLY zero room and the old guard deleted the whole box. The
    * projection is the TRAVEL now; a degenerate inner band is not a reason to
@@ -339,7 +341,7 @@ describe('buildProjectionZones — box geometry', () => {
    */
   it('still projects when the entry region collapses to the break level', () => {
     const levels = {
-      pdh: 1005, // exactly 0.5 x ATR beyond the 1000 anchor
+      pdh: 1020, // exactly 2R (2 x the 1-ATR stop) beyond the 1000 anchor
       pdl: 900,
       orh: 1000,
       orl: 950,

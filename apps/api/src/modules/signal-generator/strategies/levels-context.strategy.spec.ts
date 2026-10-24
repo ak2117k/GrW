@@ -591,35 +591,38 @@ describe('computeSlAndTarget — obstacle-aware TP1', () => {
   });
 
   it('6. BUY with resistance zone in path → TP1 at zone.lower − buffer', () => {
+    // BUY BREAKOUT: entry 24015, stop 24000 − BREAKOUT_SL_ATR(1)*100 = 23900 (slDist 115);
+    // zone lower 24100 → TP1 24090 (0.65R ≥ 0.4R), inside target 24245.
     const zone = makeZone({ classification: 'MEDIUM', touchCount: 4,
-      type: 'resistance', upper: 24080, lower: 24050 });
+      type: 'resistance', upper: 24130, lower: 24100 });
     const r = computeSlAndTarget({ isLong: true, level: 24000, zones: [zone],
       setupType: 'BREAKOUT' });
-    expect(r.partialTakeAt).toBeCloseTo(24040, 1);
+    expect(r.stoploss).toBeCloseTo(23900, 1);
+    expect(r.partialTakeAt).toBeCloseTo(24090, 1);
     expect(r.tp1Source).toBe('obstacle');
-    expect(r.tp1Obstacle?.nearEdge).toBeCloseTo(24050, 1);
+    expect(r.tp1Obstacle?.nearEdge).toBeCloseTo(24100, 1);
   });
 
   it('7. BUY with two resistance zones → only the closest one used', () => {
     const closer = makeZone({ id: 'z-close', classification: 'MEDIUM',
-      touchCount: 4, type: 'resistance', upper: 24080, lower: 24050 });
+      touchCount: 4, type: 'resistance', upper: 24130, lower: 24100 });
     const farther = makeZone({ id: 'z-far', classification: 'MEDIUM',
-      touchCount: 4, type: 'resistance', upper: 24150, lower: 24120 });
+      touchCount: 4, type: 'resistance', upper: 24200, lower: 24180 });
     const r = computeSlAndTarget({ isLong: true, level: 24000,
       zones: [farther, closer], setupType: 'BREAKOUT' });
-    expect(r.tp1Obstacle?.nearEdge).toBeCloseTo(24050, 1);
+    expect(r.tp1Obstacle?.nearEdge).toBeCloseTo(24100, 1);
   });
 
   it('8. BUY with zone beyond target → ignored', () => {
     // BUY BREAKOUT: entry = level + BREAKOUT_BODY_ATR(0.15)*atr(100) = 24015;
-    // stoploss = level - SL_BUFFER_ATR(0.25)*atr = 23975; slDist = 40;
-    // target = entry + 2*slDist = 24095. Zone nearEdge(lower)=24220 > target → out.
-    // defaultTp1 = entry + slDist = 24055.
+    // stoploss = level - BREAKOUT_SL_ATR(1)*atr = 23900; slDist = 115;
+    // target = entry + 2*slDist = 24245. Zone nearEdge(lower)=24300 > target → out.
+    // defaultTp1 = entry + slDist = 24130.
     const zone = makeZone({ classification: 'MEDIUM', touchCount: 4,
-      type: 'resistance', upper: 24240, lower: 24220 });
+      type: 'resistance', upper: 24320, lower: 24300 });
     const r = computeSlAndTarget({ isLong: true, level: 24000, zones: [zone],
       setupType: 'BREAKOUT' });
-    expect(r.partialTakeAt).toBeCloseTo(24055, 1);
+    expect(r.partialTakeAt).toBeCloseTo(24130, 1);
     expect(r.tp1Source).toBe('fixed');
   });
 

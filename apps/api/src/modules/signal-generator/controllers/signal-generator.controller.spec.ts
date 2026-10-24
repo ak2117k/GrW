@@ -466,9 +466,11 @@ describe('SignalGeneratorController — interval-aware S/R endpoints', () => {
         type: 'resistance',
         // Just under spot 100. A zone far below would put the stop so wide that
         // the next barrier cannot pay for it, and the box would correctly
-        // vanish — which tests nothing about composition.
+        // vanish — which tests nothing about composition. The breakout stop is
+        // BREAKOUT_SL_ATR (1 × ATR 5) beyond the far side, so a thin zone keeps
+        // risk at 5 and the PDH barrier (110) clears 2R.
         upper: 99,
-        lower: 98,
+        lower: 99,
         isLine: false,
         strength: 80,
         classification: 'STRONG',

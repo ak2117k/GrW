@@ -14,9 +14,15 @@ export const INTRADAY_LEVERAGE = 5;
 /** Roll to the next month when the near future has this many NSE sessions left or fewer. */
 export const ROLL_SESSIONS = 3;
 export const ATR_PERIOD = 14;
-/** Stop: ~1× daily ATR from entry, or the opening range's far end if tighter, never under 0.5× ATR. */
+/**
+ * Stop: 1× daily ATR from entry. The floor used to be 0.5× ATR (the opening range's far end was
+ * used when tighter); the level-break research (grw-mbm research/level-break, 2026-10-23) found
+ * sub-1-ATR intraday stops get run first and a 1-ATR stop lost far less, so the floor is now
+ * 1× ATR — with the 1× cap that means exactly 1× daily ATR. Sizing stays 1 % risk, so a wider
+ * stop means fewer shares / lots, never more risk.
+ */
 export const STOP_ATR_MAX = 1;
-export const STOP_ATR_MIN = 0.5;
+export const STOP_ATR_MIN = 1;
 export const TARGET1_R = 1.5;
 export const TARGET2_R = 2.5;
 /** Skip if the open gaps this many daily ATRs against the side. */
@@ -81,8 +87,8 @@ export function atr(bars: readonly HlcBar[], period = ATR_PERIOD): number | null
 }
 
 /**
- * Stop distance: the opening range's far end when known, clamped to [0.5, 1] × ATR (tighter than
- * 1 ATR allowed, never under 0.5 ATR). Without an opening range (the night plan): 1 × ATR.
+ * Stop distance: the opening range's far end when known, clamped to [STOP_ATR_MIN, STOP_ATR_MAX] ×
+ * ATR (currently [1, 1] → always 1× daily ATR). Without an opening range (the night plan): 1 × ATR.
  */
 export function stopDistance(atrValue: number, orDistance?: number | null): number {
   const max = STOP_ATR_MAX * atrValue;
@@ -287,7 +293,7 @@ export function buildSetup(i: SetupInput): TradeSetupDraft {
     `${i.symbol} opens more than ${GAP_SKIP_ATR}× ATR (${px(GAP_SKIP_ATR * i.atr)}) ${long ? 'below' : 'above'} ${px(entry)}, against the side`,
     `${i.symbol} opens more than ${GAP_SKIP_ATR}× ATR ${long ? 'above' : 'below'} the close: the move may be done`,
     `India VIX opens more than 10 % above its last close${i.vixLast ? ` (${i.vixLast.toFixed(2)})` : ''}: volatility spike`,
-    'the first 15-min candle is wider than 1× ATR (the stop would be capped at 1× ATR — take it smaller or skip)',
+    'the first 15-min candle is wider than 1× ATR (its far end is beyond the 1× ATR stop — take it smaller or skip)',
   ];
   if (fut && !i.isIndex) skipIf.push(`${i.symbol} is in today's NSE F&O ban list (not fetched by the app — check before entering)`);
 
@@ -327,9 +333,9 @@ export function buildSetup(i: SetupInput): TradeSetupDraft {
       sizingBasis,
       sizingNotes: [
         ...sizing.notes,
-        `sized on the planned 1× ATR stop (${px(dist)}); if the opening-range stop is tighter keep this size (risk falls) — never size up`,
+        `sized on the 1× daily ATR stop (${px(dist)}) at ${RISK_PCT * 100} % risk — a wider stop means fewer shares/lots, never more risk; never size up`,
       ],
-      stopRule: `Stop: 1× daily ATR (${px(dist)}) from entry, or the first candle's ${long ? 'low' : 'high'} if tighter, but never under 0.5× ATR (${px(STOP_ATR_MIN * i.atr)}).`,
+      stopRule: `Stop: 1× daily ATR (${px(dist)}) from your fill — not the first candle's ${long ? 'low' : 'high'} (stops under 1× ATR get run first intraday).`,
       targetsRule: `Targets from your fill: T1 = ${TARGET1_R}R, T2 = ${TARGET2_R}R (R = your stop distance). Shown from the last close ${px(entry)}.`,
       timeExit: `Intraday plan: exit by ${TIME_EXIT_IST} IST if neither target nor stop is hit${fut ? '' : ' (MIS is squared off by the broker later anyway)'}.`,
       levelsNote: fut
@@ -374,8 +380,8 @@ const istDay = (ts: number) => new Date(ts + IST_OFFSET_MS).toISOString().slice(
 
 /**
  * Replays the setup's rule on the session's 15-min bars: opening range = the 09:15 bar; entry on a
- * break of its high (long) / low (short) before 15:10; stop = the range's far end clamped to
- * [0.5, 1] × ATR; T1 = 1.5R. Within one bar a stop touch counts first (conservative).
+ * break of its high (long) / low (short) before 15:10; stop = stopDistance (1× daily ATR);
+ * T1 = 1.5R. Within one bar a stop touch counts first (conservative).
  */
 export function evaluateOutcome(
   setup: { side: SetupSide; atr: number; prevClose: number },

@@ -86,9 +86,10 @@ const BANDS: Record<BarrierKind, { lo: number; hi: number }> = {
  * A barrier closer than this many ATR to the break level is noise, not a
  * destination.
  *
- * Justification: the setup's own geometry already spends 0.40 ATR around the
- * break level — BREAKOUT_BODY_ATR (0.15) puts entry past the level and
- * SL_BUFFER_ATR (0.25) puts the stop behind it (see trade-plan.ts). Anything
+ * Justification: the setup's own geometry spent 0.40 ATR around the break
+ * level — BREAKOUT_BODY_ATR (0.15) puts entry past the level and the stop sat
+ * 0.25 ATR behind it (now BREAKOUT_SL_ATR = 1 ATR, see trade-plan.ts; the
+ * RR_FLOOR_STRICT check downstream rejects targets inside 2 × that). Anything
  * inside that is not somewhere price travels TO; it is inside the noise the
  * trade is already risking through, and a single ordinary bar's excursion
  * consumes it. 0.5 ATR is that spend plus a small margin. Without this filter

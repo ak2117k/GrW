@@ -119,7 +119,7 @@ describe('TradeSetupService.fillOutcomes', () => {
     const t0 = Date.parse('2026-10-22T03:45:00Z');
     const bars = [
       { ts: t0, open: 1002, high: 1010, low: 1000, close: 1008 },
-      { ts: t0 + 900_000, open: 1008, high: 1030, low: 1006, close: 1028 },
+      { ts: t0 + 900_000, open: 1008, high: 1041, low: 1006, close: 1039 }, // T1 = 1010 + 1.5 × (1× ATR 20) = 1040
     ];
     const row = { id: 's1', symbol: 'RELIANCE', sessionDate: '2026-10-22', side: 'LONG', atr: 20, entryRef: 1000 };
     const { repo } = fakeRepo({ unfilled: jest.fn(async () => [row]), bars15m: jest.fn(async () => bars) });

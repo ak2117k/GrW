@@ -244,8 +244,9 @@ function buildBox(input: BuildProjectionZonesInput, isUp: boolean): ProjectionBo
   // degenerate inner band is no reason to delete the whole projection.
   //
   // It was also a boundary the geometry hit constantly: a level anchor is a
-  // line, so risk is SL_BUFFER_ATR (0.25) x ATR, while the barrier noise filter
-  // admits targets from 0.5 x ATR — exactly 2 x risk. Entry room is
+  // line, so risk was SL_BUFFER_ATR (0.25) x ATR (now BREAKOUT_SL_ATR, 1 x ATR),
+  // while the barrier noise filter admits targets from 0.5 x ATR — exactly 2 x
+  // the old risk. Entry room is
   // (n - 2) / 3 x risk, so every barrier sitting near that threshold produced
   // EXACTLY zero room and silently suppressed the box. That is why projections
   // appeared on one timeframe and not another, and why they came and went.

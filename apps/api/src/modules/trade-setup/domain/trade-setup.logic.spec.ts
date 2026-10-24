@@ -6,6 +6,7 @@ import {
   sizeCash,
   sizeFutures,
   stopDistance,
+  STOP_ATR_MIN,
   triggerFor,
   type IntradayBar,
   type SetupInput,
@@ -37,11 +38,12 @@ describe('ATR and stop', () => {
     const gap = [...bars.slice(0, 14), { high: 140, low: 135, close: 138 }];
     expect(atr(gap)!).toBeGreaterThan(10);
   });
-  it('stop = 1× ATR, or the opening-range distance when tighter, never under 0.5× ATR', () => {
+  it('stop = 1× daily ATR: floor 1× ATR (a tighter opening range no longer tightens it), cap 1× ATR', () => {
+    expect(STOP_ATR_MIN).toBe(1);
     expect(stopDistance(20)).toBe(20);
     expect(stopDistance(20, 30)).toBe(20);
-    expect(stopDistance(20, 14)).toBe(14);
-    expect(stopDistance(20, 4)).toBe(10);
+    expect(stopDistance(20, 14)).toBe(20);
+    expect(stopDistance(20, 4)).toBe(20);
   });
 });
 
@@ -155,13 +157,19 @@ describe('evaluateOutcome (15-min replay)', () => {
   const setup = { side: 'LONG' as const, atr: 20, prevClose: 1000 };
 
   it('long: breaks the range high then reaches 1.5R first → TARGET1', () => {
-    // OR 1000–1010 (range 10 → stop dist max(10, 0.5×20)=10); entry 1010; T1 1025; stop 1000
-    const o = evaluateOutcome(setup, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1012, 1005, 1011), bar(2, 1011, 1026, 1009, 1024)]);
-    expect(o).toMatchObject({ status: 'TARGET1', entryPrice: 1010, exitPrice: 1025, r: 1.5, hitT1: true });
+    // OR 1000–1010; stop dist = 1× ATR = 20; entry 1010; T1 1040; stop 990
+    const o = evaluateOutcome(setup, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1012, 1005, 1011), bar(2, 1011, 1041, 1009, 1039)]);
+    expect(o).toMatchObject({ status: 'TARGET1', entryPrice: 1010, exitPrice: 1040, r: 1.5, hitT1: true });
   });
   it('stop first (a bar touching both counts as the stop)', () => {
-    const o = evaluateOutcome(setup, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1030, 999, 1011)]);
+    const o = evaluateOutcome(setup, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1045, 989, 1011)]);
     expect(o).toMatchObject({ status: 'STOP', r: -1, hitT1: false });
+  });
+  it('a dip to the opening-range low (inside 1× ATR) no longer stops the trade out', () => {
+    // old rule: stop at the OR low 1000 (0.5 ATR floor = 10) → stopped at 999; now stop is 990
+    const o = evaluateOutcome(setup, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1012, 999, 1005), bar(2, 1005, 1041, 1004, 1039)]);
+    expect(o).toMatchObject({ status: 'TARGET1', r: 1.5 });
+    expect(o.details.stopDistance).toBe(20);
   });
   it('never breaks → NOT_TRIGGERED; no 09:15 bar → NO_DATA', () => {
     expect(evaluateOutcome(setup, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1009, 1001, 1005)]).status).toBe('NOT_TRIGGERED');
@@ -171,9 +179,9 @@ describe('evaluateOutcome (15-min replay)', () => {
   it('time exit at 15:10 with neither hit; short side mirrored', () => {
     const late = (i: number) => bar(i, 1004, 1006, 1002, 1005);
     const o = evaluateOutcome({ ...setup, side: 'SHORT' }, '2026-10-23', [bar(0, 1004, 1010, 1003, 1005), bar(1, 1004, 1006, 1001, 1002), late(5), late(23), bar(24, 1, 1, 1, 1)]);
-    // entry 1003 (break of the low), stop dist max(7, 10)=10; bar 24 (15:15) is after the time exit
+    // entry 1003 (break of the low), stop dist 1× ATR = 20; bar 24 (15:15) is after the time exit
     expect(o.status).toBe('TIME_EXIT');
     expect(o.entryPrice).toBe(1003);
-    expect(o.r).toBeCloseTo(-0.2);
+    expect(o.r).toBeCloseTo(-0.1);
   });
 });

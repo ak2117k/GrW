@@ -26,8 +26,25 @@ import type { AnalyzeResult, LevelsSnapshot } from './signal-generator.service';
 
 /** Breakout trigger offset: entry sits this far past the level. */
 export const BREAKOUT_BODY_ATR = 0.15;
-/** SL sits this far on the wrong side of the level (direction-aware). */
+/** REVERSAL SL sits this far on the wrong side of the level (direction-aware). */
 export const SL_BUFFER_ATR = 0.25;
+/**
+ * BREAKOUT SL distance beyond the broken level, in the timeframe's ATR (the
+ * `atr` passed in — the chart / strategy timeframe's ATR14, not daily).
+ *
+ * Was SL_BUFFER_ATR (0.25). The NIFTY level-break study (grw-mbm
+ * research/level-break, 2026-10-23, 1-minute re-simulation of this exact
+ * breakout: entry 0.15 ATR past, stop 0.25 ATR) found the 0.25-ATR stop is
+ * run first intraday — e.g. 1-Oct 60m 22,570–22,622 break ran 352 pts but the
+ * 0.25-ATR trade stopped at −1R while a 1-ATR stop made +2.5R — and a 1-ATR
+ * stop lost far less across 2024–26. It is NOT an edge finding: breakouts were
+ * still net-negative; this only stops the stop being the main loss source.
+ * Because the projection box, the PENDING trigger and LevelsContextStrategy all
+ * call computeSetupPrices, they widen together (geometry parity). The min
+ * target (2 × stop distance) and TP1 (1R) scale with it; risk-based sizing
+ * downstream means a wider stop is a smaller position, not more risk.
+ */
+export const BREAKOUT_SL_ATR = 1.0;
 /** Minimum reward:risk a setup must clear to be tradeable. */
 export const RR_FLOOR_STRICT = 2.0;
 /** TP1 stands off an obstacle zone by this much ATR. */
@@ -100,7 +117,7 @@ export function computeSetupPrices(args: {
   zones?: StrongZone[];
 }): SetupPrices | null {
   const { setupType, isLong, level, atr, candidates, triggerClose, zones = [] } = args;
-  const buffer = SL_BUFFER_ATR * atr;
+  const buffer = (setupType === 'BREAKOUT' ? BREAKOUT_SL_ATR : SL_BUFFER_ATR) * atr;
 
   let entry: number;
   if (setupType === 'BREAKOUT') {

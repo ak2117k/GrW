@@ -1,7 +1,7 @@
 import {
   BREAKOUT_BODY_ATR,
+  BREAKOUT_SL_ATR,
   RR_FLOOR_STRICT,
-  SL_BUFFER_ATR,
   buildTradePlan,
   collectLevelCandidates,
   computeSetupPrices,
@@ -222,7 +222,7 @@ describe('shared setup arithmetic — pending and live cannot drift', () => {
       candidates: [],
     })!;
     expect(p.entry).toBeCloseTo(1000 + BREAKOUT_BODY_ATR * ATR, 10);
-    expect(p.stoploss).toBeCloseTo(1000 - SL_BUFFER_ATR * ATR, 10);
+    expect(p.stoploss).toBeCloseTo(1000 - BREAKOUT_SL_ATR * ATR, 10);
   });
 
   it('mirrors the offsets for a short', () => {
@@ -234,7 +234,7 @@ describe('shared setup arithmetic — pending and live cannot drift', () => {
       candidates: [],
     })!;
     expect(p.entry).toBeCloseTo(1000 - BREAKOUT_BODY_ATR * ATR, 10);
-    expect(p.stoploss).toBeCloseTo(1000 + SL_BUFFER_ATR * ATR, 10);
+    expect(p.stoploss).toBeCloseTo(1000 + BREAKOUT_SL_ATR * ATR, 10);
   });
 
   it('a REVERSAL without its confirming close is unplannable, not guessed', () => {

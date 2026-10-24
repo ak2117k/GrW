@@ -33,6 +33,7 @@ import { ChartinkModule } from './modules/chartink/chartink.module';
 import { FundamentalsModule } from './modules/fundamentals/fundamentals.module';
 import { WatchMonitorModule } from './modules/watch-monitor/watch-monitor.module';
 import { StrategyReviewModule } from './modules/strategy-review/strategy-review.module';
+import { StrategyBuilderAiModule } from './modules/strategy-builder-ai/strategy-builder-ai.module';
 import { UngatedTrackModule } from './modules/ungated-track/ungated-track.module';
 import { AdaptiveStopTrackModule } from './modules/adaptive-stop-track/adaptive-stop-track.module';
 import { AnandDualTrackModule } from './modules/anand-dual-track/anand-dual-track.module';
@@ -205,6 +206,9 @@ import { SignalTraderModule } from './modules/signal-trader/signal-trader.module
 
     // Strategy Review — read-only analytics over stored trading history
     StrategyReviewModule,
+
+    // Strategy Builder — deterministic checklist for everyone; owner-only Claude review / suggest
+    StrategyBuilderAiModule,
 
     // Ungated Track — shadow paper-trade pipeline for unfiltered signals
     UngatedTrackModule,

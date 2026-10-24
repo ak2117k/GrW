@@ -21,10 +21,12 @@ import { IndicatorPalette } from '@/components/strategy/IndicatorPalette';
 import { VisualRuleBuilder } from '@/components/strategy/VisualRuleBuilder';
 import { ValidationPanel } from '@/components/strategy/ValidationPanel';
 import { StrategyTemplates } from '@/components/strategy/StrategyTemplates';
-import { AIStrategyReview } from '@/components/strategy/AIStrategyReview';
+import { StrategyAssistant } from '@/components/strategy/StrategyAssistant';
+import { StrategyRiskSettings } from '@/components/strategy/StrategyRiskSettings';
 import { StrategyChat } from '@/components/strategy/StrategyChat';
 
-const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'];
+// Intervals the data feed serves (no 4h candles from Angel One).
+const TIMEFRAMES = ['1m', '3m', '5m', '10m', '15m', '30m', '1h', '1d'];
 const SEGMENTS = ['OPTIONS', 'EQUITY', 'FUTURES', 'COMMODITY'];
 
 export default function StrategyBuilderPage() {
@@ -180,8 +182,8 @@ export default function StrategyBuilderPage() {
             </div>
           )}
 
-          {/* Claude's semantic review — logic, risk, missing exits, etc. */}
-          <AIStrategyReview />
+          {/* Deterministic checklist (everyone) + owner-only Claude review / suggest */}
+          <StrategyAssistant />
 
           {/* Rule-based validation — syntax errors, fast and precise */}
           <ValidationPanel
@@ -257,6 +259,17 @@ export default function StrategyBuilderPage() {
                   className="w-full rounded-md border border-gray-700 bg-gray-800 px-2.5 py-1.5 text-xs text-gray-200 focus:border-blue-500 focus:outline-none"
                 />
               </div>
+              <div>
+                <label className="text-[10px] text-gray-500 mb-1 block">Instrument</label>
+                <input
+                  type="text"
+                  value={store.instrument}
+                  onChange={(e) => store.setInstrument(e.target.value)}
+                  placeholder="NIFTY / RELIANCE / CRUDEOIL"
+                  maxLength={20}
+                  className="w-full rounded-md border border-gray-700 bg-gray-800 px-2.5 py-1.5 text-xs text-gray-200 focus:border-blue-500 focus:outline-none"
+                />
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-[10px] text-gray-500 mb-1 block">Timeframe</label>
@@ -289,6 +302,9 @@ export default function StrategyBuilderPage() {
               </div>
             </div>
           </div>
+
+          {/* Stop / target / sizing / session / fill timing */}
+          <StrategyRiskSettings />
 
           {/* Templates */}
           <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] p-4">

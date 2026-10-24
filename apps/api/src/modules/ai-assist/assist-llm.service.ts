@@ -11,7 +11,7 @@ import { ASSIST_ANSWER_SCHEMA } from './advisor-guardrail';
 import { runInSharedSlot } from './assist-slot';
 
 /** `ai_calls.job` labels for the user-facing calls. */
-export type AssistJob = 'assist.news' | 'assist.advisor';
+export type AssistJob = 'assist.news' | 'assist.advisor' | 'strategy.review' | 'strategy.suggest';
 
 export const ASSIST_DEFAULT_MODEL = 'claude-sonnet-5';
 /** How long a user-facing call may wait for the shared slot before "busy, try again". */
@@ -42,8 +42,8 @@ export function assistAllowed(user: AssistPrincipal | undefined, ownerUserId: st
   return user.role === 'ADMIN';
 }
 
-/** Parse the model's JSON reply; a prose reply (CLI ignored the schema) is kept as the answer. */
-export function parseAssistAnswer(message: TransportMessage): AssistAnswer {
+/** The reply's text, or a throw for a refusal / truncation / empty reply. */
+export function replyText(message: TransportMessage): string {
   const stop = message.stop_reason;
   if (stop === 'refusal') throw new Error('the model declined to answer');
   if (stop === 'max_tokens') throw new Error('the answer was cut off (max_tokens)');
@@ -53,6 +53,22 @@ export function parseAssistAnswer(message: TransportMessage): AssistAnswer {
     .join('')
     .trim();
   if (!text) throw new Error('empty reply');
+  return text;
+}
+
+/** Parse a reply that MUST be JSON (no prose fallback); the caller validates the shape. */
+export function parseJsonReply(message: TransportMessage): unknown {
+  const text = replyText(message);
+  try {
+    return JSON.parse(stripFences(text));
+  } catch {
+    throw new Error('the reply was not JSON');
+  }
+}
+
+/** Parse the model's JSON reply; a prose reply (CLI ignored the schema) is kept as the answer. */
+export function parseAssistAnswer(message: TransportMessage): AssistAnswer {
+  const text = replyText(message);
   try {
     const parsed = JSON.parse(stripFences(text)) as Partial<AssistAnswer>;
     if (typeof parsed.answer === 'string' && parsed.answer.trim() !== '') {
@@ -102,20 +118,44 @@ export class AssistLlmService {
     user: string,
     opts: { userId?: string; maxWaitMs?: number } = {},
   ): Promise<AssistAnswer> {
+    return parseAssistAnswer(await this.send(job, system, user, ASSIST_ANSWER_SCHEMA, opts));
+  }
+
+  /**
+   * Same door with a caller-supplied JSON schema. Returns the parsed JSON
+   * UNVALIDATED — the caller owns the shape check. Throws on prose, refusal,
+   * truncation, or {@link AssistBusyError} when no shared slot frees up.
+   */
+  async completeJson(
+    job: AssistJob,
+    system: string,
+    user: string,
+    schema: Record<string, unknown>,
+    opts: { userId?: string; maxWaitMs?: number } = {},
+  ): Promise<unknown> {
+    return parseJsonReply(await this.send(job, system, user, schema, opts));
+  }
+
+  private async send(
+    job: AssistJob,
+    system: string,
+    user: string,
+    schema: Record<string, unknown>,
+    opts: { userId?: string; maxWaitMs?: number },
+  ): Promise<TransportMessage> {
     const request: TransportRequest = {
       model: this.config.get<string>('AI_ASSIST_MODEL')?.trim() || ASSIST_DEFAULT_MODEL,
       max_tokens: ASSIST_MAX_TOKENS,
-      output_config: { effort: 'medium', format: { type: 'json_schema', schema: ASSIST_ANSWER_SCHEMA } },
+      output_config: { effort: 'medium', format: { type: 'json_schema', schema } },
       system: [{ type: 'text', text: system }],
       messages: [{ role: 'user', content: user }],
     };
     const transport = this.transportFor(job);
-    const message = await runInSharedSlot(
+    return runInSharedSlot(
       this.cycle,
       () => withAiCallContext({ userId: opts.userId }, () => transport.messages.create(request)),
       { maxWaitMs: opts.maxWaitMs ?? ASSIST_DEFAULT_MAX_WAIT_MS },
     );
-    return parseAssistAnswer(message);
   }
 
   private transportFor(job: AssistJob): MessagesTransport {

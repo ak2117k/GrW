@@ -19,6 +19,6 @@ import { NewsInsightProcessor } from './news-insight.processor';
 @Module({
   imports: [PrismaModule, AiGatewayModule, InsightsModule, TradeSentinelModule],
   providers: [AssistLlmService, AssistContextService, NewsInsightProcessor, AdvisorChatService],
-  exports: [AdvisorChatService],
+  exports: [AdvisorChatService, AssistLlmService],
 })
 export class AiAssistModule {}

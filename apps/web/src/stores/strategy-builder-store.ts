@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import api from '@/services/api';
 import toast from 'react-hot-toast';
+import {
+  EMPTY_SETTINGS,
+  editPatch,
+  type AiEdit,
+  type StrategySettings,
+} from '@/components/strategy/strategyAi';
 
 // ---- Types ----
 
@@ -258,6 +264,10 @@ interface StrategyBuilderState {
   description: string;
   timeframe: string;
   segment: string;
+  /** Underlying, e.g. NIFTY / RELIANCE / CRUDEOIL. */
+  instrument: string;
+  /** Stop, target, sizing, session and fill timing — shared by both editors. */
+  settings: StrategySettings;
   indicators: IndicatorConfig[];
   entryRules: RuleConfig[];
   exitRules: RuleConfig[];
@@ -273,6 +283,10 @@ interface StrategyBuilderState {
   setDescription: (desc: string) => void;
   setTimeframe: (tf: string) => void;
   setSegment: (seg: string) => void;
+  setInstrument: (instrument: string) => void;
+  setSetting: <K extends keyof StrategySettings>(key: K, value: StrategySettings[K]) => void;
+  /** Apply one AI edit the user accepted. Returns false when it no longer applies. */
+  applyAiEdit: (edit: AiEdit, opts?: { onlyIfEmpty?: boolean }) => boolean;
   addIndicator: (indicator: IndicatorConfig) => void;
   removeIndicator: (id: string) => void;
   updateIndicator: (id: string, params: Record<string, number | string>) => void;
@@ -301,6 +315,8 @@ export const useStrategyBuilderStore = create<StrategyBuilderState>((set, get) =
   description: '',
   timeframe: '15m',
   segment: 'OPTIONS',
+  instrument: 'NIFTY',
+  settings: { ...EMPTY_SETTINGS },
   indicators: [],
   entryRules: [],
   exitRules: [],
@@ -316,6 +332,14 @@ export const useStrategyBuilderStore = create<StrategyBuilderState>((set, get) =
   setDescription: (description) => set({ description }),
   setTimeframe: (timeframe) => set({ timeframe }),
   setSegment: (segment) => set({ segment }),
+  setInstrument: (instrument) => set({ instrument: instrument.toUpperCase() }),
+  setSetting: (key, value) => set((s) => ({ settings: { ...s.settings, [key]: value } })),
+  applyAiEdit: (edit, opts) => {
+    const patch = editPatch(get(), edit, opts);
+    if (!patch) return false;
+    set(patch);
+    return true;
+  },
 
   addIndicator: (indicator) =>
     set((s) => ({ indicators: [...s.indicators, indicator] })),

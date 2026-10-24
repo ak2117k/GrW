@@ -32,6 +32,8 @@ import type { RunSummary, VerificationDraft, VerificationKind } from '../self-re
 import { TUNABLES, type TunableValue } from '../tuning/tunables';
 import { TuningService } from '../tuning/tuning.service';
 import { STOCK_MOVE_HORIZON_DAYS } from '../../stock-move/stock-move.logic';
+import { NEWS_IMPACT_REVIEW, type NewsImpactReviewSource } from '../../news-impact/news-impact.ports';
+import { newsImpactSummary, scoreNewsImpact } from '../domain/news-impact-scorer';
 
 export const SELF_REVIEW_CLOCK = Symbol('SELF_REVIEW_CLOCK');
 /** The consumers' own defaults for targets whose code default is env-derived (exit-discipline). */
@@ -85,6 +87,8 @@ export class SelfReviewRunService {
     @Inject(SELF_REVIEW_CLOCK) private readonly clock: SessionClock,
     @Inject(SELF_REVIEW_DEFAULTS) private readonly defaults: TunableDefaults,
     @Optional() @Inject(SELF_REVIEW_DIAGNOSIS) private readonly diagnosis?: DiagnosisPort,
+    /** News impact reactions (@Global news-impact module); absent ⇒ no NEWS_IMPACT rows. */
+    @Optional() @Inject(NEWS_IMPACT_REVIEW) private readonly newsImpact?: NewsImpactReviewSource,
   ) {}
 
   isEnabled(): boolean {
@@ -147,6 +151,13 @@ export class SelfReviewRunService {
       await this.soft('CHANNEL_INFO stats', errors, async () => {
         const inf = await this.repo.results({ sessions, kinds: ['CHANNEL_INFO'] }, 20_000);
         if (inf.length || sessionRows.some((r) => r.kind === 'CHANNEL_INFO')) summary.byChannel = mergeChannelInfoStats(summary.byChannel, sessionRows, inf, sessions);
+        return [];
+      });
+
+      await this.soft('NEWS_IMPACT stats', errors, async () => {
+        const rows = await this.repo.results({ sessions, kinds: ['NEWS_IMPACT'] }, 20_000);
+        const today = sessionRows.filter((r) => r.kind === 'NEWS_IMPACT');
+        if (rows.length || today.length) summary.news = { session: newsImpactSummary(today), rolling20: newsImpactSummary(rows) };
         return [];
       });
 
@@ -242,6 +253,15 @@ export class SelfReviewRunService {
     out.push(...(await this.soft('CHANNEL_SIGNAL', errors, async () => (await this.sources.channelSignals(s)).map(scoreChannelSignal))));
     // Telegram INFO items (channel market views): outcomes filled by signal-intake after the close, before this run.
     out.push(...(await this.soft('CHANNEL_INFO', errors, async () => (await this.sources.channelInfos(s)).flatMap(scoreChannelInfo))));
+    // News-impact reactions: points filled by the news-impact module's 15-min job, judged on their judge session.
+    const newsImpact = this.newsImpact;
+    if (newsImpact) {
+      out.push(
+        ...(await this.soft('NEWS_IMPACT', errors, async () =>
+          (await newsImpact.reactionRows(s)).map(scoreNewsImpact).filter((d): d is VerificationDraft => d !== null),
+        )),
+      );
+    }
     return out;
   }
 

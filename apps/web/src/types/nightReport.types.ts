@@ -262,7 +262,36 @@ export interface NightReport {
    * API from before it shipped (2026-10-24); null when the API cannot read them. Context only.
    */
   channelViews?: Section<ChannelViewsView> | null;
+  /**
+   * News digest (news-impact, 2026-10-24): the top 10 model-read impacts of the day with the reaction so
+   * far. Absent on an API from before it shipped; null when the API runs without the news-impact module.
+   */
+  newsDigest?: Section<NewsDigestView> | null;
   jobs: Section<JobItem[]>;
+}
+
+export interface NewsDigestItem {
+  clusterId: string;
+  headline: string;
+  direction: 'BULL' | 'BEAR' | 'NEUTRAL' | string;
+  magnitude: 'LOW' | 'MED' | 'HIGH' | string;
+  horizon: 'INTRADAY' | 'DAYS' | 'WEEKS' | string;
+  pricedIn: boolean;
+  confidence: number;
+  oneLine: string;
+  affected: { symbols: string[]; sectors: string[]; index: string | null };
+  sources: string[];
+  sourceCount: number;
+  materialType: string;
+  firstSeen: string;
+  analysedAt: string;
+  reaction: Array<{ symbol: string; movePct: number | null; at: 'p15' | 'p60' | 'close' | 'nextClose' | null }>;
+}
+
+export interface NewsDigestView {
+  since: string;
+  note: string;
+  items: NewsDigestItem[];
 }
 
 export interface ChannelViewItem {

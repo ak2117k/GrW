@@ -359,7 +359,10 @@ model NewsArticle {
   markets         String[] @default([])
   tagVersion      Int      @default(0)
   dateInferred    Boolean  @default(false)
+  /// News impact layer 1 (2026-10-24): the story cluster (news_clusters.id); null = not clustered yet.
+  clusterId       String?  @map("cluster_id")
 
+  @@index([clusterId])
   @@index([category, publishedAt])
   @@index([sentiment])
   @@index([relatedSymbols], type: Gin)
@@ -3426,6 +3429,91 @@ model ChannelInfo {
   @@index([outcomeSession])
   @@index([outcomeFilledAt, postedAt])
   @@map("channel_infos")
+}
+
+// ─── News impact (2026-10-24): cluster → classify → relevance → batched cheap-LLM impact → reactions ───
+
+/// One story across sources (layer 1). Coverage (sourceCount) is a feature. Boilerplate never goes further.
+model NewsCluster {
+  id             String   @id @default(cuid())
+  headline       String
+  instruments    String[] @default([])
+  sectors        String[] @default([])
+  indices        String[] @default([])
+  sources        String[] @default([])
+  sourceCount    Int      @default(1) @map("source_count")
+  articleIds     String[] @default([]) @map("article_ids")
+  titleTokens    String[] @default([]) @map("title_tokens")
+  firstSeen      DateTime @map("first_seen") @db.Timestamptz(6)
+  lastSeen       DateTime @map("last_seen") @db.Timestamptz(6)
+  materialType   String   @map("material_type") // RESULTS | ORDER_WIN | … | BOILERPLATE | OTHER | NEWS
+  material       Boolean  @default(false)
+  boilerplate    Boolean  @default(false)
+  relevance      Float    @default(0)
+  reasons        String[] @default([])
+  impactAttempts Int      @default(0) @map("impact_attempts")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([lastSeen])
+  @@index([firstSeen])
+  @@map("news_clusters")
+}
+
+/// The cheap model's read of one cluster (layer 2). One row per cluster; re-analysed only when coverage doubles.
+model NewsImpact {
+  id            String    @id @default(cuid())
+  clusterId     String    @unique @map("cluster_id")
+  analysedAt    DateTime  @map("analysed_at") @db.Timestamptz(6)
+  model         String
+  sourceCountAt Int       @map("source_count_at")
+  direction     String // BULL | BEAR | NEUTRAL
+  magnitude     String // LOW | MED | HIGH
+  horizon       String // INTRADAY | DAYS | WEEKS
+  symbols       String[]  @default([])
+  sectors       String[]  @default([])
+  indexName     String?   @map("index_name") // NIFTY | BANKNIFTY
+  pricedIn      Boolean   @map("priced_in")
+  confidence    Float
+  oneLine       String    @map("one_line")
+  rank          Float     @default(0)
+  analyses      Int       @default(1)
+  alertedAt     DateTime? @map("alerted_at") @db.Timestamptz(6)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([analysedAt])
+  @@map("news_impacts")
+}
+
+/// The market's reaction to an analysed cluster, per affected symbol / index (layer 4, factor collection).
+model NewsReaction {
+  id           String    @id @default(cuid())
+  impactId     String    @map("impact_id")
+  clusterId    String    @map("cluster_id")
+  symbol       String
+  kind         String // INDEX | STOCK
+  direction    String
+  magnitude    String
+  horizon      String
+  anchorAt     DateTime  @map("anchor_at") @db.Timestamptz(6)
+  anchorIsOpen Boolean   @default(false) @map("anchor_is_open")
+  judgeSession String?   @map("judge_session") // IST 'YYYY-MM-DD' the self-review scores it on
+  p0           Float?
+  p15          Float?
+  p60          Float?
+  pClose       Float?    @map("p_close")
+  pNextClose   Float?    @map("p_next_close")
+  atr          Float?
+  complete     Boolean   @default(false)
+  filledAt     DateTime? @map("filled_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([clusterId, symbol])
+  @@index([complete, anchorAt])
+  @@index([judgeSession])
+  @@map("news_reactions")
 }
 
 /// AI advisor multi-turn memory (owner's Claude chat). Last few turns per user, trimmed server-side;

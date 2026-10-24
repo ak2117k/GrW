@@ -79,7 +79,7 @@ export function buildSummary(
     };
   }
 
-  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'MBM_RELATIVE' && r.kind !== 'STOCK_MOVE' && r.kind !== 'CHANNEL_SIGNAL' && r.kind !== 'CHANNEL_INFO'), 5).map((r) => ({
+  const notable: NotableItem[] = topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'MBM_RELATIVE' && r.kind !== 'STOCK_MOVE' && r.kind !== 'CHANNEL_SIGNAL' && r.kind !== 'CHANNEL_INFO' && r.kind !== 'NEWS_IMPACT'), 5).map((r) => ({
     kind: r.kind,
     refId: r.refId,
     symbol: r.symbol,

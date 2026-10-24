@@ -60,6 +60,7 @@ import { MinuteBarsReader } from './adapters/minute-bars.reader';
 import { NewsEventsCoreModule } from '../news-events/news-events-core.module';
 import { NewsWatchBook } from './services/news-watch-book';
 import { NewsWakeService } from './services/news-wake.service';
+import { HighImpactNewsBook } from './services/high-impact-news-book';
 import { NewsIndexModule } from '../news-events/index/news-index.module';
 import { NewsIndexService } from '../news-events/index/news-index.service';
 import { MarketEventsModule } from '../news-events/events/market-events.module';
@@ -268,6 +269,8 @@ import { MARKET_EVENTS } from './ports/events.port';
     // port binding above; unbound, NewsWakeService subscribes to nothing.
     NewsWatchBook,
     NewsWakeService,
+    // News impact: HIGH impacts ('news.impact.high') as one fresh headline per cluster for the news sensor.
+    HighImpactNewsBook,
   ],
   // SentinelChartContextAdapter + NEWS_SHIM: read-only context blocks for the signal-trader judge.
   exports: [SentinelCycleService, SentinelRunnerService, SentinelChartContextAdapter, NEWS_SHIM],

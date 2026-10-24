@@ -29,6 +29,7 @@ import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/con
 import { newsPositionOf } from '../../news-events/keys';
 import type { FreshItem } from '../../news-events/types';
 import { NEWS_INDEX, type NewsIndexReader } from '../ports/news-index.port';
+import { HighImpactNewsBook, mergeImpactNews } from '../services/high-impact-news-book';
 
 /**
  * The window the packet's `freshCount` block names, and therefore the window
@@ -286,6 +287,8 @@ export class SentinelTickSource implements TickSource {
     // come from the in-memory index. Absent / observe / false ⇒ the legacy read.
     @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly newsCfg?: NewsEventsConfig,
     @Optional() @Inject(NEWS_INDEX) private readonly newsIndex?: NewsIndexReader,
+    // News impact: a HIGH impact on this underlying, as one more fresh headline (once per cluster).
+    @Optional() private readonly impactBook?: HighImpactNewsBook,
   ) {
     if (!this.userFeed) {
       this.logger.warn(
@@ -418,6 +421,7 @@ export class SentinelTickSource implements TickSource {
     ]);
 
     const noise = opts.closedSession ? null : await this.noiseFor(row, isCash, underlying);
+    const news = mergeImpactNews(opts.closedSession ? [] : (this.impactBook?.freshFor(structureSymbol, Date.now()) ?? []), v2News?.fresh, legacyNews);
 
     return {
       segment,
@@ -467,11 +471,11 @@ export class SentinelTickSource implements TickSource {
       entryTime: row.entryTime,
       expiry: await this.expiryFor(row.token, row.exchange, segment),
       volumeRatio: structure.volumeRatio,
-      freshNewsCount: legacyNews.count,
-      ...(v2News?.fresh ? { freshNews: v2News.fresh } : {}),
+      freshNewsCount: news.count,
+      ...(news.freshNews ? { freshNews: news.freshNews } : {}),
       // Legacy news path: the ids behind the count, so the cycle can tell a NEW
       // headline from a repeat (material-change gating). Only when there is one.
-      ...(legacyNews.items && legacyNews.items.length > 0 ? { freshNewsItems: legacyNews.items } : {}),
+      ...(news.items && news.items.length > 0 ? { freshNewsItems: news.items } : {}),
       // Both come off the SAME `analyze()` the levels above did — the factors
       // are computed as part of scoring a setup, so there is no second call and
       // no window in which the levels and the factors describe different bars.

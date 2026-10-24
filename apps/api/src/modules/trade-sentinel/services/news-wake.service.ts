@@ -1,5 +1,8 @@
 import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { OnEvent } from '@nestjs/event-emitter';
+import { NEWS_IMPACT_HIGH_EVENT, type NewsImpactHighEvent } from '../../news-impact/news-impact.ports';
+import { HighImpactNewsBook } from './high-impact-news-book';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { FRESH_WINDOW_MS, NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { keysOfTags } from '../../news-events/keys';
@@ -33,6 +36,7 @@ export class NewsWakeService implements OnModuleInit, OnModuleDestroy {
     @Optional() @Inject(NEWS_INDEX) private readonly index?: NewsIndexReader,
     @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly cfg?: NewsEventsConfig,
     @Optional() private readonly config?: ConfigService,
+    @Optional() private readonly impactBook?: HighImpactNewsBook,
   ) {}
 
   onModuleInit(): void {
@@ -47,6 +51,39 @@ export class NewsWakeService implements OnModuleInit, OnModuleDestroy {
       `[news-wake] ${this.cfg.mode}: own-instrument headlines ${this.cfg.rendering ? 'wake' : 'would wake'} the judge (cooldown ${this.cfg.wakeCooldownMin}m)`,
     );
     return true;
+  }
+
+  /**
+   * News impact (2026-10-24): a HIGH impact on a held symbol / NIFTY / BANKNIFTY. Always lands in the
+   * impact book (the tick source shows it to the news sensor as one fresh headline, id
+   * `impact:<clusterId>`, so the cycle's seen-set and the material-change gating let it through
+   * exactly once). When the push wake is running it also asks each matching tracker's owner for a
+   * sensor pass now — once per (tracker, cluster), inside the usual cooldown. Never throws.
+   */
+  @OnEvent(NEWS_IMPACT_HIGH_EVENT)
+  onHighImpact(evt: NewsImpactHighEvent, now: number = Date.now()): void {
+    try {
+      this.impactBook?.add(evt, now);
+      const cfg = this.cfg;
+      if (!this.off || !cfg?.computing) return;
+      const id = `impact:${evt.clusterId}`;
+      const keys = evt.targets.flatMap((t) => [`I:${t}`, `X:${t}`]);
+      for (const w of this.book.matching(keys)) {
+        const seen = this.seen.get(w.trackerId) ?? new Set<string>();
+        this.seen.set(w.trackerId, seen);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (!cfg.rendering) {
+          this.logger.log(`[news-wake] observe: would wake ${w.userId} for ${w.symbol} — HIGH impact "${evt.oneLine}"`);
+          continue;
+        }
+        if (now - (this.lastWake.get(w.trackerId) ?? -Infinity) < cfg.wakeCooldownMin * 60_000) continue;
+        this.lastWake.set(w.trackerId, now);
+        this.runner.wakeForTick(w.userId, `news impact HIGH ${evt.direction} on ${w.symbol}: "${evt.oneLine}"`, w.exchange);
+      }
+    } catch (err) {
+      this.logger.warn(`[news-wake] high-impact wake failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   onModuleDestroy(): void {

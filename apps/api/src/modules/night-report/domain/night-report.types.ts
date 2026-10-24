@@ -11,6 +11,9 @@ import type { NewsIdea, Scorecard } from '../../overnight-scorecard/scorecard.ty
 import type { BigMoveWatchView } from '../../stock-move/stock-move.service';
 import type { TradeSetupsView } from '../../trade-setup/domain/trade-setup.view';
 import type { InfoListItem, UnderlyingSentiment } from '../../signal-intake/domain/sentiment';
+import type { NewsDigestView } from '../../news-impact/news-impact.ports';
+
+export type { NewsDigestItem, NewsDigestView } from '../../news-impact/news-impact.ports';
 
 /** "Telegram channel views": the INFO items of the last day (newest first) and the per-underlying sentiment. */
 export interface ChannelViewsView {
@@ -275,4 +278,9 @@ export interface NightReport {
    * `{ error }` on failure, null when the store cannot read channel_infos.
    */
   channelViews?: Section<ChannelViewsView> | null;
+  /**
+   * News digest (news-impact, 2026-10-24): the top 10 model-read impacts of the window (headline, direction,
+   * magnitude, affected, sources, reaction so far). `{ error }` on failure, null when the module is not loaded.
+   */
+  newsDigest?: Section<NewsDigestView> | null;
 }

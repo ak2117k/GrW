@@ -45,6 +45,7 @@ import { SESSION_TICKS } from '../../mbm/domain/chain-snapshot';
 import { mbmHeadline, normLine, type RelativeHorizon } from '../../mbm/domain/relative-reading';
 import { channelSentiment, infoList } from '../../signal-intake/domain/sentiment';
 import type { ChannelViewsView } from '../domain/night-report.types';
+import { NEWS_DIGEST_SOURCE, type NewsDigestSource } from '../../news-impact/news-impact.ports';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
@@ -108,6 +109,8 @@ export class NightReportService {
     @Optional() @Inject(STOCK_MOVE_WATCH) private readonly stockMove?: BigMoveWatchSource,
     /** Next-morning trade setups (advisory); absent ⇒ the section is null. */
     @Optional() @Inject(TRADE_SETUPS_REPORT) private readonly tradeSetupSource?: TradeSetupsReportSource,
+    /** News impact digest (@Global news-impact module); absent ⇒ the section is null. */
+    @Optional() @Inject(NEWS_DIGEST_SOURCE) private readonly newsDigestSource?: NewsDigestSource,
   ) {}
 
   async build(userId: string, now: Date = new Date()): Promise<NightReport> {
@@ -142,6 +145,11 @@ export class NightReportService {
     const setupSource = this.tradeSetupSource;
     const tradeSetups = setupSource ? await this.safe('tradeSetups', () => setupSource.forNextSession(userId, now)) : null;
     const channelViews = this.store.channelInfosBetween ? await this.safe('channelViews', () => this.channelViews(from, now)) : null;
+    const digestSource = this.newsDigestSource;
+    // The day's news: since the earlier of the last NSE close and 24 h ago (like channel views).
+    const newsDigest = digestSource
+      ? await this.safe('newsDigest', () => digestSource.digest(new Date(Math.min(from.getTime(), now.getTime() - DAY_MS)), now, 10))
+      : null;
 
     return {
       generatedAt: now.toISOString(),
@@ -159,6 +167,7 @@ export class NightReportService {
       bigMoveWatch,
       tradeSetups,
       channelViews,
+      newsDigest,
     };
   }
 

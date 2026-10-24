@@ -25,6 +25,8 @@ const BEARISH_KEYWORDS = [
   'recession', 'downturn', 'concern', 'risk', 'fear', 'warning',
 ];
 
+/** After a failed AI-engine call, keyword analysis only for this long. */
+export const ENGINE_BACKOFF_MS = 30 * 60_000;
 
 @Injectable()
 export class NewsSentimentService {
@@ -35,21 +37,34 @@ export class NewsSentimentService {
     private readonly symbolIndex: NewsSymbolIndexService,
   ) {}
 
+  /**
+   * The Python sentiment endpoint: AI_ENGINE_URL + /api/sentiment. Unset ⇒ never called (keyword
+   * analysis only). It was a hardcoded localhost:5000 that no prod container serves, so every article
+   * paid an ECONNREFUSED round trip. A failed call now also backs the engine off for
+   * {@link ENGINE_BACKOFF_MS} (one log line per back-off), so a dead engine costs nothing per article.
+   * Once the news-impact model has read a story, its impact overwrites this sentiment (news-impact module).
+   */
+  engineUrl: string | null = (process.env.AI_ENGINE_URL ?? '').trim().replace(/\/+$/, '') || null;
+  private engineDownUntil = 0;
+  /** Test seam. */
+  now: () => number = () => Date.now();
+
   async analyzeSentiment(
     title: string,
     summary: string,
   ): Promise<SentimentResult> {
-    let result: SentimentResult;
-    try {
-      result = await this.callAIEngine(title, summary);
-    } catch (error) {
-      this.logger.debug(
-        `AI engine unavailable, falling back to keyword analysis: ${
-          error instanceof Error ? error.message : error
-        }`,
-      );
-      result = await this.keywordFallback(title, summary);
+    let result: SentimentResult | null = null;
+    if (this.engineUrl && this.now() >= this.engineDownUntil) {
+      try {
+        result = await this.callAIEngine(this.engineUrl, title, summary);
+      } catch (error) {
+        this.engineDownUntil = this.now() + ENGINE_BACKOFF_MS;
+        this.logger.warn(
+          `AI sentiment engine unavailable (${error instanceof Error ? error.message : String(error)}) — keyword analysis for the next ${ENGINE_BACKOFF_MS / 60_000} min`,
+        );
+      }
     }
+    result ??= await this.keywordFallback(title, summary);
     // Commodity and index underlyings (CRUDEOIL, GOLD, BANKNIFTY…) are not in
     // the listed-symbol index, so neither path above can ever produce them.
     // Added on BOTH paths: the AI engine's own list would otherwise hide them.
@@ -59,14 +74,15 @@ export class NewsSentimentService {
   }
 
   private async callAIEngine(
+    base: string,
     title: string,
     summary: string,
   ): Promise<SentimentResult> {
     const response = await firstValueFrom(
-      this.httpService.post<any>('http://localhost:5000/api/sentiment', {
+      this.httpService.post<any>(`${base}/api/sentiment`, {
         title,
         summary,
-      }),
+      }, { timeout: 3_000 }),
     );
 
     const data = response.data;

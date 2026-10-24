@@ -13,7 +13,8 @@ import {
   validateIdeas,
 } from './domain/news-ideas-ai';
 import { shapeOf } from './domain/positions';
-import { shortlist, type Candidate } from './domain/shortlist';
+import { shortlist, type Candidate, type CandidateArticle } from './domain/shortlist';
+import { NEWS_IMPACT_IDEAS, type ImpactIdeaSource } from '../news-impact/news-impact.ports';
 import { newsBatchDue, istYmd, type NewsBatch } from './domain/windows';
 import { baseSymbol } from '../news-events/keys';
 import { SCORECARD_CHAIN_CAPTURE, SCORECARD_LLM, SCORECARD_WATCHLIST, type ChainCapturer, type WatchlistWriter } from './ports';
@@ -29,6 +30,8 @@ const MAX_TOKENS = 4000;
 export const NEWS_IDEAS_JOB = 'news.ideas';
 /** How long a news symbol stays on stream A's chain-capture watchlist. */
 export const WATCHLIST_TTL_HOURS = 36;
+/** Top-ranked news-impact clusters offered to the shortlist per batch (it still keeps its own cap of 5). */
+export const IMPACT_IDEAS_LIMIT = 15;
 
 export interface BatchSummary {
   ran: boolean;
@@ -59,7 +62,20 @@ export class NewsIdeasService {
     @Optional() @Inject(SCORECARD_CHAIN_CAPTURE) private readonly chainCapture: ChainCapturer | null = null,
     /** Self-review lessons (scope NEWS_IDEAS), from an in-memory cache. Absent ⇒ none. */
     @Optional() @Inject(LESSONS_READER) private readonly lessons: LessonsReader | null = null,
+    /** News impact (@Global): the window's top model-read impacts, ranked; absent ⇒ keyword shortlist only. */
+    @Optional() @Inject(NEWS_IMPACT_IDEAS) private readonly impacts: ImpactIdeaSource | null = null,
   ) {}
+
+  /** The window's top-ranked impacted clusters as shortlist articles; [] when unwired or the read fails. */
+  private async impactArticles(from: Date, now: Date): Promise<CandidateArticle[]> {
+    if (!this.impacts) return [];
+    try {
+      return await this.impacts.rankedArticles(from, now, IMPACT_IDEAS_LIMIT);
+    } catch (e) {
+      this.logger.warn(`[news-ideas] news-impact read failed (keyword shortlist only): ${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
+  }
 
   /** The lessons for this batch's prompt; [] when off/observe/unwired. Never throws. */
   private batchLessons(): InjectedLesson[] {
@@ -98,17 +114,26 @@ export class NewsIdeasService {
 
   private async batch(batch: NewsBatch, now: Date): Promise<BatchSummary> {
     const from = lastSessionClose('NSE', now, this.clock) ?? new Date(now.getTime() - 24 * 3600_000);
-    const [articles, fno, held, already] = await Promise.all([
+    const [articles, fno, held, already, impacted] = await Promise.all([
       this.repo.newsBetween(from, now),
       this.repo.fnoNames(istYmd(now)),
       this.heldUnderlyings(),
       this.repo.ideaNewsIdsSince(from),
+      this.impactArticles(from, now),
     ]);
+    // Model-read impacts first (MED/HIGH, strength 0.75/1.0), then the keyword-scored articles; the
+    // shortlist keeps its own F&O / not-held / already-an-idea rules and its cap.
+    const impactedIds = new Set(impacted.map((a) => a.id));
     const candidates = shortlist(
-      articles.map((a) => ({
-        id: a.id, title: a.title, url: a.url, source: a.source, sentiment: a.sentiment, sentimentScore: a.sentimentScore,
-        publishedAt: a.publishedAt, instruments: [...(a.instruments ?? []), ...(a.relatedSymbols ?? []).map(baseSymbol)],
-      })),
+      [
+        ...impacted,
+        ...articles
+          .filter((a) => !impactedIds.has(a.id))
+          .map((a) => ({
+            id: a.id, title: a.title, url: a.url, source: a.source, sentiment: a.sentiment, sentimentScore: a.sentimentScore,
+            publishedAt: a.publishedAt, instruments: [...(a.instruments ?? []), ...(a.relatedSymbols ?? []).map(baseSymbol)],
+          })),
+      ],
       fno,
       held,
       already,

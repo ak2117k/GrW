@@ -74,6 +74,7 @@ import { SelfReviewPanel } from './SelfReviewSection';
 import { BigMoveWatchPanel } from './BigMoveWatchSection';
 import { TradeSetupsPanel } from './TradeSetupsSection';
 import { ChannelViewsPanel } from './ChannelViewsSection';
+import { NewsDigestPanel } from './NewsDigestSection';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -933,6 +934,12 @@ export function NightReportView({
           count={!isSectionError(report.channelViews) ? report.channelViews.items.length : undefined}
         >
           <Guard value={report.channelViews}>{(v) => <ChannelViewsPanel view={v} />}</Guard>
+        </SectionShell>
+      )}
+
+      {report.newsDigest != null && (
+        <SectionShell title="News digest" count={!isSectionError(report.newsDigest) ? report.newsDigest.items.length : undefined}>
+          <Guard value={report.newsDigest}>{(v) => <NewsDigestPanel view={v} />}</Guard>
         </SectionShell>
       )}
 

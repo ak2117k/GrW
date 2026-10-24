@@ -15,6 +15,8 @@ export const VERIFICATION_KINDS = [
   'CHANNEL_SIGNAL',
   /** A Telegram INFO item (market view of a channel, 2026-10-24): its bias vs the next session's / 5 sessions' close-to-close move. */
   'CHANNEL_INFO',
+  /** A news-impact model call (2026-10-24): its direction vs the +60 m (INTRADAY) / close-to-next-close (DAYS) move. */
+  'NEWS_IMPACT',
 ] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 
@@ -72,6 +74,8 @@ export interface RunSummary {
   byChannel?: Record<string, ChannelStats>;
   /** Telegram signal trades: live vs PAPER (no funds), session S and rolling 20 (domain/signal-trades.ts). */
   signalTrades?: import('./domain/signal-trades').SignalTradesSummary;
+  /** NEWS_IMPACT: hit rates by news source and by material type + mean |move| per called magnitude, session and rolling 20. */
+  news?: { session: import('./domain/news-impact-scorer').NewsImpactSummary; rolling20: import('./domain/news-impact-scorer').NewsImpactSummary };
 }
 
 export interface ChannelStats {

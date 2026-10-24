@@ -52,6 +52,7 @@ import { NightReportModule } from './modules/night-report/night-report.module';
 import { OvernightScorecardModule } from './modules/overnight-scorecard/overnight-scorecard.module';
 import { SelfReviewModule } from './modules/self-review/self-review.module';
 import { StockMoveModule } from './modules/stock-move/stock-move.module';
+import { NewsImpactModule } from './modules/news-impact/news-impact.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { SignalIntakeModule } from './modules/signal-intake/signal-intake.module';
@@ -273,6 +274,9 @@ import { SignalTraderModule } from './modules/signal-trader/signal-trader.module
     // Stock big-move model, read side (shadow): the nightly stock_move_scores book for the scorecard,
     // the night report and the sentinel packet. @Global, read-only, empty until the writer ships.
     StockMoveModule,
+    // News impact: cluster/classify/relevance every article, batched cheap-LLM impact, HIGH-impact
+    // sentinel wake + ops alert, reactions for the self-review. @Global read ports (digest, ideas, review).
+    NewsImpactModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

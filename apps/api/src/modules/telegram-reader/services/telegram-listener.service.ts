@@ -30,7 +30,7 @@ const WATCHDOG_MS = 60_000;
 /** Every 10 min, so a deaf listener shows quickly (2026-10-23: 28 quiet minutes were indistinguishable from no feed). */
 const SUMMARY_MS = 10 * 60_000;
 /** Polling safety net: newest posts of every ticked channel this often (TELEGRAM_POLL_SEC, 0 = off). */
-const DEFAULT_POLL_SEC = 60;
+const DEFAULT_POLL_SEC = 20; // live pushes rarely arrive for this session (prod 2026-10-23/24), so the poll is the main path
 const POLL_LIMIT = 5;
 
 /** Exponential backoff for attempt n (0-based), capped. */

@@ -160,12 +160,11 @@ describe('NewsIdeasService', () => {
     expect('lessons' in JSON.parse(p2.messages[0].content)).toBe(false);
   });
 
-  it('skips when off, or the night before the holiday', async () => {
+  it('skips when off; the night before a holiday now runs (every-night analysis)', async () => {
     const f = fakeRepo();
     const l = llm(ideaJson);
     expect((await new NewsIdeasService(f.repo, engineFor(f.repo), cfg({ newsIdeas: false }), clock, () => NOW, l.t, watch()).run('NIGHT', NOW)).ran).toBe(false);
-    expect((await new NewsIdeasService(f.repo, engineFor(f.repo), cfg(), clock, () => NOW, l.t, watch()).run('NIGHT', ist('2026-10-19T23:30:00'))).ran).toBe(false);
-    expect(l.calls).toHaveLength(0);
+    expect((await new NewsIdeasService(f.repo, engineFor(f.repo), cfg(), clock, () => NOW, l.t, watch()).run('NIGHT', ist('2026-10-19T23:30:00'))).reason).not.toBe('no NSE session next');
   });
 
   it('captures the F&O candidates\' chains BEFORE scoring them, so OI reads a snapshot', async () => {

@@ -4,15 +4,12 @@
  *
  *  - OVERNIGHT scorecards (15:40 IST): only on an NSE trading day, after the 15:30 close.
  *  - PRE_OPEN scorecards (08:50 IST): only on an NSE trading day, before the 09:15 open.
- *  - News ideas NIGHT batch (23:30 IST): only when the next NSE open is TOMORROW (IST) — the news
- *    of a night before a holiday is picked up by the next qualifying night (its window starts at the
- *    last close, so nothing is lost).
+ *  - News ideas NIGHT batch (23:30 IST): every night with a next NSE session (weekends/holidays too).
  *  - News ideas MORNING batch (08:40 IST): only on an NSE trading day.
  */
 import type { SessionClock } from '../../market-hub/session-clock';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 export function istYmd(at: Date): string {
   return new Date(at.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
@@ -33,9 +30,10 @@ export function scorecardJobDue(job: ScorecardJob, now: Date, clock: SessionCloc
 
 export function newsBatchDue(batch: NewsBatch, now: Date, clock: SessionClock): boolean {
   if (batch === 'MORNING') return clock.isTradingDay('NSE', now) && istMinutes(now) < 9 * 60 + 15;
-  const next = clock.nextOpen('NSE', now);
-  if (!next) return false;
-  return istYmd(next) === istYmd(new Date(now.getTime() + DAY_MS));
+  // Every night, weekends and holidays included (owner 2026-10-24: "keep doing the analysis — the more
+  // we do, the more factors we collect"). The ideas target the next NSE session (outcomeSession), and
+  // ideaNewsIdsSince keeps a Saturday idea from being re-made on Sunday for the same article.
+  return clock.nextOpen('NSE', now) !== null;
 }
 
 /** The NSE session (IST 'YYYY-MM-DD') whose open→close is a row's outcome: the first session opening after `at`. */

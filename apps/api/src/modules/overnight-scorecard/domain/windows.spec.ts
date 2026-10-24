@@ -22,10 +22,11 @@ describe('job windows across Dussehra (Tue 2026-10-20, NSE holiday)', () => {
     expect(scorecardJobDue('PRE_OPEN', ist('2026-10-21T09:30:00'), clock)).toBe(false);
   });
 
-  it('news NIGHT 23:30 runs only when the next open is tomorrow', () => {
-    expect(newsBatchDue('NIGHT', ist('2026-10-19T23:30:00'), clock)).toBe(false); // Tue is a holiday
+  it('news NIGHT 23:30 runs every night there is a next NSE session (weekends and holidays included)', () => {
+    expect(newsBatchDue('NIGHT', ist('2026-10-19T23:30:00'), clock)).toBe(true); // Tue holiday: still analysed, for Wed
     expect(newsBatchDue('NIGHT', ist('2026-10-20T23:30:00'), clock)).toBe(true); // Wed opens
-    expect(newsBatchDue('NIGHT', ist('2026-10-23T23:30:00'), clock)).toBe(false); // Fri night → Mon
+    expect(newsBatchDue('NIGHT', ist('2026-10-23T23:30:00'), clock)).toBe(true); // Fri night → Mon (every night)
+    expect(newsBatchDue('NIGHT', ist('2026-10-24T23:30:00'), clock)).toBe(true); // Sat night → Mon
     expect(newsBatchDue('NIGHT', ist('2026-10-25T23:30:00'), clock)).toBe(true); // Sun night → Mon
   });
 

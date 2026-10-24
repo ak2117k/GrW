@@ -8,27 +8,13 @@ import { StrategyRegistryService } from '../../signal-generator/services/strateg
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { AngelOneAdapterService } from '../../market-data/services/angel-one-adapter.service';
 import { BacktestRepository } from '../repositories/backtest.repository';
+import { BacktestDataService } from './backtest-data.service';
+import { resolveInstrument } from '../data/instrument-resolve';
 import { RunBacktestDto } from '../dto/backtest.dto';
 import type {
   BacktestResult,
   CandleData,
 } from '../../../common/interfaces/trading-strategy.interface';
-
-/**
- * Token lookup map for common instruments so backtests can run even when the
- * local instrument DB is empty.  Maps uppercase symbol → Angel One token/exchange.
- */
-const TOKEN_MAP: Record<string, { token: string; exchange: string }> = {
-  'NIFTY': { token: '99926000', exchange: 'NSE' },
-  'BANKNIFTY': { token: '99926009', exchange: 'NSE' },
-  'FINNIFTY': { token: '99926037', exchange: 'NSE' },
-  'SENSEX': { token: '99919000', exchange: 'BSE' },
-  'RELIANCE': { token: '2885', exchange: 'NSE' },
-  'TCS': { token: '11536', exchange: 'NSE' },
-  'HDFCBANK': { token: '1333', exchange: 'NSE' },
-  'INFY': { token: '1594', exchange: 'NSE' },
-  'ICICIBANK': { token: '4963', exchange: 'NSE' },
-};
 
 export interface ComparisonResult {
   configs: RunBacktestDto[];
@@ -44,7 +30,11 @@ export class BacktestService {
     private readonly marketDataRepo: MarketDataRepository,
     private readonly angelOneAdapter: AngelOneAdapterService,
     private readonly backtestRepo: BacktestRepository,
+    private readonly backtestData: BacktestDataService,
   ) {}
+
+  /** Bars one backtest may read from the store (BACKTEST_MAX_BARS, default 300k). */
+  private readonly maxStoreBars = Number(process.env.BACKTEST_MAX_BARS) > 0 ? Number(process.env.BACKTEST_MAX_BARS) : 300_000;
 
   /**
    * Run a single backtest for a given configuration.
@@ -59,64 +49,83 @@ export class BacktestService {
     }
 
     // 2. Resolve instrument token + exchange for the Angel One fetch.
-    let token: string = config.symbol;
-    let exchange: string = config.exchange;
-
     const instruments = await this.marketDataRepo.searchInstruments(
       config.symbol,
       config.exchange,
     );
-
-    if (instruments.length > 0) {
-      const instrument = instruments[0];
-      token = instrument.token ?? token;
-      exchange = instrument.exchange ?? exchange;
-    } else {
-      // Instrument not in local DB — resolve from TOKEN_MAP
-      const mapped = TOKEN_MAP[config.symbol.toUpperCase()];
-      if (mapped) {
-        token = mapped.token;
-        exchange = mapped.exchange;
-        this.logger.warn(
-          `Instrument "${config.symbol}" not in DB, using TOKEN_MAP: token=${token} exchange=${exchange}`,
-        );
-      } else {
-        this.logger.warn(
-          `Instrument "${config.symbol}" not in DB or TOKEN_MAP, using symbol as token`,
-        );
-      }
+    const resolved = resolveInstrument(instruments, config.symbol, config.exchange);
+    const token: string = resolved.token;
+    const exchange: string = resolved.exchange;
+    if (resolved.via === 'token-map') {
+      this.logger.warn(
+        `Instrument "${config.symbol}" not in DB, using TOKEN_MAP: token=${token} exchange=${exchange}`,
+      );
+    } else if (resolved.via === 'symbol') {
+      this.logger.warn(
+        `Instrument "${config.symbol}" not in DB or TOKEN_MAP, using symbol as token`,
+      );
     }
 
-    // 3. Fetch historical candles straight from Angel One.
+    // 2b. The backtest data store first (research downloads + on-demand fetches, no retention).
+    // A store that holds the whole range answers alone; a partial one is the fallback if the
+    // broker fetch below yields nothing. No store data at all = the previous behaviour.
+    const stored = await this.backtestData.loadFromStore(
+      config.symbol,
+      config.exchange,
+      config.timeframe,
+      config.startDate,
+      config.endDate,
+      this.maxStoreBars,
+    );
+    if (stored && stored.candles.length > this.maxStoreBars) {
+      throw new BadRequestException(
+        `More than ${this.maxStoreBars} ${config.timeframe} bars in this range: shorten it or use a coarser timeframe.`,
+      );
+    }
+
+    // 3. Otherwise fetch historical candles straight from Angel One.
     // The local `candles` table is NOT a backtest-grade historical store — it
     // holds only stray live-aggregation candles. A "local DB first" path let a
     // single stray candle suppress the broker fetch and silently starve the
-    // backtest, so backtests always pull the full range from the broker.
+    // backtest. The backtest store above only short-circuits the broker when its
+    // catalogue span covers the WHOLE requested range (coverageOf), never on a stray bar.
     let candles: CandleData[] = [];
-    try {
-      const angelCandles = await this.angelOneAdapter.getHistoricalData(
-        token,
-        exchange,
-        config.timeframe,
-        config.startDate,
-        config.endDate,
-      );
+    let dataSource = 'angel';
+    if (stored?.complete) {
+      candles = stored.candles;
+      dataSource = stored.source;
+      this.logger.log(`Using ${candles.length} stored candles (${stored.source}) for ${config.symbol} ${config.timeframe}`);
+    } else {
+      try {
+        const angelCandles = await this.angelOneAdapter.getHistoricalData(
+          token,
+          exchange,
+          config.timeframe,
+          config.startDate,
+          config.endDate,
+        );
 
-      candles = angelCandles.map((c) => ({
-        timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
-        open: Number(c.open),
-        high: Number(c.high),
-        low: Number(c.low),
-        close: Number(c.close),
-        volume: Number(c.volume),
-      }));
+        candles = angelCandles.map((c) => ({
+          timestamp: c.timestamp instanceof Date ? c.timestamp : new Date(c.timestamp),
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+          volume: Number(c.volume),
+        }));
 
-      this.logger.log(
-        `Fetched ${candles.length} candles from Angel One for ${config.symbol} (token=${token}, exchange=${exchange})`,
-      );
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      this.logger.error(`Angel One historical data fetch failed: ${msg}`);
+        this.logger.log(
+          `Fetched ${candles.length} candles from Angel One for ${config.symbol} (token=${token}, exchange=${exchange})`,
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Angel One historical data fetch failed: ${msg}`);
+      }
+      if (candles.length === 0 && stored && stored.candles.length > 0) {
+        candles = stored.candles;
+        dataSource = `${stored.source} (partial)`;
+        this.logger.warn(`Broker fetch empty: using ${candles.length} stored candles (${stored.source}, partial range)`);
+      }
     }
 
     if (candles.length === 0) {
@@ -162,6 +171,8 @@ export class BacktestService {
         timeframe: config.timeframe,
         initialCapital: config.initialCapital,
         positionSize: config.positionSize,
+        dataSource,
+        bars: candles.length,
       },
       startDate: config.startDate,
       endDate: config.endDate,
@@ -177,7 +188,7 @@ export class BacktestService {
       `Backtest complete: ${result.totalTrades} trades, ${result.winRate.toFixed(1)}% win rate, ${result.totalReturnPercent.toFixed(2)}% return`,
     );
 
-    return result;
+    return { ...result, dataSource, bars: candles.length } as BacktestResult;
   }
 
   /**

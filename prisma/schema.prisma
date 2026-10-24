@@ -512,6 +512,116 @@ model BacktestRun {
   @@map("backtest_runs")
 }
 
+// ─── Backtest data store (2026-10-24) ─────────────────────────────────────────
+// Long-lived OHLCV for backtests: the PC's research downloads (NIFTY/BANKNIFTY 1m 2016→, Yahoo
+// daily for ~215 F&O names, NSE bhavcopy futures) loaded once by scripts/backtest-data/, plus
+// whatever the owner's Angel session / Yahoo fetches on demand (DataAcquisitionService).
+// No retention. Raw SQL in apps/api/src/modules/backtest/repositories/backtest-data.repository.ts.
+
+/// One series = (symbol, exchange, interval). Also the catalogue the UI / assistant lists:
+/// [fromTs, toTs] is the contiguous span of bars held (fetches only ever extend it outward).
+model BacktestDataset {
+  id        Int      @id @default(autoincrement())
+  symbol    String // NIFTY, BANKNIFTY, INDIAVIX, RELIANCE, NIFTY-FUT1, ...
+  exchange  String // NSE | BSE | NFO | MCX
+  interval  String // 1m | 5m | 15m | 1h | 1d
+  fromTs    DateTime? @map("from_ts") @db.Timestamptz(6)
+  toTs      DateTime? @map("to_ts") @db.Timestamptz(6)
+  rows      Int      @default(0)
+  /// Comma-separated set of sources that wrote bars: research-1m, yahoo, nse-bhav, angel, mbm.
+  source    String
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  bars BacktestBar[]
+
+  @@unique([symbol, exchange, interval])
+  @@map("backtest_datasets")
+}
+
+/// ts = bar START, UTC (daily bars: the IST session date at 09:15 IST = 03:45Z).
+model BacktestBar {
+  datasetId Int      @map("dataset_id")
+  ts        DateTime @db.Timestamptz(6)
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    Float    @default(0)
+  oi        Float?
+
+  dataset BacktestDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@id([datasetId, ts])
+  @@map("backtest_bars")
+}
+
+/// NSE bhavcopy EOD for index F&O (NIFTY, BANKNIFTY): futures every contract; options only strikes
+/// within ±10 % of spot on the nearest 3 expiries. strike = 0 for FUT. Not read by the engine yet.
+model BacktestFoEod {
+  underlying String
+  date       DateTime @db.Date
+  expiry     DateTime @db.Date
+  kind       String // FUT | CE | PE
+  strike     Float    @db.Real
+  open       Float    @db.Real
+  high       Float    @db.Real
+  low        Float    @db.Real
+  close      Float    @db.Real
+  settle     Float?   @db.Real
+  contracts  Int      @default(0)
+  oi         Int      @default(0)
+  chgOi      Int      @default(0) @map("chg_oi")
+  undl       Float?   @db.Real
+
+  @@id([underlying, date, expiry, kind, strike])
+  @@map("backtest_fo_eod")
+}
+
+/// One on-demand history fetch (owner's Angel session or Yahoo): progress, calls spent (daily cap).
+model BacktestFetchJob {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  symbol     String
+  exchange   String
+  interval   String
+  fromTs     DateTime  @map("from_ts") @db.Timestamptz(6)
+  toTs       DateTime  @map("to_ts") @db.Timestamptz(6)
+  status     String // running | done | partial | refused | error
+  provider   String? // angel | yahoo
+  calls      Int       @default(0)
+  rows       Int       @default(0)
+  message    String?
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("backtest_fetch_jobs")
+}
+
+/// "Ask Claude to backtest…" (owner only): the request, the validated spec, progress and summary.
+/// requestHash = sha256 of the normalised request text: the cache key (a hit costs no model call).
+model BacktestAiRequest {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  requestHash String   @map("request_hash")
+  prompt      String
+  status      String // queued | spec | fetching | running | summarising | done | refused | error
+  progress    Json?
+  spec        Json?
+  runId       String?  @map("run_id") // backtest_runs.id
+  metrics     Json?
+  summary     String?
+  error       String?
+  llmCalls    Int      @default(0) @map("llm_calls")
+  cachedFrom  String?  @map("cached_from")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt])
+  @@index([requestHash])
+  @@map("backtest_ai_requests")
+}
+
 // ============================================
 // AI Insights — Section-level Claude analysis
 // ============================================

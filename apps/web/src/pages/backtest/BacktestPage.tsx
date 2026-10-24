@@ -17,6 +17,8 @@ import BacktestEquityCurve from '@/components/charts/BacktestEquityCurve';
 import { LoadingSkeleton } from '@/components/common';
 import AIInsightCard from '@/components/ai/AIInsightCard';
 import { StrategyChat } from '@/components/strategy/StrategyChat';
+import BacktestAssistant from '@/components/trading/BacktestAssistant';
+import BacktestDatasets from '@/components/trading/BacktestDatasets';
 import type { BacktestConfig as BacktestConfigType } from '@/stores/backtest-store';
 
 /**
@@ -246,10 +248,15 @@ export default function BacktestPage() {
             isRunning={isRunning}
             isCompareMode={isCompareMode}
           />
+          <div className="mt-4">
+            <BacktestDatasets />
+          </div>
         </div>
 
         {/* Right panel: Results */}
         <div className="space-y-6">
+          {/* Owner only: renders nothing for other users. A finished run loads into the panels below. */}
+          <BacktestAssistant onRunReady={loadBacktest} />
           {isRunning && (
             <div className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-secondary)] p-6">
               <LoadingSkeleton variant="text" height="24px" className="mb-4" />

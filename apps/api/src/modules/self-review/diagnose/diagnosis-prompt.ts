@@ -3,6 +3,7 @@
  * (with the contract's caps) and the strict reply validator. Pure — no I/O.
  */
 import { clampText, isLessonKey, isLessonScope } from '../lessons/lessons.logic';
+import { isAllowedTarget, TUNABLES } from '../tuning/tunables';
 import { LESSON_TEXT_MAX, type LessonRecord } from '../lessons/types';
 import { MISS_CATEGORIES, type DiagnosedMiss, type MissCategory, type MissInput } from './types';
 
@@ -43,6 +44,7 @@ export const DIAGNOSIS_SCHEMA = {
           lessonText: { type: 'string' },
           scope: { type: 'string', enum: ['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'ALL'] },
           contradicts: { type: 'array', items: { type: 'string' } },
+          blamedFactors: { type: 'array', items: { type: 'string' } },
           proposalTarget: { type: 'string' },
           proposedValue: { anyOf: [{ type: 'number' }, { type: 'boolean' }] },
         },
@@ -64,10 +66,12 @@ export const DIAGNOSIS_SYSTEM_PROMPT = [
   '- scope (optional): which agent the lesson is for — SENTINEL_LIVE (intraday exits), SENTINEL_OVERNIGHT (overnight hold/exit verdicts), NEWS_IDEAS (news-driven trade ideas), or ALL.',
   '- contradicts (optional): keys of EXISTING lessons that these misses followed, or would have followed, and that were therefore wrong here.',
   '- proposalTarget / proposedValue (optional): a tunable you suspect should change, e.g. scorecard.factor.news.weight 0.5. These are suggestions only; code decides.',
-  'A SCORECARD_TOTAL miss carries details.factors: the signed points of every factor that was scored (the band comes from their sum). Blame only factors listed there with non-zero points; never name a factor that is absent or scored 0 (e.g. there is no index-trend factor), and propose only a weight for a factor in that list.',
+  'A SCORECARD_TOTAL miss carries details.factors: the signed points of every factor that was scored (the band comes from their sum). Blame only factors listed there with non-zero points; never name a factor that is absent or scored 0 (e.g. there is no index-trend factor).',
+  '- blamedFactors (REQUIRED with a lessonKey or proposal on SCORECARD_TOTAL misses): the factor names, exactly as in details.factors, whose non-zero points caused the wrong band. A lesson or proposal whose blamed factors are missing, absent or zero on those misses is discarded by code.',
+  `- proposalTarget must be one of: ${Object.keys(TUNABLES).join(', ')}. Anything else is discarded.`,
   'One session is one observation: several positions that went wrong on the same day for the same market reason are one case, not several.',
   'Rules: no lesson for NOISE; never a lesson or proposal that loosens a hard risk limit (max daily loss, position size, kill switch, stop or green floor); do not invent data that is not in the input; one miss may be left without a lesson.',
-  'Answer ONLY with JSON: {"misses":[{"refIds","cause","category","lessonKey?","lessonText?","scope?","contradicts?","proposalTarget?","proposedValue?"}]}.',
+  'Answer ONLY with JSON: {"misses":[{"refIds","cause","category","lessonKey?","lessonText?","scope?","contradicts?","blamedFactors?","proposalTarget?","proposedValue?"}]}.',
 ].join('\n');
 
 function excerpt(value: unknown, max: number): string | undefined {
@@ -131,14 +135,47 @@ export function extractJsonObject(text: string): unknown {
 }
 
 const TARGET_RE = /^[A-Za-z0-9_.]{3,100}$/;
+const WEIGHT_TARGET_RE = /^scorecard\.factor\.([a-z_]+)\.weight$/;
+
+/**
+ * Why an entry's lesson/proposal is not backed by the scorecards it cites, or null when it is (or
+ * when none of its refIds has known factor points — verdicts, ideas and exits are not checked).
+ */
+export function groundingProblem(
+  refIds: readonly string[],
+  blamed: readonly string[],
+  scored: ReadonlyMap<string, Readonly<Record<string, number>>>,
+  proposalTarget?: string,
+): string | null {
+  const cards = refIds.map((id) => scored.get(id)).filter((f): f is Readonly<Record<string, number>> => f !== undefined);
+  if (cards.length === 0) return null;
+  const nonZero = new Set(cards.flatMap((f) => Object.entries(f).filter(([, p]) => p !== 0).map(([n]) => n)));
+  if (blamed.length === 0) return 'no blamedFactors on a scorecard miss';
+  const bad = blamed.filter((f) => !nonZero.has(f));
+  if (bad.length > 0) return `blamed ${bad.join(', ')} not scored non-zero (scored: ${[...nonZero].join(', ') || 'none'})`;
+  const w = proposalTarget ? WEIGHT_TARGET_RE.exec(proposalTarget) : null;
+  if (w && !blamed.includes(w[1])) return `weight for ${w[1]}, which is not a blamed factor`;
+  return null;
+}
 
 /**
  * Strict on the envelope, lenient per entry: a reply that is not `{misses: [...]}` throws;
  * an entry with no surviving refId, no cause or an unknown category is dropped; a bad
  * optional field (key, text, scope, target) is dropped from its entry alone. A lesson key
  * that is new needs `lessonText`; a key already active may come without it.
+ *
+ * GROUNDING: when an entry's refIds include scorecards with known factor points (`scored`), its
+ * lesson and proposal survive only if `blamedFactors` names at least one factor and every one of
+ * them scored non-zero on those scorecards; a weight proposal must be for a blamed factor. A
+ * proposal for a target off the allow-list is dropped here too. The cause is always kept, with
+ * `dropped` saying what was removed and why.
  */
-export function validateDiagnosis(raw: unknown, sentRefIds: readonly string[], activeKeys: ReadonlySet<string>): DiagnosedMiss[] {
+export function validateDiagnosis(
+  raw: unknown,
+  sentRefIds: readonly string[],
+  activeKeys: ReadonlySet<string>,
+  scored: ReadonlyMap<string, Readonly<Record<string, number>>> = new Map(),
+): DiagnosedMiss[] {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('diagnosis reply is not an object');
   const misses = (raw as { misses?: unknown }).misses;
   if (!Array.isArray(misses)) throw new Error('diagnosis reply has no misses array');
@@ -163,8 +200,24 @@ export function validateDiagnosis(raw: unknown, sentRefIds: readonly string[], a
       if (c.length > 0) d.contradicts = c;
     }
     if (typeof e.proposalTarget === 'string' && TARGET_RE.test(e.proposalTarget) && (typeof e.proposedValue === 'boolean' || (typeof e.proposedValue === 'number' && Number.isFinite(e.proposedValue)))) {
-      d.proposalTarget = e.proposalTarget;
-      d.proposedValue = e.proposedValue;
+      if (isAllowedTarget(e.proposalTarget)) {
+        d.proposalTarget = e.proposalTarget;
+        d.proposedValue = e.proposedValue;
+      } else {
+        d.dropped = `proposal ${e.proposalTarget}: not a tunable`;
+      }
+    }
+    const blamed = Array.isArray(e.blamedFactors) ? [...new Set(e.blamedFactors.filter((f): f is string => typeof f === 'string' && f.trim() !== '').map((f) => f.trim()))] : [];
+    if (blamed.length > 0) d.blamedFactors = blamed;
+    const ungrounded = groundingProblem(refIds, blamed, scored, d.proposalTarget);
+    if (ungrounded && (d.lessonKey || d.proposalTarget)) {
+      const what = [d.lessonKey && `lesson ${d.lessonKey}`, d.proposalTarget && `proposal ${d.proposalTarget}`].filter(Boolean).join(' + ');
+      d.dropped = [d.dropped, `${what}: ${ungrounded}`].filter(Boolean).join('; ');
+      delete d.lessonKey;
+      delete d.lessonText;
+      delete d.scope;
+      delete d.proposalTarget;
+      delete d.proposedValue;
     }
     out.push(d);
   }

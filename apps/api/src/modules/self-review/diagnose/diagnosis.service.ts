@@ -86,8 +86,11 @@ export class DiagnosisService {
         extractJsonObject(text),
         sent.map((m) => m.refId),
         new Set(active.map((l) => l.key)),
+        scoredFactors(sent),
       );
+      const ungrounded = diagnosed.filter((d) => d.dropped);
       this.logger.log(`[self-review] run ${runId}: diagnosed ${diagnosed.length} groups from ${sent.length} misses (${dropped} over the cap)`);
+      if (ungrounded.length > 0) this.logger.log(`[self-review] run ${runId}: discarded ${ungrounded.map((d) => d.dropped).join(' | ')}`);
       return { ...base, status: 'OK', misses: diagnosed, sent: sent.length, dropped, model: tier.model };
     } catch (e) {
       return this.failed(runId, `reply rejected: ${msg(e)}`, sent.length, dropped, tier.model);
@@ -98,6 +101,18 @@ export class DiagnosisService {
     this.logger.warn(`[self-review] run ${runId}: diagnosis skipped — ${reason}`);
     return { status: 'FAILED', misses: [], reason, sent, dropped, model, promptVersion: DIAGNOSIS_PROMPT_VERSION };
   }
+}
+
+/** refId → factor points, for the scorecard misses that carry them (`details.factors`). */
+export function scoredFactors(misses: readonly MissInput[]): Map<string, Record<string, number>> {
+  const out = new Map<string, Record<string, number>>();
+  for (const m of misses) {
+    const f = (m.details as { factors?: unknown } | null | undefined)?.factors;
+    if (m.kind !== 'SCORECARD_TOTAL' || !f || typeof f !== 'object' || Array.isArray(f)) continue;
+    const points = Object.fromEntries(Object.entries(f).filter(([, p]) => typeof p === 'number'));
+    if (Object.keys(points).length > 0) out.set(m.refId, points as Record<string, number>);
+  }
+  return out;
 }
 
 function msg(e: unknown): string {

@@ -82,6 +82,43 @@ describe('validateDiagnosis', () => {
     expect(out.map((d) => d.lessonKey)).toEqual([undefined, 'old-key', undefined]);
   });
 
+  describe('grounding against the scorecard points', () => {
+    // Real 2026-10-26 case: RELIANCE call AGAINST from expiry −2 / vix −1 / fii −1; no index-trend factor.
+    const scored = new Map([['r1', { oi: 0, fii_dii: -1, vix: -1, expiry: -2, news: 0, indicators: -1, mood: 1 }]]);
+    const entry = (over: Record<string, unknown>) => ({ misses: [{ refIds: ['r1'], cause: 'c', category: 'FACTOR_MISREAD', lessonKey: 'some-lesson', lessonText: 'T.', ...over }] });
+
+    it('drops the lesson and proposal when the blamed factor was not scored (keeps the cause)', () => {
+      const [d] = validateDiagnosis(entry({ blamedFactors: ['indexTrend'], proposalTarget: 'scorecard.factor.news.weight', proposedValue: 0.5 }), sent, active, scored);
+      expect(d).toMatchObject({ refIds: ['r1'], cause: 'c', blamedFactors: ['indexTrend'] });
+      expect(d.lessonKey).toBeUndefined();
+      expect(d.proposalTarget).toBeUndefined();
+      expect(d.dropped).toMatch(/lesson some-lesson \+ proposal scorecard\.factor\.news\.weight: blamed indexTrend not scored non-zero/);
+    });
+
+    it('drops it when no factor is named, or a blamed factor scored 0', () => {
+      expect(validateDiagnosis(entry({}), sent, active, scored)[0].lessonKey).toBeUndefined();
+      expect(validateDiagnosis(entry({ blamedFactors: ['expiry', 'news'] }), sent, active, scored)[0].dropped).toMatch(/blamed news not scored/);
+    });
+
+    it('keeps a lesson that blames factors with non-zero points; a weight proposal must be for one of them', () => {
+      const [ok] = validateDiagnosis(entry({ blamedFactors: ['expiry', 'vix'], proposalTarget: 'scorecard.factor.vix.weight', proposedValue: 0.5 }), sent, active, scored);
+      expect(ok).toMatchObject({ lessonKey: 'some-lesson', proposalTarget: 'scorecard.factor.vix.weight', blamedFactors: ['expiry', 'vix'] });
+      expect(ok.dropped).toBeUndefined();
+      const [bad] = validateDiagnosis(entry({ blamedFactors: ['expiry'], proposalTarget: 'scorecard.factor.vix.weight', proposedValue: 0.5 }), sent, active, scored);
+      expect(bad.dropped).toMatch(/weight for vix, which is not a blamed factor/);
+    });
+
+    it('misses without factor points (verdicts, ideas) are not checked', () => {
+      expect(validateDiagnosis(entry({ refIds: ['r2'] }), sent, active, scored)[0].lessonKey).toBe('some-lesson');
+    });
+
+    it('a proposal for a target off the allow-list is dropped, the lesson kept', () => {
+      const [d] = validateDiagnosis({ misses: [{ refIds: ['r2'], cause: 'c', category: 'TIMING', lessonKey: 'k-two', lessonText: 'T.', proposalTarget: 'scorecard.factor.indexTrend.weight', proposedValue: 0.5 }] }, sent, active);
+      expect(d).toMatchObject({ lessonKey: 'k-two', dropped: 'proposal scorecard.factor.indexTrend.weight: not a tunable' });
+      expect(d.proposalTarget).toBeUndefined();
+    });
+  });
+
   it('clamps lesson text to 400 chars', () => {
     const [d] = validateDiagnosis({ misses: [{ refIds: ['r1'], cause: 'c', category: 'TIMING', lessonKey: 'long-one', lessonText: 'x '.repeat(400) }] }, sent, active);
     expect(d.lessonText!.length).toBeLessThanOrEqual(400);
@@ -126,6 +163,13 @@ describe('DiagnosisService', () => {
     expect(req).toMatchObject({ model: 'claude-x', max_tokens: DIAGNOSIS_MAX_TOKENS, output_config: { effort: 'medium', format: { type: 'json_schema', schema: DIAGNOSIS_SCHEMA } } });
     expect(JSON.parse(req.messages[0].content).misses.map((m: MissInput) => m.refId)).toEqual(['r1', 'r2']);
     expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd2', model: 'claude-x' });
+  });
+
+  it('checks the reply against the scorecard points it was sent', async () => {
+    const create = jest.fn().mockResolvedValue(reply('{"misses":[{"refIds":["s1"],"cause":"tape","category":"FACTOR_MISREAD","lessonKey":"tape-veto","lessonText":"T.","blamedFactors":["indexTrend"]}]}'));
+    const res = await make(create).svc.diagnose('r', [miss('s1', { kind: 'SCORECARD_TOTAL', details: { factors: { expiry: -2, vix: -1 } } })]);
+    expect(res.misses[0].lessonKey).toBeUndefined();
+    expect(res.misses[0].dropped).toMatch(/blamed indexTrend/);
   });
 
   it('defaults to the compiled sentinel tier', async () => {

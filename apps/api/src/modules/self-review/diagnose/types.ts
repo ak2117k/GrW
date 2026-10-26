@@ -48,6 +48,10 @@ export interface DiagnosedMiss {
   /** A suggestion only — stream A's deterministic proposal engine decides. */
   proposalTarget?: string;
   proposedValue?: number | boolean;
+  /** Scorecard factors the diagnosis blamed (checked against the scored points). */
+  blamedFactors?: string[];
+  /** What validation removed from this entry and why (an ungrounded lesson, an unknown target). */
+  dropped?: string;
 }
 
 export type DiagnosisStatus = 'OK' | 'SKIPPED' | 'FAILED';

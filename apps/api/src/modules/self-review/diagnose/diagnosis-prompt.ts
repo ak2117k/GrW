@@ -7,7 +7,7 @@ import { LESSON_TEXT_MAX, type LessonRecord } from '../lessons/types';
 import { MISS_CATEGORIES, type DiagnosedMiss, type MissCategory, type MissInput } from './types';
 
 /** Bump when the prompt text or the schema changes; stored on the run's diagnosis. */
-export const DIAGNOSIS_PROMPT_VERSION = 'd1';
+export const DIAGNOSIS_PROMPT_VERSION = 'd2';
 
 /** At most this many misses go into one call (contract). */
 export const MAX_MISSES = 15;
@@ -64,6 +64,8 @@ export const DIAGNOSIS_SYSTEM_PROMPT = [
   '- scope (optional): which agent the lesson is for — SENTINEL_LIVE (intraday exits), SENTINEL_OVERNIGHT (overnight hold/exit verdicts), NEWS_IDEAS (news-driven trade ideas), or ALL.',
   '- contradicts (optional): keys of EXISTING lessons that these misses followed, or would have followed, and that were therefore wrong here.',
   '- proposalTarget / proposedValue (optional): a tunable you suspect should change, e.g. scorecard.factor.news.weight 0.5. These are suggestions only; code decides.',
+  'A SCORECARD_TOTAL miss carries details.factors: the signed points of every factor that was scored (the band comes from their sum). Blame only factors listed there with non-zero points; never name a factor that is absent or scored 0 (e.g. there is no index-trend factor), and propose only a weight for a factor in that list.',
+  'One session is one observation: several positions that went wrong on the same day for the same market reason are one case, not several.',
   'Rules: no lesson for NOISE; never a lesson or proposal that loosens a hard risk limit (max daily loss, position size, kill switch, stop or green floor); do not invent data that is not in the input; one miss may be left without a lesson.',
   'Answer ONLY with JSON: {"misses":[{"refIds","cause","category","lessonKey?","lessonText?","scope?","contradicts?","proposalTarget?","proposedValue?"}]}.',
 ].join('\n');

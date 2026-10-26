@@ -40,6 +40,9 @@ describe('SCORECARD_TOTAL', () => {
   it('AGAINST band → right when the move went against the side', () => {
     expect(scoreScorecardTotal(sc({ band: 'STRONG_AGAINST', total: -5, moveBp: -30 }))).toMatchObject({ correct: true, score: 30 });
   });
+  it('details carry the points of every scored factor (unavailable ones left out)', () => {
+    expect(scoreScorecardTotal(sc()).details?.factors).toEqual({ oi: 2, vix: -1, news: 1, mood: 0 });
+  });
   it('NEUTRAL → null, flat move → null', () => {
     expect(scoreScorecardTotal(sc({ band: 'NEUTRAL', total: 0 })).correct).toBeNull();
     expect(scoreScorecardTotal(sc({ moveBp: 0 })).correct).toBeNull();

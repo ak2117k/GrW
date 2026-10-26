@@ -2,9 +2,9 @@
  * Agent lessons (docs/superpowers/plans/2026-10-21-self-review-contract.md, "Lessons").
  *
  * A lesson is one or two imperative sentences the self-review diagnosis wrote about a
- * recurring miss, counted against later evidence. Only ACTIVE lessons with
- * `rightCount >= 2` are ever shown to an agent, and they are guidance — never an
- * override of a hard risk limit.
+ * recurring miss, counted against later evidence. Only ACTIVE lessons with `rightCount >= 2`
+ * from at least 2 different sessions are ever shown to an agent, and they are guidance — never
+ * an override of a hard risk limit.
  */
 
 export const LESSON_SCOPES = ['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'ALL'] as const;
@@ -27,6 +27,8 @@ export interface LessonRecord {
   firstSeen: Date;
   lastSeen: Date;
   sourceRun: string | null;
+  /** IST session dates whose misses this lesson explained (distinct, sorted). */
+  sessions: string[];
 }
 
 /**
@@ -45,6 +47,11 @@ export type InjectedLesson = {
 export const MAX_INJECTED_LESSONS = 8;
 export const LESSON_TEXT_MAX = 400;
 export const MIN_RIGHT_TO_INJECT = 2;
+/**
+ * …and those cases from at least this many sessions: one bad day (four puts on the same risk-off
+ * morning) is one observation, not a pattern.
+ */
+export const MIN_SESSIONS_TO_INJECT = 2;
 /** Auto-retire once wrong > right after at least this many judged cases. */
 export const RETIRE_MIN_CASES = 5;
 /** The in-memory cache the hot paths read is refreshed at most this often. */
@@ -63,6 +70,17 @@ export interface LessonsReader {
 
 /** DI token for {@link LessonsReader} — provided by `SelfReviewLearningModule` (@Global). */
 export const LESSONS_READER = 'SELF_REVIEW_LESSONS_READER';
+
+/**
+ * What the lesson counter knows about one diagnosed refId. Cases count per (session, symbol) —
+ * one position's overnight + pre-open scorecards and verdict reruns are one case — and fall
+ * back to the refId when either is unknown.
+ */
+export interface LessonCase {
+  kind?: string;
+  session?: string;
+  symbol?: string | null;
+}
 
 /** What `upsertFromDiagnosis` did. */
 export interface LessonUpsertSummary {

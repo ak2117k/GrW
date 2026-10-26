@@ -21,9 +21,9 @@ export class SelfReviewDiagnosisAdapter implements DiagnosisPort {
 
   async diagnose(runId: string, misses: DiagnosisMiss[]): Promise<DiagnosisOutput | null> {
     const result = await this.diagnosis.diagnose(runId, misses);
-    const kinds = new Map(misses.map((m) => [m.refId, m.kind as string]));
+    const cases = new Map(misses.map((m) => [m.refId, { kind: m.kind as string, session: m.sessionDate, symbol: m.symbol }]));
     try {
-      await this.lessons.upsertFromDiagnosis(runId, result, (refId) => kinds.get(refId));
+      await this.lessons.upsertFromDiagnosis(runId, result, (refId) => cases.get(refId));
     } catch (e) {
       this.logger.warn(`[self-review] run ${runId}: lesson upsert failed: ${e instanceof Error ? e.message : String(e)}`);
     }

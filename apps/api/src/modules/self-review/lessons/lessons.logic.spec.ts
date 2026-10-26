@@ -1,5 +1,5 @@
 import { clampText, isLessonKey, lessonDeltas, lessonsModeFrom, scopeForKind, selectForInjection, shouldRetire } from './lessons.logic';
-import type { LessonRecord } from './types';
+import type { LessonCase, LessonRecord } from './types';
 import type { DiagnosisResult } from '../diagnose/types';
 
 const row = (over: Partial<LessonRecord>): LessonRecord => ({
@@ -13,6 +13,7 @@ const row = (over: Partial<LessonRecord>): LessonRecord => ({
   firstSeen: new Date(0),
   lastSeen: new Date(0),
   sourceRun: null,
+  sessions: ['2026-10-20', '2026-10-21'],
   ...over,
 });
 
@@ -50,6 +51,15 @@ describe('selectForInjection', () => {
     expect(out).toHaveLength(8);
     expect(out.slice(0, 3).map((l) => l.key)).toEqual(['c', 'a', 'b']);
     expect(out[0]).toEqual({ key: 'c', text: 'Do the thing.', right: 6, wrong: 3 });
+  });
+
+  it('a lesson whose cases all come from one session is not shown, however many cases', () => {
+    const rows = [
+      row({ key: 'one-day', rightCount: 4, sessions: ['2026-10-21'] }),
+      row({ key: 'no-sessions', rightCount: 4, sessions: [] }),
+      row({ key: 'two-days', rightCount: 2, sessions: ['2026-10-21', '2026-10-23'] }),
+    ];
+    expect(selectForInjection(rows, 'SENTINEL_OVERNIGHT').map((l) => l.key)).toEqual(['two-days']);
   });
 
   it('cuts text to 400 chars', () => {
@@ -95,13 +105,26 @@ describe('lessonDeltas', () => {
       ]),
     );
     expect(out).toEqual([
-      { key: 'new-one', right: 2, wrong: 0, text: 'Text.', scope: 'SENTINEL_OVERNIGHT' }, // r3 both ways
-      { key: 'old-one', right: 1, wrong: 2, text: null, scope: 'ALL' },
+      { key: 'new-one', right: 2, wrong: 0, text: 'Text.', scope: 'SENTINEL_OVERNIGHT', sessions: [] }, // r3 both ways
+      { key: 'old-one', right: 1, wrong: 2, text: null, scope: 'ALL', sessions: [] },
     ]);
   });
 
+  it('one position in one session is one case (overnight + pre-open scorecards); sessions are recorded', () => {
+    const cases: Record<string, LessonCase> = {
+      on: { kind: 'SCORECARD_TOTAL', session: '2026-10-26', symbol: 'RELIANCE27OCT261270CE' },
+      pre: { kind: 'SCORECARD_TOTAL', session: '2026-10-26', symbol: 'RELIANCE27OCT261270CE' },
+      lt: { kind: 'SCORECARD_TOTAL', session: '2026-10-26', symbol: 'LT27OCT263400PE' },
+    };
+    const [d] = lessonDeltas(
+      result([{ refIds: ['on', 'pre', 'lt'], cause: 'c', category: 'FACTOR_MISREAD', lessonKey: 'some-key', lessonText: 'T.' }]),
+      (id) => cases[id],
+    );
+    expect(d).toMatchObject({ key: 'some-key', right: 2, sessions: ['2026-10-26'] });
+  });
+
   it('infers scope from the first refId kind when the diagnosis gave none', () => {
-    const out = lessonDeltas(result([{ refIds: ['v1'], cause: 'c', category: 'TIMING', lessonKey: 'abc', lessonText: 'T.' }]), () => 'NEWS_IDEA');
+    const out = lessonDeltas(result([{ refIds: ['v1'], cause: 'c', category: 'TIMING', lessonKey: 'abc', lessonText: 'T.' }]), () => ({ kind: 'NEWS_IDEA' }));
     expect(out[0].scope).toBe('NEWS_IDEAS');
   });
 

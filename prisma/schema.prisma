@@ -3107,6 +3107,7 @@ model AgentLesson {
   firstSeen  DateTime @default(now()) @map("first_seen") @db.Timestamptz(6)
   lastSeen   DateTime @default(now()) @map("last_seen") @db.Timestamptz(6)
   sourceRun  String?  @map("source_run")
+  sessions   String[] @default([]) // IST session dates of the misses it explained; injected only from 2
 
   @@index([status, scope])
   @@map("agent_lessons")

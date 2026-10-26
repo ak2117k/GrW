@@ -11,7 +11,7 @@ function fakeStore(seed: Partial<LessonRecord>[] = []) {
     const id = r.id ?? `id${++n}`;
     const full: LessonRecord = {
       id, key: 'k', text: 't', scope: 'ALL', rightCount: 0, wrongCount: 0, status: 'ACTIVE',
-      firstSeen: new Date(0), lastSeen: new Date(0), sourceRun: null, ...r,
+      firstSeen: new Date(0), lastSeen: new Date(0), sourceRun: null, sessions: [], ...r,
     };
     rows.set(full.key, full);
     return full;
@@ -80,6 +80,18 @@ describe('LessonsService.upsertFromDiagnosis', () => {
     expect(store.rows.get('bad-key')).toMatchObject({ rightCount: 2, wrongCount: 3, status: 'RETIRED' });
   });
 
+  it('stores the sessions on create and merges them on update', async () => {
+    const store = fakeStore([{ key: 'old-key', rightCount: 1, sessions: ['2026-10-21'] }]);
+    const svc = new LessonsService(store as never, cfg(), now);
+    const caseOf = (id: string) => ({ session: id === 'b' ? '2026-10-23' : '2026-10-21', symbol: id.toUpperCase() });
+    await svc.upsertFromDiagnosis('r5', ok([
+      { refIds: ['a'], cause: 'c', category: 'TIMING', lessonKey: 'new-key', lessonText: 'T.' },
+      { refIds: ['b'], cause: 'c', category: 'TIMING', lessonKey: 'old-key' },
+    ]), caseOf);
+    expect(store.rows.get('new-key')?.sessions).toEqual(['2026-10-21']);
+    expect(store.rows.get('old-key')).toMatchObject({ rightCount: 2, sessions: ['2026-10-21', '2026-10-23'] });
+  });
+
   it('counts a RETIRED lesson but never revives it', async () => {
     const store = fakeStore([{ key: 'gone-key', status: 'RETIRED', rightCount: 1, wrongCount: 4 }]);
     const svc = new LessonsService(store as never, cfg(), now);
@@ -121,7 +133,7 @@ describe('LessonsService.retire / activeFor', () => {
 });
 
 describe('LessonsService.inject (the hot-path reader)', () => {
-  const seed = [{ key: 'proven-key', rightCount: 3, scope: 'SENTINEL_LIVE' }, { key: 'young-key', rightCount: 1 }];
+  const seed = [{ key: 'proven-key', rightCount: 3, scope: 'SENTINEL_LIVE', sessions: ['2026-10-21', '2026-10-23'] }, { key: 'young-key', rightCount: 1 }];
 
   it('on: serves the selection from cache; refreshes at most every 5 min', async () => {
     const store = fakeStore(seed);

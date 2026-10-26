@@ -70,8 +70,22 @@ export function scoreScorecardTotal(row: ScorecardRow): VerificationDraft {
     actual: `${row.underlying} ${signText(row.moveBp)} bp open→close`,
     correct: dir === 0 ? null : judged(directional),
     score: dir === 0 ? null : r1(directional),
-    details: { window: row.window, side: row.side, total: row.total, band: row.band, moveBp: row.moveBp, underlying: row.underlying },
+    details: {
+      window: row.window,
+      side: row.side,
+      total: row.total,
+      band: row.band,
+      moveBp: row.moveBp,
+      underlying: row.underlying,
+      // The points that made the band, so the diagnosis names a factor that was actually scored.
+      factors: factorPoints(row.factors),
+    },
   };
+}
+
+/** `{oi: 0, expiry: -2, …}` — every factor's signed points; unavailable factors are left out. */
+export function factorPoints(raw: unknown): Record<string, number> {
+  return Object.fromEntries(readFactors(raw).filter((f) => f.available).map((f) => [f.name, f.points]));
 }
 
 interface StoredFactor {

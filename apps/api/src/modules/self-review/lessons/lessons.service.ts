@@ -7,6 +7,7 @@ import {
   LESSON_CACHE_TTL_MS,
   type InjectedLesson,
   type InjectionScope,
+  type LessonCase,
   type LessonRecord,
   type LessonsMode,
   type LessonsReader,
@@ -91,18 +92,18 @@ export class LessonsService implements LessonsReader, OnModuleInit {
   async upsertFromDiagnosis(
     runId: string,
     result: DiagnosisResult | null | undefined,
-    kindOf?: (refId: string) => string | undefined,
+    caseOf?: (refId: string) => LessonCase | undefined,
   ): Promise<LessonUpsertSummary> {
     const summary: LessonUpsertSummary = { created: [], updated: [], retired: [] };
     if (!result) return summary;
     const at = new Date(this.now());
-    for (const d of lessonDeltas(result, kindOf)) {
+    for (const d of lessonDeltas(result, caseOf)) {
       try {
         const existing = await this.store.agentLesson.findUnique({ where: { key: d.key } });
         if (!existing) {
           if (!d.text || d.right === 0) continue; // a new lesson needs text and a case it explains
           await this.store.agentLesson.create({
-            data: { key: d.key, text: d.text, scope: d.scope, rightCount: d.right, wrongCount: d.wrong, status: 'ACTIVE', firstSeen: at, lastSeen: at, sourceRun: runId },
+            data: { key: d.key, text: d.text, scope: d.scope, rightCount: d.right, wrongCount: d.wrong, status: 'ACTIVE', firstSeen: at, lastSeen: at, sourceRun: runId, sessions: d.sessions },
           });
           summary.created.push(d.key);
           continue;
@@ -110,9 +111,10 @@ export class LessonsService implements LessonsReader, OnModuleInit {
         const right = existing.rightCount + d.right;
         const wrong = existing.wrongCount + d.wrong;
         const retire = existing.status === 'ACTIVE' && shouldRetire(right, wrong);
+        const sessions = [...new Set([...(existing.sessions ?? []), ...d.sessions])].sort();
         await this.store.agentLesson.update({
           where: { key: d.key },
-          data: { rightCount: right, wrongCount: wrong, lastSeen: at, ...(retire ? { status: 'RETIRED' } : {}) },
+          data: { rightCount: right, wrongCount: wrong, lastSeen: at, sessions, ...(retire ? { status: 'RETIRED' } : {}) },
         });
         summary.updated.push(d.key);
         if (retire) {

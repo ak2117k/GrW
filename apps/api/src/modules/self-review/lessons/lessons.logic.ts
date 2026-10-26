@@ -8,9 +8,11 @@ import {
   LESSON_TEXT_MAX,
   MAX_INJECTED_LESSONS,
   MIN_RIGHT_TO_INJECT,
+  MIN_SESSIONS_TO_INJECT,
   RETIRE_MIN_CASES,
   type InjectedLesson,
   type InjectionScope,
+  type LessonCase,
   type LessonRecord,
   type LessonScope,
   type LessonsMode,
@@ -48,9 +50,9 @@ export function clampText(text: string, max = LESSON_TEXT_MAX): string {
 }
 
 /**
- * The lessons an agent in `scope` is shown: ACTIVE, `rightCount >= 2`, scope matching (or
- * `ALL`), highest `right − wrong` first (then more right cases, then key, so the order —
- * and the prompt-cache prefix — is stable), at most 8, each ≤ 400 chars.
+ * The lessons an agent in `scope` is shown: ACTIVE, `rightCount >= 2` from at least 2 sessions,
+ * scope matching (or `ALL`), highest `right − wrong` first (then more right cases, then key, so
+ * the order — and the prompt-cache prefix — is stable), at most 8, each ≤ 400 chars.
  */
 export function selectForInjection(rows: readonly LessonRecord[], scope: InjectionScope): InjectedLesson[] {
   return rows
@@ -58,6 +60,7 @@ export function selectForInjection(rows: readonly LessonRecord[], scope: Injecti
       (r) =>
         r.status === 'ACTIVE' &&
         r.rightCount >= MIN_RIGHT_TO_INJECT &&
+        new Set(r.sessions ?? []).size >= MIN_SESSIONS_TO_INJECT &&
         (r.scope === scope || r.scope === 'ALL') &&
         r.text.trim() !== '',
     )
@@ -84,6 +87,13 @@ export interface LessonDelta {
   /** From the first miss that named the key with text (used only when the key is new). */
   text: string | null;
   scope: LessonScope;
+  /** Sessions of the cases counted as right (distinct, sorted). */
+  sessions: string[];
+}
+
+/** One case per (session, symbol); the refId itself when either is unknown. */
+export function caseKey(refId: string, c: LessonCase | undefined): string {
+  return c?.session && c.symbol ? `${c.session}|${c.symbol}` : `ref:${refId}`;
 }
 
 /** Which scope a miss of `kind` belongs to when the diagnosis did not say. */
@@ -101,24 +111,33 @@ export function scopeForKind(kind: string | undefined): LessonScope {
 }
 
 /**
- * Counter deltas from one diagnosis. A miss naming `lessonKey` adds its distinct refIds to
+ * Counter deltas from one diagnosis. A miss naming `lessonKey` adds its distinct cases to
  * that lesson's `right` (following the lesson would have avoided the miss); a miss listing a
- * key in `contradicts` adds its refIds to that lesson's `wrong`. A refId counts at most once
- * per key per run, and a key both named and contradicted by the same refId counts neither.
+ * key in `contradicts` adds its cases to that lesson's `wrong`. A case ({@link caseKey}: one
+ * position in one session) counts at most once per key per run, and a key both named and
+ * contradicted by the same case counts neither.
  */
-export function lessonDeltas(result: DiagnosisResult, kindOf: (refId: string) => string | undefined = () => undefined): LessonDelta[] {
+export function lessonDeltas(result: DiagnosisResult, caseOf: (refId: string) => LessonCase | undefined = () => undefined): LessonDelta[] {
   if (result.status !== 'OK') return [];
   const right = new Map<string, Set<string>>();
   const wrong = new Map<string, Set<string>>();
+  const sessions = new Map<string, Set<string>>();
   const meta = new Map<string, { text: string | null; scope: LessonScope }>();
   const add = (m: Map<string, Set<string>>, key: string, ids: readonly string[]) => {
     const s = m.get(key) ?? new Set<string>();
-    ids.forEach((id) => s.add(id));
+    ids.forEach((id) => s.add(caseKey(id, caseOf(id))));
     m.set(key, s);
   };
+  const kindOf = (refId: string) => caseOf(refId)?.kind;
   for (const miss of result.misses) {
     if (miss.lessonKey) {
       add(right, miss.lessonKey, miss.refIds);
+      const ss = sessions.get(miss.lessonKey) ?? new Set<string>();
+      for (const id of miss.refIds) {
+        const s = caseOf(id)?.session;
+        if (s) ss.add(s);
+      }
+      sessions.set(miss.lessonKey, ss);
       const prev = meta.get(miss.lessonKey);
       if (!prev || (!prev.text && miss.lessonText)) {
         meta.set(miss.lessonKey, {
@@ -141,6 +160,7 @@ export function lessonDeltas(result: DiagnosisResult, kindOf: (refId: string) =>
         wrong: w.size - both,
         text: meta.get(key)?.text ?? null,
         scope: meta.get(key)?.scope ?? 'ALL',
+        sessions: r.size - both > 0 ? [...(sessions.get(key) ?? [])].sort() : [],
       };
     })
     .filter((d) => d.right > 0 || d.wrong > 0);

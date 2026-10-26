@@ -44,7 +44,7 @@ export const navItems: NavItem[] = [
   { path: '/signals', label: 'Signals', icon: Zap },
   { path: '/rejections', label: 'Rejections', icon: Ban },
   { path: '/chartink', label: 'Chartink', icon: Radio },
-  { path: '/telegram', label: 'Telegram Signals', icon: Send, badge: 'EXP' },
+  { path: '/telegram', label: 'Telegram Feed', icon: Send, badge: 'EXP' },
   { path: '/signals-telegram', label: 'Telegram Trading', icon: Send, badge: 'EXP' },
   { path: '/watch', label: 'Watch', icon: Eye },
   { path: '/ungated-watch', label: 'Ungated Watch', icon: GitCompareArrows, badge: 'EXP' },

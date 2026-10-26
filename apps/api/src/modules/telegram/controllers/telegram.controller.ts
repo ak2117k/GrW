@@ -22,4 +22,15 @@ export class TelegramController {
   ) {
     return this.repo.listSignals({ channelId, status, limit: Math.min(Number(limit) || 50, 200) });
   }
+
+  /** Every incoming message with its classification (and call + decision); `status` is a comma list. */
+  @Get('feed')
+  feed(
+    @Query('channelId') channelId?: string,
+    @Query('status') status?: string,
+    @Query('limit') limit = '100',
+  ) {
+    const statuses = status ? status.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+    return this.repo.feed({ channelId, statuses, limit: Number(limit) || 100 });
+  }
 }

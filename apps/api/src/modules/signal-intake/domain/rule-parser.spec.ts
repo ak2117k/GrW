@@ -97,6 +97,45 @@ describe('rule parser — tip fixtures', () => {
   });
 });
 
+describe('rule parser — calls missed in prod on 2026-10-26', () => {
+  const prodVocab = buildVocabulary(['HAL-EQ', 'ATHERENERG-EQ', 'FORTIS-EQ', 'INDIGO-EQ', 'ZYDUSLIFE-EQ', 'DRREDDY-EQ']);
+
+  it.each<[string, string, Want]>([
+    ['Unicode bold letters (MCX COMODITY CALL OPTION)',
+      '🔝𝗕𝘂𝘆 𝗖𝗿𝘂𝗱𝗲 𝗼𝗶𝗹 10700 CE (𝟭𝟳 𝗡𝗼𝘃 𝗘𝘅) ✔️𝗕𝘂𝘆:-  225/230 💥𝗧𝗮𝗿𝗴𝗲𝘁:- you ⚠️𝗦𝗹:- you #𝐅𝐫𝐞𝐞_𝐉𝐚𝐜𝐤𝐩𝐨𝐭_𝐃𝐞𝐦𝐨 👍',
+      { underlying: 'CRUDEOIL', instrumentKind: 'CE', strike: 10700, side: 'BUY', entryType: 'RANGE', entryLow: 225, entryHigh: 230, sl: null, targets: [], expiryHint: { day: 17, month: 11, year: null } }],
+    ['strike + PE ABOVE premium, no verb / SL / target (MCX COMMODITY)',
+      '▶️ BANKNIFTY 54400 PE 27 OCT 📈ABOVE  387 🙏🙏🙏',
+      { underlying: 'BANKNIFTY', instrumentKind: 'PE', strike: 54400, side: 'BUY', entryType: 'ABOVE', entryLow: 387, sl: null, targets: [], expiryHint: { day: 27, month: 10, year: null } }],
+    ['channel nickname HEL = HAL',
+      '▶️ #HEL 4700 PE 🛒 ABOVE - 64   📈#STOCK_OPTIONS 📊 #OCTOBER',
+      { underlying: 'HAL', instrumentKind: 'PE', strike: 4700, side: 'BUY', entryType: 'ABOVE', entryLow: 64 }],
+    ['Stock Gainers CMP / Support / For',
+      'OPTION BUYING VIEW ATHER ENERGY 1420CE CMP 37 Support 20 For 57+ Risky View Due To Result',
+      { underlying: 'ATHERENERG', instrumentKind: 'CE', strike: 1420, side: 'BUY', entryLow: 37, sl: 20, targets: [57] }],
+    ['Stock Gainers cash above / support / view, disclaimer ignored',
+      'Fortis Fortis cash above 731 support 720 view 740 Disclaimer :- Above calls are Not Buy or Sell Levels,These opinions are for educational purposes only',
+      { underlying: 'FORTIS', instrumentKind: 'EQ', side: 'BUY', entryType: 'ABOVE', entryLow: 731, sl: 720, targets: [740] }],
+    ['Stock Gainers option range / support / view with no verb',
+      'ZYDUSLIFE ZYDUSLIFE 1140 ce 15-16 support 9 view 21 HOLDING Disclaimer :- Above calls are Not Buy or Sell Levels,These opinions are for educational purposes only',
+      { underlying: 'ZYDUSLIFE', instrumentKind: 'CE', strike: 1140, side: 'BUY', entryType: 'RANGE', entryLow: 15, entryHigh: 16, sl: 9, targets: [21] }],
+  ])('%s', (_why, text, want) => {
+    expect(prefilter(text, prodVocab).pass).toBe(true);
+    const got = parseSignal(text, prodVocab);
+    expect(got).not.toBeNull();
+    expect(got).toMatchObject(want);
+  });
+
+  it.each([
+    ['an ABOVE level at or past the strike is a level, not a premium', 'BANKNIFTY 54000 PE ABOVE 54100'],
+    ['a bare option update with no entry word', 'ZYDUSLIFE 18🔥🚀🚀 modify support 16'],
+    ['option range with no side whose SL is above the entry', 'ZYDUSLIFE 1140 ce 15-16 support 18 view 21'],
+    ['a results brag "37 TO 77" is a move, not an entry range', 'OPTION BUYING VIEW ATHER ENERGY 1420CE 37 TO 77 🔥🔥 BLOCKBUSTER MOVE ENJOY'],
+  ])('still refuses: %s', (_why, text) => {
+    expect(parseSignal(text, prodVocab)).toBeNull();
+  });
+});
+
 describe('rule parser — refuses ambiguous posts (LLM fallback)', () => {
   it.each([
     ['two contracts in one post', 'NIFTY 24000 CE and 24000 PE buy 100 SL 80 TGT 130'],

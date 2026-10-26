@@ -32,7 +32,7 @@ const SYNONYMS: Array<[RegExp, string]> = [
   [/\bBLW\b|\bBELOW\s*:/g, ' BELOW '],
   [/\bKE\s+UPAR\b|\bKE\s+UPER\b|\bUPAR\b|\bUPER\b/g, ' ABOVE '],
   [/\bKE\s+NEECHE\b|\bNEECHE\b|\bNICHE\b/g, ' BELOW '],
-  [/\bKHARIDO\b|\bKHAREEDO\b|\bLE\s*LO\b|\bLELO\b/g, ' BUY '],
+  [/\bKHARIDO\b|\bKHAREEDO\b|\bLE\s*LO\b|\bLELO\b|\bBUYING\b/g, ' BUY '],
   [/\bBECHO\b|\bBECH\s*DO\b/g, ' SELL '],
   [/\bHERO\s*-?\s*ZERO\b/g, ' HEROZERO '],
   [/\bCOST\s+TO\s+COST\b/g, ' CTC '],
@@ -72,7 +72,10 @@ function yearOf(y: string | undefined): number | null {
 }
 
 export function normalise(raw: string, vocab: Vocabulary): Normalised {
-  let s = ` ${String(raw ?? '')} `.toUpperCase();
+  // NFKC folds the "fancy font" letters tip channels post in (𝗕𝘂𝘆 𝟭𝟳 → Buy 17; prod 2026-10-26 crude call read as NOISE).
+  let s = ` ${String(raw ?? '').normalize('NFKC')} `.toUpperCase();
+  // A boilerplate disclaimer ("Above calls are Not Buy or Sell Levels …") carries action words of its own; drop it.
+  s = s.replace(/\bDISCLAIMER\b[\s\S]*$|\bABOVE\s+CALLS?\s+ARE\s+NOT\s+BUY\b[\s\S]*$/, ' ');
   for (const [re, to] of EMOJI) s = s.replace(re, to);
   // URLs, @handles and long digit runs (phones, order ids) carry no price.
   s = s.replace(/HTTPS?:\/\/\S+|T\.ME\/\S+|WWW\.\S+/g, ' LINK ');

@@ -135,6 +135,18 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
       mode = 'qty';
       continue;
     }
+    // Stock Gainers style: "CMP 37 SUPPORT 20 FOR 57" / "above 731 support 720 view 740" — once an entry
+    // is in, a number after SUPPORT is the stop and one after VIEW / FOR is the target.
+    if (entry.length > 0 && isNumber(t[i + 1] ?? '')) {
+      if (w === 'SUPPORT' && mode !== 'tgt') {
+        mode = 'sl';
+        continue;
+      }
+      if (w === 'VIEW' || w === 'FOR') {
+        mode = 'tgt';
+        continue;
+      }
+    }
     if (RANGE_WORDS.has(w) && mode === 'entry') rangeExplicit = true;
     if (ENTRY_WORDS.has(w) && entry.length === 0 && mode !== 'sl' && mode !== 'tgt') {
       mode = 'entry';
@@ -149,13 +161,19 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   const verb = side !== null || t.includes('BTST') || t.includes('STBT');
   if (!side && t.includes('BTST')) side = 'BUY';
   if (!side && t.includes('STBT')) side = 'SELL';
+  const entryLow = Math.min(...entry);
+  const entryHigh = Math.max(...entry);
+  // A "range" more than 30% wide is a move being bragged about ("1420CE 37 TO 77 🔥"), not an entry.
+  if (entryHigh > entryLow * 1.3) return null;
+  const option = kind === 'CE' || kind === 'PE';
   if (!side) {
     if (entryType === 'ABOVE') side = 'BUY';
     else if (entryType === 'BELOW' && (kind === 'FUT' || kind === 'EQ')) side = 'SELL';
+    // An option post with no verb whose stop sits under the entry and targets over it is a buy
+    // ("ZYDUSLIFE 1140 ce 15-16 support 9 view 21"); anything else stays ambiguous.
+    else if (option && entryType !== 'BELOW' && sl !== null && sl < entryLow && targets.length > 0 && targets.every((x) => x > entryHigh)) side = 'BUY';
     else return null;
   }
-  const entryLow = Math.min(...entry);
-  const entryHigh = Math.max(...entry);
   if (!(entryLow > 0)) return null;
   if (!entryType) entryType = entry.length === 2 ? 'RANGE' : 'AT';
   if (entryType === 'RANGE' && entryLow === entryHigh) entryType = 'AT';
@@ -173,9 +191,12 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
 
   // ─── A trade instruction, not a level (prod 2026-10-23: "a monthly close above 33000-33400 needed") ──
   // An explicit verb needs an SL or a target; a bare "ABOVE / BELOW x" counts as an instruction only in
-  // the complete tip line "X 24000 PE ABOVE 60 SL 45 TGT 75" (both an SL and a target).
+  // the complete tip line "X 24000 PE ABOVE 60 SL 45 TGT 75" (both an SL and a target). The exception
+  // is a named option bought at a premium under its strike ("BANKNIFTY 54400 PE ABOVE 387", "Buy crude
+  // 10700 CE 225/230"): a strike + CE/PE + a price to pay is a call even when the SL / target is withheld.
   const hasSl = sl !== null;
-  if (verb ? !(hasSl || tgts.length > 0) : !(hasSl && tgts.length > 0)) return null;
+  const optionBuy = option && side === 'BUY' && (verb || entryType === 'ABOVE') && strike !== null && entryHigh < strike;
+  if (!optionBuy && (verb ? !(hasSl || tgts.length > 0) : !(hasSl && tgts.length > 0))) return null;
 
   const horizon: Horizon = t.includes('BTST') || t.includes('STBT') ? 'BTST' : t.some((w) => POSITIONAL_WORDS.has(w)) ? 'POSITIONAL' : 'INTRADAY';
   const tags: string[] = [];

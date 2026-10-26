@@ -77,18 +77,20 @@ describe('index aliases', () => {
   });
 });
 
-describe('a rule SIGNAL needs an instruction: verb + (SL or target), or ABOVE/BELOW + SL + target', () => {
+describe('a rule SIGNAL needs an instruction: verb + (SL or target), ABOVE/BELOW + SL + target, or an option bought at a premium', () => {
   it.each([
     ['"above x" alone', 'NIFTY FUT above 26000'],
-    ['"above x" with a target only', 'NIFTY 26000 CE above 120 TGT 150'],
-    ['a verb with neither SL nor target', 'BUY NIFTY 26000 CE @ 120'],
     ['a range "needed", no verb', 'NIFTY close above 26000-26100 needed'],
+    ['an option "above x" where x is a level past the strike', 'NIFTY 26000 CE above 26100'],
   ])('%s → no rule signal', (_why, text) => expect(classify(text).parsed).toBeNull());
 
   it.each([
     ['BTST with an SL', 'BTST TATAMOTORS 950 CE 18 SL 14', 'BUY'],
     ['STBT with a target', 'STBT SBIN FUT 820 TGT 808', 'SELL'],
     ['complete tip line without a verb', 'FINNIFTY 23500 PE ABOVE 60 SL 45 TGT 75 90', 'BUY'],
+    // Owner 2026-10-26: a strike + CE/PE + a premium to pay is a call even without an SL / target.
+    ['option "above x" with a target only', 'NIFTY 26000 CE above 120 TGT 150', 'BUY'],
+    ['option with a verb and neither SL nor target', 'BUY NIFTY 26000 CE @ 120', 'BUY'],
   ])('%s → signal', (_why, text, side) => expect(classify(text).parsed).toMatchObject({ side }));
 
   it('a call with analysis words but an explicit instruction is not a VIEW', () => {

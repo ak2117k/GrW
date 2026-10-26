@@ -13,6 +13,7 @@ export const SIGNAL_PARSE_SYSTEM = [
   'Return ONLY JSON matching the schema. Extract what the post states; never invent a stop-loss, target, strike or expiry.',
   'isSignal=false for chatter, news, P&L recaps, ads, results of earlier calls (\"target done\", \"SL hit\") and anything without a clear entry.',
   'isSignal=false for market commentary / views / levels (support, resistance, "a monthly close above X needed") without an explicit buy/sell instruction, and for sector indices without derivatives (Nifty IT, Pharma, Auto, Metal, Realty, FMCG, PSU Bank): those are never NIFTY.',
+  'A strike + CE/PE with a premium to pay ("BANKNIFTY 54400 PE ABOVE 387", "1420CE CMP 37 support 20 for 57") IS a buy call even without an SL or target; "support x" there is the sl and "view x" / "for x" a target. A disclaimer ("not buy or sell levels", "for educational purposes only") does not make a call a non-call.',
   'underlying: the exchange name (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX, CRUDEOIL, NATURALGAS, GOLD, SILVER, or the NSE cash symbol such as RELIANCE, TATAMOTORS).',
   'instrumentKind: CE or PE for options (needs strike), FUT for futures (index or commodity calls without CE/PE are FUT), EQ for cash stocks.',
   'side: BUY or SELL of that instrument (buying a put is BUY with kind PE).',

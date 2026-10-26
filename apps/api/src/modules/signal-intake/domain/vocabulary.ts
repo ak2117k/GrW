@@ -68,6 +68,10 @@ export const STOCK_ALIASES: Readonly<Record<string, string>> = {
   INFOSYS: 'INFY',
   'SUN PHARMA': 'SUNPHARMA',
   'MARUTI SUZUKI': 'MARUTI',
+  // Channel nicknames seen in prod (2026-10-26): "#HEL 4700 PE" is HAL; Ather posts as "ATHER ENERGY".
+  HEL: 'HAL',
+  'ATHER ENERGY': 'ATHERENERG',
+  ATHER: 'ATHERENERG',
 };
 
 /**

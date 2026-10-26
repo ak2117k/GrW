@@ -20,7 +20,7 @@ import { SignalContextService } from './signal-context.service';
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
 import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
-import { SIGNAL_PAPER_SKIP_REASON, paperAlert } from '../domain/paper';
+import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert } from '../domain/paper';
 
 export const SIGNAL_TRADER_CONFIG = Symbol('SIGNAL_TRADER_CONFIG');
 export const SIGNAL_TRADER_ENV = Symbol('SIGNAL_TRADER_ENV');
@@ -352,7 +352,9 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       const armed = await this.maybeArm(decisionId, s, e, channel, now, base, pg.gate);
       if (armed) return armed;
       const failed = pg.gate.checks.find((x) => x.name === pg.gate.skipReason);
-      return this.skip(decisionId, pg.gate.skipReason ?? 'gate', failed?.detail ?? '', pg.gate.checks, null, pg.plan, channel, what);
+      // Paper asks the judge on every planned call, so each SKIP still carries its OI / level / trend read.
+      const judged = this.cfg.mode === 'paper' && pg.plan ? (await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday)).record : null;
+      return this.skip(decisionId, pg.gate.skipReason ?? 'gate', failed?.detail ?? '', pg.gate.checks, judged, pg.plan, channel, what);
     }
     const j = await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday);
     if (!j.ok) return this.skip(decisionId, j.reason, j.detail, pg.gate.checks, j.record, pg.plan, channel, what);
@@ -420,6 +422,14 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const finalPlan = tightened.plan;
     const judgeWithChanges = { ...(j.record as Record<string, unknown>), tightened: tightened.changed };
     const { agreeCount, conflict } = j;
+
+    // ---- paper: the TAKE becomes a paper trade; the broker is never called (no funds read either) ----
+    if (cfg.mode === 'paper') {
+      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: judgeWithChanges, plan: finalPlan, decision: 'PAPER', skipReason: null });
+      const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty, available: null, method: 'premium' };
+      const paper = await this.openPaper(n, 'paper_mode');
+      return { decisionId, decision: 'PAPER', skipReason: null, paper };
+    }
 
     // ---- shadow: identical pipeline, no order ----
     if (cfg.mode !== 'live') {
@@ -713,7 +723,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
   }
 
   private async openPaper(n: NoFundsContext, trigger: PaperOpenInput['trigger'], brokerReason?: string): Promise<PaperOpenResult> {
-    const why = trigger === 'broker_reject' ? 'broker rejected the live entry for funds/margin' : 'account funds short of the entry';
+    const why =
+      trigger === 'paper_mode' ? 'SIGNAL_TRADING=paper' : trigger === 'broker_reject' ? 'broker rejected the live entry for funds/margin' : 'account funds short of the entry';
     let res: PaperOpenResult;
     try {
       res = await (this.paper as PaperLike).open({
@@ -734,7 +745,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const result = res.ok
       ? `Paper trade ${res.tradeId}${res.duplicate ? ' (already open)' : ''}: ${p.side} ${p.tradingsymbol} x${p.qty} @ ${res.entryPrice ?? p.limitPrice} | SL ${p.sl} | T1 ${p.targets[0] ?? 'none'} — no live order.`
       : `Paper trade could NOT be opened: ${res.reason}`;
-    void sendOpsAlert(`signal-paper:${n.decisionId}`, paperAlert({ required: n.required, available: n.available, what: n.what, channel: n.channel, result, brokerReason }));
+    void sendOpsAlert(`signal-paper:${n.decisionId}`, paperAlert({ required: n.required, available: n.available, what: n.what, channel: n.channel, result, brokerReason, paperMode: trigger === 'paper_mode' }));
     return res;
   }
 
@@ -757,8 +768,18 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     return { decisionId, decision: 'SKIP', skipReason: reason };
   }
 
-  /** The shared risk backstop sees the LIVE order shape (price = our LIMIT, so its capital cap is real). */
+  /**
+   * The shared risk backstop sees the order shape that will actually be sent (price = our LIMIT, so
+   * its capital cap is real): the LIVE order, or in paper mode the paper order from its own pool.
+   */
   private riskDto(plan: EntryPlan, decisionId: string): ExecuteTradeDto {
+    if (this.cfg.mode === 'paper') {
+      return { ...this.liveRiskDto(plan, decisionId), isPaper: true, strategy: SIGNAL_PAPER_STRATEGY } as unknown as ExecuteTradeDto;
+    }
+    return this.liveRiskDto(plan, decisionId);
+  }
+
+  private liveRiskDto(plan: EntryPlan, decisionId: string): ExecuteTradeDto {
     return {
       symbol: plan.tradingsymbol,
       token: plan.token,

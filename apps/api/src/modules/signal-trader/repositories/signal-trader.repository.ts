@@ -102,7 +102,7 @@ export interface PaperRecord {
   status: 'OPEN' | 'PENDING' | 'FAILED';
   tradeId: string | null;
   at: string;
-  trigger: 'funds_check' | 'broker_reject';
+  trigger: 'funds_check' | 'broker_reject' | 'paper_mode';
   reason?: string;
   entryPrice?: number | null;
 }

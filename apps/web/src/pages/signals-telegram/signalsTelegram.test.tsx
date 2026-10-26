@@ -32,6 +32,7 @@ describe('signals-telegram format', () => {
     expect(modeBadge('live')).toEqual({ label: 'LIVE', variant: 'danger' });
     expect(modeBadge('shadow').label).toBe('SHADOW');
     expect(modeBadge('off').label).toBe('OFF');
+    expect(modeBadge('paper')).toEqual({ label: 'PAPER', variant: 'warning' });
   });
   it('why a decision went the way it did', () => {
     expect(decisionWhy(overview.decisions[1])).toMatch(/one_lot_exceeds/);

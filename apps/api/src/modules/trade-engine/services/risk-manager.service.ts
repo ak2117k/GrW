@@ -20,6 +20,12 @@ import {
 import { formatTradeRejection } from '../../../common/utils/trade-rejection-log';
 
 /**
+ * Paper strategies whose open positions form their own concurrent-positions pool (paper only).
+ * The string is signal-trader's SIGNAL_PAPER_STRATEGY; kept literal so trade-engine does not import it.
+ */
+export const ISOLATED_PAPER_STRATEGIES: ReadonlySet<string> = new Set(['TELEGRAM_SIGNAL_NO_FUNDS']);
+
+/**
  * Risk Manager Service
  *
  * NON-NEGOTIABLE safety layer. Every trade MUST pass through validateTrade()
@@ -221,7 +227,12 @@ export class RiskManagerService {
     maxPositions: number,
     request: ExecuteTradeDto,
   ): Promise<RiskValidation> {
-    const openTrades = await this.tradeRepository.getOpenTrades();
+    const all = await this.tradeRepository.getOpenTrades();
+    // An isolated PAPER track (the Telegram paper test) has its own pool of open positions, so the
+    // paper scanner's trades cannot starve it (and vice versa). Paper only: a live order always
+    // counts every open trade.
+    const pool = request.isPaper === true && request.strategy && ISOLATED_PAPER_STRATEGIES.has(request.strategy) ? request.strategy : null;
+    const openTrades = pool ? all.filter((t) => t.isPaperTrade === true && t.strategy === pool) : all;
 
     if (openTrades.length >= maxPositions) {
       const reason = `Max concurrent positions reached: ${openTrades.length}/${maxPositions}`;

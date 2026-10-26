@@ -227,9 +227,17 @@ export function planEntry(
     const sideOk = s.side === 'BUY' ? sl < ltp && sl < limit : sl > ltp && sl > limit;
     checks.push(check('sl_side', sideOk, sideOk ? `SL ${sl} on the protective side of LTP ${ltp} / limit ${limit}` : `SL ${sl} is not ${s.side === 'BUY' ? 'below' : 'above'} LTP ${ltp} / limit ${limit} (already hit or wrong side)`));
     if (sideOk) {
-      const size = sizeEntry({ kind: s.instrumentKind, qty: s.qty, lotSize: c.lotSize, limitPrice: limit, sl }, cfg);
-      if (size.ok) {
+      let size = sizeEntry({ kind: s.instrumentKind, qty: s.qty, lotSize: c.lotSize, limitPrice: limit, sl }, cfg);
+      if (!size.ok && size.reason === 'one_lot_exceeds_risk_cap' && cfg.mode === 'paper') {
+        // Paper tests the call itself: the smallest tradable size, its risk recorded as a warning.
+        const unit = s.instrumentKind === 'EQ' ? 1 : c.lotSize;
+        const risk = r2(Math.abs(limit - sl) * unit);
+        checks.push(check('risk_cap', false, `${size.reason}: ${size.detail} — paper: 1 ${s.instrumentKind === 'EQ' ? 'share' : 'lot'} anyway`, false));
+        size = { ok: true, lots: 1, qty: unit, riskRupees: risk, detail: `paper 1 ${s.instrumentKind === 'EQ' ? 'share' : `lot × ${unit}`} (over the ₹${cfg.maxLossPerTrade} cap)` };
+      } else if (size.ok) {
         checks.push(check('risk_cap', true, `${size.detail}; risk ₹${size.riskRupees} ≤ ₹${cfg.maxLossPerTrade}`));
+      }
+      if (size.ok) {
         plan = {
           exchange: c.exchange,
           token: c.token,
@@ -281,15 +289,17 @@ export function evaluateGate(f: GateFacts, planChecks: GateCheck[], cfg: SignalT
           : check('market_hours', true, `open${f.minutesToClose !== null ? `, ${f.minutesToClose} min to close` : ''}`),
   );
   checks.push(...planChecks);
+  // Paper tests every call, so the daily count / loss stop are recorded but never block there.
+  const paper = cfg.mode === 'paper';
   checks.push(
     f.tradesToday === null
-      ? check('trades_today', false, 'could not count today\'s signal trades')
-      : check('trades_today', f.tradesToday < cfg.maxTradesPerDay, `${f.tradesToday} of ${cfg.maxTradesPerDay} today`),
+      ? check('trades_today', false, 'could not count today\'s signal trades', !paper)
+      : check('trades_today', f.tradesToday < cfg.maxTradesPerDay, `${f.tradesToday} of ${cfg.maxTradesPerDay} today`, !paper),
   );
   checks.push(
     f.signalLossToday === null
-      ? check('daily_signal_loss', false, 'could not read today\'s signal P&L')
-      : check('daily_signal_loss', f.signalLossToday < cfg.dailyLossStop, `loss today ₹${r2(f.signalLossToday)} vs stop ₹${cfg.dailyLossStop}`),
+      ? check('daily_signal_loss', false, 'could not read today\'s signal P&L', !paper)
+      : check('daily_signal_loss', f.signalLossToday < cfg.dailyLossStop, `loss today ₹${r2(f.signalLossToday)} vs stop ₹${cfg.dailyLossStop}`, !paper),
   );
   checks.push(f.clusterTaken === null ? check('cluster_not_taken', false, 'could not read the cluster') : check('cluster_not_taken', !f.clusterTaken, f.clusterTaken ? 'this cluster already produced a TAKE' : 'no TAKE in this cluster yet'));
   checks.push(f.holding === null ? check('not_holding', null, 'needs a resolved contract') : check('not_holding', !f.holding, f.holding ? 'already holding / ordering this contract' : 'not holding this contract'));

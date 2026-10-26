@@ -28,11 +28,11 @@ export function decisionIdFromTags(tags: readonly string[] | null | undefined): 
   return t ? t.slice(DECISION_TAG.length) : null;
 }
 
-export function paperAlert(i: { required: number | null; available: number | null; what: string; channel: string; result: string; brokerReason?: string }): string {
+export function paperAlert(i: { required: number | null; available: number | null; what: string; channel: string; result: string; brokerReason?: string; paperMode?: boolean }): string {
   const need = i.required === null ? '₹?' : inr(i.required);
   const have = i.available === null ? '₹?' : inr(i.available);
   return [
-    `PAPER (insufficient funds): need ${need}, available ${have} — ${i.what} (${i.channel})`,
+    i.paperMode ? `PAPER (paper mode) — ${i.what} (${i.channel})` : `PAPER (insufficient funds): need ${need}, available ${have} — ${i.what} (${i.channel})`,
     ...(i.brokerReason ? [`broker: ${i.brokerReason.slice(0, 200)}`] : []),
     i.result,
   ].join('\n');

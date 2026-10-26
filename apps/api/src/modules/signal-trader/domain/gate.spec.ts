@@ -159,6 +159,47 @@ describe('signal gate', () => {
     expect(run(facts(), cfg({ mode: 'off' })).skipReason).toBe('mode');
   });
 
+  describe('paper mode (owner 2026-10-26: test every call without touching the broker)', () => {
+    // DRREDDY-like: lot 625, entry 50, engine SL 37.5 → 1 lot risks ≈ ₹7,969 > ₹2,000.
+    const big = () =>
+      facts({
+        signal: signal({ underlying: 'DRREDDY', strike: 1240, entryLow: 50, entryHigh: 50, sl: null, targets: [] }),
+        contract: { ok: true as const, contract: { ...contract.contract, tradingsymbol: 'DRREDDY27OCT261240CE', lotSize: 625 } },
+        ltp: 50,
+        engineSl: 37.5,
+        engineSlInfo: { method: 'premium_pct', detail: '25%' },
+      });
+
+    it('one lot over the risk cap is a recorded warning with a 1-lot plan, not a block', () => {
+      const r = run(big(), cfg({ mode: 'paper' }));
+      expect(r.pass).toBe(true);
+      expect(r.checks.find((c) => c.name === 'risk_cap')).toMatchObject({ ok: false, required: false });
+      expect(r.plan).toMatchObject({ lots: 1, qty: 625 });
+      expect(r.plan!.riskRupees).toBeGreaterThan(2000);
+    });
+
+    it('the same call still blocks on the risk cap in shadow and live', () => {
+      expect(run(big(), cfg({ mode: 'shadow' })).skipReason).toBe('risk_cap');
+      expect(run(big(), cfg({ mode: 'live' })).skipReason).toBe('risk_cap');
+    });
+
+    it('daily trade count / loss stop are warnings in paper (every call is tested)', () => {
+      const r = run(facts({ tradesToday: 9, signalLossToday: 99_999 }), cfg({ mode: 'paper' }));
+      expect(r.pass).toBe(true);
+      expect(r.checks.find((c) => c.name === 'trades_today')).toMatchObject({ ok: false, required: false });
+      expect(r.checks.find((c) => c.name === 'daily_signal_loss')).toMatchObject({ ok: false, required: false });
+    });
+
+    it('live-only switches never block paper', () => {
+      const r = run(facts({ liveTradingEnabled: false, slEnforceable: { ok: false, detail: 'triggers off' } }), cfg({ mode: 'paper' }));
+      expect(r.pass).toBe(true);
+    });
+
+    it('a chased entry still fails in paper (no fill at the called price)', () => {
+      expect(run(facts({ ltp: 130 }), cfg({ mode: 'paper' })).skipReason).toBe('entry_tolerance');
+    });
+  });
+
   it('the judge may tighten SL / reduce lots but never loosen or enlarge', () => {
     const plan = run(facts({ signal: signal({ qty: 2 }) })).plan!;
     expect(plan.lots).toBe(2);

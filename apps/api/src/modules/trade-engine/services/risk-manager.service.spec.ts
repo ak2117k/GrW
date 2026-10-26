@@ -150,6 +150,31 @@ describe('RiskManagerService — trade-rejection logging', () => {
     warn.mockRestore();
   });
 
+  describe('isolated paper pool (Telegram paper track)', () => {
+    const settings = { maxDailyLoss: 5000, maxConcurrentPositions: 2, maxCapitalPerTrade: 200000, paperTrading: true, tradingHoursOnly: false };
+    const scanner = { entryPrice: 1, quantity: 1, isPaperTrade: true, strategy: 'anand-sniper-v25-combined' };
+    const tg = { entryPrice: 1, quantity: 1, isPaperTrade: true, strategy: 'TELEGRAM_SIGNAL_NO_FUNDS' };
+    const tgPaper = { ...baseRequest, isPaper: true, strategy: 'TELEGRAM_SIGNAL_NO_FUNDS' };
+
+    it('a Telegram paper trade counts only its own open paper trades', async () => {
+      const mod = await buildModule({ settings, openTrades: [scanner, scanner, tg] });
+      const svc = mod.get(RiskManagerService);
+      expect((await svc.validateTrade(tgPaper as any)).allowed).toBe(true);
+    });
+
+    it('its own pool is still capped by maxConcurrentPositions', async () => {
+      const mod = await buildModule({ settings, openTrades: [scanner, tg, tg] });
+      const svc = mod.get(RiskManagerService);
+      expect((await svc.validateTrade(tgPaper as any)).reason).toMatch(/Max concurrent positions reached: 2\/2/);
+    });
+
+    it('the same strategy as a LIVE order is never isolated (counts every open trade)', async () => {
+      const mod = await buildModule({ settings, openTrades: [scanner, scanner] });
+      const svc = mod.get(RiskManagerService);
+      expect((await svc.validateTrade({ ...tgPaper, isPaper: false } as any)).allowed).toBe(false);
+    });
+  });
+
   it('emits a [trade-rejected] line when max concurrent positions is reached', async () => {
     const mod = await buildModule({
       settings: {

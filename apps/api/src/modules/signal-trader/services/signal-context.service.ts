@@ -9,6 +9,7 @@ import { SentinelChartContextAdapter } from '../../trade-sentinel/adapters/chart
 import { NEWS_SHIM, type NewsShim } from '../../trade-sentinel/services/context-packet.service';
 import { MBM_PACKET_TUNABLE } from '../../trade-sentinel/services/context-packet.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
+import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { deriveEngineSl, type EngineSl } from '../domain/engine-sl';
 import type { ResolvedContract } from '../domain/contract-resolver';
 import type { SignalView } from '../domain/signal.types';
@@ -46,6 +47,7 @@ export class SignalContextService {
     @Optional() @Inject(MBM_CONFIG) private readonly mbmCfg?: MbmConfig,
     @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
     @Optional() private readonly feeds?: UserFeedManager,
+    @Optional() private readonly instruments?: MarketDataRepository,
   ) {}
 
   async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date }): Promise<Record<string, CtxBlock>> {
@@ -84,11 +86,11 @@ export class SignalContextService {
   }
 
   /** The level book's nearest support/resistance at `price` (engine SL source for FUT/EQ). */
-  async nearestLevels(underlying: string, kind: string, price: number, ownerUserId: string | null): Promise<{ support: number | null; resistance: number | null } | null> {
+  async nearestLevels(underlying: string, kind: string, price: number, ownerUserId: string | null): Promise<{ support: number | null; resistance: number | null; reason?: string } | null> {
     if (!this.levels) return null;
     try {
       const st = await withTimeout(this.levels.structureFor(levelSymbolFor(underlying, kind), price, ownerUserId ?? undefined), BLOCK_TIMEOUT_MS);
-      return { support: st.nearestSupport, resistance: st.nearestResistance };
+      return { support: st.nearestSupport, resistance: st.nearestResistance, reason: st.reason ?? undefined };
     } catch (err) {
       this.logger.warn(`[signal-context] level book for ${underlying}: ${errText(err)}`);
       return null;
@@ -131,13 +133,26 @@ export class SignalContextService {
         this.logger.warn(`[signal-context] chain snapshot for engine SL (${s.underlying}): ${errText(err)}`);
       }
     }
+    let spotSource = ownUnderlying ? 'contract' : spot !== null ? 'chain' : '';
     if (spot === null && !ownUnderlying && this.marketCtx) {
       try {
         const snap = await withTimeout(this.marketCtx.snapshot(s.underlying), BLOCK_TIMEOUT_MS);
         spot = typeof snap.spot === 'number' && snap.spot > 0 ? snap.spot : null;
+        if (spot !== null) spotSource = 'feed';
       } catch (err) {
         this.logger.warn(`[signal-context] spot for engine SL (${s.underlying}): ${errText(err)}`);
       }
+    }
+    // The chain snapshots cover ~10 underlyings every ~15 min and the feed map only the indices
+    // (prod 2026-10-26: BSE / COPPER / CRUDEOIL options had no spot → every SL fell to 25%).
+    // Quote the underlying itself: the stock's cash line, or an MCX option's nearest future.
+    if (spot === null && !ownUnderlying) {
+      spot = await this.underlyingQuote(s.underlying, i.contract.exchange, i.ownerUserId, i.now);
+      if (spot !== null) spotSource = 'quote';
+    }
+    // No greeks from a snapshot: the broker's own optionGreek for this expiry (NFO/BFO; MCX has none).
+    if (option && delta === null && spot !== null && i.contract.exchange !== 'MCX' && i.contract.expiry && s.strike !== null) {
+      delta = await this.brokerDelta(s.underlying, i.contract.expiry, s.strike, kind as 'CE' | 'PE', i.ownerUserId);
     }
     const lv = spot !== null ? await this.nearestLevels(s.underlying, kind, spot, i.ownerUserId) : null;
     const base = {
@@ -153,11 +168,51 @@ export class SignalContextService {
       optionPct: i.optionPct,
       bufferPct: i.bufferPct,
     };
+    // A fallback stop carries what it was missing, so the decision record says why (not just "no level").
+    const diag = [
+      spot === null ? 'no underlying price' : `spot ${spot} (${spotSource})`,
+      spot === null ? null : lv === null ? 'level book unavailable' : `level book: ${lv.reason ?? `support ${lv.support ?? 'none'} / resistance ${lv.resistance ?? 'none'}`}`,
+      option ? (delta === null ? 'no delta' : `delta ${Math.round(Math.abs(delta) * 100) / 100}`) : null,
+    ]
+      .filter(Boolean)
+      .join('; ');
+    const explain = (r: EngineSl): EngineSl => (r.method === 'level' || r.method === 'level_fut' || r.method === 'level_delta' ? r : { ...r, detail: `${r.detail} — ${diag}` } as EngineSl);
     const first = deriveEngineSl(base);
-    if (first.sl !== null || kind !== 'FUT') return first;
+    if (first.sl !== null || kind !== 'FUT') return explain(first);
     // Futures with no usable level: 1 × the contract's own daily ATR(14).
     const atr = await this.dailyAtr(i.ownerUserId, i.contract, i.now);
-    return atr ? deriveEngineSl({ ...base, atr }) : first;
+    return explain(atr ? deriveEngineSl({ ...base, atr }) : first);
+  }
+
+  /** LTP of the underlying itself: NSE cash for a stock derivative, the nearest future for MCX. Never throws. */
+  private async underlyingQuote(underlying: string, exchange: string, ownerUserId: string | null, now: Date): Promise<number | null> {
+    if (!this.feeds || !this.instruments || !ownerUserId) return null;
+    try {
+      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const inst =
+        exchange === 'MCX'
+          ? await this.instruments.getNearestFuture(underlying, 'MCX', startOfDay)
+          : await this.instruments.getInstrumentBySymbol(`${underlying}-EQ`, 'NSE');
+      if (!inst?.token) return null;
+      const q = await withTimeout(this.feeds.fetchQuote(ownerUserId, inst.token, inst.exchange), BLOCK_TIMEOUT_MS);
+      return q && Number.isFinite(q.ltp) && q.ltp > 0 ? q.ltp : null;
+    } catch (err) {
+      this.logger.warn(`[signal-context] underlying quote for engine SL (${underlying}): ${errText(err)}`);
+      return null;
+    }
+  }
+
+  /** |delta| of one strike from the broker's optionGreek for that expiry; null when unreadable. */
+  private async brokerDelta(underlying: string, expiry: string, strike: number, side: 'CE' | 'PE', ownerUserId: string | null): Promise<number | null> {
+    if (!this.feeds || !ownerUserId) return null;
+    try {
+      const rows = await withTimeout(this.feeds.fetchOptionGreeks(ownerUserId, underlying, expiry), BLOCK_TIMEOUT_MS);
+      const row = (rows ?? []).find((r) => r.optionType === side && Math.abs(r.strike - strike) < 1e-6);
+      return row && Number.isFinite(row.delta) ? row.delta : null;
+    } catch (err) {
+      this.logger.warn(`[signal-context] broker greeks for engine SL (${underlying} ${expiry}): ${errText(err)}`);
+      return null;
+    }
   }
 
   /** ATR(14) of the contract's daily bars over the owner's own session; null when unreadable. */

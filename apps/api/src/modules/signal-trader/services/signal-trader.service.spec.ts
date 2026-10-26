@@ -126,6 +126,45 @@ describe('SignalTraderService', () => {
     expect(t.executor.place).not.toHaveBeenCalled();
   });
 
+  describe('paper mode', () => {
+    it('a TAKE opens a paper trade — no broker order, no funds read', async () => {
+      const t = build({ cfg: { mode: 'paper' } });
+      const r = await t.svc.evaluate(ev);
+      expect(r).toMatchObject({ decision: 'PAPER' });
+      expect(t.executor.place).not.toHaveBeenCalled();
+      expect(t.funds.available).not.toHaveBeenCalled();
+      expect(t.paper.open).toHaveBeenCalledTimes(1);
+      expect((t.paper.open.mock.calls[0] as any[])[0]).toMatchObject({ trigger: 'paper_mode' });
+      expect(t.repo.decisions[0]).toMatchObject({ decision: 'PAPER', mode: 'paper', skipReason: null });
+      expect((sendOpsAlert as jest.Mock).mock.calls.at(-1)[1]).toMatch(/PAPER \(paper mode\)/);
+    });
+
+    it('a judge SKIP is a SKIP with the judge record, no paper trade', async () => {
+      const t = build({ cfg: { mode: 'paper' }, judge: async () => ({ ok: true, verdict: { ...takeVerdict, verdict: 'SKIP', reasons: ['PCR against'] }, latencyMs: 5 }) });
+      const r = await t.svc.evaluate(ev);
+      expect(r?.decision).toBe('SKIP');
+      expect(t.paper.open).not.toHaveBeenCalled();
+      expect(t.repo.decisions[0].judge).toMatchObject({ verdict: 'SKIP' });
+    });
+
+    it('a failed hard check with a plan still asks the judge (its read is recorded on the SKIP)', async () => {
+      killOn = true;
+      const t = build({ cfg: { mode: 'paper' } });
+      const r = await t.svc.evaluate(ev);
+      expect(r?.skipReason).toBe('kill_switch');
+      expect(t.judge.judge).toHaveBeenCalledTimes(1);
+      expect(t.repo.decisions[0].judge).toMatchObject({ verdict: 'TAKE' });
+      expect(t.paper.open).not.toHaveBeenCalled();
+    });
+
+    it('no plan (price ran away) → no judge call', async () => {
+      const t = build({ cfg: { mode: 'paper' }, ltp: 130 });
+      const r = await t.svc.evaluate(ev);
+      expect(r?.skipReason).toBe('entry_tolerance');
+      expect(t.judge.judge).not.toHaveBeenCalled();
+    });
+  });
+
   it('kill switch on → SKIP before the judge is asked', async () => {
     killOn = true;
     const t = build({ cfg: { mode: 'live' } });

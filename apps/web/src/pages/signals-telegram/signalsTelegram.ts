@@ -103,7 +103,7 @@ export interface PaperRow {
   underlying: string | null;
   plan: { tradingsymbol?: string; side?: string; qty?: number; limitPrice?: number; sl?: number; targets?: number[] } | null;
   funds: { available: number | null; required: number; ok: boolean | null; method: string } | null;
-  trigger: 'funds_check' | 'broker_reject' | null;
+  trigger: 'funds_check' | 'broker_reject' | 'paper_mode' | null;
   paperError: string | null;
   trade: { id: string; status: string; entryPrice: number | null; exitPrice: number | null; pnl: number | null; exitReasonTag: string | null; exitTime: string | null } | null;
 }
@@ -139,6 +139,7 @@ export async function setPaperOnNoFunds(enabled: boolean): Promise<{ enabled: bo
 export function modeBadge(mode: string): { label: string; variant: 'danger' | 'warning' | 'neutral' } {
   if (mode === 'live') return { label: 'LIVE', variant: 'danger' };
   if (mode === 'shadow') return { label: 'SHADOW', variant: 'warning' };
+  if (mode === 'paper') return { label: 'PAPER', variant: 'warning' };
   return { label: 'OFF', variant: 'neutral' };
 }
 

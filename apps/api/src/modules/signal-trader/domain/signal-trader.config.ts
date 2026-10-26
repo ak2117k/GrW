@@ -5,11 +5,15 @@
  * The caps are code-enforced and never overridable by the AI judge or a channel: the judge may only
  * tighten (smaller qty, tighter SL); nothing here is read from a signal.
  */
-export type SignalTradingMode = 'off' | 'shadow' | 'live';
+export type SignalTradingMode = 'off' | 'shadow' | 'paper' | 'live';
 export type SignalProduct = 'INTRADAY' | 'CARRYFORWARD';
 
 export interface SignalTraderConfig {
-  /** off = ingest only (X does nothing); shadow = full pipeline, alert, no order; live = orders. */
+  /**
+   * off = ingest only (X does nothing); shadow = full pipeline, alert, no order; paper = full
+   * pipeline, the judge on every planned call, and every TAKE opened as a paper trade (never the
+   * broker; the risk cap / daily caps are warnings so each call is tested); live = orders.
+   */
   mode: SignalTradingMode;
   /** The owner whose Angel account trades the signals (HUB_OWNER_USER_ID). */
   ownerUserId: string | null;
@@ -130,9 +134,9 @@ function num(
 export function parseSignalTradingMode(raw: string | undefined, problems: string[] = []): SignalTradingMode {
   const v = String(raw ?? '').trim().toLowerCase();
   if (v === '') return 'shadow';
-  if (v === 'off' || v === 'shadow' || v === 'live') return v;
+  if (v === 'off' || v === 'shadow' || v === 'paper' || v === 'live') return v;
   // A typo must never land on live.
-  problems.push(`SIGNAL_TRADING=${raw} is not off|shadow|live — using shadow`);
+  problems.push(`SIGNAL_TRADING=${raw} is not off|shadow|paper|live — using shadow`);
   return 'shadow';
 }
 

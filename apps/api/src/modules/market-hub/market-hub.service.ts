@@ -13,6 +13,7 @@ import { GreeksCalculatorService } from '../options-chain/services/greeks-calcul
 import { PrismaCandleRepo } from './candles/candle-repository';
 import { PrismaChainRepo } from './chain/chain-repository';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
+import type { FixupReport } from './candles/candle-store';
 import { istDay } from './candles/trading-calendar';
 import { ManagerHubBroker } from './hub-broker';
 import type { HubCandleSource } from './hub-candle-source';
@@ -229,19 +230,30 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
   async nightlyCandleFixup(): Promise<void> {
     const day = istDay(Date.now() - 24 * 60 * 60 * 1000);
     try {
-      // Through the job runner: leased (one instance) and recorded in job_runs, so a fix-up that
-      // stops running shows in /healthz/detail. With candles off the run is recorded as a no-op
-      // success, so the expected job never reads as "never ran" on a hub that has nothing to fix.
-      await this.jobs.run(CANDLE_FIXUP_JOB, { ttlMs: CANDLE_FIXUP_LEASE_MS, onRedisError: 'run-anyway' }, async () => {
-        const engine = this.engine;
-        if (!engine?.candlesEnabled) return;
-        const r = await engine.runFixup(day);
-        const log = r.failures > 0 ? this.logger.warn.bind(this.logger) : this.logger.log.bind(this.logger);
-        log(`Candle fix-up ${day}: ${r.instruments} instrument(s), ${r.calls} call(s), ${r.failures} failure(s)`);
-      });
+      await this.candleFixup(day);
     } catch (err) {
       this.logger.error(`Candle fix-up ${day} failed: ${(err as Error)?.message ?? err}`);
     }
+  }
+
+  /**
+   * One fix-up of `day` (IST YYYY-MM-DD) — the nightly cron, or an admin run (POST
+   * /api/admin/market-hub/fixup). Through the job runner: leased (one instance, so an admin run
+   * never overlaps the cron) and recorded in job_runs. With candles off the run is a no-op success,
+   * so the expected job never reads as "never ran" on a hub that has nothing to fix. Returns the
+   * report (null when candles are off or another instance holds the lease).
+   */
+  async candleFixup(day: string): Promise<FixupReport | null> {
+    return this.jobs.run(CANDLE_FIXUP_JOB, { ttlMs: CANDLE_FIXUP_LEASE_MS, onRedisError: 'run-anyway' }, async (): Promise<FixupReport | null> => {
+      const engine = this.engine;
+      if (!engine?.candlesEnabled) return null;
+      const r = await engine.runFixup(day);
+      // A fix-up that wrote no daily bar for a day with instruments did nothing, whatever the call count says.
+      const silent = r.instruments > 0 && r.written['1d'] === 0;
+      const log = r.failures > 0 || silent ? this.logger.warn.bind(this.logger) : this.logger.log.bind(this.logger);
+      log(`Candle fix-up ${day}: ${fixupLine(r)}${silent ? ' — NO daily bar written' : ''}`);
+      return r;
+    });
   }
 
   /**
@@ -319,4 +331,15 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       );
     }
   }
+}
+
+/** "62 instrument(s), 186 call(s), 0 failure(s); fetched/written 1m 1200/1200, 1h 60/60, 1d 300/0; 4 empty window(s); sample …" */
+export function fixupLine(r: FixupReport): string {
+  const t = (k: '1m' | '1h' | '1d') => `${k} ${r.fetched[k]}/${r.written[k]}`;
+  const s = r.samples[0];
+  const sample = s ? `; sample ${s.ref} ${s.table} [${s.from}, ${s.to}) fetched ${s.fetched} kept ${s.kept}${s.firstTs ? ` first ${s.firstTs} last ${s.lastTs}` : ''}` : '';
+  return (
+    `${r.instruments} instrument(s), ${r.calls} call(s), ${r.failures} failure(s); fetched/written ${t('1m')}, ${t('1h')}, ${t('1d')}; ` +
+    `${r.emptyWindows} empty window(s)${sample}`
+  );
 }

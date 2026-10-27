@@ -43,7 +43,34 @@ export interface FixupReport {
   instruments: number;
   calls: number;
   failures: number;
+  /** Per table: bars the broker returned, and bars kept + written after the window filter. */
+  fetched: Record<CandleTable, number>;
+  written: Record<CandleTable, number>;
+  /** Windows the broker answered with no bar at all. */
+  emptyWindows: number;
+  /** A few windows where bars were lost (fetched 0, or all filtered out): the evidence. */
+  samples: FixupSample[];
 }
+
+export interface FixupSample {
+  ref: string;
+  table: CandleTable;
+  from: string;
+  to: string;
+  fetched: number;
+  kept: number;
+  firstTs: string | null;
+  lastTs: string | null;
+}
+
+const MAX_FIXUP_SAMPLES = 5;
+/**
+ * A trading day with no 1h / 1d bar is a failed answer, not a quiet market: such a day is NOT marked
+ * covered, so the next read or fix-up asks again (prod 2026-10: candles_1d stopped on 09-30 while
+ * every night's fix-up marked 832 days covered with zero bars). 1m keeps the old rule — an illiquid
+ * contract genuinely has empty minutes.
+ */
+const NEEDS_A_BAR: ReadonlySet<CandleTable> = new Set<CandleTable>(['1h', '1d']);
 
 export interface CandleStoreMetrics {
   reads: number;
@@ -137,7 +164,8 @@ export class CandleStore {
 
   /** Replace `day`'s bars with the broker's: 1m and 1h for the day, 1d for the week ending that day. */
   async fixup(day: string, refs: readonly InstrumentRef[]): Promise<FixupReport> {
-    const report: FixupReport = { day, at: this.now(), instruments: 0, calls: 0, failures: 0 };
+    const zero = (): Record<CandleTable, number> => ({ '1m': 0, '1h': 0, '1d': 0 });
+    const report: FixupReport = { day, at: this.now(), instruments: 0, calls: 0, failures: 0, fetched: zero(), written: zero(), emptyWindows: 0, samples: [] };
     const start = istMidnight(day);
     const end = istMidnight(addDays(day, 1));
     for (const ref of refs) {
@@ -152,7 +180,7 @@ export class CandleStore {
       ];
       for (const w of windows) {
         report.calls++;
-        if ((await this.fetchWindow(ref, w, LANE.BACKGROUND)) !== null) report.failures++;
+        if ((await this.fetchWindow(ref, w, LANE.BACKGROUND, report)) !== null) report.failures++;
       }
     }
     return report;
@@ -277,7 +305,7 @@ export class CandleStore {
   }
 
   /** One broker call through the Governor. Returns null on success, else why it failed. */
-  private async fetchWindow(ref: InstrumentRef, w: FetchWindow, lane: Lane): Promise<IncompleteReason | null> {
+  private async fetchWindow(ref: InstrumentRef, w: FetchWindow, lane: Lane, report?: FixupReport): Promise<IncompleteReason | null> {
     const interval = TABLE_INTERVAL[w.table];
     // The cut-off is taken inside run, when the broker is actually asked, so callers coalesced
     // onto the same governed call share one cut-off (never a later caller's own clock).
@@ -305,8 +333,27 @@ export class CandleStore {
           (c.ts < todayStart || barEnd(this.d.clock, ref.exchange, w.table, c.ts) <= asked),
       );
       await this.d.repo.upsert(w.table, ref, complete, 'broker');
+      if (report) {
+        report.fetched[w.table] += candles.length;
+        report.written[w.table] += complete.length;
+        if (candles.length === 0) report.emptyWindows++;
+        if ((candles.length === 0 || complete.length === 0) && report.samples.length < MAX_FIXUP_SAMPLES) {
+          const iso = (t: number) => new Date(t).toISOString();
+          report.samples.push({
+            ref: refKey(ref),
+            table: w.table,
+            from: iso(w.from),
+            to: iso(w.to),
+            fetched: candles.length,
+            kept: complete.length,
+            firstTs: candles.length ? iso(candles[0].ts) : null,
+            lastTs: candles.length ? iso(candles[candles.length - 1].ts) : null,
+          });
+        }
+      }
       const today = istDay(asked);
-      const past = w.days.filter((day) => day < today);
+      const withBar = NEEDS_A_BAR.has(w.table) ? new Set(complete.map((c) => istDay(c.ts))) : null;
+      const past = w.days.filter((day) => day < today && (!withBar || withBar.has(day)));
       if (past.length > 0) await this.d.repo.markCovered(w.table, ref, past);
       if (w.days.includes(today)) this.rememberToday(`${w.table}:${refKey(ref)}`, today, asked);
       return null;

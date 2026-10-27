@@ -4,6 +4,7 @@ import { TradeTrackerModule } from '../trade-tracker/trade-tracker.module';
 import { HUB_CANDLE_SOURCE } from './hub-candle-source';
 import { HUB_PRICE_SOURCE } from './hub-prices';
 import { MarketHubService } from './market-hub.service';
+import { MarketHubAdminController } from './market-hub-admin.controller';
 
 /**
  * SP1 market data hub. M1 = shadow prices; M2 = CandleStore behind
@@ -15,6 +16,7 @@ import { MarketHubService } from './market-hub.service';
  */
 @Module({
   imports: [MarketDataModule, TradeTrackerModule],
+  controllers: [MarketHubAdminController],
   providers: [
     MarketHubService,
     { provide: HUB_CANDLE_SOURCE, useExisting: MarketHubService },

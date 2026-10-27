@@ -20,6 +20,8 @@ const tracker = {
 const instruments = { getInstrumentByToken: jest.fn().mockResolvedValue(null), getInstrumentBySymbol: jest.fn().mockResolvedValue(null) };
 const prisma = { $queryRaw: jest.fn().mockResolvedValue([]), $executeRaw: jest.fn().mockResolvedValue(0) };
 /** JobRunnerService double: runs the job inline (lease held, run recorded). */
+/** The fix-up report's bar counts, all zero (spread into a mocked runFixup result). */
+const NO_BARS = { fetched: { '1m': 0, '1h': 0, '1d': 0 }, written: { '1m': 0, '1h': 0, '1d': 0 }, emptyWindows: 0, samples: [] };
 const runner = { run: jest.fn((_name: string, _opts: unknown, fn: () => Promise<unknown>) => fn()) };
 
 describe('MarketHubService', () => {
@@ -253,7 +255,7 @@ describe('MarketHubService', () => {
   it('the nightly cron fixes up the previous IST day, and does nothing when candles are off', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(Date.parse('2026-10-08T00:15:00+05:30'));
-    const spy = jest.spyOn(HubEngine.prototype, 'runFixup').mockResolvedValue({ day: '2026-10-07', at: 0, instruments: 0, calls: 0, failures: 0 });
+    const spy = jest.spyOn(HubEngine.prototype, 'runFixup').mockResolvedValue({ day: '2026-10-07', at: 0, instruments: 0, calls: 0, failures: 0, ...NO_BARS });
     const off = new MarketHubService(enabled() as any, manager() as any, tracker as any, prisma as any, runner as any, instruments as any);
     off.onModuleInit();
     await off.nightlyCandleFixup();
@@ -271,7 +273,7 @@ describe('MarketHubService', () => {
   it('the nightly cron goes through the job runner as hub-candle-fixup (leased and recorded)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(Date.parse('2026-10-08T00:15:00+05:30'));
-    const spy = jest.spyOn(HubEngine.prototype, 'runFixup').mockResolvedValue({ day: '2026-10-07', at: 0, instruments: 1, calls: 3, failures: 0 });
+    const spy = jest.spyOn(HubEngine.prototype, 'runFixup').mockResolvedValue({ day: '2026-10-07', at: 0, instruments: 1, calls: 3, failures: 0, ...NO_BARS });
     const order: string[] = [];
     const jobs = {
       run: jest.fn(async (_name: string, _opts: unknown, fn: () => Promise<unknown>) => {
@@ -283,7 +285,7 @@ describe('MarketHubService', () => {
     };
     spy.mockImplementation(async () => {
       order.push('fixup');
-      return { day: '2026-10-07', at: 0, instruments: 1, calls: 3, failures: 0 };
+      return { day: '2026-10-07', at: 0, instruments: 1, calls: 3, failures: 0, ...NO_BARS };
     });
     const svc = new MarketHubService(enabled({ 'hub.candlesEnabled': true }) as any, manager() as any, tracker as any, prisma as any, jobs as any, instruments as any);
     svc.onModuleInit();

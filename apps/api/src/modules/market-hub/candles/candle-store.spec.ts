@@ -376,6 +376,39 @@ describe('CandleStore', () => {
     expect(await t.repo.coveredDays('1m', REF, ['2026-10-07'])).toEqual(new Set(['2026-10-07']));
   });
 
+  it('fix-up reports bars fetched vs written per table', async () => {
+    const t = setup();
+    t.setNow(ist('2026-10-08T00:15:00'));
+    t.respond((interval) =>
+      interval === 'ONE_MINUTE' ? minutes('2026-10-07') :
+      interval === 'ONE_HOUR' ? [{ ts: ist('2026-10-07T09:15:00'), open: 1, high: 1, low: 1, close: 1, volume: 1 }] :
+      [{ ts: istMidnight('2026-10-07'), open: 1, high: 1, low: 1, close: 1, volume: 1 }],
+    );
+    const report = await t.store.fixup('2026-10-07', [REF]);
+    expect(report).toMatchObject({ fetched: { '1m': 375, '1h': 1, '1d': 1 }, written: { '1m': 375, '1h': 1, '1d': 1 }, emptyWindows: 0, samples: [] });
+  });
+
+  it('an empty broker answer does NOT mark a 1d / 1h day covered (prod 2026-10: 832 days covered, 0 bars), and is sampled', async () => {
+    const t = setup();
+    t.setNow(ist('2026-10-08T00:15:00'));
+    t.respond(() => []);
+    const report = await t.store.fixup('2026-10-07', [REF]);
+    expect(report).toMatchObject({ failures: 0, emptyWindows: 3, written: { '1m': 0, '1h': 0, '1d': 0 } });
+    expect(report.samples.map((s) => s.table)).toEqual(['1m', '1h', '1d']);
+    expect(await t.repo.coveredDays('1d', REF, ['2026-10-07', '2026-10-06'])).toEqual(new Set());
+    expect(await t.repo.coveredDays('1h', REF, ['2026-10-07'])).toEqual(new Set());
+    // 1m keeps the old rule: an illiquid contract can genuinely have an empty day.
+    expect(await t.repo.coveredDays('1m', REF, ['2026-10-07'])).toEqual(new Set(['2026-10-07']));
+  });
+
+  it('a daily window marks only the days that got a bar', async () => {
+    const t = setup();
+    t.setNow(ist('2026-10-08T00:15:00'));
+    t.respond((interval) => (interval === 'ONE_DAY' ? [{ ts: istMidnight('2026-10-07'), open: 1, high: 1, low: 1, close: 1, volume: 1 }] : []));
+    await t.store.fixup('2026-10-07', [REF]);
+    expect(await t.repo.coveredDays('1d', REF, ['2026-10-07', '2026-10-06'])).toEqual(new Set(['2026-10-07']));
+  });
+
   it('nightly fix-up skips an instrument whose exchange did not trade that day', async () => {
     const t = setup();
     const report = await t.store.fixup('2026-10-02', [REF]); // holiday

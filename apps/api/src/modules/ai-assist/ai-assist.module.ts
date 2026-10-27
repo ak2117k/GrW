@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { MarketDataModule } from '../market-data/market-data.module';
+import { AdvisorResearchService } from './research/research.service';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { InsightsModule } from '../insights/insights.module';
@@ -19,8 +21,8 @@ import { NewsInsightProcessor } from './news-insight.processor';
  * settings. See `assist-slot.ts` for the slot rules.
  */
 @Module({
-  imports: [PrismaModule, AiGatewayModule, InsightsModule, TradeSentinelModule, NightReportModule],
-  providers: [AssistLlmService, AssistContextService, NewsInsightProcessor, AdvisorChatService, AdvisorMemoryRepository],
+  imports: [PrismaModule, AiGatewayModule, InsightsModule, TradeSentinelModule, NightReportModule, MarketDataModule],
+  providers: [AssistLlmService, AssistContextService, NewsInsightProcessor, AdvisorChatService, AdvisorMemoryRepository, AdvisorResearchService],
   exports: [AdvisorChatService, AssistLlmService],
 })
 export class AiAssistModule {}

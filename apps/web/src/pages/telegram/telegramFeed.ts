@@ -13,6 +13,17 @@ export interface FeedCall {
   decision: string | null;
   skipReason: string | null;
   mode: string | null;
+  /** The AI judge's reasons, most important first (absent from an older API / no judge ran). */
+  judgeReasons?: string[];
+  judgeConfidence?: number | null;
+}
+
+/** "AI judge (82%):" heading for the reasons list, or null when the judge gave none. */
+export function judgeHeading(c: FeedCall): string | null {
+  if (!c.judgeReasons?.length) return null;
+  const conf = c.judgeConfidence !== null && c.judgeConfidence !== undefined ? ` (${Math.round(c.judgeConfidence)}% sure)` : '';
+  const verdict = c.decision === 'SKIP' && c.skipReason?.startsWith('judge') ? 'AI judge skipped it' : 'AI judge';
+  return `${verdict}${conf}:`;
 }
 
 export interface FeedItem {

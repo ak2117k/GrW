@@ -1,6 +1,6 @@
 import { Badge } from '@/components/common';
 import { cn } from '@/utils/cn';
-import { callLine, classLabel, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
+import { callLine, classLabel, judgeHeading, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -34,6 +34,16 @@ export function TelegramFeedView({ items }: { items: FeedItem[] }) {
             )}
             {m.call && <p className="mt-1.5 text-sm font-medium text-emerald-400">{callLine(m.call)}</p>}
             {why && <p className={cn('mt-1 text-xs', MUTED)}>{why}</p>}
+            {m.call && judgeHeading(m.call) && (
+              <div className={cn('mt-1.5 text-xs', SECONDARY)}>
+                <p className="font-medium">{judgeHeading(m.call)}</p>
+                <ul className="mt-0.5 list-disc space-y-0.5 pl-4">
+                  {(m.call.judgeReasons ?? []).map((r, i) => (
+                    <li key={i}>{r}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {(m.watches ?? []).map((w, i) => (
               <p key={i} className="mt-1 text-xs font-medium text-sky-400">
                 {watchLine(w)}

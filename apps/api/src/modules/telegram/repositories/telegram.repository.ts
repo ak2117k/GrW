@@ -113,13 +113,17 @@ export class TelegramRepository {
       SELECT m.id, m."channelId" AS channel_id, ch.title AS channel, m."postedAt" AS posted_at, m."receivedAt" AS received_at,
              m."rawText" AS raw_text, m."hasMedia" AS has_media, c.status, c.reason, c.parser,
              s.tradingsymbol, s.side, s.entry_type, s.entry_low, s.entry_high, s.sl, s.targets,
-             d.decision, d.skip_reason, d.mode, w.watches
+             d.decision, d.skip_reason, d.mode, d.judge_reasons, d.judge_confidence, w.watches
       FROM telegram_messages m
       JOIN telegram_channels ch ON ch.id = m."channelId"
       LEFT JOIN signal_message_classes c ON c.message_id = m.id
       LEFT JOIN trade_signals s ON s.id = c.signal_id
       LEFT JOIN LATERAL (
-        SELECT decision, skip_reason, mode FROM signal_decisions WHERE signal_id = s.id ORDER BY evaluation DESC LIMIT 1
+        SELECT decision, skip_reason, mode,
+               -- The AI judge's own reasons (a SKIP and a TAKE alike): the owner reads why to fix the judge.
+               CASE WHEN jsonb_typeof(judge->'reasons') = 'array' THEN judge->'reasons' END AS judge_reasons,
+               (judge->>'effectiveConfidence') AS judge_confidence
+        FROM signal_decisions WHERE signal_id = s.id ORDER BY evaluation DESC LIMIT 1
       ) d ON true
       LEFT JOIN LATERAL (
         SELECT json_agg(json_build_object(
@@ -164,6 +168,8 @@ export interface FeedRow {
   mode: string | null;
   /** json_agg of signal_watches (null when the post has none). */
   watches?: unknown;
+  judge_reasons?: unknown;
+  judge_confidence?: string | number | null;
 }
 
 export interface FeedItem {
@@ -191,6 +197,9 @@ export interface FeedItem {
     decision: string | null;
     skipReason: string | null;
     mode: string | null;
+    /** The AI judge's reasons (most important first) and its confidence; [] / null when no judge ran. */
+    judgeReasons: string[];
+    judgeConfidence: number | null;
   } | null;
   /** Breakout levels from this post being watched (signal_watches), with the trade decision once one fired. */
   watches: FeedWatch[];
@@ -250,6 +259,8 @@ export function toFeedItem(r: FeedRow): FeedItem {
           decision: r.decision,
           skipReason: r.skip_reason,
           mode: r.mode,
+          judgeReasons: Array.isArray(r.judge_reasons) ? r.judge_reasons.filter((x): x is string => typeof x === 'string').slice(0, 6) : [],
+          judgeConfidence: num(r.judge_confidence),
         }
       : null,
     watches: feedWatches(r.watches),

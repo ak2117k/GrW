@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { callLine, classLabel, FILTERS, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
+import { callLine, classLabel, FILTERS, judgeHeading, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
 import { TelegramFeedView } from './TelegramFeedView';
 
 const base: FeedItem = {
@@ -95,5 +95,15 @@ describe('watchLine', () => {
     expect(watchLine({ ...w, status: 'FIRED' })).toBe('RADICO crossed 4330 → waiting for a trade decision');
     expect(watchLine({ ...w, status: 'EXPIRED' })).toBe('RADICO above 4330: not crossed, watch expired');
     expect(watchLine({ ...w, side: 'SELL', lastLtp: null })).toBe('watching RADICO below 4330');
+  });
+});
+
+describe('judgeHeading', () => {
+  const call = { tradingsymbol: 'GOLD30OCT26138000PE', side: 'BUY', entryType: 'AT', entryLow: 360, entryHigh: 360, sl: null, targets: [400], decision: 'SKIP', skipReason: 'judge_skip', mode: 'paper' };
+  it('names an AI skip and its confidence; nothing when the judge gave no reasons', () => {
+    expect(judgeHeading({ ...call, judgeReasons: ['Deep OTM put, 3 days to expiry'], judgeConfidence: 82 })).toBe('AI judge skipped it (82% sure):');
+    expect(judgeHeading({ ...call, decision: 'PAPER', skipReason: null, judgeReasons: ['OI supports'], judgeConfidence: null })).toBe('AI judge:');
+    expect(judgeHeading({ ...call, judgeReasons: [] })).toBeNull();
+    expect(judgeHeading(call)).toBeNull();
   });
 });

@@ -62,6 +62,8 @@ describe('toFeedItem', () => {
         decision: 'SKIP',
         skip_reason: 'risk_cap',
         mode: 'shadow',
+        judge_reasons: ['Engine stop risks ₹6900 on one lot', 42],
+        judge_confidence: '71',
       }),
     );
     expect(item.call).toEqual({
@@ -75,6 +77,8 @@ describe('toFeedItem', () => {
       decision: 'SKIP',
       skipReason: 'risk_cap',
       mode: 'shadow',
+      judgeReasons: ['Engine stop risks ₹6900 on one lot'],
+      judgeConfidence: 71,
     });
   });
 });

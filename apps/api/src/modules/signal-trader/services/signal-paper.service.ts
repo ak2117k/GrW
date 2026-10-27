@@ -7,15 +7,15 @@ import { SignalTraderRepository, type PaperRecord } from '../repositories/signal
 import { SIGNAL_PAPER_SOURCE, SIGNAL_PAPER_STRATEGY, paperEntryReason, paperTags } from '../domain/paper';
 import type { EntryPlan } from '../domain/gate';
 import type { SignalView } from '../domain/signal.types';
-import type { SignalProduct } from '../domain/signal-trader.config';
 
 export interface PaperOpenInput {
   decisionId: string;
   plan: EntryPlan;
-  signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'strike'>;
+  signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'strike' | 'horizon'>;
   /** Contract expiry YYYY-MM-DD (null for cash). */
   expiry: string | null;
-  product: SignalProduct;
+  /** INTRADAY (squared off before the close) | DELIVERY / CARRYFORWARD (a carried BTST / POSITIONAL call). */
+  product: 'INTRADAY' | 'DELIVERY' | 'CARRYFORWARD';
   channel: string;
   what: string;
   why: string;
@@ -65,7 +65,7 @@ export class SignalPaperService {
         stoploss: p.sl,
         target: p.targets[0],
         entryReason: paperEntryReason({ decisionId: i.decisionId, channel: i.channel, what: i.what, plan: p, why: i.why }),
-        entryTags: paperTags(i.decisionId),
+        entryTags: paperTags(i.decisionId, i.signal.horizon),
         strategy: SIGNAL_PAPER_STRATEGY,
         isPaper: true,
         source: SIGNAL_PAPER_SOURCE,

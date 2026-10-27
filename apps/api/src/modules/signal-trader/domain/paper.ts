@@ -1,5 +1,7 @@
 import type { EntryPlan } from './gate';
 import { inr } from './funds';
+import type { SignalProduct } from './signal-trader.config';
+import type { SignalHorizon } from './signal.types';
 
 /**
  * PAPER (no funds) — a signal every gate check and the AI judge said TAKE, but the owner's account
@@ -15,9 +17,34 @@ export const SIGNAL_PAPER_SOURCE = 'telegram-signal / no-funds';
 export const SIGNAL_PAPER_SKIP_REASON = 'insufficient_funds';
 const DECISION_TAG = 'decision:';
 
-export function paperTags(decisionId: string): string[] {
-  return ['telegram-signal', 'no-funds', `${DECISION_TAG}${decisionId}`];
+const HORIZON_TAG = 'horizon:';
+
+/** `horizon` (BTST / POSITIONAL) is tagged so the exit watcher knows a carried trade's rules. */
+export function paperTags(decisionId: string, horizon?: SignalHorizon): string[] {
+  const tags = ['telegram-signal', 'no-funds', `${DECISION_TAG}${decisionId}`];
+  if (horizon && horizon !== 'INTRADAY') tags.push(`${HORIZON_TAG}${horizon}`);
+  return tags;
 }
+
+export function horizonFromTags(tags: readonly string[] | null | undefined): SignalHorizon {
+  const t = (tags ?? []).find((x) => x.startsWith(HORIZON_TAG))?.slice(HORIZON_TAG.length);
+  return t === 'BTST' || t === 'POSITIONAL' ? t : 'INTRADAY';
+}
+
+/**
+ * The paper position type (owner 2026-10-27: swing picks are held overnight in paper). A BTST /
+ * POSITIONAL call is carried — DELIVERY for cash, CARRYFORWARD for a future / option; an intraday
+ * one keeps the configured product (squared off before the close).
+ */
+export function paperProduct(kind: string, horizon: SignalHorizon | undefined, base: SignalProduct): 'INTRADAY' | 'DELIVERY' | 'CARRYFORWARD' {
+  if (horizon !== 'BTST' && horizon !== 'POSITIONAL') return base;
+  return kind === 'EQ' ? 'DELIVERY' : 'CARRYFORWARD';
+}
+
+/** A POSITIONAL paper trade still open after this many calendar days is closed at the next close. */
+export const PAPER_POSITIONAL_MAX_DAYS = 14;
+
+const istYmd = (d: Date) => new Date(d.getTime() + 5.5 * 3_600_000).toISOString().slice(0, 10);
 
 export function decisionTag(decisionId: string): string {
   return `${DECISION_TAG}${decisionId}`;
@@ -57,6 +84,11 @@ export function paperExitDecision(i: {
   product: string;
   minutesToClose: number | null;
   eodMinutes?: number;
+  /** Carried trades only: the call's horizon, when it was entered, now, and the contract's expiry. */
+  horizon?: SignalHorizon;
+  entryTime?: Date | null;
+  now?: Date;
+  expiry?: Date | null;
 }): PaperExit {
   const ltp = i.ltp;
   if (ltp === null || !(ltp > 0)) return { exit: false };
@@ -68,8 +100,22 @@ export function paperExitDecision(i: {
     return { exit: true, price: i.target, tag: 'HIT_TARGET', reason: `paper target ${i.target} hit (LTP ${ltp})` };
   }
   const eod = i.eodMinutes ?? 5;
-  if (String(i.product).toUpperCase() === 'INTRADAY' && i.minutesToClose !== null && i.minutesToClose <= eod) {
-    return { exit: true, price: ltp, tag: 'TIME_EXIT', reason: `paper intraday square-off ${i.minutesToClose} min before close (LTP ${ltp})` };
+  const closing = i.minutesToClose !== null && i.minutesToClose <= eod;
+  if (String(i.product).toUpperCase() === 'INTRADAY') {
+    if (closing) return { exit: true, price: ltp, tag: 'TIME_EXIT', reason: `paper intraday square-off ${i.minutesToClose} min before close (LTP ${ltp})` };
+    return { exit: false };
+  }
+  // Carried (BTST / POSITIONAL): held overnight; a contract never past its expiry day.
+  const now = i.now ?? new Date();
+  const today = istYmd(now);
+  if (i.expiry && istYmd(i.expiry) <= today && closing) {
+    return { exit: true, price: ltp, tag: 'TIME_EXIT', reason: `paper carried trade closed on the contract's expiry day (LTP ${ltp})` };
+  }
+  if (i.horizon === 'BTST' && i.entryTime && istYmd(i.entryTime) < today) {
+    return { exit: true, price: ltp, tag: 'TIME_EXIT', reason: `paper BTST exit in the next session (LTP ${ltp})` };
+  }
+  if (i.entryTime && closing && now.getTime() - i.entryTime.getTime() >= PAPER_POSITIONAL_MAX_DAYS * 86_400_000) {
+    return { exit: true, price: ltp, tag: 'TIME_EXIT', reason: `paper positional trade closed after ${PAPER_POSITIONAL_MAX_DAYS} days without SL / T1 (LTP ${ltp})` };
   }
   return { exit: false };
 }

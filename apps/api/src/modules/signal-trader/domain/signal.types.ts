@@ -34,6 +34,8 @@ export type EntryType = 'ABOVE' | 'BELOW' | 'AT' | 'RANGE';
 export type Side = 'BUY' | 'SELL';
 
 /** A TradeSignal row (contract §Data), normalised. */
+export type SignalHorizon = 'INTRADAY' | 'BTST' | 'POSITIONAL';
+
 export interface SignalView {
   id: string;
   channelId: string | null;
@@ -52,6 +54,8 @@ export interface SignalView {
   qty: number | null;
   confidence: number | null;
   rawText: string;
+  /** INTRADAY (default) | BTST | POSITIONAL (the parser's read; a swing pick is held overnight in paper). */
+  horizon?: SignalHorizon;
 }
 
 export interface ClusterView {

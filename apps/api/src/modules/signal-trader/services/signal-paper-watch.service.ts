@@ -4,7 +4,7 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
-import { paperExitDecision } from '../domain/paper';
+import { horizonFromTags, paperExitDecision } from '../domain/paper';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
 import {
   SIGNAL_QUOTES,
@@ -70,7 +70,19 @@ export class SignalPaperWatchService {
       }
       if (!isOpen) continue;
       const ltp = await this.quotes.ltp(owner, inst.token, inst.exchange).catch(() => null);
-      const d = paperExitDecision({ side: t.side, ltp, sl: t.stoploss, target: t.target, product: t.positionType, minutesToClose });
+      const d = paperExitDecision({
+        side: t.side,
+        ltp,
+        sl: t.stoploss,
+        target: t.target,
+        product: t.positionType,
+        minutesToClose,
+        // A carried (BTST / POSITIONAL) trade: held overnight, closed on its contract's expiry day / at the hold limit.
+        horizon: horizonFromTags(t.entryTags),
+        entryTime: t.entryTime ?? t.createdAt,
+        now,
+        expiry: inst.expiry ?? null,
+      });
       try {
         if (d.exit) {
           await this.exec.closeTrade(t.id, { exitReasonTag: d.tag, reason: d.reason, exitNotes: d.reason, exitPrice: d.price });

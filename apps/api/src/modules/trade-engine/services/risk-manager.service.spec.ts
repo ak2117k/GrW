@@ -168,6 +168,14 @@ describe('RiskManagerService — trade-rejection logging', () => {
       expect((await svc.validateTrade(tgPaper as any)).reason).toMatch(/Max concurrent positions reached: 2\/2/);
     });
 
+    it('carried (swing) paper trades have their own slots: two held swing picks do not block an intraday call', async () => {
+      const swing = { ...tg, positionType: 'DELIVERY' };
+      const mod = await buildModule({ settings, openTrades: [swing, swing] });
+      const svc = mod.get(RiskManagerService);
+      expect((await svc.validateTrade({ ...tgPaper, positionType: 'INTRADAY' } as any)).allowed).toBe(true);
+      expect((await svc.validateTrade({ ...tgPaper, positionType: 'DELIVERY' } as any)).reason).toMatch(/Max concurrent positions reached: 2\/2/);
+    });
+
     it('the same strategy as a LIVE order is never isolated (counts every open trade)', async () => {
       const mod = await buildModule({ settings, openTrades: [scanner, scanner] });
       const svc = mod.get(RiskManagerService);

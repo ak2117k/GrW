@@ -21,7 +21,7 @@ import { lateRoom, type LateRoom } from '../domain/late-entry';
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
 import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
-import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert } from '../domain/paper';
+import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert, paperProduct } from '../domain/paper';
 
 export const SIGNAL_TRADER_CONFIG = Symbol('SIGNAL_TRADER_CONFIG');
 export const SIGNAL_TRADER_ENV = Symbol('SIGNAL_TRADER_ENV');
@@ -403,7 +403,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const packet = {
       promptVersion: SIGNAL_JUDGE_PROMPT_VERSION,
       at: now.toISOString(),
-      signal: { text: s.rawText.slice(0, 1500), parsed: what, channel, receivedAt: s.receivedAt?.toISOString() ?? null },
+      signal: { text: s.rawText.slice(0, 1500), parsed: what, channel, receivedAt: s.receivedAt?.toISOString() ?? null, horizon: s.horizon ?? 'INTRADAY' },
       cluster: { agreeCount, conflict, channels: cluster?.channelIds.length ?? null, strong: !conflict && agreeCount >= cfg.strongChannels },
       channelStats: channelStats ?? { status: 'unavailable', reason: 'no self-review byChannel stats yet' },
       channelViews,
@@ -756,7 +756,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         plan: n.plan,
         signal: n.signal,
         expiry: n.expiry,
-        product: this.cfg.product,
+        product: paperProduct(n.signal.instrumentKind, n.signal.horizon, this.cfg.product),
         channel: n.channel,
         what: n.what,
         why,

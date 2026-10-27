@@ -232,7 +232,12 @@ export class RiskManagerService {
     // paper scanner's trades cannot starve it (and vice versa). Paper only: a live order always
     // counts every open trade.
     const pool = request.isPaper === true && request.strategy && ISOLATED_PAPER_STRATEGIES.has(request.strategy) ? request.strategy : null;
-    const openTrades = pool ? all.filter((t) => t.isPaperTrade === true && t.strategy === pool) : all;
+    // Inside that pool, carried (BTST / POSITIONAL) paper trades held for days have their own slots,
+    // so a few swing picks cannot block the day's intraday calls (owner 2026-10-27).
+    const carried = (positionType: unknown) => String(positionType ?? 'INTRADAY').toUpperCase() !== 'INTRADAY';
+    const openTrades = pool
+      ? all.filter((t) => t.isPaperTrade === true && t.strategy === pool && carried(t.positionType) === carried(request.positionType))
+      : all;
 
     if (openTrades.length >= maxPositions) {
       const reason = `Max concurrent positions reached: ${openTrades.length}/${maxPositions}`;

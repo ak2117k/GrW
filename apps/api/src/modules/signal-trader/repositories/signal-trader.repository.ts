@@ -58,6 +58,7 @@ export function normaliseSignal(r: Row | null): SignalView | null {
     qty: num(r.qty),
     confidence: num(r.confidence),
     rawText: String(r.rawText ?? ''),
+    horizon: r.horizon === 'BTST' || r.horizon === 'POSITIONAL' ? r.horizon : 'INTRADAY',
   };
 }
 
@@ -124,7 +125,7 @@ export interface PaperTradeRow {
   entryTime: Date | null;
   exitTime: Date | null;
   createdAt: Date;
-  instrument: { token: string; exchange: string; symbol: string } | null;
+  instrument: { token: string; exchange: string; symbol: string; expiry?: Date | null } | null;
 }
 
 export interface OrderClaim {
@@ -473,7 +474,7 @@ export class SignalTraderRepository {
   private readonly paperSelect = {
     id: true, status: true, side: true, quantity: true, entryPrice: true, exitPrice: true, stoploss: true, target: true,
     pnl: true, pnlPercent: true, positionType: true, exitReasonTag: true, entryTags: true, entryTime: true, exitTime: true, createdAt: true,
-    instrument: { select: { token: true, exchange: true, symbol: true } },
+    instrument: { select: { token: true, exchange: true, symbol: true, expiry: true } },
   } as const;
 
   /** The paper trade already opened for a decision (idempotency backstop). */

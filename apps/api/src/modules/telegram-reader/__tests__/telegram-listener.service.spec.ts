@@ -226,6 +226,28 @@ describe('TelegramListenerService — post images (2026-10-23)', () => {
     expect(events.emit.mock.calls[0][1].media).toBeUndefined();
   });
 
+  it('an empty download is retried (prod 2026-10-27: ~60% of images came back empty on the first try)', async () => {
+    const { svc, prisma, events } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    (svc as any).mediaRetryDelaysMs = [0, 0];
+    await svc.start();
+    const download = jest.fn().mockResolvedValueOnce(Buffer.alloc(0)).mockResolvedValueOnce(null).mockResolvedValueOnce(Buffer.from('jpeg-bytes'));
+    await svc.handle(msg({ text: '', hasMedia: true, media: photo, download }));
+    expect(download).toHaveBeenCalledTimes(3);
+    const data = (prisma.telegramMessage.create.mock.calls[0] as any[])[0].data;
+    expect(data.rawPayload.media).toMatchObject({ kind: 'photo', bytes: 10, attempts: 3 });
+    expect(events.emit.mock.calls[0][1].media).toMatchObject({ kind: 'photo' });
+  });
+
+  it('still empty after the retries: recorded with the attempt count', async () => {
+    const { svc, prisma } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    (svc as any).mediaRetryDelaysMs = [0, 0];
+    await svc.start();
+    const download = jest.fn(async () => Buffer.alloc(0));
+    await svc.handle(msg({ text: '', hasMedia: true, media: photo, download }));
+    expect(download).toHaveBeenCalledTimes(3);
+    expect((prisma.telegramMessage.create.mock.calls[0] as any[])[0].data.rawPayload.media).toMatchObject({ skipped: 'empty download', attempts: 3 });
+  });
+
   it('a failed download never loses the message', async () => {
     const { svc, prisma, events } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
     await svc.start();

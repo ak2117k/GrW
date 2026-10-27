@@ -54,6 +54,8 @@ interface EnabledChannel {
 @Injectable()
 export class TelegramListenerService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(TelegramListenerService.name);
+  /** Waits before re-trying an EMPTY media download (see fetchMedia). Tests set [0, 0]. */
+  private mediaRetryDelaysMs: readonly number[] = [1_500, 4_000];
   private client: TgClient | null = null;
   private userId: string | null = null;
   private enabled = new Map<string, EnabledChannel>(); // tgChannelId -> channel
@@ -316,15 +318,25 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
     if (!readerEnabled(this.config.get<string>('TELEGRAM_MEDIA_DOWNLOAD'))) return { ref: null, stored: { ...base, skipped: 'TELEGRAM_MEDIA_DOWNLOAD=off' } };
     if (!m.download) return { ref: null, stored: { ...base, skipped: 'client cannot download' } };
     try {
-      const bytes = await m.download(choice.sizeType);
-      if (!bytes || bytes.length === 0) return { ref: null, stored: { ...base, skipped: 'empty download' } };
+      // GramJS returns an EMPTY buffer, not an error, when the first request after an idle spell lands on a
+      // dropped media-DC connection; the next one (which re-opened it) succeeds. Prod 2026-10-27: ~60% of
+      // images were stored without the image ("empty download"), the second image of an album saved fine.
+      let bytes = await m.download(choice.sizeType);
+      let attempts = 1;
+      for (const wait of this.mediaRetryDelaysMs) {
+        if (bytes && bytes.length > 0) break;
+        await new Promise((r) => setTimeout(r, wait));
+        bytes = await m.download(choice.sizeType);
+        attempts++;
+      }
+      if (!bytes || bytes.length === 0) return { ref: null, stored: { ...base, skipped: 'empty download', attempts } };
       if (bytes.length > DOCUMENT_MAX_BYTES) return { ref: null, stored: { ...base, skipped: `downloaded ${bytes.length} bytes > 2 MB` } };
       const dir = this.config.get<string>('TELEGRAM_MEDIA_DIR')?.trim() || DEFAULT_MEDIA_DIR;
       const ref = await saveMedia(dir, bytes, { channelId, tgMessageId: m.tgMessageId, postedAt, kind: choice.kind, mimeType: choice.mimeType });
       this.mediaSaved++;
       return {
         ref,
-        stored: { ...ref, ...(choice.kind === 'photo' ? { sizeType: choice.sizeType, width: choice.w, height: choice.h } : {}), savedAt: new Date().toISOString() },
+        stored: { ...ref, ...(choice.kind === 'photo' ? { sizeType: choice.sizeType, width: choice.w, height: choice.h } : {}), savedAt: new Date().toISOString(), ...(attempts > 1 ? { attempts } : {}) },
       };
     } catch (err) {
       this.logger.warn(`telegram-reader: media download failed (${describe(err)}) — text stored without the image`);

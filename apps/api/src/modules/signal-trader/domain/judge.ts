@@ -38,6 +38,8 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'channel\'s view accuracy): weak, crowd sentiment — context only, never a reason on its own.',
   'plan.slSource = "engine" means the CHANNEL GAVE NO USABLE STOP (e.g. "SL paid") and our engine derived one (plan.engineSl',
   'says how: level book + delta, premium %, or ATR); judge that stop on its merits, and a hidden stop is itself a weak sign.',
+  'plan.targetSource = "engine" means the channel gave NO target (or a late call had passed them all) and our engine set them',
+  '(plan.engineTargets says how: the next level-book lines / OI walls ahead × delta, else 1.5 R and 2.5 R); judge the room to them.',
   'plan.trigger present = the entry waits for the price to reach plan.trigger.price (not reached yet); judge the trade as if entered there.',
   'plan.late present = the price ALREADY RAN plan.late.chasePct% past the channel\'s entry (plan.late.channelEntry) before we saw',
   'the call; the entry is planned at the CURRENT price (plan.ltp), plan.targets holds only the targets still ahead and',

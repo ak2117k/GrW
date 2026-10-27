@@ -18,6 +18,11 @@ export interface FeedCall {
   judgeConfidence?: number | null;
   /** Learning mode: the closed paper trade held against the judge's call. */
   aiCheck?: AiCheck | null;
+  /** The decision's plan: the SL / targets actually traded and where they came from. */
+  planSl?: number | null;
+  planSlSource?: string | null;
+  planTargets?: number[];
+  planTargetSource?: string | null;
 }
 
 export interface AiCheck {
@@ -182,8 +187,12 @@ export function callLine(c: FeedCall): string {
   const entry =
     c.entryLow !== null && c.entryHigh !== null && c.entryLow !== c.entryHigh ? `${c.entryLow}–${c.entryHigh}` : px(c.entryLow);
   const how = c.entryType === 'ABOVE' ? 'above' : c.entryType === 'BELOW' ? 'below' : c.entryType === 'RANGE' ? 'between' : 'at';
-  const tgts = c.targets.length ? c.targets.join(' / ') : '—';
-  return `${c.side ?? ''} ${c.tradingsymbol ?? ''} ${how} ${entry} · SL ${px(c.sl)} · targets ${tgts}`.trim();
+  // The channel's own SL / targets; when it gave none, the ones our engine assigned (marked "engine").
+  const engineSl = c.sl === null && c.planSlSource === 'engine' && c.planSl ? c.planSl : null;
+  const engineT = c.targets.length === 0 && c.planTargetSource === 'engine' && c.planTargets?.length ? c.planTargets : null;
+  const sl = engineSl !== null ? `${engineSl} (engine)` : px(c.sl);
+  const tgts = engineT ? `${engineT.join(' / ')} (engine)` : c.targets.length ? c.targets.join(' / ') : '—';
+  return `${c.side ?? ''} ${c.tradingsymbol ?? ''} ${how} ${entry} · SL ${sl} · targets ${tgts}`.trim();
 }
 
 /** The reader's delay, shown only when it is slow enough to matter for a call. */

@@ -114,7 +114,8 @@ export class TelegramRepository {
       SELECT m.id, m."channelId" AS channel_id, ch.title AS channel, m."postedAt" AS posted_at, m."receivedAt" AS received_at,
              m."rawText" AS raw_text, m."hasMedia" AS has_media, c.status, c.reason, c.parser,
              s.tradingsymbol, s.side, s.entry_type, s.entry_low, s.entry_high, s.sl, s.targets,
-             d.decision, d.skip_reason, d.mode, d.judge_reasons, d.judge_confidence, d.ai_check, w.watches
+             d.decision, d.skip_reason, d.mode, d.judge_reasons, d.judge_confidence, d.ai_check,
+             d.plan_sl, d.plan_sl_source, d.plan_targets, d.plan_target_source, w.watches
       FROM telegram_messages m
       JOIN telegram_channels ch ON ch.id = m."channelId"
       LEFT JOIN signal_message_classes c ON c.message_id = m.id
@@ -123,7 +124,9 @@ export class TelegramRepository {
         SELECT decision, skip_reason, mode,
                -- The AI judge's own reasons (a SKIP and a TAKE alike): the owner reads why to fix the judge.
                CASE WHEN jsonb_typeof(judge->'reasons') = 'array' THEN judge->'reasons' END AS judge_reasons,
-               (judge->>'effectiveConfidence') AS judge_confidence, ai_check
+               (judge->>'effectiveConfidence') AS judge_confidence, ai_check,
+               (plan->>'sl') AS plan_sl, (plan->>'slSource') AS plan_sl_source,
+               plan->'targets' AS plan_targets, (plan->>'targetSource') AS plan_target_source
         FROM signal_decisions WHERE signal_id = s.id ORDER BY evaluation DESC LIMIT 1
       ) d ON true
       LEFT JOIN LATERAL (
@@ -194,6 +197,10 @@ export interface FeedRow {
   judge_reasons?: unknown;
   ai_check?: unknown;
   judge_confidence?: string | number | null;
+  plan_sl?: string | null;
+  plan_sl_source?: string | null;
+  plan_targets?: unknown;
+  plan_target_source?: string | null;
 }
 
 export interface FeedItem {
@@ -226,6 +233,11 @@ export interface FeedItem {
     judgeConfidence: number | null;
     /** Learning mode: the closed paper trade held against the judge's call (null until it closes). */
     aiCheck: AiCheck | null;
+    /** The decision's plan: the SL / targets actually traded, and whether the channel or the engine set them. */
+    planSl: number | null;
+    planSlSource: string | null;
+    planTargets: number[];
+    planTargetSource: string | null;
   } | null;
   /** Breakout levels from this post being watched (signal_watches), with the trade decision once one fired. */
   watches: FeedWatch[];
@@ -288,6 +300,10 @@ export function toFeedItem(r: FeedRow): FeedItem {
           judgeReasons: Array.isArray(r.judge_reasons) ? r.judge_reasons.filter((x): x is string => typeof x === 'string').slice(0, 6) : [],
           judgeConfidence: num(r.judge_confidence),
           aiCheck: asAiCheck(r.ai_check),
+          planSl: num(r.plan_sl),
+          planSlSource: r.plan_sl_source ?? null,
+          planTargets: Array.isArray(r.plan_targets) ? r.plan_targets.map(num).filter((x): x is number => x !== null) : [],
+          planTargetSource: r.plan_target_source ?? null,
         }
       : null,
     watches: feedWatches(r.watches),

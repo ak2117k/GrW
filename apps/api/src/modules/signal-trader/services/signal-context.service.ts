@@ -5,12 +5,14 @@ import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { MBM_CONFIG, type MbmConfig } from '../../mbm/mbm.config';
 import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
 import { TUNING_READER, type TuningReader } from '../../self-review/tuning/tunables';
-import { SentinelChartContextAdapter } from '../../trade-sentinel/adapters/chart-context.adapter';
+import { SentinelChartContextAdapter, levelCandidates } from '../../trade-sentinel/adapters/chart-context.adapter';
+import type { LevelsSnapshot } from '../../signal-generator/services/signal-generator.service';
 import { NEWS_SHIM, type NewsShim } from '../../trade-sentinel/services/context-packet.service';
 import { MBM_PACKET_TUNABLE } from '../../trade-sentinel/services/context-packet.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { deriveEngineSl, type EngineSl } from '../domain/engine-sl';
+import { deriveEngineTargets, type EngineTargets } from '../domain/engine-target';
 import type { ResolvedContract } from '../domain/contract-resolver';
 import type { SignalView } from '../domain/signal.types';
 
@@ -163,6 +165,48 @@ export class SignalContextService {
     // Futures with no usable level: 1 × the contract's own daily ATR(14).
     const atr = await this.dailyAtr(i.ownerUserId, i.contract, i.now);
     return explain(atr ? deriveEngineSl({ ...base, atr }) : first);
+  }
+
+  /**
+   * Engine targets when the channel gives none (domain/engine-target). Same reads as the engine SL —
+   * the underlying's spot, the option delta — plus every line of the level book and, from a chain
+   * snapshot ≤ 30 min old, the call / put walls (OI's own obstacles). `sl` = the stop the plan uses.
+   * Never throws: a failed read leaves fewer levels, and the rule falls back to R multiples.
+   */
+  async engineTargets(i: {
+    signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'side' | 'strike'>;
+    contract: ResolvedContract;
+    price: number;
+    sl: number | null;
+    ownerUserId: string | null;
+    now: Date;
+  }): Promise<EngineTargets> {
+    const s = i.signal;
+    const kind = s.instrumentKind;
+    const option = kind === 'CE' || kind === 'PE';
+    const ownUnderlying = kind === 'EQ' || (kind === 'FUT' && i.contract.exchange === 'MCX');
+    const { spot } = await this.underlyingSpot({ underlying: s.underlying, exchange: i.contract.exchange, own: ownUnderlying, price: i.price, ownerUserId: i.ownerUserId, now: i.now });
+    const delta = option && spot !== null ? await this.optionDelta({ signal: s, contract: i.contract, ownerUserId: i.ownerUserId, now: i.now }) : null;
+    const levels: number[] = [];
+    if (spot !== null && this.levels) {
+      try {
+        const book = await withTimeout(this.levels.levelsFor(levelSymbolFor(s.underlying, kind), i.ownerUserId ?? undefined), STRUCTURE_TIMEOUT_MS);
+        if (book?.value) levels.push(...levelCandidates(book.value as unknown as LevelsSnapshot));
+      } catch (err) {
+        this.logger.warn(`[signal-context] level book (targets) for ${s.underlying}: ${errText(err)}`);
+      }
+    }
+    if (spot !== null && this.chain && !ownUnderlying) {
+      try {
+        const c = await withTimeout(this.chain.latestChain(s.underlying), BLOCK_TIMEOUT_MS);
+        if (c && i.now.getTime() - c.capturedAt.getTime() <= 30 * 60_000) {
+          for (const w of [c.callWall, c.putWall]) if (typeof w === 'number' && Number.isFinite(w)) levels.push(w);
+        }
+      } catch (err) {
+        this.logger.warn(`[signal-context] chain walls (targets) for ${s.underlying}: ${errText(err)}`);
+      }
+    }
+    return deriveEngineTargets({ kind, side: s.side, price: i.price, tick: i.contract.tickSize, spot, levels, delta, sl: i.sl });
   }
 
   /**

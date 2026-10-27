@@ -34,6 +34,9 @@ export interface EntryPlan {
   /** 'none' = learning mode with no usable stop (sl is then 0, informational only). */
   slSource: 'signal' | 'engine' | 'judge' | 'none';
   targets: number[];
+  /** 'engine' = the channel gave no target (or a late call had passed them all); engineTargets says how. */
+  targetSource?: 'signal' | 'engine' | 'none';
+  engineTargets?: { methods: string[]; detail: string };
   lots: number;
   qty: number;
   /** ₹ (limit − SL) × qty — the worst-case planned loss. */
@@ -173,6 +176,8 @@ export interface GateFacts {
   engineSl: number | null;
   /** How the engine SL was derived, or why it could not be. */
   engineSlInfo?: { method: string | null; detail: string } | null;
+  /** Engine-derived targets (computed when the signal has none, or a late call may have passed them). */
+  engineTargets?: { targets: number[]; methods: string[]; detail: string } | null;
   tradesToday: number | null;
   /** ₹ loss (positive) of today's signal trades, realised + open. */
   signalLossToday: number | null;
@@ -188,6 +193,30 @@ export interface GateFacts {
 
 /** Phase 1 (pure): tolerance, SL and sizing → the plan the risk manager is asked about. */
 export function planEntry(
+  f: Pick<GateFacts, 'signal' | 'contract' | 'ltp' | 'engineSl' | 'engineSlInfo' | 'engineTargets'>,
+  cfg: SignalTraderConfig,
+): { checks: GateCheck[]; plan: EntryPlan | null } {
+  const planned = planEntryCore(f, cfg);
+  if (!planned.plan) return planned;
+  const t = chooseTargets(f, planned.plan);
+  const detail =
+    t.targetSource === 'engine'
+      ? `T ${t.targets.join(' / ')} (engine: ${t.engineTargets?.detail})`
+      : t.targetSource === 'signal'
+        ? `T ${t.targets.join(' / ')} (channel)`
+        : `no target — exits at the close / horizon${f.engineTargets ? ` (engine: ${f.engineTargets.detail})` : ''}`;
+  return { checks: [...planned.checks, check('targets', t.targets.length > 0, detail, false)], plan: { ...planned.plan, ...t } };
+}
+
+/** The channel's targets still ahead; else the engine's (the channel gave none, or a late call passed them all). */
+function chooseTargets(f: Pick<GateFacts, 'engineTargets'>, plan: EntryPlan): Pick<EntryPlan, 'targets' | 'targetSource' | 'engineTargets'> {
+  if (plan.targets.length > 0) return { targets: plan.targets, targetSource: 'signal' };
+  const e = f.engineTargets;
+  if (e && e.targets.length > 0) return { targets: e.targets, targetSource: 'engine', engineTargets: { methods: e.methods, detail: e.detail } };
+  return { targets: [], targetSource: 'none' };
+}
+
+function planEntryCore(
   f: Pick<GateFacts, 'signal' | 'contract' | 'ltp' | 'engineSl' | 'engineSlInfo'>,
   cfg: SignalTraderConfig,
 ): { checks: GateCheck[]; plan: EntryPlan | null } {

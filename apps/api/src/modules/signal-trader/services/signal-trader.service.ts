@@ -351,7 +351,18 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         }
       }
     }
-    const planned = planEntry({ signal: s, contract: base.contract, ltp: price, engineSl, engineSlInfo }, cfg);
+    // Engine targets when the channel gave none, or the price already ran past every one (a late call).
+    let engineTargets: GateFacts['engineTargets'] = null;
+    const chTargets = s.targets.filter((t) => Number.isFinite(t) && t > 0);
+    const allPassed = price !== null && chTargets.length > 0 && (s.side === 'BUY' ? price >= Math.max(...chTargets) : price <= Math.min(...chTargets));
+    if ((chTargets.length === 0 || allPassed) && base.c && price !== null && price > 0) {
+      try {
+        engineTargets = await this.context.engineTargets({ signal: s, contract: base.c, price, sl: s.sl ?? engineSl, ownerUserId: owner, now });
+      } catch (err) {
+        engineTargets = { targets: [], methods: [], detail: `engine targets failed: ${errText(err)}` };
+      }
+    }
+    const planned = planEntry({ signal: s, contract: base.contract, ltp: price, engineSl, engineSlInfo, engineTargets }, cfg);
     const plan = planned.plan;
     const riskManager = plan ? await this.safe(() => this.risk.validateTrade(this.riskDto(plan, decisionId))) : null;
     const facts: GateFacts = {

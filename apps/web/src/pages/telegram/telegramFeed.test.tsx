@@ -59,6 +59,11 @@ describe('telegram feed labels', () => {
     expect(whyLine(call)).toBe('skipped (shadow): risk above cap');
   });
 
+  it('shows the SL / targets our engine assigned when the channel gave none', () => {
+    const c = { ...call.call!, sl: null, targets: [], planSl: 245, planSlSource: 'engine', planTargets: [300, 330], planTargetSource: 'engine' };
+    expect(callLine(c)).toBe('BUY CRUDEOIL17NOV2610500CE at 270 · SL 245 (engine) · targets 300 / 330 (engine)');
+  });
+
   it('shows the reader delay only when it is slow', () => {
     expect(lagLabel(4)).toBe('');
     expect(lagLabel(58)).toBe('arrived 58s late');

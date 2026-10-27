@@ -80,7 +80,16 @@ describe('toFeedItem', () => {
       judgeReasons: ['Engine stop risks ₹6900 on one lot'],
       judgeConfidence: 71,
       aiCheck: null,
+      planSl: null,
+      planSlSource: null,
+      planTargets: [],
+      planTargetSource: null,
     });
+  });
+
+  it('carries the plan\'s engine SL / targets when the channel gave none', () => {
+    const item = toFeedItem(row({ tradingsymbol: 'X', targets: [], sl: null, plan_sl: '272', plan_sl_source: 'engine', plan_targets: [400, 500], plan_target_source: 'engine' }));
+    expect(item.call).toMatchObject({ planSl: 272, planSlSource: 'engine', planTargets: [400, 500], planTargetSource: 'engine' });
   });
 });
 

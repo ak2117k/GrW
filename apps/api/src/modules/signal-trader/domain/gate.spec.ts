@@ -58,10 +58,39 @@ describe('signal gate', () => {
     expect(r.pass).toBe(true);
     expect(r.checks.map((c) => c.name)).toEqual([
       'mode', 'owner', 'side_allowed', 'market_hours', 'instrument_resolved', 'ltp_available', 'entry_tolerance',
-      'sl_present', 'sl_side', 'risk_cap', 'trades_today', 'daily_signal_loss', 'cluster_not_taken', 'not_holding',
+      'sl_present', 'sl_side', 'risk_cap', 'targets', 'trades_today', 'daily_signal_loss', 'cluster_not_taken', 'not_holding',
       'kill_switch', 'risk_manager', 'live_trading_enabled', 'sl_enforceable',
     ]);
-    expect(r.plan).toMatchObject({ lots: 1, qty: 75, sl: 90 });
+    expect(r.plan).toMatchObject({ lots: 1, qty: 75, sl: 90, targets: [120, 140], targetSource: 'signal' });
+  });
+
+  describe('engine targets (owner 2026-10-28: a call with no target gets ours)', () => {
+    const engine = { targets: [115, 125], methods: ['level_delta', 'r_multiple'], detail: 'T1 115 = resistance 25060; T2 125 = 2.5 R' };
+
+    it('the channel gave none: the plan trades the engine targets, and says so', () => {
+      const r = run(facts({ signal: signal({ targets: [] }), engineTargets: engine }));
+      expect(r.pass).toBe(true);
+      expect(r.plan).toMatchObject({ targets: [115, 125], targetSource: 'engine', engineTargets: { methods: ['level_delta', 'r_multiple'] } });
+      expect(r.checks.find((c) => c.name === 'targets')).toMatchObject({ ok: true, required: false, detail: expect.stringContaining('engine') });
+    });
+
+    it('the channel\'s own targets always win', () => {
+      const r = run(facts({ engineTargets: engine }));
+      expect(r.plan).toMatchObject({ targets: [120, 140], targetSource: 'signal' });
+    });
+
+    it('no target from either: still tradable, the check is a warning', () => {
+      const r = run(facts({ signal: signal({ targets: [] }), engineTargets: { targets: [], methods: [], detail: 'no targets: no stop' } }));
+      expect(r.pass).toBe(true);
+      expect(r.plan).toMatchObject({ targets: [], targetSource: 'none' });
+      expect(r.checks.find((c) => c.name === 'targets')).toMatchObject({ ok: false, required: false });
+    });
+
+    it('a late call that passed every channel target trades the engine targets ahead', () => {
+      // ABOVE 100, LTP 145: past T1 120 and T2 140.
+      const r = run(facts({ ltp: 145, engineTargets: { targets: [160, 170], methods: ['r_multiple', 'r_multiple'], detail: '1.5 R; 2.5 R' } }), cfg({ mode: 'paper', paperLearn: true }));
+      expect(r.plan).toMatchObject({ targets: [160, 170], targetSource: 'engine' });
+    });
   });
 
   it('resizes DOWN to fit the per-trade loss cap, never up', () => {

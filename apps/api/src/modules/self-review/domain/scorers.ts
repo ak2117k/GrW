@@ -509,6 +509,10 @@ export interface TradeSetupVerifyRow {
   outcomeHitT1: boolean | null;
   outcomeEntryPrice: number | null;
   outcomeExitPrice: number | null;
+  entryRule?: string;
+  atr?: number;
+  /** The news idea the setup was built from (handed to the diagnosis with a miss). */
+  newsIdea?: { headline: string; idea: string; rationale: string; invalidation: string } | null;
 }
 
 /**
@@ -541,6 +545,9 @@ export function scoreTradeSetup(r: TradeSetupVerifyRow): VerificationDraft {
       entryPrice: r.outcomeEntryPrice,
       exitPrice: r.outcomeExitPrice,
       hitT1: r.outcomeHitT1,
+      ...(r.entryRule ? { entryRule: r.entryRule } : {}),
+      ...(typeof r.atr === 'number' ? { atr: r.atr } : {}),
+      ...(r.newsIdea ? { newsIdea: r.newsIdea } : {}),
     },
   };
 }

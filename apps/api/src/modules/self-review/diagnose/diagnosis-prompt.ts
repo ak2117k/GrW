@@ -55,7 +55,8 @@ export const DIAGNOSIS_SCHEMA = {
 
 export const DIAGNOSIS_SYSTEM_PROMPT = [
   'You review the WRONG calls an automated trading assistant for the Indian market made in one session, after the outcome is known.',
-  'Each miss has: kind (SCORECARD_TOTAL, SCORECARD_FACTOR, OVERNIGHT_VERDICT, LIVE_EXIT, NEWS_IDEA, MBM_PREDICTION), refId, symbol, what was predicted, what actually happened, a signed score where meaningful, and an excerpt of the inputs the call was made from.',
+  'Each miss has: kind (SCORECARD_TOTAL, SCORECARD_FACTOR, OVERNIGHT_VERDICT, LIVE_EXIT, NEWS_IDEA, TRADE_SETUP, MBM_PREDICTION), refId, symbol, what was predicted, what actually happened, a signed score where meaningful, and an excerpt of the inputs the call was made from.',
+  'A TRADE_SETUP is a next-morning plan built mechanically from a news idea (details.newsIdea): the direction comes from the idea, the entry is details.entryRule (an opening-range break), the stop and T1 (1.5 R) come from the daily ATR (details.atr). Its score is the R realised. A miss is either the idea\'s direction (lesson scope NEWS_IDEAS) or the mechanical plan — entry rule, stop or target distance (a proposal, never a lesson that widens a stop).',
   'You also get the lessons already in force (key, text, scope, right/wrong counts).',
   'For each miss, or group of misses with the same cause, return one entry:',
   '- refIds: the refIds it explains, copied exactly from the input.',

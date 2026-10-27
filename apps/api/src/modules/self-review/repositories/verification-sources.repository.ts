@@ -169,10 +169,20 @@ export class VerificationSourcesRepository {
       select: {
         id: true, sessionDate: true, symbol: true, side: true, instrument: true, entryRef: true, stopDistance: true,
         outcomeStatus: true, outcomeR: true, outcomeHitT1: true, outcomeEntryPrice: true, outcomeExitPrice: true,
+        entryRule: true, atr: true, newsIdeaId: true,
       },
       take: 200,
     });
-    return rows.map((r) => ({ ...r, outcomeStatus: r.outcomeStatus as string }));
+    // The news idea each setup was built from: what the diagnosis needs to say WHY a setup missed.
+    const ideaIds = [...new Set(rows.map((r) => r.newsIdeaId).filter((x): x is string => !!x))];
+    const ideas = ideaIds.length
+      ? await this.prisma.newsIdea.findMany({ where: { id: { in: ideaIds } }, select: { id: true, headline: true, idea: true, rationale: true, invalidation: true } })
+      : [];
+    const byId = new Map(ideas.map((i) => [i.id, i]));
+    return rows.map(({ newsIdeaId, ...r }) => {
+      const i = newsIdeaId ? byId.get(newsIdeaId) : undefined;
+      return { ...r, outcomeStatus: r.outcomeStatus as string, newsIdea: i ? { headline: i.headline, idea: i.idea, rationale: i.rationale, invalidation: i.invalidation } : null };
+    });
   }
 
   /** Telegram signal trades opened in [from, to): PAPER (no funds) Trade rows and live SignalOrders + trackers. */

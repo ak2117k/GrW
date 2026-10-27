@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] } } = {}) {
+function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] }; setups?: Array<Record<string, unknown>> } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -57,7 +57,7 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     articleSentiments: jest.fn(async () => new Map()),
     dailyRangeBp: jest.fn(async () => null),
     mbmPredictions: jest.fn(async () => o.mbm ?? []),
-    tradeSetups: jest.fn(async () => []),
+    tradeSetups: jest.fn(async (s: string) => (o.setups ?? []).filter((r) => r.sessionDate === s)),
     signalTradeOutcomes: jest.fn(async () => o.signalTrades ?? { paper: [], live: [] }),
     channelSignals: jest.fn(async (s: string) => (o.channel ?? []).filter((r) => r.sessionDate === s)),
     channelInfos: jest.fn(async (s: string) => (o.infos ?? []).filter((r) => r.sessionDate === s)),
@@ -225,6 +225,24 @@ describe('SelfReviewRunService', () => {
     const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; error: string }];
     expect(finish[1].status).toBe('DONE');
     expect(finish[1].error).toMatch(/diagnosis/);
+  });
+
+  it('a stopped-out trade setup is diagnosed, with the news idea it came from (owner 2026-10-28)', async () => {
+    const diagnose = jest.fn(async () => null);
+    const idea = { headline: 'Steel prices rise', idea: 'CE_IDEA', rationale: 'margins up', invalidation: 'gap down' };
+    const { svc } = make({
+      diagnosis: { diagnose },
+      setups: ['2026-10-19', '2026-10-20', '2026-10-21'].map((sessionDate) => ({
+        id: `ts-${sessionDate}`, sessionDate, symbol: 'SAIL', side: 'LONG', instrument: 'SAIL27OCT26FUT', entryRef: 171, stopDistance: 6,
+        outcomeStatus: 'STOP', outcomeR: -1, outcomeHitT1: false, outcomeEntryPrice: 171.5, outcomeExitPrice: 165,
+        entryRule: 'break of the first 15m high', atr: 6, newsIdea: idea,
+      })),
+    });
+    await svc.run(NOW);
+    expect(diagnose).toHaveBeenCalledTimes(1);
+    const misses = (diagnose.mock.calls[0] as unknown as [string, Array<{ kind: string; details: Record<string, unknown> }>])[1];
+    const setup = misses.find((m) => m.kind === 'TRADE_SETUP');
+    expect(setup?.details).toMatchObject({ newsIdea: idea, entryRule: 'break of the first 15m high', atr: 6 });
   });
 
   it('a failing kind costs only itself', async () => {

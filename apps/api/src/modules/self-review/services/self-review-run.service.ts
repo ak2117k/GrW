@@ -44,8 +44,11 @@ const DAY_MS = 86_400_000;
 /** Each run re-verifies this many closed sessions: outcomes filled late (daily bars at 23:45) are picked up. */
 export const VERIFY_SESSIONS = 3;
 export const ROLLING_SESSIONS = 20;
-/** Kinds handed to the diagnosis (factor misses are covered by their total; MBM misses are a model metric). */
-const DIAGNOSED_KINDS: ReadonlySet<VerificationKind> = new Set(['SCORECARD_TOTAL', 'OVERNIGHT_VERDICT', 'LIVE_EXIT', 'NEWS_IDEA']);
+/**
+ * Kinds handed to the diagnosis (factor misses are covered by their total; MBM misses are a model metric).
+ * TRADE_SETUP added 2026-10-28 (owner): the next-morning setups missed 2 of 3 on 10-27 and nobody asked why.
+ */
+export const DIAGNOSED_KINDS: ReadonlySet<VerificationKind> = new Set(['SCORECARD_TOTAL', 'OVERNIGHT_VERDICT', 'LIVE_EXIT', 'NEWS_IDEA', 'TRADE_SETUP']);
 const CONTRACT = /^([A-Z&-]+?)(\d{2})([A-Z]{3})(\d{2})(\d+(?:\.\d+)?)(CE|PE)$/;
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 

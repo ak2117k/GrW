@@ -75,6 +75,8 @@ export interface TgClient {
   subscribeUpdates?(): Promise<void>;
   /** The newest `limit` messages of a chat (marked id), newest first — the polling safety net. */
   recentMessages?(chatId: string, limit: number): Promise<TgIncomingMessage[]>;
+  /** One message by id (a fresh file reference for a re-download); null when it is gone. */
+  messageById?(chatId: string, tgMessageId: number): Promise<TgIncomingMessage | null>;
   /** Revoke this session on Telegram's side (best effort). */
   logOut(): Promise<void>;
 }

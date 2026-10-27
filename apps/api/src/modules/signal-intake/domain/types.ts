@@ -80,6 +80,8 @@ export interface TelegramMessageEvent {
   hasMedia?: boolean;
   /** The post's image as stream R saved it (photo / small image document), when there is one. */
   media?: TelegramMediaRef | null;
+  /** R re-downloaded an image it had missed: read it now, whatever the post's age (the age rule still stops trading). */
+  backfill?: boolean;
 }
 
 /** Mirrors stream R's `TelegramMediaRef` (telegram-reader.events.ts). */

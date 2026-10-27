@@ -53,6 +53,7 @@ function memStore() {
     flagConflict: async (ids) => clusters.filter((c) => ids.includes(c.id)).forEach((c) => (c.conflict = true)),
     signalsByIds: async (ids) => signals.filter((s) => ids.includes(s.id)).reverse() as never,
     latestInChannel: async (ch, since) => signals.filter((s) => s.channelId === ch && s.receivedAt >= since).reverse() as never,
+    backfilledImagesSince: async () => 0,
   };
   return { store, classes, signals, clusters, texts, infos, refs };
 }
@@ -363,6 +364,34 @@ describe('SignalIntakeService — image posts (vision)', () => {
     await m.svc.handle(img(m, 'm1', 'A'));
     expect(classify).not.toHaveBeenCalled();
     expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: expect.stringContaining('too old') });
+  });
+
+  describe('backfill: an image R missed and re-downloaded later', () => {
+    it('an image-only post filed NOISE "empty" is read hours later; the call is stored but never traded', async () => {
+      const { v, classify } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [call] });
+      const m = make({ vision: v, now: new Date(T0.getTime() + 5 * 3_600_000) });
+      await m.svc.handle({ ...m.msg('m1', 'A', ''), hasMedia: true }); // the first delivery: no image saved
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'NOISE' });
+      await m.svc.handle({ ...img(m, 'm1', 'A'), backfill: true });
+      await flush();
+      await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+      expect(classify).toHaveBeenCalledWith('', IMG);
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL' });
+      expect(m.mem.signals[0]).toMatchObject({ underlying: 'CRUDEOIL', tags: ['LLM', 'VISION'] });
+      expect(m.emitted.filter((e) => e[0] === 'signal.ready')).toEqual([]); // old: never to the trader
+    });
+
+    it('a post already filed as a call or information is left alone; the live cap is not used', async () => {
+      const { v, classify } = fakeVision({ kind: 'SIGNAL', isSignal: true, signals: [call] }, { used: 999 });
+      const m = make({ vision: v, now: new Date(T0.getTime() + 5 * 3_600_000) });
+      await m.svc.handle(m.msg('m2', 'A', 'BUY NIFTY 24000 CE ABOVE 120 SL 100 TGT 140'));
+      await m.svc.handle({ ...img(m, 'm2', 'A'), backfill: true });
+      expect(classify).not.toHaveBeenCalled();
+      await m.svc.handle({ ...m.msg('m3', 'A', ''), hasMedia: true });
+      await m.svc.handle({ ...img(m, 'm3', 'A'), backfill: true });
+      await flush();
+      expect(classify).toHaveBeenCalledTimes(1); // the live cap (999 used) does not block a backfill read
+    });
   });
 
   it('transport unavailable: the image is skipped with the reason; the caption is still classified', async () => {

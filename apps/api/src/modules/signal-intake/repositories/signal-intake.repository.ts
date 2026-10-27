@@ -383,6 +383,14 @@ export class SignalIntakeRepository {
     });
   }
 
+  /** Images R re-downloaded (backfill) and saved since `since`: their vision reads are not the live cap's. */
+  async backfilledImagesSince(since: Date): Promise<number> {
+    const rows = await this.prisma.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*)::bigint AS n FROM telegram_messages
+      WHERE "rawPayload"->'media'->>'backfilledAt' >= ${since.toISOString()} AND "rawPayload"->'media' ? 'sha256'`;
+    return Number(rows[0]?.n ?? 0);
+  }
+
   // ─── Watched breakout levels (signal_watches) ─────────────────────────────
 
   /** INFO rows posted since `since` that have no watch row yet (the watcher turns their WATCH items into watches). */

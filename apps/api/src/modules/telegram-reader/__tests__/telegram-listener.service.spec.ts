@@ -248,6 +248,36 @@ describe('TelegramListenerService — post images (2026-10-23)', () => {
     expect((prisma.telegramMessage.create.mock.calls[0] as any[])[0].data.rawPayload.media).toMatchObject({ skipped: 'empty download', attempts: 3 });
   });
 
+  it('backfill: a missed image is fetched again by id, saved, marked tried, and sent with backfill: true', async () => {
+    const { svc, prisma, events, client } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    (svc as any).mediaRetryDelaysMs = [0, 0];
+    await svc.start();
+    const raw = { id: 42, media: { kind: 'photo', mimeType: 'image/jpeg', skipped: 'empty download' } };
+    (prisma as any).$queryRaw = jest.fn(async () => [
+      { id: 'm42', channelId: 'ch1', tgChannelId: '-1001', tgMessageId: 42, postedAt: new Date('2026-10-27T15:52:22Z'), rawText: '', rawPayload: raw },
+    ]);
+    (client as any).messageById = jest.fn(async () => msg({ tgMessageId: 42, text: '', hasMedia: true, media: photo, download: async () => Buffer.from('gold-call') }));
+    expect(await svc.backfillMedia(new Date('2026-10-27T17:00:00Z'))).toBe(1);
+    expect((client as any).messageById).toHaveBeenCalledWith('-1001', 42);
+    const upd = (prisma.telegramMessage.update.mock.calls[0] as any[])[0];
+    expect(upd.where).toEqual({ id: 'm42' });
+    expect(upd.data.rawPayload.media).toMatchObject({ kind: 'photo', sha256: expect.stringMatching(/^[0-9a-f]{64}$/), backfillTried: true });
+    expect(events.emit).toHaveBeenCalledWith('telegram.message', expect.objectContaining({ messageId: 'm42', backfill: true, media: expect.objectContaining({ kind: 'photo' }) }));
+  });
+
+  it('backfill: still empty → marked tried (never retried forever), nothing sent', async () => {
+    const { svc, prisma, events, client } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
+    (svc as any).mediaRetryDelaysMs = [0, 0];
+    await svc.start();
+    (prisma as any).$queryRaw = jest.fn(async () => [
+      { id: 'm43', channelId: 'ch1', tgChannelId: '-1001', tgMessageId: 43, postedAt: new Date(), rawText: '', rawPayload: { media: { skipped: 'empty download' } } },
+    ]);
+    (client as any).messageById = jest.fn(async () => msg({ tgMessageId: 43, hasMedia: true, media: photo, download: async () => Buffer.alloc(0) }));
+    expect(await svc.backfillMedia(new Date())).toBe(0);
+    expect((prisma.telegramMessage.update.mock.calls[0] as any[])[0].data.rawPayload.media).toMatchObject({ skipped: 'empty download', backfillTried: true, attempts: 3 });
+    expect(events.emit).not.toHaveBeenCalled();
+  });
+
   it('a failed download never loses the message', async () => {
     const { svc, prisma, events } = build({ env: { TELEGRAM_MEDIA_DIR: tmp() } });
     await svc.start();

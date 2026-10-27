@@ -39,7 +39,7 @@ export type IntakeStore = Pick<
   SignalIntakeRepository,
   | 'classOf' | 'saveClass' | 'cachedLlm' | 'cachedVision' | 'llmPending' | 'duplicateOf' | 'signalByMessage' | 'createSignal' | 'updateSignal'
   | 'setSignalCluster' | 'messageText' | 'clusters' | 'recentSignals' | 'createCluster' | 'updateCluster' | 'flagConflict' | 'signalsByIds' | 'latestInChannel'
-  | 'saveInfo' | 'cachedInfoLlm' | 'refCloses' | 'reclassCandidates'
+  | 'saveInfo' | 'cachedInfoLlm' | 'refCloses' | 'reclassCandidates' | 'backfilledImagesSince'
 >;
 export interface VocabularySource {
   get(): Promise<Vocabulary>;
@@ -134,6 +134,13 @@ export class SignalIntakeService {
     const base = { messageId: evt.messageId, channelId: evt.channelId, postedAt, textHash: hash };
 
     const prior = await this.repo.classOf(evt.messageId);
+    // A missed image re-downloaded by R (backfill): read the image for a post filed NOISE / not read.
+    if (evt.backfill && evt.media) {
+      if (prior && prior.status !== 'NOISE' && prior.status !== 'LLM_SKIPPED') return;
+      if (this.visionBlocked()) return;
+      await this.startVision(evt, postedAt, evt.media, base, { backfill: true });
+      return;
+    }
     if (prior && prior.textHash === hash) return; // the same event again
     const vocab = await this.vocab.get();
     const pf = prefilter(text, vocab);
@@ -206,30 +213,35 @@ export class SignalIntakeService {
     let recorded = 0;
     try {
       recorded = (await this.vision?.usedSince(midnight)) ?? 0;
+      // Backfilled images are read under the same job label; they are not the live cap's.
+      recorded = Math.max(0, recorded - ((await this.repo.backfilledImagesSince?.(midnight)) ?? 0));
     } catch (e) {
       this.logger.warn(`[signal-intake] vision cap count failed (using the in-process count): ${errText(e)}`);
     }
     return Math.max(recorded + this.visionInflight, this.visionUsed);
   }
 
-  private async startVision(evt: TelegramMessageEvent, postedAt: Date, media: TelegramMediaRef, base: Omit<ClassRow, 'status'>): Promise<void> {
+  private async startVision(evt: TelegramMessageEvent, postedAt: Date, media: TelegramMediaRef, base: Omit<ClassRow, 'status'>, opts: { backfill?: boolean } = {}): Promise<void> {
     const cached = await this.repo.cachedVision(media.sha256);
     if (cached) {
       await this.applyVision(evt, postedAt, media, cached as VisionReply, base, 'cache');
       return;
     }
-    if (this.now().getTime() - postedAt.getTime() > this.config.visionMaxAgeMs) {
+    // A backfilled image is read whatever its age (R paces it: 6 per 5 min); its reads are not the live cap's.
+    if (!opts.backfill && this.now().getTime() - postedAt.getTime() > this.config.visionMaxAgeMs) {
       await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: 'image too old for the model (history)' });
       return;
     }
     if (this.inflight.has(evt.messageId)) return;
-    const used = await this.visionUsedToday();
+    const used = opts.backfill ? 0 : await this.visionUsedToday();
     if (used >= this.config.visionDailyCap) {
       await this.repo.saveClass({ ...base, status: 'LLM_SKIPPED', parser: 'vision', reason: `daily vision cap ${this.config.visionDailyCap} reached` });
       return;
     }
-    this.visionUsed = used + 1;
-    this.visionInflight++;
+    if (!opts.backfill) {
+      this.visionUsed = used + 1;
+      this.visionInflight++;
+    }
     this.inflight.add(evt.messageId);
     await this.repo.saveClass({ ...base, status: 'LLM_PENDING', parser: 'vision', attempts: 1 });
     // Outside the serial chain, like the text fallback.
@@ -239,14 +251,14 @@ export class SignalIntakeService {
         (reply) => this.serial(() => this.applyVision(evt, postedAt, media, reply, base, 'llm')),
         (e) =>
           this.serial(async () => {
-            if (e instanceof AssistBusyError) this.visionUsed = Math.max(0, this.visionUsed - 1); // never started: no spend
+            if (e instanceof AssistBusyError && !opts.backfill) this.visionUsed = Math.max(0, this.visionUsed - 1); // never started: no spend
             await this.repo.saveClass({ ...base, status: 'LLM_FAILED', parser: 'vision', attempts: 1, reason: `vision: ${errText(e)}`.slice(0, 500) });
           }),
       )
       .catch((e) => this.logger.warn(`[signal-intake] vision read of ${evt.messageId} failed: ${errText(e)}`))
       .finally(() => {
         this.inflight.delete(evt.messageId);
-        this.visionInflight = Math.max(0, this.visionInflight - 1);
+        if (!opts.backfill) this.visionInflight = Math.max(0, this.visionInflight - 1);
       });
   }
 

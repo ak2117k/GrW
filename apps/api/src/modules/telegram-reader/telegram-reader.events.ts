@@ -14,6 +14,8 @@ export interface TelegramMessageEvent {
   edited: boolean;
   /** Set when the post carried a photo / small image document that was saved (S may read it with vision). */
   media?: TelegramMediaRef | null;
+  /** A missed image re-downloaded later (backfill): S reads the image even though the post is old; never traded. */
+  backfill?: boolean;
 }
 
 /**

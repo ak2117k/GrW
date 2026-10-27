@@ -56,6 +56,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
   private readonly logger = new Logger(TelegramListenerService.name);
   /** Waits before re-trying an EMPTY media download (see fetchMedia). Tests set [0, 0]. */
   private mediaRetryDelaysMs: readonly number[] = [1_500, 4_000];
+  private pollTicks = 0;
   private client: TgClient | null = null;
   private userId: string | null = null;
   private enabled = new Map<string, EnabledChannel>(); // tgChannelId -> channel
@@ -183,6 +184,8 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
           if (wait) break; // Telegram asked us to slow down: skip this round
         }
       }
+      // Every ~5 min (15 polls of 20 s), a few images that came back empty are fetched again.
+      if (++this.pollTicks % 15 === 0) await this.backfillMedia(new Date()).catch((err) => this.logger.warn(`telegram-reader: image backfill failed: ${describe(err)}`));
     } finally {
       this.polling = false;
     }
@@ -342,6 +345,60 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       this.logger.warn(`telegram-reader: media download failed (${describe(err)}) — text stored without the image`);
       return { ref: null, stored: { ...base, error: describe(err) } };
     }
+  }
+
+  /**
+   * Images that came back empty (prod 2026-10-26/27: 128 of them), fetched again — a fresh message gives a
+   * fresh file reference — and, when saved, handed to S with `backfill: true` so the image is read even
+   * though the post is old (S's age rule still keeps an old call from being traded). Only posts S filed as
+   * NOISE / not read, of the last TELEGRAM_MEDIA_BACKFILL_DAYS (3; 0 = off), each tried once, 6 a run.
+   * Public for tests.
+   */
+  async backfillMedia(now: Date, limit = 6): Promise<number> {
+    const c = this.client;
+    const days = Number(this.config.get<string>('TELEGRAM_MEDIA_BACKFILL_DAYS') ?? 3);
+    if (!c?.messageById || !(days > 0) || this.stateValue !== 'listening') return 0;
+    const since = new Date(now.getTime() - days * 86_400_000);
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; channelId: string; tgChannelId: string; tgMessageId: number; postedAt: Date; rawText: string; rawPayload: Prisma.JsonValue }>>`
+      SELECT m.id, m."channelId", ch."tgChannelId", m."tgMessageId", m."postedAt", m."rawText", m."rawPayload"
+      FROM telegram_messages m
+      JOIN telegram_channels ch ON ch.id = m."channelId"
+      JOIN signal_message_classes sc ON sc.message_id = m.id
+      WHERE m."hasMedia" AND m."postedAt" >= ${since}
+        AND m."rawPayload"->'media'->>'skipped' = 'empty download'
+        AND (m."rawPayload"->'media'->>'backfillTried') IS NULL
+        AND sc.status IN ('NOISE', 'LLM_SKIPPED')
+      ORDER BY m."postedAt" DESC
+      LIMIT ${limit}`;
+    let saved = 0;
+    for (const r of rows) {
+      if (!this.enabled.has(r.tgChannelId)) continue;
+      const raw = (r.rawPayload && typeof r.rawPayload === 'object' && !Array.isArray(r.rawPayload) ? r.rawPayload : {}) as Record<string, unknown>;
+      const prev = (raw.media && typeof raw.media === 'object' ? raw.media : {}) as Record<string, unknown>;
+      let media: Record<string, unknown> = { ...prev, backfillTried: true, backfilledAt: now.toISOString() };
+      let ref: TelegramMediaRef | null = null;
+      try {
+        const m = await c.messageById(r.tgChannelId, r.tgMessageId);
+        if (!m || !m.hasMedia) media = { ...media, backfill: 'message gone or has no media now' };
+        else {
+          const fetched = await this.fetchMedia(m, r.channelId, r.postedAt);
+          if (fetched) {
+            media = { ...fetched.stored, backfillTried: true, backfilledAt: now.toISOString() };
+            ref = fetched.ref;
+          }
+        }
+      } catch (err) {
+        if (floodWaitSeconds(err)) break; // slow down: the rest wait for the next run (not marked tried)
+        media = { ...media, backfill: `refetch failed: ${describe(err)}` };
+      }
+      await this.prisma.telegramMessage.update({ where: { id: r.id }, data: { rawPayload: { ...raw, media } as Prisma.InputJsonValue } });
+      if (!ref) continue;
+      saved++;
+      const evt: TelegramMessageEvent = { messageId: r.id, channelId: r.channelId, postedAt: r.postedAt, text: r.rawText, hasMedia: true, edited: false, media: ref, backfill: true };
+      this.events.emit(TELEGRAM_MESSAGE_EVENT, evt);
+    }
+    if (rows.length) this.logger.log(`telegram-reader: image backfill — ${saved} of ${rows.length} missed image(s) saved and sent to be read`);
+    return saved;
   }
 
   /** One line per period: updates received (any chat) and stored messages per ticked channel. Public for tests. */

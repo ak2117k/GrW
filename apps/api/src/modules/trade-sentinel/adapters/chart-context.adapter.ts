@@ -331,6 +331,7 @@ interface CachedBook {
 export class SentinelChartContextAdapter implements ChartContextShim {
   private readonly logger = new Logger(SentinelChartContextAdapter.name);
   private readonly cache = new Map<string, CachedBook>();
+  private readonly inflight = new Map<string, Promise<CachedBook | null>>();
 
   /** Symbols already reported as unresolvable — warn once, not once per poll. */
   private readonly warned = new Set<string>();
@@ -466,7 +467,23 @@ export class SentinelChartContextAdapter implements ChartContextShim {
     const key = pinned ? `${pinned.exchange}:${pinned.token}` : base;
     const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit;
+    // One build per key at a time: a second reader (the engine SL and the judge's packet ask for
+    // the same book seconds apart) waits on the running one instead of queueing its own historical
+    // windows behind it on the same 350 ms-gated session.
+    const running = this.inflight.get(key);
+    if (running) return running;
+    const p = this.loadBook(key, base, symbol, userId, pinned).finally(() => this.inflight.delete(key));
+    this.inflight.set(key, p);
+    return p;
+  }
 
+  private async loadBook(
+    key: string,
+    base: string,
+    symbol: string,
+    userId?: string,
+    pinned?: StructureInstrument,
+  ): Promise<CachedBook | null> {
     if (pinned) return this.build(key, pinned, symbol, userId);
 
     try {

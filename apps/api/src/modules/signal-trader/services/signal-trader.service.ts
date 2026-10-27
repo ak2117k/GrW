@@ -370,7 +370,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const agreeCount = e.agreeCount ?? cluster?.agreeCount ?? 1;
     const conflict = e.conflict === true || cluster?.conflict === true;
     const [market, channelStats, channelViews] = await Promise.all([
-      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now }),
+      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp }),
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()

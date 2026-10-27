@@ -63,10 +63,40 @@ describe('SignalContextService.engineSl — underlying price and delta without a
     expect(r.detail).toContain('level book: no level below price');
   });
 
+  it('index option: no -EQ line, so the index row itself is quoted', async () => {
+    const { svc, feeds, instruments } = make({ support: 54100, quote: null });
+    instruments.getInstrumentBySymbol.mockImplementation((sym: string) => Promise.resolve(sym === 'BANKNIFTY' ? { token: '99926009', exchange: 'NSE' } : null));
+    feeds.fetchQuote.mockResolvedValue({ ltp: 54247 });
+    const r = await run(svc, { underlying: 'BANKNIFTY', strike: 54000 }, contract({ tradingsymbol: 'BANKNIFTY27OCT2654000CE', lotSize: 30 }), 407);
+    expect(instruments.getInstrumentBySymbol).toHaveBeenCalledWith('BANKNIFTY', 'NSE');
+    expect(feeds.fetchQuote).toHaveBeenCalledWith('owner', '99926009', 'NSE');
+    expect(r.detail).not.toContain('no underlying price');
+  });
+
   it('no underlying price anywhere → the fallback says so', async () => {
     const { svc } = make({ quote: null, cash: null });
     const r = await run(svc, {});
     expect(r.method).toBe('premium_pct');
     expect(r.detail).toContain('no underlying price');
+  });
+});
+
+describe('SignalContextService.build — the judge sees support / resistance at the underlying price', () => {
+  it('passes the underlying spot to the level book (not null) and carries the levels themselves', async () => {
+    const { svc, levels, feeds } = make({ support: 1225, quote: 1248 });
+    (levels as any).levelsFor = jest.fn().mockResolvedValue({ value: { pdh: 1260, pdl: 1220, vwap: 1244 } });
+    levels.structureFor.mockResolvedValue({ nearestSupport: 1244, nearestResistance: 1260, reason: null, factorValues: { mtfTrend: 1 } });
+    const ctx = await svc.build({ underlying: 'DRREDDY', kind: 'CE', exchange: 'NFO', ownerUserId: 'owner', now: NOW, ltp: 50 });
+    expect(levels.structureFor).toHaveBeenCalledWith('DRREDDY', 1248, 'owner');
+    expect(feeds.fetchQuote).toHaveBeenCalledWith('owner', '881', 'NSE');
+    expect(ctx.structure).toMatchObject({ status: 'present', value: { spot: 1248, spotSource: 'quote', nearestSupport: 1244, nearestResistance: 1260, levels: { pdh: 1260 } } });
+  });
+
+  it('a cash call is its own underlying: the contract LTP is the spot', async () => {
+    const { svc, levels, feeds } = make({ support: 2430 });
+    (levels as any).levelsFor = jest.fn().mockResolvedValue(null);
+    await svc.build({ underlying: 'MANKIND', kind: 'EQ', exchange: 'NSE', ownerUserId: 'owner', now: NOW, ltp: 2490 });
+    expect(levels.structureFor).toHaveBeenCalledWith('MANKIND-EQ', 2490, 'owner');
+    expect(feeds.fetchQuote).not.toHaveBeenCalled();
   });
 });

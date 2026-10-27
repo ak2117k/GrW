@@ -72,6 +72,9 @@ export const STOCK_ALIASES: Readonly<Record<string, string>> = {
   HEL: 'HAL',
   'ATHER ENERGY': 'ATHERENERG',
   ATHER: 'ATHERENERG',
+  // "KPIT TECH 540CE" (2026-10-27) read as TECH-EQ, a different cash line with no options.
+  'KPIT TECH': 'KPITTECH',
+  KPIT: 'KPITTECH',
 };
 
 /**

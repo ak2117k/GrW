@@ -98,7 +98,7 @@ describe('rule parser — tip fixtures', () => {
 });
 
 describe('rule parser — calls missed in prod on 2026-10-26', () => {
-  const prodVocab = buildVocabulary(['HAL-EQ', 'ATHERENERG-EQ', 'FORTIS-EQ', 'INDIGO-EQ', 'ZYDUSLIFE-EQ', 'DRREDDY-EQ']);
+  const prodVocab = buildVocabulary(['TECH-EQ', 'KPITTECH-EQ', 'HAL-EQ', 'ATHERENERG-EQ', 'FORTIS-EQ', 'INDIGO-EQ', 'ZYDUSLIFE-EQ', 'DRREDDY-EQ']);
 
   it.each<[string, string, Want]>([
     ['Unicode bold letters (MCX COMODITY CALL OPTION)',
@@ -113,6 +113,9 @@ describe('rule parser — calls missed in prod on 2026-10-26', () => {
     ['Stock Gainers CMP / Support / For',
       'OPTION BUYING VIEW ATHER ENERGY 1420CE CMP 37 Support 20 For 57+ Risky View Due To Result',
       { underlying: 'ATHERENERG', instrumentKind: 'CE', strike: 1420, side: 'BUY', entryLow: 37, sl: 20, targets: [57] }],
+    ['KPIT TECH is KPITTECH, not the TECH-EQ cash line (prod 2026-10-27)',
+      'This Time Bet On\n\nKPIT TECH 540CE\n\nCMP 25-26\n\nSupport 15\n\n\nFor 35++\n\n\nNovember Expiry',
+      { underlying: 'KPITTECH', instrumentKind: 'CE', strike: 540, side: 'BUY', entryType: 'RANGE', entryLow: 25, entryHigh: 26, sl: 15, targets: [35] }],
     ['Stock Gainers cash above / support / view, disclaimer ignored',
       'Fortis Fortis cash above 731 support 720 view 740 Disclaimer :- Above calls are Not Buy or Sell Levels,These opinions are for educational purposes only',
       { underlying: 'FORTIS', instrumentKind: 'EQ', side: 'BUY', entryType: 'ABOVE', entryLow: 731, sl: 720, targets: [740] }],

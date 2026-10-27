@@ -711,3 +711,23 @@ describe('the level book actually resolving', () => {
     expect(await t.svc.levelsFor('SUZLON-EQ')).toBeNull();
   });
 });
+
+describe('SentinelChartContextAdapter — concurrent reads of one book', () => {
+  it('two readers of the same symbol while it builds share ONE analyze()', async () => {
+    const t = make();
+    let release: () => void = () => undefined;
+    t.analyze.mockImplementation(
+      () => new Promise((resolve) => {
+        release = () => resolve({ kind: 'setup', side: 'BUY', levels: levels(), volumeRatio: 1, contextFactors: factors() });
+      }),
+    );
+    const a = t.svc.structureFor('SUZLON', 101, 'u1');
+    const b = t.svc.levelsFor('SUZLON', 'u1');
+    await new Promise((r) => setImmediate(r));
+    release();
+    const [sa, sb] = await Promise.all([a, b]);
+    expect(t.analyze).toHaveBeenCalledTimes(1);
+    expect(sa.nearestResistance).toBe(106);
+    expect(sb).not.toBeNull();
+  });
+});

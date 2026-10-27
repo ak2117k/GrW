@@ -18,6 +18,12 @@ import type { SignalView } from '../domain/signal.types';
 export type CtxBlock = { status: 'present'; source: string; value: unknown } | { status: 'unavailable'; reason: string };
 
 const BLOCK_TIMEOUT_MS = 8_000;
+/**
+ * A cold level book is several historical windows (daily statics, 15m bars, the higher-TF trend)
+ * through the owner's 350 ms-gated session, behind whatever else is fetching; 8 s timed out on
+ * NIFTY / BANKNIFTY / MANKIND (prod 2026-10-27). The build keeps running and fills the cache.
+ */
+const STRUCTURE_TIMEOUT_MS = 25_000;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /** Index / MCX underlyings → the symbol the level book and news resolve. */
@@ -50,7 +56,7 @@ export class SignalContextService {
     @Optional() private readonly instruments?: MarketDataRepository,
   ) {}
 
-  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date }): Promise<Record<string, CtxBlock>> {
+  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null }): Promise<Record<string, CtxBlock>> {
     const sym = levelSymbolFor(i.underlying, i.kind);
     const [chain, market, structure, news, mbm] = await Promise.all([
       this.block('mbm_chain_snapshots', async () => {
@@ -63,11 +69,21 @@ export class SignalContextService {
         const s = await this.marketCtx.snapshot(i.underlying);
         return { spot: s.spot, vix: s.vix, vixRegime: s.vixRegime, pcr: s.pcr, maxPain: s.maxPain, adRatio: s.adRatio, at: s.capturedAt.toISOString() };
       }),
-      this.block('signal-generator 15m level book + context factors (trend)', async () => {
-        if (!this.levels) return null;
-        const st = await this.levels.structureFor(sym, null, i.ownerUserId ?? undefined);
-        return st;
-      }),
+      this.block(
+        'signal-generator 15m level book + context factors (trend)',
+        async () => {
+          if (!this.levels) return null;
+          // The nearest support / resistance need the UNDERLYING's price; this used to pass null,
+          // so every packet said "price unavailable" even when the book was built.
+          const own = i.kind === 'EQ' || (i.kind === 'FUT' && i.exchange === 'MCX');
+          const { spot, source } = await this.underlyingSpot({ underlying: i.underlying, exchange: i.exchange, own, price: i.ltp ?? null, ownerUserId: i.ownerUserId, now: i.now });
+          const owner = i.ownerUserId ?? undefined;
+          const st = await this.levels.structureFor(sym, spot, owner);
+          const book = await this.levels.levelsFor(sym, owner).catch(() => null);
+          return { ...st, spot, spotSource: source || null, levels: book?.value ?? null };
+        },
+        STRUCTURE_TIMEOUT_MS,
+      ),
       this.block('news (sentinel news shim)', async () => {
         if (!this.news) return null;
         const n = await this.news.recentFor(sym);
@@ -89,7 +105,7 @@ export class SignalContextService {
   async nearestLevels(underlying: string, kind: string, price: number, ownerUserId: string | null): Promise<{ support: number | null; resistance: number | null; reason?: string } | null> {
     if (!this.levels) return null;
     try {
-      const st = await withTimeout(this.levels.structureFor(levelSymbolFor(underlying, kind), price, ownerUserId ?? undefined), BLOCK_TIMEOUT_MS);
+      const st = await withTimeout(this.levels.structureFor(levelSymbolFor(underlying, kind), price, ownerUserId ?? undefined), STRUCTURE_TIMEOUT_MS);
       return { support: st.nearestSupport, resistance: st.nearestResistance, reason: st.reason ?? undefined };
     } catch (err) {
       this.logger.warn(`[signal-context] level book for ${underlying}: ${errText(err)}`);
@@ -117,14 +133,12 @@ export class SignalContextService {
     const kind = s.instrumentKind;
     const option = kind === 'CE' || kind === 'PE';
     const ownUnderlying = kind === 'EQ' || (kind === 'FUT' && i.contract.exchange === 'MCX');
-    let spot: number | null = ownUnderlying ? i.price : null;
     let delta: number | null = null;
-    if (!ownUnderlying && this.chain) {
+    if (!ownUnderlying && this.chain && option) {
       try {
         const c = await withTimeout(this.chain.latestChain(s.underlying), BLOCK_TIMEOUT_MS);
         const age = c ? i.now.getTime() - c.capturedAt.getTime() : Infinity;
-        if (c && age <= 10 * 60_000 && c.spot > 0) spot = c.spot;
-        if (c && option && age <= 30 * 60_000 && c.expiry === i.contract.expiry && s.strike !== null) {
+        if (c && age <= 30 * 60_000 && c.expiry === i.contract.expiry && s.strike !== null) {
           const row = c.strikes.find((r) => Math.abs(r.strike - (s.strike as number)) < 1e-6);
           const leg = kind === 'CE' ? row?.ce : row?.pe;
           delta = typeof leg?.delta === 'number' && Number.isFinite(leg.delta) ? leg.delta : null;
@@ -133,23 +147,7 @@ export class SignalContextService {
         this.logger.warn(`[signal-context] chain snapshot for engine SL (${s.underlying}): ${errText(err)}`);
       }
     }
-    let spotSource = ownUnderlying ? 'contract' : spot !== null ? 'chain' : '';
-    if (spot === null && !ownUnderlying && this.marketCtx) {
-      try {
-        const snap = await withTimeout(this.marketCtx.snapshot(s.underlying), BLOCK_TIMEOUT_MS);
-        spot = typeof snap.spot === 'number' && snap.spot > 0 ? snap.spot : null;
-        if (spot !== null) spotSource = 'feed';
-      } catch (err) {
-        this.logger.warn(`[signal-context] spot for engine SL (${s.underlying}): ${errText(err)}`);
-      }
-    }
-    // The chain snapshots cover ~10 underlyings every ~15 min and the feed map only the indices
-    // (prod 2026-10-26: BSE / COPPER / CRUDEOIL options had no spot → every SL fell to 25%).
-    // Quote the underlying itself: the stock's cash line, or an MCX option's nearest future.
-    if (spot === null && !ownUnderlying) {
-      spot = await this.underlyingQuote(s.underlying, i.contract.exchange, i.ownerUserId, i.now);
-      if (spot !== null) spotSource = 'quote';
-    }
+    const { spot, source: spotSource } = await this.underlyingSpot({ underlying: s.underlying, exchange: i.contract.exchange, own: ownUnderlying, price: i.price, ownerUserId: i.ownerUserId, now: i.now });
     // No greeks from a snapshot: the broker's own optionGreek for this expiry (NFO/BFO; MCX has none).
     if (option && delta === null && spot !== null && i.contract.exchange !== 'MCX' && i.contract.expiry && s.strike !== null) {
       delta = await this.brokerDelta(s.underlying, i.contract.expiry, s.strike, kind as 'CE' | 'PE', i.ownerUserId);
@@ -184,7 +182,37 @@ export class SignalContextService {
     return explain(atr ? deriveEngineSl({ ...base, atr }) : first);
   }
 
-  /** LTP of the underlying itself: NSE cash for a stock derivative, the nearest future for MCX. Never throws. */
+  /**
+   * The underlying's price, one ladder for the engine SL and the judge's level book: the contract
+   * itself (EQ, MCX future) → a chain snapshot ≤ 10 min → market-context's feed (NSE only; it timed
+   * out on GOLD) → a quote of the underlying. Never throws; `source` is '' when nothing answered.
+   */
+  async underlyingSpot(i: { underlying: string; exchange: string; own: boolean; price: number | null; ownerUserId: string | null; now: Date }): Promise<{ spot: number | null; source: string }> {
+    if (i.own) return i.price !== null && i.price > 0 ? { spot: i.price, source: 'contract' } : { spot: null, source: '' };
+    if (this.chain) {
+      try {
+        const c = await withTimeout(this.chain.latestChain(i.underlying), BLOCK_TIMEOUT_MS);
+        if (c && i.now.getTime() - c.capturedAt.getTime() <= 10 * 60_000 && c.spot > 0) return { spot: c.spot, source: 'chain' };
+      } catch (err) {
+        this.logger.warn(`[signal-context] chain snapshot spot (${i.underlying}): ${errText(err)}`);
+      }
+    }
+    if (this.marketCtx && i.exchange !== 'MCX') {
+      try {
+        const snap = await withTimeout(this.marketCtx.snapshot(i.underlying), BLOCK_TIMEOUT_MS);
+        if (typeof snap.spot === 'number' && snap.spot > 0) return { spot: snap.spot, source: 'feed' };
+      } catch (err) {
+        this.logger.warn(`[signal-context] feed spot (${i.underlying}): ${errText(err)}`);
+      }
+    }
+    // The chain snapshots cover ~10 underlyings every ~15 min and the feed map only the indices
+    // (prod 2026-10-26: BSE / COPPER / CRUDEOIL options had no spot → every SL fell to 25%).
+    // Quote the underlying itself: the stock's cash line, the index, or an MCX option's nearest future.
+    const q = await this.underlyingQuote(i.underlying, i.exchange, i.ownerUserId, i.now);
+    return q !== null ? { spot: q, source: 'quote' } : { spot: null, source: '' };
+  }
+
+  /** LTP of the underlying itself: NSE cash (or the index) for an NSE derivative, the nearest future for MCX. Never throws. */
   private async underlyingQuote(underlying: string, exchange: string, ownerUserId: string | null, now: Date): Promise<number | null> {
     if (!this.feeds || !this.instruments || !ownerUserId) return null;
     try {
@@ -192,7 +220,7 @@ export class SignalContextService {
       const inst =
         exchange === 'MCX'
           ? await this.instruments.getNearestFuture(underlying, 'MCX', startOfDay)
-          : await this.instruments.getInstrumentBySymbol(`${underlying}-EQ`, 'NSE');
+          : ((await this.instruments.getInstrumentBySymbol(`${underlying}-EQ`, 'NSE')) ?? (await this.instruments.getInstrumentBySymbol(underlying, 'NSE')));
       if (!inst?.token) return null;
       const q = await withTimeout(this.feeds.fetchQuote(ownerUserId, inst.token, inst.exchange), BLOCK_TIMEOUT_MS);
       return q && Number.isFinite(q.ltp) && q.ltp > 0 ? q.ltp : null;
@@ -237,9 +265,9 @@ export class SignalContextService {
     }
   }
 
-  private async block(source: string, fn: () => Promise<unknown>): Promise<CtxBlock> {
+  private async block(source: string, fn: () => Promise<unknown>, timeoutMs = BLOCK_TIMEOUT_MS): Promise<CtxBlock> {
     try {
-      const value = await withTimeout(fn(), BLOCK_TIMEOUT_MS);
+      const value = await withTimeout(fn(), timeoutMs);
       if (value === null || value === undefined) return { status: 'unavailable', reason: `${source}: nothing available (not wired, or no data)` };
       return { status: 'present', source, value };
     } catch (err) {

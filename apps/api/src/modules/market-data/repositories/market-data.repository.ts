@@ -322,6 +322,13 @@ export class MarketDataRepository {
    * tokens. Returns null when no instrument matches.
    */
   async getInstrumentBySymbol(symbol: string, exchange: string) {
+    // An NSE index has two rows: the core INDEX row (99926009, which carries the candles) and a
+    // 26xxx row the daily master refresh rewrites, which has none. A plain findFirst returned the
+    // 26xxx one, so BANKNIFTY / NIFTY level books came back empty (prod 2026-10-27).
+    if (exchange === 'NSE' && !symbol.includes('-')) {
+      const index = await this.prisma.instrument.findFirst({ where: { symbol, exchange, segment: 'INDEX' } });
+      if (index) return index;
+    }
     return this.prisma.instrument.findFirst({
       where: { symbol, exchange },
     });

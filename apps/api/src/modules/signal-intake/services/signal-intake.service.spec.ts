@@ -431,8 +431,8 @@ describe('SignalIntakeService — INFO / RECAP (owner 2026-10-24)', () => {
     for (const id of ['m1', 'm2', 'm3']) expect(mem.classes.get(id)).toMatchObject({ status: 'INFO', parser: 'rule' });
     expect(mem.classes.get('m4')).toMatchObject({ status: 'RECAP' });
     expect(mem.infos.get('m1')?.items).toEqual([
-      { underlying: 'CRUDEOIL', bias: 'BULL', levels: [110, 120], targetLevel: 110, oi: null, condition: null, horizon: null },
-      { underlying: 'NIFTY', bias: 'BEAR', levels: [21000], targetLevel: 21000, oi: null, condition: { driver: 'CRUDE', direction: 'UP' }, horizon: null },
+      { underlying: 'CRUDEOIL', bias: 'BULL', levels: [110, 120], targetLevel: 110, oi: null, condition: null, horizon: null, kind: 'VIEW' },
+      { underlying: 'NIFTY', bias: 'BEAR', levels: [21000], targetLevel: 21000, oi: null, condition: { driver: 'CRUDE', direction: 'UP' }, horizon: null, kind: 'VIEW' },
     ]);
     expect(mem.infos.get('m2')?.items).toEqual([expect.objectContaining({ underlying: 'NIFTY', bias: 'BULL', oi: { strike: 22400, side: 'PE', note: 'put OI heavy → support' } })]);
     expect(mem.infos.get('m3')?.items).toEqual([expect.objectContaining({ underlying: 'NIFTY', bias: 'BEAR', levels: [22000], condition: { driver: 'CRUDE', direction: 'UP' }, horizon: 'MONTHS' })]);
@@ -452,7 +452,7 @@ describe('SignalIntakeService — INFO / RECAP (owner 2026-10-24)', () => {
     expect(classify).not.toHaveBeenCalled();
     expect(m.mem.classes.get('m1')).toMatchObject({ status: 'INFO' });
     expect(m.mem.infos.get('m1')?.items).toEqual([
-      { underlying: 'NIFTY', bias: 'BULL', levels: [22400], targetLevel: null, oi: { strike: 22400, side: 'PE', note: 'put OI 3x → support' }, condition: null, horizon: null },
+      { underlying: 'NIFTY', bias: 'BULL', levels: [22400], targetLevel: null, oi: { strike: 22400, side: 'PE', note: 'put OI 3x → support' }, condition: null, horizon: null, kind: 'VIEW' },
     ]);
   });
 

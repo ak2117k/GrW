@@ -1,7 +1,7 @@
 import { AD_RE, hasStrikePair, instrumentHits, RECAP_RE, type PrefilterResult } from './prefilter';
 import { isNumber, normalise, type Normalised } from './text';
 import { hasTradeInstruction, viewReason } from './view';
-import { AMBIGUOUS_SYMBOLS, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
+import { AMBIGUOUS_SYMBOLS, LOOSE_STOPWORDS, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
 
 /**
  * INFO / RECAP / NOISE for posts that are not a trade call (owner 2026-10-24: "these contain information
@@ -36,6 +36,14 @@ export interface InfoCondition {
   direction: InfoDirection | null;
 }
 
+/**
+ * What kind of information (owner 2026-10-27): a VIEW on an instrument (the default), a CATALYST
+ * (results / orders / a gap), a WATCH (a breakout level or a momentum list to keep an eye on), MACRO
+ * (global news, scored against NIFTY) or a MARKET-wide view with no instrument named (also NIFTY).
+ */
+export type InfoKind = 'VIEW' | 'CATALYST' | 'WATCH' | 'MACRO' | 'MARKET';
+export const INFO_KINDS: readonly InfoKind[] = ['VIEW', 'CATALYST', 'WATCH', 'MACRO', 'MARKET'];
+
 export interface InfoItem {
   underlying: string;
   bias: InfoBias | null;
@@ -44,6 +52,8 @@ export interface InfoItem {
   oi: InfoOi | null;
   condition: InfoCondition | null;
   horizon: InfoHorizon | null;
+  /** Absent on items stored before 2026-10-27 (read as VIEW). */
+  kind?: InfoKind;
 }
 
 /** Last close per underlying (the reference for "X se dur nahi" = towards X). */
@@ -101,8 +111,8 @@ const BEAR_WORDS: ReadonlySet<string> = new Set([
 ]);
 const NEUTRAL_WORDS: ReadonlySet<string> = new Set(['SIDEWAYS', 'RANGEBOUND', 'CONSOLIDATION', 'CONSOLIDATING', 'CHOPPY']);
 const STRUCT_WORDS: ReadonlySet<string> = new Set(['SUPPORT', 'SUPPORTS', 'RESISTANCE', 'RESISTANCES', 'HURDLE', 'PIVOT', 'ZONE', 'DEMAND', 'SUPPLY']);
-const BULL_BIGRAMS = ['SHORT COVERING', 'BREAK OUT', 'GO UP', 'GOING UP', 'MOVE UP', 'ABOVE FAKNE', 'ABOVE PHEKNE', 'ABOVE FEKNE', 'ABOVE JAYEGA'];
-const BEAR_BIGRAMS = ['SELL OFF', 'BREAK DOWN', 'GO DOWN', 'GOING DOWN', 'BELOW FAKNE', 'BELOW JAYEGA', 'BLOOD BATH'];
+const BULL_BIGRAMS = ['SHORT COVERING', 'BREAK OUT', 'GO UP', 'GOING UP', 'MOVE UP', 'ABOVE FAKNE', 'ABOVE PHEKNE', 'ABOVE FEKNE', 'ABOVE JAYEGA', 'ON FIRE', 'GAP UP', 'CURRENT LAG', 'UPPER CIRCUIT'];
+const BEAR_BIGRAMS = ['SELL OFF', 'BREAK DOWN', 'GO DOWN', 'GOING DOWN', 'BELOW FAKNE', 'BELOW JAYEGA', 'BLOOD BATH', 'GAP DOWN', 'LOWER CIRCUIT'];
 const NEUTRAL_BIGRAMS = ['RANGE BOUND'];
 
 const OI_WORDS: ReadonlySet<string> = new Set(['OI', 'PCR', 'WRITING', 'WRITERS', 'BUILDUP']);
@@ -153,6 +163,25 @@ const HORIZON_RES: Array<[InfoHorizon, RegExp]> = [
   ['DAYS', /\b(DAYS?|TOMORROW|KAL|BTST|STBT|SESSIONS?)\b/],
   ['INTRADAY', /\b(TODAY|INTRADAY|AAJ)\b/],
 ];
+
+const OPTION_BRAG_RE = /\b(DONE|HIT|ACHIEVED|\d+(\.\d+)?X|DOUBLE|TRIPLE|HOGYI|HOGAYI|HOGAYA|HOGYA|GYI)\b/;
+const NO_BRAG_IF: ReadonlySet<string> = new Set(['BUY', 'SELL', 'ABOVE', 'BELOW', 'SL', 'LONG', 'SHORT']);
+
+/** Results / orders / a gap: a company event that moves the stock. */
+const CATALYST_RE = /\b(RESULTS?|Q[1-4]|EARNINGS|ORDERS?|BAGS|UPGRADES?|DOWNGRADES?|DIVIDEND|BONUS|SPLIT|BUYBACK|MERGER|ACQUISITION|GAP UP|GAP DOWN|UPPER CIRCUIT|LOWER CIRCUIT)\b/;
+const CATALYST_BULL = /\b(STRONG|EXCELLENT|GOOD|SOLID|BUMPER|BEAT|BEATS|BEST|RECORD|STELLAR|GAP UP|UPPER CIRCUIT|UPGRADES?|WINS?|BAGS)\b/;
+// "good results and stock is down" is two-sided (NEUTRAL), not a bull call.
+const CATALYST_BEAR = /\b(WEAK|POOR|MISS|MISSES|DISAPPOINTING|BAD|GAP DOWN|LOWER CIRCUIT|DOWNGRADES?|LOSS|IS DOWN|STOCK DOWN|FALLS?|FELL)\b/;
+/** Trader phrases that settle the direction outright (the words inside them would vote the other way). */
+const MARKET_BEAR_RE = /\b(SELL ON RISE|SELL ON RALLY|SELL THE RISE|SELL EVERY BOUNCE|SELL IT)\b/;
+const MARKET_BULL_RE = /\b(BUY ON DIPS?|BUY THE DIP|BUY EVERY DIP)\b/;
+/** A level to watch / a list of names to keep an eye on. */
+const WATCH_RE = /\b(BREAKOUT|BREAK OUT|BREAKDOWN|RADAR|WATCH ?LIST|KEEP AN EYE|MOMENTUM|POSSIBLE IN|LOOK OUT)\b/;
+/** Global / macro news: no Indian instrument, but it can move NIFTY. */
+const MACRO_RE = /\b(US|USA|AMERICA|AMERICAN|DOW|NASDAQ|S&P|FED|FOMC|RATE CUT|RATE HIKE|INFLATION|CPI|GDP|RECESSION|CHINA|CHINESE|JAPAN|NIKKEI|HANG SENG|EUROPE|BRAZIL|ETF|ELECTION|WAR|TARIFFS?|DOLLAR|DXY|BOND YIELDS?|GLOBAL MARKETS?|GIFT NIFTY|SGX|FIIS?|DIIS?)\b/;
+/** A market-wide view with no instrument named. */
+const MARKET_RE = /\b(MARKET|MARKETS|DALAL STREET|INDIA VIX|VIX|BULLISH DAY|BEARISH DAY|INDICES)\b/;
+const MACRO_MOVE = /\b(CRASH|CRASHED|CRASHES|FALLS?|FELL|PLUNGE|PLUNGES|SLUMP|RALLY|RALLIES|SURGE|SURGES|JUMPS?|SOARS?|\d+(\.\d+)? ?%)/;
 
 const RECAP_HEADER_RE =
   /\b(LIVE\s+ANALYSIS\s+OF|RECAP|TODAY'?S?\s+(RESULTS?|PERFORMANCE)|YESTERDAY'?S?\s+(CALLS?|RESULTS?|PERFORMANCE)|RESULTS?\s+OF\s+(THE\s+)?(DAY|WEEK|TODAY|YESTERDAY)|DAY\s+SUMMARY|TRADES?\s+OF\s+THE\s+DAY|PERFORMANCE\s+(REPORT|UPDATE)|CALLS?\s+(RESULT|STATUS))\b/;
@@ -215,7 +244,7 @@ function mentionsOf(t: readonly string[], vocab: Vocabulary): Mention[] {
     const name = vocab.names.get(t[i]);
     if (!name) continue;
     const cls = vocab.classOf.get(name);
-    if (AMBIGUOUS_SYMBOLS.has(t[i]) || INFO_STOPWORDS.has(t[i])) {
+    if (AMBIGUOUS_SYMBOLS.has(t[i]) || INFO_STOPWORDS.has(t[i]) || LOOSE_STOPWORDS.has(t[i])) {
       if (cls === 'STOCK' ? !contractNext(t, i) : !numberNear(t, i, 3)) continue;
     }
     out.push({ i, name });
@@ -564,6 +593,11 @@ export function analyseInfo(raw: string, vocab: Vocabulary, refs?: RefPrices): I
 export function recapReason(raw: string, norm: Normalised, vocab: Vocabulary): string | null {
   const header = RECAP_HEADER_RE.test(String(raw ?? '').toUpperCase());
   const brag = RECAP_RE.test(norm.text);
+  // "22750 pe done target" / "22750 pe 3x hogyi" / "double hogyi put": an option the channel says paid,
+  // with no entry instruction — a brag about a past call, never a view on the index.
+  const tk = norm.tokens;
+  const option = hasStrikePair(tk) || tk.some((w, i) => isNumber(w) && Number(w) >= 100 && tk.slice(i + 1).some((x) => x === 'PUT' || x === 'CALL'));
+  if (option && OPTION_BRAG_RE.test(norm.text) && !tk.some((w) => NO_BRAG_IF.has(w))) return 'recap: an option the channel says paid';
   if (!header && !brag) return null;
   const t = norm.tokens;
   const contract = hasStrikePair(t) || instrumentHits(t, vocab).length > 0;
@@ -602,9 +636,101 @@ export function classifyCommentary(raw: string, pf: PrefilterResult, vocab: Voca
     return concrete ? out('INFO', 'info: ad with concrete market content', a) : out('NOISE', 'ad');
   }
   if (RECAP_RE.test(pf.norm.text)) return out('NOISE', 'pnl brag (no named calls)');
-  if (a.isInfo) return out('INFO', `info: ${a.reasons.join(', ')}`, a, !a.items.some(hasBias));
+  const typed = stockEventItems(pf.norm, vocab, a);
+  if (typed) return out('INFO', typed.reason, { ...a, items: typed.items });
+  if (a.isInfo) return out('INFO', `info: ${a.reasons.join(', ')}`, { ...a, items: a.items.map((i) => ({ ...i, kind: i.kind ?? 'VIEW' })) }, !a.items.some(hasBias));
+  const market = marketItem(pf.norm, a);
+  if (market) return out('INFO', market.reason, { ...a, items: [market.item] });
   const view = viewReason(pf);
   if (view) return out('INFO', view, a);
+  return null;
+}
+
+/** Stocks named in the post, in order (ambiguous words only beside a contract). */
+function stocksNamed(norm: Normalised, vocab: Vocabulary): string[] {
+  return [...new Set(instrumentHits(norm.tokens, vocab).map((h) => h.name).filter((n) => vocab.classOf.get(n) === 'STOCK'))];
+}
+
+const blankItem = (underlying: string, bias: InfoBias | null, kind: InfoKind): InfoItem => ({
+  underlying,
+  bias,
+  levels: [],
+  targetLevel: null,
+  oi: null,
+  condition: null,
+  horizon: null,
+  kind,
+});
+
+/**
+ * A CATALYST (results / orders / a gap) or a WATCH (a breakout level, a momentum list) on the stocks a
+ * post names — one item per stock, the levels the rule extractor found kept. null when neither applies.
+ */
+function stockEventItems(norm: Normalised, vocab: Vocabulary, a: InfoAnalysis): { reason: string; items: InfoItem[] } | null {
+  const stocks = stocksNamed(norm, vocab);
+  if (stocks.length === 0) return null;
+  const text = norm.text;
+  const found = new Map(a.items.map((i) => [i.underlying, i]));
+  const build = (kind: InfoKind, bias: InfoBias | null) =>
+    stocks.map((s) => {
+      const i = found.get(s);
+      return i ? { ...i, bias: i.bias === 'BULL' || i.bias === 'BEAR' ? i.bias : bias ?? i.bias, kind } : blankItem(s, bias, kind);
+    });
+  if (CATALYST_RE.test(text)) {
+    const bull = CATALYST_BULL.test(text);
+    const bear = CATALYST_BEAR.test(text);
+    const bias: InfoBias | null = bull === bear ? (bull ? 'NEUTRAL' : null) : bull ? 'BULL' : 'BEAR';
+    return { reason: `catalyst: ${(text.match(CATALYST_RE) as RegExpMatchArray)[0].toLowerCase()}${bias ? ` (${bias.toLowerCase()})` : ''}`, items: build('CATALYST', bias) };
+  }
+  if (WATCH_RE.test(text)) {
+    const bias: InfoBias = /\b(BREAKDOWN|BREAK DOWN|BELOW)\b/.test(text) ? 'BEAR' : 'BULL';
+    return { reason: `watch: ${(text.match(WATCH_RE) as RegExpMatchArray)[0].toLowerCase()} (${stocks.length} name${stocks.length > 1 ? 's' : ''})`, items: build('WATCH', bias) };
+  }
+  return null;
+}
+
+/** Bull / bear words of a whole post; a word right after "AFTER" is the backdrop, not the view ("bullish day after gap down"). */
+function postBias(t: readonly string[]): InfoBias | null {
+  let bull = 0;
+  let bear = 0;
+  for (let i = 0; i < t.length; i++) {
+    if (t.slice(Math.max(0, i - 3), i).includes('AFTER')) continue;
+    const pair = i + 1 < t.length ? `${t[i]} ${t[i + 1]}` : '';
+    if (BULL_WORDS.has(t[i]) || BULL_BIGRAMS.includes(pair)) bull++;
+    else if (BEAR_WORDS.has(t[i]) || BEAR_BIGRAMS.includes(pair) || MACRO_BEAR.has(t[i])) bear++;
+    else if (MACRO_BULL.has(t[i])) bull++;
+  }
+  if (bull === bear) return bull > 0 ? 'NEUTRAL' : null;
+  return bull > bear ? 'BULL' : 'BEAR';
+}
+const MACRO_BEAR: ReadonlySet<string> = new Set(['FALLS', 'FELL', 'PLUNGES', 'SLUMP', 'CRASHES', 'SELLING', 'PRESSURE']);
+const MACRO_BULL: ReadonlySet<string> = new Set(['RALLIES', 'SURGE', 'SURGES', 'JUMPS', 'SOARS']);
+
+/**
+ * No Indian instrument named: global / macro news (MACRO) or a market-wide view (MARKET), both read as
+ * a view on NIFTY so the self-review can measure whether such posts ever lead it. null otherwise.
+ */
+function marketItem(norm: Normalised, a: InfoAnalysis): { reason: string; item: InfoItem } | null {
+  if (a.items.length > 0) return null;
+  const text = norm.text;
+  const t = norm.tokens;
+  if (MACRO_RE.test(text) && MACRO_MOVE.test(text)) {
+    const bias = postBias(t);
+    if (bias) return { reason: `macro: ${(text.match(MACRO_RE) as RegExpMatchArray)[0].toLowerCase()} (${bias.toLowerCase()}, read against NIFTY)`, item: blankItem('NIFTY', bias, 'MACRO') };
+  }
+  if (MARKET_RE.test(text)) {
+    // Only the words beside the market word: a long pep-talk that happens to say "market" is not a view.
+    // The market word itself, else the first word of a two-word one ("BULLISH DAY", "INDIA VIX").
+    let at = t.findIndex((w) => MARKET_RE.test(w));
+    if (at < 0) at = t.findIndex((w, i) => MARKET_RE.test(`${w} ${t[i + 1] ?? ''}`));
+    // "don't miss IF market will crash" is a hypothetical, not a view.
+    if (t.slice(Math.max(0, at - 2), at).some((w) => IF_WORDS.has(w))) return null;
+    const near = t.slice(Math.max(0, at - 4), at + 6);
+    const volatile = near.some((w) => w === 'VOLATILE' || w === 'VOLATILITY');
+    const phrase: InfoBias | null = MARKET_BEAR_RE.test(text) ? 'BEAR' : MARKET_BULL_RE.test(text) ? 'BULL' : null;
+    const bias = phrase ?? postBias(near) ?? (volatile ? 'NEUTRAL' : null);
+    if (bias) return { reason: `market view (${bias.toLowerCase()}, read against NIFTY)`, item: blankItem('NIFTY', bias, 'MARKET') };
+  }
   return null;
 }
 
@@ -622,7 +748,8 @@ export function asInfoItems(v: unknown): InfoItem[] {
     const condition = o.condition && typeof o.condition === 'object' ? (o.condition as InfoCondition) : null;
     const horizon = ['INTRADAY', 'DAYS', 'WEEKS', 'MONTHS'].includes(String(o.horizon)) ? (o.horizon as InfoHorizon) : null;
     const target = Number(o.targetLevel);
-    out.push({ underlying: o.underlying, bias, levels, targetLevel: Number.isFinite(target) && target > 0 ? target : null, oi, condition, horizon });
+    const kind = INFO_KINDS.includes(o.kind as InfoKind) ? (o.kind as InfoKind) : null;
+    out.push({ underlying: o.underlying, bias, levels, targetLevel: Number.isFinite(target) && target > 0 ? target : null, oi, condition, horizon, ...(kind ? { kind } : {}) });
   }
   return out;
 }

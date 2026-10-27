@@ -31,8 +31,8 @@ describe('INFO — the owner examples (Stock Wale Bhaiyaa Learning Group, 2026-1
     const c = classify('AGAR CRUDE OIL AISE HE CHALTA RAHA TOH 110-120$ DUR NAHI   NIFTY 21000 SE DUR NAHI   CRUDE OIL KO RUKNA PADEGA');
     expect(c).toMatchObject({ kind: 'INFO', needsLlm: false });
     expect((c as CommentaryClass).items).toEqual([
-      { underlying: 'CRUDEOIL', bias: 'BULL', levels: [110, 120], targetLevel: 110, oi: null, condition: null, horizon: null },
-      { underlying: 'NIFTY', bias: 'BEAR', levels: [21000], targetLevel: 21000, oi: null, condition: { driver: 'CRUDE', direction: 'UP' }, horizon: null },
+      { underlying: 'CRUDEOIL', bias: 'BULL', levels: [110, 120], targetLevel: 110, oi: null, condition: null, horizon: null, kind: 'VIEW' },
+      { underlying: 'NIFTY', bias: 'BEAR', levels: [21000], targetLevel: 21000, oi: null, condition: { driver: 'CRUDE', direction: 'UP' }, horizon: null, kind: 'VIEW' },
     ]);
   });
 
@@ -46,7 +46,7 @@ describe('INFO — the owner examples (Stock Wale Bhaiyaa Learning Group, 2026-1
     const c = classify('Mai khud put lene wala tha   But mai kabhi OI k against nahi jata  22400 pe itna heavy tha k put me ghuse he nahi aur ye natak hua up me toh bach gya');
     expect(c).toMatchObject({ kind: 'INFO', needsLlm: false });
     expect((c as CommentaryClass).items).toEqual([
-      { underlying: 'NIFTY', bias: 'BULL', levels: [22400], targetLevel: null, oi: { strike: 22400, side: 'PE', note: 'put OI heavy → support' }, condition: null, horizon: null },
+      { underlying: 'NIFTY', bias: 'BULL', levels: [22400], targetLevel: null, oi: { strike: 22400, side: 'PE', note: 'put OI heavy → support' }, condition: null, horizon: null, kind: 'VIEW' },
     ]);
   });
 
@@ -54,7 +54,7 @@ describe('INFO — the owner examples (Stock Wale Bhaiyaa Learning Group, 2026-1
     const c = classify('22400 ki put oi dekho 3x hai . matlab ye sab upar fakne k liye aye hai');
     expect(c).toMatchObject({ kind: 'INFO' });
     expect((c as CommentaryClass).items).toEqual([
-      { underlying: 'NIFTY', bias: 'BULL', levels: [22400], targetLevel: null, oi: { strike: 22400, side: 'PE', note: 'put OI 3x → support' }, condition: null, horizon: null },
+      { underlying: 'NIFTY', bias: 'BULL', levels: [22400], targetLevel: null, oi: { strike: 22400, side: 'PE', note: 'put OI 3x → support' }, condition: null, horizon: null, kind: 'VIEW' },
     ]);
   });
 
@@ -64,7 +64,7 @@ describe('INFO — the owner examples (Stock Wale Bhaiyaa Learning Group, 2026-1
     );
     expect(c).toMatchObject({ kind: 'INFO', needsLlm: false });
     expect((c as CommentaryClass).items).toEqual([
-      { underlying: 'NIFTY', bias: 'BEAR', levels: [22000], targetLevel: null, oi: null, condition: { driver: 'CRUDE', direction: 'UP' }, horizon: 'MONTHS' },
+      { underlying: 'NIFTY', bias: 'BEAR', levels: [22000], targetLevel: null, oi: null, condition: { driver: 'CRUDE', direction: 'UP' }, horizon: 'MONTHS', kind: 'VIEW' },
     ]);
   });
 

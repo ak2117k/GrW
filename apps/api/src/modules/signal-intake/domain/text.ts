@@ -1,5 +1,5 @@
 import type { ExpiryHint } from './types';
-import { multiWordAliases, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
+import { multiWordAliases, resolveLooseNames, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
 
 /**
  * Text normalisation shared by the pre-filter, the rule parser and the update detector. Everything
@@ -126,7 +126,8 @@ export function normalise(raw: string, vocab: Vocabulary): Normalised {
   s = s.replace(/[^A-Z0-9&.%\- /]/g, ' ');
   s = s.replace(/(^|\s)\.+|\.+(?=\s|$)/g, ' ');
   s = s.replace(/\s+/g, ' ').trim();
-  return { text: s, tokens: s ? s.split(' ') : [], expiry };
+  const tokens = s ? resolveLooseNames(s.split(' '), vocab) : [];
+  return { text: tokens.join(' '), tokens, expiry };
 }
 
 export const isNumber = (t: string): boolean => /^\d+(\.\d+)?$/.test(t);

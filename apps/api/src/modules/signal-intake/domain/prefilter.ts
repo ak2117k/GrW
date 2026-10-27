@@ -1,5 +1,5 @@
 import { isNumber, isPriceLike, normalise, type Normalised } from './text';
-import { AMBIGUOUS_SYMBOLS, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
+import { AMBIGUOUS_SYMBOLS, LOOSE_STOPWORDS, SECTOR_INDEX_TOKEN, type Vocabulary } from './vocabulary';
 
 /**
  * Contract §S rule 1 — the FREE deterministic pre-filter. A message can only be a trade signal when it
@@ -19,6 +19,8 @@ export const AD_RE = /\b(JOIN|SUBSCRIBE|SUBSCRIPTION|WHATSAPP|WATSAPP|WHAT\s*S\s
 export const RECAP_RE = /\b(PNL|P&L|P\/L|TOTAL\s+PROFIT|TODAY'?S?\s+PROFIT|NET\s+PROFIT|PROFIT\s+OF|PROFIT\s+\+?\d{3,}|\d{3,}\s*\+?\s*PROFIT|ACCURACY|SCREENSHOT|TESTIMONIAL|MONTHLY\s+REPORT|WEEKLY\s+REPORT|POINTS\s+CAPTURED|PTS\s+CAPTURED)\b/;
 
 const LEVEL_CALL_RE = /\bSUPPORT \d+(\.\d+)? .*\b(VIEW|FOR) \d/;
+/** A cash pick laid out "CMP 785 SUPPORT 765 FOR 820" (CMP = current price, support = stop, for = target). */
+const CASH_LEVEL_CALL_RE = /\bCMP \d+(\.\d+)? .*\bSUPPORT \d+(\.\d+)? .*\b(VIEW|FOR|TGT) \d/;
 
 export type PrefilterReason = 'ok' | 'empty' | 'sector-index' | 'no-instrument' | 'no-action' | 'too-few-prices' | 'ad' | 'recap';
 
@@ -36,7 +38,8 @@ export function instrumentHits(tokens: readonly string[], vocab: Vocabulary): Ar
   for (let i = 0; i < tokens.length; i++) {
     const name = vocab.names.get(tokens[i]);
     if (!name) continue;
-    if (AMBIGUOUS_SYMBOLS.has(tokens[i]) && !contractBeside(tokens, i)) continue;
+    // SME symbols that are plain words (EXCELLENT, MOMENTUM, CURRENT): a stock only beside a contract.
+    if ((AMBIGUOUS_SYMBOLS.has(tokens[i]) || LOOSE_STOPWORDS.has(tokens[i])) && !contractBeside(tokens, i)) continue;
     out.push({ i, name });
   }
   return out;
@@ -64,7 +67,8 @@ export function prefilter(raw: string, vocab: Vocabulary): PrefilterResult {
   const underlyings = [...new Set(hits.map((h) => h.name))];
   if (hits.length === 0 && !hasStrikePair(t)) return fail(t.includes(SECTOR_INDEX_TOKEN) ? 'sector-index' : 'no-instrument');
   // An option post laid out as "<strike> CE 15-16 SUPPORT 9 VIEW 21" (Stock Gainers) is a call without an action word.
-  const levelCall = hasStrikePair(t) && LEVEL_CALL_RE.test(norm.text);
+  const cashCall = hits.some((h) => vocab.classOf.get(h.name) === 'STOCK') && CASH_LEVEL_CALL_RE.test(norm.text);
+  const levelCall = (hasStrikePair(t) && LEVEL_CALL_RE.test(norm.text)) || cashCall;
   if (!levelCall && !t.some((w) => ACTION_WORDS.has(w))) return fail('no-action', underlyings);
   let prices = 0;
   for (let i = 0; i < t.length; i++) if (isPriceLike(t, i)) prices++;

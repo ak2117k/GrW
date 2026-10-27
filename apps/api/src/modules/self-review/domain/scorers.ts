@@ -589,6 +589,8 @@ export interface ChannelInfoVerifyRow {
     levels: number[];
     targetLevel: number | null;
     condition: { driver: string; direction: string | null } | null;
+    /** VIEW / CATALYST / WATCH / MACRO / MARKET (absent before 2026-10-27 = VIEW). */
+    kind?: string;
     horizon: string | null;
   }>;
   outcomes: Array<{ status: string; session: string | null; ret: number | null; band: number | null; levelHit: boolean | null } | null>;
@@ -627,7 +629,8 @@ export function scoreChannelInfo(r: ChannelInfoVerifyRow): VerificationDraft[] {
       actual,
       correct,
       score: correct === null ? null : correct ? 1 : -1,
-      details: { status, ret: o?.ret ?? null, band: o?.band ?? null, levelHit: o?.levelHit ?? null, horizon: it.horizon, extractor: r.extractor, messageId: r.messageId, channelId: r.channelId },
+      // infoKind (VIEW / CATALYST / WATCH / MACRO / MARKET) so accuracy can be read per kind of post.
+      details: { status, ret: o?.ret ?? null, band: o?.band ?? null, levelHit: o?.levelHit ?? null, horizon: it.horizon, infoKind: it.kind ?? 'VIEW', extractor: r.extractor, messageId: r.messageId, channelId: r.channelId },
     });
   });
   return out;

@@ -216,6 +216,7 @@ export function validateInfoItems(raw: readonly unknown[] | null | undefined, vo
       oi: strike !== null && strike > 0 && side ? { strike, side, note: typeof o.oiNote === 'string' ? o.oiNote.slice(0, 120) : '' } : null,
       condition: driver && driver !== name && !(driver === 'CRUDE' && name === 'CRUDEOIL') ? { driver, direction: dir } : null,
       horizon: INFO_HORIZONS.has(o.horizon as InfoHorizon) ? (o.horizon as InfoHorizon) : null,
+      kind: 'VIEW',
     });
   }
   return out;

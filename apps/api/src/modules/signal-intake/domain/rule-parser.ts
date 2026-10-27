@@ -16,7 +16,7 @@ const SELL_WORDS = new Set(['SELL', 'SHORT', 'S']);
 const ENTRY_WORDS = new Set(['AT', 'NEAR', 'AROUND', 'CMP', 'ZONE', 'RANGE', 'BETWEEN', 'BW', 'ENTRY', 'PRICE', 'ONLY', 'LEVEL']);
 const RANGE_WORDS = new Set(['RANGE', 'ZONE', 'BETWEEN', 'BW']);
 const QTY_WORDS = new Set(['QTY', 'QUANTITY', 'LOT', 'LOTS', 'LOTSIZE']);
-const POSITIONAL_WORDS = new Set(['POSITIONAL', 'SWING', 'HOLD', 'LONGTERM', 'INVESTMENT', 'DELIVERY', 'WEEKS', 'WEEK', 'MONTHS', 'MONTH', 'DAYS']);
+const POSITIONAL_WORDS = new Set(['POSITIONAL', 'SWING', 'PICK', 'HOLD', 'LONGTERM', 'INVESTMENT', 'DELIVERY', 'WEEKS', 'WEEK', 'MONTHS', 'MONTH', 'DAYS']);
 
 type Mode = 'entry' | 'sl' | 'tgt' | 'qty' | 'none';
 
@@ -171,7 +171,9 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
     else if (entryType === 'BELOW' && (kind === 'FUT' || kind === 'EQ')) side = 'SELL';
     // An option post with no verb whose stop sits under the entry and targets over it is a buy
     // ("ZYDUSLIFE 1140 ce 15-16 support 9 view 21"); anything else stays ambiguous.
-    else if (option && entryType !== 'BELOW' && sl !== null && sl < entryLow && targets.length > 0 && targets.every((x) => x > entryHigh)) side = 'BUY';
+    // Cash the same way ("Equity Pick MV ELECTRO CMP 785 Support 765 For 820-850": CMP = the current
+    // price, support = the stop, for = the targets; owner 2026-10-27).
+    else if ((option || kind === 'EQ') && entryType !== 'BELOW' && sl !== null && sl < entryLow && targets.length > 0 && targets.every((x) => x > entryHigh)) side = 'BUY';
     else return null;
   }
   if (!(entryLow > 0)) return null;
@@ -198,7 +200,9 @@ export function parseSignal(raw: string, vocab: Vocabulary, pre?: Normalised): P
   const optionBuy = option && side === 'BUY' && (verb || entryType === 'ABOVE') && strike !== null && entryHigh < strike;
   if (!optionBuy && (verb ? !(hasSl || tgts.length > 0) : !(hasSl && tgts.length > 0))) return null;
 
-  const horizon: Horizon = t.includes('BTST') || t.includes('STBT') ? 'BTST' : t.some((w) => POSITIONAL_WORDS.has(w)) ? 'POSITIONAL' : 'INTRADAY';
+  // A cash pick whose first target is ≥ 4% away is a swing trade, not intraday ("For 3700-4200" on 3300).
+  const swingCash = kind === 'EQ' && tgts.length > 0 && Math.abs(tgts[0] - entryHigh) / entryHigh >= 0.04;
+  const horizon: Horizon = t.includes('BTST') || t.includes('STBT') ? 'BTST' : swingCash || t.some((w) => POSITIONAL_WORDS.has(w)) ? 'POSITIONAL' : 'INTRADAY';
   const tags: string[] = [];
   if (t.includes('HEROZERO')) tags.push('HERO_ZERO');
   if (slCost) tags.push('SL_COST');

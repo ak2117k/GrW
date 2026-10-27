@@ -57,7 +57,7 @@ function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, s
   const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), ...over.cfg };
   const repo = makeRepo();
   const judge = { judge: jest.fn(over.judge ?? (async () => ({ ok: true, verdict: takeVerdict, latencyMs: 10 }))) };
-  const context = { build: jest.fn(async () => ({})), nearestLevels: jest.fn(async () => null) };
+  const context = { build: jest.fn(async () => ({})), nearestLevels: jest.fn(async () => null), optionDelta: jest.fn(async () => null) };
   const executor = { place: jest.fn(over.place ?? (async () => ({ kind: 'PLACED', orderRowId: 'o1', brokerOrderId: 'b1' }))), resume: jest.fn() };
   const risk = { validateTrade: jest.fn(async () => ({ allowed: true })) };
   const clock = { isOpen: () => true, minutesToClose: () => 200 };
@@ -157,8 +157,17 @@ describe('SignalTraderService', () => {
       expect(t.paper.open).not.toHaveBeenCalled();
     });
 
-    it('no plan (price ran away) → no judge call', async () => {
+    it('a late entry (price ran 30% past the call) is planned at the current price and judged on the room left', async () => {
       const t = build({ cfg: { mode: 'paper' }, ltp: 130 });
+      await t.svc.evaluate(ev);
+      expect(t.judge.judge).toHaveBeenCalledTimes(1);
+      const packet = t.judge.judge.mock.calls[0][0] as { plan: { ltp: number; late: { chasePct: number; room: { needs: string; missing: string[] } } } };
+      expect(packet.plan.ltp).toBe(130);
+      expect(packet.plan.late).toMatchObject({ chasePct: 30, room: { needs: 'UP' } });
+    });
+
+    it('no plan (price ran past SIGNAL_LATE_MAX_PCT) → no judge call', async () => {
+      const t = build({ cfg: { mode: 'paper' }, ltp: 150 });
       const r = await t.svc.evaluate(ev);
       expect(r?.skipReason).toBe('entry_tolerance');
       expect(t.judge.judge).not.toHaveBeenCalled();

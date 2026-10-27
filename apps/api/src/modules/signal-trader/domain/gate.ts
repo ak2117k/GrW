@@ -1,6 +1,7 @@
 import type { SignalTraderConfig } from './signal-trader.config';
 import type { ResolvedContract } from './contract-resolver';
 import type { SignalView } from './signal.types';
+import { lateBand, lateEntryOf, targetsAhead, type LateEntry } from './late-entry';
 
 /**
  * The deterministic gate (contract §X rule 1). Pure: every input that needs I/O is resolved by the
@@ -40,6 +41,8 @@ export interface EntryPlan {
   engineSl?: { method: string; detail: string };
   /** A pending trigger (BUY ABOVE / SELL BELOW not reached yet): the plan is sized at the trigger price. */
   trigger?: TriggerState;
+  /** The price had already run past the channel's entry: planned at the current price (domain/late-entry). */
+  late?: LateEntry;
 }
 
 /** An armed trigger, persisted on SignalDecision.plan.trigger (restart-safe). */
@@ -197,16 +200,27 @@ export function planEntry(
   checks.push(ltp !== null && ltp > 0 ? check('ltp_available', true, `LTP ${ltp}`) : check('ltp_available', c ? false : null, 'no fresh quote'));
 
   let band: { low: number; high: number } | null = null;
+  let late: LateEntry | null = null;
   if (c && ltp !== null && ltp > 0) {
     band = entryBand(s, cfg.entryTolerancePct);
     const inside = ltp >= band.low - 1e-9 && ltp <= band.high + 1e-9;
-    const why = inside
-      ? `LTP ${ltp} inside [${r2(band.low)}, ${r2(band.high)}]`
-      : (s.entryType === 'ABOVE' && ltp < band.low) || (s.entryType === 'BELOW' && ltp > band.high)
-        ? `entry not reached: LTP ${ltp} vs ${s.entryType} band [${r2(band.low)}, ${r2(band.high)}]`
-        : `chasing: LTP ${ltp} outside [${r2(band.low)}, ${r2(band.high)}]`;
-    checks.push(check('entry_tolerance', inside, why));
-    if (!inside) band = null;
+    const past = inside ? null : lateEntryOf(s, ltp, band);
+    if (past && cfg.lateEntry && past.chasePct <= cfg.lateMaxPct) {
+      // Past the entry on the trade's side: plan from here and let the judge weigh the room left.
+      late = past;
+      checks.push(check('entry_tolerance', false, `late: LTP ${ltp} is ${past.chasePct}% past the channel's ${past.channelEntry} — planned at the current price, the judge weighs the room left`, false));
+      band = lateBand(s.side, ltp, cfg.entryTolerancePct);
+    } else {
+      const why = inside
+        ? `LTP ${ltp} inside [${r2(band.low)}, ${r2(band.high)}]`
+        : (s.entryType === 'ABOVE' && ltp < band.low) || (s.entryType === 'BELOW' && ltp > band.high)
+          ? `entry not reached: LTP ${ltp} vs ${s.entryType} band [${r2(band.low)}, ${r2(band.high)}]`
+          : past && cfg.lateEntry
+            ? `chasing: LTP ${ltp} is ${past.chasePct}% past the channel's ${past.channelEntry} (> ${cfg.lateMaxPct}% — the move is done, or the contract is wrong)`
+            : `chasing: LTP ${ltp} outside [${r2(band.low)}, ${r2(band.high)}]`;
+      checks.push(check('entry_tolerance', inside, why));
+      if (!inside) band = null;
+    }
   } else {
     checks.push(check('entry_tolerance', null, 'needs a contract and LTP'));
   }
@@ -251,7 +265,8 @@ export function planEntry(
           limitPrice: limit,
           sl,
           slSource,
-          targets: s.targets.filter((t) => Number.isFinite(t) && t > 0),
+          targets: late ? targetsAhead(s.side, ltp, s.targets) : s.targets.filter((t) => Number.isFinite(t) && t > 0),
+          ...(late ? { late } : {}),
           lots: size.lots,
           qty: size.qty,
           riskRupees: size.riskRupees,

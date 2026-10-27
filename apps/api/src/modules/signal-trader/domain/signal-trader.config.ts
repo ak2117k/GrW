@@ -75,6 +75,13 @@ export interface SignalTraderConfig {
   engineSlOptionPct: number;
   /** Buffer beyond the protective level, % of the underlying price. */
   engineSlBufferPct: number;
+  /**
+   * The price already ran past the channel's entry (owner 2026-10-27): plan at the current price
+   * and let the judge decide on the room left, instead of a hard "chasing" SKIP. Off = the old SKIP.
+   */
+  lateEntry: boolean;
+  /** Beyond this % past the channel's entry the move is done (or the contract mistyped): SKIP. */
+  lateMaxPct: number;
   problems: string[];
 }
 
@@ -103,6 +110,7 @@ export const SIGNAL_DEFAULTS = {
   judgeReuseMin: 10,
   engineSlOptionPct: 25,
   engineSlBufferPct: 0.15,
+  lateMaxPct: 40,
 } as const;
 
 function parseOnOff(raw: string | undefined, fallback: boolean, name: string, problems: string[]): boolean {
@@ -181,6 +189,8 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     // Bounds: a typo can make the % stop neither absurdly wide nor zero.
     engineSlOptionPct: num(env, 'SIGNAL_ENGINE_SL_OPTION_PCT', SIGNAL_DEFAULTS.engineSlOptionPct, (n) => n >= 5 && n <= 50, problems),
     engineSlBufferPct: num(env, 'SIGNAL_ENGINE_SL_BUFFER_PCT', SIGNAL_DEFAULTS.engineSlBufferPct, (n) => n >= 0 && n <= 2, problems),
+    lateEntry: parseOnOff(env.SIGNAL_LATE_ENTRY, true, 'SIGNAL_LATE_ENTRY', problems),
+    lateMaxPct: num(env, 'SIGNAL_LATE_MAX_PCT', SIGNAL_DEFAULTS.lateMaxPct, (n) => n > 0 && n <= 100, problems),
     problems,
   };
 }

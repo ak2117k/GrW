@@ -4,7 +4,7 @@ import type { SignalTraderConfig } from './signal-trader.config';
 
 /** `ai_calls.job` label of the signal judge. */
 export const SIGNAL_JUDGE_JOB = 'signal.judge';
-export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v2';
+export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v3';
 
 const NULLABLE_NUMBER = { anyOf: [{ type: 'number' }, { type: 'null' }] } as const;
 
@@ -39,6 +39,15 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'plan.slSource = "engine" means the CHANNEL GAVE NO USABLE STOP (e.g. "SL paid") and our engine derived one (plan.engineSl',
   'says how: level book + delta, premium %, or ATR); judge that stop on its merits, and a hidden stop is itself a weak sign.',
   'plan.trigger present = the entry waits for the price to reach plan.trigger.price (not reached yet); judge the trade as if entered there.',
+  'plan.late present = the price ALREADY RAN plan.late.chasePct% past the channel\'s entry (plan.late.channelEntry) before we saw',
+  'the call; the entry is planned at the CURRENT price (plan.ltp), plan.targets holds only the targets still ahead and',
+  'plan.late.targetsPassed the ones already hit. Decide on the ROOM LEFT, not on whether the channel was right:',
+  'plan.late.room gives the underlying\'s next obstacle in the trade\'s direction (level book resistance / call wall for a long,',
+  'support / put wall for a short), the points and % to it, the contract\'s move to it (≈ |delta| × points) and roomToRisk',
+  'against the stop from here. TAKE a late entry only when the room to the obstacle or to the next target clearly pays for the',
+  'stop from the current price AND the trend still supports the direction. Your first reason must state the room (e.g. "room 85',
+  'pts to 54500 call wall ≈ ₹42 premium vs ₹30 risk"). room.missing lists what we could NOT read: never treat a missing input as',
+  '"no room" — say it is unknown and judge on the inputs that are present.',
   'A block marked unavailable means we failed to look — not that the market is quiet.',
   'Reply with ONLY a JSON object: {"verdict":"TAKE"|"SKIP","confidence":1-100,"reasons":[short strings,',
   'most important first],"entry":number|null,"sl":number|null,"targets":[numbers],"lots":integer|null}.',

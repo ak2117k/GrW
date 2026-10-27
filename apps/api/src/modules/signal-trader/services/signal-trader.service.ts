@@ -16,7 +16,8 @@ import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, tr
 import { SIGNAL_READY, SIGNAL_UPDATE, type SignalReadyEvent, type SignalUpdateEvent, type SignalView } from '../domain/signal.types';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
-import { SignalContextService } from './signal-context.service';
+import { SignalContextService, type CtxBlock } from './signal-context.service';
+import { lateRoom, type LateRoom } from '../domain/late-entry';
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
 import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
@@ -353,16 +354,38 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       if (armed) return armed;
       const failed = pg.gate.checks.find((x) => x.name === pg.gate.skipReason);
       // Paper asks the judge on every planned call, so each SKIP still carries its OI / level / trend read.
-      const judged = this.cfg.mode === 'paper' && pg.plan ? (await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday)).record : null;
+      const judged = this.cfg.mode === 'paper' && pg.plan ? (await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday, base.c)).record : null;
       return this.skip(decisionId, pg.gate.skipReason ?? 'gate', failed?.detail ?? '', pg.gate.checks, judged, pg.plan, channel, what);
     }
-    const j = await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday);
+    const j = await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday, base.c);
     if (!j.ok) return this.skip(decisionId, j.reason, j.detail, pg.gate.checks, j.record, pg.plan, channel, what);
     return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, j, base);
   }
 
+  /** A late entry's room, from the packet's own level book + chain blocks and the option's delta. Never throws. */
+  private async lateRoomFor(s: SignalView, plan: EntryPlan, market: Record<string, CtxBlock>, contract: ResolvedContract | null, owner: string | null, now: Date): Promise<LateRoom> {
+    const val = (b: CtxBlock | undefined) => (b && b.status === 'present' && b.value && typeof b.value === 'object' ? (b.value as Record<string, unknown>) : {});
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+    const st = val(market.structure);
+    const ch = val(market.chain);
+    const delta = contract ? await this.context.optionDelta({ signal: s, contract, ownerUserId: owner, now }).catch(() => null) : null;
+    return lateRoom({
+      kind: s.instrumentKind,
+      side: plan.side,
+      ltp: plan.ltp,
+      sl: plan.sl,
+      targets: plan.targets,
+      spot: num(st.spot),
+      nearestSupport: num(st.nearestSupport),
+      nearestResistance: num(st.nearestResistance),
+      callWall: num(ch.callWall),
+      putWall: num(ch.putWall),
+      delta,
+    });
+  }
+
   /** The AI judge on a plan. Never throws (an unavailable judge = SKIP). */
-  private async runJudge(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date, plan: EntryPlan, tradesToday: number | null): Promise<JudgeOutcome> {
+  private async runJudge(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date, plan: EntryPlan, tradesToday: number | null, contract?: ResolvedContract | null): Promise<JudgeOutcome> {
     const cfg = this.cfg;
     const owner = cfg.ownerUserId;
     const what = describeSignal(s);
@@ -397,6 +420,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         lots: plan.lots,
         qty: plan.qty,
         riskRupees: plan.riskRupees,
+        late: plan.late ? { ...plan.late, room: await this.lateRoomFor(s, plan, market, contract ?? null, owner, now) } : null,
       },
       caps: { maxLots: cfg.maxLots, maxLossPerTrade: cfg.maxLossPerTrade, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
       market,

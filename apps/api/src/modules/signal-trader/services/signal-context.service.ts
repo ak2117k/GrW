@@ -133,25 +133,8 @@ export class SignalContextService {
     const kind = s.instrumentKind;
     const option = kind === 'CE' || kind === 'PE';
     const ownUnderlying = kind === 'EQ' || (kind === 'FUT' && i.contract.exchange === 'MCX');
-    let delta: number | null = null;
-    if (!ownUnderlying && this.chain && option) {
-      try {
-        const c = await withTimeout(this.chain.latestChain(s.underlying), BLOCK_TIMEOUT_MS);
-        const age = c ? i.now.getTime() - c.capturedAt.getTime() : Infinity;
-        if (c && age <= 30 * 60_000 && c.expiry === i.contract.expiry && s.strike !== null) {
-          const row = c.strikes.find((r) => Math.abs(r.strike - (s.strike as number)) < 1e-6);
-          const leg = kind === 'CE' ? row?.ce : row?.pe;
-          delta = typeof leg?.delta === 'number' && Number.isFinite(leg.delta) ? leg.delta : null;
-        }
-      } catch (err) {
-        this.logger.warn(`[signal-context] chain snapshot for engine SL (${s.underlying}): ${errText(err)}`);
-      }
-    }
     const { spot, source: spotSource } = await this.underlyingSpot({ underlying: s.underlying, exchange: i.contract.exchange, own: ownUnderlying, price: i.price, ownerUserId: i.ownerUserId, now: i.now });
-    // No greeks from a snapshot: the broker's own optionGreek for this expiry (NFO/BFO; MCX has none).
-    if (option && delta === null && spot !== null && i.contract.exchange !== 'MCX' && i.contract.expiry && s.strike !== null) {
-      delta = await this.brokerDelta(s.underlying, i.contract.expiry, s.strike, kind as 'CE' | 'PE', i.ownerUserId);
-    }
+    const delta = option && spot !== null ? await this.optionDelta({ signal: s, contract: i.contract, ownerUserId: i.ownerUserId, now: i.now }) : null;
     const lv = spot !== null ? await this.nearestLevels(s.underlying, kind, spot, i.ownerUserId) : null;
     const base = {
       kind,
@@ -180,6 +163,30 @@ export class SignalContextService {
     // Futures with no usable level: 1 × the contract's own daily ATR(14).
     const atr = await this.dailyAtr(i.ownerUserId, i.contract, i.now);
     return explain(atr ? deriveEngineSl({ ...base, atr }) : first);
+  }
+
+  /**
+   * The option's delta (signed as read): a chain snapshot of the same expiry ≤ 30 min old, else the
+   * broker's optionGreek for that expiry (NFO / BFO; MCX has none). null for a non-option. Never throws.
+   */
+  async optionDelta(i: { signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'strike'>; contract: ResolvedContract; ownerUserId: string | null; now: Date }): Promise<number | null> {
+    const s = i.signal;
+    const kind = s.instrumentKind;
+    if ((kind !== 'CE' && kind !== 'PE') || s.strike === null) return null;
+    if (this.chain) {
+      try {
+        const c = await withTimeout(this.chain.latestChain(s.underlying), BLOCK_TIMEOUT_MS);
+        if (c && i.now.getTime() - c.capturedAt.getTime() <= 30 * 60_000 && c.expiry === i.contract.expiry) {
+          const row = c.strikes.find((r) => Math.abs(r.strike - (s.strike as number)) < 1e-6);
+          const leg = kind === 'CE' ? row?.ce : row?.pe;
+          if (typeof leg?.delta === 'number' && Number.isFinite(leg.delta)) return leg.delta;
+        }
+      } catch (err) {
+        this.logger.warn(`[signal-context] chain snapshot delta (${s.underlying}): ${errText(err)}`);
+      }
+    }
+    if (i.contract.exchange === 'MCX' || !i.contract.expiry) return null;
+    return this.brokerDelta(s.underlying, i.contract.expiry, s.strike, kind, i.ownerUserId);
   }
 
   /**

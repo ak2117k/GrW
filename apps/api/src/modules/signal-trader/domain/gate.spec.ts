@@ -106,12 +106,53 @@ describe('signal gate', () => {
     expect(r.skipReason).toBe('sl_side');
   });
 
-  it('no chasing: LTP above the ABOVE band → SKIP; not yet reached → SKIP', () => {
-    expect(run(facts({ ltp: 104 })).skipReason).toBe('entry_tolerance');
+  it('SIGNAL_LATE_ENTRY=off: LTP above the ABOVE band → SKIP; not yet reached → SKIP', () => {
+    expect(run(facts({ ltp: 104 }), cfg({ lateEntry: false })).skipReason).toBe('entry_tolerance');
     const r = run(facts({ ltp: 99 }));
     expect(r.skipReason).toBe('entry_tolerance');
     expect(r.checks.find((c) => c.name === 'entry_tolerance')?.detail).toMatch(/not reached/);
     expect(entryBand({ entryType: 'RANGE', entryLow: 95, entryHigh: 100 }, 3)).toEqual({ low: 95, high: 100 });
+  });
+
+  describe('late entry (the price already ran past the channel\'s entry)', () => {
+    it('plans at the current price, records the chase as a warning, keeps only the targets ahead', () => {
+      // Paper: the wider stop from 125 (₹2.6k on one lot) is a risk_cap warning there; live would refuse it.
+      const r = run(facts({ ltp: 125 }), cfg({ mode: 'paper' }));
+      expect(r.checks.find((c) => c.name === 'risk_cap')).toMatchObject({ ok: false, required: false });
+      expect(r.pass).toBe(true);
+      const tol = r.checks.find((c) => c.name === 'entry_tolerance');
+      expect(tol).toMatchObject({ ok: false, required: false });
+      expect(tol?.detail).toMatch(/late: LTP 125 is 25% past the channel's 100/);
+      expect(r.plan).toMatchObject({ ltp: 125, bandLow: 125, sl: 90, targets: [140], late: { channelEntry: 100, chasePct: 25, targetsPassed: [120] } });
+      expect(r.plan!.limitPrice).toBeGreaterThanOrEqual(125);
+      expect(r.plan!.limitPrice).toBeLessThanOrEqual(r.plan!.bandHigh);
+    });
+
+    it('more than SIGNAL_LATE_MAX_PCT past it is still a SKIP (the move is done, or the contract is wrong)', () => {
+      const r = run(facts({ ltp: 150 }), cfg({ lateMaxPct: 40 }));
+      expect(r.skipReason).toBe('entry_tolerance');
+      expect(r.checks.find((c) => c.name === 'entry_tolerance')?.detail).toMatch(/> 40% — the move is done/);
+      expect(r.plan).toBeNull();
+    });
+
+    it('a late BUY whose channel SL the price already fell through on the way is refused by sl_side', () => {
+      // AT 100, SL 110 (nonsense for a buy) and the price ran to 120: the stop is above the price.
+      const r = run(facts({ ltp: 120, signal: signal({ entryType: 'AT', sl: 125 }) }));
+      expect(r.skipReason).toBe('sl_side');
+      expect(r.plan).toBeNull();
+    });
+
+    it('a SELL is late when the price already fell past its entry', () => {
+      const r = run(facts({ ltp: 90, signal: signal({ side: 'SELL', instrumentKind: 'FUT', entryType: 'AT', sl: 105, targets: [95, 80] }) }));
+      expect(r.pass).toBe(true);
+      expect(r.plan).toMatchObject({ bandHigh: 90, targets: [80], late: { channelEntry: 100, chasePct: 10, targetsPassed: [95] } });
+    });
+
+    it('a not-reached ABOVE entry is never late (it waits as a trigger)', () => {
+      const r = run(facts({ ltp: 99 }));
+      expect(r.plan).toBeNull();
+      expect(r.checks.find((c) => c.name === 'entry_tolerance')?.detail).toMatch(/not reached/);
+    });
   });
 
   it('the marketable LIMIT stays inside the band', () => {
@@ -195,8 +236,8 @@ describe('signal gate', () => {
       expect(r.pass).toBe(true);
     });
 
-    it('a chased entry still fails in paper (no fill at the called price)', () => {
-      expect(run(facts({ ltp: 130 }), cfg({ mode: 'paper' })).skipReason).toBe('entry_tolerance');
+    it('a chased entry past SIGNAL_LATE_MAX_PCT still fails in paper', () => {
+      expect(run(facts({ ltp: 150 }), cfg({ mode: 'paper' })).skipReason).toBe('entry_tolerance');
     });
   });
 

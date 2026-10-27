@@ -49,6 +49,7 @@ import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.mod
 import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-executor.module';
 import { MbmModule } from './modules/mbm/mbm.module';
 import { NightReportModule } from './modules/night-report/night-report.module';
+import { SignalBoardModule } from './modules/signal-board/signal-board.module';
 import { LevelBreakLogModule } from './modules/level-break-log/level-break-log.module';
 import { OvernightScorecardModule } from './modules/overnight-scorecard/overnight-scorecard.module';
 import { SelfReviewModule } from './modules/self-review/self-review.module';
@@ -267,6 +268,8 @@ import { SignalTraderModule } from './modules/signal-trader/signal-trader.module
     // Night report: one read-only morning page (GET /api/night-report) over the
     // night since the last NSE close. Reads only.
     NightReportModule,
+    // The Signals page: a session's night setups / ideas + the day's Telegram calls and watches. Reads only.
+    SignalBoardModule,
     // NIFTY level-break research log (OI around each break + follow-through); inert for trading.
     LevelBreakLogModule,
     // Overnight scorecard + news ideas (SCORECARD_ENABLED / NEWS_IDEAS_ENABLED, default off).

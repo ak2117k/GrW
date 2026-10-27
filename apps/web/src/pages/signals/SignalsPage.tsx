@@ -34,13 +34,15 @@ import AutoTradeDiagnostic from '@/components/trading/AutoTradeDiagnostic';
 import { useSignals } from '@/hooks/useSignals';
 import { useSignalStore } from '@/stores/signal-store';
 import AsymmetricEdgeTab from './AsymmetricEdgeTab';
+import SignalBoardTab from './SignalBoardTab';
 
 type ViewMode = 'grid' | 'table';
 
-type SignalsTab = 'signals' | 'asymmetric';
+type SignalsTab = 'today' | 'signals' | 'asymmetric';
 
 const SIGNALS_TABS: { key: SignalsTab; label: string }[] = [
-  { key: 'signals', label: 'Signals' },
+  { key: 'today', label: 'Today' },
+  { key: 'signals', label: 'Scanner' },
   { key: 'asymmetric', label: 'Asymmetric Edge' },
 ];
 
@@ -53,7 +55,7 @@ export default function SignalsPage() {
   const newSignalIds = useSignalStore((s) => s.newSignalIds);
 
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
-  const [activeTab, setActiveTab] = useState<SignalsTab>('signals');
+  const [activeTab, setActiveTab] = useState<SignalsTab>('today');
   const [detailSignal, setDetailSignal] = useState<TradeSignal | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
 
@@ -225,7 +227,7 @@ export default function SignalsPage() {
           <div>
             <h1 className="text-xl font-bold text-gray-100">Trade Signals</h1>
             <p className="text-xs text-gray-500">
-              AI-generated opportunities with entry, target, and stoploss levels
+              Night analysis, Telegram calls and breakout watches, with entry, stop and targets
             </p>
           </div>
         </div>
@@ -297,6 +299,8 @@ export default function SignalsPage() {
           </button>
         ))}
       </div>
+
+      {activeTab === 'today' && <SignalBoardTab />}
 
       {activeTab === 'asymmetric' && <AsymmetricEdgeTab />}
 

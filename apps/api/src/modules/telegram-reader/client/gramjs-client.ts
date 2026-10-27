@@ -198,14 +198,17 @@ function mediaInfo(media: Api.TypeMessageMedia | undefined): TgMediaInfo | null 
 }
 
 /** Bytes of the photo at size `sizeType`, or of the whole document; null when Telegram returns none. */
-async function downloadOf(client: TelegramClient, m: Api.Message, sizeType: string | null): Promise<Buffer | null> {
-  let thumb: Api.TypePhotoSize | undefined;
+export async function downloadOf(client: TelegramClient, m: Api.Message, sizeType: string | null): Promise<Buffer | null> {
   if (sizeType !== null) {
     const photo = m.media instanceof Api.MessageMediaPhoto && m.media.photo instanceof Api.Photo ? m.media.photo : null;
-    thumb = photo?.sizes?.find((s) => 'type' in s && s.type === sizeType);
-    if (!thumb) return null;
+    if (!photo?.sizes?.some((s) => 'type' in s && s.type === sizeType)) return null;
   }
-  const out = await client.downloadMedia(m, thumb ? { thumb } : {});
+  // The size by its TYPE string, never the size object: GramJS's getThumb (telegram@2.26) accepts a
+  // PhotoSize / Cached / Stripped / Video object but not a PhotoSizeProgressive one, and then returns
+  // Buffer.alloc(0) — every photo whose chosen size was progressive came back "empty download" (prod
+  // 2026-10-26/27: 128 images). The string branch matches every size type, progressive included.
+  // The .d.ts types `thumb` as number | PhotoSize, but downloads.js getThumb has a `typeof thumb == "string"` branch.
+  const out = await client.downloadMedia(m, sizeType !== null ? { thumb: sizeType as unknown as number } : {});
   return Buffer.isBuffer(out) ? out : null;
 }
 

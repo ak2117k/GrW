@@ -366,7 +366,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       JOIN signal_message_classes sc ON sc.message_id = m.id
       WHERE m."hasMedia" AND m."postedAt" >= ${since}
         AND m."rawPayload"->'media'->>'skipped' = 'empty download'
-        AND (m."rawPayload"->'media'->>'backfillTried') IS NULL
+        AND (m."rawPayload"->'media'->>'backfillV2') IS NULL
         AND sc.status IN ('NOISE', 'LLM_SKIPPED')
       ORDER BY m."postedAt" DESC
       LIMIT ${limit}`;
@@ -375,7 +375,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
       if (!this.enabled.has(r.tgChannelId)) continue;
       const raw = (r.rawPayload && typeof r.rawPayload === 'object' && !Array.isArray(r.rawPayload) ? r.rawPayload : {}) as Record<string, unknown>;
       const prev = (raw.media && typeof raw.media === 'object' ? raw.media : {}) as Record<string, unknown>;
-      let media: Record<string, unknown> = { ...prev, backfillTried: true, backfilledAt: now.toISOString() };
+      let media: Record<string, unknown> = { ...prev, backfillTried: true, backfillV2: true, backfilledAt: now.toISOString() };
       let ref: TelegramMediaRef | null = null;
       try {
         const m = await c.messageById(r.tgChannelId, r.tgMessageId);
@@ -383,7 +383,7 @@ export class TelegramListenerService implements OnApplicationBootstrap, OnModule
         else {
           const fetched = await this.fetchMedia(m, r.channelId, r.postedAt);
           if (fetched) {
-            media = { ...fetched.stored, backfillTried: true, backfilledAt: now.toISOString() };
+            media = { ...fetched.stored, backfillTried: true, backfillV2: true, backfilledAt: now.toISOString() };
             ref = fetched.ref;
           }
         }

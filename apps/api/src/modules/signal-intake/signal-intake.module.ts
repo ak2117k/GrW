@@ -32,6 +32,7 @@ import {
 import { SIGNAL_INFO_LLM, SIGNAL_LLM, SignalParseLlmService } from './services/signal-parse-llm.service';
 import { SIGNAL_VISION, SignalVisionService } from './services/signal-vision.service';
 import { SignalVocabularyService } from './services/signal-vocabulary.service';
+import { SignalWatchService } from './services/signal-watch.service';
 import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig } from './signal-intake.config';
 
 /**
@@ -98,6 +99,7 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
     SignalIntakeService,
     SignalOutcomeService,
     SignalIntakeCron,
+    SignalWatchService,
   ],
   exports: [SignalIntakeService, SIGNAL_INTAKE_CONFIG],
 })

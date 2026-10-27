@@ -25,7 +25,7 @@ export interface NewSignal {
   channelId: string;
   receivedAt: Date;
   sessionDate: string;
-  parser: 'rule' | 'llm';
+  parser: 'rule' | 'llm' | 'watch';
   underlying: string;
   instrumentKind: string;
   strike: number | null;
@@ -381,5 +381,39 @@ export class SignalIntakeRepository {
         outcomeFilledAt: now,
       },
     });
+  }
+
+  // ─── Watched breakout levels (signal_watches) ─────────────────────────────
+
+  /** INFO rows posted since `since` that have no watch row yet (the watcher turns their WATCH items into watches). */
+  async infosWithoutWatches(since: Date): Promise<Array<{ messageId: string; channelId: string; postedAt: Date; items: unknown }>> {
+    const rows = await this.prisma.channelInfo.findMany({
+      where: { postedAt: { gte: since } },
+      select: { messageId: true, channelId: true, postedAt: true, items: true },
+      orderBy: { postedAt: 'asc' },
+      take: 500,
+    });
+    if (rows.length === 0) return [];
+    const seen = await this.prisma.signalWatch.findMany({ where: { messageId: { in: rows.map((r) => r.messageId) } }, select: { messageId: true } });
+    const done = new Set(seen.map((s) => s.messageId));
+    return rows.filter((r) => !done.has(r.messageId));
+  }
+
+  async createWatches(rows: Prisma.SignalWatchCreateManyInput[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    return (await this.prisma.signalWatch.createMany({ data: rows, skipDuplicates: true })).count;
+  }
+
+  activeWatches() {
+    return this.prisma.signalWatch.findMany({ where: { status: 'ACTIVE' }, orderBy: { postedAt: 'asc' }, take: 200 });
+  }
+
+  async updateWatch(id: string, data: Prisma.SignalWatchUpdateInput): Promise<void> {
+    await this.prisma.signalWatch.update({ where: { id }, data });
+  }
+
+  async postText(messageId: string): Promise<string> {
+    const m = await this.prisma.telegramMessage.findUnique({ where: { id: messageId }, select: { rawText: true } });
+    return m?.rawText ?? '';
   }
 }

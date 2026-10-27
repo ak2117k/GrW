@@ -93,7 +93,8 @@ export interface TelegramMediaRef {
 
 export interface SignalReadyEvent {
   signalId: string;
-  clusterId: string;
+  /** null for a watch-fired signal (no cluster of channel calls behind it). */
+  clusterId: string | null;
   agreeCount: number;
   conflict: boolean;
 }

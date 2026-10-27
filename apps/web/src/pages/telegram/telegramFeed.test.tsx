@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { callLine, classLabel, FILTERS, lagLabel, whyLine, type FeedItem } from './telegramFeed';
+import { callLine, classLabel, FILTERS, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
 import { TelegramFeedView } from './TelegramFeedView';
 
 const base: FeedItem = {
@@ -84,5 +84,16 @@ describe('TelegramFeedView', () => {
 
   it('says so when nothing matches', () => {
     expect(renderToStaticMarkup(<TelegramFeedView items={[]} />)).toContain('No messages');
+  });
+});
+
+describe('watchLine', () => {
+  const w = { underlying: 'RADICO', side: 'BUY', level: 4330, status: 'ACTIVE', lastLtp: 4312, decision: null, skipReason: null };
+  it('says what a watch is doing in plain words', () => {
+    expect(watchLine(w)).toBe('watching RADICO above 4330 (last 4312)');
+    expect(watchLine({ ...w, status: 'FIRED', decision: 'PAPER' })).toBe('RADICO crossed 4330 → paper trade');
+    expect(watchLine({ ...w, status: 'FIRED' })).toBe('RADICO crossed 4330 → waiting for a trade decision');
+    expect(watchLine({ ...w, status: 'EXPIRED' })).toBe('RADICO above 4330: not crossed, watch expired');
+    expect(watchLine({ ...w, side: 'SELL', lastLtp: null })).toBe('watching RADICO below 4330');
   });
 });

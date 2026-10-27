@@ -113,7 +113,7 @@ export class TelegramRepository {
       SELECT m.id, m."channelId" AS channel_id, ch.title AS channel, m."postedAt" AS posted_at, m."receivedAt" AS received_at,
              m."rawText" AS raw_text, m."hasMedia" AS has_media, c.status, c.reason, c.parser,
              s.tradingsymbol, s.side, s.entry_type, s.entry_low, s.entry_high, s.sl, s.targets,
-             d.decision, d.skip_reason, d.mode
+             d.decision, d.skip_reason, d.mode, w.watches
       FROM telegram_messages m
       JOIN telegram_channels ch ON ch.id = m."channelId"
       LEFT JOIN signal_message_classes c ON c.message_id = m.id
@@ -121,6 +121,16 @@ export class TelegramRepository {
       LEFT JOIN LATERAL (
         SELECT decision, skip_reason, mode FROM signal_decisions WHERE signal_id = s.id ORDER BY evaluation DESC LIMIT 1
       ) d ON true
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object(
+                 'underlying', sw.underlying, 'side', sw.side, 'level', sw.level, 'status', sw.status, 'lastLtp', sw.last_ltp,
+                 'decision', wd.decision, 'skipReason', wd.skip_reason) ORDER BY sw.item_index) AS watches
+        FROM signal_watches sw
+        LEFT JOIN LATERAL (
+          SELECT decision, skip_reason FROM signal_decisions WHERE signal_id = sw.signal_id ORDER BY evaluation DESC LIMIT 1
+        ) wd ON true
+        WHERE sw.message_id = m.id
+      ) w ON true
       WHERE true ${byChannel} ${byStatus}
       ORDER BY m."postedAt" DESC
       LIMIT ${limit}`;
@@ -152,6 +162,8 @@ export interface FeedRow {
   decision: string | null;
   skip_reason: string | null;
   mode: string | null;
+  /** json_agg of signal_watches (null when the post has none). */
+  watches?: unknown;
 }
 
 export interface FeedItem {
@@ -180,6 +192,33 @@ export interface FeedItem {
     skipReason: string | null;
     mode: string | null;
   } | null;
+  /** Breakout levels from this post being watched (signal_watches), with the trade decision once one fired. */
+  watches: FeedWatch[];
+}
+
+export interface FeedWatch {
+  underlying: string;
+  side: string;
+  level: number;
+  status: string;
+  lastLtp: number | null;
+  decision: string | null;
+  skipReason: string | null;
+}
+
+function feedWatches(v: unknown): FeedWatch[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((w): w is Record<string, unknown> => !!w && typeof w === 'object' && typeof (w as { underlying?: unknown }).underlying === 'string')
+    .map((w) => ({
+      underlying: String(w.underlying),
+      side: String(w.side ?? ''),
+      level: Number(w.level),
+      status: String(w.status ?? ''),
+      lastLtp: num(w.lastLtp),
+      decision: typeof w.decision === 'string' ? w.decision : null,
+      skipReason: typeof w.skipReason === 'string' ? w.skipReason : null,
+    }));
 }
 
 const num = (v: unknown): number | null => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -213,5 +252,6 @@ export function toFeedItem(r: FeedRow): FeedItem {
           mode: r.mode,
         }
       : null,
+    watches: feedWatches(r.watches),
   };
 }

@@ -3432,6 +3432,35 @@ model ChannelInfo {
   @@map("channel_infos")
 }
 
+/// A breakout level a channel posted ("Radico breakout above 4330"), watched on the underlying's LTP
+/// until it is crossed (→ a trade_signals row + signal.ready, judged like any call) or expires (owner 2026-10-27).
+model SignalWatch {
+  id          String    @id @default(cuid())
+  messageId   String    @map("message_id") // telegram_messages.id of the post
+  itemIndex   Int       @map("item_index") // which channel_infos item
+  channelId   String    @map("channel_id")
+  postedAt    DateTime  @map("posted_at") @db.Timestamptz(6)
+  underlying  String
+  instrumentKind String @map("instrument_kind") // EQ (stock) | FUT (index / commodity)
+  side        String // BUY (breakout above) | SELL (breakdown below)
+  level       Float
+  exchange    String? // the underlying's quote line
+  token       String?
+  status      String    @default("ACTIVE") // ACTIVE | FIRED | EXPIRED | INVALID
+  reason      String?
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(6)
+  lastLtp     Float?    @map("last_ltp")
+  lastCheckAt DateTime? @map("last_check_at") @db.Timestamptz(6)
+  firedAt     DateTime? @map("fired_at") @db.Timestamptz(6)
+  signalId    String?   @map("signal_id") // trade_signals.id created when it fired
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([messageId, itemIndex])
+  @@index([status, expiresAt])
+  @@map("signal_watches")
+}
+
 // ─── News impact (2026-10-24): cluster → classify → relevance → batched cheap-LLM impact → reactions ───
 
 /// One story across sources (layer 1). Coverage (sourceCount) is a feature. Boilerplate never goes further.

@@ -4,7 +4,7 @@ import type { SignalTraderConfig } from './signal-trader.config';
 
 /** `ai_calls.job` label of the signal judge. */
 export const SIGNAL_JUDGE_JOB = 'signal.judge';
-export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v3';
+export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v4';
 
 const NULLABLE_NUMBER = { anyOf: [{ type: 'number' }, { type: 'null' }] } as const;
 
@@ -48,6 +48,9 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'stop from the current price AND the trend still supports the direction. Your first reason must state the room (e.g. "room 85',
   'pts to 54500 call wall ≈ ₹42 premium vs ₹30 risk"). room.missing lists what we could NOT read: never treat a missing input as',
   '"no room" — say it is unknown and judge on the inputs that are present.',
+  'signal.text starting "[watch fired: …]" = a level a channel posted as INFORMATION ("X breakout above 4330") was just crossed;',
+  'it is not a direct call, the entry is the breakout and plan.sl sits just beyond that level (a failed breakout). Judge whether',
+  'the breakout is real (volume, trend, the next resistance) before trusting it.',
   'A block marked unavailable means we failed to look — not that the market is quiet.',
   'Reply with ONLY a JSON object: {"verdict":"TAKE"|"SKIP","confidence":1-100,"reasons":[short strings,',
   'most important first],"entry":number|null,"sl":number|null,"targets":[numbers],"lots":integer|null}.',

@@ -39,6 +39,7 @@ describe('toFeedItem', () => {
       reason: 'info: entity, level',
       parser: null,
       call: null,
+      watches: [],
     });
   });
 
@@ -86,5 +87,17 @@ describe('TelegramRepository.feed', () => {
     expect(items.map((i) => i.id)).toEqual(['m1', 'm2']);
     // Tagged-template call: [strings, ...values]; the clamped limit is the last value.
     expect(prisma.$queryRaw.mock.calls[0].slice(1)).toContain(300);
+  });
+});
+
+describe('toFeedItem — watches', () => {
+  it('carries the post\'s watched breakout levels; junk rows are dropped', () => {
+    const item = toFeedItem({
+      id: 'm1', channel_id: 'c1', channel: 'Stock Gainers', posted_at: new Date('2026-10-27T06:22:00Z'), received_at: new Date('2026-10-27T06:22:05Z'),
+      raw_text: 'Radico breakout above 4330', has_media: false, status: 'INFO', reason: 'watch: breakout (1 name)', parser: 'rule',
+      tradingsymbol: null, side: null, entry_type: null, entry_low: null, entry_high: null, sl: null, targets: null, decision: null, skip_reason: null, mode: null,
+      watches: [{ underlying: 'RADICO', side: 'BUY', level: 4330, status: 'FIRED', lastLtp: 4336, decision: 'PAPER', skipReason: null }, { junk: true }],
+    });
+    expect(item.watches).toEqual([{ underlying: 'RADICO', side: 'BUY', level: 4330, status: 'FIRED', lastLtp: 4336, decision: 'PAPER', skipReason: null }]);
   });
 });

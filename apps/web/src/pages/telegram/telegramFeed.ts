@@ -29,6 +29,39 @@ export interface FeedItem {
   reason: string | null;
   parser: string | null;
   call: FeedCall | null;
+  /** Breakout levels from this post being watched; absent from an older API. */
+  watches?: FeedWatch[];
+}
+
+/** A watched breakout level ("Radico breakout above 4330") and, once crossed, the trade decision. */
+export interface FeedWatch {
+  underlying: string;
+  side: string;
+  level: number;
+  status: string;
+  lastLtp: number | null;
+  decision: string | null;
+  skipReason: string | null;
+}
+
+/** "watching RADICO above 4330 (last 4312)" / "RADICO crossed 4330 → paper trade" / "… expired". */
+export function watchLine(w: FeedWatch): string {
+  const dir = w.side === 'SELL' ? 'below' : 'above';
+  if (w.status === 'ACTIVE') return `watching ${w.underlying} ${dir} ${w.level}${w.lastLtp !== null ? ` (last ${w.lastLtp})` : ''}`;
+  if (w.status === 'FIRED') {
+    const what = !w.decision
+      ? 'waiting for a trade decision'
+      : w.decision === 'SKIP'
+        ? `skipped: ${skipLabel(w.skipReason)}`
+        : w.decision === 'PAPER'
+          ? 'paper trade'
+          : w.decision === 'TAKE'
+            ? 'taken'
+            : w.decision.toLowerCase();
+    return `${w.underlying} crossed ${w.level} → ${what}`;
+  }
+  if (w.status === 'EXPIRED') return `${w.underlying} ${dir} ${w.level}: not crossed, watch expired`;
+  return `${w.underlying} ${w.level}: not watched (no price line)`;
 }
 
 export async function getTelegramFeed(params: { channelId?: string; status?: string[]; limit?: number } = {}): Promise<FeedItem[]> {

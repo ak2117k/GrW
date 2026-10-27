@@ -3265,6 +3265,7 @@ model SignalDecision {
   plan        Json?
   decision    String? // TAKE | SKIP | PAPER (TAKE the account could not fund → paper trade; plan.paper)
   skipReason  String?   @map("skip_reason")
+  aiCheck     Json?     @map("ai_check") // learning mode: the closed paper trade held against the judge's call (domain/ai-check)
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 

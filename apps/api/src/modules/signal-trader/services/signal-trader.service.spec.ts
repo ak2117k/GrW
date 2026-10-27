@@ -147,6 +147,34 @@ describe('SignalTraderService', () => {
       expect(t.repo.decisions[0].judge).toMatchObject({ verdict: 'SKIP' });
     });
 
+    describe('learning mode (SIGNAL_PAPER_LEARN=on)', () => {
+      const skipJudge = async () => ({ ok: true, verdict: { ...takeVerdict, verdict: 'SKIP', reasons: ['PCR against'] }, latencyMs: 5 });
+
+      it('a judge SKIP is still paper-traded, the AI call kept as aiDecision, no stop on the trade', async () => {
+        const t = build({ cfg: { mode: 'paper', paperLearn: true }, judge: skipJudge });
+        const r = await t.svc.evaluate(ev);
+        expect(r?.decision).toBe('PAPER');
+        expect(t.paper.open).toHaveBeenCalledTimes(1);
+        expect((t.paper.open.mock.calls[0] as any[])[0].plan).toMatchObject({ learn: true });
+        expect(t.repo.decisions[0].judge).toMatchObject({ verdict: 'SKIP', aiDecision: 'SKIP', learnTaken: true, reasons: ['PCR against'] });
+      });
+
+      it('a TAKE is traded as TAKE; an unavailable judge is NONE; the risk check goes out tagged learn', async () => {
+        const take = build({ cfg: { mode: 'paper', paperLearn: true } });
+        await take.svc.evaluate(ev);
+        expect(take.repo.decisions[0].judge).toMatchObject({ aiDecision: 'TAKE' });
+        expect((take.risk.validateTrade.mock.calls[0] as any[])[0]).toMatchObject({ isPaper: true, entryTags: ['learn'] });
+        const none = build({ cfg: { mode: 'paper', paperLearn: true }, judge: async () => ({ ok: false, reason: 'judge_unavailable', detail: 'timeout', latencyMs: 120000 }) });
+        expect((await none.svc.evaluate(ev))?.decision).toBe('PAPER');
+        expect(none.repo.decisions[0].judge).toMatchObject({ aiDecision: 'NONE' });
+      });
+
+      it('live and shadow never learn', async () => {
+        const t = build({ cfg: { mode: 'shadow', paperLearn: true }, judge: skipJudge });
+        expect((await t.svc.evaluate(ev))?.decision).toBe('SKIP');
+      });
+    });
+
     it('a failed hard check with a plan still asks the judge (its read is recorded on the SKIP)', async () => {
       killOn = true;
       const t = build({ cfg: { mode: 'paper' } });

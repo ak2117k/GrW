@@ -503,6 +503,21 @@ export class SignalTraderRepository {
     }) as Promise<PaperTradeRow[]>;
   }
 
+  /** The judge record of a decision (learning mode reads its aiDecision when the trade closes). */
+  async decisionJudge(decisionId: string): Promise<unknown> {
+    return (await this.prisma.signalDecision.findUnique({ where: { id: decisionId }, select: { judge: true } }))?.judge ?? null;
+  }
+
+  async recordAiCheck(decisionId: string, check: unknown): Promise<void> {
+    await this.prisma.signalDecision.update({ where: { id: decisionId }, data: { aiCheck: check as Prisma.InputJsonValue } });
+  }
+
+  /** Stored AI checks since `since` (the learning-mode scorecard). */
+  async aiChecksSince(since: Date): Promise<unknown[]> {
+    const rows = await this.prisma.signalDecision.findMany({ where: { createdAt: { gte: since }, aiCheck: { not: Prisma.DbNull } }, select: { aiCheck: true }, take: 1000 });
+    return rows.map((r) => r.aiCheck);
+  }
+
   paperDecisionsSince(since: Date) {
     return this.prisma.signalDecision.findMany({ where: { decision: 'PAPER', createdAt: { gte: since } }, orderBy: { createdAt: 'desc' }, take: 200 });
   }

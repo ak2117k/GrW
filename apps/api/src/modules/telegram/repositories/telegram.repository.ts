@@ -1,3 +1,4 @@
+import { aiScorecard, type AiCheck, type AiScorecard } from '../../signal-trader/domain/ai-check';
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -113,7 +114,7 @@ export class TelegramRepository {
       SELECT m.id, m."channelId" AS channel_id, ch.title AS channel, m."postedAt" AS posted_at, m."receivedAt" AS received_at,
              m."rawText" AS raw_text, m."hasMedia" AS has_media, c.status, c.reason, c.parser,
              s.tradingsymbol, s.side, s.entry_type, s.entry_low, s.entry_high, s.sl, s.targets,
-             d.decision, d.skip_reason, d.mode, d.judge_reasons, d.judge_confidence, w.watches
+             d.decision, d.skip_reason, d.mode, d.judge_reasons, d.judge_confidence, d.ai_check, w.watches
       FROM telegram_messages m
       JOIN telegram_channels ch ON ch.id = m."channelId"
       LEFT JOIN signal_message_classes c ON c.message_id = m.id
@@ -122,7 +123,7 @@ export class TelegramRepository {
         SELECT decision, skip_reason, mode,
                -- The AI judge's own reasons (a SKIP and a TAKE alike): the owner reads why to fix the judge.
                CASE WHEN jsonb_typeof(judge->'reasons') = 'array' THEN judge->'reasons' END AS judge_reasons,
-               (judge->>'effectiveConfidence') AS judge_confidence
+               (judge->>'effectiveConfidence') AS judge_confidence, ai_check
         FROM signal_decisions WHERE signal_id = s.id ORDER BY evaluation DESC LIMIT 1
       ) d ON true
       LEFT JOIN LATERAL (
@@ -140,9 +141,31 @@ export class TelegramRepository {
       LIMIT ${limit}`;
     return rows.map(toFeedItem);
   }
+
+  /** Learning mode: how often the AI judge's call matched the paper result, over the last `days`. */
+  async aiScorecard(days: number): Promise<AiScorecard & { days: number }> {
+    const since = new Date(Date.now() - Math.max(1, Math.min(days, 90)) * 86_400_000);
+    const rows = await this.prisma.signalDecision.findMany({ where: { createdAt: { gte: since }, aiCheck: { not: Prisma.DbNull } }, select: { aiCheck: true }, take: 2000 });
+    return { ...aiScorecard(rows.map((x) => asAiCheck(x.aiCheck))), days };
+  }
 }
 
 const FEED_MAX = 300;
+
+function asAiCheck(v: unknown): AiCheck | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const d = o.aiDecision === 'TAKE' || o.aiDecision === 'SKIP' || o.aiDecision === 'NONE' ? o.aiDecision : null;
+  if (!d) return null;
+  return {
+    aiDecision: d,
+    movePct: Number(o.movePct) || 0,
+    pnl: Number(o.pnl) || 0,
+    exitTag: String(o.exitTag ?? ''),
+    correct: o.correct === true ? true : o.correct === false ? false : null,
+    at: String(o.at ?? ''),
+  };
+}
 
 /** One raw row of {@link TelegramRepository.feed} (snake_case as selected). */
 export interface FeedRow {
@@ -169,6 +192,7 @@ export interface FeedRow {
   /** json_agg of signal_watches (null when the post has none). */
   watches?: unknown;
   judge_reasons?: unknown;
+  ai_check?: unknown;
   judge_confidence?: string | number | null;
 }
 
@@ -200,6 +224,8 @@ export interface FeedItem {
     /** The AI judge's reasons (most important first) and its confidence; [] / null when no judge ran. */
     judgeReasons: string[];
     judgeConfidence: number | null;
+    /** Learning mode: the closed paper trade held against the judge's call (null until it closes). */
+    aiCheck: AiCheck | null;
   } | null;
   /** Breakout levels from this post being watched (signal_watches), with the trade decision once one fired. */
   watches: FeedWatch[];
@@ -261,6 +287,7 @@ export function toFeedItem(r: FeedRow): FeedItem {
           mode: r.mode,
           judgeReasons: Array.isArray(r.judge_reasons) ? r.judge_reasons.filter((x): x is string => typeof x === 'string').slice(0, 6) : [],
           judgeConfidence: num(r.judge_confidence),
+          aiCheck: asAiCheck(r.ai_check),
         }
       : null,
     watches: feedWatches(r.watches),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { callLine, classLabel, FILTERS, judgeHeading, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
+import { aiLine, callLine, classLabel, FILTERS, judgeHeading, lagLabel, scorecardLine, watchLine, whyLine, type FeedItem } from './telegramFeed';
 import { TelegramFeedView } from './TelegramFeedView';
 
 const base: FeedItem = {
@@ -105,5 +105,18 @@ describe('judgeHeading', () => {
     expect(judgeHeading({ ...call, decision: 'PAPER', skipReason: null, judgeReasons: ['OI supports'], judgeConfidence: null })).toBe('AI judge:');
     expect(judgeHeading({ ...call, judgeReasons: [] })).toBeNull();
     expect(judgeHeading(call)).toBeNull();
+  });
+});
+
+describe('AI judge check (learning mode)', () => {
+  it('says what the AI said, what the paper trade did, and whether the AI was right', () => {
+    expect(aiLine({ aiDecision: 'SKIP', movePct: 3.2, pnl: 1240, exitTag: 'HIT_TARGET', correct: false, at: '' })).toBe('AI said SKIP · paper +3.2% (target) → AI was wrong');
+    expect(aiLine({ aiDecision: 'TAKE', movePct: -1.1, pnl: -400, exitTag: 'TIME_EXIT', correct: false, at: '' })).toBe('AI said TAKE · paper -1.1% (time exit) → AI was wrong');
+    expect(aiLine({ aiDecision: 'NONE', movePct: 0.4, pnl: 30, exitTag: 'TIME_EXIT', correct: null, at: '' })).toBe('AI gave no verdict · paper +0.4% (time exit) → not scored');
+  });
+  it('the scorecard header', () => {
+    const base = { days: 14, scored: 0, right: 0, wrong: 0, accuracyPct: null, takeRight: 0, takeWrong: 0, skipRight: 0, skipWrong: 0, unscored: 0 };
+    expect(scorecardLine(base)).toMatch(/no closed paper trades scored yet/);
+    expect(scorecardLine({ ...base, scored: 12, right: 7, wrong: 5, accuracyPct: 58, takeRight: 4, takeWrong: 2, skipRight: 3, skipWrong: 3 })).toBe('AI judge check, last 14 days: 7 right / 5 wrong (58%) · TAKE 4✓ 2✗ · SKIP 3✓ 3✗');
   });
 });

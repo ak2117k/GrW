@@ -20,9 +20,11 @@ const DECISION_TAG = 'decision:';
 const HORIZON_TAG = 'horizon:';
 
 /** `horizon` (BTST / POSITIONAL) is tagged so the exit watcher knows a carried trade's rules. */
-export function paperTags(decisionId: string, horizon?: SignalHorizon): string[] {
+export function paperTags(decisionId: string, horizon?: SignalHorizon, learn = false): string[] {
   const tags = ['telegram-signal', 'no-funds', `${DECISION_TAG}${decisionId}`];
   if (horizon && horizon !== 'INTRADAY') tags.push(`${HORIZON_TAG}${horizon}`);
+  // 'learn' = the learning-mode track (no stop, no account caps; trade-engine LEARNING_PAPER_TAG).
+  if (learn) tags.push('learn');
   return tags;
 }
 

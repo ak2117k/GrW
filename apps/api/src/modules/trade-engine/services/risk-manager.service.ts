@@ -24,6 +24,12 @@ import { formatTradeRejection } from '../../../common/utils/trade-rejection-log'
  * The string is signal-trader's SIGNAL_PAPER_STRATEGY; kept literal so trade-engine does not import it.
  */
 export const ISOLATED_PAPER_STRATEGIES: ReadonlySet<string> = new Set(['TELEGRAM_SIGNAL_NO_FUNDS']);
+/** The entry tag of a learning-mode Telegram paper trade (no stop, no account caps). */
+export const LEARNING_PAPER_TAG = 'learn';
+
+export function isLearningPaper(r: Pick<ExecuteTradeDto, 'isPaper' | 'strategy'> & { entryTags?: string[] }): boolean {
+  return r.isPaper === true && !!r.strategy && ISOLATED_PAPER_STRATEGIES.has(r.strategy) && (r.entryTags ?? []).includes(LEARNING_PAPER_TAG);
+}
 
 /**
  * Risk Manager Service
@@ -73,6 +79,11 @@ export class RiskManagerService {
         reason,
       };
     }
+
+    // The Telegram paper LEARNING track (owner 2026-10-27, for some days): every call is paper-traded
+    // to test the AI judge, so the account caps (daily loss, positions, capital) do not apply to it.
+    // Paper only, its own isolated strategy, tagged 'learn'; the kill switch above still applies.
+    if (isLearningPaper(request)) return { allowed: true };
 
     const settings = await this.settingsService.getSettings();
 

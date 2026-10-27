@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap, type OnModuleDestroy } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
-import { RiskManagerService } from '../../trade-engine/services/risk-manager.service';
+import { LEARNING_PAPER_TAG, RiskManagerService } from '../../trade-engine/services/risk-manager.service';
 import type { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
 import { isLiveTradingEnabled } from '../../trade-engine/live-trading';
 import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
@@ -14,7 +14,7 @@ import { slEnforceability } from '../domain/execution';
 import { skipAlert, takeAlert, triggerArmedAlert, triggerFiredAlert, updateAlert } from '../domain/alerts';
 import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, triggerOf } from '../domain/trigger';
 import { SIGNAL_READY, SIGNAL_UPDATE, type SignalReadyEvent, type SignalUpdateEvent, type SignalView } from '../domain/signal.types';
-import type { SignalTraderConfig } from '../domain/signal-trader.config';
+import { learning, type SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService, type CtxBlock } from './signal-context.service';
 import { lateRoom, type LateRoom } from '../domain/late-entry';
@@ -115,7 +115,8 @@ export interface PendingTrigger {
 export function judgeFromRecord(rec: unknown, agreeCount: number, conflict: boolean): JudgeTake | null {
   if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return null;
   const r = rec as Record<string, unknown>;
-  if (r.verdict !== 'TAKE') return null;
+  // A learning-mode trigger was armed whatever the judge said (learnTake).
+  if (r.verdict !== 'TAKE' && r.learnTaken !== true) return null;
   const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   const verdict: JudgeVerdict = {
     verdict: 'TAKE',
@@ -127,6 +128,35 @@ export function judgeFromRecord(rec: unknown, agreeCount: number, conflict: bool
     lots: n(r.lots),
   };
   return { ok: true, verdict, effectiveConfidence: n(r.effectiveConfidence) ?? verdict.confidence, agreeCount, conflict, record: rec, judgedAt: typeof r.judgedAt === 'string' ? r.judgedAt : '' };
+}
+
+/**
+ * PAPER learning mode: the call is traded whatever the judge said. The AI's own call is kept on the
+ * record as `aiDecision` (TAKE / SKIP, or NONE when the judge was unavailable) with its reasons, so the
+ * closed trade can be scored against it (domain/ai-check).
+ */
+export function learnTake(j: JudgeOutcome, agreeCount: number, conflict: boolean, now: Date): JudgeTake {
+  if (j.ok) return { ...j, record: { ...(j.record as Record<string, unknown>), aiDecision: 'TAKE', learnTaken: true } };
+  const rec = j.record && typeof j.record === 'object' && !Array.isArray(j.record) ? (j.record as Record<string, unknown>) : {};
+  const judged = rec.verdict === 'TAKE' || rec.verdict === 'SKIP';
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  return {
+    ok: true,
+    verdict: {
+      verdict: 'SKIP',
+      confidence: n(rec.confidence) ?? 0,
+      reasons: Array.isArray(rec.reasons) ? rec.reasons.filter((x): x is string => typeof x === 'string') : [],
+      entry: null,
+      sl: null,
+      targets: [],
+      lots: null,
+    },
+    effectiveConfidence: n(rec.effectiveConfidence) ?? n(rec.confidence) ?? 0,
+    agreeCount,
+    conflict,
+    record: { ...rec, aiDecision: judged ? 'SKIP' : 'NONE', aiSkipReason: j.reason, learnTaken: true },
+    judgedAt: typeof rec.judgedAt === 'string' ? rec.judgedAt : now.toISOString(),
+  };
 }
 
 /** Re-evaluations allowed for one signal (a low-confidence SKIP upgraded by corroboration). */
@@ -358,6 +388,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       return this.skip(decisionId, pg.gate.skipReason ?? 'gate', failed?.detail ?? '', pg.gate.checks, judged, pg.plan, channel, what);
     }
     const j = await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday, base.c);
+    if (learning(this.cfg)) return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, learnTake(j, e.agreeCount ?? 1, e.conflict === true, now), base);
     if (!j.ok) return this.skip(decisionId, j.reason, j.detail, pg.gate.checks, j.record, pg.plan, channel, what);
     return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, j, base);
   }
@@ -442,7 +473,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const owner = cfg.ownerUserId;
     const what = describeSignal(s);
     const v = j.verdict;
-    const tightened = applyJudgeTightening(plan, { sl: v.sl, lots: v.lots }, s.instrumentKind);
+    // Learning mode trades the plan as built (no stop, fixed size): the judge's tightening does not apply.
+    const tightened = plan.learn ? { plan, changed: [] as string[] } : applyJudgeTightening(plan, { sl: v.sl, lots: v.lots }, s.instrumentKind);
     const finalPlan = tightened.plan;
     const judgeWithChanges = { ...(j.record as Record<string, unknown>), tightened: tightened.changed };
     const { agreeCount, conflict } = j;
@@ -537,8 +569,9 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     }
     const trigger: TriggerState = { ...trig, armedAt: now.toISOString(), expiresAt: expiresAt.toISOString(), judgedAt: null, lastLtp: base.ltp, lastCheckAt: now.toISOString() };
     const planAtTrigger: EntryPlan = { ...hyp.plan, trigger };
-    const j = await this.runJudge(decisionId, s, e, channel, now, planAtTrigger, base.tradesToday);
-    if (!j.ok) return this.skip(decisionId, j.reason, j.detail, hyp.gate.checks, j.record, planAtTrigger, channel, what);
+    const judged = await this.runJudge(decisionId, s, e, channel, now, planAtTrigger, base.tradesToday);
+    if (!judged.ok && !learning(cfg)) return this.skip(decisionId, judged.reason, judged.detail, hyp.gate.checks, judged.record, planAtTrigger, channel, what);
+    const j: JudgeTake = judged.ok && !learning(cfg) ? judged : learnTake(judged, e.agreeCount ?? 1, e.conflict === true, now);
     trigger.judgedAt = j.judgedAt;
     const checks: GateCheck[] = [
       ...hyp.gate.checks.map((c) => (c.name === 'entry_tolerance' ? { ...c, ok: null, required: true, detail: `waiting for ${trig.op} ${trig.price} (LTP ${base.ltp}); band [${trig.bandLow}, ${trig.bandHigh}]` } : c)),
@@ -646,6 +679,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       } else {
         j = { ...p.judge, record: { ...(p.judge.record as Record<string, unknown>), reused: true } };
       }
+      if (learning(this.cfg)) return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, learnTake(j, p.event.agreeCount ?? 1, p.event.conflict === true, now), base);
       if (!j.ok) return this.skip(p.decisionId, j.reason, j.detail, pg.gate.checks, j.record, plan, p.channel, what);
       return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, j, base);
     } catch (err) {
@@ -798,7 +832,12 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
    */
   private riskDto(plan: EntryPlan, decisionId: string): ExecuteTradeDto {
     if (this.cfg.mode === 'paper') {
-      return { ...this.liveRiskDto(plan, decisionId), isPaper: true, strategy: SIGNAL_PAPER_STRATEGY } as unknown as ExecuteTradeDto;
+      return {
+        ...this.liveRiskDto(plan, decisionId),
+        isPaper: true,
+        strategy: SIGNAL_PAPER_STRATEGY,
+        ...(plan.learn ? { entryTags: [LEARNING_PAPER_TAG] } : {}),
+      } as unknown as ExecuteTradeDto;
     }
     return this.liveRiskDto(plan, decisionId);
   }

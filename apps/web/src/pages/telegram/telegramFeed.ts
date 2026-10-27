@@ -16,6 +16,50 @@ export interface FeedCall {
   /** The AI judge's reasons, most important first (absent from an older API / no judge ran). */
   judgeReasons?: string[];
   judgeConfidence?: number | null;
+  /** Learning mode: the closed paper trade held against the judge's call. */
+  aiCheck?: AiCheck | null;
+}
+
+export interface AiCheck {
+  aiDecision: 'TAKE' | 'SKIP' | 'NONE';
+  movePct: number;
+  pnl: number;
+  exitTag: string;
+  correct: boolean | null;
+  at: string;
+}
+
+export interface AiScorecard {
+  days: number;
+  scored: number;
+  right: number;
+  wrong: number;
+  accuracyPct: number | null;
+  takeRight: number;
+  takeWrong: number;
+  skipRight: number;
+  skipWrong: number;
+  unscored: number;
+}
+
+export async function getAiScorecard(days = 14): Promise<AiScorecard> {
+  return (await api.get<AiScorecard>('/telegram/ai-scorecard', { params: { days } })).data;
+}
+
+const EXIT: Record<string, string> = { HIT_TARGET: 'target', STOPPED_OUT: 'stop', TIME_EXIT: 'time exit' };
+
+/** "AI said SKIP · paper +3.2% (target) → AI was wrong". */
+export function aiLine(c: AiCheck): string {
+  const said = c.aiDecision === 'NONE' ? 'AI gave no verdict' : `AI said ${c.aiDecision}`;
+  const move = `${c.movePct >= 0 ? '+' : ''}${c.movePct}%`;
+  const verdict = c.correct === null ? 'not scored' : c.correct ? 'AI was right' : 'AI was wrong';
+  return `${said} · paper ${move} (${EXIT[c.exitTag] ?? c.exitTag.toLowerCase()}) → ${verdict}`;
+}
+
+/** "AI judge check, last 14 days: 7 right / 5 wrong (58%) · TAKE 4✓ 2✗ · SKIP 3✓ 3✗". */
+export function scorecardLine(s: AiScorecard): string {
+  if (s.scored === 0) return `AI judge check (learning mode, last ${s.days} days): no closed paper trades scored yet`;
+  return `AI judge check, last ${s.days} days: ${s.right} right / ${s.wrong} wrong (${s.accuracyPct}%) · TAKE ${s.takeRight}✓ ${s.takeWrong}✗ · SKIP ${s.skipRight}✓ ${s.skipWrong}✗`;
 }
 
 /** "AI judge (82%):" heading for the reasons list, or null when the judge gave none. */

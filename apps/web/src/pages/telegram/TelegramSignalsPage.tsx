@@ -11,7 +11,7 @@ import {
 import { useTelegramScorecard } from '@/hooks/useTelegramScorecard';
 import { cn } from '@/utils/cn';
 import type { ChannelScorecard } from '@/types';
-import { FILTERS, getTelegramFeed } from './telegramFeed';
+import { FILTERS, getAiScorecard, getTelegramFeed, scorecardLine } from './telegramFeed';
 import { TelegramFeedView } from './TelegramFeedView';
 
 type BoardRow = ChannelScorecard & Record<string, unknown>;
@@ -34,6 +34,8 @@ export default function TelegramSignalsPage() {
     enabled: tab === 'feed',
   });
   const { scorecards, channels, isLoading: boardLoading } = useTelegramScorecard();
+  // Learning mode: the AI judge's calls held against the paper results.
+  const scorecard = useQuery({ queryKey: ['telegram', 'ai-scorecard'], queryFn: () => getAiScorecard(14), refetchInterval: 60_000, enabled: tab === 'feed' });
 
   const boardCols: Column<BoardRow>[] = [
     { key: 'title', header: 'Channel' },
@@ -78,6 +80,9 @@ export default function TelegramSignalsPage() {
 
       {tab === 'feed' ? (
         <>
+          {scorecard.data && (
+            <p className="rounded border border-gray-700/60 bg-gray-800/40 px-3 py-2 text-sm">{scorecardLine(scorecard.data)}</p>
+          )}
           <div className="flex flex-wrap items-center gap-2">
             {FILTERS.map((f) => (
               <button key={f.key} onClick={() => setFilter(f.key)} className={chip(filter === f.key)}>

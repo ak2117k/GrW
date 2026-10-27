@@ -176,6 +176,14 @@ describe('RiskManagerService — trade-rejection logging', () => {
       expect((await svc.validateTrade({ ...tgPaper, positionType: 'DELIVERY' } as any)).reason).toMatch(/Max concurrent positions reached: 2\/2/);
     });
 
+    it('a learning-mode paper trade (tagged learn) skips the account caps; untagged or live never does', async () => {
+      const mod = await buildModule({ settings, openTrades: [tg, tg, tg] });
+      const svc = mod.get(RiskManagerService);
+      expect((await svc.validateTrade({ ...tgPaper, entryTags: ['learn'] } as any)).allowed).toBe(true);
+      expect((await svc.validateTrade(tgPaper as any)).allowed).toBe(false);
+      expect((await svc.validateTrade({ ...tgPaper, isPaper: false, entryTags: ['learn'] } as any)).allowed).toBe(false);
+    });
+
     it('the same strategy as a LIVE order is never isolated (counts every open trade)', async () => {
       const mod = await buildModule({ settings, openTrades: [scanner, scanner] });
       const svc = mod.get(RiskManagerService);

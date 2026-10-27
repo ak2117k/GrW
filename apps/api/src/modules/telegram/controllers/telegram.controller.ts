@@ -23,6 +23,9 @@ export class TelegramController {
     return this.repo.listSignals({ channelId, status, limit: Math.min(Number(limit) || 50, 200) });
   }
 
+  /** Learning mode: the AI judge's calls held against the paper results (right / wrong). */
+  @Get('ai-scorecard') aiScorecard(@Query('days') days = '14') { return this.repo.aiScorecard(Number(days) || 14); }
+
   /** Every incoming message with its classification (and call + decision); `status` is a comma list. */
   @Get('feed')
   feed(

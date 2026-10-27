@@ -4,7 +4,9 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
-import { horizonFromTags, paperExitDecision } from '../domain/paper';
+import { decisionIdFromTags, horizonFromTags, paperExitDecision } from '../domain/paper';
+import { aiCheck, aiDecisionOf } from '../domain/ai-check';
+import type { PaperTradeRow } from '../repositories/signal-trader.repository';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
 import {
   SIGNAL_QUOTES,
@@ -88,6 +90,7 @@ export class SignalPaperWatchService {
           await this.exec.closeTrade(t.id, { exitReasonTag: d.tag, reason: d.reason, exitNotes: d.reason, exitPrice: d.price });
           exited += 1;
           this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}): ${d.reason}`);
+          if (t.entryTags.includes('learn')) await this.scoreAi(t, d.price, d.tag, now);
         } else if (ltp !== null && ltp > 0 && t.entryPrice && t.entryPrice > 0) {
           const sign = String(t.side).toUpperCase() === 'BUY' ? 1 : -1;
           const pnl = sign * (ltp - t.entryPrice) * t.quantity;
@@ -98,5 +101,19 @@ export class SignalPaperWatchService {
       }
     }
     return { checked: open.length, exited };
+  }
+
+  /** Learning mode: the closed trade held against the judge's own call (never throws). */
+  private async scoreAi(t: PaperTradeRow, exit: number, tag: string, now: Date): Promise<void> {
+    const decisionId = decisionIdFromTags(t.entryTags);
+    if (!decisionId) return;
+    try {
+      const judge = await this.repo.decisionJudge(decisionId);
+      const check = aiCheck({ aiDecision: aiDecisionOf(judge), side: t.side, entry: t.entryPrice, exit, qty: t.quantity, exitTag: tag, at: now });
+      await this.repo.recordAiCheck(decisionId, check);
+      this.logger.log(`[signal-paper] AI check ${decisionId}: AI said ${check.aiDecision}, move ${check.movePct}% → ${check.correct === null ? 'not scored' : check.correct ? 'RIGHT' : 'WRONG'}`);
+    } catch (err) {
+      this.logger.warn(`[signal-paper] AI check for ${decisionId} failed: ${errText(err)}`);
+    }
   }
 }

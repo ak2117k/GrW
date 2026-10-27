@@ -79,6 +79,7 @@ describe('toFeedItem', () => {
       mode: 'shadow',
       judgeReasons: ['Engine stop risks ₹6900 on one lot'],
       judgeConfidence: 71,
+      aiCheck: null,
     });
   });
 });

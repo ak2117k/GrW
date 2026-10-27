@@ -62,10 +62,11 @@ export class SignalPaperService {
         quantity: p.qty,
         price: p.limitPrice,
         positionType: i.product,
-        stoploss: p.sl,
+        // Learning mode: no stop on the paper trade (plan.sl is only the judge's reference).
+        stoploss: p.learn ? undefined : p.sl,
         target: p.targets[0],
         entryReason: paperEntryReason({ decisionId: i.decisionId, channel: i.channel, what: i.what, plan: p, why: i.why }),
-        entryTags: paperTags(i.decisionId, i.signal.horizon),
+        entryTags: paperTags(i.decisionId, i.signal.horizon, p.learn === true),
         strategy: SIGNAL_PAPER_STRATEGY,
         isPaper: true,
         source: SIGNAL_PAPER_SOURCE,

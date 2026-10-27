@@ -82,7 +82,18 @@ export interface SignalTraderConfig {
   lateEntry: boolean;
   /** Beyond this % past the channel's entry the move is done (or the contract mistyped): SKIP. */
   lateMaxPct: number;
+  /**
+   * PAPER learning mode (owner 2026-10-27, 'for some days'): every call is paper-traded whatever the AI
+   * judge says, with no stop and no risk caps (exit at T1 / the close / the horizon rules), and the
+   * judge's verdict is checked against the result. Paper only; SIGNAL_PAPER_LEARN=off ends it.
+   */
+  paperLearn: boolean;
   problems: string[];
+}
+
+/** Learning mode is on: paper trading with SIGNAL_PAPER_LEARN on. */
+export function learning(cfg: Pick<SignalTraderConfig, 'mode' | 'paperLearn'>): boolean {
+  return cfg.mode === 'paper' && cfg.paperLearn === true;
 }
 
 export const SIGNAL_DEFAULTS = {
@@ -191,6 +202,7 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     engineSlBufferPct: num(env, 'SIGNAL_ENGINE_SL_BUFFER_PCT', SIGNAL_DEFAULTS.engineSlBufferPct, (n) => n >= 0 && n <= 2, problems),
     lateEntry: parseOnOff(env.SIGNAL_LATE_ENTRY, true, 'SIGNAL_LATE_ENTRY', problems),
     lateMaxPct: num(env, 'SIGNAL_LATE_MAX_PCT', SIGNAL_DEFAULTS.lateMaxPct, (n) => n > 0 && n <= 100, problems),
+    paperLearn: parseOnOff(env.SIGNAL_PAPER_LEARN, false, 'SIGNAL_PAPER_LEARN', problems),
     problems,
   };
 }

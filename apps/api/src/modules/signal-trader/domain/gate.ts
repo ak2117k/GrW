@@ -1,4 +1,4 @@
-import type { SignalTraderConfig } from './signal-trader.config';
+import { learning, type SignalTraderConfig } from './signal-trader.config';
 import type { ResolvedContract } from './contract-resolver';
 import type { SignalView } from './signal.types';
 import { lateBand, lateEntryOf, targetsAhead, type LateEntry } from './late-entry';
@@ -31,7 +31,8 @@ export interface EntryPlan {
   /** Always a LIMIT price. */
   limitPrice: number;
   sl: number;
-  slSource: 'signal' | 'engine' | 'judge';
+  /** 'none' = learning mode with no usable stop (sl is then 0, informational only). */
+  slSource: 'signal' | 'engine' | 'judge' | 'none';
   targets: number[];
   lots: number;
   qty: number;
@@ -43,6 +44,8 @@ export interface EntryPlan {
   trigger?: TriggerState;
   /** The price had already run past the channel's entry: planned at the current price (domain/late-entry). */
   late?: LateEntry;
+  /** PAPER learning mode: traded whatever the judge says, with no stop (sl is the judge's reference only). */
+  learn?: boolean;
 }
 
 /** An armed trigger, persisted on SignalDecision.plan.trigger (restart-safe). */
@@ -205,7 +208,8 @@ export function planEntry(
     band = entryBand(s, cfg.entryTolerancePct);
     const inside = ltp >= band.low - 1e-9 && ltp <= band.high + 1e-9;
     const past = inside ? null : lateEntryOf(s, ltp, band);
-    if (past && cfg.lateEntry && past.chasePct <= cfg.lateMaxPct) {
+    // Learning mode tests late calls up to a doubled price (past that the contract is almost surely wrong).
+    if (past && cfg.lateEntry && past.chasePct <= (learning(cfg) ? Math.max(cfg.lateMaxPct, 100) : cfg.lateMaxPct)) {
       // Past the entry on the trade's side: plan from here and let the judge weigh the room left.
       late = past;
       checks.push(check('entry_tolerance', false, `late: LTP ${ltp} is ${past.chasePct}% past the channel's ${past.channelEntry} — planned at the current price, the judge weighs the room left`, false));
@@ -282,7 +286,41 @@ export function planEntry(
     checks.push(check('sl_side', null, 'needs a contract, an in-band LTP and an SL'));
     checks.push(check('risk_cap', null, 'needs a contract, an in-band LTP and an SL'));
   }
-  return { checks, plan };
+  if (!learning(cfg)) return { checks, plan };
+
+  // ---- PAPER learning mode: every priceable call is tested, no stop, no risk cap (the judge only advises) ----
+  const STOP_CHECKS = new Set(['sl_present', 'sl_side', 'risk_cap']);
+  const learnChecks = checks.map((x) => (STOP_CHECKS.has(x.name) && x.ok !== true ? { ...x, required: false, detail: `learning mode (no stop used): ${x.detail}` } : x));
+  if (plan) return { checks: learnChecks, plan: { ...plan, learn: true } };
+  if (!c || !band || ltp === null) return { checks: learnChecks, plan: null };
+  const limit = marketableLimit(s.side, ltp, band, cfg.limitBufferPct, c.tickSize);
+  // The stop the judge reasons about, when one is on the protective side; 0 = none.
+  const refSl = sl !== null && sl > 0 && (s.side === 'BUY' ? sl < limit : sl > limit) ? sl : 0;
+  const qty = s.instrumentKind === 'EQ' ? Math.max(1, Math.floor(cfg.maxNotional / limit)) : c.lotSize;
+  return {
+    checks: learnChecks,
+    plan: {
+      exchange: c.exchange,
+      token: c.token,
+      tradingsymbol: c.tradingsymbol,
+      lotSize: c.lotSize,
+      tickSize: c.tickSize,
+      side: s.side,
+      ltp,
+      bandLow: r2(band.low),
+      bandHigh: r2(band.high),
+      limitPrice: limit,
+      sl: refSl,
+      slSource: refSl > 0 ? slSource : 'none',
+      targets: late ? targetsAhead(s.side, ltp, s.targets) : s.targets.filter((t) => Number.isFinite(t) && t > 0),
+      ...(late ? { late } : {}),
+      lots: s.instrumentKind === 'EQ' ? qty : 1,
+      qty,
+      riskRupees: refSl > 0 ? r2(Math.abs(limit - refSl) * qty) : 0,
+      learn: true,
+      ...(slSource === 'engine' && f.engineSlInfo?.method ? { engineSl: { method: f.engineSlInfo.method, detail: f.engineSlInfo.detail } } : {}),
+    },
+  };
 }
 
 /** Phase 2 (pure): every hard check, in contract order, plus the phase-1 checks. */

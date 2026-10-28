@@ -57,12 +57,27 @@ describe('SCORECARD_TOTAL', () => {
 
 describe('SCORECARD_FACTOR', () => {
   it('one per factor, refId scorecardId:factor; + / − judged, 0 / unavailable null', () => {
-    const out = scoreScorecardFactors(sc({ moveBp: -20 }));
+    const out = scoreScorecardFactors(sc({ moveBp: -40 }));
     const by = Object.fromEntries(out.map((d) => [d.subject, d]));
-    expect(by.oi).toMatchObject({ refId: 'sc1:oi', correct: false, score: -20 });
-    expect(by.vix).toMatchObject({ correct: true, score: 20 });
+    expect(by.oi).toMatchObject({ refId: 'sc1:oi', correct: false, score: -40 });
+    expect(by.vix).toMatchObject({ correct: true, score: 40 }); // NIFTY: VIX votes a direction
     expect(by.mood.correct).toBeNull();
     expect(by.expiry.correct).toBeNull();
+  });
+  it('direction-free factors, VIX on a stock, and moves under 25 bp are not judged (2026-10-28)', () => {
+    const factors = [
+      { name: 'expiry', points: -1, available: true },
+      { name: 'mood', points: 1, available: true },
+      { name: 'vix', points: -1, available: true },
+      { name: 'oi', points: 1, available: true },
+    ];
+    const stock = Object.fromEntries(scoreScorecardFactors(sc({ underlying: 'RELIANCE', symbol: 'RELIANCE27OCT261270CE', factors, moveBp: -60 })).map((d) => [d.subject, d]));
+    expect(stock.expiry).toMatchObject({ correct: null, details: expect.objectContaining({ notJudged: 'direction-free factor' }) });
+    expect(stock.mood).toMatchObject({ correct: null, details: expect.objectContaining({ notJudged: 'direction-free factor' }) });
+    expect(stock.vix).toMatchObject({ correct: null, details: expect.objectContaining({ notJudged: 'no direction vote on a stock' }) });
+    expect(stock.oi).toMatchObject({ correct: false, details: expect.objectContaining({ underlying: 'RELIANCE' }) });
+    const quiet = scoreScorecardFactors(sc({ factors, moveBp: 24 })).find((d) => d.subject === 'oi');
+    expect(quiet).toMatchObject({ correct: null, details: expect.objectContaining({ notJudged: 'move under 25 bp' }) });
   });
   it('judges the RAW points when the factor was tuned', () => {
     const out = scoreScorecardFactors(sc({ factors: [{ name: 'oi', points: 0, rawPoints: 2, weight: 0, available: true }] }));

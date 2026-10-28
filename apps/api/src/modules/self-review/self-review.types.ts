@@ -121,6 +121,8 @@ export interface ProposalEvidence {
   n: number;
   right: number;
   wrong: number;
+  /** Distinct sessions the judged cases came from (absent on proposals before 2026-10-28). */
+  sessions?: number;
   examples: Array<{ refId: string; symbol: string | null; sessionDate: string }>;
 }
 

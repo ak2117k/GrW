@@ -5,6 +5,7 @@
 import type { VerificationDraft } from '../self-review.types';
 
 import { relativeCallCorrect } from '../../mbm/domain/relative-reading';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 
 const r1 = (x: number) => Math.round(x * 10) / 10;
 const r2 = (x: number) => Math.round(x * 100) / 100;
@@ -129,6 +130,25 @@ export function newsConfirmed(factors: readonly StoredFactor[]): boolean | null 
 }
 
 /**
+ * Factors that never vote a direction (overnight-scorecard factors.ts §9): expiry only penalises a long
+ * option's theta, mood is volatility context. Judging them on the underlying's direction measured whether
+ * the TRADE was wrong, not the factor (2026-10-28: "expiry 42 %" was 24 penalties scored as bear calls).
+ */
+export const DIRECTION_FREE_FACTORS: ReadonlySet<string> = new Set(['expiry', 'mood']);
+/** VIX votes a direction only for an index; on a stock option it is vega context. */
+export const INDEX_ONLY_DIRECTION_FACTORS: ReadonlySet<string> = new Set(['vix']);
+/** An open→close move smaller than this is noise, not a verdict (≈ a quiet session's drift). */
+export const MIN_JUDGED_MOVE_BP = 25;
+
+/** Why a factor vote is not judged on this move, or null when it is. */
+export function factorNotJudged(name: string, underlying: string, moveBp: number): string | null {
+  if (DIRECTION_FREE_FACTORS.has(name)) return 'direction-free factor';
+  if (INDEX_ONLY_DIRECTION_FACTORS.has(name) && !(underlying in INDEX_UNDERLYINGS)) return 'no direction vote on a stock';
+  if (!(Math.abs(moveBp) >= MIN_JUDGED_MOVE_BP)) return `move under ${MIN_JUDGED_MOVE_BP} bp`;
+  return null;
+}
+
+/**
  * One draft per factor. Judged on the RAW points (before the self-review weight), so a factor whose
  * weight was cut keeps being measured and can earn its weight back.
  */
@@ -138,7 +158,8 @@ export function scoreScorecardFactors(row: ScorecardRow): VerificationDraft[] {
   const confirmed = newsConfirmed(factors);
   return factors.map((f) => {
     const pts = f.rawPoints ?? f.points;
-    const dir = !f.available || pts === 0 ? 0 : pts > 0 ? 1 : -1;
+    const skip = factorNotJudged(f.name, row.underlying, row.moveBp);
+    const dir = skip || !f.available || pts === 0 ? 0 : pts > 0 ? 1 : -1;
     return {
       sessionDate: row.sessionDate,
       kind: 'SCORECARD_FACTOR' as const,
@@ -157,6 +178,8 @@ export function scoreScorecardFactors(row: ScorecardRow): VerificationDraft[] {
         ...(f.weight !== undefined ? { weight: f.weight } : {}),
         available: f.available,
         moveBp: row.moveBp,
+        underlying: row.underlying,
+        ...(skip ? { notJudged: skip } : {}),
         ...(f.name === 'news' && confirmed !== null ? { newsConfirmed: confirmed } : {}),
       },
     };

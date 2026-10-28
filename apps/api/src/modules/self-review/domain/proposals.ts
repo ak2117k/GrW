@@ -1,10 +1,12 @@
 /**
  * The deterministic proposal engine (contract "Proposals"). The LLM diagnosis may SUGGEST a target
- * and value; this code decides: allow-listed target, value inside the hard bounds, ≥ 5 judged cases
- * of evidence over the rolling window (only from sessions after the key's last APPLIED decision, or
+ * and value; this code decides: allow-listed target, value inside the hard bounds, evidence that passes
+ * {@link evidenceGate} (≥ 5 independent judged cases from ≥ 10 sessions, not a coin flip) over the rolling window (only from sessions after the key's last APPLIED decision, or
  * its last REJECTED one in the same direction), one PENDING per key. Anything else is rejected with a reason.
  */
 import type { ProposalDraft, ProposalEvidence, ProposalStatus, SkillStats } from '../self-review.types';
+import { DIRECTION_FREE_FACTORS, INDEX_ONLY_DIRECTION_FACTORS, MIN_JUDGED_MOVE_BP } from './scorers';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import {
   clampTunable,
   isAllowedTarget,
@@ -111,16 +113,78 @@ function evidenceOf(rows: readonly EvidenceRow[]): ProposalEvidence & { hitRate:
     .filter((r) => r.correct === false)
     .slice(0, 5)
     .map((r) => ({ refId: r.refId, symbol: r.symbol, sessionDate: r.sessionDate }));
-  return { n: judged.length, right, wrong, examples, hitRate: judged.length ? right / judged.length : null };
+  const sessions = new Set(judged.map((r) => r.sessionDate)).size;
+  return { n: judged.length, right, wrong, sessions, examples, hitRate: judged.length ? right / judged.length : null };
+}
+
+/**
+ * A rule may move a tunable only on evidence that is not luck (2026-10-28: three proposals rested on 4–5
+ * sessions, one RELIANCE contract counted 10 times): ≥ MIN_SESSIONS separate sessions and an exact
+ * two-sided binomial test against a coin flip below SIGNIFICANCE.
+ */
+export const MIN_SESSIONS = 10;
+export const SIGNIFICANCE = 0.05;
+
+/** Two-sided exact binomial p-value of `k` successes in `n` trials at p = 0.5. */
+export function binomialP(k: number, n: number): number {
+  if (n <= 0) return 1;
+  const pmf: number[] = [];
+  let p = Math.pow(0.5, n);
+  for (let i = 0; i <= n; i++) {
+    pmf.push(p);
+    p = (p * (n - i)) / (i + 1);
+  }
+  const at = pmf[k];
+  const total = pmf.reduce((s, x) => (x <= at * (1 + 1e-9) ? s + x : s), 0);
+  return Math.min(1, total);
+}
+
+/** Why `ev` cannot move a tunable, or null when it can. */
+export function evidenceGate(ev: { n: number; right: number; sessions?: number }): string | null {
+  if (ev.n < MIN_EVIDENCE) return `only ${ev.n} judged cases (need ${MIN_EVIDENCE})`;
+  if ((ev.sessions ?? 0) < MIN_SESSIONS) return `only ${ev.sessions ?? 0} sessions of evidence (need ${MIN_SESSIONS})`;
+  const p = binomialP(ev.right, ev.n);
+  if (p >= SIGNIFICANCE) return `${ev.right}/${ev.n} is not distinguishable from a coin flip (p ${p.toFixed(2)})`;
+  return null;
+}
+
+/** Factors whose reading is one market-wide value per session: one vote per session, not per symbol. */
+export const MARKET_WIDE_FACTORS: ReadonlySet<string> = new Set(['fii_dii', 'vix']);
+
+/**
+ * Scorecard factor rows as independent evidence: rows the scorer would not judge today dropped (old rows
+ * predate the direction-free / small-move rules), then one vote per (symbol, session) — the overnight and
+ * pre-open windows score the same call twice — or per session for a market-wide factor. A collapsed
+ * vote is its rows' majority; a tie is not judged.
+ */
+export function independentFactorRows(rows: readonly EvidenceRow[]): EvidenceRow[] {
+  const groups = new Map<string, EvidenceRow[]>();
+  for (const r of rows) {
+    if (r.correct === null) continue;
+    const d = det(r);
+    const move = typeof d.moveBp === 'number' ? d.moveBp : NaN;
+    if (r.subject && DIRECTION_FREE_FACTORS.has(r.subject)) continue;
+    if (r.subject && INDEX_ONLY_DIRECTION_FACTORS.has(r.subject) && !(typeof d.underlying === 'string' && d.underlying in INDEX_UNDERLYINGS)) continue;
+    if (Number.isFinite(move) && Math.abs(move) < MIN_JUDGED_MOVE_BP) continue;
+    const k = r.subject && MARKET_WIDE_FACTORS.has(r.subject) ? `${r.subject}|${r.sessionDate}` : `${r.subject}|${r.symbol ?? r.refId}|${r.sessionDate}`;
+    const g = groups.get(k);
+    if (g) g.push(r);
+    else groups.set(k, [r]);
+  }
+  return [...groups.values()].map((g) => {
+    const right = g.filter((r) => r.correct === true).length;
+    const wrong = g.length - right;
+    return g.length === 1 ? g[0] : { ...g[0], correct: right === wrong ? null : right > wrong };
+  });
 }
 
 /** The rows that are evidence for `target` (also used to vet an LLM suggestion). */
 export function evidenceRowsFor(target: string, rows: readonly EvidenceRow[]): EvidenceRow[] {
   for (const f of SCORECARD_WEIGHT_FACTORS) {
-    if (target === weightTarget(f)) return rows.filter((r) => r.kind === 'SCORECARD_FACTOR' && r.subject === f);
+    if (target === weightTarget(f)) return independentFactorRows(rows.filter((r) => r.kind === 'SCORECARD_FACTOR' && r.subject === f));
   }
   if (target === NEWS_CONFIRMATION_TARGET) {
-    return rows.filter((r) => r.kind === 'SCORECARD_FACTOR' && r.subject === 'news' && det(r).newsConfirmed === false);
+    return independentFactorRows(rows.filter((r) => r.kind === 'SCORECARD_FACTOR' && r.subject === 'news' && det(r).newsConfirmed === false));
   }
   if (target === OPENING_GUARD_TARGET) {
     return rows.filter((r) => {
@@ -136,8 +200,8 @@ export function evidenceRowsFor(target: string, rows: readonly EvidenceRow[]): E
 const pct = (x: number | null) => (x === null ? 'n/a' : `${Math.round(x * 100)}%`);
 
 /** The rule-based value for `target` given its evidence, or null when the rules say nothing. */
-function ruleValue(target: string, cur: TunableValue, ev: { n: number; hitRate: number | null }): { value: TunableValue; why: string } | null {
-  if (ev.hitRate === null || ev.n < MIN_EVIDENCE) return null;
+function ruleValue(target: string, cur: TunableValue, ev: { n: number; right: number; sessions?: number; hitRate: number | null }): { value: TunableValue; why: string } | null {
+  if (ev.hitRate === null || evidenceGate(ev)) return null;
   const low = ev.hitRate < LOW_HIT;
   const high = ev.hitRate > HIGH_HIT && ev.n >= STRONG_EVIDENCE;
   if (!low && !high) return null;
@@ -149,7 +213,7 @@ function ruleValue(target: string, cur: TunableValue, ev: { n: number; hitRate: 
   if (typeof cur !== 'number') return null;
   if (target.startsWith('scorecard.factor.')) {
     const v = clampTunable(target, low ? cur * 0.5 : (cur === 0 ? 0.5 : cur * 1.25));
-    return { value: v, why: `rolling-20 hit rate ${pct(ev.hitRate)} over ${ev.n} judged cases → weight ×${low ? '0.5' : '1.25'}` };
+    return { value: v, why: `rolling-20 hit rate ${pct(ev.hitRate)} over ${ev.n} judged cases in ${ev.sessions} sessions (p ${binomialP(ev.right, ev.n).toFixed(3)}) → weight ×${low ? '0.5' : '1.25'}` };
   }
   if (target === OPENING_GUARD_TARGET) {
     return { value: clampTunable(target, low ? cur + 5 : cur - 5), why: `exits in the first ${EARLY_EXIT_MIN} min hit ${pct(ev.hitRate)} over ${ev.n} cases` };
@@ -250,7 +314,7 @@ export function proposeTuning(input: EngineInput): EngineOutput {
       currentValue: cur,
       proposedValue: v.value,
       rationale: why,
-      evidence: { n: ev.n, right: ev.right, wrong: ev.wrong, examples: ev.examples },
+      evidence: { n: ev.n, right: ev.right, wrong: ev.wrong, sessions: ev.sessions, examples: ev.examples },
     });
   };
 
@@ -311,8 +375,9 @@ export function proposeTuning(input: EngineInput): EngineOutput {
     }
     const cut = evidenceCutoff(target, decisions, directionOf(input.current(target), v.value));
     const ev = evidenceOf(evidenceRowsFor(target, after(input.rows, cut)));
-    if (ev.n < MIN_EVIDENCE) {
-      rejected.push({ target, reason: `only ${ev.n} judged cases${cut ? ` after the ${cut} decision` : ''} (need ${MIN_EVIDENCE})` });
+    const gate = evidenceGate(ev);
+    if (gate) {
+      rejected.push({ target, reason: `${gate}${cut ? ` after the ${cut} decision` : ''}` });
       continue;
     }
     add(target, v.value, `diagnosis: ${(s.cause ?? 'suggested').slice(0, 200)} (hit ${pct(ev.hitRate)} over ${ev.n} cases)`, ev);

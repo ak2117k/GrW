@@ -1,23 +1,31 @@
-import { decide, isExpired, mbmPacketRule, proposeTuning, type EvidenceRow, type RunSkill } from './proposals';
+import { binomialP, decide, evidenceGate, independentFactorRows, isExpired, mbmPacketRule, proposeTuning, type EvidenceRow, type RunSkill } from './proposals';
 import { TUNABLES, type TunableValue } from '../tuning/tunables';
 import type { SkillStats } from '../self-review.types';
 
-const factorRows = (name: string, right: number, wrong: number, details: Record<string, unknown> = {}): EvidenceRow[] => [
-  ...Array.from({ length: right }, (_, i) => ({ kind: 'SCORECARD_FACTOR', refId: `${name}-r${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: name, correct: true, details })),
-  ...Array.from({ length: wrong }, (_, i) => ({ kind: 'SCORECARD_FACTOR', refId: `${name}-w${i}`, symbol: 'X', sessionDate: '2026-10-20', subject: name, correct: false, details })),
-];
-const exitRows = (right: number, wrong: number, minutesSinceOpen: number | null = 60): EvidenceRow[] => [
-  ...Array.from({ length: right }, (_, i) => ({ kind: 'LIVE_EXIT', refId: `e-r${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: 'LONG', correct: true, details: { minutesSinceOpen } })),
-  ...Array.from({ length: wrong }, (_, i) => ({ kind: 'LIVE_EXIT', refId: `e-w${i}`, symbol: 'X', sessionDate: '2026-10-21', subject: 'LONG', correct: false, details: { minutesSinceOpen } })),
-];
+/** IST session k days after 2026-09-01 (ISO strings sort like dates). */
+const day = (k: number) => new Date(Date.UTC(2026, 8, 1 + k)).toISOString().slice(0, 10);
+/**
+ * Independent evidence: one symbol per row, spread round-robin over `sessions` sessions from day `from`,
+ * a 50 bp move on NIFTY (judgeable by every rule).
+ */
+const factorRows = (name: string, right: number, wrong: number, details: Record<string, unknown> = {}, from = 0, sessions = 12): EvidenceRow[] =>
+  [...Array(right).fill(true), ...Array(wrong).fill(false)].map((correct, i) => ({
+    kind: 'SCORECARD_FACTOR', refId: `${name}-${from}-${i}`, symbol: `S${i}`, sessionDate: day(from + (i % sessions)), subject: name, correct,
+    details: { moveBp: 50, underlying: 'NIFTY', ...details },
+  }));
+const exitRows = (right: number, wrong: number, minutesSinceOpen: number | null = 60): EvidenceRow[] =>
+  [...Array(right).fill(true), ...Array(wrong).fill(false)].map((correct, i) => ({
+    kind: 'LIVE_EXIT', refId: `e-${i}`, symbol: `S${i}`, sessionDate: day(i % 12), subject: 'LONG', correct, details: { minutesSinceOpen },
+  }));
 const defaults = (over: Record<string, TunableValue> = {}) => (t: string): TunableValue => over[t] ?? (TUNABLES[t].default as TunableValue);
 
 describe('proposeTuning (deterministic)', () => {
-  it('weak factor (rolling-20 hit < 45 %, n ≥ 5) → weight × 0.5', () => {
-    const { drafts } = proposeTuning({ rows: factorRows('news', 1, 5), current: defaults(), pendingKeys: new Set() });
+  it('weak factor (hit < 45 %, ≥ 10 sessions, not a coin flip) → weight × 0.5', () => {
+    const { drafts } = proposeTuning({ rows: factorRows('news', 3, 17), current: defaults(), pendingKeys: new Set() });
     expect(drafts).toHaveLength(1);
     expect(drafts[0]).toMatchObject({ key: 'scorecard.factor.news.weight', target: 'scorecard.factor.news.weight', currentValue: 1, proposedValue: 0.5 });
-    expect(drafts[0].evidence).toMatchObject({ n: 6, right: 1, wrong: 5 });
+    expect(drafts[0].evidence).toMatchObject({ n: 20, right: 3, wrong: 17, sessions: 12 });
+    expect(drafts[0].rationale).toMatch(/20 judged cases in 12 sessions \(p 0\.003\)/);
     expect(drafts[0].evidence.examples.length).toBeLessThanOrEqual(5);
   });
 
@@ -35,36 +43,76 @@ describe('proposeTuning (deterministic)', () => {
   });
 
   it('a silenced factor (weight 0) can earn weight back', () => {
-    expect(proposeTuning({ rows: factorRows('vix', 18, 2), current: defaults({ 'scorecard.factor.vix.weight': 0 }), pendingKeys: new Set() }).drafts[0]).toMatchObject({ proposedValue: 0.5 });
+    expect(proposeTuning({ rows: factorRows('oi', 18, 2), current: defaults({ 'scorecard.factor.oi.weight': 0 }), pendingKeys: new Set() }).drafts[0]).toMatchObject({ proposedValue: 0.5 });
+  });
+
+  describe('evidence that is not luck (2026-10-28: three proposals rested on 4–5 sessions)', () => {
+    it('fewer than 10 sessions → nothing, however lopsided', () => {
+      expect(proposeTuning({ rows: factorRows('news', 3, 17, {}, 0, 5), current: defaults(), pendingKeys: new Set() }).drafts).toEqual([]);
+    });
+    it('a hit rate a coin flip explains → nothing (9 / 21, the prod OI proposal)', () => {
+      expect(proposeTuning({ rows: factorRows('oi', 9, 12), current: defaults(), pendingKeys: new Set() }).drafts).toEqual([]);
+      expect(evidenceGate({ n: 21, right: 9, sessions: 12 })).toMatch(/coin flip/);
+    });
+    it('direction-free factors (expiry, mood) never get a weight proposal from direction evidence', () => {
+      for (const f of ['expiry', 'mood']) expect(proposeTuning({ rows: factorRows(f, 2, 30), current: defaults(), pendingKeys: new Set() }).drafts).toEqual([]);
+    });
+    it('VIX is evidence only on an index; moves under 25 bp are not evidence', () => {
+      expect(proposeTuning({ rows: factorRows('vix', 2, 30, { underlying: 'RELIANCE' }), current: defaults(), pendingKeys: new Set() }).drafts).toEqual([]);
+      expect(proposeTuning({ rows: factorRows('indicators', 2, 30, { moveBp: 20 }), current: defaults(), pendingKeys: new Set() }).drafts).toEqual([]);
+    });
+    it('one vote per (symbol, session): the overnight and pre-open windows of one call count once', () => {
+      const twice = factorRows('oi', 1, 1).map((r) => ({ ...r, symbol: 'RELIANCE27OCT261270CE', sessionDate: day(0) }));
+      expect(independentFactorRows(twice)).toHaveLength(1);
+      expect(independentFactorRows(twice)[0].correct).toBeNull(); // 1 right, 1 wrong: a tie
+    });
+    it('a market-wide factor (FII/DII) is one vote per session, the majority of its rows', () => {
+      const rows = [...factorRows('fii_dii', 9, 2, {}, 0, 1), ...factorRows('fii_dii', 0, 3, {}, 1, 1)];
+      const out = independentFactorRows(rows);
+      expect(out.map((r) => [r.sessionDate, r.correct])).toEqual([[day(0), true], [day(1), false]]);
+    });
+    it('binomialP is the exact two-sided test', () => {
+      expect(binomialP(10, 20)).toBeCloseTo(1, 6);
+      expect(binomialP(3, 20)).toBeCloseTo(0.002577, 5);
+      expect(binomialP(21, 32)).toBeCloseTo(0.1102, 3);
+    });
   });
 
   it('one PENDING per key', () => {
-    const out = proposeTuning({ rows: factorRows('news', 1, 5), current: defaults(), pendingKeys: new Set(['scorecard.factor.news.weight']) });
+    const out = proposeTuning({ rows: factorRows('news', 3, 17), current: defaults(), pendingKeys: new Set(['scorecard.factor.news.weight']) });
     expect(out.drafts).toEqual([]);
     expect(out.rejected[0].reason).toMatch(/pending/);
   });
 
   it('unconfirmed positive news losing → requireConfirmation = true', () => {
-    const rows = factorRows('news', 1, 5, { newsConfirmed: false, points: 1 });
+    const rows = factorRows('news', 3, 17, { newsConfirmed: false, points: 1 });
     const t = proposeTuning({ rows, current: defaults(), pendingKeys: new Set() }).drafts.find((d) => d.target === 'scorecard.factor.news.requireConfirmation');
     expect(t).toMatchObject({ currentValue: false, proposedValue: true });
   });
 
   it('early exits losing → openingGuardMin + 5 (≤ 30); all exits losing → persistMinSec × 1.5 (≤ 600)', () => {
-    const early = proposeTuning({ rows: exitRows(1, 5, 4), current: defaults({ 'exit.openingGuardMin': 28 }), pendingKeys: new Set() }).drafts;
+    const early = proposeTuning({ rows: exitRows(3, 17, 4), current: defaults({ 'exit.openingGuardMin': 28 }), pendingKeys: new Set() }).drafts;
     expect(early.find((d) => d.target === 'exit.openingGuardMin')).toMatchObject({ currentValue: 28, proposedValue: 30 });
     expect(early.find((d) => d.target === 'exit.persistMinSec')).toMatchObject({ currentValue: 120, proposedValue: 180 });
-    const late = proposeTuning({ rows: exitRows(1, 5, 120), current: defaults({ 'exit.persistMinSec': 500 }), pendingKeys: new Set() }).drafts;
+    const late = proposeTuning({ rows: exitRows(3, 17, 120), current: defaults({ 'exit.persistMinSec': 500 }), pendingKeys: new Set() }).drafts;
     expect(late.find((d) => d.target === 'exit.openingGuardMin')).toBeUndefined();
     expect(late.find((d) => d.target === 'exit.persistMinSec')).toMatchObject({ proposedValue: 600 });
   });
 
   describe('LLM suggestions: the code decides', () => {
-    const rows = [...factorRows('mood', 3, 3)]; // 50 %: no rule fires
-    it('accepts an allow-listed, in-bounds suggestion with ≥ 5 judged cases', () => {
-      const out = proposeTuning({ rows, current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: 'scorecard.factor.mood.weight', proposedValue: 0.8, cause: 'mood lags gaps' }] });
-      expect(out.drafts[0]).toMatchObject({ target: 'scorecard.factor.mood.weight', proposedValue: 0.8 });
+    const rows = [...factorRows('mood', 3, 3)]; // direction-free: never evidence
+    // 60 % over 200 cases: no rule fires (45–65 %), but the evidence is not a coin flip.
+    const news = factorRows('news', 120, 80);
+    it('accepts an allow-listed, in-bounds suggestion whose evidence passes the gate', () => {
+      const out = proposeTuning({ rows: news, current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: 'scorecard.factor.news.weight', proposedValue: 1.2, cause: 'news leads gaps' }] });
+      expect(out.drafts[0]).toMatchObject({ target: 'scorecard.factor.news.weight', proposedValue: 1.2 });
       expect(out.drafts[0].rationale).toMatch(/diagnosis/);
+    });
+    it('rejects a suggestion on a direction-free factor (no evidence) or on coin-flip evidence', () => {
+      const mood = proposeTuning({ rows, current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: 'scorecard.factor.mood.weight', proposedValue: 0.8 }] });
+      expect(mood.rejected[0].reason).toMatch(/only 0 judged cases/);
+      const flip = proposeTuning({ rows: factorRows('news', 10, 10), current: defaults(), pendingKeys: new Set(), suggestions: [{ proposalTarget: 'scorecard.factor.news.weight', proposedValue: 0.8 }] });
+      expect(flip.rejected[0].reason).toMatch(/coin flip/);
     });
     it.each([
       ['risk.maxDailyLoss', 1],
@@ -196,35 +244,32 @@ describe('mbm.packet rule (rolling-20 skill verdict, 2 consecutive runs)', () =>
 
 describe('fresh evidence after an owner decision', () => {
   const NEWS = 'scorecard.factor.news.weight';
-  /** `right` / `wrong` news-factor votes on one session. */
-  const on = (sessionDate: string, right: number, wrong: number): EvidenceRow[] =>
-    factorRows('news', right, wrong).map((r) => ({ ...r, sessionDate, refId: `${sessionDate}-${r.refId}` }));
-  // Prod 2026-10-22: 16 judged cases, 44 % hit, almost all before the 10-22 APPLIED 1 → 0.5.
-  const before = [...on('2026-10-15', 3, 4), ...on('2026-10-16', 2, 3), ...on('2026-10-21', 2, 2)];
-  const applied = [{ key: NEWS, status: 'APPLIED' as const, session: '2026-10-22', direction: 'down' }];
+  // 20 losing-news cases over sessions 0–11, then the owner APPLIED 1 → 0.5 on session 12.
+  const before = factorRows('news', 3, 17, {}, 0, 12);
+  const applied = [{ key: NEWS, status: 'APPLIED' as const, session: day(12), direction: 'down' }];
   const at05 = defaults({ [NEWS]: 0.5 });
 
   it('no re-proposal on evidence from before (or on the day of) an APPLIED change', () => {
     // Without the decision the rule would halve again.
     expect(proposeTuning({ rows: before, current: at05, pendingKeys: new Set() }).drafts.find((d) => d.target === NEWS)).toMatchObject({ proposedValue: 0.25 });
-    const out = proposeTuning({ rows: [...before, ...on('2026-10-22', 0, 3)], current: at05, pendingKeys: new Set(), decisions: applied });
+    const out = proposeTuning({ rows: [...before, ...factorRows('news', 0, 3, {}, 12, 1)], current: at05, pendingKeys: new Set(), decisions: applied });
     expect(out.drafts.find((d) => d.target === NEWS)).toBeUndefined();
   });
 
-  it('re-proposes once MIN_EVIDENCE judged cases accrue from later sessions', () => {
-    const thin = proposeTuning({ rows: [...before, ...on('2026-10-23', 1, 3)], current: at05, pendingKeys: new Set(), decisions: applied });
+  it('re-proposes once enough independent evidence accrues from later sessions', () => {
+    const thin = proposeTuning({ rows: [...before, ...factorRows('news', 3, 17, {}, 13, 5)], current: at05, pendingKeys: new Set(), decisions: applied });
     expect(thin.drafts.find((d) => d.target === NEWS)).toBeUndefined();
-    const enough = proposeTuning({ rows: [...before, ...on('2026-10-23', 1, 3), ...on('2026-10-26', 0, 2)], current: at05, pendingKeys: new Set(), decisions: applied });
+    const enough = proposeTuning({ rows: [...before, ...factorRows('news', 3, 17, {}, 13, 12)], current: at05, pendingKeys: new Set(), decisions: applied });
     const d = enough.drafts.find((x) => x.target === NEWS);
     expect(d).toMatchObject({ currentValue: 0.5, proposedValue: 0.25 });
-    expect(d!.evidence).toMatchObject({ n: 6, right: 1, wrong: 5 });
+    expect(d!.evidence).toMatchObject({ n: 20, right: 3, wrong: 17, sessions: 12 });
   });
 
   it('a REJECTED proposal cools down the same direction only, until fresh evidence accrues', () => {
-    const rejected = [{ key: NEWS, status: 'REJECTED' as const, session: '2026-10-21', direction: 'down' }];
+    const rejected = [{ key: NEWS, status: 'REJECTED' as const, session: day(11), direction: 'down' }];
     const stale = proposeTuning({ rows: before, current: defaults(), pendingKeys: new Set(), decisions: rejected });
     expect(stale.drafts.find((d) => d.target === NEWS)).toBeUndefined();
-    const fresh = proposeTuning({ rows: [...before, ...on('2026-10-22', 1, 2), ...on('2026-10-23', 0, 3)], current: defaults(), pendingKeys: new Set(), decisions: rejected });
+    const fresh = proposeTuning({ rows: [...before, ...factorRows('news', 3, 17, {}, 13, 12)], current: defaults(), pendingKeys: new Set(), decisions: rejected });
     expect(fresh.drafts.find((d) => d.target === NEWS)).toMatchObject({ currentValue: 1, proposedValue: 0.5 });
     // A rejected "up" does not hold back a "down".
     const other = proposeTuning({ rows: before, current: defaults(), pendingKeys: new Set(), decisions: [{ ...rejected[0], direction: 'up' }] });
@@ -235,6 +280,6 @@ describe('fresh evidence after an owner decision', () => {
     const s = [{ proposalTarget: NEWS, proposedValue: 0.25, cause: 'news misleads' }];
     const out = proposeTuning({ rows: before, current: at05, pendingKeys: new Set(), decisions: applied, suggestions: s });
     expect(out.drafts).toEqual([]);
-    expect(out.rejected.find((r) => r.target === NEWS)?.reason).toMatch(/0 judged cases after the 2026-10-22 decision/);
+    expect(out.rejected.find((r) => r.target === NEWS)?.reason).toMatch(/only 0 judged cases \(need 5\) after the 2026-09-13 decision/);
   });
 });

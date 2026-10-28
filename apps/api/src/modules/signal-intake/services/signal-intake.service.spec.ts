@@ -549,6 +549,33 @@ describe('SignalIntakeService — INFO / RECAP (owner 2026-10-24)', () => {
     expect(m.mem.infos.get('m1')).toMatchObject({ extractor: 'rule', items: [expect.objectContaining({ underlying: 'SENSEX', bias: null, targetLevel: 80000 })] });
   });
 
+  it('market talk the rules cannot place is NOISE until the cheap LLM calls it INFO (items stored) or not information', async () => {
+    const text = 'Bank nifty driving market up is delusional \n\nThe weakest sector is Bank Nifty now\nFollowed by Reliance';
+    const item = (underlying: string) => ({ underlying, bias: 'BEAR', levels: [], targetLevel: null, oiStrike: null, oiSide: null, oiNote: null, conditionDriver: null, conditionDirection: null, horizon: null });
+    const yes = fakeInfoLlm({ isInfo: true, items: [item('BANKNIFTY'), item('RELIANCE')] });
+    const m = make({ infoLlm: yes.port });
+    await m.svc.handle(m.msg('m1', 'A', text));
+    await flush();
+    await m.svc.handle(m.msg('z', 'A', 'Good night', 1));
+    expect(yes.info).toHaveBeenCalledTimes(1);
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'INFO', parser: 'llm', reason: expect.stringContaining('unsure: names an instrument; llm (llm): 2 item(s)') });
+    expect(m.mem.infos.get('m1')).toMatchObject({ extractor: 'llm', items: [expect.objectContaining({ underlying: 'BANKNIFTY', bias: 'BEAR' }), expect.objectContaining({ underlying: 'RELIANCE', bias: 'BEAR' })] });
+
+    const no = fakeInfoLlm({ isInfo: false, items: [] });
+    const n = make({ infoLlm: no.port });
+    await n.svc.handle(n.msg('m1', 'A', 'Ajao sath me OI sikhte hai'));
+    await flush();
+    await n.svc.handle(n.msg('z', 'A', 'Good night', 1));
+    expect(no.info).toHaveBeenCalledTimes(1);
+    expect(n.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: expect.stringContaining('llm (llm): not information') });
+    expect(n.mem.infos.size).toBe(0);
+
+    const off = make({ infoLlm: yes.port, env: { SIGNAL_INFO_LLM: 'off' } });
+    await off.svc.handle(off.msg('m1', 'A', text));
+    expect(off.mem.classes.get('m1')).toMatchObject({ status: 'NOISE', reason: 'unsure: names an instrument' });
+    expect(yes.info).toHaveBeenCalledTimes(1);
+  });
+
   it('re-classification: stored NOISE / VIEW rows become INFO (+ items) or RECAP once; a second run changes nothing', async () => {
     const { port, info } = fakeInfoLlm();
     const m = make({ infoLlm: port });

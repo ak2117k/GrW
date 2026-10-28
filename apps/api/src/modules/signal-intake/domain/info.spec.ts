@@ -48,6 +48,27 @@ describe('INFO — the owner examples (Stock Wale Bhaiyaa Learning Group, 2026-1
     expect((c as CommentaryClass).items[0]).toMatchObject({ underlying: 'NIFTY', levels: [22480] });
   });
 
+  describe('market talk the rules cannot place is unsure: the cheap LLM decides (2026-10-28)', () => {
+    const unsure = (text: string) => {
+      const c = classify(text);
+      return c !== null && typeof c !== 'string' && c.kind === 'NOISE' && c.unsure === true && c.needsLlm ? c.reason : null;
+    };
+    it.each([
+      ['Bank nifty driving market up is delusional \n\nThe weakest sector is Bank Nifty now\nFollowed by Reliance', 'names an instrument'],
+      ['crude oil down and nifty up .', 'names an instrument'],
+      ['FOCUS ON IT SECTOR ON MONDAY', 'market word (sector)'],
+      ['Bloodbath and as i told, expecting gapdown\n\nNow trailing our position !', 'market word'],
+      ['All almost opened Flat \n\nMust watch for first 30 minutes', 'market word (opened)'],
+    ])('%s', (text, why) => expect(unsure(text)).toContain(why));
+    it('an index level the rules can own is INFO before it gets here ("22720-750 ke liye jayegi")', () => {
+      expect(kindOf('22720-750 ke liye jayegi ab ye \nAap put lene ki sochna jab high se trap karegi')).toBe('INFO');
+    });
+    it.each([['Good morning guys 🙏🏻\nHave a great learning day'], ['ANOTHER FEATHER\n\nBACK TO BACK IN JUST PRIME 💪'], ['MAZADOC'], ['435💥💥💥💥💥📌📌📌']])('stays plain NOISE: %s', (text) => {
+      expect(kindOf(text)).toBe('NOISE');
+      expect(unsure(text)).toBeNull();
+    });
+  });
+
   it('heavy put OI at 22400 acted as support → NIFTY BULL with the OI note', () => {
     const c = classify('Mai khud put lene wala tha   But mai kabhi OI k against nahi jata  22400 pe itna heavy tha k put me ghuse he nahi aur ye natak hua up me toh bach gya');
     expect(c).toMatchObject({ kind: 'INFO', needsLlm: false });

@@ -185,6 +185,7 @@ export class SignalIntakeService {
     }
     if (info) {
       await this.repo.saveClass({ ...base, status: info.kind, reason: info.reason });
+      if (info.unsure) await this.startInfoLlm(evt, postedAt, base, info);
       return;
     }
     if (!pf.pass) {
@@ -408,6 +409,20 @@ export class SignalIntakeService {
   ): Promise<void> {
     const vocab = await this.vocab.get();
     const items: InfoItem[] = reply?.isInfo ? validateInfoItems(reply.items, vocab) : [];
+    if (info.unsure) {
+      // NOISE the rules could not place: the model's answer is the class.
+      if (!reply?.isInfo) {
+        await this.repo.saveClass({ ...base, status: 'NOISE', parser: 'llm', reason: `${info.reason}; llm (${via}): not information`.slice(0, 500) });
+        return;
+      }
+      if (items.length) {
+        await this.repo.saveInfo({
+          messageId: evt.messageId, channelId: evt.channelId, postedAt, sessionDate: istYmd(postedAt), textHash: base.textHash, items, extractor: 'llm', confidence: 0.6, llmReply: reply,
+        });
+      }
+      await this.repo.saveClass({ ...base, status: 'INFO', parser: 'llm', reason: `${info.reason}; llm (${via}): ${items.length} item(s)`.slice(0, 500) });
+      return;
+    }
     const useLlm = items.some(hasBias);
     await this.repo.saveInfo({
       messageId: evt.messageId, channelId: evt.channelId, postedAt, sessionDate: istYmd(postedAt), textHash: base.textHash,
@@ -455,10 +470,16 @@ export class SignalIntakeService {
       await this.repo.saveClass({ ...base, ...keep, status: 'RECAP', reason: info.reason });
       return 'recap';
     }
+    if (info?.unsure && r.status === 'NOISE' && r.parser !== 'vision') {
+      // Market talk the rules could not place: the model decides (inside SIGNAL_INFO_LLM_MAX_AGE_MIN and the daily cap).
+      await this.repo.saveClass({ ...base, ...keep, status: 'NOISE', reason: info.reason });
+      await this.startInfoLlm(evt, r.postedAt, base, info);
+      return 'kept';
+    }
     if (r.status === 'VIEW') {
       // Legacy VIEW is INFO by definition (an image the model called a view stays INFO whatever its caption);
       // a text VIEW that is now an ad / a P&L brag is NOISE.
-      if (info?.kind === 'NOISE' && r.parser !== 'vision') {
+      if (info?.kind === 'NOISE' && !info.unsure && r.parser !== 'vision') {
         await this.repo.saveClass({ ...base, ...keep, status: 'NOISE', reason: info.reason });
         return 'noise';
       }

@@ -79,6 +79,8 @@ export interface CommentaryClass {
   needsLlm: boolean;
   /** Re-run with reference prices (see {@link InfoAnalysis.wantsRefs}). */
   wantsRefs: boolean;
+  /** NOISE the rules could not place but that talks about the market: the cheap LLM decides INFO / NOISE. */
+  unsure?: boolean;
 }
 
 // ─── Lexicon (normalised, upper-case tokens) ────────────────────────────────
@@ -648,7 +650,34 @@ export function classifyCommentary(raw: string, pf: PrefilterResult, vocab: Voca
   if (market) return out('INFO', market.reason, { ...a, items: [market.item] });
   const view = viewReason(pf);
   if (view) return out('INFO', view, a);
+  // A pre-filter positive goes to the LLM parse; anything else would be NOISE by default.
+  const unsure = pf.pass ? null : unsureReason(pf, a);
+  if (unsure) return { ...out('NOISE', unsure, a, true), unsure: true };
   return null;
+}
+
+/** Market words a view is written in that the rule lexicon has no bias or level for. */
+const MARKET_TALK: ReadonlySet<string> = new Set([
+  'SECTOR', 'SECTORS', 'OPEN', 'OPENED', 'OPENING', 'FLAT', 'GAP', 'GAPUP', 'GAPDOWN', 'SUPPORT', 'RESISTANCE',
+  'ABOVE', 'BELOW', 'OI', 'PCR', 'TREND', 'TRENDING', 'WEAKEST', 'STRONGEST', 'OUTPERFORM', 'UNDERPERFORM', 'LISTING', 'IPO',
+]);
+
+/**
+ * Talk about the market the rules could not place ("Bank Nifty is the weakest sector now, followed by
+ * Reliance", "crude oil down and nifty up", "focus on IT sector on Monday"): an instrument, an index
+ * level, or a market word in a post of at least three words. The cheap LLM decides (owner 2026-10-28:
+ * "there are quite information but they are being marked as noise"); without its answer the post stays NOISE.
+ */
+function unsureReason(pf: PrefilterResult, a: InfoAnalysis): string | null {
+  const t = pf.norm.tokens;
+  if (t.filter((w) => /^[A-Z]{2,}$/.test(w)).length < 3) return null;
+  if (pf.underlyings.length > 0 || a.reasons.includes('entity')) return 'unsure: names an instrument';
+  if (levelTokens(t).some((l) => inferIndex(l.v))) return 'unsure: an index level';
+  const text = pf.norm.text;
+  const word = t.find((w) => MARKET_TALK.has(w) || BULL_WORDS.has(w) || BEAR_WORDS.has(w));
+  if (word) return `unsure: market word (${word.toLowerCase()})`;
+  const re = [MARKET_RE, MACRO_RE, CATALYST_RE, WATCH_RE].find((r) => r.test(text));
+  return re ? `unsure: market word (${(text.match(re) as RegExpMatchArray)[0].toLowerCase()})` : null;
 }
 
 /** Stocks named in the post, in order (ambiguous words only beside a contract). */

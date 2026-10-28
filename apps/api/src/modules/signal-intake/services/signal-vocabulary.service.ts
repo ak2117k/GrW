@@ -3,8 +3,11 @@ import { buildVocabulary, type Vocabulary } from '../domain/vocabulary';
 import { SignalIntakeRepository } from '../repositories/signal-intake.repository';
 import type { VocabularySource } from './signal-intake.service';
 
-/** Rebuilt from the instruments table at most this often (the table itself refreshes daily at 08:00 IST). */
-const TTL_MS = 6 * 3_600_000;
+/**
+ * Rebuilt from the instruments table at most this often. The table refreshes at 08:00 IST and adds the
+ * day's new listings at 09:20 (instrument-master-refresh.cron): an hour picks those up before they trade.
+ */
+const TTL_MS = 3_600_000;
 
 /**
  * The pre-filter / parser vocabulary: indices + commodities (static) and every active NSE cash

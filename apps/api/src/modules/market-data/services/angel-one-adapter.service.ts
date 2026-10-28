@@ -1624,7 +1624,9 @@ export class AngelOneAdapterService implements BrokerAdapter {
    * InstrumentMasterRefreshCron to reconcile the local instruments allowlist
    * with the broker's listed universe. Returns the raw Angel One rows.
    */
-  async getInstrumentMaster(): Promise<any[]> {
+  /** `fresh`: drop the cached master and download it again (a listing-day symbol added after the morning load). */
+  async getInstrumentMaster(opts: { fresh?: boolean } = {}): Promise<any[]> {
+    if (opts.fresh && !this.masterCacheLoading) this.masterCacheLoadedAt = 0;
     return this.ensureMasterCache();
   }
 

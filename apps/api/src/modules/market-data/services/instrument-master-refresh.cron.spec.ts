@@ -97,4 +97,27 @@ describe('InstrumentMasterRefreshCron', () => {
       expect(instruments.ensureCoreIndexInstruments).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('listing refresh (09:20 IST): only cash symbols not in the table yet', () => {
+    const master = [
+      { symbol: 'JPL-EQ', token: '766830', name: 'JPL', exch_seg: 'NSE', instrumenttype: '', lotsize: '1', tick_size: '10' },
+      { symbol: 'SAIL-EQ', token: '2963', name: 'SAIL', exch_seg: 'NSE', instrumenttype: '', lotsize: '1', tick_size: '1' },
+    ];
+
+    it('downloads the master fresh and upserts just the new listing', async () => {
+      const instruments = { refreshMaster: jest.fn().mockResolvedValue(1), getByExchangeTokenSync: jest.fn((_e: string, t: string) => (t === '2963' ? { token: t } : null)) } as any;
+      const adapter = { getInstrumentMaster: jest.fn().mockResolvedValue(master) } as any;
+      const n = await new InstrumentMasterRefreshCron(instruments, adapter).refreshListings();
+      expect(adapter.getInstrumentMaster).toHaveBeenCalledWith({ fresh: true });
+      expect(instruments.refreshMaster).toHaveBeenCalledWith([expect.objectContaining({ symbol: 'JPL-EQ', token: '766830', exchange: 'NSE' })]);
+      expect(n).toBe(1);
+    });
+
+    it('nothing new: no write; a failed download never throws', async () => {
+      const instruments = { refreshMaster: jest.fn(), getByExchangeTokenSync: jest.fn(() => ({})) } as any;
+      expect(await new InstrumentMasterRefreshCron(instruments, { getInstrumentMaster: jest.fn().mockResolvedValue(master) } as any).refreshListings()).toBe(0);
+      expect(instruments.refreshMaster).not.toHaveBeenCalled();
+      expect(await new InstrumentMasterRefreshCron(instruments, { getInstrumentMaster: jest.fn().mockRejectedValue(new Error('cdn down')) } as any).refreshListings()).toBe(0);
+    });
+  });
 });

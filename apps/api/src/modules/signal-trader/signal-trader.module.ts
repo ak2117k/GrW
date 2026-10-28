@@ -22,7 +22,7 @@ import { SignalJudgeService } from './services/signal-judge.service';
 import { SignalContextService } from './services/signal-context.service';
 import { SignalExecutorService } from './services/signal-executor.service';
 import { SignalPaperService } from './services/signal-paper.service';
-import { SignalPaperWatchService } from './services/signal-paper-watch.service';
+import { SIGNAL_BARS, SignalPaperWatchService, type BarsLike } from './services/signal-paper-watch.service';
 import {
   SIGNAL_FUNDS,
   SIGNAL_INSTRUMENT_MASTER,
@@ -108,6 +108,17 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
         ltp: async (userId, token, exchange) => {
           const q = await feeds.fetchQuote(userId, token, exchange);
           return q && Number.isFinite(q.ltp) && q.ltp > 0 ? q.ltp : null;
+        },
+      }),
+      inject: [UserFeedManager],
+    },
+    {
+      // The paper exit shadow's noise unit: the contract's 1-min bars (a historical read, never an order).
+      provide: SIGNAL_BARS,
+      useFactory: (feeds: UserFeedManager): BarsLike => ({
+        minuteBars: async (userId, token, exchange, from, to) => {
+          const c = await feeds.fetchCandles(userId, token, exchange, '1m', from, to);
+          return c.map((b) => ({ ts: b.timestamp.getTime(), open: b.open, high: b.high, low: b.low, close: b.close }));
         },
       }),
       inject: [UserFeedManager],

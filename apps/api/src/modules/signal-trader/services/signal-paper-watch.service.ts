@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
@@ -8,6 +8,10 @@ import { decisionIdFromTags, horizonFromTags, paperExitDecision } from '../domai
 import { aiCheck, aiDecisionOf } from '../domain/ai-check';
 import type { PaperTradeRow } from '../repositories/signal-trader.repository';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
+import { emptyShadow, grossPnl, shadowLine, stepShadow, type ShadowParams, type ShadowState } from '../domain/exit-shadow';
+import { NOISE_LOOKBACK_MIN, parseExitDisciplineConfig } from '../../exit-discipline/config';
+import { noiseFromBars } from '../../exit-discipline/noise';
+import type { MinuteBar } from '../../exit-discipline/types';
 import {
   SIGNAL_QUOTES,
   SIGNAL_SESSION_CLOCK,
@@ -18,6 +22,27 @@ import {
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/** 1-min bars of a contract over the owner's own Angel session (the shadow's noise unit). */
+export const SIGNAL_BARS = Symbol('SIGNAL_BARS');
+export interface BarsLike {
+  minuteBars(userId: string, token: string, exchange: string, from: Date, to: Date): Promise<MinuteBar[]>;
+}
+
+/** A noise unit is re-read this often (sooner while it is still unknown). */
+const NOISE_REFRESH_MS = 30 * 60_000;
+const NOISE_RETRY_MS = 5 * 60_000;
+
+interface Shadowed {
+  decisionId: string | null;
+  /** The plan's reference stop (0 / null = none); not shadowed when the trade carries a real stop. */
+  refSl: number | null;
+  baseline: 'learn' | 'stop';
+  state: ShadowState;
+  n: number | null;
+  nMethod: string | null;
+  nAt: number;
+}
 
 /**
  * SL / target exits for the PAPER (no funds) trades. The paper engine has none of its own (the open
@@ -31,6 +56,9 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 export class SignalPaperWatchService {
   private readonly logger = new Logger(SignalPaperWatchService.name);
   private busy = false;
+  /** Paper exit shadow (domain/exit-shadow): per open trade, restored from its TRACK row on first sight. */
+  private readonly shadows = new Map<string, Shadowed>();
+  private readonly shadowParams: ShadowParams;
 
   constructor(
     @Inject(SIGNAL_TRADER_CONFIG) private readonly cfg: SignalTraderConfig,
@@ -39,7 +67,15 @@ export class SignalPaperWatchService {
     private readonly trades: TradeRepository,
     @Inject(SIGNAL_SESSION_CLOCK) private readonly clock: SessionClockLike,
     @Inject(SIGNAL_QUOTES) private readonly quotes: QuotesLike,
-  ) {}
+    @Optional() @Inject(SIGNAL_BARS) private readonly bars?: BarsLike,
+  ) {
+    const d = parseExitDisciplineConfig(process.env);
+    this.shadowParams = { armN: d.floorArmN, trailN: d.floorTrailN, givebackN: d.givebackN };
+  }
+
+  private shadowOn(): boolean {
+    return (process.env.PAPER_EXIT_SHADOW ?? 'on').trim().toLowerCase() !== 'off';
+  }
 
   @Cron('*/30 * * * * *', { timeZone: 'Asia/Kolkata' })
   async tick(): Promise<void> {
@@ -72,6 +108,8 @@ export class SignalPaperWatchService {
       }
       if (!isOpen) continue;
       const ltp = await this.quotes.ltp(owner, inst.token, inst.exchange).catch(() => null);
+      // Shadow first, on the same LTP: a stop crossed on the tick the trade exits is still recorded.
+      if (this.shadowOn()) await this.shadowStep(owner, t, ltp, now);
       const d = paperExitDecision({
         side: t.side,
         ltp,
@@ -87,7 +125,8 @@ export class SignalPaperWatchService {
       });
       try {
         if (d.exit) {
-          await this.exec.closeTrade(t.id, { exitReasonTag: d.tag, reason: d.reason, exitNotes: d.reason, exitPrice: d.price });
+          const line = this.shadowOn() ? await this.shadowSettle(t, d.price, now) : null;
+          await this.exec.closeTrade(t.id, { exitReasonTag: d.tag, reason: d.reason, exitNotes: line ? `${d.reason} | shadow: ${line}` : d.reason, exitPrice: d.price });
           exited += 1;
           this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}): ${d.reason}`);
           if (t.entryTags.includes('learn')) await this.scoreAi(t, d.price, d.tag, now);
@@ -101,6 +140,83 @@ export class SignalPaperWatchService {
       }
     }
     return { checked: open.length, exited };
+  }
+
+  /**
+   * One shadow step for an open paper trade: the live exit rules on this LTP, recorded never acted on
+   * (domain/exit-shadow). Restores the state from the TRACK row the first time a trade is seen (restart),
+   * refreshes the noise unit, persists new hits and a changed state. Never throws.
+   */
+  private async shadowStep(owner: string, t: PaperTradeRow, ltp: number | null, now: Date): Promise<void> {
+    try {
+      if (!t.entryPrice || !(t.entryPrice > 0)) return;
+      const sh = this.shadows.get(t.id) ?? (await this.shadowLoad(t));
+      this.shadows.set(t.id, sh);
+      await this.refreshNoise(owner, t, sh, now);
+      const before = JSON.stringify(sh.state);
+      const r = stepShadow(sh.state, { side: t.side, entry: t.entryPrice, ltp, refSl: sh.refSl, n: sh.n, params: this.shadowParams, now });
+      sh.state = r.state;
+      for (const h of r.hits) {
+        await this.repo.saveShadowHit(t.id, sh.decisionId, h.rule, h.hit, { baseline: sh.baseline, peak: r.state.peak, n: sh.n, nMethod: sh.nMethod, floorLevel: r.state.floorLevel, refSl: sh.refSl });
+        this.logger.log(`[signal-paper] shadow ${h.rule} ${t.instrument?.symbol} @ ${h.hit.price}: ${h.hit.reason}`);
+      }
+      if (JSON.stringify(sh.state) !== before) await this.repo.saveShadowTrack(t.id, sh.decisionId, this.trackDetail(sh));
+    } catch (err) {
+      this.logger.warn(`[signal-paper] shadow step ${t.id}: ${errText(err)}`);
+    }
+  }
+
+  private trackDetail(sh: Shadowed): Record<string, unknown> {
+    return { state: sh.state, refSl: sh.refSl, baseline: sh.baseline, n: sh.n, nMethod: sh.nMethod, nAt: sh.nAt };
+  }
+
+  private async shadowLoad(t: PaperTradeRow): Promise<Shadowed> {
+    const decisionId = decisionIdFromTags(t.entryTags);
+    const real = t.stoploss !== null && t.stoploss > 0;
+    const rows = await this.repo.shadowRows([t.id]);
+    const track = rows.find((r) => r.rule === 'TRACK');
+    const saved = track?.detail && typeof track.detail === 'object' ? (track.detail as Partial<Shadowed> & { state?: ShadowState }) : null;
+    let refSl: number | null = null;
+    if (!real && decisionId) {
+      const plan = await this.repo.decisionPlan(decisionId);
+      const sl = Number(plan?.sl);
+      refSl = Number.isFinite(sl) && sl > 0 ? sl : null;
+    }
+    const state = saved?.state ?? emptyShadow();
+    // Hits already written stay written (a restart never re-records a rule at a later price).
+    for (const r of rows) {
+      if (r.rule !== 'TRACK' && r.wouldExitAt && r.price !== null) state.hits[r.rule as keyof ShadowState['hits']] = { at: r.wouldExitAt.toISOString(), price: r.price, reason: 'restored' };
+    }
+    return { decisionId, refSl, baseline: real ? 'stop' : 'learn', state, n: saved?.n ?? null, nMethod: saved?.nMethod ?? null, nAt: saved?.nAt ?? 0 };
+  }
+
+  /** The contract's 1-min noise unit (exit-discipline noiseFromBars over the last NOISE_LOOKBACK_MIN). */
+  private async refreshNoise(owner: string, t: PaperTradeRow, sh: Shadowed, now: Date): Promise<void> {
+    if (!this.bars || !t.instrument?.token) return;
+    const age = now.getTime() - sh.nAt;
+    if (age < (sh.n === null ? NOISE_RETRY_MS : NOISE_REFRESH_MS)) return;
+    sh.nAt = now.getTime();
+    const bars = await this.bars.minuteBars(owner, t.instrument.token, t.instrument.exchange, new Date(now.getTime() - NOISE_LOOKBACK_MIN * 60_000), now).catch(() => []);
+    const reading = noiseFromBars(bars);
+    if (reading) {
+      sh.n = r2(reading.n);
+      sh.nMethod = reading.method;
+    }
+  }
+
+  /** At the paper close: settle every shadow row against the held result; the line for the exit notes. */
+  private async shadowSettle(t: PaperTradeRow, exit: number, now: Date): Promise<string | null> {
+    try {
+      if (!t.entryPrice) return null;
+      const entry = t.entryPrice;
+      const held = grossPnl(t.side, entry, exit, t.quantity);
+      const hits = await this.repo.settleShadows(t.id, { heldPnl: held, rulePnl: (p) => grossPnl(t.side, entry, p, t.quantity), at: now });
+      this.shadows.delete(t.id);
+      return shadowLine(Object.fromEntries(hits.map((h) => [h.rule, h])), held);
+    } catch (err) {
+      this.logger.warn(`[signal-paper] shadow settle ${t.id}: ${errText(err)}`);
+      return null;
+    }
   }
 
   /** Learning mode: the closed trade held against the judge's own call (never throws). */

@@ -541,4 +541,67 @@ export class SignalTraderRepository {
     if (ids.length === 0) return [];
     return this.prisma.telegramChannel.findMany({ where: { id: { in: ids } }, select: { id: true, title: true } }).catch(() => []);
   }
+
+  // ---- paper exit shadow (docs/superpowers/specs/2026-10-28-paper-exit-shadow-design.md) ----
+
+  /** The decision's plan (the reference stop the STOP shadow reads). */
+  async decisionPlan(decisionId: string): Promise<Record<string, unknown> | null> {
+    const r = await this.prisma.signalDecision.findUnique({ where: { id: decisionId }, select: { plan: true } });
+    return r?.plan && typeof r.plan === 'object' && !Array.isArray(r.plan) ? (r.plan as Record<string, unknown>) : null;
+  }
+
+  shadowRows(tradeIds: string[]): Promise<ShadowRow[]> {
+    if (tradeIds.length === 0) return Promise.resolve([]);
+    return this.prisma.paperExitShadow.findMany({
+      where: { tradeId: { in: tradeIds } },
+      select: { tradeId: true, rule: true, wouldExitAt: true, price: true, detail: true },
+    }) as Promise<ShadowRow[]>;
+  }
+
+  /** The running state (rule TRACK), replaced on every change. */
+  async saveShadowTrack(tradeId: string, decisionId: string | null, detail: unknown): Promise<void> {
+    const d = detail as Prisma.InputJsonValue;
+    await this.prisma.paperExitShadow.upsert({
+      where: { tradeId_rule: { tradeId, rule: 'TRACK' } },
+      create: { tradeId, decisionId, rule: 'TRACK', detail: d },
+      update: { detail: d },
+    });
+  }
+
+  /** The first time a rule would have exited — written once, never moved. */
+  async saveShadowHit(tradeId: string, decisionId: string | null, rule: string, hit: { at: string; price: number; reason: string }, detail: unknown): Promise<void> {
+    await this.prisma.paperExitShadow.upsert({
+      where: { tradeId_rule: { tradeId, rule } },
+      create: { tradeId, decisionId, rule, wouldExitAt: new Date(hit.at), price: hit.price, reason: hit.reason, detail: detail as Prisma.InputJsonValue },
+      update: {},
+    });
+  }
+
+  /** At the paper close: held vs each rule's gross ₹. Returns the settled hit rows. */
+  async settleShadows(tradeId: string, s: { heldPnl: number; rulePnl: (price: number) => number; at: Date }): Promise<Array<{ rule: string; at: string; rulePnl: number }>> {
+    const rows = await this.prisma.paperExitShadow.findMany({ where: { tradeId, settledAt: null }, select: { id: true, rule: true, wouldExitAt: true, price: true } });
+    const out: Array<{ rule: string; at: string; rulePnl: number }> = [];
+    for (const r of rows) {
+      if (r.rule === 'TRACK') {
+        await this.prisma.paperExitShadow.update({ where: { id: r.id }, data: { heldPnl: s.heldPnl, settledAt: s.at } });
+        continue;
+      }
+      if (r.price === null || !r.wouldExitAt) continue;
+      const rulePnl = s.rulePnl(r.price);
+      await this.prisma.paperExitShadow.update({
+        where: { id: r.id },
+        data: { heldPnl: s.heldPnl, rulePnl, saved: Math.round((rulePnl - s.heldPnl) * 100) / 100, settledAt: s.at },
+      });
+      out.push({ rule: r.rule, at: r.wouldExitAt.toISOString(), rulePnl });
+    }
+    return out;
+  }
+}
+
+export interface ShadowRow {
+  tradeId: string;
+  rule: string;
+  wouldExitAt: Date | null;
+  price: number | null;
+  detail: unknown;
 }

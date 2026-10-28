@@ -3462,6 +3462,30 @@ model SignalWatch {
   @@map("signal_watches")
 }
 
+/// Live exit rules recorded beside a paper trade, never acted on (owner 2026-10-28, paper-exit-shadow spec).
+/// One row per (trade, rule): STOP | FLOOR | GIVEBACK | AI_EXIT = the first time that rule would have exited;
+/// TRACK = the running state (peak, floor latches, noise unit). Settled (held / rule P&L) when the trade closes.
+model PaperExitShadow {
+  id          String    @id @default(cuid())
+  tradeId     String    @map("trade_id")
+  decisionId  String?   @map("decision_id")
+  rule        String
+  wouldExitAt DateTime? @map("would_exit_at") @db.Timestamptz(6)
+  price       Float?
+  reason      String?
+  detail      Json?
+  heldPnl     Float?    @map("held_pnl") // gross ₹ of the paper trade as actually held
+  rulePnl     Float?    @map("rule_pnl") // gross ₹ had this rule exited it
+  saved       Float? // rulePnl − heldPnl (> 0: exiting by this rule beat holding)
+  settledAt   DateTime? @map("settled_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([tradeId, rule])
+  @@index([settledAt])
+  @@map("paper_exit_shadows")
+}
+
 // ─── News impact (2026-10-24): cluster → classify → relevance → batched cheap-LLM impact → reactions ───
 
 /// One story across sources (layer 1). Coverage (sourceCount) is a feature. Boilerplate never goes further.

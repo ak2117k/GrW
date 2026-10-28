@@ -40,3 +40,71 @@ describe('SignalPaperWatchService — learning mode AI check', () => {
     expect(t.repo.recordAiCheck).not.toHaveBeenCalled();
   });
 });
+
+describe('SignalPaperWatchService — paper exit shadow (recorded, never acted on)', () => {
+  beforeAll(() => (process.env.BOOT_JOBS = 'on'));
+
+  function shadowed(o: { ltps: number[]; minutesToClose?: () => number; stoploss?: number | null; rows?: unknown[] }) {
+    const t = trade(['telegram-signal', 'decision:d1', 'learn']);
+    (t as any).stoploss = o.stoploss ?? null;
+    const repo = {
+      openPaperTrades: jest.fn(async () => [t]),
+      decisionJudge: jest.fn(async () => ({ aiDecision: 'TAKE' })),
+      recordAiCheck: jest.fn(async () => undefined),
+      decisionPlan: jest.fn(async () => ({ sl: 90 })),
+      shadowRows: jest.fn(async () => o.rows ?? []),
+      saveShadowHit: jest.fn(async () => undefined),
+      saveShadowTrack: jest.fn(async () => undefined),
+      settleShadows: jest.fn(async (_id: string, s: { heldPnl: number; rulePnl: (p: number) => number }) => [{ rule: 'STOP', at: '2026-10-28T05:12:00Z', rulePnl: s.rulePnl(89) }]),
+    };
+    const exec = { closeTrade: jest.fn(async () => undefined) };
+    const trades = { updateTrade: jest.fn(async () => undefined) };
+    const ltps = [...o.ltps];
+    const quotes = { ltp: jest.fn(async () => ltps.shift() ?? null) };
+    const clock = { isOpen: () => true, minutesToClose: o.minutesToClose ?? (() => 200) };
+    const bars = { minuteBars: jest.fn(async () => []) };
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, trades as any, clock, quotes, bars);
+    return { svc, repo, exec };
+  }
+
+  it('a crossed reference stop is recorded once and the paper trade stays open', async () => {
+    const s = shadowed({ ltps: [95, 89, 85] });
+    await s.svc.sweep(NOW);
+    await s.svc.sweep(NOW);
+    await s.svc.sweep(NOW);
+    expect(s.repo.saveShadowHit).toHaveBeenCalledTimes(1);
+    expect(s.repo.saveShadowHit).toHaveBeenCalledWith('t1', 'd1', 'STOP', expect.objectContaining({ price: 89 }), expect.objectContaining({ baseline: 'learn', refSl: 90 }));
+    expect(s.exec.closeTrade).not.toHaveBeenCalled();
+  });
+
+  it('at the real exit the shadows are settled and the line goes on the exit notes', async () => {
+    const s = shadowed({ ltps: [112], minutesToClose: () => 4 });
+    await s.svc.sweep(NOW);
+    expect(s.repo.settleShadows).toHaveBeenCalledWith('t1', expect.objectContaining({ heldPnl: 900 }));
+    expect(s.exec.closeTrade).toHaveBeenCalledWith('t1', expect.objectContaining({ exitPrice: 112, exitNotes: expect.stringContaining('shadow: stop 10:42 −₹825 · held +₹900') }));
+  });
+
+  it('a trade with a real stop is not STOP-shadowed (that is its real exit)', async () => {
+    const s = shadowed({ ltps: [89], stoploss: 90 });
+    await s.svc.sweep(NOW);
+    expect(s.repo.decisionPlan).not.toHaveBeenCalled();
+    expect(s.repo.saveShadowHit).not.toHaveBeenCalled();
+  });
+
+  it('after a restart a rule already recorded is not recorded again', async () => {
+    const s = shadowed({ ltps: [85], rows: [{ tradeId: 't1', rule: 'STOP', wouldExitAt: new Date('2026-10-28T05:12:00Z'), price: 89, detail: null }] });
+    await s.svc.sweep(NOW);
+    expect(s.repo.saveShadowHit).not.toHaveBeenCalled();
+  });
+
+  it('PAPER_EXIT_SHADOW=off: nothing is stepped', async () => {
+    process.env.PAPER_EXIT_SHADOW = 'off';
+    try {
+      const s = shadowed({ ltps: [85] });
+      await s.svc.sweep(NOW);
+      expect(s.repo.shadowRows).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.PAPER_EXIT_SHADOW;
+    }
+  });
+});

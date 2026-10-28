@@ -14,9 +14,15 @@ export class SignalBoardRepository {
   setups(userId: string, session: string): Promise<SetupRow[]> {
     return this.prisma.$queryRaw<SetupRow[]>`
       SELECT t.id, t.created_at, t.symbol, t.instrument, t.side, t.entry_rule, t.entry_ref, t.stop, t.target1, t.target2,
-             t.outcome_status, t.outcome_r, n.rationale AS idea_rationale
+             t.outcome_status, t.outcome_r, n.rationale AS idea_rationale,
+             d.decision, d.skip_reason, d.plan, d.ai_check
       FROM trade_setups t
       LEFT JOIN news_ideas n ON n.id = t.news_idea_id
+      LEFT JOIN trade_signals s ON s.message_id = 'setup:' || t.id
+      LEFT JOIN LATERAL (
+        SELECT decision, skip_reason, plan, ai_check FROM signal_decisions
+        WHERE signal_id = s.id ORDER BY evaluation DESC LIMIT 1
+      ) d ON true
       WHERE t.user_id = ${userId} AND t.session_date = ${session}
       ORDER BY t.created_at DESC`;
   }
@@ -46,7 +52,7 @@ export class SignalBoardRepository {
         WHERE signal_id = s.id AND (user_id = ${userId} OR user_id IS NULL)
         ORDER BY evaluation DESC LIMIT 1
       ) d ON true
-      WHERE s.created_at >= ${from} AND s.created_at < ${to}
+      WHERE s.created_at >= ${from} AND s.created_at < ${to} AND s.parser <> 'setup'
       ORDER BY s.created_at DESC LIMIT 300`;
   }
 

@@ -76,6 +76,14 @@ describe('signal board items', () => {
     expect(setupItem(setup({ outcome_status: 'TIME_EXIT', outcome_r: 0.02 }))).toMatchObject({ state: 'FLAT' });
   });
 
+  it('before the replay, a setup whose range broke shows its live paper call', () => {
+    expect(setupItem(setup({ decision: 'PAPER' }))).toMatchObject({ state: 'OPEN', status: 'paper PAPER' });
+    expect(setupItem(setup({ decision: 'SKIP', skip_reason: 'judge_skip' }))).toMatchObject({ state: 'SKIPPED', status: 'paper SKIP judge_skip' });
+    expect(setupItem(setup({ decision: 'PAPER', ai_check: { pnl: -420 } }))).toMatchObject({ state: 'LOST', result: { pnl: -420 } });
+    // The replay's own verdict wins once it is in.
+    expect(setupItem(setup({ decision: 'PAPER', outcome_status: 'TARGET1', outcome_r: 1.5 }))).toMatchObject({ state: 'WON', result: { r: 1.5 } });
+  });
+
   it('a news idea is a view; CE / PE ideas carry a direction', () => {
     expect(ideaItem(idea())).toMatchObject({ source: 'NEWS_IDEA', state: 'VIEW', side: null, status: 'NO_TRADE', entryNote: 'Avoid chasing the gap-up' });
     expect(ideaItem(idea({ idea: 'PE_IDEA' })).side).toBe('SELL');

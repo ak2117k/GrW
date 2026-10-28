@@ -4,6 +4,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import type { ClusterRow, RecentSignal } from '../domain/cluster';
 import type { InfoItem } from '../domain/info';
+import { setupMessageId, type SetupForWatch } from '../domain/setup-watch';
 import type { Direction, MessageStatus } from '../domain/types';
 
 export interface ClassRow {
@@ -25,7 +26,7 @@ export interface NewSignal {
   channelId: string;
   receivedAt: Date;
   sessionDate: string;
-  parser: 'rule' | 'llm' | 'watch';
+  parser: 'rule' | 'llm' | 'watch' | 'setup';
   underlying: string;
   instrumentKind: string;
   strike: number | null;
@@ -418,6 +419,21 @@ export class SignalIntakeRepository {
 
   async updateWatch(id: string, data: Prisma.SignalWatchUpdateInput): Promise<void> {
     await this.prisma.signalWatch.update({ where: { id }, data });
+  }
+
+  /** The owner's setups for a session that have not traded yet (no `setup:<id>` call). */
+  async setupsToWatch(userId: string, sessionDate: string): Promise<SetupForWatch[]> {
+    const rows = await this.prisma.tradeSetup.findMany({
+      where: { userId, sessionDate },
+      select: {
+        id: true, sessionDate: true, symbol: true, instrumentKind: true, instrument: true, exchange: true, instrumentToken: true,
+        expiry: true, side: true, entryRule: true, stop: true, target1: true, target2: true,
+      },
+    });
+    if (rows.length === 0) return [];
+    const taken = await this.prisma.tradeSignal.findMany({ where: { messageId: { in: rows.map((r) => setupMessageId(r.id)) } }, select: { messageId: true } });
+    const done = new Set(taken.map((t) => t.messageId));
+    return rows.filter((r) => !done.has(setupMessageId(r.id)));
   }
 
   async postText(messageId: string): Promise<string> {

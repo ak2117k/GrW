@@ -56,6 +56,11 @@ export interface SetupRow {
   outcome_status: string | null;
   outcome_r: number | null;
   idea_rationale: string | null;
+  /** The setup's paper call (setup-watch), when its range broke: the trader's latest decision. */
+  decision?: string | null;
+  skip_reason?: string | null;
+  plan?: unknown;
+  ai_check?: unknown;
 }
 
 export interface IdeaRow {
@@ -113,8 +118,18 @@ const text = (...xs: Array<string | null | undefined>) => xs.filter((x): x is st
 export function setupItem(r: SetupRow): BoardItem {
   const o = (r.outcome_status ?? '').toUpperCase();
   const R = num(r.outcome_r);
+  // Before the after-close replay scores it, the live paper call (if the range broke) says where it is.
+  const d = (r.decision ?? '').toUpperCase();
+  const ai = obj(r.ai_check);
+  const pnl = num(ai.pnl);
+  const live: BoardState | null =
+    d === '' ? null
+    : pnl !== null ? (pnl > 0 ? 'WON' : pnl < 0 ? 'LOST' : 'FLAT')
+    : d === 'PAPER' || d === 'TAKE' ? 'OPEN'
+    : d === 'PENDING' ? 'WAITING'
+    : 'SKIPPED';
   const state: BoardState =
-    o === '' ? 'WAITING'
+    o === '' ? (live ?? 'WAITING')
     : o === 'NOT_TRIGGERED' ? 'SKIPPED'
     : o === 'STOP' ? 'LOST'
     : o.startsWith('TARGET') ? 'WON'
@@ -134,9 +149,9 @@ export function setupItem(r: SetupRow): BoardItem {
     targets: [num(r.target1), num(r.target2)].filter((x): x is number => x !== null),
     targetSource: 'setup',
     state,
-    status: o || 'PENDING',
+    status: o || (d ? [`paper ${d}`, d === 'SKIP' ? r.skip_reason : null].filter(Boolean).join(' ') : 'PENDING'),
     why: text(r.idea_rationale),
-    result: R !== null ? { r: R } : null,
+    result: R !== null ? { r: R } : pnl !== null ? { pnl } : null,
     channel: null,
     aiCorrect: null,
   };

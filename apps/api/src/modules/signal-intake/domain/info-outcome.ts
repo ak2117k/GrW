@@ -5,9 +5,10 @@ import type { InfoItem } from './info';
  *
  * - base     = the last daily close at or before the post (a post after the session close uses that
  *              session's close; one during the session uses the previous close — close-to-close).
- * - judged   = the next session close after the post (horizon INTRADAY / DAYS / none) or the 5th
- *              (WEEKS). MONTHS is recorded but not judged (too long).
- * - band     = 0.3 × ATR14 at the base (× √5 for WEEKS): a move inside it is noise (FLAT → null).
+ * - judged   = the next session close after the post (horizon INTRADAY / none), the 3rd (DAYS — a
+ *              multi-day view was judged on one session until 2026-10-28) or the 5th (WEEKS).
+ *              MONTHS is recorded but not judged (too long).
+ * - band     = 0.3 × ATR14 at the base (× √n for n sessions): a move inside it is noise (FLAT → null).
  * - BULL right when the close-to-close return > +band, BEAR right when < −band.
  * - levelHit = any of the item's levels / target traded inside a bar between base and judged
  *              (null when the item has none). Separate from the direction verdict.
@@ -36,6 +37,7 @@ export interface InfoItemOutcome {
 
 export const INFO_BAND_ATR = 0.3;
 export const INFO_WEEKS_SESSIONS = 5;
+export const INFO_DAYS_SESSIONS = 3;
 const ATR_N = 14;
 
 const round = (x: number) => Math.round(x * 100) / 100;
@@ -67,7 +69,7 @@ export function judgeInfoItem(item: InfoItem, bars: readonly DailyBar[], post: {
     if (sorted[i].day < post.day || (sorted[i].day === post.day && post.afterClose)) baseIdx = i;
   }
   if (baseIdx < 0) return none('NO_DATA');
-  const n = item.horizon === 'WEEKS' ? INFO_WEEKS_SESSIONS : 1;
+  const n = item.horizon === 'WEEKS' ? INFO_WEEKS_SESSIONS : item.horizon === 'DAYS' ? INFO_DAYS_SESSIONS : 1;
   const next = sorted[baseIdx + 1];
   if (item.horizon === 'MONTHS') return next ? none('NOT_JUDGED_MONTHS', next.day) : none('PENDING');
   const judgedIdx = baseIdx + n;

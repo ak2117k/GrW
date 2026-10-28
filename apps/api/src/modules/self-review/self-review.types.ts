@@ -13,7 +13,7 @@ export const VERIFICATION_KINDS = [
   'TRADE_SETUP',
   /** A parsed Telegram channel tip (signal-intake, stream S, 2026-10-23): target 1 before the SL. */
   'CHANNEL_SIGNAL',
-  /** A Telegram INFO item (market view of a channel, 2026-10-24): its bias vs the next session's / 5 sessions' close-to-close move. */
+  /** A Telegram INFO item (market view of a channel, 2026-10-24): its bias vs the close-to-close move over 1 session (none / INTRADAY), 3 (DAYS) or 5 (WEEKS). */
   'CHANNEL_INFO',
   /** A news-impact model call (2026-10-24): its direction vs the +60 m (INTRADAY) / close-to-next-close (DAYS) move. */
   'NEWS_IMPACT',

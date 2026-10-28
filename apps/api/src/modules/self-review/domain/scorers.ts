@@ -538,10 +538,20 @@ export interface TradeSetupVerifyRow {
   newsIdea?: { headline: string; idea: string; rationale: string; invalidation: string } | null;
 }
 
+/** A 15:10 time exit inside ±this many R neither proved nor refuted the setup. */
+export const SETUP_TIME_EXIT_R = 0.5;
+
+function timeExitCorrect(R: number | null): boolean | null {
+  if (R === null || !Number.isFinite(R)) return null;
+  return R >= SETUP_TIME_EXIT_R ? true : R <= -SETUP_TIME_EXIT_R ? false : null;
+}
+
 /**
  * Trade setup (stream T): did the entry trigger next session, and did it reach target 1 (1.5R)
- * before the stop? correct = hit T1 first; stop or the 15:10 time exit without T1 = wrong; not
- * triggered / no bars = null. `score` = the R multiple realised by the plan.
+ * before the stop? correct = hit T1 first; the stop = wrong; the 15:10 time exit by how far it got
+ * (≥ +0.5R right, ≤ −0.5R wrong, in between inconclusive — 2026-10-28: +0.28R / +0.37R time exits
+ * were "wrong" and the diagnosis invented causes for them); not triggered / no bars = null.
+ * `score` = the R multiple realised by the plan.
  */
 export function scoreTradeSetup(r: TradeSetupVerifyRow): VerificationDraft {
   const judged = r.outcomeStatus === 'TARGET1' || r.outcomeStatus === 'STOP' || r.outcomeStatus === 'TIME_EXIT';
@@ -559,7 +569,7 @@ export function scoreTradeSetup(r: TradeSetupVerifyRow): VerificationDraft {
     symbol: r.symbol,
     predicted: `${r.side} ${r.instrument}: opening-range break, T1 1.5R before stop`,
     actual,
-    correct: judged ? r.outcomeStatus === 'TARGET1' : null,
+    correct: !judged ? null : r.outcomeStatus === 'TIME_EXIT' ? timeExitCorrect(r.outcomeR) : r.outcomeStatus === 'TARGET1',
     score: judged && r.outcomeR !== null ? r2(r.outcomeR) : null,
     details: {
       status: r.outcomeStatus,

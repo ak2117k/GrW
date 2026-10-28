@@ -43,6 +43,13 @@ describe('judgeInfoItem (CHANNEL_INFO)', () => {
     expect(judgeInfoItem(item(), bars([]), POST).status).toBe('PENDING');
   });
 
+  it('DAYS = 3 sessions with a √3 band, not the next close (2026-10-28: "BEAR BANKNIFTY (DAYS)" was judged on one session)', () => {
+    const three = bars([{ close: 22390 }, { close: 22420 }, { close: 22300 }]);
+    expect(judgeInfoItem(item({ horizon: 'DAYS' }), three, POST)).toMatchObject({ status: 'RIGHT', session: '2026-09-19', ret: -100, band: 51.96 });
+    expect(judgeInfoItem(item(), three, POST)).toMatchObject({ status: 'FLAT', session: '2026-09-17' }); // no horizon: next session
+    expect(judgeInfoItem(item({ horizon: 'DAYS' }), bars([{ close: 22300 }]), POST).status).toBe('PENDING');
+  });
+
   it('levelHit is separate from the verdict; NEUTRAL items get NO_BIAS with the level flag; no bars → NO_DATA', () => {
     expect(judgeInfoItem(item({ levels: [22000] }), bars([{ close: 22300, low: 22250 }]), POST)).toMatchObject({ status: 'RIGHT', levelHit: false });
     expect(judgeInfoItem(item({ levels: [22000] }), bars([{ close: 22300, low: 21990 }]), POST)).toMatchObject({ levelHit: true });

@@ -85,8 +85,13 @@ export interface OutcomeWrite {
   details: Record<string, unknown>;
 }
 
-/** Written on every classification; rows without it predate INFO / RECAP (2026-10-24) and are re-classified once. */
-export const CLASS_VERSION = 2;
+/**
+ * Written on every classification; rows without it predate INFO / RECAP (2026-10-24) and are re-classified once.
+ * 3 (2026-10-28): un-named index levels off the 50 / 100 grid are INFO — the last week's NOISE rows are read again.
+ */
+export const CLASS_VERSION = 3;
+/** Rows of an older class version are re-read only this far back (a rule change re-reads recent posts, not history). */
+export const RECLASS_RECENT_MS = 7 * 86_400_000;
 
 export interface InfoRow {
   messageId: string;
@@ -217,10 +222,18 @@ export class SignalIntakeRepository {
     return out;
   }
 
-  /** Rows written before the INFO classifier (classVersion null) that it may change: NOISE, VIEW, unread images. */
-  async reclassCandidates(take = 200): Promise<ReclassRow[]> {
+  /**
+   * Rows the current rules may change: written before the INFO classifier (classVersion null) — NOISE, VIEW,
+   * unread images — or NOISE of an older class version posted in the last RECLASS_RECENT_MS.
+   */
+  async reclassCandidates(take = 200, now: Date = new Date()): Promise<ReclassRow[]> {
     return this.prisma.signalMessageClass.findMany({
-      where: { classVersion: null, OR: [{ status: { in: ['NOISE', 'VIEW'] } }, { status: 'LLM_SKIPPED', parser: 'vision' }] },
+      where: {
+        OR: [
+          { classVersion: null, OR: [{ status: { in: ['NOISE', 'VIEW'] } }, { status: 'LLM_SKIPPED', parser: 'vision' }] },
+          { classVersion: { lt: CLASS_VERSION }, status: 'NOISE', postedAt: { gte: new Date(now.getTime() - RECLASS_RECENT_MS) } },
+        ],
+      },
       orderBy: { postedAt: 'asc' },
       take,
       select: {

@@ -194,11 +194,16 @@ export function driverName(underlying: string): string {
   return underlying === 'CRUDEOIL' ? 'CRUDE' : underlying;
 }
 
-/** An index name for an un-named level by its size (NIFTY 15k–35k, BANKNIFTY 40k–65k, SENSEX 66k–100k). */
+/**
+ * An index name for an un-named level by its size (NIFTY 15k–35k, BANKNIFTY 40k–65k, SENSEX 66k–100k),
+ * on a multiple of 10: channels quote spot levels like 22480, not only strikes (2026-10-28 a "22480 se
+ * pehle…" view was NOISE when this asked for the 50 / 100 strike grid).
+ */
 export function inferIndex(v: number): string | null {
-  if (v >= 15_000 && v <= 35_000 && v % 50 === 0) return 'NIFTY';
-  if (v >= 40_000 && v <= 65_000 && v % 100 === 0) return 'BANKNIFTY';
-  if (v > 65_000 && v <= 100_000 && v % 100 === 0) return 'SENSEX';
+  if (!Number.isInteger(v) || v % 10 !== 0) return null;
+  if (v >= 15_000 && v <= 35_000) return 'NIFTY';
+  if (v >= 40_000 && v <= 65_000) return 'BANKNIFTY';
+  if (v > 65_000 && v <= 100_000) return 'SENSEX';
   return null;
 }
 

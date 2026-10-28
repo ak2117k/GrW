@@ -42,6 +42,12 @@ describe('INFO — the owner examples (Stock Wale Bhaiyaa Learning Group, 2026-1
     expect(c.items.map((i) => i.bias)).toEqual([null, null]);
   });
 
+  it('an un-named NIFTY level off the 50s grid ("22480 se pehle … negative mat hona") is INFO, not NOISE (2026-10-28)', () => {
+    const c = classify('22480 se pehle bht jyda negative mat hona guys 🙏 \nOI mix hai abhi toh decision nahi ara hai \nScalping se ho para hai');
+    expect(c).toMatchObject({ kind: 'INFO' });
+    expect((c as CommentaryClass).items[0]).toMatchObject({ underlying: 'NIFTY', levels: [22480] });
+  });
+
   it('heavy put OI at 22400 acted as support → NIFTY BULL with the OI note', () => {
     const c = classify('Mai khud put lene wala tha   But mai kabhi OI k against nahi jata  22400 pe itna heavy tha k put me ghuse he nahi aur ye natak hua up me toh bach gya');
     expect(c).toMatchObject({ kind: 'INFO', needsLlm: false });

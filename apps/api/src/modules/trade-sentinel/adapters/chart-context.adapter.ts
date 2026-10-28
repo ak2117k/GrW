@@ -224,7 +224,8 @@ export function levelCandidates(levels: LevelsSnapshot): number[] {
     levels.todayHigh,
     levels.todayLow,
   ];
-  return raw.filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  // A 0 is an unset line (no bar yet), never a price.
+  return raw.filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
 }
 
 /**

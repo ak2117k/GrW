@@ -46,7 +46,34 @@ export function lateEntryOf(
   };
 }
 
-/** The band a late entry may fill in: from the current price, no further than the tolerance. */
+/** The price is already BETTER than the channel's (owner 2026-10-28): a BUY under its entry, a SELL over it. */
+export interface BetterEntry {
+  /** The channel's entry (the bottom of its range for a buy). */
+  channelEntry: number;
+  ltp: number;
+  /** How far better than the channel's entry, % of it (always ≥ 0). */
+  betterPct: number;
+}
+
+/**
+ * A BUY AT / RANGE / BELOW under its band, a SELL AT / RANGE / ABOVE over it; null otherwise. An ABOVE buy
+ * (BELOW sell) under its band has not triggered yet — that waits as a trigger, it is not a better price.
+ */
+export function betterEntryOf(
+  s: Pick<SignalView, 'side' | 'entryType' | 'entryLow' | 'entryHigh'>,
+  ltp: number,
+  band: { low: number; high: number },
+): BetterEntry | null {
+  if (!(ltp > 0)) return null;
+  const buy = s.side === 'BUY';
+  if (buy ? s.entryType === 'ABOVE' : s.entryType === 'BELOW') return null;
+  const edge = buy ? Math.min(s.entryLow, s.entryHigh) : Math.max(s.entryLow, s.entryHigh);
+  const better = buy ? ltp < band.low - 1e-9 : ltp > band.high + 1e-9;
+  if (!better || !(edge > 0)) return null;
+  return { channelEntry: r2(edge), ltp, betterPct: r2((Math.abs(ltp - edge) / edge) * 100) };
+}
+
+/** The band a late (or better) entry may fill in: from the current price, no further than the tolerance. */
 export function lateBand(side: 'BUY' | 'SELL', ltp: number, tolPct: number): { low: number; high: number } {
   const t = tolPct / 100;
   return side === 'BUY' ? { low: ltp, high: ltp * (1 + t) } : { low: ltp * (1 - t), high: ltp };

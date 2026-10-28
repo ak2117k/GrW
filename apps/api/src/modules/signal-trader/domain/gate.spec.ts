@@ -177,6 +177,30 @@ describe('signal gate', () => {
       expect(r.plan).toMatchObject({ bandHigh: 90, targets: [80], late: { channelEntry: 100, chasePct: 10, targetsPassed: [95] } });
     });
 
+    it('a BUY whose price is already cheaper than the channel\'s is planned at the cheaper price', () => {
+      // 2026-10-26 COPPER "BUY near 12", LTP 11.56: was a "chasing" SKIP.
+      const r = run(facts({ ltp: 96, signal: signal({ entryType: 'AT' }) }));
+      expect(r.pass).toBe(true);
+      const tol = r.checks.find((c) => c.name === 'entry_tolerance');
+      expect(tol).toMatchObject({ ok: false, required: false });
+      expect(tol?.detail).toMatch(/better: LTP 96 is 4% below the channel's 100/);
+      expect(r.plan).toMatchObject({ ltp: 96, bandLow: 96, better: { channelEntry: 100, betterPct: 4 } });
+      expect(r.plan!.late).toBeUndefined();
+    });
+
+    it('a SELL above its entry is better too; far past SIGNAL_LATE_MAX_PCT it is refused', () => {
+      const sell = signal({ side: 'SELL', instrumentKind: 'FUT', entryType: 'AT', sl: 110, targets: [95, 80] });
+      expect(run(facts({ ltp: 104, signal: sell })).plan).toMatchObject({ bandHigh: 104, better: { channelEntry: 100, betterPct: 4 } });
+      const far = run(facts({ ltp: 50, signal: signal({ entryType: 'AT', sl: 40 }) }), cfg({ lateMaxPct: 40 }));
+      expect(far.skipReason).toBe('entry_tolerance');
+      expect(far.checks.find((c) => c.name === 'entry_tolerance')?.detail).toMatch(/50% below the channel's 100 \(> 40%/);
+    });
+
+    it('a cheaper BUY whose price already fell through the SL is refused by sl_side', () => {
+      const r = run(facts({ ltp: 88, signal: signal({ entryType: 'AT' }) }));
+      expect(r.skipReason).toBe('sl_side');
+    });
+
     it('a not-reached ABOVE entry is never late (it waits as a trigger)', () => {
       const r = run(facts({ ltp: 99 }));
       expect(r.plan).toBeNull();

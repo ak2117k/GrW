@@ -75,6 +75,12 @@ describe('levelCandidates', () => {
     const out = levelCandidates(levels({ vwap: Number.NaN, orh: null, prevOrl: null }));
     expect(out).toEqual([110, 90, 96, 108, 107, 95]);
   });
+
+  it('drops an unset (0) line: no price trades at zero', () => {
+    // 2026-10-28 BANKNIFTY 09:26: a 0 "support" became a ₹14,679 target on a ₹445 put.
+    const out = levelCandidates(levels({ vwap: 0, orh: null, prevOrl: null }));
+    expect(out).toEqual([110, 90, 96, 108, 107, 95]);
+  });
 });
 
 describe('nearestLevels', () => {

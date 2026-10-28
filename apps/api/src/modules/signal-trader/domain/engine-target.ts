@@ -69,7 +69,7 @@ export function deriveEngineTargets(i: EngineTargetInput): EngineTargets {
   else {
     const spot = i.spot;
     const long = longUnderlying(i.kind, i.side);
-    const ahead = [...new Set(i.levels.filter((v) => Number.isFinite(v) && (long ? v > spot : v < spot)))].sort((a, b) => (long ? a - b : b - a));
+    const ahead = [...new Set(i.levels.filter((v) => pos(v) && (long ? v > spot : v < spot)))].sort((a, b) => (long ? a - b : b - a));
     const method: EngineTargetMethod = i.kind === 'EQ' ? 'level' : option ? 'level_delta' : 'level_fut';
     let tooClose = 0;
     for (const level of ahead) {

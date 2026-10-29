@@ -15,6 +15,7 @@ import {
 import { parseExitDisciplineConfig } from '../../exit-discipline/config';
 import { parseNewsEventsConfig } from '../../news-events/config';
 import { lessonsModeFrom } from '../../self-review/lessons/lessons.logic';
+import { equityBlockEnabled } from './equity-blocks';
 import type { WakeTrigger } from './tripwire.service';
 import {
   SENTINEL_OVERNIGHT_COMPOSITE_PROMPT_VERSION,
@@ -277,6 +278,8 @@ export class SentinelAgentService {
       // The judge gate's packet delta + held marker: on unless SENTINEL_PACKET_DELTA is exactly
       // 'false' (parsed as parseJudgeGateConfig parses it). No ConfigService at all ⇒ off.
       delta: !!this.config && String(this.config.get<string>('SENTINEL_PACKET_DELTA') ?? '').trim().toLowerCase() !== 'false',
+      // The cash-equity block (+e1): the SAME parse ContextPacketService uses to build it.
+      equity: equityBlockEnabled(this.config),
     };
   }
 

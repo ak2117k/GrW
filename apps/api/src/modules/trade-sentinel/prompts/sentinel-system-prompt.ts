@@ -64,6 +64,11 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * Another SUFFIX, after +l1: `v9+l1+d1`. Delta off, every text and stamp above is
  * byte-identical.
  *
+ * FROM +e1 A SIXTH SWITCH, SENTINEL_EQUITY_BLOCK (cash-equity factors, spec 2026-10-29; ON
+ * unless exactly `false`, OFF without a ConfigService): the `equity` field line and two reading
+ * lines (square-off vs exchange close, OI walls not captured for cash, how to read N / ATRd and
+ * the five built factors). A SUFFIX after +d1: `v9+l1+d1+e1`. Equity off, byte-identical.
+ *
  * {@link SENTINEL_PROMPT_VERSION} / {@link SENTINEL_SYSTEM_PROMPT} name the
  * default (discipline on, triggers off, news off, lessons off).
  */
@@ -95,6 +100,8 @@ export interface SentinelPromptOptions {
   lessons?: boolean;
   /** SENTINEL_PACKET_DELTA not exactly 'false' (judge gate): the +d1 sinceLastVerdict / ownerHold lines. */
   delta?: boolean;
+  /** SENTINEL_EQUITY_BLOCK not exactly 'false' (equityBlockEnabled): the +e1 equity-block lines. */
+  equity?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -116,7 +123,7 @@ const VERSIONS_NEWS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noC
 export function sentinelPromptVersion(o: SentinelPromptOptions): string {
   const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
   const table = o.news ? VERSIONS_NEWS : VERSIONS;
-  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}`;
+  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}${o.equity ? EQUITY_VERSION_SUFFIX : ''}`;
 }
 
 /** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
@@ -262,6 +269,36 @@ export const DELTA_READING_LINES = [
   '- ownerHold, when present, is always true: the owner holds this position against automatic exits, so nothing will act on your verdict — it is recorded for information. Judge the trade honestly all the same.',
 ].join('\n') + '\n';
 
+/**
+ * The stamp suffix for the cash-equity block (SENTINEL_EQUITY_BLOCK, on unless exactly `false`,
+ * OFF without a ConfigService — the +d1 rule): `v9+l1+d1` becomes `v9+l1+d1+e1`. One field
+ * line and two reading lines; equity off, every text and stamp above is byte-identical. The
+ * packet carries `equity` only for a cash position, so on F&O the lines describe an absent key.
+ */
+export const EQUITY_VERSION_SUFFIX = '+e1';
+
+/** The session field line; the +e1 field line follows it. Ends with a newline. */
+const SESSION_FIELDS_LINE = '- session: nowIst, nowUtc, minutesToClose, expiry.\n';
+export const EQUITY_FIELDS_LINE =
+  '- equity, present only on a cash-equity position: squareOff, priceBand, vwap, dayRange, relativeStrength, relativeVolume, eventRisk — each a block.\n';
+/** The end of the session.minutesToClose reading line; the +e1 reading lines follow it. */
+const MINUTES_TO_CLOSE_END = 'judge that from each block\'s own "at" time.\n';
+export const EQUITY_READING_LINES = [
+  '- On a cash-equity position session.minutesToClose counts to the exchange close; the broker\'s deadline is equity.squareOff, the minutes until it squares off an intraday (MIS) position at market whatever your verdict. flow.oiWalls is not captured for cash positions.',
+  '- The equity block sizes the stock against its OWN normal and never forecasts direction. N is its one-minute noise unit (flow.noiseUnit, or daily ATR14 / √375 without 1-minute bars) and ATRd its daily ATR14; signs are positive in the position\'s favour except dayRange.gapAtr and relativeStrength.today, which are stock-minus-market facts about the day. equity.vwap.gapN is price\'s distance from VWAP in N. equity.dayRange gives today\'s range in ATRd with a regime (QUIET, NORMAL, EXPANDED, BIG-MOVE DAY), the trade\'s move from entry in ATRd and its pullback from the best price in N: a 2 N dip on a QUIET day is ordinary, the same dip after a BIG-MOVE DAY run is more likely the move ending. equity.relativeStrength compares the stock with NIFTY (beta-unadjusted, rsAtr in ATRd): MARKET-DRIVEN means the index explains the move since entry, STOCK-SPECIFIC that the stock moved on its own. equity.eventRisk is the nearest company event and when it falls against the square-off. A null inside a block has its reason in that block\'s unseen list. equity.priceBand and equity.relativeVolume are not captured yet.',
+].join('\n') + '\n';
+
+/** The +e1 lines into a rendered base prompt; fails rather than drift if their anchors move. */
+function withEquity(text: string, on: boolean): string {
+  if (!on) return text;
+  if (!text.includes(SESSION_FIELDS_LINE) || !text.includes(MINUTES_TO_CLOSE_END)) {
+    throw new Error('sentinel-system-prompt: the session lines moved — rebuild the +e1 prompt');
+  }
+  return text
+    .replace(SESSION_FIELDS_LINE, `${SESSION_FIELDS_LINE}${EQUITY_FIELDS_LINE}`)
+    .replace(MINUTES_TO_CLOSE_END, `${MINUTES_TO_CLOSE_END}${EQUITY_READING_LINES}`);
+}
+
 /** The field-list line the +d1 switch extends (the two optional top-level fields). */
 const TOP_LEVEL_LINE = '- The remaining top-level fields are thesis, trigger and memory. There are no other fields;';
 const TOP_LEVEL_LINE_DELTA =
@@ -278,8 +315,8 @@ const withNewsBlocks =(line: string, on: boolean): string => (on ? line.replace(
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta'>): string {
-  const text = renderBase(o);
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta' | 'equity'>): string {
+  const text = withEquity(renderBase(o), !!o.equity);
   if (!o.delta) return text;
   if (!text.includes(TOP_LEVEL_LINE) || !text.includes(TRIGGER_LINE)) {
     throw new Error('sentinel-system-prompt: the top-level / trigger lines moved — rebuild the +d1 prompt');

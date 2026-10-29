@@ -23,6 +23,8 @@ import {
   V9_NEWS_EXIT_LINE,
   V9_NEWS_EXIT_LINE_TRIGGERS,
   V9_NEWS_READING_LINES,
+  EQUITY_FIELDS_LINE,
+  EQUITY_READING_LINES,
   sentinelPromptVersion,
   sentinelSystemPrompt,
   type SentinelPromptOptions,
@@ -156,8 +158,8 @@ describe('SentinelAgentService', () => {
     expect(svc.promptVersion).toBe('v2.4/t1');
     const on = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'true' : undefined) } as never);
     // A ConfigService with SELF_REVIEW_LESSONS unset = lessons on (its default): the +l1 suffix.
-    expect(on.promptVersion).toBe('v7+l1+d1/t1');
-    expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}+l1+d1/${THESIS_PROMPT_VERSION}`);
+    expect(on.promptVersion).toBe('v7+l1+d1+e1/t1');
+    expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}+l1+d1+e1/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');
   });
@@ -261,8 +263,8 @@ describe('SentinelAgentService', () => {
     const on = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'TRUE' : undefined) } as never);
     await on.judge(packet());
     // SELF_REVIEW_LESSONS unset = on: SENTINEL_SYSTEM_PROMPT plus the +l1 memory.lessons line.
-    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: true, triggers: false, discipline: true, lessons: true, delta: true }));
-    expect(on.promptVersion).toBe('v7+l1+d1/t1');
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: true, triggers: false, discipline: true, lessons: true, delta: true, equity: true }));
+    expect(on.promptVersion).toBe('v7+l1+d1+e1/t1');
   });
 
   it('sends the packet as the user turn and caches the system prompt', async () => {
@@ -735,9 +737,9 @@ describe('prompt v7 / v2.4 (exit discipline) and the two switches', () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const agent = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (env as Record<string, string>)[k] } as never);
     await agent.judge(packet());
-    // SELF_REVIEW_LESSONS / SENTINEL_PACKET_DELTA unset = on: every stamp carries +l1+d1.
-    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ ...o, lessons: true, delta: true }));
-    expect(agent.promptVersion).toBe(`${stamp}+l1+d1/${THESIS_PROMPT_VERSION}`);
+    // SELF_REVIEW_LESSONS / SENTINEL_PACKET_DELTA / SENTINEL_EQUITY_BLOCK unset = on: every stamp carries +l1+d1+e1.
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ ...o, lessons: true, delta: true, equity: true }));
+    expect(agent.promptVersion).toBe(`${stamp}+l1+d1+e1/${THESIS_PROMPT_VERSION}`);
   });
 
   it('a verdict citing flow.noiseUnit and money.floorBasis validates; an invented child of money is still rejected', async () => {
@@ -840,7 +842,7 @@ describe('prompt v9–v12 / v2.6–v2.9 (news & events v2)', () => {
     const c = jest.fn().mockResolvedValue(reply(validVerdict));
     const agent = new SentinelAgentService({ messages: { create: c } } as never, { get: (k: string) => (env as Record<string, string>)[k] } as never);
     await agent.judge(packet());
-    expect(agent.promptVersion).toBe(`${stamp}+l1+d1/${THESIS_PROMPT_VERSION}`); // SELF_REVIEW_LESSONS unset = on
+    expect(agent.promptVersion).toBe(`${stamp}+l1+d1+e1/${THESIS_PROMPT_VERSION}`); // SELF_REVIEW_LESSONS unset = on
   });
 });
 
@@ -876,14 +878,14 @@ describe('judge gate: model tiering and the +d1 packet-delta prompt', () => {
     expect(text).toContain('- sinceLastVerdict, present when you have judged this trade before');
     expect(text).toContain('- ownerHold, when present, is always true');
     expect(text).toContain('plus sinceLastVerdict and ownerHold when present. There are no other fields;');
-    expect(agent.promptVersion).toBe(`v2.4+l1+d1/${THESIS_PROMPT_VERSION}`);
+    expect(agent.promptVersion).toBe(`v2.4+l1+d1+e1/${THESIS_PROMPT_VERSION}`);
   });
 
   it('SENTINEL_PACKET_DELTA=false: byte-identical to the pre-delta prompt and stamp', async () => {
     const { c, agent } = agentWith({ SENTINEL_PACKET_DELTA: 'false' });
     await agent.judge(packet());
-    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: false, triggers: false, discipline: true, lessons: true }));
-    expect(agent.promptVersion).toBe(`v2.4+l1/${THESIS_PROMPT_VERSION}`);
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: false, triggers: false, discipline: true, lessons: true, equity: true }));
+    expect(agent.promptVersion).toBe(`v2.4+l1+e1/${THESIS_PROMPT_VERSION}`);
   });
 
   it('a verdict citing sinceLastVerdict / ownerHold validates when the packet carries them', async () => {
@@ -899,5 +901,42 @@ describe('judge gate: model tiering and the +d1 packet-delta prompt', () => {
     };
     c.mockResolvedValue(reply({ ...validVerdictLocal, evidence: ['sinceLastVerdict.ltp', 'ownerHold', 'money.netPnl'] }));
     await expect(agent.judge(p)).resolves.toMatchObject({ verdict: 'HOLD' });
+  });
+  it('equity on (the default with config): the field line, the two reading lines and the +e1 stamp', async () => {
+    const { c, agent } = agentWith({});
+    await agent.judge(packet());
+    const text: string = c.mock.calls[0][0].system[0].text;
+    expect(text).toContain(EQUITY_FIELDS_LINE);
+    expect(text).toContain(EQUITY_READING_LINES);
+    expect(text).toContain("the broker's deadline is equity.squareOff");
+    expect(text).toContain('flow.oiWalls is not captured for cash positions.');
+    // +e1 adds exactly its three lines to the text it extends, nothing else.
+    const off = sentinelSystemPrompt({ cues: false, triggers: false, discipline: true, lessons: true, delta: true });
+    expect(text.replace(EQUITY_FIELDS_LINE, '').replace(EQUITY_READING_LINES, '')).toBe(off);
+  });
+
+  it('SENTINEL_EQUITY_BLOCK=false: byte-identical to the pre-equity prompt and stamp', async () => {
+    const { c, agent } = agentWith({ SENTINEL_EQUITY_BLOCK: 'false' });
+    await agent.judge(packet());
+    expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: false, triggers: false, discipline: true, lessons: true, delta: true }));
+    expect(agent.promptVersion).toBe(`v2.4+l1+d1/${THESIS_PROMPT_VERSION}`);
+  });
+
+  it('a verdict citing equity.* validates when the packet carries the equity block', async () => {
+    const { c, agent } = agentWith({});
+    const p = {
+      ...packet(),
+      equity: {
+        squareOff: present(47, 'clock', '2026-10-29T08:58:00.000Z'),
+        priceBand: absent('not captured'),
+        vwap: present({ vwap: 100, gapRupees: 1, gapN: 4, basis: 'level book' }, 'level book', '2026-10-29T08:58:00.000Z'),
+        dayRange: absent('no level book'),
+        relativeStrength: absent('no NIFTY'),
+        relativeVolume: absent('not captured'),
+        eventRisk: absent('unseen'),
+      },
+    };
+    c.mockResolvedValue(reply({ ...validVerdictLocal, evidence: ['equity.squareOff', 'equity.vwap', 'money.netPnl'] }));
+    await expect(agent.judge(p as never)).resolves.toMatchObject({ verdict: 'HOLD' });
   });
 });

@@ -11,7 +11,7 @@ import { NewsAggregatorService } from '../../news/services/news-aggregator.servi
 import { startOfLocalDay } from '../../market-data/services/master-contract';
 import { segmentFor } from '../charges';
 import type { Segment, Side } from '../charges';
-import type { TickOptions, TickReading, TickSource } from '../services/sentinel-cycle.service';
+import type { TickOptions, TickReading, TickRow, TickSource } from '../services/sentinel-cycle.service';
 import {
   SPOT_SOURCE_CASH,
   SPOT_SOURCE_HUB,
@@ -329,7 +329,20 @@ export class SentinelTickSource implements TickSource {
       },
     });
     if (!row) throw new TickUnavailable(`tracker ${trackerId} no longer exists`);
+    return this.tickForRow(trackerId, row, opts);
+  }
 
+  /**
+   * The whole reading for one position row — everything `tickFor` does after the
+   * tracker read. Public for the paper sentinel, which builds the row from a paper
+   * trade (no tracker exists) so a paper position is read EXACTLY as a live one is.
+   * `uncounted` keeps such reads out of the hub's `positions` consumer counter.
+   */
+  async tickForRow(
+    trackerId: string,
+    row: TickRow,
+    opts: TickOptions & { uncounted?: boolean } = {},
+  ): Promise<TickReading> {
     // SP1 M3 (HUB_PRICES_POSITIONS): the hub's own price for the contract when it
     // serves this user (today: the owner only) and has one ≤ 10 s old. Otherwise
     // the tracker row, with both of its refusals.
@@ -338,7 +351,7 @@ export class SentinelTickSource implements TickSource {
     const hubLtp = this.hubContractPrice(hub, row);
     // M1: consumers.positions counts only users the hub serves (hub !== null), so the
     // production gate reads the hub's own share and other tenants never confound it.
-    const counted = hub ? source : null;
+    const counted = hub && !opts.uncounted ? source : null;
     let ltp: number;
     if (hubLtp !== null) {
       ltp = hubLtp;

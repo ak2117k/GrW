@@ -3486,6 +3486,38 @@ model PaperExitShadow {
   @@map("paper_exit_shadows")
 }
 
+/// Paper sentinel (paper exit shadow stage 2): every look the live AI sentinel took at an open PAPER
+/// trade. The same columns as sentinel_verdicts, deliberately in a separate table: the live trigger
+/// watcher and the auto-exit executor read sentinel_verdicts, and a paper row must never reach them.
+/// trackerId is `paper:<tradeId>`. No FK, like sentinel_verdicts.
+model PaperSentinelLook {
+  id                String   @id @default(cuid())
+  tradeId           String
+  userId            String
+  trackerId         String
+  symbol            String
+  verdict           String
+  confidence        String
+  thesisStatus      String
+  recoveryAvailable Boolean
+  reason            String
+  evidence          Json
+  invalidationPoint String?
+  reviewInSec       Int
+  packet            Json
+  promptVersion     String
+  triggeredBy       Json
+  netPnl            Float
+  greenFloor        Float?
+  exitTrigger       Json?
+  newsShadow        Json?
+  createdAt         DateTime @default(now())
+
+  @@index([trackerId, createdAt])
+  @@index([tradeId])
+  @@map("paper_sentinel_looks")
+}
+
 // ─── News impact (2026-10-24): cluster → classify → relevance → batched cheap-LLM impact → reactions ───
 
 /// One story across sources (layer 1). Coverage (sourceCount) is a feature. Boilerplate never goes further.

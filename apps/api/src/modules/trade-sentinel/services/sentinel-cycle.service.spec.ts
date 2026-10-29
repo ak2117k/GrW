@@ -456,6 +456,8 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     join(__dirname, '..', 'tripwires', 'exit-confirm.ts'),
     // News & events v2: index additions wake the runner. A production entry point, so it is walked.
     join(__dirname, 'news-wake.service.ts'),
+    // Paper exit shadow stage 2: a second cycle over paper trades, driven by the paper watch.
+    join(__dirname, '..', '..', 'paper-sentinel', 'paper-sentinel.service.ts'),
   ];
 
   /**

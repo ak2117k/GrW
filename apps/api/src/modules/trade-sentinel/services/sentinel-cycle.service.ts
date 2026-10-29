@@ -70,6 +70,11 @@ import {
   type FutileRejudgeConfig,
 } from './futile-rejudge';
 
+/** What the cycle reads from its roster. */
+export type CycleRoster = Pick<RosterService, 'build'>;
+/** What the cycle reads and writes of its verdict store. */
+export type CycleVerdicts = Pick<SentinelVerdictRepository, 'record' | 'recentForTracker'>;
+
 export interface CycleReport {
   evaluated: number;
   /**
@@ -235,6 +240,24 @@ export type TickReading = Omit<
  * the live staleness refusal must not apply — the last print is returned with
  * its time in `ltpAt`. A missing price is still refused.
  */
+/** The tracker columns a tick reading is built from (see SentinelTickSource.tickForRow). */
+export interface TickRow {
+  userId: string;
+  symbol: string;
+  exchange: string;
+  token: string;
+  kind: string;
+  entryPrice: number;
+  /** Signed: negative is a short. */
+  qty: number;
+  entryTime: Date;
+  holdingHigh: number | null;
+  holdingLow: number | null;
+  lastLtp: number | null;
+  /** The age of `lastLtp` (see the note on the tracker read). */
+  updatedAt: Date;
+}
+
 export interface TickOptions {
   closedSession?: boolean;
 }
@@ -512,12 +535,15 @@ export class SentinelCycleService {
   private capReportedAt = 0;
 
   constructor(
-    private readonly roster: RosterService,
+    // Narrowed to what the cycle calls, with the class as the DI token, so the paper
+    // sentinel (paper/paper-sentinel.service.ts) can run this SAME cycle over its own
+    // roster and its own look table — never sentinel_verdicts.
+    @Inject(RosterService) private readonly roster: CycleRoster,
     private readonly tripwires: TripwireService,
     private readonly packets: ContextPacketService,
     private readonly thesis: ThesisService,
     private readonly agent: SentinelAgentService,
-    private readonly verdicts: SentinelVerdictRepository,
+    @Inject(SentinelVerdictRepository) private readonly verdicts: CycleVerdicts,
     private readonly oiWalls: OiWallSnapshotService,
     @Inject(TICK_SOURCE) private readonly ticks: TickSource,
     // Part B (price triggers, R14): per-tracker context for price-only sensors on

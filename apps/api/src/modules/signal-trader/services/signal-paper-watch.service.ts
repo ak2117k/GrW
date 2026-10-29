@@ -12,6 +12,7 @@ import { emptyShadow, grossPnl, shadowLine, stepShadow, type ShadowParams, type 
 import { NOISE_LOOKBACK_MIN, parseExitDisciplineConfig } from '../../exit-discipline/config';
 import { noiseFromBars } from '../../exit-discipline/noise';
 import type { MinuteBar } from '../../exit-discipline/types';
+import { PaperSentinelService, type PaperPosition } from '../../paper-sentinel/paper-sentinel.service';
 import {
   SIGNAL_QUOTES,
   SIGNAL_SESSION_CLOCK,
@@ -68,6 +69,8 @@ export class SignalPaperWatchService {
     @Inject(SIGNAL_SESSION_CLOCK) private readonly clock: SessionClockLike,
     @Inject(SIGNAL_QUOTES) private readonly quotes: QuotesLike,
     @Optional() @Inject(SIGNAL_BARS) private readonly bars?: BarsLike,
+    // Shadow stage 2: the live AI sentinel on these trades (looks + AI exits recorded, never acted on).
+    @Optional() private readonly paperSentinel?: PaperSentinelService,
   ) {
     const d = parseExitDisciplineConfig(process.env);
     this.shadowParams = { armN: d.floorArmN, trailN: d.floorTrailN, givebackN: d.givebackN };
@@ -95,6 +98,7 @@ export class SignalPaperWatchService {
     if (!owner) return { checked: 0, exited: 0 };
     const open = await this.repo.openPaperTrades();
     let exited = 0;
+    const priced: PaperPosition[] = [];
     for (const t of open) {
       const inst = t.instrument;
       if (!inst?.token || !inst.exchange) continue;
@@ -131,6 +135,11 @@ export class SignalPaperWatchService {
           this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}): ${d.reason}`);
           if (t.entryTags.includes('learn')) await this.scoreAi(t, d.price, d.tag, now);
         } else if (ltp !== null && ltp > 0 && t.entryPrice && t.entryPrice > 0) {
+          priced.push({
+            tradeId: t.id, userId: owner, symbol: inst.symbol, exchange: inst.exchange, token: inst.token, side: t.side, quantity: t.quantity,
+            entryPrice: t.entryPrice, entryTime: t.entryTime ?? t.createdAt, product: t.positionType ?? null,
+            decisionId: decisionIdFromTags(t.entryTags), ltp, ltpAt: now,
+          });
           const sign = String(t.side).toUpperCase() === 'BUY' ? 1 : -1;
           const pnl = sign * (ltp - t.entryPrice) * t.quantity;
           await this.trades.updateTrade(t.id, { pnl: r2(pnl), pnlPercent: r2(((sign * (ltp - t.entryPrice)) / t.entryPrice) * 100) });
@@ -139,6 +148,7 @@ export class SignalPaperWatchService {
         this.logger.warn(`[signal-paper] ${inst.symbol} (${t.id}): ${errText(err)}`);
       }
     }
+    if (this.shadowOn()) this.paperSentinel?.observe(priced, now);
     return { checked: open.length, exited };
   }
 

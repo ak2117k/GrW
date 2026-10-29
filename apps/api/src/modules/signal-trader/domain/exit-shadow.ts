@@ -95,7 +95,7 @@ export function grossPnl(side: string, entry: number, exit: number, qty: number)
 
 /** "stop 10:42 −₹1.2k · trail 11:05 +₹300 · held +₹800" — the line on the closed paper trade. */
 export function shadowLine(hits: Partial<Record<string, { at: string; rulePnl: number }>>, held: number): string {
-  const label: Record<string, string> = { STOP: 'stop', FLOOR: 'trail', GIVEBACK: 'giveback', AI_EXIT: 'AI' };
+  const label: Record<string, string> = { STOP: 'stop', FLOOR: 'trail', GIVEBACK: 'giveback', AI_EXIT: 'AI', AI_TRIGGER: 'AI trigger' };
   const inr = (v: number) => `${v < 0 ? '−' : '+'}₹${Math.abs(v) >= 1000 ? `${r2(Math.abs(v) / 1000)}k` : Math.round(Math.abs(v))}`;
   const ist = (iso: string) => new Date(Date.parse(iso) + 5.5 * 3_600_000).toISOString().slice(11, 16);
   const parts = Object.entries(hits)

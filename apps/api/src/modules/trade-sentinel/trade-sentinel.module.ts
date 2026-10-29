@@ -68,6 +68,7 @@ import { EventsService } from '../news-events/events/events.service';
 import { MbmModule } from '../mbm/mbm.module';
 import { NEWS_INDEX } from './ports/news-index.port';
 import { MARKET_EVENTS } from './ports/events.port';
+import { PaperLookRepository } from './paper/paper-look.repository';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -271,8 +272,29 @@ import { MARKET_EVENTS } from './ports/events.port';
     NewsWakeService,
     // News impact: HIGH impacts ('news.impact.high') as one fresh headline per cluster for the news sensor.
     HighImpactNewsBook,
+    // Paper exit shadow stage 2: the paper looks' table (read by the packet's memory block too).
+    PaperLookRepository,
   ],
   // SentinelChartContextAdapter + NEWS_SHIM: read-only context blocks for the signal-trader judge.
-  exports: [SentinelCycleService, SentinelRunnerService, SentinelChartContextAdapter, NEWS_SHIM],
+  // The rest: the pieces PaperSentinelModule builds its second, paper-only cycle from — the same
+  // sensors, packet, thesis, judge and configs as the live one.
+  exports: [
+    SentinelCycleService,
+    SentinelRunnerService,
+    SentinelChartContextAdapter,
+    NEWS_SHIM,
+    TripwireService,
+    ContextPacketService,
+    ThesisService,
+    SentinelAgentService,
+    OiWallSnapshotService,
+    PaperLookRepository,
+    TICK_SOURCE,
+    EXIT_DISCIPLINE_CONFIG,
+    REJUDGE_CONFIG,
+    FUTILE_REJUDGE_CONFIG,
+    JUDGE_GATE_CONFIG,
+    MARKET_EVENTS,
+  ],
 })
 export class TradeSentinelModule {}

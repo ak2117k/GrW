@@ -198,3 +198,23 @@ describe('SentinelVerdictRepository — exitTrigger (price triggers)', () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('SentinelVerdictRepository — paper trackers never touch sentinel_verdicts', () => {
+  const create = jest.fn();
+  const findMany = jest.fn();
+  const paperRecent = jest.fn().mockResolvedValue([{ id: 'L1' }]);
+
+  it('refuses to record a paper look (the live trigger watcher and executor read this table)', async () => {
+    const repo = new SentinelVerdictRepository({ sentinelVerdict: { create } } as any);
+    await expect(repo.record({ trackerId: 'paper:T1' } as any)).rejects.toThrow(/refusing a paper look/);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("serves a paper tracker's prior looks from the paper table, and nothing without it", async () => {
+    const repo = new SentinelVerdictRepository({ sentinelVerdict: { findMany } } as any, { recentForTracker: paperRecent } as any);
+    await expect(repo.recentForTracker('paper:T1', 3)).resolves.toEqual([{ id: 'L1' }]);
+    expect(paperRecent).toHaveBeenCalledWith('paper:T1', 3);
+    expect(findMany).not.toHaveBeenCalled();
+    await expect(new SentinelVerdictRepository({ sentinelVerdict: { findMany } } as any).recentForTracker('paper:T1', 3)).resolves.toEqual([]);
+  });
+});

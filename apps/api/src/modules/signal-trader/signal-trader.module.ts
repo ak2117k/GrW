@@ -14,6 +14,7 @@ import { SessionClock, parseLateClose } from '../market-hub/session-clock';
 import { TradeEngineModule } from '../trade-engine/trade-engine.module';
 import { TradeTrackerModule } from '../trade-tracker/trade-tracker.module';
 import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
+import { PaperSentinelModule } from '../paper-sentinel/paper-sentinel.module';
 import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { MbmModule } from '../mbm/mbm.module';
 import { parseSignalTraderConfig } from './domain/signal-trader.config';
@@ -52,6 +53,7 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
     TradeEngineModule,
     TradeTrackerModule,
     TradeSentinelModule,
+    PaperSentinelModule,
     AiGatewayModule,
     MbmModule,
   ],

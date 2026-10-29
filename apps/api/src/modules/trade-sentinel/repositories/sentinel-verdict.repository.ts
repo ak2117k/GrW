@@ -1,6 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Prisma, type SentinelVerdict } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { PaperLookRepository } from '../paper/paper-look.repository';
+import { isPaperTracker } from '../paper/paper-tracker';
 
 /** Everything needed to persist one agent decision together with the evidence it saw. */
 export interface RecordVerdictInput {
@@ -58,9 +60,16 @@ export interface RecordVerdictInput {
 export class SentinelVerdictRepository {
   private readonly logger = new Logger(SentinelVerdictRepository.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // Paper sentinel: the packet builder reads prior looks through THIS repository, so a
+    // `paper:` tracker's are served from paper_sentinel_looks. Optional: absent ⇒ none.
+    @Optional() private readonly paperLooks?: PaperLookRepository,
+  ) {}
 
   async record(input: RecordVerdictInput): Promise<SentinelVerdict> {
+    // The live trigger watcher and auto-exit executor act on these rows: a paper look here could exit a real position.
+    if (isPaperTracker(input.trackerId)) throw new Error(`refusing a paper look in sentinel_verdicts (${input.trackerId})`);
     const shadow = input.newsShadow !== undefined && input.newsShadow !== null;
     try {
       return await this.create(input, shadow);
@@ -124,6 +133,7 @@ export class SentinelVerdictRepository {
     limit: number,
     opts: { liveOnly?: boolean } = {},
   ): Promise<SentinelVerdict[]> {
+    if (isPaperTracker(trackerId)) return this.paperLooks ? this.paperLooks.recentForTracker(trackerId, limit) : [];
     return this.prisma.sentinelVerdict.findMany({
       where: opts.liveOnly
         ? {

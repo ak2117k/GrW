@@ -103,23 +103,108 @@ describe('PaperSentinelService — the live sentinel cycle on paper trades', () 
     process.env = { ...saved };
   });
 
-  it('roster: F&O only, oldest first, capped at PAPER_SENTINEL_MAX, every left-out trade with its reason', async () => {
+  type Roster = Array<{ trackerId: string; watched: boolean; reason: string }>;
+  const rosterOf = (svc: PaperSentinelService): Roster => (svc as unknown as { roster(u: string): Roster }).roster(OWNER);
+  const eq = (over: Partial<PaperPosition> = {}) => pos({ tradeId: 'EQ', exchange: 'NSE', symbol: 'SAKAR-EQ', token: '222', quantity: 100, entryPrice: 500, ltp: 500, product: 'INTRADAY', ...over });
+
+  it('roster: F&O before equity, oldest first, capped at PAPER_SENTINEL_MAX, every left-out trade with its reason', async () => {
     const t = make({ env: { PAPER_SENTINEL_MAX: '1' } });
     t.svc.observe(
       [
         pos({ tradeId: 'NEW', entryTime: new Date('2026-10-29T05:00:00.000Z') }),
         pos({ tradeId: 'OLD', entryTime: new Date('2026-10-29T03:50:00.000Z') }),
-        pos({ tradeId: 'EQ', exchange: 'NSE', symbol: 'RELIANCE-EQ' }),
+        // The oldest of all, but a stock never takes an F&O slot.
+        eq({ entryTime: new Date('2026-10-29T03:46:00.000Z') }),
       ],
       NOW,
     );
     await t.svc.idle();
-    const roster = await (t.svc as unknown as { roster(u: string): Array<{ trackerId: string; watched: boolean; reason: string }> }).roster(OWNER);
+    const roster = rosterOf(t.svc);
+    expect(roster.map((e) => e.trackerId)).toEqual(['paper:OLD', 'paper:NEW', 'paper:EQ']);
     expect(roster.find((e) => e.trackerId === 'paper:OLD')).toMatchObject({ watched: true });
     expect(roster.find((e) => e.trackerId === 'paper:NEW')).toMatchObject({ watched: false, reason: expect.stringContaining('PAPER_SENTINEL_MAX') });
-    expect(roster.find((e) => e.trackerId === 'paper:EQ')).toMatchObject({ watched: false, reason: expect.stringContaining('F&O only') });
+    expect(roster.find((e) => e.trackerId === 'paper:EQ')).toMatchObject({ watched: false, reason: expect.stringContaining('PAPER_SENTINEL_MAX') });
     // Only the watched one was priced and judged.
     expect(t.tickForRow.mock.calls.map((c) => c[0])).toEqual(['paper:OLD']);
+  });
+
+  it('roster: equity fills the slots F&O leaves, oldest first; NSE and BSE both', async () => {
+    const t = make({ env: { PAPER_SENTINEL_MAX: '3' } });
+    t.svc.observe(
+      [
+        eq({ tradeId: 'EQ2', exchange: 'BSE', entryTime: new Date('2026-10-29T05:00:00.000Z') }),
+        eq({ tradeId: 'EQ1', entryTime: new Date('2026-10-29T04:30:00.000Z') }),
+        eq({ tradeId: 'EQ3', entryTime: new Date('2026-10-29T05:10:00.000Z') }),
+        pos({ tradeId: 'FNO' }),
+      ],
+      NOW,
+    );
+    await t.svc.idle();
+    const roster = rosterOf(t.svc);
+    expect(roster.map((e) => [e.trackerId, e.watched])).toEqual([
+      ['paper:FNO', true],
+      ['paper:EQ1', true],
+      ['paper:EQ2', true],
+      ['paper:EQ3', false],
+    ]);
+    expect(roster[3].reason).toContain('PAPER_SENTINEL_MAX (3)');
+  });
+
+  it('PAPER_SENTINEL_EQUITY=off: F&O only, the stock left out with its reason; another exchange is never watched', async () => {
+    const t = make({ env: { PAPER_SENTINEL_EQUITY: 'off' } });
+    t.svc.observe([pos(), eq(), pos({ tradeId: 'CDS', exchange: 'CDS', symbol: 'USDINR' })], NOW);
+    await t.svc.idle();
+    const roster = rosterOf(t.svc);
+    expect(roster.find((e) => e.trackerId === 'paper:T1')).toMatchObject({ watched: true });
+    expect(roster.find((e) => e.trackerId === 'paper:EQ')).toMatchObject({ watched: false, reason: expect.stringContaining('PAPER_SENTINEL_EQUITY=off') });
+    expect(roster.find((e) => e.trackerId === 'paper:CDS')).toMatchObject({ watched: false, reason: expect.stringContaining('CDS') });
+    expect(t.tickForRow.mock.calls.map((c) => c[0])).toEqual(['paper:T1']);
+  });
+
+  it('a cash paper trade is read through the live tick source as an NSE row', async () => {
+    const t = make();
+    t.svc.observe([eq({ ltp: 505 })], NOW);
+    await t.svc.idle();
+    const [trackerId, row] = t.tickForRow.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(trackerId).toBe('paper:EQ');
+    expect(row).toMatchObject({ symbol: 'SAKAR-EQ', exchange: 'NSE', token: '222', qty: 100, entryPrice: 500, lastLtp: 505 });
+    expect(t.record.mock.calls[0][0]).toMatchObject({ trackerId: 'paper:EQ' });
+  });
+
+  it('an EXIT_NOW on an NSE paper trade is the AI_EXIT, and the close handler gets the price', async () => {
+    const t = make({ judge: { verdict: 'EXIT_NOW', thesisStatus: 'BROKEN' } });
+    const handler = jest.fn().mockResolvedValue(undefined);
+    t.svc.onExit(handler);
+    t.svc.observe([eq({ ltp: 488.5 })], NOW);
+    await t.svc.idle();
+    expect(t.upsert).toHaveBeenCalledTimes(1);
+    expect(t.upsert.mock.calls[0][0].create).toMatchObject({ tradeId: 'EQ', rule: 'AI_EXIT', price: 488.5 });
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ tradeId: 'EQ', rule: 'AI_EXIT', price: 488.5 }));
+  });
+
+  it('an UNDERLYING exitTrigger on a stock arms on the stock’s own price and fires as AI_TRIGGER', async () => {
+    const t = make();
+    t.record.mockImplementation(async (input: Record<string, unknown>) => ({
+      ...input,
+      id: 'L1',
+      tradeId: 'EQ',
+      createdAt: new Date(),
+      exitTrigger: { v: 1, instrument: 'UNDERLYING', op: 'BELOW', price: 490, watch: null },
+    }));
+    const handler = jest.fn().mockResolvedValue(undefined);
+    t.svc.onExit(handler);
+    const at = (s: number) => new Date(Date.now() + s * 1000);
+    t.svc.observe([eq({ ltp: 500, ltpAt: at(0) })], at(0));
+    await t.svc.idle();
+    t.svc.observe([eq({ ltp: 498, ltpAt: at(30) })], at(30));
+    await t.svc.idle();
+    expect(t.upsert).not.toHaveBeenCalled();
+    t.svc.observe([eq({ ltp: 489, ltpAt: at(60) })], at(60));
+    await t.svc.idle();
+    expect(t.upsert).toHaveBeenCalledTimes(1);
+    expect(t.upsert.mock.calls[0][0].create).toMatchObject({ tradeId: 'EQ', rule: 'AI_TRIGGER', price: 489 });
+    expect(t.upsert.mock.calls[0][0].create.detail.trigger).toMatchObject({ instrument: 'PREMIUM', proposedInstrument: 'UNDERLYING', op: 'BELOW', price: 490 });
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ tradeId: 'EQ', rule: 'AI_TRIGGER', price: 489 }));
   });
 
   it('reads the position through the live tick source, as a signed, uncounted row with its running high/low', async () => {

@@ -26,7 +26,9 @@ import { PaperLookRepository } from '../trade-sentinel/paper/paper-look.reposito
 import { paperTrackerId, tradeIdOf } from '../trade-sentinel/paper/paper-tracker';
 import {
   armPaperTrigger,
+  CASH_EXCHANGES,
   gateExits,
+  isCashExchange,
   paperExitGate,
   stepPaperTrigger,
   type PaperTrigger,
@@ -92,8 +94,9 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
  * It is the live `SentinelCycleService`, a second instance built from the module's own sensors, packet
  * builder, thesis, judge and every live config — so a paper position is sensed, gated and judged exactly
  * as a live one. Three things differ, and only these:
- *  - the ROSTER is the open paper trades the paper watch hands in each sweep (F&O only, as the live
- *    auto-exit; at most PAPER_SENTINEL_MAX, oldest first);
+ *  - the ROSTER is the open paper trades the paper watch hands in each sweep — F&O as the live
+ *    auto-exit, plus cash equity (NSE/BSE, PAPER_SENTINEL_EQUITY, default on); at most
+ *    PAPER_SENTINEL_MAX, F&O first, oldest first within each;
  *  - the TICK is SentinelTickSource.tickForRow over a row built from the paper trade and the watch's LTP;
  *  - the VERDICT STORE is paper_sentinel_looks, never sentinel_verdicts.
  * No hub tick sensors and no news push-wake (decision 6: no feed slots), and the instance has its own
@@ -268,14 +271,32 @@ export class PaperSentinelService {
   }
   private readonly checked = new Set<string>();
 
+  /** Owner 2026-10-29: cash-equity paper trades get the same AI sentinel. PAPER_SENTINEL_EQUITY=off ⇒ F&O only. */
+  private equity(): boolean {
+    return (process.env.PAPER_SENTINEL_EQUITY ?? 'on').trim().toLowerCase() !== 'off';
+  }
+
+  /** The exchanges a paper trade may be watched (and a trigger armed) on. */
+  private exchanges(): readonly string[] {
+    return this.equity() ? [...AUTO_EXIT_EXCHANGES, ...CASH_EXCHANGES] : AUTO_EXIT_EXCHANGES;
+  }
+
   private roster(userId: string): RosterEntry[] {
-    const mine = [...this.book.values()].filter((h) => h.userId === userId).sort((a, b) => a.entryTime.getTime() - b.entryTime.getTime());
+    // F&O ranks before equity for the slots (a stock never takes an F&O slot); oldest first within each.
+    const rank = (h: Held) => (AUTO_EXIT_EXCHANGES.includes(h.exchange.toUpperCase()) ? 0 : 1);
+    const mine = [...this.book.values()]
+      .filter((h) => h.userId === userId)
+      .sort((a, b) => rank(a) - rank(b) || a.entryTime.getTime() - b.entryTime.getTime());
     const max = this.max();
+    const allowed = this.exchanges();
     let slots = 0;
     return mine.map((h) => {
       const exchange = h.exchange.toUpperCase();
       const base = { userId, trackerId: paperTrackerId(h.tradeId), symbol: h.symbol, exchange, kind: 'POSITION' as const, ownership: 'SENTINEL' as const };
-      if (!AUTO_EXIT_EXCHANGES.includes(exchange)) return { ...base, watched: false, reason: 'paper: the live AI exit is F&O only' };
+      if (!allowed.includes(exchange)) {
+        const reason = isCashExchange(exchange) ? 'paper: equity is off (PAPER_SENTINEL_EQUITY=off), F&O only' : `paper: the AI sentinel does not watch ${exchange}`;
+        return { ...base, watched: false, reason };
+      }
       if (h.aiExited) return { ...base, watched: false, reason: `paper: the AI already exited (${h.aiExited})` };
       if (slots >= max) return { ...base, watched: false, reason: `paper: over PAPER_SENTINEL_MAX (${max})` };
       slots += 1;
@@ -372,7 +393,7 @@ export class PaperSentinelService {
             prices,
             armed: h.armed,
             cfg: this.triggerCfg,
-            fnoExchanges: AUTO_EXIT_EXCHANGES,
+            exchanges: this.exchanges(),
             now: at,
           });
           if (r.kind === 'armed') {
@@ -392,7 +413,15 @@ export class PaperSentinelService {
           const t = h.armed;
           await this.recordExit(h, 'AI_TRIGGER', h.ltp, `AI trigger ${t.instrument} ${t.op} ${t.price} crossed (${r2(s.watched)})`, {
             lookId: t.lookId,
-            trigger: { instrument: t.instrument, op: t.op, price: t.price, refPrice: t.refPrice, armedAt: new Date(t.armedAt).toISOString(), watched: s.watched },
+            trigger: {
+              instrument: t.instrument,
+              op: t.op,
+              price: t.price,
+              refPrice: t.refPrice,
+              armedAt: new Date(t.armedAt).toISOString(),
+              watched: s.watched,
+              ...(t.proposedInstrument ? { proposedInstrument: t.proposedInstrument } : {}),
+            },
           });
         }
       } catch (err) {

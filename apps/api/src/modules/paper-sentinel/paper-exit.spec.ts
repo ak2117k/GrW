@@ -5,6 +5,7 @@ import { armPaperTrigger, gateExits, paperExitGate, stepPaperTrigger, type Paper
 const NOW = Date.parse('2026-10-29T06:00:00Z');
 const tcfg = parseTriggerConfig({});
 const FNO = ['NFO', 'BFO', 'MCX'];
+const EQ = [...FNO, 'NSE', 'BSE'];
 const premium = (price: number, ageMs = 0) => ({ premium: { price, at: NOW - ageMs }, underlying: null });
 const trigger = (o: Record<string, unknown>) => ({ v: 1, instrument: 'PREMIUM', op: 'BELOW', price: 90, watch: null, ...o });
 const arm = (o: Partial<Parameters<typeof armPaperTrigger>[0]> = {}) =>
@@ -16,7 +17,7 @@ const arm = (o: Partial<Parameters<typeof armPaperTrigger>[0]> = {}) =>
     prices: premium(100),
     armed: null,
     cfg: tcfg,
-    fnoExchanges: FNO,
+    exchanges: FNO,
     now: NOW,
     ...o,
   });
@@ -79,8 +80,17 @@ describe('armPaperTrigger — the live arming rules', () => {
     });
   });
 
-  it('is F&O only, as the live auto-exit', () => {
-    expect(arm({ exchange: 'NSE', symbol: 'RELIANCE-EQ' })).toEqual({ kind: 'rejected', reason: 'EXCHANGE_NOT_FNO' });
+  it('arms only on the allowed exchanges (F&O alone when equity is off)', () => {
+    expect(arm({ exchange: 'NSE', symbol: 'RELIANCE-EQ' })).toEqual({ kind: 'rejected', reason: 'EXCHANGE_NOT_ALLOWED (NSE)' });
+    expect(arm({ exchange: 'nse', symbol: 'RELIANCE-EQ', exchanges: EQ })).toMatchObject({ kind: 'armed' });
+  });
+
+  it('an F&O UNDERLYING trigger is unchanged: armed on the underlying, under its own limit', () => {
+    const r = arm({
+      pending: { lookId: 'L1', exitTrigger: trigger({ instrument: 'UNDERLYING', price: 23900 }), seenAt: NOW },
+      prices: { premium: { price: 100, at: NOW }, underlying: { price: 24000, at: NOW } },
+    });
+    expect(r).toEqual({ kind: 'armed', trigger: { lookId: 'L1', instrument: 'UNDERLYING', op: 'BELOW', price: 23900, armedAt: NOW, refPrice: 24000 } });
   });
 
   it('tighten-only: a newer level that loosens the armed one is rejected', () => {
@@ -90,6 +100,56 @@ describe('armPaperTrigger — the live arming rules', () => {
 
   it('a malformed stored trigger is rejected with the reader’s reason', () => {
     expect(arm({ pending: { lookId: 'L1', exitTrigger: { v: 1, problem: 'no level' }, seenAt: NOW } })).toEqual({ kind: 'rejected', reason: 'MALFORMED: no level' });
+  });
+});
+
+describe('armPaperTrigger — cash equity (NSE/BSE)', () => {
+  // SAKAR-EQ long 100 at ₹500: the contract IS the stock, so there is one price.
+  const cash = (o: Partial<Parameters<typeof armPaperTrigger>[0]> = {}) =>
+    arm({ symbol: 'SAKAR-EQ', exchange: 'NSE', qty: 100, exchanges: EQ, prices: { premium: { price: 500, at: NOW }, underlying: { price: 500, at: NOW } }, ...o });
+  const at = (o: Record<string, unknown>) => ({ lookId: 'L1', exitTrigger: trigger(o), seenAt: NOW });
+
+  it('an UNDERLYING proposal is normalised to the stock’s own price (no UNKNOWN_CONTRACT_KIND)', () => {
+    const r = cash({ pending: at({ instrument: 'UNDERLYING', price: 480 }) });
+    expect(r).toEqual({
+      kind: 'armed',
+      trigger: { lookId: 'L1', instrument: 'PREMIUM', op: 'BELOW', price: 480, armedAt: NOW, refPrice: 500, proposedInstrument: 'UNDERLYING' },
+    });
+  });
+
+  it('a PREMIUM proposal arms as is, with no normalisation note', () => {
+    const r = cash({ pending: at({ price: 480 }) });
+    expect(r).toEqual({ kind: 'armed', trigger: { lookId: 'L1', instrument: 'PREMIUM', op: 'BELOW', price: 480, armedAt: NOW, refPrice: 500 } });
+  });
+
+  it('the distance limit is the UNDERLYING 10 %, not PREMIUM’s 60 %', () => {
+    expect(cash({ pending: at({ price: 451 }) }).kind).toBe('armed'); // 9.8 %
+    expect(cash({ pending: at({ price: 400 }) })).toEqual({ kind: 'rejected', reason: 'TOO_FAR (20.00% > 10%)' });
+    expect(cash({ pending: at({ instrument: 'UNDERLYING', price: 400 }) })).toEqual({ kind: 'rejected', reason: 'TOO_FAR (20.00% > 10%)' });
+    // The same 20 % on an option premium stays inside PREMIUM's 60 %.
+    expect(arm({ pending: { lookId: 'L1', exitTrigger: trigger({ price: 80 }), seenAt: NOW } }).kind).toBe('armed');
+  });
+
+  it('the protective side is the position’s sign: a long stock exits BELOW, a short ABOVE', () => {
+    expect(cash({ pending: at({ instrument: 'UNDERLYING', op: 'ABOVE', price: 520 }) })).toEqual({ kind: 'rejected', reason: 'NOT_PROTECTIVE' });
+    expect(cash({ qty: -100, pending: at({ instrument: 'UNDERLYING', op: 'ABOVE', price: 520 }) })).toMatchObject({
+      kind: 'armed',
+      trigger: { instrument: 'PREMIUM', op: 'ABOVE', price: 520 },
+    });
+    expect(cash({ qty: -100, pending: at({ op: 'BELOW', price: 480 }) })).toEqual({ kind: 'rejected', reason: 'NOT_PROTECTIVE' });
+  });
+
+  it('the live rules still apply: already crossed, fresh price, tighten-only across both proposal kinds, malformed', () => {
+    expect(cash({ pending: at({ price: 505 }) })).toEqual({ kind: 'rejected', reason: 'ALREADY_CROSSED' });
+    expect(cash({ prices: { premium: { price: 500, at: NOW - 20_000 }, underlying: null } })).toEqual({ kind: 'wait' });
+    const armed: PaperTrigger = { lookId: 'L0', instrument: 'PREMIUM', op: 'BELOW', price: 490, armedAt: NOW - 60_000, refPrice: 500, proposedInstrument: 'UNDERLYING' };
+    expect(cash({ armed, pending: at({ instrument: 'UNDERLYING', price: 480 }) })).toEqual({ kind: 'rejected', reason: 'LOOSENS' });
+    expect(cash({ armed, pending: at({ instrument: 'UNDERLYING', price: 495 }) })).toMatchObject({ kind: 'armed', trigger: { price: 495 } });
+    expect(cash({ pending: { lookId: 'L1', exitTrigger: { v: 1, problem: 'no level' }, seenAt: NOW } })).toEqual({ kind: 'rejected', reason: 'MALFORMED: no level' });
+  });
+
+  it('BSE is cash too', () => {
+    expect(cash({ exchange: 'BSE', pending: at({ instrument: 'UNDERLYING', price: 480 }) })).toMatchObject({ kind: 'armed', trigger: { instrument: 'PREMIUM' } });
   });
 });
 

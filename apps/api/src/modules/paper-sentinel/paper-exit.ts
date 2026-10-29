@@ -20,6 +20,9 @@ import type { TriggerInstrument, TriggerOp } from '../sentinel-executor/domain/t
  *
  * The one stated difference: live triggers confirm on 2 hub ticks ≥ 1 s apart; the paper watch prices
  * every 30 s, so the first sweep beyond the level stands for that confirmation, at that sweep's LTP.
+ *
+ * Cash equity (owner 2026-10-29: "same logic as futures"): the live executor never arms a stock, so a
+ * paper stock's trigger is the live rules on the stock's own price — see `armPaperTrigger`.
  */
 
 /** ExitGateService.decide, minus the I/O it does around it (the caller supplies the same reads). */
@@ -68,7 +71,13 @@ export interface PaperTrigger {
   armedAt: number;
   /** The price the trigger was armed against. */
   refPrice: number;
+  /** Cash only: the instrument the AI named, when it was normalised to the stock's own price. */
+  proposedInstrument?: TriggerInstrument;
 }
+
+/** Cash-equity exchanges: the contract IS the stock, so contract price and underlying are one price. */
+export const CASH_EXCHANGES: readonly string[] = ['NSE', 'BSE'];
+export const isCashExchange = (exchange: string): boolean => CASH_EXCHANGES.includes(String(exchange).toUpperCase());
 
 export interface TriggerPrices {
   /** The paper contract's LTP and when it was read. */
@@ -90,6 +99,11 @@ const ARM_PRICE_MAX_AGE_MS = 15_000;
 /**
  * TriggerWatchService.armOne for a paper trade. `wait` = no fresh price yet, still inside the defer window
  * (re-tried next sweep); `rejected` carries the live reason word.
+ *
+ * Cash (NSE/BSE): any proposal, UNDERLYING or PREMIUM, is a level on the stock's own price — armed as
+ * PREMIUM (the paper watch's LTP, so the protective side is the position's sign: long ⇒ BELOW) under
+ * the UNDERLYING distance limit, since a stock moves like an underlying, not like an option premium.
+ * Everything else (fresh price, not crossed, tighten-only) is the live validateTrigger unchanged.
  */
 export function armPaperTrigger(i: {
   pending: PendingTrigger;
@@ -100,27 +114,34 @@ export function armPaperTrigger(i: {
   prices: TriggerPrices;
   armed: PaperTrigger | null;
   cfg: Pick<TriggerConfig, 'maxDistancePct' | 'tightenOnly'>;
-  fnoExchanges: readonly string[];
+  /** Where a paper trigger may arm: the live auto-exit's F&O exchanges, plus NSE/BSE when equity is on. */
+  exchanges: readonly string[];
   now: number;
 }): { kind: 'armed'; trigger: PaperTrigger } | { kind: 'wait' } | { kind: 'rejected'; reason: string } {
   const stored = parseStoredTrigger(i.pending.exitTrigger);
   if (stored.kind === 'problem') return { kind: 'rejected', reason: `MALFORMED: ${stored.problem}` };
   const p = stored.trigger;
-  if (!i.fnoExchanges.includes(String(i.exchange).toUpperCase())) return { kind: 'rejected', reason: 'EXCHANGE_NOT_FNO' };
-  const quote = p.instrument === 'PREMIUM' ? i.prices.premium : i.prices.underlying;
+  const exchange = String(i.exchange).toUpperCase();
+  if (!i.exchanges.includes(exchange)) return { kind: 'rejected', reason: `EXCHANGE_NOT_ALLOWED (${exchange})` };
+  const cash = isCashExchange(exchange);
+  const instrument: TriggerInstrument = cash ? 'PREMIUM' : p.instrument;
+  const quote = instrument === 'PREMIUM' ? i.prices.premium : i.prices.underlying;
   const fresh = quote && quote.price > 0 && i.now - quote.at <= ARM_PRICE_MAX_AGE_MS ? quote : null;
   if (!fresh) return i.now - i.pending.seenAt < ARM_DEFER_MS ? { kind: 'wait' } : { kind: 'rejected', reason: 'NO_FRESH_PRICE' };
-  const level: TriggerLevel = { instrument: p.instrument, op: p.op, price: p.price };
+  const level: TriggerLevel = { instrument, op: p.op, price: p.price };
+  const cfg = cash ? { ...i.cfg, maxDistancePct: { ...i.cfg.maxDistancePct, PREMIUM: i.cfg.maxDistancePct.UNDERLYING } } : i.cfg;
   const v = validateTrigger({
     proposal: level,
     qty: i.qty,
     kind: contractKindOf(i.symbol),
     current: { price: fresh.price, ageMs: Math.max(0, i.now - fresh.at) },
     armed: i.armed ? { instrument: i.armed.instrument, op: i.armed.op, price: i.armed.price } : null,
-    cfg: i.cfg,
+    cfg,
   });
   if (!v.ok) return { kind: 'rejected', reason: v.reason };
-  return { kind: 'armed', trigger: { lookId: i.pending.lookId, ...level, armedAt: i.now, refPrice: fresh.price } };
+  const trigger: PaperTrigger = { lookId: i.pending.lookId, ...level, armedAt: i.now, refPrice: fresh.price };
+  if (cash && p.instrument !== instrument) trigger.proposedInstrument = p.instrument;
+  return { kind: 'armed', trigger };
 }
 
 /** One sweep against an armed trigger: fire on the first read beyond the level, expire at the live max age. */

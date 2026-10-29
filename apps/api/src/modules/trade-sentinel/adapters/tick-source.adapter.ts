@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
 import { isHubExchange, type InstrumentRef } from '../../market-hub/hub.types';
-import { resolveUnderlying as resolveUnderlyingRef } from '../../market-hub/underlying';
+import { INDEX_UNDERLYINGS, resolveUnderlying as resolveUnderlyingRef } from '../../market-hub/underlying';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
@@ -23,7 +23,10 @@ import { SENTINEL_LEVEL_SOURCE, SentinelChartContextAdapter } from './chart-cont
 import { normaliseSymbol } from '../symbols';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import { EXIT_DISCIPLINE_CONFIG, type ExitDisciplineConfig } from '../../exit-discipline/config';
-import { noiseFromBars } from '../../exit-discipline/noise';
+import { noiseFromBars, scaledUnderlyingNoise } from '../../exit-discipline/noise';
+import type { NoiseReading } from '../../exit-discipline/types';
+import { sessionFor } from '../market-sessions';
+import type { EquityLeg, EquityTickInputs } from '../services/equity-blocks';
 import { MinuteBarsReader } from './minute-bars.reader';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { newsPositionOf } from '../../news-events/keys';
@@ -150,6 +153,18 @@ const NO_UNDERLYING: Underlying = { name: null, token: null, exchange: null, con
  */
 export const SPOT_QUOTE_TTL_MS = 20_000;
 
+/**
+ * How long a MISSED "NIFTY at entry" read is remembered before it is tried again. A found close
+ * never changes (it is a past bar); a miss may fill in when the hub flushes late, so it is retried,
+ * but not on every 30 s look — one indexed DB read per position per five minutes at most.
+ */
+export const ANCHOR_MISS_RETRY_MS = 5 * 60_000;
+
+/** 'HH:MM' of an instant in IST (UTC+5:30, no DST). */
+function istWallHhmm(d: Date): string {
+  return new Date(d.getTime() + 5.5 * 3_600_000).toISOString().slice(11, 16);
+}
+
 /** A resolved underlying price, or a stated absence naming what was tried. */
 interface SpotReading {
   ltp: number | null;
@@ -264,6 +279,9 @@ export class SentinelTickSource implements TickSource {
   private readonly quotes = new Map<string, { at: number; ltp: number; capturedAt: string }>();
 
   private hubSourceRef: HubPriceSource | null = null;
+
+  /** NIFTY at each position's entry (equity block F5): a found close is kept for the position's life, a miss retried after {@link ANCHOR_MISS_RETRY_MS}. */
+  private readonly niftyAnchors = new Map<string, { close: number | null; at: number }>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -434,6 +452,8 @@ export class SentinelTickSource implements TickSource {
     ]);
 
     const noise = opts.closedSession ? null : await this.noiseFor(row, isCash, underlying);
+    // Equity spec §4: the equity block's market inputs — CASH only, so an F&O tick is unchanged.
+    const equityInputs = isCash ? await this.equityInputsFor(trackerId, row, hub) : null;
     const news = mergeImpactNews(opts.closedSession ? [] : (this.impactBook?.freshFor(structureSymbol, Date.now()) ?? []), v2News?.fresh, legacyNews);
 
     return {
@@ -495,6 +515,7 @@ export class SentinelTickSource implements TickSource {
       factorValues: structure.factorValues,
       factorsReason: structure.factorsReason,
       noise,
+      ...(equityInputs ? { equityInputs } : {}),
     };
   }
 
@@ -505,7 +526,7 @@ export class SentinelTickSource implements TickSource {
    * underlying. Never throws — the reader turns a DB failure into no bars.
    */
   private async noiseFor(
-    row: { exchange: string; token: string; symbol: string },
+    row: { exchange: string; token: string; symbol: string; userId?: string },
     isCash: boolean,
     underlying: Underlying,
   ): Promise<TickReading['noise']> {
@@ -520,15 +541,133 @@ export class SentinelTickSource implements TickSource {
           )
         : Promise.resolve([]),
     ]);
-    const contract = noiseFromBars(cBars);
+    // Equity spec T1: a CASH position without hub bars falls back to its OWN daily ATR14 / √(session
+    // minutes) — the fallback the packet already gave `underlying`, now on `contract` too, because
+    // for cash the contract IS the underlying. Without it the noise floor, the noise giveback and
+    // every N-based rule were off for nearly every stock (few hold a hub slot). F&O: unchanged.
+    const contract = noiseFromBars(cBars) ?? (isCash ? await this.cashDailyNoise(row, now) : null);
     const underlying1m = isCash ? contract : noiseFromBars(uBars);
     return {
       contract,
       underlying1m,
       reason: contract
         ? null
-        : 'no hub 1-minute bars for this contract in the last 120 minutes (needs MARKET_HUB_ENABLED + HUB_CANDLES_ENABLED and a live feed slot)',
+        : 'no hub 1-minute bars for this contract in the last 120 minutes (needs MARKET_HUB_ENABLED + HUB_CANDLES_ENABLED and a live feed slot)' +
+          (isCash ? ", and no daily ATR14 on the stock's level book to fall back to" : ''),
     };
+  }
+
+  /**
+   * T1: the stock's daily ATR14 scaled to one minute. Reads the SAME cached level book
+   * `structureFor` built a moment ago (60 s cache keyed by symbol, in-flight shared), so it costs
+   * no broker call. Null when there is no book or no ATR. Never throws.
+   */
+  private async cashDailyNoise(row: { exchange: string; symbol: string; userId?: string }, now: Date): Promise<NoiseReading | null> {
+    try {
+      const book = await this.charts.levelsFor(row.symbol, row.userId);
+      const atr = (book?.value as { atr14?: unknown } | null | undefined)?.atr14;
+      const session = sessionFor(row.exchange);
+      return scaledUnderlyingNoise(typeof atr === 'number' ? atr : null, book?.at ?? now.toISOString(), session.closeMin - session.openMin);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Equity spec §4 (F4 gap, F5 relative strength): the stock's day bar, NIFTY now and NIFTY at
+   * entry. NO BROKER CALL: synchronous hub / live-level-book peeks and one DB read of the hub's
+   * 1-minute bars, kept per position. Each leg is a reading with its provenance or the reason
+   * there is none — the packet never renders a missing leg as a zero. Never throws.
+   */
+  private async equityInputsFor(
+    trackerId: string,
+    row: { exchange: string; token: string; symbol: string; entryTime: Date },
+    hub: HubPrices | null,
+  ): Promise<EquityTickInputs> {
+    const nifty = INDEX_UNDERLYINGS.NIFTY;
+    return {
+      day: this.stockDayBar(row, hub),
+      nifty: this.niftyNow(hub),
+      niftyAtEntry: await this.niftyAtEntry(trackerId, row.entryTime, nifty),
+    };
+  }
+
+  /**
+   * The stock's previous close (and open). Tier 1: the hub's broker-reported day bar, ≤ the LTP
+   * bound old. Tier 2: the live level book's prevClose — only when that book is this exchange's
+   * (books are keyed by token alone) and ticked today; it carries no open.
+   */
+  private stockDayBar(row: { exchange: string; token: string; symbol: string }, hub: HubPrices | null): EquityLeg<{ open: number | null; prevClose: number }> {
+    const ref = hub ? toHubRef(row.exchange, row.token, row.symbol) : null;
+    if (hub && ref) {
+      const r = hub.price(ref, { maxAgeMs: LTP_STALENESS_MS });
+      const day = r.kind === 'fresh' ? r.price.day : undefined;
+      if (r.kind === 'fresh' && day && day.close > 0) {
+        return { ok: true, open: day.open > 0 ? day.open : null, prevClose: day.close, at: new Date(r.price.at).toISOString(), source: 'market-hub day bar (broker-reported)' };
+      }
+    }
+    const book = this.levelBooks.getLevels(row.token);
+    if (
+      book &&
+      String(book.exchange ?? '').toUpperCase() === String(row.exchange ?? '').toUpperCase() &&
+      Number.isFinite(book.prevClose) &&
+      book.prevClose > 0 &&
+      istDateOnly(book.lastTickAt) === istDateOnly(new Date())
+    ) {
+      return { ok: true, open: null, prevClose: book.prevClose, at: book.lastTickAt.toISOString(), source: 'live level book (previous close; no open)' };
+    }
+    return {
+      ok: false,
+      reason:
+        `no day bar for ${row.symbol}: the hub does not serve it fresh for this user and it is not on the live level book ` +
+        "(the tracker's broker quote keeps only the last price)",
+    };
+  }
+
+  /** NIFTY now: the hub (≤ 10 s, the decision bound), else the live level book (≤ 60 s). */
+  private niftyNow(hub: HubPrices | null): EquityLeg<{ ltp: number; prevClose: number | null }> {
+    const ref = INDEX_UNDERLYINGS.NIFTY;
+    let hubWhy = 'no hub serves this user';
+    if (hub) {
+      const r = hub.price(ref, { maxAgeMs: HUB_DECISION_MAX_AGE_MS });
+      if (r.kind === 'fresh' && r.price.ltp > 0) {
+        const pc = r.price.day?.close;
+        return { ok: true, ltp: r.price.ltp, prevClose: typeof pc === 'number' && pc > 0 ? pc : null, at: new Date(r.price.at).toISOString(), source: SPOT_SOURCE_HUB.replace('underlying spot', 'NIFTY') };
+      }
+      hubWhy = r.kind === 'stale' ? `hub NIFTY is ${Math.round(r.ageMs / 1000)} s old` : `hub NIFTY ${r.kind === 'unavailable' ? r.reason : r.kind}`;
+    }
+    const book = this.levelBooks.getLevels(ref.token);
+    if (book && Number.isFinite(book.spot) && book.spot > 0) {
+      const age = Date.now() - book.lastTickAt.getTime();
+      if (age <= SPOT_STALENESS_MS) {
+        return { ok: true, ltp: book.spot, prevClose: book.prevClose > 0 ? book.prevClose : null, at: book.lastTickAt.toISOString(), source: 'live level book (NIFTY live feed tick)' };
+      }
+      return { ok: false, reason: `${hubWhy}; the live NIFTY level book is ${Math.round(age / 1000)} s old` };
+    }
+    return { ok: false, reason: `${hubWhy}; NIFTY is not on the live level book` };
+  }
+
+  /** NIFTY's 1-minute close at the position's entry, from the hub's stored bars (DB only). */
+  private async niftyAtEntry(trackerId: string, entryTime: Date, ref: InstrumentRef): Promise<EquityLeg<{ close: number }>> {
+    const when = `${istWallHhmm(entryTime)} IST on ${istDateOnly(entryTime)}`;
+    if (!this.minuteBars) return { ok: false, reason: 'no minute-bar reader is wired, so NIFTY at entry cannot be read' };
+    const key = `${trackerId}:${entryTime.getTime()}`;
+    let hit = this.niftyAnchors.get(key);
+    if (!hit || (hit.close === null && Date.now() - hit.at > ANCHOR_MISS_RETRY_MS)) {
+      let close: number | null = null;
+      try {
+        close = await this.minuteBars.closeAt(ref, entryTime);
+      } catch {
+        close = null;
+      }
+      hit = { close, at: Date.now() };
+      this.niftyAnchors.delete(key);
+      this.niftyAnchors.set(key, hit);
+      if (this.niftyAnchors.size > 500) this.niftyAnchors.delete(this.niftyAnchors.keys().next().value as string);
+    }
+    return hit.close !== null
+      ? { ok: true, close: hit.close, at: entryTime.toISOString(), source: `hub candles_1m NIFTY bar at entry (${when})` }
+      : { ok: false, reason: `no NIFTY 1-minute bar at entry ${when} in candles_1m (the hub stores bars only while it runs)` };
   }
 
   /** The hub's fresh contract price, or null (no hub for this user, an exchange it does not speak, or not fresh). */

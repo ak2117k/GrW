@@ -26,11 +26,13 @@ import { TUNING_READER, type TuningReader } from '../../self-review/tuning/tunab
 // A VALUE import: MbmClient is injected by class, so design:paramtypes must see it.
 import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
-import { MBM_BLOCK_SOURCE, STOCK_MOVE_BLOCK_SOURCE, marketBehaviourValue, stockMoveValue } from './market-behaviour-block';
+import { MBM_BLOCK_SOURCE, STOCK_MOVE_BLOCK_SOURCE, marketBehaviourValue, stockMoveValue, type StockMoveValue } from './market-behaviour-block';
 import { STOCK_MOVE_READER, type StockMoveReader } from '../../stock-move/stock-move.service';
 import { underlyingName } from '../../night-report/domain/night-report.logic';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { LESSONS_READER, type InjectedLesson, type InjectionScope, type LessonsReader } from '../../self-review/lessons/types';
+import { ConfigService } from '@nestjs/config';
+import { CASH_OI_WALLS_REASON, equityBlockEnabled, equityBlocks, isCashSegment, parseSquareOffIst, type EquityBlock, type EquityTickInputs } from './equity-blocks';
 
 /** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
 export const MBM_PACKET_LOG_EVERY_MS = 15 * 60_000;
@@ -429,6 +431,11 @@ export interface TickSnapshot {
   noise?: { contract: NoiseReading | null; underlying1m: NoiseReading | null; reason: string | null } | null;
   /** Exit discipline §4: set by the CYCLE only (like the latch); a tick source never sets it. */
   noiseFloor?: NoiseFloor | null;
+  /**
+   * Equity spec §4: the stock's day bar, NIFTY now and NIFTY at entry, for the `equity` block.
+   * Set by the tick source for CASH positions only (absent for F&O); never rendered as such.
+   */
+  equityInputs?: EquityTickInputs | null;
 }
 
 /**
@@ -551,6 +558,14 @@ export type ContextPacket = {
    * off/observe, an index/MCX position, or no score for the stock: the packet stays byte-identical.
    */
   stockMove?: Block<Prisma.InputJsonValue>;
+  /**
+   * Equity spec §4 (SENTINEL_EQUITY_BLOCK, on unless exactly `false`; off without a ConfigService):
+   * exit context for a CASH-EQUITY position — square-off clock, VWAP and day range in the stock's
+   * own noise units / daily ATR, relative strength vs NIFTY, the nearest company event, and the
+   * two factors not captured yet stated absent. Absent key ⇒ an F&O position or the switch off,
+   * so every F&O packet is byte-identical.
+   */
+  equity?: EquityBlock;
   session: {
     nowIst: string;
     nowUtc: string;
@@ -962,7 +977,21 @@ export class ContextPacketService {
      * the env alone (MBM_PACKET) decides, exactly as before.
      */
     @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
+    /**
+     * Read for SENTINEL_EQUITY_BLOCK and SENTINEL_EQ_SQUAREOFF_IST only. Absent ⇒ the equity
+     * block is off and every packet is exactly as before (the same rule as the judge gate's delta).
+     */
+    @Optional() private readonly config?: ConfigService,
   ) {}
+
+  /**
+   * The equity block switch: on unless SENTINEL_EQUITY_BLOCK is exactly `false`; off without a
+   * ConfigService. Parsed exactly as `SentinelAgentService` parses it for the prompt's `+e1`
+   * lines, so the prompt never describes a block the packet does not carry.
+   */
+  private equityOn(): boolean {
+    return equityBlockEnabled(this.config);
+  }
 
   /**
    * The effective MBM packet mode: `on` when MBM_PACKET=on OR the self-review
@@ -1053,6 +1082,40 @@ export class ContextPacketService {
       return null;
     } catch (err) {
       this.logger.warn(`[mbm-packet] stockMove skipped: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /** The `equity` block for a cash position (pure; never throws — a failure is logged and the key dropped). */
+  private equityBlock(
+    entry: RosterEntry,
+    tick: TickSnapshot,
+    levelBook: Block<Prisma.InputJsonValue>,
+    events: EventsBlocksV2 | null,
+    stockMove: Block<Prisma.InputJsonValue> | null,
+    now: Date,
+  ): EquityBlock | null {
+    try {
+      return equityBlocks({
+        segment: tick.segment,
+        side: tick.side,
+        exchange: String(entry.exchange ?? 'NSE').toUpperCase(),
+        symbol: entry.symbol,
+        ltp: tick.ltp,
+        entryPrice: tick.entryPrice,
+        peak: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
+        levelBook,
+        noise: tick.noise?.contract ?? null,
+        inputs: tick.equityInputs,
+        events,
+        stockMove: stockMove?.available ? (stockMove.value as unknown as StockMoveValue) : null,
+        stockMoveShown: this.mbmPacketMode() === 'on',
+        now,
+        clock: liveSessionClock(),
+        squareOffMin: parseSquareOffIst(this.config?.get<string>('SENTINEL_EQ_SQUAREOFF_IST')),
+      });
+    } catch (err) {
+      this.logger.warn(`[equity] block skipped for ${entry.symbol}: ${err instanceof Error ? err.message : String(err)}`);
       return null;
     }
   }
@@ -1218,6 +1281,9 @@ export class ContextPacketService {
     const v2b = v2 ? this.v2Blocks(entry, tick, now, at) : null;
     const marketBehaviour = await marketBehaviourP;
     const stockMove = this.stockMoveBlock(entry, now, at);
+    // Equity spec §4: CASH positions only, behind SENTINEL_EQUITY_BLOCK — every F&O packet is unchanged.
+    const cashEquity = this.equityOn() && isCashSegment(tick.segment);
+    const equity = cashEquity ? this.equityBlock(entry, tick, levelBook, v2b?.events ?? null, stockMove, now) : null;
 
     return {
       position: {
@@ -1315,7 +1381,7 @@ export class ContextPacketService {
         ),
         oiWalls:
           tick.oiWallNow === null
-            ? absent('no options chain for this symbol, so no OI walls')
+            ? absent(cashEquity ? CASH_OI_WALLS_REASON : 'no options chain for this symbol, so no OI walls')
             : present(
                 { now: tick.oiWallNow, previous: tick.oiWallPrev },
                 'oi-wall.service',
@@ -1365,6 +1431,7 @@ export class ContextPacketService {
       ...(v2b ? { events: v2b.events } : {}),
       ...(marketBehaviour ? { marketBehaviour } : {}),
       ...(stockMove ? { stockMove } : {}),
+      ...(equity ? { equity } : {}),
       session: {
         nowIst: istWallClock(now),
         nowUtc: at,

@@ -19,6 +19,11 @@ export const ASOF_SOURCE = 'news ingestion health (last successful fetch of any 
 export const EVENTS_SOURCE =
   'market-events (NSE event calendar and corporate actions, Yahoo estimates, config/market-events.json, EIA rules, contract expiry)';
 export const NEXT_HIGH_SOURCE = 'market-events (timed high-impact events only)';
+/**
+ * How `events.upcoming`'s reason opens when the calendar WAS read and holds nothing — a finding,
+ * not a failure to look. The equity block's eventRisk keys off it, so the two cannot drift.
+ */
+export const NO_EVENTS_PREFIX = 'no scheduled event relevant to this position';
 
 export interface NewsBlocksV2 {
   headlines: Block<J>;
@@ -76,7 +81,7 @@ export function eventsBlocks(peek: EventsPeek | null, at: string, horizonDays: n
           `${EVENTS_SOURCE}${notes}`,
           peek.fetchedAt ?? at,
         )
-      : no(`no scheduled event relevant to this position in the next ${horizonDays} trading days${notes}`),
+      : no(`${NO_EVENTS_PREFIX} in the next ${horizonDays} trading days${notes}`),
     minutesToNextHighImpact:
       peek.minutesToNextHighImpact !== null
         ? ok(peek.minutesToNextHighImpact, NEXT_HIGH_SOURCE, at)

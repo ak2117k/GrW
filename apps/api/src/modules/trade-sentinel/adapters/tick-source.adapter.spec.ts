@@ -44,7 +44,7 @@ const row = (over: Record<string, unknown> = {}) => ({
  * test gets by accident.
  */
 function make(
-  opts: { withFeed?: boolean; hub?: HubPriceSource; minuteBars?: unknown; discipline?: unknown; news?: { mode: string; peek: jest.Mock } } = {},
+  opts: { withFeed?: boolean; hub?: HubPriceSource; minuteBars?: unknown; discipline?: unknown; news?: { mode: string; peek: jest.Mock }; levelsFor?: jest.Mock } = {},
 ) {
   const fetchQuote = jest.fn().mockResolvedValue(null);
   const userFeed = opts.withFeed === false ? undefined : ({ fetchQuote } as never);
@@ -70,7 +70,7 @@ function make(
     { getInstrumentByToken, getInstrumentBySymbol, getNearestFuture } as never,
     { getLevels } as never,
     { getNewsForSymbol } as never,
-    { structureFor } as never,
+    { structureFor, ...(opts.levelsFor ? { levelsFor: opts.levelsFor } : {}) } as never,
     userFeed,
     opts.hub ? ({ get: jest.fn(() => opts.hub) } as never) : undefined,
     opts.minuteBars as never,
@@ -1218,5 +1218,75 @@ describe('news & events v2: the fresh count comes from the index when true', () 
     expect(t.getNewsForSymbol).toHaveBeenCalled();
     expect(peek).not.toHaveBeenCalled();
     expect(tick).not.toHaveProperty('freshNews');
+  });
+});
+
+describe('equity spec: cash noise unit (T1) and the equity block inputs', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(NOW));
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+  const ON = parseExitDisciplineConfig({});
+  const bookWithAtr = (atr14: unknown) =>
+    jest.fn().mockResolvedValue({ value: { vwap: 104, todayHigh: 106, todayLow: 100, atr14, interval: '15m' }, source: 's', at: '2026-08-14T05:59:30.000Z' });
+
+  it('T1: a cash position without hub bars falls back to its own daily ATR14 / √375 on contract AND underlying', async () => {
+    const levelsFor = bookWithAtr(7.5);
+    const t = make({ minuteBars: { recent: jest.fn().mockResolvedValue([]), closeAt: jest.fn().mockResolvedValue(null) }, discipline: ON, levelsFor });
+    const tick = await t.svc.tickFor('t1');
+    const fallback = { n: 7.5 / Math.sqrt(375), method: 'atr14-daily-scaled', bars: 0, at: '2026-08-14T05:59:30.000Z' };
+    expect(tick.noise).toEqual({ contract: fallback, underlying1m: fallback, reason: null });
+    expect(levelsFor).toHaveBeenCalledWith('SUZLON-EQ', 'u1');
+  });
+
+  it('T1: no ATR on the book either ⇒ contract null with the cash reason', async () => {
+    const t = make({ minuteBars: { recent: jest.fn().mockResolvedValue([]), closeAt: jest.fn().mockResolvedValue(null) }, discipline: ON, levelsFor: bookWithAtr(0) });
+    const tick = await t.svc.tickFor('t1');
+    expect(tick.noise).toEqual({ contract: null, underlying1m: null, reason: expect.stringMatching(/no daily ATR14 on the stock's level book/) });
+  });
+
+  it('T1: an F&O position never asks for the stock fallback (unchanged path)', async () => {
+    const levelsFor = bookWithAtr(7.5);
+    const t = make({ minuteBars: { recent: jest.fn().mockResolvedValue([]) }, discipline: ON, levelsFor });
+    t.findUnique.mockResolvedValue(row({ symbol: 'NIFTY28AUG2524000CE', exchange: 'NFO', token: '99' }));
+    const tick = await t.svc.tickFor('t1');
+    expect(tick.noise).toEqual({ contract: null, underlying1m: null, reason: expect.stringMatching(/^no hub 1-minute bars for this contract in the last 120 minutes \(needs MARKET_HUB_ENABLED \+ HUB_CANDLES_ENABLED and a live feed slot\)$/) });
+    expect(levelsFor).not.toHaveBeenCalled();
+    expect(tick).not.toHaveProperty('equityInputs');
+  });
+
+  it('cash: equity inputs from the live level books and the NIFTY bar at entry — no broker call', async () => {
+    const closeAt = jest.fn().mockResolvedValue(24_000);
+    const t = make({ minuteBars: { recent: jest.fn().mockResolvedValue([]), closeAt }, discipline: ON, levelsFor: bookWithAtr(7.5) });
+    t.getLevels.mockImplementation((token: string) =>
+      token === '99926000'
+        ? { exchange: 'NSE', spot: 24_240, prevClose: 24_100, lastTickAt: new Date(NOW.getTime() - 5_000) }
+        : token === '12345'
+          ? { exchange: 'NSE', spot: 105, prevClose: 101, lastTickAt: new Date(NOW.getTime() - 5_000) }
+          : null,
+    );
+    const tick = await t.svc.tickFor('t1');
+    expect(tick.equityInputs).toEqual({
+      day: { ok: true, open: null, prevClose: 101, at: expect.any(String), source: 'live level book (previous close; no open)' },
+      nifty: { ok: true, ltp: 24_240, prevClose: 24_100, at: expect.any(String), source: 'live level book (NIFTY live feed tick)' },
+      niftyAtEntry: { ok: true, close: 24_000, at: '2026-08-14T04:00:00.000Z', source: expect.stringContaining('09:30 IST') },
+    });
+    expect(closeAt).toHaveBeenCalledWith(expect.objectContaining({ token: '99926000' }), new Date('2026-08-14T04:00:00Z'));
+    expect(t.fetchQuote).not.toHaveBeenCalled();
+    // The anchor is read once per position, not on every look.
+    await t.svc.tickFor('t1');
+    expect(closeAt).toHaveBeenCalledTimes(1);
+  });
+
+  it('cash: missing inputs are stated, never zero; a level book from another exchange is not the stock', async () => {
+    const t = make({ minuteBars: { recent: jest.fn().mockResolvedValue([]), closeAt: jest.fn().mockResolvedValue(null) }, discipline: ON, levelsFor: bookWithAtr(7.5) });
+    t.getLevels.mockImplementation((token: string) => (token === '12345' ? { exchange: 'NFO', spot: 1, prevClose: 1, lastTickAt: NOW } : null));
+    const tick = await t.svc.tickFor('t1');
+    expect(tick.equityInputs).toEqual({
+      day: { ok: false, reason: expect.stringMatching(/no day bar for SUZLON-EQ/) },
+      nifty: { ok: false, reason: expect.stringMatching(/NIFTY is not on the live level book/) },
+      niftyAtEntry: { ok: false, reason: expect.stringMatching(/no NIFTY 1-minute bar at entry/) },
+    });
   });
 });

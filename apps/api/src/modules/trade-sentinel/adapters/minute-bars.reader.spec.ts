@@ -23,4 +23,13 @@ describe('MinuteBarsReader', () => {
     const r = new MinuteBarsReader({ read: jest.fn(async () => { throw new Error('db'); }) } as never);
     await expect(r.recent(REF, NOW)).resolves.toEqual([]);
   });
+  it('closeAt: the last stored bar in the five minutes up to the anchor minute; null when none or on a DB error', async () => {
+    const at = new Date('2026-10-14T04:00:42Z');
+    const minute = Date.parse('2026-10-14T04:00:00Z');
+    const read = jest.fn(async () => [{ ts: minute - 120_000, open: 1, high: 2, low: 1, close: 24_010, volume: 0 }, { ts: minute, open: 1, high: 2, low: 1, close: 24_020, volume: 0 }]);
+    await expect(new MinuteBarsReader({ read } as never).closeAt(REF, at)).resolves.toBe(24_020);
+    expect(read).toHaveBeenCalledWith('1m', REF, minute - 4 * 60_000, minute + 60_000);
+    await expect(new MinuteBarsReader({ read: jest.fn(async () => []) } as never).closeAt(REF, at)).resolves.toBeNull();
+    await expect(new MinuteBarsReader({ read: jest.fn(async () => { throw new Error('db'); }) } as never).closeAt(REF, at)).resolves.toBeNull();
+  });
 });

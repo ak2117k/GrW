@@ -7,6 +7,8 @@ import type { InstrumentRef } from '../../market-hub/hub.types';
 type Ref = { exchange: string; token: string; symbol: string };
 const CACHE_MS = 20_000;
 const CACHE_MAX = 500;
+/** How far before an anchor minute `closeAt` may reach for a bar (a quiet minute stores none). */
+export const ANCHOR_WINDOW_MIN = 5;
 const IST_OFFSET_MS = 5.5 * 3_600_000;
 const istMidnightUtc = (now: Date) => {
   const ist = now.getTime() + IST_OFFSET_MS;
@@ -42,5 +44,21 @@ export class MinuteBarsReader {
     this.cache.set(key, { at: now.getTime(), bars });
     if (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value as string);
     return bars;
+  }
+
+  /**
+   * The close of the last stored 1-minute bar starting in the {@link ANCHOR_WINDOW_MIN} minutes up
+   * to and including `at`'s minute — the equity block's "NIFTY at entry". Null when none is stored
+   * or the read failed. Uncached here: the caller keeps one answer per position. DB only.
+   */
+  async closeAt(ref: Ref, at: Date): Promise<number | null> {
+    const minute = Math.floor(at.getTime() / 60_000) * 60_000;
+    try {
+      const bars = await this.repo.read('1m', ref as InstrumentRef, minute - (ANCHOR_WINDOW_MIN - 1) * 60_000, minute + 60_000);
+      const c = bars.length > 0 ? bars[bars.length - 1].close : null;
+      return typeof c === 'number' && Number.isFinite(c) && c > 0 ? c : null;
+    } catch {
+      return null;
+    }
   }
 }

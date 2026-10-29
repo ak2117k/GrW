@@ -60,3 +60,51 @@ describe('paperExitDecision — target trailing', () => {
     expect(at(112, 90, 112)).toMatchObject({ exit: true, tag: 'HIT_TARGET', price: 112 });
   });
 });
+
+describe('paperExitDecision — one-target calls hand over to the noise trail (owner 2026-10-29)', () => {
+  const one = { side: 'BUY', product: 'INTRADAY', minutesToClose: 120, entry: 53.4, targets: [70] };
+  const noise = (n: number | null, peak: number | null) => ({ n, peak, trailN: 2 });
+
+  it('the only target hit: no exit, the target is dropped, SL = peak − trailN·N', () => {
+    // ADANIPORTS 2026-10-29: T1 70 hit at 72.35; N 1.26 ⇒ SL 72.35 − 2.52 = 69.83.
+    expect(paperExitDecision({ ...one, ltp: 72.35, sl: null, target: 70, noise: noise(1.26, 70.5) })).toEqual({
+      exit: false,
+      trail: expect.objectContaining({ sl: 69.83, target: null }),
+    });
+  });
+
+  it('ratchets up with the peak and never down; closes as MOVED_STOP when hit', () => {
+    expect(paperExitDecision({ ...one, ltp: 76, sl: 69.83, target: null, noise: noise(1.26, 76) })).toEqual({
+      exit: false,
+      trail: expect.objectContaining({ sl: 73.48, target: null }),
+    });
+    // Pullback above the SL: the peak is unchanged, so no move (and no exit).
+    expect(paperExitDecision({ ...one, ltp: 74, sl: 73.48, target: null, noise: noise(1.26, 76) })).toEqual({ exit: false });
+    expect(paperExitDecision({ ...one, ltp: 73.4, sl: 73.48, target: null, noise: noise(1.26, 76) })).toMatchObject({ exit: true, tag: 'MOVED_STOP', price: 73.4 });
+  });
+
+  it('never below the entry', () => {
+    expect(paperExitDecision({ ...one, ltp: 70, sl: null, target: 70, noise: noise(10, 70) })).toEqual({
+      exit: false,
+      trail: expect.objectContaining({ sl: 53.4, target: null }),
+    });
+  });
+
+  it('a short trails from its low', () => {
+    const s = { ...one, side: 'SELL', entry: 100, targets: [90] };
+    expect(paperExitDecision({ ...s, ltp: 89, sl: 105, target: 90, noise: noise(1, 89) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 91, target: null }) });
+    expect(paperExitDecision({ ...s, ltp: 91.5, sl: 91, target: null, noise: noise(1, 88) })).toMatchObject({ exit: true, tag: 'MOVED_STOP' });
+  });
+
+  it('N not measured yet: the only target exits as before', () => {
+    expect(paperExitDecision({ ...one, ltp: 72.35, sl: null, target: 70, noise: noise(null, 70) })).toMatchObject({ exit: true, tag: 'HIT_TARGET', price: 70 });
+    expect(paperExitDecision({ ...one, ltp: 72.35, sl: null, target: 70 })).toMatchObject({ exit: true, tag: 'HIT_TARGET', price: 70 });
+  });
+
+  it('multi-target plans are unchanged: the noise trail is for one-target calls only', () => {
+    expect(paperExitDecision({ ...one, targets: [70, 80], ltp: 71, sl: null, target: 70, noise: noise(1.26, 71) })).toEqual({
+      exit: false,
+      trail: expect.objectContaining({ sl: 53.4, target: 80 }),
+    });
+  });
+});

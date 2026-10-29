@@ -120,6 +120,7 @@ describe('SignalPaperWatchService — target trailing (owner 2026-10-29)', () =>
       decisionJudge: jest.fn(async () => ({ aiDecision: 'TAKE' })),
       recordAiCheck: jest.fn(async () => undefined),
       decisionPlan: jest.fn(async () => ({ sl: 90, targets: [110, 120, 130] })),
+      setPaperTrail: jest.fn(async () => undefined),
       shadowRows: jest.fn(async () => []),
       saveShadowHit: jest.fn(async () => undefined),
       saveShadowTrack: jest.fn(async () => undefined),
@@ -136,7 +137,7 @@ describe('SignalPaperWatchService — target trailing (owner 2026-10-29)', () =>
   it('T1 moves the SL to entry and the target to T2 on the row; the trade stays open', async () => {
     const s = trailing([111]);
     await s.svc.sweep(NOW);
-    expect(s.trades.updateTrade).toHaveBeenCalledWith('t1', { stoploss: 100, target: 120 });
+    expect(s.repo.setPaperTrail).toHaveBeenCalledWith('t1', 100, 120);
     expect(s.exec.closeTrade).not.toHaveBeenCalled();
   });
 
@@ -144,7 +145,7 @@ describe('SignalPaperWatchService — target trailing (owner 2026-10-29)', () =>
     const s = trailing([111, 121, 109]);
     await s.svc.sweep(NOW);
     await s.svc.sweep(NOW);
-    expect(s.trades.updateTrade).toHaveBeenCalledWith('t1', { stoploss: 110, target: 130 });
+    expect(s.repo.setPaperTrail).toHaveBeenCalledWith('t1', 110, 130);
     await s.svc.sweep(NOW);
     expect(s.exec.closeTrade).toHaveBeenCalledWith('t1', expect.objectContaining({ exitReasonTag: 'MOVED_STOP', exitPrice: 109 }));
   });

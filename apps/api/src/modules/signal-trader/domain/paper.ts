@@ -71,11 +71,31 @@ export type PaperExit =
   | { exit: false; trail?: PaperTrail }
   | { exit: true; price: number; tag: 'STOPPED_OUT' | 'MOVED_STOP' | 'HIT_TARGET' | 'TIME_EXIT'; reason: string };
 
-/** A target was hit with more targets left: the trade stays open with its SL and target moved up. */
+/**
+ * The trade stays open with its SL (and target) moved: a target hit with more left (target = the next
+ * one), or the noise trail of a one-target call (target = null — no target any more, only the trail).
+ */
 export interface PaperTrail {
   sl: number;
-  target: number;
+  target: number | null;
   reason: string;
+}
+
+/** The contract's 1-min noise unit N, the best price since entry, and exit-discipline's trail distance (× N). */
+export interface PaperNoise {
+  n: number | null;
+  peak: number | null;
+  trailN: number;
+}
+
+const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/** The noise trail level: trailN·N behind the peak, never on the losing side of the entry. Null when N is unknown. */
+function noiseTrailLevel(buy: boolean, entry: number, ltp: number, noise: PaperNoise | undefined): number | null {
+  const n = noise?.n;
+  if (!noise || n === null || n === undefined || !Number.isFinite(n) || n <= 0 || !(noise.trailN > 0)) return null;
+  const peak = noise.peak !== null && Number.isFinite(noise.peak) && noise.peak > 0 ? (buy ? Math.max(noise.peak, ltp) : Math.min(noise.peak, ltp)) : ltp;
+  return r2(buy ? Math.max(entry, peak - noise.trailN * n) : Math.min(entry, peak + noise.trailN * n));
 }
 
 /**
@@ -99,7 +119,12 @@ export function orderedTargets(side: string, entry: number, targets: unknown): n
  * last does not exit — the SL steps up (T1 → entry, T2 → T1, …) and the row's target becomes the
  * next one (`trail`, applied by the caller). Only the LAST target closes as HIT_TARGET; a stepped
  * SL hit closes as MOVED_STOP. A sweep that jumps several targets steps straight to the highest one
- * reached. Without targets (or with one), T1 exits exactly as before.
+ * reached. Without targets, T1 exits exactly as before.
+ *
+ * ONE-TARGET CALLS (owner 2026-10-29): the only target does not exit either — the target is dropped
+ * and a NOISE TRAIL takes over (the live exit-discipline trail: trailN × the contract's 1-min noise N
+ * behind the best price, never below the entry), ratcheting every sweep; its hit closes as MOVED_STOP.
+ * With N not yet measured the target exits as before.
  */
 export function paperExitDecision(i: {
   side: string;
@@ -117,6 +142,8 @@ export function paperExitDecision(i: {
   /** Target trailing: the entry and the plan's targets (see `orderedTargets`). */
   entry?: number | null;
   targets?: number[];
+  /** One-target calls: the noise trail's inputs. Absent ⇒ the only target exits. */
+  noise?: PaperNoise;
 }): PaperExit {
   const ltp = i.ltp;
   if (ltp === null || !(ltp > 0)) return { exit: false };
@@ -129,10 +156,28 @@ export function paperExitDecision(i: {
       ? { exit: true, price: ltp, tag: 'MOVED_STOP', reason: `paper trailed SL ${i.sl} hit (LTP ${ltp})` }
       : { exit: true, price: ltp, tag: 'STOPPED_OUT', reason: `paper SL ${i.sl} hit (LTP ${ltp})` };
   }
+  const entry = i.entry ?? null;
+  // Noise-trail mode (a one-target call past its target): no target, an SL on the profit side; ratchet it.
+  if (i.target === null && entry !== null && entry > 0 && i.sl !== null && i.sl > 0 && (buy ? i.sl >= entry : i.sl <= entry)) {
+    const level = noiseTrailLevel(buy, entry, ltp, i.noise);
+    if (level !== null && (buy ? level > i.sl : level < i.sl)) {
+      return { exit: false, trail: { sl: level, target: null, reason: `paper noise trail SL ${i.sl} → ${level} (LTP ${ltp}, N ${r2(i.noise?.n ?? 0)})` } };
+    }
+  }
   if (i.target !== null && i.target > 0 && beyond(i.target)) {
     const ts = i.targets ?? [];
     const at = ts.findIndex((t) => Math.abs(t - (i.target as number)) < 1e-6);
-    const entry = i.entry ?? null;
+    // A one-target call: drop the target and hand over to the noise trail (when N is known).
+    if (ts.length === 1 && at === 0 && entry !== null && entry > 0) {
+      const level = noiseTrailLevel(buy, entry, ltp, i.noise);
+      if (level !== null) {
+        const sl = i.sl !== null && i.sl > 0 ? (buy ? Math.max(i.sl, level) : Math.min(i.sl, level)) : level;
+        return {
+          exit: false,
+          trail: { sl, target: null, reason: `paper only target ${ts[0]} hit (LTP ${ltp}): noise trail from here, SL → ${sl} (${i.noise?.trailN}×N, N ${r2(i.noise?.n ?? 0)})` },
+        };
+      }
+    }
     if (at >= 0 && at < ts.length - 1 && entry !== null && entry > 0) {
       // The highest target this LTP has reached.
       let k = at;

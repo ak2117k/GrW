@@ -568,6 +568,17 @@ export class SignalTraderRepository {
     });
   }
 
+  /**
+   * Target trailing: the paper trade's moved SL and its next target — or null, a one-target call now on
+   * its noise trail. Only an OPEN tagged paper trade is touched.
+   */
+  async setPaperTrail(tradeId: string, stoploss: number, target: number | null): Promise<void> {
+    await this.prisma.trade.updateMany({
+      where: { id: tradeId, strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, status: 'OPEN' },
+      data: { stoploss, target },
+    });
+  }
+
   /** One open paper trade by id (the AI close re-reads it: it may have closed meanwhile). */
   openPaperTrade(tradeId: string): Promise<PaperTradeRow | null> {
     return this.prisma.trade.findFirst({

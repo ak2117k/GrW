@@ -4,7 +4,7 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
-import { decisionIdFromTags, horizonFromTags, orderedTargets, paperExitDecision } from '../domain/paper';
+import { decisionIdFromTags, horizonFromTags, orderedTargets, paperExitDecision, type PaperNoise } from '../domain/paper';
 import { aiCheck, aiDecisionOf } from '../domain/ai-check';
 import type { PaperTradeRow } from '../repositories/signal-trader.repository';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
@@ -226,11 +226,13 @@ export class SignalPaperWatchService {
         // Target trailing: a hit target that is not the last steps the SL up instead of exiting.
         entry: t.entryPrice,
         targets: await this.targetsFor(t),
+        // One-target calls: the noise trail, on the exit shadow's own noise unit and peak.
+        noise: this.noiseFor(t.id),
       });
       try {
         if (!d.exit && d.trail) {
           // The row IS the trail state (restart-safe): its stoploss and target move, the trade stays open.
-          await this.trades.updateTrade(t.id, { stoploss: d.trail.sl, target: d.trail.target });
+          await this.repo.setPaperTrail(t.id, d.trail.sl, d.trail.target);
           t.stoploss = d.trail.sl;
           t.target = d.trail.target;
           this.logger.warn(`[signal-paper] trailed paper ${inst.symbol} (${t.id}): ${d.trail.reason}`);
@@ -286,6 +288,16 @@ export class SignalPaperWatchService {
     } catch (err) {
       this.logger.warn(`[signal-paper] shadow step ${t.id}: ${errText(err)}`);
     }
+  }
+
+  /**
+   * The noise trail's inputs for a one-target call: the exit shadow's contract noise unit N and best price
+   * since entry (stepped on this same LTP just before), and the live trail distance. Undefined without a
+   * shadow (PAPER_EXIT_SHADOW=off) ⇒ the only target exits as before.
+   */
+  private noiseFor(tradeId: string): PaperNoise | undefined {
+    const sh = this.shadows.get(tradeId);
+    return sh ? { n: sh.n, peak: sh.state.peak, trailN: this.shadowParams.trailN } : undefined;
   }
 
   /** The plan's targets for a paper trade (ordered, beyond the entry); read once per trade, [] when none. */

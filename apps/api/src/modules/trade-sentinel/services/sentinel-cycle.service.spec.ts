@@ -2718,10 +2718,51 @@ describe('SentinelCycleService — futile re-judge suppression (held positions, 
     t.evaluate.mockReturnValue(fire('giveback-off-peak', 'context-factor-flip'));
     // Judged 1 min ago: no heartbeat due on any cadence.
     t.recentForTracker.mockResolvedValue([recentVerdict(60_000)]);
+    // An option, which the executor can act on: the held / exit-blocked rules are about F&O exits.
+    // (The default fixture is cash, which is now observe-only on EXIT_NOW — see that describe.)
+    t.tickFor.mockResolvedValue(tick({ segment: 'OPT', expiry: '2026-10-30', underlyingLtp: 24000 }));
     return { ...t, reader: r };
   }
 
   afterEach(() => jest.restoreAllMocks());
+
+  describe('observe-only (cash equity on EXIT_NOW, 2026-10-29)', () => {
+    const cash = (segment: string) => (t: ReturnType<typeof setup>) => t.tickFor.mockResolvedValue(tick({ segment: segment as never }));
+
+    it('drops the fires on a cash position whose last verdict is EXIT_NOW — nothing can execute it', async () => {
+      const t = setup();
+      cash('EQ_INTRADAY')(t);
+      for (let i = 0; i < 4; i += 1) await t.svc.runForUser(USER, at(i * 30_000));
+      expect(t.judge).not.toHaveBeenCalled();
+    });
+
+    it('a NEW-risk fire still reaches the judge', async () => {
+      const t = setup();
+      cash('EQ_INTRADAY')(t);
+      t.evaluate.mockReturnValue(fire('level-break'));
+      await t.svc.runForUser(USER, NOW);
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+
+    it('lifts once the last verdict is not EXIT_NOW, and never applies to F&O or to paper positions', async () => {
+      const hold = setup();
+      cash('EQ_INTRADAY')(hold);
+      hold.recentForTracker.mockResolvedValue([recentVerdict(60_000, 'HOLD')]);
+      await hold.svc.runForUser(USER, NOW);
+      expect(hold.judge).toHaveBeenCalledTimes(1);
+
+      const fno = setup();
+      fno.tickFor.mockResolvedValue(tick({ segment: 'OPT', expiry: '2026-10-30', underlyingLtp: 24000 }));
+      await fno.svc.runForUser(USER, NOW);
+      expect(fno.judge).toHaveBeenCalledTimes(1);
+
+      const paper = setup();
+      cash('EQ_INTRADAY')(paper);
+      paper.build.mockResolvedValue([watched('paper:T1')]);
+      await paper.svc.runForUser(USER, NOW);
+      expect(paper.judge).toHaveBeenCalledTimes(1);
+    });
+  });
 
   describe('held (AI_AUTO_EXIT_HOLD)', () => {
     it('drops FIRE-triggered judgements on a held symbol, logging one line per position per 30 min', async () => {
@@ -2821,10 +2862,10 @@ describe('SentinelCycleService — futile re-judge suppression (held positions, 
 
     it('lifts when the position quantity changes', async () => {
       const t = setup({}, [attempt()]);
-      t.tickFor.mockResolvedValue(tick({ qty: 100 }));
+      t.tickFor.mockResolvedValue(tick({ qty: 100, segment: 'OPT', expiry: '2026-10-30', underlyingLtp: 24000 }));
       await t.svc.runForUser(USER, NOW);
       expect(t.judge).not.toHaveBeenCalled();
-      t.tickFor.mockResolvedValue(tick({ qty: 50 }));
+      t.tickFor.mockResolvedValue(tick({ qty: 50, segment: 'OPT', expiry: '2026-10-30', underlyingLtp: 24000 }));
       await t.svc.runForUser(USER, at(30_000));
       expect(t.judge).toHaveBeenCalledTimes(1);
     });
@@ -2963,6 +3004,8 @@ describe('SentinelCycleService — judge gate (held heartbeat-only, 15-min cap +
       it('the exit-confirm re-look (exit discipline: CONSECUTIVE needs it inside PERSIST_WINDOW_SEC)', async () => {
         const t = setup({}, parseExitDisciplineConfig({}));
         t.evaluate.mockReturnValue(QUIET);
+        // An option: on cash, an EXIT_NOW is observe-only and the re-look is futile (futile-rejudge rule 3).
+        t.tickFor.mockResolvedValue(tick({ segment: 'OPT', expiry: '2026-10-30', underlyingLtp: 24000 }));
         t.recentForTracker.mockResolvedValue([row(130_000, { verdict: 'EXIT_NOW' })]);
         await t.svc.runForUser(USER, NOW);
         expect(t.judge).toHaveBeenCalledTimes(1);

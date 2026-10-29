@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { computeGreenFloor } from '../charges';
+import { isPaperTracker } from '../paper/paper-tracker';
 import { RosterService, type RosterEntry } from './roster.service';
 import {
   TripwireService,
@@ -63,6 +64,7 @@ import {
   FUTILE_REJUDGE_CONFIG,
   HELD_LOG_EVERY_MS,
   exitBlocked,
+  observeOnlyExit,
   isHeldPosition,
   suppressFutileJudgements,
   type BlockedExitMemo,
@@ -860,7 +862,7 @@ export class SentinelCycleService {
     // whose last exit attempt hit a broker-auth/read wall or OWNER_HOLD, drop the
     // fires and the exit-confirm re-look — unless a NEW-risk sensor fired — and
     // keep only the heartbeat, at its normal cadence.
-    const cause = this.futileCause(entry, state, tick.qty, futile.attempts.get(entry.trackerId), now);
+    const cause = this.futileCause(entry, state, tick.qty, futile.attempts.get(entry.trackerId), now, tick.segment, last ? String(last.verdict) : null);
     const futiled = suppressFutileJudgements(
       withCarriedFires(rejudged.decision, state.carriedFires),
       confirm,
@@ -1087,13 +1089,18 @@ export class SentinelCycleService {
     qty: number,
     attempt: ExitAttempt | undefined,
     now: Date,
+    segment?: string,
+    lastVerdict?: string | null,
   ): FutileCause | null {
     const cfg = this.futileCfg;
     if (!cfg?.enabled) return null;
     if (isHeldPosition(cfg.hold, entry)) return 'held';
     const blocked = exitBlocked(attempt, state.blockedExit, qty, now.getTime(), cfg);
     state.blockedExit = blocked.memo;
-    return blocked.blocked ? 'exit-blocked' : null;
+    if (blocked.blocked) return 'exit-blocked';
+    // Paper positions are excluded: their AI exit IS carried out (the paper close), so the exit-confirm re-look matters there.
+    if (segment && !isPaperTracker(entry.trackerId) && observeOnlyExit(segment, lastVerdict)) return 'observe-only';
+    return null;
   }
 
   /** Start one candidate's judgement detached, and register it as in flight. */

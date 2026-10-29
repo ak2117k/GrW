@@ -140,7 +140,19 @@ export function exitBlocked(
   return { blocked: kept.qty === qty, memo: kept };
 }
 
-export type FutileCause = 'held' | 'exit-blocked';
+/**
+ * 3. OBSERVE-ONLY (2026-10-29). A cash-equity position (watched since the intraday-equity roster change)
+ *    whose latest live verdict is EXIT_NOW. The executor acts on F&O only, so nothing can ever carry that
+ *    exit out and no exit attempt is ever written — rule 2 never sees it. Prod 2026-10-29: HAL-EQ and
+ *    ABB-EQ re-confirmed EXIT_NOW every ~2 min (43 judgements in 40 min) and starved JPL-EQ of both judge
+ *    slots for 40 min. Same treatment as the other two: fires and the exit-confirm re-look dropped,
+ *    heartbeat kept, NEW-risk fires always through. Lifts by itself when a verdict other than EXIT_NOW lands.
+ */
+export function observeOnlyExit(segment: string, lastVerdict: string | null | undefined): boolean {
+  return (segment === 'EQ_INTRADAY' || segment === 'EQ_DELIVERY') && lastVerdict === 'EXIT_NOW';
+}
+
+export type FutileCause = 'held' | 'exit-blocked' | 'observe-only';
 
 /**
  * Apply the rules to a wake. `decision` is the sensor decision with carried

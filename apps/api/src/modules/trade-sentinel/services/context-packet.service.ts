@@ -13,8 +13,10 @@ import { liveSessionClock } from '../overnight/overnight-calendar';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import type { CommodityCueKey, CommodityQuote, CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
-import type { FloorBasis, NoiseFloor, NoiseReading, NoiseUnitValue } from '../../exit-discipline/types';
+import type { Exposure, FloorAnchors, FloorBasis, NoiseFloor, NoiseReading, NoiseUnitValue, PriceAnchor } from '../../exit-discipline/types';
 import { scaledUnderlyingNoise } from '../../exit-discipline/noise';
+import { exposureOf } from '../../exit-discipline/exposure';
+import { underlyingAgainst } from '../../exit-discipline/hard-floor';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { baseSymbol, newsPositionOf } from '../../news-events/keys';
 import type { EventsPeek, FreshItem, NewsPeek, NewsPosition } from '../../news-events/types';
@@ -433,6 +435,11 @@ export interface TickSnapshot {
   /** Exit discipline §4: set by the CYCLE only (like the latch); a tick source never sets it. */
   noiseFloor?: NoiseFloor | null;
   /**
+   * FLOOR_HARD_EXIT: the position's fixed references (best point, floor arm point) and K, set by the
+   * CYCLE only (cycle-anchors.ts). Absent ⇒ the packet has no `money.anchors` (byte-identical).
+   */
+  anchors?: (FloorAnchors & { hardExitN: number }) | null;
+  /**
    * Equity spec §4: the stock's day bar, NIFTY now and NIFTY at entry, for the `equity` block.
    * Set by the tick source for CASH positions only (absent for F&O); never rendered as such.
    */
@@ -507,6 +514,11 @@ export type ContextPacket = {
      * reader treats a missing basis as 'fixed'.
      */
     floorBasis?: FloorBasis;
+    /**
+     * FLOOR_HARD_EXIT (on unless exactly `false`): the FIXED references every adverse move is measured
+     * from — never the previous verdict. Absent key ⇒ the switch off (byte-identical packet).
+     */
+    anchors?: PacketAnchors;
     mfe: number | null;
     mae: number | null;
   };
@@ -603,6 +615,43 @@ export type ContextPacket = {
    */
   squareOffDecision?: SquareOffDecision;
 };
+
+/** A move of the underlying AGAINST the position (+ = against), in its points and in its noise units (null: N unknown). */
+export type AdverseMove = { points: number; n: number | null };
+
+/**
+ * `money.anchors` (FLOOR_HARD_EXIT). A `type` so it stays assignable to Prisma JSON.
+ *  - best: the position's best contract price (money.mfe's price) and the underlying when it was seen.
+ *  - floorArm: the contract price and underlying when the green floor first read armed; null before.
+ *  - underlyingAgainst: the underlying's move against the position from each, now.
+ *  - hardExitN: K — the code exits a broken floor once fromBest reaches K noise units (hard-floor.ts).
+ */
+export type PacketAnchors = {
+  best: PriceAnchor | null;
+  floorArm: PriceAnchor | null;
+  underlyingAgainst: { fromBest: AdverseMove | null; fromFloorArm: AdverseMove | null };
+  hardExitN: number;
+};
+
+/** The `money.anchors` block from the cycle's anchors and this packet's underlying / N. Pure. */
+export function packetAnchorsBlock(
+  a: FloorAnchors & { hardExitN: number },
+  exposure: Exposure | null,
+  underlyingNow: number | null,
+  nUnderlying: number | null,
+): PacketAnchors {
+  const n = typeof nUnderlying === 'number' && Number.isFinite(nUnderlying) && nUnderlying > 0 ? nUnderlying : null;
+  const move = (from: PriceAnchor | null): AdverseMove | null => {
+    const points = underlyingAgainst(exposure, from?.underlying, underlyingNow);
+    return points === null ? null : { points, n: n === null ? null : Math.round((points / n) * 100) / 100 };
+  };
+  return {
+    best: a.best ? { ...a.best } : null,
+    floorArm: a.floorArm ? { ...a.floorArm } : null,
+    underlyingAgainst: { fromBest: move(a.best), fromFloorArm: move(a.floorArm) },
+    hardExitN: a.hardExitN,
+  };
+}
 
 /** See {@link ContextPacket.sinceLastVerdict}. A `type` so it stays assignable to Prisma JSON. */
 export type SinceLastVerdict = {
@@ -1295,6 +1344,12 @@ export class ContextPacketService {
     // Equity spec §4: CASH positions only, behind SENTINEL_EQUITY_BLOCK — every F&O packet is unchanged.
     const cashEquity = this.equityOn() && isCashSegment(tick.segment);
     const equity = cashEquity ? this.equityBlock(entry, tick, levelBook, v2b?.events ?? null, stockMove, now) : null;
+    const noiseUnit = tick.noise
+      ? noiseUnitBlock(tick.noise, levelBook, at, tick.underlyingRef?.exchange ?? tick.contractRef?.exchange ?? null)
+      : null;
+    // FLOOR_HARD_EXIT: the anchors in the underlying's own N — the same unit flow.noiseUnit shows.
+    const nU = noiseUnit?.available ? ((noiseUnit.value as unknown as NoiseUnitValue).underlying?.n ?? null) : null;
+    const anchors = tick.anchors ? packetAnchorsBlock(tick.anchors, exposureOf(entry.symbol, tick.side), tick.underlyingLtp, nU) : null;
 
     return {
       position: {
@@ -1337,6 +1392,8 @@ export class ContextPacketService {
         greenFloorArmed: tick.noiseFloor ? tick.noiseFloor.armed : tick.greenFloorArmedLatched || floor.armed,
         // Only with discipline on; off, the key is absent (byte-identical packet).
         ...(disciplineOn ? { floorBasis: (tick.noiseFloor ? 'noise' : 'fixed') as FloorBasis } : {}),
+        // Only when the cycle supplied anchors (FLOOR_HARD_EXIT on); off, the key is absent.
+        ...(anchors ? { anchors } : {}),
         // Excursions are read from the position's side: a LONG's best case is
         // the high, a SHORT's is the low. Both are PRICES, not rupee figures.
         mfe: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
@@ -1400,7 +1457,7 @@ export class ContextPacketService {
                 // read on their own cadence and can be up to a minute old.
                 tick.oiWallsAt ?? at,
               ),
-        ...(tick.noise ? { noiseUnit: noiseUnitBlock(tick.noise, levelBook, at, tick.underlyingRef?.exchange ?? tick.contractRef?.exchange ?? null) } : {}),
+        ...(noiseUnit ? { noiseUnit } : {}),
       },
       macro: {
         ...macroBlocks(this.readMacro(now), now, {

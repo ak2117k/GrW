@@ -50,6 +50,25 @@ describe('paperExitGate — ExitGateService.decide on a paper look', () => {
     expect(gateExits(r)).toBe(true);
   });
 
+  it('FLOOR_HARD_EXIT: the cycle rule\'s EXIT_NOW (a packet with money.anchors) exits a paper trade at once, as live', () => {
+    const block = (value: unknown) => ({ available: true, value, source: 's', at: 'a' });
+    const packet = (anchors: unknown) => ({
+      position: { symbol: 'CRUDEOILM17NOV269350PE', side: 'LONG', qty: 20, entryPrice: 362.55, ltp: 364, underlyingLtp: block(9600) },
+      money: { charges: 135, netPnl: -106, greenFloorPrice: 376.8, greenFloorArmed: true, floorBasis: 'noise', ...(anchors ? { anchors } : {}) },
+      thesis: block({ invalidation: 9650 }),
+      structure: { levelBook: block({ vwap: 9610 }), nearestSupport: block(9500), nearestResistance: block(9620) },
+      flow: { noiseUnit: block({ contract: { n: 1.8, method: 'atr14-1m', bars: 60, at: 'a' }, underlying: { n: 12.5, method: 'atr14-1m', bars: 60, at: 'a' } }) },
+      session: { nowUtc: 'a', minutesToClose: block(130) },
+    });
+    const anchors = { best: { ltp: 380.4, underlying: 9531, at: 'a' }, floorArm: { ltp: 373, underlying: 9547, at: 'a' }, underlyingAgainst: {}, hardExitN: 2 };
+    const r = paperExitGate({ ...base, ltpNow: 363.8, look: { ...base.look, packet: packet(anchors) }, cfg: parseExitDisciplineConfig({}) });
+    expect(r).toMatchObject({ outcome: 'PASS', justification: 'FLOOR_HARD_EXIT', persistence: { rule: 'BYPASS' } });
+    expect(gateExits(r)).toBe(true);
+    // The same packet before anchors existed: the old frame, which waits for a second EXIT_NOW.
+    const legacy = paperExitGate({ ...base, ltpNow: 363.8, look: { ...base.look, packet: packet(null) }, cfg: parseExitDisciplineConfig({}) });
+    expect(legacy.justification).not.toBe('FLOOR_HARD_EXIT');
+  });
+
   it('only PASS and BYPASS exit; a held or unconfirmed verdict does not', () => {
     expect(gateExits({ outcome: 'GATED_THESIS_INTACT' } as never)).toBe(false);
     expect(gateExits({ outcome: 'AWAITING_CONFIRMATION' } as never)).toBe(false);

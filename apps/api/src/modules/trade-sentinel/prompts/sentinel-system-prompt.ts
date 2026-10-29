@@ -75,6 +75,13 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * `v9+l1+d1+e1+s1`. Off, byte-identical. The packet carries the key only inside a position's
  * hard-risk window before its deadline, so every other packet describes an absent key.
  *
+ * FROM +a1 AN EIGHTH SWITCH, FLOOR_HARD_EXIT (fixed anchors + the hard floor, 2026-10-29; ON unless
+ * exactly `false`, OFF without a ConfigService; only with exit discipline on): money.anchors in the
+ * field list and one reading line, the gate line's confirming move measured from the floor's arm
+ * point instead of "since your last HOLD", the hard-floor mandate line, and (with +d1) one sentence
+ * saying sinceLastVerdict is never the risk reference. A SUFFIX after +s1: `v9+l1+d1+e1+s1+a1`.
+ * Off, byte-identical. See {@link ANCHORS_VERSION_SUFFIX}.
+ *
  * {@link SENTINEL_PROMPT_VERSION} / {@link SENTINEL_SYSTEM_PROMPT} name the
  * default (discipline on, triggers off, news off, lessons off).
  */
@@ -110,6 +117,8 @@ export interface SentinelPromptOptions {
   equity?: boolean;
   /** SENTINEL_SQUARE_OFF_LOOK not exactly 'false' (parseJudgeGateConfig): the +s1 squareOffDecision lines. */
   squareOff?: boolean;
+  /** FLOOR_HARD_EXIT not exactly 'false' (parseExitDisciplineConfig), with discipline on: the +a1 money.anchors / hard-floor lines. */
+  anchors?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -131,7 +140,7 @@ const VERSIONS_NEWS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noC
 export function sentinelPromptVersion(o: SentinelPromptOptions): string {
   const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
   const table = o.news ? VERSIONS_NEWS : VERSIONS;
-  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}${o.equity ? EQUITY_VERSION_SUFFIX : ''}${o.squareOff ? SQUARE_OFF_VERSION_SUFFIX : ''}`;
+  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}${o.equity ? EQUITY_VERSION_SUFFIX : ''}${o.squareOff ? SQUARE_OFF_VERSION_SUFFIX : ''}${o.anchors && o.discipline ? ANCHORS_VERSION_SUFFIX : ''}`;
 }
 
 /** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
@@ -323,17 +332,69 @@ const withNewsBlocks =(line: string, on: boolean): string => (on ? line.replace(
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta' | 'equity' | 'squareOff'>): string {
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta' | 'equity' | 'squareOff' | 'anchors'>): string {
   const text = withEquity(renderBase(o), !!o.equity);
-  if (!o.delta) return withSquareOff(text, !!o.squareOff, false);
+  const anchors = !!o.anchors && o.discipline;
+  if (!o.delta) return withAnchors(withSquareOff(text, !!o.squareOff, false), anchors, false);
   if (!text.includes(TOP_LEVEL_LINE) || !text.includes(TRIGGER_LINE)) {
     throw new Error('sentinel-system-prompt: the top-level / trigger lines moved — rebuild the +d1 prompt');
   }
-  return withSquareOff(
-    text.replace(TOP_LEVEL_LINE, TOP_LEVEL_LINE_DELTA).replace(TRIGGER_LINE, `${TRIGGER_LINE}${DELTA_READING_LINES}`),
-    !!o.squareOff,
+  return withAnchors(
+    withSquareOff(
+      text.replace(TOP_LEVEL_LINE, TOP_LEVEL_LINE_DELTA).replace(TRIGGER_LINE, `${TRIGGER_LINE}${DELTA_READING_LINES}`),
+      !!o.squareOff,
+      true,
+    ),
+    anchors,
     true,
   );
+}
+
+/**
+ * The stamp suffix for the fixed anchors and the hard floor (FLOOR_HARD_EXIT, on unless exactly
+ * `false`, OFF without a ConfigService — the +d1 rule; rendered only with exit discipline on, which
+ * the lines amend): `v9+l1+d1+e1+s1` becomes `v9+l1+d1+e1+s1+a1`. Off, byte-identical.
+ *
+ * Prod 2026-10-29 (CRUDEOILM17NOV269350PE): 37 HOLDs while a green trade went red, every one reasoning
+ * "only X points against me since my last HOLD — under one N", because the gate line told it the
+ * confirming move is counted "since your last HOLD". Re-anchored on every verdict, a slow grind never
+ * reaches one N. +a1 measures from money.anchors (the best point, the floor's arm point), states the
+ * hard floor the code now enforces, and forbids an invalidation that re-anchors on the judge itself.
+ */
+export const ANCHORS_VERSION_SUFFIX = '+a1';
+
+/** The v7 gate-line phrase +a1 replaces: the confirming move's reference. */
+const GATE_SINCE_HOLD = 'it has moved against the position by at least one of its own noise units since your last HOLD';
+const GATE_FROM_ARM =
+  'it has moved against the position by at least one of its own noise units from where the floor armed (money.anchors.floorArm)';
+
+/** The +a1 mandate line, after the v7 mandate lines. Ends with a newline. */
+export const ANCHORS_MANDATE_LINE =
+  '- The armed green floor is also a hard rule that does not ask you: once money.greenFloorArmed is true, code exits the position by itself when position.ltp stays below money.greenFloorPrice (above it for a short) and money.netPnl has turned negative, or when it stays below the floor and the underlying has moved against the position by money.anchors.hardExitN of its own noise units from money.anchors.best.\n';
+
+/** The +a1 reading line, after the v7 reading lines. Ends with a newline. */
+export const ANCHORS_READING_LINE =
+  '- money.anchors holds the position\'s FIXED references: best is its best contract price (as money.mfe) with the underlying when it was seen, floorArm the contract price and underlying when the green floor armed (null before it armed), and underlyingAgainst gives the underlying\'s move against the position from each of them now, in points and in flow.noiseUnit underlying units (positive = against). Measure every adverse move from these, never from your own previous verdict: an invalidationPoint such as "one noise unit beyond the price at this verdict" moves each time you are asked, so a slow grind never reaches it. State invalidationPoint as a fixed price or as a distance from money.anchors.\n';
+
+/** The +d1 sentence +a1 extends: the delta is a summary, not a risk reference. */
+const DELTA_CONSISTENT = 'Nothing new since your previous verdict is a reason to stay consistent with it.';
+const DELTA_CONSISTENT_ANCHORS =
+  `${DELTA_CONSISTENT} It is never the reference for how far the underlying has moved against the position — money.anchors is.`;
+
+/** The +a1 lines into a rendered prompt; fails rather than drift if their anchors move. */
+function withAnchors(text: string, on: boolean, delta: boolean): string {
+  if (!on) return text;
+  const money = V7_MONEY_FIELDS;
+  const readEnd = V7_READING_LINES;
+  if (!text.includes(GATE_SINCE_HOLD) || !text.includes(V7_MANDATE_LINES) || !text.includes(money) || !text.includes(readEnd) || (delta && !text.includes(DELTA_CONSISTENT))) {
+    throw new Error('sentinel-system-prompt: the v7 / +d1 lines moved — rebuild the +a1 prompt');
+  }
+  const mandate = V7_MANDATE_LINES.replace(GATE_SINCE_HOLD, GATE_FROM_ARM);
+  const out = text
+    .replace(V7_MANDATE_LINES, `${mandate}${ANCHORS_MANDATE_LINE}`)
+    .replace(money, money.replace('floorBasis, mfe', 'floorBasis, anchors, mfe'))
+    .replace(readEnd, `${readEnd}${ANCHORS_READING_LINE}`);
+  return delta ? out.replace(DELTA_CONSISTENT, DELTA_CONSISTENT_ANCHORS) : out;
 }
 
 /**

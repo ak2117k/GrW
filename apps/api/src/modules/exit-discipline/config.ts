@@ -16,6 +16,7 @@ export const EXIT_DISCIPLINE_DEFAULTS = {
   persistMinSec: 120,
   outcomeWindowMin: 60,
   openingGuardMin: 15,
+  floorHardExitN: 2.0,
 } as const;
 
 /** Spec text, not tunables. */
@@ -27,6 +28,13 @@ export const NOISE_LOOKBACK_MIN = 120;
 export const ATR_PERIOD = 14;
 export const EXIT_CONFIRM_MAX_RELOOKS = 3;
 export const GATE_LOAD_TIMEOUT_MS = 2000;
+/**
+ * Hard floor exit (hard-floor.ts): the trip must hold on two consecutive cycle reads at least this
+ * many seconds apart — one 30-s cycle step — so a single print through the floor never sells.
+ */
+export const FLOOR_HARD_CONFIRM_SEC = 20;
+/** Hard floor exit: after a rule EXIT_NOW is recorded, the rule stays quiet this long while the exit runs. */
+export const FLOOR_HARD_REFIRE_SEC = 120;
 
 export interface ExitDisciplineConfig {
   enabled: boolean;
@@ -40,6 +48,15 @@ export interface ExitDisciplineConfig {
   outcomeWindowMin: number;
   /** Minutes after the session open in which only HARD_RISK may sell (the opening spike is noise). */
   openingGuardMin: number;
+  /**
+   * FLOOR_HARD_EXIT (ON unless exactly `false`; prod 2026-10-29 CRUDEOILM 9350 PE): adverse moves are
+   * measured from FIXED references — the position's best point and the floor's arm point — never from
+   * the last verdict, and an armed green floor is a deterministic exit (hard-floor.ts) rather than a
+   * level the judge may keep re-anchoring. Off: packet, prompt, gate and cycle are exactly as before.
+   */
+  floorHardExit: boolean;
+  /** FLOOR_HARD_EXIT_N (default 2, 1–6): K — the underlying's move against the position, in its own noise units, from the best point. */
+  floorHardExitN: number;
   problems: string[];
 }
 
@@ -62,6 +79,12 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
   if (raw !== '' && raw !== 'true' && raw !== 'false') {
     problems.push(`EXIT_DISCIPLINE_ENABLED=${raw} is not true|false — keeping exit discipline ON`);
   }
+  // A typo keeps the hard floor ON: it only sells a position whose armed floor has broken AND that
+  // has turned red (or whose underlying ran K·N against it), and the executor's guards still apply.
+  const hard = (env.FLOOR_HARD_EXIT ?? '').trim();
+  if (hard !== '' && hard !== 'true' && hard !== 'false') {
+    problems.push(`FLOOR_HARD_EXIT=${hard} is not true|false — keeping the hard floor exit ON`);
+  }
   const d = EXIT_DISCIPLINE_DEFAULTS;
   return {
     enabled: raw !== 'false',
@@ -74,6 +97,8 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
     persistMinSec: num(env, 'PERSIST_MIN_SEC', d.persistMinSec, int(0, 900), problems),
     outcomeWindowMin: num(env, 'EXIT_OUTCOME_WINDOW_MIN', d.outcomeWindowMin, int(15, 240), problems),
     openingGuardMin: num(env, 'EXIT_OPENING_GUARD_MIN', d.openingGuardMin, int(0, 60), problems),
+    floorHardExit: hard !== 'false',
+    floorHardExitN: num(env, 'FLOOR_HARD_EXIT_N', d.floorHardExitN, real(1, 6), problems),
     problems,
   };
 }
@@ -81,7 +106,8 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
 export function describeExitDiscipline(c: ExitDisciplineConfig): string {
   return `${c.enabled ? 'ON' : 'OFF'} floorArmN=${c.floorArmN} floorTrailN=${c.floorTrailN} givebackN=${c.givebackN} ` +
     `gateCloseMin=${c.gateCloseMin} gateUnderlyingN=${c.gateUnderlyingN} ` +
-    `persist=${c.persistWindowSec}s/${c.persistMinSec}s openingGuard=${c.openingGuardMin}m outcomeWindow=${c.outcomeWindowMin}m`;
+    `persist=${c.persistWindowSec}s/${c.persistMinSec}s openingGuard=${c.openingGuardMin}m outcomeWindow=${c.outcomeWindowMin}m ` +
+    `floorHardExit=${c.floorHardExit ? `ON K=${c.floorHardExitN}` : 'off'}`;
 }
 
 /**

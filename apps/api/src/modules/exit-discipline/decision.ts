@@ -52,11 +52,13 @@ export function decideExit(i: {
     }
     return { ...base, outcome: 'GATED_THESIS_INTACT', persistence: null };
   }
-  // Only HARD_RISK skips confirmation. A thesis break by a "clear margin" used to bypass too, and on
-  // 2026-10-21 three long puts were sold into the 09:15 spike that reversed minutes later.
-  const p = evaluatePersistence({ current: i.current, history: i.history, bypass: g.hardRisk, cfg: i.cfg });
+  // Only HARD_RISK and the hard floor skip confirmation. A thesis break by a "clear margin" used to
+  // bypass too, and on 2026-10-21 three long puts were sold into the 09:15 spike that reversed minutes
+  // later. The hard floor is confirmed by its own two reads (the cycle's, and the packet's beside the
+  // executor's fresh LTP) — waiting for a second EXIT_NOW would hand it back to a judge that may HOLD.
+  const p = evaluatePersistence({ current: i.current, history: i.history, bypass: g.hardRisk || g.floorHard, cfg: i.cfg });
   // Opening guard: in the first minutes of the session only HARD_RISK may sell; a thesis break or a
-  // floor breach must outlast the opening print.
+  // floor breach — the hard floor included — must outlast the opening print.
   const since = i.facts.minutesSinceOpen;
   if (!g.hardRisk && typeof since === 'number' && Number.isFinite(since) && since >= 0 && since < i.cfg.openingGuardMin) {
     return {
@@ -126,5 +128,9 @@ export function buildGateFacts(p: PacketFacts, ctx: {
     isExpiryDay: p.expiry !== null && p.expiry === istDate(ctx.now),
     dailyLossLatched: ctx.dailyLossLatched,
     minutesSinceOpen,
+    // FLOOR_HARD_EXIT: only for a packet that carries money.anchors — older packets keep the legacy facts.
+    ...(p.anchors
+      ? { anchors: { bestUnderlying: p.anchors.bestUnderlying, armUnderlying: p.anchors.armUnderlying, packetLtp: p.ltp, packetNetPnl: p.netPnl, freshNetPnl: fresh } }
+      : {}),
   };
 }

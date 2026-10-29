@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { computeGreenFloor } from '../charges';
+import { computeGreenFloor, isDerivativeSegment } from '../charges';
 import { isPaperTracker } from '../paper/paper-tracker';
 import { RosterService, type RosterEntry } from './roster.service';
 import {
@@ -46,11 +46,15 @@ import { OiWallSnapshotService, type WallPair } from './oi-wall-snapshot.service
 import {
   EXIT_CONFIRM_MAX_RELOOKS,
   EXIT_DISCIPLINE_CONFIG,
+  FLOOR_HARD_REFIRE_SEC,
   parseExitDisciplineConfig,
   type ExitDisciplineConfig,
 } from '../../exit-discipline/config';
 import { exitConfirmFire } from '../tripwires/exit-confirm';
 import { solveCycleFloor } from './cycle-floor';
+import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
+import { confirmHardFloor, hardFloorReading, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import { exposureOf } from '../../exit-discipline/exposure';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
 import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
@@ -439,6 +443,15 @@ interface TrackerState {
    * the last live packet — see `storedNoiseFloor`.
    */
   noiseFloor: { armed: boolean; level: number | null; entry: number | null };
+  /**
+   * FLOOR_HARD_EXIT: the in-process half of the position's fixed references (best point, floor arm
+   * point); the durable half is the last live packet's money.anchors — see cycle-anchors.ts.
+   */
+  anchors?: AnchorMemory;
+  /** FLOOR_HARD_EXIT: the hard-floor confirmation run and the last fire (hard-floor.ts). Memory only. */
+  hardFloor?: HardFloorMemo;
+  /** FLOOR_HARD_EXIT: epoch ms a held position's suppressed trip was last logged (once per 30 min). */
+  hardFloorHeldLoggedAt?: number;
   /** News & events v2 edge-trigger memory (R4): fresh own-instrument article ids already fired on. */
   newsSeen?: Set<string>;
   /** News & events v2 edge-trigger memory (R4): event ids already fired (or, in observe, logged) as event-near. */
@@ -472,6 +485,21 @@ interface TrackerState {
 
 /** Owner alerts: an observe-only EXIT_NOW is re-sent at most this often per position. */
 export const OWNER_EXIT_ALERT_EVERY_MS = 30 * 60_000;
+
+/** Judge gate: no new judgement on a position this soon after its latest recorded verdict (see evaluateOne). */
+export const MIN_REJUDGE_GAP_MS = 60_000;
+/** The looks {@link MIN_REJUDGE_GAP_MS} never delays: the EXIT_NOW confirmation and the deadline look. */
+const GAP_EXEMPT_FIRES: ReadonlySet<string> = new Set(['exit-confirm', SQUARE_OFF_DUE]);
+
+/** FLOOR_HARD_EXIT: the rule's fire name (packet trigger, verdict triggeredBy). */
+export const FLOOR_HARD_EXIT_FIRE = 'floor-hard-exit';
+/**
+ * FLOOR_HARD_EXIT: the promptVersion of a rule verdict — no prompt wrote it, and a stamp that looked
+ * like a judge's would let the replay and the scorecards blame the prompt for a code rule.
+ */
+export const FLOOR_HARD_EXIT_STAMP = 'rule:floor-hard/1';
+/** FLOOR_HARD_EXIT: every rule verdict's reason starts with this (the executor row's verdictReason). */
+export const FLOOR_HARD_EXIT_REASON_PREFIX = 'FLOOR_HARD_EXIT (code rule, not a judgement)';
 
 /** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
 const DISCIPLINE_OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
@@ -638,7 +666,8 @@ export class SentinelCycleService {
       // runner's per-sensor isolation is the inner layer of this; the whole of a
       // position's work — tick, walls, packet, agent, write — is the outer one.
       try {
-        const candidate = await this.evaluateOne(entry, index, now, report, suppressed, futile);
+        // A hard-floor exit (FLOOR_HARD_EXIT) is recorded detached into `jobs` beside the judgements.
+        const candidate = await this.evaluateOne(entry, index, now, report, suppressed, futile, jobs);
         if (candidate) candidates.push(candidate);
       } catch (err) {
         report.failed += 1;
@@ -735,6 +764,7 @@ export class SentinelCycleService {
     report: CycleReport,
     suppressedTally: Record<string, number> = {},
     futile: FutilePass = { attempts: new Map(), tally: {} },
+    ruleJobs: Array<Promise<JudgeOutcome>> = [],
   ): Promise<JudgeCandidate | null> {
     const raw = await this.ticks.tickFor(entry.trackerId);
     const tick = withCashUnderlying(raw);
@@ -799,10 +829,31 @@ export class SentinelCycleService {
       last,
     });
     this.stateFor(entry).noiseFloor = floorSolve.memory;
-    const tickF: TickReading = { ...tick, noiseFloor: floorSolve.noiseFloor };
     // What the heartbeat cadence reads: the noise floor's latch when it is in
     // charge, else the fixed one.
     const armedForCadence = floorSolve.noiseFloor ? floorSolve.noiseFloor.armed : greenFloorArmedLatched;
+    // FLOOR_HARD_EXIT: the fixed references (best point, floor arm point), ratcheted like the floor —
+    // updated every pass, so the packet and the hard-floor rule never measure from a verdict's price.
+    const hardOn = !!this.discipline?.enabled && this.discipline.floorHardExit === true;
+    const anchorSolve = hardOn
+      ? solveCycleAnchors({
+          side: tick.side,
+          entryPrice: tick.entryPrice,
+          ltp: tick.ltp,
+          peak: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
+          underlying: tick.underlyingLtp,
+          floorArmed: armedForCadence,
+          now,
+          memory: this.stateFor(entry).anchors ?? EMPTY_ANCHORS,
+          last,
+        })
+      : null;
+    if (anchorSolve) this.stateFor(entry).anchors = anchorSolve.memory;
+    const tickF: TickReading = {
+      ...tick,
+      noiseFloor: floorSolve.noiseFloor,
+      ...(anchorSolve ? { anchors: { ...anchorSolve.anchors, hardExitN: this.discipline!.floorHardExitN } } : {}),
+    };
 
     const capture = await this.wallsFor(entry, tick, now);
     const walls = capture.walls;
@@ -936,6 +987,16 @@ export class SentinelCycleService {
     }
     const decision = gated ? gated.decision : futiled.decision;
 
+    // FLOOR_HARD_EXIT (hard-floor.ts): a broken armed floor that has turned red, or with the underlying
+    // K·N against the position from its best point, is an exit the judge is not asked about. Read on
+    // EVERY pass (the confirmation needs consecutive reads) and ahead of the judge's own gates — the
+    // agent backoff, the in-flight lock — so an outage or a slow judgement cannot hold it.
+    const hard = this.hardFloorFor(entry, state, tickF, floorSolve.noiseFloor, greenFloorArmedLatched, now);
+    if (hard) {
+      ruleJobs.push(this.recordHardFloorExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, hard, now));
+      return null;
+    }
+
     if (!decision.shouldEvaluate) {
       report.skipped += 1;
       return null;
@@ -969,6 +1030,27 @@ export class SentinelCycleService {
       return null;
     }
 
+    // AT MOST ONE JUDGEMENT A MINUTE PER POSITION (judge gate on). Prod 2026-10-29: six pairs of
+    // verdicts on one tracker inside the same minute, confidence flipping between them. The lock above
+    // only stops two at once; the next one started the moment the first was written — a pass or a
+    // hub-tick wake seconds later, its repeat fire judged "material" against the baseline taken at the
+    // previous DISPATCH (a CLI judgement takes 30–60 s, so the price has moved by then), with the cap
+    // bypassed because the armed floor was breached. Too soon after a recorded verdict the wake waits:
+    // edge-triggered fires are carried, level-triggered ones (SUPPRESSIBLE_FIRES) fire again by
+    // themselves. Never delayed: the exit-confirm re-look and the deadline look. The money is not left
+    // waiting on it — the hard floor (FLOOR_HARD_EXIT) above does not ask the judge.
+    if (
+      this.gateCfg?.enabled &&
+      lastVerdictAt !== null &&
+      now.getTime() - new Date(lastVerdictAt).getTime() < MIN_REJUDGE_GAP_MS &&
+      !decision.fires.some((f) => GAP_EXEMPT_FIRES.has(f.name))
+    ) {
+      report.skipped += 1;
+      suppressedTally['rejudge-gap'] = (suppressedTally['rejudge-gap'] ?? 0) + 1;
+      state.carriedFires = mergeFires(state.carriedFires, decision.fires.filter((f) => !SUPPRESSIBLE_FIRES.has(f.name)));
+      return null;
+    }
+
     return {
       index,
       entry,
@@ -985,6 +1067,115 @@ export class SentinelCycleService {
       // The packet's held marker / delta (gate on) and the deadline framing (inside the window).
       ...(gate?.review || sq ? { review: { ...(gate?.review ?? {}), ...(sq ? { deadline: sq.decision } : {}) } } : {}),
     };
+  }
+
+  /**
+   * FLOOR_HARD_EXIT: this pass's hard-floor read, folded into the position's confirmation run. Returns
+   * the read when it CONFIRMS a trip (and the rule is not inside its refire quiet time), else null.
+   *
+   * Only where an exit is ours and is carried out: a SENTINEL-owned derivative (the executor acts on
+   * NFO/BFO/MCX only) or a paper trade (the paper sentinel closes it). Never on a position another
+   * engine manages. A HELD position (AI_AUTO_EXIT_HOLD) is read but never fired — the executor would
+   * refuse it as OWNER_HOLD anyway; the suppressed trip is logged once per 30 min.
+   */
+  private hardFloorFor(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    noiseFloor: TickSnapshot['noiseFloor'] | null | undefined,
+    greenFloorArmedLatched: boolean,
+    now: Date,
+  ): { reading: HardFloorReading; floor: number; netPnl: number } | null {
+    const cfg = this.discipline;
+    if (!cfg?.enabled || !cfg.floorHardExit || !tick.anchors) return null;
+    if (entry.ownership !== 'SENTINEL' || !(isDerivativeSegment(tick.segment) || isPaperTracker(entry.trackerId))) return null;
+    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side });
+    // The floor in charge, exactly as the packet and the judge gate read it.
+    const floor = noiseFloor
+      ? { price: noiseFloor.armed ? noiseFloor.level : null, armed: noiseFloor.armed }
+      : { price: greenFloorArmedLatched ? green.floorPrice : null, armed: greenFloorArmedLatched };
+    const reading = hardFloorReading({
+      side: tick.side,
+      exposure: exposureOf(entry.symbol, tick.side),
+      ltp: tick.ltp,
+      floor,
+      netPnl: green.netPnl,
+      underlying: tick.underlyingLtp,
+      bestUnderlying: tick.anchors.best?.underlying ?? null,
+      nUnderlying: tick.noise?.underlying1m?.n ?? null,
+      k: cfg.floorHardExitN,
+    });
+    const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    if (reading.trip && hold && isHeldPosition(hold, entry)) {
+      if (now.getTime() - (state.hardFloorHeldLoggedAt ?? Number.NEGATIVE_INFINITY) >= HELD_LOG_EVERY_MS) {
+        state.hardFloorHeldLoggedAt = now.getTime();
+        this.logger.warn(`[floor-hard-exit] HELD — ${reading.rule} on ${entry.symbol} (tracker ${entry.trackerId}) not fired: the owner holds it (AI_AUTO_EXIT_HOLD)`);
+      }
+      state.hardFloor = confirmHardFloor(state.hardFloor, false, now.getTime()).memo;
+      return null;
+    }
+    const c = confirmHardFloor(state.hardFloor, reading.trip, now.getTime());
+    state.hardFloor = c.memo;
+    return c.fire && floor.price !== null ? { reading, floor: floor.price, netPnl: green.netPnl } : null;
+  }
+
+  /**
+   * FLOOR_HARD_EXIT: record the rule's EXIT_NOW — no judge call — so it reaches the SAME path as an AI
+   * EXIT_NOW: the executor's poll and every guard (owner HOLD, F&O only, the daily cap, an exit in
+   * flight), then the exit gate, whose FLOOR_HARD_* clauses re-check it on the packet AND the fresh
+   * LTP; on paper, the paper sentinel's replay of that gate. The packet is the ordinary one (the
+   * cached thesis, never a new inference), so the gate, the audit and the next judge all read it.
+   * Never rejects. A failed write clears the fire, so the next confirming pass retries.
+   */
+  private async recordHardFloorExit(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    walls: { now: WallPair | null; prev: WallPair | null },
+    wallsAt: string | null,
+    greenFloorArmedLatched: boolean,
+    hard: { reading: HardFloorReading; floor: number; netPnl: number },
+    now: Date,
+  ): Promise<JudgeOutcome> {
+    const r = hard.reading;
+    const from = tick.anchors?.best;
+    const detail =
+      r.rule === 'GREEN_TO_RED'
+        ? `premium ${tick.ltp} below the armed floor ${hard.floor} and net ₹${Math.round(hard.netPnl)} — the trade turned red`
+        : `premium ${tick.ltp} below the armed floor ${hard.floor}; underlying ${tick.underlyingLtp} is ${r.adverseFromBest} (${r.adverseFromBestN} N) against the position from ${from?.underlying} at its best point ${from?.ltp}`;
+    const fire: TripwireFire = { name: FLOOR_HARD_EXIT_FIRE, detail };
+    try {
+      const packet = await this.packets.build(
+        entry,
+        { ...tick, oiWallNow: walls.now, oiWallPrev: walls.prev, oiWallsAt: wallsAt, greenFloorArmedLatched },
+        state.thesis?.value ?? null,
+        [fire],
+      );
+      await this.verdicts.record({
+        userId: entry.userId,
+        trackerId: entry.trackerId,
+        symbol: entry.symbol,
+        verdict: 'EXIT_NOW',
+        confidence: 'high',
+        thesisStatus: 'WEAKENING',
+        recoveryAvailable: true,
+        reason: `${FLOOR_HARD_EXIT_REASON_PREFIX} ${r.rule}: ${detail}`.slice(0, 500),
+        evidence: ['position.ltp', 'money.greenFloorPrice', 'money.greenFloorArmed', 'money.netPnl', 'money.anchors'],
+        invalidationPoint: null,
+        reviewInSec: FLOOR_HARD_REFIRE_SEC,
+        packet: packetAsJson(packet),
+        promptVersion: FLOOR_HARD_EXIT_STAMP,
+        triggeredBy: [FLOOR_HARD_EXIT_FIRE],
+        netPnl: packet.money.netPnl,
+        greenFloor: packet.money.greenFloorPrice,
+      });
+      this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${r.rule}: ${detail}`);
+      return 'evaluated';
+    } catch (err) {
+      if (state.hardFloor) state.hardFloor = { ...state.hardFloor, firedAt: null };
+      this.logger.error(`[floor-hard-exit] could not record the EXIT_NOW for ${entry.symbol}: ${err instanceof Error ? err.message : String(err)} — retried next pass`);
+      return 'failed';
+    }
   }
 
   /** The deadline look for this pass (square-off-look.ts), or null when off / outside the window. Never throws. */

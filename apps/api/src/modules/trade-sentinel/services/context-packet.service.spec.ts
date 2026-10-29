@@ -949,6 +949,27 @@ describe('ContextPacketService', () => {
       expect(p.money).toMatchObject({ greenFloorPrice: 530.5, greenFloorArmed: true, floorBasis: 'noise' });
     });
 
+    it('FLOOR_HARD_EXIT: tick.anchors ⇒ money.anchors, the underlying move from each anchor in points and flow.noiseUnit units; absent ⇒ no key', async () => {
+      const contract = { n: 4.5, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      const underlying1m = { n: 4, method: 'atr14-1m' as const, bars: 20, at: '2026-10-14T11:00:00.000Z' };
+      const u = tick.underlyingLtp as number;
+      const anchors = {
+        best: { ltp: 130, underlying: u + 10, at: '2026-10-14T10:40:00.000Z' },
+        floorArm: { ltp: 125, underlying: u + 2, at: '2026-10-14T10:30:00.000Z' },
+        hardExitN: 2,
+      };
+      const p = await svc.build(entry, { ...tick, noise: { contract, underlying1m, reason: null }, anchors }, null);
+      // A long on a non-put is BULLISH: the underlying 10 below its best-point value is 10 against (2.5 N).
+      expect(p.money.anchors).toEqual({
+        best: anchors.best, floorArm: anchors.floorArm,
+        underlyingAgainst: { fromBest: { points: 10, n: 2.5 }, fromFloorArm: { points: 2, n: 0.5 } },
+        hardExitN: 2,
+      });
+      expect(Object.keys(p.money)).toEqual(['grossPnl', 'charges', 'netPnl', 'greenFloorPrice', 'greenFloorArmed', 'floorBasis', 'anchors', 'mfe', 'mae']);
+      const q = await svc.build(entry, { ...tick, noise: { contract, underlying1m, reason: null } }, null);
+      expect('anchors' in q.money).toBe(false);
+    });
+
     it('an unarmed noise floor is reported unarmed even when the fixed latch is set (the ₹150 latch never arms the noise floor)', async () => {
       const p = await svc.build(entry, { ...tick, greenFloorArmedLatched: true, noiseFloor: { basis: 'noise', armed: false, level: 529.65, armPrice: 529.65, n: 4.5 } }, null);
       expect(p.money).toMatchObject({ greenFloorPrice: 529.65, greenFloorArmed: false, floorBasis: 'noise' });

@@ -556,7 +556,10 @@ interface Scenario {
  */
 // SENTINEL_EQUITY_BLOCK off: the baseline predates the +e1 equity lines (pinned in sentinel-agent.service.spec.ts).
 // SENTINEL_SQUARE_OFF_LOOK off: likewise it predates the +s1 squareOffDecision lines (same pin).
-const BASELINE_ENV: Record<string, string> = { EXIT_DISCIPLINE_ENABLED: 'false', SENTINEL_EQUITY_BLOCK: 'false', SENTINEL_SQUARE_OFF_LOOK: 'false' };
+// FLOOR_HARD_EXIT off: likewise it predates the +a1 money.anchors / hard-floor lines (same pin).
+const BASELINE_ENV: Record<string, string> = {
+  EXIT_DISCIPLINE_ENABLED: 'false', SENTINEL_EQUITY_BLOCK: 'false', SENTINEL_SQUARE_OFF_LOOK: 'false', FLOOR_HARD_EXIT: 'false',
+};
 
 /** The real judge, as configured by `env` (over BASELINE_ENV), over `client`. */
 const runJudge = (

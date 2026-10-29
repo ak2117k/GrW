@@ -34,6 +34,14 @@ describe('readPacketFacts', () => {
     expect(f).toMatchObject({ noise, floor: { price: 530.5, armed: true, basis: 'noise' } });
   });
 
+  it('FLOOR_HARD_EXIT: reads money.anchors (the best point and arm point underlyings); absent ⇒ no key', () => {
+    expect('anchors' in (readPacketFacts(P()) as object)).toBe(false);
+    const money = { ...P().money, anchors: { best: { ltp: 539.5, underlying: 9018, at: 'x' }, floorArm: null, underlyingAgainst: {}, hardExitN: 2 } };
+    expect(readPacketFacts(P({ money }))).toMatchObject({ anchors: { bestUnderlying: 9018, armUnderlying: null } });
+    const junk = { ...P().money, anchors: { best: { underlying: 'x' }, floorArm: 7 } };
+    expect(readPacketFacts(P({ money: junk }))).toMatchObject({ anchors: { bestUnderlying: null, armUnderlying: null } });
+  });
+
   it.each([
     ['unavailable underlying', { position: { ...P().position, underlyingLtp: { available: false, reason: 'x' } } }, 'underlying', null],
     ['no thesis', { thesis: { available: false, reason: 'none' } }, 'invalidation', null],

@@ -105,6 +105,57 @@ describe('evaluateExitGate', () => {
     expect(r.justification).toBe('CONFIRMED_FLOOR_BREACH');
   });
 
+  describe('FLOOR_HARD_EXIT: an anchored packet (money.anchors) — prod 2026-10-29 long CRUDEOILM 9350 PE', () => {
+    // Crude ground up from the 9531 best point; the floor armed with crude at 9547; the last HOLD was a minute ago at 9551.
+    const PE: GateFacts = {
+      ...BASE, exposure: 'BEARISH', ltpNow: 375, underlying: 9553, invalidation: 9650, vwap: 9590, nUnderlying: 12.5,
+      holdRef: { id: 'vh', underlying: 9551, support: 9500, resistance: 9620, at: '2026-10-29T15:42:00.000Z' },
+      floor: { price: 376.8, armed: true, basis: 'noise' }, netPnlNow: 115,
+      anchors: { bestUnderlying: 9531, armUnderlying: 9547, packetLtp: 375.2, packetNetPnl: 119, freshNetPnl: 115 },
+    };
+
+    it('appends the two hard-floor clauses; a pre-anchor packet keeps exactly the eight', () => {
+      expect(evaluateExitGate(PE, CFG).clauses.map((c) => c.id).slice(8)).toEqual(['FLOOR_HARD_GREEN_TO_RED', 'FLOOR_HARD_UNDERLYING_MOVE']);
+      expect(evaluateExitGate({ ...PE, anchors: undefined }, CFG).clauses).toHaveLength(8);
+      expect(evaluateExitGate(PE, { ...CFG, floorHardExit: false }).clauses).toHaveLength(8);
+    });
+
+    it('the confirming move is measured from the floor arm point, never the last HOLD (which re-anchors every verdict)', () => {
+      const legacy = clause(evaluateExitGate({ ...PE, anchors: undefined }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
+      expect(legacy).toMatchObject({ pass: false, measured: expect.objectContaining({ holdUnderlying: 9551, adverseMove: 2 }) });
+      const fixed = clause(evaluateExitGate({ ...PE, underlying: 9560 }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
+      expect(fixed).toMatchObject({ pass: true, measured: expect.objectContaining({ from: 'FLOOR_ARM', refUnderlying: 9547, adverseMove: 13 }) });
+      // No arm point recorded: the best point stands in.
+      const best = clause(evaluateExitGate({ ...PE, anchors: { ...PE.anchors!, armUnderlying: null } }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
+      expect(best).toMatchObject({ pass: true, measured: expect.objectContaining({ from: 'BEST', adverseMove: 22 }) });
+    });
+
+    it('below the floor but still net green, the underlying 1.76 N from the best point: no hard-floor clause passes', () => {
+      const r = evaluateExitGate(PE, CFG);
+      expect(r.floorHard).toBe(false);
+      expect(clause(r, 'FLOOR_HARD_GREEN_TO_RED').pass).toBe(false);
+      expect(clause(r, 'FLOOR_HARD_UNDERLYING_MOVE')).toMatchObject({ pass: false, measured: expect.objectContaining({ adverseMove: 22, needN: 2 }) });
+    });
+
+    it('FLOOR_HARD_UNDERLYING_MOVE: below the floor on both reads, crude 2 N against from the best point', () => {
+      const r = evaluateExitGate({ ...PE, underlying: 9556 }, CFG);
+      expect(r).toMatchObject({ justified: true, justification: 'FLOOR_HARD_EXIT', floorHard: true, hardRisk: false });
+      expect(clause(r, 'FLOOR_HARD_UNDERLYING_MOVE').pass).toBe(true);
+    });
+
+    it('FLOOR_HARD_GREEN_TO_RED: below the floor on both reads and net red on both', () => {
+      const red = { ...PE, ltpNow: 368, anchors: { ...PE.anchors!, packetLtp: 368.4, packetNetPnl: -18, freshNetPnl: -26 } };
+      expect(evaluateExitGate(red, CFG)).toMatchObject({ justification: 'FLOOR_HARD_EXIT', floorHard: true });
+      // One read still green, or one read back above the floor: not a hard exit.
+      expect(evaluateExitGate({ ...red, anchors: { ...red.anchors, packetNetPnl: 4 } }, CFG).floorHard).toBe(false);
+      expect(evaluateExitGate({ ...red, anchors: { ...red.anchors, packetLtp: 377 } }, CFG).floorHard).toBe(false);
+    });
+
+    it('hard risk still outranks the hard floor in the justification', () => {
+      expect(evaluateExitGate({ ...PE, underlying: 9556, dailyLossLatched: true }, CFG).justification).toBe('HARD_RISK');
+    });
+  });
+
   it('every clause carries its numbers', () => {
     for (const c of evaluateExitGate(BASE, CFG).clauses) {
       expect(Object.keys(c.measured).length).toBeGreaterThan(0);

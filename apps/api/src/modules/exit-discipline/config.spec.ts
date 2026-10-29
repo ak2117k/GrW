@@ -3,11 +3,23 @@ import { EXIT_DISCIPLINE_DEFAULTS, describeExitDiscipline, parseExitDisciplineCo
 describe('parseExitDisciplineConfig', () => {
   it('empty env = spec §10 defaults, ON', () => {
     const c = parseExitDisciplineConfig({});
-    expect(c).toEqual({ enabled: true, ...EXIT_DISCIPLINE_DEFAULTS, problems: [] });
+    expect(c).toEqual({ enabled: true, floorHardExit: true, ...EXIT_DISCIPLINE_DEFAULTS, problems: [] });
     expect(EXIT_DISCIPLINE_DEFAULTS).toEqual({
       floorArmN: 1.5, floorTrailN: 2.0, givebackN: 1.5, gateCloseMin: 10, gateUnderlyingN: 1.0,
-      persistWindowSec: 300, persistMinSec: 120, outcomeWindowMin: 60, openingGuardMin: 15,
+      persistWindowSec: 300, persistMinSec: 120, outcomeWindowMin: 60, openingGuardMin: 15, floorHardExitN: 2.0,
     });
+  });
+
+  it('FLOOR_HARD_EXIT: off only for the exact word false (a typo stays ON and is reported); FLOOR_HARD_EXIT_N is K in 1–6', () => {
+    expect(parseExitDisciplineConfig({ FLOOR_HARD_EXIT: 'false' }).floorHardExit).toBe(false);
+    expect(parseExitDisciplineConfig({ FLOOR_HARD_EXIT: 'true' }).floorHardExit).toBe(true);
+    const typo = parseExitDisciplineConfig({ FLOOR_HARD_EXIT: 'off' });
+    expect(typo.floorHardExit).toBe(true);
+    expect(typo.problems).toEqual([expect.stringMatching(/FLOOR_HARD_EXIT=off/)]);
+    expect(parseExitDisciplineConfig({ FLOOR_HARD_EXIT_N: '2.5' }).floorHardExitN).toBe(2.5);
+    const bad = parseExitDisciplineConfig({ FLOOR_HARD_EXIT_N: '0.5' });
+    expect(bad.floorHardExitN).toBe(2);
+    expect(bad.problems).toEqual([expect.stringMatching(/FLOOR_HARD_EXIT_N=0.5/)]);
   });
 
   it('only the exact word false turns it off; a typo stays ON (the narrower behaviour) and is reported', () => {
@@ -49,8 +61,9 @@ describe('parseExitDisciplineConfig', () => {
 
   it('describeExitDiscipline names every multiplier (the boot log)', () => {
     expect(describeExitDiscipline(parseExitDisciplineConfig({}))).toBe(
-      'ON floorArmN=1.5 floorTrailN=2 givebackN=1.5 gateCloseMin=10 gateUnderlyingN=1 persist=300s/120s openingGuard=15m outcomeWindow=60m',
+      'ON floorArmN=1.5 floorTrailN=2 givebackN=1.5 gateCloseMin=10 gateUnderlyingN=1 persist=300s/120s openingGuard=15m outcomeWindow=60m floorHardExit=ON K=2',
     );
+    expect(describeExitDiscipline(parseExitDisciplineConfig({ FLOOR_HARD_EXIT: 'false' }))).toMatch(/ floorHardExit=off$/);
     expect(describeExitDiscipline(parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' }))).toMatch(/^OFF /);
   });
 });

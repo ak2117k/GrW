@@ -56,6 +56,27 @@ describe('decideExit', () => {
     const r = decideExit({ facts: { ...FACTS, dailyLossLatched: true }, current: CUR, history: HIST, cfg: CFG, now: NOW });
     expect(r).toMatchObject({ outcome: 'PASS', justification: 'HARD_RISK', persistence: { rule: 'BYPASS' } });
   });
+  it('FLOOR_HARD_EXIT on the FIRST EXIT_NOW ⇒ PASS (persistence bypassed), but the opening guard still holds it', () => {
+    const red = {
+      ...FACTS, ltpNow: 520, netPnlNow: -260,
+      anchors: { bestUnderlying: 9018, armUnderlying: 9006, packetLtp: 520.5, packetNetPnl: -200, freshNetPnl: -260 },
+    };
+    const r = decideExit({ facts: red, current: CUR, history: HIST, cfg: CFG, now: NOW });
+    expect(r).toMatchObject({ outcome: 'PASS', justification: 'FLOOR_HARD_EXIT', persistence: { rule: 'BYPASS' } });
+    const early = decideExit({ facts: { ...red, minutesSinceOpen: 5 }, current: CUR, history: HIST, cfg: CFG, now: NOW });
+    expect(early).toMatchObject({ outcome: 'AWAITING_CONFIRMATION', openingGuard: { minutesSinceOpen: 5, guardMin: 15 } });
+  });
+  it('buildGateFacts carries money.anchors and both net P&L reads only for an anchored packet', () => {
+    const p: PacketFacts = {
+      symbol: 'CRUDEOILM17NOV269350PE', side: 'LONG', qty: 20, entryPrice: 362.55, ltp: 371.35, underlying: 9556.45, invalidation: 9650,
+      vwap: 9590, levelBookAtr15m: null, noise: null, floor: { price: 376.8, armed: true, basis: 'noise' }, netPnl: 41, charges: 135,
+      expiry: '2026-11-17', builtAt: null, minutesToClose: 135, support: 9500, resistance: 9620,
+    };
+    const ctx = { ltpNow: 371, productType: 'CARRYFORWARD', minutesToClose: 135, maxLossPerTrade: null, dailyLossLatched: false, history: [], now: NOW };
+    expect(buildGateFacts(p, ctx).anchors).toBeUndefined();
+    expect(buildGateFacts({ ...p, anchors: { bestUnderlying: 9531, armUnderlying: 9547 } }, ctx).anchors)
+      .toEqual({ bestUnderlying: 9531, armUnderlying: 9547, packetLtp: 371.35, packetNetPnl: 41, freshNetPnl: expect.closeTo(34, 6) });
+  });
   it('clear invalidation break on the FIRST EXIT_NOW ⇒ AWAITING_CONFIRMATION (only hard risk bypasses)', () => {
     const r = decideExit({ facts: { ...FACTS, underlying: 8925 }, current: CUR, history: HIST, cfg: CFG, now: NOW });
     expect(r).toMatchObject({ outcome: 'AWAITING_CONFIRMATION', justification: 'THESIS_BROKEN', persistence: { confirmed: false, rule: null } });

@@ -283,6 +283,11 @@ export class SentinelAgentService {
       // The deadline look's packet framing (+s1): the same parse parseJudgeGateConfig uses for
       // SENTINEL_SQUARE_OFF_LOOK. No ConfigService at all ⇒ off (the +d1 rule).
       squareOff: !!this.config && String(this.config.get<string>('SENTINEL_SQUARE_OFF_LOOK') ?? '').trim().toLowerCase() !== 'false',
+      // The fixed anchors + hard floor (+a1): the same parse the cycle uses for FLOOR_HARD_EXIT
+      // (rendered only with discipline on). No ConfigService at all ⇒ off (the +d1 rule).
+      anchors: !!this.config && parseExitDisciplineConfig({
+        FLOOR_HARD_EXIT: this.config.get<string>('FLOOR_HARD_EXIT') ?? undefined,
+      }).floorHardExit,
     };
   }
 

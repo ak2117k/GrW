@@ -8,6 +8,8 @@ export interface PacketFacts {
   floor: { price: number | null; armed: boolean; basis: FloorBasis };
   netPnl: number | null; charges: number | null; expiry: string | null; builtAt: string | null;
   minutesToClose: number | null; support: number | null; resistance: number | null;
+  /** `money.anchors` (FLOOR_HARD_EXIT): the underlying at the best point and at the floor's arm point. Absent key ⇒ a pre-anchor packet. */
+  anchors?: { bestUnderlying: number | null; armUnderlying: number | null };
 }
 
 type Obj = Record<string, unknown>;
@@ -40,6 +42,7 @@ export function readPacketFacts(packet: unknown): PacketFacts | { unreadable: st
   const noiseRaw = obj(blockValue(flow?.noiseUnit));
   const noise = noiseRaw ? { contract: noiseReading(noiseRaw.contract), underlying: noiseReading(noiseRaw.underlying) } : null;
   const session = obj(p.session);
+  const anchors = obj(money.anchors);
 
   return {
     symbol: String(pos.symbol ?? ''), side, qty, entryPrice, ltp,
@@ -54,5 +57,9 @@ export function readPacketFacts(packet: unknown): PacketFacts | { unreadable: st
     minutesToClose: num(blockValue(session?.minutesToClose)),
     support: num(blockValue(structure?.nearestSupport)),
     resistance: num(blockValue(structure?.nearestResistance)),
+    // Spread only when the packet carries the block, so a pre-anchor packet reads exactly as before.
+    ...(anchors
+      ? { anchors: { bestUnderlying: num(obj(anchors.best)?.underlying), armUnderlying: num(obj(anchors.floorArm)?.underlying) } }
+      : {}),
   };
 }

@@ -21,6 +21,8 @@ import {
 } from './context-packet.service';
 import {
   JUDGE_GATE_CONFIG,
+  hardRiskWindow,
+  isAdverseMove,
   exitTriggerCrossed,
   gateJudgement,
   type GateFacts,
@@ -980,18 +982,20 @@ export class SentinelCycleService {
     const triggerCrossed = exitTriggerCrossed(last?.exitTrigger, tick);
 
     // Hard-risk windows the cycle can see: the last minutes of the session (not for
-    // delivery holdings) and of expiry day. Max-loss and the daily-loss latch live
-    // in the executor's gate and the core risk manager, mechanically.
+    // delivery holdings; for intraday cash, counted to the broker's MIS square-off)
+    // and of expiry day. Max-loss and the daily-loss latch live in the executor's
+    // gate and the core risk manager, mechanically.
     const mtc = minutesToSessionClose(now, entry.exchange);
     const left = mtc.available ? mtc.value : null;
     const expiryToday = tick.expiry !== null && tick.expiry === istWallClock(now).slice(0, 10);
-    const hardRisk =
-      left !== null && tick.segment !== 'EQ_DELIVERY' && (left <= cfg.closeGuardMin || (expiryToday && left <= cfg.expiryCloseMin));
+    const hardRisk = hardRiskWindow(cfg, tick.segment, left, expiryToday);
 
-    // An adverse move since the last judgement, while losing.
+    // An adverse move since the last judgement, while losing. Segment-aware: cash
+    // equity is measured in its own noise units (see isAdverseMove).
     const prev = previousJudged(last);
     const adverseMove =
-      prev !== null && prev.ltp > 0 && green.netPnl < 0 && ((tick.ltp - prev.ltp) / prev.ltp) * dir <= -cfg.adverseMovePct;
+      prev !== null && green.netPnl < 0 &&
+      isAdverseMove(cfg, { segment: tick.segment, prevLtp: prev.ltp, ltp: tick.ltp, dir, noiseN: tick.noise?.contract?.n });
 
     // News: which fresh headline ids the judge has not been shown yet.
     const items = tick.freshNews ?? tick.freshNewsItems ?? null;

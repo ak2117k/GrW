@@ -1,4 +1,4 @@
-import { capBypass, exitTriggerCrossed, gateJudgement, parseJudgeGateConfig, type GateFacts } from './judge-gate';
+import { capBypass, hardRiskWindow, isAdverseMove, exitTriggerCrossed, gateJudgement, parseJudgeGateConfig, type GateFacts } from './judge-gate';
 import type { TripwireResult } from './tripwire.service';
 
 const cfg = parseJudgeGateConfig({});
@@ -18,7 +18,8 @@ describe('parseJudgeGateConfig', () => {
   it('defaults: on, 15-min cap, 30-min held heartbeat, close guard = GATE_CLOSE_MIN, delta on', () => {
     expect(cfg).toEqual({
       enabled: true, minIntervalMs: 900_000, heldHeartbeatMs: 30 * MIN, hold: [], closeGuardMin: 10,
-      expiryCloseMin: 30, adverseMovePct: 0.04, packetDelta: true,
+      expiryCloseMin: 30, adverseMovePct: 0.04, adverseMoveNEq: 6, adverseMovePctEq: 0.008,
+      eqSquareOffLeadMin: 15, packetDelta: true,
     });
   });
   it('reads overrides, the hold list like the executor, and the rollbacks', () => {
@@ -110,5 +111,58 @@ describe('exitTriggerCrossed', () => {
     expect(exitTriggerCrossed({ v: 1, instrument: 'UNDERLYING', op: 'BELOW', price: 24900 }, { ltp: 99, underlyingLtp: null })).toBe(false);
     expect(exitTriggerCrossed({ v: 1, problem: 'malformed' }, px)).toBe(false);
     expect(exitTriggerCrossed(null, px)).toBe(false);
+  });
+});
+
+describe('isAdverseMove — cash equity is far less volatile than a premium', () => {
+  const mv = (segment: any, ltp: number, noiseN: number | null = null, dir: 1 | -1 = 1) =>
+    isAdverseMove(cfg, { segment, prevLtp: 100, ltp, dir, noiseN });
+
+  it('F&O keeps the 4 % rule exactly, and ignores any noise unit', () => {
+    expect([mv('OPT', 96), mv('OPT', 96.1), mv('FUT', 96), mv(undefined, 96)]).toEqual([true, false, true, true]);
+    expect(mv('OPT', 99, 0.1)).toBe(false); // 10 N, but only 1 %
+    expect(mv('OPT', 104, null, -1)).toBe(true); // a short, price up 4 %
+  });
+
+  it('cash with a noise unit: 6 N against the position', () => {
+    expect(mv('EQ_INTRADAY', 99.4, 0.1)).toBe(true);
+    expect(mv('EQ_INTRADAY', 99.5, 0.1)).toBe(false);
+    expect(mv('EQ_INTRADAY', 100.6, 0.1, -1)).toBe(true);
+    expect(mv('EQ_INTRADAY', 100.6, 0.1)).toBe(false); // favourable
+  });
+
+  it('cash without a noise unit: the 0.8 % fallback', () => {
+    expect([mv('EQ_INTRADAY', 99.2), mv('EQ_INTRADAY', 99.3), mv('EQ_DELIVERY', 99.2, 0)]).toEqual([true, false, true]);
+  });
+
+  it('no usable last price is never adverse', () => {
+    expect(isAdverseMove(cfg, { segment: 'OPT', prevLtp: 0, ltp: 1, dir: 1, noiseN: null })).toBe(false);
+  });
+
+  it('env overrides touch only the equity rule', () => {
+    const c = parseJudgeGateConfig({ SENTINEL_ADVERSE_MOVE_N_EQ: '4', SENTINEL_ADVERSE_MOVE_PCT_EQ: '0.012', SENTINEL_ADVERSE_MOVE_PCT: '0.06' });
+    expect(isAdverseMove(c, { segment: 'EQ_INTRADAY', prevLtp: 100, ltp: 99.6, dir: 1, noiseN: 0.1 })).toBe(true);
+    expect(isAdverseMove(c, { segment: 'EQ_INTRADAY', prevLtp: 100, ltp: 98.9, dir: 1, noiseN: null })).toBe(false);
+    expect(isAdverseMove(c, { segment: 'OPT', prevLtp: 100, ltp: 95, dir: 1, noiseN: null })).toBe(false);
+    expect(parseJudgeGateConfig({ SENTINEL_ADVERSE_MOVE_N_EQ: '-1' }).adverseMoveNEq).toBe(6);
+  });
+});
+
+describe('hardRiskWindow — intraday cash counts to the 15:15 MIS square-off', () => {
+  it('F&O: unchanged — 10 min to the close, 30 on expiry day', () => {
+    expect([hardRiskWindow(cfg, 'OPT', 11, false), hardRiskWindow(cfg, 'OPT', 10, false)]).toEqual([false, true]);
+    expect([hardRiskWindow(cfg, 'FUT', 30, true), hardRiskWindow(cfg, 'FUT', 31, true)]).toEqual([true, false]);
+    expect(hardRiskWindow(cfg, undefined, 10, false)).toBe(true);
+  });
+
+  it('EQ_INTRADAY opens at 15:05 (25 min to the 15:30 close) and stays open past the square-off', () => {
+    expect(hardRiskWindow(cfg, 'EQ_INTRADAY', 26, false)).toBe(false);
+    expect(hardRiskWindow(cfg, 'EQ_INTRADAY', 25, false)).toBe(true);
+    expect(hardRiskWindow(cfg, 'EQ_INTRADAY', 5, false)).toBe(true);
+    expect(hardRiskWindow(parseJudgeGateConfig({ SENTINEL_EQ_SQUARE_OFF_LEAD_MIN: '10' }), 'EQ_INTRADAY', 21, false)).toBe(false);
+  });
+
+  it('delivery and a closed session are never in it', () => {
+    expect([hardRiskWindow(cfg, 'EQ_DELIVERY', 1, false), hardRiskWindow(cfg, 'OPT', null, true)]).toEqual([false, false]);
   });
 });

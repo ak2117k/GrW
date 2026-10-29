@@ -4,8 +4,13 @@ import {
   HEARTBEAT_INTERVAL_MS,
   HEARTBEAT_MAX_MS,
   HEARTBEAT_QUIET_MS,
+  heartbeatDue,
   heartbeatIntervalMs,
   materiallyChanged,
+  priceMovedMaterially,
+  MATERIAL_MOVE_N_EQ,
+  MATERIAL_MOVE_PCT,
+  MATERIAL_MOVE_PCT_EQ,
   type HeartbeatContext,
   type LastJudged,
 } from './tripwire.service';
@@ -308,5 +313,35 @@ describe('cost controls', () => {
       expect(out.shouldEvaluate).toBe(true);
       expect(out.trigger).toBe('HEARTBEAT');
     });
+  });
+});
+
+describe('cash equity: the heartbeat material-move step', () => {
+  const judged = (ltp: number): LastJudged => ({ ltp, qty: 40, greenFloorArmed: false });
+  const far = { underlyingLtp: 100, nearestSupport: 80, nearestResistance: 120 };
+
+  it('F&O and unknown keep 1 % exactly; cash is 3 N, else 0.4 %', () => {
+    expect([MATERIAL_MOVE_PCT, MATERIAL_MOVE_N_EQ, MATERIAL_MOVE_PCT_EQ]).toEqual([0.01, 3, 0.004]);
+    expect([priceMovedMaterially(100, 101, 'OPT'), priceMovedMaterially(100, 100.9, 'FUT', 0.1), priceMovedMaterially(100, 101)]).toEqual([true, false, true]);
+    expect([priceMovedMaterially(100, 100.3, 'EQ_INTRADAY', 0.1), priceMovedMaterially(100, 100.29, 'EQ_INTRADAY', 0.1)]).toEqual([true, false]);
+    expect([priceMovedMaterially(100, 100.4, 'EQ_INTRADAY'), priceMovedMaterially(100, 100.3, 'EQ_INTRADAY', null)]).toEqual([true, false]);
+  });
+
+  it('a 0.5 % move is material for a stock and not for a premium; no segment = F&O', () => {
+    expect(materiallyChanged(judged(100), judged(100.5), 'EQ_INTRADAY')).toBe(true);
+    expect(materiallyChanged(judged(100), judged(100.2), 'EQ_INTRADAY', 0.1)).toBe(false);
+    expect(materiallyChanged(judged(100), judged(100.5), 'OPT')).toBe(false);
+    expect(materiallyChanged(judged(100), judged(100.5))).toBe(false);
+  });
+
+  it('heartbeatDue reads the segment and noise unit off its input', () => {
+    const now = new Date('2026-10-29T06:00:00Z');
+    const last = new Date(now.getTime() - HEARTBEAT_QUIET_MS);
+    const ctx: HeartbeatContext = { greenFloorArmed: false, lastJudged: judged(100), current: judged(100.5) };
+    const noise = (n: number) => ({ n, armN: 3, givebackN: 2 });
+    expect(heartbeatDue({ ...far, segment: 'EQ_INTRADAY' }, last, now, ctx)).toBe(true);
+    expect(heartbeatDue({ ...far, segment: 'EQ_INTRADAY', noise: noise(0.2) }, last, now, ctx)).toBe(false); // 2.5 N
+    expect(heartbeatDue({ ...far, segment: 'OPT' }, last, now, ctx)).toBe(false);
+    expect(heartbeatDue(far, last, now, ctx)).toBe(false);
   });
 });

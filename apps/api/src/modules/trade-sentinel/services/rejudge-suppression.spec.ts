@@ -1,5 +1,6 @@
 import {
   parseRejudgeConfig,
+  priceMoveIsMaterial,
   rejudgeSnapshot,
   repeatIsMaterial,
   suppressRepeatJudgements,
@@ -24,6 +25,8 @@ describe('parseRejudgeConfig', () => {
       enabled: true,
       cooldownMs: 10 * 60_000,
       priceMovePct: 0.02,
+      priceMoveNEq: 3,
+      priceMovePctEq: 0.004,
       givebackDeepenN: 0.5,
       givebackDeepenFrac: 0.1,
       routineOnCooldown: true,
@@ -253,5 +256,41 @@ describe('material-change gating (2026-10-22): news ids, broken levels, edge fla
     expect(suppressRepeatJudgements(fired('news-hit'), b, snap({ at: 1, newsUnjudged: 0, newsCount: 1 }), cfg, false).suppressed).toEqual(['news-hit']);
     // A NEW headline keeps the strong tier.
     expect(suppressRepeatJudgements(fired('news-hit'), b, snap({ at: 1, newsUnjudged: 1, newsCount: 2 }), cfg, false).decision.trigger).toBe('FIRE');
+  });
+});
+
+describe('cash equity: the always-material price step is the equity one', () => {
+  const pm = (segment: any, ltp: number, noiseN: number | null = null) =>
+    priceMoveIsMaterial(cfg, { ltp: 100, noiseN, segment }, { ltp, noiseN, segment });
+
+  it('F&O and unknown keep 2 % exactly, whatever the noise unit', () => {
+    expect([pm('OPT', 102), pm('OPT', 101.9), pm('FUT', 98), pm(undefined, 101.9)]).toEqual([true, false, true, false]);
+    expect(pm('OPT', 100.5, 0.1)).toBe(false); // 5 N but only 0.5 %
+  });
+
+  it('cash with a noise unit: 3 N either way', () => {
+    expect([pm('EQ_INTRADAY', 100.3, 0.1), pm('EQ_INTRADAY', 99.7, 0.1), pm('EQ_INTRADAY', 100.29, 0.1)]).toEqual([true, true, false]);
+  });
+
+  it('cash without a noise unit: the 0.4 % fallback', () => {
+    expect([pm('EQ_INTRADAY', 100.4), pm('EQ_INTRADAY', 100.3)]).toEqual([true, false]);
+    const c = parseRejudgeConfig({ SENTINEL_REJUDGE_PRICE_MOVE_PCT_EQ: '0.01' });
+    expect(priceMoveIsMaterial(c, { ltp: 100, noiseN: null, segment: 'EQ_INTRADAY' }, { ltp: 100.5, noiseN: null, segment: 'EQ_INTRADAY' })).toBe(false);
+  });
+
+  it('through repeatIsMaterial: a 0.5 % stock move is material on equity and NOT on an option', () => {
+    // volume-anomaly with an unchanged ratio: only the price rule can make it material.
+    const eqBase = snap({ at: 0, segment: 'EQ_INTRADAY' });
+    expect(repeatIsMaterial('volume-anomaly', eqBase, snap({ at: 1, ltp: 100.5, segment: 'EQ_INTRADAY' }), cfg)).toBe(true);
+    expect(repeatIsMaterial('volume-anomaly', eqBase, snap({ at: 1, ltp: 100.3, segment: 'EQ_INTRADAY' }), cfg)).toBe(false);
+    const optBase = snap({ at: 0, segment: 'OPT' });
+    expect(repeatIsMaterial('volume-anomaly', optBase, snap({ at: 1, ltp: 100.5, segment: 'OPT' }), cfg)).toBe(false);
+    expect(repeatIsMaterial('volume-anomaly', optBase, snap({ at: 1, ltp: 102, segment: 'OPT' }), cfg)).toBe(true);
+  });
+
+  it('rejudgeSnapshot carries the segment only when given, so old callers build the same snapshot', () => {
+    const t = { side: 'LONG' as const, entryPrice: 100, ltp: 101, qty: 1, holdingHigh: 102, holdingLow: 99, volumeRatio: null };
+    expect('segment' in rejudgeSnapshot(t, null, 0)).toBe(false);
+    expect(rejudgeSnapshot({ ...t, segment: 'EQ_INTRADAY' }, null, 0).segment).toBe('EQ_INTRADAY');
   });
 });

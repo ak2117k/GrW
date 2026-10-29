@@ -5,6 +5,14 @@ import type { Tripwire, TripwireFire, TripwireInput } from './types';
  * Fraction of peak favourable excursion that must be surrendered before this
  * sensor speaks — the rule when no noise unit is known (exit discipline §5). Deliberately loose: a sensor's job is "look at this", not
  * "sell this", so a false alarm costs one agent call, not a trade.
+ *
+ * SAME FOR CASH EQUITY, deliberately (2026-10-29). Unlike the fixed-% price
+ * steps elsewhere on the cycle, this is a fraction of the trade's OWN excursion,
+ * so it already scales with how far the instrument actually moved — a stock's
+ * smaller swing gives a smaller excursion and a proportionally smaller giveback.
+ * The volatility-aware rule is the noise unit below, and a cash position gets
+ * one (the stock's own 1-minute ATR, from the tick source's cash path) whenever
+ * exit discipline is on; this fallback runs only when no unit was measured.
  */
 export const GIVEBACK_FRACTION = 0.4;
 

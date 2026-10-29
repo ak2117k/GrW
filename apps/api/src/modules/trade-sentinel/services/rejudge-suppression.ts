@@ -1,4 +1,4 @@
-import type { Side } from '../charges';
+import { isDerivativeSegment, type Segment, type Side } from '../charges';
 import type { TripwireResult } from './tripwire.service';
 
 /**
@@ -14,7 +14,8 @@ import type { TripwireResult } from './tripwire.service';
  * The rule: a repeat of one of these two fires, on a position the judge has
  * already been asked about for that same fire, is dropped UNLESS something the
  * verdict could depend on changed — the cooldown elapsed, the quantity changed,
- * the contract's price moved by `priceMovePct`, the giveback found a new peak or
+ * the contract's price moved by `priceMovePct` (for cash equity `priceMoveNEq`
+ * noise units, else `priceMovePctEq`), the giveback found a new peak or
  * deepened by a noise-unit fraction, or a new volume bar closed.
  *
  * From 2026-10-22 `news-hit` (a headline id not yet shown to the judge) and
@@ -56,6 +57,22 @@ export interface RejudgeConfig {
   cooldownMs: number;
   /** SENTINEL_REJUDGE_PRICE_MOVE_PCT (default 0.02): contract-price move, either way, that is always material. */
   priceMovePct: number;
+  /**
+   * SENTINEL_REJUDGE_PRICE_MOVE_N_EQ (default 3): the same for a CASH equity
+   * position, in the stock's own noise units (spec 2026-10-29 T3: half the
+   * 6 N adverse-move bypass, the 1:2 ratio F&O has at 2 % : 4 %). 2 % is a
+   * routine wobble for an option premium but a big session move for a stock,
+   * so the F&O number would hold an equity's repeat fires back until the
+   * cooldown almost every time. Applied only when the snapshot says the
+   * segment is cash and carries a noise unit.
+   */
+  priceMoveNEq: number;
+  /**
+   * SENTINEL_REJUDGE_PRICE_MOVE_PCT_EQ (default 0.004): the cash-equity
+   * fallback when no noise unit was measured — half the 0.8 % adverse-move
+   * fallback, the same 1:2 ratio.
+   */
+  priceMovePctEq: number;
   /** SENTINEL_REJUDGE_GIVEBACK_DEEPEN_N (default 0.5): pullback deepening, in noise units, that is material. */
   givebackDeepenN: number;
   /** SENTINEL_REJUDGE_GIVEBACK_DEEPEN_FRAC (default 0.1): without a noise unit, deepening as a fraction of the peak excursion. */
@@ -85,6 +102,8 @@ export function parseRejudgeConfig(env: Env): RejudgeConfig {
     enabled: (env.SENTINEL_REJUDGE_SUPPRESSION ?? '').trim().toLowerCase() !== 'false',
     cooldownMs: positive(env.SENTINEL_REJUDGE_COOLDOWN_MIN, 10) * 60_000,
     priceMovePct: positive(env.SENTINEL_REJUDGE_PRICE_MOVE_PCT, 0.02),
+    priceMoveNEq: positive(env.SENTINEL_REJUDGE_PRICE_MOVE_N_EQ, 3),
+    priceMovePctEq: positive(env.SENTINEL_REJUDGE_PRICE_MOVE_PCT_EQ, 0.004),
     givebackDeepenN: positive(env.SENTINEL_REJUDGE_GIVEBACK_DEEPEN_N, 0.5),
     givebackDeepenFrac: positive(env.SENTINEL_REJUDGE_GIVEBACK_DEEPEN_FRAC, 0.1),
     routineOnCooldown: (env.SENTINEL_REJUDGE_ROUTINE_TIER ?? '').trim().toLowerCase() !== 'false',
@@ -106,6 +125,12 @@ export interface RejudgeSnapshot {
   volumeRatio: number | null;
   /** The contract's noise unit when exit discipline measured one. */
   noiseN: number | null;
+  /**
+   * The position's segment, when the caller knew it. Cash equity selects the
+   * equity price step (see priceMoveIsMaterial); absent (older callers, tests)
+   * or F&O keeps `priceMovePct`.
+   */
+  segment?: Segment;
   /** level-break: the level the underlying is beyond (support for a long, resistance for a short); null when none / unknown. */
   level?: number | null;
   /** news-hit: fresh own-instrument headline ids the judge has NOT been shown yet; null when the feed gave no ids. */
@@ -132,6 +157,7 @@ export function rejudgeSnapshot(
     holdingHigh: number | null;
     holdingLow: number | null;
     volumeRatio: number | null;
+    segment?: Segment;
   },
   noiseN: number | null,
   at: number,
@@ -148,7 +174,29 @@ export function rejudgeSnapshot(
     excursion: peak !== null && Number.isFinite(t.entryPrice) ? (peak - t.entryPrice) * dir : null,
     volumeRatio: t.volumeRatio !== null && Number.isFinite(t.volumeRatio) ? t.volumeRatio : null,
     noiseN: noiseN !== null && Number.isFinite(noiseN) && noiseN > 0 ? noiseN : null,
+    // Spread only when known, so a caller that never passed one builds exactly
+    // the snapshot it always did.
+    ...(t.segment !== undefined ? { segment: t.segment } : {}),
   };
+}
+
+/**
+ * The always-material price step, by segment: cash equity moves far less than a
+ * premium. F&O / unknown: |move| >= `priceMovePct` of the last price — the rule
+ * before cash was watched. Cash: >= `priceMoveNEq` noise units when either
+ * snapshot carries one, else >= `priceMovePctEq`. `last.ltp` must be > 0.
+ */
+export function priceMoveIsMaterial(
+  cfg: Pick<RejudgeConfig, 'priceMovePct' | 'priceMoveNEq' | 'priceMovePctEq'>,
+  last: Pick<RejudgeSnapshot, 'ltp' | 'noiseN' | 'segment'>,
+  now: Pick<RejudgeSnapshot, 'ltp' | 'noiseN' | 'segment'>,
+): boolean {
+  const move = Math.abs(now.ltp - last.ltp);
+  const segment = now.segment ?? last.segment;
+  if (segment === undefined || isDerivativeSegment(segment)) return move / last.ltp >= cfg.priceMovePct;
+  const n = now.noiseN ?? last.noiseN;
+  if (n !== null && n > 0) return move >= cfg.priceMoveNEq * n - 1e-9;
+  return move / last.ltp >= cfg.priceMovePctEq;
 }
 
 /**
@@ -172,8 +220,9 @@ export function repeatIsMaterial(
   if (last.qty !== now.qty) return true;
   if (!Number.isFinite(last.ltp) || last.ltp <= 0 || !Number.isFinite(now.ltp)) return true;
   // The P&L step: the contract price IS the per-unit P&L, so a priceMovePct move
-  // is a P&L move of that fraction of the position's notional, either way.
-  if (Math.abs(now.ltp - last.ltp) / last.ltp >= cfg.priceMovePct) return true;
+  // is a P&L move of that fraction of the position's notional, either way. The
+  // step is the segment's (see priceMoveIsMaterial).
+  if (priceMoveIsMaterial(cfg, last, now)) return true;
   for (const k of EDGE_FLAGS) if (now[k] === true && last[k] !== true) return true;
 
   if (fire === NEWS_HIT) {

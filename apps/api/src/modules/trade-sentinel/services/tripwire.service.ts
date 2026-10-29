@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { isDerivativeSegment, type Segment } from '../charges';
 import type { Tripwire, TripwireFire, TripwireInput } from '../tripwires/types';
 import { givebackOffPeak } from '../tripwires/giveback-off-peak.tripwire';
 import { levelBreak } from '../tripwires/level-break.tripwire';
@@ -60,6 +61,31 @@ export const HEARTBEAT_MAX_MS = 90 * 60 * 1000;
 export const MATERIAL_MOVE_PCT = 0.01;
 
 /**
+ * The same for a CASH equity position (watched since 2026-10-29), in the
+ * stock's own 1-minute noise units (spec 2026-10-29 T4). 1 % of the price is a
+ * routine flicker for a premium but a real move for a stock in a session — on
+ * the F&O number a quiet equity would almost never earn its heartbeat before
+ * the HEARTBEAT_MAX_MS ceiling. 3 N matches the re-judge step. Never applied to F&O.
+ */
+export const MATERIAL_MOVE_N_EQ = 3;
+
+/** The cash-equity fallback when no noise unit was measured (= the re-judge fallback). */
+export const MATERIAL_MOVE_PCT_EQ = 0.004;
+
+/**
+ * Whether the contract's price moved materially, by segment. F&O / unknown:
+ * `MATERIAL_MOVE_PCT` of the last price, exactly as before cash was watched.
+ * Cash: `MATERIAL_MOVE_N_EQ` noise units when N is known, else
+ * `MATERIAL_MOVE_PCT_EQ`. `lastLtp` must be > 0.
+ */
+export function priceMovedMaterially(lastLtp: number, ltp: number, segment?: Segment, noiseN?: number | null): boolean {
+  const move = Math.abs(ltp - lastLtp);
+  if (segment === undefined || isDerivativeSegment(segment)) return move / lastLtp >= MATERIAL_MOVE_PCT;
+  if (noiseN != null && Number.isFinite(noiseN) && noiseN > 0) return move >= MATERIAL_MOVE_N_EQ * noiseN - 1e-9;
+  return move / lastLtp >= MATERIAL_MOVE_PCT_EQ;
+}
+
+/**
  * What the agent saw the last time it actually judged this position, reduced to
  * the handful of facts that decide whether looking again could change anything.
  *
@@ -92,12 +118,12 @@ export interface LastJudged {
  *    reasoning about a different position than the one it last judged, and no
  *    price test would ever notice.
  */
-export function materiallyChanged(last: LastJudged | null, now: LastJudged): boolean {
+export function materiallyChanged(last: LastJudged | null, now: LastJudged, segment?: Segment, noiseN?: number | null): boolean {
   if (last === null) return true;
   if (last.greenFloorArmed !== now.greenFloorArmed) return true;
   if (last.qty !== now.qty) return true;
   if (!Number.isFinite(last.ltp) || last.ltp <= 0) return true;
-  return Math.abs(now.ltp - last.ltp) / last.ltp >= MATERIAL_MOVE_PCT;
+  return priceMovedMaterially(last.ltp, now.ltp, segment, noiseN);
 }
 
 /**
@@ -182,7 +208,10 @@ export interface HeartbeatContext {
  * futile re-judge rule) keeps the heartbeat at exactly its normal cadence.
  */
 export function heartbeatDue(
-  input: Pick<TripwireInput, 'underlyingLtp' | 'nearestSupport' | 'nearestResistance'>,
+  // `segment` / `noise` optional: callers that pass the full TripwireInput (the
+  // cycle) get the segment's material-move step; a caller without them keeps F&O's.
+  input: Pick<TripwireInput, 'underlyingLtp' | 'nearestSupport' | 'nearestResistance'> &
+    Partial<Pick<TripwireInput, 'segment' | 'noise'>>,
   lastVerdictAt: Date | null,
   now: Date,
   context?: HeartbeatContext,
@@ -198,7 +227,7 @@ export function heartbeatDue(
   if (sinceMs >= HEARTBEAT_MAX_MS) return true;
 
   const due = sinceMs >= heartbeatIntervalMs(input, context.greenFloorArmed);
-  const changed = materiallyChanged(context.lastJudged, context.current);
+  const changed = materiallyChanged(context.lastJudged, context.current, input.segment, input.noise?.n);
   return due && changed;
 }
 

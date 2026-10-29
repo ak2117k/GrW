@@ -1,8 +1,9 @@
 import { RosterService, SENTINEL_MAX_WATCHED } from './roster.service';
+import { segmentFor } from '../charges';
 
 /**
- * DEFAULTS TO A DERIVATIVE, because the roster's remit is F&O only and a cash
- * fixture is now filtered out before any of the policy below runs. `NFO` with an
+ * DEFAULTS TO A DERIVATIVE, because F&O is the roster's first-ranked group and a
+ * cash fixture would drag the equity ranking rule into tests not about it. `NFO` with an
  * unparsed suffix classifies as OPT (the conservative read in `segmentFor`),
  * which is what these tests want: a watchable contract whose SYMBOL is then free
  * to exercise the ownership-normalisation rules without also having to be a
@@ -370,20 +371,20 @@ describe('RosterService — ownership across two symbol spellings', () => {
 });
 
 /**
- * THE SENTINEL'S REMIT: F&O ONLY.
+ * SENTINEL_WATCH_EQUITY_INTRADAY=off: THE PRE-2026-10-29 REMIT, F&O ONLY.
  *
- * A deliberate scope decision, and the one the instrument justifies. An option
- * decays, expires on a fixed date and can lose its whole premium in a session,
- * so "should I still be holding this?" has a deadline attached. A cash equity has
- * no expiry and no theta; the same question is a portfolio decision on a horizon
- * of weeks, which a 30-second poll is the wrong shape for.
+ * The rollback must restore that roster exactly, so these are the original
+ * F&O-only tests, unchanged except that the roster is built with the switch
+ * off. With it on (the default) intraday cash joins — see the next block.
  */
-describe('RosterService — F&O only', () => {
+describe('RosterService — F&O only (SENTINEL_WATCH_EQUITY_INTRADAY=off)', () => {
   const list = jest.fn();
   const ownedElsewhere = jest.fn().mockResolvedValue(new Set<string>());
-  const svc = new RosterService({ listOpen: list } as any, {
-    symbolsOwnedByOtherEngines: ownedElsewhere,
-  } as any);
+  const svc = new RosterService(
+    { listOpen: list } as any,
+    { symbolsOwnedByOtherEngines: ownedElsewhere } as any,
+    { SENTINEL_WATCH_EQUITY_INTRADAY: 'off' },
+  );
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -441,5 +442,122 @@ describe('RosterService — F&O only', () => {
     const roster = await svc.build('u1');
     expect(roster.map((r) => r.trackerId)).toEqual(['opt']);
     expect(roster[0].watched).toBe(true);
+  });
+});
+
+/**
+ * INTRADAY CASH EQUITY (owner request 2026-10-29, default on).
+ *
+ * An MIS position has a deadline — the broker squares it off before the close —
+ * so it is a today-decision like an option and is watched. Observe-only: the
+ * executor refuses NSE/BSE (sentinel-executor `equity-observe-only.spec.ts`).
+ * F&O ALWAYS outranks equity for the five slots.
+ */
+describe('RosterService — intraday cash equity', () => {
+  const list = jest.fn();
+  const ownedElsewhere = jest.fn().mockResolvedValue(new Set<string>());
+  const build = (env: Record<string, string | undefined> = {}) =>
+    new RosterService({ listOpen: list } as any, { symbolsOwnedByOtherEngines: ownedElsewhere } as any, env).build('u1');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    ownedElsewhere.mockResolvedValue(new Set<string>());
+  });
+
+  it('watches the owner’s open JPL-EQ position by default', async () => {
+    list.mockResolvedValue([tracker('jpl', 'POSITION', 'JPL-EQ', at(29), 'NSE')]);
+    expect(await build()).toEqual([
+      expect.objectContaining({ trackerId: 'jpl', symbol: 'JPL-EQ', exchange: 'NSE', kind: 'POSITION', watched: true }),
+    ]);
+  });
+
+  it('watches a BSE cash position too', async () => {
+    list.mockResolvedValue([tracker('b', 'POSITION', 'JPL', undefined, 'BSE')]);
+    expect((await build()).map((r) => r.trackerId)).toEqual(['b']);
+  });
+
+  it('still leaves holdings (delivery) out', async () => {
+    list.mockResolvedValue([
+      tracker('h', 'HOLDING', 'SUZLON-EQ', at(1), 'NSE'),
+      tracker('jpl', 'POSITION', 'JPL-EQ', at(2), 'NSE'),
+    ]);
+    expect((await build()).map((r) => r.trackerId)).toEqual(['jpl']);
+  });
+
+  it('F&O outranks equity for the slots, whatever the entry times', async () => {
+    // Six equities, every one OLDER than the two F&O contracts and listed first:
+    // the contracts still take the first two slots, the oldest equities the rest.
+    list.mockResolvedValue([
+      ...Array.from({ length: 6 }, (_, i) => tracker(`eq${i}`, 'POSITION', `EQ${i}-EQ`, at(1 + i), 'NSE')),
+      tracker('opt-new', 'POSITION', 'KEI29SEP265800CE', at(20), 'NFO'),
+      tracker('fut-old', 'POSITION', 'CRUDEOIL19NOV26FUT', at(10), 'MCX'),
+    ]);
+    const roster = await build();
+    expect(roster.filter((r) => r.watched).map((r) => r.trackerId)).toEqual(['fut-old', 'opt-new', 'eq0', 'eq1', 'eq2']);
+    expect(roster.filter((r) => !r.watched).map((r) => r.trackerId)).toEqual(['eq3', 'eq4', 'eq5']);
+    expect(roster.find((r) => r.trackerId === 'eq5')!.reason).toMatch(/over capacity/i);
+  });
+
+  it('an equity position never takes a slot from an F&O one', async () => {
+    list.mockResolvedValue([
+      tracker('eq', 'POSITION', 'JPL-EQ', at(1), 'NSE'),
+      ...Array.from({ length: 5 }, (_, i) => tracker(`o${i}`, 'POSITION', `NIFTY${i}CE`, at(10 + i), 'NFO')),
+    ]);
+    const roster = await build();
+    expect(roster.filter((r) => r.watched).map((r) => r.trackerId)).toEqual(['o0', 'o1', 'o2', 'o3', 'o4']);
+    expect(roster.find((r) => r.trackerId === 'eq')).toMatchObject({ watched: false, reason: expect.stringMatching(/over capacity/i) });
+  });
+
+  it('within equity, oldest first', async () => {
+    list.mockResolvedValue([
+      tracker('new', 'POSITION', 'A-EQ', at(9), 'NSE'),
+      tracker('old', 'POSITION', 'B-EQ', at(1), 'NSE'),
+    ]);
+    expect((await build()).map((r) => r.trackerId)).toEqual(['old', 'new']);
+  });
+
+  it('an equity managed by another engine is observed only, like any position', async () => {
+    ownedElsewhere.mockResolvedValue(new Set(['JPL']));
+    list.mockResolvedValue([tracker('jpl', 'POSITION', 'JPL-EQ', undefined, 'NSE')]);
+    expect((await build())[0]).toMatchObject({ ownership: 'OBSERVE_ONLY', watched: true });
+  });
+
+  it.each([['off'], [' OFF '], ['Off']])('SENTINEL_WATCH_EQUITY_INTRADAY=%j drops equity again', async (v) => {
+    list.mockResolvedValue([
+      tracker('jpl', 'POSITION', 'JPL-EQ', at(1), 'NSE'),
+      tracker('opt', 'POSITION', 'KEI29SEP265800CE', at(2), 'NFO'),
+    ]);
+    expect((await build({ SENTINEL_WATCH_EQUITY_INTRADAY: v })).map((r) => r.trackerId)).toEqual(['opt']);
+  });
+
+  it.each([[undefined], [''], ['on'], ['true'], ['of']])('SENTINEL_WATCH_EQUITY_INTRADAY=%j keeps equity on', async (v) => {
+    list.mockResolvedValue([tracker('jpl', 'POSITION', 'JPL-EQ', at(1), 'NSE')]);
+    expect((await build({ SENTINEL_WATCH_EQUITY_INTRADAY: v })).map((r) => r.trackerId)).toEqual(['jpl']);
+  });
+
+  it('off is exactly the on roster minus the equity rows', async () => {
+    list.mockResolvedValue([
+      tracker('eq', 'POSITION', 'JPL-EQ', at(1), 'NSE'),
+      tracker('o2', 'POSITION', 'NIFTY2CE', at(5), 'NFO'),
+      tracker('o1', 'POSITION', 'NIFTY1CE', at(3), 'NFO'),
+    ]);
+    const on = await build();
+    const off = await build({ SENTINEL_WATCH_EQUITY_INTRADAY: 'off' });
+    expect(off).toEqual(on.filter((r) => r.exchange !== 'NSE'));
+  });
+});
+
+describe('segmentFor never reads an executable exchange as intraday cash', () => {
+  // The other half of sentinel-executor's equity-observe-only.spec.ts: the
+  // executor acts only on NFO/BFO/MCX, and no row on those exchanges can enter
+  // the roster's equity group, whatever its symbol says.
+  it.each([['NFO'], ['BFO'], ['MCX'], ['nfo']])('%s → a derivative segment', (exchange) => {
+    for (const symbol of ['JPL-EQ', 'JPL', 'RELIANCE']) {
+      expect(segmentFor({ exchange, symbol, kind: 'POSITION' })).not.toMatch(/^EQ_/);
+    }
+  });
+  it('NSE / BSE cash positions are EQ_INTRADAY', () => {
+    expect(segmentFor({ exchange: 'NSE', symbol: 'JPL-EQ', kind: 'POSITION' })).toBe('EQ_INTRADAY');
+    expect(segmentFor({ exchange: 'BSE', symbol: 'JPL', kind: 'POSITION' })).toBe('EQ_INTRADAY');
   });
 });

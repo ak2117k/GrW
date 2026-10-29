@@ -1,9 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { OPEN_POSITIONS, type OpenPositionsPort } from '../ports/open-positions.port';
 // From `charges.ts`, NOT from the tick source that also exports `segmentFor`:
 // that adapter imports `UserFeedManager` and reaches the broker, and the cycle
 // imports this file. See the note on `segmentFor` for why it was moved.
-import { isDerivativeSegment, segmentFor } from '../charges';
+import { isDerivativeSegment, segmentFor, type Segment } from '../charges';
 import { normaliseSymbol } from '../symbols';
 
 /** Hard cap on concurrently watched positions (spec §2). */
@@ -61,6 +61,32 @@ export interface EngineOwnershipProbe {
  */
 export const ENGINE_OWNERSHIP_PROBE = 'SENTINEL_ENGINE_OWNERSHIP_PROBE';
 
+/**
+ * DI token for the environment the roster reads its scope switch from. Optional:
+ * absent (the shipped module) the roster reads `process.env` on every build, so
+ * the switch needs no wiring; tests hand in a plain object instead of mutating
+ * the process environment.
+ */
+export const SENTINEL_ROSTER_ENV = 'SENTINEL_ROSTER_ENV';
+
+type Env = Record<string, string | undefined>;
+
+/**
+ * SENTINEL_WATCH_EQUITY_INTRADAY — whether intraday CASH-equity positions join
+ * the roster (owner request 2026-10-29). ON unless exactly `off` (any case,
+ * trimmed): the owner asked for it, and a typo should not silently switch it
+ * back off. `off` restores the F&O-only roster exactly — same members, same
+ * order.
+ *
+ * OBSERVE-ONLY BY CONSTRUCTION, not by this switch: the auto-exit executor acts
+ * only on NFO/BFO/MCX (`AUTO_EXIT_EXCHANGES`), so an NSE/BSE verdict is recorded
+ * and can never reach an order whatever this says. Pinned by the
+ * sentinel-executor spec `equity-observe-only.spec.ts`.
+ */
+export function watchEquityIntraday(env: Env): boolean {
+  return (env.SENTINEL_WATCH_EQUITY_INTRADAY ?? '').trim().toLowerCase() !== 'off';
+}
+
 /** Why an entry is not watched. Never dropped silently — the reason is recorded. */
 const OVER_CAPACITY_REASON = `over capacity: more than ${SENTINEL_MAX_WATCHED} open, not watched`;
 
@@ -82,7 +108,12 @@ function entryMillis(t: { entryTime?: Date | string | null }): number | null {
  * 1. Positions before holdings. Only a position can ever gain close authority,
  *    so a position must never lose a slot to an instrument the sentinel could
  *    not act on even if every sensor fired.
- * 2. Within a kind, OLDEST `entryTime` first. The tie-break is for churn
+ * 2. F&O before intraday cash equity. The same argument one level down: an F&O
+ *    contract is the only thing the auto-exit can ever close, and it carries
+ *    the bigger, faster risk (leverage, decay, expiry), so an equity position
+ *    may fill a slot no F&O position wants but never take one from it. A book
+ *    of six equities and one option watches the option and four equities.
+ * 3. Within a group, OLDEST `entryTime` first. The tie-break is for churn
  *    resistance: newest-first would reshuffle the watched set on every new
  *    fill, and a position dropped mid-observation loses its tripwire history
  *    (peak, giveback, last-verdict clock) — continuity is worth more here than
@@ -92,11 +123,12 @@ function entryMillis(t: { entryTime?: Date | string | null }): number | null {
  * Stage 0 fixes this policy; whether it should instead rank by capital at risk
  * is a trading decision, not a code cleanup.
  */
-function byWatchPriority(
-  a: { kind: string; entryTime?: Date | string | null },
-  b: { kind: string; entryTime?: Date | string | null },
-): number {
+type Ranked = { kind: string; segment: Segment; entryTime?: Date | string | null };
+
+function byWatchPriority(a: Ranked, b: Ranked): number {
   if (a.kind !== b.kind) return a.kind === 'POSITION' ? -1 : 1;
+  const aFno = isDerivativeSegment(a.segment);
+  if (aFno !== isDerivativeSegment(b.segment)) return aFno ? -1 : 1;
   const aMs = entryMillis(a);
   const bMs = entryMillis(b);
   if (aMs === null || bMs === null) return 0;
@@ -113,6 +145,7 @@ export class RosterService {
     // from a live cycle. See the note on OpenPositionsPort.
     @Inject(OPEN_POSITIONS) private readonly trackers: OpenPositionsPort,
     @Inject(ENGINE_OWNERSHIP_PROBE) private readonly ownership: EngineOwnershipProbe,
+    @Optional() @Inject(SENTINEL_ROSTER_ENV) private readonly env?: Env,
   ) {}
 
   async build(userId: string): Promise<RosterEntry[]> {
@@ -132,8 +165,9 @@ export class RosterService {
       [...(await this.ownership.symbolsOwnedByOtherEngines(userId))].map(normaliseSymbol),
     );
 
-    // F&O POSITIONS ONLY. Two filters, and they exclude different things for
-    // different reasons — neither subsumes the other.
+    // F&O POSITIONS, PLUS INTRADAY CASH-EQUITY POSITIONS. Two filters, and they
+    // exclude different things for different reasons — neither subsumes the
+    // other.
     //
     // (1) NOT HOLDINGS. The original design had them OBSERVE_ONLY: watched and
     // explained but never closed. In practice that inverted the feature. A real
@@ -145,23 +179,36 @@ export class RosterService {
     // reason about well; spending it on the wrong five is worse than spending it
     // on none.
     //
-    // (2) NOT CASH EQUITY. The sentinel's remit is derivatives — OPT and FUT.
-    // This is a deliberate scope decision, not an optimisation, and it is the
-    // one the instrument actually justifies: an option decays, expires on a
-    // fixed date, and can lose its entire premium in a session, so "should I
-    // still be holding this?" is a question with a deadline attached. A cash
-    // equity has no expiry and no theta; the same question there is a portfolio
-    // decision on a horizon of weeks, which a 30-second poll is the wrong shape
-    // for and which the user has not asked the agent to make.
+    // (2) DERIVATIVES (OPT, FUT) AND EQ_INTRADAY — NOT EQ_DELIVERY. "Should I
+    // still be holding this?" is the right question for a 30-second poll only
+    // when it has a DEADLINE attached. An option has one: it decays, expires on
+    // a fixed date, and can lose its entire premium in a session. Since
+    // 2026-10-29 (owner request) so does an intraday cash position: the broker
+    // squares off an MIS position before the close whatever the user thinks, so
+    // a JPL-EQ bought this morning is a today-decision exactly like an option.
+    // Delivery equity has no such deadline; there the same question is a
+    // portfolio decision on a horizon of weeks, which a 30-second poll is the
+    // wrong shape for and which the user has not asked the agent to make.
+    // (`segmentFor` reads a cash POSITION as intraday and only a HOLDING as
+    // delivery, so (1) and this coincide today. The segment test is stated
+    // anyway, so a cash row ever classified as delivery stays out on its own.)
     //
-    // The consequence is stated rather than hidden: a book of nothing but cash
-    // positions produces an EMPTY roster, and the cycle correctly reports having
-    // watched nothing. That is the intended behaviour, not a silent failure —
-    // the alternative is spending agent calls and the user's money judging
-    // trades the sentinel was never meant to have an opinion about.
-    const positions = open.filter(
-      (t) => t.kind !== 'HOLDING' && isDerivativeSegment(segmentFor(t)),
-    );
+    // EQUITY IS WATCHED, NEVER CLOSED. Its looks and verdicts are recorded
+    // exactly as for F&O, but the auto-exit executor acts only on NFO/BFO/MCX,
+    // so an EXIT_NOW or an exitTrigger on an NSE/BSE position is refused there
+    // (EXCHANGE_NOT_FNO). The cycle's thresholds sized for a derivative's
+    // volatility take an equity value for cash — see judge-gate.ts,
+    // rejudge-suppression.ts and tripwire.service.ts.
+    //
+    // SENTINEL_WATCH_EQUITY_INTRADAY=off restores the F&O-only roster exactly.
+    // Its consequence is stated rather than hidden: a book of nothing but cash
+    // positions then produces an EMPTY roster, and the cycle correctly reports
+    // having watched nothing.
+    const withEquity = watchEquityIntraday(this.env ?? process.env);
+    const positions = open
+      .filter((t) => t.kind !== 'HOLDING')
+      .map((t) => ({ ...t, segment: segmentFor(t) }))
+      .filter((t) => isDerivativeSegment(t.segment) || (withEquity && t.segment === 'EQ_INTRADAY'));
 
     // Slot allocation is decided HERE, not by listOpen's orderBy — see
     // byWatchPriority for the policy and why it is stated in this module.

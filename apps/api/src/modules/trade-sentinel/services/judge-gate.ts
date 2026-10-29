@@ -1,3 +1,4 @@
+import { isDerivativeSegment, type Segment } from '../charges';
 import type { TripwireFire } from '../tripwires/types';
 import type { TripwireResult } from './tripwire.service';
 
@@ -29,7 +30,10 @@ import type { TripwireResult } from './tripwire.service';
  *     path is never delayed); a latest verdict of EXIT_NOW or EXIT_ARMED (an exit
  *     candidate); a hard-risk window the cycle can see (intraday close, expiry-day
  *     close); an armed floor breached by ltp; the price beyond the latest
- *     verdict's exitTrigger; an adverse move of `adverseMovePct` while losing.
+ *     verdict's exitTrigger; an adverse move of `adverseMovePct` while losing
+ *     (on cash equity: `adverseMoveNEq` noise units, else `adverseMovePctEq` —
+ *     see isAdverseMove). For an intraday cash position the close window counts
+ *     to the broker's MIS square-off, not the exchange close (hardRiskWindow).
  *     A capped wake's EDGE-triggered fires (news-hit, event-near — spent once
  *     fired) and any already-carried fire are carried to the next judgement, so
  *     a capped headline is delayed, never lost.
@@ -59,6 +63,29 @@ export interface JudgeGateConfig {
   expiryCloseMin: number;
   /** SENTINEL_ADVERSE_MOVE_PCT (default 0.04): an adverse contract move, since the last judgement, that bypasses the cap while losing. */
   adverseMovePct: number;
+  /**
+   * SENTINEL_ADVERSE_MOVE_N_EQ (default 6): the same bypass for a CASH equity
+   * position, in the stock's own 1-minute noise units (spec 2026-10-29 T2: about
+   * 1.5 sigma over a 15-minute cap window). A 4 % move is routine for an option
+   * premium and rare for a stock in a session, so the F&O number would almost
+   * never let a losing equity jump the cap; N measures "unusual" on the stock's
+   * own scale. Never applied to F&O.
+   */
+  adverseMoveNEq: number;
+  /**
+   * SENTINEL_ADVERSE_MOVE_PCT_EQ (default 0.008): the cash-equity fallback when
+   * no noise unit was measured — 0.8 % is the same read for a typical large cap
+   * (N ~ 0.1 %, 6 N ~ 0.6-0.8 %). Never applied to F&O.
+   */
+  adverseMovePctEq: number;
+  /**
+   * SENTINEL_EQ_SQUARE_OFF_LEAD_MIN (default 15): how many minutes before the
+   * exchange close the broker squares off an MIS cash position (Angel One:
+   * 15:15 IST against NSE/BSE's 15:30). An EQ_INTRADAY position's close window
+   * counts down to that, so it opens at 15:05 rather than 15:20 — after which
+   * Angel has already closed the trade. Never applied to F&O (spec T6).
+   */
+  eqSquareOffLeadMin: number;
   /** SENTINEL_PACKET_DELTA (default true): the `sinceLastVerdict` block on re-judgements. */
   packetDelta: boolean;
 }
@@ -97,8 +124,50 @@ export function parseJudgeGateConfig(env: Env): JudgeGateConfig {
     closeGuardMin: nonNegative(env.SENTINEL_HARD_RISK_CLOSE_MIN, nonNegative(env.GATE_CLOSE_MIN, 10)),
     expiryCloseMin: 30,
     adverseMovePct: positive(env.SENTINEL_ADVERSE_MOVE_PCT, 0.04),
+    adverseMoveNEq: positive(env.SENTINEL_ADVERSE_MOVE_N_EQ, 6),
+    adverseMovePctEq: positive(env.SENTINEL_ADVERSE_MOVE_PCT_EQ, 0.008),
+    eqSquareOffLeadMin: nonNegative(env.SENTINEL_EQ_SQUARE_OFF_LEAD_MIN, 15),
     packetDelta: !isOff(env.SENTINEL_PACKET_DELTA),
   };
+}
+
+const isCashSegment = (segment: Segment | undefined): boolean => segment !== undefined && !isDerivativeSegment(segment);
+
+/**
+ * The adverse-move bypass: the price moved against the position, since the last
+ * judgement, by at least the segment's threshold. F&O (and an unknown segment,
+ * which keeps the pre-equity behaviour rather than guessing): the fraction
+ * `adverseMovePct` of the last judged price — exactly the rule before cash was
+ * watched. Cash equity: `adverseMoveNEq` noise units when N is known, else the
+ * fraction `adverseMovePctEq`. The caller still requires the trade be losing.
+ */
+export function isAdverseMove(
+  cfg: Pick<JudgeGateConfig, 'adverseMovePct' | 'adverseMoveNEq' | 'adverseMovePctEq'>,
+  p: { segment: Segment | undefined; prevLtp: number; ltp: number; dir: 1 | -1; noiseN: number | null | undefined },
+): boolean {
+  if (!(p.prevLtp > 0)) return false;
+  if (!isCashSegment(p.segment)) return ((p.ltp - p.prevLtp) / p.prevLtp) * p.dir <= -cfg.adverseMovePct;
+  const n = p.noiseN;
+  if (n != null && Number.isFinite(n) && n > 0) return (p.ltp - p.prevLtp) * p.dir <= -cfg.adverseMoveNEq * n + 1e-9;
+  return ((p.ltp - p.prevLtp) / p.prevLtp) * p.dir <= -cfg.adverseMovePctEq + 1e-12;
+}
+
+/**
+ * Whether the position is inside its hard-risk close window. `minutesToClose`
+ * counts to the exchange close. F&O: `closeGuardMin`, or `expiryCloseMin` on
+ * expiry day — unchanged. EQ_INTRADAY counts to the MIS square-off instead
+ * (`eqSquareOffLeadMin` earlier), and stays in the window once past it.
+ * EQ_DELIVERY has no close risk and is never in it.
+ */
+export function hardRiskWindow(
+  cfg: Pick<JudgeGateConfig, 'closeGuardMin' | 'expiryCloseMin' | 'eqSquareOffLeadMin'>,
+  segment: Segment | undefined,
+  minutesToClose: number | null,
+  expiryToday: boolean,
+): boolean {
+  if (minutesToClose === null || segment === 'EQ_DELIVERY') return false;
+  const left = segment === 'EQ_INTRADAY' ? minutesToClose - cfg.eqSquareOffLeadMin : minutesToClose;
+  return left <= cfg.closeGuardMin || (expiryToday && left <= cfg.expiryCloseMin);
 }
 
 /** Verdicts whose position is an exit candidate: the cap never delays its next look. */

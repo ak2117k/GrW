@@ -11,6 +11,7 @@ import { NEWS_SHIM, type NewsShim } from '../../trade-sentinel/services/context-
 import { MBM_PACKET_TUNABLE } from '../../trade-sentinel/services/context-packet.service';
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
+import { atr14 } from '../domain/atr';
 import { deriveEngineSl, type EngineSl } from '../domain/engine-sl';
 import { deriveEngineTargets, type EngineTargets } from '../domain/engine-target';
 import type { ResolvedContract } from '../domain/contract-resolver';
@@ -337,17 +338,5 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]).finally(() => clearTimeout(t));
 }
 
-/** Simple (unsmoothed) ATR(14) over daily bars (oldest first); null with fewer than 2 bars. */
-export function atr14(bars: ReadonlyArray<{ high: number; low: number; close: number }>, n = 14): number | null {
-  const ok = bars.filter((b) => [b.high, b.low, b.close].every((v) => typeof v === 'number' && Number.isFinite(v) && v > 0));
-  if (ok.length < 2) return null;
-  const tr: number[] = [];
-  for (let k = 1; k < ok.length; k++) {
-    const b = ok[k];
-    const pc = ok[k - 1].close;
-    tr.push(Math.max(b.high - b.low, Math.abs(b.high - pc), Math.abs(b.low - pc)));
-  }
-  const last = tr.slice(-n);
-  const v = last.reduce((a, x) => a + x, 0) / last.length;
-  return v > 0 ? Math.round(v * 100) / 100 : null;
-}
+/** ATR(14) over daily bars — moved to domain/atr (the paper watch's carried noise uses it too). */
+export { atr14 };

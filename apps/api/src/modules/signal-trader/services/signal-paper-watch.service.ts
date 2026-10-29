@@ -4,7 +4,19 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
-import { decisionIdFromTags, horizonFromTags, orderedTargets, paperExitDecision, type PaperNoise } from '../domain/paper';
+import {
+  decisionIdFromTags,
+  horizonFromTags,
+  isCarried,
+  orderedTargets,
+  paperExitDecision,
+  paperTrailConfig,
+  type PaperNoise,
+  type PaperTrailConfig,
+} from '../domain/paper';
+import { atr14 } from '../domain/atr';
+import type { SignalHorizon } from '../domain/signal.types';
+import { DEFAULT_SESSION_MINUTES } from '../../exit-discipline/noise';
 import { aiCheck, aiDecisionOf } from '../domain/ai-check';
 import type { PaperTradeRow } from '../repositories/signal-trader.repository';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
@@ -28,11 +40,26 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 export const SIGNAL_BARS = Symbol('SIGNAL_BARS');
 export interface BarsLike {
   minuteBars(userId: string, token: string, exchange: string, from: Date, to: Date): Promise<MinuteBar[]>;
+  /** Daily bars (a carried trade's noise scale: the contract's daily ATR). Optional: absent ⇒ the 1-min N scaled to a day. */
+  dailyBars?(userId: string, token: string, exchange: string, from: Date, to: Date): Promise<Array<{ high: number; low: number; close: number }>>;
 }
 
 /** A noise unit is re-read this often (sooner while it is still unknown). */
 const NOISE_REFRESH_MS = 30 * 60_000;
 const NOISE_RETRY_MS = 5 * 60_000;
+/** Daily bars read for a carried trade's ATR(14). */
+const DAILY_LOOKBACK_DAYS = 40;
+
+const istDay = (d: Date) => new Date(d.getTime() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+
+/** A carried trade's daily ATR, read once per trade per IST day (retried after NOISE_RETRY_MS when unreadable). */
+interface DailyAtr {
+  day: string;
+  atr: number | null;
+  at: number;
+  /** Read today (else a retry is due after NOISE_RETRY_MS). */
+  fresh: boolean;
+}
 
 interface Shadowed {
   decisionId: string | null;
@@ -53,6 +80,8 @@ interface HeldFollow {
   sl: number | null;
   target: number | null;
   targets: number[];
+  /** The plan's own SL (rows written before 2026-10-29 lack it). */
+  planSl?: number | null;
   product: string;
   tags: string[];
   entryTime: string;
@@ -78,8 +107,12 @@ export class SignalPaperWatchService {
   /** Paper exit shadow (domain/exit-shadow): per open trade, restored from its TRACK row on first sight. */
   private readonly shadows = new Map<string, Shadowed>();
   private readonly shadowParams: ShadowParams;
-  /** Target trailing: each open trade's plan targets (domain/paper orderedTargets). */
+  /** Target trailing: each open trade's plan targets (domain/paper orderedTargets) and plan SL. */
   private readonly targets = new Map<string, number[]>();
+  private readonly planSls = new Map<string, number | null>();
+  /** Carried trades: the contract's daily ATR (the noise scale of a multi-day trade). */
+  private readonly dailyAtrs = new Map<string, DailyAtr>();
+  private readonly trailCfg: PaperTrailConfig = paperTrailConfig(process.env);
 
   constructor(
     @Inject(SIGNAL_TRADER_CONFIG) private readonly cfg: SignalTraderConfig,
@@ -107,6 +140,7 @@ export class SignalPaperWatchService {
     if (!t?.instrument || !t.entryPrice) return; // closed meanwhile by its own rules: that close stands
     const inst = t.instrument;
     const targets = await this.targetsFor(t);
+    const planSl = this.planSls.get(t.id) ?? null;
     const line = this.shadowOn() ? await this.shadowSettle(t, e.price, e.at) : null;
     const what = e.rule === 'AI_TRIGGER' ? 'AI trigger' : 'AI exit';
     const notes = [`${what}: ${e.reason}`, line ? `shadow: ${line}` : null, 'night review: the HELD row follows what holding would have made'];
@@ -116,12 +150,12 @@ export class SignalPaperWatchService {
       exitNotes: notes.filter(Boolean).join(' | ').slice(0, 2000),
       exitPrice: e.price,
     });
-    this.targets.delete(t.id);
+    this.forget(t.id);
     this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}) on ${e.rule} @ ${e.price}: ${e.reason}`);
     if (t.entryTags.includes('learn')) await this.scoreAi(t, e.price, 'AI_EXIT', e.at);
     try {
       const follow: HeldFollow = {
-        side: t.side, entry: t.entryPrice, qty: t.quantity, sl: t.stoploss, target: t.target, targets,
+        side: t.side, entry: t.entryPrice, qty: t.quantity, sl: t.stoploss, target: t.target, targets, planSl,
         product: t.positionType, tags: t.entryTags, entryTime: (t.entryTime ?? t.createdAt).toISOString(),
         token: inst.token, exchange: inst.exchange, symbol: inst.symbol, expiry: inst.expiry ? inst.expiry.toISOString() : null,
         ai: { rule: e.rule, price: e.price, at: e.at.toISOString() },
@@ -151,10 +185,13 @@ export class SignalPaperWatchService {
         if (!f?.token || !f.exchange || !(f.entry > 0)) continue;
         if (!this.clock.isOpen(f.exchange, now)) continue;
         const ltp = await this.quotes.ltp(owner, f.token, f.exchange).catch(() => null);
+        const horizon = horizonFromTags(f.tags);
+        // A carried trade follows on its daily-ATR rules too (an intraday one has no shadow N any more: plain steps).
+        const noise = isCarried(horizon) ? await this.noiseFor(owner, `held:${r.tradeId}`, horizon, f, now) : undefined;
         const d = paperExitDecision({
           side: f.side, ltp, sl: f.sl, target: f.target, product: f.product, minutesToClose: this.clock.minutesToClose(f.exchange, now),
-          horizon: horizonFromTags(f.tags), entryTime: new Date(f.entryTime), now, expiry: f.expiry ? new Date(f.expiry) : null,
-          entry: f.entry, targets: f.targets,
+          horizon, entryTime: new Date(f.entryTime), now, expiry: f.expiry ? new Date(f.expiry) : null,
+          entry: f.entry, targets: f.targets, planSl: f.planSl ?? null, noise,
         });
         if (!d.exit && d.trail) {
           await this.repo.updateHeld(r.id, { detail: { ...f, sl: d.trail.sl, target: d.trail.target } });
@@ -163,6 +200,7 @@ export class SignalPaperWatchService {
           const ai = r.heldPnl ?? grossPnl(f.side, f.entry, f.ai.price, f.qty);
           const reason = `held: ${d.reason} → ${held} vs AI ${f.ai.rule} @ ${f.ai.price} → ${ai}`;
           await this.repo.updateHeld(r.id, { detail: f, done: { at: now, price: d.price, reason, rulePnl: held, saved: r2(held - ai) } });
+          this.dailyAtrs.delete(`held:${r.tradeId}`);
           this.logger.log(`[signal-paper] HELD follow ${f.symbol} (${r.tradeId}) done — ${reason}`);
         }
       } catch (err) {
@@ -211,6 +249,8 @@ export class SignalPaperWatchService {
       const ltp = await this.quotes.ltp(owner, inst.token, inst.exchange).catch(() => null);
       // Shadow first, on the same LTP: a stop crossed on the tick the trade exits is still recorded.
       if (this.shadowOn()) await this.shadowStep(owner, t, ltp, now);
+      const horizon = horizonFromTags(t.entryTags);
+      const targets = await this.targetsFor(t);
       const d = paperExitDecision({
         side: t.side,
         ltp,
@@ -219,15 +259,16 @@ export class SignalPaperWatchService {
         product: t.positionType,
         minutesToClose,
         // A carried (BTST / POSITIONAL) trade: held overnight, closed on its contract's expiry day / at the hold limit.
-        horizon: horizonFromTags(t.entryTags),
+        horizon,
         entryTime: t.entryTime ?? t.createdAt,
         now,
         expiry: inst.expiry ?? null,
         // Target trailing: a hit target that is not the last steps the SL up instead of exiting.
         entry: t.entryPrice,
-        targets: await this.targetsFor(t),
-        // One-target calls: the noise trail, on the exit shadow's own noise unit and peak.
-        noise: this.noiseFor(t.id),
+        targets,
+        planSl: this.planSls.get(t.id) ?? null,
+        // The noise trail + breakeven guard, on the horizon's noise scale (1-min N intraday, daily ATR carried).
+        noise: await this.noiseFor(owner, t.id, horizon, inst, now),
       });
       try {
         if (!d.exit && d.trail) {
@@ -241,7 +282,7 @@ export class SignalPaperWatchService {
           const line = this.shadowOn() ? await this.shadowSettle(t, d.price, now) : null;
           await this.exec.closeTrade(t.id, { exitReasonTag: d.tag, reason: d.reason, exitNotes: line ? `${d.reason} | shadow: ${line}` : d.reason, exitPrice: d.price });
           exited += 1;
-          this.targets.delete(t.id);
+          this.forget(t.id);
           this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}): ${d.reason}`);
           if (t.entryTags.includes('learn')) await this.scoreAi(t, d.price, d.tag, now);
         } else {
@@ -291,16 +332,59 @@ export class SignalPaperWatchService {
   }
 
   /**
-   * The noise trail's inputs for a one-target call: the exit shadow's contract noise unit N and best price
-   * since entry (stepped on this same LTP just before), and the live trail distance. Undefined without a
-   * shadow (PAPER_EXIT_SHADOW=off) ⇒ the only target exits as before.
+   * The noise trail + breakeven guard inputs, on the trade's horizon (owner 2026-10-29):
+   * - INTRADAY: the exit shadow's contract 1-min noise N and best price since entry (stepped on this same
+   *   LTP just before), the live trail distance (FLOOR_TRAIL_N), guard PAPER_STEP_MIN_N × N. Undefined
+   *   without a shadow (PAPER_EXIT_SHADOW=off) ⇒ the only target exits, every step as before.
+   * - Carried (BTST / POSITIONAL): the contract's DAILY ATR(14) (read once per trade per IST day; when
+   *   unreadable, the 1-min N × √(session minutes) — the inverse of exit-discipline's daily→1-min scaling),
+   *   trail PAPER_CARRIED_TRAIL_ATR × ATR, guard PAPER_STEP_MIN_ATR × ATR. Undefined when neither is known.
    */
-  private noiseFor(tradeId: string): PaperNoise | undefined {
+  private async noiseFor(
+    owner: string,
+    tradeId: string,
+    horizon: SignalHorizon,
+    inst: { token: string; exchange: string },
+    now: Date,
+  ): Promise<PaperNoise | undefined> {
     const sh = this.shadows.get(tradeId);
-    return sh ? { n: sh.n, peak: sh.state.peak, trailN: this.shadowParams.trailN } : undefined;
+    const peak = sh?.state.peak ?? null;
+    if (!isCarried(horizon)) {
+      return sh ? { n: sh.n, peak, trailN: this.shadowParams.trailN, minStepN: this.trailCfg.stepMinN, unit: '1m N' } : undefined;
+    }
+    const atr = await this.dailyAtrFor(owner, tradeId, inst, now);
+    const scaled = sh?.n && sh.n > 0 ? r2(sh.n * Math.sqrt(DEFAULT_SESSION_MINUTES)) : null;
+    const n = atr ?? scaled;
+    if (n === null) return undefined;
+    return { n, peak, trailN: this.trailCfg.carriedTrailAtr, minStepN: this.trailCfg.stepMinAtr, unit: atr !== null ? 'daily ATR' : 'daily ATR (1m N scaled)' };
   }
 
-  /** The plan's targets for a paper trade (ordered, beyond the entry); read once per trade, [] when none. */
+  /** The contract's daily ATR(14) over the owner's session; cached per trade per IST day. Null when unreadable. */
+  private async dailyAtrFor(owner: string, tradeId: string, inst: { token: string; exchange: string }, now: Date): Promise<number | null> {
+    const day = istDay(now);
+    const c = this.dailyAtrs.get(tradeId);
+    if (c && c.day === day && (c.fresh || now.getTime() - c.at < NOISE_RETRY_MS)) return c.atr;
+    let atr: number | null = null;
+    if (this.bars?.dailyBars) {
+      try {
+        const bars = await this.bars.dailyBars(owner, inst.token, inst.exchange, new Date(now.getTime() - DAILY_LOOKBACK_DAYS * 86_400_000), now);
+        atr = atr14(bars ?? []);
+      } catch (err) {
+        this.logger.warn(`[signal-paper] daily ATR for ${tradeId}: ${errText(err)}`);
+      }
+    }
+    // Unreadable today: keep the last good one (an earlier day's) rather than drop to the scaled fallback; retry later.
+    this.dailyAtrs.set(tradeId, { day, atr: atr ?? c?.atr ?? null, at: now.getTime(), fresh: atr !== null });
+    return atr ?? c?.atr ?? null;
+  }
+
+  private forget(tradeId: string): void {
+    this.targets.delete(tradeId);
+    this.planSls.delete(tradeId);
+    this.dailyAtrs.delete(tradeId);
+  }
+
+  /** The plan's targets for a paper trade (ordered, beyond the entry) and its SL; read once per trade, [] when none. */
   private async targetsFor(t: PaperTradeRow): Promise<number[]> {
     const cached = this.targets.get(t.id);
     if (cached) return cached;
@@ -309,6 +393,8 @@ export class SignalPaperWatchService {
     try {
       const plan = decisionId && t.entryPrice ? await this.repo.decisionPlan(decisionId) : null;
       out = plan && t.entryPrice ? orderedTargets(t.side, t.entryPrice, plan.targets) : [];
+      const sl = Number(plan?.sl);
+      this.planSls.set(t.id, Number.isFinite(sl) && sl > 0 ? sl : null);
     } catch (err) {
       this.logger.warn(`[signal-paper] targets for ${t.id}: ${errText(err)} — T1 exits as before`);
       return [];

@@ -1,4 +1,4 @@
-import { orderedTargets, paperExitDecision } from './paper';
+import { orderedTargets, paperExitDecision, paperTrailConfig } from './paper';
 
 // Owner 2026-10-29: a hit target that is not the last steps the SL up (T1 → entry, T2 → T1, …);
 // the last target closes; a stepped SL hit closes as MOVED_STOP.
@@ -106,5 +106,94 @@ describe('paperExitDecision — one-target calls hand over to the noise trail (o
       exit: false,
       trail: expect.objectContaining({ sl: 53.4, target: 80 }),
     });
+  });
+});
+
+describe('paperExitDecision — horizon-aware breakeven guard (owner 2026-10-29, ACUTAAS)', () => {
+  // ACUTAAS-EQ 2026-10-29, POSITIONAL: entry 3986.06, T1 4000 (+0.35 %, ≈ 1.8 × the 1-min N 7.69), T2 4400, plan SL 3400.
+  const acutaas = { side: 'BUY', product: 'DELIVERY', horizon: 'POSITIONAL' as const, minutesToClose: 200, entry: 3986.06, targets: [4000, 4400], planSl: 3400 };
+  const daily = (atr: number | null, peak: number | null = null) => ({ n: atr, peak, trailN: 1, minStepN: 1, unit: 'daily ATR' });
+
+  it('the old rule (no guard) moved the SL to entry on T1 and the 3958 wiggle stopped it: the prod failure', () => {
+    expect(paperExitDecision({ ...acutaas, ltp: 4001, sl: 3400, target: 4000 })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 3986.06, target: 4400 }) });
+    expect(paperExitDecision({ ...acutaas, ltp: 3958, sl: 3986.06, target: 4400 })).toMatchObject({ exit: true, tag: 'MOVED_STOP', price: 3958 });
+  });
+
+  it('T1 within 1 × daily ATR of the entry: the target advances, the SL stays at the plan SL, 3958 does NOT stop it', () => {
+    expect(paperExitDecision({ ...acutaas, ltp: 4001, sl: 3400, target: 4000, noise: daily(120, 4001) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 3400, target: 4400 }) });
+    expect(paperExitDecision({ ...acutaas, ltp: 3958, sl: 3400, target: 4400, noise: daily(120, 4001) })).toEqual({ exit: false });
+  });
+
+  it('the held-back step is taken once the best price is 1 × daily ATR beyond the entry (target unchanged)', () => {
+    expect(paperExitDecision({ ...acutaas, ltp: 4100, sl: 3400, target: 4400, noise: daily(120, 4100) })).toEqual({ exit: false });
+    // 3986.06 + 120 = 4106.06; the best price since entry counts (a 30 s sweep can miss the spike itself).
+    expect(paperExitDecision({ ...acutaas, ltp: 4060, sl: 3400, target: 4400, noise: daily(120, 4110) })).toEqual({
+      exit: false,
+      trail: expect.objectContaining({ sl: 3986.06, target: 4400 }),
+    });
+    expect(paperExitDecision({ ...acutaas, ltp: 4060, sl: 3986.06, target: 4400, noise: daily(120, 4110) })).toEqual({ exit: false });
+  });
+
+  it('daily ATR unreadable: the 1-min N scaled to a day (7.69 × √375 ≈ 148.9) still holds the step back', () => {
+    expect(paperExitDecision({ ...acutaas, ltp: 4001, sl: 3400, target: 4000, noise: daily(148.92, 4001) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 3400, target: 4400 }) });
+  });
+
+  it('a learning trade with no SL keeps none while the step is held back', () => {
+    expect(paperExitDecision({ ...acutaas, ltp: 4001, sl: null, target: 4000, noise: daily(120) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: null, target: 4400 }) });
+  });
+
+  it('later steps: T2 → T1 only with the room; else the furthest earlier level that has it', () => {
+    const three = { side: 'BUY', product: 'INTRADAY', minutesToClose: 200, entry: 100, targets: [101, 104, 110] };
+    const n1 = (n: number) => ({ n, peak: 104, trailN: 2, minStepN: 3, unit: '1m N' });
+    // T2 104 hit: T1 101 has 3 N of room (104 − 101 = 3) → SL T1.
+    expect(paperExitDecision({ ...three, ltp: 104, sl: 95, target: 104, noise: n1(1) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 101, target: 110 }) });
+    // N 2: T1 has no room (3 < 6), the entry neither (4 < 6) → SL stays 95.
+    expect(paperExitDecision({ ...three, ltp: 104, sl: 95, target: 104, noise: n1(2) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 95, target: 110 }) });
+    // N 1.3: T1 short (3 < 3.9), the entry has it (4 ≥ 3.9) → SL entry.
+    expect(paperExitDecision({ ...three, ltp: 104, sl: 95, target: 104, noise: n1(1.3) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 100, target: 110 }) });
+  });
+
+  it('INTRADAY keeps the old behaviour when T1 is well clear of 3 N (the existing cases)', () => {
+    const n = { n: 1, peak: 111, trailN: 2, minStepN: 3, unit: '1m N' };
+    expect(paperExitDecision({ ...base, ltp: 111, sl: 90, target: 110, noise: n })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 100, target: 120 }) });
+  });
+
+  it('INTRADAY with a T1 inside 3 N: the step waits for 3 N of room (same ACUTAAS numbers, 1-min N 7.69)', () => {
+    const intra = { ...acutaas, product: 'INTRADAY', horizon: 'INTRADAY' as const };
+    const n = (peak: number) => ({ n: 7.69, peak, trailN: 2, minStepN: 3, unit: '1m N' });
+    expect(paperExitDecision({ ...intra, ltp: 4001, sl: 3400, target: 4000, noise: n(4001) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 3400, target: 4400 }) });
+    // 3986.06 + 3 × 7.69 = 4009.13
+    expect(paperExitDecision({ ...intra, ltp: 4010, sl: 3400, target: 4400, noise: n(4010) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 3986.06, target: 4400 }) });
+  });
+});
+
+describe('paperExitDecision — positional one-target call on the daily ATR', () => {
+  // Entry 500, only target 510 (2/3 of a 15-point daily ATR), plan SL 470; trail 1 × ATR, guard 1 × ATR.
+  const pos = { side: 'BUY', product: 'DELIVERY', horizon: 'POSITIONAL' as const, minutesToClose: 200, entry: 500, targets: [510], planSl: 470 };
+  const daily = (peak: number) => ({ n: 15, peak, trailN: 1, minStepN: 1, unit: 'daily ATR' });
+
+  it('the target hit hands over to a daily-ATR trail; no breakeven yet, SL one ATR behind the best price', () => {
+    expect(paperExitDecision({ ...pos, ltp: 511, sl: 470, target: 510, noise: daily(511) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 496, target: null }) });
+    // The intraday-sized trail it replaces: 2 × a 0.5 N behind 511 → SL 510, stopped by any wiggle.
+    expect(paperExitDecision({ ...pos, ltp: 511, sl: 470, target: 510, noise: { n: 0.5, peak: 511, trailN: 2 } })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 510 }) });
+  });
+
+  it('a pullback above the trail holds; past 1 ATR beyond the entry the trail ratchets (floored at the entry)', () => {
+    expect(paperExitDecision({ ...pos, ltp: 498, sl: 496, target: null, noise: daily(511) })).toEqual({ exit: false });
+    expect(paperExitDecision({ ...pos, ltp: 520, sl: 496, target: null, noise: daily(520) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 505, target: null }) });
+    expect(paperExitDecision({ ...pos, ltp: 540, sl: 505, target: null, noise: daily(540) })).toEqual({ exit: false, trail: expect.objectContaining({ sl: 525, target: null }) });
+  });
+
+  it('the trailed SL below the entry closes as MOVED_STOP (tighter than the plan SL); the plan SL as STOPPED_OUT', () => {
+    expect(paperExitDecision({ ...pos, ltp: 495, sl: 496, target: null, noise: daily(511) })).toMatchObject({ exit: true, tag: 'MOVED_STOP', price: 495 });
+    expect(paperExitDecision({ ...pos, ltp: 469, sl: 470, target: 510, noise: daily(505) })).toMatchObject({ exit: true, tag: 'STOPPED_OUT' });
+  });
+});
+
+describe('paperTrailConfig', () => {
+  it('defaults: 3 × N intraday, 1 × daily ATR carried (guard and trail); env-tunable, bad values ignored', () => {
+    expect(paperTrailConfig({})).toEqual({ stepMinN: 3, stepMinAtr: 1, carriedTrailAtr: 1 });
+    expect(paperTrailConfig({ PAPER_STEP_MIN_N: '2', PAPER_STEP_MIN_ATR: '0', PAPER_CARRIED_TRAIL_ATR: '1.5' })).toEqual({ stepMinN: 2, stepMinAtr: 0, carriedTrailAtr: 1.5 });
+    expect(paperTrailConfig({ PAPER_STEP_MIN_N: 'x', PAPER_CARRIED_TRAIL_ATR: '0' })).toEqual({ stepMinN: 3, stepMinAtr: 1, carriedTrailAtr: 1 });
   });
 });

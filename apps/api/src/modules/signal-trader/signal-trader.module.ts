@@ -122,6 +122,11 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
           const c = await feeds.fetchCandles(userId, token, exchange, '1m', from, to);
           return c.map((b) => ({ ts: b.timestamp.getTime(), open: b.open, high: b.high, low: b.low, close: b.close }));
         },
+        // A carried (BTST / POSITIONAL) paper trade's noise scale: the contract's daily ATR (read once a day per trade).
+        dailyBars: async (userId, token, exchange, from, to) => {
+          const c = await feeds.fetchCandles(userId, token, exchange, '1d', from, to);
+          return c.map((b) => ({ high: b.high, low: b.low, close: b.close }));
+        },
       }),
       inject: [UserFeedManager],
     },

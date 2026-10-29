@@ -74,28 +74,111 @@ export type PaperExit =
 /**
  * The trade stays open with its SL (and target) moved: a target hit with more left (target = the next
  * one), or the noise trail of a one-target call (target = null — no target any more, only the trail).
+ * `sl` null = the trade keeps no SL (a learning trade whose step the breakeven guard held back).
  */
 export interface PaperTrail {
-  sl: number;
+  sl: number | null;
   target: number | null;
   reason: string;
 }
 
-/** The contract's 1-min noise unit N, the best price since entry, and exit-discipline's trail distance (× N). */
+/**
+ * The trade's noise scale and the trail / step rules on it (owner 2026-10-29, horizon-aware):
+ * - `n` — the noise unit. INTRADAY: the contract's 1-min noise N (exit shadow). Carried (BTST /
+ *   POSITIONAL): the contract's DAILY ATR(14) — a multi-day trade must survive a normal day, not a
+ *   normal minute (ACUTAAS 2026-10-29 was stopped at entry by an intraday wiggle, then ran).
+ * - `peak` — the best price since entry; `trailN` — the noise trail's distance behind it, in units.
+ * - `minStepN` — the BREAKEVEN GUARD: an SL step to level L (the entry, or an earlier target) is taken
+ *   only once the best price is ≥ minStepN units beyond L. Absent / 0 = off (every step as before).
+ */
 export interface PaperNoise {
   n: number | null;
   peak: number | null;
   trailN: number;
+  minStepN?: number;
+  /** What `n` is, for the reasons ('1m N' / 'daily ATR'). */
+  unit?: string;
 }
+
+/** INTRADAY breakeven guard, × the 1-min N (env PAPER_STEP_MIN_N; 0 = off). */
+export const PAPER_STEP_MIN_N_DEFAULT = 3;
+/** Carried breakeven guard, × the daily ATR (env PAPER_STEP_MIN_ATR; 0 = off). */
+export const PAPER_STEP_MIN_ATR_DEFAULT = 1;
+/** Carried noise trail distance behind the best price, × the daily ATR (env PAPER_CARRIED_TRAIL_ATR). */
+export const PAPER_CARRIED_TRAIL_ATR_DEFAULT = 1;
+
+export interface PaperTrailConfig {
+  stepMinN: number;
+  stepMinAtr: number;
+  carriedTrailAtr: number;
+}
+
+/** The env-tunable guard / trail sizes; a missing or bad value falls back to its default. */
+export function paperTrailConfig(env: Record<string, string | undefined>): PaperTrailConfig {
+  const num = (key: string, d: number, min: number) => {
+    const raw = env[key];
+    if (raw === undefined || raw.trim() === '') return d;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= min && v <= 20 ? v : d;
+  };
+  return {
+    stepMinN: num('PAPER_STEP_MIN_N', PAPER_STEP_MIN_N_DEFAULT, 0),
+    stepMinAtr: num('PAPER_STEP_MIN_ATR', PAPER_STEP_MIN_ATR_DEFAULT, 0),
+    carriedTrailAtr: num('PAPER_CARRIED_TRAIL_ATR', PAPER_CARRIED_TRAIL_ATR_DEFAULT, 0.1),
+  };
+}
+
+/** A carried horizon: its noise scale is daily. */
+export const isCarried = (h: SignalHorizon | undefined): boolean => h === 'BTST' || h === 'POSITIONAL';
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
-/** The noise trail level: trailN·N behind the peak, never on the losing side of the entry. Null when N is unknown. */
-function noiseTrailLevel(buy: boolean, entry: number, ltp: number, noise: PaperNoise | undefined): number | null {
+const unitOf = (noise: PaperNoise | undefined): number | null => {
   const n = noise?.n;
-  if (!noise || n === null || n === undefined || !Number.isFinite(n) || n <= 0 || !(noise.trailN > 0)) return null;
-  const peak = noise.peak !== null && Number.isFinite(noise.peak) && noise.peak > 0 ? (buy ? Math.max(noise.peak, ltp) : Math.min(noise.peak, ltp)) : ltp;
-  return r2(buy ? Math.max(entry, peak - noise.trailN * n) : Math.min(entry, peak + noise.trailN * n));
+  return n !== null && n !== undefined && Number.isFinite(n) && n > 0 ? n : null;
+};
+
+/** The best price seen: the peak since entry or this LTP, whichever is further in the trade's favour. */
+function bestOf(buy: boolean, ltp: number, noise: PaperNoise | undefined): number {
+  const p = noise?.peak;
+  return p !== null && p !== undefined && Number.isFinite(p) && p > 0 ? (buy ? Math.max(p, ltp) : Math.min(p, ltp)) : ltp;
+}
+
+/** The breakeven guard is on: a known unit and minStepN > 0. */
+const guarded = (noise: PaperNoise | undefined): boolean => unitOf(noise) !== null && (noise?.minStepN ?? 0) > 0;
+
+/** The best price is ≥ minStepN units beyond `level` (always true with the guard off). */
+function roomBeyond(buy: boolean, best: number, level: number, noise: PaperNoise | undefined): boolean {
+  if (!guarded(noise)) return true;
+  const need = (noise?.minStepN as number) * (unitOf(noise) as number);
+  return (buy ? best - level : level - best) >= need - 1e-9;
+}
+
+/**
+ * The SL step over these candidate levels (the entry first, then the earlier targets; the regular step
+ * is the last): the furthest one with the guard's room behind the best price, or null (the SL stays).
+ */
+function stepLevel(buy: boolean, best: number, levels: number[], noise: PaperNoise | undefined): number | null {
+  for (let j = levels.length - 1; j >= 0; j--) if (roomBeyond(buy, best, levels[j], noise)) return levels[j];
+  return null;
+}
+
+/** `a` is tighter than `b` (or there is no `b`) in the trade's direction. */
+const tighter = (buy: boolean, a: number, b: number | null): boolean => b === null || !(b > 0) || (buy ? a > b : a < b);
+
+/**
+ * The noise trail level: trailN units behind the best price. Floored at the entry once the best price is
+ * the guard's room beyond it (guard off: always — the original rule); before that it may sit below the
+ * entry (a noise-sized stop; the caller still keeps the tighter of it and the current SL). Null when the
+ * unit is unknown.
+ */
+function noiseTrailLevel(buy: boolean, entry: number, ltp: number, noise: PaperNoise | undefined): number | null {
+  const n = unitOf(noise);
+  if (!noise || n === null || !(noise.trailN > 0)) return null;
+  const best = bestOf(buy, ltp, noise);
+  const raw = buy ? best - noise.trailN * n : best + noise.trailN * n;
+  const floorAtEntry = roomBeyond(buy, best, entry, noise);
+  return r2(floorAtEntry ? (buy ? Math.max(entry, raw) : Math.min(entry, raw)) : raw);
 }
 
 /**
@@ -122,9 +205,14 @@ export function orderedTargets(side: string, entry: number, targets: unknown): n
  * reached. Without targets, T1 exits exactly as before.
  *
  * ONE-TARGET CALLS (owner 2026-10-29): the only target does not exit either — the target is dropped
- * and a NOISE TRAIL takes over (the live exit-discipline trail: trailN × the contract's 1-min noise N
- * behind the best price, never below the entry), ratcheting every sweep; its hit closes as MOVED_STOP.
- * With N not yet measured the target exits as before.
+ * and a NOISE TRAIL takes over (trailN units behind the best price, never below the entry once the
+ * guard allows the breakeven), ratcheting every sweep; its hit closes as MOVED_STOP. With the unit not
+ * yet measured the target exits as before.
+ *
+ * BREAKEVEN GUARD (owner 2026-10-29, `noise.minStepN`): a step to a level the best price is not yet
+ * minStepN units beyond is held back — the SL stays at the plan SL (or the previous step) while the
+ * target still advances, and the step is caught up on a later sweep once the price has the room. The
+ * unit is horizon-aware (the caller's job): the 1-min N intraday, the daily ATR for a carried trade.
  */
 export function paperExitDecision(i: {
   side: string;
@@ -142,7 +230,9 @@ export function paperExitDecision(i: {
   /** Target trailing: the entry and the plan's targets (see `orderedTargets`). */
   entry?: number | null;
   targets?: number[];
-  /** One-target calls: the noise trail's inputs. Absent ⇒ the only target exits. */
+  /** The plan's own SL: an SL hit tighter than it (moved by a trail) closes as MOVED_STOP even below the entry. */
+  planSl?: number | null;
+  /** The trail / guard inputs. Absent ⇒ the only target exits, and every step is taken as before. */
   noise?: PaperNoise;
 }): PaperExit {
   const ltp = i.ltp;
@@ -150,31 +240,38 @@ export function paperExitDecision(i: {
   const buy = String(i.side).toUpperCase() === 'BUY';
   const beyond = (level: number) => (buy ? ltp >= level : ltp <= level);
   if (i.sl !== null && i.sl > 0 && (buy ? ltp <= i.sl : ltp >= i.sl)) {
-    // An SL at or past the entry can only be one the trail moved there (a plan SL is always on the loss side).
-    const moved = i.entry != null && i.entry > 0 && (buy ? i.sl >= i.entry : i.sl <= i.entry);
-    return moved
+    // An SL at or past the entry can only be one the trail moved there (a plan SL is always on the loss side);
+    // one tighter than the plan's own SL was moved too (a noise trail the guard still holds below the entry).
+    const atEntry = i.entry != null && i.entry > 0 && (buy ? i.sl >= i.entry : i.sl <= i.entry);
+    const pastPlan = i.planSl != null && i.planSl > 0 && Math.abs(i.sl - i.planSl) > 1e-6 && (buy ? i.sl > i.planSl : i.sl < i.planSl);
+    return atEntry || pastPlan
       ? { exit: true, price: ltp, tag: 'MOVED_STOP', reason: `paper trailed SL ${i.sl} hit (LTP ${ltp})` }
       : { exit: true, price: ltp, tag: 'STOPPED_OUT', reason: `paper SL ${i.sl} hit (LTP ${ltp})` };
   }
   const entry = i.entry ?? null;
-  // Noise-trail mode (a one-target call past its target): no target, an SL on the profit side; ratchet it.
-  if (i.target === null && entry !== null && entry > 0 && i.sl !== null && i.sl > 0 && (buy ? i.sl >= entry : i.sl <= entry)) {
-    const level = noiseTrailLevel(buy, entry, ltp, i.noise);
-    if (level !== null && (buy ? level > i.sl : level < i.sl)) {
-      return { exit: false, trail: { sl: level, target: null, reason: `paper noise trail SL ${i.sl} → ${level} (LTP ${ltp}, N ${r2(i.noise?.n ?? 0)})` } };
+  const ts = i.targets ?? [];
+  const sl0 = i.sl !== null && i.sl > 0 ? i.sl : null;
+  const unitText = () => `${i.noise?.unit ?? 'N'} ${r2(unitOf(i.noise) ?? 0)}`;
+  // Noise-trail mode (a one-target call past its target): no target; ratchet the SL with the best price.
+  // The SL may still sit below the entry while the guard holds the breakeven back, hence the plan check.
+  const trailMode =
+    i.target === null && entry !== null && entry > 0 && ((ts.length === 1 && guarded(i.noise)) || (sl0 !== null && (buy ? sl0 >= entry : sl0 <= entry)));
+  if (trailMode) {
+    const level = noiseTrailLevel(buy, entry as number, ltp, i.noise);
+    if (level !== null && tighter(buy, level, sl0)) {
+      return { exit: false, trail: { sl: level, target: null, reason: `paper noise trail SL ${sl0 ?? 'none'} → ${level} (LTP ${ltp}, ${unitText()})` } };
     }
   }
   if (i.target !== null && i.target > 0 && beyond(i.target)) {
-    const ts = i.targets ?? [];
     const at = ts.findIndex((t) => Math.abs(t - (i.target as number)) < 1e-6);
-    // A one-target call: drop the target and hand over to the noise trail (when N is known).
+    // A one-target call: drop the target and hand over to the noise trail (when the unit is known).
     if (ts.length === 1 && at === 0 && entry !== null && entry > 0) {
       const level = noiseTrailLevel(buy, entry, ltp, i.noise);
       if (level !== null) {
-        const sl = i.sl !== null && i.sl > 0 ? (buy ? Math.max(i.sl, level) : Math.min(i.sl, level)) : level;
+        const sl = tighter(buy, level, sl0) ? level : sl0;
         return {
           exit: false,
-          trail: { sl, target: null, reason: `paper only target ${ts[0]} hit (LTP ${ltp}): noise trail from here, SL → ${sl} (${i.noise?.trailN}×N, N ${r2(i.noise?.n ?? 0)})` },
+          trail: { sl, target: null, reason: `paper only target ${ts[0]} hit (LTP ${ltp}): noise trail from here, SL → ${sl ?? 'none'} (${i.noise?.trailN}× ${unitText()})` },
         };
       }
     }
@@ -186,15 +283,32 @@ export function paperExitDecision(i: {
       if (k === last) {
         return { exit: true, price: ts[last], tag: 'HIT_TARGET', reason: `paper last target T${last + 1} ${ts[last]} hit (LTP ${ltp})` };
       }
-      const stepped = k === 0 ? entry : ts[k - 1];
+      // The step (T1 → entry, T2 → T1, …) — or, under the guard, the furthest earlier level with room; none = SL stays.
+      const intended = k === 0 ? entry : ts[k - 1];
+      const stepped = stepLevel(buy, bestOf(buy, ltp, i.noise), [entry, ...ts.slice(0, k)], i.noise);
       // Never loosens: an SL already tighter stays.
-      const sl = i.sl !== null && i.sl > 0 ? (buy ? Math.max(i.sl, stepped) : Math.min(i.sl, stepped)) : stepped;
-      return {
-        exit: false,
-        trail: { sl, target: ts[k + 1], reason: `paper T${k + 1} ${ts[k]} hit (LTP ${ltp}): SL → ${sl}${k === 0 ? ' (entry)' : ` (T${k})`}, next target T${k + 2} ${ts[k + 1]}` },
-      };
+      const sl = stepped !== null && tighter(buy, stepped, sl0) ? stepped : sl0;
+      const name = (lv: number) => (lv === entry ? ' (entry)' : ` (T${ts.indexOf(lv) + 1})`);
+      const how =
+        stepped === null
+          ? `SL stays ${sl ?? 'none'} (the step to ${intended} is within ${i.noise?.minStepN}× ${unitText()} of the price — held back)`
+          : `SL → ${sl}${sl === stepped ? name(stepped) : ''}${stepped !== intended ? ` (the step to ${intended} held back by the noise guard)` : ''}`;
+      return { exit: false, trail: { sl, target: ts[k + 1], reason: `paper T${k + 1} ${ts[k]} hit (LTP ${ltp}): ${how}, next target T${k + 2} ${ts[k + 1]}` } };
     }
     return { exit: true, price: i.target, tag: 'HIT_TARGET', reason: `paper target ${i.target} hit (LTP ${ltp})` };
+  }
+  // Breakeven catch-up: a step the guard held back is taken once the best price has the room (target unchanged).
+  if (guarded(i.noise) && i.target !== null && entry !== null && entry > 0) {
+    const j = ts.findIndex((t) => Math.abs(t - (i.target as number)) < 1e-6);
+    if (j >= 1) {
+      const stepped = stepLevel(buy, bestOf(buy, ltp, i.noise), [entry, ...ts.slice(0, j - 1)], i.noise);
+      if (stepped !== null && tighter(buy, stepped, sl0)) {
+        return {
+          exit: false,
+          trail: { sl: stepped, target: i.target, reason: `paper held-back step taken (LTP ${ltp}, ≥ ${i.noise?.minStepN}× ${unitText()} beyond it): SL ${sl0 ?? 'none'} → ${stepped}` },
+        };
+      }
+    }
   }
   const eod = i.eodMinutes ?? 5;
   const closing = i.minutesToClose !== null && i.minutesToClose <= eod;

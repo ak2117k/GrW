@@ -151,6 +151,55 @@ describe('SignalPaperWatchService — target trailing (owner 2026-10-29)', () =>
   });
 });
 
+describe('SignalPaperWatchService — carried trades trail on the daily ATR (ACUTAAS 2026-10-29)', () => {
+  beforeAll(() => (process.env.BOOT_JOBS = 'on'));
+
+  function positional(ltps: number[], dailyBars: jest.Mock) {
+    const t = {
+      ...trade(['telegram-signal', 'decision:d1', 'learn', 'horizon:POSITIONAL']),
+      entryPrice: 3986.06, stoploss: 3400, target: 4000, positionType: 'DELIVERY',
+      instrument: { token: '9', exchange: 'NSE', symbol: 'ACUTAAS-EQ' },
+    };
+    const repo = {
+      openPaperTrades: jest.fn(async () => [t]),
+      decisionJudge: jest.fn(async () => ({ aiDecision: 'SKIP' })),
+      recordAiCheck: jest.fn(async () => undefined),
+      decisionPlan: jest.fn(async () => ({ sl: 3400, targets: [4000, 4400] })),
+      setPaperTrail: jest.fn(async () => undefined),
+      shadowRows: jest.fn(async () => []),
+      saveShadowHit: jest.fn(async () => undefined),
+      saveShadowTrack: jest.fn(async () => undefined),
+      settleShadows: jest.fn(async () => []),
+      followingHeld: jest.fn(async () => []),
+    };
+    const exec = { closeTrade: jest.fn(async () => undefined) };
+    const queue = [...ltps];
+    const quotes = { ltp: jest.fn(async () => queue.shift() ?? null) };
+    const bars = { minuteBars: jest.fn(async () => []), dailyBars };
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, { updateTrade: jest.fn() } as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes, bars);
+    return { svc, repo, exec };
+  }
+  // 15 daily bars, each a 120-point range around 4000 → ATR(14) 120.
+  const atr120 = () => jest.fn(async () => Array.from({ length: 15 }, () => ({ high: 4060, low: 3940, close: 4000 })));
+
+  it('T1 4000 hit: SL stays at the plan SL 3400 (T1 is inside 1 × daily ATR), target → T2; the 3958 dip does not stop it', async () => {
+    const daily = atr120();
+    const s = positional([4001, 3958], daily);
+    await s.svc.sweep(NOW);
+    expect(s.repo.setPaperTrail).toHaveBeenCalledWith('t1', 3400, 4400);
+    await s.svc.sweep(NOW);
+    expect(s.exec.closeTrade).not.toHaveBeenCalled();
+    expect(daily).toHaveBeenCalledTimes(1); // read once per trade per day
+  });
+
+  it('the breakeven step is taken once the price is 1 × daily ATR beyond the entry', async () => {
+    const s = positional([4001, 4110], atr120());
+    await s.svc.sweep(NOW);
+    await s.svc.sweep(NOW);
+    expect(s.repo.setPaperTrail).toHaveBeenLastCalledWith('t1', 3986.06, 4400);
+  });
+});
+
 describe('SignalPaperWatchService — AI close + HELD follow (owner 2026-10-29)', () => {
   beforeAll(() => (process.env.BOOT_JOBS = 'on'));
 

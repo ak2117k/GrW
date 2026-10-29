@@ -22,13 +22,19 @@ import {
 } from './context-packet.service';
 import {
   JUDGE_GATE_CONFIG,
+  SQUARE_OFF_DUE,
   hardRiskWindow,
   isAdverseMove,
   exitTriggerCrossed,
   gateJudgement,
+  minutesToDeadline,
+  type CapBypass,
   type GateFacts,
   type JudgeGateConfig,
 } from './judge-gate';
+import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
+import { OWNER_ALERTS, type OwnerAlert, type OwnerAlertPort } from '../ports/owner-alerts.port';
+import type { Verdict as SentinelVerdict } from './sentinel-agent.service';
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
 import { SentinelVerdictRepository } from '../repositories/sentinel-verdict.repository';
@@ -454,7 +460,18 @@ interface TrackerState {
    * it stays small. Memory only: a restart costs at most one repeat look.
    */
   newsJudged?: Set<string>;
+  /**
+   * Judge gate, green-to-red (judge-gate.ts): for the peak `peak`, whether a judgement has already
+   * been RECORDED on the red state (`red`) and on a giveback from that green peak (`giveback`).
+   * A new peak starts a fresh episode. Memory only: a restart costs at most one repeat look.
+   */
+  g2r?: { peak: number; red: boolean; giveback: boolean };
+  /** Owner alerts: epoch ms (cycle clock) of the last observe-only EXIT_NOW alert — at most one per 30 min. */
+  ownerExitAlertAt?: number;
 }
+
+/** Owner alerts: an observe-only EXIT_NOW is re-sent at most this often per position. */
+export const OWNER_EXIT_ALERT_EVERY_MS = 30 * 60_000;
 
 /** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
 const DISCIPLINE_OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
@@ -483,6 +500,8 @@ interface JudgeCandidate {
   review?: PacketReview;
   /** Judge gate: the fresh headline ids this judgement shows, marked judged once it is recorded. */
   newsIds?: string[];
+  /** Judge gate, green-to-red: the episode state this judgement answers, marked spent once it is recorded. */
+  g2r?: { peak: number; greenToRed: boolean; peakGreen: boolean };
 }
 
 /** One judgement in flight: its promise, and the fire names it was asked about. */
@@ -570,6 +589,10 @@ export class SentinelCycleService {
     // Judge gate (held heartbeat-only, the 15-min rate cap + its bypasses, tier
     // upgrade, the packet delta). Optional: absent ⇒ off, exactly as before.
     @Optional() @Inject(JUDGE_GATE_CONFIG) private readonly gateCfg?: JudgeGateConfig,
+    // Owner alerts (ports/owner-alerts.port.ts): a LIVE cash position's square-off decision or
+    // EXIT_NOW, which nothing automatic carries out. Optional: absent ⇒ no alerts (the paper
+    // cycle is built without one). Fire-and-forget — it can never fail a judgement.
+    @Optional() @Inject(OWNER_ALERTS) private readonly ownerAlerts?: OwnerAlertPort,
   ) {}
 
   /**
@@ -657,7 +680,9 @@ export class SentinelCycleService {
     // broken level outranks a routine look — and within each group never judged
     // first, then the oldest last verdict, then whoever has been refused a slot
     // the longest; roster order only breaks a full tie.
-    const fired = (c: JudgeCandidate) => (c.decision.fires.length > 0 ? 0 : 1);
+    // The deadline look first of all: it is the one judgement that cannot wait for a later tick.
+    const fired = (c: JudgeCandidate) =>
+      c.decision.fires.some((f) => f.name === SQUARE_OFF_DUE) ? 0 : c.decision.fires.length > 0 ? 1 : 2;
     candidates.sort(
       (a, b) =>
         fired(a) - fired(b) ||
@@ -863,8 +888,12 @@ export class SentinelCycleService {
     // fires and the exit-confirm re-look — unless a NEW-risk sensor fired — and
     // keep only the heartbeat, at its normal cadence.
     const cause = this.futileCause(entry, state, tick.qty, futile.attempts.get(entry.trackerId), now, tick.segment, last ? String(last.verdict) : null);
+    // The deadline look (square-off-look.ts): inside the hard-risk window and not judged since it
+    // opened (or due its one final re-look) ⇒ a `square-off-due` fire, merged like a carried fire —
+    // a NEW-risk fire the futile rule passes and a cap bypass. Null outside the window / when off.
+    const sq = this.deadlineLookFor(entry, tick, last, now);
     const futiled = suppressFutileJudgements(
-      withCarriedFires(rejudged.decision, state.carriedFires),
+      withCarriedFires(rejudged.decision, sq?.fire ? mergeFires(state.carriedFires, [sq.fire]) : state.carriedFires),
       confirm,
       cause,
       this.futileCfg,
@@ -895,7 +924,14 @@ export class SentinelCycleService {
       state.carriedFires = gated.carry;
       this.logger.debug(
         `[judge-gate] ${gated.dropped} — ${entry.symbol} (tracker ${entry.trackerId}): dropped ${gated.suppressed.join(', ')}` +
-          (gated.carry.length > 0 ? `; carried ${gated.carry.map((f) => f.name).join(', ')}` : ''),
+          (gated.carry.length > 0 ? `; carried ${gated.carry.map((f) => f.name).join(', ')}` : '') +
+          (gate?.facts.greenToRed ? ' (greenToRed: judged on it already this peak)' : ''),
+      );
+    } else if (gated?.bypass && LOGGED_BYPASSES.has(gated.bypass)) {
+      this.logger.log(
+        `[judge-gate] bypass ${gated.bypass} — ${entry.symbol} (tracker ${entry.trackerId}): ` +
+          `${gated.decision.fires.map((f) => f.name).join(', ') || 'heartbeat'}` +
+          (gate?.facts.greenToRed ? '; greenToRed (peak was net-green, now at or below breakeven)' : ''),
       );
     }
     const decision = gated ? gated.decision : futiled.decision;
@@ -945,8 +981,27 @@ export class SentinelCycleService {
       decision,
       lastJudgedAt: last ? new Date(last.createdAt).getTime() : null,
       rejudgeSnap,
-      ...(gate ? { review: gate.review, newsIds: gate.newsIds } : {}),
+      ...(gate ? { newsIds: gate.newsIds, g2r: gate.g2r } : {}),
+      // The packet's held marker / delta (gate on) and the deadline framing (inside the window).
+      ...(gate?.review || sq ? { review: { ...(gate?.review ?? {}), ...(sq ? { deadline: sq.decision } : {}) } } : {}),
     };
+  }
+
+  /** The deadline look for this pass (square-off-look.ts), or null when off / outside the window. Never throws. */
+  private deadlineLookFor(entry: RosterEntry, tick: TickReading, last: SentinelVerdictLike | undefined, now: Date): SquareOffLook | null {
+    const cfg = this.gateCfg;
+    if (!cfg?.squareOffLook) return null;
+    const mtc = minutesToSessionClose(now, entry.exchange);
+    return squareOffLook({
+      cfg,
+      segment: tick.segment,
+      kind: entry.kind,
+      exchange: entry.exchange,
+      minutesToClose: mtc.available ? mtc.value : null,
+      expiryToday: tick.expiry !== null && tick.expiry === istWallClock(now).slice(0, 10),
+      nowMs: now.getTime(),
+      last: last ? { verdict: String(last.verdict), createdAt: new Date(last.createdAt) } : null,
+    });
   }
 
   /**
@@ -969,6 +1024,7 @@ export class SentinelCycleService {
     reviewDue: boolean | undefined;
     review: PacketReview | undefined;
     newsIds: string[];
+    g2r: { peak: number; greenToRed: boolean; peakGreen: boolean } | undefined;
   } {
     const cfg = this.gateCfg!;
     const nowMs = now.getTime();
@@ -1017,6 +1073,17 @@ export class SentinelCycleService {
     const reviewInSec = typeof last?.reviewInSec === 'number' && last.reviewInSec > 0 ? last.reviewInSec : null;
     const reviewDue = lastAt && reviewInSec !== null ? nowMs - lastAt.getTime() >= reviewInSec * 1000 : undefined;
 
+    // Green-to-red (2026-10-29): was the favourable extreme in profit NET of charges, and is the
+    // position now at or below breakeven? Charges as computeGreenFloor counts them, at the peak.
+    const rawPeak = tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow;
+    const peak = rawPeak !== null && Number.isFinite(rawPeak) && rawPeak > 0 ? rawPeak : null;
+    const peakGreen =
+      cfg.greenToRed && peak !== null &&
+      computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: peak, qty: tick.qty, side: tick.side }).netPnl > 0;
+    const greenToRed = peakGreen && green.netPnl <= 0;
+    const memo = peak !== null && state.g2r?.peak === peak ? state.g2r : undefined;
+    const g2r = peak !== null && peakGreen ? { peak, greenToRed, peakGreen } : undefined;
+
     const held = isHeldPosition(cfg.hold, entry);
     const stored = last?.packet as
       | { position?: { ltp?: unknown; underlyingLtp?: { available?: unknown; value?: unknown } } }
@@ -1047,6 +1114,9 @@ export class SentinelCycleService {
         floorBreached,
         triggerCrossed,
         adverseMove,
+        greenToRed,
+        greenToRedOwed: greenToRed && !memo?.red,
+        givebackGreenOwed: peakGreen && !memo?.giveback,
       },
       snap: {
         level,
@@ -1055,10 +1125,12 @@ export class SentinelCycleService {
         floorBreached,
         triggerCrossed,
         hardRisk,
+        greenToRed,
       },
       reviewDue,
       review,
       newsIds: unjudged.map((i) => i.id),
+      g2r,
     };
   }
 
@@ -1139,6 +1211,15 @@ export class SentinelCycleService {
         }
         // Judge gate: these headlines have now been in front of the judge.
         if (c.newsIds?.length) for (const id of c.newsIds) (state.newsJudged ??= new Set<string>()).add(id);
+        // Green-to-red: the judge has now seen this episode's state — once per transition per peak.
+        if (c.g2r) {
+          const m = state.g2r?.peak === c.g2r.peak ? state.g2r : { peak: c.g2r.peak, red: false, giveback: false };
+          state.g2r = {
+            peak: c.g2r.peak,
+            red: m.red || c.g2r.greenToRed,
+            giveback: m.giveback || c.decision.fires.some((f) => f.name === 'giveback-off-peak'),
+          };
+        }
       }
       if (this.judging.get(entry.trackerId) === inFlight) this.judging.delete(entry.trackerId);
       this.wakeSlotWaiters();
@@ -1346,6 +1427,64 @@ export class SentinelCycleService {
       ...(exitTrigger ? { exitTrigger: exitTrigger as unknown as Prisma.InputJsonValue } : {}),
       ...(newsShadow ? { newsShadow } : {}),
     });
+    this.alertOwner(entry, state, tick, packet, verdict, decision, now, review?.deadline);
+  }
+
+  /**
+   * Owner alerts (ports/owner-alerts.port.ts) for a LIVE cash position — the executor acts on F&O
+   * only, so on cash a human has to: the square-off decision's verdict (any verdict, once per look),
+   * and any other EXIT_NOW at most once per position per 30 min. Paper never alerts. FIRE-AND-FORGET:
+   * a throw or a rejection from the port is logged and never reaches the judgement.
+   */
+  private alertOwner(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    packet: ContextPacket,
+    verdict: SentinelVerdict,
+    decision: TripwireResult,
+    now: Date,
+    sq: SquareOffDecision | undefined,
+  ): void {
+    try {
+      const port = this.ownerAlerts;
+      if (!port || isPaperTracker(entry.trackerId)) return;
+      if (tick.segment !== 'EQ_INTRADAY' && tick.segment !== 'EQ_DELIVERY') return;
+      const squareOff = decision.fires.some((f) => f.name === SQUARE_OFF_DUE);
+      const exit = verdict.verdict === 'EXIT_NOW';
+      if (!squareOff && !exit) return;
+      const nowMs = now.getTime();
+      if (!squareOff && nowMs - (state.ownerExitAlertAt ?? Number.NEGATIVE_INFINITY) < OWNER_EXIT_ALERT_EVERY_MS) return;
+      if (exit) state.ownerExitAlertAt = nowMs;
+      const mtc = minutesToSessionClose(now, entry.exchange);
+      const alert: OwnerAlert = {
+        kind: squareOff ? 'square-off-decision' : 'observe-only-exit',
+        key: squareOff
+          ? `square-off:${entry.trackerId}:${istWallClock(now).slice(0, 10)}:${sq?.look ?? 'look'}`
+          : `exit:${entry.trackerId}`,
+        userId: entry.userId,
+        trackerId: entry.trackerId,
+        symbol: entry.symbol,
+        exchange: String(entry.exchange).toUpperCase(),
+        side: tick.side,
+        qty: tick.qty,
+        entryPrice: tick.entryPrice,
+        ltp: tick.ltp,
+        netPnl: packet.money.netPnl,
+        verdict: verdict.verdict,
+        confidence: verdict.confidence,
+        reason: String(verdict.reason ?? '').split('\n')[0].slice(0, 240),
+        minutesToSquareOff: mtc.available ? minutesToDeadline(this.gateCfg ?? { eqSquareOffLeadMin: 15 }, tick.segment, mtc.value) : null,
+        deadlineIst: sq?.deadlineIst ?? null,
+      };
+      void Promise.resolve(port.send(alert)).catch((err: unknown) => this.ownerAlertFailed(entry, err));
+    } catch (err) {
+      this.ownerAlertFailed(entry, err);
+    }
+  }
+
+  private ownerAlertFailed(entry: RosterEntry, err: unknown): void {
+    this.logger.warn(`[owner-alert] ${entry.symbol} (${entry.trackerId}): alert failed, judgement unaffected: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   /** The observe-mode shadow (see {@link judgeAndRecord}); null when off or on failure. */
@@ -1621,6 +1760,9 @@ type SentinelVerdictLike = {
   packet?: unknown;
   exitTrigger?: unknown;
 };
+
+/** Cap bypasses worth one log line each when they let a wake through (2026-10-29 additions). */
+const LOGGED_BYPASSES: ReadonlySet<CapBypass> = new Set<CapBypass>(['square-off-due', 'green-to-red', 'giveback-green']);
 
 /** How one detached judgement ended, as the report bucket it lands in. */
 type JudgeOutcome = 'evaluated' | 'failed';

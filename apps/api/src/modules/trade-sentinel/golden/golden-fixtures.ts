@@ -555,7 +555,8 @@ interface Scenario {
  * prove both switches off change nothing.
  */
 // SENTINEL_EQUITY_BLOCK off: the baseline predates the +e1 equity lines (pinned in sentinel-agent.service.spec.ts).
-const BASELINE_ENV: Record<string, string> = { EXIT_DISCIPLINE_ENABLED: 'false', SENTINEL_EQUITY_BLOCK: 'false' };
+// SENTINEL_SQUARE_OFF_LOOK off: likewise it predates the +s1 squareOffDecision lines (same pin).
+const BASELINE_ENV: Record<string, string> = { EXIT_DISCIPLINE_ENABLED: 'false', SENTINEL_EQUITY_BLOCK: 'false', SENTINEL_SQUARE_OFF_LOOK: 'false' };
 
 /** The real judge, as configured by `env` (over BASELINE_ENV), over `client`. */
 const runJudge = (

@@ -69,6 +69,8 @@ import { MbmModule } from '../mbm/mbm.module';
 import { NEWS_INDEX } from './ports/news-index.port';
 import { MARKET_EVENTS } from './ports/events.port';
 import { PaperLookRepository } from './paper/paper-look.repository';
+import { OWNER_ALERTS } from './ports/owner-alerts.port';
+import { TelegramOwnerAlerts } from './adapters/owner-alert.telegram.adapter';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -224,6 +226,10 @@ import { PaperLookRepository } from './paper/paper-look.repository';
     // SENTINEL_MIN_JUDGE_INTERVAL_SEC (900) with safety bypasses, routine-wake tier
     // upgrade under risk, and the sinceLastVerdict packet delta (SENTINEL_PACKET_DELTA).
     { provide: JUDGE_GATE_CONFIG, useFactory: () => parseJudgeGateConfig(process.env) },
+    // Owner alerts (SENTINEL_OWNER_ALERTS, default on): a Telegram message over the existing ops bot
+    // for a LIVE cash position's square-off decision or EXIT_NOW, which nothing automatic carries out.
+    // Bound for the live cycle only — the paper cycle is built without it, so paper never alerts.
+    { provide: OWNER_ALERTS, useFactory: () => new TelegramOwnerAlerts(process.env) },
     {
       provide: MinuteBarsReader,
       useFactory: (prisma: PrismaService) => new MinuteBarsReader(new PrismaCandleRepo(prisma as never)),

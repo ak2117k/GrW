@@ -33,6 +33,7 @@ import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { LESSONS_READER, type InjectedLesson, type InjectionScope, type LessonsReader } from '../../self-review/lessons/types';
 import { ConfigService } from '@nestjs/config';
 import { CASH_OI_WALLS_REASON, equityBlockEnabled, equityBlocks, isCashSegment, parseSquareOffIst, type EquityBlock, type EquityTickInputs } from './equity-blocks';
+import type { SquareOffDecision } from './square-off-look';
 
 /** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
 export const MBM_PACKET_LOG_EVERY_MS = 15 * 60_000;
@@ -593,6 +594,14 @@ export type ContextPacket = {
    * ever `true`; absent otherwise.
    */
   ownerHold?: true;
+  /**
+   * The deadline framing (square-off-look.ts, SENTINEL_SQUARE_OFF_LOOK): present only
+   * when this look falls inside the position's hard-risk window before its deadline —
+   * the broker's MIS square-off for intraday cash, the session / expiry-day close for
+   * F&O. Turns the look into "exit now, or let the deadline decide". Absent key
+   * otherwise, so every other packet is byte-identical to before.
+   */
+  squareOffDecision?: SquareOffDecision;
 };
 
 /** See {@link ContextPacket.sinceLastVerdict}. A `type` so it stays assignable to Prisma JSON. */
@@ -615,6 +624,8 @@ export type SinceLastVerdict = {
 /** What the cycle hands the packet builder about the previous live verdict (the `then` side). */
 export interface PacketReview {
   held?: boolean;
+  /** Inside the hard-risk window before the position's deadline: the packet's squareOffDecision. */
+  deadline?: SquareOffDecision;
   since?: {
     verdict: string;
     at: Date;
@@ -1480,6 +1491,7 @@ export class ContextPacketService {
           }
         : {}),
       ...(review?.held ? { ownerHold: true as const } : {}),
+      ...(review?.deadline ? { squareOffDecision: { ...review.deadline } } : {}),
     };
   }
 

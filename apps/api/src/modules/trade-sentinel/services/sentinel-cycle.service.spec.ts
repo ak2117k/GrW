@@ -36,6 +36,7 @@ import {
   type FutileRejudgeConfig,
 } from './futile-rejudge';
 import { JUDGE_GATE_CONFIG, parseJudgeGateConfig, type JudgeGateConfig } from './judge-gate';
+import { OWNER_ALERTS, type OwnerAlertPort } from '../ports/owner-alerts.port';
 
 const USER = 'u1';
 
@@ -117,6 +118,7 @@ function makeSvc(
   rejudge?: RejudgeConfig,
   futile?: { cfg?: FutileRejudgeConfig; reader?: ExitAttemptReader },
   gate?: JudgeGateConfig,
+  alerts?: OwnerAlertPort,
 ) {
   const build = jest.fn().mockResolvedValue([]);
   const evaluate = jest.fn().mockReturnValue({ fires: [], heartbeat: true, shouldEvaluate: true, trigger: 'FIRE' as const });
@@ -168,6 +170,7 @@ function makeSvc(
     futile?.cfg,
     futile?.reader,
     gate,
+    alerts,
   );
 
   return {
@@ -589,8 +592,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // the 14th the re-judge suppression CONFIG (a plain parsed value object).
     // The 15th the futile re-judge CONFIG (a plain parsed value object); the 16th the
     // EXIT_ATTEMPTS port (a READ-ONLY ai_exit_executions view, type-only); the 17th the
-    // judge-gate CONFIG (a plain parsed value object).
-    expect(injected).toHaveLength(17);
+    // judge-gate CONFIG (a plain parsed value object); the 18th the OWNER_ALERTS port
+    // (ports/owner-alerts.port.ts, type-only: a Telegram message, bound in the module).
+    expect(injected).toHaveLength(18);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.
@@ -609,6 +613,7 @@ describe('SentinelCycleService — shadow mode is structural', () => {
         expect.objectContaining({ index: 14, param: FUTILE_REJUDGE_CONFIG }),
         expect.objectContaining({ index: 15, param: EXIT_ATTEMPTS }),
         expect.objectContaining({ index: 16, param: JUDGE_GATE_CONFIG }),
+        expect.objectContaining({ index: 17, param: OWNER_ALERTS }),
       ]),
     );
 
@@ -3148,6 +3153,260 @@ describe('SentinelCycleService — judge gate (held heartbeat-only, 15-min cap +
         triggersThen: ['news-hit'],
         newHeadlines: ['Fresh news'],
       });
+    });
+  });
+});
+
+describe('SentinelCycleService — the deadline look, owner alerts and green-to-red (prod failures 2026-10-29)', () => {
+  // Monday 2026-10-12 (an NSE session). IST wall clock -> Date.
+  const istAt = (h: number, m: number, s = 0) => new Date(Date.UTC(2026, 9, 12, h, m, s) - 5.5 * 3_600_000);
+  const MIN = 60_000;
+  const fire = (...names: string[]) => ({
+    fires: names.map((name) => ({ name, detail: name })),
+    heartbeat: false,
+    shouldEvaluate: true,
+    trigger: 'FIRE' as const,
+  });
+  const QUIET = { fires: [], heartbeat: false, shouldEvaluate: false, trigger: null };
+  const OPT = { segment: 'OPT' as const, expiry: '2026-10-29', underlyingLtp: 24000 };
+  const row = (at: Date, over: Record<string, unknown> = {}) =>
+    verdictRow({
+      createdAt: at,
+      reviewInSec: 3600,
+      netPnl: 0,
+      triggeredBy: ['heartbeat'],
+      packet: {
+        position: { ltp: 100, qty: 10, entryPrice: 100, underlyingLtp: { available: true, value: 100 } },
+        money: { greenFloorArmed: false },
+        macro: { realFactors: { available: false } },
+      },
+      ...over,
+    });
+  const names = (call: unknown[]) => (call[3] as Array<{ name: string }>).map((f) => f.name);
+  const review = (call: unknown[]) => call[4] as { deadline?: { look: string; deadline: string; deadlineIst: string; minutesLeft: number } } | undefined;
+
+  function setup(env: Record<string, string> = {}, alerts?: OwnerAlertPort, gate: JudgeGateConfig | undefined = parseJudgeGateConfig(env)) {
+    const t = makeSvc(
+      undefined,
+      undefined,
+      parseRejudgeConfig({}),
+      { cfg: parseFutileRejudgeConfig(env), reader: { latestSince: jest.fn().mockResolvedValue(new Map()) } },
+      gate,
+      alerts,
+    );
+    t.build.mockResolvedValue([watched('t1')]);
+    t.evaluate.mockReturnValue(QUIET);
+    return t;
+  }
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+  afterEach(() => jest.restoreAllMocks());
+
+  describe('the deadline look (square-off-look.ts) — JPL-EQ: looks at 13:43 and 14:44, then none before the 15:15 square-off', () => {
+    it('intraday cash: a quiet tape at 15:05 still gets ONE judgement, framed as the square-off decision', async () => {
+      const t = setup();
+      t.recentForTracker.mockResolvedValue([row(istAt(14, 44))]);
+      await t.svc.runForUser(USER, istAt(15, 4, 30));
+      expect(t.judge).not.toHaveBeenCalled();
+
+      await t.svc.runForUser(USER, istAt(15, 5, 10));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(t.judge.mock.calls[0][1]).toBe('FIRE');
+      expect(names(t.buildPacket.mock.calls[0])).toEqual(['square-off-due']);
+      expect(review(t.buildPacket.mock.calls[0])?.deadline).toMatchObject({ deadline: 'BROKER_SQUARE_OFF', deadlineIst: '15:15', minutesLeft: 10, look: 'FIRST' });
+      expect(t.record.mock.calls[0][0].triggeredBy).toEqual(['square-off-due']);
+
+      // Once that verdict is on record, no second deadline look — until the one final re-look at 15:10.
+      t.recentForTracker.mockResolvedValue([row(istAt(15, 5, 20))]);
+      await t.svc.runForUser(USER, istAt(15, 7));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      await t.svc.runForUser(USER, istAt(15, 10, 5));
+      expect(t.judge).toHaveBeenCalledTimes(2);
+      expect(review(t.buildPacket.mock.calls[1])?.deadline?.look).toBe('FINAL');
+      t.recentForTracker.mockResolvedValue([row(istAt(15, 10, 20))]);
+      await t.svc.runForUser(USER, istAt(15, 12));
+      expect(t.judge).toHaveBeenCalledTimes(2);
+    });
+
+    it('is not dropped by the observe-only rule (cash EXIT_NOW) nor by the 15-min cap', async () => {
+      const t = setup();
+      // EXIT_NOW 4 min before the window: observe-only drops ordinary fires, the cap would hold anything else.
+      t.recentForTracker.mockResolvedValue([row(istAt(15, 1), { verdict: 'EXIT_NOW' })]);
+      t.evaluate.mockReturnValue(fire('giveback-off-peak'));
+      await t.svc.runForUser(USER, istAt(15, 5, 10));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(names(t.buildPacket.mock.calls[0])).toEqual(['giveback-off-peak', 'square-off-due']);
+    });
+
+    it('F&O (an option): the session-close guard at 15:20, framed as hold-through-the-close', async () => {
+      const t = setup();
+      t.tickFor.mockResolvedValue(tick(OPT));
+      t.recentForTracker.mockResolvedValue([row(istAt(15, 12))]);
+      await t.svc.runForUser(USER, istAt(15, 19, 30));
+      expect(t.judge).not.toHaveBeenCalled();
+      await t.svc.runForUser(USER, istAt(15, 20, 10));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(names(t.buildPacket.mock.calls[0])).toEqual(['square-off-due']);
+      expect(review(t.buildPacket.mock.calls[0])?.deadline).toMatchObject({ deadline: 'SESSION_CLOSE', deadlineIst: '15:30', look: 'FIRST' });
+    });
+
+    it('works with the cap rolled back (SENTINEL_JUDGE_GATE=false); SENTINEL_SQUARE_OFF_LOOK=false restores the old silence', async () => {
+      const capOff = setup({ SENTINEL_JUDGE_GATE: 'false' });
+      capOff.recentForTracker.mockResolvedValue([row(istAt(14, 44))]);
+      await capOff.svc.runForUser(USER, istAt(15, 6));
+      expect(capOff.judge).toHaveBeenCalledTimes(1);
+      expect(review(capOff.buildPacket.mock.calls[0])?.deadline?.look).toBe('FIRST');
+
+      const off = setup({ SENTINEL_SQUARE_OFF_LOOK: 'false' });
+      off.recentForTracker.mockResolvedValue([row(istAt(14, 44))]);
+      await off.svc.runForUser(USER, istAt(15, 6));
+      expect(off.judge).not.toHaveBeenCalled();
+    });
+
+    it('takes the first free judge slot ahead of other fired positions that were judged longer ago', async () => {
+      const t = setup();
+      // a and b: MCX options (their close is 23:30) with a fresh fire, judged at 13:00; c: an NFO option inside its window.
+      t.build.mockResolvedValue([watched('a', { exchange: 'MCX' }), watched('b', { exchange: 'MCX' }), watched('c', { exchange: 'NFO' })]);
+      t.tickFor.mockResolvedValue(tick(OPT));
+      t.recentForTracker.mockImplementation((id: string) => Promise.resolve([row(id === 'c' ? istAt(15, 12) : istAt(13, 0))]));
+      t.evaluate.mockImplementation((input: { trackerId: string }) => (input.trackerId === 'c' ? QUIET : fire('volume-anomaly')));
+      await t.svc.runForUser(USER, istAt(15, 20, 10));
+      const judged = t.record.mock.calls.map((c) => c[0].trackerId);
+      expect(judged).toHaveLength(JUDGE_CONCURRENCY);
+      expect(judged).toContain('c');
+    });
+  });
+
+  describe('owner alerts (SENTINEL_OWNER_ALERTS) — live cash only, fire-and-forget', () => {
+    const port = () => ({ send: jest.fn().mockResolvedValue(undefined) });
+
+    it('the square-off decision is sent with symbol, side/qty, LTP, P&L, the verdict and the minutes left', async () => {
+      const alerts = port();
+      const t = setup({}, alerts);
+      t.recentForTracker.mockResolvedValue([row(istAt(14, 44))]);
+      await t.svc.runForUser(USER, istAt(15, 5, 10));
+      expect(alerts.send).toHaveBeenCalledTimes(1);
+      expect(alerts.send.mock.calls[0][0]).toMatchObject({
+        kind: 'square-off-decision', symbol: 'T1', exchange: 'NSE', side: 'LONG', qty: 10, ltp: 100, netPnl: 42,
+        verdict: 'HOLD', confidence: 'high', reason: 'ok', minutesToSquareOff: 10, deadlineIst: '15:15',
+      });
+    });
+
+    it('a live observe-only EXIT_NOW is sent at most once per position per 30 min; F&O never', async () => {
+      const alerts = port();
+      const t = setup({}, alerts, undefined); // no cap: every pass is judged
+      t.evaluate.mockReturnValue(fire('level-break'));
+      t.judge.mockResolvedValue({
+        verdict: 'EXIT_NOW', confidence: 'high', thesisStatus: 'BROKEN', recoveryAvailable: false,
+        reason: 'support gone\nsecond line', evidence: ['money.netPnl'], invalidationPoint: 'x', reviewIn: 60,
+      });
+      await t.svc.runForUser(USER, istAt(11, 0));
+      await t.svc.runForUser(USER, istAt(11, 2));
+      expect(alerts.send).toHaveBeenCalledTimes(1);
+      expect(alerts.send.mock.calls[0][0]).toMatchObject({ kind: 'observe-only-exit', verdict: 'EXIT_NOW', reason: 'support gone' });
+      await t.svc.runForUser(USER, istAt(11, 31));
+      expect(alerts.send).toHaveBeenCalledTimes(2);
+
+      const fnoAlerts = port();
+      const f = setup({}, fnoAlerts, undefined);
+      f.tickFor.mockResolvedValue(tick(OPT));
+      f.evaluate.mockReturnValue(fire('level-break'));
+      f.judge.mockResolvedValue({
+        verdict: 'EXIT_NOW', confidence: 'high', thesisStatus: 'BROKEN', recoveryAvailable: false,
+        reason: 'x', evidence: ['money.netPnl'], invalidationPoint: 'x', reviewIn: 60,
+      });
+      await f.svc.runForUser(USER, istAt(11, 0));
+      expect(f.judge).toHaveBeenCalledTimes(1);
+      expect(fnoAlerts.send).not.toHaveBeenCalled();
+    });
+
+    it('a throwing or rejecting alert never fails the cycle: the verdict is recorded and the failure logged', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      for (const send of [
+        jest.fn(() => {
+          throw new Error('boom');
+        }),
+        jest.fn().mockRejectedValue(new Error('telegram down')),
+      ]) {
+        const t = setup({}, { send });
+        t.recentForTracker.mockResolvedValue([row(istAt(14, 44))]);
+        const report = await t.svc.runForUser(USER, istAt(15, 5, 10));
+        await flush();
+        expect(report).toMatchObject({ evaluated: 1, failed: 0 });
+        expect(t.record).toHaveBeenCalledTimes(1);
+        expect(send).toHaveBeenCalledTimes(1);
+      }
+      expect(warn.mock.calls.filter((c) => String(c[0]).startsWith('[owner-alert] T1')).length).toBe(2);
+    });
+
+    it('paper positions get the deadline look but never an alert', async () => {
+      const alerts = port();
+      const t = setup({}, alerts);
+      t.build.mockResolvedValue([watched('paper:T1')]);
+      t.recentForTracker.mockResolvedValue([row(istAt(14, 44))]);
+      await t.svc.runForUser(USER, istAt(15, 5, 10));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(names(t.buildPacket.mock.calls[0])).toEqual(['square-off-due']);
+      expect(alerts.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('green-to-red (paper CRUDEOIL 2026-10-29: peaked +₹791, the giveback was capped at 14:23, closed −₹1,439)', () => {
+    // An option, mid-session: entry 100 x 50, a net-green peak at 110.
+    const opt = (over: Partial<TickReading> = {}) => tick({ ...OPT, qty: 50, holdingHigh: 110, holdingLow: 98, ...over });
+    const optRow = (at: Date) =>
+      row(at, { packet: { position: { ltp: 101, qty: 50, entryPrice: 100, underlyingLtp: { available: true, value: 24000 } }, money: { greenFloorArmed: false }, macro: { realFactors: { available: false } } } });
+
+    it('a position that peaked net-green and is now at or below breakeven passes the cap ONCE, and says so in the log', async () => {
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      const t = setup();
+      t.tickFor.mockResolvedValue(opt({ ltp: 99.5 }));
+      t.evaluate.mockReturnValue(fire('context-factor-flip'));
+      t.recentForTracker.mockResolvedValue([optRow(istAt(11, 0))]);
+      await t.svc.runForUser(USER, istAt(11, 5));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls.some((c) => String(c[0]).startsWith('[judge-gate] bypass green-to-red — T1') && String(c[0]).includes('greenToRed'))).toBe(true);
+
+      // Judged on it: the next wake on the same peak is capped as usual — no judge-every-pass loop.
+      t.recentForTracker.mockResolvedValue([optRow(istAt(11, 5))]);
+      await t.svc.runForUser(USER, istAt(11, 6));
+      await t.svc.runForUser(USER, istAt(11, 7));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+
+      // A new peak is a new episode: green again at 112, then red again ⇒ one more pass.
+      t.tickFor.mockResolvedValue(opt({ ltp: 99.5, holdingHigh: 112 }));
+      await t.svc.runForUser(USER, istAt(11, 8));
+      expect(t.judge).toHaveBeenCalledTimes(2);
+    });
+
+    it('a giveback-off-peak fire on a net-green peak passes the cap once even while still green', async () => {
+      const t = setup();
+      t.tickFor.mockResolvedValue(opt({ ltp: 104 }));
+      t.evaluate.mockReturnValue(fire('giveback-off-peak', 'news-hit'));
+      t.recentForTracker.mockResolvedValue([optRow(istAt(11, 0))]);
+      await t.svc.runForUser(USER, istAt(11, 5));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+      t.recentForTracker.mockResolvedValue([optRow(istAt(11, 5))]);
+      t.tickFor.mockResolvedValue(opt({ ltp: 103 }));
+      await t.svc.runForUser(USER, istAt(11, 6));
+      expect(t.judge).toHaveBeenCalledTimes(1);
+    });
+
+    it('never-green peaks and SENTINEL_GREEN_TO_RED_BYPASS=false keep the cap', async () => {
+      const never = setup();
+      // A peak of 100.2 on entry 100 never cleared the charges.
+      never.tickFor.mockResolvedValue(opt({ ltp: 99.5, holdingHigh: 100.2 }));
+      never.evaluate.mockReturnValue(fire('giveback-off-peak'));
+      never.recentForTracker.mockResolvedValue([optRow(istAt(11, 0))]);
+      await never.svc.runForUser(USER, istAt(11, 5));
+      expect(never.judge).not.toHaveBeenCalled();
+
+      const off = setup({ SENTINEL_GREEN_TO_RED_BYPASS: 'false' });
+      off.tickFor.mockResolvedValue(opt({ ltp: 99.5 }));
+      off.evaluate.mockReturnValue(fire('giveback-off-peak'));
+      off.recentForTracker.mockResolvedValue([optRow(istAt(11, 0))]);
+      await off.svc.runForUser(USER, istAt(11, 5));
+      expect(off.judge).not.toHaveBeenCalled();
     });
   });
 });

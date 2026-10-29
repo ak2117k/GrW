@@ -46,8 +46,13 @@ import { withExitConfirm } from '../tripwires/exit-confirm';
 export const FUTILE_REJUDGE_CONFIG = 'FUTILE_REJUDGE_CONFIG';
 export const EXIT_ATTEMPTS = 'EXIT_ATTEMPTS';
 
-/** Sensor families that assert NEW risk: a wake carrying any of these always reaches the judge. */
-export const NEW_RISK_FIRES: ReadonlySet<string> = new Set(['level-break', 'news-hit', 'event-near', 'oi-wall-shift']);
+/**
+ * Sensor families that assert NEW risk: a wake carrying any of these always reaches the judge.
+ * `square-off-due` (2026-10-29) is the cycle's forced deadline look (square-off-look.ts): an
+ * observe-only cash position's EXIT_NOW must not silence the one decision before the broker's
+ * square-off, and the owner's Telegram alert hangs off that verdict.
+ */
+export const NEW_RISK_FIRES: ReadonlySet<string> = new Set(['level-break', 'news-hit', 'event-near', 'oi-wall-shift', 'square-off-due']);
 
 /** How often the held-position line is logged per position. */
 export const HELD_LOG_EVERY_MS = 30 * 60_000;

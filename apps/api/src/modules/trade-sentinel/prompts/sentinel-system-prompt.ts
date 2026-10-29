@@ -69,6 +69,12 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * lines (square-off vs exchange close, OI walls not captured for cash, how to read N / ATRd and
  * the five built factors). A SUFFIX after +d1: `v9+l1+d1+e1`. Equity off, byte-identical.
  *
+ * FROM +s1 A SEVENTH SWITCH, SENTINEL_SQUARE_OFF_LOOK (the deadline look, 2026-10-29; ON unless
+ * exactly `false`, OFF without a ConfigService — the +d1 rule): the optional top-level field
+ * squareOffDecision in the field list and one reading line for it. A SUFFIX after +e1:
+ * `v9+l1+d1+e1+s1`. Off, byte-identical. The packet carries the key only inside a position's
+ * hard-risk window before its deadline, so every other packet describes an absent key.
+ *
  * {@link SENTINEL_PROMPT_VERSION} / {@link SENTINEL_SYSTEM_PROMPT} name the
  * default (discipline on, triggers off, news off, lessons off).
  */
@@ -102,6 +108,8 @@ export interface SentinelPromptOptions {
   delta?: boolean;
   /** SENTINEL_EQUITY_BLOCK not exactly 'false' (equityBlockEnabled): the +e1 equity-block lines. */
   equity?: boolean;
+  /** SENTINEL_SQUARE_OFF_LOOK not exactly 'false' (parseJudgeGateConfig): the +s1 squareOffDecision lines. */
+  squareOff?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -123,7 +131,7 @@ const VERSIONS_NEWS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noC
 export function sentinelPromptVersion(o: SentinelPromptOptions): string {
   const key = o.discipline ? (o.triggers ? 'ed+trg' : 'ed') : o.triggers ? 'trg' : 'off';
   const table = o.news ? VERSIONS_NEWS : VERSIONS;
-  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}${o.equity ? EQUITY_VERSION_SUFFIX : ''}`;
+  return `${o.cues ? table[key].cues : table[key].noCues}${o.lessons ? LESSONS_VERSION_SUFFIX : ''}${o.delta ? DELTA_VERSION_SUFFIX : ''}${o.equity ? EQUITY_VERSION_SUFFIX : ''}${o.squareOff ? SQUARE_OFF_VERSION_SUFFIX : ''}`;
 }
 
 /** {@link sentinelPromptVersion} composed with the thesis prompt — what goes on the verdict row. */
@@ -315,13 +323,41 @@ const withNewsBlocks =(line: string, on: boolean): string => (on ? line.replace(
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta' | 'equity'>): string {
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta' | 'equity' | 'squareOff'>): string {
   const text = withEquity(renderBase(o), !!o.equity);
-  if (!o.delta) return text;
+  if (!o.delta) return withSquareOff(text, !!o.squareOff, false);
   if (!text.includes(TOP_LEVEL_LINE) || !text.includes(TRIGGER_LINE)) {
     throw new Error('sentinel-system-prompt: the top-level / trigger lines moved — rebuild the +d1 prompt');
   }
-  return text.replace(TOP_LEVEL_LINE, TOP_LEVEL_LINE_DELTA).replace(TRIGGER_LINE, `${TRIGGER_LINE}${DELTA_READING_LINES}`);
+  return withSquareOff(
+    text.replace(TOP_LEVEL_LINE, TOP_LEVEL_LINE_DELTA).replace(TRIGGER_LINE, `${TRIGGER_LINE}${DELTA_READING_LINES}`),
+    !!o.squareOff,
+    true,
+  );
+}
+
+/**
+ * The stamp suffix for the deadline look (SENTINEL_SQUARE_OFF_LOOK, on unless exactly `false`,
+ * OFF without a ConfigService): `v9+l1+d1+e1` becomes `v9+l1+d1+e1+s1`. Off, byte-identical.
+ */
+export const SQUARE_OFF_VERSION_SUFFIX = '+s1';
+
+/** The +s1 reading line, after the trigger line (and the +d1 lines when present). Ends with a newline. */
+export const SQUARE_OFF_READING_LINE =
+  '- squareOffDecision, present only in the last minutes before this position\'s deadline, makes this look a decision with a deadline: deadline says what happens then (BROKER_SQUARE_OFF: the broker closes an intraday cash position at market; SESSION_CLOSE or EXPIRY_CLOSE: the exchange close), deadlineIst and minutesLeft say when, look says whether this is the FIRST decision, the FINAL re-look or another look inside the window, and choice states the two options. Weigh exiting now at the current price against what the deadline will do to the position anyway; a verdict other than EXIT_NOW accepts that outcome, so say in reason why it beats exiting now.\n';
+
+/** The +s1 field list and reading line into a rendered prompt; fails rather than drift if the anchors move. */
+function withSquareOff(text: string, on: boolean, delta: boolean): string {
+  if (!on) return text;
+  const top = delta ? TOP_LEVEL_LINE_DELTA : TOP_LEVEL_LINE;
+  const after = delta ? `${TRIGGER_LINE}${DELTA_READING_LINES}` : TRIGGER_LINE;
+  if (!text.includes(top) || !text.includes(after)) {
+    throw new Error('sentinel-system-prompt: the top-level / trigger lines moved — rebuild the +s1 prompt');
+  }
+  const topSq = delta
+    ? top.replace('plus sinceLastVerdict and ownerHold when present', 'plus sinceLastVerdict, ownerHold and squareOffDecision when present')
+    : top.replace('thesis, trigger and memory.', 'thesis, trigger and memory, plus squareOffDecision when present.');
+  return text.replace(top, topSq).replace(after, `${after}${SQUARE_OFF_READING_LINE}`);
 }
 
 /** The trigger reading line (ends with its newline); the +d1 lines follow it. */

@@ -42,6 +42,22 @@ import type { TripwireResult } from './tripwire.service';
  *     the risk bypasses above is upgraded to the strong (FIRE) tier. The cheap
  *     tier is only for "nothing material changed".
  *
+ * Two more bypasses (2026-10-29, prod failures that day):
+ *
+ *  - SQUARE-OFF DUE. The cycle's deadline look (square-off-look.ts) — the one
+ *    forced judgement when a position enters its hard-risk window unjudged — is
+ *    a `square-off-due` fire, which this gate never caps (it is also a NEW-risk
+ *    fire for the futile rule and is not a suppressible repeat).
+ *  - GREEN-TO-RED. A position whose favourable extreme was in profit NET of
+ *    charges (computeGreenFloor at the peak) and that is now at or below
+ *    breakeven — or a giveback-off-peak fire on such a position. Paper
+ *    CRUDEOIL 2026-10-29: peaked +₹791, the giveback fire was capped at 14:23,
+ *    the judge only saw it at 14:29 and the trade closed −₹1,439. Profit turning
+ *    into loss is safety, not routine. ONCE PER TRANSITION: the cycle passes
+ *    `greenToRedOwed` / `givebackGreenOwed` only until a judgement has been
+ *    recorded on that state for that peak (a new peak re-arms both), so a red
+ *    position is not judged every pass. Rollback: SENTINEL_GREEN_TO_RED_BYPASS=false.
+ *
  * Absent config ⇒ off: the cycle behaves exactly as before. Rollback:
  * SENTINEL_JUDGE_GATE=false.
  */
@@ -88,6 +104,21 @@ export interface JudgeGateConfig {
   eqSquareOffLeadMin: number;
   /** SENTINEL_PACKET_DELTA (default true): the `sinceLastVerdict` block on re-judgements. */
   packetDelta: boolean;
+  /**
+   * SENTINEL_SQUARE_OFF_LOOK (default true): the forced deadline look when an
+   * intraday position enters its hard-risk window unjudged, and the packet's
+   * `squareOffDecision` framing inside that window (square-off-look.ts). Works
+   * whether or not the cap itself is enabled. Rollback: `false`.
+   */
+  squareOffLook: boolean;
+  /**
+   * SENTINEL_SQUARE_OFF_RELOOK_MIN (default 5; 0 = never): the one FINAL re-look,
+   * in the last this-many minutes before the deadline, when the window's earlier
+   * look was not an exit. See square-off-look.ts for why one and not more.
+   */
+  squareOffRelookMin: number;
+  /** SENTINEL_GREEN_TO_RED_BYPASS (default true): the green-to-red cap bypass. Rollback: `false`. */
+  greenToRed: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -128,6 +159,9 @@ export function parseJudgeGateConfig(env: Env): JudgeGateConfig {
     adverseMovePctEq: positive(env.SENTINEL_ADVERSE_MOVE_PCT_EQ, 0.008),
     eqSquareOffLeadMin: nonNegative(env.SENTINEL_EQ_SQUARE_OFF_LEAD_MIN, 15),
     packetDelta: !isOff(env.SENTINEL_PACKET_DELTA),
+    squareOffLook: !isOff(env.SENTINEL_SQUARE_OFF_LOOK),
+    squareOffRelookMin: nonNegative(env.SENTINEL_SQUARE_OFF_RELOOK_MIN, 5),
+    greenToRed: !isOff(env.SENTINEL_GREEN_TO_RED_BYPASS),
   };
 }
 
@@ -166,12 +200,29 @@ export function hardRiskWindow(
   expiryToday: boolean,
 ): boolean {
   if (minutesToClose === null || segment === 'EQ_DELIVERY') return false;
-  const left = segment === 'EQ_INTRADAY' ? minutesToClose - cfg.eqSquareOffLeadMin : minutesToClose;
+  const left = minutesToDeadline(cfg, segment, minutesToClose);
   return left <= cfg.closeGuardMin || (expiryToday && left <= cfg.expiryCloseMin);
+}
+
+/** Minutes to the position's own deadline: the MIS square-off for EQ_INTRADAY, else the exchange close. */
+export function minutesToDeadline(
+  cfg: Pick<JudgeGateConfig, 'eqSquareOffLeadMin'>,
+  segment: Segment | undefined,
+  minutesToClose: number,
+): number {
+  return segment === 'EQ_INTRADAY' ? minutesToClose - cfg.eqSquareOffLeadMin : minutesToClose;
+}
+
+/** The hard-risk window's length in minutes (the expiry-day window when it is the longer one). */
+export function hardRiskWindowMinutes(cfg: Pick<JudgeGateConfig, 'closeGuardMin' | 'expiryCloseMin'>, expiryToday: boolean): number {
+  return expiryToday ? Math.max(cfg.closeGuardMin, cfg.expiryCloseMin) : cfg.closeGuardMin;
 }
 
 /** Verdicts whose position is an exit candidate: the cap never delays its next look. */
 export const EXIT_CANDIDATE_VERDICTS: ReadonlySet<string> = new Set(['EXIT_NOW', 'EXIT_ARMED']);
+
+/** The cycle's forced deadline look (square-off-look.ts): never capped, never futile. */
+export const SQUARE_OFF_DUE = 'square-off-due';
 
 /** Edge-triggered sensors whose fire is spent once raised: carried when capped, never dropped. */
 export const CARRY_WHEN_CAPPED: ReadonlySet<string> = new Set(['news-hit', 'event-near']);
@@ -183,7 +234,10 @@ export type CapBypass =
   | 'hard-risk'
   | 'floor-breach'
   | 'trigger-crossed'
-  | 'adverse-move';
+  | 'adverse-move'
+  | 'square-off-due'
+  | 'green-to-red'
+  | 'giveback-green';
 
 /** What the gate needs to know about this position on this pass. */
 export interface GateFacts {
@@ -195,6 +249,17 @@ export interface GateFacts {
   floorBreached: boolean;
   triggerCrossed: boolean;
   adverseMove: boolean;
+  /**
+   * The position's favourable extreme was in profit NET of charges and it is now
+   * at or below breakeven (computeGreenFloor at the peak, and now). A state fact,
+   * reported in the logs and the re-judge snapshot; the bypass reads the two
+   * `...Owed` flags below. Absent ⇒ false (older callers, tests).
+   */
+  greenToRed?: boolean;
+  /** greenToRed holds AND no judgement has been recorded on it for this peak yet: the cap is bypassed once. */
+  greenToRedOwed?: boolean;
+  /** The peak was net-green AND no giveback judgement has been recorded for this peak yet: a giveback-off-peak fire bypasses once. */
+  givebackGreenOwed?: boolean;
   /** Names of fires that were carried into this decision (they never reached the judge). */
   carried: ReadonlySet<string>;
 }
@@ -219,10 +284,13 @@ const NONE: TripwireResult = { fires: [], heartbeat: false, shouldEvaluate: fals
 export function capBypass(decision: TripwireResult, f: GateFacts): CapBypass | null {
   if (!f.last) return 'first-look';
   if (decision.fires.some((x) => x.name === 'exit-confirm')) return 'exit-confirm';
+  if (decision.fires.some((x) => x.name === SQUARE_OFF_DUE)) return 'square-off-due';
   if (f.hardRisk) return 'hard-risk';
   if (f.floorBreached) return 'floor-breach';
   if (f.triggerCrossed) return 'trigger-crossed';
   if (f.adverseMove) return 'adverse-move';
+  if (f.greenToRedOwed) return 'green-to-red';
+  if (f.givebackGreenOwed && decision.fires.some((x) => x.name === 'giveback-off-peak')) return 'giveback-green';
   if (EXIT_CANDIDATE_VERDICTS.has(f.last.verdict)) return 'exit-candidate';
   return null;
 }
@@ -265,7 +333,8 @@ export function gateJudgement(
   }
 
   const risky =
-    f.hardRisk || f.floorBreached || f.triggerCrossed || f.adverseMove || (f.last !== null && EXIT_CANDIDATE_VERDICTS.has(f.last.verdict));
+    f.hardRisk || f.floorBreached || f.triggerCrossed || f.adverseMove || f.greenToRedOwed === true ||
+    (f.last !== null && EXIT_CANDIDATE_VERDICTS.has(f.last.verdict));
   if (decision.trigger === 'HEARTBEAT' && risky) {
     return { ...pass, decision: { ...decision, trigger: 'FIRE' }, bypass, upgraded: true };
   }

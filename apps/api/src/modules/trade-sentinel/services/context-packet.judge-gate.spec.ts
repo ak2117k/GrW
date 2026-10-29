@@ -109,3 +109,20 @@ describe('packet delta: sinceLastVerdict and ownerHold', () => {
     expect(rest).toEqual(plain);
   });
 });
+
+describe('squareOffDecision (the deadline look, SENTINEL_SQUARE_OFF_LOOK)', () => {
+  const deadline = {
+    deadline: 'SESSION_CLOSE' as const, deadlineIst: '15:30', minutesLeft: 10, look: 'FIRST' as const,
+    choice: 'Decide now, 10 min before the NFO close at 15:30 IST: ...',
+  };
+
+  it('present exactly as the cycle framed it when the review carries a deadline; absent otherwise (byte-identical)', async () => {
+    const { svc } = make({});
+    const p = await svc.build(NIFTY_ENTRY as never, TICK, null, [], { deadline });
+    expect(p.squareOffDecision).toEqual(deadline);
+    expect(JSON.parse(JSON.stringify(p)).squareOffDecision).toEqual(deadline);
+    const plain = await svc.build(NIFTY_ENTRY as never, TICK, null, [], {});
+    expect('squareOffDecision' in plain).toBe(false);
+    expect('squareOffDecision' in (await svc.build(NIFTY_ENTRY as never, TICK, null))).toBe(false);
+  });
+});

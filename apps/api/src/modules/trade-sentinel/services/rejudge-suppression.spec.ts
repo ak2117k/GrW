@@ -231,8 +231,8 @@ describe('material-change gating (2026-10-22): news ids, broken levels, edge fla
     expect(repeatIsMaterial('level-break', b, snap({ at: 1, level: null }), cfg)).toBe(true);
   });
 
-  it('a floor breach, an exitTrigger cross or a hard-risk window APPEARING is material; persisting is not', () => {
-    for (const k of ['floorBreached', 'triggerCrossed', 'hardRisk'] as const) {
+  it('a floor breach, an exitTrigger cross, a hard-risk window or green-to-red APPEARING is material; persisting is not', () => {
+    for (const k of ['floorBreached', 'triggerCrossed', 'hardRisk', 'greenToRed'] as const) {
       expect(repeatIsMaterial('giveback-off-peak', base, snap({ at: 1, [k]: true }), cfg)).toBe(true);
       expect(repeatIsMaterial('giveback-off-peak', snap({ [k]: true }), snap({ at: 1, [k]: true }), cfg)).toBe(false);
     }

@@ -133,7 +133,7 @@ describe('suppressFutileJudgements', () => {
     }
   });
 
-  it('NEW_RISK_FIRES is exactly the four new-risk sensor families', () => {
-    expect([...NEW_RISK_FIRES].sort()).toEqual(['event-near', 'level-break', 'news-hit', 'oi-wall-shift']);
+  it('NEW_RISK_FIRES is exactly the four new-risk sensor families plus the deadline look', () => {
+    expect([...NEW_RISK_FIRES].sort()).toEqual(['event-near', 'level-break', 'news-hit', 'oi-wall-shift', 'square-off-due']);
   });
 });

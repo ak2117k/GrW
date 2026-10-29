@@ -143,10 +143,17 @@ export interface RejudgeSnapshot {
   triggerCrossed?: boolean;
   /** A hard-risk window the cycle can see (intraday / expiry-day close). Edge-material: false → true. */
   hardRisk?: boolean;
+  /**
+   * Green-to-red (judge-gate.ts, 2026-10-29): the peak was net-green and the position is now at or
+   * below breakeven. Edge-material: false → true, so the giveback repeat that crosses breakeven is
+   * asked once — and, once a judgement on it is recorded, the baseline carries `true` and the
+   * still-red repeats are back to the ordinary material-change rules.
+   */
+  greenToRed?: boolean;
 }
 
 /** Flags whose false → true transition since the last judgement is always new. */
-const EDGE_FLAGS = ['floorBreached', 'triggerCrossed', 'hardRisk'] as const;
+const EDGE_FLAGS = ['floorBreached', 'triggerCrossed', 'hardRisk', 'greenToRed'] as const;
 
 export function rejudgeSnapshot(
   t: {

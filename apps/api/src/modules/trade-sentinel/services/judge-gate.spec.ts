@@ -19,7 +19,7 @@ describe('parseJudgeGateConfig', () => {
     expect(cfg).toEqual({
       enabled: true, minIntervalMs: 900_000, heldHeartbeatMs: 30 * MIN, hold: [], closeGuardMin: 10,
       expiryCloseMin: 30, adverseMovePct: 0.04, adverseMoveNEq: 6, adverseMovePctEq: 0.008,
-      eqSquareOffLeadMin: 15, packetDelta: true,
+      eqSquareOffLeadMin: 15, packetDelta: true, squareOffLook: true, squareOffRelookMin: 5, greenToRed: true,
     });
   });
   it('reads overrides, the hold list like the executor, and the rollbacks', () => {
@@ -164,5 +164,40 @@ describe('hardRiskWindow — intraday cash counts to the 15:15 MIS square-off', 
 
   it('delivery and a closed session are never in it', () => {
     expect([hardRiskWindow(cfg, 'EQ_DELIVERY', 1, false), hardRiskWindow(cfg, 'OPT', null, true)]).toEqual([false, false]);
+  });
+});
+
+describe('gateJudgement — the 2026-10-29 bypasses (square-off due, green-to-red)', () => {
+  it('a square-off-due fire is never capped, and is named', () => {
+    const r = gateJudgement(fire('square-off-due'), facts(), cfg, never);
+    expect(r.dropped).toBeNull();
+    expect(r.bypass).toBe('square-off-due');
+  });
+
+  it('green-to-red owed: the capped giveback passes once (prod CRUDEOIL 2026-10-29)', () => {
+    const owed = gateJudgement(fire('giveback-off-peak', 'news-hit'), facts({ greenToRed: true, greenToRedOwed: true }), cfg, never);
+    expect(owed.dropped).toBeNull();
+    expect(owed.bypass).toBe('green-to-red');
+    // Spent (judged on it already this peak): the cap is back.
+    const spent = gateJudgement(fire('giveback-off-peak'), facts({ greenToRed: true, greenToRedOwed: false }), cfg, never);
+    expect(spent.dropped).toBe('cap');
+  });
+
+  it('green-to-red owed raises a routine heartbeat to the strong tier', () => {
+    const r = gateJudgement(HEARTBEAT, facts({ greenToRed: true, greenToRedOwed: true }), cfg, never);
+    expect(r.decision.trigger).toBe('FIRE');
+    expect(r.upgraded).toBe(true);
+  });
+
+  it('giveback-green: only a giveback-off-peak fire on a net-green peak, once', () => {
+    expect(gateJudgement(fire('giveback-off-peak'), facts({ givebackGreenOwed: true }), cfg, never).bypass).toBe('giveback-green');
+    expect(gateJudgement(fire('volume-anomaly'), facts({ givebackGreenOwed: true }), cfg, never).dropped).toBe('cap');
+    expect(gateJudgement(fire('giveback-off-peak'), facts({ givebackGreenOwed: false }), cfg, never).dropped).toBe('cap');
+  });
+
+  it('absent facts (older callers) change nothing; the switches parse', () => {
+    expect(gateJudgement(fire('giveback-off-peak'), facts(), cfg, never).dropped).toBe('cap');
+    const off = parseJudgeGateConfig({ SENTINEL_SQUARE_OFF_LOOK: 'false', SENTINEL_GREEN_TO_RED_BYPASS: 'false', SENTINEL_SQUARE_OFF_RELOOK_MIN: '0' });
+    expect(off).toMatchObject({ squareOffLook: false, greenToRed: false, squareOffRelookMin: 0 });
   });
 });

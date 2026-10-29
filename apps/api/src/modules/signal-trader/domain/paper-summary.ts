@@ -50,6 +50,75 @@ export function paperSummary(trades: Array<{ status: string; pnl: number | null 
   return summarise(trades.map((t) => (t ? { open: t.status !== 'CLOSED', pnl: t.pnl } : null)));
 }
 
+/** One bucket of the paper trades by the AI entry judge's call. */
+export interface JudgeBucket {
+  /** Paper trades in the bucket (decisions with no paper trade are left out). */
+  n: number;
+  closed: number;
+  open: number;
+  wins: number;
+  losses: number;
+  /** ₹ GROSS of the closed trades: side × (exit − entry) × qty — charges left out. */
+  gross: number;
+  /** ₹ mark-to-market of the open ones (the row's P&L, which the paper watch writes gross). */
+  openMark: number;
+  /** wins / (wins + losses), null when none closed. */
+  winRate: number | null;
+}
+
+export type JudgeSplit = Record<'TAKE' | 'SKIP' | 'NONE', JudgeBucket>;
+
+/**
+ * The AI entry judge's call on a PAPER decision: learning mode records it as `aiDecision`; a plain
+ * no-funds PAPER decision (no `aiDecision`) only exists after the judge said TAKE, so its `verdict` is it.
+ */
+export function judgeCallOf(judgeRecord: unknown): 'TAKE' | 'SKIP' | 'NONE' {
+  const r = judgeRecord && typeof judgeRecord === 'object' && !Array.isArray(judgeRecord) ? (judgeRecord as Record<string, unknown>) : {};
+  if (r.aiDecision === 'TAKE' || r.aiDecision === 'SKIP' || r.aiDecision === 'NONE') return r.aiDecision;
+  return r.verdict === 'TAKE' || r.verdict === 'SKIP' ? r.verdict : 'NONE';
+}
+
+const emptyBucket = (): JudgeBucket => ({ n: 0, closed: 0, open: 0, wins: 0, losses: 0, gross: 0, openMark: 0, winRate: null });
+
+/**
+ * Paper P&L split by the AI entry judge (owner 2026-10-29): learning mode books every call, including
+ * the ones the AI rejected — this shows what the AI-approved (TAKE) trades made apart from the SKIPs
+ * and the calls with no judge verdict (NONE). Closed P&L is recomputed GROSS from entry / exit /
+ * quantity, never read from the row's pnl, so it is right whatever the paper close books (charges, or a
+ * close-path bug). Pure.
+ */
+export function paperByJudge(
+  rows: ReadonlyArray<{
+    aiDecision: 'TAKE' | 'SKIP' | 'NONE';
+    trade: { status: string; side: string; quantity: number; entryPrice: number | null; exitPrice: number | null; pnl: number | null } | null;
+  }>,
+): JudgeSplit {
+  const out: JudgeSplit = { TAKE: emptyBucket(), SKIP: emptyBucket(), NONE: emptyBucket() };
+  for (const r of rows) {
+    const t = r.trade;
+    if (!t) continue;
+    const b = out[r.aiDecision] ?? out.NONE;
+    b.n += 1;
+    if (t.status !== 'CLOSED') {
+      b.open += 1;
+      if (typeof t.pnl === 'number' && Number.isFinite(t.pnl)) b.openMark += t.pnl;
+      continue;
+    }
+    b.closed += 1;
+    const priced = t.entryPrice !== null && t.entryPrice > 0 && t.exitPrice !== null && t.exitPrice > 0 && Number.isFinite(t.quantity);
+    const g = priced ? (String(t.side).toUpperCase() === 'SELL' ? -1 : 1) * ((t.exitPrice as number) - (t.entryPrice as number)) * t.quantity : 0;
+    b.gross += g;
+    if (g > 0) b.wins += 1;
+    else if (g < 0) b.losses += 1;
+  }
+  for (const b of Object.values(out)) {
+    b.gross = r2(b.gross);
+    b.openMark = r2(b.openMark);
+    b.winRate = b.wins + b.losses > 0 ? r2(b.wins / (b.wins + b.losses)) : null;
+  }
+  return out;
+}
+
 /** Live signal orders: only a FILLED / PARTIAL entry is a trade; its tracker carries the P&L. */
 export function liveSummary(orders: Array<{ status: string; trackerStatus: string | null; pnl: number | null }>): TradeOutcomeSummary {
   const filled = orders.filter((o) => o.status === 'FILLED' || o.status === 'PARTIAL');

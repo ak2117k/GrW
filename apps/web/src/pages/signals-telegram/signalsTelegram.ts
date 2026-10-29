@@ -96,8 +96,23 @@ export interface TradeOutcomeSummary {
   winRate: number | null;
 }
 
+/** Paper trades by the AI entry judge's call; `gross` = closed side × (exit − entry) × qty, charges left out. */
+export interface JudgeBucket {
+  n: number;
+  closed: number;
+  open: number;
+  wins: number;
+  losses: number;
+  gross: number;
+  openMark: number;
+  winRate: number | null;
+}
+export type JudgeSplit = Record<'TAKE' | 'SKIP' | 'NONE', JudgeBucket>;
+
 export interface PaperRow {
   decisionId: string;
+  /** The AI entry judge's call (learning mode paper-trades SKIPs too). */
+  aiDecision?: 'TAKE' | 'SKIP' | 'NONE';
   decidedAt: string;
   channel: string | null;
   underlying: string | null;
@@ -113,7 +128,7 @@ export interface SignalOverview {
   /** Owner toggle, stored on the app settings row (user_settings.signalPaperOnNoFunds). */
   paperOnNoFunds?: { enabled: boolean; store: string };
   /** PAPER (no funds) decisions of the last `lookbackDays` with their outcomes, and live over the same window. */
-  paper?: { lookbackDays: number; rows: PaperRow[]; summary: TradeOutcomeSummary; live: TradeOutcomeSummary };
+  paper?: { lookbackDays: number; rows: PaperRow[]; summary: TradeOutcomeSummary; byJudge?: JudgeSplit; live: TradeOutcomeSummary };
   caps: { maxLots: number; maxLossPerTrade: number; maxTradesPerDay: number; dailyLossStop: number; entryTolerancePct: number; product: string; triggerWaitMin?: number; triggerMaxPending?: number; engineSl?: boolean };
   /** Armed triggers waiting for their price. */
   pending?: PendingTriggerRow[];
@@ -220,6 +235,14 @@ export function outcomeLine(s: TradeOutcomeSummary | null | undefined): string {
   const parts = [`${s.closed} closed`, `${s.wins}W/${s.losses}L`];
   if (s.open) parts.push(`${s.open} open`);
   parts.push(`P&L ${rupee(s.pnl)}`);
+  return parts.join(' · ');
+}
+
+/** "3 trades · 2 closed · 1W/1L · gross ₹80 · 1 open (mark ₹30)" — one AI-judge bucket of the paper trades. */
+export function judgeLine(b: JudgeBucket | null | undefined): string {
+  if (!b || b.n === 0) return 'none';
+  const parts = [`${b.n} trade${b.n === 1 ? '' : 's'}`, `${b.closed} closed`, `${b.wins}W/${b.losses}L`, `gross ${rupee(b.gross)}`];
+  if (b.open) parts.push(`${b.open} open (mark ${rupee(b.openMark)})`);
   return parts.join(' · ');
 }
 

@@ -1,6 +1,6 @@
 import { fundsCheck, isFundsRejection, requiredFunds } from './funds';
 import { decisionIdFromTags, paperAlert, paperExitDecision, paperTags } from './paper';
-import { liveSummary, paperSummary } from './paper-summary';
+import { judgeCallOf, liveSummary, paperByJudge, paperSummary } from './paper-summary';
 import { parseSignalTraderConfig } from './signal-trader.config';
 
 const cfg = { fundsBufferPct: 1, futMarginPct: 25 };
@@ -75,5 +75,27 @@ describe('summaries', () => {
   it('paper vs live', () => {
     expect(paperSummary([{ status: 'CLOSED', pnl: 500 }, { status: 'CLOSED', pnl: -200 }, { status: 'OPEN', pnl: 50 }, null])).toMatchObject({ n: 4, closed: 2, open: 1, noTrade: 1, wins: 1, losses: 1, pnl: 350, realised: 300, winRate: 0.5 });
     expect(liveSummary([{ status: 'FILLED', trackerStatus: 'CLOSED', pnl: 100 }, { status: 'CANCELLED', trackerStatus: null, pnl: null }])).toMatchObject({ n: 2, closed: 1, wins: 1, noTrade: 1, realised: 100 });
+  });
+
+  it('paper P&L by the AI entry judge: TAKE / SKIP / NONE, gross from entry, exit and quantity (not the booked pnl)', () => {
+    const tr = (side: string, entry: number, exit: number | null, qty: number, pnl: number | null = 999_999) => ({ status: exit === null ? 'OPEN' : 'CLOSED', side, quantity: qty, entryPrice: entry, exitPrice: exit, pnl });
+    const s = paperByJudge([
+      { aiDecision: 'TAKE', trade: tr('BUY', 100, 110, 10) },
+      { aiDecision: 'TAKE', trade: tr('SELL', 100, 104, 5) },
+      { aiDecision: 'TAKE', trade: tr('BUY', 100, null, 10, 30) },
+      // ACUTAAS 2026-10-29 (AI SKIP): 3986.06 → 3958 × 25.
+      { aiDecision: 'SKIP', trade: tr('BUY', 3986.06, 3958, 25) },
+      { aiDecision: 'SKIP', trade: null },
+      { aiDecision: 'NONE', trade: tr('BUY', 50, 50, 1) },
+    ]);
+    expect(s.TAKE).toEqual({ n: 3, closed: 2, open: 1, wins: 1, losses: 1, gross: 80, openMark: 30, winRate: 0.5 });
+    expect(s.SKIP).toEqual({ n: 1, closed: 1, open: 0, wins: 0, losses: 1, gross: -701.5, openMark: 0, winRate: 0 });
+    expect(s.NONE).toMatchObject({ n: 1, closed: 1, wins: 0, losses: 0, gross: 0, winRate: null });
+  });
+
+  it("the judge's call: learning mode's aiDecision, else a no-funds PAPER decision's verdict (only a TAKE gets there)", () => {
+    expect(judgeCallOf({ verdict: 'TAKE', aiDecision: 'SKIP' })).toBe('SKIP');
+    expect(judgeCallOf({ verdict: 'TAKE' })).toBe('TAKE');
+    expect(judgeCallOf(null)).toBe('NONE');
   });
 });

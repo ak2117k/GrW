@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { channelStatsLine, countdown, decisionWhy, engineSlLabel, fundsLine, fundsMethod, modeBadge, openOrders, outcomeLine, paperState, planLine, skipLabel, type SignalOverview } from './signalsTelegram';
+import { channelStatsLine, countdown, decisionWhy, engineSlLabel, fundsLine, fundsMethod, judgeLine, modeBadge, openOrders, outcomeLine, paperState, planLine, skipLabel, type SignalOverview } from './signalsTelegram';
 import { SignalsTelegramView } from './SignalsTelegramView';
 
 const overview: SignalOverview = {
@@ -91,6 +91,12 @@ describe('paper (no funds)', () => {
     expect(fundsLine(paperOverview.paper!.rows[0].funds)).toBe('need ₹15,377, available ₹9,000');
     expect(decisionWhy(paperOverview.decisions[2])).toMatch(/^paper trade instead — INSUFFICIENT/);
     expect(skipLabel('insufficient_funds')).toBe('not enough funds');
+  });
+
+  it('formats a paper bucket by the AI entry judge', () => {
+    expect(judgeLine({ n: 3, closed: 2, open: 1, wins: 1, losses: 1, gross: 80, openMark: 30, winRate: 0.5 })).toBe('3 trades · 2 closed · 1W/1L · gross ₹80 · 1 open (mark ₹30)');
+    expect(judgeLine({ n: 1, closed: 1, open: 0, wins: 0, losses: 1, gross: -701.5, openMark: 0, winRate: 0 })).toBe('1 trade · 1 closed · 0W/1L · gross −₹701');
+    expect(judgeLine(undefined)).toBe('none');
   });
 
   it('renders the toggle, the PAPER decision and a separate Paper (no funds) section with live alongside', () => {

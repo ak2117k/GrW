@@ -8,6 +8,7 @@ import {
   engineSlLabel,
   fundsMethod,
   fundsLine,
+  judgeLine,
   modeBadge,
   outcomeLine,
   paperState,
@@ -154,6 +155,20 @@ function PaperSection({ paper }: { paper: NonNullable<SignalOverview['paper']> }
         <p className={cn('text-sm', SECONDARY)} data-testid="live-summary">
           Live: <span className={TONE[paper.live.pnl > 0 ? 'good' : paper.live.pnl < 0 ? 'bad' : 'neutral']}>{outcomeLine(paper.live)}</span>
         </p>
+        {paper.byJudge && (
+          <div className="mt-2" data-testid="paper-by-judge">
+            <p className={cn('text-xs', MUTED)}>Paper by the AI entry judge (gross, from entry / exit / qty):</p>
+            {(['TAKE', 'SKIP', 'NONE'] as const).map((k) => {
+              const b = paper.byJudge![k];
+              return (
+                <p key={k} className={cn('text-sm', SECONDARY)} data-testid={`paper-judge-${k}`}>
+                  {k === 'TAKE' ? 'AI TAKE' : k === 'SKIP' ? 'AI SKIP' : 'No judge'}:{' '}
+                  <span className={TONE[b.gross > 0 ? 'good' : b.gross < 0 ? 'bad' : 'neutral']}>{judgeLine(b)}</span>
+                </p>
+              );
+            })}
+          </div>
+        )}
       </div>
       {paper.rows.length > 0 && (
         <ul className="mt-2 space-y-2">

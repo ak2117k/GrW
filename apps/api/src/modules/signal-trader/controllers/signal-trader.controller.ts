@@ -4,7 +4,7 @@ import { SignalTraderRepository } from '../repositories/signal-trader.repository
 import { SignalTraderService } from '../services/signal-trader.service';
 import { istDayStart, slEnforceability } from '../domain/execution';
 import { decisionIdFromTags } from '../domain/paper';
-import { paperSummary, liveSummary } from '../domain/paper-summary';
+import { judgeCallOf, paperByJudge, paperSummary, liveSummary } from '../domain/paper-summary';
 import { readTrigger } from '../domain/trigger';
 
 /** How far back the Paper (no funds) section looks (analysis needs more than today). */
@@ -153,11 +153,20 @@ export class SignalTraderController {
         funds: (fundsCheck?.funds ?? null) as { available: number | null; required: number; ok: boolean | null; method: string } | null,
         trigger: (plan?.paper as { trigger?: string } | undefined)?.trigger ?? null,
         paperError: (plan?.paper as { status?: string; reason?: string } | undefined)?.status === 'FAILED' ? ((plan?.paper as { reason?: string }).reason ?? 'failed') : null,
+        // The AI entry judge's call (learning mode trades every call, TAKE or SKIP).
+        aiDecision: judgeCallOf(d.judge),
         trade: t
           ? { id: t.id, status: t.status, entryPrice: t.entryPrice, exitPrice: t.exitPrice, pnl: t.pnl, exitReasonTag: t.exitReasonTag, exitTime: t.exitTime }
           : null,
       };
     });
+    // Paper P&L by the AI judge's call, gross from entry / exit / quantity (independent of the booked pnl).
+    const byJudge = paperByJudge(
+      decisions.map((d) => {
+        const t = byDecision.get(d.id) ?? null;
+        return { aiDecision: judgeCallOf(d.judge), trade: t ? { status: t.status, side: t.side, quantity: t.quantity, entryPrice: t.entryPrice, exitPrice: t.exitPrice, pnl: t.pnl } : null };
+      }),
+    );
     // The live signal trades over the same window, for the side-by-side comparison.
     const liveOrders = await this.repo.ordersSince(since);
     const liveTrackers = new Map((await this.repo.trackersByIds(liveOrders.map((o) => o.trackerId).filter((x): x is string => !!x))).map((t) => [t.id, t]));
@@ -167,7 +176,7 @@ export class SignalTraderController {
         return { status: o.status, trackerStatus: t?.status ?? null, pnl: t?.pnl ?? null };
       }),
     );
-    return { lookbackDays: PAPER_LOOKBACK_DAYS, rows, summary: paperSummary(rows.map((r) => r.trade)), live };
+    return { lookbackDays: PAPER_LOOKBACK_DAYS, rows, summary: paperSummary(rows.map((r) => r.trade)), byJudge, live };
   }
 }
 

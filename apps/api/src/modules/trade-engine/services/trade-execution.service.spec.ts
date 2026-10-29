@@ -857,6 +857,150 @@ describe('TradeExecutionService.closeTrade — broker charge', () => {
   });
 });
 
+/**
+ * Regression (prod 2026-10-28/29): an OPEN paper trade's `pnl` column holds the
+ * MARK-TO-MARKET figure written by the open-paper-trade refresher (options,
+ * every 30 s) and the signal paper watch (every sweep). closeTrade used to add
+ * that unrealised mark onto the realised slice, so option paper trades closed
+ * near their last mark booked ~2x the gross P&L. Realised P&L carried into a
+ * close exists only on a PARTIALLY_FILLED trade (an earlier partial exit).
+ *
+ * Convention: `trades.pnl` is GROSS side x (exit - entry) x quantity; charges
+ * live in `trades.fees` (net = pnl - fees, see PaperTradeService replay).
+ */
+describe('TradeExecutionService.closeTrade — an OPEN trade\'s mark-to-market pnl is not realised P&L', () => {
+  let service: TradeExecutionService;
+  let repo: ReturnType<typeof buildMockRepo>;
+  let paperService: { simulateOrder: jest.Mock; simulateTick: jest.Mock; applyExitAccounting: jest.Mock };
+  let positions: { addPosition: jest.Mock; removePosition: jest.Mock; reducePosition: jest.Mock; updatePositionPnL: jest.Mock };
+
+  beforeEach(async () => {
+    repo = buildMockRepo();
+    paperService = {
+      // The simulator's own fill is deliberately off: the caller's trigger price must win.
+      simulateOrder: jest.fn(async () => ({ orderId: 'paper_close_1', status: 'FILLED', message: 'ok', fillPrice: 1 })),
+      simulateTick: jest.fn(),
+      applyExitAccounting: jest.fn(() => 100),
+    };
+    positions = { addPosition: jest.fn(), removePosition: jest.fn(), reducePosition: jest.fn(), updatePositionPnL: jest.fn() };
+    const module = await Test.createTestingModule({
+      providers: [
+        TradeExecutionService,
+        {
+          provide: BROKER_ADAPTER_TOKEN,
+          useValue: {
+            getLiveQuote: jest.fn(async () => ({ ltp: 125 })),
+            placeOrder: jest.fn(async () => ({ orderId: 'broker_close_1', status: 'FILLED', message: 'ok' })),
+          },
+        },
+        { provide: PaperTradeService, useValue: paperService },
+        {
+          provide: RiskManagerService,
+          useValue: { validateTrade: jest.fn(async () => ({ allowed: true })), getDailyRiskStatus: jest.fn(async () => ({})), activateKillSwitch: jest.fn() },
+        },
+        { provide: OrderTrackerService, useValue: { trackOrder: jest.fn() } },
+        { provide: PositionManagerService, useValue: positions },
+        { provide: TradeRepository, useValue: repo },
+        { provide: TradeGateway, useValue: { emitTradeUpdate: jest.fn(), emitKillSwitchActivated: jest.fn(), emitRiskStatus: jest.fn() } },
+        { provide: SettingsService, useValue: { getSettings: jest.fn(async () => ({ paperTrading: true })), activateKillSwitch: jest.fn() } },
+        { provide: MarketFeedService, useValue: { getQuote: jest.fn(() => null), getBreadth: jest.fn() } },
+        { provide: MarketContextService, useValue: { snapshot: jest.fn(async () => null) } },
+      ],
+    }).compile();
+    service = module.get(TradeExecutionService);
+  });
+
+  function seed(t: { symbol: string; exchange: string; quantity: number; entryPrice: number; markPnl: number; status?: string; isPaperTrade?: boolean }) {
+    repo._trades['trade_1'] = {
+      id: 'trade_1',
+      status: t.status ?? 'OPEN',
+      side: 'BUY',
+      quantity: t.quantity,
+      entryPrice: t.entryPrice,
+      isPaperTrade: t.isPaperTrade ?? true,
+      positionType: 'INTRADAY',
+      notes: null,
+      fees: 10,
+      pnl: t.markPnl, // what the MTM writers left on the row before the close
+      instrument: { symbol: t.symbol, token: '1', exchange: t.exchange },
+    };
+  }
+
+  // The four prod rows. markPnl = the mark the sweep left (stored − gross), so
+  // the old code reproduces the stored figure exactly.
+  const cases = [
+    // CRUDEOIL 10400CE: stored −2878 = 2 × gross.
+    { symbol: 'CRUDEOIL17NOV2610400CE', exchange: 'MCX', quantity: 100, entryPrice: 239.89, exitPrice: 225.5, markPnl: -1439, oldStored: -2878 },
+    // CRUDEOIL 9100PE: stored −5046 = 2 × gross.
+    { symbol: 'CRUDEOIL17NOV269100PE', exchange: 'MCX', quantity: 100, entryPrice: 263.73, exitPrice: 238.5, markPnl: -2523, oldStored: -5046 },
+    // ADANIPORTS 1800CE: stored 15313.65 = gross + mark at ~69.05.
+    { symbol: 'ADANIPORTS23NOV261800CE', exchange: 'NFO', quantity: 475, entryPrice: 53.405, exitPrice: 70, markPnl: 7431.025, oldStored: 15313.65 },
+    // ACUTAAS cash: stored −44 = gross −84.18 + a stale +40.18 mark (LTP ~3999.45 on the previous sweep).
+    { symbol: 'ACUTAAS-EQ', exchange: 'NSE', quantity: 3, entryPrice: 3986.06, exitPrice: 3958, markPnl: 40.18, oldStored: -44 },
+  ];
+
+  it.each(cases)('$symbol: pnl = (exit − entry) × qty, not mark + realised (was $oldStored)', async (c) => {
+    seed(c);
+    const trade = await service.closeTrade('trade_1', { exitReasonTag: 'STOPPED_OUT', reason: 'x', exitPrice: c.exitPrice });
+    const gross = (c.exitPrice - c.entryPrice) * c.quantity;
+    expect(trade.status).toBe('CLOSED');
+    expect(trade.exitPrice).toBe(c.exitPrice);
+    expect(trade.pnl).toBeCloseTo(gross, 2);
+    expect(trade.pnl).not.toBeCloseTo(c.oldStored, 0);
+    expect(trade.pnlPercent).toBeCloseTo(((c.exitPrice - c.entryPrice) / c.entryPrice) * 100, 4);
+    // Fees stay separate (gross pnl convention): entry fee 10 + a real exit charge.
+    expect(trade.fees).toBeGreaterThan(10);
+    // The paper cash and the position tracker already used the slice; they still do.
+    expect(paperService.applyExitAccounting).toHaveBeenCalledWith(expect.closeTo(gross, 6), expect.any(Number));
+    expect(positions.removePosition).toHaveBeenCalledWith('trade_1', expect.closeTo(gross, 6));
+  });
+
+  it('a SELL paper trade with a mark on the row books only side × (exit − entry) × qty', async () => {
+    seed({ symbol: 'NIFTYFUT', exchange: 'NFO', quantity: 75, entryPrice: 200, markPnl: 900 });
+    repo._trades['trade_1'].side = 'SELL';
+    const trade = await service.closeTrade('trade_1', { exitPrice: 188 });
+    expect(trade.pnl).toBeCloseTo(900, 6); // (200 − 188) × 75
+  });
+
+  it('a partial close of an OPEN trade books the slice only, ignoring the mark', async () => {
+    seed({ symbol: 'X', exchange: 'NFO', quantity: 100, entryPrice: 100, markPnl: 5000 });
+    const trade = await service.closeTrade('trade_1', { quantity: 40, exitPrice: 110 });
+    expect(trade.status).toBe('PARTIALLY_FILLED');
+    expect(trade.pnl).toBeCloseTo(400, 6);
+  });
+
+  it('a PARTIALLY_FILLED trade still accumulates the realised P&L of its earlier partial exit', async () => {
+    seed({ symbol: 'X', exchange: 'NFO', quantity: 60, entryPrice: 100, markPnl: 400, status: 'PARTIALLY_FILLED' });
+    const trade = await service.closeTrade('trade_1', { exitPrice: 120 });
+    expect(trade.status).toBe('CLOSED');
+    expect(trade.pnl).toBeCloseTo(400 + 20 * 60, 6);
+  });
+
+  it('two partial exits then a full close sum to the whole gross P&L', async () => {
+    seed({ symbol: 'X', exchange: 'NFO', quantity: 100, entryPrice: 100, markPnl: 0 });
+    await service.closeTrade('trade_1', { quantity: 30, exitPrice: 110 }); // +300
+    await service.closeTrade('trade_1', { quantity: 30, exitPrice: 90 }); // −300
+    const trade = await service.closeTrade('trade_1', { exitPrice: 105 }); // +200
+    expect(trade.status).toBe('CLOSED');
+    expect(trade.pnl).toBeCloseTo(200, 6);
+  });
+
+  it('LIVE: an OPEN live trade (nothing marks it) is unchanged — broker LTP, slice pnl', async () => {
+    seed({ symbol: 'X', exchange: 'NFO', quantity: 50, entryPrice: 100, markPnl: 0, isPaperTrade: false });
+    repo._trades['trade_1'].pnl = null;
+    const trade = await service.closeTrade('trade_1', { exitPrice: 999 }); // exitPrice ignored for live
+    expect(trade.exitPrice).toBe(125);
+    expect(trade.pnl).toBeCloseTo(1250, 6);
+    expect(paperService.applyExitAccounting).not.toHaveBeenCalled();
+  });
+
+  it('LIVE: a PARTIALLY_FILLED live trade still carries its realised P&L', async () => {
+    seed({ symbol: 'X', exchange: 'NFO', quantity: 50, entryPrice: 100, markPnl: 300, status: 'PARTIALLY_FILLED', isPaperTrade: false });
+    const trade = await service.closeTrade('trade_1');
+    expect(trade.pnl).toBeCloseTo(300 + 1250, 6);
+  });
+});
+
 describe('TradeExecutionService.executeTrade — LIVE_TRADING_ENABLED backstop', () => {
   let service: TradeExecutionService;
   let brokerAdapter: { placeOrder: jest.Mock; getLiveQuote: jest.Mock };

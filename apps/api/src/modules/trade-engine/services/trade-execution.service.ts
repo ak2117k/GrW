@@ -516,10 +516,21 @@ export class TradeExecutionService {
 
     // Calculate P&L on the slice being closed, then accumulate it onto any
     // P&L already realized by earlier partial closes of this same trade.
+    //
+    // `trades.pnl` is GROSS side × (exit − entry) × qty (charges are in
+    // `fees`), but what it holds before the close depends on status:
+    //  - PARTIALLY_FILLED: the REALISED P&L of the earlier partial exit(s).
+    //  - OPEN: an UNREALISED mark-to-market written by the open-paper-trade
+    //    refresher (paper options, every 30 s) and the signal paper watch
+    //    (every sweep). Adding that mark to the slice double-counted the move
+    //    — paper options closed near their last mark booked ~2× gross.
+    // Only the PARTIALLY_FILLED value is realised, so only it carries over.
     const entryPrice = trade.entryPrice ?? 0;
     const multiplier = trade.side === 'BUY' ? 1 : -1;
     const slicePnl = multiplier * (exitPrice - entryPrice) * closeQty;
-    const pnl = (trade.pnl ?? 0) + slicePnl;
+    const priorRealisedPnl =
+      trade.status === 'PARTIALLY_FILLED' ? trade.pnl ?? 0 : 0;
+    const pnl = priorRealisedPnl + slicePnl;
     // Price-return percentage — quantity-independent, so it stays correct
     // after a partial exit. The old pnl / (entryPrice × trade.quantity) used
     // the post-shrink remaining quantity as the denominator while pnl was the

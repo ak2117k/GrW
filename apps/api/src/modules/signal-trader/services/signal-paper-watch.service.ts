@@ -101,6 +101,8 @@ export class SignalPaperWatchService {
     const open = await this.repo.openPaperTrades();
     let exited = 0;
     const priced: PaperPosition[] = [];
+    /** Open, market-open and not closed this sweep — priced or not (the paper sentinel keeps these). */
+    const stillOpen = new Set<string>();
     for (const t of open) {
       const inst = t.instrument;
       if (!inst?.token || !inst.exchange) continue;
@@ -147,7 +149,10 @@ export class SignalPaperWatchService {
           this.targets.delete(t.id);
           this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}): ${d.reason}`);
           if (t.entryTags.includes('learn')) await this.scoreAi(t, d.price, d.tag, now);
-        } else if (ltp !== null && ltp > 0 && t.entryPrice && t.entryPrice > 0) {
+        } else {
+          stillOpen.add(t.id);
+        }
+        if (!d.exit && ltp !== null && ltp > 0 && t.entryPrice && t.entryPrice > 0) {
           priced.push({
             tradeId: t.id, userId: owner, symbol: inst.symbol, exchange: inst.exchange, token: inst.token, side: t.side, quantity: t.quantity,
             entryPrice: t.entryPrice, entryTime: t.entryTime ?? t.createdAt, product: t.positionType ?? null,
@@ -161,7 +166,7 @@ export class SignalPaperWatchService {
         this.logger.warn(`[signal-paper] ${inst.symbol} (${t.id}): ${errText(err)}`);
       }
     }
-    if (this.shadowOn()) this.paperSentinel?.observe(priced, now);
+    if (this.shadowOn()) this.paperSentinel?.observe(priced, now, stillOpen);
     return { checked: open.length, exited };
   }
 

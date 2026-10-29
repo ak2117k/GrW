@@ -168,10 +168,13 @@ export class PaperSentinelService {
    * The paper watch's sweep: the open, market-open paper trades with their fresh LTP. Starts one cycle
    * pass detached (a pass still running is not doubled — the next sweep catches up). Never throws.
    */
-  observe(positions: PaperPosition[], now: Date): void {
+  observe(positions: PaperPosition[], now: Date, open?: ReadonlySet<string>): void {
     if (!this.enabled()) return;
     try {
-      const seen = new Set<string>();
+      // Kept: every trade still open with its market open (`open`), priced this sweep or not. A missed
+      // quote must not evict a trade mid-pass (its look fails) or wipe its cycle memory; it keeps its
+      // last LTP, and the tick source's own staleness guard refuses it once too old — as for a live tracker.
+      const seen = new Set<string>(open ?? []);
       for (const p of positions) {
         if (!(p.ltp > 0) || !(p.entryPrice > 0)) continue;
         seen.add(p.tradeId);

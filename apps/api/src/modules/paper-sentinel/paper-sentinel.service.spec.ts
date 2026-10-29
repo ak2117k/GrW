@@ -181,6 +181,19 @@ describe('PaperSentinelService — the live sentinel cycle on paper trades', () 
     expect(t.upsert.mock.calls[0][0].create.detail.trigger).toMatchObject({ instrument: 'PREMIUM', op: 'BELOW', price: 95, refPrice: 99 });
   });
 
+  it('a trade still open whose quote missed this sweep stays on the roster with its last LTP; a closed one leaves', async () => {
+    const t = make();
+    t.svc.observe([pos({ tradeId: 'A', ltp: 101 }), pos({ tradeId: 'B', ltp: 102 })], NOW);
+    await t.svc.idle();
+    // Next sweep: A's quote failed (not priced) but A is open; B is gone (closed).
+    t.svc.observe([], new Date(NOW.getTime() + 30_000), new Set(['A']));
+    await t.svc.idle();
+    const roster = (t.svc as unknown as { roster(u: string): Array<{ trackerId: string }> }).roster(OWNER);
+    expect(roster.map((e) => e.trackerId)).toEqual(['paper:A']);
+    const lastRowForA = t.tickForRow.mock.calls.filter((c) => c[0] === 'paper:A').pop() as unknown as [string, { lastLtp: number; updatedAt: Date }];
+    expect(lastRowForA[1]).toMatchObject({ lastLtp: 101, updatedAt: NOW });
+  });
+
   it('PAPER_SENTINEL=off (or PAPER_EXIT_SHADOW=off) stops it entirely', async () => {
     for (const env of [{ PAPER_SENTINEL: 'off' }, { PAPER_EXIT_SHADOW: 'off' }] as Array<Record<string, string>>) {
       const t = make({ env });

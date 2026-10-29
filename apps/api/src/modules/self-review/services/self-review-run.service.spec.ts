@@ -173,6 +173,27 @@ describe('SelfReviewRunService', () => {
     expect(f2[1].summary.signalTrades).toBeUndefined();
   });
 
+  it('the signal paper splits by OI verdict / AI judge (with S’s trades) are handed to the diagnosis', async () => {
+    const diagnose = jest.fn(async () => ({ misses: [], signalPaperAssessment: 'insufficient sample' }));
+    const at = new Date('2026-10-21T05:00:00Z');
+    const { svc } = make({
+      diagnosis: { diagnose },
+      signalTrades: {
+        paper: [
+          { createdAt: at, status: 'CLOSED', pnl: -2400, side: 'BUY', quantity: 100, entryPrice: 20, exitPrice: 8, oiVerdict: 'AGAINST', oiSummary: 'AGAINST (chain 2026-11-17, want bullish) open: CE +0.0% PE −22.0%', aiDecision: 'TAKE', symbol: 'CRUDEOIL17NOV265400CE' },
+          { createdAt: at, status: 'CLOSED', pnl: 1200, side: 'BUY', quantity: 10, entryPrice: 100, exitPrice: 160, oiVerdict: 'AGREES', aiDecision: 'SKIP', symbol: 'X' },
+        ],
+        live: [],
+      },
+    });
+    await svc.run(NOW);
+    expect(diagnose).toHaveBeenCalledTimes(1);
+    const ctx = (diagnose.mock.calls[0] as unknown as [string, unknown[], { signalPaper: any }])[2];
+    expect(ctx.signalPaper.session.byOi.AGAINST).toMatchObject({ n: 1, closed: 1, losses: 1, gross: -1200, winRate: 0 }); // gross, not the (double-counted) booked −2400
+    expect(ctx.signalPaper.rolling20.byJudge.SKIP).toMatchObject({ n: 1, wins: 1, gross: 600 });
+    expect(ctx.signalPaper.sessionTrades[0]).toMatchObject({ symbol: 'CRUDEOIL17NOV265400CE', oi: 'AGAINST', judge: 'TAKE', gross: -1200, oiWhy: expect.stringMatching(/PE −22.0%/) });
+  });
+
   it('STOCK_MOVE: rows whose 5-session horizon closes at S (scored 5 sessions earlier) are judged; MID is null; not a factor', async () => {
     const { svc, sources, stored, repo } = make();
     await svc.run(NOW);

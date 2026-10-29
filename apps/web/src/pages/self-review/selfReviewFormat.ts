@@ -255,6 +255,23 @@ export function skillLines(summary: SelfReviewSummary | null | undefined): Array
 
 const rupees = (n: number) => `${n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
+const OI_LABEL = { AGREES: 'OI agrees', AGAINST: 'OI against', MIXED: 'OI mixed', NO_DATA: 'no OI data' } as const;
+
+/** Signal paper trades by the OI check at entry, last 20 sessions, GROSS — one line per verdict with trades, or [] when none. */
+export function paperOiLines(summary: SelfReviewSummary | null | undefined): Array<{ key: string; label: string; text: string; tone: 'good' | 'bad' | 'neutral' }> {
+  const by = summary?.signalTrades?.rolling20?.paperByOi;
+  if (!by) return [];
+  return (Object.keys(OI_LABEL) as Array<keyof typeof OI_LABEL>)
+    .filter((k) => (by[k]?.n ?? 0) > 0)
+    .map((k) => {
+      const s = by[k];
+      const parts = [`${s.closed} closed`, `${s.wins}W/${s.losses}L`];
+      if (s.winRate !== null) parts.push(`win ${Math.round(s.winRate * 100)}%`);
+      parts.push(`gross ${rupees(s.gross)}`);
+      return { key: k, label: OI_LABEL[k], text: parts.join(' · '), tone: (s.gross > 0 ? 'good' : s.gross < 0 ? 'bad' : 'neutral') as 'good' | 'bad' | 'neutral' };
+    });
+}
+
 /** Telegram signal trades, live vs paper (no funds), last 20 sessions — one line each, or [] when none. */
 export function signalTradeLines(summary: SelfReviewSummary | null | undefined): Array<{ key: 'live' | 'paperNoFunds'; label: string; text: string; tone: 'good' | 'bad' | 'neutral' }> {
   const r = summary?.signalTrades?.rolling20;

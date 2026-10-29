@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { channelStatsLine, countdown, decisionWhy, engineSlLabel, fundsLine, fundsMethod, judgeLine, modeBadge, openOrders, outcomeLine, paperState, planLine, skipLabel, type SignalOverview } from './signalsTelegram';
+import { channelStatsLine, countdown, decisionWhy, engineSlLabel, fundsLine, fundsMethod, judgeLine, modeBadge, oiLabel, openOrders, outcomeLine, paperState, planLine, skipLabel, type SignalOverview } from './signalsTelegram';
 import { SignalsTelegramView } from './SignalsTelegramView';
 
 const overview: SignalOverview = {
@@ -108,6 +108,24 @@ describe('paper (no funds)', () => {
     expect(html).toContain('1 closed · 1W/0L · P&amp;L ₹2,775');
     expect(html).toContain('0W/1L');
     expect(html).toContain('>PAPER<');
+  });
+
+  it('shows the paper split by the OI check and each row\'s OI verdict with its reasoning', () => {
+    const b = (gross: number) => ({ n: 1, closed: 1, open: 0, wins: gross > 0 ? 1 : 0, losses: gross < 0 ? 1 : 0, gross, openMark: 0, winRate: gross > 0 ? 1 : 0 });
+    const none = { n: 0, closed: 0, open: 0, wins: 0, losses: 0, gross: 0, openMark: 0, winRate: null };
+    const p = paperOverview.paper!;
+    const data: SignalOverview = {
+      ...paperOverview,
+      paper: { ...p, byOi: { AGREES: b(2775), AGAINST: b(-1200), MIXED: none, NO_DATA: none }, rows: [{ ...p.rows[0], oiVerdict: 'AGAINST', oiSummary: 'AGAINST (chain 2026-11-17, want bullish) 30m: CE +0.4% PE −6.0%' }, p.rows[1]] },
+    };
+    const html = renderToStaticMarkup(<SignalsTelegramView data={data} />);
+    expect(html).toContain('data-testid="paper-by-oi"');
+    expect(html).toMatch(/data-testid="paper-oi-AGAINST">OI against:/);
+    expect(html).toContain('gross −₹1,200');
+    expect(html.match(/data-testid="paper-row-oi"/g)).toHaveLength(1);
+    expect(html).toContain('30m: CE +0.4% PE −6.0%');
+    expect(oiLabel('NO_DATA')).toBe('no OI data');
+    expect(oiLabel(undefined)).toBe('no OI data');
   });
 
   it('without the new fields (older API) nothing extra renders', () => {

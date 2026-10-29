@@ -93,6 +93,8 @@ model OISnapshot {
   /// OI minus the contract's last OI of the previous session; NULL = no baseline (SP1 M5).
   oiChange     BigInt?
   volume       BigInt   @default(0)
+  /// LTP in rupees from the same quote call as `oi`; NULL = none reported / written before 2026-10-29.
+  ltp          Float?
   timestamp    DateTime
 
   @@index([instrumentId, timestamp])
@@ -3266,6 +3268,7 @@ model SignalDecision {
   decision    String? // TAKE | SKIP | PAPER (TAKE the account could not fund → paper trade; plan.paper)
   skipReason  String?   @map("skip_reason")
   aiCheck     Json?     @map("ai_check") // learning mode: the closed paper trade held against the judge's call (domain/ai-check)
+  oiCheck     Json?     @map("oi_check") // the paper open's OI check, record only: {verdict, source, numbers} (domain/oi-check)
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 

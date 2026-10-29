@@ -16,6 +16,7 @@ import {
   runStatusVariant,
   scopeLabel,
   sessionLabel,
+  paperOiLines,
   signalTradeLines,
   skillLines,
   targetLabel,
@@ -254,6 +255,16 @@ export function RunCard({ run }: { run: SelfReviewRun }) {
           {s.label}, last 20 sessions: <span className={cn('font-semibold', TONE_TEXT[s.tone])}>{s.text}</span>
         </p>
       ))}
+      {paperOiLines(run.summary).map((s) => (
+        <p key={s.key} className={cn('text-[11px]', MUTED)} data-testid="paper-oi-line">
+          Signal paper, {s.label} at entry, last 20 sessions: <span className={cn('font-semibold', TONE_TEXT[s.tone])}>{s.text}</span>
+        </p>
+      ))}
+      {run.signalPaperAssessment && (
+        <p className={cn('text-xs', SECONDARY)} data-testid="paper-oi-assessment">
+          OI check review: {run.signalPaperAssessment}
+        </p>
+      )}
     </article>
   );
 }

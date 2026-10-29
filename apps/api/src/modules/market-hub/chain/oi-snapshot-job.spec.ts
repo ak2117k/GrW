@@ -36,13 +36,13 @@ describe('OiSnapshotJob', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
 
-  it('writes one OI row per quoted contract (null oiChange kept) every 3 minutes while open', async () => {
+  it('writes one OI row (with the leg LTP) per quoted contract (null oiChange kept) every 3 minutes while open', async () => {
     const { j, repo } = job();
     jest.setSystemTime(IST('2026-10-12T10:00:00'));
     await j.tick(Date.now());
     expect(repo.oiRows).toEqual([
-      { instrumentId: 'i-ce', oi: 1000, oiChange: 50, volume: 3, at: new Date(IST('2026-10-12T10:00:00')) },
-      { instrumentId: 'i-pe', oi: 2000, oiChange: null, volume: 3, at: new Date(IST('2026-10-12T10:00:00')) },
+      { instrumentId: 'i-ce', oi: 1000, oiChange: 50, volume: 3, ltp: 10, at: new Date(IST('2026-10-12T10:00:00')) },
+      { instrumentId: 'i-pe', oi: 2000, oiChange: null, volume: 3, ltp: 10, at: new Date(IST('2026-10-12T10:00:00')) },
     ]);
     jest.setSystemTime(IST('2026-10-12T10:01:00'));
     await j.tick(Date.now());

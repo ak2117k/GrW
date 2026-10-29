@@ -1,10 +1,13 @@
-import { istDay } from '../candles/trading-calendar';
+import { istDay, istMidnight } from '../candles/trading-calendar';
 import type { SessionClock } from '../session-clock';
 import { LANE, refKey, type HubExchange, type InstrumentRef, type Lane, type PriceResult } from '../hub.types';
 import type { QuoteOutcome } from '../quote-batcher';
 import type { BuildOutcome, ChainBuilder } from './chain-builder';
 import type { ChainRepo } from './chain-repository';
+import { INDEX_UNDERLYINGS } from '../underlying';
+import type { OiCaptureRepo } from './chain-repository';
 import type { ChainRequest, ChainResult, ChainStatus, ChainUnavailable, HubChain, HubChains, OptionSide } from './chain.types';
+import { FuturesOiJob } from './futures-oi-job';
 import { OiSnapshotJob, type SnapshotTarget } from './oi-snapshot-job';
 
 export const CHAIN_FRESH_MS = 15_000;
@@ -22,6 +25,23 @@ const BUILD_SAMPLES = 200;
 /** The OI snapshot job's tick; the job itself runs each target every 3 minutes (OI_SNAPSHOT_EVERY_MS). */
 const SNAPSHOT_TICK_MS = 30_000;
 const REASONS: ChainUnavailable[] = ['no-contracts', 'throttled', 'busy', 'no-session', 'error'];
+/** How often the extra-target source (today's channel calls + open trades on stock options) is re-read. */
+export const EXTRA_POLL_MS = 180_000;
+
+/** Why addExtraTarget did (not) admit an underlying. */
+export type ExtraTargetOutcome = 'added' | 'already' | 'capped' | 'not-stock' | 'no-expiry' | 'off';
+
+/**
+ * On-demand stock option chains (a channel call or an open trade on a stock option): each admitted
+ * underlying's nearest-expiry chain at ±strikesAround joins the OI snapshot targets for the rest of
+ * the IST day. At most maxPerDay underlyings a day (first come); the set empties at IST midnight.
+ */
+export interface ExtraTargetsConfig {
+  maxPerDay: number;
+  strikesAround: number;
+  /** Underlying names to admit, re-read every EXTRA_POLL_MS (oldest first). Absent ⇒ only addExtraTarget. */
+  candidates?: (since: Date) => Promise<string[]>;
+}
 
 export interface ChainServiceDeps {
   builder: Pick<ChainBuilder, 'contracts' | 'expiries' | 'contractFor' | 'build' | 'baselineFailures'>;
@@ -37,7 +57,9 @@ export interface ChainServiceDeps {
    * OI snapshots for these always-on underlyings (+ held + viewed today). Absent ⇒ the job is off.
    * Held chains are targets whatever refreshHeld() says: snapshots run with HUB_SERVES_CHAIN off.
    */
-  snapshots?: { core: readonly string[]; writeChainJson?: () => boolean };
+  snapshots?: { core: readonly string[]; writeChainJson?: () => boolean; extra?: ExtraTargetsConfig };
+  /** Stock-futures OI capture (FuturesOiJob), on the snapshot job's 30 s tick. Absent ⇒ off. */
+  futuresOi?: { repo: Pick<OiCaptureRepo, 'futures'> };
   /** Cache capacity (LRU); default 100. */
   maxCache?: number;
   log?: (message: string) => void;
@@ -71,18 +93,31 @@ export class ChainService implements HubChains {
   private readonly unavailable = Object.fromEntries(REASONS.map((r) => [r, 0])) as Record<ChainUnavailable, number>;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly job: OiSnapshotJob | null;
+  private readonly futuresJob: FuturesOiJob | null;
   private jobTimer: ReturnType<typeof setInterval> | null = null;
+  private extra = { day: '', names: [] as string[], capped: 0 };
+  private extraPolledAt = Number.NEGATIVE_INFINITY;
 
   constructor(private readonly d: ChainServiceDeps) {
     this.job = d.snapshots
       ? new OiSnapshotJob({
           targets: (now) => this.snapshotTargets(now),
           contracts: (u, e) => this.d.builder.contracts(u, e),
-          freshChain: (u, e) => this.freshChain(u, e),
+          freshChain: (u, e, s) => this.freshChain(u, e, s),
           repo: d.repo,
           clock: d.clock,
           writeChainJson: d.snapshots.writeChainJson,
           log: d.log,
+        })
+      : null;
+    const futuresRepo = d.futuresOi?.repo;
+    this.futuresJob = futuresRepo
+      ? new FuturesOiJob({
+          repo: { futures: (t) => futuresRepo.futures(t), baseline: (i, b) => d.repo.baseline(i, b), writeOi: (r) => d.repo.writeOi(r) },
+          quoteNow: (refs, lane) => this.d.quoteNow(refs, lane),
+          clock: d.clock,
+          log: d.log,
+          now: () => this.now(),
         })
       : null;
   }
@@ -96,8 +131,12 @@ export class ChainService implements HubChains {
       this.timer = setInterval(() => void this.refreshTick(this.now()), CHAIN_REFRESH_MS);
       this.timer.unref?.();
     }
-    if (this.job && !this.jobTimer) {
-      this.jobTimer = setInterval(() => void this.job?.tick(this.now()), SNAPSHOT_TICK_MS);
+    if ((this.job || this.futuresJob) && !this.jobTimer) {
+      this.jobTimer = setInterval(() => {
+        const now = this.now();
+        void this.job?.tick(now);
+        void this.futuresJob?.tick(now);
+      }, SNAPSHOT_TICK_MS);
       this.jobTimer.unref?.();
     }
   }
@@ -204,21 +243,25 @@ export class ChainService implements HubChains {
     );
   }
 
-  /** A chain built within the last 10 s, else one Routine build; null when it cannot be built. */
-  async freshChain(underlying: string, expiry: string): Promise<HubChain | null> {
+  /**
+   * A chain built within the last 10 s, else one Routine build; null when it cannot be built.
+   * `strikesAround` narrows the build (on-demand stock chains); a cached full chain still serves it.
+   */
+  async freshChain(underlying: string, expiry: string, strikesAround?: number): Promise<HubChain | null> {
     const key = keyOf(underlying, expiry);
     const c = this.cache.get(key);
     if (c && this.now() - c.at < CHAIN_REFRESH_MS) {
       this.touch(key, c);
       return c;
     }
-    const out = await this.build(key, underlying.toUpperCase(), expiry, LANE.ROUTINE);
+    const out = await this.build(key, underlying.toUpperCase(), expiry, LANE.ROUTINE, strikesAround);
     return out.kind === 'ok' ? out.chain : null;
   }
 
   /**
    * Core list (nearest expiry; on its expiry day also the next, so tomorrow's chain has an OI
-   * baseline) ∪ held chains ∪ chains a screen opened today.
+   * baseline) ∪ held chains ∪ chains a screen opened today ∪ today's extra (on-demand stock) chains,
+   * the last at the narrower ExtraTargetsConfig.strikesAround unless another source wants the chain.
    */
   async snapshotTargets(now: number): Promise<SnapshotTarget[]> {
     const keys = new Set<string>([...this.held, ...this.viewedKeys(now)]);
@@ -228,10 +271,74 @@ export class ChainService implements HubChains {
       if (nearest) keys.add(keyOf(name, nearest));
       if (nearest === today && next) keys.add(keyOf(name, next));
     }
-    return [...keys].map((k) => {
+    const narrow = new Map<string, number>();
+    const extraCfg = this.d.snapshots?.extra;
+    if (extraCfg && extraCfg.maxPerDay > 0) {
+      await this.pollExtra(now, extraCfg);
+      for (const name of this.extraNames(now)) {
+        const [nearest, next] = await this.expiries(name);
+        for (const e of nearest === today && next ? [nearest, next] : nearest ? [nearest] : []) {
+          const k = keyOf(name, e);
+          if (!keys.has(k)) narrow.set(k, extraCfg.strikesAround);
+        }
+      }
+    }
+    return [...keys, ...narrow.keys()].map((k) => {
       const [underlying, expiry] = splitKey(k);
-      return { underlying, expiry };
+      const strikesAround = narrow.get(k);
+      return strikesAround === undefined ? { underlying, expiry } : { underlying, expiry, strikesAround };
     });
+  }
+
+  /**
+   * Admit a stock's option chain as an OI snapshot target for the rest of the IST day (a channel call
+   * or an open trade on that stock's options). Indices and the core list are refused (already
+   * captured), and so is a name with no listed option expiry, which would otherwise burn a slot.
+   */
+  async addExtraTarget(name: string, now: number = this.now()): Promise<ExtraTargetOutcome> {
+    const cfg = this.d.snapshots?.extra;
+    if (!cfg || cfg.maxPerDay <= 0) return 'off';
+    const u = name.trim().toUpperCase();
+    if (!u || INDEX_UNDERLYINGS[u] || (this.d.snapshots?.core ?? []).some((c) => c.toUpperCase() === u)) return 'not-stock';
+    const admit = (): ExtraTargetOutcome | null => {
+      this.rollExtra(now);
+      if (this.extra.names.includes(u)) return 'already';
+      if (this.extra.names.length < cfg.maxPerDay) return null;
+      this.extra.capped++;
+      this.warnOnce('extra:capped', `OI extra chains: daily cap ${cfg.maxPerDay} reached; ${u} not captured`);
+      return 'capped';
+    };
+    const early = admit();
+    if (early) return early;
+    if ((await this.expiries(u)).length === 0) return 'no-expiry';
+    // Re-check after the await: a concurrent call may have added the same name or taken the last slot.
+    const late = admit();
+    if (late) return late;
+    this.extra.names.push(u);
+    return 'added';
+  }
+
+  /** Today's admitted extra underlyings, in admission order. */
+  extraNames(now: number = this.now()): string[] {
+    this.rollExtra(now);
+    return [...this.extra.names];
+  }
+
+  /** Re-read the candidate source every EXTRA_POLL_MS; a failure is logged once a day and retried next poll. */
+  private async pollExtra(now: number, cfg: ExtraTargetsConfig): Promise<void> {
+    if (!cfg.candidates || now - this.extraPolledAt < EXTRA_POLL_MS) return;
+    this.extraPolledAt = now;
+    try {
+      const names = await cfg.candidates(new Date(istMidnight(istDay(now))));
+      for (const name of names) await this.addExtraTarget(name, now);
+    } catch (err) {
+      this.warnOnce('extra:candidates', `OI extra-chain candidates failed: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
+  private rollExtra(now: number): void {
+    const day = istDay(now);
+    if (this.extra.day !== day) this.extra = { day, names: [], capped: 0 };
   }
 
   pruneOi(before: Date): Promise<number> {
@@ -253,6 +360,15 @@ export class ChainService implements HubChains {
       snapshot: this.job
         ? { enabled: true, ...this.job.status(this.now()) }
         : { enabled: false, rowsToday: 0, failures: 0, lastAt: {} },
+      extra: {
+        enabled: !!this.job && (this.d.snapshots?.extra?.maxPerDay ?? 0) > 0,
+        maxPerDay: this.d.snapshots?.extra?.maxPerDay ?? 0,
+        today: this.extraNames(),
+        capped: this.extra.capped,
+      },
+      futuresOi: this.futuresJob
+        ? this.futuresJob.status(this.now())
+        : { enabled: false, contracts: 0, rowsToday: 0, callsToday: 0, failures: 0, missingToday: 0, lastAt: null },
     };
   }
 
@@ -300,13 +416,15 @@ export class ChainService implements HubChains {
     return snap && istDay(snap.at) === istDay(now) ? snap : null;
   }
 
-  private build(key: string, u: string, e: string, lane: Lane): Promise<BuildOutcome> {
+  private build(key: string, u: string, e: string, lane: Lane, strikesAround: number = this.d.strikesAround): Promise<BuildOutcome> {
     const existing = this.inflight.get(key);
     if (existing) return existing;
     const started = this.now();
     const hintSpot = this.cache.get(key)?.spot ?? null;
+    // A narrower build is not cached: a screen must never be served a ±5-strike chain as the full one.
+    const cacheable = strikesAround >= this.d.strikesAround;
     const p = this.d.builder
-      .build(u, e, { lane, strikesAround: this.d.strikesAround, hintSpot })
+      .build(u, e, { lane, strikesAround, hintSpot })
       .then((out) => {
         if (out.kind === 'ok') {
           this.builds++;
@@ -316,7 +434,7 @@ export class ChainService implements HubChains {
             this.greeksLocal++;
             this.warnOnce(`greeks:${key}`, `optionGreek unavailable for ${key}; Greeks computed locally from LTP`);
           }
-          this.remember(key, out.chain);
+          if (cacheable) this.remember(key, out.chain);
         } else {
           // Every failed build counts once, whether the caller then gets stale, a snapshot or nothing.
           this.unavailable[out.reason]++;

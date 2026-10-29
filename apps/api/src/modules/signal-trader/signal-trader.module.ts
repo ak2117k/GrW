@@ -23,6 +23,7 @@ import { SignalJudgeService } from './services/signal-judge.service';
 import { SignalContextService } from './services/signal-context.service';
 import { SignalExecutorService } from './services/signal-executor.service';
 import { SignalPaperService } from './services/signal-paper.service';
+import { SignalOiCheckService } from './services/signal-oi-check.service';
 import { SIGNAL_BARS, SignalPaperWatchService, type BarsLike } from './services/signal-paper-watch.service';
 import {
   SIGNAL_FUNDS,
@@ -65,6 +66,7 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
     SignalExecutorService,
     SignalTraderService,
     SignalPaperService,
+    SignalOiCheckService,
     SignalPaperWatchService,
     { provide: SIGNAL_PAPER, useExisting: SignalPaperService },
     {

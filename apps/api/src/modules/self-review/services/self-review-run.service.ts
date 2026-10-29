@@ -23,7 +23,7 @@ import {
 } from '../domain/scorers';
 import { buildSummary, channelStats, mergeChannelInfoStats, topMisses } from '../domain/summary';
 import { probabilitySkill, relativeSkill } from '../domain/skill';
-import { signalTradeStats } from '../domain/signal-trades';
+import { signalPaperDigest, signalTradeStats } from '../domain/signal-trades';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -382,9 +382,11 @@ export class SelfReviewRunService {
       const priorWrong = Object.values(((prior.summary as RunSummary | null)?.byKind ?? {}) as RunSummary['byKind']).reduce((s, k) => s + (k?.wrong ?? 0), 0);
       if (priorWrong >= wrong) return prior.diagnosis as unknown as DiagnosisOutput;
     }
-    if (!this.diagnosis || misses.length === 0) return null;
+    // The signal paper splits (OI verdict / AI judge) go in too: the owner checks the OI check at the nightly review.
+    const signalPaper = signalPaperDigest(summary.signalTrades);
+    if (!this.diagnosis || (misses.length === 0 && !signalPaper)) return null;
     try {
-      const out = await this.diagnosis.diagnose(runId, misses);
+      const out = await this.diagnosis.diagnose(runId, misses, signalPaper ? { signalPaper } : undefined);
       // B persists the diagnosis itself; make sure the run carries it either way.
       if (out) await this.repo.setDiagnosisIfEmpty(runId, out);
       return out;

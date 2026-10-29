@@ -9,6 +9,7 @@ import {
   fundsMethod,
   fundsLine,
   judgeLine,
+  oiLabel,
   modeBadge,
   outcomeLine,
   paperState,
@@ -169,6 +170,20 @@ function PaperSection({ paper }: { paper: NonNullable<SignalOverview['paper']> }
             })}
           </div>
         )}
+        {paper.byOi && (
+          <div className="mt-2" data-testid="paper-by-oi">
+            <p className={cn('text-xs', MUTED)}>Paper by the OI check at entry (record only; gross, from entry / exit / qty):</p>
+            {(['AGREES', 'AGAINST', 'MIXED', 'NO_DATA'] as const).map((k) => {
+              const b = paper.byOi![k];
+              return (
+                <p key={k} className={cn('text-sm', SECONDARY)} data-testid={`paper-oi-${k}`}>
+                  {oiLabel(k)}:{' '}
+                  <span className={TONE[b.gross > 0 ? 'good' : b.gross < 0 ? 'bad' : 'neutral']}>{judgeLine(b)}</span>
+                </p>
+              );
+            })}
+          </div>
+        )}
       </div>
       {paper.rows.length > 0 && (
         <ul className="mt-2 space-y-2">
@@ -190,6 +205,12 @@ function PaperSection({ paper }: { paper: NonNullable<SignalOverview['paper']> }
                   {r.funds ? ` · ${fundsLine(r.funds)}` : ''}
                   {r.trigger === 'broker_reject' ? ' · broker rejected for funds' : ''}
                 </p>
+                {r.oiVerdict && (
+                  <p className={cn('mt-1 text-xs', MUTED)} data-testid="paper-row-oi" title={r.oiSummary ?? undefined}>
+                    <span className={TONE[r.oiVerdict === 'AGREES' ? 'good' : r.oiVerdict === 'AGAINST' ? 'bad' : 'neutral']}>{oiLabel(r.oiVerdict)}</span>
+                    {r.oiSummary ? ` · ${r.oiSummary}` : ''}
+                  </p>
+                )}
               </li>
             );
           })}

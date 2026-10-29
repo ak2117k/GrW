@@ -100,6 +100,16 @@ export default () => ({
     oiSnapshotEnabled: process.env.HUB_OI_SNAPSHOT_ENABLED !== 'false',
     // M5: underlyings that always get OI snapshots (comma-separated master names, exact).
     oiCoreUnderlyings: process.env.HUB_OI_CORE_UNDERLYINGS || 'NIFTY,BANKNIFTY,FINNIFTY,MIDCPNIFTY,CRUDEOIL,NATURALGAS',
+    // SENSEX (BFO, weekly) joins the core OI list whatever HUB_OI_CORE_UNDERLYINGS says. ON by default;
+    // `false` = the rollback (prod sets the core list explicitly, so this is the switch, not that list).
+    oiSensexEnabled: process.env.HUB_OI_SENSEX_ENABLED !== 'false',
+    // Stock (+ index) near-month NFO futures OI + LTP every 3 min from batched FULL quotes. ON by default.
+    oiFuturesEnabled: process.env.HUB_OI_FUTURES_ENABLED !== 'false',
+    // On-demand stock option chains (today's channel calls + open trades on stock options) as OI
+    // snapshot targets for the day: at most this many underlyings a day; 0 = off. Needs the snapshot job.
+    oiExtraMaxPerDay: +(process.env.HUB_OI_EXTRA_MAX_PER_DAY ?? 10),
+    // Strikes each side of ATM for those on-demand chains.
+    oiExtraStrikesAround: +(process.env.HUB_OI_EXTRA_STRIKES_AROUND || 5),
     // M5: strikes each side of ATM in a hub chain (20 → 82 legs → two quote calls).
     chainStrikesAround: +(process.env.HUB_CHAIN_STRIKES_AROUND || 20),
     // MCX 23:55 close windows, "YYYY-MM-DD:YYYY-MM-DD" comma-separated (US-DST-linked).

@@ -14,9 +14,16 @@ export interface SelfReviewLatestView {
   misses: Array<DiagnosisMissOut & { kind?: string | null; symbol?: string | null }>;
   lessonsAdded: Array<{ id: string; key: string; text: string; scope: string; rightCount: number; wrongCount: number; status: string }>;
   proposalsPending: number;
+  /** The diagnosis' read of the signal paper trades split by OI verdict / AI judge call; null when none. */
+  signalPaperAssessment?: string | null;
 }
 
 const MISS_CAP = 15;
+
+function readAssessment(diagnosis: unknown): string | null {
+  const a = diagnosis && typeof diagnosis === 'object' && !Array.isArray(diagnosis) ? (diagnosis as { signalPaperAssessment?: unknown }).signalPaperAssessment : null;
+  return typeof a === 'string' && a.trim() !== '' ? a : null;
+}
 
 /** Reads for the API / night report, and the owner's approve / reject / retire decisions. */
 @Injectable()
@@ -56,11 +63,13 @@ export class SelfReviewService {
         status: run.status,
         summary: run.summary ?? null,
         error: run.error,
+        signalPaperAssessment: readAssessment(run.diagnosis),
       },
       summary: (run.summary as RunSummary | null) ?? null,
       misses,
       lessonsAdded: lessons.map((l) => ({ id: l.id, key: l.key, text: l.text, scope: l.scope, rightCount: l.rightCount, wrongCount: l.wrongCount, status: l.status })),
       proposalsPending,
+      signalPaperAssessment: readAssessment(run.diagnosis),
     };
   }
 

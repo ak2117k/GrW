@@ -108,11 +108,17 @@ export interface JudgeBucket {
   winRate: number | null;
 }
 export type JudgeSplit = Record<'TAKE' | 'SKIP' | 'NONE', JudgeBucket>;
+/** OI check at the paper open (record only): does the OI positioning agree with the trade's direction? */
+export type OiVerdict = 'AGREES' | 'AGAINST' | 'MIXED' | 'NO_DATA';
+export type OiSplit = Record<OiVerdict, JudgeBucket>;
 
 export interface PaperRow {
   decisionId: string;
   /** The AI entry judge's call (learning mode paper-trades SKIPs too). */
   aiDecision?: 'TAKE' | 'SKIP' | 'NONE';
+  /** The OI check at the paper open and its one-line reasoning (null = none recorded). */
+  oiVerdict?: OiVerdict;
+  oiSummary?: string | null;
   decidedAt: string;
   channel: string | null;
   underlying: string | null;
@@ -128,7 +134,7 @@ export interface SignalOverview {
   /** Owner toggle, stored on the app settings row (user_settings.signalPaperOnNoFunds). */
   paperOnNoFunds?: { enabled: boolean; store: string };
   /** PAPER (no funds) decisions of the last `lookbackDays` with their outcomes, and live over the same window. */
-  paper?: { lookbackDays: number; rows: PaperRow[]; summary: TradeOutcomeSummary; byJudge?: JudgeSplit; live: TradeOutcomeSummary };
+  paper?: { lookbackDays: number; rows: PaperRow[]; summary: TradeOutcomeSummary; byJudge?: JudgeSplit; byOi?: OiSplit; live: TradeOutcomeSummary };
   caps: { maxLots: number; maxLossPerTrade: number; maxTradesPerDay: number; dailyLossStop: number; entryTolerancePct: number; product: string; triggerWaitMin?: number; triggerMaxPending?: number; engineSl?: boolean };
   /** Armed triggers waiting for their price. */
   pending?: PendingTriggerRow[];
@@ -244,6 +250,11 @@ export function judgeLine(b: JudgeBucket | null | undefined): string {
   const parts = [`${b.n} trade${b.n === 1 ? '' : 's'}`, `${b.closed} closed`, `${b.wins}W/${b.losses}L`, `gross ${rupee(b.gross)}`];
   if (b.open) parts.push(`${b.open} open (mark ${rupee(b.openMark)})`);
   return parts.join(' · ');
+}
+
+/** "OI agrees" / "OI against" / "OI mixed" / "no OI data" for a paper row or an OI bucket. */
+export function oiLabel(v: OiVerdict | null | undefined): string {
+  return v === 'AGREES' ? 'OI agrees' : v === 'AGAINST' ? 'OI against' : v === 'MIXED' ? 'OI mixed' : 'no OI data';
 }
 
 /** One paper row's state: open with its mark, closed with its exit, or why it never opened. */

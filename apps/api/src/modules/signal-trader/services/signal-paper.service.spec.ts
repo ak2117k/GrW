@@ -48,6 +48,29 @@ describe('SignalPaperService', () => {
     expect(t.instruments.upsertInstrument).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'NIFTY28OCT2625000CE', token: '111', exchange: 'NFO', name: 'NIFTY', lotSize: 75, strike: 25000, optionType: 'CE' }));
   });
 
+  it('the OI check is fired after the trade opens, never awaited: a hanging or throwing check cannot block or fail the open', async () => {
+    const make = (record: jest.Mock) => {
+      const t = makePaper();
+      const svc = new SignalPaperService(t.repo as never, t.exec as never, t.trades as never, t.instruments as never, { record } as never);
+      return { svc, t };
+    };
+    const hang = jest.fn(() => new Promise(() => undefined));
+    const a = make(hang);
+    expect(await a.svc.open(input)).toEqual({ ok: true, tradeId: 't1', entryPrice: 101.52, duplicate: false });
+    await new Promise((r) => setImmediate(r));
+    expect(hang).toHaveBeenCalledWith(expect.objectContaining({ decisionId: 'dec_1', expiry: '2026-10-28', signal: input.signal, plan }));
+    const boom = jest.fn(() => { throw new Error('db down'); });
+    expect(await make(boom).svc.open(input)).toMatchObject({ ok: true, tradeId: 't1' });
+    await new Promise((r) => setImmediate(r));
+    expect(boom).toHaveBeenCalled();
+    // A duplicate open does not re-check.
+    const dup = jest.fn(async () => undefined);
+    const t = makePaper({ existing: { id: 't0', entryPrice: 100 } });
+    await new SignalPaperService(t.repo as never, t.exec as never, t.trades as never, t.instruments as never, { record: dup } as never).open(input);
+    await new Promise((r) => setImmediate(r));
+    expect(dup).not.toHaveBeenCalled();
+  });
+
   it('a paper-path failure is recorded, never thrown', async () => {
     const t = makePaper({ exec: jest.fn(async () => { throw new Error('Trade rejected: Max concurrent positions reached'); }) });
     expect(await t.svc.open(input)).toEqual({ ok: false, reason: 'Trade rejected: Max concurrent positions reached' });

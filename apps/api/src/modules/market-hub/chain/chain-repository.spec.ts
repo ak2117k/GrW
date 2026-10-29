@@ -11,7 +11,7 @@ function prismaMock() {
 }
 
 describe('PrismaChainRepo', () => {
-  it('contracts match the underlying name exactly, NFO/MCX CE/PE, one expiry day with the master convention', async () => {
+  it('contracts match the underlying name exactly, NFO/BFO/MCX CE/PE, one expiry day with the master convention', async () => {
     const prisma = prismaMock();
     prisma.instrument.findMany.mockResolvedValue([
       { id: 'i1', token: '40001', symbol: 'NIFTY13OCT2625000CE', exchange: 'NFO', strike: 25000, optionType: 'CE', lotSize: 75 },
@@ -21,7 +21,7 @@ describe('PrismaChainRepo', () => {
     const where = prisma.instrument.findMany.mock.calls[0][0].where;
     expect(where).toEqual({
       name: 'NIFTY',
-      exchange: { in: ['NFO', 'MCX'] },
+      exchange: { in: ['NFO', 'BFO', 'MCX'] },
       optionType: { in: ['CE', 'PE'] },
       isActive: true,
       expiry: { gte: localMidnight('2026-10-13'), lt: localMidnight('2026-10-14') },
@@ -63,17 +63,17 @@ describe('PrismaChainRepo', () => {
     expect(prisma.instrument.findFirst.mock.calls[0][0]).toEqual({ where: { symbol: 'RELIANCE-EQ', exchange: 'NSE' } });
   });
 
-  it('writes OI rows with a NULL oiChange when there was no baseline', async () => {
+  it('writes OI rows with a NULL oiChange when there was no baseline, and a NULL ltp when none was quoted', async () => {
     const prisma = prismaMock();
     const repo = new PrismaChainRepo(prisma as any);
     const at = new Date('2026-10-13T05:00:00Z');
     await repo.writeOi([
       { instrumentId: 'i1', oi: 1000, oiChange: null, volume: 5, at },
-      { instrumentId: 'i2', oi: 2000, oiChange: -50, volume: 6, at },
+      { instrumentId: 'i2', oi: 2000, oiChange: -50, volume: 6, ltp: 101.5, at },
     ]);
     expect(prisma.oISnapshot.createMany.mock.calls[0][0].data).toEqual([
-      { instrumentId: 'i1', oi: BigInt(1000), oiChange: null, volume: BigInt(5), timestamp: at },
-      { instrumentId: 'i2', oi: BigInt(2000), oiChange: BigInt(-50), volume: BigInt(6), timestamp: at },
+      { instrumentId: 'i1', oi: BigInt(1000), oiChange: null, volume: BigInt(5), ltp: null, timestamp: at },
+      { instrumentId: 'i2', oi: BigInt(2000), oiChange: BigInt(-50), volume: BigInt(6), ltp: 101.5, timestamp: at },
     ]);
   });
 
@@ -124,5 +124,55 @@ describe('PrismaChainRepo', () => {
     await expect(repo.baseline(['i1', 'i2'], new Date('2026-10-12T18:30:00Z'))).resolves.toEqual(new Map([['i1', 900]]));
     await expect(repo.baseline([], new Date())).resolves.toEqual(new Map());
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it('describe covers BFO (SENSEX) contracts, never cash', async () => {
+    const prisma = prismaMock();
+    prisma.instrument.findMany.mockResolvedValue([{ name: 'SENSEX', expiry: localMidnight('2026-10-29') }]);
+    const repo = new PrismaChainRepo(prisma as any);
+    await expect(
+      repo.describe([
+        { exchange: 'BFO', token: '8001', symbol: 'SENSEX2610282000CE' },
+        { exchange: 'NSE', token: '2885', symbol: 'RELIANCE-EQ' },
+      ]),
+    ).resolves.toEqual([{ name: 'SENSEX', expiry: '2026-10-29' }]);
+    expect(prisma.instrument.findMany.mock.calls[0][0].where).toEqual({ OR: [{ exchange: 'BFO', token: '8001' }] });
+  });
+
+  it('futures: active NFO FUT rows expiring on/after today, as upper-cased names and host-local expiries', async () => {
+    const prisma = prismaMock();
+    prisma.instrument.findMany.mockResolvedValue([
+      { id: 'f1', token: '52001', symbol: 'RELIANCE27OCT26FUT', name: 'reliance', expiry: localMidnight('2026-10-27') },
+      { id: 'f2', token: '52002', symbol: 'BROKEN26FUT', name: null, expiry: localMidnight('2026-10-27') },
+    ]);
+    const repo = new PrismaChainRepo(prisma as any);
+    await expect(repo.futures('2026-10-12')).resolves.toEqual([
+      { instrumentId: 'f1', ref: { exchange: 'NFO', token: '52001', symbol: 'RELIANCE27OCT26FUT' }, name: 'RELIANCE', expiry: '2026-10-27' },
+    ]);
+    expect(prisma.instrument.findMany.mock.calls[0][0].where).toEqual({
+      exchange: 'NFO', optionType: null, isActive: true, symbol: { endsWith: 'FUT' }, expiry: { gte: localMidnight('2026-10-12') },
+    });
+  });
+
+  it("optionCallUnderlyings: today's NFO option calls (by token) then open option trades, de-duplicated in order", async () => {
+    const prisma: any = {
+      ...prismaMock(),
+      telegramSignal: { findMany: jest.fn().mockResolvedValue([{ token: 'T1' }, { token: 'T2' }, { token: 'T1' }, { token: 'TFUT' }]) },
+      trade: { findMany: jest.fn().mockResolvedValue([{ instrument: { name: 'cipla' } }, { instrument: { name: 'KOTAKBANK' } }]) },
+    };
+    prisma.instrument.findMany.mockResolvedValue([
+      { token: 'T1', name: 'KOTAKBANK' },
+      { token: 'T2', name: 'ADANIPORTS' },
+    ]);
+    const repo = new PrismaChainRepo(prisma);
+    const since = new Date('2026-10-11T18:30:00Z');
+    await expect(repo.optionCallUnderlyings(since)).resolves.toEqual(['KOTAKBANK', 'ADANIPORTS', 'CIPLA']);
+    expect(prisma.telegramSignal.findMany.mock.calls[0][0].where).toEqual({ createdAt: { gte: since }, exchange: 'NFO', token: { not: null } });
+    expect(prisma.trade.findMany.mock.calls[0][0].where).toEqual({
+      status: { in: ['OPEN', 'PARTIALLY_FILLED'] },
+      instrument: { exchange: 'NFO', optionType: { in: ['CE', 'PE'] } },
+    });
+    // Only option contracts resolve a call's token (a futures call names no chain).
+    expect(prisma.instrument.findMany.mock.calls[0][0].where).toEqual({ exchange: 'NFO', token: { in: ['T1', 'T2', 'TFUT'] }, optionType: { in: ['CE', 'PE'] } });
   });
 });

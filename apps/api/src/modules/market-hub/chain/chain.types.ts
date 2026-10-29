@@ -31,7 +31,7 @@ export interface HubChain {
   underlying: string;
   /** YYYY-MM-DD */
   expiry: string;
-  /** NFO or MCX: the venue whose session decides fresh / market-closed. */
+  /** NFO, BFO (SENSEX) or MCX: the venue whose session decides fresh / market-closed. */
   exchange: HubExchange;
   spot: number | null;
   /** ms epoch the prices were current (the quote call's completion). */
@@ -46,7 +46,35 @@ export interface OiRow {
   oi: number;
   oiChange: number | null;
   volume: number;
+  /** LTP in rupees from the same quote; absent / ≤ 0 is stored as NULL. */
+  ltp?: number | null;
   at: Date;
+}
+
+/** One NFO future from the DB instrument master (the stock-futures OI capture). */
+export interface FutureContract {
+  instrumentId: string;
+  ref: InstrumentRef;
+  /** Master underlying name, upper-cased ('RELIANCE', 'NIFTY'). */
+  name: string;
+  /** YYYY-MM-DD */
+  expiry: string;
+}
+
+/** The stock-futures OI capture's counters (`/healthz/detail` via the hub status). */
+export interface FuturesOiStatus {
+  enabled: boolean;
+  /** Futures in today's capture set. */
+  contracts: number;
+  rowsToday: number;
+  /** Quote calls (≤ 50 tokens each) sent today. */
+  callsToday: number;
+  /** Runs that wrote nothing, or threw (an empty broker answer is a failure, never a throw). */
+  failures: number;
+  /** Contracts a quote came back without (no tick / no OI) today. */
+  missingToday: number;
+  /** ms epoch of the last run that wrote rows; null = none today. */
+  lastAt: number | null;
 }
 
 /** Why a chain could not be built (REST 503 reason). */
@@ -80,4 +108,7 @@ export interface ChainStatus {
   held: number;
   viewedToday: number;
   snapshot: { enabled: boolean; rowsToday: number; failures: number; lastAt: Record<string, number> };
+  /** On-demand stock option chains admitted as OI snapshot targets today; `capped` = refused by the daily cap. */
+  extra: { enabled: boolean; maxPerDay: number; today: string[]; capped: number };
+  futuresOi: FuturesOiStatus;
 }

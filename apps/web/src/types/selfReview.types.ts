@@ -50,9 +50,24 @@ export interface SelfReviewSummary {
   skill?: Partial<Record<VerificationKind | string, { session: SkillStats; rolling20: SkillStats }>>;
   /** Telegram signal trades: live vs PAPER (made when the account lacked funds), session + last 20 sessions. */
   signalTrades?: {
-    session: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome };
-    rolling20: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome };
+    session: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome; paperByOi?: Record<OiVerdict, PaperGrossBucket> };
+    rolling20: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome; paperByOi?: Record<OiVerdict, PaperGrossBucket> };
   };
+}
+
+/** The OI check recorded at a signal paper trade's open (record only). */
+export type OiVerdict = 'AGREES' | 'AGAINST' | 'MIXED' | 'NO_DATA';
+
+/** A signal paper bucket on the GROSS basis: side × (exit − entry) × qty of the closed trades (never the booked pnl). */
+export interface PaperGrossBucket {
+  n: number;
+  closed: number;
+  open: number;
+  wins: number;
+  losses: number;
+  gross: number;
+  openMark: number;
+  winRate: number | null;
 }
 
 export interface SignalTradeOutcome {
@@ -91,6 +106,8 @@ export interface SelfReviewRun {
   status: RunStatus | string;
   summary: SelfReviewSummary | null;
   error?: string | null;
+  /** The diagnosis' read of the signal paper trades by OI verdict / AI judge (latest run only). */
+  signalPaperAssessment?: string | null;
 }
 
 /** One diagnosed miss from the run's LLM diagnosis. */

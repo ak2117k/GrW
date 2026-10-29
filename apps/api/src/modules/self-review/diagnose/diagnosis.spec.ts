@@ -156,13 +156,13 @@ describe('DiagnosisService', () => {
     const create = jest.fn().mockResolvedValue(reply('```json\n{"misses":[{"refIds":["r1"],"cause":"gap","category":"THESIS_WRONG","lessonKey":"old-key"}]}\n```'));
     const { svc } = make(create, { SENTINEL_MODEL_TRIGGERED: 'claude-x', SENTINEL_EFFORT_TRIGGERED: 'medium' });
     const res = await svc.diagnose('run1', [miss('r1'), miss('r2')]);
-    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd2' });
+    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd3' });
     expect(res.misses).toEqual([{ refIds: ['r1'], cause: 'gap', category: 'THESIS_WRONG', lessonKey: 'old-key' }]);
     expect(create).toHaveBeenCalledTimes(1);
     const req = create.mock.calls[0][0];
     expect(req).toMatchObject({ model: 'claude-x', max_tokens: DIAGNOSIS_MAX_TOKENS, output_config: { effort: 'medium', format: { type: 'json_schema', schema: DIAGNOSIS_SCHEMA } } });
     expect(JSON.parse(req.messages[0].content).misses.map((m: MissInput) => m.refId)).toEqual(['r1', 'r2']);
-    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd2', model: 'claude-x' });
+    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd3', model: 'claude-x' });
   });
 
   it('checks the reply against the scorecard points it was sent', async () => {
@@ -198,6 +198,24 @@ describe('DiagnosisService', () => {
     expect(res.misses).toEqual([]);
     expect(res.reason).toBeTruthy();
     expect(diagnosisForRun(res)).toBeNull();
+  });
+
+  it('the signal paper splits go in (even with no misses) and the assessment comes back; the prompt asks for "insufficient sample"', async () => {
+    const signalPaper = { rolling20: { byOi: { AGAINST: { n: 4, closed: 4, wins: 1, losses: 3, winRate: 0.25, gross: -2100 } } }, sessionTrades: [{ symbol: 'CRUDEOIL17NOV265400CE', oi: 'AGAINST', oiWhy: 'AGAINST (chain …)' }] };
+    const create = jest.fn().mockResolvedValue(reply('{"misses":[],"signalPaperAssessment":"  AGAINST 1W/3L −₹2,100 vs AGREES 2W/0L; insufficient sample.  "}'));
+    const res = await make(create).svc.diagnose('r', [], { signalPaper });
+    expect(create).toHaveBeenCalledTimes(1);
+    const req = create.mock.calls[0][0];
+    expect(JSON.parse(req.messages[0].content).signalPaper).toEqual(signalPaper);
+    expect(req.system[0].text).toMatch(/AGAINST trades underperformed the AGREES/);
+    expect(req.system[0].text).toMatch(/fewer than 10 closed trades .* "insufficient sample"/);
+    expect(res).toMatchObject({ status: 'OK', misses: [], signalPaperAssessment: 'AGAINST 1W/3L −₹2,100 vs AGREES 2W/0L; insufficient sample.' });
+    expect(diagnosisForRun(res)?.signalPaperAssessment).toBe(res.signalPaperAssessment);
+    // Without signalPaper, an assessment in the reply is ignored and the message carries no signalPaper.
+    const c2 = jest.fn().mockResolvedValue(reply('{"misses":[],"signalPaperAssessment":"x"}'));
+    const r2 = await make(c2).svc.diagnose('r', [miss('r1')]);
+    expect(r2.signalPaperAssessment).toBeUndefined();
+    expect(JSON.parse(c2.mock.calls[0][0].messages[0].content).signalPaper).toBeUndefined();
   });
 
   it('diagnoses without lessons when they cannot be read', async () => {

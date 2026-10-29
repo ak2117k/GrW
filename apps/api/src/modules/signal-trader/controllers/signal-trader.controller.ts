@@ -4,7 +4,8 @@ import { SignalTraderRepository } from '../repositories/signal-trader.repository
 import { SignalTraderService } from '../services/signal-trader.service';
 import { istDayStart, slEnforceability } from '../domain/execution';
 import { decisionIdFromTags } from '../domain/paper';
-import { judgeCallOf, paperByJudge, paperSummary, liveSummary } from '../domain/paper-summary';
+import { judgeCallOf, paperByJudge, paperByOi, paperSummary, liveSummary } from '../domain/paper-summary';
+import { oiVerdictOf } from '../domain/oi-check';
 import { readTrigger } from '../domain/trigger';
 
 /** How far back the Paper (no funds) section looks (analysis needs more than today). */
@@ -155,6 +156,9 @@ export class SignalTraderController {
         paperError: (plan?.paper as { status?: string; reason?: string } | undefined)?.status === 'FAILED' ? ((plan?.paper as { reason?: string }).reason ?? 'failed') : null,
         // The AI entry judge's call (learning mode trades every call, TAKE or SKIP).
         aiDecision: judgeCallOf(d.judge),
+        // The OI check at the paper open (record only, domain/oi-check).
+        oiVerdict: oiVerdictOf(d.oiCheck),
+        oiSummary: oiSummaryOf(d.oiCheck),
         trade: t
           ? { id: t.id, status: t.status, entryPrice: t.entryPrice, exitPrice: t.exitPrice, pnl: t.pnl, exitReasonTag: t.exitReasonTag, exitTime: t.exitTime }
           : null,
@@ -167,6 +171,13 @@ export class SignalTraderController {
         return { aiDecision: judgeCallOf(d.judge), trade: t ? { status: t.status, side: t.side, quantity: t.quantity, entryPrice: t.entryPrice, exitPrice: t.exitPrice, pnl: t.pnl } : null };
       }),
     );
+    // The same split by the OI check's verdict at entry (does "OI against" lose?).
+    const byOi = paperByOi(
+      decisions.map((d) => {
+        const t = byDecision.get(d.id) ?? null;
+        return { oiVerdict: oiVerdictOf(d.oiCheck), trade: t ? { status: t.status, side: t.side, quantity: t.quantity, entryPrice: t.entryPrice, exitPrice: t.exitPrice, pnl: t.pnl } : null };
+      }),
+    );
     // The live signal trades over the same window, for the side-by-side comparison.
     const liveOrders = await this.repo.ordersSince(since);
     const liveTrackers = new Map((await this.repo.trackersByIds(liveOrders.map((o) => o.trackerId).filter((x): x is string => !!x))).map((t) => [t.id, t]));
@@ -176,8 +187,14 @@ export class SignalTraderController {
         return { status: o.status, trackerStatus: t?.status ?? null, pnl: t?.pnl ?? null };
       }),
     );
-    return { lookbackDays: PAPER_LOOKBACK_DAYS, rows, summary: paperSummary(rows.map((r) => r.trade)), byJudge, live };
+    return { lookbackDays: PAPER_LOOKBACK_DAYS, rows, summary: paperSummary(rows.map((r) => r.trade)), byJudge, byOi, live };
   }
+}
+
+/** A stored OI check's one-line reasoning for the row (null when none was recorded). */
+function oiSummaryOf(check: unknown): string | null {
+  const s = check && typeof check === 'object' && !Array.isArray(check) ? (check as { summary?: unknown }).summary : null;
+  return typeof s === 'string' ? s.slice(0, 400) : null;
 }
 
 /** The judge's packet is large; the page needs the verdict, not the evidence. */

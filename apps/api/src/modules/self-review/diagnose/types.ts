@@ -54,6 +54,11 @@ export interface DiagnosedMiss {
   dropped?: string;
 }
 
+/** Run-level context beside the misses. `signalPaper` = signal-trades' signalPaperDigest (null/absent = none). */
+export interface DiagnosisContext {
+  signalPaper?: unknown;
+}
+
 export type DiagnosisStatus = 'OK' | 'SKIPPED' | 'FAILED';
 
 /**
@@ -70,10 +75,12 @@ export interface DiagnosisResult {
   dropped: number;
   model?: string;
   promptVersion: string;
+  /** The diagnosis' read of the signal paper splits by OI verdict / judge call (observation only). */
+  signalPaperAssessment?: string;
 }
 
 /** What to store on `self_review_runs.diagnosis`: the misses on OK, else null. */
-export function diagnosisForRun(result: DiagnosisResult | null | undefined): { misses: DiagnosedMiss[]; promptVersion: string; model?: string } | null {
+export function diagnosisForRun(result: DiagnosisResult | null | undefined): { misses: DiagnosedMiss[]; promptVersion: string; model?: string; signalPaperAssessment?: string } | null {
   if (!result || result.status !== 'OK') return null;
-  return { misses: result.misses, promptVersion: result.promptVersion, model: result.model };
+  return { misses: result.misses, promptVersion: result.promptVersion, model: result.model, ...(result.signalPaperAssessment ? { signalPaperAssessment: result.signalPaperAssessment } : {}) };
 }

@@ -3,7 +3,7 @@ import { SessionClock } from '../session-clock';
 import { MemoryChainRepo } from '../testing/memory-chain-repo';
 import type { BuildOutcome } from './chain-builder';
 import type { ChainContract, HubChain } from './chain.types';
-import { CHAIN_AWAIT_DEADLINE_MS, ChainService, type ChainServiceDeps } from './chain-service';
+import { CHAIN_AWAIT_DEADLINE_MS, ChainService, EXTRA_POLL_MS, type ChainServiceDeps } from './chain-service';
 
 const IST = (local: string) => Date.parse(`${local}Z`) - 5.5 * 3600_000;
 const E = '2026-10-13';
@@ -297,5 +297,105 @@ describe('ChainService', () => {
   it('without snapshots deps the job is off and reported disabled', () => {
     const { svc } = service('2026-10-12T10:00:00');
     expect(svc.status().snapshot).toEqual({ enabled: false, rowsToday: 0, failures: 0, lastAt: {} });
+    expect(svc.status().futuresOi.enabled).toBe(false);
+    expect(svc.status().extra).toEqual({ enabled: false, maxPerDay: 0, today: [], capped: 0 });
+  });
+
+  describe('extra (on-demand stock) chain targets', () => {
+    const extraService = (start: string, extra: Partial<NonNullable<NonNullable<ChainServiceDeps['snapshots']>['extra']>> = {}) => {
+      const h = service(start, { snapshots: { core: ['NIFTY'], extra: { maxPerDay: 2, strikesAround: 5, ...extra } } });
+      const listed = new Set(['NIFTY', 'KOTAKBANK', 'CIPLA', 'TVSMOTOR']);
+      h.deps.builder.expiries = async (u) => (listed.has(u) ? [E] : []);
+      return h;
+    };
+
+    it('an admitted stock is a target at the narrow strike count; indices, the core list and unlisted names are refused', async () => {
+      const { svc, now } = extraService('2026-10-12T10:00:00');
+      await expect(svc.addExtraTarget('kotakbank')).resolves.toBe('added');
+      await expect(svc.addExtraTarget('KOTAKBANK')).resolves.toBe('already');
+      await expect(svc.addExtraTarget('NIFTY')).resolves.toBe('not-stock');
+      await expect(svc.addExtraTarget('SENSEX')).resolves.toBe('not-stock');
+      await expect(svc.addExtraTarget('NOSUCH')).resolves.toBe('no-expiry');
+      const t = await svc.snapshotTargets(now());
+      expect(t).toEqual([
+        { underlying: 'NIFTY', expiry: E },
+        { underlying: 'KOTAKBANK', expiry: E, strikesAround: 5 },
+      ]);
+      expect(svc.status().extra).toEqual({ enabled: true, maxPerDay: 2, today: ['KOTAKBANK'], capped: 0 });
+    });
+
+    it('caps the day at maxPerDay (first come), counts refusals, and empties at IST midnight', async () => {
+      const log = jest.fn();
+      const h = extraService('2026-10-12T10:00:00');
+      (h.deps as { log?: (m: string) => void }).log = log;
+      await h.svc.addExtraTarget('KOTAKBANK');
+      await h.svc.addExtraTarget('CIPLA');
+      await expect(h.svc.addExtraTarget('TVSMOTOR')).resolves.toBe('capped');
+      await expect(h.svc.addExtraTarget('TVSMOTOR')).resolves.toBe('capped');
+      expect(h.svc.status().extra).toEqual(expect.objectContaining({ today: ['KOTAKBANK', 'CIPLA'], capped: 2 }));
+      h.advance(24 * 3600_000);
+      expect(h.svc.extraNames()).toEqual([]);
+      await expect(h.svc.addExtraTarget('TVSMOTOR')).resolves.toBe('added');
+    });
+
+    it('maxPerDay 0 is off', async () => {
+      const { svc } = extraService('2026-10-12T10:00:00', { maxPerDay: 0 });
+      await expect(svc.addExtraTarget('KOTAKBANK')).resolves.toBe('off');
+      expect(svc.status().extra.enabled).toBe(false);
+    });
+
+    it('polls the candidate source at most every 3 minutes, from IST midnight; a failure never breaks the targets', async () => {
+      const candidates = jest.fn().mockResolvedValueOnce(['NIFTY', 'CIPLA']).mockRejectedValueOnce(new Error('db down'));
+      const h = extraService('2026-10-12T10:00:00', { candidates });
+      expect((await h.svc.snapshotTargets(h.now())).map((x) => x.underlying)).toEqual(['NIFTY', 'CIPLA']);
+      expect(candidates.mock.calls[0][0]).toEqual(new Date(IST('2026-10-12T00:00:00')));
+      h.advance(60_000);
+      await h.svc.snapshotTargets(h.now());
+      expect(candidates).toHaveBeenCalledTimes(1);
+      h.advance(EXTRA_POLL_MS);
+      expect((await h.svc.snapshotTargets(h.now())).map((x) => x.underlying)).toEqual(['NIFTY', 'CIPLA']);
+      expect(candidates).toHaveBeenCalledTimes(2);
+    });
+
+    it('a chain another source already targets keeps the full width', async () => {
+      const { svc, now } = extraService('2026-10-12T10:00:00');
+      await svc.chain('CIPLA', E, { screen: true });
+      await svc.addExtraTarget('CIPLA');
+      expect(await svc.snapshotTargets(now())).toEqual([
+        { underlying: 'CIPLA', expiry: E },
+        { underlying: 'NIFTY', expiry: E },
+      ]);
+    });
+
+    it('a narrow build is passed its strike count and is not cached for screens', async () => {
+      const h = service('2026-10-12T10:00:00');
+      const widths: number[] = [];
+      h.deps.builder.build = async (u, _e, o) => {
+        widths.push(o.strikesAround);
+        return { kind: 'ok', chain: chainAt(u, h.now()) };
+      };
+      await h.svc.freshChain('NIFTY', E, 5);
+      await h.svc.freshChain('NIFTY', E, 5);
+      await h.svc.freshChain('NIFTY', E);
+      await h.svc.freshChain('NIFTY', E, 5);
+      expect(widths).toEqual([5, 5, 20]); // the full chain (cached) then serves the narrow request
+    });
+  });
+
+  describe('futures OI job wiring', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('runs on the snapshot tick even with the option snapshots off, and reports its status', async () => {
+      const fut = { instrumentId: 'f1', ref: { exchange: 'NFO' as const, token: 'F1', symbol: 'RELIANCE27OCT26FUT' }, name: 'RELIANCE', expiry: '2026-10-27' };
+      const quoteNow = jest.fn(async () => new Map([['NFO:F1', { kind: 'ok' as const, tick: { token: 'F1', symbol: '', ltp: 1400, open: 0, high: 0, low: 0, close: 0, volume: 10, oi: 5000, timestamp: new Date() } }]]));
+      jest.setSystemTime(IST('2026-10-12T10:00:00'));
+      const h = service('2026-10-12T10:00:00', { quoteNow, futuresOi: { repo: { futures: async () => [fut] } } });
+      h.svc.start();
+      await jest.advanceTimersByTimeAsync(30_000);
+      h.svc.stop();
+      expect(h.repo.oiRows).toEqual([expect.objectContaining({ instrumentId: 'f1', oi: 5000, ltp: 1400 })]);
+      expect(h.svc.status().futuresOi).toEqual(expect.objectContaining({ enabled: true, contracts: 1, rowsToday: 1, callsToday: 1 }));
+    });
   });
 });

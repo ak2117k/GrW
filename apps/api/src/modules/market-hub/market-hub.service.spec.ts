@@ -1,5 +1,5 @@
 import { HubEngine } from './hub-engine';
-import { MarketHubService, chainStrikesAround } from './market-hub.service';
+import { MarketHubService, chainStrikesAround, configInt, oiCoreUnderlyings } from './market-hub.service';
 
 function config(values: Record<string, unknown>) {
   return { get: jest.fn((k: string) => values[k]) };
@@ -132,6 +132,24 @@ describe('MarketHubService', () => {
     expect(chainStrikesAround(1)).toBe(1);
     expect(chainStrikesAround(12.9)).toBe(12);
     expect(chainStrikesAround('15')).toBe(15);
+  });
+
+  it('oiCoreUnderlyings: upper-cased, de-duplicated, plus SENSEX while its switch is on', () => {
+    expect(oiCoreUnderlyings(' nifty, BANKNIFTY ,,nifty', true)).toEqual(['NIFTY', 'BANKNIFTY', 'SENSEX']);
+    expect(oiCoreUnderlyings('NIFTY,SENSEX', true)).toEqual(['NIFTY', 'SENSEX']);
+    expect(oiCoreUnderlyings('NIFTY', false)).toEqual(['NIFTY']);
+    expect(oiCoreUnderlyings(undefined, true)).toEqual(['SENSEX']);
+  });
+
+  it('configInt: an integer at or above min, rounded down; anything else is the fallback', () => {
+    expect(configInt(undefined, 10, 0)).toBe(10);
+    expect(configInt('', 10, 0)).toBe(10);
+    expect(configInt('abc', 10, 0)).toBe(10);
+    expect(configInt(Number.NaN, 10, 0)).toBe(10);
+    expect(configInt(-1, 10, 0)).toBe(10);
+    expect(configInt(0, 10, 0)).toBe(0);
+    expect(configInt('7.9', 10, 0)).toBe(7);
+    expect(configInt(0, 5, 1)).toBe(5);
   });
 
   it('the browser hub can unwatch, and its outcomes land in status().consumers.browser', async () => {

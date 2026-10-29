@@ -8,7 +8,7 @@ import { LESSON_TEXT_MAX, type LessonRecord } from '../lessons/types';
 import { MISS_CATEGORIES, type DiagnosedMiss, type MissCategory, type MissInput } from './types';
 
 /** Bump when the prompt text or the schema changes; stored on the run's diagnosis. */
-export const DIAGNOSIS_PROMPT_VERSION = 'd2';
+export const DIAGNOSIS_PROMPT_VERSION = 'd3';
 
 /** At most this many misses go into one call (contract). */
 export const MAX_MISSES = 15;
@@ -24,6 +24,10 @@ const INPUTS_EXCERPT_MAX = 6000;
 const DETAILS_EXCERPT_MAX = 1200;
 const CAUSE_MAX = 500;
 const MAX_ACTIVE_LESSONS_SHOWN = 30;
+/** The signal paper-trade assessment is clamped to this. */
+export const PAPER_ASSESSMENT_MAX = 1200;
+/** Below this many CLOSED trades in a bucket the assessment must say "insufficient sample". */
+export const PAPER_MIN_SAMPLE = 10;
 
 export const DIAGNOSIS_SCHEMA = {
   type: 'object',
@@ -50,6 +54,7 @@ export const DIAGNOSIS_SCHEMA = {
         },
       },
     },
+    signalPaperAssessment: { type: 'string' },
   },
 } as const;
 
@@ -72,7 +77,8 @@ export const DIAGNOSIS_SYSTEM_PROMPT = [
   `- proposalTarget must be one of: ${Object.keys(TUNABLES).join(', ')}. Anything else is discarded.`,
   'One session is one observation: several positions that went wrong on the same day for the same market reason are one case, not several.',
   'Rules: no lesson for NOISE; never a lesson or proposal that loosens a hard risk limit (max daily loss, position size, kill switch, stop or green floor); do not invent data that is not in the input; one miss may be left without a lesson.',
-  'Answer ONLY with JSON: {"misses":[{"refIds","cause","category","lessonKey?","lessonText?","scope?","contradicts?","blamedFactors?","proposalTarget?","proposedValue?"}]}.',
+  `When the input has signalPaper (the Telegram-signal learning-mode paper trades, split by the OI check recorded at entry — AGREES / AGAINST / MIXED / NO_DATA — and by the AI entry judge's call TAKE / SKIP / NONE, for the session and the rolling 20 sessions, with the session's trades and each OI check's one-line reasoning), also return signalPaperAssessment: two to four plain sentences on whether the AGAINST trades underperformed the AGREES ones (win rate and GROSS ₹ of the closed trades — side × (exit − entry) × qty, see signalPaper.basis; the booked P&L is not used) and whether the judge's TAKEs beat its SKIPs. Name the numbers you used. When either compared bucket has fewer than ${PAPER_MIN_SAMPLE} closed trades in the rolling window, say "insufficient sample" and draw no conclusion. This is an observation for the owner, never a lesson or a proposal. Leave signalPaperAssessment out when there is no signalPaper.`,
+  'Answer ONLY with JSON: {"misses":[{"refIds","cause","category","lessonKey?","lessonText?","scope?","contradicts?","blamedFactors?","proposalTarget?","proposedValue?"}],"signalPaperAssessment?"}.',
 ].join('\n');
 
 function excerpt(value: unknown, max: number): string | undefined {
@@ -97,7 +103,7 @@ export function capMisses(misses: readonly MissInput[], max = MAX_MISSES): { sen
   return { sent: ranked, dropped: Math.max(0, misses.length - ranked.length) };
 }
 
-export function buildDiagnosisUserMessage(misses: readonly MissInput[], lessons: readonly LessonRecord[]): string {
+export function buildDiagnosisUserMessage(misses: readonly MissInput[], lessons: readonly LessonRecord[], signalPaper?: unknown): string {
   const lessonList = lessons
     .filter((l) => l.status === 'ACTIVE')
     .slice(0, MAX_ACTIVE_LESSONS_SHOWN)
@@ -119,11 +125,18 @@ export function buildDiagnosisUserMessage(misses: readonly MissInput[], lessons:
         inputs: excerpt(m.inputs, inputsMax),
       })),
       activeLessons: lessonList,
+      ...(signalPaper ? { signalPaper } : {}),
     });
     if (msg.length <= USER_MESSAGE_MAX_CHARS || inputsMax < 200) return msg.slice(0, USER_MESSAGE_MAX_CHARS);
     inputsMax = Math.floor(inputsMax / 2);
     detailsMax = Math.floor(detailsMax / 2);
   }
+}
+
+/** The reply's signal paper-trade assessment, trimmed and clamped; undefined when absent or empty. */
+export function paperAssessmentOf(raw: unknown): string | undefined {
+  const a = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { signalPaperAssessment?: unknown }).signalPaperAssessment : undefined;
+  return typeof a === 'string' && a.trim() !== '' ? clampText(a.trim(), PAPER_ASSESSMENT_MAX) : undefined;
 }
 
 /** Pull the first JSON object out of a reply (tolerates a ```json fence). */

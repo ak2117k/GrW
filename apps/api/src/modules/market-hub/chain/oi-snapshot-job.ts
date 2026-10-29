@@ -11,12 +11,14 @@ const EARLY_MS = 15_000;
 export interface SnapshotTarget {
   underlying: string;
   expiry: string;
+  /** Strikes each side of ATM for this target's build; absent = the hub's HUB_CHAIN_STRIKES_AROUND. */
+  strikesAround?: number;
 }
 
 export interface OiSnapshotJobDeps {
   targets(now: number): Promise<SnapshotTarget[]>;
   contracts(underlying: string, expiry: string): Promise<ChainContract[]>;
-  freshChain(underlying: string, expiry: string): Promise<HubChain | null>;
+  freshChain(underlying: string, expiry: string, strikesAround?: number): Promise<HubChain | null>;
   repo: Pick<ChainRepo, 'writeOi' | 'writeChainSnapshot'>;
   clock: Pick<SessionClock, 'isOpen'>;
   /**
@@ -79,7 +81,7 @@ export class OiSnapshotJob {
       if (!due && !closing) return;
       st.lastAt = now;
 
-      const chain = await this.d.freshChain(t.underlying, t.expiry);
+      const chain = await this.d.freshChain(t.underlying, t.expiry, t.strikesAround);
       if (!chain) {
         this.counts.failures++;
         return;
@@ -91,7 +93,7 @@ export class OiSnapshotJob {
         for (const leg of [e.ceData, e.peData]) {
           const id = leg?.token ? idByToken.get(leg.token) : undefined;
           if (!leg || !id) continue;
-          rows.push({ instrumentId: id, oi: leg.oi, oiChange: leg.oiChange, volume: leg.volume, at });
+          rows.push({ instrumentId: id, oi: leg.oi, oiChange: leg.oiChange, volume: leg.volume, ltp: leg.ltp, at });
         }
       }
       this.counts.rows += await this.d.repo.writeOi(rows);

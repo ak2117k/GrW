@@ -12,6 +12,7 @@ import { TradeTrackerService } from '../trade-tracker/services/trade-tracker.ser
 import { GreeksCalculatorService } from '../options-chain/services/greeks-calculator.service';
 import { PrismaCandleRepo } from './candles/candle-repository';
 import { PrismaChainRepo } from './chain/chain-repository';
+import type { ExtraTargetOutcome } from './chain/chain-service';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
 import type { FixupReport } from './candles/candle-store';
 import { istDay } from './candles/trading-calendar';
@@ -53,6 +54,25 @@ export function chainStrikesAround(raw: unknown): number {
   return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_CHAIN_STRIKES_AROUND;
 }
 
+/** A config integer ≥ `min`, rounded down; anything else (unset, '', NaN, below min) is `fallback`. */
+export function configInt(raw: unknown, fallback: number, min: number): number {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) && n >= min ? Math.floor(n) : fallback;
+}
+
+/**
+ * The OI core list: HUB_OI_CORE_UNDERLYINGS (comma-separated, upper-cased, de-duplicated), plus SENSEX
+ * while HUB_OI_SENSEX_ENABLED is on. Prod sets the list explicitly, so SENSEX has its own switch.
+ */
+export function oiCoreUnderlyings(raw: string | undefined, sensex: boolean): string[] {
+  const names = (raw ?? '')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+  if (sensex) names.push('SENSEX');
+  return [...new Set(names)];
+}
+
 /**
  * SP1 market hub. M1 (shadow): prices a default context set and the owner's
  * open positions on the owner's shared session and reports metrics; no
@@ -64,7 +84,9 @@ export function chainStrikesAround(raw: unknown): number {
  * M4: feeds the owner's browser (the /ws gateway and the quote, depth, indices
  * and watchlist endpoints) behind HUB_SERVES_BROWSER.
  * M5: option chains (HubChains, through `hubFor(…, 'chain')`) behind HUB_SERVES_CHAIN, and 3-minute OI
- * snapshots behind HUB_OI_SNAPSHOT_ENABLED.
+ * snapshots behind HUB_OI_SNAPSHOT_ENABLED. 2026-10-29 widening: SENSEX in the core list
+ * (HUB_OI_SENSEX_ENABLED), near-month NFO futures OI + LTP (HUB_OI_FUTURES_ENABLED) and the day's
+ * stock-option call underlyings as narrow chains (HUB_OI_EXTRA_MAX_PER_DAY), all on by default.
  * Start is fire-and-forget: boot must never wait on the broker.
  */
 @Injectable()
@@ -110,6 +132,8 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       INDICES.FIN_NIFTY,
       INDICES.SENSEX,
     ].map((i) => ({ exchange: i.exchange as HubExchange, token: i.token, symbol: i.symbol }));
+    const chainRepo = new PrismaChainRepo(this.prisma);
+    const extraMax = configInt(this.config.get<unknown>('hub.oiExtraMaxPerDay'), 10, 0);
     const engine = new HubEngine({
       broker: new ManagerHubBroker(this.manager, owner),
       clock: this.session,
@@ -125,14 +149,23 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         chain: this.consumerEnabled('chain'),
       }),
       chain: {
-        repo: new PrismaChainRepo(this.prisma),
+        repo: chainRepo,
         math: new GreeksCalculatorService(),
         strikesAround: chainStrikesAround(this.config.get<unknown>('hub.chainStrikesAround')),
-        coreUnderlyings: (this.config.get<string>('hub.oiCoreUnderlyings') ?? '')
-          .split(',')
-          .map((s) => s.trim().toUpperCase())
-          .filter(Boolean),
+        coreUnderlyings: oiCoreUnderlyings(
+          this.config.get<string>('hub.oiCoreUnderlyings'),
+          this.config.get<boolean>('hub.oiSensexEnabled') !== false,
+        ),
         snapshots: this.config.get<boolean>('hub.oiSnapshotEnabled') !== false,
+        extra:
+          extraMax > 0
+            ? {
+                maxPerDay: extraMax,
+                strikesAround: configInt(this.config.get<unknown>('hub.oiExtraStrikesAround'), 5, 1),
+                candidates: (since) => chainRepo.optionCallUnderlyings(since),
+              }
+            : undefined,
+        futuresOi: this.config.get<boolean>('hub.oiFuturesEnabled') !== false ? { repo: chainRepo } : undefined,
         log: (m) => this.logger.warn(m),
       },
     });
@@ -202,6 +235,22 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     if (userId === null && consumer === 'browser') return null;
     if (userId !== null && userId !== this.ownerUserId) return null;
     return this.ownerHub;
+  }
+
+  /**
+   * Capture this stock's nearest-expiry option chain (±HUB_OI_EXTRA_STRIKES_AROUND) into oi_snapshots
+   * every 3 minutes for the rest of the IST day — for a caller that knows of a stock-option call before
+   * the next 3-minute poll of channel calls / open trades would. Capped per day; never throws.
+   */
+  async captureOptionChain(underlying: string): Promise<ExtraTargetOutcome> {
+    const chains = this.engine?.chains;
+    if (!chains) return 'off';
+    try {
+      return await chains.addExtraTarget(underlying);
+    } catch (err) {
+      this.logger.warn(`OI extra chain ${underlying} failed: ${(err as Error)?.message ?? err}`);
+      return 'off';
+    }
   }
 
   record(consumer: HubConsumer, outcome: HubOutcome, count = 1): void {

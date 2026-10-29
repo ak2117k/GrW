@@ -23,11 +23,13 @@ export interface DiagnosisMissOut {
 
 export interface DiagnosisOutput {
   misses: DiagnosisMissOut[];
+  /** The diagnosis' read of the signal paper trades split by OI verdict / AI judge call (observation only). */
+  signalPaperAssessment?: string;
 }
 
 export interface DiagnosisPort {
   /** One batched LLM call; persists `self_review_runs.diagnosis` / `ai_call_id` and upserts lessons. */
-  diagnose(runId: string, misses: DiagnosisMiss[]): Promise<DiagnosisOutput | null>;
+  diagnose(runId: string, misses: DiagnosisMiss[], context?: { signalPaper?: unknown }): Promise<DiagnosisOutput | null>;
 }
 
 export interface LessonsPort {

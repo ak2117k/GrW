@@ -18,6 +18,15 @@ const num = (v: unknown): number | null => {
 const str = (v: unknown): string | null => (v === null || v === undefined || String(v).trim() === '' ? null : String(v).trim());
 const up = (v: unknown) => String(v ?? '').trim().toUpperCase();
 
+/** Option / future venues of the OI check's master reads (instruments.segment holds these too). */
+const OI_DERIVATIVE_EXCHANGES = ['NFO', 'BFO', 'MCX'];
+
+/** IST calendar day `ymd` as an instant range: covers the master's UTC- and IST-midnight expiry encodings. */
+function istDayRange(ymdIst: string): { gte: Date; lt: Date } {
+  const gte = new Date(`${ymdIst}T00:00:00+05:30`);
+  return { gte, lt: new Date(gte.getTime() + 86_400_000) };
+}
+
 function ymd(v: unknown): string | null {
   if (v === null || v === undefined || v === '') return null;
   if (v instanceof Date) {
@@ -516,6 +525,104 @@ export class SignalTraderRepository {
   async aiChecksSince(since: Date): Promise<unknown[]> {
     const rows = await this.prisma.signalDecision.findMany({ where: { createdAt: { gte: since }, aiCheck: { not: Prisma.DbNull } }, select: { aiCheck: true }, take: 1000 });
     return rows.map((r) => r.aiCheck);
+  }
+
+  // ---- OI check at the paper open (domain/oi-check): database reads only, never the broker ----
+
+  async recordOiCheck(decisionId: string, check: unknown): Promise<void> {
+    await this.prisma.signalDecision.update({ where: { id: decisionId }, data: { oiCheck: check as Prisma.InputJsonValue } });
+  }
+
+  /** IST expiry dates (YYYY-MM-DD, ascending) of `name`'s active options on or after `from`. */
+  async optionExpiries(name: string, from: Date): Promise<string[]> {
+    const rows = await this.prisma.instrument.findMany({
+      where: { name: name.toUpperCase(), exchange: { in: OI_DERIVATIVE_EXCHANGES }, optionType: { in: ['CE', 'PE'] }, isActive: true, expiry: { gte: from } },
+      select: { expiry: true },
+      distinct: ['expiry'],
+      orderBy: { expiry: 'asc' },
+    });
+    return [...new Set(rows.map((r) => ymd(r.expiry)).filter((x): x is string => !!x))];
+  }
+
+  /** `name`'s option contracts expiring on IST date `expiry` (either master midnight convention). */
+  async optionContracts(name: string, expiry: string): Promise<Array<{ instrumentId: string; strike: number; optionType: 'CE' | 'PE' }>> {
+    const rows = await this.prisma.instrument.findMany({
+      where: { name: name.toUpperCase(), exchange: { in: OI_DERIVATIVE_EXCHANGES }, optionType: { in: ['CE', 'PE'] }, expiry: istDayRange(expiry) },
+      select: { id: true, strike: true, optionType: true },
+      take: 2000,
+    });
+    return rows
+      .filter((r) => r.strike !== null && (r.optionType === 'CE' || r.optionType === 'PE'))
+      .map((r) => ({ instrumentId: r.id, strike: Number(r.strike), optionType: r.optionType as 'CE' | 'PE' }));
+  }
+
+  /** `name`'s nearest active future expiring on or after `from` (the current month). */
+  async nearestFuture(name: string, from: Date): Promise<{ instrumentId: string; symbol: string; exchange: string; token: string } | null> {
+    const r = await this.prisma.instrument.findFirst({
+      where: { name: name.toUpperCase(), exchange: { in: OI_DERIVATIVE_EXCHANGES }, optionType: null, symbol: { endsWith: 'FUT' }, isActive: true, expiry: { gte: from } },
+      orderBy: { expiry: 'asc' },
+      select: { id: true, symbol: true, exchange: true, token: true },
+    });
+    return r ? { instrumentId: r.id, symbol: r.symbol, exchange: r.exchange, token: r.token } : null;
+  }
+
+  /** The NSE cash line of a stock (`X-EQ`, else `X`). */
+  async cashRef(name: string): Promise<{ exchange: string; token: string; symbol: string } | null> {
+    const n = name.toUpperCase();
+    for (const symbol of [`${n}-EQ`, n]) {
+      const r = await this.prisma.instrument.findFirst({ where: { symbol, exchange: 'NSE' }, select: { exchange: true, token: true, symbol: true } });
+      if (r) return r;
+    }
+    return null;
+  }
+
+  /** oi_snapshots rows of `ids` inside any of the windows (oi as a number). */
+  async oiRows(ids: string[], windows: Array<[Date, Date]>): Promise<Array<{ instrumentId: string; oi: number; at: Date }>> {
+    if (ids.length === 0 || windows.length === 0) return [];
+    const rows = await this.prisma.oISnapshot.findMany({
+      where: { instrumentId: { in: ids }, OR: windows.map(([gte, lte]) => ({ timestamp: { gte, lte } })) },
+      select: { instrumentId: true, oi: true, timestamp: true },
+      take: 20_000,
+    });
+    return rows.map((r) => ({ instrumentId: r.instrumentId, oi: Number(r.oi), at: r.timestamp }));
+  }
+
+  /**
+   * One instrument's oi_snapshots LTPs (the price from the same quote that read the OI; column added by
+   * migration 20261029190000_oi_snapshot_ltp). Raw SQL so this module does not depend on that column at
+   * compile time; [] when the column is absent or empty (the caller falls back to candles_1m).
+   */
+  async oiLtps(instrumentId: string, from: Date, to: Date): Promise<Array<{ at: Date; close: number }>> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ timestamp: Date; ltp: number }>>`
+        SELECT "timestamp", "ltp" FROM "oi_snapshots"
+        WHERE "instrumentId" = ${instrumentId} AND "ltp" IS NOT NULL AND "timestamp" >= ${from} AND "timestamp" <= ${to}
+        ORDER BY "timestamp"`;
+      return rows.map((r) => ({ at: r.timestamp, close: Number(r.ltp) })).filter((r) => r.close > 0);
+    } catch {
+      return [];
+    }
+  }
+
+  /** The newest chain snapshot's spot for `underlying` captured at or after `since`; null when none. */
+  async chainSpotSince(underlying: string, since: Date): Promise<number | null> {
+    const r = await this.prisma.optionChainSnapshot.findFirst({
+      where: { underlying: underlying.toUpperCase(), capturedAt: { gte: since } },
+      orderBy: { capturedAt: 'desc' },
+      select: { spotPrice: true },
+    });
+    const v = r ? Number(r.spotPrice) : null;
+    return v !== null && v > 0 ? v : null;
+  }
+
+  /** The hub's tick-built 1m closes (candles_1m) of one instrument in [from, to]. */
+  async minuteCloses(exchange: string, token: string, from: Date, to: Date): Promise<Array<{ at: Date; close: number }>> {
+    const rows = await this.prisma.$queryRaw<Array<{ ts: Date; close: number }>>`
+      SELECT ts, close FROM "candles_1m"
+      WHERE exchange = ${exchange} AND token = ${token}
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+      ORDER BY ts`;
+    return rows.map((r) => ({ at: r.ts, close: Number(r.close) }));
   }
 
   paperDecisionsSince(since: Date) {

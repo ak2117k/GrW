@@ -4,7 +4,9 @@ import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { MANUAL_VERDICT_PREFIX } from '../../sentinel-executor/domain/manual-exit';
 import { OVERNIGHT_TAGS } from '../domain/scorers';
 import { STOCK_MOVE_HORIZON_DAYS, STOCK_MOVE_THRESHOLD_ATR } from '../../stock-move/stock-move.logic';
-import { SIGNAL_PAPER_STRATEGY } from '../../signal-trader/domain/paper';
+import { SIGNAL_PAPER_STRATEGY, decisionIdFromTags } from '../../signal-trader/domain/paper';
+import { oiVerdictOf } from '../../signal-trader/domain/oi-check';
+import { judgeCallOf } from '../../signal-trader/domain/paper-summary';
 import { asInfoItems } from '../../signal-intake/domain/info';
 
 /**
@@ -190,7 +192,7 @@ export class VerificationSourcesRepository {
     const [paper, orders] = await Promise.all([
       this.prisma.trade.findMany({
         where: { strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, createdAt: { gte: from, lt: to } },
-        select: { createdAt: true, status: true, pnl: true },
+        select: { createdAt: true, status: true, pnl: true, side: true, quantity: true, entryPrice: true, exitPrice: true, entryTags: true, instrument: { select: { symbol: true } } },
         take: 2000,
       }),
       this.prisma.signalOrder.findMany({ where: { createdAt: { gte: from, lt: to } }, select: { createdAt: true, status: true, trackerId: true }, take: 2000 }),
@@ -198,8 +200,23 @@ export class VerificationSourcesRepository {
     const ids = [...new Set(orders.map((o) => o.trackerId).filter((x): x is string => !!x))];
     const trackers = ids.length ? await this.prisma.tradeTracker.findMany({ where: { id: { in: ids } }, select: { id: true, status: true, pnl: true } }) : [];
     const byId = new Map(trackers.map((t) => [t.id, t]));
+    // Each paper trade's OI check at entry (signal_decisions.oi_check, record only) and AI entry judge call,
+    // for the splits by OI verdict / judge the diagnosis reasons over.
+    const decisionIds = [...new Set(paper.map((p) => decisionIdFromTags(p.entryTags)).filter((x): x is string => !!x))];
+    const decisions = decisionIds.length ? await this.prisma.signalDecision.findMany({ where: { id: { in: decisionIds } }, select: { id: true, oiCheck: true, judge: true } }) : [];
+    const byDecision = new Map(decisions.map((d) => [d.id, d]));
     return {
-      paper,
+      paper: paper.map(({ entryTags, instrument, ...p }) => {
+        const d = byDecision.get(decisionIdFromTags(entryTags) ?? '');
+        const summary = (d?.oiCheck as { summary?: unknown } | null | undefined)?.summary;
+        return {
+          ...p,
+          symbol: instrument?.symbol ?? null,
+          oiVerdict: d ? oiVerdictOf(d.oiCheck) : ('NO_DATA' as const),
+          oiSummary: typeof summary === 'string' ? summary : null,
+          aiDecision: d ? judgeCallOf(d.judge) : ('NONE' as const),
+        };
+      }),
       live: orders.map((o) => {
         const t = o.trackerId ? byId.get(o.trackerId) : undefined;
         return { createdAt: o.createdAt, status: o.status, trackerStatus: t ? String(t.status) : null, pnl: t?.pnl ?? null };

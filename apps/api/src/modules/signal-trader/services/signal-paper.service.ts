@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
 import type { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
@@ -7,6 +7,7 @@ import { SignalTraderRepository, type PaperRecord } from '../repositories/signal
 import { SIGNAL_PAPER_SOURCE, SIGNAL_PAPER_STRATEGY, paperEntryReason, paperTags } from '../domain/paper';
 import type { EntryPlan } from '../domain/gate';
 import type { SignalView } from '../domain/signal.types';
+import { SignalOiCheckService } from './signal-oi-check.service';
 
 export interface PaperOpenInput {
   decisionId: string;
@@ -44,6 +45,7 @@ export class SignalPaperService {
     private readonly exec: TradeExecutionService,
     private readonly trades: TradeRepository,
     private readonly instruments: MarketDataRepository,
+    @Optional() private readonly oi?: SignalOiCheckService,
   ) {}
 
   async open(i: PaperOpenInput): Promise<PaperOpenResult> {
@@ -75,6 +77,11 @@ export class SignalPaperService {
       const entryPrice = trade.entryPrice ?? null;
       await this.repo.recordPaper(i.decisionId, { status: trade.status === 'OPEN' ? 'OPEN' : 'PENDING', tradeId: trade.id, at: at(), trigger: i.trigger, entryPrice });
       this.logger.warn(`[signal-paper] PAPER ${p.side} ${p.tradingsymbol} x${p.qty} @ ${entryPrice ?? p.limitPrice} (decision ${i.decisionId}, trade ${trade.id})`);
+      // OI check (record only): fired after the trade exists and never awaited — it cannot block, delay or change it.
+      const openedAt = new Date();
+      void Promise.resolve()
+        .then(() => this.oi?.record({ decisionId: i.decisionId, signal: i.signal, plan: p, expiry: i.expiry, at: openedAt }))
+        .catch((e) => this.logger.warn(`[signal-paper] OI check for decision ${i.decisionId} failed: ${errText(e)}`));
       return { ok: true, tradeId: trade.id, entryPrice, duplicate: false };
     } catch (err) {
       const reason = errText(err);

@@ -5,8 +5,8 @@ import type { CandlesResult, Timeframe } from './candles/candle.types';
 import { istMidnight } from './candles/trading-calendar';
 import { ChainBuilder } from './chain/chain-builder';
 import type { GreeksMath } from './chain/chain-math';
-import type { ChainRepo } from './chain/chain-repository';
-import { ChainService } from './chain/chain-service';
+import type { ChainRepo, OiCaptureRepo } from './chain/chain-repository';
+import { ChainService, type ExtraTargetsConfig } from './chain/chain-service';
 import type { ChainStatus, OptionGreekRow } from './chain/chain.types';
 import { DEFAULT_RATES, Governor, type GovernorMetrics, type GovResult } from './governor';
 import type { HubBroker } from './hub-broker';
@@ -45,6 +45,10 @@ export interface HubEngineDeps {
     strikesAround: number;
     coreUnderlyings: readonly string[];
     snapshots: boolean;
+    /** On-demand stock option chains as extra snapshot targets (needs `snapshots`). Absent ⇒ off. */
+    extra?: ExtraTargetsConfig;
+    /** Stock-futures OI capture. Absent ⇒ off. */
+    futuresOi?: { repo: Pick<OiCaptureRepo, 'futures'> };
     log?: (message: string) => void;
   };
 }
@@ -211,8 +215,13 @@ export class HubEngine {
         refreshHeld: () => this.d.consumerFlags?.().chain ?? false,
         // Chain JSON only while the hub serves chains: legacy readers share OptionChainSnapshot.
         snapshots: chainDeps.snapshots
-          ? { core: chainDeps.coreUnderlyings, writeChainJson: () => this.d.consumerFlags?.().chain ?? false }
+          ? {
+              core: chainDeps.coreUnderlyings,
+              writeChainJson: () => this.d.consumerFlags?.().chain ?? false,
+              extra: chainDeps.extra,
+            }
           : undefined,
+        futuresOi: chainDeps.futuresOi,
         log: chainDeps.log,
       });
     } else {

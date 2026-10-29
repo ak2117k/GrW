@@ -3,11 +3,17 @@ import type { OptionsChainEntry } from '@td/shared/types';
 import type { PrismaService } from '../../../common/prisma/prisma.service';
 import type { HubExchange, InstrumentRef } from '../hub.types';
 import { INDEX_UNDERLYINGS } from '../underlying';
-import type { ChainContract, HubChain, OiRow } from './chain.types';
+import type { ChainContract, FutureContract, HubChain, OiRow } from './chain.types';
 import { localMidnight, nextYmd, ymdLocal } from './chain-dates';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const BASELINE_LOOKBACK_MS = 10 * DAY_MS;
+/**
+ * Venues a hub chain can live on. BFO carries only the bounded SENSEX/BANKEX/SENSEX50 index F&O the
+ * master refresh keeps (master-contract.ts keepMasterRow), so adding it cannot pull in BSE stock options.
+ */
+const CHAIN_EXCHANGES: readonly HubExchange[] = ['NFO', 'BFO', 'MCX'];
+const OPEN_TRADE_STATUSES = ['OPEN', 'PARTIALLY_FILLED'];
 
 /**
  * A stored chain carries no Greeks provenance, so derive it: 'broker' when any leg has an IV
@@ -19,7 +25,7 @@ function storedGreeksSource(entries: readonly OptionsChainEntry[]): 'broker' | '
 }
 
 export interface ChainRepo {
-  /** Active CE/PE contracts of exactly `name` expiring on `expiry` (YYYY-MM-DD), NFO or MCX. */
+  /** Active CE/PE contracts of exactly `name` expiring on `expiry` (YYYY-MM-DD), NFO, BFO or MCX. */
   contracts(name: string, expiry: string): Promise<ChainContract[]>;
   /** Distinct expiries (YYYY-MM-DD, ascending) of `name`'s options on or after `today` (IST YYYY-MM-DD). */
   expiries(name: string, today: string): Promise<string[]>;
@@ -36,15 +42,26 @@ export interface ChainRepo {
   pruneOi(before: Date): Promise<number>;
 }
 
+/** The widened OI capture's reads (stock futures, on-demand stock chains); kept off ChainRepo so its fakes stay small. */
+export interface OiCaptureRepo {
+  /** Active NFO futures (stock and index) expiring on or after `today` (IST YYYY-MM-DD). */
+  futures(today: string): Promise<FutureContract[]>;
+  /**
+   * Master names of the NFO option underlyings a channel call named since `since` or an open trade
+   * holds, oldest first (so a daily cap admits the earliest). Index names are NOT filtered here.
+   */
+  optionCallUnderlyings(since: Date): Promise<string[]>;
+}
+
 /** The chain's database reads and writes. Names are matched EXACTLY (CRUDEOIL ≠ CRUDEOILM). */
-export class PrismaChainRepo implements ChainRepo {
+export class PrismaChainRepo implements ChainRepo, OiCaptureRepo {
   constructor(private readonly prisma: PrismaService) {}
 
   async contracts(name: string, expiry: string): Promise<ChainContract[]> {
     const rows = await this.prisma.instrument.findMany({
       where: {
         name: name.toUpperCase(),
-        exchange: { in: ['NFO', 'MCX'] },
+        exchange: { in: [...CHAIN_EXCHANGES] },
         optionType: { in: ['CE', 'PE'] },
         isActive: true,
         expiry: { gte: localMidnight(expiry), lt: localMidnight(nextYmd(expiry)) },
@@ -66,7 +83,7 @@ export class PrismaChainRepo implements ChainRepo {
     const rows = await this.prisma.instrument.findMany({
       where: {
         name: name.toUpperCase(),
-        exchange: { in: ['NFO', 'MCX'] },
+        exchange: { in: [...CHAIN_EXCHANGES] },
         optionType: { in: ['CE', 'PE'] },
         isActive: true,
         expiry: { gte: localMidnight(today) },
@@ -97,7 +114,7 @@ export class PrismaChainRepo implements ChainRepo {
   }
 
   async describe(refs: readonly InstrumentRef[]): Promise<Array<{ name: string; expiry: string }>> {
-    const derivatives = refs.filter((r) => r.exchange === 'NFO' || r.exchange === 'MCX');
+    const derivatives = refs.filter((r) => CHAIN_EXCHANGES.includes(r.exchange));
     if (derivatives.length === 0) return [];
     const rows = await this.prisma.instrument.findMany({
       where: { OR: derivatives.map((r) => ({ exchange: r.exchange, token: r.token })) },
@@ -132,10 +149,61 @@ export class PrismaChainRepo implements ChainRepo {
         oi: BigInt(Math.round(r.oi)),
         oiChange: r.oiChange === null ? null : BigInt(Math.round(r.oiChange)),
         volume: BigInt(Math.round(r.volume)),
+        ltp: r.ltp != null && Number.isFinite(r.ltp) && r.ltp > 0 ? r.ltp : null,
         timestamp: r.at,
       })),
     });
     return res.count;
+  }
+
+  async futures(today: string): Promise<FutureContract[]> {
+    const rows = await this.prisma.instrument.findMany({
+      where: {
+        exchange: 'NFO',
+        optionType: null,
+        isActive: true,
+        symbol: { endsWith: 'FUT' },
+        expiry: { gte: localMidnight(today) },
+      },
+      select: { id: true, token: true, symbol: true, name: true, expiry: true },
+    });
+    return rows
+      .filter((r) => r.name && r.expiry)
+      .map((r) => ({
+        instrumentId: r.id,
+        ref: { exchange: 'NFO' as const, token: r.token, symbol: r.symbol },
+        name: (r.name as string).toUpperCase(),
+        expiry: ymdLocal(r.expiry as Date),
+      }));
+  }
+
+  async optionCallUnderlyings(since: Date): Promise<string[]> {
+    const [signals, trades] = await Promise.all([
+      this.prisma.telegramSignal.findMany({
+        where: { createdAt: { gte: since }, exchange: 'NFO', token: { not: null } },
+        select: { token: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+      this.prisma.trade.findMany({
+        where: { status: { in: OPEN_TRADE_STATUSES }, instrument: { exchange: 'NFO', optionType: { in: ['CE', 'PE'] } } },
+        select: { instrument: { select: { name: true } } },
+        orderBy: { createdAt: 'asc' },
+      }),
+    ]);
+    const tokens = [...new Set(signals.map((s) => s.token as string))];
+    const byToken = new Map<string, string>();
+    if (tokens.length > 0) {
+      const rows = await this.prisma.instrument.findMany({
+        where: { exchange: 'NFO', token: { in: tokens }, optionType: { in: ['CE', 'PE'] } },
+        select: { token: true, name: true },
+      });
+      for (const r of rows) if (r.name) byToken.set(r.token, r.name.toUpperCase());
+    }
+    const names = [
+      ...tokens.map((t) => byToken.get(t)),
+      ...trades.map((t) => t.instrument?.name?.toUpperCase()),
+    ].filter((n): n is string => !!n);
+    return [...new Set(names)];
   }
 
   async writeChainSnapshot(chain: HubChain): Promise<void> {

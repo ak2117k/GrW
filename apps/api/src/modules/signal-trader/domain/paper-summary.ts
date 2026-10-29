@@ -1,3 +1,5 @@
+import type { OiVerdict } from './oi-check';
+
 /**
  * Paper (no funds) vs live signal trades, side by side (the page and the self-review). Pure.
  * A trade is a WIN when its P&L is > 0, a LOSS when < 0; open trades count their mark-to-market
@@ -67,6 +69,8 @@ export interface JudgeBucket {
 }
 
 export type JudgeSplit = Record<'TAKE' | 'SKIP' | 'NONE', JudgeBucket>;
+/** The same buckets keyed by the OI check's verdict at entry. */
+export type OiSplit = Record<OiVerdict, JudgeBucket>;
 
 /**
  * The AI entry judge's call on a PAPER decision: learning mode records it as `aiDecision`; a plain
@@ -87,17 +91,23 @@ const emptyBucket = (): JudgeBucket => ({ n: 0, closed: 0, open: 0, wins: 0, los
  * quantity, never read from the row's pnl, so it is right whatever the paper close books (charges, or a
  * close-path bug). Pure.
  */
-export function paperByJudge(
-  rows: ReadonlyArray<{
-    aiDecision: 'TAKE' | 'SKIP' | 'NONE';
-    trade: { status: string; side: string; quantity: number; entryPrice: number | null; exitPrice: number | null; pnl: number | null } | null;
-  }>,
-): JudgeSplit {
-  const out: JudgeSplit = { TAKE: emptyBucket(), SKIP: emptyBucket(), NONE: emptyBucket() };
+export function paperByJudge(rows: ReadonlyArray<{ aiDecision: 'TAKE' | 'SKIP' | 'NONE'; trade: BucketTrade | null }>): JudgeSplit {
+  return bucketPaper(['TAKE', 'SKIP', 'NONE'] as const, 'NONE', rows.map((r) => ({ key: r.aiDecision, trade: r.trade })));
+}
+
+/** Paper P&L split by the OI check's verdict at entry (domain/oi-check), same gross rule as the judge split. Pure. */
+export function paperByOi(rows: ReadonlyArray<{ oiVerdict: OiVerdict; trade: BucketTrade | null }>): OiSplit {
+  return bucketPaper(['AGREES', 'AGAINST', 'MIXED', 'NO_DATA'] as const, 'NO_DATA', rows.map((r) => ({ key: r.oiVerdict, trade: r.trade })));
+}
+
+type BucketTrade = { status: string; side: string; quantity: number; entryPrice: number | null; exitPrice: number | null; pnl: number | null };
+
+function bucketPaper<K extends string>(keys: readonly K[], fallback: K, rows: ReadonlyArray<{ key: K; trade: BucketTrade | null }>): Record<K, JudgeBucket> {
+  const out = Object.fromEntries(keys.map((k) => [k, emptyBucket()])) as Record<K, JudgeBucket>;
   for (const r of rows) {
     const t = r.trade;
     if (!t) continue;
-    const b = out[r.aiDecision] ?? out.NONE;
+    const b = out[r.key] ?? out[fallback];
     b.n += 1;
     if (t.status !== 'CLOSED') {
       b.open += 1;
@@ -111,7 +121,7 @@ export function paperByJudge(
     if (g > 0) b.wins += 1;
     else if (g < 0) b.losses += 1;
   }
-  for (const b of Object.values(out)) {
+  for (const b of Object.values<JudgeBucket>(out)) {
     b.gross = r2(b.gross);
     b.openMark = r2(b.openMark);
     b.winRate = b.wins + b.losses > 0 ? r2(b.wins / (b.wins + b.losses)) : null;

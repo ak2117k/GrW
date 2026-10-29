@@ -9,6 +9,7 @@ import {
   kindRows,
   skillLines,
   signalTradeLines,
+  paperOiLines,
   lessonInjected,
   lessonsAddedCount,
   lessonsAddedList,
@@ -189,5 +190,26 @@ describe('signalTradeLines', () => {
       { key: 'paperNoFunds', label: 'Telegram signals — paper (no funds)', text: '1 closed · 1W/0L · 1 open · P&L ₹2,775', tone: 'good' },
     ]);
     expect(signalTradeLines({ session: '', byKind: {} })).toEqual([]);
+  });
+});
+
+describe('paperOiLines', () => {
+  it('signal paper by the OI check at entry, last 20 sessions; verdicts without trades are left out', () => {
+    const o = (realised: number, wins: number, losses: number, winRate: number | null) => ({ n: wins + losses, open: 0, closed: wins + losses, wins, losses, noTrade: 0, pnl: realised, realised, winRate });
+    const z = o(0, 0, 0, null);
+    const g = (gross: number, wins: number, losses: number, winRate: number | null) => ({ n: wins + losses, closed: wins + losses, open: 0, wins, losses, gross, openMark: 0, winRate });
+    const s: SelfReviewSummary = {
+      session: '2026-10-29',
+      byKind: {},
+      signalTrades: {
+        session: { live: z, paperNoFunds: z },
+        rolling20: { live: z, paperNoFunds: o(-1400, 1, 3, 0.25), paperByOi: { AGREES: g(600, 1, 0, 1), AGAINST: g(-2000, 0, 3, 0), MIXED: g(0, 0, 0, null), NO_DATA: g(0, 0, 0, null) } },
+      },
+    };
+    expect(paperOiLines(s)).toEqual([
+      { key: 'AGREES', label: 'OI agrees', text: '1 closed · 1W/0L · win 100% · gross ₹600', tone: 'good' },
+      { key: 'AGAINST', label: 'OI against', text: '3 closed · 0W/3L · win 0% · gross −₹2,000', tone: 'bad' },
+    ]);
+    expect(paperOiLines({ session: '', byKind: {} })).toEqual([]);
   });
 });

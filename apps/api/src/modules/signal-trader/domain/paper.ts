@@ -68,15 +68,38 @@ export function paperAlert(i: { required: number | null; available: number | nul
 }
 
 export type PaperExit =
-  | { exit: false }
-  | { exit: true; price: number; tag: 'STOPPED_OUT' | 'HIT_TARGET' | 'TIME_EXIT'; reason: string };
+  | { exit: false; trail?: PaperTrail }
+  | { exit: true; price: number; tag: 'STOPPED_OUT' | 'MOVED_STOP' | 'HIT_TARGET' | 'TIME_EXIT'; reason: string };
+
+/** A target was hit with more targets left: the trade stays open with its SL and target moved up. */
+export interface PaperTrail {
+  sl: number;
+  target: number;
+  reason: string;
+}
+
+/**
+ * The plan's targets beyond the entry, in the trade's direction (nearest first), or [] when the plan
+ * carries none usable. A target on the wrong side of the entry is dropped, not trusted.
+ */
+export function orderedTargets(side: string, entry: number, targets: unknown): number[] {
+  if (!Array.isArray(targets) || !(entry > 0)) return [];
+  const buy = String(side).toUpperCase() === 'BUY';
+  const ok = targets.map(Number).filter((t) => Number.isFinite(t) && t > 0 && (buy ? t > entry : t < entry));
+  return [...new Set(ok)].sort((a, b) => (buy ? a - b : b - a));
+}
 
 /**
  * When a tagged paper trade exits (pure). SL first (checked before the target on the same look);
  * the SL fills at the observed LTP (never better than the SL — a gap through it costs the gap),
- * the target at the target price (a resting LIMIT would). The Trade row carries ONE target: T1, the
- * same "first target before SL" the CHANNEL_SIGNAL self-review scores. An INTRADAY trade is squared
- * off at the LTP inside the last `eodMinutes` of the session.
+ * the target at the target price (a resting LIMIT would). An INTRADAY trade is squared off at the
+ * LTP inside the last `eodMinutes` of the session.
+ *
+ * TARGET TRAILING (owner 2026-10-29): with the plan's targets given, a hit target that is not the
+ * last does not exit — the SL steps up (T1 → entry, T2 → T1, …) and the row's target becomes the
+ * next one (`trail`, applied by the caller). Only the LAST target closes as HIT_TARGET; a stepped
+ * SL hit closes as MOVED_STOP. A sweep that jumps several targets steps straight to the highest one
+ * reached. Without targets (or with one), T1 exits exactly as before.
  */
 export function paperExitDecision(i: {
   side: string;
@@ -91,14 +114,41 @@ export function paperExitDecision(i: {
   entryTime?: Date | null;
   now?: Date;
   expiry?: Date | null;
+  /** Target trailing: the entry and the plan's targets (see `orderedTargets`). */
+  entry?: number | null;
+  targets?: number[];
 }): PaperExit {
   const ltp = i.ltp;
   if (ltp === null || !(ltp > 0)) return { exit: false };
   const buy = String(i.side).toUpperCase() === 'BUY';
+  const beyond = (level: number) => (buy ? ltp >= level : ltp <= level);
   if (i.sl !== null && i.sl > 0 && (buy ? ltp <= i.sl : ltp >= i.sl)) {
-    return { exit: true, price: ltp, tag: 'STOPPED_OUT', reason: `paper SL ${i.sl} hit (LTP ${ltp})` };
+    // An SL at or past the entry can only be one the trail moved there (a plan SL is always on the loss side).
+    const moved = i.entry != null && i.entry > 0 && (buy ? i.sl >= i.entry : i.sl <= i.entry);
+    return moved
+      ? { exit: true, price: ltp, tag: 'MOVED_STOP', reason: `paper trailed SL ${i.sl} hit (LTP ${ltp})` }
+      : { exit: true, price: ltp, tag: 'STOPPED_OUT', reason: `paper SL ${i.sl} hit (LTP ${ltp})` };
   }
-  if (i.target !== null && i.target > 0 && (buy ? ltp >= i.target : ltp <= i.target)) {
+  if (i.target !== null && i.target > 0 && beyond(i.target)) {
+    const ts = i.targets ?? [];
+    const at = ts.findIndex((t) => Math.abs(t - (i.target as number)) < 1e-6);
+    const entry = i.entry ?? null;
+    if (at >= 0 && at < ts.length - 1 && entry !== null && entry > 0) {
+      // The highest target this LTP has reached.
+      let k = at;
+      while (k + 1 < ts.length && beyond(ts[k + 1])) k += 1;
+      const last = ts.length - 1;
+      if (k === last) {
+        return { exit: true, price: ts[last], tag: 'HIT_TARGET', reason: `paper last target T${last + 1} ${ts[last]} hit (LTP ${ltp})` };
+      }
+      const stepped = k === 0 ? entry : ts[k - 1];
+      // Never loosens: an SL already tighter stays.
+      const sl = i.sl !== null && i.sl > 0 ? (buy ? Math.max(i.sl, stepped) : Math.min(i.sl, stepped)) : stepped;
+      return {
+        exit: false,
+        trail: { sl, target: ts[k + 1], reason: `paper T${k + 1} ${ts[k]} hit (LTP ${ltp}): SL → ${sl}${k === 0 ? ' (entry)' : ` (T${k})`}, next target T${k + 2} ${ts[k + 1]}` },
+      };
+    }
     return { exit: true, price: i.target, tag: 'HIT_TARGET', reason: `paper target ${i.target} hit (LTP ${ltp})` };
   }
   const eod = i.eodMinutes ?? 5;
@@ -128,6 +178,6 @@ export function paperEntryReason(i: { decisionId: string; channel: string; what:
   return [
     `${SIGNAL_PAPER_SOURCE} (decision ${i.decisionId}) — ${i.why}.`,
     `Signal (${i.channel}): ${i.what}.`,
-    `Plan: LIMIT ${i.plan.limitPrice} x${i.plan.qty} SL ${i.plan.sl} targets ${t.length ? t.join(' / ') : 'none'} (paper exits at SL or T1).`,
+    `Plan: LIMIT ${i.plan.limitPrice} x${i.plan.qty} SL ${i.plan.sl} targets ${t.length ? t.join(' / ') : 'none'} (paper exits at SL or the last target; each earlier target trails the SL — T1 to entry, then to the previous target).`,
   ].join(' ');
 }

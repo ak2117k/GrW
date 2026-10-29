@@ -4,7 +4,7 @@ import { TradeExecutionService } from '../../trade-engine/services/trade-executi
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
-import { decisionIdFromTags, horizonFromTags, paperExitDecision } from '../domain/paper';
+import { decisionIdFromTags, horizonFromTags, orderedTargets, paperExitDecision } from '../domain/paper';
 import { aiCheck, aiDecisionOf } from '../domain/ai-check';
 import type { PaperTradeRow } from '../repositories/signal-trader.repository';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
@@ -60,6 +60,8 @@ export class SignalPaperWatchService {
   /** Paper exit shadow (domain/exit-shadow): per open trade, restored from its TRACK row on first sight. */
   private readonly shadows = new Map<string, Shadowed>();
   private readonly shadowParams: ShadowParams;
+  /** Target trailing: each open trade's plan targets (domain/paper orderedTargets). */
+  private readonly targets = new Map<string, number[]>();
 
   constructor(
     @Inject(SIGNAL_TRADER_CONFIG) private readonly cfg: SignalTraderConfig,
@@ -126,12 +128,23 @@ export class SignalPaperWatchService {
         entryTime: t.entryTime ?? t.createdAt,
         now,
         expiry: inst.expiry ?? null,
+        // Target trailing: a hit target that is not the last steps the SL up instead of exiting.
+        entry: t.entryPrice,
+        targets: await this.targetsFor(t),
       });
       try {
+        if (!d.exit && d.trail) {
+          // The row IS the trail state (restart-safe): its stoploss and target move, the trade stays open.
+          await this.trades.updateTrade(t.id, { stoploss: d.trail.sl, target: d.trail.target });
+          t.stoploss = d.trail.sl;
+          t.target = d.trail.target;
+          this.logger.warn(`[signal-paper] trailed paper ${inst.symbol} (${t.id}): ${d.trail.reason}`);
+        }
         if (d.exit) {
           const line = this.shadowOn() ? await this.shadowSettle(t, d.price, now) : null;
           await this.exec.closeTrade(t.id, { exitReasonTag: d.tag, reason: d.reason, exitNotes: line ? `${d.reason} | shadow: ${line}` : d.reason, exitPrice: d.price });
           exited += 1;
+          this.targets.delete(t.id);
           this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}): ${d.reason}`);
           if (t.entryTags.includes('learn')) await this.scoreAi(t, d.price, d.tag, now);
         } else if (ltp !== null && ltp > 0 && t.entryPrice && t.entryPrice > 0) {
@@ -176,16 +189,42 @@ export class SignalPaperWatchService {
     }
   }
 
+  /** The plan's targets for a paper trade (ordered, beyond the entry); read once per trade, [] when none. */
+  private async targetsFor(t: PaperTradeRow): Promise<number[]> {
+    const cached = this.targets.get(t.id);
+    if (cached) return cached;
+    const decisionId = decisionIdFromTags(t.entryTags);
+    let out: number[] = [];
+    try {
+      const plan = decisionId && t.entryPrice ? await this.repo.decisionPlan(decisionId) : null;
+      out = plan && t.entryPrice ? orderedTargets(t.side, t.entryPrice, plan.targets) : [];
+    } catch (err) {
+      this.logger.warn(`[signal-paper] targets for ${t.id}: ${errText(err)} — T1 exits as before`);
+      return [];
+    }
+    this.targets.set(t.id, out);
+    return out;
+  }
+
   private trackDetail(sh: Shadowed): Record<string, unknown> {
     return { state: sh.state, refSl: sh.refSl, baseline: sh.baseline, n: sh.n, nMethod: sh.nMethod, nAt: sh.nAt };
   }
 
   private async shadowLoad(t: PaperTradeRow): Promise<Shadowed> {
     const decisionId = decisionIdFromTags(t.entryTags);
-    const real = t.stoploss !== null && t.stoploss > 0;
     const rows = await this.repo.shadowRows([t.id]);
     const track = rows.find((r) => r.rule === 'TRACK');
     const saved = track?.detail && typeof track.detail === 'object' ? (track.detail as Partial<Shadowed> & { state?: ShadowState }) : null;
+    // The baseline as first seen: after target trailing a learning trade carries a real (moved) SL on its row,
+    // and re-deriving it from the row would wrongly turn it into a 'stop' trade with no reference stop.
+    if (saved && (saved.baseline === 'learn' || saved.baseline === 'stop')) {
+      const state = saved.state ?? emptyShadow();
+      for (const r of rows) {
+        if (r.rule !== 'TRACK' && r.wouldExitAt && r.price !== null) state.hits[r.rule as keyof ShadowState['hits']] = { at: r.wouldExitAt.toISOString(), price: r.price, reason: 'restored' };
+      }
+      return { decisionId, refSl: saved.refSl ?? null, baseline: saved.baseline, state, n: saved.n ?? null, nMethod: saved.nMethod ?? null, nAt: saved.nAt ?? 0 };
+    }
+    const real = t.stoploss !== null && t.stoploss > 0;
     let refSl: number | null = null;
     if (!real && decisionId) {
       const plan = await this.repo.decisionPlan(decisionId);

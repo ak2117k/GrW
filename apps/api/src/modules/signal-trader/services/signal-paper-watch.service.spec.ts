@@ -87,8 +87,9 @@ describe('SignalPaperWatchService — paper exit shadow (recorded, never acted o
   it('a trade with a real stop is not STOP-shadowed (that is its real exit)', async () => {
     const s = shadowed({ ltps: [89], stoploss: 90 });
     await s.svc.sweep(NOW);
-    expect(s.repo.decisionPlan).not.toHaveBeenCalled();
+    // The plan IS read now (target trailing reads its targets), but no reference stop is shadowed.
     expect(s.repo.saveShadowHit).not.toHaveBeenCalled();
+    expect(s.repo.saveShadowTrack).toHaveBeenCalledWith('t1', 'd1', expect.objectContaining({ baseline: 'stop', refSl: null }));
   });
 
   it('after a restart a rule already recorded is not recorded again', async () => {
@@ -106,5 +107,45 @@ describe('SignalPaperWatchService — paper exit shadow (recorded, never acted o
     } finally {
       delete process.env.PAPER_EXIT_SHADOW;
     }
+  });
+});
+
+describe('SignalPaperWatchService — target trailing (owner 2026-10-29)', () => {
+  beforeAll(() => (process.env.BOOT_JOBS = 'on'));
+
+  function trailing(ltps: number[]) {
+    const t = { ...trade(['telegram-signal', 'decision:d1', 'learn']), target: 110 };
+    const repo = {
+      openPaperTrades: jest.fn(async () => [t]),
+      decisionJudge: jest.fn(async () => ({ aiDecision: 'TAKE' })),
+      recordAiCheck: jest.fn(async () => undefined),
+      decisionPlan: jest.fn(async () => ({ sl: 90, targets: [110, 120, 130] })),
+      shadowRows: jest.fn(async () => []),
+      saveShadowHit: jest.fn(async () => undefined),
+      saveShadowTrack: jest.fn(async () => undefined),
+      settleShadows: jest.fn(async () => []),
+    };
+    const exec = { closeTrade: jest.fn(async () => undefined) };
+    const trades = { updateTrade: jest.fn(async () => undefined) };
+    const queue = [...ltps];
+    const quotes = { ltp: jest.fn(async () => queue.shift() ?? null) };
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, trades as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes);
+    return { svc, repo, exec, trades, t };
+  }
+
+  it('T1 moves the SL to entry and the target to T2 on the row; the trade stays open', async () => {
+    const s = trailing([111]);
+    await s.svc.sweep(NOW);
+    expect(s.trades.updateTrade).toHaveBeenCalledWith('t1', { stoploss: 100, target: 120 });
+    expect(s.exec.closeTrade).not.toHaveBeenCalled();
+  });
+
+  it('T1, T2, then a pullback to T1 closes at the trailed SL as MOVED_STOP', async () => {
+    const s = trailing([111, 121, 109]);
+    await s.svc.sweep(NOW);
+    await s.svc.sweep(NOW);
+    expect(s.trades.updateTrade).toHaveBeenCalledWith('t1', { stoploss: 110, target: 130 });
+    await s.svc.sweep(NOW);
+    expect(s.exec.closeTrade).toHaveBeenCalledWith('t1', expect.objectContaining({ exitReasonTag: 'MOVED_STOP', exitPrice: 109 }));
   });
 });

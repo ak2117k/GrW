@@ -72,6 +72,16 @@ interface Held extends PaperPosition {
 
 export const AI_RULES = ['AI_EXIT', 'AI_TRIGGER'] as const;
 
+/** An AI exit to act on: the paper watch closes the paper trade at `price` (see `onExit`). */
+export interface PaperAiExit {
+  tradeId: string;
+  rule: (typeof AI_RULES)[number];
+  price: number;
+  reason: string;
+  at: Date;
+}
+export type PaperExitHandler = (e: PaperAiExit) => Promise<void>;
+
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -90,8 +100,9 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
  * judge slots, so a paper look can never take or delay a live one.
  *
  * Each look is then replayed through the live exit paths (paper-exit.ts) and the first AI exit is
- * written to paper_exit_shadows (AI_EXIT / AI_TRIGGER), settled against the held result at the paper
- * close by the paper watch. NEVER an order and never a paper close: nothing here can reach either.
+ * written to paper_exit_shadows (AI_EXIT / AI_TRIGGER), then handed to the paper watch's `onExit`
+ * handler, which closes the PAPER trade (owner 2026-10-29) and follows what holding would have made
+ * (the HELD row, for the night review). NEVER an order: nothing in this module can reach order code.
  */
 @Injectable()
 export class PaperSentinelService {
@@ -235,12 +246,24 @@ export class PaperSentinelService {
     if (unknown.length === 0) return;
     const rows = await this.prisma.paperExitShadow.findMany({
       where: { tradeId: { in: unknown.map((h) => h.tradeId) }, rule: { in: [...AI_RULES] } },
-      select: { tradeId: true, rule: true },
+      select: { tradeId: true, rule: true, price: true, reason: true, wouldExitAt: true },
     });
     for (const h of unknown) this.checked.add(h.tradeId);
     for (const r of rows) {
       const h = this.book.get(r.tradeId);
-      if (h && h.aiExited === null) h.aiExited = r.rule;
+      if (!h || h.aiExited !== null) continue;
+      h.aiExited = r.rule;
+      // Recorded but the trade is still open (a restart between the record and the close, or recorded
+      // before closing existed): close it now at the AI's recorded price, saying so.
+      if (this.exitHandler && this.closes() && r.price !== null && r.price > 0 && r.wouldExitAt) {
+        const at = r.wouldExitAt;
+        const late = `closed late — the AI exit was recorded at ${at.toISOString()}`;
+        try {
+          await this.exitHandler({ tradeId: h.tradeId, rule: r.rule as (typeof AI_RULES)[number], price: r.price, reason: `${r.reason ?? r.rule} (${late})`, at });
+        } catch (err) {
+          this.logger.warn(`[paper-sentinel] late close of ${h.symbol} on ${r.rule} failed: ${errText(err)}`);
+        }
+      }
     }
   }
   private readonly checked = new Set<string>();
@@ -378,8 +401,32 @@ export class PaperSentinelService {
     }
   }
 
-  /** The first AI exit of a paper trade: a paper_exit_shadows row, never an order or a close. */
+  /**
+   * Owner 2026-10-29: the AI's exit CLOSES the paper trade, as it closes a live position. The close
+   * itself is the paper watch's (signal-trader owns the paper close; this module can reach no trade or
+   * order code), registered here at boot. Absent, or PAPER_SENTINEL_CLOSES=off ⇒ recorded only.
+   */
+  onExit(handler: PaperExitHandler): void {
+    this.exitHandler = handler;
+  }
+  private exitHandler: PaperExitHandler | null = null;
+
+  private closes(): boolean {
+    return (process.env.PAPER_SENTINEL_CLOSES ?? 'on').trim().toLowerCase() !== 'off';
+  }
+
+  /** The first AI exit of a paper trade: a paper_exit_shadows row, then (closes on) the paper close. */
   private async recordExit(h: Held, rule: (typeof AI_RULES)[number], price: number, reason: string, detail: Record<string, Prisma.InputJsonValue>): Promise<void> {
+    await this.writeExit(h, rule, price, reason, detail);
+    if (!this.exitHandler || !this.closes()) return;
+    try {
+      await this.exitHandler({ tradeId: h.tradeId, rule, price, reason, at: new Date() });
+    } catch (err) {
+      this.logger.warn(`[paper-sentinel] closing paper ${h.symbol} on ${rule} failed: ${errText(err)} — recorded only`);
+    }
+  }
+
+  private async writeExit(h: Held, rule: (typeof AI_RULES)[number], price: number, reason: string, detail: Record<string, Prisma.InputJsonValue>): Promise<void> {
     if (h.aiExited) return;
     h.aiExited = rule;
     h.armed = null;

@@ -149,3 +149,62 @@ describe('SignalPaperWatchService — target trailing (owner 2026-10-29)', () =>
     expect(s.exec.closeTrade).toHaveBeenCalledWith('t1', expect.objectContaining({ exitReasonTag: 'MOVED_STOP', exitPrice: 109 }));
   });
 });
+
+describe('SignalPaperWatchService — AI close + HELD follow (owner 2026-10-29)', () => {
+  beforeAll(() => (process.env.BOOT_JOBS = 'on'));
+
+  function closing(ltps: number[], follow: Record<string, unknown> | null = null) {
+    const t = { ...trade(['telegram-signal', 'decision:d1']), stoploss: 90, target: 110 };
+    const repo = {
+      openPaperTrades: jest.fn(async () => []),
+      openPaperTrade: jest.fn(async () => t),
+      decisionJudge: jest.fn(async () => null),
+      recordAiCheck: jest.fn(async () => undefined),
+      decisionPlan: jest.fn(async () => ({ sl: 90, targets: [110, 120] })),
+      shadowRows: jest.fn(async () => []),
+      saveShadowHit: jest.fn(async () => undefined),
+      saveShadowTrack: jest.fn(async () => undefined),
+      settleShadows: jest.fn(async () => [{ rule: 'AI_EXIT', at: '2026-10-28T06:04:05Z', rulePnl: -600 }]),
+      startHeldFollow: jest.fn(async () => undefined),
+      followingHeld: jest.fn(async () => (follow ? [{ id: 'h1', tradeId: 't1', heldPnl: -600, detail: follow }] : [])),
+      updateHeld: jest.fn(async () => undefined),
+    };
+    const exec = { closeTrade: jest.fn(async () => undefined) };
+    const queue = [...ltps];
+    const quotes = { ltp: jest.fn(async () => queue.shift() ?? null) };
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, { updateTrade: jest.fn() } as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes);
+    return { svc, repo, exec };
+  }
+
+  it('closes the paper trade at the AI price with the reason and shadow on the notes, then starts the HELD follow', async () => {
+    const s = closing([]);
+    await s.svc.closeByAi({ tradeId: 't1', rule: 'AI_EXIT', price: 92, reason: 'AI EXIT_NOW (PASS: THESIS_BROKEN)', at: new Date('2026-10-28T06:04:05Z') });
+    expect(s.exec.closeTrade).toHaveBeenCalledWith('t1', expect.objectContaining({ exitReasonTag: 'AI_EXIT', exitPrice: 92 }));
+    const notes = (s.exec.closeTrade.mock.calls[0] as any)[1].exitNotes as string;
+    expect(notes).toContain('AI exit: AI EXIT_NOW (PASS: THESIS_BROKEN)');
+    expect(notes).toContain('shadow:');
+    expect(notes).toContain('night review');
+    expect(s.repo.startHeldFollow).toHaveBeenCalledWith('t1', 'd1', -600, expect.objectContaining({ sl: 90, target: 110, targets: [110, 120], ai: expect.objectContaining({ price: 92 }) }));
+  });
+
+  it('a trade that closed meanwhile on its own rules is left alone', async () => {
+    const s = closing([]);
+    s.repo.openPaperTrade.mockResolvedValue(null as never);
+    await s.svc.closeByAi({ tradeId: 't1', rule: 'AI_EXIT', price: 92, reason: 'x', at: new Date() });
+    expect(s.exec.closeTrade).not.toHaveBeenCalled();
+  });
+
+  it('the HELD follow trails on its own rules and settles held vs AI when they would have exited', async () => {
+    const follow = {
+      side: 'BUY', entry: 100, qty: 75, sl: 90, target: 110, targets: [110, 120], product: 'INTRADAY', tags: [],
+      entryTime: '2026-10-28T05:00:00Z', token: '1', exchange: 'NFO', symbol: 'NIFTYCE', expiry: null, ai: { rule: 'AI_EXIT', price: 92, at: '2026-10-28T06:04:05Z' },
+    };
+    const s = closing([111], follow);
+    await s.svc.sweep(NOW);
+    expect(s.repo.updateHeld).toHaveBeenCalledWith('h1', { detail: expect.objectContaining({ sl: 100, target: 120 }) });
+
+    const s2 = closing([121], { ...follow, sl: 100, target: 120 });
+    await s2.svc.sweep(NOW);
+    expect(s2.repo.updateHeld).toHaveBeenCalledWith('h1', expect.objectContaining({ done: expect.objectContaining({ price: 120, rulePnl: 1500, saved: 2100 }) }));
+  });
+});

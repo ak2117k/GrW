@@ -12,7 +12,7 @@ import { emptyShadow, grossPnl, shadowLine, stepShadow, type ShadowParams, type 
 import { NOISE_LOOKBACK_MIN, parseExitDisciplineConfig } from '../../exit-discipline/config';
 import { noiseFromBars } from '../../exit-discipline/noise';
 import type { MinuteBar } from '../../exit-discipline/types';
-import { PaperSentinelService, type PaperPosition } from '../../paper-sentinel/paper-sentinel.service';
+import { PaperSentinelService, type PaperAiExit, type PaperPosition } from '../../paper-sentinel/paper-sentinel.service';
 import {
   SIGNAL_QUOTES,
   SIGNAL_SESSION_CLOCK,
@@ -45,6 +45,24 @@ interface Shadowed {
   nAt: number;
 }
 
+/** The HELD row's follow state: the closed trade's own exit rules, carried on after the AI closed it. */
+interface HeldFollow {
+  side: string;
+  entry: number;
+  qty: number;
+  sl: number | null;
+  target: number | null;
+  targets: number[];
+  product: string;
+  tags: string[];
+  entryTime: string;
+  token: string;
+  exchange: string;
+  symbol: string;
+  expiry: string | null;
+  ai: { rule: string; price: number; at: string };
+}
+
 /**
  * SL / target exits for the PAPER (no funds) trades. The paper engine has none of its own (the open
  * paper refresher only marks option P&L, and each paper track runs its own exit poller), so this is
@@ -71,11 +89,86 @@ export class SignalPaperWatchService {
     @Inject(SIGNAL_SESSION_CLOCK) private readonly clock: SessionClockLike,
     @Inject(SIGNAL_QUOTES) private readonly quotes: QuotesLike,
     @Optional() @Inject(SIGNAL_BARS) private readonly bars?: BarsLike,
-    // Shadow stage 2: the live AI sentinel on these trades (looks + AI exits recorded, never acted on).
+    // Shadow stage 2: the live AI sentinel on these trades; its exits close them (owner 2026-10-29).
     @Optional() private readonly paperSentinel?: PaperSentinelService,
   ) {
     const d = parseExitDisciplineConfig(process.env);
     this.shadowParams = { armN: d.floorArmN, trailN: d.floorTrailN, givebackN: d.givebackN };
+    this.paperSentinel?.onExit((e) => this.closeByAi(e));
+  }
+
+  /**
+   * The AI sentinel's exit, as live: the paper trade closes at the AI's price (the standard paper close)
+   * with the AI's reason on the exit notes. Then, for the night review, a HELD row follows the trade on
+   * its own rules (SL, trailing targets, square-off) to say what holding would have made instead.
+   */
+  async closeByAi(e: PaperAiExit): Promise<void> {
+    const t = await this.repo.openPaperTrade(e.tradeId);
+    if (!t?.instrument || !t.entryPrice) return; // closed meanwhile by its own rules: that close stands
+    const inst = t.instrument;
+    const targets = await this.targetsFor(t);
+    const line = this.shadowOn() ? await this.shadowSettle(t, e.price, e.at) : null;
+    const what = e.rule === 'AI_TRIGGER' ? 'AI trigger' : 'AI exit';
+    const notes = [`${what}: ${e.reason}`, line ? `shadow: ${line}` : null, 'night review: the HELD row follows what holding would have made'];
+    await this.exec.closeTrade(t.id, {
+      exitReasonTag: 'AI_EXIT',
+      reason: `paper closed by the AI sentinel (${e.rule})`,
+      exitNotes: notes.filter(Boolean).join(' | ').slice(0, 2000),
+      exitPrice: e.price,
+    });
+    this.targets.delete(t.id);
+    this.logger.warn(`[signal-paper] closed paper ${inst.symbol} (${t.id}) on ${e.rule} @ ${e.price}: ${e.reason}`);
+    if (t.entryTags.includes('learn')) await this.scoreAi(t, e.price, 'AI_EXIT', e.at);
+    try {
+      const follow: HeldFollow = {
+        side: t.side, entry: t.entryPrice, qty: t.quantity, sl: t.stoploss, target: t.target, targets,
+        product: t.positionType, tags: t.entryTags, entryTime: (t.entryTime ?? t.createdAt).toISOString(),
+        token: inst.token, exchange: inst.exchange, symbol: inst.symbol, expiry: inst.expiry ? inst.expiry.toISOString() : null,
+        ai: { rule: e.rule, price: e.price, at: e.at.toISOString() },
+      };
+      await this.repo.startHeldFollow(t.id, decisionIdFromTags(t.entryTags), grossPnl(t.side, t.entryPrice, e.price, t.quantity), follow);
+    } catch (err) {
+      this.logger.warn(`[signal-paper] HELD follow for ${t.id} not started: ${errText(err)}`);
+    }
+  }
+
+  /**
+   * Night review: each AI-closed trade, still followed on its own rules. On their exit the HELD row is
+   * settled: rulePnl = what holding made, heldPnl = what the AI's close made, saved = held − AI
+   * (> 0: holding would have beaten the AI). Never throws.
+   */
+  private async followHeld(owner: string, now: Date): Promise<void> {
+    let rows: Awaited<ReturnType<SignalTraderRepository['followingHeld']>>;
+    try {
+      rows = await this.repo.followingHeld();
+    } catch (err) {
+      this.logger.warn(`[signal-paper] HELD follow read failed: ${errText(err)}`);
+      return;
+    }
+    for (const r of rows) {
+      try {
+        const f = r.detail as HeldFollow | null;
+        if (!f?.token || !f.exchange || !(f.entry > 0)) continue;
+        if (!this.clock.isOpen(f.exchange, now)) continue;
+        const ltp = await this.quotes.ltp(owner, f.token, f.exchange).catch(() => null);
+        const d = paperExitDecision({
+          side: f.side, ltp, sl: f.sl, target: f.target, product: f.product, minutesToClose: this.clock.minutesToClose(f.exchange, now),
+          horizon: horizonFromTags(f.tags), entryTime: new Date(f.entryTime), now, expiry: f.expiry ? new Date(f.expiry) : null,
+          entry: f.entry, targets: f.targets,
+        });
+        if (!d.exit && d.trail) {
+          await this.repo.updateHeld(r.id, { detail: { ...f, sl: d.trail.sl, target: d.trail.target } });
+        } else if (d.exit) {
+          const held = grossPnl(f.side, f.entry, d.price, f.qty);
+          const ai = r.heldPnl ?? grossPnl(f.side, f.entry, f.ai.price, f.qty);
+          const reason = `held: ${d.reason} → ${held} vs AI ${f.ai.rule} @ ${f.ai.price} → ${ai}`;
+          await this.repo.updateHeld(r.id, { detail: f, done: { at: now, price: d.price, reason, rulePnl: held, saved: r2(held - ai) } });
+          this.logger.log(`[signal-paper] HELD follow ${f.symbol} (${r.tradeId}) done — ${reason}`);
+        }
+      } catch (err) {
+        this.logger.warn(`[signal-paper] HELD follow ${r.tradeId}: ${errText(err)}`);
+      }
+    }
   }
 
   private shadowOn(): boolean {
@@ -167,6 +260,7 @@ export class SignalPaperWatchService {
       }
     }
     if (this.shadowOn()) this.paperSentinel?.observe(priced, now, stillOpen);
+    if (this.shadowOn()) await this.followHeld(owner, now);
     return { checked: open.length, exited };
   }
 

@@ -568,6 +568,49 @@ export class SignalTraderRepository {
     });
   }
 
+  /** One open paper trade by id (the AI close re-reads it: it may have closed meanwhile). */
+  openPaperTrade(tradeId: string): Promise<PaperTradeRow | null> {
+    return this.prisma.trade.findFirst({
+      where: { id: tradeId, strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, status: 'OPEN' },
+      select: this.paperSelect,
+    }) as Promise<PaperTradeRow | null>;
+  }
+
+  /**
+   * AI close, night review: the HELD row follows the closed trade on its own rules (detail = the
+   * follow state) until they would have closed it. Open while `wouldExitAt` is null.
+   */
+  async startHeldFollow(tradeId: string, decisionId: string | null, aiPnl: number, detail: unknown): Promise<void> {
+    await this.prisma.paperExitShadow.upsert({
+      where: { tradeId_rule: { tradeId, rule: 'HELD' } },
+      create: { tradeId, decisionId, rule: 'HELD', heldPnl: aiPnl, detail: detail as Prisma.InputJsonValue },
+      update: {},
+    });
+  }
+
+  followingHeld(): Promise<Array<{ id: string; tradeId: string; heldPnl: number | null; detail: unknown }>> {
+    return this.prisma.paperExitShadow.findMany({
+      where: { rule: 'HELD', wouldExitAt: null },
+      select: { id: true, tradeId: true, heldPnl: true, detail: true },
+      take: 100,
+    });
+  }
+
+  async updateHeld(
+    id: string,
+    data: { detail: unknown; done?: { at: Date; price: number; reason: string; rulePnl: number; saved: number } },
+  ): Promise<void> {
+    await this.prisma.paperExitShadow.update({
+      where: { id },
+      data: {
+        detail: data.detail as Prisma.InputJsonValue,
+        ...(data.done
+          ? { wouldExitAt: data.done.at, price: data.done.price, reason: data.done.reason, rulePnl: data.done.rulePnl, saved: data.done.saved, settledAt: data.done.at }
+          : {}),
+      },
+    });
+  }
+
   /** The first time a rule would have exited — written once, never moved. */
   async saveShadowHit(tradeId: string, decisionId: string | null, rule: string, hit: { at: string; price: number; reason: string }, detail: unknown): Promise<void> {
     await this.prisma.paperExitShadow.upsert({

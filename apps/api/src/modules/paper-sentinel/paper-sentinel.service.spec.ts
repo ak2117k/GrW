@@ -194,6 +194,39 @@ describe('PaperSentinelService — the live sentinel cycle on paper trades', () 
     expect(lastRowForA[1]).toMatchObject({ lastLtp: 101, updatedAt: NOW });
   });
 
+  it('an AI exit is handed to the close handler (the paper watch closes the trade); PAPER_SENTINEL_CLOSES=off records only', async () => {
+    const t = make({ judge: { verdict: 'EXIT_NOW', thesisStatus: 'BROKEN' } });
+    const handler = jest.fn().mockResolvedValue(undefined);
+    t.svc.onExit(handler);
+    t.svc.observe([pos({ ltp: 92 })], NOW);
+    await t.svc.idle();
+    expect(t.upsert).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ tradeId: 'T1', rule: 'AI_EXIT', price: 92 }));
+
+    const off = make({ judge: { verdict: 'EXIT_NOW' }, env: { PAPER_SENTINEL_CLOSES: 'off' } });
+    const h2 = jest.fn();
+    off.svc.onExit(h2);
+    off.svc.observe([pos({ ltp: 92 })], NOW);
+    await off.svc.idle();
+    expect(off.upsert).toHaveBeenCalledTimes(1);
+    expect(h2).not.toHaveBeenCalled();
+  });
+
+  it('an AI exit recorded while the trade stayed open is closed late, at the recorded price', async () => {
+    const t = make();
+    const at = new Date('2026-10-29T06:04:05.000Z');
+    (t as unknown as { svc: { prisma: { paperExitShadow: { findMany: jest.Mock } } } }).svc.prisma.paperExitShadow.findMany.mockResolvedValue([
+      { tradeId: 'T1', rule: 'AI_EXIT', price: 124, reason: 'AI EXIT_NOW (PASS)', wouldExitAt: at },
+    ]);
+    const handler = jest.fn().mockResolvedValue(undefined);
+    t.svc.onExit(handler);
+    t.svc.observe([pos({ ltp: 120 })], NOW);
+    await t.svc.idle();
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ tradeId: 'T1', rule: 'AI_EXIT', price: 124, at, reason: expect.stringContaining('closed late') }));
+    // Already exited: no further looks.
+    expect(t.record).not.toHaveBeenCalled();
+  });
+
   it('PAPER_SENTINEL=off (or PAPER_EXIT_SHADOW=off) stops it entirely', async () => {
     for (const env of [{ PAPER_SENTINEL: 'off' }, { PAPER_EXIT_SHADOW: 'off' }] as Array<Record<string, string>>) {
       const t = make({ env });

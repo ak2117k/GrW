@@ -229,7 +229,7 @@ export function paperState(r: PaperRow): { label: string; tone: 'good' | 'bad' |
   const pnl = r.trade.pnl ?? 0;
   const tone = pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'neutral';
   if (r.trade.status === 'CLOSED') {
-    const why = r.trade.exitReasonTag === 'HIT_TARGET' ? 'target' : r.trade.exitReasonTag === 'STOPPED_OUT' ? 'SL' : r.trade.exitReasonTag === 'MOVED_STOP' ? 'trailed SL' : r.trade.exitReasonTag === 'TIME_EXIT' ? 'EOD' : 'closed';
+    const why = r.trade.exitReasonTag === 'HIT_TARGET' ? 'target' : r.trade.exitReasonTag === 'STOPPED_OUT' ? 'SL' : r.trade.exitReasonTag === 'MOVED_STOP' ? 'trailed SL' : r.trade.exitReasonTag === 'AI_EXIT' ? 'AI exit' : r.trade.exitReasonTag === 'TIME_EXIT' ? 'EOD' : 'closed';
     return { label: `${why} @ ${r.trade.exitPrice ?? '?'} · ${rupee(pnl)}`, tone };
   }
   return { label: `open @ ${r.trade.entryPrice ?? '?'} · ${rupee(pnl)}`, tone };

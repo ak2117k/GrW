@@ -63,6 +63,7 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { HealthModule } from './modules/health/health.module';
 import { TradeCoreModule } from './modules/trade-core/trade-core.module';
 import { SignalTraderModule } from './modules/signal-trader/signal-trader.module';
+import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
 
 @Module({
   imports: [
@@ -312,6 +313,11 @@ import { SignalTraderModule } from './modules/signal-trader/signal-trader.module
     // Telegram signal TRADING (stream X): signal.ready → hard-cap gate → AI judge → LIMIT entry.
     // SIGNAL_TRADING=off|shadow|live (default shadow: no order). Live also needs LIVE_TRADING_ENABLED.
     SignalTraderModule,
+
+    // "Noise or real?" read at every AI exit (paper, signal paper, real) — RECORD ONLY, fired after the
+    // exit decision and never awaited; a 5-min sweep fills the 15 / 30-min follow-up for the night review.
+    // @Global (ExitNoiseReadService, injected @Optional()). EXIT_NOISE_READS=off disables it.
+    ExitNoiseModule,
 
     // Liveness + keep-warm probe (/healthz) — pinged by the keep-warm cron so
     // the free-tier stack rarely cold-starts and logins stay fast.

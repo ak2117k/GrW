@@ -1,5 +1,5 @@
 // apps/api/src/modules/sentinel-executor/services/trigger-watch.service.ts
-import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { lookupHubPrices, type HubPrices } from '../../market-hub/hub-prices';
@@ -21,6 +21,8 @@ import {
   type TriggerFields,
 } from '../repositories/sentinel-exit-trigger.repository';
 import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './sentinel-exit-executor.service';
+import { NOISE_READ_STATUSES, exitPriceOf } from './sentinel-exit-poller.service';
+import { ExitNoiseReadService } from '../../exit-noise/exit-noise.service';
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const IST_HM = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -67,6 +69,7 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     private readonly executor: SentinelExitExecutor,
     private readonly moduleRef: ModuleRef,
     @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen'>,
+    @Optional() private readonly noise?: ExitNoiseReadService,
   ) {}
 
   onModuleInit(): void {
@@ -315,7 +318,18 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`[ai-trigger] execution for trigger ${t.id} already claimed — nothing more sent`);
         return;
       }
-      await this.executor.execute(id, v, acfg, now, 'PRICE_TRIGGER');
+      const out = await this.executor.execute(id, v, acfg, now, 'PRICE_TRIGGER');
+      // "Noise or real?" (record only) for a trigger exit that was sent / filled / rehearsed: fired after
+      // the attempt ended, never awaited — it cannot block, delay or change it.
+      if (this.noise && out && NOISE_READ_STATUSES.has(out.status)) {
+        const context = { execution: out.status, trigger: { instrument: t.instrument, op: t.op, price: t.price, watch: t.watch.symbol, firedAt: f.tick.price, armedBy: t.verdictId } };
+        void Promise.resolve()
+          .then(async () => {
+            const exitPrice = exitPriceOf(await Promise.resolve().then(() => this.execRepo.findByVerdictId(v.id)).catch(() => null));
+            return this.noise?.record({ source: 'real', refId: v.id, exitRule: 'AI_TRIGGER', at: now, trackerId: t.trackerId, userId: t.userId, exitPrice, context });
+          })
+          .catch((e) => this.logger.warn(`[ai-trigger] noise read for trigger ${t.id} failed: ${errText(e)}`));
+      }
     } catch (err) {
       this.logger.error(`[ai-trigger] executor errored for trigger ${t.id}: ${errText(err)}`);
     }

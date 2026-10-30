@@ -53,6 +53,21 @@ export interface SelfReviewSummary {
     session: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome; paperByOi?: Record<OiVerdict, PaperGrossBucket> };
     rolling20: { live: SignalTradeOutcome; paperNoFunds: SignalTradeOutcome; paperByOi?: Record<OiVerdict, PaperGrossBucket> };
   };
+  /** "Noise or real?" reads at AI exits, scored on the underlying's next 30 min (observation only). */
+  exitNoise?: { session: ExitNoiseStats; rolling20: ExitNoiseStats };
+}
+
+/** The "noise or real?" read at an AI exit (record only). */
+export type NoiseVerdict = 'NOISE' | 'REAL' | 'MIXED' | 'NO_DATA';
+
+/** Exit noise reads in a window: NOISE right = the underlying recovered ≥ 1 N within 30 min; REAL right = it kept going ≥ 1 N against. */
+export interface ExitNoiseStats {
+  reads: number;
+  byVerdict: Record<NoiseVerdict, number>;
+  scored: number;
+  pending: number;
+  noise: { scored: number; right: number };
+  real: { scored: number; right: number };
 }
 
 /** The OI check recorded at a signal paper trade's open (record only). */
@@ -108,6 +123,8 @@ export interface SelfReviewRun {
   error?: string | null;
   /** The diagnosis' read of the signal paper trades by OI verdict / AI judge (latest run only). */
   signalPaperAssessment?: string | null;
+  /** The diagnosis' read of the exit noise reads' scores (latest run only). */
+  exitNoiseAssessment?: string | null;
 }
 
 /** One diagnosed miss from the run's LLM diagnosis. */

@@ -272,6 +272,20 @@ export function paperOiLines(summary: SelfReviewSummary | null | undefined): Arr
     });
 }
 
+/**
+ * The "noise or real?" reads at AI exits, last 20 sessions: "N scored, NOISE right x/y, REAL right x/y"
+ * (+ pending / unscored counts). null when there are none.
+ */
+export function exitNoiseLine(summary: SelfReviewSummary | null | undefined): string | null {
+  const s = summary?.exitNoise?.rolling20;
+  if (!s || !(s.reads > 0)) return null;
+  const parts = [`${s.scored} scored`, `NOISE right ${s.noise.right}/${s.noise.scored}`, `REAL right ${s.real.right}/${s.real.scored}`];
+  if (s.pending > 0) parts.push(`${s.pending} pending`);
+  const unscored = (s.byVerdict?.MIXED ?? 0) + (s.byVerdict?.NO_DATA ?? 0);
+  if (unscored > 0) parts.push(`${unscored} mixed / no data`);
+  return parts.join(', ');
+}
+
 /** Telegram signal trades, live vs paper (no funds), last 20 sessions — one line each, or [] when none. */
 export function signalTradeLines(summary: SelfReviewSummary | null | undefined): Array<{ key: 'live' | 'paperNoFunds'; label: string; text: string; tone: 'good' | 'bad' | 'neutral' }> {
   const r = summary?.signalTrades?.rolling20;

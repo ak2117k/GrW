@@ -6,6 +6,7 @@ import type { AgentLesson, SelfReviewRun, TuningProposal } from '@/types/selfRev
 import type { Decision } from './proposalDecision';
 import {
   evidenceLine,
+  exitNoiseLine,
   formatValue,
   hitRateOf,
   hitTone,
@@ -263,6 +264,16 @@ export function RunCard({ run }: { run: SelfReviewRun }) {
       {run.signalPaperAssessment && (
         <p className={cn('text-xs', SECONDARY)} data-testid="paper-oi-assessment">
           OI check review: {run.signalPaperAssessment}
+        </p>
+      )}
+      {exitNoiseLine(run.summary) && (
+        <p className={cn('text-[11px]', MUTED)} data-testid="exit-noise-line">
+          Exit noise reads, last 20 sessions: <span className="font-semibold">{exitNoiseLine(run.summary)}</span>
+        </p>
+      )}
+      {run.exitNoiseAssessment && (
+        <p className={cn('text-xs', SECONDARY)} data-testid="exit-noise-assessment">
+          Exit noise review: {run.exitNoiseAssessment}
         </p>
       )}
     </article>

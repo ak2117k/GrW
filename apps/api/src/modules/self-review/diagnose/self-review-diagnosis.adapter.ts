@@ -19,7 +19,7 @@ export class SelfReviewDiagnosisAdapter implements DiagnosisPort {
     private readonly lessons: LessonsService,
   ) {}
 
-  async diagnose(runId: string, misses: DiagnosisMiss[], context?: { signalPaper?: unknown }): Promise<DiagnosisOutput | null> {
+  async diagnose(runId: string, misses: DiagnosisMiss[], context?: { signalPaper?: unknown; noiseReads?: unknown }): Promise<DiagnosisOutput | null> {
     const result = await this.diagnosis.diagnose(runId, misses, context);
     const cases = new Map(misses.map((m) => [m.refId, { kind: m.kind as string, session: m.sessionDate, symbol: m.symbol }]));
     try {

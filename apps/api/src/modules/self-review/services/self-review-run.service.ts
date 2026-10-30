@@ -24,6 +24,7 @@ import {
 import { buildSummary, channelStats, mergeChannelInfoStats, topMisses } from '../domain/summary';
 import { probabilitySkill, relativeSkill } from '../domain/skill';
 import { signalPaperDigest, signalTradeStats } from '../domain/signal-trades';
+import { exitNoiseStats, noiseReadDigest } from '../domain/exit-noise';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -169,6 +170,14 @@ export class SelfReviewRunService {
         const to = new Date(istMidnightOf(S).getTime() + DAY_MS);
         const rows = await this.sources.signalTradeOutcomes(from, to);
         if (rows.paper.length || rows.live.length) summary.signalTrades = signalTradeStats(rows, sessions);
+        return [];
+      });
+
+      await this.soft('EXIT_NOISE reads (noise or real at AI exits)', errors, async () => {
+        const from = istMidnightOf(sessions[sessions.length - 1]);
+        const to = new Date(istMidnightOf(S).getTime() + DAY_MS);
+        const rows = await this.sources.exitNoiseReads(from, to);
+        if (rows.length) summary.exitNoise = exitNoiseStats(rows, sessions);
         return [];
       });
 
@@ -384,9 +393,12 @@ export class SelfReviewRunService {
     }
     // The signal paper splits (OI verdict / AI judge) go in too: the owner checks the OI check at the nightly review.
     const signalPaper = signalPaperDigest(summary.signalTrades);
-    if (!this.diagnosis || (misses.length === 0 && !signalPaper)) return null;
+    // The exit noise reads too (observation only): does a NOISE read at an AI exit mean the exit was premature?
+    const noiseReads = noiseReadDigest(summary.exitNoise);
+    if (!this.diagnosis || (misses.length === 0 && !signalPaper && !noiseReads)) return null;
     try {
-      const out = await this.diagnosis.diagnose(runId, misses, signalPaper ? { signalPaper } : undefined);
+      const context = { ...(signalPaper ? { signalPaper } : {}), ...(noiseReads ? { noiseReads } : {}) };
+      const out = await this.diagnosis.diagnose(runId, misses, signalPaper || noiseReads ? context : undefined);
       // B persists the diagnosis itself; make sure the run carries it either way.
       if (out) await this.repo.setDiagnosisIfEmpty(runId, out);
       return out;

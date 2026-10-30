@@ -24,6 +24,7 @@ import { parseTriggerConfig } from '../sentinel-executor/domain/trigger-config';
 import type { SessionClock } from '../market-hub/session-clock';
 import { PaperLookRepository } from '../trade-sentinel/paper/paper-look.repository';
 import { paperTrackerId, tradeIdOf } from '../trade-sentinel/paper/paper-tracker';
+import { ExitNoiseReadService } from '../exit-noise/exit-noise.service';
 import {
   armPaperTrigger,
   CASH_EXCHANGES,
@@ -134,6 +135,8 @@ export class PaperSentinelService {
     @Optional() @Inject(FUTILE_REJUDGE_CONFIG) futileCfg?: FutileRejudgeConfig,
     @Optional() @Inject(JUDGE_GATE_CONFIG) gateCfg?: JudgeGateConfig,
     @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
+    // "Noise or real?" at each AI exit (record only, never awaited by the exit).
+    @Optional() private readonly noise?: ExitNoiseReadService,
   ) {
     this.clock = makeSentinelClock(config.get<string>('hub.mcxLateClose'));
     this.risk = new ExitGateRepository(prisma);
@@ -447,12 +450,32 @@ export class PaperSentinelService {
   /** The first AI exit of a paper trade: a paper_exit_shadows row, then (closes on) the paper close. */
   private async recordExit(h: Held, rule: (typeof AI_RULES)[number], price: number, reason: string, detail: Record<string, Prisma.InputJsonValue>): Promise<void> {
     await this.writeExit(h, rule, price, reason, detail);
-    if (!this.exitHandler || !this.closes()) return;
-    try {
-      await this.exitHandler({ tradeId: h.tradeId, rule, price, reason, at: new Date() });
-    } catch (err) {
-      this.logger.warn(`[paper-sentinel] closing paper ${h.symbol} on ${rule} failed: ${errText(err)} — recorded only`);
+    const at = new Date();
+    if (this.exitHandler && this.closes()) {
+      try {
+        await this.exitHandler({ tradeId: h.tradeId, rule, price, reason, at });
+      } catch (err) {
+        this.logger.warn(`[paper-sentinel] closing paper ${h.symbol} on ${rule} failed: ${errText(err)} — recorded only`);
+      }
     }
+    // "Noise or real?" (record only): fired after the exit is recorded and closed, never awaited — it
+    // cannot block, delay or change the exit. One row per (trade, rule); a repeat is ignored.
+    const underlyingNow = h.reading?.underlyingLtp;
+    void Promise.resolve()
+      .then(() => this.noise?.record({
+        source: h.decisionId ? 'signal_paper' : 'paper',
+        refId: h.tradeId,
+        exitRule: rule,
+        at,
+        trackerId: paperTrackerId(h.tradeId),
+        tradeId: h.tradeId,
+        userId: h.userId,
+        position: { symbol: h.symbol, exchange: h.exchange, token: h.token, side: String(h.side).toUpperCase() === 'SELL' ? 'SHORT' : 'LONG' },
+        exitPrice: price,
+        underlyingNow: typeof underlyingNow === 'number' && underlyingNow > 0 ? underlyingNow : null,
+        context: { reason: reason.slice(0, 300), ...(detail.lookId ? { lookId: detail.lookId } : {}), ...(detail.trigger ? { trigger: detail.trigger } : {}) },
+      }))
+      .catch((e) => this.logger.warn(`[paper-sentinel] noise read for ${h.symbol} failed: ${errText(e)}`));
   }
 
   private async writeExit(h: Held, rule: (typeof AI_RULES)[number], price: number, reason: string, detail: Record<string, Prisma.InputJsonValue>): Promise<void> {

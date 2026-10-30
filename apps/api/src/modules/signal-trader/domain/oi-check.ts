@@ -151,7 +151,7 @@ export function wantedLean(kind: string, side: string): 'BULLISH' | 'BEARISH' {
 }
 
 /** Snapshot buckets: every row of one capture run shares its timestamp. */
-function buckets(rows: readonly OiRow[], keep: ReadonlySet<string> | null): Array<{ at: number; oi: Map<string, number> }> {
+export function buckets(rows: readonly OiRow[], keep: ReadonlySet<string> | null): Array<{ at: number; oi: Map<string, number> }> {
   const by = new Map<number, Map<string, number>>();
   for (const r of rows) {
     if (keep && !keep.has(r.instrumentId)) continue;
@@ -193,7 +193,7 @@ export function nearStrikes(strikes: readonly number[], center: number, n: numbe
   return s.slice(Math.max(0, i - n), i + n + 1);
 }
 
-function chainWindow(then: { at: number; oi: Map<string, number> }, now: { at: number; oi: Map<string, number> }, typeOf: Map<string, 'CE' | 'PE'>): ChainWindow | null {
+export function chainWindow(then: { at: number; oi: Map<string, number> }, now: { at: number; oi: Map<string, number> }, typeOf: Map<string, 'CE' | 'PE'>): ChainWindow | null {
   let ceThen = 0, ceNow = 0, peThen = 0, peNow = 0, n = 0;
   for (const [id, oiNow] of now.oi) {
     const oiThen = then.oi.get(id);

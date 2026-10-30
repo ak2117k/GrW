@@ -16,12 +16,14 @@ export interface SelfReviewLatestView {
   proposalsPending: number;
   /** The diagnosis' read of the signal paper trades split by OI verdict / AI judge call; null when none. */
   signalPaperAssessment?: string | null;
+  /** The diagnosis' read of the exit noise reads' scores (summary.exitNoise holds the counts); null when none. */
+  exitNoiseAssessment?: string | null;
 }
 
 const MISS_CAP = 15;
 
-function readAssessment(diagnosis: unknown): string | null {
-  const a = diagnosis && typeof diagnosis === 'object' && !Array.isArray(diagnosis) ? (diagnosis as { signalPaperAssessment?: unknown }).signalPaperAssessment : null;
+function readAssessment(diagnosis: unknown, key: 'signalPaperAssessment' | 'exitNoiseAssessment' = 'signalPaperAssessment'): string | null {
+  const a = diagnosis && typeof diagnosis === 'object' && !Array.isArray(diagnosis) ? (diagnosis as Record<string, unknown>)[key] : null;
   return typeof a === 'string' && a.trim() !== '' ? a : null;
 }
 
@@ -64,12 +66,14 @@ export class SelfReviewService {
         summary: run.summary ?? null,
         error: run.error,
         signalPaperAssessment: readAssessment(run.diagnosis),
+        exitNoiseAssessment: readAssessment(run.diagnosis, 'exitNoiseAssessment'),
       },
       summary: (run.summary as RunSummary | null) ?? null,
       misses,
       lessonsAdded: lessons.map((l) => ({ id: l.id, key: l.key, text: l.text, scope: l.scope, rightCount: l.rightCount, wrongCount: l.wrongCount, status: l.status })),
       proposalsPending,
       signalPaperAssessment: readAssessment(run.diagnosis),
+      exitNoiseAssessment: readAssessment(run.diagnosis, 'exitNoiseAssessment'),
     };
   }
 

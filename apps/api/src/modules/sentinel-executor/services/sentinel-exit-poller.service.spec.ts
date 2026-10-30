@@ -162,3 +162,33 @@ describe('SentinelExitPoller', () => {
     expect(outcomes.runOnce).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('SentinelExitPoller — exit noise read (record only)', () => {
+  afterEach(() => { jest.restoreAllMocks(); setEnv({}); });
+
+  it('is fired after an exit the executor acted on, never awaited: a hanging or throwing read cannot block the next verdict', async () => {
+    setEnv({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner' });
+    const repo = { pendingVerdicts: jest.fn().mockResolvedValue([]), sweepInterrupted: jest.fn().mockResolvedValue(0), findByVerdictId: jest.fn(async () => ({ fillPrice: null, orderLtp: 532, decisionLtp: 531.3 })) };
+    const executor = { process: jest.fn() };
+    const idle = { runOnce: jest.fn().mockResolvedValue(undefined) };
+    const created = new Date('2026-10-30T05:55:00Z');
+    repo.pendingVerdicts.mockResolvedValue([
+      { id: 'a', userId: 'owner', trackerId: 't1', symbol: 'X', reason: 'r', createdAt: created },
+      { id: 'b', userId: 'owner', trackerId: 't2', symbol: 'Y', reason: 'r', createdAt: created },
+      { id: 'c', userId: 'owner', trackerId: 't3', symbol: 'Z', reason: 'r', createdAt: created },
+    ]);
+    executor.process.mockResolvedValueOnce({ status: 'FILLED' }).mockResolvedValueOnce({ status: 'SKIPPED', reason: 'DAILY_CAP' }).mockResolvedValueOnce({ status: 'DRY_RUN' });
+    const record = jest.fn().mockImplementationOnce(() => new Promise(() => undefined)).mockImplementationOnce(() => { throw new Error('db down'); });
+    const poller = new SentinelExitPoller(repo as never, executor as never, idle as never, idle as never, { record } as never);
+    jest.spyOn(global, 'setInterval').mockReturnValue({ unref: () => undefined } as never);
+    jest.spyOn(global, 'setTimeout').mockReturnValue({ unref: () => undefined } as never);
+    poller.onModuleInit();
+    await poller.runOnce();
+    expect(executor.process.mock.calls.map((c) => c[0].id)).toEqual(['a', 'b', 'c']);
+    await new Promise((r) => setImmediate(r));
+    // SKIPPED is not an exit: only a and c are read.
+    expect(record.mock.calls.map((c) => c[0].refId)).toEqual(['a', 'c']);
+    expect(record.mock.calls[0][0]).toMatchObject({ source: 'real', exitRule: 'AI_EXIT', trackerId: 't1', userId: 'owner', context: { execution: 'FILLED' }, exitPrice: 532 });
+    poller.onModuleDestroy();
+  });
+});

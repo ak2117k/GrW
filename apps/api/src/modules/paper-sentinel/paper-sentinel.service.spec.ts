@@ -62,7 +62,7 @@ const verdict = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function make(opts: { judge?: Record<string, unknown>; env?: Record<string, string> } = {}) {
+function make(opts: { judge?: Record<string, unknown>; env?: Record<string, string>; noise?: { record: jest.Mock } } = {}) {
   for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
   let n = 0;
   const looks: Array<Record<string, unknown>> = [];
@@ -93,6 +93,8 @@ function make(opts: { judge?: Record<string, unknown>; env?: Record<string, stri
     { tickForRow } as never,
     // Discipline off: the live gate BYPASSes (DISABLED) and the executor exits — the simplest live path.
     parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' }),
+    undefined, undefined, undefined, undefined, undefined, undefined,
+    opts.noise as never,
   );
   return { svc, record, judge, upsert, tickForRow };
 }
@@ -310,6 +312,35 @@ describe('PaperSentinelService — the live sentinel cycle on paper trades', () 
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ tradeId: 'T1', rule: 'AI_EXIT', price: 124, at, reason: expect.stringContaining('closed late') }));
     // Already exited: no further looks.
     expect(t.record).not.toHaveBeenCalled();
+  });
+
+  it('the noise read is fired after the AI exit is recorded and closed, never awaited: a hanging or throwing read cannot block or fail the exit', async () => {
+    const hang = { record: jest.fn(() => new Promise(() => undefined)) };
+    const t = make({ judge: { verdict: 'EXIT_NOW', thesisStatus: 'BROKEN' }, noise: hang });
+    const handler = jest.fn().mockResolvedValue(undefined);
+    t.svc.onExit(handler);
+    t.svc.observe([pos({ ltp: 92 })], NOW);
+    await t.svc.idle();
+    expect(t.upsert).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ tradeId: 'T1', rule: 'AI_EXIT', price: 92 }));
+    await new Promise((r) => setImmediate(r));
+    expect(hang.record).toHaveBeenCalledWith(expect.objectContaining({
+      source: 'signal_paper', refId: 'T1', exitRule: 'AI_EXIT', trackerId: 'paper:T1', tradeId: 'T1', exitPrice: 92, underlyingNow: 24000,
+      position: { symbol: 'NIFTY04NOV2524000CE', exchange: 'NFO', token: '111', side: 'LONG' },
+    }));
+    // The read starts only after the close handler ran.
+    expect(handler.mock.invocationCallOrder[0]).toBeLessThan(hang.record.mock.invocationCallOrder[0]);
+
+    const boom = { record: jest.fn(() => { throw new Error('db down'); }) };
+    const b = make({ judge: { verdict: 'EXIT_NOW', thesisStatus: 'BROKEN' }, noise: boom });
+    const h2 = jest.fn().mockResolvedValue(undefined);
+    b.svc.onExit(h2);
+    b.svc.observe([pos({ ltp: 92 })], NOW);
+    await b.svc.idle();
+    await new Promise((r) => setImmediate(r));
+    expect(boom.record).toHaveBeenCalled();
+    expect(b.upsert).toHaveBeenCalledTimes(1);
+    expect(h2).toHaveBeenCalledTimes(1);
   });
 
   it('PAPER_SENTINEL=off (or PAPER_EXIT_SHADOW=off) stops it entirely', async () => {

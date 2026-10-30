@@ -8,6 +8,8 @@ import { SIGNAL_PAPER_STRATEGY, decisionIdFromTags } from '../../signal-trader/d
 import { oiVerdictOf } from '../../signal-trader/domain/oi-check';
 import { judgeCallOf } from '../../signal-trader/domain/paper-summary';
 import { asInfoItems } from '../../signal-intake/domain/info';
+import { noiseVerdictOfRecord } from '../../exit-noise/domain/noise-read';
+import type { ExitNoiseReadRow } from '../domain/exit-noise';
 
 /**
  * Read-only access to the rows the scorers judge. Every query is bounded by a time range the run
@@ -222,6 +224,39 @@ export class VerificationSourcesRepository {
         return { createdAt: o.createdAt, status: o.status, trackerStatus: t ? String(t.status) : null, pnl: t?.pnl ?? null };
       }),
     };
+  }
+
+  /**
+   * The "noise or real?" reads taken at AI exits in [from, to) (exit_noise_reads, record only), with
+   * their follow-up. Raw SQL so this module does not depend on the table at compile time; [] when the
+   * table is absent (migration 20261030120000 not applied).
+   */
+  async exitNoiseReads(from: Date, to: Date): Promise<ExitNoiseReadRow[]> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+        SELECT source, symbol, exit_rule, want, verdict, exit_at, underlying_at_exit, noise_n, underlying_after_15m, underlying_after_30m,
+          max_favour_30m, max_against_30m, followed_at, read->>'summary' AS summary
+        FROM "exit_noise_reads" WHERE exit_at >= ${from} AND exit_at < ${to} ORDER BY exit_at LIMIT 2000`;
+      const n = (v: unknown) => (v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+      return rows.map((r) => ({
+        source: String(r.source),
+        symbol: String(r.symbol),
+        exitRule: String(r.exit_rule),
+        want: r.want === 'BEARISH' ? 'BEARISH' : 'BULLISH',
+        verdict: noiseVerdictOfRecord(r.verdict),
+        exitAt: r.exit_at as Date,
+        underlyingAtExit: n(r.underlying_at_exit),
+        n: n(r.noise_n),
+        after15m: n(r.underlying_after_15m),
+        after30m: n(r.underlying_after_30m),
+        maxFavour30m: n(r.max_favour_30m),
+        maxAgainst30m: n(r.max_against_30m),
+        followed: r.followed_at !== null && r.followed_at !== undefined,
+        summary: typeof r.summary === 'string' ? r.summary : null,
+      }));
+    } catch {
+      return [];
+    }
   }
 
   /** Telegram INFO rows whose outcome is scored on `session` (signal-intake fills it at 16:20 IST). */

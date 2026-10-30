@@ -45,7 +45,7 @@ function harness(o: {
     trackerExchanges: jest.fn(async () => new Map([['t1', 'MCX']])),
     closedTrackerIds: jest.fn(async (..._a: any[]) => o.closed ?? ([] as string[])),
   };
-  const execRepo = { claim: jest.fn(async (..._a: any[]) => 'exec1') };
+  const execRepo = { claim: jest.fn(async (..._a: any[]) => 'exec1'), findByVerdictId: jest.fn(async (..._a: any[]) => ({ fillPrice: 8920, orderLtp: 8924, decisionLtp: 8924 })) };
   const executor = { execute: jest.fn(async (..._a: any[]) => ({ status: 'DRY_RUN' })) };
   const clock = { isOpen: jest.fn(() => true) };
   const svc = new TriggerWatchService(repo as never, execRepo as never, executor as never, moduleRef as never, clock as never);
@@ -337,5 +337,24 @@ describe('TriggerWatchService — disabled is inert (R11, Review Focus 6)', () =
     } finally {
       if (prev === undefined) delete process.env.BOOT_JOBS; else process.env.BOOT_JOBS = prev;
     }
+  });
+});
+
+describe('TriggerWatchService — exit noise read (record only)', () => {
+  it('a fired trigger the executor acted on is read after the attempt, never awaited; a hanging read changes nothing', async () => {
+    const h = harness({ proposals: [[proposal()], []] });
+    const record = jest.fn(() => new Promise(() => undefined));
+    (h.svc as unknown as { noise: unknown }).noise = { record };
+    await armed(h);
+    h.emit(8925, ms(T0, 1000));
+    h.emit(8924, ms(T0, 2100));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(h.executor.execute).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledTimes(1);
+    expect((record.mock.calls[0] as unknown[])[0]).toMatchObject({
+      source: 'real', refId: 'trg_trg1', exitRule: 'AI_TRIGGER', trackerId: 't1', userId: 'owner', exitPrice: 8920,
+      context: { execution: 'DRY_RUN', trigger: { instrument: 'UNDERLYING', op: 'BELOW', price: 8930, armedBy: 'v1' } },
+    });
   });
 });

@@ -74,6 +74,8 @@ export interface RunSummary {
   byChannel?: Record<string, ChannelStats>;
   /** Telegram signal trades: live vs PAPER (no funds), session S and rolling 20 (domain/signal-trades.ts). */
   signalTrades?: import('./domain/signal-trades').SignalTradesSummary;
+  /** "Noise or real?" reads at AI exits, scored on the next 30 min, session S and rolling 20 (domain/exit-noise.ts). Observation only. */
+  exitNoise?: import('./domain/exit-noise').ExitNoiseSummary;
   /** NEWS_IMPACT: hit rates by news source and by material type + mean |move| per called magnitude, session and rolling 20. */
   news?: { session: import('./domain/news-impact-scorer').NewsImpactSummary; rolling20: import('./domain/news-impact-scorer').NewsImpactSummary };
 }

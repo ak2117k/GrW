@@ -3661,3 +3661,42 @@ model LevelBreakLog {
   @@index([outcomeFilledAt, ts])
   @@map("level_break_log")
 }
+
+/// "Noise or real?" read taken when an AI exit fires (owner 2026-10-30, modules/exit-noise). RECORD ONLY:
+/// written after the exit decision, never read by an exit path. source = paper | signal_paper | real;
+/// ref_id = the paper trade id or the real exit's verdict id. The follow-up columns (underlying 15 / 30 min
+/// later, excursions over the 30 min) are filled by ExitNoiseFollowCron for the night review's scoring.
+/// Written and read with raw SQL (exit-noise.repository.ts).
+model ExitNoiseRead {
+  id                 String    @id @default(cuid())
+  source             String
+  refId              String    @map("ref_id")
+  tradeId            String?   @map("trade_id")
+  trackerId          String?   @map("tracker_id")
+  userId             String?   @map("user_id")
+  symbol             String
+  exchange           String?
+  underlying         String?
+  underlyingExchange String?   @map("underlying_exchange")
+  underlyingToken    String?   @map("underlying_token")
+  side               String // LONG | SHORT
+  want               String // BULLISH | BEARISH
+  exitRule           String    @map("exit_rule") // AI_EXIT | AI_TRIGGER
+  exitPrice          Float?    @map("exit_price")
+  exitAt             DateTime  @map("exit_at") @db.Timestamptz(6)
+  underlyingAtExit   Float?    @map("underlying_at_exit")
+  noiseN             Float?    @map("noise_n")
+  verdict            String // NOISE | REAL | MIXED | NO_DATA
+  read               Json // NoiseRead (exit-noise/domain/noise-read.ts)
+  underlyingAfter15m Float?    @map("underlying_after_15m")
+  underlyingAfter30m Float?    @map("underlying_after_30m")
+  maxFavour30m       Float?    @map("max_favour_30m")
+  maxAgainst30m      Float?    @map("max_against_30m")
+  followedAt         DateTime? @map("followed_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([source, refId, exitRule])
+  @@index([exitAt])
+  @@index([followedAt, exitAt])
+  @@map("exit_noise_reads")
+}

@@ -10,6 +10,7 @@ import {
   skillLines,
   signalTradeLines,
   paperOiLines,
+  exitNoiseLine,
   lessonInjected,
   lessonsAddedCount,
   lessonsAddedList,
@@ -211,5 +212,18 @@ describe('paperOiLines', () => {
       { key: 'AGAINST', label: 'OI against', text: '3 closed · 0W/3L · win 0% · gross −₹2,000', tone: 'bad' },
     ]);
     expect(paperOiLines({ session: '', byKind: {} })).toEqual([]);
+  });
+});
+
+describe('exitNoiseLine', () => {
+  it('exit noise reads, last 20 sessions: scored and right counts per verdict; null without reads', () => {
+    const st = (over: Partial<NonNullable<SelfReviewSummary['exitNoise']>['rolling20']> = {}) => ({
+      reads: 9, byVerdict: { NOISE: 5, REAL: 2, MIXED: 1, NO_DATA: 1 }, scored: 6, pending: 1,
+      noise: { scored: 4, right: 3 }, real: { scored: 2, right: 1 }, ...over,
+    });
+    const s: SelfReviewSummary = { session: '2026-10-30', byKind: {}, exitNoise: { session: st(), rolling20: st() } };
+    expect(exitNoiseLine(s)).toBe('6 scored, NOISE right 3/4, REAL right 1/2, 1 pending, 2 mixed / no data');
+    expect(exitNoiseLine({ session: '', byKind: {} })).toBeNull();
+    expect(exitNoiseLine({ session: '', byKind: {}, exitNoise: { session: st({ reads: 0 }), rolling20: st({ reads: 0 }) } })).toBeNull();
   });
 });

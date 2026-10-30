@@ -54,9 +54,13 @@ export interface DiagnosedMiss {
   dropped?: string;
 }
 
-/** Run-level context beside the misses. `signalPaper` = signal-trades' signalPaperDigest (null/absent = none). */
+/**
+ * Run-level context beside the misses. `signalPaper` = signal-trades' signalPaperDigest, `noiseReads` =
+ * exit-noise's noiseReadDigest (null/absent = none).
+ */
 export interface DiagnosisContext {
   signalPaper?: unknown;
+  noiseReads?: unknown;
 }
 
 export type DiagnosisStatus = 'OK' | 'SKIPPED' | 'FAILED';
@@ -77,10 +81,20 @@ export interface DiagnosisResult {
   promptVersion: string;
   /** The diagnosis' read of the signal paper splits by OI verdict / judge call (observation only). */
   signalPaperAssessment?: string;
+  /** The diagnosis' read of the exit noise reads' scores (observation only). */
+  exitNoiseAssessment?: string;
 }
 
 /** What to store on `self_review_runs.diagnosis`: the misses on OK, else null. */
-export function diagnosisForRun(result: DiagnosisResult | null | undefined): { misses: DiagnosedMiss[]; promptVersion: string; model?: string; signalPaperAssessment?: string } | null {
+export function diagnosisForRun(
+  result: DiagnosisResult | null | undefined,
+): { misses: DiagnosedMiss[]; promptVersion: string; model?: string; signalPaperAssessment?: string; exitNoiseAssessment?: string } | null {
   if (!result || result.status !== 'OK') return null;
-  return { misses: result.misses, promptVersion: result.promptVersion, model: result.model, ...(result.signalPaperAssessment ? { signalPaperAssessment: result.signalPaperAssessment } : {}) };
+  return {
+    misses: result.misses,
+    promptVersion: result.promptVersion,
+    model: result.model,
+    ...(result.signalPaperAssessment ? { signalPaperAssessment: result.signalPaperAssessment } : {}),
+    ...(result.exitNoiseAssessment ? { exitNoiseAssessment: result.exitNoiseAssessment } : {}),
+  };
 }

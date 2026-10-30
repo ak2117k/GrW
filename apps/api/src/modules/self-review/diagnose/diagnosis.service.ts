@@ -13,6 +13,7 @@ import {
   DIAGNOSIS_SYSTEM_PROMPT,
   extractJsonObject,
   noiseAssessmentOf,
+  engineAssessmentOf,
   paperAssessmentOf,
   validateDiagnosis,
 } from './diagnosis-prompt';
@@ -58,8 +59,8 @@ export class DiagnosisService {
   async diagnose(runId: string, misses: readonly MissInput[], context: DiagnosisContext = {}): Promise<DiagnosisResult> {
     const base = { promptVersion: DIAGNOSIS_PROMPT_VERSION };
     const { sent, dropped } = capMisses(misses);
-    // The signal paper-trade and exit noise assessments are wanted even on a session with no misses.
-    if (sent.length === 0 && !context.signalPaper && !context.noiseReads) return { ...base, status: 'SKIPPED', misses: [], reason: 'no misses', sent: 0, dropped: 0 };
+    // The signal paper-trade, exit noise and entry engine assessments are wanted even on a session with no misses.
+    if (sent.length === 0 && !context.signalPaper && !context.noiseReads && !context.engine) return { ...base, status: 'SKIPPED', misses: [], reason: 'no misses', sent: 0, dropped: 0 };
 
     let active: LessonRecord[] = [];
     try {
@@ -75,7 +76,7 @@ export class DiagnosisService {
         max_tokens: DIAGNOSIS_MAX_TOKENS,
         output_config: { effort: tier.effort, format: { type: 'json_schema', schema: DIAGNOSIS_SCHEMA as unknown as Record<string, unknown> } },
         system: [{ type: 'text', text: DIAGNOSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        messages: [{ role: 'user', content: buildDiagnosisUserMessage(sent, active, context.signalPaper, context.noiseReads) }],
+        messages: [{ role: 'user', content: buildDiagnosisUserMessage(sent, active, context.signalPaper, context.noiseReads, context.engine) }],
       });
     } catch (e) {
       return this.failed(runId, `LLM call failed: ${msg(e)}`, sent.length, dropped, tier.model);
@@ -97,10 +98,12 @@ export class DiagnosisService {
       if (ungrounded.length > 0) this.logger.log(`[self-review] run ${runId}: discarded ${ungrounded.map((d) => d.dropped).join(' | ')}`);
       const signalPaperAssessment = context.signalPaper ? paperAssessmentOf(raw) : undefined;
       const exitNoiseAssessment = context.noiseReads ? noiseAssessmentOf(raw) : undefined;
+      const engineAssessment = context.engine ? engineAssessmentOf(raw) : undefined;
       return {
         ...base, status: 'OK', misses: diagnosed, sent: sent.length, dropped, model: tier.model,
         ...(signalPaperAssessment ? { signalPaperAssessment } : {}),
         ...(exitNoiseAssessment ? { exitNoiseAssessment } : {}),
+        ...(engineAssessment ? { engineAssessment } : {}),
       };
     } catch (e) {
       return this.failed(runId, `reply rejected: ${msg(e)}`, sent.length, dropped, tier.model);

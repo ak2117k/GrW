@@ -18,11 +18,13 @@ export interface SelfReviewLatestView {
   signalPaperAssessment?: string | null;
   /** The diagnosis' read of the exit noise reads' scores (summary.exitNoise holds the counts); null when none. */
   exitNoiseAssessment?: string | null;
+  /** The diagnosis' read of the entry engine (summary.engine holds the counts); null when none. */
+  engineAssessment?: string | null;
 }
 
 const MISS_CAP = 15;
 
-function readAssessment(diagnosis: unknown, key: 'signalPaperAssessment' | 'exitNoiseAssessment' = 'signalPaperAssessment'): string | null {
+function readAssessment(diagnosis: unknown, key: 'signalPaperAssessment' | 'exitNoiseAssessment' | 'engineAssessment' = 'signalPaperAssessment'): string | null {
   const a = diagnosis && typeof diagnosis === 'object' && !Array.isArray(diagnosis) ? (diagnosis as Record<string, unknown>)[key] : null;
   return typeof a === 'string' && a.trim() !== '' ? a : null;
 }
@@ -67,6 +69,7 @@ export class SelfReviewService {
         error: run.error,
         signalPaperAssessment: readAssessment(run.diagnosis),
         exitNoiseAssessment: readAssessment(run.diagnosis, 'exitNoiseAssessment'),
+        engineAssessment: readAssessment(run.diagnosis, 'engineAssessment'),
       },
       summary: (run.summary as RunSummary | null) ?? null,
       misses,
@@ -74,6 +77,7 @@ export class SelfReviewService {
       proposalsPending,
       signalPaperAssessment: readAssessment(run.diagnosis),
       exitNoiseAssessment: readAssessment(run.diagnosis, 'exitNoiseAssessment'),
+      engineAssessment: readAssessment(run.diagnosis, 'engineAssessment'),
     };
   }
 

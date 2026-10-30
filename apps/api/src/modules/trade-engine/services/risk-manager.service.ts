@@ -21,9 +21,10 @@ import { formatTradeRejection } from '../../../common/utils/trade-rejection-log'
 
 /**
  * Paper strategies whose open positions form their own concurrent-positions pool (paper only).
- * The string is signal-trader's SIGNAL_PAPER_STRATEGY; kept literal so trade-engine does not import it.
+ * The strings are signal-trader's SIGNAL_PAPER_STRATEGY and entry-engine's ENGINE_ENTRY_STRATEGY; kept
+ * literal so trade-engine does not import them.
  */
-export const ISOLATED_PAPER_STRATEGIES: ReadonlySet<string> = new Set(['TELEGRAM_SIGNAL_NO_FUNDS']);
+export const ISOLATED_PAPER_STRATEGIES: ReadonlySet<string> = new Set(['TELEGRAM_SIGNAL_NO_FUNDS', 'ENGINE_ENTRY']);
 /** The entry tag of a learning-mode Telegram paper trade (no stop, no account caps). */
 export const LEARNING_PAPER_TAG = 'learn';
 

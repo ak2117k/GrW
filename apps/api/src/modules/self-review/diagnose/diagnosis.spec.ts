@@ -156,13 +156,13 @@ describe('DiagnosisService', () => {
     const create = jest.fn().mockResolvedValue(reply('```json\n{"misses":[{"refIds":["r1"],"cause":"gap","category":"THESIS_WRONG","lessonKey":"old-key"}]}\n```'));
     const { svc } = make(create, { SENTINEL_MODEL_TRIGGERED: 'claude-x', SENTINEL_EFFORT_TRIGGERED: 'medium' });
     const res = await svc.diagnose('run1', [miss('r1'), miss('r2')]);
-    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd4' });
+    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd5' });
     expect(res.misses).toEqual([{ refIds: ['r1'], cause: 'gap', category: 'THESIS_WRONG', lessonKey: 'old-key' }]);
     expect(create).toHaveBeenCalledTimes(1);
     const req = create.mock.calls[0][0];
     expect(req).toMatchObject({ model: 'claude-x', max_tokens: DIAGNOSIS_MAX_TOKENS, output_config: { effort: 'medium', format: { type: 'json_schema', schema: DIAGNOSIS_SCHEMA } } });
     expect(JSON.parse(req.messages[0].content).misses.map((m: MissInput) => m.refId)).toEqual(['r1', 'r2']);
-    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd4', model: 'claude-x' });
+    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd5', model: 'claude-x' });
   });
 
   it('checks the reply against the scorecard points it was sent', async () => {
@@ -235,6 +235,20 @@ describe('DiagnosisService', () => {
     const r2 = await make(c2).svc.diagnose('r', [miss('r1')]);
     expect(r2.exitNoiseAssessment).toBeUndefined();
     expect(JSON.parse(c2.mock.calls[0][0].messages[0].content).noiseReads).toBeUndefined();
+  });
+
+  it('the entry engine block goes in (even with no misses) and its assessment comes back; under 10 closed engine trades the prompt asks for "insufficient sample"', async () => {
+    const engine = { sampleOk: false, rolling20: { decisions: 40, enters: 2, closed: 1, gross: 300 }, sessionEnters: [{ underlying: 'CRUDEOIL', action: 'ENTER_PE' }] };
+    const create = jest.fn().mockResolvedValue(reply('{"misses":[],"engineAssessment":"  2 enters in 40; insufficient sample.  "}'));
+    const res = await make(create).svc.diagnose('r', [], { engine });
+    expect(create).toHaveBeenCalledTimes(1);
+    const req = create.mock.calls[0][0];
+    expect(JSON.parse(req.messages[0].content).engine).toEqual(engine);
+    expect(req.system[0].text).toMatch(/fewer than 10 closed engine trades, say "insufficient sample"/);
+    expect(res).toMatchObject({ status: 'OK', promptVersion: 'd5', engineAssessment: '2 enters in 40; insufficient sample.' });
+    expect(diagnosisForRun(res)?.engineAssessment).toBe(res.engineAssessment);
+    const c2 = jest.fn().mockResolvedValue(reply('{"misses":[],"engineAssessment":"x"}'));
+    expect((await make(c2).svc.diagnose('r', [miss('r1')])).engineAssessment).toBeUndefined();
   });
 
   it('diagnoses without lessons when they cannot be read', async () => {

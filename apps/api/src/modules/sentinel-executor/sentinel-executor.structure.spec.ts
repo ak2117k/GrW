@@ -110,10 +110,27 @@ describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
    */
   const SANCTIONED_READERS = ['trade-sentinel/repositories/exit-attempt.reader.ts', 'portfolio/repositories/live-trades.repository.ts'];
 
+  /*
+   * Audit reader (2026-10-30): the sanity audit checks a FILLED AI exit's price against the sentinel's
+   * last look and that each AI exit got its noise read. It needs fill prices (so not a SANCTIONED_READER),
+   * writes nothing to the table, feeds no corpus, and excludes `man_` (owner Exit button) verdict ids.
+   */
+  const AUDIT_READERS = ['sanity-audit/repositories/ai-exit-audit.reader.ts'];
+
+  it('the audit reader stays read-only and never counts a manual exit', () => {
+    for (const rel of AUDIT_READERS) {
+      const src = code(join(MODULES, rel));
+      expect(src).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b|aiExitExecution\s*\.\s*(create|update|upsert|delete)/i);
+      const queries = src.match(/FROM "ai_exit_executions"[\s\S]*?`/g) ?? [];
+      expect(queries.length).toBeGreaterThan(0);
+      for (const q of queries) expect(q).toContain(`left(a."verdictId", 4) <> 'man_'`);
+    }
+  });
+
   it('only sentinel-executor reads ai_exit_executions — no corpus writer can mistake a manual exit for an AI decision', () => {
     const offenders = all()
       .filter((f) => !f.includes(`${join('modules', 'sentinel-executor')}`))
-      .filter((f) => !SANCTIONED_READERS.includes(relative(MODULES, f).replace(/\\/g, '/')))
+      .filter((f) => ![...SANCTIONED_READERS, ...AUDIT_READERS].includes(relative(MODULES, f).replace(/\\/g, '/')))
       .filter((f) => /aiExitExecution|ai_exit_executions/.test(code(f)))
       .map((f) => relative(MODULES, f).replace(/\\/g, '/'));
     expect(offenders).toEqual([]);

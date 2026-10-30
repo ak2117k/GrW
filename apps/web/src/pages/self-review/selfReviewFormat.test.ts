@@ -11,6 +11,7 @@ import {
   signalTradeLines,
   paperOiLines,
   exitNoiseLine,
+  engineLine,
   lessonInjected,
   lessonsAddedCount,
   lessonsAddedList,
@@ -212,6 +213,16 @@ describe('paperOiLines', () => {
       { key: 'AGAINST', label: 'OI against', text: '3 closed · 0W/3L · win 0% · gross −₹2,000', tone: 'bad' },
     ]);
     expect(paperOiLines({ session: '', byKind: {} })).toEqual([]);
+  });
+});
+
+describe('engineLine', () => {
+  it('entry engine, last 20 sessions: decisions, enters, paper trades, gross; insufficient sample under 10 closed; null when nothing', () => {
+    const st = { decisions: 40, enters: 2, byAction: { ENTER_PE: 2, NO_TRADE: 38 }, trades: 1, closed: 1, wins: 1, losses: 0, winRate: 1, gross: 3000 };
+    const s: SelfReviewSummary = { session: '2026-10-30', byKind: {}, engine: { session: st, rolling20: st } };
+    expect(engineLine(s)).toEqual({ text: '40 decisions · 2 enter (CE 0 / PE 2) · 1 paper trades · 1 closed 1W/0L · gross ₹3,000 · insufficient sample', tone: 'good' });
+    expect(engineLine({ session: '', byKind: {} })).toBeNull();
+    expect(engineLine({ session: '', byKind: {}, engine: { session: { ...st, decisions: 0, trades: 0 }, rolling20: { ...st, decisions: 0, trades: 0 } } })).toBeNull();
   });
 });
 

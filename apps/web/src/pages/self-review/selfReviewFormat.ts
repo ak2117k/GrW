@@ -286,6 +286,22 @@ export function exitNoiseLine(summary: SelfReviewSummary | null | undefined): st
   return parts.join(', ');
 }
 
+/**
+ * The entry engine, last 20 sessions: "N decisions, E enter (CE c / PE p), T paper trades, C closed W/L, gross ₹"
+ * with a tone from the gross. null when it recorded nothing.
+ */
+export function engineLine(summary: SelfReviewSummary | null | undefined): { text: string; tone: 'good' | 'bad' | 'neutral' } | null {
+  const s = summary?.engine?.rolling20;
+  if (!s || !(s.decisions > 0 || s.trades > 0)) return null;
+  const parts = [`${s.decisions} decisions`, `${s.enters} enter (CE ${s.byAction?.ENTER_CE ?? 0} / PE ${s.byAction?.ENTER_PE ?? 0})`, `${s.trades} paper trades`];
+  if (s.closed > 0) {
+    parts.push(`${s.closed} closed ${s.wins}W/${s.losses}L`);
+    parts.push(`gross ${rupees(s.gross)}`);
+  }
+  if (s.closed < 10) parts.push('insufficient sample');
+  return { text: parts.join(' · '), tone: s.closed > 0 ? (s.gross > 0 ? 'good' : s.gross < 0 ? 'bad' : 'neutral') : 'neutral' };
+}
+
 /** Telegram signal trades, live vs paper (no funds), last 20 sessions — one line each, or [] when none. */
 export function signalTradeLines(summary: SelfReviewSummary | null | undefined): Array<{ key: 'live' | 'paperNoFunds'; label: string; text: string; tone: 'good' | 'bad' | 'neutral' }> {
   const r = summary?.signalTrades?.rolling20;

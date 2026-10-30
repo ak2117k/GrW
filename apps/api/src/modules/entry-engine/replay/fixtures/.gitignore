@@ -1,0 +1,2 @@
+# Real production exports (sql/export-entry-fixture.sql). Never committed.
+*.real.json

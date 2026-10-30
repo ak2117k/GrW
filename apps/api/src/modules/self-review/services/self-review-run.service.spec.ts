@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] }; exitNoise?: unknown[]; setups?: Array<Record<string, unknown>> } = {}) {
+function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] }; exitNoise?: unknown[]; engine?: { decisions: unknown[]; trades: unknown[] }; setups?: Array<Record<string, unknown>> } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -60,6 +60,7 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     tradeSetups: jest.fn(async (s: string) => (o.setups ?? []).filter((r) => r.sessionDate === s)),
     signalTradeOutcomes: jest.fn(async () => o.signalTrades ?? { paper: [], live: [] }),
     exitNoiseReads: jest.fn(async () => o.exitNoise ?? []),
+    engineReview: jest.fn(async () => o.engine ?? { decisions: [], trades: [] }),
     channelSignals: jest.fn(async (s: string) => (o.channel ?? []).filter((r) => r.sessionDate === s)),
     channelInfos: jest.fn(async (s: string) => (o.infos ?? []).filter((r) => r.sessionDate === s)),
     stockMoves: jest.fn(async (asOf: string) =>
@@ -210,6 +211,25 @@ describe('SelfReviewRunService', () => {
     const ctx = (diagnose.mock.calls[0] as unknown as [string, unknown[], { noiseReads: any }])[2];
     expect(ctx.noiseReads.rolling20).toMatchObject({ reads: 1, noiseRight: '1/1', realRight: '0/0' });
     expect(ctx.noiseReads.sessionReads[0]).toMatchObject({ symbol: 'SENSEX26N0574500CE', verdict: 'NOISE', score: 'RIGHT' });
+  });
+
+  it('the entry engine decisions and paper trades go into summary.engine and the diagnosis (observation only, insufficient sample under 10 closed)', async () => {
+    const diagnose = jest.fn(async () => ({ misses: [], engineAssessment: 'insufficient sample' }));
+    const at = new Date('2026-10-21T04:35:00Z');
+    const engine = {
+      decisions: [
+        { at, underlying: 'CRUDEOIL', action: 'ENTER_PE', mode: 'paper', tradeId: 't1', reasons: ['news: BEARISH ✓', 'trend: BEARISH ✓', 'oi: AGREES ✓'] },
+        { at, underlying: 'NIFTY', action: 'NO_TRADE', mode: 'paper', tradeId: null, reasons: ['news: NO_DATA'] },
+      ],
+      trades: [{ id: 't1', createdAt: at, underlying: 'CRUDEOIL', symbol: 'CRUDEOIL17NOV269650PE', status: 'CLOSED', side: 'BUY', quantity: 100, entryPrice: 250, exitPrice: 280, exitReasonTag: 'AI_EXIT' }],
+    };
+    const { svc, repo } = make({ diagnosis: { diagnose }, engine });
+    await svc.run(NOW);
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { engine?: any }; error: string | null }];
+    expect(finish[1].summary.engine.rolling20).toMatchObject({ decisions: 2, enters: 1, trades: 1, closed: 1, wins: 1, gross: 3000 });
+    const ctx = (diagnose.mock.calls[0] as unknown as [string, unknown[], { engine: any }])[2];
+    expect(ctx.engine).toMatchObject({ sampleOk: false, rolling20: { enters: 1, closed: 1 } });
+    expect(ctx.engine.sessionEnters[0]).toMatchObject({ underlying: 'CRUDEOIL', action: 'ENTER_PE', traded: true });
   });
 
   it('STOCK_MOVE: rows whose 5-session horizon closes at S (scored 5 sessions earlier) are judged; MID is null; not a factor', async () => {

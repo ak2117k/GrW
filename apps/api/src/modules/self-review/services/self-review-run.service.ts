@@ -25,6 +25,7 @@ import { buildSummary, channelStats, mergeChannelInfoStats, topMisses } from '..
 import { probabilitySkill, relativeSkill } from '../domain/skill';
 import { signalPaperDigest, signalTradeStats } from '../domain/signal-trades';
 import { exitNoiseStats, noiseReadDigest } from '../domain/exit-noise';
+import { engineDigest, engineStats } from '../domain/engine-trades';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -178,6 +179,14 @@ export class SelfReviewRunService {
         const to = new Date(istMidnightOf(S).getTime() + DAY_MS);
         const rows = await this.sources.exitNoiseReads(from, to);
         if (rows.length) summary.exitNoise = exitNoiseStats(rows, sessions);
+        return [];
+      });
+
+      await this.soft('ENTRY_ENGINE decisions and paper trades', errors, async () => {
+        const from = istMidnightOf(sessions[sessions.length - 1]);
+        const to = new Date(istMidnightOf(S).getTime() + DAY_MS);
+        const rows = await this.sources.engineReview(from, to);
+        if (rows.decisions.length || rows.trades.length) summary.engine = engineStats(rows, sessions);
         return [];
       });
 
@@ -395,10 +404,12 @@ export class SelfReviewRunService {
     const signalPaper = signalPaperDigest(summary.signalTrades);
     // The exit noise reads too (observation only): does a NOISE read at an AI exit mean the exit was premature?
     const noiseReads = noiseReadDigest(summary.exitNoise);
-    if (!this.diagnosis || (misses.length === 0 && !signalPaper && !noiseReads)) return null;
+    // The entry engine too (observation only): how often it entered, what blocked it, did its paper trades pay?
+    const engine = engineDigest(summary.engine);
+    if (!this.diagnosis || (misses.length === 0 && !signalPaper && !noiseReads && !engine)) return null;
     try {
-      const context = { ...(signalPaper ? { signalPaper } : {}), ...(noiseReads ? { noiseReads } : {}) };
-      const out = await this.diagnosis.diagnose(runId, misses, signalPaper || noiseReads ? context : undefined);
+      const context = { ...(signalPaper ? { signalPaper } : {}), ...(noiseReads ? { noiseReads } : {}), ...(engine ? { engine } : {}) };
+      const out = await this.diagnosis.diagnose(runId, misses, signalPaper || noiseReads || engine ? context : undefined);
       // B persists the diagnosis itself; make sure the run carries it either way.
       if (out) await this.repo.setDiagnosisIfEmpty(runId, out);
       return out;

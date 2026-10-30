@@ -98,7 +98,8 @@ interface HeldFollow {
  * the minimal one for these tagged trades: every 30 s, a fresh LTP over the owner's own Angel feed
  * session (a quote, never an order), then paperExitDecision → TradeExecutionService.closeTrade with
  * the exit price and reason tag (the standard paper close: journal, charges, paper balance), else a
- * mark-to-market P&L on the row. Only trades whose strategy is TELEGRAM_SIGNAL_NO_FUNDS are touched.
+ * mark-to-market P&L on the row. Only trades whose strategy is in PAPER_WATCH_STRATEGIES are touched
+ * (TELEGRAM_SIGNAL_NO_FUNDS and the entry engine's ENGINE_ENTRY).
  */
 @Injectable()
 export class SignalPaperWatchService {

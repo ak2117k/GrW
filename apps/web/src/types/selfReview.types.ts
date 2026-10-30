@@ -55,6 +55,21 @@ export interface SelfReviewSummary {
   };
   /** "Noise or real?" reads at AI exits, scored on the underlying's next 30 min (observation only). */
   exitNoise?: { session: ExitNoiseStats; rolling20: ExitNoiseStats };
+  /** Entry engine (stage 1): its recorded decisions and ENGINE_ENTRY paper trades, GROSS (observation only). */
+  engine?: { session: EngineStats; rolling20: EngineStats };
+}
+
+/** The entry engine in a window: decisions (ENTER_CE / ENTER_PE / NO_TRADE) and its paper trades, gross ₹ of the closed ones. */
+export interface EngineStats {
+  decisions: number;
+  enters: number;
+  byAction: Record<string, number>;
+  trades: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  winRate: number | null;
+  gross: number;
 }
 
 /** The "noise or real?" read at an AI exit (record only). */
@@ -125,6 +140,8 @@ export interface SelfReviewRun {
   signalPaperAssessment?: string | null;
   /** The diagnosis' read of the exit noise reads' scores (latest run only). */
   exitNoiseAssessment?: string | null;
+  /** The diagnosis' read of the entry engine's decisions and paper trades (latest run only). */
+  engineAssessment?: string | null;
 }
 
 /** One diagnosed miss from the run's LLM diagnosis. */

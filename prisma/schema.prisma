@@ -3700,3 +3700,39 @@ model ExitNoiseRead {
   @@index([followedAt, exitAt])
   @@map("exit_noise_reads")
 }
+
+/// Sanity audit (sanity-audit module): one row per broken invariant per subject. Detection only.
+model SanityViolation {
+  id          String    @id @default(cuid())
+  check       String // PAPER_FILL_VS_LTP | PNL_ARITHMETIC | EXIT_NEAR_TRIGGER | RECORDS_PRESENT | JOBS_RAN
+  subjectId   String    @map("subject_id")
+  severity    String // error | warn | known (before SANITY_AUDIT_SINCE: stored, never alerted)
+  detail      Json
+  firstSeenAt DateTime  @default(now()) @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt  DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  alertedAt   DateTime? @map("alerted_at") @db.Timestamptz(6)
+
+  @@unique([check, subjectId])
+  @@index([lastSeenAt])
+  @@map("sanity_violations")
+}
+
+/// Entry engine stage 1 (owner 2026-10-30): one row per evaluation of an underlying (news + trend + OI →
+/// ENTER_CE / ENTER_PE / NO_TRADE), NO_TRADE included. Written with raw SQL by entry-engine.repository.ts.
+/// tradeId = the PAPER trade an ENTER opened (ENTRY_ENGINE=paper). No FK.
+model EntryEngineDecision {
+  id         String   @id
+  underlying String
+  at         DateTime @db.Timestamptz(6)
+  action     String // ENTER_CE | ENTER_PE | NO_TRADE
+  inputs     Json // news / trend / oi readings, guards, scores
+  reasons    Json // string[]
+  tradeId    String?  @map("trade_id")
+  mode       String // observe | paper
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([at])
+  @@index([underlying, at])
+  @@index([tradeId])
+  @@map("entry_engine_decisions")
+}

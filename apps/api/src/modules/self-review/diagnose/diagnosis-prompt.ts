@@ -8,7 +8,7 @@ import { LESSON_TEXT_MAX, type LessonRecord } from '../lessons/types';
 import { MISS_CATEGORIES, type DiagnosedMiss, type MissCategory, type MissInput } from './types';
 
 /** Bump when the prompt text or the schema changes; stored on the run's diagnosis. */
-export const DIAGNOSIS_PROMPT_VERSION = 'd4';
+export const DIAGNOSIS_PROMPT_VERSION = 'd5';
 
 /** At most this many misses go into one call (contract). */
 export const MAX_MISSES = 15;
@@ -24,6 +24,10 @@ const INPUTS_EXCERPT_MAX = 6000;
 const DETAILS_EXCERPT_MAX = 1200;
 const CAUSE_MAX = 500;
 const MAX_ACTIVE_LESSONS_SHOWN = 30;
+/** The entry engine assessment is clamped to this. */
+export const ENGINE_ASSESSMENT_MAX = 1200;
+/** Below this many CLOSED engine paper trades the assessment must say "insufficient sample" (domain/engine-trades ENGINE_MIN_SAMPLE). */
+export const ENGINE_MIN_SAMPLE = 10;
 /** The signal paper-trade assessment is clamped to this. */
 export const PAPER_ASSESSMENT_MAX = 1200;
 /** Below this many CLOSED trades in a bucket the assessment must say "insufficient sample". */
@@ -60,6 +64,7 @@ export const DIAGNOSIS_SCHEMA = {
     },
     signalPaperAssessment: { type: 'string' },
     exitNoiseAssessment: { type: 'string' },
+    engineAssessment: { type: 'string' },
   },
 } as const;
 
@@ -84,7 +89,8 @@ export const DIAGNOSIS_SYSTEM_PROMPT = [
   'Rules: no lesson for NOISE; never a lesson or proposal that loosens a hard risk limit (max daily loss, position size, kill switch, stop or green floor); do not invent data that is not in the input; one miss may be left without a lesson.',
   `When the input has signalPaper (the Telegram-signal learning-mode paper trades, split by the OI check recorded at entry — AGREES / AGAINST / MIXED / NO_DATA — and by the AI entry judge's call TAKE / SKIP / NONE, for the session and the rolling 20 sessions, with the session's trades and each OI check's one-line reasoning), also return signalPaperAssessment: two to four plain sentences on whether the AGAINST trades underperformed the AGREES ones (win rate and GROSS ₹ of the closed trades — side × (exit − entry) × qty, see signalPaper.basis; the booked P&L is not used) and whether the judge's TAKEs beat its SKIPs. Name the numbers you used. When either compared bucket has fewer than ${PAPER_MIN_SAMPLE} closed trades in the rolling window, say "insufficient sample" and draw no conclusion. This is an observation for the owner, never a lesson or a proposal. Leave signalPaperAssessment out when there is no signalPaper.`,
   `When the input has noiseReads (a "noise or real?" read recorded at each AI exit — NOISE / REAL / MIXED / NO_DATA from the adverse move in noise units N, near-money option OI, futures OI with price, VWAP and volume — each NOISE / REAL read scored against the underlying's next 30 minutes, see noiseReads.basis, for the session and the rolling 20 sessions, with the session's reads and their one-line reasoning), also return exitNoiseAssessment: two to four plain sentences on how often NOISE reads were right (the exit was premature: the underlying recovered) and how often REAL reads were right (the move continued). Name the numbers you used (noiseRight / realRight are right/scored). When the rolling window has fewer than ${NOISE_MIN_SAMPLE} scored reads of a verdict, say "insufficient sample" for it and draw no conclusion. This is an observation for the owner, never a lesson or a proposal. Leave exitNoiseAssessment out when there is no noiseReads.`,
-  'Answer ONLY with JSON: {"misses":[{"refIds","cause","category","lessonKey?","lessonText?","scope?","contradicts?","blamedFactors?","proposalTarget?","proposedValue?"}],"signalPaperAssessment?","exitNoiseAssessment?"}.',
+  `When the input has engine (the entry engine, stage 1: every 15 min per underlying it records ENTER_CE / ENTER_PE / NO_TRADE — ENTER only when news, trend and OI all agree — and in paper mode opens an ENGINE_ENTRY paper trade; counts and GROSS ₹ of the closed engine trades for the session and the rolling 20 sessions, with the session's ENTER decisions and their reasons, see engine.basis), also return engineAssessment: two to four plain sentences on how often the engine entered, which component most often blocked an entry, and whether its closed paper trades made money (win rate and gross ₹). Name the numbers you used. When the rolling window has fewer than ${ENGINE_MIN_SAMPLE} closed engine trades, say "insufficient sample" for the P&L and draw no conclusion about it. This is an observation for the owner, never a lesson or a proposal. Leave engineAssessment out when there is no engine.`,
+  'Answer ONLY with JSON: {"misses":[{"refIds","cause","category","lessonKey?","lessonText?","scope?","contradicts?","blamedFactors?","proposalTarget?","proposedValue?"}],"signalPaperAssessment?","exitNoiseAssessment?","engineAssessment?"}.',
 ].join('\n');
 
 function excerpt(value: unknown, max: number): string | undefined {
@@ -109,7 +115,7 @@ export function capMisses(misses: readonly MissInput[], max = MAX_MISSES): { sen
   return { sent: ranked, dropped: Math.max(0, misses.length - ranked.length) };
 }
 
-export function buildDiagnosisUserMessage(misses: readonly MissInput[], lessons: readonly LessonRecord[], signalPaper?: unknown, noiseReads?: unknown): string {
+export function buildDiagnosisUserMessage(misses: readonly MissInput[], lessons: readonly LessonRecord[], signalPaper?: unknown, noiseReads?: unknown, engine?: unknown): string {
   const lessonList = lessons
     .filter((l) => l.status === 'ACTIVE')
     .slice(0, MAX_ACTIVE_LESSONS_SHOWN)
@@ -133,6 +139,7 @@ export function buildDiagnosisUserMessage(misses: readonly MissInput[], lessons:
       activeLessons: lessonList,
       ...(signalPaper ? { signalPaper } : {}),
       ...(noiseReads ? { noiseReads } : {}),
+      ...(engine ? { engine } : {}),
     });
     if (msg.length <= USER_MESSAGE_MAX_CHARS || inputsMax < 200) return msg.slice(0, USER_MESSAGE_MAX_CHARS);
     inputsMax = Math.floor(inputsMax / 2);
@@ -150,6 +157,12 @@ export function paperAssessmentOf(raw: unknown): string | undefined {
 export function noiseAssessmentOf(raw: unknown): string | undefined {
   const a = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { exitNoiseAssessment?: unknown }).exitNoiseAssessment : undefined;
   return typeof a === 'string' && a.trim() !== '' ? clampText(a.trim(), NOISE_ASSESSMENT_MAX) : undefined;
+}
+
+/** The reply's entry engine assessment, trimmed and clamped; undefined when absent or empty. */
+export function engineAssessmentOf(raw: unknown): string | undefined {
+  const a = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as { engineAssessment?: unknown }).engineAssessment : undefined;
+  return typeof a === 'string' && a.trim() !== '' ? clampText(a.trim(), ENGINE_ASSESSMENT_MAX) : undefined;
 }
 
 /** Pull the first JSON object out of a reply (tolerates a ```json fence). */

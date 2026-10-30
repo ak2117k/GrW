@@ -64,6 +64,8 @@ import { HealthModule } from './modules/health/health.module';
 import { TradeCoreModule } from './modules/trade-core/trade-core.module';
 import { SignalTraderModule } from './modules/signal-trader/signal-trader.module';
 import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
+import { EntryEngineModule } from './modules/entry-engine/entry-engine.module';
+import { SanityAuditModule } from './modules/sanity-audit/sanity-audit.module';
 
 @Module({
   imports: [
@@ -318,6 +320,16 @@ import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
     // exit decision and never awaited; a 5-min sweep fills the 15 / 30-min follow-up for the night review.
     // @Global (ExitNoiseReadService, injected @Optional()). EXIT_NOISE_READS=off disables it.
     ExitNoiseModule,
+
+    // Entry engine stage 1 — news + trend + OI → ENTER_CE / ENTER_PE / NO_TRADE every 15 min, every
+    // evaluation recorded (entry_engine_decisions). ENTRY_ENGINE=off|observe|paper (default observe:
+    // records only); paper opens PAPER trades only (strategy ENGINE_ENTRY). Never a broker order.
+    EntryEngineModule,
+
+    // Sanity audit — invariants on every trade / exit / feed every 5 min; each violation stored once in
+    // sanity_violations and alerted once (ops bot). DETECTION ONLY: never modifies or blocks a trade.
+    // SANITY_AUDIT=off disables it; SANITY_AUDIT_SINCE (default 2026-10-30T09:30Z) is the alert cutoff.
+    SanityAuditModule,
 
     // Liveness + keep-warm probe (/healthz) — pinged by the keep-warm cron so
     // the free-tier stack rarely cold-starts and logins stay fast.

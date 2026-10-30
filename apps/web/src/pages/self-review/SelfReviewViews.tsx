@@ -5,6 +5,7 @@ import { cn } from '@/utils/cn';
 import type { AgentLesson, SelfReviewRun, TuningProposal } from '@/types/selfReview.types';
 import type { Decision } from './proposalDecision';
 import {
+  engineLine,
   evidenceLine,
   exitNoiseLine,
   formatValue,
@@ -274,6 +275,16 @@ export function RunCard({ run }: { run: SelfReviewRun }) {
       {run.exitNoiseAssessment && (
         <p className={cn('text-xs', SECONDARY)} data-testid="exit-noise-assessment">
           Exit noise review: {run.exitNoiseAssessment}
+        </p>
+      )}
+      {engineLine(run.summary) && (
+        <p className={cn('text-[11px]', MUTED)} data-testid="engine-line">
+          Entry engine, last 20 sessions: <span className={cn('font-semibold', TONE_TEXT[engineLine(run.summary)!.tone])}>{engineLine(run.summary)!.text}</span>
+        </p>
+      )}
+      {run.engineAssessment && (
+        <p className={cn('text-xs', SECONDARY)} data-testid="engine-assessment">
+          Entry engine review: {run.engineAssessment}
         </p>
       )}
     </article>

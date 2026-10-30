@@ -14,6 +14,12 @@ import type { SignalHorizon } from './signal.types';
 export const SIGNAL_PAPER_STRATEGY = 'TELEGRAM_SIGNAL_NO_FUNDS';
 /** Trade.source of these paper trades (free text in the DB; the journal shows every paper trade). */
 export const SIGNAL_PAPER_SOURCE = 'telegram-signal / no-funds';
+/**
+ * Paper trades the paper watch (SL / target / square-off, and the paper sentinel's AI exits) manages:
+ * the Telegram ones and the entry engine's (entry-engine ENGINE_ENTRY_STRATEGY, kept literal so this
+ * module does not import entry-engine). The decision / judge / OI records stay Telegram-only.
+ */
+export const PAPER_WATCH_STRATEGIES: readonly string[] = [SIGNAL_PAPER_STRATEGY, 'ENGINE_ENTRY'];
 export const SIGNAL_PAPER_SKIP_REASON = 'insufficient_funds';
 const DECISION_TAG = 'decision:';
 

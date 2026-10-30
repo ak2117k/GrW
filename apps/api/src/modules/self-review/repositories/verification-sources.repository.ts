@@ -10,6 +10,7 @@ import { judgeCallOf } from '../../signal-trader/domain/paper-summary';
 import { asInfoItems } from '../../signal-intake/domain/info';
 import { noiseVerdictOfRecord } from '../../exit-noise/domain/noise-read';
 import type { ExitNoiseReadRow } from '../domain/exit-noise';
+import type { EngineDecisionRow, EngineTradeRow } from '../domain/engine-trades';
 
 /**
  * Read-only access to the rows the scorers judge. Every query is bounded by a time range the run
@@ -223,6 +224,49 @@ export class VerificationSourcesRepository {
         const t = o.trackerId ? byId.get(o.trackerId) : undefined;
         return { createdAt: o.createdAt, status: o.status, trackerStatus: t ? String(t.status) : null, pnl: t?.pnl ?? null };
       }),
+    };
+  }
+
+  /**
+   * The entry engine in [from, to): its recorded decisions (entry_engine_decisions, raw SQL so this
+   * module does not depend on the table at compile time; [] when absent — migration 20261030160000 not
+   * applied) and its ENGINE_ENTRY paper trades. Observation only.
+   */
+  async engineReview(from: Date, to: Date): Promise<{ decisions: EngineDecisionRow[]; trades: EngineTradeRow[] }> {
+    let decisions: EngineDecisionRow[] = [];
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ at: Date; underlying: string; action: string; mode: string; trade_id: string | null; reasons: unknown }>>`
+        SELECT at, underlying, action, mode, trade_id, reasons FROM "entry_engine_decisions" WHERE at >= ${from} AND at < ${to} ORDER BY at LIMIT 5000`;
+      decisions = rows.map((r) => ({
+        at: r.at,
+        underlying: String(r.underlying),
+        action: String(r.action),
+        mode: String(r.mode),
+        tradeId: r.trade_id ?? null,
+        reasons: Array.isArray(r.reasons) ? r.reasons.filter((x): x is string => typeof x === 'string') : [],
+      }));
+    } catch {
+      decisions = [];
+    }
+    const trades = await this.prisma.trade.findMany({
+      where: { strategy: 'ENGINE_ENTRY', isPaperTrade: true, createdAt: { gte: from, lt: to } },
+      select: { id: true, createdAt: true, status: true, side: true, quantity: true, entryPrice: true, exitPrice: true, exitReasonTag: true, entryTags: true, instrument: { select: { symbol: true } } },
+      take: 2000,
+    });
+    return {
+      decisions,
+      trades: trades.map((t) => ({
+        id: t.id,
+        createdAt: t.createdAt,
+        underlying: (t.entryTags ?? []).find((x) => x.startsWith('underlying:'))?.slice('underlying:'.length) ?? null,
+        symbol: t.instrument?.symbol ?? null,
+        status: String(t.status),
+        side: t.side ? String(t.side) : null,
+        quantity: t.quantity ?? null,
+        entryPrice: t.entryPrice ?? null,
+        exitPrice: t.exitPrice ?? null,
+        exitReasonTag: t.exitReasonTag ?? null,
+      })),
     };
   }
 

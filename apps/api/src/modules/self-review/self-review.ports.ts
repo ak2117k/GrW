@@ -27,11 +27,13 @@ export interface DiagnosisOutput {
   signalPaperAssessment?: string;
   /** The diagnosis' read of the exit noise reads' scores (observation only). */
   exitNoiseAssessment?: string;
+  /** The diagnosis' read of the entry engine's decisions and paper trades (observation only). */
+  engineAssessment?: string;
 }
 
 export interface DiagnosisPort {
   /** One batched LLM call; persists `self_review_runs.diagnosis` / `ai_call_id` and upserts lessons. */
-  diagnose(runId: string, misses: DiagnosisMiss[], context?: { signalPaper?: unknown; noiseReads?: unknown }): Promise<DiagnosisOutput | null>;
+  diagnose(runId: string, misses: DiagnosisMiss[], context?: { signalPaper?: unknown; noiseReads?: unknown; engine?: unknown }): Promise<DiagnosisOutput | null>;
 }
 
 export interface LessonsPort {

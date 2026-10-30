@@ -4,7 +4,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { channelSentiment, type ChannelInfoAccuracy } from '../../signal-intake/domain/sentiment';
 import type { ClusterView, EntryType, InstrumentKind, SignalView } from '../domain/signal.types';
 import { SIGNAL_ENTRY_VERDICT_TAG, istDayStart } from '../domain/execution';
-import { SIGNAL_PAPER_STRATEGY, decisionTag } from '../domain/paper';
+import { PAPER_WATCH_STRATEGIES, SIGNAL_PAPER_STRATEGY, decisionTag } from '../domain/paper';
 
 const isUnique = (err: unknown) => err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 type Row = Record<string, unknown>;
@@ -506,7 +506,7 @@ export class SignalTraderRepository {
   /** Open tagged paper trades — the paper SL/target watch. */
   openPaperTrades(): Promise<PaperTradeRow[]> {
     return this.prisma.trade.findMany({
-      where: { strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, status: 'OPEN' },
+      where: { strategy: { in: [...PAPER_WATCH_STRATEGIES] }, isPaperTrade: true, status: 'OPEN' },
       select: this.paperSelect,
       take: 200,
     }) as Promise<PaperTradeRow[]>;
@@ -681,7 +681,7 @@ export class SignalTraderRepository {
    */
   async setPaperTrail(tradeId: string, stoploss: number | null, target: number | null): Promise<void> {
     await this.prisma.trade.updateMany({
-      where: { id: tradeId, strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, status: 'OPEN' },
+      where: { id: tradeId, strategy: { in: [...PAPER_WATCH_STRATEGIES] }, isPaperTrade: true, status: 'OPEN' },
       data: { stoploss, target },
     });
   }
@@ -689,7 +689,7 @@ export class SignalTraderRepository {
   /** One open paper trade by id (the AI close re-reads it: it may have closed meanwhile). */
   openPaperTrade(tradeId: string): Promise<PaperTradeRow | null> {
     return this.prisma.trade.findFirst({
-      where: { id: tradeId, strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, status: 'OPEN' },
+      where: { id: tradeId, strategy: { in: [...PAPER_WATCH_STRATEGIES] }, isPaperTrade: true, status: 'OPEN' },
       select: this.paperSelect,
     }) as Promise<PaperTradeRow | null>;
   }

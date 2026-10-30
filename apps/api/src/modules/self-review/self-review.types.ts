@@ -76,6 +76,8 @@ export interface RunSummary {
   signalTrades?: import('./domain/signal-trades').SignalTradesSummary;
   /** "Noise or real?" reads at AI exits, scored on the next 30 min, session S and rolling 20 (domain/exit-noise.ts). Observation only. */
   exitNoise?: import('./domain/exit-noise').ExitNoiseSummary;
+  /** Entry engine (stage 1): its decisions and ENGINE_ENTRY paper trades, session S and rolling 20 (domain/engine-trades.ts). Observation only. */
+  engine?: import('./domain/engine-trades').EngineSummary;
   /** NEWS_IMPACT: hit rates by news source and by material type + mean |move| per called magnitude, session and rolling 20. */
   news?: { session: import('./domain/news-impact-scorer').NewsImpactSummary; rolling20: import('./domain/news-impact-scorer').NewsImpactSummary };
 }

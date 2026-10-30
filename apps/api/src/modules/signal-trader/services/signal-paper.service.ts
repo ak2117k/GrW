@@ -62,7 +62,9 @@ export class SignalPaperService {
         side: p.side,
         orderType: 'MARKET',
         quantity: p.qty,
-        price: p.limitPrice,
+        // The fill base when the token is off the live feed: the LTP the plan just read, not the
+        // marketable limit (LTP + buffer) — prod 2026-10-30 NIFTY FUT paid 121 pts over LTP that way.
+        price: p.ltp > 0 ? p.ltp : p.limitPrice,
         positionType: i.product,
         // Learning mode: no stop on the paper trade (plan.sl is only the judge's reference).
         stoploss: p.learn ? undefined : p.sl,

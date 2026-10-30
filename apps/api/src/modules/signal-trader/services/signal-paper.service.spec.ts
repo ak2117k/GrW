@@ -27,13 +27,22 @@ describe('SignalPaperService', () => {
     expect(await t.svc.open(input)).toEqual({ ok: true, tradeId: 't1', entryPrice: 101.52, duplicate: false });
     const dto = (t.exec.executeTrade.mock.calls[0] as any[])[0];
     expect(dto).toMatchObject({
-      isPaper: true, symbol: 'NIFTY28OCT2625000CE', token: '111', exchange: 'NFO', side: 'BUY', quantity: 150, price: 101.5,
+      isPaper: true, symbol: 'NIFTY28OCT2625000CE', token: '111', exchange: 'NFO', side: 'BUY', quantity: 150, price: 101,
       stoploss: 90, target: 120, strategy: 'TELEGRAM_SIGNAL_NO_FUNDS', source: 'telegram-signal / no-funds', positionType: 'INTRADAY',
     });
     expect(dto.entryTags).toEqual(['telegram-signal', 'no-funds', 'decision:dec_1']);
     expect(dto.entryReason).toMatch(/decision dec_1.*Alpha.*targets 120 \/ 140/s);
     expect(t.repo.recordPaper).toHaveBeenCalledWith('dec_1', expect.objectContaining({ status: 'OPEN', tradeId: 't1', trigger: 'funds_check' }));
     expect(t.instruments.upsertInstrument).not.toHaveBeenCalled();
+  });
+
+  it('the paper fill base is the plan LTP, not the marketable limit; the limit only when no LTP was read', async () => {
+    const t = makePaper();
+    await t.svc.open({ ...input, plan: { ...plan, ltp: 23048, limitPrice: 23163.2 } });
+    expect((t.exec.executeTrade.mock.calls[0] as any[])[0].price).toBe(23048);
+    const u = makePaper();
+    await u.svc.open({ ...input, plan: { ...plan, ltp: 0 } });
+    expect((u.exec.executeTrade.mock.calls[0] as any[])[0].price).toBe(101.5);
   });
 
   it('idempotent per decision: an existing paper trade is returned, nothing new opened', async () => {

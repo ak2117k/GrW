@@ -4,7 +4,7 @@ import { AngelOneAdapterService } from '../../market-data/services/angel-one-ada
 import { UserFeedManager } from '../../market-data/services/user-feed-manager.service';
 import { SentinelChartContextAdapter } from '../../trade-sentinel/adapters/chart-context.adapter';
 import { NEWS_SHIM, type NewsShim } from '../../trade-sentinel/services/context-packet.service';
-import { buildupSeries, chainSummary, pickExpiry, researchIntent, type BuildupDay, type ResearchData, type ResearchIntent, type StrikeRow } from './research-data';
+import { buildupSeries, chainSummary, pickExpiry, priceHistory, researchIntent, type Bar, type BuildupDay, type ResearchData, type ResearchIntent, type StrikeRow } from './research-data';
 
 type Row = Record<string, unknown>;
 const up = (v: unknown) => String(v ?? '').trim().toUpperCase();
@@ -141,6 +141,35 @@ export class AdvisorResearchService {
       }
     }
 
+    // Price history: ~6 months of daily candles + today's 15-minute ones, from the cash stock when the
+    // master lists one (SYMBOL-EQ on NSE), else the future (indices / commodities have no cash line here).
+    let price: ResearchData['price'] = null;
+    if (this.feeds) {
+      const cash = (await this.master()).find((r) => up(r.exch_seg) === 'NSE' && up(r.symbol) === `${sym}-EQ`);
+      const line = cash ? { token: String(cash.token), exchange: 'NSE', label: `${sym}-EQ` } : fut ? { token: String(fut.r.token), exchange: up(fut.r.exch_seg), label: String(fut.r.symbol) } : null;
+      if (line) {
+        const toBar = (b: Record<string, unknown>, day: boolean): Bar => {
+          const t = new Date(b.timestamp as string | number | Date);
+          return {
+            date: day ? istYmd(t) : new Date(t.getTime() + 5.5 * 3_600_000).toISOString().slice(11, 16),
+            open: Number(b.open), high: Number(b.high), low: Number(b.low), close: Number(b.close), volume: Number(b.volume) || 0,
+          };
+        };
+        try {
+          const [daily, intra] = await Promise.all([
+            this.feeds.fetchCandles(ownerUserId, line.token, line.exchange, '1d', new Date(now.getTime() - 180 * 86_400_000), now),
+            this.feeds
+              .fetchCandles(ownerUserId, line.token, line.exchange, '15m', new Date(`${today}T03:45:00.000Z`), now)
+              .catch(() => []),
+          ]);
+          price = priceHistory(((daily ?? []) as unknown as Array<Record<string, unknown>>).map((b) => toBar(b, true)), ((intra ?? []) as unknown as Array<Record<string, unknown>>).map((b) => toBar(b, false)), line.label);
+          if (!price) missing.push(`price history for ${line.label} (fewer than 5 daily candles returned)`);
+        } catch (e) {
+          missing.push(`price history: ${errText(e)}`);
+        }
+      }
+    }
+
     let levels: ResearchData['levels'] = null;
     if (this.levels && spot !== null) {
       try {
@@ -173,6 +202,7 @@ export class AdvisorResearchService {
       chain,
       futures: fut ? { tradingsymbol: String(fut.r.symbol), ltp: futLtp, oi: futOi, days } : null,
       levels,
+      price,
       news,
       missing,
       at: now.toISOString(),

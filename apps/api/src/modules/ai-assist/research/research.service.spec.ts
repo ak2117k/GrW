@@ -9,6 +9,7 @@ const master = [
   { name: 'IDEA', symbol: 'IDEA28OCT26FUT', token: 'F1', exch_seg: 'NFO', instrumenttype: 'FUTSTK', expiry: '28OCT2026', strike: '-1', lotsize: '80000' },
   { name: 'IDEA', symbol: 'IDEA25NOV26FUT', token: 'F2', exch_seg: 'NFO', instrumenttype: 'FUTSTK', expiry: '25NOV2026', strike: '-1', lotsize: '80000' },
   { ...leg(12, 'CE', 'C12', '28OCT2026'), symbol: 'IDEA28OCT2612CE' },
+  { name: 'IDEA', symbol: 'IDEA-EQ', token: 'EQ1', exch_seg: 'NSE', instrumenttype: '', expiry: '', strike: '-1', lotsize: '1' },
   leg(11, 'CE', 'C11'), leg(11, 'PE', 'P11'), leg(12, 'CE', 'C12N'), leg(12, 'PE', 'P12'), leg(13, 'CE', 'C13'), leg(13, 'PE', 'P13'),
 ];
 
@@ -22,10 +23,15 @@ function make() {
       { ts: new Date('2026-10-23T04:00:00Z'), oi: 100 },
       { ts: new Date('2026-10-24T04:00:00Z'), oi: 110 },
     ]),
-    fetchCandles: jest.fn(async () => [
-      { timestamp: '2026-10-23T03:45:00Z', close: 12.0 },
-      { timestamp: '2026-10-24T03:45:00Z', close: 12.3 },
-    ]),
+    fetchCandles: jest.fn(async (_u: string, token: string, _e: string, tf: string) =>
+      token === 'EQ1'
+        ? tf === '1d'
+          ? Array.from({ length: 30 }, (_, i) => ({ timestamp: new Date(Date.UTC(2026, 8, 1) + i * 86_400_000).toISOString(), open: 13, high: 13.2, low: 12.8, close: 13 - i * 0.04, volume: 100 }))
+          : [{ timestamp: '2026-10-27T03:45:00Z', open: 11.9, high: 12, low: 11.8, close: 11.85, volume: 10 }]
+        : [
+            { timestamp: '2026-10-23T03:45:00Z', close: 12.0 },
+            { timestamp: '2026-10-24T03:45:00Z', close: 12.3 },
+          ]),
   };
   const levels = { structureFor: jest.fn(async () => ({ nearestSupport: 11.8, nearestResistance: 12.6, factorValues: { mtfTrend: -1 } })) };
   return { svc: new AdvisorResearchService(adapter as any, feeds as any, levels as any, undefined), feeds };
@@ -43,6 +49,10 @@ describe('AdvisorResearchService', () => {
     expect(d.chain).toMatchObject({ ceOi: 18000, peOi: 17000, callWall: 13, putWall: 11 });
     expect(d.futures).toMatchObject({ tradingsymbol: 'IDEA25NOV26FUT', days: [expect.objectContaining({ kind: 'LONG_BUILDUP' })] });
     expect(d.missing).toEqual(['F&O ban list (not tracked by the app)']);
+    // Price history from the cash stock: 6 months daily + today's 15-minute candles.
+    expect(t.feeds.fetchCandles).toHaveBeenCalledWith('owner', 'EQ1', 'NSE', '1d', expect.any(Date), NOW);
+    expect(t.feeds.fetchCandles).toHaveBeenCalledWith('owner', 'EQ1', 'NSE', '15m', new Date('2026-10-27T03:45:00.000Z'), NOW);
+    expect(d.price).toMatchObject({ source: 'IDEA-EQ', sessions: 30, trend: 'DOWN', intraday: [expect.objectContaining({ date: '09:15', close: 11.85 })] });
   });
 
   it('a normal question is not research; a broker failure is named, not thrown', async () => {

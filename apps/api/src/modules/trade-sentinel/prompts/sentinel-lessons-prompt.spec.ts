@@ -42,10 +42,10 @@ describe('live prompt +l1 (SELF_REVIEW_LESSONS)', () => {
       new SentinelAgentService({} as never, env === null ? undefined : ({ get: (k: string) => env[k] } as never));
     expect(agent({}).promptVersion).toBe(sentinelCompositePromptVersion({ cues: false, triggers: false, discipline: true, lessons: true, delta: true, equity: true, squareOff: true, anchors: true }));
     // SENTINEL_PACKET_DELTA unset = on with a ConfigService: +d1 follows +l1 (judge gate).
-    // SENTINEL_EQUITY_BLOCK / SENTINEL_SQUARE_OFF_LOOK / FLOOR_HARD_EXIT unset = on with a ConfigService: +e1+s1+a1 follow +d1.
-    expect(agent({}).promptVersion).toMatch(/^v2\.4\+l1\+d1\+e1\+s1\+a1\//);
-    expect(agent({ SELF_REVIEW_LESSONS: 'off' }).promptVersion).toMatch(/^v2\.4\+d1\+e1\+s1\+a1\//);
-    expect(agent({ SELF_REVIEW_LESSONS: 'observe' }).promptVersion).toMatch(/^v2\.4\+d1\+e1\+s1\+a1\//);
+    // SENTINEL_EQUITY_BLOCK / SENTINEL_SQUARE_OFF_LOOK / FLOOR_HARD_EXIT unset = on with a ConfigService: +e1+s1+a2 follow +d1.
+    expect(agent({}).promptVersion).toMatch(/^v2\.4\+l1\+d1\+e1\+s1\+a2\//);
+    expect(agent({ SELF_REVIEW_LESSONS: 'off' }).promptVersion).toMatch(/^v2\.4\+d1\+e1\+s1\+a2\//);
+    expect(agent({ SELF_REVIEW_LESSONS: 'observe' }).promptVersion).toMatch(/^v2\.4\+d1\+e1\+s1\+a2\//);
     expect(agent(null).promptVersion).toMatch(/^v2\.4\//);
   });
 });

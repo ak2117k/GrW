@@ -360,13 +360,17 @@ function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' |
  * confirming move is counted "since your last HOLD". Re-anchored on every verdict, a slow grind never
  * reaches one N. +a1 measures from money.anchors (the best point, the floor's arm point), states the
  * hard floor the code now enforces, and forbids an invalidation that re-anchors on the judge itself.
+ *
+ * +a2 (prod 2026-10-30, SENSEX26N0574500CE): the gate's confirming move from the arm point was one N, so
+ * the judge set its stop one N under it and sold on an ordinary one-minute dip. The move is now
+ * money.anchors.hardExitN, and the reading line says code widens a closer protective trigger.
  */
-export const ANCHORS_VERSION_SUFFIX = '+a1';
+export const ANCHORS_VERSION_SUFFIX = '+a2';
 
 /** The v7 gate-line phrase +a1 replaces: the confirming move's reference. */
 const GATE_SINCE_HOLD = 'it has moved against the position by at least one of its own noise units since your last HOLD';
 const GATE_FROM_ARM =
-  'it has moved against the position by at least one of its own noise units from where the floor armed (money.anchors.floorArm)';
+  'it has moved against the position by at least money.anchors.hardExitN of its own noise units from where the floor armed (money.anchors.floorArm)';
 
 /** The +a1 mandate line, after the v7 mandate lines. Ends with a newline. */
 export const ANCHORS_MANDATE_LINE =
@@ -374,7 +378,7 @@ export const ANCHORS_MANDATE_LINE =
 
 /** The +a1 reading line, after the v7 reading lines. Ends with a newline. */
 export const ANCHORS_READING_LINE =
-  '- money.anchors holds the position\'s FIXED references: best is its best contract price (as money.mfe) with the underlying when it was seen, floorArm the contract price and underlying when the green floor armed (null before it armed), and underlyingAgainst gives the underlying\'s move against the position from each of them now, in points and in flow.noiseUnit underlying units (positive = against). Measure every adverse move from these, never from your own previous verdict: an invalidationPoint such as "one noise unit beyond the price at this verdict" moves each time you are asked, so a slow grind never reaches it. State invalidationPoint as a fixed price or as a distance from money.anchors.\n';
+  '- money.anchors holds the position\'s FIXED references: best is its best contract price (as money.mfe) with the underlying when it was seen, floorArm the contract price and underlying when the green floor armed (null before it armed), and underlyingAgainst gives the underlying\'s move against the position from each of them now, in points and in flow.noiseUnit underlying units (positive = against). Measure every adverse move from these, never from your own previous verdict: an invalidationPoint such as "one noise unit beyond the price at this verdict" moves each time you are asked, so a slow grind never reaches it. State invalidationPoint as a fixed price or as a distance from money.anchors. One noise unit is one ordinary minute\'s swing: code moves a protective UNDERLYING exitTrigger closer than money.anchors.hardExitN noise units to the floor\'s arm point (else the best point) out to that distance.\n';
 
 /** The +d1 sentence +a1 extends: the delta is a summary, not a risk reference. */
 const DELTA_CONSISTENT = 'Nothing new since your previous verdict is a reason to stay consistent with it.';

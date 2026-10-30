@@ -1,5 +1,5 @@
 import { FLOOR_HARD_CONFIRM_SEC, FLOOR_HARD_REFIRE_SEC } from './config';
-import { confirmHardFloor, hardFloorReading, underlyingAgainst, type HardFloorInput } from './hard-floor';
+import { confirmHardFloor, hardFloorReading, underlyingAgainst, widenExitTrigger, type HardFloorInput, type TriggerFloorInput } from './hard-floor';
 
 /** Long CRUDEOILM 9350 PE (BEARISH exposure: a RISING underlying hurts), 2026-10-29 numbers. */
 const BASE: HardFloorInput = {
@@ -78,5 +78,38 @@ describe('confirmHardFloor', () => {
       m = r.memo;
     }
     expect(confirmHardFloor(m, true, T0 + 30_000 + FLOOR_HARD_REFIRE_SEC * 1000).fire).toBe(true);
+  });
+});
+
+/** Long SENSEX 74500 CE (BULLISH), prod 2026-10-30: arm 74485.6, best 74495.69, N 26.48, judge set BELOW 74459.1. */
+describe('widenExitTrigger — no AI stop inside noise', () => {
+  const T: TriggerFloorInput = {
+    instrument: 'UNDERLYING', op: 'BELOW', price: 74459.1, exposure: 'BULLISH',
+    floorArmUnderlying: 74485.6, bestUnderlying: 74495.69, underlyingNow: 74476.09, nUnderlying: 26.48, k: 2,
+  };
+
+  it('a 1 N stop under the arm point is pushed out to 2 N (74432.64) — the 74458 dip no longer sells', () => {
+    expect(widenExitTrigger(T)).toEqual({ price: 74432.64, widenedFrom: 74459.1, ref: 74485.6 });
+  });
+
+  it('a stop already 2 N or more away is left alone', () => {
+    expect(widenExitTrigger({ ...T, price: 74400 })).toEqual({ price: 74400, widenedFrom: null, ref: 74485.6 });
+  });
+
+  it('no arm point: the best point is the reference, then the underlying the judge saw', () => {
+    expect(widenExitTrigger({ ...T, floorArmUnderlying: null }).price).toBe(74442.73);
+    expect(widenExitTrigger({ ...T, floorArmUnderlying: null, bestUnderlying: null }).price).toBe(74423.13);
+  });
+
+  it('bearish exposure mirrors: a protective ABOVE level is pushed up', () => {
+    const pe = { ...T, exposure: 'BEARISH' as const, op: 'ABOVE' as const, floorArmUnderlying: 9547, nUnderlying: 12.5, price: 9555 };
+    expect(widenExitTrigger(pe)).toEqual({ price: 9572, widenedFrom: 9555, ref: 9547 });
+  });
+
+  it('passes unchanged: a PREMIUM trigger, a take-profit-side level, an unknown N or exposure', () => {
+    expect(widenExitTrigger({ ...T, instrument: 'PREMIUM' }).widenedFrom).toBeNull();
+    expect(widenExitTrigger({ ...T, op: 'ABOVE', price: 74600 }).widenedFrom).toBeNull();
+    expect(widenExitTrigger({ ...T, nUnderlying: null }).widenedFrom).toBeNull();
+    expect(widenExitTrigger({ ...T, exposure: null }).widenedFrom).toBeNull();
   });
 });

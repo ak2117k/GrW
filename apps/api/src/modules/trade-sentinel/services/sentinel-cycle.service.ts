@@ -53,7 +53,7 @@ import {
 import { exitConfirmFire } from '../tripwires/exit-confirm';
 import { solveCycleFloor } from './cycle-floor';
 import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
-import { confirmHardFloor, hardFloorReading, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import { confirmHardFloor, hardFloorReading, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
@@ -1588,6 +1588,23 @@ export class SentinelCycleService {
 
     // Price triggers: the judge's level and the instrument it watches. DATA ONLY —
     // arming, validation and execution all live in sentinel-executor (ruling R1).
+    // No protective underlying level inside K noise units of the fixed reference (widenExitTrigger).
+    const p = verdict.exitTrigger;
+    if (p && this.discipline?.enabled) {
+      const w = widenExitTrigger({
+        ...p,
+        exposure: exposureOf(entry.symbol, tick.side),
+        floorArmUnderlying: tick.anchors?.floorArm?.underlying ?? null,
+        bestUnderlying: tick.anchors?.best?.underlying ?? null,
+        underlyingNow: tick.underlyingLtp,
+        nUnderlying: tick.noise?.underlying1m?.n ?? null,
+        k: this.discipline.floorHardExitN,
+      });
+      if (w.widenedFrom !== null) {
+        this.logger.log(`[trigger-floor] ${entry.symbol} ${p.op} ${w.widenedFrom} → ${w.price} (${this.discipline.floorHardExitN} N from ${w.ref})`);
+        verdict.exitTrigger = { ...p, price: w.price };
+      }
+    }
     const exitTrigger = exitTriggerRecord(verdict, tick);
     if (newsShadow) this.logger.log(`[news-shadow] ${entry.symbol} ${verdict.verdict}: ${shadowSummary(newsShadow as never)}`);
 

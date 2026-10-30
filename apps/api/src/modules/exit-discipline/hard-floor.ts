@@ -101,3 +101,37 @@ export function confirmHardFloor(memo: HardFloorMemo | null | undefined, trip: b
   const fire = confirmed && quiet;
   return { fire, memo: { since, reads, firedAt: fire ? nowMs : m.firedAt } };
 }
+
+/**
+ * NO AI STOP INSIDE NOISE (owner-approved 2026-10-30). Pure.
+ *
+ * Prod 2026-10-30, SENSEX26N0574500CE (paper): the judge set "UNDERLYING BELOW 74459.1" — one noise unit
+ * (26.5 pts) under the floor's arm point, as the +a1 gate line then allowed. SENSEX touched 74458.33 for
+ * one bar, the trade sold at −₹169, and SENSEX ran to 74634. One N is by definition one ordinary minute's
+ * swing. An UNDERLYING trigger on the adverse side is pushed out to at least K noise units (FLOOR_HARD_EXIT_N,
+ * the hard floor's own K) from the fixed reference: the floor's arm point, else the best point, else the
+ * underlying the judge saw. Protective-side direction only; a PREMIUM trigger and an unknown N pass unchanged.
+ */
+export interface TriggerFloorInput {
+  instrument: 'UNDERLYING' | 'PREMIUM';
+  op: 'BELOW' | 'ABOVE';
+  price: number;
+  exposure: Exposure | null;
+  floorArmUnderlying: number | null;
+  bestUnderlying: number | null;
+  underlyingNow: number | null;
+  nUnderlying: number | null;
+  k: number;
+}
+
+export function widenExitTrigger(i: TriggerFloorInput): { price: number; widenedFrom: number | null; ref: number | null } {
+  const same = { price: i.price, widenedFrom: null, ref: null };
+  if (i.instrument !== 'UNDERLYING' || i.exposure === null || !fin(i.nUnderlying) || i.nUnderlying <= 0 || !fin(i.k) || i.k <= 0) return same;
+  const protective = i.exposure === 'BULLISH' ? i.op === 'BELOW' : i.op === 'ABOVE';
+  const ref = [i.floorArmUnderlying, i.bestUnderlying, i.underlyingNow].find(fin) ?? null;
+  if (!protective || ref === null) return same;
+  const gap = i.k * i.nUnderlying;
+  const limit = r2(i.exposure === 'BULLISH' ? ref - gap : ref + gap);
+  const tooClose = i.exposure === 'BULLISH' ? i.price > limit : i.price < limit;
+  return tooClose ? { price: limit, widenedFrom: i.price, ref } : { ...same, ref };
+}

@@ -123,11 +123,14 @@ describe('evaluateExitGate', () => {
     it('the confirming move is measured from the floor arm point, never the last HOLD (which re-anchors every verdict)', () => {
       const legacy = clause(evaluateExitGate({ ...PE, anchors: undefined }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
       expect(legacy).toMatchObject({ pass: false, measured: expect.objectContaining({ holdUnderlying: 9551, adverseMove: 2 }) });
-      const fixed = clause(evaluateExitGate({ ...PE, underlying: 9560 }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
-      expect(fixed).toMatchObject({ pass: true, measured: expect.objectContaining({ from: 'FLOOR_ARM', refUnderlying: 9547, adverseMove: 13 }) });
+      // From a fixed point it needs the hard floor's K (2 N = 25 pts), never one N (prod 2026-10-30 SENSEX CE).
+      const oneN = clause(evaluateExitGate({ ...PE, underlying: 9560 }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
+      expect(oneN).toMatchObject({ pass: false, measured: expect.objectContaining({ from: 'FLOOR_ARM', refUnderlying: 9547, adverseMove: 13, needN: 2 }) });
+      const fixed = clause(evaluateExitGate({ ...PE, underlying: 9573 }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
+      expect(fixed).toMatchObject({ pass: true, measured: expect.objectContaining({ from: 'FLOOR_ARM', refUnderlying: 9547, adverseMove: 26 }) });
       // No arm point recorded: the best point stands in.
-      const best = clause(evaluateExitGate({ ...PE, anchors: { ...PE.anchors!, armUnderlying: null } }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
-      expect(best).toMatchObject({ pass: true, measured: expect.objectContaining({ from: 'BEST', adverseMove: 22 }) });
+      const best = clause(evaluateExitGate({ ...PE, underlying: 9556, anchors: { ...PE.anchors!, armUnderlying: null } }, CFG), 'FLOOR_BREACH_UNDERLYING_MOVE');
+      expect(best).toMatchObject({ pass: true, measured: expect.objectContaining({ from: 'BEST', adverseMove: 25 }) });
     });
 
     it('below the floor but still net green, the underlying 1.76 N from the best point: no hard-floor clause passes', () => {

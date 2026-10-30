@@ -77,8 +77,11 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig): GateE
   let move: ClauseResult;
   if (fixedRef && known && nU !== null) {
     const adverse = r2(bull ? fixedRef.u - (u as number) : (u as number) - fixedRef.u);
-    move = res('FLOOR_BREACH_UNDERLYING_MOVE', breached && adverse >= cfg.gateUnderlyingN * nU,
-      { floorBreached: breached, floor: fp ?? null, ltpNow: f.ltpNow, underlying: u, from: fixedRef.from, refUnderlying: fixedRef.u, adverseMove: adverse, nUnderlying: nU, needN: cfg.gateUnderlyingN },
+    // From a fixed point the confirming move is the hard floor's K, never less: 1 N is one ordinary
+    // minute's swing (prod 2026-10-30 SENSEX CE sold on a 1 N dip, then ran +176).
+    const needN = Math.max(cfg.gateUnderlyingN, cfg.floorHardExitN);
+    move = res('FLOOR_BREACH_UNDERLYING_MOVE', breached && adverse >= needN * nU - 1e-9,
+      { floorBreached: breached, floor: fp ?? null, ltpNow: f.ltpNow, underlying: u, from: fixedRef.from, refUnderlying: fixedRef.u, adverseMove: adverse, nUnderlying: nU, needN },
       `armed floor breached AND the underlying moved against the position from the ${fixedRef.from === 'FLOOR_ARM' ? "floor's arm point" : 'best point'}`);
   } else if (!known || holdU === null || nU === null) {
     move = res('FLOOR_BREACH_UNDERLYING_MOVE', null, { floorBreached: breached, underlying: u, holdUnderlying: holdU, nUnderlying: nU },

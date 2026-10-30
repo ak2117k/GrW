@@ -303,7 +303,7 @@ export class PortfolioRepository {
       this.prisma.trade.findMany({
         where,
         include: {
-          instrument: { select: { symbol: true, exchange: true, segment: true } },
+          instrument: { select: { symbol: true, exchange: true, segment: true, token: true } },
         },
         orderBy,
         skip,

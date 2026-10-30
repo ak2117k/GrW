@@ -9,6 +9,7 @@ import TradeDetailModal from '@/components/trading/TradeDetailModal';
 import ExitTradeModal from '@/components/trading/ExitTradeModal';
 import StrategyBadge from '@/components/trading/StrategyBadge';
 import { useTradeJournal } from '@/hooks/useTradeJournal';
+import { useJournalLtps, ltpKey } from '@/hooks/useJournalLtps';
 import type { Trade } from '@/types';
 
 function formatDate(d: Date | string | undefined): string {
@@ -121,6 +122,8 @@ function PaperJournal() {
     setExitTradeId(selectedTrade.id);
     setModalOpen(false);
   }, [selectedTrade]);
+
+  const ltps = useJournalLtps(trades);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
@@ -247,13 +250,14 @@ function PaperJournal() {
         align: 'right' as const,
         render: (_val, row) => {
           const t = row as unknown as Trade;
-          // Closed trade: exit price is the current price.
-          if (t.exitPrice != null) {
-            return <span className="text-xs">{t.exitPrice.toFixed(2)}</span>;
+          // Live market price — for closed trades too (where it went after the exit).
+          const live = t.token && t.exchange ? ltps.get(ltpKey(t.exchange, t.token)) : undefined;
+          if (live != null) {
+            return <span className="text-xs">{live.toFixed(2)}</span>;
           }
-          // Open trade: derive from entry + per-unit unrealized P&L. The
-          // refresher worker keeps trade.pnl live for option positions.
-          if (t.entryPrice != null && t.pnl != null && t.quantity > 0) {
+          // No quote yet: an open trade derives it from entry + per-unit unrealized P&L
+          // (the refresher keeps trade.pnl live); a closed one shows '--', never the exit.
+          if (t.exitPrice == null && t.entryPrice != null && t.pnl != null && t.quantity > 0) {
             const perUnit = t.pnl / t.quantity;
             const current =
               t.side === 'BUY' ? t.entryPrice + perUnit : t.entryPrice - perUnit;
@@ -432,7 +436,7 @@ function PaperJournal() {
         },
       },
     ],
-    [],
+    [ltps],
   );
 
   return (

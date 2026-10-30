@@ -85,6 +85,7 @@ export function useTradeJournal() {
         isPaper: t.isPaper ?? t.isPaperTrade ?? false,
         symbol: t.symbol ?? t.instrument?.symbol ?? '',
         exchange: t.exchange ?? t.instrument?.exchange ?? '',
+        token: t.token ?? t.instrument?.token ?? null,
       }));
       setTrades(normalized);
       setTotalCount(data?.totalCount ?? data?.total ?? normalized.length);

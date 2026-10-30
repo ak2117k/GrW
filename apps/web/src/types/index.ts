@@ -61,6 +61,8 @@ export interface Trade extends SharedTrade {
   contextSnapshot?: Record<string, unknown> | null;
   exitReasonTag?: ExitReasonTag | null;
   exitNotes?: string | null;
+  /** Instrument token (journal rows), for the live "Current" price. */
+  token?: string | null;
 }
 
 // M5: Tag chip options shown on ExecuteTradeModal — the trader picks zero

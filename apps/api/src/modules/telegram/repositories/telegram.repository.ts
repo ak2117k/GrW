@@ -115,10 +115,13 @@ export class TelegramRepository {
              m."rawText" AS raw_text, m."hasMedia" AS has_media, c.status, c.reason, c.parser,
              s.tradingsymbol, s.side, s.entry_type, s.entry_low, s.entry_high, s.sl, s.targets,
              d.decision, d.skip_reason, d.mode, d.judge_reasons, d.judge_confidence, d.ai_check,
-             d.plan_sl, d.plan_sl_source, d.plan_targets, d.plan_target_source, w.watches
+             d.plan_sl, d.plan_sl_source, d.plan_targets, d.plan_target_source, w.watches,
+             ir.kind AS image_kind, ir.extraction AS image_extraction, ir.valid AS image_valid, ir.reason AS image_reason,
+             ir.linked_signal_id AS image_signal_id
       FROM telegram_messages m
       JOIN telegram_channels ch ON ch.id = m."channelId"
       LEFT JOIN signal_message_classes c ON c.message_id = m.id
+      LEFT JOIN telegram_image_reads ir ON ir.message_id = m.id
       LEFT JOIN trade_signals s ON s.id = c.signal_id
       LEFT JOIN LATERAL (
         SELECT decision, skip_reason, mode,
@@ -203,6 +206,32 @@ export interface FeedRow {
   plan_sl_source?: string | null;
   plan_targets?: unknown;
   plan_target_source?: string | null;
+  /** telegram_image_reads (chart-screenshot setup), when the photo was read. */
+  image_kind?: string | null;
+  image_extraction?: unknown;
+  image_valid?: boolean | null;
+  image_reason?: string | null;
+  image_signal_id?: string | null;
+}
+
+/** The chart-screenshot setup read from the post's image (signal-intake image-setup). */
+export interface FeedImageRead {
+  kind: string;
+  valid: boolean;
+  reason: string | null;
+  /** The model's own kind when the code rules changed it. */
+  modelKind: string | null;
+  side: string | null;
+  /** The instrument as read ("NIFTY 03 NOV 2026 23200 PE · NSE FO") or the contract it resolved to. */
+  instrument: string | null;
+  entry: number | null;
+  stopLoss: number | null;
+  targets: number[];
+  currentPrice: number | null;
+  confidence: number | null;
+  /** Set when the read could not be made (not read / failed). */
+  error: string | null;
+  linkedSignalId: string | null;
 }
 
 export interface FeedItem {
@@ -243,6 +272,30 @@ export interface FeedItem {
   } | null;
   /** Breakout levels from this post being watched (signal_watches), with the trade decision once one fired. */
   watches: FeedWatch[];
+  /** Present only when the post's image was read for a chart setup. */
+  imageRead?: FeedImageRead;
+}
+
+export function feedImageRead(r: Pick<FeedRow, 'image_kind' | 'image_extraction' | 'image_valid' | 'image_reason' | 'image_signal_id'>): FeedImageRead | null {
+  if (!r.image_kind) return null;
+  const x = (r.image_extraction && typeof r.image_extraction === 'object' && !Array.isArray(r.image_extraction) ? r.image_extraction : {}) as Record<string, unknown>;
+  const inst = (x.instrument && typeof x.instrument === 'object' ? x.instrument : {}) as Record<string, unknown>;
+  const modelKind = typeof x.modelKind === 'string' && x.modelKind !== r.image_kind ? x.modelKind : null;
+  return {
+    kind: r.image_kind,
+    valid: r.image_valid === true,
+    reason: r.image_reason ?? null,
+    modelKind,
+    side: typeof x.side === 'string' ? x.side : null,
+    instrument: typeof x.contract === 'string' ? x.contract : typeof inst.raw === 'string' ? inst.raw : typeof inst.underlying === 'string' ? inst.underlying : null,
+    entry: num(x.entry),
+    stopLoss: num(x.stopLoss),
+    targets: Array.isArray(x.targets) ? x.targets.map(num).filter((t): t is number => t !== null) : [],
+    currentPrice: num(x.currentPrice),
+    confidence: num(x.confidence),
+    error: typeof x.error === 'string' ? x.error : null,
+    linkedSignalId: r.image_signal_id ?? null,
+  };
 }
 
 export interface FeedWatch {
@@ -275,7 +328,9 @@ const num = (v: unknown): number | null => (v === null || v === undefined || !Nu
 export function toFeedItem(r: FeedRow): FeedItem {
   const posted = new Date(r.posted_at);
   const received = new Date(r.received_at);
+  const imageRead = feedImageRead(r);
   return {
+    ...(imageRead ? { imageRead } : {}),
     id: r.id,
     channelId: r.channel_id,
     channel: r.channel,

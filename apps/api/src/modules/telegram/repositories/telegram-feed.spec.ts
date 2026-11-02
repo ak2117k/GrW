@@ -115,3 +115,30 @@ describe('toFeedItem — watches', () => {
     expect(item.watches).toEqual([{ underlying: 'RADICO', side: 'BUY', level: 4330, status: 'FIRED', lastLtp: 4336, decision: 'PAPER', skipReason: null }]);
   });
 });
+
+describe('toFeedItem — chart-screenshot setup (telegram_image_reads)', () => {
+  it('a read image carries its setup; the model kind only when a rule changed it; the contract wins over the header text', () => {
+    const item = toFeedItem(
+      row({
+        has_media: true,
+        image_kind: 'RESULT',
+        image_valid: true,
+        image_reason: 'NEW_SETUP → RESULT: caption says "Target done"',
+        image_signal_id: null,
+        image_extraction: {
+          modelKind: 'NEW_SETUP', side: 'SELL', instrument: { raw: 'NIFTY 03 NOV 2026 23200 PE · NSE FO' }, contract: 'NIFTY03NOV2623200PE',
+          entry: 87.55, stopLoss: 100.5, targets: [48, 'x'], currentPrice: 49.65, confidence: 0.85,
+        },
+      }),
+    );
+    expect(item.imageRead).toEqual({
+      kind: 'RESULT', valid: true, reason: 'NEW_SETUP → RESULT: caption says "Target done"', modelKind: 'NEW_SETUP', side: 'SELL', instrument: 'NIFTY03NOV2623200PE',
+      entry: 87.55, stopLoss: 100.5, targets: [48], currentPrice: 49.65, confidence: 0.85, error: null, linkedSignalId: null,
+    });
+  });
+
+  it('a not-read image carries the error; a post without a read has no imageRead key', () => {
+    expect(toFeedItem(row({ image_kind: 'NOT_A_SETUP', image_valid: false, image_reason: 'not read: daily cap 40 reached', image_extraction: { error: 'not read: daily cap 40 reached' } })).imageRead).toMatchObject({ error: 'not read: daily cap 40 reached', modelKind: null, instrument: null });
+    expect('imageRead' in toFeedItem(row())).toBe(false);
+  });
+});

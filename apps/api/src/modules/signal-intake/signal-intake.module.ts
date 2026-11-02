@@ -7,7 +7,11 @@ import { AngelOneAdapterService } from '../market-data/services/angel-one-adapte
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { makeSentinelClock } from '../trade-sentinel/overnight/overnight-calendar';
 import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
+import { parseImageSetupConfig, IMAGE_SETUP_CONFIG, type ImageSetupConfig } from './image-setup.config';
+import { ImageReadRepository } from './repositories/image-read.repository';
 import { SignalIntakeRepository } from './repositories/signal-intake.repository';
+import { IMAGE_SETUP_READER, ImageSetupVisionReader } from './services/image-setup-reader.service';
+import { IMAGE_SETUP_SINK, IMAGE_SETUP_STORE, ImageSetupService } from './services/image-setup.service';
 import { SignalIntakeCron } from './services/signal-intake.cron';
 import {
   eventEmitterAdapter,
@@ -98,6 +102,15 @@ import { parseSignalIntakeConfig, SIGNAL_INTAKE_CONFIG, type SignalIntakeConfig 
     { provide: SIGNAL_INFO_MASTER, useExisting: SIGNAL_MASTER },
     { provide: SIGNAL_INFO_VOCAB, useExisting: SignalVocabularyService },
     SignalIntakeService,
+    // Chart-screenshot setups (IMAGE_SETUPS / IMAGE_SETUP_CHANNELS): read, store, and in signal mode hand a
+    // fresh NEW_SETUP to SignalIntakeService.ingestImageSetup (the text calls' own path).
+    { provide: IMAGE_SETUP_CONFIG, useFactory: (): ImageSetupConfig => parseImageSetupConfig(process.env) },
+    ImageReadRepository,
+    { provide: IMAGE_SETUP_STORE, useExisting: ImageReadRepository },
+    ImageSetupVisionReader,
+    { provide: IMAGE_SETUP_READER, useExisting: ImageSetupVisionReader },
+    { provide: IMAGE_SETUP_SINK, useExisting: SignalIntakeService },
+    ImageSetupService,
     SignalOutcomeService,
     SignalIntakeCron,
     SignalWatchService,

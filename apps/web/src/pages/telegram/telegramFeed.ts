@@ -138,6 +138,52 @@ export interface FeedItem {
   call: FeedCall | null;
   /** Breakout levels from this post being watched; absent from an older API. */
   watches?: FeedWatch[];
+  /** The chart setup read from the post's image (only for read images; absent from an older API). */
+  imageRead?: FeedImageRead;
+}
+
+/** A trade setup read from a chart screenshot (API signal-intake image-setup). */
+export interface FeedImageRead {
+  kind: string;
+  valid: boolean;
+  reason: string | null;
+  /** The model's own kind when a code rule changed it. */
+  modelKind: string | null;
+  side: string | null;
+  instrument: string | null;
+  entry: number | null;
+  stopLoss: number | null;
+  targets: number[];
+  currentPrice: number | null;
+  confidence: number | null;
+  error: string | null;
+  linkedSignalId: string | null;
+}
+
+const IMAGE_KIND: Record<string, string> = { NEW_SETUP: 'new setup', UPDATE: 'trade in progress', RESULT: 'result', NOT_A_SETUP: 'no setup' };
+
+/** "Chart read: new setup · SELL NIFTY03NOV2623200PE · entry 87.55 · SL 100.5 · T 48 · now 72.8 · 85% sure". */
+export function imageReadLine(r: FeedImageRead): string {
+  if (r.error) return `Chart not read: ${r.error.replace(/^not read: /, '')}`;
+  const kind = IMAGE_KIND[r.kind] ?? r.kind.toLowerCase();
+  const parts = [`Chart read: ${kind}`];
+  const what = [r.side, r.instrument].filter(Boolean).join(' ');
+  if (what) parts.push(what);
+  if (r.entry !== null) parts.push(`entry ${r.entry}`);
+  if (r.stopLoss !== null) parts.push(`SL ${r.stopLoss}`);
+  if (r.targets.length) parts.push(`T ${r.targets.join(' / ')}`);
+  if (r.currentPrice !== null) parts.push(`now ${r.currentPrice}`);
+  if (r.confidence !== null) parts.push(`${Math.round(r.confidence * 100)}% sure`);
+  return parts.join(' · ');
+}
+
+/** "valid · signal created" / "not valid: levels contradict the side …" / "valid · observe mode (fresh)". */
+export function imageReadStatus(r: FeedImageRead): string | null {
+  if (r.error) return null;
+  const head = r.valid ? 'valid' : 'not valid';
+  const reason = r.reason ? (r.valid ? ` · ${r.reason}` : `: ${r.reason}`) : '';
+  const model = r.modelKind ? ` (model said ${IMAGE_KIND[r.modelKind] ?? r.modelKind})` : '';
+  return `${head}${reason}${model}`;
 }
 
 /** A watched breakout level ("Radico breakout above 4330") and, once crossed, the trade decision. */

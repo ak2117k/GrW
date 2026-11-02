@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { aiLine, aiRight, callLine, classLabel, FILTERS, judgeHeading, lagLabel, scorecardLine, watchLine, whyLine, type FeedItem } from './telegramFeed';
+import { aiLine, aiRight, callLine, classLabel, FILTERS, imageReadLine, imageReadStatus, judgeHeading, lagLabel, scorecardLine, watchLine, whyLine, type FeedImageRead, type FeedItem } from './telegramFeed';
 import { TelegramFeedView } from './TelegramFeedView';
 
 const base: FeedItem = {
@@ -131,5 +131,32 @@ describe('AI judge check (learning mode)', () => {
     const base = { days: 14, scored: 0, right: 0, wrong: 0, accuracyPct: null, takeRight: 0, takeWrong: 0, skipRight: 0, skipWrong: 0, unscored: 0 };
     expect(scorecardLine(base)).toMatch(/no closed paper trades scored yet/);
     expect(scorecardLine({ ...base, scored: 12, right: 7, wrong: 5, accuracyPct: 58, takeRight: 4, takeWrong: 2, skipRight: 3, skipWrong: 3 })).toBe('AI judge check, last 14 days: 7 right / 5 wrong (58%) · TAKE 4✓ 2✗ · SKIP 3✓ 3✗');
+  });
+});
+
+describe('chart-screenshot setup under an image post', () => {
+  const read: FeedImageRead = {
+    kind: 'RESULT', valid: true, reason: 'NEW_SETUP → RESULT: caption says "Target done"', modelKind: 'NEW_SETUP', side: 'SELL', instrument: 'NIFTY03NOV2623200PE',
+    entry: 87.55, stopLoss: 100.5, targets: [48], currentPrice: 49.65, confidence: 0.85, error: null, linkedSignalId: null,
+  };
+
+  it('one line with kind, side, contract, levels, price and confidence; one with valid / reason', () => {
+    expect(imageReadLine(read)).toBe('Chart read: result · SELL NIFTY03NOV2623200PE · entry 87.55 · SL 100.5 · T 48 · now 49.65 · 85% sure');
+    expect(imageReadStatus(read)).toBe('valid · NEW_SETUP → RESULT: caption says "Target done" (model said new setup)');
+    expect(imageReadStatus({ ...read, valid: false, kind: 'NOT_A_SETUP', modelKind: 'NEW_SETUP', reason: 'unknown underlying USOIL' })).toBe('not valid: unknown underlying USOIL (model said new setup)');
+    expect(imageReadStatus({ ...read, reason: null, modelKind: null })).toBe('valid');
+  });
+
+  it('a not-read image says why, with no status line', () => {
+    const r = { ...read, error: 'not read: daily cap 40 reached', valid: false, kind: 'NOT_A_SETUP' };
+    expect(imageReadLine(r)).toBe('Chart not read: daily cap 40 reached');
+    expect(imageReadStatus(r)).toBeNull();
+  });
+
+  it('renders under the post only when the image was read', () => {
+    const html = renderToStaticMarkup(<TelegramFeedView items={[{ ...base, hasMedia: true, text: 'Target done 👍', imageRead: read }, { ...base, id: 'm9' }]} />);
+    expect(html).toContain('Chart read: result · SELL NIFTY03NOV2623200PE');
+    expect(html).toContain('(model said new setup)');
+    expect(html.match(/data-testid="image-read"/g)).toHaveLength(1);
   });
 });

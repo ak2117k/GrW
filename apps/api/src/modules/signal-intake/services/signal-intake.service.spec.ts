@@ -435,6 +435,42 @@ describe('SignalIntakeService — image posts (vision)', () => {
     expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_NOT_SIGNAL', reason: expect.stringContaining('sl on the wrong side') });
     expect(m.emitted).toEqual([]);
   });
+
+  describe('ingestImageSetup (chart-screenshot setups, IMAGE_SETUPS=signal)', () => {
+    const setup = {
+      underlying: 'NIFTY', instrumentKind: 'PE' as const, strike: 23200, expiryHint: { day: 3, month: 11, year: 2026 }, side: 'SELL' as const,
+      entryType: 'AT' as const, entryLow: 87.55, entryHigh: 87.55, sl: 100.5, targets: [48], qty: null, horizon: 'INTRADAY' as const, tags: ['IMAGE_SETUP'], confidence: 0.85,
+    };
+    const TEXT = '[image] SELL NIFTY 23200 PE 03NOV AT 87.55 SL 100.5 T 48';
+
+    it('takes the text calls\' path: TradeSignal (rawText [image] …, tag IMAGE_SETUP) + cluster + SIGNAL class + signal.ready', async () => {
+      const { v } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] });
+      const m = make({ vision: v });
+      const evt = img(m, 'm1', 'A', 'Sell this');
+      await m.svc.handle(evt);
+      await flush();
+      const id = await m.svc.ingestImageSetup(evt, setup, TEXT);
+      expect(id).toBe('sig1');
+      expect(m.mem.signals[0]).toMatchObject({ rawText: TEXT, tags: ['IMAGE_SETUP'], side: 'SELL', instrumentKind: 'PE', strike: 23200, sl: 100.5, targets: [48], expiry: '2026-11-03' });
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', signalId: 'sig1' });
+      expect(m.emitted).toEqual([['signal.ready', expect.objectContaining({ signalId: 'sig1', agreeCount: 1 })]]);
+    });
+
+    it('a message already a call is left alone; a late generic vision reply never overwrites the image-setup call', async () => {
+      let release!: (r: VisionReply) => void;
+      const { v } = fakeVision(() => new Promise<VisionReply>((r) => (release = r)));
+      const m = make({ vision: v });
+      const evt = img(m, 'm1', 'A');
+      await m.svc.handle(evt); // generic vision read pending
+      expect(await m.svc.ingestImageSetup(evt, setup, TEXT)).toBe('sig1');
+      release({ kind: 'NOISE', isSignal: false, signals: [] });
+      await flush();
+      await m.svc.handle(m.msg('z', 'A', 'Good night', 1)); // drain the chain
+      expect(m.mem.classes.get('m1')).toMatchObject({ status: 'SIGNAL', signalId: 'sig1' });
+      expect(await m.svc.ingestImageSetup(evt, setup, TEXT)).toBeNull();
+      expect(m.mem.signals).toHaveLength(1);
+    });
+  });
 });
 
 describe('SignalIntakeService — INFO / RECAP (owner 2026-10-24)', () => {

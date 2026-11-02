@@ -1,6 +1,6 @@
 import { Badge } from '@/components/common';
 import { cn } from '@/utils/cn';
-import { aiLine, aiRight, callLine, classLabel, judgeHeading, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
+import { aiLine, aiRight, callLine, classLabel, imageReadLine, imageReadStatus, judgeHeading, lagLabel, watchLine, whyLine, type FeedItem } from './telegramFeed';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -31,6 +31,16 @@ export function TelegramFeedView({ items }: { items: FeedItem[] }) {
               <p className={cn('mt-1.5 whitespace-pre-wrap break-words text-sm line-clamp-4', SECONDARY)}>{m.text}</p>
             ) : (
               <p className={cn('mt-1.5 text-sm italic', MUTED)}>(no text)</p>
+            )}
+            {m.imageRead && (
+              <div className="mt-1.5 rounded border border-[var(--color-border-default)] px-2 py-1 text-xs" data-testid="image-read">
+                <p className={cn('font-medium', m.imageRead.error ? MUTED : m.imageRead.kind === 'NEW_SETUP' && m.imageRead.valid ? 'text-emerald-400' : SECONDARY)}>
+                  {imageReadLine(m.imageRead)}
+                </p>
+                {imageReadStatus(m.imageRead) && (
+                  <p className={cn('mt-0.5', m.imageRead.valid ? MUTED : 'text-amber-400')}>{imageReadStatus(m.imageRead)}</p>
+                )}
+              </div>
             )}
             {m.call && <p className="mt-1.5 text-sm font-medium text-emerald-400">{callLine(m.call)}</p>}
             {why && <p className={cn('mt-1 text-xs', MUTED)}>{why}</p>}

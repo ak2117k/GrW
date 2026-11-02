@@ -119,6 +119,28 @@ export class SignalIntakeService {
     return run;
   }
 
+  /**
+   * A valid, fresh NEW_SETUP read from a chart screenshot (image-setup service, IMAGE_SETUPS=signal) → a normal
+   * parsed signal through the SAME path as a text call: dedup, cluster, signal_message_classes, `signal.ready`
+   * (judge, OI check, learning paper trade, fair score) under the same age rule. The signal's rawText is
+   * `signalText` ("[image] SELL NIFTY …") and its tags carry IMAGE_SETUP, so image calls split from text ones.
+   * Serialised with the message chain. Returns the signal id (the earlier one when the same idea was already
+   * posted), null when the message is already a call or intake is off.
+   */
+  ingestImageSetup(evt: TelegramMessageEvent, p: ParsedSignal, signalText: string): Promise<string | null> {
+    return this.serial(async () => {
+      if (!this.config.enabled) return null;
+      const prior = await this.repo.classOf(evt.messageId);
+      if (prior?.status === 'SIGNAL' && prior.signalId) return null;
+      const postedAt = new Date(evt.postedAt);
+      const text = String(evt.text ?? '');
+      const hash = prior?.textHash ?? (evt.media ? textHash(`${text}\n#img:${evt.media.sha256}`) : textHash(text));
+      const base = { messageId: evt.messageId, channelId: evt.channelId, postedAt, textHash: hash };
+      await this.createFromParsed({ ...evt, text: signalText }, postedAt, p, 'llm', base, null);
+      return (await this.repo.classOf(evt.messageId))?.signalId ?? null;
+    });
+  }
+
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.chain.then(fn);
     this.chain = run.catch(() => undefined);
@@ -276,6 +298,9 @@ export class SignalIntakeService {
     base: Omit<ClassRow, 'status'>,
     via: 'llm' | 'cache',
   ): Promise<void> {
+    // The chart-setup reader (image-setup) may already have made this post a call: never overwrite that class row.
+    const prior = await this.repo.classOf(evt.messageId);
+    if (prior?.status === 'SIGNAL' && prior.signalId) return;
     const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), imageSha256: media.sha256 };
     const save = (status: MessageStatus, reason: string) =>
       this.repo.saveClass({ ...base, status, parser: 'vision', llmResult: stored, reason: `vision (${via}): ${reason}`.slice(0, 500) });

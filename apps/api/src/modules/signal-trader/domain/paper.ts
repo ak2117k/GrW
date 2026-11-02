@@ -268,7 +268,10 @@ export function paperExitDecision(i: {
       return { exit: false, trail: { sl: level, target: null, reason: `paper noise trail SL ${sl0 ?? 'none'} → ${level} (LTP ${ltp}, ${unitText()})` } };
     }
   }
-  if (i.target !== null && i.target > 0 && beyond(i.target)) {
+  // A target on the wrong side of the entry is never a hit (prod 2026-11-02 RELIANCE FUT: BUY 1236.11 with
+  // T1 1208.93 closed at once "at the target" for −₹13.6k while LTP was 1237.8).
+  const sane = entry === null || !(entry > 0) || i.target === null || (buy ? i.target > entry : i.target < entry);
+  if (sane && i.target !== null && i.target > 0 && beyond(i.target)) {
     const at = ts.findIndex((t) => Math.abs(t - (i.target as number)) < 1e-6);
     // A one-target call: drop the target and hand over to the noise trail (when the unit is known).
     if (ts.length === 1 && at === 0 && entry !== null && entry > 0) {

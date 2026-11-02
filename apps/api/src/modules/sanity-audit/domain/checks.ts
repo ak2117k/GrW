@@ -69,6 +69,8 @@ export interface ClosedTradeRow {
   exitAt: Date;
   /** trade_events PARTIAL_EXIT rows of the trade. */
   partialExits: number;
+  /** trades.exitReasonTag (HIT_TARGET, STOPPED_OUT, …); null when unset. */
+  exitReasonTag?: string | null;
 }
 
 /**
@@ -87,6 +89,23 @@ export function pnlArithmetic(r: ClosedTradeRow): Finding | null {
     subjectAt: r.exitAt,
     message: `${r.symbol} ${r.side} ${r.quantity} @ ${r2(r.entryPrice)} → ${r2(r.exitPrice)}: pnl ₹${r2(r.pnl)}, expected ₹${r2(expected)} (off ₹${r2(diff)}) — trade ${r.tradeId}`,
     detail: { symbol: r.symbol, side: r.side, quantity: r.quantity, entryPrice: r.entryPrice, exitPrice: r.exitPrice, pnl: r.pnl, expected: r2(expected), diff: r2(diff) },
+  };
+}
+
+/**
+ * TARGET_EXIT_IN_PROFIT (2026-11-02): a HIT_TARGET exit is on the trade's side of the entry. RELIANCE23NOV26FUT
+ * (paper, BUY 1236.11) closed "at the target" 1208.93 — a channel T1 below the entry — for a fake −₹13.6k
+ * that PNL_ARITHMETIC passes: the arithmetic was right, the exit price was not.
+ */
+export function targetExitInProfit(r: ClosedTradeRow): Finding | null {
+  if (r.exitReasonTag !== 'HIT_TARGET' || r.entryPrice === null || r.exitPrice === null) return null;
+  const buy = r.side !== 'SELL';
+  if (buy ? r.exitPrice > r.entryPrice : r.exitPrice < r.entryPrice) return null;
+  return {
+    subjectId: r.tradeId,
+    subjectAt: r.exitAt,
+    message: `${r.symbol} ${r.side} ${r.quantity} @ ${r2(r.entryPrice)} closed HIT_TARGET at ${r2(r.exitPrice)} — a target on the wrong side of the entry — trade ${r.tradeId}`,
+    detail: { symbol: r.symbol, side: r.side, entryPrice: r.entryPrice, exitPrice: r.exitPrice, pnl: r.pnl },
   };
 }
 

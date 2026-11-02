@@ -12,6 +12,7 @@ import {
   oiCheckPresent,
   paperFillVsLtp,
   pnlArithmetic,
+  targetExitInProfit,
   selfReviewRan,
   type Finding,
   type Severity,
@@ -68,6 +69,13 @@ export const SANITY_CHECKS: readonly SanityCheck[] = [
     severity: 'error',
     load: (repo, ctx) => repo.closedTrades(ctx.from),
     evaluate: (row) => pnlArithmetic(row),
+  }),
+  def({
+    check: 'TARGET_EXIT_IN_PROFIT',
+    id: 'target-exit',
+    severity: 'error',
+    load: (repo, ctx) => repo.closedTrades(ctx.from),
+    evaluate: (row) => targetExitInProfit(row),
   }),
   def({
     check: 'EXIT_NEAR_TRIGGER',

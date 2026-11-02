@@ -311,7 +311,9 @@ function planEntryCore(
           limitPrice: limit,
           sl,
           slSource,
-          targets: late ? targetsAhead(s.side, ltp, s.targets) : s.targets.filter((t) => Number.isFinite(t) && t > 0),
+          // Only targets ahead of the price, late or not: a target already behind it (prod 2026-11-02 RELIANCE FUT
+          // BUY ~1236 with T1 1208.93) is no target — it closed the paper trade at once for a fake −₹13.6k.
+          targets: targetsAhead(s.side, ltp, s.targets),
           ...(late ? { late } : {}),
           ...(better ? { better } : {}),
           lots: size.lots,
@@ -355,7 +357,8 @@ function planEntryCore(
       limitPrice: limit,
       sl: refSl,
       slSource: refSl > 0 ? slSource : 'none',
-      targets: late ? targetsAhead(s.side, ltp, s.targets) : s.targets.filter((t) => Number.isFinite(t) && t > 0),
+      // Only targets ahead of the price, late or not (see the first plan above).
+      targets: targetsAhead(s.side, ltp, s.targets),
       ...(late ? { late } : {}),
       ...(better ? { better } : {}),
       lots: s.instrumentKind === 'EQ' ? qty : 1,

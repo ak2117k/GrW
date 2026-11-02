@@ -325,6 +325,50 @@ export function positionEntryPrice(p: Record<string, unknown>, netQty: number): 
   return candidates.find((c) => c > 0) ?? 0;
 }
 
+/**
+ * The broker's own exit price of a squared-off leg (netqty 0), by token. Prod 2026-11-02:
+ * RELIANCE23NOV261300CE was sold at 7.15 but the tracker closed at its last tick, 8.15 (the premium
+ * had bounced in the ~90 s before the reconcile saw the leg gone) — +₹625 shown for a +₹125 trade.
+ * A long's exit is today's sell average, a short's the buy average; "0" is Angel's "absent".
+ */
+export interface SquaredOffLeg {
+  sell: number;
+  sellQty: number;
+  buy: number;
+  buyQty: number;
+}
+
+export function squaredOffExitPrices(positions: unknown): Map<string, SquaredOffLeg> {
+  const out = new Map<string, SquaredOffLeg>();
+  if (!Array.isArray(positions)) return out;
+  for (const p of positions as Array<Record<string, unknown>>) {
+    const token = p?.symboltoken ? String(p.symboltoken) : '';
+    if (!token || toNum(p?.netqty) !== 0) continue;
+    out.set(token, { sell: toNum(p?.sellavgprice), sellQty: toNum(p?.sellqty), buy: toNum(p?.buyavgprice), buyQty: toNum(p?.buyqty) });
+  }
+  return out;
+}
+
+/**
+ * This round trip's exit price from the day's exit-side average: the broker averages EVERY exit of the
+ * day, so an earlier same-day round trip on the token (already closed at its own price) is taken out
+ * first. 0 when it cannot be read cleanly — the caller then falls back to the last tick.
+ */
+export function roundTripExitPrice(leg: SquaredOffLeg | undefined, qty: number, earlier: ReadonlyArray<{ qty: number; exitPrice: number | null }>): number {
+  if (!leg) return 0;
+  const short = qty < 0;
+  const avg = short ? leg.buy : leg.sell;
+  const dayQty = short ? leg.buyQty : leg.sellQty;
+  const mine = Math.abs(qty);
+  if (!(avg > 0) || !(dayQty > 0) || !(mine > 0)) return 0;
+  const before = earlier.filter((e) => e.exitPrice !== null && e.exitPrice > 0 && Math.sign(e.qty) === Math.sign(qty));
+  const beforeQty = before.reduce((a, e) => a + Math.abs(e.qty), 0);
+  if (Math.abs(dayQty - beforeQty - mine) > 1e-9) return 0;
+  if (beforeQty === 0) return avg;
+  const price = (avg * dayQty - before.reduce((a, e) => a + Math.abs(e.qty) * (e.exitPrice as number), 0)) / mine;
+  return price > 0 ? Math.round(price * 100) / 100 : 0;
+}
+
 export function normalizePositions(positions: unknown): BookItem[] {
   if (!Array.isArray(positions)) return [];
   const out: BookItem[] = [];
@@ -589,6 +633,7 @@ export class TradeTrackerService implements OnModuleDestroy {
     ];
     const bookByKey = new Map<string, BookItem>();
     for (const item of book) bookByKey.set(bookKey(item.token, item.kind), item);
+    const squaredOff = squaredOffExitPrices(positions);
 
     const open = await this.prisma.tradeTracker.findMany({
       where: { userId, status: 'OPEN' },
@@ -661,7 +706,16 @@ export class TradeTrackerService implements OnModuleDestroy {
     for (const [key, tracker] of openByKey) {
       if (bookByKey.has(key)) continue;
       if (!fetched.has(tracker.kind)) continue;
-      const exitPrice = tracker.lastLtp ?? tracker.entryPrice;
+      // The broker's fill average for a squared-off position; the last tick only when it has none.
+      const leg = tracker.kind === 'POSITION' ? squaredOff.get(tracker.token) : undefined;
+      const earlier = leg
+        ? await this.prisma.tradeTracker.findMany({
+            where: { userId, token: tracker.token, kind: 'POSITION', status: 'CLOSED', exitTime: { gte: new Date(`${today}T00:00:00+05:30`) } },
+            select: { qty: true, exitPrice: true },
+          })
+        : [];
+      const fill = roundTripExitPrice(leg, tracker.qty, earlier);
+      const exitPrice = fill > 0 ? fill : tracker.lastLtp ?? tracker.entryPrice;
       const { pnl, pnlPercent } = computePnl(
         tracker.entryPrice,
         exitPrice,

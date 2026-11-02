@@ -7,6 +7,7 @@ import {
   oiCheckPresent,
   paperFillVsLtp,
   pnlArithmetic,
+  targetExitInProfit,
   selfReviewRan,
 } from './checks';
 
@@ -172,5 +173,17 @@ describe('lastDueReviewSession / selfReviewRan', () => {
     expect(selfReviewRan({ ...r, firstDoneAt: at('2026-10-30T13:15:00.048Z') }, now)).toBeNull();
     expect(selfReviewRan({ ...r, firstDoneAt: null }, now)!.subjectId).toBe('self-review:2026-10-30');
     expect(selfReviewRan({ ...r, firstDoneAt: at('2026-10-31T03:30:00Z') }, at('2026-10-31T04:00:00Z'))).not.toBeNull();
+  });
+});
+
+describe('TARGET_EXIT_IN_PROFIT', () => {
+  const row = { tradeId: 't', symbol: 'RELIANCE23NOV26FUT', side: 'BUY', quantity: 500, entryPrice: 1236.11, exitPrice: 1208.93, pnl: -13589, exitAt: new Date(), partialExits: 0, exitReasonTag: 'HIT_TARGET' };
+  it('flags the 2026-11-02 RELIANCE target exit below a BUY entry', () => {
+    expect(targetExitInProfit(row)?.message).toMatch(/closed HIT_TARGET at 1208.93/);
+  });
+  it('passes a real target hit, and ignores other exit tags', () => {
+    expect(targetExitInProfit({ ...row, exitPrice: 1238.28 })).toBeNull();
+    expect(targetExitInProfit({ ...row, exitReasonTag: 'STOPPED_OUT' })).toBeNull();
+    expect(targetExitInProfit({ ...row, side: 'SELL', exitPrice: 1200 })).toBeNull();
   });
 });

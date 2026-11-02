@@ -197,3 +197,16 @@ describe('paperTrailConfig', () => {
     expect(paperTrailConfig({ PAPER_STEP_MIN_N: 'x', PAPER_CARRIED_TRAIL_ATR: '0' })).toEqual({ stepMinN: 3, stepMinAtr: 1, carriedTrailAtr: 1 });
   });
 });
+
+/** Prod 2026-11-02 RELIANCE23NOV26FUT paper: BUY 500 @ 1236.11, channel targets 1208.93 / 1238.28, LTP 1237.8. */
+describe('a target on the wrong side of the entry is never a hit', () => {
+  const base = { side: 'BUY', ltp: 1237.8, sl: null, product: 'INTRADAY', minutesToClose: 300, entry: 1236.11, targets: orderedTargets('BUY', 1236.11, [1208.93, 1238.28]) };
+
+  it('T1 1208.93 below a BUY entry does not close the trade at 1208.93', () => {
+    expect(paperExitDecision({ ...base, target: 1208.93 })).toEqual({ exit: false });
+  });
+
+  it('the valid target still works: 1238.28 hit exits at the target', () => {
+    expect(paperExitDecision({ ...base, ltp: 1238.5, target: 1238.28 })).toMatchObject({ exit: true, tag: 'HIT_TARGET', price: 1238.28 });
+  });
+});

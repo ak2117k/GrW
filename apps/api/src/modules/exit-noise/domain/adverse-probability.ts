@@ -262,8 +262,25 @@ export function componentsOfRecord(read: unknown): NoiseComponent[] {
 
 export interface CalibrationSample {
   parts: readonly AdversePart[];
-  /** The outcome: the underlying went on against the position (≥ 1 N within 30 min). */
+  /** The outcome, by {@link keptLosing} (owner-chosen definition C). */
   adverse: boolean;
+}
+
+/** Minutes after the exit at which {@link keptLosing} reads the underlying. */
+export const KEPT_LOSING_AFTER_MIN = 30;
+
+/**
+ * "Holding would have kept losing" — the outcome p is calibrated against (owner 2026-11-02, option C):
+ * 30 minutes after the exit the underlying is still at least 1 N WORSE for the position than at the
+ * exit. Not "touched 1 N against at any point" (option A): that happened after 12 of 16 exits, most of
+ * which then recovered, so a model calibrated on it would call nearly every exit justified. Pure;
+ * null when the 30-minute price or N is unknown.
+ */
+export function keptLosing(i: { want: Want; underlyingAtExit: number | null; underlyingAfter30m: number | null; n: number | null }): boolean | null {
+  const ok = (x: number | null): x is number => typeof x === 'number' && Number.isFinite(x);
+  if (!ok(i.underlyingAtExit) || !ok(i.underlyingAfter30m) || !ok(i.n) || i.n <= 0) return null;
+  const against = i.want === 'BULLISH' ? i.underlyingAtExit - i.underlyingAfter30m : i.underlyingAfter30m - i.underlyingAtExit;
+  return against >= i.n - 1e-9;
 }
 
 /**

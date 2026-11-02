@@ -1,4 +1,5 @@
 import {
+  keptLosing,
   ADVERSE_P_V1,
   CALIBRATION_MIN_SAMPLE,
   EXIT_JUSTIFIED_P,
@@ -132,5 +133,18 @@ describe('calibration', () => {
       { bucket: '0.5–0.75', n: 1, adverse: 1, rate: 1, meanP: 0.6 },
       { bucket: '0.75–1', n: 1, adverse: 1, rate: 1, meanP: 0.8 },
     ]);
+  });
+});
+
+describe('keptLosing (calibration outcome, option C)', () => {
+  it('long: 30 min later still >= 1 N below the exit = kept losing; a dip that recovered is not', () => {
+    expect(keptLosing({ want: 'BULLISH', underlyingAtExit: 1237, underlyingAfter30m: 1234, n: 2.5 })).toBe(true);
+    expect(keptLosing({ want: 'BULLISH', underlyingAtExit: 1237, underlyingAfter30m: 1239, n: 2.5 })).toBe(false);
+    expect(keptLosing({ want: 'BULLISH', underlyingAtExit: 1237, underlyingAfter30m: 1236, n: 2.5 })).toBe(false);
+  });
+  it('short mirrors; unknown price or N is null', () => {
+    expect(keptLosing({ want: 'BEARISH', underlyingAtExit: 9560, underlyingAfter30m: 9575, n: 4.3 })).toBe(true);
+    expect(keptLosing({ want: 'BEARISH', underlyingAtExit: 9560, underlyingAfter30m: null, n: 4.3 })).toBeNull();
+    expect(keptLosing({ want: 'BULLISH', underlyingAtExit: 1237, underlyingAfter30m: 1234, n: null })).toBeNull();
   });
 });

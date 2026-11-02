@@ -8,6 +8,8 @@
  *   TELEGRAM     a channel call and what we did with it (latest signal_decisions row)
  *   WATCH        a breakout level from a channel post, still waiting (a fired one shows as its TELEGRAM call)
  */
+import { aiVerdictOf, type AiCheck } from '../../signal-trader/domain/ai-check';
+
 export type BoardSource = 'NIGHT_SETUP' | 'NEWS_IDEA' | 'TELEGRAM' | 'WATCH';
 
 /** A coarse state every source maps onto, so one filter works across them. */
@@ -221,7 +223,8 @@ export function callItem(r: CallRow): BoardItem {
     why: reasons.length ? reasons : text(r.skip_reason),
     result: closed ? { ...(num(ai.movePct) !== null ? { movePct: num(ai.movePct) as number } : {}), ...(pnl !== null ? { pnl } : {}) } : null,
     channel: r.channel,
-    aiCorrect: typeof ai.correct === 'boolean' ? ai.correct : null,
+    // The FAIR verdict when the check carries one (domain/ai-check aiVerdictOf), else the old no-stop rule.
+    aiCorrect: aiVerdictOf({ correct: typeof ai.correct === 'boolean' ? ai.correct : null, fair: ai.fair as AiCheck['fair'] }).right,
   };
 }
 

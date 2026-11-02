@@ -33,6 +33,25 @@ describe('SignalPaperWatchService — learning mode AI check', () => {
     expect(t.repo.recordAiCheck).toHaveBeenCalledWith('d1', expect.objectContaining({ aiDecision: 'SKIP', movePct: 12, pnl: 900, correct: false }));
   });
 
+  it('the FAIR check rides along: the contract\'s 1-min bars hit the cap-sized stop → the same SKIP is RIGHT (risk cap)', async () => {
+    const judge = { verdict: 'SKIP', aiDecision: 'SKIP', aiSkipReason: 'judge_skip', reasons: ['Risk busts the cap: SL 60 = ₹3,000 on 1 lot vs ₹2,000 max'], packet: { caps: { maxLossPerTrade: 2000 } } };
+    const plan = { sl: 60, targets: [130], lotSize: 75, lots: 1, qty: 75, riskRupees: 3000, tickSize: 0.05 };
+    const t = make(trade(['telegram-signal', 'decision:d1', 'learn']), judge);
+    Object.assign(t.repo, {
+      fairScoreFacts: jest.fn(async () => ({ judge, plan, underlying: 'NIFTY', instrument: null, shadowStop: null })),
+      hubMinuteBars: jest.fn(async () => []),
+      underlyingRef: jest.fn(async () => null),
+    });
+    // cap stop = 100 − 2000/75 = 73.35: the 05:30 bar dips to 70, then the trade recovers to 112.
+    const bar = (m: number, high: number, low: number) => ({ ts: Date.parse('2026-10-28T05:00:00Z') + m * 60_000, open: low, high, low, close: high });
+    const minuteBars = Array.from({ length: 290 }, (_, k) => (k === 30 ? bar(k + 1, 95, 70) : bar(k + 1, 105, 96)));
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, t.repo as any, t.exec as any, { updateTrade: jest.fn() } as any, { isOpen: () => true, minutesToClose: () => 4 }, { ltp: jest.fn(async () => 112) }, { minuteBars: jest.fn(async () => minuteBars) });
+    await svc.sweep(NOW);
+    const check = (t.repo.recordAiCheck.mock.calls[0] as unknown[])[1] as Record<string, any>;
+    expect(check).toMatchObject({ aiDecision: 'SKIP', correct: false });
+    expect(check.fair).toMatchObject({ verdict: 'RIGHT', skipKind: 'RISK_CAP', capStop: 73.35, method: 'contract-1m (broker 1-min history)', capOutcome: { result: 'STOPPED', price: 73.35 }, signalStopOutcome: { result: 'EXIT', price: 112 } });
+  });
+
   it('a normal paper trade is not scored', async () => {
     const t = make(trade(['telegram-signal', 'decision:d2']), { verdict: 'TAKE' });
     await t.svc.sweep(NOW);

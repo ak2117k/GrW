@@ -17,6 +17,12 @@ export const VERIFICATION_KINDS = [
   'CHANNEL_INFO',
   /** A news-impact model call (2026-10-24): its direction vs the +60 m (INTRADAY) / close-to-next-close (DAYS) move. */
   'NEWS_IMPACT',
+  /** The Telegram entry judge's TAKE / SKIP on a closed learning paper trade, on the FAIR check (ai_check.fair), 2026-11-02. */
+  'SIGNAL_JUDGE',
+  /** An AI / noise-trail exit of a PAPER trade: premature when the underlying recovered >= 1 N in favour within 30 min, 2026-11-02. */
+  'PAPER_EXIT',
+  /** A closed ENGINE_ENTRY paper trade (the entry engine): a gross loss is a miss, 2026-11-02. */
+  'ENGINE_ENTRY',
 ] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 

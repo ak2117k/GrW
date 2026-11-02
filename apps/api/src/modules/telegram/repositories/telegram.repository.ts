@@ -167,6 +167,8 @@ function asAiCheck(v: unknown): AiCheck | null {
     exitTag: String(o.exitTag ?? ''),
     correct: o.correct === true ? true : o.correct === false ? false : null,
     at: String(o.at ?? ''),
+    // The fair verdict (domain/fair-score), passed through as stored; readers go through aiVerdictOf.
+    ...(o.fair && typeof o.fair === 'object' && !Array.isArray(o.fair) && typeof (o.fair as { verdict?: unknown }).verdict === 'string' ? { fair: o.fair as AiCheck['fair'] } : {}),
   };
 }
 

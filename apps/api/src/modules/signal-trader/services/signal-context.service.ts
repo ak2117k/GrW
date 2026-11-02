@@ -16,6 +16,20 @@ import { deriveEngineSl, type EngineSl } from '../domain/engine-sl';
 import { deriveEngineTargets, type EngineTargets } from '../domain/engine-target';
 import type { ResolvedContract } from '../domain/contract-resolver';
 import type { SignalView } from '../domain/signal.types';
+import { SignalTraderRepository } from '../repositories/signal-trader.repository';
+import { noiseBlock, underlyingNoise } from '../domain/judge-noise';
+import { deltaReading, type DeltaReading } from '../domain/option-delta';
+import { noiseFromBars } from '../../exit-discipline/noise';
+import { NOISE_LOOKBACK_MIN } from '../../exit-discipline/config';
+import type { MinuteBar } from '../../exit-discipline/types';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+
+/** Fewer hub bars than this today ⇒ the noise block asks the broker's 1-min history instead. */
+const MIN_HUB_BARS = 15;
+const istMidnight = (now: Date) => {
+  const ist = now.getTime() + 5.5 * 3_600_000;
+  return ist - (ist % 86_400_000) - 5.5 * 3_600_000;
+};
 
 /** A block that is either present with its source, or stated unavailable WITH the reason (never silent). */
 export type CtxBlock = { status: 'present'; source: string; value: unknown } | { status: 'unavailable'; reason: string };
@@ -57,7 +71,81 @@ export class SignalContextService {
     @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
     @Optional() private readonly feeds?: UserFeedManager,
     @Optional() private readonly instruments?: MarketDataRepository,
+    @Optional() private readonly repo?: SignalTraderRepository,
   ) {}
+
+  /**
+   * market.noise for the judge (domain/judge-noise): the underlying's 1-min / 5-min noise units from the
+   * hub's candles_1m (the broker's 1-min history when the hub has under {@link MIN_HUB_BARS} bars today),
+   * the contract's premium N1 from its own 1-min bars when they exist, the option's |delta| (chain / broker
+   * greek, else the moneyness heuristic — named so on the block) and both stops' distances in those units.
+   * Never throws: an `unavailable` block with the reason.
+   */
+  async noise(i: {
+    signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'side' | 'strike'>;
+    contract: ResolvedContract | null;
+    price: number;
+    planSl: number | null;
+    cap: number | null;
+    lotQty: number;
+    spot: number | null;
+    vix: number | null;
+    ownerUserId: string | null;
+    now: Date;
+  }): Promise<CtxBlock> {
+    return this.block('noise units (candles_1m / broker 1-min history; delta: chain / broker greeks / moneyness heuristic)', async () => {
+      const s = i.signal;
+      const kind = s.instrumentKind;
+      const c = i.contract;
+      if (!c) throw new Error('no resolved contract');
+      const own = kind === 'EQ' || (kind === 'FUT' && c.exchange === 'MCX');
+      const ref = own ? { exchange: c.exchange, token: c.token, symbol: c.tradingsymbol } : this.repo ? await this.repo.underlyingRef(s.underlying, c.exchange, i.now) : null;
+      if (!ref) throw new Error(`no price line for the underlying ${s.underlying}`);
+      const from = new Date(Math.max(i.now.getTime() - NOISE_LOOKBACK_MIN * 60_000, istMidnight(i.now)));
+      const u = await this.minuteBars(ref, from, i.now, i.ownerUserId);
+      const und = underlyingNoise(u.bars);
+      const option = kind === 'CE' || kind === 'PE';
+      const prem = option || (kind === 'FUT' && !own) ? await this.minuteBars({ exchange: c.exchange, token: c.token, symbol: c.tradingsymbol }, from, i.now, i.ownerUserId) : null;
+      const pn = prem ? noiseFromBars(prem.bars) : null;
+      let delta: DeltaReading | null = { abs: 1, source: 'linear (non-option: the contract moves 1:1 with its underlying)' };
+      if (option) {
+        const read = await this.optionDelta({ signal: s, contract: c, ownerUserId: i.ownerUserId, now: i.now }).catch(() => null);
+        delta = deltaReading({ kind, read, readSource: 'chain / broker greek', spot: i.spot, strike: s.strike, expiry: c.expiry, now: i.now, vix: i.vix, index: s.underlying.toUpperCase() in INDEX_UNDERLYINGS });
+      }
+      return noiseBlock({
+        side: s.side,
+        price: i.price,
+        planSl: i.planSl,
+        cap: i.cap,
+        lotQty: i.lotQty,
+        tick: c.tickSize,
+        delta,
+        underlying: { ...und, symbol: ref.symbol, source: u.source },
+        premium: pn ? { n1: Math.round(pn.n * 100) / 100, method: `${pn.method} (${prem?.source})`, bars: pn.bars } : null,
+      });
+    });
+  }
+
+  /** 1-min bars: the hub's candles_1m, else (too few today) the broker's 1-min history over the owner's session. */
+  private async minuteBars(ref: { exchange: string; token: string; symbol: string }, from: Date, to: Date, ownerUserId: string | null): Promise<{ bars: MinuteBar[]; source: string }> {
+    let hub: MinuteBar[] = [];
+    if (this.repo) {
+      try {
+        hub = await withTimeout(this.repo.hubMinuteBars(ref.exchange, ref.token, from, to), BLOCK_TIMEOUT_MS);
+      } catch (err) {
+        this.logger.warn(`[signal-context] candles_1m ${ref.symbol}: ${errText(err)}`);
+      }
+    }
+    if (hub.length >= MIN_HUB_BARS || !this.feeds || !ownerUserId) return { bars: hub, source: `candles_1m ${ref.symbol}` };
+    try {
+      const c = await withTimeout(this.feeds.fetchCandles(ownerUserId, ref.token, ref.exchange, '1m', from, to), BLOCK_TIMEOUT_MS);
+      const bars = (c ?? []).map((b) => ({ ts: b.timestamp.getTime(), open: b.open, high: b.high, low: b.low, close: b.close }));
+      return bars.length > hub.length ? { bars, source: `broker 1-min history ${ref.symbol}` } : { bars: hub, source: `candles_1m ${ref.symbol}` };
+    } catch (err) {
+      this.logger.warn(`[signal-context] broker 1-min ${ref.symbol}: ${errText(err)}`);
+      return { bars: hub, source: `candles_1m ${ref.symbol}` };
+    }
+  }
 
   async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null }): Promise<Record<string, CtxBlock>> {
     const sym = levelSymbolFor(i.underlying, i.kind);

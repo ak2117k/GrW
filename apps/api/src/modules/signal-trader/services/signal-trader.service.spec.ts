@@ -53,7 +53,7 @@ function makeRepo() {
 
 const takeVerdict = { verdict: 'TAKE', confidence: 80, reasons: ['OI supports'], entry: null, sl: null, targets: [], lots: null };
 
-function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any } = {}) {
+function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any; lessons?: any } = {}) {
   const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), ...over.cfg };
   const repo = makeRepo();
   const judge = { judge: jest.fn(over.judge ?? (async () => ({ ok: true, verdict: takeVerdict, latencyMs: 10 }))) };
@@ -70,7 +70,7 @@ function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, s
     return fundsVal;
   }) };
   const paper = { open: jest.fn(async () => ({ ok: true as const, tradeId: 'pt1', entryPrice: 101.5, duplicate: false })) };
-  const svc = new SignalTraderService(cfg, over.env ?? LIVE_ENV, repo as never, judge as never, context as never, executor as never, risk as never, clock, master, quotes, funds, paper);
+  const svc = new SignalTraderService(cfg, over.env ?? LIVE_ENV, repo as never, judge as never, context as never, executor as never, risk as never, clock, master, quotes, funds, paper, over.lessons);
   return { svc, repo, judge, executor, risk, quotes, funds, paper };
 }
 
@@ -244,6 +244,26 @@ describe('SignalTraderService', () => {
     (t3.repo.channelViews as jest.Mock).mockRejectedValueOnce(new Error('relation "channel_infos" does not exist'));
     await t3.svc.evaluate({ ...ev, agreeCount: 3, conflict: true });
     expect(((t3.judge.judge.mock.calls[0] as any[])[0]).channelViews).toMatchObject({ status: 'unavailable', reason: expect.stringContaining('channel_infos') });
+  });
+
+  it('prompt v5 packet: channel sample flag, market.noise (stated unavailable when it cannot be read)', async () => {
+    const t = build({ cfg: { mode: 'shadow' } });
+    (t.repo.channelStats as jest.Mock).mockResolvedValueOnce({ n: 8, right: 0, wrong: 1, rolling20Right: 5, rolling20Wrong: 2 });
+    await t.svc.evaluate(ev);
+    const packet = (t.judge.judge.mock.calls[0] as any[])[0];
+    expect(packet.promptVersion).toBe('signal-judge-v5');
+    expect(packet.channelStats).toMatchObject({ scoredCalls: 7, sessionScored: 1, sampleSufficient: false });
+    expect(packet.market.noise).toMatchObject({ status: 'unavailable', reason: expect.stringMatching(/^noise units:/) });
+    expect(packet.plan).toHaveProperty('optionValue');
+    expect(packet).not.toHaveProperty('lessons');
+  });
+
+  it('self-review lessons of scope SIGNAL_JUDGE ride in the packet when the reader gives any', async () => {
+    const lessons = { inject: jest.fn(() => [{ key: 'judge-the-cap-stop', text: 'Judge the cap-sized stop on its noise distance.', right: 2, wrong: 0 }]) };
+    const t = build({ cfg: { mode: 'shadow' }, lessons });
+    await t.svc.evaluate(ev);
+    expect(lessons.inject).toHaveBeenCalledWith('SIGNAL_JUDGE');
+    expect(((t.judge.judge.mock.calls[0] as any[])[0]).lessons).toEqual([expect.objectContaining({ key: 'judge-the-cap-stop' })]);
   });
 
   it('a low-confidence SKIP may be upgraded once corroborated; a TAKE is never re-evaluated', async () => {

@@ -379,3 +379,45 @@ describe('helpers', () => {
     expect(minutesSinceOpenOf(clock, 'NFO', new Date('2026-10-20T05:00:00Z'))).toBeNull(); // holiday
   });
 });
+
+describe('SelfReviewRunService — learning kinds (SIGNAL_JUDGE / PAPER_EXIT / ENGINE_ENTRY)', () => {
+  it('verifies them for S, hands their misses to the diagnosis beside the old kinds, and leaves the old kinds as they were', async () => {
+    const diagnosis = { diagnose: jest.fn(async () => ({ misses: [] })) };
+    const t = make({ diagnosis });
+    const exitAt = new Date('2026-10-21T06:00:20Z');
+    const T0 = Date.parse('2026-10-21T04:00:00Z');
+    const bars = [
+      ...Array.from({ length: 120 }, (_, k) => ({ ts: T0 + k * 60_000, open: 100, high: 105, low: 95, close: 100 })),
+      ...Array.from({ length: 30 }, (_, k) => ({ ts: Date.parse('2026-10-21T06:01:00Z') + k * 60_000, open: 100, high: 100 + k, low: 99, close: 100 + k })),
+    ];
+    const fair = { verdict: 'WRONG', skipKind: 'RISK_CAP', capStop: 272.25, capOutcome: { stop: 272.25, result: 'TARGET', price: 340, pnl1Lot: 2403.7 }, signalStop: 240, signalStopOutcome: { stop: 240, result: 'TARGET', price: 340, pnl1Lot: 2403.7 }, method: 'underlying-1m×delta' };
+    // Only S's day answers (the run re-verifies 3 sessions; rows are keyed by kind + refId).
+    const onS = <T,>(rows: T[]) => jest.fn(async (from: Date) => (from.toISOString() === '2026-10-20T18:30:00.000Z' ? rows : []));
+    Object.assign(t.sources, {
+      signalJudgeChecks: onS([
+        { decisionId: 'd1', symbol: 'NIFTY03NOV2623000CE', channelId: 'c1', aiDecision: 'SKIP', confidence: 74, reasons: ['Risk busts the cap'], fairRaw: fair, oldCorrect: false, exitTag: 'MOVED_STOP', paperPnl: 2939.74, promptVersion: 'signal-judge-v4' },
+        { decisionId: 'd2', symbol: 'X', channelId: 'c1', aiDecision: 'SKIP', confidence: 70, reasons: ['r'], fairRaw: null, oldCorrect: false, exitTag: 'HIT_TARGET', paperPnl: 10, promptVersion: null },
+      ]),
+      paperExits: onS([
+        { tradeId: 'p1', symbol: 'NIFTY03NOV2623000CE', underlying: 'NIFTY', exchange: 'NFO', token: '1', exitRule: 'AI_EXIT', exitAt, side: 'BUY', entryPrice: 300, exitPrice: 290, qty: 65, reason: 'AI exit', read: null, held: null },
+      ]),
+      underlyingRefOf: jest.fn(async () => ({ exchange: 'NSE', token: '99926000', symbol: 'NIFTY' })),
+      minuteBarsHL: jest.fn(async () => bars),
+      engineClosedTrades: onS([{ id: 'e1', symbol: 'NIFTYCE', underlying: 'NIFTY', side: 'BUY', quantity: 65, entryPrice: 100, exitPrice: 90, exitReasonTag: 'STOPPED_OUT', reasons: [] }]),
+    });
+    await t.svc.run(NOW);
+    const forS = t.stored.filter((r) => r.sessionDate === '2026-10-21');
+    expect(forS.find((r) => r.kind === 'SIGNAL_JUDGE' && r.refId === 'd1')).toMatchObject({ correct: false, score: 2403.7 });
+    expect(forS.find((r) => r.kind === 'SIGNAL_JUDGE' && r.refId === 'd2')).toMatchObject({ correct: null });
+    expect(forS.find((r) => r.kind === 'PAPER_EXIT')).toMatchObject({ refId: 'p1', correct: false, details: expect.objectContaining({ favourN: 2.9 }) });
+    expect(forS.find((r) => r.kind === 'ENGINE_ENTRY')).toMatchObject({ correct: false, score: -650 });
+    // the old kinds' rows are exactly as before
+    expect(forS.filter((r) => !['SIGNAL_JUDGE', 'PAPER_EXIT', 'ENGINE_ENTRY'].includes(r.kind as string)).map((r) => `${r.kind}:${r.refId}`).sort()).toEqual([
+      'OVERNIGHT_VERDICT:v1', 'SCORECARD_FACTOR:sc1:news', 'SCORECARD_FACTOR:sc1:oi', 'SCORECARD_TOTAL:sc1', 'STOCK_MOVE:41', 'STOCK_MOVE:42',
+    ]);
+    const sent = (diagnosis.diagnose.mock.calls[0] as unknown[])[1] as Array<{ kind: string }>;
+    expect(sent.map((m) => m.kind).sort()).toEqual(['ENGINE_ENTRY', 'OVERNIGHT_VERDICT', 'PAPER_EXIT', 'SCORECARD_TOTAL', 'SIGNAL_JUDGE']);
+    const finish = t.repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { byKind: Record<string, unknown> } }];
+    expect(finish[1].summary.byKind).toMatchObject({ SIGNAL_JUDGE: { n: 2, wrong: 1, nullCount: 1 }, PAPER_EXIT: { n: 1, wrong: 1 }, ENGINE_ENTRY: { n: 1, wrong: 1 } });
+  });
+});

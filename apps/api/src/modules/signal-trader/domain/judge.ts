@@ -4,7 +4,8 @@ import type { SignalTraderConfig } from './signal-trader.config';
 
 /** `ai_calls.job` label of the signal judge. */
 export const SIGNAL_JUDGE_JOB = 'signal.judge';
-export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v4';
+/** v5 (2026-11-02): market.noise units + cap-sized stop, intrinsic from SPOT (plan.optionValue), channel sample rule, self-review lessons. */
+export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v5';
 
 const NULLABLE_NUMBER = { anyOf: [{ type: 'number' }, { type: 'null' }] } as const;
 
@@ -56,6 +57,23 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'signal.text starting "[watch fired: …]" = a level a channel posted as INFORMATION ("X breakout above 4330") was just crossed;',
   'it is not a direct call, the entry is the breakout and plan.sl sits just beyond that level (a failed breakout). Judge whether',
   'the breakout is real (volume, trend, the next resistance) before trusting it.',
+  'NOISE — never guess "inside noise": market.noise gives the underlying\'s 1-minute and 5-minute noise units (N1, N5, in',
+  'underlying points), the contract\'s own premium N1 when its bars exist, |delta| with its source, and for plan.sl (stops.plan) and',
+  'the CAP-SIZED stop (stops.cap: the widest stop keeping 1 lot within caps.maxLossPerTrade) the premium points to it, the',
+  'underlying move that hits it and that move in N1 / N5. Under ~1.5×N5 a stop is inside ordinary 5-minute noise; 1.5–3×N5 is',
+  'tight but tradable; over 3×N5 is outside routine noise. Any reason about a stop vs noise must quote these numbers. A delta',
+  'marked moneyness-heuristic is an estimate, not a quote. When plan.riskRupees breaks caps.maxLossPerTrade, the trade you can',
+  'actually take is the cap-sized stop: judge THAT stop on its noise distance and its reward to the target — the cap alone is',
+  'not the decisive reason when the cap-sized stop sits outside noise with room to the target.',
+  'INTRINSIC — an index or stock option\'s intrinsic value is from the SPOT (market.chain.spot / plan.optionValue.spot), NEVER the',
+  'future (market.chain.fut carries cost of carry; options settle to spot). plan.optionValue gives intrinsicFromSpot, timeValue and',
+  'belowIntrinsicPct: a deep-ITM option quoting at or up to ~1% below spot intrinsic near expiry is NORMAL (bid/ask, no carry for',
+  'its buyer) — not a stale or illiquid quote. Call a quote stale only on evidence (belowIntrinsicNormal false, a missing feed).',
+  'CHANNEL RECORD — channelStats.scoredCalls = the channel\'s scored direct calls over 20 sessions (n / right / wrong are the',
+  'LAST SESSION only; n counts every call seen, scored or not). When channelStats.sampleSufficient is false (fewer than 8 scored',
+  'calls) the record is NOT evidence: never cite it as a reason, for or against.',
+  'lessons present = lessons the nightly self-review learned from this judge\'s own past misses (each proven on at least 2',
+  'right cases from 2 sessions): weigh them as guidance; they never override the hard caps or the rules above.',
   'A block marked unavailable means we failed to look — not that the market is quiet.',
   'Reply with ONLY a JSON object: {"verdict":"TAKE"|"SKIP","confidence":1-100,"reasons":[short strings,',
   'most important first],"entry":number|null,"sl":number|null,"targets":[numbers],"lots":integer|null}.',

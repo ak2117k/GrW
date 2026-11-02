@@ -30,8 +30,34 @@ export interface AiCheck {
   movePct: number;
   pnl: number;
   exitTag: string;
+  /** The OLD no-stop rule (kept for older checks); read the verdict through aiRight. */
   correct: boolean | null;
   at: string;
+  /** The FAIR verdict (API domain/fair-score): the cap-sized stop replayed on the trade's price path. */
+  fair?: FairCheck;
+}
+
+export interface FairOutcome {
+  stop: number | null;
+  result: 'STOPPED' | 'TARGET' | 'EXIT' | 'UNSCORABLE';
+  pnl1Lot: number | null;
+  reason: string;
+}
+
+export interface FairCheck {
+  verdict: 'RIGHT' | 'WRONG' | 'UNSCORABLE';
+  skipKind: 'RISK_CAP' | 'JUDGEMENT' | null;
+  capStop: number | null;
+  capOutcome: FairOutcome;
+  signalStop: number | null;
+  signalStopOutcome: FairOutcome;
+  method: string;
+}
+
+/** The verdict to show: the fair one when present (UNSCORABLE = null), else the old rule. */
+export function aiRight(c: AiCheck): boolean | null {
+  if (c.fair) return c.fair.verdict === 'RIGHT' ? true : c.fair.verdict === 'WRONG' ? false : null;
+  return c.correct;
 }
 
 export interface AiScorecard {
@@ -45,26 +71,47 @@ export interface AiScorecard {
   skipRight: number;
   skipWrong: number;
   unscored: number;
+  /** Absent from an older API. */
+  skipRightRiskCap?: number;
+  skipWrongRiskCap?: number;
+  skipRightJudgement?: number;
+  skipWrongJudgement?: number;
+  oldBasis?: number;
+  old?: { scored: number; right: number; wrong: number; accuracyPct: number | null };
 }
 
 export async function getAiScorecard(days = 14): Promise<AiScorecard> {
   return (await api.get<AiScorecard>('/telegram/ai-scorecard', { params: { days } })).data;
 }
 
-const EXIT: Record<string, string> = { HIT_TARGET: 'target', STOPPED_OUT: 'stop', TIME_EXIT: 'time exit' };
+const EXIT: Record<string, string> = { HIT_TARGET: 'target', STOPPED_OUT: 'stop', TIME_EXIT: 'time exit', MOVED_STOP: 'trailed stop', AI_EXIT: 'AI exit' };
+const OUTCOME: Record<FairOutcome['result'], string> = { STOPPED: 'stopped', TARGET: 'reached the target', EXIT: 'held to the paper exit', UNSCORABLE: 'no price path' };
 
 /** "AI said SKIP · paper +3.2% (target) → AI was wrong". */
 export function aiLine(c: AiCheck): string {
   const said = c.aiDecision === 'NONE' ? 'AI gave no verdict' : `AI said ${c.aiDecision}`;
   const move = `${c.movePct >= 0 ? '+' : ''}${c.movePct}%`;
-  const verdict = c.correct === null ? 'not scored' : c.correct ? 'AI was right' : 'AI was wrong';
-  return `${said} · paper ${move} (${EXIT[c.exitTag] ?? c.exitTag.toLowerCase()}) → ${verdict}`;
+  const right = aiRight(c);
+  const verdict = right === null ? 'not scored' : right ? 'AI was right' : 'AI was wrong';
+  const head = `${said} · paper ${move} (${EXIT[c.exitTag] ?? c.exitTag.toLowerCase()}) → ${verdict}`;
+  const f = c.fair;
+  if (!f) return head;
+  const pnl = f.capOutcome.pnl1Lot;
+  const money = pnl === null ? '' : ` ${pnl >= 0 ? '+' : '−'}₹${Math.abs(Math.round(pnl))}`;
+  const cap = f.capStop !== null ? `cap-sized stop ${f.capStop} ${OUTCOME[f.capOutcome.result]}${money}` : `no cap-sized stop, ${OUTCOME[f.capOutcome.result]}${money}`;
+  const kind = f.skipKind === 'RISK_CAP' ? ' · skipped on the risk cap' : f.skipKind === 'JUDGEMENT' ? ' · skipped on judgement' : '';
+  return `${head} (fair check: ${cap}${kind})`;
 }
 
 /** "AI judge check, last 14 days: 7 right / 5 wrong (58%) · TAKE 4✓ 2✗ · SKIP 3✓ 3✗". */
 export function scorecardLine(s: AiScorecard): string {
   if (s.scored === 0) return `AI judge check (learning mode, last ${s.days} days): no closed paper trades scored yet`;
-  return `AI judge check, last ${s.days} days: ${s.right} right / ${s.wrong} wrong (${s.accuracyPct}%) · TAKE ${s.takeRight}✓ ${s.takeWrong}✗ · SKIP ${s.skipRight}✓ ${s.skipWrong}✗`;
+  const line = `AI judge check, last ${s.days} days: ${s.right} right / ${s.wrong} wrong (${s.accuracyPct}%) · TAKE ${s.takeRight}✓ ${s.takeWrong}✗ · SKIP ${s.skipRight}✓ ${s.skipWrong}✗`;
+  if (!s.old) return line;
+  const rc = [s.skipRightRiskCap ?? 0, s.skipWrongRiskCap ?? 0, s.skipRightJudgement ?? 0, s.skipWrongJudgement ?? 0];
+  const kinds = rc.some((x) => x > 0) ? ` (risk cap ${rc[0]}✓ ${rc[1]}✗, judgement ${rc[2]}✓ ${rc[3]}✗)` : '';
+  const old = s.old.scored > 0 ? ` · old no-stop rule ${s.old.right}/${s.old.scored} (${s.old.accuracyPct}%)` : '';
+  return `${line}${kinds}${old}`;
 }
 
 /** "AI judge (82%):" heading for the reasons list, or null when the judge gave none. */

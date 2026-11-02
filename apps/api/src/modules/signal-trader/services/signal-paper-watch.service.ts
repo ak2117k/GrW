@@ -18,6 +18,9 @@ import { atr14 } from '../domain/atr';
 import type { SignalHorizon } from '../domain/signal.types';
 import { DEFAULT_SESSION_MINUTES } from '../../exit-discipline/noise';
 import { aiCheck, aiDecisionOf } from '../domain/ai-check';
+import type { FairCheck } from '../domain/fair-score';
+import { buildFairPath, fairFromRecords, judgeFacts, kindOf, pathDelta } from '../domain/fair-inputs';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import type { PaperTradeRow } from '../repositories/signal-trader.repository';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
 import { emptyShadow, grossPnl, shadowLine, stepShadow, type ShadowParams, type ShadowState } from '../domain/exit-shadow';
@@ -473,10 +476,52 @@ export class SignalPaperWatchService {
     try {
       const judge = await this.repo.decisionJudge(decisionId);
       const check = aiCheck({ aiDecision: aiDecisionOf(judge), side: t.side, entry: t.entryPrice, exit, qty: t.quantity, exitTag: tag, at: now });
+      const fair = await this.fairFor(t, decisionId, exit, now);
+      if (fair) check.fair = fair;
       await this.repo.recordAiCheck(decisionId, check);
-      this.logger.log(`[signal-paper] AI check ${decisionId}: AI said ${check.aiDecision}, move ${check.movePct}% → ${check.correct === null ? 'not scored' : check.correct ? 'RIGHT' : 'WRONG'}`);
+      const fairText = fair ? ` · fair ${fair.verdict}${fair.skipKind ? ` (${fair.skipKind})` : ''}: cap stop ${fair.capStop ?? '—'} → ${fair.capOutcome.result} [${fair.method}]` : ' · fair: not computed';
+      this.logger.log(`[signal-paper] AI check ${decisionId}: AI said ${check.aiDecision}, move ${check.movePct}% → old ${check.correct === null ? 'not scored' : check.correct ? 'RIGHT' : 'WRONG'}${fairText}`);
     } catch (err) {
       this.logger.warn(`[signal-paper] AI check for ${decisionId} failed: ${errText(err)}`);
+    }
+  }
+
+  /**
+   * The FAIR check (domain/fair-score) at the close. Path, best first: the contract's own 1-min bars over
+   * the owner's session (a historical read) → the underlying's candles_1m × the packet's / the chain's /
+   * the moneyness-heuristic delta → only the shadow's 30 s STOP. Never throws (null = not computed).
+   */
+  private async fairFor(t: PaperTradeRow, decisionId: string, exit: number, now: Date): Promise<FairCheck | null> {
+    try {
+      if (!t.entryPrice || !t.instrument) return null;
+      const entryAt = t.entryTime ?? t.createdAt;
+      const facts = await this.repo.fairScoreFacts(decisionId, t.id);
+      const inst = facts.instrument ?? { strike: null, optionType: null, name: null, expiry: t.instrument.expiry ?? null, exchange: t.instrument.exchange, token: t.instrument.token, symbol: t.instrument.symbol };
+      const kind = kindOf(inst.symbol, inst.optionType);
+      const owner = this.cfg.ownerUserId;
+      let contractBars: MinuteBar[] = [];
+      if (this.bars && owner) contractBars = await this.bars.minuteBars(owner, t.instrument.token, t.instrument.exchange, entryAt, now).catch(() => []);
+      let underlyingBars: Awaited<ReturnType<SignalTraderRepository['hubMinuteBars']>> = [];
+      let label = 'underlying';
+      let delta = null as ReturnType<typeof pathDelta>;
+      if (contractBars.length === 0) {
+        const u = facts.underlying ?? inst.name;
+        const ref = kind === 'EQ' ? { exchange: t.instrument.exchange, token: t.instrument.token, symbol: t.instrument.symbol } : u ? await this.repo.underlyingRef(u, t.instrument.exchange, entryAt) : null;
+        if (ref) {
+          label = ref.symbol;
+          underlyingBars = await this.repo.hubMinuteBars(ref.exchange, ref.token, new Date(entryAt.getTime() - 5 * 60_000), now).catch(() => []);
+        }
+        const f = judgeFacts(facts.judge, facts.plan, t.quantity);
+        delta = pathDelta({ kind, facts: f, strike: inst.strike, expiry: inst.expiry, at: entryAt, index: !!u && u.toUpperCase() in INDEX_UNDERLYINGS });
+      }
+      const path = buildFairPath({
+        kind, entry: t.entryPrice, entryTs: entryAt.getTime(), exitTs: now.getTime(),
+        contractBars, contractBarsSource: 'broker 1-min history', underlyingBars, underlyingLabel: label, delta, shadowStop: facts.shadowStop,
+      });
+      return fairFromRecords({ judge: facts.judge, plan: facts.plan, side: t.side, entry: t.entryPrice, entryTs: entryAt.getTime(), exit: { ts: now.getTime(), price: exit }, fallbackLotQty: t.quantity, path });
+    } catch (err) {
+      this.logger.warn(`[signal-paper] fair AI check for ${decisionId}: ${errText(err)}`);
+      return null;
     }
   }
 }

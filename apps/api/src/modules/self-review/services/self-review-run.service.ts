@@ -26,6 +26,7 @@ import { probabilitySkill, relativeSkill } from '../domain/skill';
 import { signalPaperDigest, signalTradeStats } from '../domain/signal-trades';
 import { exitNoiseStats, noiseReadDigest } from '../domain/exit-noise';
 import { engineDigest, engineStats } from '../domain/engine-trades';
+import { asFair, recoveryFromBars, scoreEngineEntry, scorePaperExit, scoreSignalJudge, wantOf } from '../domain/learning-kinds';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -49,8 +50,12 @@ export const ROLLING_SESSIONS = 20;
 /**
  * Kinds handed to the diagnosis (factor misses are covered by their total; MBM misses are a model metric).
  * TRADE_SETUP added 2026-10-28 (owner): the next-morning setups missed 2 of 3 on 10-27 and nobody asked why.
+ * SIGNAL_JUDGE / PAPER_EXIT / ENGINE_ENTRY added 2026-11-02 (owner): the week's real mistakes — the entry judge, the paper AI exits,
+ * the engine — never reached the diagnosis, so nothing was proposed after 10-28 (domain/learning-kinds).
  */
-export const DIAGNOSED_KINDS: ReadonlySet<VerificationKind> = new Set(['SCORECARD_TOTAL', 'OVERNIGHT_VERDICT', 'LIVE_EXIT', 'NEWS_IDEA', 'TRADE_SETUP']);
+export const DIAGNOSED_KINDS: ReadonlySet<VerificationKind> = new Set([
+  'SCORECARD_TOTAL', 'OVERNIGHT_VERDICT', 'LIVE_EXIT', 'NEWS_IDEA', 'TRADE_SETUP', 'SIGNAL_JUDGE', 'PAPER_EXIT', 'ENGINE_ENTRY',
+]);
 const CONTRACT = /^([A-Z&-]+?)(\d{2})([A-Z]{3})(\d{2})(\d+(?:\.\d+)?)(CE|PE)$/;
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
@@ -274,6 +279,18 @@ export class SelfReviewRunService {
     out.push(...(await this.soft('CHANNEL_SIGNAL', errors, async () => (await this.sources.channelSignals(s)).map(scoreChannelSignal))));
     // Telegram INFO items (channel market views): outcomes filled by signal-intake after the close, before this run.
     out.push(...(await this.soft('CHANNEL_INFO', errors, async () => (await this.sources.channelInfos(s)).flatMap(scoreChannelInfo))));
+    // The learning kinds (domain/learning-kinds, 2026-11-02): the entry judge on the FAIR check, paper AI / trail
+    // exits against the next 30 min, closed engine paper trades — by the IST day of the trade's exit.
+    const dayEnd = new Date(b.midnight.getTime() + DAY_MS);
+    out.push(
+      ...(await this.soft('SIGNAL_JUDGE', errors, async () =>
+        (await this.sources.signalJudgeChecks(b.midnight, dayEnd)).map((r) => scoreSignalJudge({ ...r, sessionDate: s, fair: asFair(r.fairRaw) })),
+      )),
+    );
+    out.push(...(await this.soft('PAPER_EXIT', errors, () => this.paperExits(s, b.midnight, dayEnd))));
+    out.push(
+      ...(await this.soft('ENGINE_ENTRY', errors, async () => (await this.sources.engineClosedTrades(b.midnight, dayEnd)).map((r) => scoreEngineEntry({ ...r, sessionDate: s })))),
+    );
     // News-impact reactions: points filled by the news-impact module's 15-min job, judged on their judge session.
     const newsImpact = this.newsImpact;
     if (newsImpact) {
@@ -296,6 +313,40 @@ export class SelfReviewRunService {
     if (back[0] !== s || back.length <= STOCK_MOVE_HORIZON_DAYS) return [];
     const asOf = back[STOCK_MOVE_HORIZON_DAYS];
     return (await this.sources.stockMoves(asOf)).map((r) => scoreStockMove({ ...r, sessionDate: s }));
+  }
+
+  /**
+   * PAPER_EXIT rows: the exit noise read's own follow-up when the exit has one (same N, same 30 min), else the
+   * underlying's candles_1m around the exit (N = 1-min ATR14 of the 2 h before it). Exits whose 30 min is not
+   * over yet are left unjudged (re-verified the next nights).
+   */
+  private async paperExits(s: string, from: Date, to: Date): Promise<VerificationDraft[]> {
+    const out: VerificationDraft[] = [];
+    for (const x of await this.sources.paperExits(from, to)) {
+      const want = wantOf(x.side, x.symbol);
+      let path = x.read
+        ? { n: x.read.n, underlyingAtExit: x.read.underlyingAtExit, after15m: x.read.after15m, after30m: x.read.after30m, maxFavour30m: x.read.maxFavour30m, maxAgainst30m: x.read.maxAgainst30m }
+        : null;
+      let nSource = x.read ? 'exit noise read' : 'candles_1m';
+      if (!path || path.n === null || (path.maxFavour30m === null && path.after30m === null)) {
+        const ref = await this.sources.underlyingRefOf({ name: x.underlying, exchange: x.exchange, token: x.token, at: x.exitAt });
+        if (ref) {
+          const bars = await this.sources.minuteBarsHL(ref.exchange, ref.token, new Date(x.exitAt.getTime() - 125 * 60_000), new Date(x.exitAt.getTime() + 31 * 60_000));
+          path = recoveryFromBars(bars, x.exitAt, want);
+          nSource = `candles_1m ${ref.symbol} (N = 1-min ATR14 before the exit)`;
+        }
+      }
+      out.push(
+        scorePaperExit({
+          tradeId: x.tradeId, sessionDate: s, symbol: x.symbol, underlying: x.underlying, exitRule: x.exitRule, exitAt: x.exitAt, want,
+          entryPrice: x.entryPrice, exitPrice: x.exitPrice, qty: x.qty, reason: x.reason,
+          n: path?.n ?? null, nSource, underlyingAtExit: path?.underlyingAtExit ?? null, after15m: path?.after15m ?? null, after30m: path?.after30m ?? null,
+          maxFavour30m: path?.maxFavour30m ?? null, maxAgainst30m: path?.maxAgainst30m ?? null,
+          noiseVerdict: x.read?.verdict ?? null, noiseSummary: x.read?.summary ?? null, held: x.held,
+        }),
+      );
+    }
+    return out;
   }
 
   private async overnight(

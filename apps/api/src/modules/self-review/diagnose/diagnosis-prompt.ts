@@ -4,11 +4,12 @@
  */
 import { clampText, isLessonKey, isLessonScope } from '../lessons/lessons.logic';
 import { isAllowedTarget, TUNABLES } from '../tuning/tunables';
-import { LESSON_TEXT_MAX, type LessonRecord } from '../lessons/types';
+import { LESSON_SCOPES, LESSON_TEXT_MAX, type LessonRecord } from '../lessons/types';
 import { MISS_CATEGORIES, type DiagnosedMiss, type MissCategory, type MissInput } from './types';
 
 /** Bump when the prompt text or the schema changes; stored on the run's diagnosis. */
-export const DIAGNOSIS_PROMPT_VERSION = 'd5';
+/** d6 (2026-11-02): SIGNAL_JUDGE / PAPER_EXIT / ENGINE_ENTRY misses; scopes SIGNAL_JUDGE and ENTRY_ENGINE. */
+export const DIAGNOSIS_PROMPT_VERSION = 'd6';
 
 /** At most this many misses go into one call (contract). */
 export const MAX_MISSES = 15;
@@ -54,7 +55,7 @@ export const DIAGNOSIS_SCHEMA = {
           category: { type: 'string', enum: [...MISS_CATEGORIES] },
           lessonKey: { type: 'string' },
           lessonText: { type: 'string' },
-          scope: { type: 'string', enum: ['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'ALL'] },
+          scope: { type: 'string', enum: [...LESSON_SCOPES] },
           contradicts: { type: 'array', items: { type: 'string' } },
           blamedFactors: { type: 'array', items: { type: 'string' } },
           proposalTarget: { type: 'string' },
@@ -70,8 +71,11 @@ export const DIAGNOSIS_SCHEMA = {
 
 export const DIAGNOSIS_SYSTEM_PROMPT = [
   'You review the WRONG calls an automated trading assistant for the Indian market made in one session, after the outcome is known.',
-  'Each miss has: kind (SCORECARD_TOTAL, SCORECARD_FACTOR, OVERNIGHT_VERDICT, LIVE_EXIT, NEWS_IDEA, TRADE_SETUP, MBM_PREDICTION), refId, symbol, what was predicted, what actually happened, a signed score where meaningful, and an excerpt of the inputs the call was made from.',
+  'Each miss has: kind (SCORECARD_TOTAL, SCORECARD_FACTOR, OVERNIGHT_VERDICT, LIVE_EXIT, NEWS_IDEA, TRADE_SETUP, MBM_PREDICTION, SIGNAL_JUDGE, PAPER_EXIT, ENGINE_ENTRY), refId, symbol, what was predicted, what actually happened, a signed score where meaningful, and an excerpt of the inputs the call was made from.',
   'A TRADE_SETUP is a next-morning plan built mechanically from a news idea (details.newsIdea): the direction comes from the idea, the entry is details.entryRule (an opening-range break), the stop and T1 (1.5 R) come from the daily ATR (details.atr). Its score is the R realised. A miss is either the idea\'s direction (lesson scope NEWS_IDEAS) or the mechanical plan — entry rule, stop or target distance (a proposal, never a lesson that widens a stop).',
+  'A SIGNAL_JUDGE miss is the Telegram-signal entry judge\'s TAKE / SKIP held against the FAIR check: the trade it could actually have taken — the cap-sized stop (details.capStop: entry ∓ caps.maxLossPerTrade per lot, never wider than the signal SL) replayed on the price path to T1 — made money after a SKIP, or lost after a TAKE. details carry the judge\'s reasons, skipKind (RISK_CAP = the decisive reason was the risk cap / sizing, JUDGEMENT = a market read), both stops\' outcomes and the path method. Its score is the ₹ of 1 lot on the cap-sized stop. Lessons for it use scope SIGNAL_JUDGE (the entry judge reads them). Never propose raising the risk cap; a RISK_CAP miss means the judge should judge the cap-sized stop on its noise distance instead of skipping on the cap alone.',
+  'A PAPER_EXIT miss is an AI exit (AI_EXIT / AI_TRIGGER) or the noise-trail exit (MOVED_STOP) of a PAPER trade after which the underlying recovered ≥ 1 exit unit N in the trade\'s favour within 30 minutes (a premature exit). details carry favourN / againstN, N and its source, whether the exit noise read said NOISE, and the HELD follow (what holding on the trade\'s own rules made; score = ₹ holding beat the exit, else the recovery in N). Lessons for it use scope SENTINEL_LIVE (the same sentinel exit prompt runs paper and live).',
+  'An ENGINE_ENTRY miss is a closed entry-engine paper trade that lost (score = gross ₹). The engine is rule-based, not an LLM: give it no lesson unless the cause is a recurring rule problem (then scope ENTRY_ENGINE, shown to the owner only).',
   'You also get the lessons already in force (key, text, scope, right/wrong counts).',
   'For each miss, or group of misses with the same cause, return one entry:',
   '- refIds: the refIds it explains, copied exactly from the input.',
@@ -79,7 +83,7 @@ export const DIAGNOSIS_SYSTEM_PROMPT = [
   `- category: one of ${MISS_CATEGORIES.join(', ')}.`,
   '- lessonKey (optional): a lowercase-hyphenated slug (3–60 chars) for a lesson that, had it been followed, would have avoided these misses. REUSE an existing key when the same pattern recurs; invent a new key only for a genuinely new pattern.',
   `- lessonText (optional, required for a NEW key): one or two imperative sentences under ${LESSON_TEXT_MAX} characters, specific enough to act on (name the factor, window or condition).`,
-  '- scope (optional): which agent the lesson is for — SENTINEL_LIVE (intraday exits), SENTINEL_OVERNIGHT (overnight hold/exit verdicts), NEWS_IDEAS (news-driven trade ideas), or ALL.',
+  '- scope (optional): which agent the lesson is for — SENTINEL_LIVE (intraday exits, live and paper), SENTINEL_OVERNIGHT (overnight hold/exit verdicts), NEWS_IDEAS (news-driven trade ideas), SIGNAL_JUDGE (the Telegram-signal entry judge), ENTRY_ENGINE (the rule-based entry engine; owner only), or ALL.',
   '- contradicts (optional): keys of EXISTING lessons that these misses followed, or would have followed, and that were therefore wrong here.',
   '- proposalTarget / proposedValue (optional): a tunable you suspect should change, e.g. scorecard.factor.news.weight 0.5. These are suggestions only; code decides.',
   'A SCORECARD_TOTAL miss carries details.factors: the signed points of every factor that was scored (the band comes from their sum). Blame only factors listed there with non-zero points; never name a factor that is absent or scored 0 (e.g. there is no index-trend factor).',

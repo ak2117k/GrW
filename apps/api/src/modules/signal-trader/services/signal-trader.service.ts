@@ -18,6 +18,9 @@ import { learning, type SignalTraderConfig } from '../domain/signal-trader.confi
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService, type CtxBlock } from './signal-context.service';
 import { lateRoom, type LateRoom } from '../domain/late-entry';
+import { channelStatsForJudge, labelChain, optionValue, packetMarketFacts } from '../domain/judge-noise';
+import { daysToExpiry } from '../domain/option-delta';
+import { LESSONS_READER, type InjectedLesson, type LessonsReader } from '../../self-review/lessons/types';
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
 import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
@@ -208,6 +211,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     @Inject(SIGNAL_QUOTES) private readonly quotes: QuotesLike,
     @Optional() @Inject(SIGNAL_FUNDS) private readonly funds?: FundsLike,
     @Optional() @Inject(SIGNAL_PAPER) private readonly paper?: PaperLike,
+    /** Self-review lessons for the entry judge (scope SIGNAL_JUDGE; @Global SelfReviewLearningModule). Absent / off ⇒ none. */
+    @Optional() @Inject(LESSONS_READER) private readonly lessons?: LessonsReader,
   ) {}
 
   get config(): SignalTraderConfig {
@@ -442,12 +447,35 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         .then(() => this.repo.channelViews(s.underlying, now))
         .catch((err: unknown) => ({ status: 'unavailable', reason: `channel views: ${err instanceof Error ? err.message : String(err)}` })),
     ]);
+    // The judge's numbers (domain/judge-noise): noise units + both stops in them, intrinsic from SPOT, chain labels.
+    const facts = packetMarketFacts(market);
+    const lotQty = plan.lots > 0 ? plan.qty / plan.lots : plan.lotSize;
+    market.noise = await Promise.resolve()
+      .then(() => this.context.noise({ signal: s, contract: contract ?? null, price: plan.ltp, planSl: plan.sl > 0 ? plan.sl : null, cap: cfg.maxLossPerTrade, lotQty, spot: facts.spot, vix: facts.vix, ownerUserId: owner, now }))
+      .catch((err: unknown) => ({ status: 'unavailable' as const, reason: `noise units: ${err instanceof Error ? err.message : String(err)}` }));
+    labelChain(market);
+    const optionValueBlock = optionValue({
+      kind: s.instrumentKind,
+      strike: s.strike,
+      ltp: plan.ltp,
+      spot: facts.spot,
+      spotSource: facts.spotSource,
+      future: facts.future,
+      daysToExpiry: daysToExpiry(contract?.expiry ?? null, now),
+    });
+    // Self-review lessons (SELF_REVIEW_LESSONS=on, gated: ≥ 2 right cases from ≥ 2 sessions). Never throws.
+    let judgeLessons: InjectedLesson[] = [];
+    try {
+      judgeLessons = this.lessons?.inject('SIGNAL_JUDGE') ?? [];
+    } catch {
+      judgeLessons = [];
+    }
     const packet = {
       promptVersion: SIGNAL_JUDGE_PROMPT_VERSION,
       at: now.toISOString(),
       signal: { text: s.rawText.slice(0, 1500), parsed: what, channel, receivedAt: s.receivedAt?.toISOString() ?? null, horizon: s.horizon ?? 'INTRADAY' },
       cluster: { agreeCount, conflict, channels: cluster?.channelIds.length ?? null, strong: !conflict && agreeCount >= cfg.strongChannels },
-      channelStats: channelStats ?? { status: 'unavailable', reason: 'no self-review byChannel stats yet' },
+      channelStats: channelStatsForJudge(channelStats) ?? { status: 'unavailable', reason: 'no self-review byChannel stats yet', scoredCalls: 0, sampleSufficient: false },
       channelViews,
       plan: {
         contract: plan.tradingsymbol,
@@ -463,9 +491,11 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         qty: plan.qty,
         riskRupees: plan.riskRupees,
         late: plan.late ? { ...plan.late, room: await this.lateRoomFor(s, plan, market, contract ?? null, owner, now) } : null,
+        optionValue: optionValueBlock,
       },
       caps: { maxLots: cfg.maxLots, maxLossPerTrade: cfg.maxLossPerTrade, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
       market,
+      ...(judgeLessons.length ? { lessons: judgeLessons } : {}),
     };
     const out = await this.judge.judge(packet, { model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs, slotWaitMs: cfg.judgeSlotWaitMs, userId: owner });
     if (!out.ok) {

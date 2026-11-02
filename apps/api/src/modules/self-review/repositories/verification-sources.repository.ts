@@ -4,13 +4,14 @@ import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { MANUAL_VERDICT_PREFIX } from '../../sentinel-executor/domain/manual-exit';
 import { OVERNIGHT_TAGS } from '../domain/scorers';
 import { STOCK_MOVE_HORIZON_DAYS, STOCK_MOVE_THRESHOLD_ATR } from '../../stock-move/stock-move.logic';
-import { SIGNAL_PAPER_STRATEGY, decisionIdFromTags } from '../../signal-trader/domain/paper';
+import { PAPER_WATCH_STRATEGIES, SIGNAL_PAPER_STRATEGY, decisionIdFromTags } from '../../signal-trader/domain/paper';
 import { oiVerdictOf } from '../../signal-trader/domain/oi-check';
 import { judgeCallOf } from '../../signal-trader/domain/paper-summary';
 import { asInfoItems } from '../../signal-intake/domain/info';
 import { noiseVerdictOfRecord } from '../../exit-noise/domain/noise-read';
 import type { ExitNoiseReadRow } from '../domain/exit-noise';
 import type { EngineDecisionRow, EngineTradeRow } from '../domain/engine-trades';
+import type { MinuteBar } from '../../exit-discipline/types';
 
 /**
  * Read-only access to the rows the scorers judge. Every query is bounded by a time range the run
@@ -336,6 +337,143 @@ export class VerificationSourcesRepository {
       sessionDate: outcomeSession as string,
       outcomeStatus: r.outcomeStatus as string,
       targets: Array.isArray(targets) ? (targets as unknown[]).map(Number).filter((x) => Number.isFinite(x)) : [],
+    }));
+  }
+
+  // ─── Learning kinds (domain/learning-kinds.ts): SIGNAL_JUDGE, PAPER_EXIT, ENGINE_ENTRY ───
+
+  /** Closed learning paper trades of the Telegram signals in [from, to) by exit time, with their decision's judge and ai_check. */
+  async signalJudgeChecks(from: Date, to: Date) {
+    const trades = await this.prisma.trade.findMany({
+      where: { strategy: SIGNAL_PAPER_STRATEGY, isPaperTrade: true, status: 'CLOSED', exitTime: { gte: from, lt: to }, entryTags: { has: 'learn' } },
+      select: { id: true, entryTags: true, exitReasonTag: true, side: true, quantity: true, entryPrice: true, exitPrice: true, instrument: { select: { symbol: true } } },
+      take: 2000,
+    });
+    const ids = [...new Set(trades.map((t) => decisionIdFromTags(t.entryTags)).filter((x): x is string => !!x))];
+    const decisions = ids.length ? await this.prisma.signalDecision.findMany({ where: { id: { in: ids } }, select: { id: true, channelId: true, judge: true, aiCheck: true } }) : [];
+    const byId = new Map(decisions.map((d) => [d.id, d]));
+    return trades.flatMap((t) => {
+      const d = byId.get(decisionIdFromTags(t.entryTags) ?? '');
+      if (!d) return [];
+      const j = (d.judge && typeof d.judge === 'object' && !Array.isArray(d.judge) ? d.judge : {}) as Record<string, unknown>;
+      const ai = (d.aiCheck && typeof d.aiCheck === 'object' && !Array.isArray(d.aiCheck) ? d.aiCheck : {}) as Record<string, unknown>;
+      const pk = (j.packet && typeof j.packet === 'object' ? j.packet : {}) as Record<string, unknown>;
+      const priced = t.entryPrice && t.exitPrice;
+      return [{
+        decisionId: d.id,
+        symbol: t.instrument?.symbol ?? null,
+        channelId: d.channelId ?? null,
+        aiDecision: judgeCallOf(d.judge),
+        confidence: typeof j.confidence === 'number' ? j.confidence : null,
+        reasons: Array.isArray(j.reasons) ? j.reasons.filter((x): x is string => typeof x === 'string') : [],
+        fairRaw: ai.fair ?? null,
+        oldCorrect: typeof ai.correct === 'boolean' ? ai.correct : null,
+        exitTag: t.exitReasonTag ?? null,
+        paperPnl: priced ? Math.round((String(t.side).toUpperCase() === 'SELL' ? -1 : 1) * ((t.exitPrice as number) - (t.entryPrice as number)) * t.quantity * 100) / 100 : null,
+        promptVersion: typeof pk.promptVersion === 'string' ? pk.promptVersion : null,
+      }];
+    });
+  }
+
+  /**
+   * PAPER trades (Telegram + engine) closed in [from, to) by an AI exit (AI_EXIT, incl. AI_TRIGGER) or the noise
+   * trail (MOVED_STOP), with the exit noise read taken at that exit (if any) and the HELD follow (paper_exit_shadows).
+   */
+  async paperExits(from: Date, to: Date) {
+    const trades = await this.prisma.trade.findMany({
+      where: { strategy: { in: [...PAPER_WATCH_STRATEGIES] }, isPaperTrade: true, status: 'CLOSED', exitTime: { gte: from, lt: to }, exitReasonTag: { in: ['AI_EXIT', 'MOVED_STOP'] } },
+      select: { id: true, side: true, quantity: true, entryPrice: true, exitPrice: true, exitTime: true, exitReasonTag: true, exitNotes: true, instrument: { select: { symbol: true, name: true, exchange: true, token: true } } },
+      take: 2000,
+    });
+    const ids = trades.map((t) => t.id);
+    let reads: Array<Record<string, unknown>> = [];
+    if (ids.length) {
+      try {
+        reads = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+          SELECT trade_id, verdict, noise_n, underlying_at_exit, underlying_after_15m, underlying_after_30m, max_favour_30m, max_against_30m, read->>'summary' AS summary
+          FROM "exit_noise_reads" WHERE trade_id = ANY(${ids})`;
+      } catch {
+        reads = [];
+      }
+    }
+    const held = ids.length ? await this.prisma.paperExitShadow.findMany({ where: { tradeId: { in: ids }, rule: 'HELD' }, select: { tradeId: true, rulePnl: true, heldPnl: true, saved: true } }) : [];
+    const readOf = new Map(reads.map((r) => [String(r.trade_id), r]));
+    const heldOf = new Map(held.map((h) => [h.tradeId, h]));
+    const n = (v: unknown) => (v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+    return trades.flatMap((t) => {
+      const inst = t.instrument;
+      if (!inst || !t.exitTime) return [];
+      const notes = t.exitNotes ?? '';
+      const rule = t.exitReasonTag === 'MOVED_STOP' ? 'MOVED_STOP' : /^AI trigger/i.test(notes) ? 'AI_TRIGGER' : 'AI_EXIT';
+      const r = readOf.get(t.id);
+      const h = heldOf.get(t.id);
+      return [{
+        tradeId: t.id,
+        symbol: inst.symbol,
+        underlying: inst.name ?? null,
+        exchange: inst.exchange,
+        token: inst.token,
+        exitRule: rule,
+        exitAt: t.exitTime,
+        side: String(t.side),
+        entryPrice: t.entryPrice ?? null,
+        exitPrice: t.exitPrice ?? null,
+        qty: t.quantity,
+        reason: notes ? notes.split(' | ')[0].slice(0, 300) : null,
+        read: r
+          ? { verdict: String(r.verdict), n: n(r.noise_n), underlyingAtExit: n(r.underlying_at_exit), after15m: n(r.underlying_after_15m), after30m: n(r.underlying_after_30m), maxFavour30m: n(r.max_favour_30m), maxAgainst30m: n(r.max_against_30m), summary: typeof r.summary === 'string' ? r.summary : null }
+          : null,
+        held: h ? { rulePnl: h.rulePnl ?? null, heldPnl: h.heldPnl ?? null, saved: h.saved ?? null } : null,
+      }];
+    });
+  }
+
+  /** The underlying's price line for a contract (index map / MCX nearest future / NSE cash); a cash line is its own. */
+  async underlyingRefOf(i: { name: string | null; exchange: string; token: string; at: Date }): Promise<{ exchange: string; token: string; symbol: string } | null> {
+    const ex = i.exchange.toUpperCase();
+    if (ex === 'NSE' || ex === 'BSE') return { exchange: ex, token: i.token, symbol: i.name ?? i.token };
+    const name = (i.name ?? '').toUpperCase();
+    if (!name) return null;
+    const idx = INDEX_UNDERLYINGS[name];
+    if (idx) return { exchange: idx.exchange, token: idx.token, symbol: idx.symbol };
+    if (ex === 'MCX') {
+      const f = await this.prisma.instrument.findFirst({
+        where: { name, exchange: 'MCX', symbol: { endsWith: 'FUT' }, expiry: { gte: new Date(i.at.getTime() - 86_400_000) } },
+        orderBy: { expiry: 'asc' },
+        select: { exchange: true, token: true, symbol: true },
+      });
+      return f ?? null;
+    }
+    for (const symbol of [`${name}-EQ`, name]) {
+      const r = await this.prisma.instrument.findFirst({ where: { symbol, exchange: 'NSE' }, select: { exchange: true, token: true, symbol: true } });
+      if (r) return r;
+    }
+    return null;
+  }
+
+  /** candles_1m with high / low (bars1m above carries open / close only). */
+  async minuteBarsHL(exchange: string, token: string, from: Date, to: Date): Promise<MinuteBar[]> {
+    const rows = await this.prisma.hubCandle1m.findMany({ where: { exchange, token, ts: { gte: from, lt: to } }, select: { ts: true, open: true, high: true, low: true, close: true }, orderBy: { ts: 'asc' } });
+    return rows.map((r) => ({ ts: r.ts.getTime(), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close) }));
+  }
+
+  /** ENGINE_ENTRY paper trades CLOSED in [from, to) by exit time (the engine's entry note as its reason). */
+  async engineClosedTrades(from: Date, to: Date) {
+    const trades = await this.prisma.trade.findMany({
+      where: { strategy: 'ENGINE_ENTRY', isPaperTrade: true, status: 'CLOSED', exitTime: { gte: from, lt: to } },
+      select: { id: true, side: true, quantity: true, entryPrice: true, exitPrice: true, exitReasonTag: true, entryTags: true, notes: true, instrument: { select: { symbol: true } } },
+      take: 2000,
+    });
+    return trades.map((t) => ({
+      id: t.id,
+      symbol: t.instrument?.symbol ?? null,
+      underlying: (t.entryTags ?? []).find((x) => x.startsWith('underlying:'))?.slice('underlying:'.length) ?? null,
+      side: t.side ? String(t.side) : null,
+      quantity: t.quantity ?? null,
+      entryPrice: t.entryPrice ?? null,
+      exitPrice: t.exitPrice ?? null,
+      exitReasonTag: t.exitReasonTag ?? null,
+      reasons: t.notes ? [t.notes.slice(0, 400)] : [],
     }));
   }
 }

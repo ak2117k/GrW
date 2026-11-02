@@ -105,6 +105,13 @@ export function scopeForKind(kind: string | undefined): LessonScope {
       return 'SENTINEL_LIVE';
     case 'NEWS_IDEA':
       return 'NEWS_IDEAS';
+    case 'SIGNAL_JUDGE':
+      return 'SIGNAL_JUDGE';
+    // A paper trade's AI exit is the same sentinel exit prompt as a live one.
+    case 'PAPER_EXIT':
+      return 'SENTINEL_LIVE';
+    case 'ENGINE_ENTRY':
+      return 'ENTRY_ENGINE';
     default:
       return 'ALL';
   }

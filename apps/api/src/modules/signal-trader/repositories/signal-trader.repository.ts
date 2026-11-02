@@ -5,6 +5,7 @@ import { channelSentiment, type ChannelInfoAccuracy } from '../../signal-intake/
 import type { ClusterView, EntryType, InstrumentKind, SignalView } from '../domain/signal.types';
 import { SIGNAL_ENTRY_VERDICT_TAG, istDayStart } from '../domain/execution';
 import { PAPER_WATCH_STRATEGIES, SIGNAL_PAPER_STRATEGY, decisionTag } from '../domain/paper';
+import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 
 const isUnique = (err: unknown) => err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 type Row = Record<string, unknown>;
@@ -525,6 +526,66 @@ export class SignalTraderRepository {
   async aiChecksSince(since: Date): Promise<unknown[]> {
     const rows = await this.prisma.signalDecision.findMany({ where: { createdAt: { gte: since }, aiCheck: { not: Prisma.DbNull } }, select: { aiCheck: true }, take: 1000 });
     return rows.map((r) => r.aiCheck);
+  }
+
+  // ---- fair AI check (domain/fair-score): database reads only ----
+
+  /** What the fair check needs beyond the closed trade: the decision's records, the contract's master row, the shadow STOP. */
+  async fairScoreFacts(decisionId: string, tradeId: string): Promise<{
+    judge: unknown;
+    plan: unknown;
+    underlying: string | null;
+    instrument: { strike: number | null; optionType: string | null; name: string | null; expiry: Date | null; exchange: string; token: string; symbol: string } | null;
+    shadowStop: { ts: number; price: number } | null;
+  }> {
+    const [d, t, stop] = await Promise.all([
+      this.prisma.signalDecision.findUnique({ where: { id: decisionId }, select: { judge: true, plan: true, underlying: true } }),
+      this.prisma.trade.findUnique({ where: { id: tradeId }, select: { instrument: { select: { strike: true, optionType: true, name: true, expiry: true, exchange: true, token: true, symbol: true } } } }),
+      this.prisma.paperExitShadow.findFirst({ where: { tradeId, rule: 'STOP', wouldExitAt: { not: null } }, select: { wouldExitAt: true, price: true } }),
+    ]);
+    const i = t?.instrument ?? null;
+    return {
+      judge: d?.judge ?? null,
+      plan: d?.plan ?? null,
+      underlying: d?.underlying ?? i?.name ?? null,
+      instrument: i ? { strike: i.strike ?? null, optionType: i.optionType ?? null, name: i.name ?? null, expiry: i.expiry ?? null, exchange: i.exchange, token: i.token, symbol: i.symbol } : null,
+      shadowStop: stop?.wouldExitAt && typeof stop.price === 'number' ? { ts: stop.wouldExitAt.getTime(), price: stop.price } : null,
+    };
+  }
+
+  /** The hub's tick-built 1-minute bars (candles_1m) — the stored price path. */
+  async hubMinuteBars(exchange: string, token: string, from: Date, to: Date): Promise<Array<{ ts: number; open: number; high: number; low: number; close: number }>> {
+    const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+      SELECT ts, open, high, low, close FROM "candles_1m"
+      WHERE exchange = ${exchange} AND token = ${token}
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+      ORDER BY ts`;
+    return rows
+      .map((r) => ({ ts: (r.ts as Date).getTime(), open: num(r.open) ?? 0, high: num(r.high) ?? 0, low: num(r.low) ?? 0, close: num(r.close) ?? 0 }))
+      .filter((b) => b.low > 0 && b.high >= b.low);
+  }
+
+  /**
+   * The underlying's own price line (market-hub INDEX_UNDERLYINGS for an index; the nearest live future
+   * of the same name on MCX; the NSE cash line for a stock). null when the master has none.
+   */
+  async underlyingRef(underlying: string, exchange: string, at: Date): Promise<{ exchange: string; token: string; symbol: string } | null> {
+    const u = up(underlying);
+    const index = INDEX_UNDERLYINGS[u];
+    if (index) return { exchange: index.exchange, token: index.token, symbol: index.symbol };
+    if (up(exchange) === 'MCX') {
+      const f = await this.prisma.instrument.findFirst({
+        where: { name: u, exchange: 'MCX', symbol: { endsWith: 'FUT' }, expiry: { gte: new Date(at.getTime() - 86_400_000) } },
+        orderBy: { expiry: 'asc' },
+        select: { exchange: true, token: true, symbol: true },
+      });
+      return f ?? null;
+    }
+    for (const symbol of [`${u}-EQ`, u]) {
+      const r = await this.prisma.instrument.findFirst({ where: { symbol, exchange: 'NSE' }, select: { exchange: true, token: true, symbol: true } });
+      if (r) return r;
+    }
+    return null;
   }
 
   // ---- OI check at the paper open (domain/oi-check): database reads only, never the broker ----

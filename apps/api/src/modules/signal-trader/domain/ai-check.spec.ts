@@ -25,7 +25,7 @@ describe('AI check: the judge held against the paper result', () => {
   it('reads the AI call off the judge record; tallies the scorecard', () => {
     expect(aiDecisionOf({ aiDecision: 'SKIP', verdict: 'SKIP' })).toBe('SKIP');
     expect(aiDecisionOf(null)).toBe('NONE');
-    expect(aiScorecard([{ aiDecision: 'TAKE', correct: true }, { aiDecision: 'SKIP', correct: false }, { aiDecision: 'SKIP', correct: true }, null, { aiDecision: 'NONE', correct: null }])).toEqual({
+    expect(aiScorecard([{ aiDecision: 'TAKE', correct: true }, { aiDecision: 'SKIP', correct: false }, { aiDecision: 'SKIP', correct: true }, null, { aiDecision: 'NONE', correct: null }])).toMatchObject({
       scored: 3, right: 2, wrong: 1, accuracyPct: 67, takeRight: 1, takeWrong: 0, skipRight: 1, skipWrong: 1, unscored: 2,
     });
   });

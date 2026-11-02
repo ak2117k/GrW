@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { aiLine, callLine, classLabel, FILTERS, judgeHeading, lagLabel, scorecardLine, watchLine, whyLine, type FeedItem } from './telegramFeed';
+import { aiLine, aiRight, callLine, classLabel, FILTERS, judgeHeading, lagLabel, scorecardLine, watchLine, whyLine, type FeedItem } from './telegramFeed';
 import { TelegramFeedView } from './TelegramFeedView';
 
 const base: FeedItem = {
@@ -118,6 +118,14 @@ describe('AI judge check (learning mode)', () => {
     expect(aiLine({ aiDecision: 'SKIP', movePct: 3.2, pnl: 1240, exitTag: 'HIT_TARGET', correct: false, at: '' })).toBe('AI said SKIP · paper +3.2% (target) → AI was wrong');
     expect(aiLine({ aiDecision: 'TAKE', movePct: -1.1, pnl: -400, exitTag: 'TIME_EXIT', correct: false, at: '' })).toBe('AI said TAKE · paper -1.1% (time exit) → AI was wrong');
     expect(aiLine({ aiDecision: 'NONE', movePct: 0.4, pnl: 30, exitTag: 'TIME_EXIT', correct: null, at: '' })).toBe('AI gave no verdict · paper +0.4% (time exit) → not scored');
+  });
+  it('the FAIR verdict wins over the old no-stop rule and says why', () => {
+    const out = (result: 'STOPPED' | 'TARGET', pnl1Lot: number) => ({ stop: 272.25, result, pnl1Lot, reason: '' });
+    const fair = { verdict: 'RIGHT' as const, skipKind: 'RISK_CAP' as const, capStop: 272.25, capOutcome: out('STOPPED', -2000), signalStop: 240, signalStopOutcome: out('TARGET', 2400), method: 'underlying-1m×delta' };
+    const c = { aiDecision: 'SKIP' as const, movePct: 14.93, pnl: 2939.74, exitTag: 'MOVED_STOP', correct: false, at: '', fair };
+    expect(aiRight(c)).toBe(true);
+    expect(aiLine(c)).toBe('AI said SKIP · paper +14.93% (trailed stop) → AI was right (fair check: cap-sized stop 272.25 stopped −₹2000 · skipped on the risk cap)');
+    expect(aiRight({ ...c, fair: { ...fair, verdict: 'UNSCORABLE' } })).toBeNull();
   });
   it('the scorecard header', () => {
     const base = { days: 14, scored: 0, right: 0, wrong: 0, accuracyPct: null, takeRight: 0, takeWrong: 0, skipRight: 0, skipWrong: 0, unscored: 0 };

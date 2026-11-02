@@ -7,7 +7,11 @@
  * an override of a hard risk limit.
  */
 
-export const LESSON_SCOPES = ['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'ALL'] as const;
+/**
+ * SIGNAL_JUDGE (2026-11-02): the Telegram entry judge (signal-trader reads it into its packet). ENTRY_ENGINE: the
+ * rule-based entry engine — no agent reads it (the engine is not an LLM); its lessons are for the owner only.
+ */
+export const LESSON_SCOPES = ['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'SIGNAL_JUDGE', 'ENTRY_ENGINE', 'ALL'] as const;
 export type LessonScope = (typeof LESSON_SCOPES)[number];
 
 /** A scope a consumer asks for (`ALL` lessons are included in every one of them). */

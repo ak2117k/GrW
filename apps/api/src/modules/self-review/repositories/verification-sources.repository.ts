@@ -12,6 +12,8 @@ import { noiseVerdictOfRecord } from '../../exit-noise/domain/noise-read';
 import type { ExitNoiseReadRow } from '../domain/exit-noise';
 import type { EngineDecisionRow, EngineTradeRow } from '../domain/engine-trades';
 import type { MinuteBar } from '../../exit-discipline/types';
+import { componentsOfRecord, type NewsImpactLike } from '../../exit-noise/domain/adverse-probability';
+import type { NoiseComponent } from '../../exit-noise/domain/noise-read';
 
 /**
  * Read-only access to the rows the scorers judge. Every query is bounded by a time range the run
@@ -98,11 +100,51 @@ export class VerificationSourcesRepository {
       where: { kind: 'EXECUTED', status: 'DONE', decisionAt: { gte: from, lt: to }, NOT: { verdictId: { startsWith: MANUAL_VERDICT_PREFIX } } },
       select: {
         executionId: true, verdictId: true, symbol: true, exchange: true, positionSide: true, qty: true,
-        decisionPrice: true, decisionAt: true, closeAt60: true, closeAtEnd: true,
+        decisionPrice: true, decisionAt: true, closeAt60: true, closeAtEnd: true, trackerId: true, token: true,
       },
       take: 500,
     });
-    return outcomes;
+    if (outcomes.length === 0) return [];
+    // For P(adverse) (domain/exit-justification): the exit noise read taken at the exit (source 'real', ref = the
+    // verdict), the contract's underlying name, and the tracker's entry (bounds the candles_1m best point).
+    let reads: Array<Record<string, unknown>> = [];
+    try {
+      reads = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+        SELECT ref_id, verdict, read FROM "exit_noise_reads" WHERE source = 'real' AND ref_id = ANY(${outcomes.map((o) => o.verdictId)})`;
+    } catch {
+      reads = [];
+    }
+    const readOf = new Map(reads.map((r) => [String(r.ref_id), r]));
+    const insts = await this.prisma.instrument.findMany({ where: { OR: outcomes.map((o) => ({ exchange: o.exchange, token: o.token })) }, select: { exchange: true, token: true, name: true } });
+    const nameOf = new Map(insts.map((i) => [`${i.exchange}:${i.token}`, i.name ?? null]));
+    const trackers = await this.prisma.tradeTracker.findMany({ where: { id: { in: [...new Set(outcomes.map((o) => o.trackerId))] } }, select: { id: true, entryTime: true } });
+    const entryOf = new Map(trackers.map((t) => [t.id, t.entryTime]));
+    return outcomes.map((o) => {
+      const r = readOf.get(o.verdictId);
+      return {
+        ...o,
+        underlying: nameOf.get(`${o.exchange}:${o.token}`) ?? null,
+        entryAt: entryOf.get(o.trackerId) ?? null,
+        readComponents: r ? componentsOfRecord(r.read) : null,
+        readVerdict: r ? String(r.verdict) : null,
+      };
+    });
+  }
+
+  /**
+   * News impacts that can bear on P(adverse) at an exit in [from, to): directional MED / HIGH reads (the
+   * domain filter — same underlying, not priced in, not a recap, 60 min window — runs on these).
+   */
+  async newsImpactsAround(from: Date, to: Date): Promise<NewsImpactLike[]> {
+    const rows = await this.prisma.newsImpact.findMany({
+      where: { analysedAt: { gte: from, lt: to }, direction: { in: ['BULL', 'BEAR'] }, magnitude: { in: ['MED', 'HIGH'] } },
+      select: { analysedAt: true, direction: true, magnitude: true, confidence: true, pricedIn: true, symbols: true, indexName: true, oneLine: true, clusterId: true },
+      take: 2000,
+    });
+    if (rows.length === 0) return [];
+    const clusters = await this.prisma.newsCluster.findMany({ where: { id: { in: rows.map((r) => r.clusterId) } }, select: { id: true, headline: true } });
+    const head = new Map(clusters.map((c) => [c.id, c.headline]));
+    return rows.map((r) => ({ analysedAt: r.analysedAt, direction: r.direction, magnitude: r.magnitude, confidence: r.confidence, pricedIn: r.pricedIn, symbols: r.symbols, indexName: r.indexName, headline: head.get(r.clusterId) ?? null, oneLine: r.oneLine }));
   }
 
   newsIdeas(from: Date, to: Date) {
@@ -382,7 +424,7 @@ export class VerificationSourcesRepository {
   async paperExits(from: Date, to: Date) {
     const trades = await this.prisma.trade.findMany({
       where: { strategy: { in: [...PAPER_WATCH_STRATEGIES] }, isPaperTrade: true, status: 'CLOSED', exitTime: { gte: from, lt: to }, exitReasonTag: { in: ['AI_EXIT', 'MOVED_STOP'] } },
-      select: { id: true, side: true, quantity: true, entryPrice: true, exitPrice: true, exitTime: true, exitReasonTag: true, exitNotes: true, instrument: { select: { symbol: true, name: true, exchange: true, token: true } } },
+      select: { id: true, side: true, quantity: true, entryPrice: true, entryTime: true, exitPrice: true, exitTime: true, exitReasonTag: true, exitNotes: true, instrument: { select: { symbol: true, name: true, exchange: true, token: true } } },
       take: 2000,
     });
     const ids = trades.map((t) => t.id);
@@ -390,7 +432,7 @@ export class VerificationSourcesRepository {
     if (ids.length) {
       try {
         reads = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
-          SELECT trade_id, verdict, noise_n, underlying_at_exit, underlying_after_15m, underlying_after_30m, max_favour_30m, max_against_30m, read->>'summary' AS summary
+          SELECT trade_id, verdict, noise_n, underlying_at_exit, underlying_after_15m, underlying_after_30m, max_favour_30m, max_against_30m, read->>'summary' AS summary, read
           FROM "exit_noise_reads" WHERE trade_id = ANY(${ids})`;
       } catch {
         reads = [];
@@ -415,13 +457,14 @@ export class VerificationSourcesRepository {
         token: inst.token,
         exitRule: rule,
         exitAt: t.exitTime,
+        entryAt: t.entryTime ?? null,
         side: String(t.side),
         entryPrice: t.entryPrice ?? null,
         exitPrice: t.exitPrice ?? null,
         qty: t.quantity,
         reason: notes ? notes.split(' | ')[0].slice(0, 300) : null,
         read: r
-          ? { verdict: String(r.verdict), n: n(r.noise_n), underlyingAtExit: n(r.underlying_at_exit), after15m: n(r.underlying_after_15m), after30m: n(r.underlying_after_30m), maxFavour30m: n(r.max_favour_30m), maxAgainst30m: n(r.max_against_30m), summary: typeof r.summary === 'string' ? r.summary : null }
+          ? { verdict: String(r.verdict), n: n(r.noise_n), underlyingAtExit: n(r.underlying_at_exit), after15m: n(r.underlying_after_15m), after30m: n(r.underlying_after_30m), maxFavour30m: n(r.max_favour_30m), maxAgainst30m: n(r.max_against_30m), summary: typeof r.summary === 'string' ? r.summary : null, components: componentsOfRecord(r.read) as NoiseComponent[] }
           : null,
         held: h ? { rulePnl: h.rulePnl ?? null, heldPnl: h.heldPnl ?? null, saved: h.saved ?? null } : null,
       }];

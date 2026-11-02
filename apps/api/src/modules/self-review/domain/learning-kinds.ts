@@ -1,8 +1,11 @@
 import { noiseFromBars } from '../../exit-discipline/noise';
 import type { MinuteBar } from '../../exit-discipline/types';
 import { NOISE_SCORE, scoreNoiseRead } from '../../exit-noise/domain/noise-score';
+import { EXIT_JUSTIFIED_P } from '../../exit-noise/domain/adverse-probability';
 import type { Want } from '../../exit-noise/domain/noise-read';
+import type { AdverseProbability } from '../../exit-noise/domain/adverse-probability';
 import type { VerificationDraft } from '../self-review.types';
+import { judgeExit, justificationDetails } from './exit-justification';
 
 /**
  * The three kinds that make this week's real mistakes visible to the diagnosis (owner 2026-11-02: the
@@ -15,7 +18,9 @@ import type { VerificationDraft } from '../self-review.types';
  *    that was right is right (not a miss); one that was wrong IS a miss (the cap-sized trade would have paid).
  *  PAPER_EXIT — an AI exit (AI_EXIT / AI_TRIGGER) or the noise-trail exit (MOVED_STOP) of a PAPER trade:
  *    a miss ("premature exit") when the underlying recovered ≥ NOISE_SCORE.minMoveN exit units N in the
- *    trade's favour within 30 min (exit-noise/domain/noise-score, the same rule a NOISE read is scored by).
+ *    trade's favour within 30 min (exit-noise/domain/noise-score, the same rule a NOISE read is scored by)
+ *    AND the exit was not justified: P(adverse) at the exit < EXIT_JUSTIFIED_P (owner 2026-11-02,
+ *    domain/exit-justification). Justified and recovered anyway = JUSTIFIED_UNLUCKY, not a miss.
  *  ENGINE_ENTRY — a closed ENGINE_ENTRY paper trade: a gross loss is a miss, a gain is right, flat null.
  */
 const r2 = (n: number) => Math.round(n * 100) / 100;
@@ -137,6 +142,8 @@ export interface PaperExitRow {
   noiseSummary: string | null;
   /** The paper watch's HELD follow (paper_exit_shadows rule HELD): what holding on the trade's own rules made. */
   held: { rulePnl: number | null; heldPnl: number | null; saved: number | null } | null;
+  /** P(adverse) at the exit (exit-noise/domain/adverse-probability); absent / null p = not justified (counted as before). */
+  adverse?: AdverseProbability | null;
 }
 
 /** The underlying's N (1-min ATR14 over the bars before the exit) and its 30 min after the exit, from 1-min bars. */
@@ -166,6 +173,24 @@ export function recoveryFromBars(bars: readonly MinuteBar[], exitAt: Date, want:
   };
 }
 
+/**
+ * No exit noise read: the adverse move from the position's best point in N, from the underlying's 1-min bars
+ * (best = the highest high for a bullish position / lowest low for a bearish one, since max(entry, exit − 120 min);
+ * the move to the exit-minute close). null when the bars do not cover it.
+ */
+export function adverseMoveFromBars(bars: readonly MinuteBar[], exitAt: Date, want: Want, n: number | null, entryAt: Date | null = null): number | null {
+  if (!fin(n) || !(n > 0)) return null;
+  const exitMin = Math.floor(exitAt.getTime() / 60_000) * 60_000;
+  const since = Math.max(exitMin - 120 * 60_000, entryAt ? Math.floor(entryAt.getTime() / 60_000) * 60_000 : -Infinity);
+  const win = bars.filter((b) => [b.high, b.low, b.close].every(fin) && b.low > 0 && b.ts >= since && b.ts <= exitMin).sort((a, b) => a.ts - b.ts);
+  if (win.length === 0) return null;
+  const last = win[win.length - 1];
+  if (exitMin - last.ts > 5 * 60_000) return null;
+  const best = want === 'BULLISH' ? Math.max(...win.map((b) => b.high)) : Math.min(...win.map((b) => b.low));
+  const move = want === 'BULLISH' ? best - last.close : last.close - best;
+  return r2(Math.max(0, move) / n);
+}
+
 export function scorePaperExit(r: PaperExitRow): VerificationDraft {
   const s = scoreNoiseRead({ verdict: 'NOISE', want: r.want, underlyingAtExit: r.underlyingAtExit, n: r.n, after15m: r.after15m, after30m: r.after30m, maxFavour30m: r.maxFavour30m, maxAgainst30m: r.maxAgainst30m });
   const base = {
@@ -193,18 +218,24 @@ export function scorePaperExit(r: PaperExitRow): VerificationDraft {
     noiseReadSaidNoise: r.noiseVerdict === null ? null : r.noiseVerdict === 'NOISE',
     noiseReadSummary: r.noiseSummary,
     held: r.held,
-    rule: `premature when the underlying recovered ≥ ${NOISE_SCORE.minMoveN} N in the trade's favour within 30 min`,
+    rule: `premature when the underlying recovered ≥ ${NOISE_SCORE.minMoveN} N in the trade's favour within 30 min and the exit was not justified (p < ${EXIT_JUSTIFIED_P})`,
   };
-  if (s.favourN === null) return { ...base, actual: 'no underlying path / noise unit after the exit', correct: null, score: null, details };
+  if (s.favourN === null) {
+    const j0 = judgeExit(r.adverse, null);
+    return { ...base, actual: 'no underlying path / noise unit after the exit', correct: null, score: null, details: { ...details, ...justificationDetails(r.adverse, j0) } };
+  }
   const premature = s.favourN >= NOISE_SCORE.minMoveN;
+  const j = judgeExit(r.adverse, premature);
   const heldTxt = r.held && fin(r.held.saved) ? `; holding on its own rules ${inr(r.held.saved)} vs the exit` : '';
+  const head = !premature ? 'exit held up' : j.outcome === 'JUSTIFIED_UNLUCKY' ? `justified, unlucky (p ${j.pAdverse})` : 'premature exit';
+  const pTxt = j.pAdverse !== null && j.outcome !== 'JUSTIFIED_UNLUCKY' ? `; p ${j.pAdverse}` : '';
   return {
     ...base,
-    actual: `${premature ? 'premature exit' : 'exit held up'}: underlying ${s.favourN} N in favour / ${s.againstN} N against within 30 min${r.noiseVerdict ? ` (noise read said ${r.noiseVerdict})` : ''}${heldTxt}`.slice(0, 400),
-    correct: !premature,
+    actual: `${head}: underlying ${s.favourN} N in favour / ${s.againstN} N against within 30 min${r.noiseVerdict ? ` (noise read said ${r.noiseVerdict})` : ''}${heldTxt}${pTxt}`.slice(0, 400),
+    correct: j.correct,
     // ₹ when the HELD follow knows what holding made (> 0 = the exit cost that much), else the recovery in N.
     score: r.held && fin(r.held.saved) ? r2(r.held.saved) : s.favourN,
-    details,
+    details: { ...details, ...justificationDetails(r.adverse, j) },
   };
 }
 

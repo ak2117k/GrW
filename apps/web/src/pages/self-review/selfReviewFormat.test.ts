@@ -11,6 +11,7 @@ import {
   signalTradeLines,
   paperOiLines,
   exitNoiseLine,
+  exitJustificationLine,
   engineLine,
   lessonInjected,
   lessonsAddedCount,
@@ -236,5 +237,21 @@ describe('exitNoiseLine', () => {
     expect(exitNoiseLine(s)).toBe('6 scored, NOISE right 3/4, REAL right 1/2, 1 pending, 2 mixed / no data');
     expect(exitNoiseLine({ session: '', byKind: {} })).toBeNull();
     expect(exitNoiseLine({ session: '', byKind: {}, exitNoise: { session: st({ reads: 0 }), rolling20: st({ reads: 0 }) } })).toBeNull();
+  });
+});
+
+describe('exitJustificationLine', () => {
+  const st = (over: Partial<NonNullable<SelfReviewSummary['exitJustification']>['rolling20']> = {}) => ({
+    exits: 12, judged: 11, withP: 10, justified: 3, justifiedRecovered: 2, misses: 4, missesWithoutP: 1, threshold: 0.75, basis: ['heuristic-v1'], ...over,
+  });
+  it('justified x of y, of which recovered anyway z; misses; uncalibrated flag; null without exits', () => {
+    expect(exitJustificationLine({ session: '', byKind: {}, exitJustification: { session: st(), rolling20: st() } })).toBe(
+      'justified (p ≥ 0.75): 3 of 12, of which recovered anyway: 2 · 4 misses · 1 without p · p uncalibrated',
+    );
+    expect(exitJustificationLine({ session: '', byKind: {}, exitJustification: { session: st(), rolling20: st({ missesWithoutP: 0, basis: ['calibrated-v1'] }) } })).toBe(
+      'justified (p ≥ 0.75): 3 of 12, of which recovered anyway: 2 · 4 misses',
+    );
+    expect(exitJustificationLine({ session: '', byKind: {} })).toBeNull();
+    expect(exitJustificationLine({ session: '', byKind: {}, exitJustification: { session: st({ exits: 0 }), rolling20: st({ exits: 0 }) } })).toBeNull();
   });
 });

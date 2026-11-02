@@ -82,6 +82,11 @@ export interface RunSummary {
   signalTrades?: import('./domain/signal-trades').SignalTradesSummary;
   /** "Noise or real?" reads at AI exits, scored on the next 30 min, session S and rolling 20 (domain/exit-noise.ts). Observation only. */
   exitNoise?: import('./domain/exit-noise').ExitNoiseSummary;
+  /**
+   * PAPER_EXIT / LIVE_EXIT under the owner's rule (2026-11-02): how many exits were justified (P(adverse) ≥ 0.75),
+   * how many of those recovered anyway (JUSTIFIED_UNLUCKY, not misses), session S and rolling 20 (domain/exit-justification).
+   */
+  exitJustification?: { session: import('./domain/exit-justification').ExitJustificationStats; rolling20: import('./domain/exit-justification').ExitJustificationStats };
   /** Entry engine (stage 1): its decisions and ENGINE_ENTRY paper trades, session S and rolling 20 (domain/engine-trades.ts). Observation only. */
   engine?: import('./domain/engine-trades').EngineSummary;
   /** NEWS_IMPACT: hit rates by news source and by material type + mean |move| per called magnitude, session and rolling 20. */

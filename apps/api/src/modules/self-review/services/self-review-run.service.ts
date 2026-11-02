@@ -26,7 +26,11 @@ import { probabilitySkill, relativeSkill } from '../domain/skill';
 import { signalPaperDigest, signalTradeStats } from '../domain/signal-trades';
 import { exitNoiseStats, noiseReadDigest } from '../domain/exit-noise';
 import { engineDigest, engineStats } from '../domain/engine-trades';
-import { asFair, recoveryFromBars, scoreEngineEntry, scorePaperExit, scoreSignalJudge, wantOf } from '../domain/learning-kinds';
+import { adverseMoveFromBars, asFair, recoveryFromBars, scoreEngineEntry, scorePaperExit, scoreSignalJudge, wantOf } from '../domain/learning-kinds';
+import { exitJustificationStats } from '../domain/exit-justification';
+import { adverseProbability, type AdverseProbability, type NewsImpactLike } from '../../exit-noise/domain/adverse-probability';
+import type { NoiseComponent, Want } from '../../exit-noise/domain/noise-read';
+import type { MinuteBar } from '../../exit-discipline/types';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
@@ -187,6 +191,13 @@ export class SelfReviewRunService {
         return [];
       });
 
+      await this.soft('EXIT_JUSTIFICATION (p ≥ 0.75 at AI exits)', errors, async () => {
+        const hist = await this.repo.results({ sessions, kinds: ['PAPER_EXIT', 'LIVE_EXIT'] }, 20_000);
+        const today = sessionRows.filter((r) => r.kind === 'PAPER_EXIT' || r.kind === 'LIVE_EXIT');
+        if (hist.length || today.length) summary.exitJustification = { session: exitJustificationStats(today), rolling20: exitJustificationStats(hist.map(toDraft)) };
+        return [];
+      });
+
       await this.soft('ENTRY_ENGINE decisions and paper trades', errors, async () => {
         const from = istMidnightOf(sessions[sessions.length - 1]);
         const to = new Date(istMidnightOf(S).getTime() + DAY_MS);
@@ -258,11 +269,17 @@ export class SelfReviewRunService {
 
     out.push(...(await this.soft('OVERNIGHT_VERDICT', errors, () => this.overnight(s, b, lookFrom, inS, proxy))));
     out.push(
-      ...(await this.soft('LIVE_EXIT', errors, async () =>
-        (await this.sources.liveExits(b.midnight, new Date(b.midnight.getTime() + DAY_MS))).map((o) =>
-          scoreLiveExit({ ...o, sessionDate: s, minutesSinceOpen: minutesSinceOpenOf(this.clock, o.exchange, o.decisionAt) }),
-        ),
-      )),
+      ...(await this.soft('LIVE_EXIT', errors, async () => {
+        const rows = await this.sources.liveExits(b.midnight, new Date(b.midnight.getTime() + DAY_MS));
+        const news = rows.length ? await this.newsFor(b.midnight, errors) : null;
+        const out: VerificationDraft[] = [];
+        for (const o of rows) {
+          const want = wantOf(o.positionSide === 'SHORT' ? 'SELL' : 'BUY', o.symbol);
+          const adverse = await this.adverseAt({ want, exitAt: o.decisionAt, underlying: o.underlying, exchange: o.exchange, token: o.token, entryAt: o.entryAt, components: o.readComponents, news });
+          out.push(scoreLiveExit({ ...o, sessionDate: s, minutesSinceOpen: minutesSinceOpenOf(this.clock, o.exchange, o.decisionAt), adverse }));
+        }
+        return out;
+      })),
     );
     out.push(...(await this.soft('NEWS_IDEA', errors, () => this.newsIdeas(s, b.openAt, lookFrom, inS))));
     out.push(
@@ -322,8 +339,11 @@ export class SelfReviewRunService {
    */
   private async paperExits(s: string, from: Date, to: Date): Promise<VerificationDraft[]> {
     const out: VerificationDraft[] = [];
-    for (const x of await this.sources.paperExits(from, to)) {
+    const exits = await this.sources.paperExits(from, to);
+    const news = exits.length ? await this.newsFor(from, []) : null;
+    for (const x of exits) {
       const want = wantOf(x.side, x.symbol);
+      const adverse = await this.adverseAt({ want, exitAt: x.exitAt, underlying: x.underlying, exchange: x.exchange, token: x.token, entryAt: x.entryAt, components: x.read?.components ?? null, news });
       let path = x.read
         ? { n: x.read.n, underlyingAtExit: x.read.underlyingAtExit, after15m: x.read.after15m, after30m: x.read.after30m, maxFavour30m: x.read.maxFavour30m, maxAgainst30m: x.read.maxAgainst30m }
         : null;
@@ -342,11 +362,46 @@ export class SelfReviewRunService {
           entryPrice: x.entryPrice, exitPrice: x.exitPrice, qty: x.qty, reason: x.reason,
           n: path?.n ?? null, nSource, underlyingAtExit: path?.underlyingAtExit ?? null, after15m: path?.after15m ?? null, after30m: path?.after30m ?? null,
           maxFavour30m: path?.maxFavour30m ?? null, maxAgainst30m: path?.maxAgainst30m ?? null,
-          noiseVerdict: x.read?.verdict ?? null, noiseSummary: x.read?.summary ?? null, held: x.held,
+          noiseVerdict: x.read?.verdict ?? null, noiseSummary: x.read?.summary ?? null, held: x.held, adverse,
         }),
       );
     }
     return out;
+  }
+
+  /** The session's news impacts (from 60 min before IST midnight to the day's end) for P(adverse); null when unreadable. */
+  private async newsFor(midnight: Date, errors: string[]): Promise<NewsImpactLike[] | null> {
+    try {
+      return await this.sources.newsImpactsAround(new Date(midnight.getTime() - 60 * 60_000), new Date(midnight.getTime() + DAY_MS));
+    } catch (e) {
+      errors.push(`news for P(adverse): ${errText(e)}`);
+      return null;
+    }
+  }
+
+  /**
+   * P(adverse) at an exit (exit-noise/domain/adverse-probability): the exit noise read's components when the exit
+   * has a read, else the adverse move from the best point in N from the underlying's candles_1m; + news. Review only.
+   */
+  private async adverseAt(i: {
+    want: Want; exitAt: Date; underlying: string | null; exchange: string; token: string; entryAt: Date | null;
+    components: NoiseComponent[] | null; news: NewsImpactLike[] | null;
+  }): Promise<AdverseProbability | null> {
+    try {
+      let fallbackMoveN: number | null = null;
+      if (!i.components || i.components.length === 0) {
+        const ref = await this.sources.underlyingRefOf({ name: i.underlying, exchange: i.exchange, token: i.token, at: i.exitAt });
+        if (ref) {
+          const bars: MinuteBar[] = await this.sources.minuteBarsHL(ref.exchange, ref.token, new Date(i.exitAt.getTime() - 125 * 60_000), new Date(i.exitAt.getTime() + 60_000));
+          const n = recoveryFromBars(bars, i.exitAt, i.want).n;
+          fallbackMoveN = adverseMoveFromBars(bars, i.exitAt, i.want, n, i.entryAt);
+        }
+      }
+      const components = i.components && i.components.length ? i.components : null;
+      return adverseProbability({ want: i.want, exitAt: i.exitAt, underlying: i.underlying, components, fallbackMoveN, news: i.news });
+    } catch {
+      return null;
+    }
   }
 
   private async overnight(
@@ -454,7 +509,7 @@ export class SelfReviewRunService {
     // The signal paper splits (OI verdict / AI judge) go in too: the owner checks the OI check at the nightly review.
     const signalPaper = signalPaperDigest(summary.signalTrades);
     // The exit noise reads too (observation only): does a NOISE read at an AI exit mean the exit was premature?
-    const noiseReads = noiseReadDigest(summary.exitNoise);
+    const noiseReads = noiseReadDigest(summary.exitNoise, summary.exitJustification);
     // The entry engine too (observation only): how often it entered, what blocked it, did its paper trades pay?
     const engine = engineDigest(summary.engine);
     if (!this.diagnosis || (misses.length === 0 && !signalPaper && !noiseReads && !engine)) return null;

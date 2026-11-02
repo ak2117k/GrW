@@ -287,6 +287,20 @@ export function exitNoiseLine(summary: SelfReviewSummary | null | undefined): st
 }
 
 /**
+ * The owner's rule at AI exits, last 20 sessions: "justified (p ≥ 0.75): x of y, of which recovered anyway: z"
+ * (+ the misses, and how many of them had no p). null when no exit was judged with it.
+ */
+export function exitJustificationLine(summary: SelfReviewSummary | null | undefined): string | null {
+  const s = summary?.exitJustification?.rolling20;
+  if (!s || !(s.exits > 0)) return null;
+  const t = s.threshold ?? 0.75;
+  const parts = [`justified (p ≥ ${t}): ${s.justified} of ${s.exits}, of which recovered anyway: ${s.justifiedRecovered}`, `${s.misses} misses`];
+  if (s.missesWithoutP > 0) parts.push(`${s.missesWithoutP} without p`);
+  if ((s.basis ?? []).every((b) => b.startsWith('heuristic'))) parts.push('p uncalibrated');
+  return parts.join(' · ');
+}
+
+/**
  * The entry engine, last 20 sessions: "N decisions, E enter (CE c / PE p), T paper trades, C closed W/L, gross ₹"
  * with a tone from the gross. null when it recorded nothing.
  */

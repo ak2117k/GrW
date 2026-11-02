@@ -55,6 +55,8 @@ export interface SelfReviewSummary {
   };
   /** "Noise or real?" reads at AI exits, scored on the underlying's next 30 min (observation only). */
   exitNoise?: { session: ExitNoiseStats; rolling20: ExitNoiseStats };
+  /** PAPER_EXIT / LIVE_EXIT under the owner's rule: justified = P(adverse) ≥ 0.75 at the exit (heuristic, uncalibrated). */
+  exitJustification?: { session: ExitJustificationStats; rolling20: ExitJustificationStats };
   /** Entry engine (stage 1): its recorded decisions and ENGINE_ENTRY paper trades, GROSS (observation only). */
   engine?: { session: EngineStats; rolling20: EngineStats };
 }
@@ -83,6 +85,22 @@ export interface ExitNoiseStats {
   pending: number;
   noise: { scored: number; right: number };
   real: { scored: number; right: number };
+}
+
+/** AI exits judged under "a recovered exit is a miss only when P(adverse) < 0.75": justified ones that recovered anyway are not misses. */
+export interface ExitJustificationCounts {
+  exits: number;
+  judged: number;
+  withP: number;
+  justified: number;
+  justifiedRecovered: number;
+  misses: number;
+  missesWithoutP: number;
+}
+export interface ExitJustificationStats extends ExitJustificationCounts {
+  byKind?: Partial<Record<'PAPER_EXIT' | 'LIVE_EXIT', ExitJustificationCounts>>;
+  threshold: number;
+  basis: string[];
 }
 
 /** The OI check recorded at a signal paper trade's open (record only). */

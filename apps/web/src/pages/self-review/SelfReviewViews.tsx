@@ -8,6 +8,7 @@ import {
   engineLine,
   evidenceLine,
   exitNoiseLine,
+  exitJustificationLine,
   formatValue,
   hitRateOf,
   hitTone,
@@ -270,6 +271,11 @@ export function RunCard({ run }: { run: SelfReviewRun }) {
       {exitNoiseLine(run.summary) && (
         <p className={cn('text-[11px]', MUTED)} data-testid="exit-noise-line">
           Exit noise reads, last 20 sessions: <span className="font-semibold">{exitNoiseLine(run.summary)}</span>
+        </p>
+      )}
+      {exitJustificationLine(run.summary) && (
+        <p className={cn('text-[11px]', MUTED)} data-testid="exit-justification-line">
+          AI exits, last 20 sessions: <span className="font-semibold">{exitJustificationLine(run.summary)}</span>
         </p>
       )}
       {run.exitNoiseAssessment && (

@@ -1,6 +1,9 @@
 import { istYmd } from '../../night-report/domain/night-report.logic';
 import type { NoiseVerdict, Want } from '../../exit-noise/domain/noise-read';
 import { NOISE_SCORE, noiseReadStats, scoreNoiseRead, type NoiseReadStats, type ReadScore } from '../../exit-noise/domain/noise-score';
+import { EXIT_JUSTIFIED_P } from '../../exit-noise/domain/adverse-probability';
+import type { ExitJustificationStats } from './exit-justification';
+import type { RunSummary } from '../self-review.types';
 
 /**
  * The "noise or real?" reads taken at AI exits (exit_noise_reads, record only — owner 2026-10-30), for
@@ -78,13 +81,24 @@ function compact(s: NoiseReadStats) {
  * The exit noise reads, compact for the diagnosis message: S and rolling-20 counts and scores, plus
  * S's reads with their reasoning line. null when the window has no read (nothing to assess).
  */
-export function noiseReadDigest(s: ExitNoiseSummary | undefined | null) {
+export function noiseReadDigest(s: ExitNoiseSummary | undefined | null, justification?: RunSummary['exitJustification'] | null) {
   if (!s || (s.rolling20?.reads ?? 0) === 0) return null;
   return {
     basis: `a NOISE read is right when the underlying recovered ≥ ${NOISE_SCORE.minMoveN} N in the position's favour within 30 min of the exit; a REAL read when it kept going ≥ ${NOISE_SCORE.minMoveN} N against; MIXED / NO_DATA are not scored`,
     session: compact(s.session),
     rolling20: compact(s.rolling20),
     sessionReads: s.session.items ?? [],
+    ...(justification ? { justification: justificationDigest(justification) } : {}),
+  };
+}
+
+/** The owner's rule counts (domain/exit-justification) for the diagnosis: justified exits and those that recovered anyway. */
+function justificationDigest(j: NonNullable<RunSummary['exitJustification']>) {
+  const c = (x: ExitJustificationStats) => ({ exits: x.exits, withP: x.withP, justified: x.justified, justifiedRecoveredAnyway: x.justifiedRecovered, misses: x.misses, missesWithoutP: x.missesWithoutP });
+  return {
+    basis: `an exit is justified when P(adverse) at the exit ≥ ${EXIT_JUSTIFIED_P} (heuristic-v1, uncalibrated); a justified exit the price recovered from is JUSTIFIED_UNLUCKY, not a miss`,
+    session: c(j.session),
+    rolling20: c(j.rolling20),
   };
 }
 

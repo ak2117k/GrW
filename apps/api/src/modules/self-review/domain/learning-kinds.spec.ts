@@ -92,8 +92,8 @@ describe('wiring: diagnosed kinds, scopes, prompt d6', () => {
     expect(['SIGNAL_JUDGE', 'PAPER_EXIT', 'ENGINE_ENTRY', 'OVERNIGHT_VERDICT', 'LIVE_EXIT', 'NEWS_IDEA', 'TRADE_SETUP'].map(scopeForKind)).toEqual(['SIGNAL_JUDGE', 'SENTINEL_LIVE', 'ENTRY_ENGINE', 'SENTINEL_OVERNIGHT', 'SENTINEL_LIVE', 'NEWS_IDEAS', 'ALL']);
     expect(DIAGNOSIS_SCHEMA.properties.misses.items.properties.scope.enum).toEqual(['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'SIGNAL_JUDGE', 'ENTRY_ENGINE', 'ALL']);
   });
-  it('the diagnosis prompt is d6 and describes each new kind', () => {
-    expect(DIAGNOSIS_PROMPT_VERSION).toBe('d6');
+  it('the diagnosis prompt is d7 and describes each new kind', () => {
+    expect(DIAGNOSIS_PROMPT_VERSION).toBe('d7');
     expect(DIAGNOSIS_SYSTEM_PROMPT).toMatch(/A SIGNAL_JUDGE miss is .* FAIR check/);
     expect(DIAGNOSIS_SYSTEM_PROMPT).toMatch(/Never propose raising the risk cap/);
     expect(DIAGNOSIS_SYSTEM_PROMPT).toMatch(/A PAPER_EXIT miss is .* premature exit/);

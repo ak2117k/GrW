@@ -6,6 +6,8 @@ import type { VerificationDraft } from '../self-review.types';
 
 import { relativeCallCorrect } from '../../mbm/domain/relative-reading';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+import type { AdverseProbability } from '../../exit-noise/domain/adverse-probability';
+import { judgeExit, justificationDetails } from './exit-justification';
 
 const r1 = (x: number) => Math.round(x * 10) / 10;
 const r2 = (x: number) => Math.round(x * 100) / 100;
@@ -326,9 +328,18 @@ export interface LiveExitRow {
   closeAtEnd: number | null;
   sessionDate: string;
   minutesSinceOpen: number | null;
+  /**
+   * P(adverse) at the exit (exit-noise/domain/adverse-probability, owner 2026-11-02). A recovered exit is a
+   * miss only when p < EXIT_JUSTIFIED_P; absent / null p = not justified (counted as before).
+   */
+  adverse?: AdverseProbability | null;
 }
 
-/** Right if the instrument was worse for the position 60 min after the fill (window end if the close came first). */
+/**
+ * Right if the instrument was worse for the position 60 min after the fill (window end if the close came first).
+ * Wrong ("recovered") only when the exit was not justified (domain/exit-justification): a justified exit the
+ * price recovered from anyway is JUSTIFIED_UNLUCKY (correct null, details.outcome).
+ */
 export function scoreLiveExit(r: LiveExitRow): VerificationDraft {
   const after = r.closeAt60 ?? r.closeAtEnd;
   const long = r.positionSide !== 'SHORT';
@@ -350,12 +361,15 @@ export function scoreLiveExit(r: LiveExitRow): VerificationDraft {
   };
   if (after === null || !Number.isFinite(after)) return { ...base, actual: 'no after-price', correct: null, score: null, details };
   const saved = (r.decisionPrice - after) * r.qty * (long ? 1 : -1);
+  const held = judged(saved);
+  const j = judgeExit(r.adverse, held === null ? null : !held);
+  const tag = j.outcome === 'JUSTIFIED_UNLUCKY' ? ` — justified, unlucky (p ${j.pAdverse})` : j.pAdverse !== null ? ` (p ${j.pAdverse})` : '';
   return {
     ...base,
-    actual: `${after} after ${details.horizon}`,
-    correct: judged(saved),
+    actual: `${after} after ${details.horizon}${tag}`,
+    correct: j.correct,
     score: r2(saved),
-    details: { ...details, savedPnl: r2(saved) },
+    details: { ...details, savedPnl: r2(saved), ...justificationDetails(r.adverse, j) },
   };
 }
 

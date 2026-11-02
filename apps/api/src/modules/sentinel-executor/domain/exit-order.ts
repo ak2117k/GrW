@@ -3,6 +3,7 @@ import type { OrderRequest } from '../../../common/interfaces/broker-adapter.int
 import type { AutoExitMode, QtyUnit } from './auto-exit.types';
 import type { ExitTrigger } from './manual-exit';
 import { MAX_PROTECTIVE_CANCELS } from './claim-timing';
+import { parseAngelIstTimestamp } from './exit-fill';
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const PRODUCTS = new Set(['INTRADAY', 'CARRYFORWARD', 'DELIVERY']);
@@ -213,13 +214,20 @@ export function findOrderByTag(rows: unknown[], tag: string): (OrderBookEntry & 
  * ours — AI ('ax'), the owner's manual button ('am') or a price trigger ('at') — on this contract that
  * may have moved the position (anything but rejected/cancelled)?
  * Angel's order book only carries the current trading day.
+ *
+ * `positionSince` (2026-11-02): an exit that COMPLETED before the current position was opened closed an
+ * EARLIER round trip, not this one. Prod: RELIANCE23NOV261300CE was AI-sold at 09:48, re-bought at 11:05,
+ * and every AI / hard-floor exit of the re-entry (8 of them, 11:19–11:42, from −₹132) was skipped as
+ * PRIOR_AI_EXIT_TODAY until the owner cut it by hand at −₹755. Unfinished or undated exits still block.
  */
-export function hasPriorAiExit(rows: unknown[], exchange: string, token: string): boolean {
+export function hasPriorAiExit(rows: unknown[], exchange: string, token: string, positionSince?: Date | null): boolean {
+  const since = positionSince instanceof Date && Number.isFinite(positionSince.getTime()) ? positionSince.getTime() : null;
   return (rows as Row[]).some((o) => {
     const tag = String(o?.ordertag ?? '');
-    return matches(o, exchange, token)
-      && EXIT_TAG_PREFIXES.some((p) => tag.startsWith(p))
-      && !isDeadOrderStatus(statusOf(o));
+    if (!(matches(o, exchange, token) && EXIT_TAG_PREFIXES.some((p) => tag.startsWith(p)) && !isDeadOrderStatus(statusOf(o)))) return false;
+    if (since === null || !isTerminalOrderStatus(statusOf(o))) return true;
+    const at = parseAngelIstTimestamp(o.exchorderupdatetime) ?? parseAngelIstTimestamp(o.exchtime) ?? parseAngelIstTimestamp(o.updatetime);
+    return at === null || at.getTime() >= since;
   });
 }
 

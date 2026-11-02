@@ -404,3 +404,21 @@ describe('PRICE_TRIGGER ordertag (ruling R13)', () => {
     expect(hasPriorAiExit([row('rejected')], 'MCX', '445566')).toBe(false);
   });
 });
+
+/** Prod 2026-11-02 RELIANCE23NOV261300CE: AI-sold 09:48:24, re-bought (tracker entryTime) 11:05, every exit then skipped. */
+describe('hasPriorAiExit — an exit that completed before this position opened does not block', () => {
+  const morning = { symboltoken: '125997', exchange: 'NFO', ordertag: 'axMabc', status: 'complete', exchorderupdatetime: '02-Nov-2026 09:48:24' };
+  const reEntry = new Date('2026-11-02T05:35:20Z'); // 11:05:20 IST
+
+  it('the 09:48 AI exit no longer blocks the 11:05 re-entry', () => {
+    expect(hasPriorAiExit([morning], 'NFO', '125997', reEntry)).toBe(false);
+  });
+  it('an exit at or after the position opened still blocks (it may be closing this one)', () => {
+    expect(hasPriorAiExit([{ ...morning, exchorderupdatetime: '02-Nov-2026 11:19:05' }], 'NFO', '125997', reEntry)).toBe(true);
+  });
+  it('an unfinished or undated prior exit still blocks; no entry time = the old rule', () => {
+    expect(hasPriorAiExit([{ ...morning, status: 'open' }], 'NFO', '125997', reEntry)).toBe(true);
+    expect(hasPriorAiExit([{ ...morning, exchorderupdatetime: undefined }], 'NFO', '125997', reEntry)).toBe(true);
+    expect(hasPriorAiExit([morning], 'NFO', '125997', null)).toBe(true);
+  });
+});

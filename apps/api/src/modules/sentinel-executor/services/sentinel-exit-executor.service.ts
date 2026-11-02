@@ -60,7 +60,7 @@ const CONFIRM_STEPS_MS = [2_000, 3_000, 5_000];
 /** Reason prefix for every outcome that leaves a position whose protective order we cancelled unexited. */
 export const UNPROTECTED_AFTER_CANCEL = 'UNPROTECTED_AFTER_CANCEL';
 
-type Tracker = { id: string; userId: string; status: string; kind: string; exchange: string; token: string; qty: number };
+type Tracker = { id: string; userId: string; status: string; kind: string; exchange: string; token: string; qty: number; entryTime?: Date | null };
 type Inst = { tickSize: number | null; lotSize: number | null } | null;
 type PreCheck =
   | { kind: 'ok'; order: OrderRequest; ltp: number; unitVerified: boolean }
@@ -586,7 +586,8 @@ export class SentinelExitExecutor {
     const book = ob.rows;
     // Review fix 2: one AI exit per contract per day — an earlier one (even of
     // unknown fate) may have closed or be closing this position already.
-    if (hasPriorAiExit(book, plan.order.exchange, plan.order.token)) return { kind: 'skip', reason: 'PRIOR_AI_EXIT_TODAY' };
+    // An exit that completed before this position opened belonged to an earlier round trip (hasPriorAiExit).
+    if (hasPriorAiExit(book, plan.order.exchange, plan.order.token, t.entryTime ?? null)) return { kind: 'skip', reason: 'PRIOR_AI_EXIT_TODAY' };
     if (hasOpenOrderFor(book, plan.order.exchange, plan.order.token)) {
       if (allowCancel && run.cfg.cancelProtective) {
         const scan = protectiveOrdersFor(book, {

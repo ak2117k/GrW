@@ -183,10 +183,21 @@ export class ExitNoiseRepository {
     return rows.map((r) => ({ id: r.id, want: r.want, exitAt: r.exit_at, underlyingAtExit: num(r.underlying_at_exit), underlyingExchange: r.underlying_exchange, underlyingToken: r.underlying_token }));
   }
 
-  async setFollow(id: string, f: { after15m: number | null; after30m: number | null; maxFavour30m: number | null; maxAgainst30m: number | null }, at: Date): Promise<void> {
+  /**
+   * Close a read's follow-up. `source` (which bars filled it: candles_1m / the broker's 1m history /
+   * none) is kept on the row as read.follow — no new column, no Prisma regeneration.
+   */
+  async setFollow(
+    id: string,
+    f: { after15m: number | null; after30m: number | null; maxFavour30m: number | null; maxAgainst30m: number | null },
+    at: Date,
+    source?: Record<string, unknown>,
+  ): Promise<void> {
+    const follow = JSON.stringify(source ?? {});
     await this.prisma.$executeRaw`
       UPDATE "exit_noise_reads" SET "underlying_after_15m" = ${f.after15m}, "underlying_after_30m" = ${f.after30m},
-        "max_favour_30m" = ${f.maxFavour30m}, "max_against_30m" = ${f.maxAgainst30m}, "followed_at" = ${at}
+        "max_favour_30m" = ${f.maxFavour30m}, "max_against_30m" = ${f.maxAgainst30m}, "followed_at" = ${at},
+        "read" = COALESCE("read", '{}'::jsonb) || jsonb_build_object('follow', ${follow}::jsonb)
       WHERE id = ${id} AND followed_at IS NULL`;
   }
 }

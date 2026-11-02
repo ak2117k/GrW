@@ -96,6 +96,44 @@ describe('NewsImpactService — batched layer 2', () => {
   });
 });
 
+describe('NewsImpactService — code guards over the reply (prompt v2)', () => {
+  it('a recap headline is stored NEUTRAL / LOW / priced in, whatever the model said; model tagged with the prompt version', async () => {
+    const { svc, repo } = setup({
+      clusters: [cluster('w1', { headline: 'Why is the stock market down today? Sensex drops over 600 points, Nifty below 22,400' })],
+      reply: { items: [item('w1', { direction: 'BEAR', magnitude: 'MED', affected: { symbols: [], sectors: [], index: 'NIFTY' } })] },
+    });
+    await svc.run(NOW);
+    expect(repo.upsertImpact).toHaveBeenCalledWith(
+      expect.objectContaining({ clusterId: 'w1', direction: 'NEUTRAL', magnitude: 'LOW', pricedIn: true }),
+      'claude-haiku-5-5#v2', 1, expect.any(Number), NOW,
+    );
+    expect(repo.setClusterSentiment).toHaveBeenCalledWith('w1', 'neutral', 0);
+  });
+
+  it('a crude + index reply drops both targets (no reaction row, no HIGH alert on NIFTY)', async () => {
+    const { svc, repo, events } = setup({
+      held: [],
+      reply: { items: [item('c1', { direction: 'BULL', magnitude: 'HIGH', affected: { symbols: ['CRUDEOIL'], sectors: [], index: 'NIFTY' } })] },
+    });
+    await svc.run(NOW);
+    expect(repo.createReaction).not.toHaveBeenCalled();
+    expect(events.emit).not.toHaveBeenCalled();
+  });
+
+  it('the reaction is anchored at the read (analysed), not the publish time', async () => {
+    const { svc, repo } = setup({ reply: { items: [item('c1', { magnitude: 'LOW' })] } });
+    await svc.run(NOW);
+    expect(repo.createReaction).toHaveBeenCalledWith(expect.objectContaining({ anchorAt: NOW, anchorIsOpen: false }));
+  });
+
+  it('read after the close → anchored at the next open', async () => {
+    const evening = new Date('2026-10-23T13:30:00Z'); // Fri 19:00 IST
+    const { svc, repo } = setup({ clusters: [cluster('c1', { firstSeen: new Date('2026-10-23T09:30:00Z'), lastSeen: evening })], reply: { items: [item('c1', { magnitude: 'LOW' })] } });
+    await svc.run(evening);
+    expect(repo.createReaction).toHaveBeenCalledWith(expect.objectContaining({ anchorAt: new Date('2026-10-26T03:45:00Z'), anchorIsOpen: true, judgeSession: '2026-10-26' }));
+  });
+});
+
 describe('NewsImpactService — HIGH impact wake + alert', () => {
   it('emits news.impact.high once per cluster for a held symbol', async () => {
     const { svc, events } = setup({ reply: { items: [item('c1')] } });

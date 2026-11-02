@@ -4,7 +4,7 @@ import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { istYmd } from '../../market-cues/fetchers/ist-dates';
 import { istMidnightOf } from '../../night-report/domain/night-report.logic';
 import type { SessionClock } from '../../market-hub/session-clock';
-import { atrOf, isComplete, mergePoints, pointsFrom, type SessionSpan } from '../domain/reaction';
+import { atrOf, isComplete, mergePoints, pointsFrom, type ReactionPoints, type SessionSpan } from '../domain/reaction';
 import { NEWS_IMPACT_CONFIG, type NewsImpactConfig } from '../news-impact.config';
 import { NewsImpactRepository, type StoredReaction } from '../news-impact.repository';
 import { NEWS_IMPACT_CLOCK } from './news-impact.service';
@@ -77,13 +77,31 @@ export class NewsReactionService {
     const until = Math.min(now.getTime(), (next ?? session).closeAt);
     const bars = await this.repo.minuteBars(r.symbol, new Date(session.openAt), new Date(until));
     const found = pointsFrom(bars, r.anchorAt.getTime(), r.anchorIsOpen, session, next, now.getTime());
-    const merged = mergePoints(pick(r), found);
+    const merged = await this.withDailyCloses(r, mergePoints(pick(r), found), session, next, now);
     const atr = r.atr ?? atrOf(await this.repo.dailyBars(r.symbol, new Date(session.openAt)).catch(() => []));
     const giveUp = now.getTime() > (next ?? session).closeAt + GIVE_UP_AFTER_MS;
     const changed = JSON.stringify(merged) !== JSON.stringify(pick(r)) || atr !== r.atr || giveUp || isComplete(merged);
     if (!changed) return false;
     await this.repo.updateReaction(r.id, { ...merged, atr, complete: isComplete(merged) || giveUp }, now);
     return true;
+  }
+
+  /**
+   * DAYS horizon only needs the two session closes: a stock without 1m bars falls back to its `candles`
+   * 1d closes (prod 26 Oct – 2 Nov: 271 directional DAYS stock reactions, ~85 % without a 1m bar). Only
+   * for sessions that have closed; the index / MBM series always have 1m bars.
+   */
+  private async withDailyCloses(r: StoredReaction, p: ReactionPoints, session: SessionSpan, next: SessionSpan | null, now: Date): Promise<ReactionPoints> {
+    if (r.kind !== 'STOCK' || r.horizon !== 'DAYS') return p;
+    const day = (s: SessionSpan) => istMidnightOf(istYmd(new Date(s.openAt)));
+    const out = { ...p };
+    try {
+      if (out.pClose === null && session.closeAt <= now.getTime()) out.pClose = await this.repo.dailyCloseOn(r.symbol, day(session));
+      if (out.pNextClose === null && next && next.closeAt <= now.getTime()) out.pNextClose = await this.repo.dailyCloseOn(r.symbol, day(next));
+    } catch {
+      return p;
+    }
+    return out;
   }
 }
 

@@ -16,9 +16,10 @@ function row(o: Partial<StoredReaction> = {}): StoredReaction {
   };
 }
 
-function setup(bars: Array<{ t: number; open: number; close: number }>) {
+function setup(bars: Array<{ t: number; open: number; close: number }>, r: StoredReaction = row(), daily: Record<string, number> = {}) {
   const repo = {
-    incompleteReactions: jest.fn(async () => [row()]),
+    incompleteReactions: jest.fn(async () => [r]),
+    dailyCloseOn: jest.fn(async (_s: string, day: Date) => daily[day.toISOString()] ?? null),
     minuteBars: jest.fn(async () => bars),
     dailyBars: jest.fn(async () => Array.from({ length: 10 }, () => ({ high: 25_200, low: 25_000, close: 25_100 }))),
     updateReaction: jest.fn(async () => undefined),
@@ -44,5 +45,23 @@ describe('NewsReactionService — filling reactions', () => {
     const late = new Date('2026-10-28T10:00:00Z');
     await svc.fill(late);
     expect(repo.updateReaction).toHaveBeenCalledWith('r1', expect.objectContaining({ p0: null, complete: true }), late);
+  });
+
+  it('a DAYS stock reaction without 1m bars takes its session closes from the daily candles', async () => {
+    // Session 23 Oct (IST midnight 2026-10-22T18:30Z) and the next, Mon 26 Oct (2026-10-25T18:30Z).
+    const r = row({ symbol: 'MARUTI', kind: 'STOCK', horizon: 'DAYS', judgeSession: '2026-10-26' });
+    const { svc, repo } = setup([], r, { '2026-10-22T18:30:00.000Z': 16_000, '2026-10-25T18:30:00.000Z': 16_240 });
+    const now = new Date('2026-10-26T11:00:00Z'); // after Monday's close
+    await svc.fill(now);
+    expect(repo.updateReaction).toHaveBeenCalledWith('r1', expect.objectContaining({ p0: null, pClose: 16_000, pNextClose: 16_240 }), now);
+  });
+
+  it('no daily fallback for INTRADAY or index rows, nor before the session closed', async () => {
+    const { svc, repo } = setup([], row({ symbol: 'MARUTI', kind: 'STOCK', horizon: 'INTRADAY' }), { '2026-10-22T18:30:00.000Z': 16_000 });
+    await svc.fill(new Date('2026-10-26T11:00:00Z'));
+    expect(repo.dailyCloseOn).not.toHaveBeenCalled();
+    const early = setup([], row({ symbol: 'MARUTI', kind: 'STOCK', horizon: 'DAYS' }), { '2026-10-22T18:30:00.000Z': 16_000 });
+    await early.svc.fill(new Date(ANCHOR.getTime() + 60 * 60_000));
+    expect(early.repo.dailyCloseOn).not.toHaveBeenCalled();
   });
 });

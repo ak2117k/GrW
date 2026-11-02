@@ -311,7 +311,33 @@ export class NewsImpactRepository {
       select: { timestamp: true, open: true, close: true },
       orderBy: { timestamp: 'asc' },
     });
-    return rows.map((b) => ({ t: b.timestamp.getTime(), open: b.open, close: b.close }));
+    if (rows.length > 0) return rows.map((b) => ({ t: b.timestamp.getTime(), open: b.open, close: b.close }));
+    // The market hub's 1m store (candles_1m, the live feed's tokens): prod 26 Oct – 2 Nov 85 % of stock
+    // reactions had no bar in mbm_bars_1m / candles; candles_1m covers some of them.
+    const token = await this.cashToken(symbol);
+    if (!token) return [];
+    const hub = await this.prisma.$queryRaw<Array<{ ts: Date; open: number; close: number }>>`
+      SELECT ts, open, close FROM "candles_1m"
+      WHERE exchange = 'NSE' AND token = ${token}
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+      ORDER BY ts`;
+    return hub.map((b) => ({ t: new Date(b.ts).getTime(), open: Number(b.open), close: Number(b.close) }));
+  }
+
+  /**
+   * A stock's daily close on an IST session date from `candles` 1d (bars stamped at IST midnight, UTC
+   * without zone) — the DAYS-horizon fallback when there are no 1m bars. null when none.
+   */
+  async dailyCloseOn(symbol: string, sessionStart: Date): Promise<number | null> {
+    if (symbol === 'NIFTY' || symbol === 'BANKNIFTY') return null;
+    const inst = await this.cashInstrumentId(symbol);
+    if (!inst) return null;
+    const row = await this.prisma.candle.findFirst({
+      where: { instrumentId: inst, timeframe: '1d', timestamp: { gte: sessionStart, lt: new Date(sessionStart.getTime() + 86_400_000) } },
+      select: { close: true },
+      orderBy: { timestamp: 'asc' },
+    });
+    return row && row.close > 0 ? row.close : null;
   }
 
   /** Daily OHLC (oldest first) for ATR: `candles` 1d for stocks, else mbm 1m aggregated per IST day. */
@@ -338,15 +364,23 @@ export class NewsImpactRepository {
     return rows.map((r) => ({ high: Number(r.high), low: Number(r.low), close: Number(r.close) }));
   }
 
-  private readonly cashIds = new Map<string, string | null>();
+  private readonly cashIds = new Map<string, { id: string; token: string } | null>();
 
-  private async cashInstrumentId(symbol: string): Promise<string | null> {
+  private async cashInstrument(symbol: string): Promise<{ id: string; token: string } | null> {
     if (this.cashIds.has(symbol)) return this.cashIds.get(symbol) ?? null;
     const row = await this.prisma.instrument.findFirst({
       where: { exchange: 'NSE', OR: [{ symbol: `${symbol}-EQ` }, { symbol }] },
-      select: { id: true },
+      select: { id: true, token: true },
     });
-    this.cashIds.set(symbol, row?.id ?? null);
-    return row?.id ?? null;
+    this.cashIds.set(symbol, row ?? null);
+    return row ?? null;
+  }
+
+  private async cashInstrumentId(symbol: string): Promise<string | null> {
+    return (await this.cashInstrument(symbol))?.id ?? null;
+  }
+
+  private async cashToken(symbol: string): Promise<string | null> {
+    return (await this.cashInstrument(symbol))?.token ?? null;
   }
 }

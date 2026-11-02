@@ -6,7 +6,10 @@ import {
   impactRank,
   impactRunDue,
   impactSentiment,
+  NEWS_IMPACT_PROMPT_VERSION,
   NEWS_IMPACT_SCHEMA,
+  NEWS_IMPACT_SYSTEM,
+  normaliseTargets,
   pickBatch,
   validateImpactReply,
   type ClusterForImpact,
@@ -123,5 +126,45 @@ describe('impact → sentiment, rank, targets, cadence', () => {
     expect(impactRunDue(NOW, 11 * 60, false, last)).toBe(false);
     expect(impactRunDue(NOW, 18 * 60, true, new Date(NOW.getTime() - 2 * 3_600_000))).toBe(true);
     expect(impactRunDue(NOW, 18 * 60, true, null)).toBe(true);
+  });
+});
+
+describe('prompt v2 (2026-11-02): one direction per target set, crude guidance, recaps', () => {
+  const base = {
+    clusterId: 'c1', direction: 'BULL' as const, magnitude: 'MED' as const, horizon: 'DAYS' as const,
+    affected: { symbols: ['CRUDEOIL'], sectors: [], index: 'NIFTY' as const }, pricedIn: false, confidence: 0.6, oneLine: 'Oil spike pressures equities.',
+  };
+
+  it('the system prompt carries the version, the crude-vs-index rule and the oil-direction guidance', () => {
+    expect(NEWS_IMPACT_PROMPT_VERSION).toBe('v2');
+    expect(NEWS_IMPACT_SYSTEM).toMatch(/TRUE FOR EVERY TARGET/);
+    expect(NEWS_IMPACT_SYSTEM).toMatch(/ceasefire[^\n]*CRUDEOIL BEAR/);
+    expect(NEWS_IMPACT_SYSTEM).toMatch(/Hormuz[^\n]*CRUDEOIL BULL/);
+    expect(NEWS_IMPACT_SYSTEM).toMatch(/top gainers and losers/);
+  });
+
+  it('a directional reply naming a commodity AND an index keeps neither (stocks stay)', () => {
+    // Prod 28 Oct: "Indian shares set for lower open as oil rise weighs" → BULL [CRUDEOIL] + NIFTY (crude's direction).
+    expect(normaliseTargets(base).affected).toEqual({ symbols: [], sectors: [], index: null });
+    expect(normaliseTargets({ ...base, affected: { symbols: ['CRUDEOIL', 'ONGC'], sectors: [], index: 'NIFTY' } }).affected).toEqual({ symbols: ['ONGC'], sectors: [], index: null });
+    // NEUTRAL: nothing contradicts, kept.
+    expect(normaliseTargets({ ...base, direction: 'NEUTRAL' }).affected.index).toBe('NIFTY');
+  });
+
+  it('commodity aliases / minis → the MCX benchmark; untouched items are returned as-is', () => {
+    expect(normaliseTargets({ ...base, affected: { symbols: ['BRENT', 'CRUDEOILM'], sectors: [], index: null } }).affected.symbols).toEqual(['CRUDEOIL']);
+    const plain = { ...base, affected: { symbols: ['TCS'], sectors: [], index: 'NIFTY' as const } };
+    expect(normaliseTargets(plain)).toBe(plain);
+  });
+
+  it('a held CRUDEOILM position is a HIGH target of a CRUDEOIL story', () => {
+    expect(highImpactTargets({ magnitude: 'HIGH', affected: { symbols: ['CRUDEOIL'], sectors: [], index: null } }, new Set(['CRUDEOILM']))).toEqual(['CRUDEOIL']);
+  });
+
+  it('a recap cluster is flagged to the model in the batch message', () => {
+    const msg = buildImpactUserMessage([cl('w1', { headline: 'Sensex, Nifty fall as oil tops $116; midcaps crash' }), cl('n1', { headline: 'L&T wins ₹5,000 crore metro order' })]);
+    const [w, n] = msg.split('clusterId: ').slice(1);
+    expect(w).toMatch(/note: wrap headline \(a recap\) — answer NEUTRAL, LOW, pricedIn true/);
+    expect(n).not.toMatch(/note:/);
   });
 });

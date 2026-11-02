@@ -6,6 +6,8 @@
 import type { MaterialType } from './announcement-classifier';
 import { NSE_ANNOUNCEMENTS } from './announcement-classifier';
 import { RELEVANT_AT } from './relevance';
+import { recapKind } from './recap';
+import { MCX_BENCHMARKS_V2, MCX_PARENT_V2 } from '../../news-events/keys';
 
 export const DIRECTIONS = ['BULL', 'BEAR', 'NEUTRAL'] as const;
 export const MAGNITUDES = ['LOW', 'MED', 'HIGH'] as const;
@@ -67,12 +69,30 @@ export function pickBatch(clusters: readonly ClusterForImpact[], now: Date, cap 
     .slice(0, cap);
 }
 
-export const NEWS_IMPACT_SYSTEM = `You are a markets desk analyst for an Indian F&O trader (NIFTY / BANKNIFTY options, F&O stocks, MCX).
-For EACH news story you are given, judge its likely price impact. Be conservative: most news is NEUTRAL or LOW.
-- direction: BULL / BEAR / NEUTRAL for the affected instruments (for a market-wide story, for the Indian index).
-- magnitude: LOW (noise, < 0.5 ATR), MED (a noticeable move), HIGH (a gap / trend-changing move; rare — results surprises, big orders vs market cap, M&A, regulatory bans, RBI / Fed surprises, war).
+/**
+ * Bump when NEWS_IMPACT_SYSTEM changes: stored on every news_impacts row as `<model>#<version>` (the
+ * `model` column) so the self-review can split hit rates by prompt. v1 = 2026-10-24 original.
+ * v2 (2026-11-02): one direction per target set (crude vs the Indian index), commodity symbols named,
+ * oil-direction guidance (diplomacy / ceasefire ⇒ crude BEAR; strikes / Hormuz ⇒ crude BULL), recaps
+ * and already-realised moves NEUTRAL (also enforced in code: recap.ts).
+ */
+export const NEWS_IMPACT_PROMPT_VERSION = 'v2';
+
+export const NEWS_IMPACT_SYSTEM = `You are a markets desk analyst for an Indian F&O trader (NIFTY / BANKNIFTY options, F&O stocks, MCX crude oil / gold / silver).
+For EACH news story you are given, judge its likely price impact FROM NOW ON (not the move that already happened). Most news is NEUTRAL or LOW.
+- direction: BULL / BEAR / NEUTRAL. It must be TRUE FOR EVERY TARGET you list (affected.symbols AND affected.index).
+  Crude and the Indian index usually move OPPOSITE ways (India imports oil: oil up ⇒ NIFTY / OMCs / paints / airlines down; ONGC / OIL up).
+  So for an oil-price story list CRUDEOIL in affected.symbols with crude's direction and set affected.index to null (say the index effect in oneLine);
+  only list NIFTY / BANKNIFTY (with the index's own direction) when the story is mainly about Indian equities.
+- magnitude: LOW (noise, < 0.5 ATR), MED (a noticeable move), HIGH (a gap / trend-changing move; rare — results surprises, big orders vs market cap, M&A, regulatory bans, RBI / Fed surprises, war start / end, a supply shock).
 - horizon: INTRADAY (fades today), DAYS, WEEKS.
-- affected.symbols: NSE symbols directly affected (upper case, ≤ 5); affected.sectors: sector names; affected.index: NIFTY, BANKNIFTY or null.
+- affected.symbols: NSE / MCX symbols directly affected (upper case, ≤ 5). Commodities by MCX name: CRUDEOIL (crude / Brent / WTI / OPEC / oil prices), NATURALGAS, GOLD, SILVER, COPPER. affected.sectors: sector names; affected.index: NIFTY, BANKNIFTY or null.
+- Oil / geopolitics: talks, diplomacy, ceasefire, a peace deal or "war ending" signals, OPEC+ output hikes, SPR releases, inventory builds ⇒ CRUDEOIL BEAR.
+  Strikes, escalation, attacks on refineries / tankers, Strait of Hormuz / Red Sea disruption, sanctions on producers, OPEC+ cuts ⇒ CRUDEOIL BULL.
+  A war-ending or supply-shock story is MED or HIGH for CRUDEOIL, not LOW, unless it only repeats what an earlier story already said.
+- Recaps are NEUTRAL with pricedIn true: market wraps ("Sensex, Nifty fall as ..."), live blogs, index roundups, "top gainers and losers", "stocks to watch / in news" lists,
+  previews / outlooks ("things that will decide the market", "GIFT Nifty signals ..."), and headlines that describe an already-realised move ("52-week low", "down 20% in a month", "worst week").
+  Do not give a symbol a direction merely because it is named in such a list.
 - pricedIn: true when the story is old, widely expected, or a recap of a move that already happened.
 - confidence: 0..1. oneLine: ≤ 20 words, what it means for price.
 Use only the text given. Answer every clusterId exactly once. Strict JSON only.`;
@@ -122,6 +142,7 @@ export function buildImpactUserMessage(
   batch: ReadonlyArray<ClusterForImpact & { titles?: string[]; summary?: string | null }>,
 ): string {
   const blocks = batch.map((c) => {
+    const recap = recapKind(c.headline);
     const lines = [
       `clusterId: ${c.id}`,
       `headline: ${cut(c.headline.replace(/\s+/g, ' '), HEADLINE_MAX)}`,
@@ -132,6 +153,7 @@ export function buildImpactUserMessage(
       ...(c.summary ? [`summary: ${cut(c.summary.replace(/\s+/g, ' '), SUMMARY_MAX)}`] : []),
       `type: ${c.materialType}; sources: ${c.sourceCount} (${c.sources.slice(0, 4).join(', ')}); first seen ${istStamp(c.firstSeen)} IST`,
       `tags: instruments=[${c.instruments.slice(0, 8).join(', ')}] sectors=[${c.sectors.slice(0, 4).join(', ')}] indices=[${c.indices.join(', ')}]`,
+      ...(recap ? [`note: ${recap.toLowerCase().replace('_', ' ')} headline (a recap) — answer NEUTRAL, LOW, pricedIn true`] : []),
     ];
     return lines.join('\n');
   });
@@ -193,6 +215,33 @@ export function validateImpactReply(reply: unknown, batchIds: readonly string[])
   return out;
 }
 
+const MCX_NAMES: ReadonlySet<string> = new Set([...MCX_BENCHMARKS_V2, ...Object.keys(MCX_PARENT_V2)]);
+/** Common spellings the model uses for a commodity → its MCX benchmark. */
+const COMMODITY_ALIAS: Readonly<Record<string, string>> = { BRENT: 'CRUDEOIL', WTI: 'CRUDEOIL', CRUDE: 'CRUDEOIL', OIL: 'CRUDEOIL', CRUDE_OIL: 'CRUDEOIL', NATGAS: 'NATURALGAS' };
+
+/**
+ * One direction must hold for every target (prompt v2). Prod v1 (26 Oct – 2 Nov) mixed them: "Indian
+ * shares set for lower open as oil rise weighs" came back BULL with [CRUDEOIL] + index NIFTY — crude's
+ * direction, judged (and used by the entry engine) as a NIFTY BULL call. Crude and the index nearly
+ * always move opposite ways and the reply cannot say whose direction it is, so a reply naming BOTH a
+ * commodity and an index keeps neither (stocks stay): an ambiguous call is worse than none. Commodity
+ * minis / aliases → the MCX benchmark (CRUDEOILM → CRUDEOIL, BRENT → CRUDEOIL) so consumers matching
+ * on CRUDEOIL see them.
+ */
+export function normaliseTargets(item: ImpactItem): ImpactItem {
+  let symbols = [...new Set(item.affected.symbols.map((s) => {
+    const a = COMMODITY_ALIAS[s] ?? s;
+    return MCX_PARENT_V2[a] ?? a;
+  }))].slice(0, 5);
+  let index = item.affected.index;
+  if (index !== null && item.direction !== 'NEUTRAL' && symbols.some((s) => MCX_NAMES.has(s))) {
+    symbols = symbols.filter((s) => !MCX_NAMES.has(s));
+    index = null;
+  }
+  if (index === item.affected.index && symbols.length === item.affected.symbols.length && symbols.every((s, i) => s === item.affected.symbols[i])) return item;
+  return { ...item, affected: { ...item.affected, symbols, index } };
+}
+
 export const MAGNITUDE_WEIGHT: Readonly<Record<Magnitude, number>> = { LOW: 0.3, MED: 0.6, HIGH: 0.9 };
 
 /** The article sentiment an impact implies (replaces the keyword guess once the model has read the story). */
@@ -226,7 +275,9 @@ export function highImpactTargets(
 ): string[] {
   if (i.magnitude !== 'HIGH') return [];
   const out = new Set<string>();
-  for (const s of i.affected.symbols) if (held.has(s)) out.add(s);
+  // A held CRUDEOILM / GOLDM position is concerned by a CRUDEOIL / GOLD story.
+  const heldNames = new Set([...held].flatMap((h) => [h, MCX_PARENT_V2[h] ?? h]));
+  for (const s of i.affected.symbols) if (heldNames.has(s)) out.add(s);
   if (i.affected.index) out.add(i.affected.index);
   return [...out];
 }

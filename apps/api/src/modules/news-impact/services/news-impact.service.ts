@@ -15,6 +15,8 @@ import {
   impactRank,
   impactRunDue,
   impactSentiment,
+  NEWS_IMPACT_PROMPT_VERSION,
+  normaliseTargets,
   pickBatch,
   priorityRunDue,
   touchesPreOpenUniverse,
@@ -23,6 +25,7 @@ import {
   type ImpactItem,
 } from '../domain/impact';
 import { RELEVANT_AT } from '../domain/relevance';
+import { applyRecapGuard, recapKind } from '../domain/recap';
 import { isIndexSymbol, judgeSessionOf } from '../domain/reaction';
 import { NEWS_IMPACT_CONFIG, type NewsImpactConfig } from '../news-impact.config';
 import { NEWS_IMPACT_HIGH_EVENT, type NewsImpactHighEvent } from '../news-impact.ports';
@@ -116,20 +119,21 @@ export class NewsImpactService {
       await this.repo.bumpAttempts(batch.map((c) => c.id));
       throw e;
     }
-    const items = validateImpactReply(reply, batch.map((c) => c.id));
+    // Code guards over the reply (prompt v2): recap headlines carry no direction; one direction per target set.
+    const byId = new Map(batch.map((c) => [c.id, c]));
+    const items = validateImpactReply(reply, batch.map((c) => c.id)).map((i) => normaliseTargets(applyRecapGuard(i, recapKind(byId.get(i.clusterId)?.headline))));
     const got = new Set(items.map((i) => i.clusterId));
     await this.repo.bumpAttempts(batch.filter((c) => !got.has(c.id)).map((c) => c.id));
 
-    const byId = new Map(batch.map((c) => [c.id, c]));
     let held: Set<string> | null = null;
     let high = 0;
     for (const item of items) {
       const c = byId.get(item.clusterId)!;
       try {
-        const saved = await this.repo.upsertImpact(item, this.cfg.model, c.sourceCount, impactRank(item, c.relevance, c.sourceCount), now);
+        const saved = await this.repo.upsertImpact(item, `${this.cfg.model}#${NEWS_IMPACT_PROMPT_VERSION}`, c.sourceCount, impactRank(item, c.relevance, c.sourceCount), now);
         const s = impactSentiment(item);
         await this.repo.setClusterSentiment(c.id, s.sentiment, s.score);
-        await this.recordReactions(saved.id, c, item);
+        await this.recordReactions(saved.id, c, item, now);
         if (item.magnitude === 'HIGH' && this.cfg.alerts && saved.alertedAt === null) {
           held ??= await this.repo.heldUnderlyings().catch(() => new Set<string>());
           if (await this.highImpact(saved.id, c, item, held, now)) high++;
@@ -142,12 +146,19 @@ export class NewsImpactService {
     return { ran: true, sent: batch.length, stored: items.length, high };
   }
 
-  /** One reaction row per affected stock (≤ 3, no commodities) and the index. */
-  private async recordReactions(impactId: string, c: ClusterForImpact, item: ImpactItem): Promise<void> {
+  /**
+   * One reaction row per affected stock (≤ 3, no commodities) and the index. The anchor is when the
+   * read was AVAILABLE — max(first seen, analysed) — not the publish time (2026-11-02): prod 26 Oct –
+   * 2 Nov the in-session read came p50 ~20 min after publish and the index had already moved ~29 bp
+   * in the called direction by then, which the old publish-time anchor credited to the call. A
+   * decision can only act from the read on, so that is the window judged.
+   */
+  private async recordReactions(impactId: string, c: ClusterForImpact, item: ImpactItem, analysedAt: Date): Promise<void> {
     const symbols = [...item.affected.symbols.filter((s) => !COMMODITIES.has(s) && !isIndexSymbol(s)).slice(0, REACTION_SYMBOLS), ...(item.affected.index ? [item.affected.index] : [])];
     if (symbols.length === 0) return;
-    const open = this.clock.isOpen('NSE', c.firstSeen);
-    const anchor = open ? c.firstSeen : this.clock.nextOpen('NSE', c.firstSeen);
+    const readAt = new Date(Math.max(c.firstSeen.getTime(), analysedAt.getTime()));
+    const open = this.clock.isOpen('NSE', readAt);
+    const anchor = open ? readAt : this.clock.nextOpen('NSE', readAt);
     if (!anchor) return;
     const w = this.clock.tradingWindow('NSE', anchor);
     const closeAt = w ? new Date(istMidnightOf(istYmd(anchor)).getTime() + w.closeMin * 60_000) : anchor;

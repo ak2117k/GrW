@@ -83,6 +83,9 @@ export interface ImpactRow {
   material: boolean;
   materialType: string | null;
   headline: string;
+  /** The cluster's sources (outlets) and tagged instruments — read by the news theme; optional (older fixtures). */
+  sources?: string[];
+  instruments?: string[];
 }
 
 /** Which impacts concern an underlying. Broad-market (index NIFTY) news counts for NIFTY and SENSEX. */
@@ -127,7 +130,19 @@ export interface NewsReading {
   /** Minutes since the freshest counted story was first seen; null when none. */
   freshestAgeMin: number | null;
   summary: string;
+  /**
+   * Which rule made the news material (2026-11-02): STORY = the original per-story rule (a MED/HIGH
+   * story or a material cluster in the last 60 min); THEME = the news theme score (several same-side
+   * stories / sources in 3 h, news-theme.ts); PRE_OPEN = a strong pre-open outlook bias in the opening
+   * window. null / absent = not material. Set by `withNewsPaths` (news-paths.ts).
+   */
+  materialPath?: NewsMaterialPath | null;
+  /** The extra-path reads behind it (recorded on the decision row). */
+  theme?: unknown;
+  preOpen?: unknown;
 }
+
+export type NewsMaterialPath = 'STORY' | 'THEME' | 'PRE_OPEN';
 
 const MIN = 60_000;
 const r4 = (x: number) => Math.round(x * 10_000) / 10_000;
@@ -182,6 +197,7 @@ export function newsReading(impacts: readonly ImpactRow[], underlying: string, a
     material,
     items,
     freshestAgeMin,
+    materialPath: material ? 'STORY' : null,
     summary: `${lean.toLowerCase()} score ${score} from ${items.length} stor${items.length === 1 ? 'y' : 'ies'}${material ? ' (material)' : ''}; latest: ${top.direction} ${top.magnitude} ${top.confidence} "${top.headline.slice(0, 80)}"`,
   };
 }
@@ -350,6 +366,7 @@ export interface EntryDecision {
     news: number;
     newsLean: ComponentLean;
     newsMaterial: boolean;
+    newsMaterialPath: NewsMaterialPath | null;
     trendLean: ComponentLean;
     vwapPct: number | null;
     ema15Slope: number | null;
@@ -374,6 +391,7 @@ export function entryDecision(i: EntryInput): EntryDecision {
     news: i.news.score,
     newsLean: i.news.lean,
     newsMaterial: i.news.material,
+    newsMaterialPath: i.news.material ? i.news.materialPath ?? 'STORY' : null,
     trendLean: i.trend.lean,
     vwapPct: i.trend.vwapPct,
     ema15Slope: i.trend.ema15Slope,
@@ -392,9 +410,9 @@ export function entryDecision(i: EntryInput): EntryDecision {
     reasons.push(`news: ${i.news.lean} — ${i.news.summary}`);
   } else if (!i.news.material) {
     ok = false;
-    reasons.push(`news: ${dir} but not material (needs a ${ENTRY_ENGINE.newsMaterialMagnitudes.join('/')} story on that side) — ${i.news.summary}`);
+    reasons.push(`news: ${dir} but not material (needs a ${ENTRY_ENGINE.newsMaterialMagnitudes.join('/')} story on that side, a material theme or a strong pre-open bias) — ${i.news.summary}`);
   } else {
-    reasons.push(`news: ${dir} ✓ — ${i.news.summary}`);
+    reasons.push(`news: ${dir} ✓${i.news.materialPath ? ` (material via ${i.news.materialPath})` : ''} — ${i.news.summary}`);
   }
 
   if (i.trend.lean === 'NO_DATA' || i.trend.lean === 'NEUTRAL') {

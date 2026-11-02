@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import type { Bar1m, ImpactRow } from './domain/entry-decision';
+import type { PreOpenBiasInput } from './domain/news-paths';
 import { ENGINE_ENTRY_STRATEGY, ENGINE_UNDERLYING_TAG, type EntryEngineMode } from './entry-engine.config';
 
 export interface DecisionRow {
@@ -31,7 +32,7 @@ export class EntryEngineRepository {
   async impacts(from: Date, to: Date): Promise<ImpactRow[]> {
     const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
       SELECT i.cluster_id, i.analysed_at, c.first_seen, i.direction, i.magnitude, i.confidence, i.priced_in, i.symbols, i.sectors,
-        i.index_name, c.material, c.material_type, c.headline
+        i.index_name, c.material, c.material_type, c.headline, c.sources, c.instruments
       FROM "news_impacts" i JOIN "news_clusters" c ON c.id = i.cluster_id
       WHERE i.analysed_at > ${from} AND i.analysed_at <= ${to}
       ORDER BY i.analysed_at DESC LIMIT 500`;
@@ -49,7 +50,36 @@ export class EntryEngineRepository {
       material: r.material === true,
       materialType: typeof r.material_type === 'string' ? r.material_type : null,
       headline: String(r.headline ?? ''),
+      sources: Array.isArray(r.sources) ? (r.sources as string[]) : [],
+      instruments: Array.isArray(r.instruments) ? (r.instruments as string[]) : [],
     }));
+  }
+
+  /**
+   * The latest pre-open outlook for (underlying, IST session date) — pre_open_outlooks, written by the
+   * pre-open-outlook module (migration 20261102130000_global_price_snapshots). null when none (or the
+   * table is not there yet): the PRE_OPEN news path then simply does not apply.
+   */
+  async preOpenOutlook(underlying: string, sessionDate: string): Promise<PreOpenBiasInput | null> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+        SELECT underlying, to_char(session_date, 'YYYY-MM-DD') AS session_date, bias, confidence, at, summary FROM "pre_open_outlooks"
+        WHERE underlying = ${underlying.toUpperCase()} AND session_date = ${sessionDate}::date
+        ORDER BY at DESC LIMIT 1`;
+      const r = rows[0];
+      if (!r) return null;
+      const bias = String(r.bias);
+      return {
+        underlying: String(r.underlying),
+        sessionDate: String(r.session_date),
+        bias: bias === 'BULLISH' || bias === 'BEARISH' ? bias : 'NEUTRAL',
+        confidence: num(r.confidence),
+        at: (r.at as Date).toISOString(),
+        summary: String(r.summary ?? ''),
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** The hub's 1-minute bars (candles_1m). */

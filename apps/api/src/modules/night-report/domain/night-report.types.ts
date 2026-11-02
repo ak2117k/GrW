@@ -12,6 +12,7 @@ import type { BigMoveWatchView } from '../../stock-move/stock-move.service';
 import type { TradeSetupsView } from '../../trade-setup/domain/trade-setup.view';
 import type { InfoListItem, UnderlyingSentiment } from '../../signal-intake/domain/sentiment';
 import type { NewsDigestView } from '../../news-impact/news-impact.ports';
+import type { PreOpenOutlookReport } from '../../pre-open-outlook/pre-open-outlook.ports';
 
 export type { NewsDigestItem, NewsDigestView } from '../../news-impact/news-impact.ports';
 
@@ -283,4 +284,10 @@ export interface NightReport {
    * magnitude, affected, sources, reaction so far). `{ error }` on failure, null when the module is not loaded.
    */
   newsDigest?: Section<NewsDigestView> | null;
+  /**
+   * Pre-open outlook (2026-11-02): per underlying (CRUDEOIL, NIFTY, BANKNIFTY) the bias, confidence, expected
+   * gap off the last close from the overnight global move, the news theme and top headlines. The 08:30 IST
+   * run when fresh, else a preview from stored data. `{ error }` on failure, null when the module is not loaded.
+   */
+  preOpenOutlook?: Section<PreOpenOutlookReport> | null;
 }

@@ -11,6 +11,8 @@ import type { InstrumentMasterLike, QuotesLike, SessionClockLike } from '../sign
 import { atmOption, engineContract, engineSignal, planEngineEntry } from './domain/engine-contract';
 import { chooseBars, ENGINE_UNIVERSE, ENGINE_WINDOW, istDayAt, istMinutes, readOi, sessionStartOf, wantFor } from './domain/engine-inputs';
 import { ENTRY_ENGINE, entryDecision, entryGuards, newsReading, trendReading, type EntryDecision, type GuardResult, type OiReading } from './domain/entry-decision';
+import { withNewsPaths } from './domain/news-paths';
+import { NEWS_THEME, newsTheme } from './domain/news-theme';
 import { ENTRY_ENGINE_CONFIG, type EntryEngineConfig } from './entry-engine.config';
 import { EntryEnginePaperService } from './entry-engine-paper.service';
 import { EntryEngineRepository } from './entry-engine.repository';
@@ -22,6 +24,7 @@ export const ENGINE_QUOTES = Symbol('ENGINE_QUOTES');
 export const ENGINE_SIGNAL_CONFIG = Symbol('ENGINE_SIGNAL_CONFIG');
 
 const MIN = 60_000;
+const istYmdOf = (d: Date) => new Date(d.getTime() + 5.5 * 3_600_000).toISOString().slice(0, 10);
 /** History read for the 1h EMA (≥ 11 hourly closes: two NSE sessions, over a weekend). */
 const BAR_HISTORY_DAYS = 6;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -107,12 +110,15 @@ export class EntryEngineService {
     const sessionStart = sessionStartOf(optionExchange, at);
     const line = await this.lineOf(underlying, at);
     const from = new Date(at.getTime() - BAR_HISTORY_DAYS * 24 * 60 * MIN);
-    const [impacts, hub, table] = await Promise.all([
-      this.repo.impacts(new Date(at.getTime() - ENTRY_ENGINE.newsLookbackMin * MIN), at),
+    // Impacts for the 60-min read AND the 3 h news theme; the day's pre-open outlook (08:30 IST).
+    const lookbackMin = Math.max(ENTRY_ENGINE.newsLookbackMin, NEWS_THEME.intraday.windowMin);
+    const [impacts, hub, table, preOpen] = await Promise.all([
+      this.repo.impacts(new Date(at.getTime() - lookbackMin * MIN), at),
       line ? this.repo.hubBars(line.exchange, line.token, from, at) : Promise.resolve([]),
       line ? this.repo.tableBars(line.exchange, line.token, from, at) : Promise.resolve([]),
+      this.repo.preOpenOutlook(underlying, istYmdOf(at)).catch(() => null),
     ]);
-    const news = newsReading(impacts, underlying, at);
+    const news = withNewsPaths(newsReading(impacts, underlying, at), newsTheme(impacts, underlying, at, NEWS_THEME.intraday), preOpen, at);
     const chosen = chooseBars(hub, table, sessionStart, at);
     const trend = trendReading(chosen.bars, at, sessionStart);
     const want = wantFor(news, trend);

@@ -46,6 +46,7 @@ import { mbmHeadline, normLine, type RelativeHorizon } from '../../mbm/domain/re
 import { channelSentiment, infoList } from '../../signal-intake/domain/sentiment';
 import type { ChannelViewsView } from '../domain/night-report.types';
 import { NEWS_DIGEST_SOURCE, type NewsDigestSource } from '../../news-impact/news-impact.ports';
+import { PRE_OPEN_OUTLOOK_REPORT, type PreOpenOutlookSource } from '../../pre-open-outlook/pre-open-outlook.ports';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
@@ -111,6 +112,8 @@ export class NightReportService {
     @Optional() @Inject(TRADE_SETUPS_REPORT) private readonly tradeSetupSource?: TradeSetupsReportSource,
     /** News impact digest (@Global news-impact module); absent ⇒ the section is null. */
     @Optional() @Inject(NEWS_DIGEST_SOURCE) private readonly newsDigestSource?: NewsDigestSource,
+    /** Pre-open outlook (@Global pre-open-outlook module); absent ⇒ the section is null. */
+    @Optional() @Inject(PRE_OPEN_OUTLOOK_REPORT) private readonly preOpenSource?: PreOpenOutlookSource,
   ) {}
 
   async build(userId: string, now: Date = new Date()): Promise<NightReport> {
@@ -150,6 +153,8 @@ export class NightReportService {
     const newsDigest = digestSource
       ? await this.safe('newsDigest', () => digestSource.digest(new Date(Math.min(from.getTime(), now.getTime() - DAY_MS)), now, 10))
       : null;
+    const preOpenSource = this.preOpenSource;
+    const preOpenOutlook = preOpenSource ? await this.safe('preOpenOutlook', () => preOpenSource.forReport(now)) : null;
 
     return {
       generatedAt: now.toISOString(),
@@ -168,6 +173,7 @@ export class NightReportService {
       tradeSetups,
       channelViews,
       newsDigest,
+      preOpenOutlook,
     };
   }
 

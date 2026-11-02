@@ -1,5 +1,6 @@
 -- Entry engine replay fixture export (READ-ONLY). One underlying-day as a single JSON document:
--- news impacts (+ cluster), the underlying line's 1m bars (candles_1m and the legacy `candles` 1m),
+-- news impacts (+ cluster, with its sources / instruments; from 72 h before the day so the pre-open
+-- outlook's news theme can read back to the last close over a weekend), the underlying line's 1m bars (candles_1m and the legacy `candles` 1m),
 -- the option chain's oi_snapshots for one expiry within a strike band, and the near-month future's
 -- OI + LTP. Fill the placeholders and run with a read-only transaction, e.g.
 --   sed -e 's/__U__/CRUDEOIL/;s/__D__/2026-10-29/;s/__LEX__/MCX/;s/__LTOK__/573422/;s/__OEX__/MCX/;s/__EXP__/2026-11-17/;s/__LO__/9000/;s/__HI__/10400/;s/__FUT__/CRUDEOIL19NOV26FUT/' \
@@ -32,9 +33,10 @@ tbl as (
   where i.exchange = p.lex and i.token = p.ltok and c.timeframe = '1m' and c.timestamp >= w.day0 - interval '6 days' and c.timestamp < w.day1),
 imp as (
   select to_char(i.analysed_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') "analysedAt", to_char(c.first_seen at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') "firstSeen",
-    i.direction, i.magnitude, i.confidence, i.priced_in "pricedIn", i.symbols, i.sectors, i.index_name "indexName", c.material, c.material_type "materialType", c.headline, i.cluster_id "clusterId"
+    i.direction, i.magnitude, i.confidence, i.priced_in "pricedIn", i.symbols, i.sectors, i.index_name "indexName", c.material, c.material_type "materialType", c.headline, i.cluster_id "clusterId",
+    c.sources, c.instruments
   from news_impacts i join news_clusters c on c.id = i.cluster_id, w
-  where i.analysed_at >= (w.day0 - interval '2 hours') at time zone 'UTC' and i.analysed_at < w.day1 at time zone 'UTC')
+  where i.analysed_at >= (w.day0 - interval '72 hours') at time zone 'UTC' and i.analysed_at < w.day1 at time zone 'UTC')
 select json_build_object(
   'v', 1, 'underlying', (select u from p), 'date', (select d from p)::text, 'line', json_build_object('exchange', (select lex from p), 'token', (select ltok from p)),
   'optionExchange', (select oex from p), 'exportedAt', to_char(now() at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),

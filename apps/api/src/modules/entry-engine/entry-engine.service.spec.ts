@@ -2,6 +2,7 @@ import { parseSignalTraderConfig } from '../signal-trader/domain/signal-trader.c
 import { PAPER_WATCH_STRATEGIES } from '../signal-trader/domain/paper';
 import { ISOLATED_PAPER_STRATEGIES } from '../trade-engine/services/risk-manager.service';
 import type { Bar1m, ImpactRow } from './domain/entry-decision';
+import type { PreOpenBiasInput } from './domain/news-paths';
 import { ENGINE_ENTRY_SOURCE, ENGINE_ENTRY_STRATEGY, parseEntryEngineConfig, type EntryEngineMode } from './entry-engine.config';
 import { EntryEnginePaperService, enginePaperDto } from './entry-engine-paper.service';
 import { EntryEngineService } from './entry-engine.service';
@@ -36,7 +37,7 @@ function bearishOiInput(at: Date, want: 'BULLISH' | 'BEARISH') {
   return { at, want, sessionStart: SESSION, chain: { expiry: '2026-11-17', contracts, rows, center: 9650, centerSource: 'test' }, futures: null };
 }
 
-function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minutesToClose?: number; oiFails?: boolean; impacts?: ImpactRow[] } = {}) {
+function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minutesToClose?: number; oiFails?: boolean; impacts?: ImpactRow[]; preOpen?: PreOpenBiasInput | null } = {}) {
   const repo = {
     impacts: jest.fn(async () => o.impacts ?? [bearImpact]),
     hubBars: jest.fn(async () => [] as Bar1m[]),
@@ -45,6 +46,7 @@ function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minute
     engineTradesSince: jest.fn(async () => o.today ?? 0),
     insertDecision: jest.fn(async () => undefined),
     settleDecision: jest.fn(async () => undefined),
+    preOpenOutlook: jest.fn(async () => o.preOpen ?? null),
   };
   const signalRepo = { nearestFuture: jest.fn(async () => ({ instrumentId: 'f1', symbol: 'CRUDEOIL19NOV26FUT', exchange: 'MCX', token: '573422' })) };
   const oi = {
@@ -122,6 +124,22 @@ describe('EntryEngineService', () => {
       expect(paper.open).not.toHaveBeenCalled();
       expect(repo.settleDecision).toHaveBeenCalledWith(expect.any(String), null, expect.stringMatching(/^paper: not opened/));
     }
+  });
+
+  it('PRE_OPEN path: no news, but a strong pre-open BEARISH outlook in the opening window + bearish trend + OI → ENTER_PE (path recorded); outside the window → NO_TRADE', async () => {
+    const preOpen: PreOpenBiasInput = { underlying: 'CRUDEOIL', sessionDate: '2026-10-29', bias: 'BEARISH', confidence: 0.75, at: '2026-10-29T03:00:00.000Z', summary: 'CRUDEOIL BEARISH: CL=F -3.2%' };
+    const a = make({ impacts: [], preOpen });
+    const r = await a.svc.evaluate('CRUDEOIL', AT); // 10:05 IST = 09:20 + 45 min, the last run of the opening window
+    expect(r.action).toBe('ENTER_PE');
+    expect(a.repo.preOpenOutlook).toHaveBeenCalledWith('CRUDEOIL', '2026-10-29');
+    const row = (a.repo.insertDecision.mock.calls[0] as unknown as [{ reasons: string[]; inputs: { scores: { newsMaterialPath: string } } }])[0];
+    expect(row.reasons[0]).toContain('material via PRE_OPEN');
+    expect(row.inputs.scores.newsMaterialPath).toBe('PRE_OPEN');
+    const b = make({ impacts: [], preOpen });
+    const late = await b.svc.evaluate('CRUDEOIL', new Date('2026-10-29T04:50:00Z')); // 10:20 IST
+    expect(late.action).toBe('NO_TRADE');
+    const lateRow = (b.repo.insertDecision.mock.calls[0] as unknown as [{ reasons: string[] }])[0];
+    expect(lateRow.reasons[0]).toMatch(/^news: NO_DATA/);
   });
 
   it('off: run() does nothing; outside 09:20–23:00 IST nothing is evaluated', async () => {

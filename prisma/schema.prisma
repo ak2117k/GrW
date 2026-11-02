@@ -3736,3 +3736,46 @@ model EntryEngineDecision {
   @@index([tradeId])
   @@map("entry_engine_decisions")
 }
+
+/// Pre-open outlook (2026-11-02): overnight global prices (Yahoo chart; CL=F / BZ=F / ES=F), every
+/// 30 min incl. weekends. Written with raw SQL by the pre-open-outlook module. NO_DATA rows carry
+/// a reason and null price (never a zero).
+model GlobalPriceSnapshot {
+  id         String    @id
+  symbol     String
+  price      Float?
+  priceTime  DateTime? @map("price_time") @db.Timestamptz(6)
+  fetchedAt  DateTime  @map("fetched_at") @db.Timestamptz(6)
+  status     String // OK | NO_DATA
+  source     String
+  reason     String?
+  intervalMs Int?      @map("interval_ms")
+  bars       Json? // [{ t: ms epoch bar open, close }]
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([symbol, priceTime])
+  @@index([symbol, fetchedAt])
+  @@map("global_price_snapshots")
+}
+
+/// Pre-open outlook per underlying per run (08:30 IST): bias, confidence, expected gap, theme, headlines.
+/// Read by the night report and the entry engine (PRE_OPEN news path). Raw SQL writes.
+model PreOpenOutlook {
+  id          String   @id
+  underlying  String
+  sessionDate DateTime @map("session_date") @db.Date
+  at          DateTime @db.Timestamptz(6)
+  bias        String // BULLISH | BEARISH | NEUTRAL
+  confidence  Float
+  score       Float
+  gapPct      Float?   @map("gap_pct")
+  gapPoints   Float?   @map("gap_points")
+  lastClose   Float?   @map("last_close")
+  payload     Json
+  summary     String
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([underlying, sessionDate, at])
+  @@index([at])
+  @@map("pre_open_outlooks")
+}

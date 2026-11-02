@@ -65,6 +65,7 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
 import { SignalTraderModule } from './modules/signal-trader/signal-trader.module';
 import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
 import { EntryEngineModule } from './modules/entry-engine/entry-engine.module';
+import { PreOpenOutlookModule } from './modules/pre-open-outlook/pre-open-outlook.module';
 import { SanityAuditModule } from './modules/sanity-audit/sanity-audit.module';
 
 @Module({
@@ -325,6 +326,11 @@ import { SanityAuditModule } from './modules/sanity-audit/sanity-audit.module';
     // evaluation recorded (entry_engine_decisions). ENTRY_ENGINE=off|observe|paper (default observe:
     // records only); paper opens PAPER trades only (strategy ENGINE_ENTRY). Never a broker order.
     EntryEngineModule,
+
+    // Pre-open outlook (2026-11-02) — global prices every 30 min (global_price_snapshots), the 08:30 IST
+    // outlook per underlying (pre_open_outlooks, ops alert, night report, the engine's PRE_OPEN news path)
+    // and the off-hours news fetch. Observe only. PRE_OPEN_OUTLOOK / GLOBAL_PRICES / NEWS_OFFHOURS_FETCH=off.
+    PreOpenOutlookModule,
 
     // Sanity audit — invariants on every trade / exit / feed every 5 min; each violation stored once in
     // sanity_violations and alerted once (ops bot). DETECTION ONLY: never modifies or blocks a trade.

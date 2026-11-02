@@ -10,6 +10,8 @@
 import type { ChainContractRef, OiCheckInput, OiRow } from '../../signal-trader/domain/oi-check';
 import { entryDecision, entryGuards, newsReading, trendReading, type Bar1m, type EntryDecision, type GuardResult, type ImpactRow, type NewsReading, type OiReading, type TrendReading } from '../domain/entry-decision';
 import { chooseBars, ENGINE_WINDOW, istMinutes, readOi, sessionStartOf, wantFor } from '../domain/engine-inputs';
+import { withNewsPaths, type PreOpenBiasInput } from '../domain/news-paths';
+import { NEWS_THEME, newsTheme } from '../domain/news-theme';
 
 export interface EntryFixtureV1 {
   v: 1;
@@ -24,6 +26,13 @@ export interface EntryFixtureV1 {
   tableBars: Array<{ t: string; o: number; h: number; l: number; c: number; v: number }>;
   chain: { expiry: string; contracts: ChainContractRef[]; rows: Array<{ i: string; oi: number; t: string }> } | null;
   futures: { instrumentId: string; symbol: string; rows: Array<{ oi: number; t: string }>; prices: Array<{ close: number; t: string }> | null } | null;
+  /** The day's pre-open outlook as the engine would read it (pre_open_outlooks); absent = none. */
+  preOpen?: PreOpenBiasInput | null;
+}
+
+export interface ReplayOptions {
+  /** false = the engine before 2026-11-02 (per-story rule only: no news theme, no pre-open bias). */
+  newsPaths?: boolean;
 }
 
 export interface ReplayStep {
@@ -67,7 +76,8 @@ export function stepTimes(fx: Pick<EntryFixtureV1, 'date' | 'optionExchange'>): 
   return out;
 }
 
-export function replayEntry(fx: EntryFixtureV1): ReplayStep[] {
+export function replayEntry(fx: EntryFixtureV1, opts: ReplayOptions = {}): ReplayStep[] {
+  const paths = opts.newsPaths !== false;
   const impacts: ImpactRow[] = fx.impacts.map((r) => ({ ...r, analysedAt: toDate(r.analysedAt), firstSeen: toDate(r.firstSeen), symbols: r.symbols ?? [], sectors: r.sectors ?? [] }));
   const hub = toBars(fx.hubBars);
   const table = toBars(fx.tableBars);
@@ -80,7 +90,8 @@ export function replayEntry(fx: EntryFixtureV1): ReplayStep[] {
   for (const at of stepTimes(fx)) {
     const t = at.getTime();
     const sessionStart = sessionStartOf(fx.optionExchange, at);
-    const news = newsReading(impacts, fx.underlying, at);
+    const story = newsReading(impacts, fx.underlying, at);
+    const news = paths ? withNewsPaths(story, newsTheme(impacts, fx.underlying, at, NEWS_THEME.intraday), fx.preOpen ?? null, at) : story;
     const chosen = chooseBars(hub, table, sessionStart, at);
     const trend = trendReading(chosen.bars, at, sessionStart);
     const want = wantFor(news, trend);
@@ -112,7 +123,8 @@ const pad = (s: string, n: number) => (s.length >= n ? s : s + ' '.repeat(n - s.
 /** One line per step for the console. */
 export function formatStep(s: ReplayStep): string {
   const d = s.decision.scores;
-  const news = `${d.newsLean}${d.newsMaterial ? '*' : ''} ${d.news >= 0 ? '+' : ''}${d.news.toFixed(2)}`;
+  const tag = d.newsMaterialPath === 'THEME' ? '*T' : d.newsMaterialPath === 'PRE_OPEN' ? '*P' : d.newsMaterial ? '*' : '';
+  const news = `${d.newsLean}${tag} ${d.news >= 0 ? '+' : ''}${d.news.toFixed(2)}`;
   const trend = `${d.trendLean} vwap ${pct(d.vwapPct)} 15m ${pct(d.ema15Slope)} 1h ${pct(d.ema1hSlope)}`;
   const oi = `${d.oiVerdict}→${s.oi.want.slice(0, 4)} (${d.oiLean}) 30m ${pct(d.chainLeanAgo)} open ${pct(d.chainLeanOpen)} fut ${d.futuresVerdict}`;
   return `${s.ist}  ${pad(s.decision.action, 8)}${s.wouldOpen ? ' OPEN' : '     '}  news ${pad(news, 16)} | trend ${pad(trend, 52)} | oi ${oi}`;

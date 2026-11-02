@@ -240,3 +240,26 @@ export function impactRunDue(now: Date, istMin: number, tradingDay: boolean, las
   if (inSession) return true;
   return lastRunAt === null || now.getTime() - lastRunAt.getTime() >= 2 * 3_600_000 - 60_000;
 }
+
+/**
+ * PRE-OPEN PRIORITY (2026-11-02). Off-session the batch runs every 2 h; prod 2 Nov the weekend US–Iran
+ * crude stories were first read at 09:00 Monday. A cluster touching the pre-open universe (MCX crude,
+ * NIFTY / BANKNIFTY / SENSEX) may run the batch every 30 min off-session — still ONE call over the
+ * whole eligible batch, still under NEWS_IMPACT_DAILY_CALLS, and only while that day's calls leave
+ * {@link PRIORITY_RESERVE_CALLS} for the NSE session (15-min cadence 09:00–15:45 ≈ 27 calls).
+ */
+export const PRIORITY_CADENCE_MS = 30 * 60_000;
+export const PRIORITY_RESERVE_CALLS = 30;
+const PRIORITY_TAGS: ReadonlySet<string> = new Set(['CRUDEOIL', 'CRUDEOILM', 'NIFTY', 'BANKNIFTY', 'SENSEX']);
+const PRIORITY_HEADLINE = /\b(crude|brent|wti|opec|oil prices?|nifty|sensex)\b/i;
+
+export function touchesPreOpenUniverse(c: Pick<ClusterForImpact, 'instruments' | 'indices' | 'headline'>): boolean {
+  const up = (xs: readonly string[]) => (xs ?? []).map((x) => String(x).toUpperCase());
+  return up(c.instruments).some((s) => PRIORITY_TAGS.has(s)) || up(c.indices).some((s) => PRIORITY_TAGS.has(s)) || PRIORITY_HEADLINE.test(c.headline ?? '');
+}
+
+/** May an off-cadence (30-min) priority run happen? The batch must also touch the universe (caller). */
+export function priorityRunDue(now: Date, lastRunAt: Date | null, usedToday: number, dailyCalls: number): boolean {
+  if (usedToday >= dailyCalls - PRIORITY_RESERVE_CALLS) return false;
+  return lastRunAt === null || now.getTime() - lastRunAt.getTime() >= PRIORITY_CADENCE_MS - 60_000;
+}

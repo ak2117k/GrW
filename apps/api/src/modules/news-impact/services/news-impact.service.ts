@@ -16,6 +16,8 @@ import {
   impactRunDue,
   impactSentiment,
   pickBatch,
+  priorityRunDue,
+  touchesPreOpenUniverse,
   validateImpactReply,
   type ClusterForImpact,
   type ImpactItem,
@@ -42,7 +44,7 @@ export interface ImpactRunSummary {
 
 /**
  * Layer 2 + 3a. Every 15 min (the cadence rule in `impactRunDue` makes it 15 min in the NSE session,
- * 2 h otherwise): ONE batched model call over the new relevant + material clusters (≤ 30), capped
+ * 2 h otherwise; 30 min off-session when the batch touches the pre-open universe — `priorityRunDue`): ONE batched model call over the new relevant + material clusters (≤ 30), capped
  * at NEWS_IMPACT_DAILY_CALLS per IST day. Each valid item → news_impacts (+ the cluster's article
  * sentiment, + reaction rows). A HIGH impact on a held symbol / NIFTY / BANKNIFTY → one
  * 'news.impact.high' event (the sentinel's news wake) and one Telegram ops alert, once per cluster.
@@ -76,13 +78,17 @@ export class NewsImpactService {
     this.running = true;
     try {
       if (this.lastRunAt === undefined) this.lastRunAt = await this.repo.lastAiCallAt().catch(() => null);
-      if (!impactRunDue(now, istMinutes(now), this.clock.isTradingDay('NSE', now), this.lastRunAt)) return { ran: false, reason: 'not due' };
+      const due = impactRunDue(now, istMinutes(now), this.clock.isTradingDay('NSE', now), this.lastRunAt);
+      // Off-cadence: a 30-min priority run is possible (pre-open universe news), decided after the read.
+      if (!due && !priorityRunDue(now, this.lastRunAt, this.calls.day === istYmd(now) ? this.calls.n : 0, this.cfg.dailyCalls)) return { ran: false, reason: 'not due' };
       const day = istYmd(now);
       if (this.calls.day !== day) this.calls = { day, n: 0 };
       const used = Math.max(this.calls.n, await this.repo.aiCallsSince(istMidnightOf(day)).catch(() => 0));
       if (used >= this.cfg.dailyCalls) return { ran: false, reason: `daily cap ${this.cfg.dailyCalls} reached` };
+      if (!due && !priorityRunDue(now, this.lastRunAt, used, this.cfg.dailyCalls)) return { ran: false, reason: 'not due' };
 
       const batch = pickBatch(await this.repo.impactCandidates(new Date(now.getTime() - ANALYSE_WITHIN_MS), RELEVANT_AT), now);
+      if (!due && !batch.some(touchesPreOpenUniverse)) return { ran: false, reason: 'not due (no pre-open universe news for a priority run)' };
       if (batch.length === 0) return { ran: true, sent: 0, stored: 0, high: 0 };
       return await this.analyse(batch, now);
     } catch (e) {

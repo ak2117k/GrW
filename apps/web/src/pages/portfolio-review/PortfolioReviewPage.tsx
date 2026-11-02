@@ -1,13 +1,14 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
-import { AlertTriangle, ClipboardCheck, RefreshCw } from 'lucide-react';
-import { Badge } from '@/components/common';
+import { AlertTriangle, ClipboardCheck, Play, RefreshCw } from 'lucide-react';
+import { Badge, Tabs } from '@/components/common';
 import { cn } from '@/utils/cn';
 import { apiErrorMessage } from '@/pages/core-strategies/core-strategy-picker';
-import { getPortfolioReview } from '@/services/portfolioReview';
-import type { Bucket, HoldingCheck, Pattern, PortfolioReview, Suggestion } from '@/types/portfolioReview.types';
-import { bucketLabel, inr, monthLabel, pct, pnlTone, severityVariant, tagVariant } from './portfolioReviewFormat';
+import { getLatestPortfolioReview, getPortfolioReviewRun, runPortfolioReview } from '@/services/portfolioReview';
+import type { Bucket, HoldingCheck, Pattern, PortfolioReview, ReviewQuota, Suggestion } from '@/types/portfolioReview.types';
+import { ActionPlanView } from './ActionPlanView';
+import { bucketLabel, inr, istDateTime, monthLabel, pct, pnlTone, severityVariant, tagVariant } from './portfolioReviewFormat';
 
 const CARD = 'rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-card)] p-3 sm:p-4';
 const MUTED = 'text-[var(--color-text-muted)]';
@@ -173,31 +174,32 @@ function Summary({ r }: { r: PortfolioReview }) {
   );
 }
 
-export function PortfolioReviewView({ r, onRefresh, refreshing }: { r: PortfolioReview; onRefresh: () => void; refreshing: boolean }) {
+export type ReviewTab = 'happened' | 'next';
+
+const TABS = [
+  { key: 'happened', label: 'What happened' },
+  { key: 'next', label: 'What you can do next' },
+];
+
+/** The stored review in two tabs: the backward-looking report and the forward-looking action plan. */
+export function PortfolioReviewView({ r, tab, onTab }: { r: PortfolioReview; tab: ReviewTab; onTab: (t: ReviewTab) => void }) {
+  return (
+    <div className="space-y-3 sm:space-y-4">
+      <Tabs tabs={TABS} activeTab={tab} onChange={(k) => onTab(k as ReviewTab)} className="border-[var(--color-border-default)]" />
+      {tab === 'next' ? <ActionPlanView plan={r.actionPlan} /> : <WhatHappenedView r={r} />}
+    </div>
+  );
+}
+
+/** "What happened": where the P&L came from, behaviour, holdings check and what to change. */
+export function WhatHappenedView({ r }: { r: PortfolioReview }) {
   const h = r.headline;
   const b = r.breakdowns;
   const patterns = r.patterns.filter((p) => p.severity !== 'OK');
   const quiet = r.patterns.filter((p) => p.severity === 'OK');
   return (
-    <div className="mx-auto max-w-6xl space-y-3 p-3 sm:space-y-4 sm:p-4">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 className={cn('flex items-center gap-2 text-lg font-semibold', PRIMARY)}>
-            <ClipboardCheck className="h-5 w-5" /> Portfolio review
-          </h1>
-          <p className={cn('text-xs', MUTED)}>
-            Real broker book since {h.trackedSince ?? '—'} (paper trades excluded) · generated {new Date(r.generatedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={onRefresh}
-          disabled={refreshing}
-          className="inline-flex min-h-10 items-center gap-2 rounded border border-[var(--color-border-default)] px-3 text-sm text-[var(--color-text-secondary)] disabled:opacity-60"
-        >
-          <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} /> {refreshing ? 'Analysing…' : 'Re-analyse'}
-        </button>
-      </header>
+    <div className="space-y-3 sm:space-y-4">
+      <p className={cn('text-xs', MUTED)}>Real broker book since {h.trackedSince ?? '—'} (paper trades excluded).</p>
 
       <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
         <Stat label="Total P&L" value={inr(h.total, true)} tone={pnlTone(h.total)} sub="realised net + unrealised" />
@@ -318,57 +320,146 @@ export function PortfolioReviewView({ r, onRefresh, refreshing }: { r: Portfolio
   );
 }
 
-/** Portfolio review: where the P&L comes from and what to change. */
+/** Header: when the shown review was made, the run button (with progress / errors) and the quota line. */
+export function ReviewHeader({
+  lastAt,
+  running,
+  progress,
+  error,
+  quota,
+  onRun,
+}: {
+  lastAt: string | null;
+  running: boolean;
+  progress: string | null;
+  error: string | null;
+  quota: ReviewQuota | null;
+  onRun: () => void;
+}) {
+  return (
+    <header className="flex flex-wrap items-start justify-between gap-3">
+      <div className="min-w-0">
+        <h1 className={cn('flex items-center gap-2 text-lg font-semibold', PRIMARY)}>
+          <ClipboardCheck className="h-5 w-5" /> Portfolio review
+        </h1>
+        <p className={cn('text-xs', MUTED)}>{lastAt ? `Last review: ${istDateTime(lastAt)} IST` : 'No review yet'}</p>
+        {quota && <p className={cn('text-[11px]', MUTED)}>{quota.note}</p>}
+      </div>
+      <div className="flex w-full flex-col items-stretch gap-1 sm:w-auto sm:items-end">
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={running}
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded bg-[var(--color-accent-blue)] px-4 text-sm font-medium text-white disabled:opacity-60"
+        >
+          {running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+          {running ? 'Running review…' : 'Run portfolio review'}
+        </button>
+        {running && <p className={cn('text-xs', SECONDARY)}>{progress ?? 'Working'} — this can take a few minutes; you can leave the page open.</p>}
+        {error && (
+          <p className="flex items-center gap-1 text-xs text-[var(--color-accent-red)]">
+            <AlertTriangle className="h-3.5 w-3.5" /> {error}
+          </p>
+        )}
+      </div>
+    </header>
+  );
+}
+
+/** How often the page polls a running review. */
+export const RUN_POLL_MS = 3_000;
+
+/**
+ * Portfolio review: opening the page shows the latest STORED review (never starts one); the button runs a
+ * new one and the page polls it until DONE.
+ */
 export default function PortfolioReviewPage() {
   const qc = useQueryClient();
-  const [refreshing, setRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
-  const q = useQuery({ queryKey: ['portfolio-review'], queryFn: () => getPortfolioReview(false), staleTime: 5 * 60_000 });
+  const [tab, setTab] = useState<ReviewTab>('happened');
+  const [runId, setRunId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const latest = useQuery({ queryKey: ['portfolio-review', 'latest'], queryFn: getLatestPortfolioReview, staleTime: 60_000 });
 
-  const onRefresh = async () => {
-    setRefreshing(true);
-    setRefreshError(null);
+  // Resume polling a run that was already in progress when the page opened.
+  const activeId = latest.data?.activeRun?.status === 'RUNNING' ? latest.data.activeRun.id : null;
+  const pollId = runId ?? activeId;
+  const poll = useQuery({
+    queryKey: ['portfolio-review', 'run', pollId],
+    queryFn: () => getPortfolioReviewRun(pollId as string),
+    enabled: !!pollId,
+    refetchInterval: (query) => (query.state.data?.run.status === 'RUNNING' || !query.state.data ? RUN_POLL_MS : false),
+  });
+
+  const finished = poll.data && poll.data.run.status !== 'RUNNING' ? poll.data : null;
+  useEffect(() => {
+    if (!finished) return;
+    if (finished.run.status === 'FAILED') setRunError(finished.run.error ?? 'The review failed — try again.');
+    if (finished.run.status === 'DONE') {
+      void qc.invalidateQueries({ queryKey: ['portfolio-review', 'latest'] });
+      setTab('next');
+    }
+    setRunId(null);
+  }, [finished, qc]);
+
+  const onRun = async () => {
+    setStarting(true);
+    setRunError(null);
     try {
-      qc.setQueryData(['portfolio-review'], await getPortfolioReview(true));
+      const res = await runPortfolioReview();
+      if (res.run.status === 'DONE') {
+        await qc.invalidateQueries({ queryKey: ['portfolio-review', 'latest'] });
+        setTab('next');
+      } else if (res.run.status === 'FAILED') setRunError(res.run.error ?? 'The review failed — try again.');
+      else setRunId(res.run.id);
     } catch (e) {
-      setRefreshError(apiErrorMessage(e, 'Could not re-analyse'));
+      setRunError(apiErrorMessage(e, 'Could not start the review'));
     } finally {
-      setRefreshing(false);
+      setStarting(false);
     }
   };
 
-  if (q.isLoading) {
-    return (
-      <div className="mx-auto max-w-6xl space-y-3 p-4">
-        <h1 className={cn('text-lg font-semibold', PRIMARY)}>Portfolio review</h1>
-        <p className={cn('text-sm', SECONDARY)}>Analysing your trades and holdings… the first run reads a year of prices per holding and can take a minute.</p>
+  const running = starting || (!!pollId && (!poll.data || poll.data.run.status === 'RUNNING'));
+  const review = latest.data?.review ?? null;
+  const header = (
+    <ReviewHeader
+      lastAt={review?.generatedAt ?? null}
+      running={running}
+      progress={poll.data?.run.progress ?? (starting ? 'Starting' : null)}
+      error={runError}
+      quota={latest.data?.quota ?? null}
+      onRun={() => void onRun()}
+    />
+  );
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-3 p-3 sm:space-y-4 sm:p-4">
+      {header}
+      {latest.isLoading ? (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {Array.from({ length: 4 }, (_, i) => (
             <div key={i} className={cn(CARD, 'h-20 animate-pulse')} />
           ))}
         </div>
-      </div>
-    );
-  }
-
-  if (q.isError || !q.data) {
-    return (
-      <div className="mx-auto max-w-6xl space-y-3 p-4">
-        <h1 className={cn('text-lg font-semibold', PRIMARY)}>Portfolio review</h1>
-        <p className="flex items-center gap-2 text-sm text-[var(--color-accent-red)]">
-          <AlertTriangle className="h-4 w-4" /> {apiErrorMessage(q.error, 'Could not load the portfolio review')}
-        </p>
-        <button type="button" onClick={() => void q.refetch()} className="min-h-10 rounded border border-[var(--color-border-default)] px-3 text-sm text-[var(--color-text-secondary)]">
-          Try again
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <>
-      {refreshError && <p className="mx-auto max-w-6xl px-4 pt-3 text-sm text-[var(--color-accent-red)]">{refreshError}</p>}
-      <PortfolioReviewView r={q.data} onRefresh={() => void onRefresh()} refreshing={refreshing} />
-    </>
+      ) : latest.isError ? (
+        <div className={CARD}>
+          <p className="flex items-center gap-2 text-sm text-[var(--color-accent-red)]">
+            <AlertTriangle className="h-4 w-4" /> {apiErrorMessage(latest.error, 'Could not load the portfolio review')}
+          </p>
+          <button type="button" onClick={() => void latest.refetch()} className="mt-2 min-h-10 rounded border border-[var(--color-border-default)] px-3 text-sm text-[var(--color-text-secondary)]">
+            Try again
+          </button>
+        </div>
+      ) : review ? (
+        <PortfolioReviewView r={review} tab={tab} onTab={setTab} />
+      ) : (
+        <div className={CARD}>
+          <p className={cn('text-sm', SECONDARY)}>
+            No portfolio review yet. Press <span className="font-medium">Run portfolio review</span> to analyse your real broker book — where the P&amp;L came from — and get a rule-based plan of what
+            you can do next with your holdings and your current balance.
+          </p>
+        </div>
+      )}
+    </div>
   );
 }

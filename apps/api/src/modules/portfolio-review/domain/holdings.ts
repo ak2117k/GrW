@@ -13,9 +13,13 @@ export const HOLDING_RULES = {
   concentratedSharePct: 15,
   /** Sessions in ~6 months. */
   sixMonthBars: 126,
+  /** Sessions in ~1 month. */
+  oneMonthBars: 20,
 } as const;
 
 export interface DailyBar {
+  /** IST day (optional; the OI join uses it). */
+  date?: string;
   close: number;
   high: number;
   low: number;
@@ -33,6 +37,7 @@ export function trendFromBars(bars: DailyBar[]): HoldingTrend {
   const last = closes[closes.length - 1];
   const year = clean.slice(-250);
   const back = closes[Math.max(0, closes.length - 1 - HOLDING_RULES.sixMonthBars)];
+  const back1m = closes[Math.max(0, closes.length - 1 - HOLDING_RULES.oneMonthBars)];
   return {
     status: 'OK',
     bars: clean.length,
@@ -41,7 +46,24 @@ export function trendFromBars(bars: DailyBar[]): HoldingTrend {
     high52w: round2(Math.max(...year.map((b) => b.high || b.close))),
     low52w: round2(Math.min(...year.map((b) => b.low || b.close))),
     ret6m: round1(((last - back) / back) * 100),
+    dma20: round2(mean(closes.slice(-20))),
+    ret1m: round1(((last - back1m) / back1m) * 100),
+    atr14: atr(clean, 14),
+    lastClose: last,
   };
+}
+
+/** Average true range over the last `n` sessions (simple mean of TR), or null with too few bars. */
+export function atr(bars: DailyBar[], n: number): number | null {
+  if (bars.length < n + 1) return null;
+  const trs: number[] = [];
+  for (let i = bars.length - n; i < bars.length; i++) {
+    const prev = bars[i - 1].close;
+    const high = bars[i].high || bars[i].close;
+    const low = bars[i].low || bars[i].close;
+    trs.push(Math.max(high - low, Math.abs(high - prev), Math.abs(low - prev)));
+  }
+  return round2(mean(trs));
 }
 
 export const NO_TREND = (reason: string): HoldingTrend => ({

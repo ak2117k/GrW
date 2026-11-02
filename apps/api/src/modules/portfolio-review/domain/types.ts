@@ -199,6 +199,14 @@ export interface HoldingTrend {
   low52w: number | null;
   /** % change over ~6 months (126 sessions, or the available history). */
   ret6m: number | null;
+  /** 20-DMA (optional: reviews stored before the action plan do not carry it). */
+  dma20?: number | null;
+  /** % change over ~1 month (20 sessions). */
+  ret1m?: number | null;
+  /** 14-session average true range, rupees. */
+  atr14?: number | null;
+  /** Last daily close. */
+  lastClose?: number | null;
 }
 
 export type HoldingTag = 'STRONG' | 'WEAK-TREND' | 'DEAD-MONEY' | 'CONCENTRATED' | 'NEUTRAL';
@@ -262,4 +270,217 @@ export interface PortfolioReview {
   };
   digest: string;
   summary: LlmSummary;
+  /** The forward-looking plan (absent on reviews stored before the action plan existed). */
+  actionPlan?: ActionPlan | null;
+}
+
+// ---------------------------------------------------------------------------
+// Action plan — "what you can do next" (owner 2026-11-02)
+// ---------------------------------------------------------------------------
+
+/** Price trend from daily candles vs the 20/50/200-DMA (evidence.ts classifyTrend). */
+export type TrendClass = 'STRONG_UP' | 'UP' | 'WEAK' | 'DOWN' | 'NO_DATA';
+export type MomentumClass = 'POSITIVE' | 'FLAT' | 'NEGATIVE' | 'NO_DATA';
+export type NewsClass = 'POSITIVE' | 'NEGATIVE' | 'MIXED' | 'NONE';
+/** Futures OI over the last sessions: price × OI direction. */
+export type OiClass = 'SUPPORTIVE' | 'NEUTRAL' | 'ADVERSE' | 'NOT_FNO' | 'NO_DATA';
+export type OiBuildup = 'LONG_BUILDUP' | 'SHORT_BUILDUP' | 'SHORT_COVERING' | 'LONG_UNWINDING' | 'FLAT';
+
+/** One recent material (MED+, non-recap) news read for a symbol. */
+export interface NewsItem {
+  at: string; // ISO
+  headline: string;
+  direction: string; // BULL | BEAR | NEUTRAL
+  magnitude: string; // MED | HIGH
+  oneLine: string;
+}
+
+/** One upcoming company event (market_events, scope company). */
+export interface UpcomingEvent {
+  kind: string; // results | board_meeting | ex_dividend | split | bonus | corporate_action
+  title: string;
+  at: string; // ISO
+}
+
+/** Futures OI evidence: the window's aggregate build-up plus the daily kinds. */
+export interface OiEvidence {
+  status: OiClass;
+  source: 'BROKER' | 'SNAPSHOTS' | null;
+  sessions: number;
+  pricePct: number | null;
+  oiPct: number | null;
+  buildup: OiBuildup | null;
+  days: Array<{ date: string; kind: OiBuildup }>;
+  reason?: string;
+}
+
+export interface Evidence {
+  trend: TrendClass;
+  momentum: MomentumClass;
+  close: number | null;
+  dma20: number | null;
+  dma50: number | null;
+  dma200: number | null;
+  ret1m: number | null;
+  ret6m: number | null;
+  /** % below the 52-week high (≥ 0). */
+  fromHigh52wPct: number | null;
+  /** % above the 52-week low (≥ 0). */
+  fromLow52wPct: number | null;
+  atr14: number | null;
+  news: NewsClass;
+  newsItems: NewsItem[];
+  oi: OiEvidence;
+  events: UpcomingEvent[];
+  sector: string | null;
+}
+
+export type Recommendation = 'HOLD' | 'ADD' | 'TRIM' | 'EXIT' | 'SET_STOP';
+
+/** A short label + tone for the UI's evidence chips. */
+export interface EvidenceChip {
+  label: string;
+  tone: 'good' | 'bad' | 'neutral' | 'info';
+}
+
+export interface HoldingAction {
+  symbol: string;
+  exchange: string;
+  token: string;
+  recommendation: Recommendation;
+  /** Shares to buy (ADD) or sell (TRIM / EXIT); for HOLD / SET_STOP the held quantity the stop covers. */
+  qty: number;
+  heldQty: number;
+  ltp: number | null;
+  value: number | null;
+  /** Rupees: + spent (ADD), − freed (TRIM / EXIT), 0 otherwise. */
+  cashImpact: number;
+  /** Protective stop (rupees per share), null without a price. */
+  stop: number | null;
+  stopBasis: string;
+  pnl: number;
+  pnlPct: number;
+  daysHeld: number;
+  /** Share of total capital (cash + holdings value), %, before and after the plan. */
+  weightPct: number;
+  weightAfterPct: number;
+  /** The rule hits behind the recommendation, in plain words. */
+  reasons: string[];
+  /** Rules that blocked an ADD (e.g. no averaging down). */
+  blocked: string[];
+  chips: EvidenceChip[];
+  evidence: Evidence;
+}
+
+export interface NewIdea {
+  symbol: string;
+  exchange: string;
+  token: string;
+  sector: string | null;
+  close: number;
+  qty: number;
+  amount: number;
+  entryLow: number;
+  entryHigh: number;
+  stop: number;
+  /** Rupees lost if the stop is hit from the top of the entry zone. */
+  riskRupees: number;
+  score: number;
+  reasons: string[];
+  chips: EvidenceChip[];
+  evidence: Evidence;
+}
+
+export interface BalanceRead {
+  status: 'LIVE' | 'LAST_KNOWN' | 'NO_DATA';
+  availableCash: number | null;
+  asOf: string | null;
+  reason?: string;
+}
+
+export interface WeightRow {
+  symbol: string;
+  beforePct: number;
+  afterPct: number;
+}
+
+export interface Sizing {
+  balance: BalanceRead;
+  /** Cash used in the math (0 when the balance is unknown). */
+  cash: number;
+  holdingsValue: number;
+  totalCapital: number;
+  cashPctBefore: number;
+  cashPctAfter: number;
+  /** The buffer the plan keeps in cash (rupees, cashBufferPct × capital). */
+  bufferRupees: number;
+  /** Rupees freed by TRIM / EXIT at the last price. */
+  freed: number;
+  /** Rupees the ADDs and new ideas would spend. */
+  spent: number;
+  /** Cash above the buffer before the plan (negative = below the buffer). */
+  deployableBefore: number;
+  maxWeightBeforePct: number;
+  maxWeightAfterPct: number;
+  overCapBefore: number;
+  overCapAfter: number;
+  /** Share of capital in stocks below their long trend (DOWN), before → after. */
+  downTrendPctBefore: number;
+  downTrendPctAfter: number;
+  /** Rupees lost if every stop in the plan is hit (holdings kept + new ideas). */
+  riskToStops: number;
+  weights: WeightRow[];
+  /**
+   * When cash is below the buffer: the rupees needed to restore it and the weakest holdings by the
+   * rules that would be sold first (dead money + below the long trend, then below the long trend,
+   * then dead money). Informational — these rows keep their own recommendation.
+   */
+  raiseCash: { needed: number; covered: number; candidates: Array<{ symbol: string; value: number; why: string }> } | null;
+  notes: string[];
+}
+
+export interface ScreenStats {
+  universe: number;
+  fetched: number;
+  cachedToday: number;
+  passedTrend: number;
+  oiChecked: number;
+  picked: number;
+  skippedReason: string | null;
+}
+
+export interface ActionPlan {
+  generatedAt: string;
+  rules: Record<string, number>;
+  holdings: HoldingAction[];
+  ideas: NewIdea[];
+  sizing: Sizing;
+  screen: ScreenStats;
+  brokerCalls: { used: number; cap: number };
+  counts: Record<Recommendation, number>;
+  explanation: LlmSummary;
+  disclaimer: string;
+  dataNotes: string[];
+}
+
+/** One portfolio_review_runs row (each explicit "Run portfolio review"). */
+export interface ReviewRun {
+  id: string;
+  userId: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'RUNNING' | 'DONE' | 'FAILED';
+  progress: string | null;
+  error: string | null;
+  reviewId: string | null;
+}
+
+/** The monthly-quota hook. NOT enforced yet: `allowed` is always true. */
+export interface ReviewQuota {
+  usedThisMonth: number;
+  freeLimit: number;
+  allowed: boolean;
+  enforced: boolean;
+  periodStart: string; // IST month 'YYYY-MM'
+  note: string;
 }

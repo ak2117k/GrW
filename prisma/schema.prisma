@@ -3409,6 +3409,25 @@ model SignalMessageClass {
   @@map("signal_message_classes")
 }
 
+/// A trade setup read from a Telegram chart screenshot (signal-intake image-setup, 2026-11-02). No FK.
+model TelegramImageRead {
+  id             String   @id @default(cuid())
+  messageId      String   @unique @map("message_id") // telegram_messages.id
+  channelId      String   @map("channel_id")
+  postedAt       DateTime @map("posted_at") @db.Timestamptz(6)
+  kind           String // NEW_SETUP | UPDATE | RESULT | NOT_A_SETUP (after the code rules; the model's own kind is in extraction)
+  extraction     Json // the read (domain/image-setup ImageSetupExtraction + modelKind / checks), or { error }
+  valid          Boolean
+  reason         String?
+  model          String?
+  linkedSignalId String?  @map("linked_signal_id") // trade_signals.id in IMAGE_SETUPS=signal mode
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([channelId, postedAt])
+  @@index([createdAt])
+  @@map("telegram_image_reads")
+}
+
 /// Structured market information from INFO posts (views, levels, OI notes, macro links) — 2026-10-24.
 /// One row per message; one post can carry several items. Read-only context: never triggers a trade.
 model ChannelInfo {
@@ -3798,4 +3817,20 @@ model PortfolioReview {
 
   @@index([userId, createdAt])
   @@map("portfolio_reviews")
+}
+
+/// One explicit "Run portfolio review" (POST /api/portfolio-review/run). The monthly-quota hook counts
+/// RUNNING + DONE per user per IST month (not enforced yet). reviewId → portfolio_reviews.id (no FK).
+model PortfolioReviewRun {
+  id         String    @id
+  userId     String    @map("user_id")
+  startedAt  DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt DateTime? @map("finished_at") @db.Timestamptz(6)
+  status     String // RUNNING | DONE | FAILED
+  progress   String?
+  error      String?
+  reviewId   String?   @map("review_id")
+
+  @@index([userId, startedAt])
+  @@map("portfolio_review_runs")
 }

@@ -1,4 +1,4 @@
-import type { HoldingTag, Severity } from '@/types/portfolioReview.types';
+import type { EvidenceChip, HoldingTag, Recommendation, Severity } from '@/types/portfolioReview.types';
 
 type Variant = 'success' | 'danger' | 'warning' | 'info' | 'neutral';
 
@@ -69,4 +69,42 @@ export function monthLabel(ym: string): string {
   const [y, m] = ym.split('-').map(Number);
   if (!y || !m) return ym;
   return new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-IN', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+export function recommendationVariant(r: Recommendation): Variant {
+  switch (r) {
+    case 'EXIT':
+      return 'danger';
+    case 'TRIM':
+    case 'SET_STOP':
+      return 'warning';
+    case 'ADD':
+      return 'success';
+    default:
+      return 'neutral';
+  }
+}
+
+const REC_LABEL: Record<Recommendation, string> = { HOLD: 'Hold', ADD: 'Add', TRIM: 'Trim', EXIT: 'Exit', SET_STOP: 'Set stop' };
+
+export function recommendationLabel(r: Recommendation): string {
+  return REC_LABEL[r] ?? r;
+}
+
+export function chipVariant(tone: EvidenceChip['tone']): Variant {
+  return tone === 'good' ? 'success' : tone === 'bad' ? 'danger' : tone === 'info' ? 'info' : 'neutral';
+}
+
+/** Price with en-IN grouping and up to 2 decimals (no ₹ rounding to whole rupees). */
+export function price(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+}
+
+/** An ISO time as 'dd Mon yyyy, hh:mm' IST. */
+export function istDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 }

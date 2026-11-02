@@ -1,3 +1,4 @@
+import { actionPlanDigest } from './action-plan';
 import { computePatterns } from './behaviour';
 import { buildEpisodes } from './episodes';
 import { holdingChecks } from './holdings';
@@ -72,10 +73,10 @@ export function buildPortfolioReview(input: ReviewInputs): PortfolioReview {
 }
 
 /**
- * One paragraph the AI advisor can read (plain text, no markup). Exported for
- * ai-assist; this module does not wire it in.
+ * One paragraph the AI advisor can read (plain text, no markup), including the
+ * action plan when present. Exported for ai-assist; this module does not wire it in.
  */
-export function portfolioReviewDigest(r: Pick<PortfolioReview, 'headline' | 'breakdowns' | 'suggestions' | 'holdings' | 'generatedAt'>): string {
+export function portfolioReviewDigest(r: Pick<PortfolioReview, 'headline' | 'breakdowns' | 'suggestions' | 'holdings' | 'generatedAt'> & Partial<Pick<PortfolioReview, 'actionPlan'>>): string {
   const h = r.headline;
   const worstSeg = r.breakdowns.bySegment[0];
   const worstUnd = r.breakdowns.byUnderlying[0];
@@ -90,6 +91,7 @@ export function portfolioReviewDigest(r: Pick<PortfolioReview, 'headline' | 'bre
     worstUnd ? `Worst underlying ${worstUnd.key} ${inr(worstUnd.net)}.` : '',
     dead ? `${dead} dead holdings (≤ −20% after 60+ days).` : '',
     top ? `Top suggestions: ${top}.` : '',
+    r.actionPlan ? actionPlanDigest(r.actionPlan) : '',
   ]
     .filter(Boolean)
     .join(' ');

@@ -1,15 +1,16 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, HttpCode, NotFoundException, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../../common/decorators';
 import type { AuthenticatedUser } from '../../../common/decorators/current-user.decorator';
-import type { PortfolioReview } from '../domain/types';
+import type { ReviewQuota } from '../domain/types';
 import type { ReviewHistoryRow } from '../repositories/portfolio-review.repository';
-import { PortfolioReviewService } from '../services/portfolio-review.service';
+import { PortfolioReviewService, type LatestReviewResponse, type RunResponse } from '../services/portfolio-review.service';
 
 /**
- * GET /api/portfolio-review — the caller's portfolio review (real broker book,
- * paper excluded), cached ~15 min; `?refresh=1` recomputes (at most once a
- * minute). Authenticated by the global JwtAuthGuard, scoped to the caller.
+ * Portfolio review, run on demand (owner 2026-11-02). Opening the page (GET /) reads the latest
+ * STORED review only — it never computes. POST /run starts a run (answers DONE with the review, or
+ * RUNNING with a run id to poll at GET /runs/:id). Each run is recorded for the monthly quota hook
+ * (GET /quota; counted, NOT enforced). Authenticated by the global JwtAuthGuard, scoped to the caller.
  */
 @ApiTags('Portfolio review')
 @Controller('api/portfolio-review')
@@ -17,9 +18,30 @@ export class PortfolioReviewController {
   constructor(private readonly service: PortfolioReviewService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Portfolio review: where the P&L comes from, behaviour patterns, holdings check, ranked suggestions' })
-  get(@CurrentUser() user: AuthenticatedUser, @Query('refresh') refresh?: string): Promise<PortfolioReview> {
-    return this.service.get({ userId: user.userId, role: user.role }, { refresh: refresh === '1' || refresh === 'true' });
+  @ApiOperation({ summary: 'The latest stored portfolio review (never computes), the run in progress and the quota' })
+  latest(@CurrentUser('userId') userId: string): Promise<LatestReviewResponse> {
+    return this.service.latest(userId);
+  }
+
+  @Post('run')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Run a portfolio review now: the report + the action plan. Returns DONE with the review, or RUNNING to poll' })
+  run(@CurrentUser() user: AuthenticatedUser): Promise<RunResponse> {
+    return this.service.startRun({ userId: user.userId, role: user.role });
+  }
+
+  @Get('runs/:id')
+  @ApiOperation({ summary: 'One review run (status, progress; the review once DONE)' })
+  async runStatus(@CurrentUser('userId') userId: string, @Param('id') id: string): Promise<RunResponse> {
+    const r = await this.service.runStatus(userId, id);
+    if (!r) throw new NotFoundException('No such review run');
+    return r;
+  }
+
+  @Get('quota')
+  @ApiOperation({ summary: 'Reviews used this month vs the free limit (not enforced yet)' })
+  quota(@CurrentUser('userId') userId: string): Promise<ReviewQuota> {
+    return this.service.reviewQuota(userId);
   }
 
   @Get('history')

@@ -1,12 +1,28 @@
 import api from './api';
-import type { PortfolioReview, ReviewHistoryRow } from '@/types/portfolioReview.types';
+import type { LatestReviewResponse, ReviewHistoryRow, ReviewQuota, RunResponse } from '@/types/portfolioReview.types';
+
+/** The latest STORED review + the run in progress + the quota. Never starts a review. */
+export async function getLatestPortfolioReview(): Promise<LatestReviewResponse> {
+  const { data } = await api.get<LatestReviewResponse>('/portfolio-review');
+  return data;
+}
 
 /**
- * The caller's portfolio review. A fresh computation reads ~1 year of daily candles per holding and may
- * wait for the AI summary, so it gets a longer timeout than the client default.
+ * Start a review run (the "Run portfolio review" button). The server answers within ~15 s: DONE with
+ * the review, or RUNNING with a run id to poll ({@link getPortfolioReviewRun}).
  */
-export async function getPortfolioReview(refresh = false): Promise<PortfolioReview> {
-  const { data } = await api.get<PortfolioReview>('/portfolio-review', { params: refresh ? { refresh: 1 } : undefined, timeout: 150_000 });
+export async function runPortfolioReview(): Promise<RunResponse> {
+  const { data } = await api.post<RunResponse>('/portfolio-review/run', undefined, { timeout: 60_000 });
+  return data;
+}
+
+export async function getPortfolioReviewRun(id: string): Promise<RunResponse> {
+  const { data } = await api.get<RunResponse>(`/portfolio-review/runs/${encodeURIComponent(id)}`);
+  return data;
+}
+
+export async function getPortfolioReviewQuota(): Promise<ReviewQuota> {
+  const { data } = await api.get<ReviewQuota>('/portfolio-review/quota');
   return data;
 }
 

@@ -1,7 +1,31 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import type { LlmSummary, PortfolioReview, TrackerInput } from '../domain/types';
+import type { LlmSummary, PortfolioReview, ReviewRun, TrackerInput } from '../domain/types';
+
+interface RunRow {
+  id: string;
+  user_id: string;
+  started_at: Date;
+  finished_at: Date | null;
+  status: string;
+  progress: string | null;
+  error: string | null;
+  review_id: string | null;
+}
+
+function toRun(r: RunRow): ReviewRun {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    startedAt: new Date(r.started_at).toISOString(),
+    finishedAt: r.finished_at ? new Date(r.finished_at).toISOString() : null,
+    status: r.status === 'RUNNING' || r.status === 'DONE' ? r.status : 'FAILED',
+    progress: r.progress,
+    error: r.error,
+    reviewId: r.review_id,
+  };
+}
 
 export interface ReviewHistoryRow {
   id: string;
@@ -79,6 +103,70 @@ export class PortfolioReviewRepository {
        WHERE "user_id" = ${userId} AND "created_at" >= ${since}
        ORDER BY "created_at" DESC LIMIT 1`;
     return rows[0] ? { id: rows[0].id, review: rows[0].payload } : null;
+  }
+
+  /** Fill the action plan's LLM explanation in place when it arrives after the run stored the review. */
+  async updatePlanExplanation(id: string, userId: string, explanation: LlmSummary): Promise<void> {
+    await this.prisma.$executeRaw`
+      UPDATE "portfolio_reviews"
+         SET "payload" = jsonb_set("payload", '{actionPlan,explanation}', ${JSON.stringify(explanation)}::jsonb)
+       WHERE "id" = ${id} AND "user_id" = ${userId} AND jsonb_typeof("payload"->'actionPlan') = 'object'`;
+  }
+
+  /** The newest stored review for the user (any age), or null. Never computes. */
+  async latest(userId: string): Promise<{ id: string; review: PortfolioReview } | null> {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; payload: PortfolioReview }>>`
+      SELECT "id", "payload" FROM "portfolio_reviews"
+       WHERE "user_id" = ${userId}
+       ORDER BY "created_at" DESC LIMIT 1`;
+    return rows[0] ? { id: rows[0].id, review: rows[0].payload } : null;
+  }
+
+  /** One stored review by id, scoped to the user. */
+  async byId(id: string, userId: string): Promise<PortfolioReview | null> {
+    const rows = await this.prisma.$queryRaw<Array<{ payload: PortfolioReview }>>`
+      SELECT "payload" FROM "portfolio_reviews" WHERE "id" = ${id} AND "user_id" = ${userId} LIMIT 1`;
+    return rows[0]?.payload ?? null;
+  }
+
+  // --- runs (portfolio_review_runs) -------------------------------------------------------------
+
+  async createRun(run: ReviewRun): Promise<void> {
+    await this.prisma.$executeRaw`
+      INSERT INTO "portfolio_review_runs" ("id", "user_id", "started_at", "status", "progress")
+      VALUES (${run.id}, ${run.userId}, ${new Date(run.startedAt)}, ${run.status}, ${run.progress})`;
+  }
+
+  async finishRun(
+    id: string,
+    userId: string,
+    patch: { status: ReviewRun['status']; finishedAt: Date; reviewId: string | null; error: string | null; progress: string | null },
+  ): Promise<void> {
+    await this.prisma.$executeRaw`
+      UPDATE "portfolio_review_runs"
+         SET "status" = ${patch.status}, "finished_at" = ${patch.finishedAt}, "review_id" = ${patch.reviewId},
+             "error" = ${patch.error}, "progress" = ${patch.progress}
+       WHERE "id" = ${id} AND "user_id" = ${userId}`;
+  }
+
+  async runById(id: string, userId: string): Promise<ReviewRun | null> {
+    const rows = await this.prisma.$queryRaw<RunRow[]>`
+      SELECT * FROM "portfolio_review_runs" WHERE "id" = ${id} AND "user_id" = ${userId} LIMIT 1`;
+    return rows[0] ? toRun(rows[0]) : null;
+  }
+
+  async latestRun(userId: string): Promise<ReviewRun | null> {
+    const rows = await this.prisma.$queryRaw<RunRow[]>`
+      SELECT * FROM "portfolio_review_runs" WHERE "user_id" = ${userId} ORDER BY "started_at" DESC LIMIT 1`;
+    return rows[0] ? toRun(rows[0]) : null;
+  }
+
+  /** Runs started since `since` that count toward the monthly quota (RUNNING or DONE). */
+  async countRunsSince(userId: string, since: Date): Promise<number> {
+    const rows = await this.prisma.$queryRaw<Array<{ n: bigint | number }>>`
+      SELECT COUNT(*) AS n FROM "portfolio_review_runs"
+       WHERE "user_id" = ${userId} AND "started_at" >= ${since} AND "status" IN ('RUNNING', 'DONE')`;
+    return Number(rows[0]?.n ?? 0);
   }
 
   async history(userId: string, limit = 30): Promise<ReviewHistoryRow[]> {

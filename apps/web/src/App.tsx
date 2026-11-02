@@ -42,6 +42,7 @@ import VerifyEmailPage from '@/pages/verify-email/VerifyEmailPage';
 import TelegramSignalsPage from '@/pages/telegram/TelegramSignalsPage';
 import NightReportPage from '@/pages/night-report/NightReportPage';
 import SelfReviewPage from '@/pages/self-review/SelfReviewPage';
+import PortfolioReviewPage from '@/pages/portfolio-review/PortfolioReviewPage';
 import SignalsTelegramPage from '@/pages/signals-telegram/SignalsTelegramPage';
 
 // Gate the authenticated app. While the stored session is being verified we
@@ -179,6 +180,7 @@ export default function App() {
         <Route path="night-report" element={<RequireRole role="ADMIN"><NightReportPage /></RequireRole>} />
         <Route path="self-review" element={<RequireRole role="ADMIN"><SelfReviewPage /></RequireRole>} />
         <Route path="signals-telegram" element={<RequireRole role="ADMIN"><SignalsTelegramPage /></RequireRole>} />
+        <Route path="portfolio-review" element={<RequireRole role="ADMIN"><PortfolioReviewPage /></RequireRole>} />
         <Route path="portfolio" element={<PortfolioPage />} />
         <Route path="monitor" element={<MonitorPage />} />
         <Route path="payments" element={<PaymentsPage />} />

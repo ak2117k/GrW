@@ -67,6 +67,7 @@ import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
 import { EntryEngineModule } from './modules/entry-engine/entry-engine.module';
 import { PreOpenOutlookModule } from './modules/pre-open-outlook/pre-open-outlook.module';
 import { SanityAuditModule } from './modules/sanity-audit/sanity-audit.module';
+import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-review.module';
 
 @Module({
   imports: [
@@ -336,6 +337,11 @@ import { SanityAuditModule } from './modules/sanity-audit/sanity-audit.module';
     // sanity_violations and alerted once (ops bot). DETECTION ONLY: never modifies or blocks a trade.
     // SANITY_AUDIT=off disables it; SANITY_AUDIT_SINCE (default 2026-10-30T09:30Z) is the alert cutoff.
     SanityAuditModule,
+
+    // Portfolio review (2026-11-02) — GET /api/portfolio-review: the caller's real book analysed (P&L
+    // sources, behaviour patterns, holdings tags, ranked suggestions, owner-only AI summary). Read-only;
+    // stores each report in portfolio_reviews.
+    PortfolioReviewModule,
 
     // Liveness + keep-warm probe (/healthz) — pinged by the keep-warm cron so
     // the free-tier stack rarely cold-starts and logins stay fast.

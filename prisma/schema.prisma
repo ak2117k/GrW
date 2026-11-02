@@ -3779,3 +3779,23 @@ model PreOpenOutlook {
   @@index([at])
   @@map("pre_open_outlooks")
 }
+
+/// Portfolio review per generation (GET /api/portfolio-review, ~15-min cache): headline numbers + the whole
+/// report in payload, so the owner can compare over time. Raw SQL writes. No FK.
+model PortfolioReview {
+  id            String   @id
+  userId        String   @map("user_id")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  realisedNet   Float    @map("realised_net")
+  unrealised    Float
+  total         Float
+  charges       Float
+  trades        Int
+  winRate       Float    @map("win_rate")
+  summaryStatus String   @map("summary_status") // OK | SKIPPED | PENDING | BUSY | FAILED
+  summary       String?
+  payload       Json
+
+  @@index([userId, createdAt])
+  @@map("portfolio_reviews")
+}

@@ -32,6 +32,7 @@ import {
   Moon,
   ScrollText,
   ListChecks,
+  ClipboardCheck,
 } from 'lucide-react';
 import type { NavItem } from '@/types';
 
@@ -59,6 +60,7 @@ export const navItems: NavItem[] = [
   { path: '/night-report', label: 'Night Report', icon: Moon },
   { path: '/self-review', label: 'Self-review', icon: ListChecks },
   { path: '/portfolio', label: 'Portfolio', icon: PieChart },
+  { path: '/portfolio-review', label: 'Portfolio review', icon: ClipboardCheck },
   { path: '/monitor', label: 'Monitor', icon: Target },
   { path: '/payments', label: 'Payments', icon: CreditCard },
   { path: '/news', label: 'News', icon: Newspaper },

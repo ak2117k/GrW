@@ -16,6 +16,8 @@ import {
   normalizeHoldings,
   normalizePositions,
 } from './trade-tracker.service';
+// These suites pin reconcile's close semantics; the book-blink grace (blinkCloseDue) has its own spec.
+process.env.TRACKER_BLINK_GRACE = 'off';
 
 /** Build a persisted-tracker fixture with sensible defaults. */
 function tracker(overrides: Partial<TradeTracker> = {}): TradeTracker {

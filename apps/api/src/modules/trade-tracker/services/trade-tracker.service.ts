@@ -369,6 +369,20 @@ export function roundTripExitPrice(leg: SquaredOffLeg | undefined, qty: number, 
   return price > 0 ? Math.round(price * 100) / 100 : 0;
 }
 
+/**
+ * BOOK-BLINK GRACE (2026-11-02). Angel's holdings / positions reads intermittently omit a row that is
+ * still held; the tracker closed it at that moment's mark and re-opened a new row minutes later. Prod:
+ * 397 holding closes re-opened within 30 min at the same price (≈12 rows per holding), −₹2.90L of
+ * "realised" P&L that never happened. A tracker missing from an answered read now closes only once it
+ * has stayed missing for the grace — at once when the broker lists the position squared off (netqty 0).
+ */
+export const BLINK_GRACE_MS: Readonly<Record<string, number>> = { HOLDING: 35 * 60_000, POSITION: 10 * 60_000 };
+
+export function blinkCloseDue(kind: string, squaredOff: boolean, firstMissingMs: number, nowMs: number): boolean {
+  if (process.env.TRACKER_BLINK_GRACE === 'off' || squaredOff) return true;
+  return nowMs - firstMissingMs >= (BLINK_GRACE_MS[kind] ?? 0);
+}
+
 export function normalizePositions(positions: unknown): BookItem[] {
   if (!Array.isArray(positions)) return [];
   const out: BookItem[] = [];
@@ -465,6 +479,8 @@ const OPEN_TOKENS_TTL_MS = 60_000;
 @Injectable()
 export class TradeTrackerService implements OnModuleDestroy {
   private readonly logger = new Logger(TradeTrackerService.name);
+  /** Tracker id → when an answered read first lacked it (blinkCloseDue). In-process; a restart restarts the grace. */
+  private readonly missingSince = new Map<string, number>();
 
   /** Latest pending LTP per (scope, EXCHANGE:token), coalesced between debounced flushes. */
   private readonly pendingTicks = new Map<string, PendingTick>();
@@ -704,10 +720,18 @@ export class TradeTrackerService implements OnModuleDestroy {
     }
 
     for (const [key, tracker] of openByKey) {
-      if (bookByKey.has(key)) continue;
+      if (bookByKey.has(key)) {
+        this.missingSince.delete(tracker.id);
+        continue;
+      }
       if (!fetched.has(tracker.kind)) continue;
       // The broker's fill average for a squared-off position; the last tick only when it has none.
       const leg = tracker.kind === 'POSITION' ? squaredOff.get(tracker.token) : undefined;
+      // A book blink is not an exit: wait out the grace unless the broker shows the leg squared off.
+      const first = this.missingSince.get(tracker.id) ?? now.getTime();
+      this.missingSince.set(tracker.id, first);
+      if (!blinkCloseDue(tracker.kind, leg !== undefined, first, now.getTime())) continue;
+      this.missingSince.delete(tracker.id);
       const earlier = leg
         ? await this.prisma.tradeTracker.findMany({
             where: { userId, token: tracker.token, kind: 'POSITION', status: 'CLOSED', exitTime: { gte: new Date(`${today}T00:00:00+05:30`) } },

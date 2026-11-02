@@ -6,6 +6,7 @@ import {
   type LiveTrackerRow,
 } from '../repositories/live-trades.repository';
 import { triggerOf } from '../../sentinel-executor/domain/manual-exit';
+import { withoutBlinkCloses } from './blink-closes';
 
 /**
  * LIVE (real-money) performance for the Dashboard and the Journal's Live tab.
@@ -290,7 +291,8 @@ export class LivePerformanceService {
       this.repo.listLiveExits(userId),
       this.repo.listLiveOrders(userId),
     ]);
-    return buildLiveTrades(trackers, exits, orders);
+    // Book-blink closes and no-cost rows are not trades (blink-closes.ts): totals count real exits only.
+    return buildLiveTrades(withoutBlinkCloses(trackers), exits, orders);
   }
 
   async getDashboard(userId: string, now: Date = new Date()): Promise<LiveDashboard> {

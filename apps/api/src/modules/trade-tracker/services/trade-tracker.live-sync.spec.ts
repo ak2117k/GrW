@@ -1,6 +1,8 @@
 import { Logger } from '@nestjs/common';
 import type { TradeTracker } from '@prisma/client';
 import { TradeTrackerService, istDateString } from './trade-tracker.service';
+// These suites pin reconcile's close semantics; the book-blink grace (blinkCloseDue) has its own spec.
+process.env.TRACKER_BLINK_GRACE = 'off';
 
 /**
  * TradeTrackerService support for near-live broker sync: the positions-only,

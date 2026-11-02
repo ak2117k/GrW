@@ -1,4 +1,4 @@
-import { roundTripExitPrice, squaredOffExitPrices } from './trade-tracker.service';
+import { blinkCloseDue, roundTripExitPrice, squaredOffExitPrices } from './trade-tracker.service';
 
 /** Prod 2026-11-02 RELIANCE23NOV261300CE: bought 500 @ 6.9, AI sold @ 7.15; the tracker showed its last tick 8.15. */
 describe('squared-off exit price (broker fill, not the last tick)', () => {
@@ -27,5 +27,27 @@ describe('squared-off exit price (broker fill, not the last tick)', () => {
     expect(roundTripExitPrice(leg, 500, [])).toBe(0);
     expect(roundTripExitPrice(undefined, 500, [])).toBe(0);
     expect(roundTripExitPrice(squaredOffExitPrices([row({ sellavgprice: '0' })]).get('125997'), 500, [])).toBe(0);
+  });
+});
+
+describe('book-blink grace (blinkCloseDue)', () => {
+  const t0 = Date.parse('2026-11-02T05:00:00Z');
+  const OLD = process.env.TRACKER_BLINK_GRACE;
+  beforeEach(() => delete process.env.TRACKER_BLINK_GRACE);
+  afterAll(() => (process.env.TRACKER_BLINK_GRACE = OLD));
+
+  it('a holding missing from one read is not closed; it closes after 35 min missing', () => {
+    expect(blinkCloseDue('HOLDING', false, t0, t0)).toBe(false);
+    expect(blinkCloseDue('HOLDING', false, t0, t0 + 30 * 60_000)).toBe(false);
+    expect(blinkCloseDue('HOLDING', false, t0, t0 + 35 * 60_000)).toBe(true);
+  });
+  it('a position the broker lists squared off closes at once; otherwise after 10 min', () => {
+    expect(blinkCloseDue('POSITION', true, t0, t0)).toBe(true);
+    expect(blinkCloseDue('POSITION', false, t0, t0 + 9 * 60_000)).toBe(false);
+    expect(blinkCloseDue('POSITION', false, t0, t0 + 10 * 60_000)).toBe(true);
+  });
+  it('TRACKER_BLINK_GRACE=off closes at once, as before', () => {
+    process.env.TRACKER_BLINK_GRACE = 'off';
+    expect(blinkCloseDue('HOLDING', false, t0, t0)).toBe(true);
   });
 });

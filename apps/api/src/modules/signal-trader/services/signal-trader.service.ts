@@ -338,8 +338,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
   }
 
   /** Engine SL (when the signal has none) + plan + risk manager + the full gate, at entry price `price`. */
-  private async planAndGate(decisionId: string, s: SignalView, base: BaseFacts, price: number | null, now: Date): Promise<{ gate: GateResult; plan: EntryPlan | null }> {
-    const cfg = this.cfg;
+  private async planAndGate(decisionId: string, s: SignalView, base: BaseFacts, price: number | null, now: Date, cfgOver?: SignalTraderConfig): Promise<{ gate: GateResult; plan: EntryPlan | null }> {
+    const cfg = cfgOver ?? this.cfg;
     const owner = cfg.ownerUserId;
     let engineSl: number | null = null;
     let engineSlInfo: GateFacts['engineSlInfo'] = null;
@@ -398,6 +398,17 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     if (!pg.gate.pass || !pg.plan) {
       const armed = await this.maybeArm(decisionId, s, e, channel, now, base, pg.gate);
       if (armed) return armed;
+      // Live + learning: a call the live gate refuses (cap, trades/day, kill switch…) is still LEARNING-paper-traded
+      // on the paper-mode plan, so the night review keeps scoring it. Marked liveGateBlocked: act() never sends it live.
+      if (liveLearning(this.cfg)) {
+        const lp = await this.planAndGate(decisionId, s, base, base.ltp, now, { ...this.cfg, mode: 'paper' });
+        if (lp.gate.pass && lp.plan) {
+          const lj = await this.runJudge(decisionId, s, e, channel, now, lp.plan, base.tradesToday, base.c);
+          const take = learnTake(lj, e.agreeCount ?? 1, e.conflict === true, now);
+          const blocked = { ...take, record: { ...(take.record as Record<string, unknown>), liveGateBlocked: pg.gate.skipReason ?? 'gate' } };
+          return this.act(decisionId, s, channel, now, lp.gate.checks, lp.plan, blocked, base);
+        }
+      }
       const failed = pg.gate.checks.find((x) => x.name === pg.gate.skipReason);
       // Paper asks the judge on every planned call, so each SKIP still carries its OI / level / trend read.
       const judged = this.cfg.mode === 'paper' && pg.plan ? (await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday, base.c)).record : null;
@@ -524,7 +535,9 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
     // ---- paper: the TAKE becomes a paper trade; the broker is never called (no funds read either) ----
     // Also in live: a learning outcome (the judge did not TAKE) and an underlying outside SIGNAL_LIVE_UNDERLYINGS.
-    const learnOnly = (j.record as { learnTaken?: unknown } | null)?.learnTaken === true && (j.record as { aiDecision?: unknown }).aiDecision !== 'TAKE';
+    const rec = (j.record ?? {}) as { learnTaken?: unknown; aiDecision?: unknown; liveGateBlocked?: unknown };
+    // A learning outcome the judge did not TAKE, or any call the live gate refused, is paper only — never sent.
+    const learnOnly = (rec.learnTaken === true && rec.aiDecision !== 'TAKE') || (rec.liveGateBlocked !== undefined && rec.liveGateBlocked !== null);
     if (cfg.mode === 'paper' || (cfg.mode === 'live' && (learnOnly || !liveAllowedFor(cfg, s.underlying)))) {
       await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: judgeWithChanges, plan: finalPlan, decision: 'PAPER', skipReason: null });
       const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty, available: null, method: 'premium' };
@@ -877,7 +890,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
    * its capital cap is real): the LIVE order, or in paper mode the paper order from its own pool.
    */
   private riskDto(plan: EntryPlan, decisionId: string): ExecuteTradeDto {
-    if (this.cfg.mode === 'paper') {
+    // A learning plan is paper whatever the mode (live + learning trades gate-refused calls on paper).
+    if (this.cfg.mode === 'paper' || plan.learn === true) {
       return {
         ...this.liveRiskDto(plan, decisionId),
         isPaper: true,

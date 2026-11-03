@@ -129,6 +129,18 @@ describe('SignalTraderService', () => {
       expect(other.paper.open).toHaveBeenCalledTimes(1);
     });
 
+    it('live + SIGNAL_PAPER_LEARN: a call the live gate refuses (trades/day used) is learning-paper-traded — even a judge TAKE is never sent', async () => {
+      const t = build({ cfg: { mode: 'live', paperLearn: true } });
+      t.repo.tradesToday.mockResolvedValue(3);
+      expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'PAPER' });
+      expect(t.executor.place).not.toHaveBeenCalled();
+      expect(t.paper.open).toHaveBeenCalledTimes(1);
+      const off = build({ cfg: { mode: 'live', paperLearn: false } });
+      off.repo.tradesToday.mockResolvedValue(3);
+      expect((await off.svc.evaluate(ev))?.skipReason).toBe('trades_today');
+      expect(off.paper.open).not.toHaveBeenCalled();
+    });
+
     it('live + SIGNAL_PAPER_LEARN: a judge SKIP opens a learning paper trade and never reaches the broker', async () => {
       const skip = async () => ({ ok: true, verdict: { verdict: 'SKIP', confidence: 60, reasons: ['thin room'], entry: null, sl: null, targets: [], lots: null }, latencyMs: 5 });
       const t = build({ cfg: { mode: 'live', paperLearn: true }, judge: skip as never });

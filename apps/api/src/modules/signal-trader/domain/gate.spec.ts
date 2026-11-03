@@ -306,3 +306,22 @@ describe('signal gate', () => {
     expect(applyJudgeTightening(plan, { sl: 101.5, lots: null }, 'CE').plan.sl).toBe(90);
   });
 });
+
+describe('SIGNAL_RISK_CAP_GATE=off (2026-11-03 going live)', () => {
+  it('live with the cap off takes 1 lot of a call whose 1-lot risk breaks the cap; with it on, it does not', () => {
+    const wide = (riskCapGate: boolean) => parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner', SIGNAL_TRADING: 'live', SIGNAL_RISK_CAP_GATE: riskCapGate ? 'on' : 'off' });
+    expect(wide(false).riskCapGate).toBe(false);
+    expect(wide(true).riskCapGate).toBe(true);
+    expect(parseSignalTraderConfig({}).riskCapGate).toBe(true);
+  });
+});
+
+describe('SIGNAL_RISK_CAP_GATE=off: plan', () => {
+  it('a call whose 1 lot breaks the cap is planned at 1 lot (risk recorded as a warning) — not skipped', () => {
+    const off = { ...cfg(), riskCapGate: false };
+    const r = run(facts({ signal: signal({ sl: 70 }) }), off);
+    expect(r.plan?.lots).toBe(1);
+    expect(r.checks.find((c) => c.name === 'risk_cap')).toMatchObject({ ok: false, required: false });
+    expect(r.checks.find((c) => c.name === 'risk_cap')?.detail).toMatch(/risk cap off: 1 lot anyway/);
+  });
+});

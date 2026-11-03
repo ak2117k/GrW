@@ -53,7 +53,7 @@ import {
 import { exitConfirmFire } from '../tripwires/exit-confirm';
 import { solveCycleFloor } from './cycle-floor';
 import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
-import { confirmHardFloor, hardFloorReading, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import { confirmHardFloor, hardFloorReading, hardLossLimit, hardLossTrip, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
@@ -450,6 +450,8 @@ interface TrackerState {
   anchors?: AnchorMemory;
   /** FLOOR_HARD_EXIT: the hard-floor confirmation run and the last fire (hard-floor.ts). Memory only. */
   hardFloor?: HardFloorMemo;
+  /** HARD_LOSS_EXIT confirmation memo (hardLossFor). */
+  hardLoss?: HardFloorMemo;
   /** FLOOR_HARD_EXIT: epoch ms a held position's suppressed trip was last logged (once per 30 min). */
   hardFloorHeldLoggedAt?: number;
   /** News & events v2 edge-trigger memory (R4): fresh own-instrument article ids already fired on. */
@@ -991,6 +993,12 @@ export class SentinelCycleService {
     // K·N against the position from its best point, is an exit the judge is not asked about. Read on
     // EVERY pass (the confirmation needs consecutive reads) and ahead of the judge's own gates — the
     // agent backoff, the in-flight lock — so an outage or a slow judgement cannot hold it.
+    // HARD_LOSS_EXIT (hard-floor.ts): a real position at −₹HARD_LOSS_EXIT_RUPEES net exits by rule, ahead of the floor.
+    const loss = this.hardLossFor(entry, state, tickF, now);
+    if (loss) {
+      ruleJobs.push(this.recordHardFloorExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, loss, now));
+      return null;
+    }
     const hard = this.hardFloorFor(entry, state, tickF, floorSolve.noiseFloor, greenFloorArmedLatched, now);
     if (hard) {
       ruleJobs.push(this.recordHardFloorExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, hard, now));
@@ -1078,6 +1086,20 @@ export class SentinelCycleService {
    * engine manages. A HELD position (AI_AUTO_EXIT_HOLD) is read but never fired — the executor would
    * refuse it as OWNER_HOLD anyway; the suppressed trip is logged once per 30 min.
    */
+  /** HARD_LOSS_EXIT: REAL derivative positions only (never paper); the owner's HOLD list is respected like the floor. */
+  private hardLossFor(entry: RosterEntry, state: TrackerState, tick: TickReading, now: Date): { reading: HardFloorReading; floor: number; netPnl: number } | null {
+    const limit = hardLossLimit();
+    if (limit === null || entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !isDerivativeSegment(tick.segment)) return null;
+    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side });
+    const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    const trip = hardLossTrip(green.netPnl, limit) && !(hold && isHeldPosition(hold, entry));
+    const c = confirmHardFloor(state.hardLoss, trip, now.getTime());
+    state.hardLoss = c.memo;
+    if (!c.fire) return null;
+    const reading: HardFloorReading = { trip: true, rule: 'MAX_LOSS', belowFloor: false, netRed: true, adverseFromBest: null, adverseFromBestN: null };
+    return { reading, floor: -limit, netPnl: green.netPnl };
+  }
+
   private hardFloorFor(
     entry: RosterEntry,
     state: TrackerState,
@@ -1140,7 +1162,9 @@ export class SentinelCycleService {
     const r = hard.reading;
     const from = tick.anchors?.best;
     const detail =
-      r.rule === 'GREEN_TO_RED'
+      r.rule === 'MAX_LOSS'
+        ? `net ₹${Math.round(hard.netPnl)} reached the hard loss exit of ₹${-hard.floor} (HARD_LOSS_EXIT_RUPEES)`
+        : r.rule === 'GREEN_TO_RED'
         ? `premium ${tick.ltp} below the armed floor ${hard.floor} and net ₹${Math.round(hard.netPnl)} — the trade turned red`
         : `premium ${tick.ltp} below the armed floor ${hard.floor}; underlying ${tick.underlyingLtp} is ${r.adverseFromBest} (${r.adverseFromBestN} N) against the position from ${from?.underlying} at its best point ${from?.ltp}`;
     const fire: TripwireFire = { name: FLOOR_HARD_EXIT_FIRE, detail };

@@ -93,6 +93,12 @@ export interface SignalTraderConfig {
    * sent for; any other TAKE is paper-traded instead. Empty = every underlying (the old behaviour).
    */
   liveUnderlyings: string[];
+  /**
+   * SIGNAL_RISK_CAP_GATE (default on; 2026-11-03 owner: "silence the risk-reward for now"). off: a call whose
+   * 1-lot risk breaks maxLossPerTrade is still taken at 1 lot (as paper does) — the loss is capped at the exit
+   * by HARD_LOSS_EXIT_RUPEES instead (exit-discipline/hard-floor.ts).
+   */
+  riskCapGate: boolean;
   problems: string[];
 }
 
@@ -218,6 +224,7 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     lateEntry: parseOnOff(env.SIGNAL_LATE_ENTRY, true, 'SIGNAL_LATE_ENTRY', problems),
     lateMaxPct: num(env, 'SIGNAL_LATE_MAX_PCT', SIGNAL_DEFAULTS.lateMaxPct, (n) => n > 0 && n <= 100, problems),
     paperLearn: parseOnOff(env.SIGNAL_PAPER_LEARN, false, 'SIGNAL_PAPER_LEARN', problems),
+    riskCapGate: parseOnOff(env.SIGNAL_RISK_CAP_GATE, true, 'SIGNAL_RISK_CAP_GATE', problems),
     liveUnderlyings: String(env.SIGNAL_LIVE_UNDERLYINGS ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
     problems,
   };

@@ -1,5 +1,5 @@
 import { FLOOR_HARD_CONFIRM_SEC, FLOOR_HARD_REFIRE_SEC } from './config';
-import { confirmHardFloor, hardFloorReading, underlyingAgainst, widenExitTrigger, type HardFloorInput, type TriggerFloorInput } from './hard-floor';
+import { confirmHardFloor, hardFloorReading, hardLossLimit, hardLossTrip, underlyingAgainst, widenExitTrigger, type HardFloorInput, type TriggerFloorInput } from './hard-floor';
 
 /** Long CRUDEOILM 9350 PE (BEARISH exposure: a RISING underlying hurts), 2026-10-29 numbers. */
 const BASE: HardFloorInput = {
@@ -111,5 +111,22 @@ describe('widenExitTrigger — no AI stop inside noise', () => {
     expect(widenExitTrigger({ ...T, op: 'ABOVE', price: 74600 }).widenedFrom).toBeNull();
     expect(widenExitTrigger({ ...T, nUnderlying: null }).widenedFrom).toBeNull();
     expect(widenExitTrigger({ ...T, exposure: null }).widenedFrom).toBeNull();
+  });
+});
+
+describe('hard loss exit (HARD_LOSS_EXIT_RUPEES, 2026-11-03)', () => {
+  it('reads the limit from env; unset / 0 / junk = off', () => {
+    expect(hardLossLimit({ HARD_LOSS_EXIT_RUPEES: '2000' })).toBe(2000);
+    expect(hardLossLimit({})).toBeNull();
+    expect(hardLossLimit({ HARD_LOSS_EXIT_RUPEES: '0' })).toBeNull();
+    expect(hardLossLimit({ HARD_LOSS_EXIT_RUPEES: 'two' })).toBeNull();
+  });
+  it('trips at a net loss of the limit or more, never on a smaller loss, a profit or no P&L', () => {
+    expect(hardLossTrip(-2000, 2000)).toBe(true);
+    expect(hardLossTrip(-2450, 2000)).toBe(true);
+    expect(hardLossTrip(-1999, 2000)).toBe(false);
+    expect(hardLossTrip(300, 2000)).toBe(false);
+    expect(hardLossTrip(null, 2000)).toBe(false);
+    expect(hardLossTrip(-5000, null)).toBe(false);
   });
 });

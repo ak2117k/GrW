@@ -14,6 +14,7 @@ import type { SessionClock } from '../../market-hub/session-clock';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
 import { ExitGateRepository } from '../repositories/exit-gate.repository';
 import { AI_EXIT_SESSION_CLOCK } from './executor.tokens';
+import { hardLossLimit } from '../../exit-discipline/hard-floor';
 
 export type GateContext =
   | {
@@ -116,11 +117,14 @@ export class ExitGateService {
     const facts = readPacketFacts(packet);
     if ('unreadable' in facts) return { kind: 'unreadable', reason: facts.unreadable };
     const since = new Date(v.createdAt.getTime() - STREAK_LOOKBACK_MIN * 60_000);
-    const [history, maxLossPerTrade, dailyLossLatched] = await Promise.all([
+    const [history, coreMaxLoss, dailyLossLatched] = await Promise.all([
       this.repo.recentVerdicts(v.trackerId, v.id, v.createdAt, since),
       this.repo.maxRiskPerTrade(v.userId, now),
       this.repo.dailyLossLatched(v.userId, istDate(now)),
     ]);
+    // HARD_LOSS_EXIT_RUPEES (live signal trades, 2026-11-03) is a tighter per-trade max loss than the core limit.
+    const hardLoss = hardLossLimit();
+    const maxLossPerTrade = coreMaxLoss !== null && hardLoss !== null ? Math.min(coreMaxLoss, hardLoss) : coreMaxLoss ?? hardLoss;
     return { kind: 'ready', verdict: { id: v.id, createdAt: v.createdAt }, packet: facts, history, maxLossPerTrade, dailyLossLatched };
   }
 

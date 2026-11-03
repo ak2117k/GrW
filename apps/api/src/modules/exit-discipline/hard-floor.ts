@@ -22,7 +22,7 @@ import type { Exposure, PositionSide } from './types';
  * at least FLOOR_HARD_CONFIRM_SEC apart, so one print through the floor never sells. The exit goes
  * through the same verdict → executor → gate path as an AI EXIT_NOW (owner HOLD, F&O only, the cap).
  */
-export type HardFloorRule = 'GREEN_TO_RED' | 'HWM_UNDERLYING_MOVE';
+export type HardFloorRule = 'GREEN_TO_RED' | 'HWM_UNDERLYING_MOVE' | 'MAX_LOSS';
 
 const fin = (x: number | null | undefined): x is number => typeof x === 'number' && Number.isFinite(x);
 const r2 = (x: number) => Math.round(x * 100) / 100;
@@ -134,4 +134,20 @@ export function widenExitTrigger(i: TriggerFloorInput): { price: number; widened
   const limit = r2(i.exposure === 'BULLISH' ? ref - gap : ref + gap);
   const tooClose = i.exposure === 'BULLISH' ? i.price > limit : i.price < limit;
   return tooClose ? { price: limit, widenedFrom: i.price, ref } : { ...same, ref };
+}
+
+/**
+ * HARD LOSS EXIT (owner 2026-11-03, going live: "for real close the trade on a loss of 2 k"). Pure.
+ * The entry risk cap is relaxed for live signal trades (SIGNAL_RISK_CAP_GATE=off), so the per-trade
+ * loss is capped at the exit instead: a REAL derivative position whose net P&L after charges is at or
+ * below −HARD_LOSS_EXIT_RUPEES exits, confirmed like the hard floor (two reads ≥ FLOOR_HARD_CONFIRM_SEC
+ * apart). 0 / unset = off. Paper trades are untouched.
+ */
+export function hardLossLimit(env: Record<string, string | undefined> = process.env): number | null {
+  const n = Number(String(env.HARD_LOSS_EXIT_RUPEES ?? '').trim());
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+export function hardLossTrip(netPnl: number | null | undefined, limit: number | null): boolean {
+  return limit !== null && fin(netPnl) && netPnl <= -limit;
 }

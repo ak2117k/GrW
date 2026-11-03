@@ -288,11 +288,12 @@ function planEntryCore(
     checks.push(check('sl_side', sideOk, sideOk ? `SL ${sl} on the protective side of LTP ${ltp} / limit ${limit}` : `SL ${sl} is not ${s.side === 'BUY' ? 'below' : 'above'} LTP ${ltp} / limit ${limit} (already hit or wrong side)`));
     if (sideOk) {
       let size = sizeEntry({ kind: s.instrumentKind, qty: s.qty, lotSize: c.lotSize, limitPrice: limit, sl }, cfg);
-      if (!size.ok && size.reason === 'one_lot_exceeds_risk_cap' && cfg.mode === 'paper') {
+      // Paper always; live too with SIGNAL_RISK_CAP_GATE=off (the loss is then capped at the exit, HARD_LOSS_EXIT_RUPEES).
+      if (!size.ok && size.reason === 'one_lot_exceeds_risk_cap' && (cfg.mode === 'paper' || cfg.riskCapGate === false)) {
         // Paper tests the call itself: the smallest tradable size, its risk recorded as a warning.
         const unit = s.instrumentKind === 'EQ' ? 1 : c.lotSize;
         const risk = r2(Math.abs(limit - sl) * unit);
-        checks.push(check('risk_cap', false, `${size.reason}: ${size.detail} — paper: 1 ${s.instrumentKind === 'EQ' ? 'share' : 'lot'} anyway`, false));
+        checks.push(check('risk_cap', false, `${size.reason}: ${size.detail} — ${cfg.mode === 'paper' ? 'paper' : 'risk cap off'}: 1 ${s.instrumentKind === 'EQ' ? 'share' : 'lot'} anyway`, false));
         size = { ok: true, lots: 1, qty: unit, riskRupees: risk, detail: `paper 1 ${s.instrumentKind === 'EQ' ? 'share' : `lot × ${unit}`} (over the ₹${cfg.maxLossPerTrade} cap)` };
       } else if (size.ok) {
         checks.push(check('risk_cap', true, `${size.detail}; risk ₹${size.riskRupees} ≤ ₹${cfg.maxLossPerTrade}`));

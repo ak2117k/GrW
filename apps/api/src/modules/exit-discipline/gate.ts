@@ -11,6 +11,8 @@ export interface GateEvaluation {
   thesisClearMargin: boolean;
   /** A FLOOR_HARD_* clause passed (FLOOR_HARD_EXIT): skips persistence like hard risk, not the opening guard. */
   floorHard: boolean;
+  /** The TARGET_LADDER clause passed: skips persistence like the hard floor, not the opening guard. */
+  ladder: boolean;
   clauses: ClauseResult[];
 }
 
@@ -120,13 +122,28 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig): GateE
         'armed floor broken on both reads AND the underlying moved K noise units against the position from the best point'));
   }
 
-  const clauses = [inv, lvl, loss, close, expiry, daily, move, vw, ...hard];
+  // 5. target ladder (target-ladder.ts), enforced packets only: the last target was reached, or the ladder's
+  // moved stop is crossed on BOTH reads — the packet's premium and the executor's fresh one. A code rule the
+  // owner set ("same rules as paper"), confirmed by the cycle's two reads, so it skips persistence like the
+  // hard floor; the opening guard still applies.
+  const ladder: ClauseResult[] = [];
+  if (f.ladder) {
+    const L = f.ladder;
+    const lt = [L.packetLtp, f.ltpNow].filter(fin);
+    const crossed = fin(L.stop) && L.stage >= 1 && lt.length === 2 && lt.every((x) => (f.positionSide === 'LONG' ? x <= (L.stop as number) : x >= (L.stop as number)));
+    ladder.push(res('TARGET_LADDER', L.lastHit || crossed,
+      { stage: L.stage, stop: L.stop, lastHit: L.lastHit, packetLtp: L.packetLtp, ltpNow: f.ltpNow, stopCrossed: crossed },
+      L.lastHit ? 'the last target was reached' : 'the ladder stop (entry after T1, T(n−1) after T(n), or the one-target trail) crossed on both reads'));
+  }
+
+  const clauses = [inv, lvl, loss, close, expiry, daily, move, vw, ...hard, ...ladder];
   const ok = (c: ClauseResult) => c.pass === true;
   const hardRisk = [loss, close, expiry, daily].some(ok);
   const floorHard = hard.some(ok);
+  const ladderHit = ladder.some(ok);
   const thesis = [inv, lvl].some(ok);
   const floorOk = [move, vw].some(ok);
-  const justification: Justification | null = hardRisk ? 'HARD_RISK' : floorHard ? 'FLOOR_HARD_EXIT'
+  const justification: Justification | null = hardRisk ? 'HARD_RISK' : floorHard ? 'FLOOR_HARD_EXIT' : ladderHit ? 'TARGET_LADDER'
     : thesis ? 'THESIS_BROKEN' : floorOk ? 'CONFIRMED_FLOOR_BREACH' : null;
-  return { justified: justification !== null, justification, hardRisk, thesisClearMargin: clear, floorHard, clauses };
+  return { justified: justification !== null, justification, hardRisk, thesisClearMargin: clear, floorHard, ladder: ladderHit, clauses };
 }

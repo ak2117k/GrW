@@ -71,6 +71,9 @@ import { MARKET_EVENTS } from './ports/events.port';
 import { PaperLookRepository } from './paper/paper-look.repository';
 import { OWNER_ALERTS } from './ports/owner-alerts.port';
 import { TelegramOwnerAlerts } from './adapters/owner-alert.telegram.adapter';
+import { LADDER_PLANS } from './ports/ladder-plans.port';
+import { PrismaLadderPlanReader } from './repositories/ladder-plan.reader';
+import { parseLadderMode } from '../exit-discipline/target-ladder';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -230,6 +233,17 @@ import { TelegramOwnerAlerts } from './adapters/owner-alert.telegram.adapter';
     // for a LIVE cash position's square-off decision or EXIT_NOW, which nothing automatic carries out.
     // Bound for the live cycle only — the paper cycle is built without it, so paper never alerts.
     { provide: OWNER_ALERTS, useFactory: () => new TelegramOwnerAlerts(process.env) },
+    // Target ladder for REAL positions (exit-discipline/target-ladder.ts; TARGET_LADDER=on|observe|off, default
+    // on): live signal trades and the owner's manual F&O trades. A READ-ONLY view of signal_orders and of the
+    // stops proposed on sentinel_verdicts. Bound for the live cycle only — the paper cycle is built without it.
+    {
+      provide: LADDER_PLANS,
+      useFactory: (prisma: PrismaService) => {
+        const mode = parseLadderMode(process.env.TARGET_LADDER);
+        return mode === 'off' ? null : new PrismaLadderPlanReader(prisma, mode);
+      },
+      inject: [PrismaService],
+    },
     {
       provide: MinuteBarsReader,
       useFactory: (prisma: PrismaService) => new MinuteBarsReader(new PrismaCandleRepo(prisma as never)),

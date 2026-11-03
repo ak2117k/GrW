@@ -10,6 +10,8 @@ export interface PacketFacts {
   minutesToClose: number | null; support: number | null; resistance: number | null;
   /** `money.anchors` (FLOOR_HARD_EXIT): the underlying at the best point and at the floor's arm point. Absent key ⇒ a pre-anchor packet. */
   anchors?: { bestUnderlying: number | null; armUnderlying: number | null };
+  /** `money.ladder` (TARGET_LADDER, target-ladder.ts). Absent key ⇒ no ladder on this position. */
+  ladder?: { stop: number | null; stage: number; lastHit: boolean; enforced: boolean };
 }
 
 type Obj = Record<string, unknown>;
@@ -43,6 +45,7 @@ export function readPacketFacts(packet: unknown): PacketFacts | { unreadable: st
   const noise = noiseRaw ? { contract: noiseReading(noiseRaw.contract), underlying: noiseReading(noiseRaw.underlying) } : null;
   const session = obj(p.session);
   const anchors = obj(money.anchors);
+  const ladder = obj(money.ladder);
 
   return {
     symbol: String(pos.symbol ?? ''), side, qty, entryPrice, ltp,
@@ -60,6 +63,9 @@ export function readPacketFacts(packet: unknown): PacketFacts | { unreadable: st
     // Spread only when the packet carries the block, so a pre-anchor packet reads exactly as before.
     ...(anchors
       ? { anchors: { bestUnderlying: num(obj(anchors.best)?.underlying), armUnderlying: num(obj(anchors.floorArm)?.underlying) } }
+      : {}),
+    ...(ladder
+      ? { ladder: { stop: num(ladder.stop), stage: num(ladder.stage) ?? 0, lastHit: ladder.lastHit === true, enforced: ladder.enforced === true } }
       : {}),
   };
 }

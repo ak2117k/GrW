@@ -36,7 +36,8 @@ export type ClauseId =
   | 'THESIS_INVALIDATION' | 'THESIS_LEVEL'
   | 'HARD_MAX_LOSS' | 'HARD_SESSION_CLOSE' | 'HARD_EXPIRY' | 'HARD_DAILY_LOSS'
   | 'FLOOR_BREACH_UNDERLYING_MOVE' | 'FLOOR_BREACH_VWAP'
-  | 'FLOOR_HARD_GREEN_TO_RED' | 'FLOOR_HARD_UNDERLYING_MOVE';
+  | 'FLOOR_HARD_GREEN_TO_RED' | 'FLOOR_HARD_UNDERLYING_MOVE'
+  | 'TARGET_LADDER';
 /** `pass: null` = could not be measured (an input was missing). */
 export interface ClauseResult {
   id: ClauseId;
@@ -53,7 +54,7 @@ export interface PersistenceResult {
 }
 
 export type GateOutcome = 'PASS' | 'GATED_THESIS_INTACT' | 'AWAITING_CONFIRMATION' | 'BYPASS';
-export type Justification = 'THESIS_BROKEN' | 'HARD_RISK' | 'CONFIRMED_FLOOR_BREACH' | 'FLOOR_HARD_EXIT';
+export type Justification = 'THESIS_BROKEN' | 'HARD_RISK' | 'CONFIRMED_FLOOR_BREACH' | 'FLOOR_HARD_EXIT' | 'TARGET_LADDER';
 
 /** The numbers the gate judged, copied onto the row (E7). */
 export interface GateFactsSnapshot {
@@ -82,6 +83,12 @@ export interface GateFactsSnapshot {
    * legacy since-the-last-HOLD frame and no hard-floor clauses, exactly as before.
    */
   anchors?: { bestUnderlying: number | null; armUnderlying: number | null; packetLtp: number; packetNetPnl: number | null; freshNetPnl: number | null };
+  /**
+   * TARGET_LADDER (target-ladder.ts), from a packet whose `money.ladder` is enforced: the ladder's stop and
+   * stage, whether the last target was reached, and the packet's premium (the stop clause needs it AND the
+   * executor's fresh one beyond the stop). Absent ⇒ no ladder clause, exactly as before.
+   */
+  ladder?: { stop: number | null; stage: number; lastHit: boolean; packetLtp: number };
 }
 
 /** `ai_exit_executions.gate` (E7). */

@@ -55,6 +55,8 @@ import { solveCycleFloor } from './cycle-floor';
 import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
 import { confirmHardFloor, hardFloorReading, hardLossLimit, hardLossTrip, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
 import { exposureOf } from '../../exit-discipline/exposure';
+import { defaultLadderStop, ladderReading, ladderTargets, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
+import { LADDER_PLANS, type LadderPlan, type LadderPlanReader } from '../ports/ladder-plans.port';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
 import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
@@ -454,6 +456,13 @@ interface TrackerState {
   hardLoss?: HardFloorMemo;
   /** FLOOR_HARD_EXIT: epoch ms a held position's suppressed trip was last logged (once per 30 min). */
   hardFloorHeldLoggedAt?: number;
+  /**
+   * TARGET_LADDER (exit-discipline/target-ladder.ts): the position's targets — FROZEN once set, so a manual
+   * trade's R never drifts with a later stop — the ratcheted ladder stop, and the exit's confirmation run.
+   * Durable halves: the targets and the stop ride on every packet's money.ladder (restored from the last live
+   * verdict after a restart), and the stage is read from the tracker's holdingHigh / holdingLow.
+   */
+  ladder?: LadderMemo;
   /** News & events v2 edge-trigger memory (R4): fresh own-instrument article ids already fired on. */
   newsSeen?: Set<string>;
   /** News & events v2 edge-trigger memory (R4): event ids already fired (or, in observe, logged) as event-near. */
@@ -483,6 +492,34 @@ interface TrackerState {
   g2r?: { peak: number; red: boolean; giveback: boolean };
   /** Owner alerts: epoch ms (cycle clock) of the last observe-only EXIT_NOW alert — at most one per 30 min. */
   ownerExitAlertAt?: number;
+}
+
+/** TARGET_LADDER: the per-position memory (see `TrackerState.ladder`). */
+interface LadderMemo {
+  /** The entry the plan was set against: a repaired cost basis voids it (targets are re-set). */
+  entry: number;
+  plan: LadderPlan | null;
+  /** Cycle-clock ms before which a missing plan is not asked for again. */
+  retryAt: number;
+  stop: number | null;
+  confirm?: HardFloorMemo;
+  heldLoggedAt?: number;
+}
+
+/** TARGET_LADDER: a position whose targets cannot be set yet is asked again this often. */
+export const LADDER_RETRY_MS = 60_000;
+/** TARGET_LADDER: the rule's fire name (packet trigger, verdict triggeredBy). */
+export const TARGET_LADDER_FIRE = 'target-ladder';
+/** TARGET_LADDER: the promptVersion of a rule verdict (no prompt wrote it). */
+export const TARGET_LADDER_STAMP = 'rule:target-ladder/1';
+/** TARGET_LADDER: every rule verdict's reason starts with this (the executor row's verdictReason). */
+export const TARGET_LADDER_REASON_PREFIX = 'TARGET_LADDER (code rule, not a judgement)';
+
+/** The last live packet's `money.ladder` (restart memory), or null. Never throws on odd JSON. */
+export function storedLadder(last: { packet?: unknown } | undefined | null): PacketLadder | null {
+  const l = (last?.packet as { money?: { ladder?: unknown } } | undefined)?.money?.ladder as Partial<PacketLadder> | undefined;
+  if (!l || typeof l !== 'object' || l.v !== 1 || !Array.isArray(l.targets) || typeof l.entry !== 'number') return null;
+  return l as PacketLadder;
 }
 
 /** Owner alerts: an observe-only EXIT_NOW is re-sent at most this often per position. */
@@ -623,6 +660,9 @@ export class SentinelCycleService {
     // EXIT_NOW, which nothing automatic carries out. Optional: absent ⇒ no alerts (the paper
     // cycle is built without one). Fire-and-forget — it can never fail a judgement.
     @Optional() @Inject(OWNER_ALERTS) private readonly ownerAlerts?: OwnerAlertPort,
+    // Target ladder for real positions (ports/ladder-plans.port.ts). Optional: absent or null (the paper
+    // cycle, TARGET_LADDER=off) ⇒ no ladder — every packet and exit exactly as before.
+    @Optional() @Inject(LADDER_PLANS) private readonly ladderPlans?: LadderPlanReader | null,
   ) {}
 
   /**
@@ -851,10 +891,14 @@ export class SentinelCycleService {
         })
       : null;
     if (anchorSolve) this.stateFor(entry).anchors = anchorSolve.memory;
+    // TARGET_LADDER: the position's targets, stage and ladder stop — on the packet (display, the exit gate,
+    // restart memory) and read by the ladder exit below. Null when no ladder applies (paper, observe-only…).
+    const ladder = await this.ladderFor(entry, this.stateFor(entry), tick, last, now);
     const tickF: TickReading = {
       ...tick,
       noiseFloor: floorSolve.noiseFloor,
       ...(anchorSolve ? { anchors: { ...anchorSolve.anchors, hardExitN: this.discipline!.floorHardExitN } } : {}),
+      ...(ladder ? { ladder: ladder.block } : {}),
     };
 
     const capture = await this.wallsFor(entry, tick, now);
@@ -999,7 +1043,14 @@ export class SentinelCycleService {
       ruleJobs.push(this.recordHardFloorExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, loss, now));
       return null;
     }
-    const hard = this.hardFloorFor(entry, state, tickF, floorSolve.noiseFloor, greenFloorArmedLatched, now);
+    // TARGET_LADDER: the last target reached, or the ladder's moved stop crossed — an exit by rule, confirmed
+    // like the hard floor, through the same verdict → executor → exit-gate path.
+    const ladderExit = ladder ? this.ladderExitFor(entry, state, ladder.block, ladder.reading, now) : null;
+    if (ladderExit) {
+      ruleJobs.push(this.recordLadderExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, ladderExit, now));
+      return null;
+    }
+    const hard =this.hardFloorFor(entry, state, tickF, floorSolve.noiseFloor, greenFloorArmedLatched, now);
     if (hard) {
       ruleJobs.push(this.recordHardFloorExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, hard, now));
       return null;
@@ -1198,6 +1249,161 @@ export class SentinelCycleService {
     } catch (err) {
       if (state.hardFloor) state.hardFloor = { ...state.hardFloor, firedAt: null };
       this.logger.error(`[floor-hard-exit] could not record the EXIT_NOW for ${entry.symbol}: ${err instanceof Error ? err.message : String(err)} — retried next pass`);
+      return 'failed';
+    }
+  }
+
+  /**
+   * TARGET_LADDER: this pass's ladder for a REAL position the sentinel owns (live signal trades and the owner's
+   * manual trades; never paper, never a holding or another engine's position). The targets are set once —
+   * the signal plan, else engine targets on the position's known stop or the default 1× daily ATR stop
+   * (ports/ladder-plans.port.ts) — and frozen; the stage and stop are read every pass. Cash equity gets the
+   * targets on its packet for display but `enforced` false (nothing automatic exits cash). Never throws.
+   */
+  private async ladderFor(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    last: SentinelVerdictLike | undefined,
+    now: Date,
+  ): Promise<{ block: PacketLadder; reading: LadderReading } | null> {
+    const reader = this.ladderPlans;
+    if (!reader || entry.ownership !== 'SENTINEL' || entry.kind !== 'POSITION' || isPaperTracker(entry.trackerId)) return null;
+    const entryPrice = tick.entryPrice;
+    if (!(entryPrice > 0) || !Number.isFinite(tick.ltp) || !(tick.ltp > 0)) return null;
+    try {
+      if (!state.ladder || state.ladder.entry !== entryPrice) state.ladder = { entry: entryPrice, plan: null, retryAt: 0, stop: null };
+      const memo = state.ladder;
+      const stored = storedLadder(last);
+      const same = stored !== null && stored.entry === entryPrice;
+      if (!memo.plan && same) {
+        memo.plan = { targets: [...stored!.targets], riskStop: stored!.riskStop ?? null, source: stored!.source, detail: stored!.detail };
+      }
+      if (!memo.plan && now.getTime() >= memo.retryAt) {
+        memo.retryAt = now.getTime() + LADDER_RETRY_MS;
+        const levels = [tick.nearestSupport, tick.nearestResistance].filter((x): x is number => typeof x === 'number' && Number.isFinite(x) && x > 0);
+        memo.plan = await reader.planFor({
+          trackerId: entry.trackerId,
+          userId: entry.userId,
+          symbol: entry.symbol,
+          side: tick.side,
+          entry: entryPrice,
+          spot: tick.underlyingLtp,
+          levels,
+          fallbackStop: defaultLadderStop(tick.side, entryPrice, tick.noise?.contract?.n ?? null),
+        });
+        if (memo.plan) this.logger.log(`[target-ladder] ${entry.symbol} (tracker ${entry.trackerId}): targets ${memo.plan.targets.join(' / ') || 'none'} — ${memo.plan.source}: ${memo.plan.detail}`);
+      }
+      const plan = memo.plan;
+      if (!plan || plan.targets.length === 0) return null;
+      if (memo.stop === null && same && typeof stored!.stop === 'number') memo.stop = stored!.stop;
+      const reading = ladderReading({
+        side: tick.side,
+        entry: entryPrice,
+        targets: plan.targets,
+        best: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
+        ltp: tick.ltp,
+        nContract: tick.noise?.contract?.n ?? null,
+        trailN: (this.discipline ?? DISCIPLINE_OFF).floorTrailN,
+        prevStop: memo.stop,
+      });
+      if (reading.stop !== memo.stop && reading.stop !== null) {
+        this.logger.log(`[target-ladder] ${entry.symbol} (tracker ${entry.trackerId}): stop ${memo.stop ?? 'none'} → ${reading.stop} — ${reading.detail}`);
+      }
+      memo.stop = reading.stop;
+      const block: PacketLadder = {
+        v: 1,
+        source: plan.source,
+        detail: plan.detail,
+        entry: entryPrice,
+        riskStop: plan.riskStop,
+        targets: ladderTargets(tick.side, entryPrice, plan.targets),
+        stage: reading.stage,
+        stop: reading.stop,
+        best: reading.best,
+        lastHit: reading.lastHit,
+        trailing: reading.trailing,
+        // Exits only where the executor acts (NFO/BFO/MCX derivatives) and with TARGET_LADDER=on.
+        enforced: reader.mode === 'on' && isDerivativeSegment(tick.segment),
+      };
+      return { block, reading };
+    } catch (err) {
+      this.logger.warn(`[target-ladder] ${entry.symbol} (tracker ${entry.trackerId}) skipped this pass: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * TARGET_LADDER: the ladder's trip folded into the position's confirmation run (two reads ≥
+   * FLOOR_HARD_CONFIRM_SEC apart, one fire per FLOOR_HARD_REFIRE_SEC — the hard floor's rule). A HELD position
+   * (AI_AUTO_EXIT_HOLD) is read but never fired; the suppressed trip is logged once per 30 min.
+   */
+  private ladderExitFor(entry: RosterEntry, state: TrackerState, block: PacketLadder, reading: LadderReading, now: Date): LadderReading | null {
+    const memo = state.ladder;
+    if (!memo) return null;
+    const trip = block.enforced && reading.trip !== null;
+    const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
+    if (trip && hold && isHeldPosition(hold, entry)) {
+      if (now.getTime() - (memo.heldLoggedAt ?? Number.NEGATIVE_INFINITY) >= HELD_LOG_EVERY_MS) {
+        memo.heldLoggedAt = now.getTime();
+        this.logger.warn(`[target-ladder] HELD — ${reading.trip} on ${entry.symbol} (tracker ${entry.trackerId}) not fired: the owner holds it (AI_AUTO_EXIT_HOLD)`);
+      }
+      memo.confirm = confirmHardFloor(memo.confirm, false, now.getTime()).memo;
+      return null;
+    }
+    const c = confirmHardFloor(memo.confirm, trip, now.getTime());
+    memo.confirm = c.memo;
+    return c.fire ? reading : null;
+  }
+
+  /**
+   * TARGET_LADDER: record the rule's EXIT_NOW — no judge call — exactly like the hard floor's
+   * (recordHardFloorExit): the executor's poll and every guard (owner HOLD, F&O only, the daily cap, an exit
+   * in flight), then the exit gate, whose TARGET_LADDER clause re-checks it on the packet AND the fresh LTP.
+   * Never rejects. A failed write clears the fire, so the next confirming pass retries.
+   */
+  private async recordLadderExit(
+    entry: RosterEntry,
+    state: TrackerState,
+    tick: TickReading,
+    walls: { now: WallPair | null; prev: WallPair | null },
+    wallsAt: string | null,
+    greenFloorArmedLatched: boolean,
+    reading: LadderReading,
+    now: Date,
+  ): Promise<JudgeOutcome> {
+    const rule = reading.trip as NonNullable<LadderReading['trip']>;
+    const fire: TripwireFire = { name: TARGET_LADDER_FIRE, detail: reading.detail };
+    try {
+      const packet = await this.packets.build(
+        entry,
+        { ...tick, oiWallNow: walls.now, oiWallPrev: walls.prev, oiWallsAt: wallsAt, greenFloorArmedLatched },
+        state.thesis?.value ?? null,
+        [fire],
+      );
+      await this.verdicts.record({
+        userId: entry.userId,
+        trackerId: entry.trackerId,
+        symbol: entry.symbol,
+        verdict: 'EXIT_NOW',
+        confidence: 'high',
+        thesisStatus: 'INTACT',
+        recoveryAvailable: false,
+        reason: `${TARGET_LADDER_REASON_PREFIX} ${rule}: ${reading.detail}`.slice(0, 500),
+        evidence: ['position.ltp', 'money.ladder'],
+        invalidationPoint: null,
+        reviewInSec: FLOOR_HARD_REFIRE_SEC,
+        packet: packetAsJson(packet),
+        promptVersion: TARGET_LADDER_STAMP,
+        triggeredBy: [TARGET_LADDER_FIRE],
+        netPnl: packet.money.netPnl,
+        greenFloor: packet.money.greenFloorPrice,
+      });
+      this.logger.warn(`[target-ladder] EXIT_NOW recorded — ${entry.symbol} (tracker ${entry.trackerId}): ${rule}: ${reading.detail}`);
+      return 'evaluated';
+    } catch (err) {
+      if (state.ladder?.confirm) state.ladder.confirm = { ...state.ladder.confirm, firedAt: null };
+      this.logger.error(`[target-ladder] could not record the EXIT_NOW for ${entry.symbol}: ${err instanceof Error ? err.message : String(err)} — retried next pass`);
       return 'failed';
     }
   }

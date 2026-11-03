@@ -17,6 +17,7 @@ import type { Exposure, FloorAnchors, FloorBasis, NoiseFloor, NoiseReading, Nois
 import { scaledUnderlyingNoise } from '../../exit-discipline/noise';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { underlyingAgainst } from '../../exit-discipline/hard-floor';
+import type { PacketLadder } from '../../exit-discipline/target-ladder';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { baseSymbol, newsPositionOf } from '../../news-events/keys';
 import type { EventsPeek, FreshItem, NewsPeek, NewsPosition } from '../../news-events/types';
@@ -440,6 +441,11 @@ export interface TickSnapshot {
    */
   anchors?: (FloorAnchors & { hardExitN: number }) | null;
   /**
+   * TARGET_LADDER (exit-discipline/target-ladder.ts): the position's targets, stage and ladder stop, set by
+   * the CYCLE only. Absent ⇒ the packet has no `money.ladder` (byte-identical).
+   */
+  ladder?: PacketLadder | null;
+  /**
    * Equity spec §4: the stock's day bar, NIFTY now and NIFTY at entry, for the `equity` block.
    * Set by the tick source for CASH positions only (absent for F&O); never rendered as such.
    */
@@ -519,6 +525,12 @@ export type ContextPacket = {
      * from — never the previous verdict. Absent key ⇒ the switch off (byte-identical packet).
      */
     anchors?: PacketAnchors;
+    /**
+     * TARGET_LADDER: the position's targets (signal plan, or the engine rule for a manual trade), how many
+     * are reached, and the stop the ladder moved — the exit gate re-checks a ladder exit on it. Absent key ⇒
+     * no ladder (paper, observe-only, or the switch off).
+     */
+    ladder?: PacketLadder;
     mfe: number | null;
     mae: number | null;
   };
@@ -1394,6 +1406,8 @@ export class ContextPacketService {
         ...(disciplineOn ? { floorBasis: (tick.noiseFloor ? 'noise' : 'fixed') as FloorBasis } : {}),
         // Only when the cycle supplied anchors (FLOOR_HARD_EXIT on); off, the key is absent.
         ...(anchors ? { anchors } : {}),
+        // Only when the cycle read a ladder for this position; otherwise the key is absent.
+        ...(tick.ladder ? { ladder: { ...tick.ladder, targets: [...tick.ladder.targets] } } : {}),
         // Excursions are read from the position's side: a LONG's best case is
         // the high, a SHORT's is the low. Both are PRICES, not rupee figures.
         mfe: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,

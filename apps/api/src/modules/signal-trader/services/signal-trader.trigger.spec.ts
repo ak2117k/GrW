@@ -282,7 +282,8 @@ describe('SignalTraderService — engine SL', () => {
 });
 
 describe('SignalTraderService — broker margin in the funds check', () => {
-  const futCfg = { mode: 'live' as const, limitBufferPct: 0 };
+  // SIGNAL_LIVE_KINDS defaults to options only; these specs send a future live on purpose.
+  const futCfg = { mode: 'live' as const, limitBufferPct: 0, liveKinds: ['CE', 'PE', 'FUT'] as SignalTraderConfig['liveKinds'] };
 const futSignal: Partial<SignalView> = { instrumentKind: 'FUT', strike: null, entryType: 'AT', entryLow: 25000, entryHigh: 25000, sl: 24990, qty: 1 };
   beforeEach(() => {
     process.env.LIVE_TRADING_ENABLED = 'true';

@@ -54,7 +54,8 @@ function makeRepo() {
 const takeVerdict = { verdict: 'TAKE', confidence: 80, reasons: ['OI supports'], entry: null, sl: null, targets: [], lots: null };
 
 function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any; lessons?: any } = {}) {
-  const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), ...over.cfg };
+  // liveFromIstMin 0: the specs run at any hour (the 09:45 live start has its own tests).
+  const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), liveFromIstMin: 0, ...over.cfg };
   const repo = makeRepo();
   const judge = { judge: jest.fn(over.judge ?? (async () => ({ ok: true, verdict: takeVerdict, latencyMs: 10 }))) };
   const context = { build: jest.fn(async () => ({})), nearestLevels: jest.fn(async () => null), optionDelta: jest.fn(async () => null) };
@@ -150,6 +151,29 @@ describe('SignalTraderService', () => {
       const off = build({ cfg: { mode: 'live', paperLearn: false }, judge: skip as never });
       expect(await off.svc.evaluate(ev)).toMatchObject({ decision: 'SKIP' });
       expect(off.paper.open).not.toHaveBeenCalled();
+    });
+
+    it('SIGNAL_LIVE_KINDS: a live TAKE on a kind off the list is paper-traded (reason recorded), never sent', async () => {
+      const t = build({ cfg: { mode: 'live', liveKinds: ['FUT'] } });
+      expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'PAPER' });
+      expect(t.executor.place).not.toHaveBeenCalled();
+      expect(t.paper.open).toHaveBeenCalledTimes(1);
+      expect(t.repo.decisions[0].judge.liveRouted).toMatchObject({ reason: 'live_kind' });
+      // The default (OPT) sends a CE buy.
+      const opt = build({ cfg: { mode: 'live', liveKinds: parseSignalTraderConfig({}).liveKinds } });
+      expect(await opt.svc.evaluate(ev)).toMatchObject({ decision: 'TAKE', placed: 'PLACED' });
+    });
+
+    it('SIGNAL_LIVE_FROM_IST: a live TAKE before 09:45 IST is paper-traded; from 09:45 it is sent; paper mode is untouched', async () => {
+      const early = build({ cfg: { mode: 'live', liveFromIstMin: 9 * 60 + 45 } });
+      expect(await early.svc.evaluate(ev, new Date('2026-11-04T04:10:00Z'))).toMatchObject({ decision: 'PAPER' }); // 09:40 IST
+      expect(early.executor.place).not.toHaveBeenCalled();
+      expect(early.repo.decisions[0].judge.liveRouted).toMatchObject({ reason: 'live_before_start' });
+      const later = build({ cfg: { mode: 'live', liveFromIstMin: 9 * 60 + 45 } });
+      expect(await later.svc.evaluate(ev, new Date('2026-11-04T04:15:00Z'))).toMatchObject({ decision: 'TAKE', placed: 'PLACED' }); // 09:45 IST
+      const paper = build({ cfg: { mode: 'paper', liveFromIstMin: 9 * 60 + 45 } });
+      expect(await paper.svc.evaluate(ev, new Date('2026-11-04T03:50:00Z'))).toMatchObject({ decision: 'PAPER' });
+      expect(paper.repo.decisions[0].judge.liveRouted).toBeUndefined();
     });
   });
 

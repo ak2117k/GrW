@@ -99,7 +99,29 @@ export interface SignalTraderConfig {
    * by HARD_LOSS_EXIT_RUPEES instead (exit-discipline/hard-floor.ts).
    */
   riskCapGate: boolean;
+  /**
+   * SIGNAL_LIVE_KINDS (2026-11-03, owner: "live = options only"): the instrument kinds a live TAKE may be sent
+   * for — OPT (= CE and PE), CE, PE, FUT, EQ; comma list. Default OPT. A live TAKE on any other kind (a future,
+   * a cash share) is paper-traded on the learning path instead, never sent. Option WRITING stays refused by
+   * allowOptionSell, so OPT means option buys.
+   */
+  liveKinds: SignalLiveKind[];
+  /**
+   * SIGNAL_LIVE_FROM_IST (2026-11-03, owner: opening swings / event days — the US election results land the
+   * morning of 4 Nov): minutes after IST midnight before which a live TAKE is paper-traded instead of sent.
+   * Default 09:45. Paper trading itself still runs from the open. One rule for every venue (MCX included).
+   */
+  liveFromIstMin: number;
   problems: string[];
+}
+
+/** The SIGNAL_LIVE_KINDS kinds (the token OPT expands to CE + PE). */
+export type SignalLiveKind = 'CE' | 'PE' | 'FUT' | 'EQ';
+
+/** Why a live-mode TAKE is paper-traded instead of sent (the live allowlists); null = it may be sent. */
+export interface LiveRouteBlock {
+  reason: 'live_underlying' | 'live_kind' | 'live_before_start';
+  detail: string;
 }
 
 /** Learning mode is on: paper trading with SIGNAL_PAPER_LEARN on. */
@@ -115,6 +137,72 @@ export function liveLearning(cfg: Pick<SignalTraderConfig, 'mode' | 'paperLearn'
 /** May a live TAKE on this underlying be sent to the broker (SIGNAL_LIVE_UNDERLYINGS)? */
 export function liveAllowedFor(cfg: Pick<SignalTraderConfig, 'liveUnderlyings'>, underlying: string): boolean {
   return cfg.liveUnderlyings.length === 0 || cfg.liveUnderlyings.includes(String(underlying ?? '').trim().toUpperCase());
+}
+
+const hhmm = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+
+/** Minutes after IST midnight of `now`. */
+export function istMinuteOfDay(now: Date): number {
+  const m = Math.floor((now.getTime() + 330 * 60_000) / 60_000) % 1440;
+  return m < 0 ? m + 1440 : m;
+}
+
+/**
+ * May this live TAKE be sent to the broker? Pure. Asked in act() for a live-mode TAKE at the moment it would
+ * be sent (a trigger that fires later is asked at its fire time): SIGNAL_LIVE_UNDERLYINGS, then
+ * SIGNAL_LIVE_KINDS, then SIGNAL_LIVE_FROM_IST. A block routes the call to the paper path — never live — and
+ * is recorded on the decision's judge record as `liveRouted`.
+ */
+export function liveRouteBlock(
+  cfg: Pick<SignalTraderConfig, 'liveUnderlyings' | 'liveKinds' | 'liveFromIstMin'>,
+  s: { underlying: string; instrumentKind: string },
+  now: Date,
+): LiveRouteBlock | null {
+  if (!liveAllowedFor(cfg, s.underlying)) {
+    return { reason: 'live_underlying', detail: `${s.underlying} is not on SIGNAL_LIVE_UNDERLYINGS (${cfg.liveUnderlyings.join(',')}) — paper-traded` };
+  }
+  const kind = String(s.instrumentKind ?? '').trim().toUpperCase();
+  if (!(cfg.liveKinds as string[]).includes(kind)) {
+    return { reason: 'live_kind', detail: `${kind || 'unknown kind'} is not on SIGNAL_LIVE_KINDS (${cfg.liveKinds.join(',')}) — paper-traded` };
+  }
+  const at = istMinuteOfDay(now);
+  if (at < cfg.liveFromIstMin) {
+    return { reason: 'live_before_start', detail: `${hhmm(at)} IST is before SIGNAL_LIVE_FROM_IST ${hhmm(cfg.liveFromIstMin)} — paper-traded` };
+  }
+  return null;
+}
+
+/** SIGNAL_LIVE_KINDS: OPT = CE + PE; an unknown token is reported and dropped; nothing usable = the default (OPT). */
+export function parseLiveKinds(raw: string | undefined, problems: string[]): SignalLiveKind[] {
+  const out = new Set<SignalLiveKind>();
+  const tokens = String(raw ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
+  for (const t of tokens) {
+    if (t === 'OPT') {
+      out.add('CE');
+      out.add('PE');
+    } else if (t === 'CE' || t === 'PE' || t === 'FUT' || t === 'EQ') out.add(t);
+    else problems.push(`SIGNAL_LIVE_KINDS entry ${t} is not OPT|CE|PE|FUT|EQ — ignored`);
+  }
+  if (out.size > 0) return [...out];
+  // Never wider than the default: a typo lands on options only, not on every kind.
+  if (tokens.length > 0) problems.push(`SIGNAL_LIVE_KINDS=${raw} has no usable kind — using OPT`);
+  return ['CE', 'PE'];
+}
+
+/** SIGNAL_LIVE_FROM_IST "HH:MM" → minutes after IST midnight; a bad value = the default 09:45 (reported). */
+export function parseLiveFromIst(raw: string | undefined, problems: string[]): number {
+  const v = String(raw ?? '').trim();
+  const d = SIGNAL_DEFAULTS.liveFromIstMin;
+  if (v === '') return d;
+  const m = /^(\d{1,2}):(\d{2})$/.exec(v);
+  if (m && Number(m[1]) <= 23 && Number(m[2]) <= 59) return Number(m[1]) * 60 + Number(m[2]);
+  problems.push(`SIGNAL_LIVE_FROM_IST=${raw} is not HH:MM — using ${hhmm(d)}`);
+  return d;
+}
+
+/** The boot line's view of the live allowlists. */
+export function liveRouteSummary(cfg: Pick<SignalTraderConfig, 'liveUnderlyings' | 'liveKinds' | 'liveFromIstMin'>): string {
+  return `liveUnderlyings=${cfg.liveUnderlyings.length ? cfg.liveUnderlyings.join(',') : 'all'} liveKinds=${cfg.liveKinds.join(',')} liveFrom=${hhmm(cfg.liveFromIstMin)} IST`;
 }
 
 export const SIGNAL_DEFAULTS = {
@@ -143,6 +231,8 @@ export const SIGNAL_DEFAULTS = {
   engineSlOptionPct: 25,
   engineSlBufferPct: 0.15,
   lateMaxPct: 40,
+  /** SIGNAL_LIVE_FROM_IST: 09:45 IST. */
+  liveFromIstMin: 9 * 60 + 45,
 } as const;
 
 function parseOnOff(raw: string | undefined, fallback: boolean, name: string, problems: string[]): boolean {
@@ -226,6 +316,8 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     paperLearn: parseOnOff(env.SIGNAL_PAPER_LEARN, false, 'SIGNAL_PAPER_LEARN', problems),
     riskCapGate: parseOnOff(env.SIGNAL_RISK_CAP_GATE, true, 'SIGNAL_RISK_CAP_GATE', problems),
     liveUnderlyings: String(env.SIGNAL_LIVE_UNDERLYINGS ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
+    liveKinds: parseLiveKinds(env.SIGNAL_LIVE_KINDS, problems),
+    liveFromIstMin: parseLiveFromIst(env.SIGNAL_LIVE_FROM_IST, problems),
     problems,
   };
 }

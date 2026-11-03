@@ -14,7 +14,7 @@ import { slEnforceability } from '../domain/execution';
 import { skipAlert, takeAlert, triggerArmedAlert, triggerFiredAlert, updateAlert } from '../domain/alerts';
 import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, triggerOf } from '../domain/trigger';
 import { SIGNAL_READY, SIGNAL_UPDATE, type SignalReadyEvent, type SignalUpdateEvent, type SignalView } from '../domain/signal.types';
-import { learning, liveAllowedFor, liveLearning, type SignalTraderConfig } from '../domain/signal-trader.config';
+import { learning, liveLearning, liveRouteBlock, liveRouteSummary, type SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService, type CtxBlock } from './signal-context.service';
 import { lateRoom, type LateRoom } from '../domain/late-entry';
@@ -221,7 +221,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
   onApplicationBootstrap(): void {
     for (const p of this.cfg.problems) this.logger.warn(`[signal-trader] ${p}`);
-    this.logger.warn(`[signal-trader] mode=${this.cfg.mode} maxLots=${this.cfg.maxLots} maxLoss=₹${this.cfg.maxLossPerTrade} trades/day=${this.cfg.maxTradesPerDay} dailyStop=₹${this.cfg.dailyLossStop}`);
+    this.logger.warn(`[signal-trader] mode=${this.cfg.mode} maxLots=${this.cfg.maxLots} maxLoss=₹${this.cfg.maxLossPerTrade} trades/day=${this.cfg.maxTradesPerDay} dailyStop=₹${this.cfg.dailyLossStop} ${liveRouteSummary(this.cfg)}`);
     if (this.cfg.mode === 'live' && bootJobsEnabled()) {
       void this.repo
         .pendingOrders(new Date())
@@ -534,12 +534,17 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const { agreeCount, conflict } = j;
 
     // ---- paper: the TAKE becomes a paper trade; the broker is never called (no funds read either) ----
-    // Also in live: a learning outcome (the judge did not TAKE) and an underlying outside SIGNAL_LIVE_UNDERLYINGS.
+    // Also in live: a learning outcome (the judge did not TAKE), and a TAKE the live allowlists refuse
+    // (liveRouteBlock: SIGNAL_LIVE_UNDERLYINGS, SIGNAL_LIVE_KINDS — options only by default — and
+    // SIGNAL_LIVE_FROM_IST, checked at this moment, so a trigger that fires later is checked at its fire time).
     const rec = (j.record ?? {}) as { learnTaken?: unknown; aiDecision?: unknown; liveGateBlocked?: unknown };
     // A learning outcome the judge did not TAKE, or any call the live gate refused, is paper only — never sent.
     const learnOnly = (rec.learnTaken === true && rec.aiDecision !== 'TAKE') || (rec.liveGateBlocked !== undefined && rec.liveGateBlocked !== null);
-    if (cfg.mode === 'paper' || (cfg.mode === 'live' && (learnOnly || !liveAllowedFor(cfg, s.underlying)))) {
-      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: judgeWithChanges, plan: finalPlan, decision: 'PAPER', skipReason: null });
+    const routed = cfg.mode === 'live' && !learnOnly ? liveRouteBlock(cfg, s, now) : null;
+    if (cfg.mode === 'paper' || (cfg.mode === 'live' && (learnOnly || routed !== null))) {
+      const judge = routed ? { ...judgeWithChanges, liveRouted: routed } : judgeWithChanges;
+      if (routed) this.logger.log(`[signal-trader] ${what}: live TAKE paper-traded — ${routed.reason}: ${routed.detail}`);
+      await this.repo.finishDecision(decisionId, { gate: gateChecks, judge, plan: finalPlan, decision: 'PAPER', skipReason: null });
       const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty, available: null, method: 'premium' };
       const paper = await this.openPaper(n, 'paper_mode');
       return { decisionId, decision: 'PAPER', skipReason: null, paper };

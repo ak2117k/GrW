@@ -88,12 +88,27 @@ export interface SignalTraderConfig {
    * judge's verdict is checked against the result. Paper only; SIGNAL_PAPER_LEARN=off ends it.
    */
   paperLearn: boolean;
+  /**
+   * SIGNAL_LIVE_UNDERLYINGS (2026-11-03, owner going live): comma list of underlyings a live TAKE may be
+   * sent for; any other TAKE is paper-traded instead. Empty = every underlying (the old behaviour).
+   */
+  liveUnderlyings: string[];
   problems: string[];
 }
 
 /** Learning mode is on: paper trading with SIGNAL_PAPER_LEARN on. */
 export function learning(cfg: Pick<SignalTraderConfig, 'mode' | 'paperLearn'>): boolean {
   return cfg.mode === 'paper' && cfg.paperLearn === true;
+}
+
+/** Live with SIGNAL_PAPER_LEARN on: a judge SKIP that passed the gate still opens its learning PAPER trade. */
+export function liveLearning(cfg: Pick<SignalTraderConfig, 'mode' | 'paperLearn'>): boolean {
+  return cfg.mode === 'live' && cfg.paperLearn === true;
+}
+
+/** May a live TAKE on this underlying be sent to the broker (SIGNAL_LIVE_UNDERLYINGS)? */
+export function liveAllowedFor(cfg: Pick<SignalTraderConfig, 'liveUnderlyings'>, underlying: string): boolean {
+  return cfg.liveUnderlyings.length === 0 || cfg.liveUnderlyings.includes(String(underlying ?? '').trim().toUpperCase());
 }
 
 export const SIGNAL_DEFAULTS = {
@@ -203,6 +218,7 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     lateEntry: parseOnOff(env.SIGNAL_LATE_ENTRY, true, 'SIGNAL_LATE_ENTRY', problems),
     lateMaxPct: num(env, 'SIGNAL_LATE_MAX_PCT', SIGNAL_DEFAULTS.lateMaxPct, (n) => n > 0 && n <= 100, problems),
     paperLearn: parseOnOff(env.SIGNAL_PAPER_LEARN, false, 'SIGNAL_PAPER_LEARN', problems),
+    liveUnderlyings: String(env.SIGNAL_LIVE_UNDERLYINGS ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
     problems,
   };
 }

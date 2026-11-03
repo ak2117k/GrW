@@ -119,6 +119,28 @@ describe('SignalTraderService', () => {
     expect(t.executor.place).toHaveBeenCalledTimes(1);
   });
 
+  describe('going live (2026-11-03): allowlist + live learning', () => {
+    it('SIGNAL_LIVE_UNDERLYINGS: a TAKE on a listed underlying is placed; any other is paper-traded, never sent', async () => {
+      const listed = build({ cfg: { mode: 'live', liveUnderlyings: ['NIFTY', 'BANKNIFTY', 'SENSEX'] } });
+      expect(await listed.svc.evaluate(ev)).toMatchObject({ decision: 'TAKE', placed: 'PLACED' });
+      const other = build({ cfg: { mode: 'live', liveUnderlyings: ['BANKNIFTY'] } });
+      expect(await other.svc.evaluate(ev)).toMatchObject({ decision: 'PAPER' });
+      expect(other.executor.place).not.toHaveBeenCalled();
+      expect(other.paper.open).toHaveBeenCalledTimes(1);
+    });
+
+    it('live + SIGNAL_PAPER_LEARN: a judge SKIP opens a learning paper trade and never reaches the broker', async () => {
+      const skip = async () => ({ ok: true, verdict: { verdict: 'SKIP', confidence: 60, reasons: ['thin room'], entry: null, sl: null, targets: [], lots: null }, latencyMs: 5 });
+      const t = build({ cfg: { mode: 'live', paperLearn: true }, judge: skip as never });
+      expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'PAPER' });
+      expect(t.executor.place).not.toHaveBeenCalled();
+      expect(t.paper.open).toHaveBeenCalledTimes(1);
+      const off = build({ cfg: { mode: 'live', paperLearn: false }, judge: skip as never });
+      expect(await off.svc.evaluate(ev)).toMatchObject({ decision: 'SKIP' });
+      expect(off.paper.open).not.toHaveBeenCalled();
+    });
+  });
+
   it('judge timeout → SKIP judge_unavailable, no order', async () => {
     const t = build({ cfg: { mode: 'live' }, judge: async () => ({ ok: false, reason: 'judge_unavailable', detail: 'no verdict within 120 s', latencyMs: 120000 }) });
     const r = await t.svc.evaluate(ev);

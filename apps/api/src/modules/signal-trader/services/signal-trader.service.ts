@@ -14,7 +14,7 @@ import { slEnforceability } from '../domain/execution';
 import { skipAlert, takeAlert, triggerArmedAlert, triggerFiredAlert, updateAlert } from '../domain/alerts';
 import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, triggerOf } from '../domain/trigger';
 import { SIGNAL_READY, SIGNAL_UPDATE, type SignalReadyEvent, type SignalUpdateEvent, type SignalView } from '../domain/signal.types';
-import { learning, type SignalTraderConfig } from '../domain/signal-trader.config';
+import { learning, liveAllowedFor, liveLearning, type SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService, type CtxBlock } from './signal-context.service';
 import { lateRoom, type LateRoom } from '../domain/late-entry';
@@ -405,6 +405,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     }
     const j = await this.runJudge(decisionId, s, e, channel, now, pg.plan, base.tradesToday, base.c);
     if (learning(this.cfg)) return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, learnTake(j, e.agreeCount ?? 1, e.conflict === true, now), base);
+    // Live + learning: a SKIP still opens its learning paper trade (act() never sends a learnTaken outcome live).
+    if (!j.ok && liveLearning(this.cfg)) return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, learnTake(j, e.agreeCount ?? 1, e.conflict === true, now), base);
     if (!j.ok) return this.skip(decisionId, j.reason, j.detail, pg.gate.checks, j.record, pg.plan, channel, what);
     return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, j, base);
   }
@@ -521,7 +523,9 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const { agreeCount, conflict } = j;
 
     // ---- paper: the TAKE becomes a paper trade; the broker is never called (no funds read either) ----
-    if (cfg.mode === 'paper') {
+    // Also in live: a learning outcome (the judge did not TAKE) and an underlying outside SIGNAL_LIVE_UNDERLYINGS.
+    const learnOnly = (j.record as { learnTaken?: unknown } | null)?.learnTaken === true && (j.record as { aiDecision?: unknown }).aiDecision !== 'TAKE';
+    if (cfg.mode === 'paper' || (cfg.mode === 'live' && (learnOnly || !liveAllowedFor(cfg, s.underlying)))) {
       await this.repo.finishDecision(decisionId, { gate: gateChecks, judge: judgeWithChanges, plan: finalPlan, decision: 'PAPER', skipReason: null });
       const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty, available: null, method: 'premium' };
       const paper = await this.openPaper(n, 'paper_mode');
@@ -611,7 +615,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const trigger: TriggerState = { ...trig, armedAt: now.toISOString(), expiresAt: expiresAt.toISOString(), judgedAt: null, lastLtp: base.ltp, lastCheckAt: now.toISOString() };
     const planAtTrigger: EntryPlan = { ...hyp.plan, trigger };
     const judged = await this.runJudge(decisionId, s, e, channel, now, planAtTrigger, base.tradesToday);
-    if (!judged.ok && !learning(cfg)) return this.skip(decisionId, judged.reason, judged.detail, hyp.gate.checks, judged.record, planAtTrigger, channel, what);
+    if (!judged.ok && !learning(cfg) && !liveLearning(cfg)) return this.skip(decisionId, judged.reason, judged.detail, hyp.gate.checks, judged.record, planAtTrigger, channel, what);
     const j: JudgeTake = judged.ok && !learning(cfg) ? judged : learnTake(judged, e.agreeCount ?? 1, e.conflict === true, now);
     trigger.judgedAt = j.judgedAt;
     const checks: GateCheck[] = [
@@ -721,6 +725,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         j = { ...p.judge, record: { ...(p.judge.record as Record<string, unknown>), reused: true } };
       }
       if (learning(this.cfg)) return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, learnTake(j, p.event.agreeCount ?? 1, p.event.conflict === true, now), base);
+      if (!j.ok && liveLearning(this.cfg)) return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, learnTake(j, p.event.agreeCount ?? 1, p.event.conflict === true, now), base);
       if (!j.ok) return this.skip(p.decisionId, j.reason, j.detail, pg.gate.checks, j.record, plan, p.channel, what);
       return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, j, base);
     } catch (err) {

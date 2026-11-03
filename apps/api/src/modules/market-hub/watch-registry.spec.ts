@@ -64,3 +64,32 @@ describe('allocateSlots', () => {
     expect(allocateSlots(reg.entries(), 50).live).toHaveLength(2);
   });
 });
+
+describe('pinned lines', () => {
+  it('a pinned entry takes a live slot before every P0 position (prod 2026-11-03: crude future evicted)', () => {
+    const reg = new WatchRegistry();
+    reg.watch(ref('573422', 'MCX'), 1, 'hub:lines', 10, undefined, true);
+    for (let i = 0; i < 3; i++) reg.watch(ref(`pos${i}`, 'MCX'), 0, 'positions', i);
+    const a = allocateSlots(reg.entries(), 2);
+    expect(a.live.map((e) => e.ref.token)).toEqual(['573422', 'pos0']);
+    expect(a.criticalOverflow.map((e) => e.ref.token)).toEqual(['pos1', 'pos2']);
+  });
+
+  it('is pinned while any holder pins it, and only then', () => {
+    const reg = new WatchRegistry();
+    reg.watch(ref('1'), 3, 'ui', 0, 120_000);
+    expect(reg.entries()[0].pinned).toBeUndefined();
+    reg.watch(ref('1'), 1, 'hub:lines', 0, undefined, true);
+    expect(reg.entries()[0]).toMatchObject({ pinned: true, priority: 1 });
+    reg.unwatch(ref('1'), 'hub:lines');
+    expect(reg.entries()[0].pinned).toBeUndefined();
+  });
+
+  it('a pinned line that overflows the cap is still polled on the Critical lane (it is P1)', () => {
+    const reg = new WatchRegistry();
+    reg.watch(ref('a'), 1, 'hub:lines', 0, undefined, true);
+    reg.watch(ref('b'), 1, 'hub:lines', 1, undefined, true);
+    const a = allocateSlots(reg.entries(), 1);
+    expect(a.criticalOverflow.map((e) => e.ref.token)).toEqual(['b']);
+  });
+});

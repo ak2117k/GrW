@@ -467,4 +467,64 @@ describe('MarketHubService — the owner book changing re-watches positions at o
     svc.onModuleDestroy();
     expect(off).toHaveBeenCalled();
   });
+
+  const enabled = (extra: Record<string, unknown> = {}) =>
+    config({ 'hub.enabled': true, 'hub.ownerUserId': 'owner', 'hub.slotCap': 50, 'hub.mcxLateClose': '', ...extra });
+
+  it('pins the index spots and each HUB_LINE_FUTURES name’s near-month future as lines; a failed lookup keeps the last future', async () => {
+    const start = jest.spyOn(HubEngine.prototype, 'start').mockResolvedValue(undefined);
+    const setLines = jest.spyOn(HubEngine.prototype, 'setLines');
+    const crude = { token: '573422', symbol: 'CRUDEOIL19NOV26FUT' };
+    const lookups = {
+      getInstrumentByToken: jest.fn().mockResolvedValue(null),
+      getInstrumentBySymbol: jest.fn(),
+      getNearestFuture: jest.fn(async (name: string) => (name === 'CRUDEOIL' ? crude : name === 'NIFTY' ? { token: '61471', symbol: 'NIFTY23NOV26FUT' } : null)),
+    };
+    const svc = new MarketHubService(enabled({ 'hub.lineFutures': 'NIFTY,CRUDEOIL' }) as any, manager(jest.fn().mockResolvedValue(undefined)) as any, tracker as any, prisma as any, runner as any, lookups as any);
+    svc.onModuleInit();
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    const keys = () => svc['engine']!.lineRefs().map((r) => `${r.exchange}:${r.token}`);
+    expect(keys()).toEqual(['NSE:99926000', 'NSE:99926009', 'NSE:99926037', 'BSE:99919000', 'NFO:61471', 'MCX:573422']);
+    expect(lookups.getNearestFuture).toHaveBeenCalledWith('CRUDEOIL', 'MCX', expect.any(Date));
+    expect(lookups.getNearestFuture).toHaveBeenCalledWith('NIFTY', 'NFO', expect.any(Date));
+    // The master blips: crude's lookup fails, the line stays.
+    lookups.getNearestFuture.mockImplementation(async (name: string) => {
+      if (name === 'CRUDEOIL') throw new Error('db down');
+      return { token: '61471', symbol: 'NIFTY23NOV26FUT' };
+    });
+    await svc.refreshLines();
+    expect(keys()).toContain('MCX:573422');
+    expect(setLines).toHaveBeenCalled();
+    svc.onModuleDestroy();
+    start.mockRestore();
+    setLines.mockRestore();
+  });
+
+  it('an MCX option position holds its month’s future as the underlying (it resolved to none before)', async () => {
+    const start = jest.spyOn(HubEngine.prototype, 'start').mockResolvedValue(undefined);
+    const setPositions = jest.spyOn(HubEngine.prototype, 'setPositions').mockResolvedValue(undefined);
+    jest.spyOn(MarketHubService.prototype, 'refreshLines').mockResolvedValue(undefined);
+    const positions = {
+      openTrackerRefsByUser: jest.fn(),
+      openPositionRefsByUser: jest.fn().mockResolvedValue(new Map([['owner', [{ exchange: 'MCX', token: '590001', symbol: 'CRUDEOILM17NOV269150CE' }]]])),
+    };
+    const expiry = new Date('2026-11-17T00:00:00Z');
+    const lookups = {
+      getInstrumentByToken: jest.fn().mockResolvedValue({ name: 'CRUDEOILM', expiry }),
+      getInstrumentBySymbol: jest.fn(),
+      getNearestFuture: jest.fn().mockResolvedValue({ token: '573423', symbol: 'CRUDEOILM19NOV26FUT' }),
+    };
+    const svc = new MarketHubService(enabled() as any, manager() as any, positions as any, prisma as any, runner as any, lookups as any);
+    svc.onModuleInit();
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(setPositions).toHaveBeenLastCalledWith(
+      [{ exchange: 'MCX', token: '590001', symbol: 'CRUDEOILM17NOV269150CE' }],
+      [{ exchange: 'MCX', token: '573423', symbol: 'CRUDEOILM19NOV26FUT' }],
+    );
+    expect(lookups.getNearestFuture).toHaveBeenCalledWith('CRUDEOILM', 'MCX', expiry);
+    svc.onModuleDestroy();
+    start.mockRestore();
+    setPositions.mockRestore();
+    jest.restoreAllMocks();
+  });
 });

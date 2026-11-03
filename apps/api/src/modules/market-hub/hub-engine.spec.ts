@@ -409,3 +409,101 @@ describe('HubEngine', () => {
     expect(e.status().chain).toBeNull();
   });
 });
+
+/**
+ * Prod 2026-11-03: CRUDEOIL19NOV26FUT (MCX 573422) lost its subscription at 18:04 IST and its 1m bars for
+ * the rest of the MCX evening; the entry engine froze crude at 9218 for 2 h. The lines are pinned, build
+ * bars from polled quotes too, and are refilled from the broker's 1m history when their bars go stale.
+ */
+describe('HubEngine lines', () => {
+  const CRUDE: InstrumentRef = { exchange: 'MCX', token: '573422', symbol: 'CRUDEOIL19NOV26FUT' };
+  const opt = (i: number): InstrumentRef => ({ exchange: 'MCX', token: `90${i}`, symbol: `CRUDEOILM17NOV26${9100 + i * 50}CE` });
+
+  function lineEngine(cap = 50, broker = new FakeBroker(), repo = new MemoryCandleRepo()) {
+    const e = new HubEngine({
+      broker,
+      clock: new SessionClock({ holidays: MARKET_HOLIDAYS, mcxLateClose: [{ from: '2026-11-02', to: '2027-03-08' }] }),
+      cap,
+      defaults: [NIFTY],
+      candles: { repo },
+    });
+    return { e, broker, repo };
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(IST('2026-11-03T20:30:00')); // MCX evening; NSE shut
+  });
+  afterEach(() => jest.useRealTimers());
+
+  it('a pinned line keeps its live slot when new positions fill the cap', async () => {
+    const { e, broker } = lineEngine(2);
+    await e.start();
+    await e.setLines([CRUDE]);
+    await e.setPositions([opt(1), opt(2), opt(3)]);
+    expect(broker.subscribed.has('MCX:573422')).toBe(true);
+    expect(e.status().slots.live).toBe(2);
+    await e.setLines([]);
+    expect(broker.subscribed.has('MCX:573422')).toBe(false);
+    e.stop();
+  });
+
+  it('a stale line is refilled from the broker’s 1m history and then counts as fresh', async () => {
+    const { e, broker, repo } = lineEngine();
+    const bar = (local: string, close: number) => ({ ts: IST(local), open: close, high: close, low: close, close, volume: 10 });
+    broker.candlesImpl = async () => [bar('2026-11-03T20:27:00', 8890), bar('2026-11-03T20:28:00', 8885), bar('2026-11-03T20:29:00', 8881)];
+    await e.start();
+    await e.setLines([CRUDE]);
+    expect(e.status().candles?.lines.stale).toEqual(['MCX:573422']);
+    const p = e.checkLines();
+    await jest.advanceTimersByTimeAsync(1000);
+    await p;
+    const calls = broker.candleCalls.filter((c) => c.ref.token === '573422');
+    expect(calls.map((c) => c.interval)).toEqual(['ONE_MINUTE']);
+    const rows = await repo.read('1m', CRUDE, IST('2026-11-03T20:00:00'), IST('2026-11-03T20:30:00'));
+    expect(rows.map((r) => r.close)).toEqual([8890, 8885, 8881]);
+    expect(repo.rows['1m'].get('MCX:573422')?.get(IST('2026-11-03T20:29:00'))?.source).toBe('broker');
+    expect(e.status().candles?.lines).toMatchObject({ count: 1, stale: [], refills: 1, refillFailures: 0 });
+    // Fresh now: the next check asks nothing.
+    await e.checkLines();
+    expect(broker.candleCalls.filter((c) => c.ref.token === '573422')).toHaveLength(1);
+    e.stop();
+  });
+
+  it('a line with flowing ticks is never refilled', async () => {
+    const { e, broker } = lineEngine();
+    await e.start();
+    await e.setLines([CRUDE]);
+    jest.setSystemTime(IST('2026-11-03T20:30:10'));
+    broker.emitTick(FakeBroker.tick('573422', 8881, 'MCX'));
+    jest.setSystemTime(IST('2026-11-03T20:31:05'));
+    broker.emitTick(FakeBroker.tick('573422', 8879, 'MCX')); // closes the 20:30 bar
+    await e.checkLines(IST('2026-11-03T20:31:30'));
+    expect(broker.candleCalls).toHaveLength(0);
+    e.stop();
+  });
+
+  it('a line keeps getting bars from polled quotes while the socket is down; a position does not', async () => {
+    const { e, broker, repo } = lineEngine();
+    await e.start();
+    await e.setLines([CRUDE]);
+    await e.setPositions([opt(1)]);
+    broker.emitState('reconnecting');
+    await jest.advanceTimersByTimeAsync(70_000); // past 20:31 + close grace + a flush
+    const crude = await repo.read('1m', CRUDE, IST('2026-11-03T20:30:00'), IST('2026-11-03T20:31:00'));
+    expect(crude).toHaveLength(1);
+    expect(crude[0].close).toBe(100);
+    expect(await repo.read('1m', opt(1), IST('2026-11-03T20:00:00'), IST('2026-11-03T21:00:00'))).toEqual([]);
+    e.stop();
+  });
+
+  it('checkLines never rejects when the store read throws; it counts a refill failure', async () => {
+    const { e, repo } = lineEngine();
+    await e.start();
+    await e.setLines([CRUDE]);
+    jest.spyOn(repo, 'dayCounts').mockRejectedValue(new Error('db down'));
+    await expect(e.checkLines()).resolves.toBeUndefined();
+    expect(e.status().candles?.lines).toMatchObject({ refillFailures: 1, lastRefillError: 'MCX:573422: db down' });
+    e.stop();
+  });
+});

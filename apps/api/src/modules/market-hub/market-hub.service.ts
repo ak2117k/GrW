@@ -15,7 +15,8 @@ import { PrismaChainRepo } from './chain/chain-repository';
 import type { ExtraTargetOutcome } from './chain/chain-service';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
 import type { FixupReport } from './candles/candle-store';
-import { istDay } from './candles/trading-calendar';
+import { istDay, istMidnight } from './candles/trading-calendar';
+import { mergeLines, parseLineFutures, resolveLineFutures } from './hub-lines';
 import { ManagerHubBroker } from './hub-broker';
 import type { HubCandleSource } from './hub-candle-source';
 import { HubEngine, type HubStatus } from './hub-engine';
@@ -25,6 +26,8 @@ import { SessionClock, parseLateClose } from './session-clock';
 import { isDerivative, resolveUnderlying } from './underlying';
 
 const POSITION_REFRESH_MS = 60_000;
+/** Re-resolve the lines' near-month futures (an expiry rolls the month; the master refreshes at 08:00 IST). */
+const LINE_REFRESH_MS = 30 * 60_000;
 const CALENDAR_ALERT_MS = 24 * 60 * 60 * 1000;
 const MAX_UNDERLYING_CACHE = 1000;
 /** The config key behind each consumer switch. */
@@ -100,6 +103,11 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
   private ownerUserId: string | null = null;
   private ownerHub: HubPrices | null = null;
   private readonly underlyings = new Map<string, InstrumentRef | null>();
+  private indexLines: InstrumentRef[] = [];
+  /** Line futures by master name (HUB_LINE_FUTURES), as last resolved. */
+  private lineFutures = new Map<string, InstrumentRef>();
+  /** Names last reported missing, so a missing future warns once per change, not every 30 min. */
+  private lastMissingLines = '';
 
   constructor(
     private readonly config: ConfigService,
@@ -172,11 +180,15 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     this.engine = engine;
     this.ownerUserId = owner;
     this.ownerHub = engineHubPrices(engine);
+    // The index spots are lines as soon as the hub is up; their futures join once the master answers.
+    this.indexLines = defaults;
     void engine
       .start()
-      .then(() => this.refreshPositions(owner))
+      // setLines registers synchronously; the futures' master lookup must not wait on a slow broker.
+      .then(() => Promise.all([this.refreshPositions(owner), engine.setLines(defaults), this.refreshLines()]))
       .catch((err) => this.logger.error(`Market hub start failed: ${err?.message ?? err}`));
     const refresh = setInterval(() => void this.refreshPositions(owner), POSITION_REFRESH_MS);
+    const lines = setInterval(() => void this.refreshLines(), LINE_REFRESH_MS);
     // A reconcile that opened/closed one of the owner's trackers (order stream,
     // adaptive poll, cron) re-watches at once: a fresh position is priced from
     // its first seconds, and a closed one frees its slot, without waiting for
@@ -187,8 +199,9 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       }) ?? null;
     const calendar = setInterval(() => this.checkCalendar(), CALENDAR_ALERT_MS);
     refresh.unref?.();
+    lines.unref?.();
     calendar.unref?.();
-    this.timers = [refresh, calendar];
+    this.timers = [refresh, lines, calendar];
     this.checkCalendar();
   }
 
@@ -354,6 +367,41 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     }
   }
 
+  /**
+   * The pinned lines (hub-lines.ts): the index spots + the near-month future of each
+   * HUB_LINE_FUTURES name, resolved from the master the same way the engines pick it. On boot and
+   * every 30 min (an expiry rolls the month). A failed lookup keeps the previous futures rather
+   * than dropping them: a master blip must not unpin crude mid-session. Never throws.
+   */
+  async refreshLines(): Promise<void> {
+    const engine = this.engine;
+    if (!engine) return;
+    try {
+      const names = parseLineFutures(this.config.get<string>('hub.lineFutures'));
+      const today = new Date(istMidnight(istDay(Date.now())));
+      const { found, missing } = await resolveLineFutures(
+        names,
+        (name, exchange, onOrAfter) => this.instruments.getNearestFuture(name, exchange, onOrAfter),
+        today,
+      );
+      const missingKey = missing.join(',');
+      if (missingKey !== this.lastMissingLines) {
+        this.lastMissingLines = missingKey;
+        if (missing.length > 0) this.logger.warn(`Market hub lines: no near-month future in the master for ${missingKey}`);
+      }
+      const next = new Map<string, InstrumentRef>();
+      for (const [name, ref] of found) next.set(name, ref);
+      for (const name of missing) {
+        const prev = this.lineFutures.get(name);
+        if (prev) next.set(name, prev); // a failed lookup keeps the last known future
+      }
+      this.lineFutures = next;
+      await engine.setLines(mergeLines(this.indexLines, [...next.values()]));
+    } catch (err) {
+      this.logger.warn(`Market hub line refresh failed: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
   /** Memoised per contract (the master does not change intraday); a failure is not cached. */
   private async underlyingOf(ref: InstrumentRef): Promise<InstrumentRef | null> {
     const key = refKey(ref);
@@ -362,6 +410,9 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       const { ref: underlying } = await resolveUnderlying(ref, {
         contract: (exchange, token) => this.instruments.getInstrumentByToken(token, exchange),
         cash: (symbol, exchange) => this.instruments.getInstrumentBySymbol(symbol, exchange),
+        // An MCX option's underlying is its month's future (the sentinel's pick): without this an
+        // MCX position resolved to NO underlying and its future was never held.
+        future: (name, exchange, contractExpiry) => this.nearestFutureFor(name, exchange, contractExpiry),
       });
       if (this.underlyings.size >= MAX_UNDERLYING_CACHE) this.underlyings.clear();
       this.underlyings.set(key, underlying);
@@ -370,6 +421,16 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
       this.logger.warn(`Underlying lookup failed for ${ref.symbol} (${key}): ${(err as Error)?.message ?? err}`);
       return null;
     }
+  }
+
+  /** The future of the contract's own month (expiring on/after it), else today's nearest — tick-source.adapter.ts's pick. */
+  private async nearestFutureFor(name: string, exchange: string, contractExpiry: Date | null) {
+    const today = new Date(istMidnight(istDay(Date.now())));
+    if (contractExpiry && contractExpiry.getTime() > today.getTime()) {
+      const own = await this.instruments.getNearestFuture(name, exchange, contractExpiry);
+      if (own) return own;
+    }
+    return this.instruments.getNearestFuture(name, exchange, today);
   }
 
   private checkCalendar(): void {

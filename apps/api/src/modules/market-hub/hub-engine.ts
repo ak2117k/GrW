@@ -2,7 +2,8 @@ import { CandleBuilder, type ClosedBar } from './candles/candle-builder';
 import type { CandleRepo } from './candles/candle-repository';
 import { CandleStore, type FixupReport } from './candles/candle-store';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
-import { istMidnight } from './candles/trading-calendar';
+import { istDay, istMidnight } from './candles/trading-calendar';
+import { LINES_OWNER, staleLines } from './hub-lines';
 import { ChainBuilder } from './chain/chain-builder';
 import type { GreeksMath } from './chain/chain-math';
 import type { ChainRepo, OiCaptureRepo } from './chain/chain-repository';
@@ -75,6 +76,20 @@ export interface CandleStatus {
   fillErrors: number;
   lastError: string | null;
   lastFixup: FixupReport | null;
+  /** The pinned lines (hub-lines.ts): their bar freshness and the broker refills that back them up. */
+  lines: LineStatus;
+}
+
+export interface LineStatus {
+  count: number;
+  /** EXCHANGE:token of lines whose exchange is open and whose newest bar is stale right now. */
+  stale: string[];
+  /** Stale-line reads through the CandleStore that came back complete (a broker call only when a minute was missing). */
+  refills: number;
+  /** Stale-line reads left incomplete (throttled / busy / error) or that threw. */
+  refillFailures: number;
+  lastRefillAt: number | null;
+  lastRefillError: string | null;
 }
 
 /** One consumer's outcomes since boot (spec §10: unpriced positions must be visible, never silent). */
@@ -124,6 +139,8 @@ const TICK_FLUSH_MS = 5000;
 const MAX_PENDING_BARS = 20_000;
 /** CandleBuilder's close grace (its default), named so stop() can close exactly the ended minutes. */
 const TICK_GRACE_MS = 2000;
+/** How often the lines' bar freshness is checked (and a stale line refilled from the broker). */
+const LINE_CHECK_MS = 30_000;
 
 /** Wires the hub's parts. No NestJS, no config — testable with a FakeBroker. */
 export class HubEngine {
@@ -146,6 +163,16 @@ export class HubEngine {
   private tickWriteFailures = 0;
   private lastTickWriteAt: number | null = null;
   private lastFixup: FixupReport | null = null;
+  /** The pinned lines, by key (setLines). */
+  private lines = new Map<string, InstrumentRef>();
+  /** Per line key: start (ms) of the newest 1m bar the hub knows of — tick-built or broker-refilled. */
+  private readonly lineLastBar = new Map<string, number>();
+  private lineTimer: ReturnType<typeof setInterval> | null = null;
+  private lineCheckInFlight = false;
+  private lineRefills = 0;
+  private lineRefillFailures = 0;
+  private lastLineRefillAt: number | null = null;
+  private lastLineRefillError: string | null = null;
   private readonly priceListeners = new Set<(p: Price) => void>();
   private listenerErrors = 0;
   private readonly consumerCounts: Record<HubConsumer, ConsumerCounters> = {
@@ -174,7 +201,7 @@ export class HubEngine {
       clock: d.clock,
       nearLiveTargetMs: 5000,
       criticalTargetMs: 2000,
-      onPrice: (p) => this.emit(p),
+      onPrice: (p) => this.onPolled(p),
     });
     if (d.candles) {
       const builder = new CandleBuilder(TICK_GRACE_MS);
@@ -249,6 +276,8 @@ export class HubEngine {
     if (this.builder) {
       this.flushTimer = setInterval(() => void this.flushBars(Date.now()), TICK_FLUSH_MS);
       this.flushTimer.unref?.();
+      this.lineTimer = setInterval(() => void this.checkLines(Date.now()), LINE_CHECK_MS);
+      this.lineTimer.unref?.();
     }
     try {
       await this.d.broker.connect();
@@ -265,6 +294,8 @@ export class HubEngine {
     this.maintenanceTimer = null;
     if (this.flushTimer) clearInterval(this.flushTimer);
     this.flushTimer = null;
+    if (this.lineTimer) clearInterval(this.lineTimer);
+    this.lineTimer = null;
     // Best effort: write every bar whose minute has ended (grace waived). The forming minute is
     // dropped, never stored (no forming bars in the database); the nightly fix-up fills it.
     if (this.builder) void this.flushBars(Date.now() + TICK_GRACE_MS);
@@ -307,6 +338,84 @@ export class HubEngine {
     this.positions = next;
     void this.chains?.setHeld([...refs]); // never rejects
     await this.feed.reconcile();
+  }
+
+  /**
+   * Replace the pinned lines (hub-lines.ts): watched at priority 1 under one owner and PINNED — a
+   * live slot before any position token, polled on the Critical lane while the socket is down —
+   * for as long as the hub runs. Never rejects (a broker failure is in status().lastError; the
+   * 30 s maintenance reconcile retries).
+   */
+  async setLines(refs: readonly InstrumentRef[]): Promise<void> {
+    const next = new Map(refs.map((r) => [refKey(r), r] as const));
+    const now = Date.now();
+    for (const [k, r] of this.lines) {
+      if (next.has(k)) continue;
+      this.registry.unwatch(r, LINES_OWNER);
+      this.lineLastBar.delete(k);
+    }
+    for (const r of next.values()) this.registry.watch(r, 1, LINES_OWNER, now, undefined, true);
+    this.lines = next;
+    await this.reconcileSafely();
+  }
+
+  /** The current lines (for status / tests). */
+  lineRefs(): InstrumentRef[] {
+    return [...this.lines.values()];
+  }
+
+  /**
+   * The broker-history backstop for the lines (every 30 s). A line whose exchange is open and whose
+   * newest bar is stale (or that has no bar yet this process — a restart mid-session) is read
+   * through the CandleStore on the Routine lane: its gap fill asks Angel for today's 1m history
+   * (at most once per completed minute — the store remembers how far today's last fetch reached)
+   * and upserts it as 'broker' bars. Ticks stopping (an eviction, a dead socket, an Angel stream
+   * that goes quiet) then cost minutes, not the rest of the session. Never rejects; one check at
+   * a time.
+   */
+  async checkLines(now: number = Date.now()): Promise<void> {
+    if (!this.store || this.lineCheckInFlight) return;
+    this.lineCheckInFlight = true;
+    try {
+      for (const ref of staleLines([...this.lines.values()], this.lineLastBar, this.d.clock, now)) {
+        try {
+          const r = await this.store.candles(ref, '1m', istMidnight(istDay(now)), Date.now(), { lane: LANE.ROUTINE });
+          const last = r.candles.length ? r.candles[r.candles.length - 1].ts : undefined;
+          if (last !== undefined) this.noteLineBar(refKey(ref), last);
+          if (r.incomplete.length > 0) {
+            this.lineRefillFailures++;
+            this.lastLineRefillError = `${refKey(ref)}: ${r.incomplete.map((i) => i.reason).join(',')}`;
+          } else {
+            this.lineRefills++;
+            this.lastLineRefillAt = Date.now();
+          }
+        } catch (err) {
+          this.lineRefillFailures++;
+          this.lastLineRefillError = `${refKey(ref)}: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      }
+    } catch (err) {
+      this.lineRefillFailures++;
+      this.lastLineRefillError = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.lineCheckInFlight = false;
+    }
+  }
+
+  private noteLineBar(key: string, ts: number): void {
+    if (!this.lines.has(key)) return;
+    const prev = this.lineLastBar.get(key);
+    if (prev === undefined || ts > prev) this.lineLastBar.set(key, ts);
+  }
+
+  /**
+   * A polled quote. Every consumer hears it; only a LINE's quote also builds bars (positions keep
+   * the tick-only rule): a line polled because the socket is down or quiet must still get a bar
+   * every minute. The broker refill / nightly fix-up replace these with the broker's own.
+   */
+  private onPolled(p: Price): void {
+    this.emit(p);
+    if (this.builder && this.lines.has(refKey(p.ref))) this.queueBars(this.builder.onPrice(p));
   }
 
   price(ref: InstrumentRef, opts: { maxAgeMs: number }): PriceResult {
@@ -408,6 +517,7 @@ export class HubEngine {
 
   private queueBars(bars: ClosedBar[]): void {
     if (bars.length === 0) return;
+    for (const b of bars) this.noteLineBar(refKey(b.ref), b.candle.ts);
     this.pendingBars.push(...bars);
     const over = this.pendingBars.length - MAX_PENDING_BARS;
     if (over > 0) {
@@ -463,6 +573,14 @@ export class HubEngine {
       lastTickWriteAt: this.lastTickWriteAt,
       ...this.store.metrics(),
       lastFixup: this.lastFixup,
+      lines: {
+        count: this.lines.size,
+        stale: staleLines([...this.lines.values()], this.lineLastBar, this.d.clock, Date.now()).map(refKey),
+        refills: this.lineRefills,
+        refillFailures: this.lineRefillFailures,
+        lastRefillAt: this.lastLineRefillAt,
+        lastRefillError: this.lastLineRefillError,
+      },
     };
   }
 

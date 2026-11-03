@@ -9,10 +9,15 @@ export interface Allocation {
   demoted: number;
 }
 
-/** Live slots by priority, then first-watch time, then key — never first come first served. */
+/**
+ * Live slots: pinned lines first (the hub's own index / near-month-future lines, hub-lines.ts —
+ * position tokens must never evict them), then by priority, then first-watch time, then key —
+ * never first come first served.
+ */
 export function allocateSlots(entries: readonly WatchEntry[], cap: number): Allocation {
   const sorted = [...entries].sort(
     (a, b) =>
+      Number(!!b.pinned) - Number(!!a.pinned) ||
       a.priority - b.priority ||
       a.firstAt - b.firstAt ||
       refKey(a.ref).localeCompare(refKey(b.ref)),

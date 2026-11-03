@@ -4,11 +4,17 @@ export interface WatchEntry {
   ref: InstrumentRef;
   priority: Priority;
   firstAt: number;
+  /**
+   * A pinned line (hub-lines.ts): allocated a live slot before every unpinned entry, P0 positions
+   * included, so a burst of new positions can never evict it. Absent = not pinned.
+   */
+  pinned?: boolean;
 }
 
 interface Holder {
   priority: Priority;
   expiresAt: number | null;
+  pinned: boolean;
 }
 
 interface Slot {
@@ -25,14 +31,15 @@ interface Slot {
 export class WatchRegistry {
   private readonly slots = new Map<string, Slot>();
 
-  watch(ref: InstrumentRef, priority: Priority, owner: string, now: number, ttlMs?: number): void {
+  /** `pinned` — only the hub's own line owner sets it; see {@link WatchEntry.pinned}. */
+  watch(ref: InstrumentRef, priority: Priority, owner: string, now: number, ttlMs?: number, pinned = false): void {
     const key = refKey(ref);
     let slot = this.slots.get(key);
     if (!slot) {
       slot = { ref, firstAt: now, holders: new Map() };
       this.slots.set(key, slot);
     }
-    slot.holders.set(owner, { priority, expiresAt: ttlMs === undefined ? null : now + ttlMs });
+    slot.holders.set(owner, { priority, expiresAt: ttlMs === undefined ? null : now + ttlMs, pinned });
   }
 
   unwatch(ref: InstrumentRef, owner: string): void {
@@ -67,10 +74,15 @@ export class WatchRegistry {
   }
 
   entries(): WatchEntry[] {
-    return [...this.slots.values()].map((s) => ({
-      ref: s.ref,
-      firstAt: s.firstAt,
-      priority: Math.min(...[...s.holders.values()].map((h) => h.priority)) as Priority,
-    }));
+    return [...this.slots.values()].map((s) => {
+      const holders = [...s.holders.values()];
+      const e: WatchEntry = {
+        ref: s.ref,
+        firstAt: s.firstAt,
+        priority: Math.min(...holders.map((h) => h.priority)) as Priority,
+      };
+      if (holders.some((h) => h.pinned)) e.pinned = true;
+      return e;
+    });
   }
 }

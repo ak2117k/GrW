@@ -185,11 +185,51 @@ export function pubDateGuard(raw: string | null, fetchedAt: Date): { publishedAt
 export const ET_COMMODITIES_RSS_URL =
   'https://economictimes.indiatimes.com/markets/commodities/rssfeeds/1808152121.cms';
 
+/**
+ * US MACRO sources (2026-11-03, US midterm night). The two global feeds above are CNBC *World*
+ * (non-US) and MarketWatch top stories — thin on US politics, the Fed, S&P futures and the dollar,
+ * which move the Indian open overnight. Verified 2026-11-03 (HTTP 200, items dated that day):
+ * CNBC US Top News (id 100003114), Politics (10000113), Economy (20910258).
+ * NEWS_US_MACRO_FEEDS=off removes them.
+ */
+export const US_MACRO_RSS_SOURCES: readonly RSSSource[] = Object.freeze([
+  { name: 'CNBC US Top News', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114', category: 'global' },
+  { name: 'CNBC Politics', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000113', category: 'global' },
+  { name: 'CNBC Economy', url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258', category: 'global' },
+] as RSSSource[]);
+
+/**
+ * ONE Google News RSS search over the US-macro queries (OR-ed, last day) — one source, so the same
+ * story found by two queries is not counted as two independent sources. NEWS_US_MACRO_QUERIES
+ * (comma-separated) replaces the list; `off` removes the source. Verified 2026-11-03: HTTP 200, WSJ /
+ * Bloomberg / Seeking Alpha midterm + futures + yields headlines.
+ */
+export const DEFAULT_US_MACRO_QUERIES: readonly string[] = Object.freeze([
+  'US election results stocks',
+  'midterms markets',
+  'Federal Reserve',
+  'S&P 500 futures',
+  'Wall Street stocks',
+  'dollar index Treasury yields',
+]);
+
+export function googleNewsSearchUrl(queries: readonly string[]): string {
+  const q = `${queries.map((x) => `(${x})`).join(' OR ')} when:1d`;
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`;
+}
+
 /** Every RSS source this process fetches. `env` is injectable for tests. */
 export function rssSources(env: Record<string, string | undefined> = process.env): RSSSource[] {
+  const out = [...RSS_SOURCES];
   const raw = (env.NEWS_COMMODITIES_RSS_URL ?? '').trim();
-  if (raw.toLowerCase() === 'off') return RSS_SOURCES;
-  return [...RSS_SOURCES, { name: 'ET Commodities', url: raw || ET_COMMODITIES_RSS_URL, category: 'sector' }];
+  if (raw.toLowerCase() !== 'off') out.push({ name: 'ET Commodities', url: raw || ET_COMMODITIES_RSS_URL, category: 'sector' });
+  if ((env.NEWS_US_MACRO_FEEDS ?? '').trim().toLowerCase() !== 'off') out.push(...US_MACRO_RSS_SOURCES);
+  const qRaw = (env.NEWS_US_MACRO_QUERIES ?? '').trim();
+  if (qRaw.toLowerCase() !== 'off') {
+    const queries = qRaw ? qRaw.split(',').map((s) => s.trim()).filter(Boolean) : [...DEFAULT_US_MACRO_QUERIES];
+    if (queries.length) out.push({ name: 'Google News US Macro', url: googleNewsSearchUrl(queries), category: 'global' });
+  }
+  return out;
 }
 
 @Injectable()

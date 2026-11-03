@@ -10,8 +10,10 @@ import { offHoursNewsDue, offHoursNewsEnabled, PRE_OPEN_CRONS } from '../domain/
  * every weekend US–Iran / crude story reached news_clusters at 08:00 Monday and was first analysed
  * at 09:00 (news-impact itself runs off-session every 2 h — it simply had nothing to read).
  *
- * This enqueues the SAME 'news-fetch' job (same processor, same feeds, free HTTP) every 30 min
- * outside that window: weekday nights 00:00–07:30 and all weekend. The news module is unchanged.
+ * This enqueues the SAME 'news-fetch' job (same processor, same feeds, free HTTP) outside that
+ * window: weekday nights every 30 min 00:00–04:30 and every 10 min 05:00–07:50 (2026-11-03: US
+ * results / US close land ~05:30–09:30 IST; the regular 5-min fetch takes over at 08:00), and all
+ * weekend every 30 min. The news module's schedule is unchanged.
  * NEWS_OFFHOURS_FETCH=off / BOOT_JOBS=false stop it.
  */
 @Injectable()
@@ -25,7 +27,12 @@ export class OffHoursNewsService {
     await this.enqueue(new Date());
   }
 
-  @Cron(PRE_OPEN_CRONS.newsOffHoursWeekend, { name: 'news-offhours-weekend', timeZone: 'Asia/Kolkata' })
+  @Cron(PRE_OPEN_CRONS.newsOffHoursDawn, { name: 'news-offhours-dawn', timeZone: 'Asia/Kolkata' })
+  async dawn(): Promise<void> {
+    await this.enqueue(new Date());
+  }
+
+  @Cron(PRE_OPEN_CRONS.newsOffHoursWeekend,{ name: 'news-offhours-weekend', timeZone: 'Asia/Kolkata' })
   async weekend(): Promise<void> {
     await this.enqueue(new Date());
   }

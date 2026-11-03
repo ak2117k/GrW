@@ -4,8 +4,11 @@
  *   outlook        08:30 IST Mon–Fri (per underlying, only on its venue's trading day).
  *   global prices  every 30 min, every day (weekends included: the Sunday-evening reopen of
  *                  US futures is exactly what a Monday outlook needs).
- *   news off-hours every 30 min when the RSS news fetch does not run (news-fetch.schedule.ts runs
- *                  weekdays 08:00–23:30 IST only): weekday nights 00:00–07:30 and all weekend.
+ *   news off-hours when the RSS news fetch does not run (news-fetch.schedule.ts runs weekdays
+ *                  08:00–23:30 IST every 5 min): weekday nights every 30 min 00:00–04:30, then every
+ *                  10 min 05:00–07:50 (US results / US close land ~05:30–09:30 IST; from 08:00 the
+ *                  regular 5-min fetch takes over, so the overnight read is continuous to 09:00 and
+ *                  beyond without a second cron on the same minutes), and all weekend every 30 min.
  *                  Prod 2 Nov: every weekend crude story was ingested at 08:00 IST Monday.
  *
  * Switches: BOOT_JOBS=false stops all three; PRE_OPEN_OUTLOOK=off, GLOBAL_PRICES=off and
@@ -14,7 +17,8 @@
 export const PRE_OPEN_CRONS = Object.freeze({
   outlook: '0 30 8 * * 1-5',
   globalPrices: '0 0,30 * * * *',
-  newsOffHoursWeekday: '0 0,30 0-7 * * 1-5',
+  newsOffHoursWeekday: '0 0,30 0-4 * * 1-5',
+  newsOffHoursDawn: '0 */10 5-7 * * 1-5',
   newsOffHoursWeekend: '0 0,30 * * * 0,6',
 });
 

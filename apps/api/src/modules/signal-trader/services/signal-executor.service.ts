@@ -8,6 +8,7 @@ import { answeredPositions, TradeTrackerService } from '../../trade-tracker/serv
 import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 import { isLiveTradingEnabled } from '../../trade-engine/live-trading';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
+import { eventTags } from '../../../common/utils/market-events';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
 import { buildEntryOrder, signalOrderTag, slExitTrigger } from '../domain/execution';
 import { fillAlert, rejectAlert } from '../domain/alerts';
@@ -281,7 +282,8 @@ export class SignalExecutorService {
       reason: `Signal entry plan (${i.channel}): exit if ${p.tradingsymbol} ${p.side === 'BUY' ? '<' : '>'} ${p.sl} (signal SL).`,
       invalidationPoint: `${p.tradingsymbol} ${p.side === 'BUY' ? 'below' : 'above'} ${p.sl}`,
       exitTrigger: slExitTrigger(p, { price, at: at.toISOString() }),
-      packet: { source: 'signal-trader', orderId: rowId, entry: price, sl: p.sl, targets: t },
+      // Event-day tags (EVENT:<NAME>): a live signal order has no trades row, so no entryTags column.
+      packet: { source: 'signal-trader', orderId: rowId, entry: price, sl: p.sl, targets: t, tags: eventTags(at) },
     });
     await this.repo.updateOrder(rowId, { trackerId: tracker.id, slVerdictId: verdictId });
     return `thesis set; SL trigger proposed (verdict ${verdictId}) — armed by the price-trigger watch`;

@@ -1,5 +1,6 @@
 import type { NewsTheme } from '../../entry-engine/domain/news-theme';
 import type { GlobalMove } from './global-chart';
+import type { UsOvernight } from './us-overnight';
 
 /**
  * PRE-OPEN OUTLOOK (owner 2026-11-02: "we should have predicted this in the night"). Deterministic
@@ -166,6 +167,8 @@ export interface PreOpenOutlook {
   headlineMoves: { n: number; medianPct: number | null; items: HeadlineMove[] };
   headlines: OutlookHeadline[];
   summary: string;
+  /** NSE underlyings: the US overnight volatility / gap-size section (domain/us-overnight; no direction). */
+  usOvernight?: UsOvernight | null;
 }
 
 const clamp = (x: number) => Math.max(-1, Math.min(1, x));
@@ -262,5 +265,7 @@ export function outlookAlertText(xs: readonly PreOpenOutlook[]): string {
     const heads = o.headlines.slice(0, 2).map((h) => `  · ${h.direction} ${h.magnitude} ${h.headline.slice(0, 90)}`);
     return [`${o.underlying}: ${o.bias} conf ${o.confidence}${g}${o.lastClose ? ` off ${o.lastClose.price}` : ''}`, `  ${o.global?.status === 'OK' || o.global?.status === 'STALE' ? `${o.global.symbol} ${signed(o.global.movePct ?? 0)}%` : 'no global price'} · ${o.theme.summary.slice(0, 120)}`, ...heads].join('\n');
   });
-  return `GrW pre-open outlook ${xs[0]?.sessionDate ?? ''} (observe only — no orders)\n${lines.join('\n')}`;
+  const us = xs.find((o) => o.usOvernight)?.usOvernight;
+  const usBlock = us ? `\nUS overnight (volatility / gap size only — no direction call):\n${us.lines.map((l) => `  ${l}`).join('\n')}` : '';
+  return `GrW pre-open outlook ${xs[0]?.sessionDate ?? ''} (observe only — no orders)\n${lines.join('\n')}${usBlock}`;
 }

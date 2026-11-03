@@ -17,6 +17,7 @@ function make(o: { live?: boolean; stored?: boolean; nseOpen?: boolean; stale?: 
     clustersBetween: jest.fn(async () => [{ id: 'k1', headline: 'Oil slips more than 1% as talks continue on ending Iran war', firstSeen: new Date('2026-11-02T02:30:00Z') }]),
     insertOutlook: jest.fn(async () => 'id'),
     latestOutlooks: jest.fn(async () => o.stale ?? []),
+    lastVixClose: jest.fn(async () => ({ close: 15.87, at: new Date('2026-10-30T09:59:00Z') })),
   };
   const impacts = { impacts: jest.fn(async () => []) };
   const prices = { chart: jest.fn(async (symbol: string) => (o.live !== false && symbol === 'CL=F' ? { ok: true as const, chart: at0830, source: 'Yahoo chart CL=F' } : { ok: false as const, reason: 'HTTP 503', source: `Yahoo chart ${symbol}` })) };
@@ -73,5 +74,26 @@ describe('PreOpenOutlookService', () => {
     expect(p.items.find((i) => i.underlying === 'CRUDEOIL')?.bias).toBe('BEARISH');
     expect(m.prices.chart).not.toHaveBeenCalled();
     expect(m.repo.insertOutlook).not.toHaveBeenCalled();
+  });
+
+  it('NSE trading: NIFTY / BANKNIFTY carry ONE US overnight section (VIX, event line; no direction); CRUDEOIL does not', async () => {
+    const prev = process.env.MARKET_EVENT_DAYS;
+    process.env.MARKET_EVENT_DAYS = '2026-11-02:US_MIDTERM_RESULTS';
+    try {
+      const { svc, repo, prices } = make({ nseOpen: true });
+      const r = await svc.run(NOW, { alert: false });
+      expect(r.outlooks.map((o) => o.underlying)).toEqual(['CRUDEOIL', 'NIFTY', 'BANKNIFTY']);
+      expect(r.outlooks[0].usOvernight).toBeUndefined();
+      expect(r.outlooks[1].usOvernight).toBe(r.usOvernight);
+      expect(r.outlooks[2].usOvernight).toBe(r.usOvernight);
+      expect(r.usOvernight?.vix).toMatchObject({ close: 15.87, typicalDayMovePct: 1 });
+      expect(r.usOvernight?.indianCloseAt).toBe('2026-10-30T10:00:00.000Z');
+      expect(r.usOvernight?.lines).toContain('Event: US midterm results overnight — expect a bigger-than-usual opening move; direction not predicted');
+      expect(repo.lastVixClose).toHaveBeenCalledTimes(1);
+      expect(prices.chart).toHaveBeenCalledWith('ES=F');
+    } finally {
+      if (prev === undefined) delete process.env.MARKET_EVENT_DAYS;
+      else process.env.MARKET_EVENT_DAYS = prev;
+    }
   });
 });

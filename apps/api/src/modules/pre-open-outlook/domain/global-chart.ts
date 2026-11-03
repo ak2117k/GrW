@@ -34,6 +34,11 @@ export interface GlobalChart {
   /** Bar width in ms (1h → 3 600 000). */
   intervalMs: number;
   bars: ChartBar[];
+  /**
+   * The instrument's own previous daily close/settle (meta.previousClose; for ES=F the CME settle
+   * before the current Globex session). Live reads only — stored snapshots do not carry it.
+   */
+  previousClose?: number | null;
 }
 
 const ok = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
@@ -67,6 +72,7 @@ export function parseYahooChart(data: unknown, fallbackSymbol: string): GlobalCh
     priceAt: Number.isFinite(priceAt) && priceAt > 0 ? priceAt * 1000 : null,
     intervalMs,
     bars,
+    previousClose: ok(meta.previousClose) ? meta.previousClose : null,
   };
 }
 

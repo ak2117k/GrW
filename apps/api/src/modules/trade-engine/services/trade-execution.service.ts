@@ -9,6 +9,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
+import { withEventTags } from '../../../common/utils/market-events';
 import {
   BrokerAdapter,
   OrderRequest,
@@ -268,7 +269,9 @@ export class TradeExecutionService {
       source,
       entryTime,
       entryReason: request.entryReason ?? null,
-      entryTags: request.entryTags ?? [],
+      // Event-day tag (EVENT:<NAME>, common/utils/market-events) so the self-review can separate
+      // event-day results. Appended only; existing tags (decision:, learn, underlying:) are kept.
+      entryTags: withEventTags(request.entryTags, entryTime ?? new Date()),
       spotAtEntry: context?.spot ?? null,
       vixAtEntry: context?.vix ?? null,
       vixRegimeAtEntry: context?.vixRegime ?? null,

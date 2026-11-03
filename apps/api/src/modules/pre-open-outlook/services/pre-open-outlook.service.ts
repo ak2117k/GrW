@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { activeEvents } from '../../../common/utils/market-events';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { istDayAt } from '../../entry-engine/domain/engine-inputs';
 import { headlineAbout, NEWS_THEME, newsTheme } from '../../entry-engine/domain/news-theme';
@@ -18,6 +19,7 @@ import {
   type PreOpenOutlook,
 } from '../domain/outlook';
 import { istYmd, outlookEnabled, PRE_OPEN_CRONS } from '../domain/schedule';
+import { usOvernightOf, type UsOvernight } from '../domain/us-overnight';
 import type { PreOpenOutlookReport, PreOpenOutlookSource } from '../pre-open-outlook.ports';
 import { PreOpenOutlookRepository } from '../pre-open-outlook.repository';
 import { GlobalPriceService } from './global-price.service';
@@ -39,6 +41,8 @@ export interface RunResult {
   outlooks: PreOpenOutlook[];
   skipped: Array<{ underlying: string; reason: string }>;
   alerted: boolean;
+  /** The US overnight section (null when NSE does not trade today or it could not be built). */
+  usOvernight: UsOvernight | null;
 }
 
 /**
@@ -71,10 +75,11 @@ export class PreOpenOutlookService implements PreOpenOutlookSource {
   /** Compute, store and alert every underlying whose venue trades today. */
   async run(now: Date, opts: { alert?: boolean } = {}): Promise<RunResult> {
     const sessionDate = istYmd(now);
-    if (this.running) return { sessionDate, outlooks: [], skipped: [{ underlying: '*', reason: 'previous run still going' }], alerted: false };
+    if (this.running) return { sessionDate, outlooks: [], skipped: [{ underlying: '*', reason: 'previous run still going' }], alerted: false, usOvernight: null };
     this.running = true;
     const outlooks: PreOpenOutlook[] = [];
     const skipped: RunResult['skipped'] = [];
+    let us: UsOvernight | null | undefined;
     try {
       for (const u of OUTLOOK_ORDER) {
         const venue = OUTLOOK_UNIVERSE[u].venue;
@@ -89,7 +94,8 @@ export class PreOpenOutlookService implements PreOpenOutlookSource {
           continue;
         }
         try {
-          const o = await this.compute(u, now, true);
+          if (venue === 'NSE' && us === undefined) us = await this.usOvernight(now, true);
+          const o = await this.compute(u, now, true, venue === 'NSE' ? us ?? null : undefined);
           await this.repo.insertOutlook(o).catch((e) => this.logger.warn(`[pre-open] storing ${u} failed: ${errText(e)}`));
           outlooks.push(o);
           this.logger.log(`[pre-open] ${o.summary}`);
@@ -103,7 +109,7 @@ export class PreOpenOutlookService implements PreOpenOutlookSource {
     }
     let alerted = false;
     if (outlooks.length > 0 && opts.alert !== false) alerted = await sendOpsAlert(`pre-open:${sessionDate}`, outlookAlertText(outlooks));
-    return { sessionDate, outlooks, skipped, alerted };
+    return { sessionDate, outlooks, skipped, alerted, usOvernight: us ?? null };
   }
 
   /** The newest stored outlook per underlying of the last 24 h. */
@@ -116,9 +122,10 @@ export class PreOpenOutlookService implements PreOpenOutlookSource {
     const stored = await this.repo.latestOutlooks(new Date(now.getTime() - REPORT_STORED_MAX_AGE_MS));
     if (stored.length > 0) return { source: 'stored', asOf: stored.map((o) => o.at).sort().pop() ?? now.toISOString(), items: stored, note: 'Computed by the 08:30 IST pre-open outlook (deterministic; observe only).' };
     const items: PreOpenOutlook[] = [];
+    const us = await this.usOvernight(now, false);
     for (const u of OUTLOOK_ORDER) {
       try {
-        items.push(await this.compute(u, now, false));
+        items.push(await this.compute(u, now, false, OUTLOOK_UNIVERSE[u].venue === 'NSE' ? us : undefined));
       } catch (e) {
         this.logger.warn(`[pre-open] preview ${u} failed: ${errText(e)}`);
       }
@@ -126,8 +133,11 @@ export class PreOpenOutlookService implements PreOpenOutlookSource {
     return { source: 'preview', asOf: now.toISOString(), items, note: 'Preview from the stored global price snapshots and news so far; the 08:30 IST run replaces it.' };
   }
 
-  /** One underlying's outlook at `now`. `live` = may fetch Yahoo / market-cues; else DB / cache only. */
-  async compute(underlying: string, now: Date, live: boolean): Promise<PreOpenOutlook> {
+  /**
+   * One underlying's outlook at `now`. `live` = may fetch Yahoo / market-cues; else DB / cache only.
+   * `us` (NSE underlyings) is attached as the outlook's US overnight section; it does not change the score.
+   */
+  async compute(underlying: string, now: Date, live: boolean, us?: UsOvernight | null): Promise<PreOpenOutlook> {
     const u = underlying.toUpperCase();
     const entry = OUTLOOK_UNIVERSE[u];
     if (!entry) throw new Error(`no pre-open outlook for ${u}`);
@@ -146,7 +156,42 @@ export class PreOpenOutlookService implements PreOpenOutlookSource {
       .filter((c) => headlineAbout(u, c.headline))
       .map((c) => parseHeadlineMove(u, c.id, c.headline))
       .filter((x): x is HeadlineMove => x !== null);
-    return outlookOf({ underlying: u, sessionDate: istYmd(now), at: now, lastClose, move, theme, headlineMoves });
+    const o = outlookOf({ underlying: u, sessionDate: istYmd(now), at: now, lastClose, move, theme, headlineMoves });
+    return us === undefined ? o : { ...o, usOvernight: us };
+  }
+
+  /**
+   * The US overnight section (volatility / gap size, never a direction): ES=F and WTI since the NSE
+   * close (NIFTY's last in-session bar), ES=F since its own previous settle (live only), India VIX's
+   * last close and the active MARKET_EVENT_DAYS. Never throws (null on an unexpected failure).
+   */
+  async usOvernight(now: Date, live: boolean): Promise<UsOvernight | null> {
+    try {
+      const nse = OUTLOOK_UNIVERSE.NIFTY;
+      const sessionStart = istDayAt(now, nse.openMin);
+      const line = INDEX_UNDERLYINGS.NIFTY;
+      const last = line ? await this.repo.lastBarBefore(line.exchange, line.token, sessionStart, nse.openMin, nse.closeMin).catch(() => null) : null;
+      const indianClose = last ? { price: last.price, at: new Date(last.at.getTime() + MIN) } : null;
+      const [es, crude] = [await this.chartFor('ES=F', now, live), await this.chartFor('CL=F', now, live)];
+      const vix = await this.repo.lastVixClose(sessionStart).catch(() => null);
+      return usOvernightOf({ at: now, indianClose, es, crude, vix, events: activeEvents(now) });
+    } catch (e) {
+      this.logger.warn(`[pre-open] US overnight section failed: ${errText(e)}`);
+      return null;
+    }
+  }
+
+  /** A chart for `sym`: live Yahoo when allowed, else the newest stored snapshot. */
+  private async chartFor(sym: string, now: Date, live: boolean): Promise<{ chart: GlobalChart | null; source: string; why?: string }> {
+    let why = '';
+    if (live) {
+      const r = await this.prices.chart(sym);
+      if (r.ok) return { chart: { ...r.chart, symbol: sym }, source: r.source };
+      why = `live: ${r.reason}`;
+    }
+    const stored = await this.repo.latestChart(sym, now).catch(() => null);
+    if (stored) return { chart: { ...stored, symbol: sym }, source: `global_price_snapshots ${sym}` };
+    return { chart: null, source: 'n/a', why: `${why ? `${why}; ` : ''}no stored snapshot` };
   }
 
   /** The first usable global move of the underlying's list (GIFT for the indices, then Yahoo symbols). */

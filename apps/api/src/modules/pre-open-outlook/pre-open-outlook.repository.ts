@@ -92,6 +92,16 @@ export class PreOpenOutlookRepository {
     return t && num(t.close) !== null ? { price: num(t.close) as number, at: t.ts as Date } : null;
   }
 
+  /** India VIX's last 1-minute close strictly before `before` (≤ 7 days back), from mbm_bars_1m (series INDIAVIX). */
+  async lastVixClose(before: Date): Promise<{ close: number; at: Date } | null> {
+    const from = new Date(before.getTime() - 7 * 86_400_000);
+    const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+      SELECT ts, close FROM "mbm_bars_1m" WHERE series = 'INDIAVIX' AND ts >= ${from} AND ts < ${before} AND close > 0
+      ORDER BY ts DESC LIMIT 1`;
+    const r = rows[0];
+    return r && num(r.close) !== null ? { close: num(r.close) as number, at: r.ts as Date } : null;
+  }
+
   /** Clusters first seen in (from, to] (headline-move fallback). */
   async clustersBetween(from: Date, to: Date): Promise<Array<{ id: string; headline: string; firstSeen: Date }>> {
     const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`

@@ -441,6 +441,27 @@ describe('TradeExecutionService.executeTrade — paper-trade entry price', () =>
     expect(created.source).toBe('WATCH');
   });
 
+  it('event day (MARKET_EVENT_DAYS): appends EVENT:<NAME> to the caller tags, keeps them; none on other days', async () => {
+    const prev = process.env.MARKET_EVENT_DAYS;
+    const todayIst = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+    const req = {
+      symbol: 'NIFTY24MAY22500CE', token: '99926000', exchange: 'NFO', side: 'BUY' as any, orderType: 'MARKET' as any,
+      quantity: 50, positionType: 'INTRADAY' as any, entryTags: ['telegram-signal', 'decision:d1', 'learn'],
+    } as any;
+    try {
+      process.env.MARKET_EVENT_DAYS = `${todayIst}:US_MIDTERM_RESULTS`;
+      await service.executeTrade(req);
+      expect((repo.createTrade as jest.Mock).mock.calls[0][0].entryTags).toEqual(['telegram-signal', 'decision:d1', 'learn', 'EVENT:US_MIDTERM_RESULTS']);
+      expect(req.entryTags).toEqual(['telegram-signal', 'decision:d1', 'learn']);
+      process.env.MARKET_EVENT_DAYS = 'off';
+      await service.executeTrade({ ...req, entryTags: undefined });
+      expect((repo.createTrade as jest.Mock).mock.calls[1][0].entryTags).toEqual([]);
+    } finally {
+      if (prev === undefined) delete process.env.MARKET_EVENT_DAYS;
+      else process.env.MARKET_EVENT_DAYS = prev;
+    }
+  });
+
   it('persists limitPrice + PENDING status for a resting paper LIMIT order', async () => {
     // A LIMIT order below market does not fill — the simulator returns PENDING.
     paperService.simulateOrder.mockResolvedValueOnce({

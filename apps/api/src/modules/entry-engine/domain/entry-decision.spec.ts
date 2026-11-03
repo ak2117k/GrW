@@ -87,6 +87,19 @@ describe('trendReading', () => {
     expect(trendReading(bars(sessionStart.getTime(), 65, (i) => 100 - i), AT, sessionStart).lean).toBe('NO_DATA');
   });
 
+  it('a frozen line (newest bar closed > trendMaxStaleMin ago) is NO_DATA, not the stale trend', () => {
+    const prev = bars(sessionStart.getTime() - 24 * 60 * MIN, 840, (i) => 10_000 - i * 0.2);
+    const fresh = bars(sessionStart.getTime(), 65, (i) => 9_800 - i * 1); // last bar 10:04 → closed 10:05 = AT
+    expect(trendReading([...prev, ...fresh], AT, sessionStart).lean).toBe('BEARISH');
+    const stopped = fresh.slice(0, 65 - (ENTRY_ENGINE.trendMaxStaleMin + 2)); // feed stopped 5 min before AT
+    const r = trendReading([...prev, ...stopped], AT, sessionStart);
+    expect(r.lean).toBe('NO_DATA');
+    expect(r.price).toBeNull();
+    expect(r.summary).toMatch(/stale/);
+    const justIn = fresh.slice(0, 65 - ENTRY_ENGINE.trendMaxStaleMin); // exactly the limit: still read
+    expect(trendReading([...prev, ...justIn], AT, sessionStart).lean).toBe('BEARISH');
+  });
+
   it('index volume (0) and a running-total volume fall back to TWAP', () => {
     expect(volumeUsable(bars(0, 20, () => 1, () => 0))).toBe(false);
     expect(volumeUsable(bars(0, 20, () => 1, (i) => 1000 + i * 10))).toBe(false);

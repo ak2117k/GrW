@@ -41,6 +41,12 @@ export const ENTRY_ENGINE = Object.freeze({
   trendVwapMinPct: 0.0005,
   /** At least this many closed 1-minute bars this session before the trend can be read. */
   trendMinSessionBars: 15,
+  /**
+   * The newest closed bar must have ended within this many minutes of `at`, else the trend is NO_DATA.
+   * Prod 2026-11-03: CRUDEOIL's 1m bars stopped at 18:04 IST and the engine read "price 9218" for 2 h
+   * while crude fell to 8881, then called PE after the move (owner: never decide on a frozen price).
+   */
+  trendMaxStaleMin: 3,
   /** EMA period on 15-minute and 1-hour closes (aggregated from the 1-minute bars). */
   ema15Period: 9,
   ema1hPeriod: 9,
@@ -279,7 +285,12 @@ export function trendReading(bars: readonly Bar1m[], at: Date, sessionStart: Dat
   const session = closed.filter((b) => b.ts >= sessionStart.getTime());
   const empty: TrendReading = { lean: 'NO_DATA', price: null, vwap: null, vwapSource: null, vwapPct: null, ema15: null, ema15Slope: null, ema1h: null, ema1hSlope: null, sessionBars: session.length, summary: '' };
   if (session.length < ENTRY_ENGINE.trendMinSessionBars) return { ...empty, summary: `NO_DATA: ${session.length} closed 1m bars this session (< ${ENTRY_ENGINE.trendMinSessionBars})` };
-  const price = session[session.length - 1].close;
+  const last = session[session.length - 1];
+  const staleMin = Math.floor((t - (last.ts + MIN)) / MIN);
+  if (staleMin > ENTRY_ENGINE.trendMaxStaleMin) {
+    return { ...empty, summary: `NO_DATA: stale — the last 1m bar closed ${staleMin} min ago (> ${ENTRY_ENGINE.trendMaxStaleMin}) at ${last.close}` };
+  }
+  const price = last.close;
   const useVol = volumeUsable(session);
   let num = 0, den = 0;
   for (const b of session) {

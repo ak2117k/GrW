@@ -1,6 +1,6 @@
 import { dedupKey, planCluster, type ClusterRow, type RecentSignal } from './cluster';
 import { earliestUsable, inferExpiry, monthlyRule, ruleExpiry } from './expiry';
-import { evaluateSignalOutcome, outcomeCorrect, type OutcomeBar } from './outcome';
+import { evaluateSignalOutcome, outcomeCorrect, sideLevels, type OutcomeBar } from './outcome';
 import { prefilter } from './prefilter';
 import { detectUpdate } from './updates';
 import { buildVocabulary } from './vocabulary';
@@ -165,6 +165,22 @@ describe('outcome replay', () => {
     expect(evaluateSignalOutcome(sig, [bar(0, 115, 125), bar(5, 118, 130)]).status).toBe('NEITHER');
     expect(evaluateSignalOutcome(sig, []).status).toBe('NO_DATA');
     expect(outcomeCorrect('NEITHER')).toBeNull();
+  });
+  it('a wrong-side target is never scored as hit; the next right-side one is T1 (MARICO 2026-11-03)', () => {
+    const marico = { side: 'BUY' as const, entryType: 'ABOVE' as const, entryLow: 851.2, entryHigh: 851.2, sl: 833.99, targets: [824.38, 841.59] };
+    expect(sideLevels(marico)).toEqual({ sl: 833.99, t1: null, dropped: [824.38, 841.59] });
+    // Was TARGET1 on the trigger bar (high 852 ≥ 824.38): now no target can be hit.
+    expect(evaluateSignalOutcome(marico, [bar(0, 846, 852), bar(5, 849, 860)]).status).toBe('NEITHER');
+    const mixed = { ...marico, targets: [841.59, 870] };
+    expect(evaluateSignalOutcome(mixed, [bar(0, 846, 852), bar(5, 849, 871)])).toMatchObject({ status: 'TARGET1', exitPrice: 870 });
+    // SELL: a target above the entry is dropped too.
+    const s = { side: 'SELL' as const, entryType: 'BELOW' as const, entryLow: 100, entryHigh: 100, sl: 110, targets: [105] };
+    expect(evaluateSignalOutcome(s, [bar(0, 99, 106)]).status).toBe('NEITHER');
+  });
+  it('a wrong-side SL is not scored (no fake SL on the trigger bar); with no valid level left → NO_LEVELS', () => {
+    const s = { side: 'BUY' as const, entryType: 'ABOVE' as const, entryLow: 120, entryHigh: 120, sl: 125, targets: [140] };
+    expect(evaluateSignalOutcome(s, [bar(0, 119, 126), bar(5, 124, 141)]).status).toBe('TARGET1');
+    expect(evaluateSignalOutcome({ ...s, targets: [110] }, [bar(0, 119, 126)]).status).toBe('NO_LEVELS');
   });
   it('sell-side levels are mirrored', () => {
     const s = { side: 'SELL' as const, entryType: 'BELOW' as const, entryLow: 24050, entryHigh: 24050, sl: 24120, targets: [23950] };

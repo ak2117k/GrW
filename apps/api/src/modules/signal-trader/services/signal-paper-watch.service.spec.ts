@@ -9,7 +9,7 @@ function make(trade: Record<string, unknown>, judge: unknown) {
     recordAiCheck: jest.fn(async () => undefined),
   };
   const exec = { closeTrade: jest.fn(async () => undefined) };
-  const trades = { updateTrade: jest.fn(async () => undefined) };
+  const trades = { updateTrade: jest.fn(async () => undefined), markOpenTrade: jest.fn(async () => true) };
   const clock = { isOpen: () => true, minutesToClose: () => 4 };
   const quotes = { ltp: jest.fn(async () => 112) };
   const cfg = { mode: 'paper', ownerUserId: 'owner' } as any;
@@ -45,7 +45,7 @@ describe('SignalPaperWatchService — learning mode AI check', () => {
     // cap stop = 100 − 2000/75 = 73.35: the 05:30 bar dips to 70, then the trade recovers to 112.
     const bar = (m: number, high: number, low: number) => ({ ts: Date.parse('2026-10-28T05:00:00Z') + m * 60_000, open: low, high, low, close: high });
     const minuteBars = Array.from({ length: 290 }, (_, k) => (k === 30 ? bar(k + 1, 95, 70) : bar(k + 1, 105, 96)));
-    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, t.repo as any, t.exec as any, { updateTrade: jest.fn() } as any, { isOpen: () => true, minutesToClose: () => 4 }, { ltp: jest.fn(async () => 112) }, { minuteBars: jest.fn(async () => minuteBars) });
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, t.repo as any, t.exec as any, { updateTrade: jest.fn(), markOpenTrade: jest.fn(async () => true) } as any, { isOpen: () => true, minutesToClose: () => 4 }, { ltp: jest.fn(async () => 112) }, { minuteBars: jest.fn(async () => minuteBars) });
     await svc.sweep(NOW);
     const check = (t.repo.recordAiCheck.mock.calls[0] as unknown[])[1] as Record<string, any>;
     expect(check).toMatchObject({ aiDecision: 'SKIP', correct: false });
@@ -77,7 +77,7 @@ describe('SignalPaperWatchService — paper exit shadow (recorded, never acted o
       settleShadows: jest.fn(async (_id: string, s: { heldPnl: number; rulePnl: (p: number) => number }) => [{ rule: 'STOP', at: '2026-10-28T05:12:00Z', rulePnl: s.rulePnl(89) }]),
     };
     const exec = { closeTrade: jest.fn(async () => undefined) };
-    const trades = { updateTrade: jest.fn(async () => undefined) };
+    const trades = { updateTrade: jest.fn(async () => undefined), markOpenTrade: jest.fn(async () => true) };
     const ltps = [...o.ltps];
     const quotes = { ltp: jest.fn(async () => ltps.shift() ?? null) };
     const clock = { isOpen: () => true, minutesToClose: o.minutesToClose ?? (() => 200) };
@@ -146,7 +146,7 @@ describe('SignalPaperWatchService — target trailing (owner 2026-10-29)', () =>
       settleShadows: jest.fn(async () => []),
     };
     const exec = { closeTrade: jest.fn(async () => undefined) };
-    const trades = { updateTrade: jest.fn(async () => undefined) };
+    const trades = { updateTrade: jest.fn(async () => undefined), markOpenTrade: jest.fn(async () => true) };
     const queue = [...ltps];
     const quotes = { ltp: jest.fn(async () => queue.shift() ?? null) };
     const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, trades as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes);
@@ -195,7 +195,7 @@ describe('SignalPaperWatchService — carried trades trail on the daily ATR (ACU
     const queue = [...ltps];
     const quotes = { ltp: jest.fn(async () => queue.shift() ?? null) };
     const bars = { minuteBars: jest.fn(async () => []), dailyBars };
-    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, { updateTrade: jest.fn() } as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes, bars);
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, { updateTrade: jest.fn(), markOpenTrade: jest.fn(async () => true) } as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes, bars);
     return { svc, repo, exec };
   }
   // 15 daily bars, each a 120-point range around 4000 → ATR(14) 120.
@@ -241,7 +241,7 @@ describe('SignalPaperWatchService — AI close + HELD follow (owner 2026-10-29)'
     const exec = { closeTrade: jest.fn(async () => undefined) };
     const queue = [...ltps];
     const quotes = { ltp: jest.fn(async () => queue.shift() ?? null) };
-    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, { updateTrade: jest.fn() } as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes);
+    const svc = new SignalPaperWatchService({ mode: 'paper', ownerUserId: 'owner' } as any, repo as any, exec as any, { updateTrade: jest.fn(), markOpenTrade: jest.fn(async () => true) } as any, { isOpen: () => true, minutesToClose: () => 200 }, quotes);
     return { svc, repo, exec };
   }
 

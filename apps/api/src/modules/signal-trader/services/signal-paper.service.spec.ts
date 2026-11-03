@@ -101,7 +101,7 @@ describe('SignalPaperWatchService (paper SL / target exits)', () => {
     const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), mode: 'live' as const };
     const repo = { openPaperTrades: jest.fn(async () => rows) };
     const exec = { closeTrade: jest.fn(async () => ({})) };
-    const trades = { updateTrade: jest.fn(async () => ({})) };
+    const trades = { updateTrade: jest.fn(async () => ({})), markOpenTrade: jest.fn(async () => true) };
     const clock = { isOpen: () => open, minutesToClose: () => minutesToClose };
     const quotes = { ltp: jest.fn(async () => ltp) };
     const svc = new SignalPaperWatchService(cfg, repo as never, exec as never, trades as never, clock, quotes);
@@ -125,7 +125,7 @@ describe('SignalPaperWatchService (paper SL / target exits)', () => {
     const t = makeWatch(110);
     await t.svc.sweep(new Date());
     expect(t.exec.closeTrade).not.toHaveBeenCalled();
-    expect(t.trades.updateTrade).toHaveBeenCalledWith('t1', { pnl: 1275, pnlPercent: 8.37 });
+    expect(t.trades.markOpenTrade).toHaveBeenCalledWith('t1', { pnl: 1275, pnlPercent: 8.37 });
   });
 
   it('INTRADAY squares off near the close; a closed market is left alone', async () => {

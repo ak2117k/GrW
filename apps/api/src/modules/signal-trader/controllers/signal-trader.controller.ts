@@ -160,7 +160,7 @@ export class SignalTraderController {
         oiVerdict: oiVerdictOf(d.oiCheck),
         oiSummary: oiSummaryOf(d.oiCheck),
         trade: t
-          ? { id: t.id, status: t.status, entryPrice: t.entryPrice, exitPrice: t.exitPrice, pnl: t.pnl, exitReasonTag: t.exitReasonTag, exitTime: t.exitTime }
+          ? { id: t.id, status: t.status, entryPrice: t.entryPrice, exitPrice: t.exitPrice, pnl: t.pnl, fees: t.fees ?? null, exitReasonTag: t.exitReasonTag, exitTime: t.exitTime }
           : null,
       };
     });

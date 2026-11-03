@@ -181,7 +181,8 @@ export class OpenPaperTradeRefresherWorker {
         const pnlPercent = ((currentLtp - entryPrice) / entryPrice) * 100;
 
         try {
-          await this.tradeRepository.updateTrade(trade.id, {
+          // OPEN-only write: a close that lands while this cycle is pricing must keep its realised pnl.
+          await this.tradeRepository.markOpenTrade(trade.id, {
             pnl: Math.round(pnl * 100) / 100,
             pnlPercent: Math.round(pnlPercent * 100) / 100,
           });

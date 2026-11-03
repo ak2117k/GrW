@@ -12,7 +12,7 @@ import { MarketFeedService } from '../../market-data/services/market-feed.servic
  */
 describe('OpenPaperTradeRefresherWorker — preserves realized partial P&L', () => {
   let worker: OpenPaperTradeRefresherWorker;
-  let tradeRepo: { getOpenTrades: jest.Mock; updateTrade: jest.Mock };
+  let tradeRepo: { getOpenTrades: jest.Mock; updateTrade: jest.Mock; markOpenTrade: jest.Mock };
 
   let chain: { getOptionsChainWithSpot: jest.Mock; getLiveOptionLtp: jest.Mock };
 
@@ -31,6 +31,7 @@ describe('OpenPaperTradeRefresherWorker — preserves realized partial P&L', () 
     tradeRepo = {
       getOpenTrades: jest.fn(),
       updateTrade: jest.fn().mockResolvedValue({}),
+      markOpenTrade: jest.fn().mockResolvedValue(true),
     };
     chain = {
       getOptionsChainWithSpot: jest.fn().mockResolvedValue({
@@ -55,7 +56,7 @@ describe('OpenPaperTradeRefresherWorker — preserves realized partial P&L', () 
 
     await worker.refreshLoop();
 
-    expect(tradeRepo.updateTrade).not.toHaveBeenCalled();
+    expect(tradeRepo.markOpenTrade).not.toHaveBeenCalled();
   });
 
   it('still refreshes a fully-OPEN option trade', async () => {
@@ -63,7 +64,7 @@ describe('OpenPaperTradeRefresherWorker — preserves realized partial P&L', () 
 
     await worker.refreshLoop();
 
-    expect(tradeRepo.updateTrade).toHaveBeenCalled();
+    expect(tradeRepo.markOpenTrade).toHaveBeenCalled();
   });
 
   it('skips an option trade whose contract has expired — no chain fetch for a dead expiry', async () => {
@@ -75,7 +76,7 @@ describe('OpenPaperTradeRefresherWorker — preserves realized partial P&L', () 
 
     expect(chain.getOptionsChainWithSpot).not.toHaveBeenCalled();
     expect(chain.getLiveOptionLtp).not.toHaveBeenCalled();
-    expect(tradeRepo.updateTrade).not.toHaveBeenCalled();
+    expect(tradeRepo.markOpenTrade).not.toHaveBeenCalled();
   });
 });
 

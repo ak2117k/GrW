@@ -392,6 +392,8 @@ export function evaluateOutcome(
   const none = (why: string): SetupOutcome => ({ status: 'NO_DATA', entryAt: null, entryPrice: null, exitPrice: null, r: null, hitT1: null, details: { why } });
   const or = day.find((b) => istMinute(b.ts) === OPENING_RANGE_MIN);
   if (!or) return none('no 09:15 bar for the session');
+  // No R ⇒ the stop and T1 would sit AT the entry and the first bar would "hit" one of them.
+  if (!(setup.atr > 0)) return none('no daily ATR: stop / target cannot lie beyond the entry');
   const long = setup.side === 'LONG';
   const sgn = long ? 1 : -1;
   const level = long ? or.high : or.low;

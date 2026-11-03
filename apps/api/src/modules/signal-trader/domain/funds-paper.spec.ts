@@ -77,6 +77,13 @@ describe('summaries', () => {
     expect(liveSummary([{ status: 'FILLED', trackerStatus: 'CLOSED', pnl: 100 }, { status: 'CANCELLED', trackerStatus: null, pnl: null }])).toMatchObject({ n: 2, closed: 1, wins: 1, noTrade: 1, realised: 100 });
   });
 
+  it('paper charges: pnl stays GROSS (trades.pnl convention), net = pnl − fees is reported beside it', () => {
+    const s = paperSummary([{ status: 'CLOSED', pnl: 500, fees: 60 }, { status: 'CLOSED', pnl: -200, fees: 40 }, { status: 'OPEN', pnl: 50, fees: 20 }, null]);
+    expect(s).toMatchObject({ pnl: 350, realised: 300, charges: 120, net: 230, netRealised: 200 });
+    // No fees on the rows (live trackers): charges unknown, not ₹0.
+    expect(paperSummary([{ status: 'CLOSED', pnl: 500 }])).toMatchObject({ charges: null, net: null, netRealised: null });
+  });
+
   it('paper P&L by the AI entry judge: TAKE / SKIP / NONE, gross from entry, exit and quantity (not the booked pnl)', () => {
     const tr = (side: string, entry: number, exit: number | null, qty: number, pnl: number | null = 999_999) => ({ status: exit === null ? 'OPEN' : 'CLOSED', side, quantity: qty, entryPrice: entry, exitPrice: exit, pnl });
     const s = paperByJudge([

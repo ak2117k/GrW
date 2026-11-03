@@ -129,6 +129,8 @@ export interface PaperTradeRow {
   target: number | null;
   pnl: number | null;
   pnlPercent: number | null;
+  /** ₹ charges booked (entry leg; + exit leg once closed). pnl is GROSS: net = pnl − fees. */
+  fees?: number | null;
   positionType: string;
   exitReasonTag: string | null;
   entryTags: string[];
@@ -483,7 +485,7 @@ export class SignalTraderRepository {
 
   private readonly paperSelect = {
     id: true, status: true, side: true, quantity: true, entryPrice: true, exitPrice: true, stoploss: true, target: true,
-    pnl: true, pnlPercent: true, positionType: true, exitReasonTag: true, entryTags: true, entryTime: true, exitTime: true, createdAt: true,
+    pnl: true, pnlPercent: true, fees: true, positionType: true, exitReasonTag: true, entryTags: true, entryTime: true, exitTime: true, createdAt: true,
     instrument: { select: { token: true, exchange: true, symbol: true, expiry: true } },
   } as const;
 

@@ -441,7 +441,7 @@ export class SignalIntakeRepository {
       where: { userId, sessionDate },
       select: {
         id: true, sessionDate: true, symbol: true, instrumentKind: true, instrument: true, exchange: true, instrumentToken: true,
-        expiry: true, side: true, entryRule: true, stop: true, target1: true, target2: true,
+        expiry: true, side: true, entryRule: true, stop: true, target1: true, target2: true, stopDistance: true,
       },
     });
     if (rows.length === 0) return [];

@@ -19,37 +19,60 @@ export interface TradeOutcomeSummary {
   realised: number;
   /** wins / (wins + losses) of the closed trades; null when none closed. */
   winRate: number | null;
+  /**
+   * ₹ charges booked on the trades (trades.fees: the entry leg, plus the exit leg once closed); null when
+   * the rows carry none (live). `pnl` / `realised` stay GROSS — trades.pnl is gross by convention.
+   */
+  charges: number | null;
+  /** ₹ pnl − charges: what the account actually made; null when charges are unknown. */
+  net: number | null;
+  /** ₹ realised − the closed trades' charges; null when charges are unknown. */
+  netRealised: number | null;
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
-function summarise(rows: Array<{ open: boolean; pnl: number | null } | null>): TradeOutcomeSummary {
-  const s: TradeOutcomeSummary = { n: rows.length, open: 0, closed: 0, wins: 0, losses: 0, noTrade: 0, pnl: 0, realised: 0, winRate: null };
+const finite = (v: number | null | undefined): v is number => typeof v === 'number' && Number.isFinite(v);
+
+function summarise(rows: Array<{ open: boolean; pnl: number | null; fees?: number | null } | null>): TradeOutcomeSummary {
+  const s: TradeOutcomeSummary = { n: rows.length, open: 0, closed: 0, wins: 0, losses: 0, noTrade: 0, pnl: 0, realised: 0, winRate: null, charges: null, net: null, netRealised: null };
+  let charges = 0;
+  let closedCharges = 0;
+  let anyFees = false;
   for (const r of rows) {
     if (!r) {
       s.noTrade += 1;
       continue;
     }
     const p = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : 0;
+    const f = finite(r.fees) ? r.fees : 0;
+    if (finite(r.fees)) anyFees = true;
     s.pnl += p;
+    charges += f;
     if (r.open) {
       s.open += 1;
       continue;
     }
     s.closed += 1;
     s.realised += p;
+    closedCharges += f;
     if (p > 0) s.wins += 1;
     else if (p < 0) s.losses += 1;
   }
   s.pnl = r2(s.pnl);
   s.realised = r2(s.realised);
   s.winRate = s.wins + s.losses > 0 ? r2(s.wins / (s.wins + s.losses)) : null;
+  if (anyFees) {
+    s.charges = r2(charges);
+    s.net = r2(s.pnl - charges);
+    s.netRealised = r2(s.realised - closedCharges);
+  }
   return s;
 }
 
 /** Paper trades (Trade rows; null = no paper trade for that decision). */
-export function paperSummary(trades: Array<{ status: string; pnl: number | null } | null>): TradeOutcomeSummary {
-  return summarise(trades.map((t) => (t ? { open: t.status !== 'CLOSED', pnl: t.pnl } : null)));
+export function paperSummary(trades: Array<{ status: string; pnl: number | null; fees?: number | null } | null>): TradeOutcomeSummary {
+  return summarise(trades.map((t) => (t ? { open: t.status !== 'CLOSED', pnl: t.pnl, fees: t.fees } : null)));
 }
 
 /** One bucket of the paper trades by the AI entry judge's call. */

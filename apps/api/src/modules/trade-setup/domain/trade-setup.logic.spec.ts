@@ -171,6 +171,13 @@ describe('evaluateOutcome (15-min replay)', () => {
     expect(o).toMatchObject({ status: 'TARGET1', r: 1.5 });
     expect(o.details.stopDistance).toBe(20);
   });
+  it('a gap far above the night plan: stop / T1 are measured from the fill, never left below it (MARICO 2026-11-03)', () => {
+    // Plan from the 1000 close; the session opens 3 ATR higher. T1 must be 1.5R above the 1070 break, not the plan's 1030.
+    const o = evaluateOutcome(setup, '2026-10-23', [bar(0, 1062, 1070, 1060, 1068), bar(1, 1068, 1075, 1066, 1072), bar(2, 1072, 1101, 1071, 1100)]);
+    expect(o).toMatchObject({ status: 'TARGET1', entryPrice: 1070, exitPrice: 1100, r: 1.5 });
+    expect(o.details).toMatchObject({ stop: 1050, target1: 1100 });
+    expect(evaluateOutcome({ ...setup, atr: 0 }, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1045, 989, 1011)]).status).toBe('NO_DATA');
+  });
   it('never breaks → NOT_TRIGGERED; no 09:15 bar → NO_DATA', () => {
     expect(evaluateOutcome(setup, '2026-10-23', [bar(0, 1002, 1010, 1000, 1008), bar(1, 1008, 1009, 1001, 1005)]).status).toBe('NOT_TRIGGERED');
     expect(evaluateOutcome(setup, '2026-10-23', [bar(1, 1008, 1009, 1001, 1005)]).status).toBe('NO_DATA');

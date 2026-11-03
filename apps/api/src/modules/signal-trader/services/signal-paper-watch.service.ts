@@ -300,7 +300,8 @@ export class SignalPaperWatchService {
           });
           const sign = String(t.side).toUpperCase() === 'BUY' ? 1 : -1;
           const pnl = sign * (ltp - t.entryPrice) * t.quantity;
-          await this.trades.updateTrade(t.id, { pnl: r2(pnl), pnlPercent: r2(((sign * (ltp - t.entryPrice)) / t.entryPrice) * 100) });
+          // OPEN-only write: an AI exit can close the trade while this sweep is still on its stale row.
+          await this.trades.markOpenTrade(t.id, { pnl: r2(pnl), pnlPercent: r2(((sign * (ltp - t.entryPrice)) / t.entryPrice) * 100) });
         }
       } catch (err) {
         this.logger.warn(`[signal-paper] ${inst.symbol} (${t.id}): ${errText(err)}`);

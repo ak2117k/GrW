@@ -301,23 +301,73 @@ export class TradeRepository {
   }
 
   /**
-   * Find instrument by symbol+exchange, or by token.
-   * Returns the instrumentId needed for trade creation.
+   * The instruments row a new trade links to (its instrumentId).
+   *
+   * The exchange REUSES tokens after a contract expires: NFO 95394 was GODREJCP25AUG26940CE (expired
+   * 2026-08-25) and is CDSL23NOV261260CE in November. The old `findFirst({OR: [{symbol}, {token}]})`
+   * returned whichever row the planner met first, so a paper trade on CDSL was linked to the expired
+   * GODREJCP row (prod 2026-11-03). Now (pickInstrumentRow): the exact tradingsymbol wins; a token-only
+   * match is accepted only from a row that has not expired (newest expiry first). Null when only an
+   * expired row shares the token — the caller upserts the right row (signal / engine paper) or refuses.
    */
   async findInstrumentId(
     symbol: string,
     exchange: string,
     token: string,
+    now: Date = new Date(),
   ): Promise<string | null> {
-    const instrument = await this.prisma.instrument.findFirst({
-      where: {
-        OR: [
-          { symbol, exchange },
-          { token, exchange },
-        ],
-      },
-      select: { id: true },
+    const rows = await this.prisma.instrument.findMany({
+      where: { exchange, OR: [{ symbol }, { token }] },
+      select: { id: true, symbol: true, token: true, expiry: true, updatedAt: true },
+      take: 50,
     });
-    return instrument?.id ?? null;
+    return pickInstrumentRow(rows, symbol, token, now)?.id ?? null;
   }
+
+  /**
+   * Mark-to-market an OPEN trade's unrealised pnl, conditional on status OPEN in the same statement:
+   * a mark computed from a quote read before a concurrent close (the AI sentinel's exit, a stop) must
+   * never overwrite the realised pnl that close wrote — prod 2026-11-03 BSE23NOV263600CE closed at
+   * 175.5 (gross −33.34) and was left at −363.34, the sweep's stale mark at LTP 173.85. False when the
+   * trade was no longer OPEN.
+   */
+  async markOpenTrade(id: string, mark: { pnl: number; pnlPercent: number }): Promise<boolean> {
+    const r = await this.prisma.trade.updateMany({
+      where: { id, status: 'OPEN' },
+      data: { pnl: mark.pnl, pnlPercent: mark.pnlPercent },
+    });
+    return r.count > 0;
+  }
+}
+
+export interface InstrumentCandidate {
+  id: string;
+  symbol: string;
+  token: string;
+  expiry: Date | null;
+  updatedAt?: Date | null;
+}
+
+const istDayOf = (d: Date) => new Date(d.getTime() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+
+/**
+ * Pure: which of the rows sharing a symbol or a token (same exchange) a trade on `symbol` / `token`
+ * links to.
+ *  1. Same tradingsymbol AND token, else same tradingsymbol — newest expiry first.
+ *  2. Token only (callers that pass the token as the symbol, an equity stored under another symbol
+ *     spelling): only a row not expired on `now`'s IST day (no expiry = cash, always live), newest
+ *     expiry first, then the most recently refreshed. A reused token's expired contract is never
+ *     returned.
+ */
+export function pickInstrumentRow<T extends InstrumentCandidate>(rows: readonly T[], symbol: string, token: string, now: Date): T | null {
+  const far = Number.MAX_SAFE_INTEGER;
+  const newest = (a: T, b: T) =>
+    (b.expiry?.getTime() ?? far) - (a.expiry?.getTime() ?? far) || (b.updatedAt?.getTime() ?? 0) - (a.updatedAt?.getTime() ?? 0);
+  const bySymbol = rows.filter((r) => r.symbol === symbol);
+  const exact = bySymbol.filter((r) => r.token === token).sort(newest);
+  if (exact.length) return exact[0];
+  if (bySymbol.length) return [...bySymbol].sort(newest)[0];
+  const today = istDayOf(now);
+  const live = rows.filter((r) => r.token === token && (r.expiry === null || istDayOf(r.expiry) >= today)).sort(newest);
+  return live[0] ?? null;
 }

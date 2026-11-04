@@ -23,6 +23,7 @@ import {
 } from './tuning/tunables';
 import { SelfReviewTuningModule } from './tuning/tuning.module';
 import { SelfReviewLearningModule } from './lessons/self-review-learning.module';
+import { DecisionsModule } from './decisions/decisions.module';
 import { AutoApplyCron } from './auto-apply/auto-apply.cron';
 import { AUTO_APPLY_CONFIG, parseAutoApplyConfig } from './auto-apply/auto-apply.ports';
 import { AutoApplyRepository } from './auto-apply/auto-apply.repository';
@@ -44,7 +45,8 @@ import { SPIKE_BANK_RISE_N, SPIKE_BANK_TRAIL_N } from '../exit-discipline/config
  */
 @Global()
 @Module({
-  imports: [PrismaModule, SelfReviewTuningModule, SelfReviewLearningModule],
+  // DecisionsModule (2026-11-04 stream F): the decision ledger — exports DecisionGradingService / DecisionGradeRepository.
+  imports: [PrismaModule, SelfReviewTuningModule, SelfReviewLearningModule, DecisionsModule],
   controllers: [SelfReviewController],
   providers: [
     SelfReviewRepository,

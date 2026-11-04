@@ -3128,6 +3128,39 @@ model VerificationResult {
   @@map("verification_results")
 }
 
+/// The decision ledger (docs/superpowers/plans/2026-11-04-self-review-wrong-decision-loop.md, stream F):
+/// one trade decision (or one system-detector hit) graded against the other choice in real ₹ per lot,
+/// net of charges, at one horizon. A view over signal_decisions / ai_exit_executions / sentinel_verdicts /
+/// trades / intraday_carry_decisions / sentinel_theses, written nightly by DecisionGradingService. No FK.
+model DecisionGrade {
+  id             String   @id @default(cuid())
+  sessionDate    String   @map("session_date") // IST 'YYYY-MM-DD' of the decision
+  decisionType   String   @map("decision_type") // ENTRY_TAKE | ENTRY_SKIP | ENTRY_BLOCKED | SIZE | EXIT | HOLD | GATED_EXIT | FLOOR | SPIKE_BANK | HARD_LOSS | LADDER | CARRY | CARRY_EXIT | THESIS | DETECTOR
+  detector       String? // LIVE_NOT_PLACED | INPUT_MISSING | EVENT_NO_ACTION | THESIS_CONTRADICTS_DATA (DETECTOR rows only)
+  refTable       String   @map("ref_table") // the source table, or 'detector' for a grouped hit
+  refId          String   @map("ref_id")
+  userId         String?  @map("user_id")
+  symbol         String?
+  underlying     String?
+  mode           String // live | paper
+  decidedAt      DateTime @map("decided_at") @db.Timestamptz(6)
+  chosen         String
+  alternative    String
+  pnlChosen      Float?   @map("pnl_chosen") // ₹ per lot, net
+  pnlAlternative Float?   @map("pnl_alternative") // ₹ per lot, net
+  deltaRupees    Float?   @map("delta_rupees") // alternative − chosen
+  horizon        String // 15m | 30m | 60m | close | next1h
+  verdict        String // RIGHT | WRONG | UNSCORABLE
+  reason         String
+  facts          Json
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([refTable, refId, decisionType, horizon])
+  @@index([sessionDate, verdict])
+  @@index([decisionType, sessionDate])
+  @@map("decision_grades")
+}
+
 /// One nightly self-review pass.
 model SelfReviewRun {
   id          String    @id @default(cuid())

@@ -40,7 +40,7 @@ describe('GOLD / SILVER option chains into oi_snapshots', () => {
         contracts: async (u) => (u === 'GOLD' ? GOLD_CONTRACTS : []),
         expiries: async (u) => expiries[u] ?? [],
         contractFor: async () => null,
-        build: async () => ({ kind: 'unavailable', reason: 'not used' }),
+        build: async () => ({ kind: 'unavailable', reason: 'throttled' }),
         baselineFailures: 0,
       },
       repo: new MemoryChainRepo(),

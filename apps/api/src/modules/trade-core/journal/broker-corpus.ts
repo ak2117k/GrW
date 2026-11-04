@@ -1,3 +1,4 @@
+import { contractValueFactor } from '@td/shared';
 import { estimateCharges, isDerivativeSegment, segmentFor } from '../../trade-sentinel/charges';
 import { istDate } from '../execution/ledger-math';
 
@@ -78,12 +79,14 @@ export function brokerTradeRecord(t: TrackerRow, verdicts: readonly VerdictRow[]
   const side = t.qty > 0 ? 'LONG' : 'SHORT';
   const qty = Math.abs(t.qty);
   const sign = side === 'LONG' ? 1 : -1;
-  const grossPnl = r2((exitPrice - t.entryPrice) * t.qty);
-  const fees = r2(estimateCharges({ segment, entryPrice: t.entryPrice, exitPrice, qty, side }));
+  // MCX (GOLD 100, ZINC 1000 ...): rupees per unit of qty per point; 1 elsewhere.
+  const valueFactor = contractValueFactor(t.exchange, t.symbol);
+  const grossPnl = r2((exitPrice - t.entryPrice) * t.qty * valueFactor);
+  const fees = r2(estimateCharges({ segment, entryPrice: t.entryPrice, exitPrice, qty, side, valueFactor }));
   const netPnl = r2(grossPnl - fees);
   const mfePrice = side === 'LONG' ? t.holdingHigh : t.holdingLow;
   const maePrice = side === 'LONG' ? t.holdingLow : t.holdingHigh;
-  const excursion = (p: number | null): number | null => (p === null ? null : r2((p - t.entryPrice) * sign * qty));
+  const excursion = (p: number | null): number | null => (p === null ? null : r2((p - t.entryPrice) * sign * qty * valueFactor));
   const held = verdicts
     .filter((v) => v.createdAt.getTime() >= t.entryTime.getTime() && v.createdAt.getTime() <= exitTime.getTime())
     .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id));

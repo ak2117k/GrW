@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { contractValueFactor } from '@td/shared';
 import { TradeRepository } from '../repositories/trade.repository';
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
@@ -194,7 +195,8 @@ export class OpenPaperTradeRefresherWorker {
 
         // A SELL (written option) gains when the premium falls.
         const sign = String(trade.side).toUpperCase() === 'SELL' ? -1 : 1;
-        const pnl = sign * (currentLtp - entryPrice) * trade.quantity;
+        // MCX options (GOLD, ZINC ...): x the contract value factor; 1 for NFO/BFO.
+        const pnl = sign * (currentLtp - entryPrice) * trade.quantity * contractValueFactor(inst.exchange, inst.symbol ?? underlying);
         const pnlPercent = ((sign * (currentLtp - entryPrice)) / entryPrice) * 100;
 
         try {

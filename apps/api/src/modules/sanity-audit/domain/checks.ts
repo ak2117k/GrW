@@ -7,6 +7,8 @@
  * the LTP (NIFTY23NOV26FUT 23169 vs 23048, fixed c6fc825), the journal "Current" showing the exit price.
  */
 
+import { contractValueFactor } from '@td/shared';
+
 const MIN = 60_000;
 
 export type Severity = 'error' | 'warn' | 'known';
@@ -61,6 +63,8 @@ export const PNL_TOLERANCE_RUPEES = 1;
 export interface ClosedTradeRow {
   tradeId: string;
   symbol: string;
+  /** instruments.exchange, for the MCX contract value factor; absent => factor 1. */
+  exchange?: string | null;
   side: string;
   quantity: number;
   entryPrice: number | null;
@@ -81,7 +85,8 @@ export interface ClosedTradeRow {
 export function pnlArithmetic(r: ClosedTradeRow): Finding | null {
   if (r.partialExits > 0 || r.pnl === null || r.entryPrice === null || r.exitPrice === null) return null;
   const sign = r.side === 'SELL' ? -1 : 1;
-  const expected = sign * (r.exitPrice - r.entryPrice) * r.quantity;
+  // MCX (GOLD 100, ZINC 1000 ...): the close books x the contract value factor (2026-11-04 fix).
+  const expected = sign * (r.exitPrice - r.entryPrice) * r.quantity * contractValueFactor(r.exchange, r.symbol);
   const diff = r.pnl - expected;
   if (Math.abs(diff) <= PNL_TOLERANCE_RUPEES) return null;
   return {

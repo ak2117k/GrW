@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { contractValueFactor } from '@td/shared';
 import { computeGreenFloor, isDerivativeSegment } from '../charges';
 import { isPaperTracker } from '../paper/paper-tracker';
 import { RosterService, type RosterEntry } from './roster.service';
@@ -86,6 +87,9 @@ import {
   type FutileCause,
   type FutileRejudgeConfig,
 } from './futile-rejudge';
+
+/** MCX rupee factor for a roster entry (rupees = Δprice × qty × factor); 1 outside MCX. */
+const valueFactorOf = (e: { exchange: string; symbol: string }): number => contractValueFactor(e.exchange, e.symbol);
 
 /** What the cycle reads from its roster. */
 export type CycleRoster = Pick<RosterService, 'build'>;
@@ -895,6 +899,7 @@ export class SentinelCycleService {
       side: tick.side,
       entryPrice: tick.entryPrice,
       qty: tick.qty,
+      valueFactor: valueFactorOf(entry),
       holdingHigh: tick.holdingHigh,
       holdingLow: tick.holdingLow,
       nContract: tick.noise?.contract?.n ?? null,
@@ -1178,7 +1183,7 @@ export class SentinelCycleService {
   private hardLossFor(entry: RosterEntry, state: TrackerState, tick: TickReading, now: Date): { reading: HardFloorReading; floor: number; netPnl: number } | null {
     const cfg = hardLossConfig();
     if (cfg.limit === null || entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !isDerivativeSegment(tick.segment)) return null;
-    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side });
+    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) });
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
     const loss = hardLossReading({
       netPnl: green.netPnl,
@@ -1220,7 +1225,7 @@ export class SentinelCycleService {
     const cfg = this.discipline;
     if (!cfg?.enabled || !cfg.floorHardExit || !tick.anchors) return null;
     if (entry.ownership !== 'SENTINEL' || !(isDerivativeSegment(tick.segment) || isPaperTracker(entry.trackerId))) return null;
-    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side });
+    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) });
     // The floor in charge, exactly as the packet and the judge gate read it.
     const floor = noiseFloor
       ? { price: noiseFloor.armed ? noiseFloor.level : null, armed: noiseFloor.armed }
@@ -1520,7 +1525,7 @@ export class SentinelCycleService {
     const cfg = this.gateCfg!;
     const nowMs = now.getTime();
     const dir = tick.side === 'LONG' ? 1 : -1;
-    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side });
+    const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) });
 
     // Armed floor breached: the noise floor when it is in charge, else the latched fixed floor.
     const floorLevel = noiseFloor ? (noiseFloor.armed ? noiseFloor.level : null) : greenFloorArmedLatched ? green.floorPrice : null;
@@ -1570,7 +1575,7 @@ export class SentinelCycleService {
     const peak = rawPeak !== null && Number.isFinite(rawPeak) && rawPeak > 0 ? rawPeak : null;
     const peakGreen =
       cfg.greenToRed && peak !== null &&
-      computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: peak, qty: tick.qty, side: tick.side }).netPnl > 0;
+      computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: peak, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) }).netPnl > 0;
     const greenToRed = peakGreen && green.netPnl <= 0;
     const memo = peak !== null && state.g2r?.peak === peak ? state.g2r : undefined;
     const g2r = peak !== null && peakGreen ? { peak, greenToRed, peakGreen } : undefined;
@@ -2042,6 +2047,7 @@ export class SentinelCycleService {
       ltp: tick.ltp,
       qty: tick.qty,
       side: tick.side,
+      valueFactor: valueFactorOf(entry),
     }).armed;
 
     // The one exception to "only ever false -> true": a changed cost basis.

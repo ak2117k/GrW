@@ -63,13 +63,13 @@ export class SanityAuditRepository {
 
   /** Trades CLOSED since `from`, with their PARTIAL_EXIT event count. */
   async closedTrades(from: Date): Promise<ClosedTradeRow[]> {
-    const rows = await this.prisma.$queryRaw<Array<{ id: string; symbol: string; side: string; quantity: number; entry: unknown; exit: unknown; pnl: unknown; exit_time: Date; partials: bigint | number; tag: string | null }>>`
-      SELECT t.id, i.symbol, t.side, t.quantity, t."entryPrice" AS entry, t."exitPrice" AS exit, t.pnl, t."exitTime" AS exit_time, t."exitReasonTag" AS tag,
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; symbol: string; exchange: string | null; side: string; quantity: number; entry: unknown; exit: unknown; pnl: unknown; exit_time: Date; partials: bigint | number; tag: string | null }>>`
+      SELECT t.id, i.symbol, i.exchange::text AS exchange, t.side, t.quantity, t."entryPrice" AS entry, t."exitPrice" AS exit, t.pnl, t."exitTime" AS exit_time, t."exitReasonTag" AS tag,
         (SELECT count(*) FROM "trade_events" e WHERE e."tradeId" = t.id AND e."eventType"::text = 'PARTIAL_EXIT') AS partials
       FROM "trades" t JOIN "instruments" i ON i.id = t."instrumentId"
       WHERE t.status = 'CLOSED' AND t."exitTime" >= ${from}`;
     return rows.map((r) => ({
-      tradeId: r.id, symbol: r.symbol, side: r.side, quantity: Number(r.quantity), entryPrice: num(r.entry), exitPrice: num(r.exit),
+      tradeId: r.id, symbol: r.symbol, exchange: r.exchange, side: r.side, quantity: Number(r.quantity), entryPrice: num(r.entry), exitPrice: num(r.exit),
       pnl: num(r.pnl), exitAt: r.exit_time, partialExits: Number(r.partials), exitReasonTag: r.tag,
     }));
   }

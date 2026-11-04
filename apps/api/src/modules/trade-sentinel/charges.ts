@@ -162,6 +162,16 @@ export interface ChargeInput {
   qty: number;
   /** Direction of the position. Decides which leg is the sell and which the buy. */
   side: Side;
+  /**
+   * Rupees per unit of qty per 1-point move (`contractValueFactor` in @td/shared): 1 outside MCX,
+   * e.g. 100 for MCX GOLD (master lotSize 1, ₹100/pt/lot). Absent ⇒ 1. Scales turnover only.
+   */
+  valueFactor?: number;
+}
+
+/** A usable value factor: a positive finite number, else 1. */
+function vf(f: number | undefined): number {
+  return typeof f === 'number' && Number.isFinite(f) && f > 0 ? f : 1;
 }
 
 /** Brokerage on one executed order: flat for options, else the lower of flat vs %. */
@@ -214,18 +224,21 @@ export interface LegChargeInput {
   leg: LegSide;
   price: number;
   qty: number;
+  /** See ChargeInput.valueFactor. Absent ⇒ 1. */
+  valueFactor?: number;
 }
 
 /** Charges for one executed leg (SP2 M3: posted per fill). Every part >= 0. */
-export function chargesForLeg({ segment, leg, price, qty }: LegChargeInput): ChargeBreakdown {
-  const turnover = Math.abs(price * qty);
+export function chargesForLeg({ segment, leg, price, qty, valueFactor }: LegChargeInput): ChargeBreakdown {
+  const turnover = Math.abs(price * qty * vf(valueFactor));
   return breakdown(segment, leg === 'BUY' ? turnover : 0, leg === 'SELL' ? turnover : 0, { buy: leg === 'BUY', sell: leg === 'SELL' });
 }
 
 /** Total round-trip charges in rupees. Always >= 0. */
-export function estimateCharges({ segment, entryPrice, exitPrice, qty, side }: ChargeInput): number {
-  const entryTurnover = Math.abs(entryPrice * qty);
-  const exitTurnover = Math.abs(exitPrice * qty);
+export function estimateCharges({ segment, entryPrice, exitPrice, qty, side, valueFactor }: ChargeInput): number {
+  const units = qty * vf(valueFactor);
+  const entryTurnover = Math.abs(entryPrice * units);
+  const exitTurnover = Math.abs(exitPrice * units);
 
   // A LONG buys at entry and sells at exit; a SHORT does the reverse.
   const buyTurnover = side === 'LONG' ? entryTurnover : exitTurnover;
@@ -240,6 +253,8 @@ export interface GreenFloorInput {
   ltp: number;
   qty: number;
   side: Side;
+  /** See ChargeInput.valueFactor. Absent ⇒ 1. */
+  valueFactor?: number;
 }
 
 export interface GreenFloor {
@@ -277,15 +292,17 @@ function roundToTickConservative(price: number, dir: number): number {
  * green floor (margin ₹150) and breakeven (margin 0). The caller guarantees qty ≠ 0.
  */
 function solveFloorPrice(
-  { segment, entryPrice, qty, side }: Omit<GreenFloorInput, 'ltp'>,
+  { segment, entryPrice, qty, side, valueFactor }: Omit<GreenFloorInput, 'ltp'>,
   marginRupees: number,
   charges: number,
 ): number {
   const dir = side === 'LONG' ? 1 : -1;
-  let floorPrice = entryPrice + ((charges + marginRupees) / qty) * dir;
+  // Rupees per point for the whole position: qty × the contract's value factor.
+  const units = qty * vf(valueFactor);
+  let floorPrice = entryPrice + ((charges + marginRupees) / units) * dir;
   for (let i = 0; i < FLOOR_MAX_ITERATIONS; i += 1) {
-    const chargesAtFloor = estimateCharges({ segment, entryPrice, exitPrice: floorPrice, qty, side });
-    const next = entryPrice + ((chargesAtFloor + marginRupees) / qty) * dir;
+    const chargesAtFloor = estimateCharges({ segment, entryPrice, exitPrice: floorPrice, qty, side, valueFactor });
+    const next = entryPrice + ((chargesAtFloor + marginRupees) / units) * dir;
     const converged = Math.abs(next - floorPrice) < FLOOR_TOLERANCE_RUPEES;
     floorPrice = next;
     if (converged) break;
@@ -297,9 +314,9 @@ function solveFloorPrice(
  * Exit discipline §4: breakeven after charges — the green-floor solve with no
  * margin. Null for qty 0, a non-finite entry, or a solve that is not a price.
  */
-export function breakevenPrice(i: { segment: Segment; entryPrice: number; qty: number; side: Side }): number | null {
+export function breakevenPrice(i: { segment: Segment; entryPrice: number; qty: number; side: Side; valueFactor?: number }): number | null {
   if (i.qty === 0 || !Number.isFinite(i.entryPrice)) return null;
-  const charges = estimateCharges({ segment: i.segment, entryPrice: i.entryPrice, exitPrice: i.entryPrice, qty: i.qty, side: i.side });
+  const charges = estimateCharges({ segment: i.segment, entryPrice: i.entryPrice, exitPrice: i.entryPrice, qty: i.qty, side: i.side, valueFactor: i.valueFactor });
   const p = solveFloorPrice(i, 0, charges);
   return p > 0 ? p : null;
 }
@@ -317,10 +334,10 @@ export function breakevenPrice(i: { segment: Segment; entryPrice: number; qty: n
  * price, a strong contraction) and the result is then nudged one tick in the
  * conservative direction so the guarantee holds strictly rather than to rounding.
  */
-export function computeGreenFloor({ segment, entryPrice, ltp, qty, side }: GreenFloorInput): GreenFloor {
+export function computeGreenFloor({ segment, entryPrice, ltp, qty, side, valueFactor }: GreenFloorInput): GreenFloor {
   const dir = side === 'LONG' ? 1 : -1;
-  const charges = estimateCharges({ segment, entryPrice, exitPrice: ltp, qty, side });
-  const gross = (ltp - entryPrice) * qty * dir;
+  const charges = estimateCharges({ segment, entryPrice, exitPrice: ltp, qty, side, valueFactor });
+  const gross = (ltp - entryPrice) * qty * vf(valueFactor) * dir;
   const netPnl = gross - charges;
 
   if (qty === 0) {
@@ -331,7 +348,7 @@ export function computeGreenFloor({ segment, entryPrice, ltp, qty, side }: Green
   // Only a POSITIVE price is a price. `> 0` rather than `<= 0` so a NaN that
   // escaped the solve becomes null too, rather than reaching the packet as a
   // reading. See `GreenFloor.floorPrice`.
-  const rounded = solveFloorPrice({ segment, entryPrice, qty, side }, GREEN_FLOOR_MARGIN_RUPEES, charges);
+  const rounded = solveFloorPrice({ segment, entryPrice, qty, side, valueFactor }, GREEN_FLOOR_MARGIN_RUPEES, charges);
 
   return {
     armed: netPnl >= GREEN_FLOOR_MARGIN_RUPEES,

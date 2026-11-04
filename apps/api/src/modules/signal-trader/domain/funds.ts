@@ -1,3 +1,4 @@
+import { contractValueFactor } from '@td/shared';
 import type { EntryPlan, GateCheck } from './gate';
 import type { SignalView } from './signal.types';
 
@@ -36,18 +37,20 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 export const inr = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
 
 export function requiredFunds(
-  plan: Pick<EntryPlan, 'side' | 'limitPrice' | 'qty'>,
+  /** exchange + tradingsymbol give the MCX rupee factor (GOLD: 100 per point per unit); absent => 1. */
+  plan: Pick<EntryPlan, 'side' | 'limitPrice' | 'qty'> & Partial<Pick<EntryPlan, 'exchange' | 'tradingsymbol'>>,
   signal: Pick<SignalView, 'instrumentKind' | 'strike'>,
   cfg: { fundsBufferPct: number; futMarginPct: number },
   /** Futures / option writing: the broker margin-calculator answer (null = not asked). */
   broker: BrokerMargin | null = null,
 ): FundsRequirement {
   const buffer = 1 + cfg.fundsBufferPct / 100;
+  const vf = contractValueFactor(plan.exchange, plan.tradingsymbol);
   const kind = signal.instrumentKind;
   const option = kind === 'CE' || kind === 'PE';
   if (option && plan.side === 'BUY') {
-    const v = plan.limitPrice * plan.qty * buffer;
-    return { required: r2(v), method: 'premium', detail: `premium ${plan.limitPrice} × ${plan.qty} + ${cfg.fundsBufferPct}% charges` };
+    const v = plan.limitPrice * plan.qty * vf * buffer;
+    return { required: r2(v), method: 'premium', detail: `premium ${plan.limitPrice} × ${plan.qty}${vf !== 1 ? ` × ${vf} (MCX contract value)` : ''} + ${cfg.fundsBufferPct}% charges` };
   }
   if (kind === 'EQ') {
     const v = plan.limitPrice * plan.qty * buffer;
@@ -57,7 +60,7 @@ export function requiredFunds(
     return { required: r2(broker.margin * buffer), method: 'broker', detail: `broker margin calculator ${inr(broker.margin)} + ${cfg.fundsBufferPct}% charges` };
   }
   const base = option ? (signal.strike ?? plan.limitPrice) : plan.limitPrice;
-  const notional = base * plan.qty;
+  const notional = base * plan.qty * vf;
   const v = (notional * cfg.futMarginPct) / 100 * buffer;
   const why = broker && !broker.ok ? `broker margin unavailable: ${broker.reason}` : 'no broker margin API wired';
   return {

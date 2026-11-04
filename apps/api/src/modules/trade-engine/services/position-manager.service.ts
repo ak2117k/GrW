@@ -15,6 +15,7 @@ import { TradeRepository } from '../repositories/trade.repository';
 import { TradeGateway } from '../gateways/trade.gateway';
 import { RiskManagerService } from './risk-manager.service';
 import { Position, Exchange, OrderSide } from '@td/shared/types';
+import { contractValueFactor } from '@td/shared';
 import { DailyPerformanceData } from '../dto/trade.dto';
 
 /**
@@ -63,13 +64,16 @@ export class PositionManagerService implements OnModuleInit {
       if (position.token === tick.token) {
         position.ltp = tick.ltp;
         const multiplier = position.side === OrderSide.BUY ? 1 : -1;
+        // MCX: x the contract value factor (GOLD 100); 1 elsewhere.
+        const valueFactor = contractValueFactor(position.exchange, position.symbol);
         position.pnl =
           multiplier *
           (tick.ltp - position.entryPrice) *
-          position.quantity;
+          position.quantity *
+          valueFactor;
         position.pnlPercent =
           position.entryPrice > 0
-            ? (position.pnl / (position.entryPrice * position.quantity)) * 100
+            ? (position.pnl / (position.entryPrice * position.quantity * valueFactor)) * 100
             : 0;
         updated = true;
       }
@@ -327,7 +331,7 @@ export class PositionManagerService implements OnModuleInit {
   private getCapitalDeployed(): number {
     let total = 0;
     for (const position of this.positions.values()) {
-      total += position.averagePrice * position.quantity;
+      total += position.averagePrice * position.quantity * contractValueFactor(position.exchange, position.symbol);
     }
     return total;
   }

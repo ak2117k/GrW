@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { contractValueFactor } from '@td/shared';
 import { Cron } from '@nestjs/schedule';
 import { TradeExecutionService } from '../../trade-engine/services/trade-execution.service';
 import { TradeRepository } from '../../trade-engine/repositories/trade.repository';
@@ -164,7 +165,7 @@ export class SignalPaperWatchService {
         token: inst.token, exchange: inst.exchange, symbol: inst.symbol, expiry: inst.expiry ? inst.expiry.toISOString() : null,
         ai: { rule: e.rule, price: e.price, at: e.at.toISOString() },
       };
-      await this.repo.startHeldFollow(t.id, decisionIdFromTags(t.entryTags), grossPnl(t.side, t.entryPrice, e.price, t.quantity), follow);
+      await this.repo.startHeldFollow(t.id, decisionIdFromTags(t.entryTags), grossPnl(t.side, t.entryPrice, e.price, t.quantity, contractValueFactor(inst.exchange, inst.symbol)), follow);
     } catch (err) {
       this.logger.warn(`[signal-paper] HELD follow for ${t.id} not started: ${errText(err)}`);
     }
@@ -200,8 +201,9 @@ export class SignalPaperWatchService {
         if (!d.exit && d.trail) {
           await this.repo.updateHeld(r.id, { detail: { ...f, sl: d.trail.sl, target: d.trail.target } });
         } else if (d.exit) {
-          const held = grossPnl(f.side, f.entry, d.price, f.qty);
-          const ai = r.heldPnl ?? grossPnl(f.side, f.entry, f.ai.price, f.qty);
+          const vf = contractValueFactor(f.exchange, f.symbol);
+          const held = grossPnl(f.side, f.entry, d.price, f.qty, vf);
+          const ai = r.heldPnl ?? grossPnl(f.side, f.entry, f.ai.price, f.qty, vf);
           const reason = `held: ${d.reason} → ${held} vs AI ${f.ai.rule} @ ${f.ai.price} → ${ai}`;
           await this.repo.updateHeld(r.id, { detail: f, done: { at: now, price: d.price, reason, rulePnl: held, saved: r2(held - ai) } });
           this.dailyAtrs.delete(`held:${r.tradeId}`);
@@ -299,7 +301,8 @@ export class SignalPaperWatchService {
             decisionId: decisionIdFromTags(t.entryTags), ltp, ltpAt: now,
           });
           const sign = String(t.side).toUpperCase() === 'BUY' ? 1 : -1;
-          const pnl = sign * (ltp - t.entryPrice) * t.quantity;
+          // MCX: x the contract value factor (GOLD: 100 per point per master-lot unit), else 1.
+          const pnl = sign * (ltp - t.entryPrice) * t.quantity * contractValueFactor(inst.exchange, inst.symbol);
           // OPEN-only write: an AI exit can close the trade while this sweep is still on its stale row.
           await this.trades.markOpenTrade(t.id, { pnl: r2(pnl), pnlPercent: r2(((sign * (ltp - t.entryPrice)) / t.entryPrice) * 100) });
         }
@@ -460,8 +463,9 @@ export class SignalPaperWatchService {
     try {
       if (!t.entryPrice) return null;
       const entry = t.entryPrice;
-      const held = grossPnl(t.side, entry, exit, t.quantity);
-      const hits = await this.repo.settleShadows(t.id, { heldPnl: held, rulePnl: (p) => grossPnl(t.side, entry, p, t.quantity), at: now });
+      const vf = contractValueFactor(t.instrument?.exchange, t.instrument?.symbol);
+      const held = grossPnl(t.side, entry, exit, t.quantity, vf);
+      const hits = await this.repo.settleShadows(t.id, { heldPnl: held, rulePnl: (p) => grossPnl(t.side, entry, p, t.quantity, vf), at: now });
       this.shadows.delete(t.id);
       return shadowLine(Object.fromEntries(hits.map((h) => [h.rule, h])), held);
     } catch (err) {

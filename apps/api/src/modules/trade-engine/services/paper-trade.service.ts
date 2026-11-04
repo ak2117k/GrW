@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit, Inject, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { contractValueFactor } from '@td/shared';
 import { WarnLimiter } from '../../../common/utils/warn-limiter';
 import { expiryFromSymbol, istDateOf, isPastExpiry } from '../../../common/utils/contract-expiry';
 import { TradeEventType } from '@prisma/client';
@@ -193,7 +194,9 @@ export class PaperTradeService implements OnModuleInit {
         // OPEN / PARTIALLY_FILLED — still an open position whose
         // `quantity` is the units that remain open.
         if (t.entryPrice == null || t.quantity <= 0) continue;
-        const remainingValue = t.entryPrice * t.quantity;
+        // MCX: x the contract value factor (GOLD 100), the same rupees fillAtPrice debited live.
+        const remainingValue =
+          t.entryPrice * t.quantity * contractValueFactor((t as any).instrument?.exchange, (t as any).instrument?.symbol);
         if (t.side === 'BUY') {
           bal -= remainingValue;
         } else {
@@ -241,7 +244,7 @@ export class PaperTradeService implements OnModuleInit {
       }
 
       const deployed = Array.from(positions.values()).reduce(
-        (sum, p) => sum + p.averagePrice * p.quantity,
+        (sum, p) => sum + p.averagePrice * p.quantity * contractValueFactor(p.exchange, p.symbol),
         0,
       );
       const openCount = positions.size;
@@ -346,7 +349,7 @@ export class PaperTradeService implements OnModuleInit {
       if (pos.symbol === tick.symbol) {
         pos.ltp = tick.ltp;
         const multiplier = pos.side === 'BUY' ? 1 : -1;
-        pos.pnl = multiplier * (tick.ltp - pos.averagePrice) * pos.quantity;
+        pos.pnl = multiplier * (tick.ltp - pos.averagePrice) * pos.quantity * contractValueFactor(pos.exchange, pos.symbol);
       }
     }
 
@@ -479,7 +482,9 @@ export class PaperTradeService implements OnModuleInit {
     // DB open trades — the authoritative open-position set.
     const openTrades = await this.tradeRepository.getOpenTrades();
     const deployed = openTrades.reduce(
-      (sum, t) => sum + (t.entryPrice ?? 0) * t.quantity,
+      (sum, t) =>
+        sum +
+        (t.entryPrice ?? 0) * t.quantity * contractValueFactor((t as any).instrument?.exchange, (t as any).instrument?.symbol),
       0,
     );
     const openPositions = openTrades.length;
@@ -615,7 +620,7 @@ export class PaperTradeService implements OnModuleInit {
       if (ltp <= 0) continue;
       pos.ltp = ltp;
       const multiplier = pos.side === 'BUY' ? 1 : -1;
-      pos.pnl = multiplier * (ltp - pos.averagePrice) * pos.quantity;
+      pos.pnl = multiplier * (ltp - pos.averagePrice) * pos.quantity * contractValueFactor(pos.exchange, pos.symbol);
     }
   }
 
@@ -721,7 +726,8 @@ export class PaperTradeService implements OnModuleInit {
     const fillPrice = basePrice + slippage;
 
     // Update virtual balance
-    const orderValue = fillPrice * request.quantity;
+    // MCX: x the contract value factor (GOLD: Rs 100 per point per master-lot unit); 1 elsewhere.
+    const orderValue = fillPrice * request.quantity * contractValueFactor(request.exchange, request.symbol);
     if (request.side === 'BUY') {
       this.virtualBalance -= orderValue;
     } else {

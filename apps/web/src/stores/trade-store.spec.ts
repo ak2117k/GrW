@@ -160,3 +160,14 @@ describe('overlayLivePrices', () => {
     expect(p.pnl).toBe(-50); // (210-200)*5*-1
   });
 });
+
+describe('MCX contract value factor', () => {
+  it('re-marks MCX GOLD at Rs 100 per point per unit of quantity (master lotSize 1)', () => {
+    const base = tradesToPositions([
+      makeTrade({ symbol: 'GOLD05DEC26FUT', exchange: 'MCX', side: 'BUY', entryPrice: 120000, quantity: 1, ltp: undefined as unknown as number, pnl: undefined as unknown as number, pnlPercent: undefined as unknown as number }),
+    ]);
+    const [p] = overlayLivePrices(base, { GOLD05DEC26FUT: 120100 });
+    expect(p.pnl).toBe(10000);
+    expect(p.pnlPercent).toBeCloseTo((100 / 120000) * 100, 6);
+  });
+});

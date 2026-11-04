@@ -8,6 +8,7 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { contractValueFactor } from '@td/shared';
 import { coreEntryAllowed } from '../../trade-core/risk-wall/kill-gate';
 import { withEventTags } from '../../../common/utils/market-events';
 import {
@@ -353,6 +354,7 @@ export class TradeExecutionService {
         price: entryPrice,
         quantity: request.quantity,
         exchange: request.exchange,
+        symbol: request.symbol,
       });
       this.paperTradeService.applyEntryCharge(entryCharges.total);
       await this.tradeRepository.updateTrade(trade.id, { fees: entryCharges.total });
@@ -530,7 +532,9 @@ export class TradeExecutionService {
     // Only the PARTIALLY_FILLED value is realised, so only it carries over.
     const entryPrice = trade.entryPrice ?? 0;
     const multiplier = trade.side === 'BUY' ? 1 : -1;
-    const slicePnl = multiplier * (exitPrice - entryPrice) * closeQty;
+    // MCX: x the contract value factor (GOLD: Rs 100 per point per master-lot unit); 1 elsewhere.
+    const valueFactor = contractValueFactor(instrument?.exchange, instrument?.symbol);
+    const slicePnl = multiplier * (exitPrice - entryPrice) * closeQty * valueFactor;
     const priorRealisedPnl =
       trade.status === 'PARTIALLY_FILLED' ? trade.pnl ?? 0 : 0;
     const pnl = priorRealisedPnl + slicePnl;
@@ -550,6 +554,7 @@ export class TradeExecutionService {
       price: exitPrice,
       quantity: closeQty,
       exchange: instrument?.exchange ?? 'NSE',
+      symbol: instrument?.symbol ?? null,
     });
     if (trade.isPaperTrade) {
       this.paperTradeService.applyExitAccounting(slicePnl, exitCharges.total);

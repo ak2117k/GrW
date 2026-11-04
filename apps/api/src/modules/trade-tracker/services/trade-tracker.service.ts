@@ -1,3 +1,4 @@
+import { contractValueFactor } from '@td/shared';
 import {
   Inject,
   Injectable,
@@ -121,13 +122,17 @@ export function istDateString(d: Date = new Date()): string {
   }).format(d);
 }
 
-/** P&L in rupees and percent for a price move off entry. */
+/**
+ * P&L in rupees and percent for a price move off entry. `valueFactor` is the MCX rupee factor
+ * (contractValueFactor in @td/shared: GOLD 100, ZINC 1000, …); 1 for everything else.
+ */
 export function computePnl(
   entryPrice: number,
   price: number,
   qty: number,
+  valueFactor = 1,
 ): { pnl: number; pnlPercent: number } {
-  const pnl = (price - entryPrice) * qty;
+  const pnl = (price - entryPrice) * qty * valueFactor;
   const pnlPercent =
     entryPrice !== 0 ? ((price - entryPrice) / entryPrice) * 100 : 0;
   return { pnl, pnlPercent };
@@ -211,7 +216,7 @@ export function computeTickPatch(
   tracker: Pick<
     TradeTracker,
     'entryPrice' | 'qty' | 'holdingHigh' | 'holdingLow' | 'dayHigh' | 'dayLow' | 'dayDate'
-  >,
+  > & Partial<Pick<TradeTracker, 'exchange' | 'symbol'>>,
   ltp: number,
   now: Date = new Date(),
 ): TickPatch {
@@ -223,7 +228,7 @@ export function computeTickPatch(
   const holdingHigh = Math.max(tracker.holdingHigh ?? ltp, ltp);
   const holdingLow = Math.min(tracker.holdingLow ?? ltp, ltp);
 
-  const { pnl, pnlPercent } = computePnl(tracker.entryPrice, ltp, tracker.qty);
+  const { pnl, pnlPercent } = computePnl(tracker.entryPrice, ltp, tracker.qty, contractValueFactor(tracker.exchange, tracker.symbol));
 
   return {
     holdingHigh,
@@ -668,7 +673,7 @@ export class TradeTrackerService implements OnModuleDestroy {
         continue; // already tracked — otherwise an idempotent no-op
       }
       const seed = item.ltp > 0 ? item.ltp : item.entryPrice;
-      const { pnl, pnlPercent } = computePnl(item.entryPrice, seed, item.qty);
+      const { pnl, pnlPercent } = computePnl(item.entryPrice, seed, item.qty, contractValueFactor(item.exchange, item.symbol));
       await this.prisma.tradeTracker.create({
         data: {
           userId,
@@ -744,6 +749,7 @@ export class TradeTrackerService implements OnModuleDestroy {
         tracker.entryPrice,
         exitPrice,
         tracker.qty,
+        contractValueFactor(tracker.exchange, tracker.symbol),
       );
       await this.prisma.tradeTracker.updateMany({
         where: { id: tracker.id, userId },
@@ -807,7 +813,7 @@ export class TradeTrackerService implements OnModuleDestroy {
   private async repairZeroEntry(userId: string, tracker: TradeTracker, item: BookItem): Promise<void> {
     if ((tracker.entryPrice ?? 0) > 0 || !(item.entryPrice > 0)) return;
     const price = tracker.lastLtp != null && tracker.lastLtp > 0 ? tracker.lastLtp : item.ltp;
-    const { pnl, pnlPercent } = computePnl(item.entryPrice, price, tracker.qty);
+    const { pnl, pnlPercent } = computePnl(item.entryPrice, price, tracker.qty, contractValueFactor(tracker.exchange, tracker.symbol));
     await this.prisma.tradeTracker.updateMany({
       // status in the predicate: a concurrent close must not be un-done into a
       // repaired-but-CLOSED row with a stale pnl.

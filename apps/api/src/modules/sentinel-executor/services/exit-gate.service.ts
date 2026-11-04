@@ -1,3 +1,4 @@
+import { contractValueFactor } from '@td/shared';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { MBM_CONFIG, type MbmConfig } from '../../mbm/mbm.config';
 import { mbmInstrumentFor } from '../../mbm/domain/mbm-applies';
@@ -142,6 +143,7 @@ export class ExitGateService {
         underlyingSessionMinutes: w ? w.closeMin - w.openMin : undefined,
         minutesToClose: this.clock.minutesToClose(live.exchange, live.now),
         maxLossPerTrade: ctx.maxLossPerTrade, dailyLossLatched: ctx.dailyLossLatched, history: ctx.history, now: live.now,
+        valueFactor: contractValueFactor(live.exchange, ctx.packet.symbol),
       });
       const record = decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg, now: live.now });
       if (record.outcome === 'BYPASS') this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${record.error ?? record.bypassReason}`);

@@ -1,3 +1,4 @@
+import { contractValueFactor } from '@td/shared';
 import { buildGateFacts, bypassRecord, decideExit } from '../exit-discipline/decision';
 import { withExitTuning, type ExitDisciplineConfig } from '../exit-discipline/config';
 import { readPacketFacts } from '../exit-discipline/packet-facts';
@@ -38,6 +39,8 @@ export function paperExitGate(i: {
   cfg: ExitDisciplineConfig;
   tuning: Parameters<typeof withExitTuning>[1];
   now: Date;
+  /** The contract's exchange, for the MCX rupee factor of the fresh P&L. Absent ⇒ factor 1. */
+  exchange?: string;
 }): GateRecordV1 {
   const cfg = withExitTuning(i.cfg, i.tuning);
   if (!cfg.enabled) return bypassRecord('DISABLED', cfg, i.now);
@@ -53,6 +56,7 @@ export function paperExitGate(i: {
       dailyLossLatched: i.dailyLossLatched,
       history: i.history,
       now: i.now,
+      valueFactor: contractValueFactor(i.exchange, facts.symbol),
     });
     return decideExit({ facts: gateFacts, current: { id: i.look.id, createdAt: i.look.createdAt }, history: i.history, cfg, now: i.now });
   } catch (err) {

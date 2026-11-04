@@ -25,9 +25,11 @@ export function solveCycleFloor(i: {
   memory: Memory; last: { packet?: unknown } | undefined;
   /** SPIKE BANK (cycle-spike.ts): the trail in force for this position; absent ⇒ cfg.floorTrailN. */
   trailN?: number;
+  /** MCX rupee factor (contractValueFactor); absent ⇒ 1. */
+  valueFactor?: number;
 }): { noiseFloor: NoiseFloor | null; memory: Memory } {
   if (!i.cfg.enabled || i.nContract === null || !(i.nContract > 0)) return { noiseFloor: null, memory: EMPTY };
-  const breakeven = breakevenPrice({ segment: i.segment, entryPrice: i.entryPrice, qty: i.qty, side: i.side });
+  const breakeven = breakevenPrice({ segment: i.segment, entryPrice: i.entryPrice, qty: i.qty, side: i.side, valueFactor: i.valueFactor });
   if (breakeven === null) return { noiseFloor: null, memory: EMPTY };
   const mem = i.memory.entry === i.entryPrice ? i.memory : EMPTY;
   const stored = storedNoiseFloor(i.last, i.entryPrice);

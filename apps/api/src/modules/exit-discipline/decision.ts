@@ -102,9 +102,12 @@ export function buildGateFacts(p: PacketFacts, ctx: {
   /** Underlying exchange session length (minutes) for the daily-ATR fallback; default 375. */
   underlyingSessionMinutes?: number;
   floorOverride?: { price: number | null; armed: boolean; basis: FloorBasis };
+  /** MCX rupees per unit of qty per point (contractValueFactor in @td/shared); absent ⇒ 1. */
+  valueFactor?: number;
 }): GateFacts {
   const dir = p.side === 'LONG' ? 1 : -1;
-  const fresh = Number.isFinite(ctx.ltpNow) && p.charges !== null ? (ctx.ltpNow - p.entryPrice) * p.qty * dir - p.charges : null;
+  const vf = typeof ctx.valueFactor === 'number' && Number.isFinite(ctx.valueFactor) && ctx.valueFactor > 0 ? ctx.valueFactor : 1;
+  const fresh = Number.isFinite(ctx.ltpNow) && p.charges !== null ? (ctx.ltpNow - p.entryPrice) * p.qty * vf * dir - p.charges : null;
   const netPnlNow = p.netPnl === null ? fresh : fresh === null ? p.netPnl : Math.min(p.netPnl, fresh);
   const scaled = scaledUnderlyingNoise(p.levelBookAtr15m, '', ctx.underlyingSessionMinutes)?.n ?? null;
   const mtc = ctx.minutesToClose ?? p.minutesToClose;

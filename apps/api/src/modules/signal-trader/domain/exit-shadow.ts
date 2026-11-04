@@ -88,9 +88,10 @@ export function stepShadow(
 }
 
 /** Gross ₹ of exiting at `exit`: the same formula for the held trade and every rule. */
-export function grossPnl(side: string, entry: number, exit: number, qty: number): number {
+export function grossPnl(side: string, entry: number, exit: number, qty: number, valueFactor = 1): number {
   const sign = String(side).toUpperCase() === 'BUY' ? 1 : -1;
-  return r2(sign * (exit - entry) * qty);
+  // valueFactor: MCX rupees per unit of qty per point (contractValueFactor in @td/shared); 1 elsewhere.
+  return r2(sign * (exit - entry) * qty * valueFactor);
 }
 
 /** "stop 10:42 −₹1.2k · trail 11:05 +₹300 · held +₹800" — the line on the closed paper trade. */

@@ -4,6 +4,8 @@
  * Exchanges other than NSE use the BSE transaction rate.
  */
 
+import { contractValueFactor } from '@td/shared';
+
 const BROKERAGE_RATE = 0.0003;       // 0.03% of turnover
 const BROKERAGE_CAP = 20;            // INR 20 per order
 const STT_SELL_RATE = 0.00025;       // 0.025% on the sell leg
@@ -18,6 +20,11 @@ export interface OrderChargeInput {
   price: number;
   quantity: number;
   exchange: string;
+  /**
+   * Tradingsymbol (or underlying name), for the MCX contract value factor (contractValueFactor in
+   * @td/shared: GOLD 100, ZINC 1000, ...). Turnover = price x quantity x factor. Absent / non-MCX => 1.
+   */
+  symbol?: string | null;
 }
 
 export interface OrderCharges {
@@ -33,7 +40,8 @@ export interface OrderCharges {
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 export function computeOrderCharges(input: OrderChargeInput): OrderCharges {
-  const turnover = Math.max(0, input.price) * Math.max(0, input.quantity);
+  const turnover =
+    Math.max(0, input.price) * Math.max(0, input.quantity) * contractValueFactor(input.exchange, input.symbol);
   const isBuy = input.side === 'BUY';
   const isNse = (input.exchange ?? 'NSE').toUpperCase() === 'NSE';
 

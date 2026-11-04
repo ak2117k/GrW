@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap, type OnModuleDestroy } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
+import { contractValueFactor } from '@td/shared';
 import { LEARNING_PAPER_TAG, RiskManagerService } from '../../trade-engine/services/risk-manager.service';
 import type { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
 import { isLiveTradingEnabled } from '../../trade-engine/live-trading';
@@ -545,7 +546,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       const judge = routed ? { ...judgeWithChanges, liveRouted: routed } : judgeWithChanges;
       if (routed) this.logger.log(`[signal-trader] ${what}: live TAKE paper-traded — ${routed.reason}: ${routed.detail}`);
       await this.repo.finishDecision(decisionId, { gate: gateChecks, judge, plan: finalPlan, decision: 'PAPER', skipReason: null });
-      const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty, available: null, method: 'premium' };
+      const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty * contractValueFactor(finalPlan.exchange, finalPlan.tradingsymbol), available: null, method: 'premium' };
       const paper = await this.openPaper(n, 'paper_mode');
       return { decisionId, decision: 'PAPER', skipReason: null, paper };
     }

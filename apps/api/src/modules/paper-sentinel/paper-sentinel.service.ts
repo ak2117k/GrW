@@ -367,6 +367,7 @@ export class PaperSentinelService {
       cfg: this.discipline ?? { enabled: false } as ExitDisciplineConfig,
       tuning: this.tuning,
       now,
+      exchange: h.exchange,
     });
     const summary = gateSummary(record);
     if (!gateExits(record)) {

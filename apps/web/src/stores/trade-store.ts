@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { contractValueFactor } from '@td/shared';
 import type { Trade, TradeEvent, RiskStatus } from '@/types';
 import type { Position } from '@/types';
 import api from '@/services/api';
@@ -217,7 +218,7 @@ export const useTradeStore = create<TradeState>((set) => ({
 /** Sum of `entryPrice * quantity` over the given open trades. */
 export function deriveCapitalDeployed(trades: Trade[]): number {
   return trades.reduce(
-    (sum, t) => sum + (t.entryPrice ?? 0) * (t.quantity ?? 0),
+    (sum, t) => sum + (t.entryPrice ?? 0) * (t.quantity ?? 0) * contractValueFactor(t.exchange, t.symbol),
     0,
   );
 }
@@ -238,11 +239,13 @@ export function tradesToPositions(trades: Trade[]): Position[] {
     const averagePrice = t.entryPrice ?? 0;
     const ltp = t.ltp ?? averagePrice;
     const direction = t.side === 'BUY' ? 1 : -1;
+    // MCX (GOLD 100, ZINC 1000 ...): rupees per unit of quantity per point; 1 elsewhere.
+    const vf = contractValueFactor(t.exchange, t.symbol);
     const pnl =
       typeof t.pnl === 'number'
         ? t.pnl
-        : (ltp - averagePrice) * (t.quantity ?? 0) * direction;
-    const cost = averagePrice * (t.quantity ?? 0);
+        : (ltp - averagePrice) * (t.quantity ?? 0) * direction * vf;
+    const cost = averagePrice * (t.quantity ?? 0) * vf;
     const pnlPercent =
       typeof t.pnlPercent === 'number'
         ? t.pnlPercent
@@ -281,8 +284,9 @@ export function overlayLivePrices(
     const ltp = priceBySymbol[p.symbol];
     if (typeof ltp !== 'number' || ltp === p.ltp) return p;
     const direction = p.side === 'BUY' ? 1 : -1;
-    const pnl = (ltp - p.averagePrice) * p.quantity * direction;
-    const cost = p.averagePrice * p.quantity;
+    const vf = contractValueFactor(p.exchange, p.symbol);
+    const pnl = (ltp - p.averagePrice) * p.quantity * direction * vf;
+    const cost = p.averagePrice * p.quantity * vf;
     const pnlPercent = cost > 0 ? (pnl / cost) * 100 : 0;
     return { ...p, ltp, pnl, pnlPercent };
   });

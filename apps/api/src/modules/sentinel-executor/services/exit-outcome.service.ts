@@ -1,4 +1,5 @@
 // apps/api/src/modules/sentinel-executor/services/exit-outcome.service.ts
+import { contractValueFactor } from '@td/shared';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { Prisma, type AiExitOutcome } from '@prisma/client';
@@ -196,8 +197,10 @@ export class ExitOutcomeService {
   private async scoreOne(o: AiExitOutcome, now: Date): Promise<void> {
     const ref: InstrumentRef = { exchange: o.exchange as HubExchange, token: o.token, symbol: o.symbol };
     const side = o.positionSide as PositionSide;
+    // qty here only prices rupees (missed/saved/netAtEnd): scale MCX lot units to ₹ per point.
+    const rupeeQty = o.qty * contractValueFactor(o.exchange, o.symbol);
     const compute = (bars: MinuteBar[]) => computeExitOutcome({
-      positionSide: side, qty: o.qty, decisionPrice: o.decisionPrice, decisionAt: o.decisionAt, windowEnd: o.windowEnd, bars,
+      positionSide: side, qty: rupeeQty, decisionPrice: o.decisionPrice, decisionAt: o.decisionAt, windowEnd: o.windowEnd, bars,
     });
 
     const dbBars = (await this.candles.read('1m', ref, o.decisionAt.getTime(), o.windowEnd.getTime())).map(toBar);

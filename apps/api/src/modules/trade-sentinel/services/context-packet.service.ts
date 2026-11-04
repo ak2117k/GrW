@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
+import { contractValueFactor } from '@td/shared';
 import { computeGreenFloor, type Segment, type Side } from '../charges';
 // A VALUE import, deliberately. `import type` is erased, so
 // `design:paramtypes` would emit `Object` for this parameter and Nest could not
@@ -1284,15 +1285,18 @@ export class ContextPacketService {
     // MBM M3: started first so its (cached, ≤ 800 ms, fail-open) read overlaps the others. Never rejects.
     const marketBehaviourP = this.marketBehaviourBlock(entry, now, at);
 
+    // MCX: qty is the master's lot unit, not the quotation unit (GOLD ₹100/pt per lot of qty 1).
+    const valueFactor = contractValueFactor(entry.exchange, entry.symbol);
     const floor = computeGreenFloor({
       segment: tick.segment,
       entryPrice: tick.entryPrice,
       ltp: tick.ltp,
       qty: tick.qty,
       side: tick.side,
+      valueFactor,
     });
     const dir = tick.side === 'LONG' ? 1 : -1;
-    const grossPnl = (tick.ltp - tick.entryPrice) * tick.qty * dir;
+    const grossPnl = (tick.ltp - tick.entryPrice) * tick.qty * valueFactor * dir;
 
     /**
      * THE EVIDENCE SOURCES ARE KEYED BY THE UNDERLYING, NOT BY THE CONTRACT.

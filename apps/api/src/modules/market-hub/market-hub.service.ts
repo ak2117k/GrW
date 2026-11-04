@@ -16,7 +16,7 @@ import type { ExtraTargetOutcome } from './chain/chain-service';
 import type { CandlesResult, Timeframe } from './candles/candle.types';
 import type { FixupReport } from './candles/candle-store';
 import { istDay, istMidnight } from './candles/trading-calendar';
-import { mergeLines, parseLineFutures, resolveLineFutures } from './hub-lines';
+import { mergeLines, parseLineFutures, positionUnderlyingLines, resolveLineFutures } from './hub-lines';
 import { ManagerHubBroker } from './hub-broker';
 import type { HubCandleSource } from './hub-candle-source';
 import { HubEngine, type HubStatus } from './hub-engine';
@@ -30,6 +30,10 @@ const POSITION_REFRESH_MS = 60_000;
 const LINE_REFRESH_MS = 30 * 60_000;
 const CALENDAR_ALERT_MS = 24 * 60 * 60 * 1000;
 const MAX_UNDERLYING_CACHE = 1000;
+/** HUB_PIN_POSITION_UNDERLYINGS: anything but 'false' / '0' / 'off' pins open stock options' underlyings (default on). */
+export function pinPositionUnderlyings(raw: string | undefined = process.env.HUB_PIN_POSITION_UNDERLYINGS): boolean {
+  return !['false', '0', 'off'].includes(String(raw ?? '').trim().toLowerCase());
+}
 /** The config key behind each consumer switch. */
 const CONSUMER_FLAG: Record<HubConsumer, string> = {
   positions: 'hub.pricesPositions',
@@ -108,6 +112,8 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
   private lineFutures = new Map<string, InstrumentRef>();
   /** Names last reported missing, so a missing future warns once per change, not every 30 min. */
   private lastMissingLines = '';
+  /** Open stock-option positions' cash underlyings pinned as lines (hub-lines.ts positionUnderlyingLines). */
+  private positionLines: InstrumentRef[] = [];
 
   constructor(
     private readonly config: ConfigService,
@@ -362,6 +368,20 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         if (u) underlyings.push(u);
       }
       await this.engine.setPositions(refs, underlyings);
+      // 2026-11-04 (LAURUSLABS-EQ had 4 bars all session under an open option): the cash underlying of an
+      // open stock option is a pinned line while the position is open. HUB_PIN_POSITION_UNDERLYINGS=false
+      // (rollback) keeps it a plain P1 position watch, as before. Default on.
+      const pinned = pinPositionUnderlyings()
+        ? positionUnderlyingLines(underlyings, {
+            base: mergeLines(this.indexLines, [...this.lineFutures.values()]),
+            positions: refs.length,
+            cap: this.config.get<number>('hub.slotCap') ?? 50,
+          })
+        : [];
+      if (pinned.map(refKey).join(',') !== this.positionLines.map(refKey).join(',')) {
+        this.positionLines = pinned;
+        await this.engine.setLines(this.allLines());
+      }
     } catch (err) {
       this.logger.warn(`Market hub position refresh failed: ${(err as Error)?.message ?? err}`);
     }
@@ -396,10 +416,15 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         if (prev) next.set(name, prev); // a failed lookup keeps the last known future
       }
       this.lineFutures = next;
-      await engine.setLines(mergeLines(this.indexLines, [...next.values()]));
+      await engine.setLines(this.allLines());
     } catch (err) {
       this.logger.warn(`Market hub line refresh failed: ${(err as Error)?.message ?? err}`);
     }
+  }
+
+  /** Index spots, then the line futures, then the pinned position underlyings — one entry per EXCHANGE:token. */
+  private allLines(): InstrumentRef[] {
+    return mergeLines(this.indexLines, [...this.lineFutures.values()], this.positionLines);
   }
 
   /** Memoised per contract (the master does not change intraday); a failure is not cached. */

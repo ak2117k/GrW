@@ -19,8 +19,13 @@ import { refKey, type HubExchange, type InstrumentRef } from './hub.types';
  * HUB_LINE_FUTURES. The engine watches them pinned at priority 1 (a live slot before any position
  * token; polled on the Critical lane when the socket is down), builds bars from polled quotes too,
  * and refills from the broker's 1m history when a line's bars go stale.
+ *
+ * 2026-11-04: GOLD and SILVER joined the default (2 slots). On the US-midterm day GOLD moved ~3.5k
+ * points and candles_1m held ZERO bars for GOLD04DEC26FUT (MCX 495213): the judge, the noise units
+ * and the entry engine read gold blind. Full GOLD, not GOLDM (owner). Rollback: set
+ * HUB_LINE_FUTURES=NIFTY,BANKNIFTY,SENSEX,CRUDEOIL,CRUDEOILM.
  */
-export const DEFAULT_LINE_FUTURES = 'NIFTY,BANKNIFTY,SENSEX,CRUDEOIL,CRUDEOILM';
+export const DEFAULT_LINE_FUTURES = 'NIFTY,BANKNIFTY,SENSEX,CRUDEOIL,CRUDEOILM,GOLD,SILVER';
 
 /** Hub watch owner of the lines. */
 export const LINES_OWNER = 'hub:lines';
@@ -87,6 +92,39 @@ export function mergeLines(...groups: ReadonlyArray<readonly InstrumentRef[]>): 
   const out = new Map<string, InstrumentRef>();
   for (const g of groups) for (const r of g) if (!out.has(refKey(r))) out.set(refKey(r), r);
   return [...out.values()];
+}
+
+/**
+ * The underlyings of open STOCK-option positions that become pinned lines (spec 2026-11-04 carry
+ * §5.5). Prod 2026-11-04: a LAURUSLABS option was open all session and candles_1m held 4 bars for
+ * LAURUSLABS-EQ (NSE 19234). A position's underlying was only a P1 watch: tick-only (no bars from
+ * polled quotes) and no broker refill when its ticks stopped, so the sentinel's underlying read had
+ * nothing to stand on. A line gets both.
+ *
+ * Only cash underlyings (NSE / BSE, not already a line): index spots and the near-month futures are
+ * lines already, and an MCX option's future is a P1 position underlying as before. One slot per
+ * distinct underlying, released when no open position needs it (the caller recomputes on every
+ * position refresh). Budget: pinned lines take live slots BEFORE position contracts
+ * (slot-allocator.ts), so a pinned underlying must never cost a held contract its slot — at most
+ * `cap − base lines − position contracts` are pinned; the rest stay plain P1 watches. Pure.
+ */
+export function positionUnderlyingLines(
+  underlyings: readonly InstrumentRef[],
+  opts: { base: readonly InstrumentRef[]; positions: number; cap: number },
+): InstrumentRef[] {
+  const taken = new Set(opts.base.map(refKey));
+  let budget = Math.max(0, Math.floor(opts.cap) - taken.size - Math.max(0, opts.positions));
+  const out: InstrumentRef[] = [];
+  for (const u of underlyings) {
+    if (budget <= 0) break;
+    if (u.exchange !== 'NSE' && u.exchange !== 'BSE') continue;
+    const k = refKey(u);
+    if (taken.has(k)) continue;
+    taken.add(k);
+    out.push(u);
+    budget--;
+  }
+  return out;
 }
 
 /**

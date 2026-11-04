@@ -5,6 +5,7 @@ import {
   futureExchangeFor,
   mergeLines,
   parseLineFutures,
+  positionUnderlyingLines,
   resolveLineFutures,
   staleLines,
 } from './hub-lines';
@@ -23,6 +24,56 @@ describe('hub lines', () => {
     expect(parseLineFutures('crudeoil, NIFTY,crudeoil,')).toEqual(['CRUDEOIL', 'NIFTY']);
     expect(parseLineFutures('none')).toEqual([]);
     expect(DEFAULT_LINE_FUTURES).toContain('CRUDEOIL');
+  });
+
+  it('pins full GOLD and SILVER near-month futures by default (2026-11-04: zero GOLD bars), not GOLDM', () => {
+    const names = parseLineFutures(undefined);
+    expect(names).toEqual(expect.arrayContaining(['GOLD', 'SILVER', 'CRUDEOIL']));
+    expect(names).not.toContain('GOLDM');
+    expect(futureExchangeFor('GOLD')).toBe('MCX');
+    expect(futureExchangeFor('SILVER')).toBe('MCX');
+  });
+
+  it('GOLD rolls at expiry like CRUDEOIL: the nearest future on/after today is re-picked', async () => {
+    const book = [
+      { token: '495213', symbol: 'GOLD04DEC26FUT', expiry: IST('2026-12-04T00:00:00') },
+      { token: '559933', symbol: 'GOLD05FEB27FUT', expiry: IST('2027-02-05T00:00:00') },
+    ];
+    const lookup = async (name: string, _ex: string, onOrAfter: Date) =>
+      name === 'GOLD' ? book.find((f) => f.expiry >= onOrAfter.getTime()) ?? null : null;
+    const before = await resolveLineFutures(['GOLD'], lookup, new Date(IST('2026-11-04T00:00:00')));
+    expect(before.found.get('GOLD')).toEqual({ exchange: 'MCX', token: '495213', symbol: 'GOLD04DEC26FUT' });
+    const after = await resolveLineFutures(['GOLD'], lookup, new Date(IST('2026-12-05T00:00:00')));
+    expect(after.found.get('GOLD')).toEqual({ exchange: 'MCX', token: '559933', symbol: 'GOLD05FEB27FUT' });
+  });
+
+  describe('positionUnderlyingLines', () => {
+    const LAURUS: InstrumentRef = { exchange: 'NSE', token: '19234', symbol: 'LAURUSLABS-EQ' };
+    const GOLD_FUT: InstrumentRef = { exchange: 'MCX', token: '495213', symbol: 'GOLD04DEC26FUT' };
+    const base = [NIFTY, CRUDE];
+
+    it('an open stock option pins its cash underlying; an index / MCX underlying is not re-pinned', () => {
+      expect(positionUnderlyingLines([LAURUS, NIFTY, GOLD_FUT], { base, positions: 3, cap: 30 })).toEqual([LAURUS]);
+    });
+
+    it('closing the position releases it (no underlyings in, none out)', () => {
+      expect(positionUnderlyingLines([], { base, positions: 0, cap: 30 })).toEqual([]);
+    });
+
+    it('one slot per distinct underlying (two LAURUSLABS options pin it once)', () => {
+      expect(positionUnderlyingLines([LAURUS, { ...LAURUS }], { base, positions: 2, cap: 30 })).toEqual([LAURUS]);
+    });
+
+    it('respects the slot budget (30): pinned underlyings never take a held contract’s slot', () => {
+      const stocks = Array.from({ length: 20 }, (_, i): InstrumentRef => ({ exchange: 'NSE', token: String(1000 + i), symbol: `S${i}-EQ` }));
+      const eleven = Array.from({ length: 11 }, (_, i): InstrumentRef => ({ exchange: 'NSE', token: String(99 + i), symbol: `L${i}` }));
+      // 11 base lines + 15 position contracts → 4 slots left for underlyings.
+      const out = positionUnderlyingLines(stocks, { base: eleven, positions: 15, cap: 30 });
+      expect(out).toEqual(stocks.slice(0, 4));
+      expect(eleven.length + 15 + out.length).toBeLessThanOrEqual(30);
+      // A full book pins nothing.
+      expect(positionUnderlyingLines(stocks, { base: eleven, positions: 19, cap: 30 })).toEqual([]);
+    });
   });
 
   it('puts index futures on NFO / BFO and everything else on MCX', () => {

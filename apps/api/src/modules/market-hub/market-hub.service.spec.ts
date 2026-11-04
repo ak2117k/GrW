@@ -527,4 +527,42 @@ describe('MarketHubService — the owner book changing re-watches positions at o
     setPositions.mockRestore();
     jest.restoreAllMocks();
   });
+
+  it('an open LAURUSLABS option pins LAURUSLABS-EQ (NSE 19234) as a line; closing the position releases it', async () => {
+    const start = jest.spyOn(HubEngine.prototype, 'start').mockResolvedValue(undefined);
+    const LAURUS_CE = { exchange: 'NFO', token: '120001', symbol: 'LAURUSLABS25NOV26900CE' };
+    let open: Array<typeof LAURUS_CE> = [LAURUS_CE];
+    const positions = {
+      openTrackerRefsByUser: jest.fn(),
+      openPositionRefsByUser: jest.fn(async () => new Map([['owner', open]])),
+    };
+    const lookups = {
+      getInstrumentByToken: jest.fn().mockResolvedValue({ name: 'LAURUSLABS', expiry: null }),
+      getInstrumentBySymbol: jest.fn(async (symbol: string) => (symbol === 'LAURUSLABS-EQ' ? { token: '19234', symbol: 'LAURUSLABS-EQ' } : null)),
+      getNearestFuture: jest.fn().mockResolvedValue(null),
+    };
+    const svc = new MarketHubService(enabled({ 'hub.lineFutures': 'none' }) as any, manager(jest.fn().mockResolvedValue(undefined)) as any, positions as any, prisma as any, runner as any, lookups as any);
+    svc.onModuleInit();
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    const keys = () => svc['engine']!.lineRefs().map((r) => `${r.exchange}:${r.token}`);
+    expect(keys()).toContain('NSE:19234');
+    // A 30-min line refresh keeps it (it merges the position lines).
+    await svc.refreshLines();
+    expect(keys()).toContain('NSE:19234');
+
+    open = [];
+    await svc['refreshPositions']('owner');
+    expect(keys()).not.toContain('NSE:19234');
+    expect(keys()).toContain('NSE:99926000'); // the index lines stay
+    svc.onModuleDestroy();
+    start.mockRestore();
+  });
+
+  it('HUB_PIN_POSITION_UNDERLYINGS=false keeps the old behaviour (a plain P1 watch, no line)', () => {
+    const { pinPositionUnderlyings } = jest.requireActual('./market-hub.service');
+    expect(pinPositionUnderlyings(undefined)).toBe(true);
+    expect(pinPositionUnderlyings('')).toBe(true);
+    expect(pinPositionUnderlyings('false')).toBe(false);
+    expect(pinPositionUnderlyings('OFF')).toBe(false);
+  });
 });

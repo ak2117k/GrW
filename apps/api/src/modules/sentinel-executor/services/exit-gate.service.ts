@@ -15,7 +15,7 @@ import type { SessionClock } from '../../market-hub/session-clock';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
 import { ExitGateRepository } from '../repositories/exit-gate.repository';
 import { AI_EXIT_SESSION_CLOCK } from './executor.tokens';
-import { hardLossLimit } from '../../exit-discipline/hard-floor';
+import { lossLimitFor } from '../../../common/utils/loss-limit';
 
 export type GateContext =
   | {
@@ -124,7 +124,8 @@ export class ExitGateService {
       this.repo.dailyLossLatched(v.userId, istDate(now)),
     ]);
     // HARD_LOSS_EXIT_RUPEES (live signal trades, 2026-11-03) is a tighter per-trade max loss than the core limit.
-    const hardLoss = hardLossLimit();
+    // Per underlying (owner 2026-11-04, "GOLD loss limit ₹7.5k"): HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING via lossLimitFor.
+    const hardLoss = lossLimitFor(v.symbol).limit;
     const maxLossPerTrade = coreMaxLoss !== null && hardLoss !== null ? Math.min(coreMaxLoss, hardLoss) : coreMaxLoss ?? hardLoss;
     return { kind: 'ready', verdict: { id: v.id, createdAt: v.createdAt }, packet: facts, history, maxLossPerTrade, dailyLossLatched };
   }

@@ -1,5 +1,6 @@
 import { FLOOR_HARD_CONFIRM_SEC, FLOOR_HARD_REFIRE_SEC } from './config';
 import type { Exposure, NoiseOpinion, PositionSide } from './types';
+import { defaultLossLimit, HARD_LOSS_CAP_DEFAULT_RUPEES, lossLimitFor } from '../../common/utils/loss-limit';
 
 /**
  * HARD FLOOR EXIT (owner-approved 2026-10-29: "measure from the best point, and make the floor a
@@ -162,16 +163,15 @@ export function widenExitTrigger(i: TriggerFloorInput): { price: number; widened
  * apart). 0 / unset = off. Paper trades are untouched.
  */
 export function hardLossLimit(env: Record<string, string | undefined> = process.env): number | null {
-  const n = Number(String(env.HARD_LOSS_EXIT_RUPEES ?? '').trim());
-  return Number.isFinite(n) && n > 0 ? n : null;
+  return defaultLossLimit(env);
 }
 
 export function hardLossTrip(netPnl: number | null | undefined, limit: number | null): boolean {
   return limit !== null && fin(netPnl) && netPnl <= -limit;
 }
 
-/** HARD_LOSS_CAP_RUPEES default: the absolute per-trade loss exit (no conditions). */
-export const HARD_LOSS_CAP_DEFAULT_RUPEES = 3000;
+/** HARD_LOSS_CAP_RUPEES default: the absolute per-trade loss exit (no conditions). Lives in common/utils/loss-limit.ts. */
+export { HARD_LOSS_CAP_DEFAULT_RUPEES };
 /** HARD_LOSS_NOISE_N default: the underlying move, in its own noise units, that makes a ₹2k–cap loss real. */
 export const HARD_LOSS_NOISE_N_DEFAULT = 3;
 
@@ -198,12 +198,15 @@ function envNum(raw: string | undefined, fallback: number): number | null {
   return n === 0 ? null : n;
 }
 
-export function hardLossConfig(env: Record<string, string | undefined> = process.env): HardLossConfig {
-  return {
-    limit: hardLossLimit(env),
-    cap: envNum(env.HARD_LOSS_CAP_RUPEES, HARD_LOSS_CAP_DEFAULT_RUPEES),
-    noiseN: envNum(env.HARD_LOSS_NOISE_N, HARD_LOSS_NOISE_N_DEFAULT),
-  };
+/**
+ * PER UNDERLYING (owner 2026-11-04, "GOLD loss limit ₹7.5k"): pass the position's underlying or
+ * tradingsymbol and limit / cap come from lossLimitFor (HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING, code
+ * default GOLD:7500, `off` = rollback). A listed underlying has limit = cap, so hardLossBandOn is false
+ * and it is the plain rule. No underlying = exactly the config before 2026-11-04.
+ */
+export function hardLossConfig(env: Record<string, string | undefined> = process.env, underlying: string | null = null): HardLossConfig {
+  const { limit, cap } = lossLimitFor(underlying, env);
+  return { limit, cap, noiseN: envNum(env.HARD_LOSS_NOISE_N, HARD_LOSS_NOISE_N_DEFAULT) };
 }
 
 /** True when the ₹limit–₹cap band is noise-aware (else the plain rule). */

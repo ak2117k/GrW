@@ -70,14 +70,25 @@ export function configInt(raw: unknown, fallback: number, min: number): number {
 /**
  * The OI core list: HUB_OI_CORE_UNDERLYINGS (comma-separated, upper-cased, de-duplicated), plus SENSEX
  * while HUB_OI_SENSEX_ENABLED is on. Prod sets the list explicitly, so SENSEX has its own switch.
+ *
+ * 2026-11-04: plus GOLD and SILVER (MCX bullion) while HUB_OI_BULLION_ENABLED is on. On the US-midterm
+ * day oi_check for a GOLD channel call read "NO_DATA: no option chain in oi_snapshots" and the judge
+ * had no chain; CRUDEOIL / NATURALGAS were captured through this same path all day. The capture is the
+ * hub's REST quote path (3-minute OI snapshot job), never a feed slot.
  */
-export function oiCoreUnderlyings(raw: string | undefined, sensex: boolean): string[] {
+export function oiCoreUnderlyings(raw: string | undefined, sensex: boolean, bullion = false): string[] {
   const names = (raw ?? '')
     .split(',')
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean);
   if (sensex) names.push('SENSEX');
+  if (bullion) names.push('GOLD', 'SILVER');
   return [...new Set(names)];
+}
+
+/** HUB_OI_BULLION_ENABLED: anything but 'false' / '0' / 'off' captures GOLD + SILVER chains (default on; 'false' = rollback). */
+export function oiBullionEnabled(raw: string | undefined = process.env.HUB_OI_BULLION_ENABLED): boolean {
+  return !['false', '0', 'off'].includes(String(raw ?? '').trim().toLowerCase());
 }
 
 /**
@@ -169,6 +180,7 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
         coreUnderlyings: oiCoreUnderlyings(
           this.config.get<string>('hub.oiCoreUnderlyings'),
           this.config.get<boolean>('hub.oiSensexEnabled') !== false,
+          oiBullionEnabled(),
         ),
         snapshots: this.config.get<boolean>('hub.oiSnapshotEnabled') !== false,
         extra:

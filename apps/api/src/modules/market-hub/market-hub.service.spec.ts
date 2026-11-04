@@ -139,6 +139,11 @@ describe('MarketHubService', () => {
     expect(oiCoreUnderlyings('NIFTY,SENSEX', true)).toEqual(['NIFTY', 'SENSEX']);
     expect(oiCoreUnderlyings('NIFTY', false)).toEqual(['NIFTY']);
     expect(oiCoreUnderlyings(undefined, true)).toEqual(['SENSEX']);
+    // 2026-11-04: GOLD + SILVER chains while HUB_OI_BULLION_ENABLED is on (default); 'false' = rollback.
+    expect(oiCoreUnderlyings('NIFTY,GOLD', false, true)).toEqual(['NIFTY', 'GOLD', 'SILVER']);
+    const { oiBullionEnabled } = jest.requireActual('./market-hub.service');
+    expect(oiBullionEnabled(undefined)).toBe(true);
+    expect(oiBullionEnabled('false')).toBe(false);
   });
 
   it('configInt: an integer at or above min, rounded down; anything else is the fallback', () => {

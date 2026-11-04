@@ -98,7 +98,16 @@ export interface GateFactsSnapshot {
    * executor's fresh one beyond the stop). Absent ⇒ no ladder clause, exactly as before.
    */
   ladder?: { stop: number | null; stage: number; lastHit: boolean; packetLtp: number };
+  /**
+   * The packet thesis's source (2026-11-04, spec D8/D10): INFERRED = a manual trade whose thesis the model
+   * guessed; USER = recorded by the platform or corrected by the user. With
+   * GATE_INFERRED_THESIS_RECORD_ONLY on, an INFERRED thesis's THESIS_INVALIDATION / THESIS_LEVEL are
+   * record-only. Absent / null ⇒ exactly as before.
+   */
+  thesisSource?: ThesisSource | null;
 }
+
+export type ThesisSource = 'INFERRED' | 'USER';
 
 /** `ai_exit_executions.gate` (E7). */
 export interface GateRecordV1 {

@@ -1,5 +1,5 @@
 import { parseExitDisciplineConfig } from './config';
-import { buildGateFacts, bypassRecord, decideExit, gateSummary, isBlocking, istDate, lastHoldRef } from './decision';
+import { buildGateFacts, bypassRecord, decideExit, gateSummary, isBlocking, istDate, lastHoldRef, thesisSourceOf } from './decision';
 import type { GateFacts } from './gate';
 import type { HistoryVerdict } from './persistence';
 import type { PacketFacts } from './packet-facts';
@@ -190,5 +190,15 @@ describe('buildGateFacts', () => {
 
   it('a packet minutesToClose is the fallback when the clock has none', () => {
     expect(buildGateFacts(PF, { ...ctx, minutesToClose: null }).minutesToClose).toBe(419);
+  });
+});
+
+describe('thesisSourceOf (2026-11-04)', () => {
+  it('reads the packet thesis source; anything else is null', () => {
+    expect(thesisSourceOf({ thesis: { available: true, value: { source: 'INFERRED' } } })).toBe('INFERRED');
+    expect(thesisSourceOf({ thesis: { available: true, value: { source: 'USER' } } })).toBe('USER');
+    expect(thesisSourceOf({ thesis: { available: true, value: { source: 'GUESS' } } })).toBeNull();
+    expect(thesisSourceOf({ thesis: { available: false, reason: 'x' } })).toBeNull();
+    expect(thesisSourceOf(null)).toBeNull();
   });
 });

@@ -25,11 +25,34 @@ const res = (id: ClauseId, pass: boolean | null, measured: ClauseResult['measure
  * Spec §6, pure. Never throws; a missing input makes a clause `pass: null`
  * (unmeasurable), which never justifies an exit.
  */
-export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig): GateEvaluation {
+/**
+ * INFERRED THESIS IS RECORD-ONLY (2026-11-04, spec D8/D10). Prod LAURUSLABS23NOV262600CE (manual NRML):
+ * the thesis service guessed "breakout above PDH 2343.9, cleared and held" with the stock at 2310, the
+ * guessed invalidation was breached at birth, THESIS_INVALIDATION passed, and two EXIT_NOW verdicts sold
+ * the trade 3 minutes in. A guess about what a hand-placed trade was for cannot sell it on its own:
+ * with thesisSource INFERRED, THESIS_INVALIDATION / THESIS_LEVEL are measured and recorded but never pass
+ * (and never give the clear-margin persistence bypass). Every hard-risk, floor, hard-floor and ladder
+ * clause is unchanged. USER / null source ⇒ as before.
+ * GATE_INFERRED_THESIS_RECORD_ONLY: on unless exactly "false" (rollback = "false").
+ */
+export function inferredThesisRecordOnly(env: Record<string, string | undefined> = process.env): boolean {
+  return env.GATE_INFERRED_THESIS_RECORD_ONLY !== 'false';
+}
+
+const RECORD_ONLY_NOTE = 'inferred thesis — record only';
+const recordOnly = (c: ClauseResult): ClauseResult => ({
+  ...c,
+  pass: c.pass === null ? null : false,
+  measured: { ...c.measured, recordOnly: true, wouldPass: c.pass },
+  note: `${RECORD_ONLY_NOTE}: ${c.note}`,
+});
+
+export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig, env: Record<string, string | undefined> = process.env): GateEvaluation {
   const bull = f.exposure === 'BULLISH';
   const u = fin(f.underlying) ? f.underlying : null;
   const known = f.exposure !== null && u !== null;
   const nU = fin(f.nUnderlying) && f.nUnderlying > 0 ? f.nUnderlying : null;
+  const thesisRecordOnly = f.thesisSource === 'INFERRED' && inferredThesisRecordOnly(env);
 
   // 1a. invalidation
   let inv: ClauseResult;
@@ -49,10 +72,15 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig): GateE
 
   // 1b. the level the trade was HELD against (last HOLD's packet)
   const held = f.holdRef ? (bull ? f.holdRef.support : f.holdRef.resistance) : null;
-  const lvl = !known || !fin(held)
+  let lvl = !known || !fin(held)
     ? res('THESIS_LEVEL', null, { underlying: u, heldLevel: held ?? null }, 'no HOLD-time support/resistance to compare')
     : res('THESIS_LEVEL', bull ? (u as number) < held : (u as number) > held, { underlying: u, heldLevel: held, holdId: f.holdRef!.id },
       bull ? 'underlying vs the support held at the last HOLD' : 'underlying vs the resistance held at the last HOLD');
+  if (thesisRecordOnly) {
+    inv = recordOnly(inv);
+    lvl = recordOnly(lvl);
+    clear = false;
+  }
 
   // 2. hard risk
   const maxLoss = fin(f.maxLossPerTrade) && f.maxLossPerTrade > 0 ? f.maxLossPerTrade : null;

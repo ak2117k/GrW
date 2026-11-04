@@ -50,6 +50,49 @@ describe('ExitGateService', () => {
     expect(r.facts!.nUnderlying).toBeCloseTo(13.5 / Math.sqrt(870), 9);
   });
 
+  describe('thesis source + per-underlying loss limit (2026-11-04)', () => {
+    const broken = (source: string | undefined) => ({
+      ...PACKET,
+      position: { ...PACKET.position, underlyingLtp: { available: true, value: 8930 } },
+      thesis: { available: true, value: { invalidation: 8932, ...(source ? { source } : {}) } },
+    });
+    const live = { ltpNow: 535, productType: 'CARRYFORWARD', exchange: 'MCX', now: NOW };
+    afterEach(() => { delete process.env.HARD_LOSS_EXIT_RUPEES; });
+
+    it('an INFERRED packet thesis is record-only: no THESIS_BROKEN', async () => {
+      const { svc } = make({ packet: broken('INFERRED') });
+      const r = svc.decide(await svc.load(V as never, NOW), live);
+      expect(r.facts!.thesisSource).toBe('INFERRED');
+      expect(r.justification).not.toBe('THESIS_BROKEN');
+      expect(r.clauses.find((c) => c.id === 'THESIS_INVALIDATION')!.pass).toBe(false);
+    });
+
+    it('a USER packet thesis still breaks the thesis', async () => {
+      const { svc } = make({ packet: broken('USER') });
+      const r = svc.decide(await svc.load(V as never, NOW), live);
+      expect(r.facts!.thesisSource).toBe('USER');
+      expect(r.justification).toBe('THESIS_BROKEN');
+    });
+
+    it('a packet thesis with no source reads null and behaves as before', async () => {
+      const { svc } = make({ packet: broken(undefined) });
+      const r = svc.decide(await svc.load(V as never, NOW), live);
+      expect(r.facts!.thesisSource).toBeNull();
+      expect(r.justification).toBe('THESIS_BROKEN');
+    });
+
+    it('GOLD positions read the ₹7,500 hard loss; GOLDM the default', async () => {
+      process.env.HARD_LOSS_EXIT_RUPEES = '2000';
+      const gold = make();
+      gold.repo.maxRiskPerTrade.mockResolvedValue(null as never);
+      const ctx = await gold.svc.load({ ...V, symbol: 'GOLD27NOV26125000PE' } as never, NOW);
+      expect(ctx).toMatchObject({ kind: 'ready', maxLossPerTrade: 7500 });
+      const goldm = make();
+      goldm.repo.maxRiskPerTrade.mockResolvedValue(null as never);
+      expect(await goldm.svc.load({ ...V, symbol: 'GOLDM05DEC26FUT' } as never, NOW)).toMatchObject({ kind: 'ready', maxLossPerTrade: 2000 });
+    });
+  });
+
   it('a clock without a trading window ⇒ the equity default (375 min), not a failure', async () => {
     const { svc } = make();
     const ctx = await svc.load(V as never, NOW);

@@ -182,3 +182,53 @@ describe('evaluateExitGate', () => {
     }
   });
 });
+
+describe('INFERRED thesis is record-only (GATE_INFERRED_THESIS_RECORD_ONLY, 2026-11-04 LAURUSLABS CE)', () => {
+  // Floor not armed, so only the thesis clauses could justify an exit.
+  const BROKEN: GateFacts = { ...BASE, underlying: 8930, floor: { price: null, armed: false, basis: 'noise' } };
+
+  it('INFERRED thesis beyond invalidation by a clear margin → clause pass false, note "inferred thesis — record only", outcome not THESIS_BROKEN', () => {
+    const r = evaluateExitGate({ ...BROKEN, thesisSource: 'INFERRED' }, CFG, {});
+    const inv = clause(r, 'THESIS_INVALIDATION');
+    expect(inv.pass).toBe(false);
+    expect(inv.note).toMatch(/^inferred thesis — record only/);
+    expect(inv.measured).toMatchObject({ recordOnly: true, wouldPass: true, clearMargin: true });
+    expect(clause(r, 'THESIS_LEVEL')).toMatchObject({ pass: false, measured: expect.objectContaining({ recordOnly: true, wouldPass: true }) });
+    expect(r.justification).not.toBe('THESIS_BROKEN');
+    expect(r).toMatchObject({ justified: false, justification: null, thesisClearMargin: false });
+  });
+
+  it('USER thesis, same facts → THESIS_BROKEN, as before', () => {
+    const r = evaluateExitGate({ ...BROKEN, thesisSource: 'USER' }, CFG, {});
+    expect(r).toMatchObject({ justified: true, justification: 'THESIS_BROKEN', thesisClearMargin: true });
+    expect(clause(r, 'THESIS_INVALIDATION').pass).toBe(true);
+  });
+
+  it('null / absent source → THESIS_BROKEN, as before', () => {
+    expect(evaluateExitGate({ ...BROKEN, thesisSource: null }, CFG, {}).justification).toBe('THESIS_BROKEN');
+    expect(evaluateExitGate(BROKEN, CFG, {}).justification).toBe('THESIS_BROKEN');
+  });
+
+  it('INFERRED thesis + HARD_MAX_LOSS breached → PASS via HARD_MAX_LOSS', () => {
+    const r = evaluateExitGate({ ...BROKEN, thesisSource: 'INFERRED', netPnlNow: -2100 }, CFG, {});
+    expect(r).toMatchObject({ justified: true, justification: 'HARD_RISK', hardRisk: true });
+    expect(clause(r, 'HARD_MAX_LOSS').pass).toBe(true);
+    expect(clause(r, 'THESIS_INVALIDATION').pass).toBe(false);
+  });
+
+  it('INFERRED thesis + confirmed floor breach still exits by the floor', () => {
+    const r = evaluateExitGate({ ...BASE, underlying: 8930, thesisSource: 'INFERRED' }, CFG, {});
+    expect(r.justification).toBe('CONFIRMED_FLOOR_BREACH');
+  });
+
+  it('flag "false" → INFERRED behaves as before', () => {
+    const r = evaluateExitGate({ ...BROKEN, thesisSource: 'INFERRED' }, CFG, { GATE_INFERRED_THESIS_RECORD_ONLY: 'false' });
+    expect(r.justification).toBe('THESIS_BROKEN');
+  });
+
+  it('an unmeasurable thesis clause stays null', () => {
+    const r = evaluateExitGate({ ...BROKEN, invalidation: null, holdRef: null, thesisSource: 'INFERRED' }, CFG, {});
+    expect(clause(r, 'THESIS_INVALIDATION').pass).toBeNull();
+    expect(clause(r, 'THESIS_LEVEL').pass).toBeNull();
+  });
+});

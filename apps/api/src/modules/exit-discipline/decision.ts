@@ -4,7 +4,7 @@ import { evaluatePersistence, type HistoryVerdict } from './persistence';
 import { exposureOf } from './exposure';
 import { scaledUnderlyingNoise } from './noise';
 import type { PacketFacts } from './packet-facts';
-import type { FloorBasis, GateFactsSnapshot, GateRecordV1 } from './types';
+import type { FloorBasis, GateFactsSnapshot, GateRecordV1, ThesisSource } from './types';
 
 const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
 /** `YYYY-MM-DD` in Asia/Kolkata. */
@@ -104,6 +104,8 @@ export function buildGateFacts(p: PacketFacts, ctx: {
   floorOverride?: { price: number | null; armed: boolean; basis: FloorBasis };
   /** MCX rupees per unit of qty per point (contractValueFactor in @td/shared); absent ⇒ 1. */
   valueFactor?: number;
+  /** The packet thesis's source (thesisSourceOf); absent ⇒ the facts carry no thesisSource, as before. */
+  thesisSource?: ThesisSource | null;
 }): GateFacts {
   const dir = p.side === 'LONG' ? 1 : -1;
   const vf = typeof ctx.valueFactor === 'number' && Number.isFinite(ctx.valueFactor) && ctx.valueFactor > 0 ? ctx.valueFactor : 1;
@@ -139,5 +141,18 @@ export function buildGateFacts(p: PacketFacts, ctx: {
     ...(p.ladder?.enforced
       ? { ladder: { stop: p.ladder.stop, stage: p.ladder.stage, lastHit: p.ladder.lastHit, packetLtp: p.ltp } }
       : {}),
+    // Thesis source (2026-11-04, spec D8/D10): only when the caller read one, so other callers' facts are unchanged.
+    ...(ctx.thesisSource !== undefined ? { thesisSource: ctx.thesisSource } : {}),
   };
+}
+
+/**
+ * The stored packet's `thesis.value.source` (the packet copies the thesis row's source verbatim), or null
+ * when the thesis block is absent or carries no known source. Defensive: the packet is JSON from the DB.
+ */
+export function thesisSourceOf(packet: unknown): ThesisSource | null {
+  const o = (x: unknown) => (x && typeof x === 'object' && !Array.isArray(x) ? (x as Record<string, unknown>) : null);
+  const block = o(o(packet)?.thesis);
+  const src = block && block.available === true ? o(block.value)?.source : null;
+  return src === 'INFERRED' || src === 'USER' ? src : null;
 }

@@ -7,10 +7,10 @@ import { MbmClient } from '../../mbm/services/mbm-client.service';
 import { mbmExitShadow, mbmExitShadowLine, type MbmShadowSlot } from '../domain/mbm-exit-shadow';
 import { EXIT_DISCIPLINE_CONFIG, GATE_LOAD_TIMEOUT_MS, STREAK_LOOKBACK_MIN, withExitTuning, type ExitDisciplineConfig } from '../../exit-discipline/config';
 import { TUNING_READER, type TuningReader } from '../../self-review/tuning/tunables';
-import { buildGateFacts, bypassRecord, decideExit, istDate } from '../../exit-discipline/decision';
+import { buildGateFacts, bypassRecord, decideExit, istDate, thesisSourceOf } from '../../exit-discipline/decision';
 import { readPacketFacts, type PacketFacts } from '../../exit-discipline/packet-facts';
 import type { HistoryVerdict } from '../../exit-discipline/persistence';
-import type { GateRecordV1 } from '../../exit-discipline/types';
+import type { GateRecordV1, ThesisSource } from '../../exit-discipline/types';
 import type { SessionClock } from '../../market-hub/session-clock';
 import type { PendingVerdict } from '../repositories/ai-exit-execution.repository';
 import { ExitGateRepository } from '../repositories/exit-gate.repository';
@@ -20,6 +20,8 @@ import { lossLimitFor } from '../../../common/utils/loss-limit';
 export type GateContext =
   | {
       kind: 'ready'; verdict: { id: string; createdAt: Date }; packet: PacketFacts; history: HistoryVerdict[]; maxLossPerTrade: number | null; dailyLossLatched: boolean;
+      /** The packet thesis's source (2026-11-04, gate.ts inferredThesisRecordOnly); absent on hand-built contexts ⇒ as before. */
+      thesisSource?: ThesisSource | null;
       /** MBM_EXIT_SHADOW observe|on only: the shadow's MBM read, never awaited by `decide`. */
       mbm?: MbmShadowSlot;
     }
@@ -127,7 +129,9 @@ export class ExitGateService {
     // Per underlying (owner 2026-11-04, "GOLD loss limit ₹7.5k"): HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING via lossLimitFor.
     const hardLoss = lossLimitFor(v.symbol).limit;
     const maxLossPerTrade = coreMaxLoss !== null && hardLoss !== null ? Math.min(coreMaxLoss, hardLoss) : coreMaxLoss ?? hardLoss;
-    return { kind: 'ready', verdict: { id: v.id, createdAt: v.createdAt }, packet: facts, history, maxLossPerTrade, dailyLossLatched };
+    // The stored thesis's source rides in the packet (2026-11-04): INFERRED theses are record-only in the gate.
+    const thesisSource = thesisSourceOf(packet);
+    return { kind: 'ready', verdict: { id: v.id, createdAt: v.createdAt }, packet: facts, history, maxLossPerTrade, dailyLossLatched, thesisSource };
   }
 
   decide(ctx: GateContext, live: { ltpNow: number; productType: string | null; exchange: string; now: Date }): GateRecordV1 {
@@ -145,6 +149,7 @@ export class ExitGateService {
         minutesToClose: this.clock.minutesToClose(live.exchange, live.now),
         maxLossPerTrade: ctx.maxLossPerTrade, dailyLossLatched: ctx.dailyLossLatched, history: ctx.history, now: live.now,
         valueFactor: contractValueFactor(live.exchange, ctx.packet.symbol),
+        ...(ctx.thesisSource !== undefined ? { thesisSource: ctx.thesisSource } : {}),
       });
       const record = decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg, now: live.now });
       if (record.outcome === 'BYPASS') this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${record.error ?? record.bypassReason}`);

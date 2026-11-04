@@ -75,12 +75,14 @@ describe('entry engine — GOLD / SILVER', () => {
     const oi: OiReading = { want: 'BULLISH', verdict: 'AGREES', source: 'CHAIN', futuresVerdict: 'NO_DATA', summary: 'oi AGREES', chainLeanAgo: 0.03, chainLeanOpen: 0.05 };
     const input = (o: Partial<EntryInput>): EntryInput => ({ underlying: 'GOLD', at: AT, news, trend, oi, ...o });
 
-    it('an event affecting GOLD is named in the reasons; it never makes the entry (move size, not direction)', () => {
+    it('an event affecting GOLD is named in the reasons; it waives neutral news, and the TREND (not the event) sets the side', () => {
       const d = entryDecision(
         input({ event: { status: 'present', events: [{ name: 'US midterm election results', at: '2026-11-04 IST session', impact: 'high', affects: ['GOLD', 'NIFTY'], expectMove: true }] } }),
       );
       expect(d.reasons).toContain('event: US midterm election results (2026-11-04 IST session, high) — big move expected, direction unknown');
-      expect(d.action).toBe('NO_TRADE'); // news NEUTRAL: the event adds no direction
+      // 2026-11-04 evening event-day news waiver: news NEUTRAL + trend BULLISH + OI AGREES ⇒ CE.
+      expect(d.action).toBe('ENTER_CE');
+      expect(d.reasons[0]).toMatch(/^news: waived on an event day/);
     });
 
     it('an absent calendar says absent with its reason, never "no event"', () => {

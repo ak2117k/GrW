@@ -79,8 +79,13 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'most important first],"entry":number|null,"sl":number|null,"targets":[numbers],"lots":integer|null}.',
 ].join(' ');
 
-/** v6-take (2026-11-04): default TAKE unless concrete evidence against; `events` (event days) in the packet. */
-export const SIGNAL_JUDGE_PROMPT_VERSION_TAKE = 'signal-judge-v6-take';
+/**
+ * v6-take (2026-11-04): default TAKE unless concrete evidence against; `events` (event days) in the packet.
+ * v7-take (2026-11-04 evening): a nearby level is not a wall when the trend runs with the call. Prod 18:05 IST:
+ * a CRUDEOIL 8600 PE call was SKIPped at 78% because support 8938 sat 31 pts below spot, with crude's 15m and
+ * 1h trends both bearish; the support broke within the hour and the PE hit its 339 target by 21:00.
+ */
+export const SIGNAL_JUDGE_PROMPT_VERSION_TAKE = 'signal-judge-v7-take';
 
 /** The v5 default-SKIP opening the take prompt replaces (must exist in SIGNAL_JUDGE_SYSTEM verbatim). */
 const SKIP_DEFAULT_RULE =
@@ -98,6 +103,9 @@ export function judgeTakeRule(minConfidence: number): string {
     '(the price is on the wrong side of plan.sl); the entry is outside the tolerance band; an expiry-day or illiquid',
     'contract (no quote, a wide spread, a stale feed); or a hard risk (an obstacle or wall right in the way with no room to',
     'T1, the trend firmly against the direction, the stop inside ordinary noise per market.noise).',
+    'A nearby support or resistance is NOT concrete evidence when the trend already runs WITH the call (the higher-timeframe',
+    'trend in the call\'s direction): price moving into a level with the trend behind it is a break candidate, not a wall —',
+    'judge the room to T1 beyond that level. A level is a wall only when the trend is flat or against the call.',
     'Unavailable data (option chain, OI, VIX, the expected-move model) and mixed or neutral news are NEVER by themselves a',
     'reason to SKIP: state what is absent and judge on what is present.',
     'events = the scheduled event days affecting this underlying (US elections, FOMC, US CPI/NFP, RBI policy, India CPI,',

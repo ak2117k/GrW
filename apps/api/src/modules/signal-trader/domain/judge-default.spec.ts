@@ -24,7 +24,7 @@ describe('SIGNAL_JUDGE_DEFAULT prompt', () => {
   it('take: the default-take rule replaces the default-SKIP opening; everything else is kept', () => {
     const p = signalJudgeSystem('take');
     expect(signalJudgePromptVersion('take')).toBe(SIGNAL_JUDGE_PROMPT_VERSION_TAKE);
-    expect(SIGNAL_JUDGE_PROMPT_VERSION_TAKE).toBe('signal-judge-v6-take');
+    expect(SIGNAL_JUDGE_PROMPT_VERSION_TAKE).toBe('signal-judge-v7-take');
     expect(p).not.toMatch(/your default is SKIP/);
     expect(p).toMatch(/Your default is TAKE: take the channel's call unless there is CONCRETE EVIDENCE AGAINST it/);
     expect(p).toMatch(/price is already past T1/);
@@ -35,6 +35,9 @@ describe('SIGNAL_JUDGE_DEFAULT prompt', () => {
     expect(p).toMatch(/mixed or neutral news are NEVER by themselves a\s+reason to SKIP/);
     expect(p).toMatch(/events\.status "absent" means we could not read the calendar — NOT that there is no event/);
     expect(p).toMatch(/on such a day missing data counts for nothing/);
+    // v7 (2026-11-04 CRUDEOIL 8600 PE): a level the trend runs into is a break candidate, not a wall.
+    expect(p).toMatch(/A nearby support or resistance is NOT concrete evidence when the trend already runs WITH the call/);
+    expect(p).toMatch(/A level is a wall only when the trend is flat or against the call/);
     expect(p).toMatch(/confidence 65 or more; code SKIPs a TAKE below 60\./);
     // The v5 rules all survive.
     for (const rule of [/never guess "inside noise": market\.noise/, /intrinsic value is from the SPOT .* NEVER the future/, /sampleSufficient is false/, /Reply with ONLY a JSON object/]) expect(p).toMatch(rule);

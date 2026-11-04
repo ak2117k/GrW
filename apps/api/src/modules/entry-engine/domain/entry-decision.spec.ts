@@ -179,3 +179,29 @@ describe('entryGuards (cooldowns)', () => {
     expect(entryGuards({ openForUnderlying: 0, tradesToday: 0, minutesToClose: null }).ok).toBe(false);
   });
 });
+
+describe('event-day news waiver (2026-11-04 CRUDEOIL after the US midterms)', () => {
+  const EVENT = { status: 'present' as const, events: [{ name: 'US_MIDTERM_RESULTS', at: '2026-11-04 IST session', impact: 'high' as const, affects: ['CRUDEOIL'], expectMove: true }] };
+  const NO_DATA_NEWS: NewsReading = { lean: 'NO_DATA', score: 0, material: false, items: [], freshestAgeMin: null, summary: 'no news read in the last 60 min' };
+  it('19:35 shape: news NO_DATA, trend BEARISH, OI AGREES bearish, event day ⇒ ENTER_PE', () => {
+    const d = entryDecision(input({ news: NO_DATA_NEWS, event: EVENT }));
+    expect(d.action).toBe('ENTER_PE');
+    expect(d.reasons[0]).toMatch(/^news: waived on an event day/);
+  });
+  it('the same without an event day stays NO_TRADE', () => {
+    expect(entryDecision(input({ news: NO_DATA_NEWS })).action).toBe('NO_TRADE');
+  });
+  it('non-material news on the trend side is waived too', () => {
+    expect(entryDecision(input({ news: news('BEARISH', false), event: EVENT })).action).toBe('ENTER_PE');
+  });
+  it('news pointing AGAINST the trend still blocks (evidence, not absence)', () => {
+    expect(entryDecision(input({ news: news('BULLISH', false), event: EVENT })).action).toBe('NO_TRADE');
+  });
+  it('OI must still confirm; a neutral trend gets no waiver', () => {
+    expect(entryDecision(input({ news: NO_DATA_NEWS, event: EVENT, oi: oi('BEARISH', 'MIXED') })).action).toBe('NO_TRADE');
+    expect(entryDecision(input({ news: NO_DATA_NEWS, event: EVENT, trend: trend('NEUTRAL') })).action).toBe('NO_TRADE');
+  });
+  it('an absent calendar waives nothing', () => {
+    expect(entryDecision(input({ news: NO_DATA_NEWS, event: { status: 'absent', reason: 'db down' } })).action).toBe('NO_TRADE');
+  });
+});

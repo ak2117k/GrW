@@ -117,7 +117,7 @@ export interface SignalTraderConfig {
    * neither for nor against. Over 21 days the judge SKIPped 65 of 70 channel calls; its scored skips were
    * 11 right (−₹9.3k avoided) vs 13 wrong (+₹34.6k missed), and on 4 Nov it SKIPped a GOLD CE that ran +53%
    * citing unavailable chain/VIX and "mixed news".
-   *   take (default): prompt signal-judge-v6-take — TAKE unless there is concrete evidence against; missing
+   *   take (default): prompt signal-judge-v7-take — TAKE unless there is concrete evidence against; missing
    *                   data / mixed news are no reason to SKIP; the packet carries `events` (event days).
    *   skip: today's behaviour exactly — prompt signal-judge-v5 byte for byte, no `events` in the packet.
    * Rollback: SIGNAL_JUDGE_DEFAULT=skip + restart. A typo lands on skip (the conservative value, reported).

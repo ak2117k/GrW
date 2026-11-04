@@ -330,14 +330,14 @@ describe('SignalTraderService', () => {
       expect(packet).not.toHaveProperty('events');
     });
 
-    it('take: the default-take prompt and v6-take; events present from the calendar', async () => {
+    it('take: the default-take prompt and v7-take; events present from the calendar', async () => {
       const fomc = { id: 'e1', scope: 'market', kind: 'fomc', key: 'US', title: 'FOMC rate decision', startsAt: new Date(), allDay: false, impact: 'high', source: 'config/market-events.json', sourceRef: null, fetchedAt: new Date() };
       const t = build({ cfg: { mode: 'shadow', judgeDefault: 'take' }, env: { ...LIVE_ENV, MARKET_EVENT_DAYS: 'off' }, marketEvents: { listFrom: jest.fn(async () => [fomc]) } });
       await t.svc.evaluate(ev);
       const [packet, opts] = judged(t);
       expect(opts.system).toMatch(/Your default is TAKE/);
       expect(opts.system).not.toMatch(/your default is SKIP/);
-      expect(packet.promptVersion).toBe('signal-judge-v6-take');
+      expect(packet.promptVersion).toBe('signal-judge-v7-take');
       expect(packet.events).toEqual({ status: 'present', events: [expect.objectContaining({ name: 'FOMC rate decision', expectMove: true, affects: expect.arrayContaining(['NIFTY']) })] });
     });
 

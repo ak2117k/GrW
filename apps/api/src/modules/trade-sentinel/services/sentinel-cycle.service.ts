@@ -53,7 +53,7 @@ import {
   type ExitDisciplineConfig,
 } from '../../exit-discipline/config';
 import { exitConfirmFire } from '../tripwires/exit-confirm';
-import { solveCycleFloor } from './cycle-floor';
+import { floorNoiseUnit, solveCycleFloor } from './cycle-floor';
 import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
 import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
 import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
@@ -916,7 +916,8 @@ export class SentinelCycleService {
       valueFactor: valueFactorOf(entry),
       holdingHigh: tick.holdingHigh,
       holdingLow: tick.holdingLow,
-      nContract: tick.noise?.contract?.n ?? null,
+      // 2026-11-04: an unmeasured contract unit no longer drops the floor to the fixed ₹150 (cycle-floor.ts floorNoiseUnit).
+      nContract: floorNoiseUnit(tick.noise?.contract?.n, tick.noise?.underlying1m?.n, entry.symbol).n,
       memory: this.stateFor(entry).noiseFloor,
       last,
     });

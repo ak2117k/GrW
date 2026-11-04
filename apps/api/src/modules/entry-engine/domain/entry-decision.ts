@@ -387,8 +387,9 @@ export interface EntryInput {
   trend: TrendReading;
   oi: OiReading | null;
   /**
-   * The event view for the underlying (news-events eventContextFor, 2026-11-04). Recorded as a reason
-   * only: an event day predicts move SIZE, not direction, so it never makes or blocks an entry here.
+   * The event view for the underlying (news-events eventContextFor, 2026-11-04). It never picks a direction
+   * (an event day predicts move SIZE): with an expectMove event it only waives the NEWS requirement, so the
+   * trend names the side and OI must confirm it (see entryDecision, the event-day news waiver).
    * Absent / undefined = not read (older callers, the replay).
    */
   event?: EventContext | null;
@@ -428,8 +429,9 @@ export interface EntryDecision {
 
 /**
  * The entry decision. ENTER only when news (leaning AND material), trend and OI all point the same
- * way and futures OI (when captured) is not against it. Everything else is NO_TRADE with the
- * failing component(s) named. Pure and deterministic.
+ * way and futures OI (when captured) is not against it — except on an expectMove event day, where
+ * absent / non-material news is waived and the trend names the side. Everything else is NO_TRADE with
+ * the failing component(s) named. Pure and deterministic.
  */
 export function entryDecision(i: EntryInput): EntryDecision {
   const reasons: string[] = [];
@@ -449,10 +451,21 @@ export function entryDecision(i: EntryInput): EntryDecision {
     chainLeanAgo: i.oi?.chainLeanAgo ?? null,
     chainLeanOpen: i.oi?.chainLeanOpen ?? null,
   };
-  const dir: Direction | null = i.news.lean === 'BULLISH' || i.news.lean === 'BEARISH' ? i.news.lean : null;
+  const newsDir: Direction | null = i.news.lean === 'BULLISH' || i.news.lean === 'BEARISH' ? i.news.lean : null;
+  // EVENT-DAY NEWS WAIVER (2026-11-04 evening, owner "go ahead"). Prod: from 17:35 IST CRUDEOIL's trend read
+  // BEARISH on every check and at 19:35 OI AGREED, but news was NO_DATA / NEUTRAL ("already realised"), so the
+  // engine never entered while crude fell ~450 pts after the US midterms. On a day whose event view expects a big
+  // move for this underlying, missing or non-material news no longer blocks: the TREND names the direction and
+  // OI must still confirm it. News that points the OTHER way still blocks (that is evidence, not absence).
+  const eventMove = i.event?.status === 'present' && i.event.events.some((e) => e.expectMove);
+  const trendDir: Direction | null = i.trend.lean === 'BULLISH' || i.trend.lean === 'BEARISH' ? i.trend.lean : null;
+  const newsWaived = eventMove && trendDir !== null && (!newsDir || !i.news.material) && (!newsDir || newsDir === trendDir);
+  const dir: Direction | null = newsWaived ? trendDir : newsDir;
   let ok = true;
 
-  if (!dir) {
+  if (newsWaived) {
+    reasons.push(`news: waived on an event day (big move expected) — direction from the trend ${dir}; news ${i.news.lean} — ${i.news.summary}`);
+  } else if (!dir) {
     ok = false;
     reasons.push(`news: ${i.news.lean} — ${i.news.summary}`);
   } else if (!i.news.material) {
@@ -468,6 +481,8 @@ export function entryDecision(i: EntryInput): EntryDecision {
   } else if (dir && i.trend.lean !== dir) {
     ok = false;
     reasons.push(`trend: ${i.trend.lean} disagrees with news ${dir} — ${i.trend.summary}`);
+  } else if (newsWaived) {
+    reasons.push(`trend: ${i.trend.lean} ✓ (sets the direction on the event day) — ${i.trend.summary}`);
   } else {
     reasons.push(`trend: ${i.trend.lean}${dir ? ' ✓' : ''} — ${i.trend.summary}`);
   }

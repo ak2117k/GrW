@@ -1,5 +1,5 @@
 import { parseExitDisciplineConfig } from '../../exit-discipline/config';
-import { solveCycleFloor, storedNoiseFloor } from './cycle-floor';
+import { floorNoiseUnit, solveCycleFloor, storedNoiseFloor } from './cycle-floor';
 
 const CFG = parseExitDisciplineConfig({});
 const BASE = { cfg: CFG, segment: 'OPT' as const, side: 'LONG' as const, entryPrice: 521.9, qty: 100,
@@ -54,5 +54,24 @@ describe('solveCycleFloor', () => {
     const r = solveCycleFloor({ ...BASE, side: 'SHORT', entryPrice: 100, holdingHigh: 103, holdingLow: 94, nContract: 2 });
     expect(r.noiseFloor).toMatchObject({ armed: true });
     expect(r.noiseFloor!.level).toBeLessThan(100);
+  });
+});
+
+describe('floorNoiseUnit (2026-11-04 CRUDEOIL 8600 PE: no fixed ₹150 floor before the contract unit exists)', () => {
+  it('the contract unit wins when measured', () => {
+    expect(floorNoiseUnit(4.5, 13.5, 'CRUDEOIL17NOV268600PE')).toEqual({ n: 4.5, source: 'contract' });
+  });
+  it('unmeasured contract ⇒ the underlying unit × 0.5 for an option, × 1 otherwise', () => {
+    expect(floorNoiseUnit(null, 13.5, 'CRUDEOIL17NOV268600PE')).toEqual({ n: 6.75, source: 'underlying-stand-in' });
+    expect(floorNoiseUnit(undefined, 13.5, 'CRUDEOIL19NOV26FUT')).toEqual({ n: 13.5, source: 'underlying-stand-in' });
+  });
+  it('neither known ⇒ null (the fixed basis, as before)', () => {
+    expect(floorNoiseUnit(null, null, 'CRUDEOIL17NOV268600PE')).toEqual({ n: null, source: 'none' });
+  });
+  it('the 18:05 entry 246.84 (qty 100) does not arm on the 18:06–18:08 blip to ~250', () => {
+    const r = solveCycleFloor({ ...BASE, entryPrice: 246.84, holdingHigh: 250.5, holdingLow: 246.5, valueFactor: 1,
+      nContract: floorNoiseUnit(null, 13.5, 'CRUDEOIL17NOV268600PE').n });
+    expect(r.noiseFloor).not.toBeNull();
+    expect(r.noiseFloor!.armed).toBe(false);
   });
 });

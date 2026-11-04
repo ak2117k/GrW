@@ -2,6 +2,8 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 // @ts-ignore — smartapi-javascript has no type declarations
 import { SmartAPI } from 'smartapi-javascript';
 import {
+  ConvertPositionRequest,
+  ConvertPositionResult,
   OrderRequest,
   OrderResponse,
 } from '../../../common/interfaces/broker-adapter.interface';
@@ -51,6 +53,11 @@ export interface UserSmartApiLike {
    * and a client without it makes every cancel UNCERTAIN (never a silent success).
    */
   cancelOrder?(params: Record<string, string>): Promise<any>;
+  /**
+   * smartapi-javascript `convertPosition(params)` (POST convert_position). Optional in this seam
+   * for the same reason as cancelOrder; a client without it makes every conversion `accepted:false`.
+   */
+  convertPosition?(params: Record<string, string>): Promise<any>;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -131,6 +138,45 @@ export interface UserBrokerSession {
    * request: the caller must confirm the order is `cancelled` in the order book.
    */
   cancelOrderClassified(variety: string, orderId: string): Promise<ClassifiedCancel>;
+
+  /**
+   * Convert one open position's product on this user's own account (intraday carry, 2026-11-04:
+   * MIS → CARRYFORWARD). Same never-rejects SDK caveat: `accepted` is true only when Angel itself
+   * answered `status: true`; `{}`, `{status:false}`, an HTTP error, a throw or the timeout are
+   * `accepted: false`. EVEN `accepted: true` IS NOT PROOF — the caller confirms on a fresh
+   * position book (intraday-carry/domain/verify-conversion.ts). Optional so read-only fakes need
+   * not stub it.
+   */
+  convertPosition?(p: ConvertPositionRequest): Promise<ConvertPositionResult>;
+}
+
+/** Classify a raw smartapi-javascript `convertPosition` resolution. Pure; never throws. */
+export function classifyConvertResponse(response: unknown): ConvertPositionResult {
+  const isObj = !!response && typeof response === 'object' && !Array.isArray(response);
+  const r = (isObj ? response : {}) as Record<string, any>;
+  const text = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+  if (r.status === true || r.success === true) return { accepted: true, message: text(r.message) || 'conversion accepted' };
+  const code = text(r.errorcode) || text(r.errorCode);
+  const parts = [r.status !== undefined ? `status ${String(r.status)}` : '', code ? `errorcode ${code}` : '', text(r.message)].filter(Boolean);
+  return { accepted: false, message: (parts.join(' ') || 'no answer (empty)').slice(0, 200) };
+}
+
+/** The Angel `convertPosition` params for a request (core fields + the book row's descriptive ones). */
+export function convertPositionParams(p: ConvertPositionRequest): Record<string, string> {
+  return {
+    ...(p.extra ?? {}),
+    exchange: p.exchange,
+    symboltoken: p.symboltoken,
+    tradingsymbol: p.tradingsymbol,
+    transactiontype: p.transactiontype,
+    quantity: String(p.quantity),
+    // Angel's current API names the old product `oldproducttype`; the SDK's JSDoc still says
+    // `producttype`. Both are sent with the same value so either spelling is understood.
+    oldproducttype: p.oldproducttype,
+    producttype: p.oldproducttype,
+    newproducttype: p.newproducttype,
+    type: 'DAY',
+  };
 }
 
 /** Outcome of {@link UserBrokerSession.cancelOrderClassified}. */
@@ -315,6 +361,27 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
       return { status: 'UNCERTAIN', message: msg };
     }
     return classifyCancelResponse(response);
+  }
+
+  async convertPosition(p: ConvertPositionRequest): Promise<ConvertPositionResult> {
+    this.assertCanPlace();
+    this.logger.log(
+      `Converting per-user position ${p.tradingsymbol} qty=${p.quantity} ${p.oldproducttype}→${p.newproducttype} (client ${maskClientId(this.clientId)})`,
+    );
+    try {
+      const response = await withTimeout(
+        this.client.convertPosition
+          ? this.client.convertPosition(convertPositionParams(p))
+          : Promise.reject(new Error('this broker client has no convertPosition')),
+        BROKER_CALL_TIMEOUT_MS,
+        'Angel One convertPosition',
+      );
+      return classifyConvertResponse(response);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to convert per-user position ${p.tradingsymbol} (outcome unknown): ${msg}`);
+      return { accepted: false, message: msg.slice(0, 200) };
+    }
   }
 
   private assertCanPlace(): void {

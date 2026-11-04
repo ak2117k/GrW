@@ -12,6 +12,7 @@ function fakeClient(): jest.Mocked<Required<UserSmartApiLike>> {
     getTradeBook: jest.fn(),
     getOrderBook: jest.fn().mockResolvedValue({ status: true, data: [{ orderid: 'O1', status: 'open' }] }),
     cancelOrder: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', errorcode: '', data: { orderid: 'SL1' } }),
+    convertPosition: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', data: null }),
   };
 }
 const CREDS = { apiKey: 'k', apiSecret: 's', clientId: 'C1', password: 'p', totpSecret: 'JBSWY3DPEHPK3PXP' };
@@ -193,5 +194,31 @@ describe('cancelOrderClassified — a client without cancelOrder', () => {
     const f = new PerUserBrokerSessionFactory(() => { throw new Error('must not build a client'); });
     const r = await f.borrow(client as never, 'C1', (s) => s.cancelOrderClassified('NORMAL', 'SL1'));
     expect(r.status).toBe('UNCERTAIN');
+  });
+});
+
+describe('convertPosition — intraday carry (2026-11-04): the broker answer is never proof', () => {
+  const req = {
+    exchange: 'NFO', symboltoken: '123', tradingsymbol: 'NIFTY11NOV2524000CE', transactiontype: 'BUY' as const, quantity: 75,
+    oldproducttype: 'INTRADAY' as const, newproducttype: 'CARRYFORWARD' as const,
+  };
+  const borrow = (client: unknown) =>
+    new PerUserBrokerSessionFactory(() => { throw new Error('must not build a client'); }).borrow(client as never, 'C1', (s) => s.convertPosition!(req));
+
+  it('sends the Angel params and reads status true as accepted', async () => {
+    const client = fakeClient();
+    await expect(borrow(client)).resolves.toEqual({ accepted: true, message: 'SUCCESS' });
+    expect(client.convertPosition).toHaveBeenCalledWith(expect.objectContaining({ oldproducttype: 'INTRADAY', newproducttype: 'CARRYFORWARD', quantity: '75', type: 'DAY' }));
+  });
+
+  it('{} (the SDK swallowing an error), a throw, or no convertPosition → not accepted', async () => {
+    const empty = fakeClient();
+    empty.convertPosition.mockResolvedValue({});
+    expect((await borrow(empty)).accepted).toBe(false);
+    const boom = fakeClient();
+    boom.convertPosition.mockRejectedValue(new Error('net'));
+    expect((await borrow(boom)).accepted).toBe(false);
+    const { convertPosition: _omit, ...none } = fakeClient();
+    expect((await borrow(none)).accepted).toBe(false);
   });
 });

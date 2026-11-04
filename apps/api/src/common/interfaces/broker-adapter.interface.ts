@@ -166,4 +166,37 @@ export interface BrokerAdapter {
       lotSize: number;
     }>
   >;
+
+  /**
+   * Convert an open position's product (intraday carry, 2026-11-04: MIS → carry-forward).
+   * Optional: only the per-user Angel session implements it (there is no shared feed account).
+   * `accepted` is the broker's answer only — never proof: the caller must confirm on a fresh
+   * position book (intraday-carry/domain/verify-conversion.ts).
+   */
+  convertPosition?(p: ConvertPositionRequest): Promise<ConvertPositionResult>;
+}
+
+/** One whole-position product conversion (Angel `convertPosition`). */
+export interface ConvertPositionRequest {
+  exchange: string;
+  symboltoken: string;
+  tradingsymbol: string;
+  /** The position's side: BUY for a long, SELL for a short. */
+  transactiontype: 'BUY' | 'SELL';
+  /** Units, |netqty| of the position book row. */
+  quantity: number;
+  oldproducttype: 'INTRADAY';
+  newproducttype: 'CARRYFORWARD';
+  /**
+   * The position book row's own descriptive fields (symbolname, instrumenttype, priceden, pricenum,
+   * genden, gennum, precision, multiplier, boardlotsize, buyqty, sellqty, buyamount, sellamount),
+   * which Angel's convert API documents alongside the core fields. Passed through as strings.
+   */
+  extra?: Record<string, string>;
+}
+
+/** The broker's answer to a conversion. `accepted` false on `{}`, `{status:false}`, an HTTP error, a throw or a timeout. */
+export interface ConvertPositionResult {
+  accepted: boolean;
+  message: string;
 }

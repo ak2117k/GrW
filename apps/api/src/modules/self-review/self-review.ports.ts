@@ -7,13 +7,19 @@
  */
 import type { VerificationDraft } from './self-review.types';
 
-/** One wrong call handed to the diagnosis (the stored result, with its id). */
-export type DiagnosisMiss = VerificationDraft & { id?: string };
+/**
+ * One wrong call handed to the diagnosis (the stored result, with its id). Since 2026-11-04 it may also be a
+ * decision-ledger row (kind `DECISION:<type>`, refId `dg:<id>`), which is not a verification_results kind.
+ */
+export type DiagnosisMiss = Omit<VerificationDraft, 'kind'> & { kind: VerificationDraft['kind'] | `DECISION:${string}`; id?: string };
 
 export interface DiagnosisMissOut {
   refIds: string[];
   cause: string;
   category?: string;
+  /** d8: DATA | SETTING | REASONING | CODE_BUG | NOISE. */
+  causeType?: string;
+  ticket?: { title: string; proposedChange: string; files: string[]; testDescription: string };
   lessonKey?: string;
   lessonText?: string;
   scope?: string;

@@ -10,8 +10,11 @@
 /**
  * SIGNAL_JUDGE (2026-11-02): the Telegram entry judge (signal-trader reads it into its packet). ENTRY_ENGINE: the
  * rule-based entry engine — no agent reads it (the engine is not an LLM); its lessons are for the owner only.
+ * THESIS / NEWS (2026-11-04, wrong-decision loop): the sentinel's inferred-thesis step and the news-impact reader.
+ * A REASONING lesson may now be scoped to them; until those prompts ask for their scope such lessons are stored
+ * and counted but injected nowhere.
  */
-export const LESSON_SCOPES = ['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'SIGNAL_JUDGE', 'ENTRY_ENGINE', 'ALL'] as const;
+export const LESSON_SCOPES = ['SENTINEL_LIVE', 'SENTINEL_OVERNIGHT', 'NEWS_IDEAS', 'SIGNAL_JUDGE', 'ENTRY_ENGINE', 'THESIS', 'NEWS', 'ALL'] as const;
 export type LessonScope = (typeof LESSON_SCOPES)[number];
 
 /** A scope a consumer asks for (`ALL` lessons are included in every one of them). */

@@ -34,13 +34,37 @@ import type { MinuteBar } from '../../exit-discipline/types';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { VerificationSourcesRepository } from '../repositories/verification-sources.repository';
 import { SELF_REVIEW_CONFIG, type SelfReviewConfig } from '../self-review.config';
-import { DIAGNOSIS_MISS_CAP, SELF_REVIEW_DIAGNOSIS, type DiagnosisOutput, type DiagnosisPort } from '../self-review.ports';
+import { DIAGNOSIS_MISS_CAP, SELF_REVIEW_DIAGNOSIS, type DiagnosisMiss, type DiagnosisOutput, type DiagnosisPort } from '../self-review.ports';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import type { RunSummary, VerificationDraft, VerificationKind } from '../self-review.types';
 import { TUNABLES, type TunableValue } from '../tuning/tunables';
 import { TuningService } from '../tuning/tuning.service';
 import { STOCK_MOVE_HORIZON_DAYS } from '../../stock-move/stock-move.logic';
 import { NEWS_IMPACT_REVIEW, type NewsImpactReviewSource } from '../../news-impact/news-impact.ports';
 import { newsImpactSummary, scoreNewsImpact } from '../domain/news-impact-scorer';
+import {
+  decisionLoopOn,
+  SELF_REVIEW_OPS_ALERT,
+  type DecisionGradeRowLike,
+  type DecisionGradesPort,
+  type DecisionGradingPort,
+  type GradeSessionResult,
+  type OpsAlertFn,
+} from '../tickets/decision-loop.ports';
+import {
+  DECISION_LOOKBACK_SESSIONS,
+  decisionMiss,
+  mergeMisses,
+  missFacts,
+  nothingGradedReason,
+  shouldAlertNothingGraded,
+  ticketDrafts,
+  wrongItems,
+  type DecisionLoopSummary,
+} from '../tickets/decision-loop';
+import { FixTicketRepository } from '../tickets/fix-ticket.repository';
+import { DecisionGradeRepository } from '../decisions/decision-grade.repository';
+import { DecisionGradingService } from '../decisions/decision-grading.service';
 
 export const SELF_REVIEW_CLOCK = Symbol('SELF_REVIEW_CLOCK');
 /** The consumers' own defaults for targets whose code default is env-derived (exit-discipline). */
@@ -103,6 +127,11 @@ export class SelfReviewRunService {
     @Optional() @Inject(SELF_REVIEW_DIAGNOSIS) private readonly diagnosis?: DiagnosisPort,
     /** News impact reactions (@Global news-impact module); absent ⇒ no NEWS_IMPACT rows. */
     @Optional() @Inject(NEWS_IMPACT_REVIEW) private readonly newsImpact?: NewsImpactReviewSource,
+    /** The wrong-decision loop (2026-11-04): stream F's grading + ledger, G1's tickets and alert; each absent ⇒ skipped. */
+    @Optional() @Inject(DecisionGradingService) private readonly grading?: DecisionGradingPort,
+    @Optional() @Inject(DecisionGradeRepository) private readonly grades?: DecisionGradesPort,
+    @Optional() private readonly tickets?: FixTicketRepository,
+    @Optional() @Inject(SELF_REVIEW_OPS_ALERT) private readonly alert?: OpsAlertFn,
   ) {}
 
   isEnabled(): boolean {
@@ -206,7 +235,9 @@ export class SelfReviewRunService {
         return [];
       });
 
-      const diagnosis = await this.diagnose(run.id, S, sessionRows, summary, errors);
+      const loop = decisionLoopOn() ? await this.gradeDecisions(S, sessions, now, errors) : null;
+      const { out: diagnosis, sent } = await this.diagnose(run.id, S, sessionRows, summary, errors, loop?.rows ?? []);
+      if (loop) summary.decisions = await this.finishDecisionLoop(S, loop, diagnosis, sent, now, errors);
       const mbmSkill = await this.mbmSkillRuns(S, summary, errors);
       const proposals = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors, mbmSkill);
 
@@ -498,13 +529,16 @@ export class SelfReviewRunService {
     rows: VerificationDraft[],
     summary: RunSummary,
     errors: string[],
-  ): Promise<DiagnosisOutput | null> {
-    const misses = topMisses(rows.filter((r) => DIAGNOSED_KINDS.has(r.kind)), DIAGNOSIS_MISS_CAP);
-    const wrong = Object.values(summary.byKind).reduce((s, k) => s + (k?.wrong ?? 0), 0);
+    decisionRows: readonly DecisionGradeRowLike[] = [],
+  ): Promise<{ out: DiagnosisOutput | null; sent: DiagnosisMiss[] }> {
+    // The decision ledger's WRONG / DETECTOR rows (last 10 sessions) share the 15-miss cap with the older kinds.
+    const misses = mergeMisses(topMisses(rows.filter((r) => DIAGNOSED_KINDS.has(r.kind)), DIAGNOSIS_MISS_CAP), decisionRows, DIAGNOSIS_MISS_CAP);
+    const wrong = Object.values(summary.byKind).reduce((s, k) => s + (k?.wrong ?? 0), 0) + decisionRows.length;
     const prior = (await this.repo.doneRunsFor(S)).find((r) => r.diagnosis !== null && r.id !== runId);
     if (prior) {
-      const priorWrong = Object.values(((prior.summary as RunSummary | null)?.byKind ?? {}) as RunSummary['byKind']).reduce((s, k) => s + (k?.wrong ?? 0), 0);
-      if (priorWrong >= wrong) return prior.diagnosis as unknown as DiagnosisOutput;
+      const ps = prior.summary as (RunSummary & { decisions?: { wrongInWindow?: number } }) | null;
+      const priorWrong = Object.values((ps?.byKind ?? {}) as RunSummary['byKind']).reduce((s, k) => s + (k?.wrong ?? 0), 0) + (ps?.decisions?.wrongInWindow ?? 0);
+      if (priorWrong >= wrong) return { out: prior.diagnosis as unknown as DiagnosisOutput, sent: misses };
     }
     // The signal paper splits (OI verdict / AI judge) go in too: the owner checks the OI check at the nightly review.
     const signalPaper = signalPaperDigest(summary.signalTrades);
@@ -512,18 +546,103 @@ export class SelfReviewRunService {
     const noiseReads = noiseReadDigest(summary.exitNoise, summary.exitJustification);
     // The entry engine too (observation only): how often it entered, what blocked it, did its paper trades pay?
     const engine = engineDigest(summary.engine);
-    if (!this.diagnosis || (misses.length === 0 && !signalPaper && !noiseReads && !engine)) return null;
+    if (!this.diagnosis || (misses.length === 0 && !signalPaper && !noiseReads && !engine)) return { out: null, sent: misses };
     try {
       const context = { ...(signalPaper ? { signalPaper } : {}), ...(noiseReads ? { noiseReads } : {}), ...(engine ? { engine } : {}) };
       const out = await this.diagnosis.diagnose(runId, misses, signalPaper || noiseReads || engine ? context : undefined);
       // B persists the diagnosis itself; make sure the run carries it either way.
       if (out) await this.repo.setDiagnosisIfEmpty(runId, out);
-      return out;
+      return { out, sent: misses };
     } catch (e) {
       errors.push(`diagnosis: ${errText(e)}`);
       this.logger.warn(`[self-review] diagnosis failed (run continues): ${errText(e)}`);
-      return null;
+      return { out: null, sent: misses };
     }
+  }
+
+  // ─── Wrong-decision loop (2026-11-04, plan G1) ──────────────────────────────
+
+  /**
+   * Grade S's decisions (stream F), then read the WRONG / DETECTOR rows of the last 10 sessions for the diagnosis.
+   * Fail-soft: a grading or ledger failure costs only this step (the reason goes on the report line).
+   */
+  private async gradeDecisions(S: string, sessions: readonly string[], now: Date, errors: string[]): Promise<{ grade: GradeSessionResult | null; rows: DecisionGradeRowLike[] }> {
+    let grade: GradeSessionResult | null = null;
+    if (this.grading) {
+      try {
+        grade = await this.grading.gradeSession(S, now);
+      } catch (e) {
+        // F's contract is never-throw; hold the line here anyway.
+        grade = { graded: 0, wrong: 0, unscorable: 0, byType: {}, error: errText(e) };
+      }
+      if (grade?.error) errors.push(`decision grading: ${grade.error}`);
+    }
+    let rows: DecisionGradeRowLike[] = [];
+    if (this.grades) {
+      const from = sessions[Math.min(DECISION_LOOKBACK_SESSIONS, sessions.length) - 1] ?? S;
+      try {
+        rows = (await this.grades.wrongSince(from)).filter((r) => r.verdict === 'WRONG' || r.decisionType === 'DETECTOR');
+      } catch (e) {
+        errors.push(`decision ledger: ${errText(e)}`);
+        this.logger.warn(`[self-review] decision ledger read failed (run continues): ${errText(e)}`);
+      }
+    }
+    return { grade, rows };
+  }
+
+  /**
+   * After the diagnosis: tickets for the actionable CODE_BUG / DATA groups, the session's wrong items with what was
+   * done about each, and the "graded N, wrong W, unscorable U" line. A trading day with nothing graded alerts
+   * (SELF_REVIEW_NOTHING_GRADED): a silent loop is the failure this whole loop exists to stop (spec §3).
+   */
+  private async finishDecisionLoop(
+    S: string,
+    loop: { grade: GradeSessionResult | null; rows: DecisionGradeRowLike[] },
+    diagnosis: DiagnosisOutput | null,
+    sent: readonly DiagnosisMiss[],
+    now: Date,
+    errors: string[],
+  ): Promise<DecisionLoopSummary> {
+    const g = loop.grade;
+    const loaded = !!this.grading;
+    const sessionToday = istYmd(now) === S;
+    // The gate counts every ledger miss of the window, not only the ones that fit the cap.
+    const facts = missFacts([...sent, ...loop.rows.map(decisionMiss)]);
+    const ticketsOut: DecisionLoopSummary['tickets'] = [];
+    const tickets = this.tickets;
+    if (tickets && diagnosis) {
+      for (const d of ticketDrafts(diagnosis, [...sent, ...loop.rows.map(decisionMiss)], S)) {
+        try {
+          const t = await tickets.upsert(d, now);
+          ticketsOut.push({ key: t.key, title: t.title, occurrences: t.occurrences, status: t.status });
+          this.logger.log(`[self-review] FIX TICKET ${t.key} (${t.status}, seen ${t.occurrences}×): ${t.title}`);
+        } catch (e) {
+          errors.push(`fix ticket ${d.key}: ${errText(e)}`);
+        }
+      }
+    }
+    const reason = nothingGradedReason(g, loaded, sessionToday);
+    const out: DecisionLoopSummary & { wrongInWindow: number } = {
+      session: S,
+      graded: g?.graded ?? 0,
+      wrong: g?.wrong ?? 0,
+      unscorable: g?.unscorable ?? 0,
+      byType: g?.byType ?? {},
+      ...(reason ? { reason } : {}),
+      items: wrongItems(loop.rows.filter((r) => r.sessionDate === S), diagnosis, facts),
+      tickets: ticketsOut,
+      wrongInWindow: loop.rows.length,
+    };
+    if (shouldAlertNothingGraded(g, loaded, sessionToday)) {
+      const send = this.alert ?? ((key: string, text: string) => sendOpsAlert(key, text));
+      try {
+        await send('SELF_REVIEW_NOTHING_GRADED', `Self-review ${S}: 0 decisions graded on a trading day (${reason ?? 'unknown'}). The wrong-decision loop saw nothing tonight — check the decision ledger and the 18:45 run log.`);
+      } catch {
+        // sendOpsAlert never throws; an injected double might.
+      }
+    }
+    this.logger.log(`[self-review] decisions ${S}: graded ${out.graded}, wrong ${out.wrong}, unscorable ${out.unscorable}${reason ? ` (${reason})` : ''}; ${loop.rows.length} wrong/detector rows in ${DECISION_LOOKBACK_SESSIONS} sessions; ${ticketsOut.length} tickets`);
+    return out;
   }
 
   // ─── Propose ───────────────────────────────────────────────────────────────

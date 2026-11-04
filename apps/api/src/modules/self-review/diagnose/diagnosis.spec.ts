@@ -123,6 +123,52 @@ describe('validateDiagnosis', () => {
     const [d] = validateDiagnosis({ misses: [{ refIds: ['r1'], cause: 'c', category: 'TIMING', lessonKey: 'long-one', lessonText: 'x '.repeat(400) }] }, sent, active);
     expect(d.lessonText!.length).toBeLessThanOrEqual(400);
   });
+
+  describe('causeType + ticket (d8, wrong-decision loop)', () => {
+    it('cause parsed and validated; unknown cause ⇒ dropped with reason', () => {
+      const out = validateDiagnosis(
+        { misses: [
+          { refIds: ['r1'], cause: 'risk manager counts paper trades', category: 'OTHER', causeType: 'CODE_BUG' },
+          { refIds: ['r2'], cause: 'c', category: 'TIMING', causeType: 'GREMLINS', ticket: { title: 't', proposedChange: 'p', files: [], testDescription: '' } },
+        ] },
+        sent,
+        active,
+      );
+      expect(out[0]).toEqual({ refIds: ['r1'], cause: 'risk manager counts paper trades', category: 'OTHER', causeType: 'CODE_BUG' });
+      expect(out[1].causeType).toBeUndefined();
+      expect(out[1].ticket).toBeUndefined();
+      expect(out[1].dropped).toContain('causeType GREMLINS: unknown');
+      expect(out[1].dropped).toContain('ticket');
+    });
+
+    it('a CODE_BUG ticket is kept trimmed, with repo-relative files only; other causes take no ticket', () => {
+      const ticket = { title: ' Live orders never placed ', proposedChange: 'Exclude paper trades from the live position count.', files: ['apps/api/src/modules/risk/x.ts', '../etc/passwd', 'C:/secret', 'apps\\api\\y.ts'], testDescription: 'paper trades do not block a live order' };
+      const [bug, setting] = validateDiagnosis(
+        { misses: [
+          { refIds: ['r1'], cause: 'c', category: 'OTHER', causeType: 'CODE_BUG', ticket },
+          { refIds: ['r2'], cause: 'c', category: 'TIMING', causeType: 'SETTING', ticket },
+        ] },
+        sent,
+        active,
+      );
+      expect(bug.ticket).toEqual({ title: 'Live orders never placed', proposedChange: ticket.proposedChange, files: ['apps/api/src/modules/risk/x.ts', 'apps/api/y.ts'], testDescription: ticket.testDescription });
+      expect(setting.ticket).toBeUndefined();
+      expect(setting.dropped).toContain('ticket: causeType SETTING takes none');
+    });
+
+    it('causeType NOISE never carries a lesson; THESIS / NEWS are lesson scopes', () => {
+      const [noise, thesis] = validateDiagnosis(
+        { misses: [
+          { refIds: ['r1'], cause: 'c', category: 'TIMING', causeType: 'NOISE', lessonKey: 'noise-key', lessonText: 'T.' },
+          { refIds: ['r2'], cause: 'c', category: 'THESIS_WRONG', causeType: 'REASONING', lessonKey: 'check-invalidation', lessonText: 'Check the invalidation against the bar at entry.', scope: 'THESIS' },
+        ] },
+        sent,
+        active,
+      );
+      expect(noise.lessonKey).toBeUndefined();
+      expect(thesis).toMatchObject({ lessonKey: 'check-invalidation', scope: 'THESIS', causeType: 'REASONING' });
+    });
+  });
 });
 
 describe('capMisses / buildDiagnosisUserMessage', () => {
@@ -156,13 +202,13 @@ describe('DiagnosisService', () => {
     const create = jest.fn().mockResolvedValue(reply('```json\n{"misses":[{"refIds":["r1"],"cause":"gap","category":"THESIS_WRONG","lessonKey":"old-key"}]}\n```'));
     const { svc } = make(create, { SENTINEL_MODEL_TRIGGERED: 'claude-x', SENTINEL_EFFORT_TRIGGERED: 'medium' });
     const res = await svc.diagnose('run1', [miss('r1'), miss('r2')]);
-    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd7' });
+    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd8' });
     expect(res.misses).toEqual([{ refIds: ['r1'], cause: 'gap', category: 'THESIS_WRONG', lessonKey: 'old-key' }]);
     expect(create).toHaveBeenCalledTimes(1);
     const req = create.mock.calls[0][0];
     expect(req).toMatchObject({ model: 'claude-x', max_tokens: DIAGNOSIS_MAX_TOKENS, output_config: { effort: 'medium', format: { type: 'json_schema', schema: DIAGNOSIS_SCHEMA } } });
     expect(JSON.parse(req.messages[0].content).misses.map((m: MissInput) => m.refId)).toEqual(['r1', 'r2']);
-    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd7', model: 'claude-x' });
+    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd8', model: 'claude-x' });
   });
 
   it('checks the reply against the scorecard points it was sent', async () => {
@@ -245,7 +291,7 @@ describe('DiagnosisService', () => {
     const req = create.mock.calls[0][0];
     expect(JSON.parse(req.messages[0].content).engine).toEqual(engine);
     expect(req.system[0].text).toMatch(/fewer than 10 closed engine trades, say "insufficient sample"/);
-    expect(res).toMatchObject({ status: 'OK', promptVersion: 'd7', engineAssessment: '2 enters in 40; insufficient sample.' });
+    expect(res).toMatchObject({ status: 'OK', promptVersion: 'd8', engineAssessment: '2 enters in 40; insufficient sample.' });
     expect(diagnosisForRun(res)?.engineAssessment).toBe(res.engineAssessment);
     const c2 = jest.fn().mockResolvedValue(reply('{"misses":[],"engineAssessment":"x"}'));
     expect((await make(c2).svc.diagnose('r', [miss('r1')])).engineAssessment).toBeUndefined();

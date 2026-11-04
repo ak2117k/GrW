@@ -14,6 +14,7 @@ import { SelfReviewDiagnosisAdapter } from '../diagnose/self-review-diagnosis.ad
 import { SELF_REVIEW_DIAGNOSIS, SELF_REVIEW_LESSONS } from '../self-review.ports';
 import { LessonsService } from './lessons.service';
 import { LESSONS_READER } from './types';
+import { SelfReviewTicketsModule } from '../tickets/tickets.module';
 
 /**
  * Self-review learning (stream B): the batched miss diagnosis and the agent lessons.
@@ -25,7 +26,9 @@ import { LESSONS_READER } from './types';
  */
 @Global()
 @Module({
-  imports: [PrismaModule, AiGatewayModule],
+  // SelfReviewTicketsModule (@Global, 2026-11-04): fix tickets for the diagnosis' CODE_BUG / DATA groups; imported
+  // here so the run, the controller and the night report resolve it without another edit to SelfReviewModule.
+  imports: [PrismaModule, AiGatewayModule, SelfReviewTicketsModule],
   providers: [
     LessonsService,
     { provide: LESSONS_READER, useExisting: LessonsService },

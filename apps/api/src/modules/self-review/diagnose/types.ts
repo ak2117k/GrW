@@ -33,12 +33,33 @@ export const MISS_CATEGORIES = [
 ] as const;
 export type MissCategory = (typeof MISS_CATEGORIES)[number];
 
+/**
+ * The root cause class of a diagnosed group (2026-11-04, wrong-decision loop spec goal 4 / S8). It sits beside the
+ * free-text `cause` (kept: stored diagnoses, lessons and the web read it), so the field is `causeType`.
+ * DATA = missing/stale/wrong input; SETTING = a tunable threshold is off; REASONING = an AI's judgement or prompt;
+ * CODE_BUG = the code did what its own comment/spec says it shouldn't; NOISE = nothing could have known.
+ */
+export const FIX_CAUSES = ['DATA', 'SETTING', 'REASONING', 'CODE_BUG', 'NOISE'] as const;
+export type FixCause = (typeof FIX_CAUSES)[number];
+
+/** A proposed code/data fix written by the diagnosis for a CODE_BUG or DATA group (becomes a fix ticket). */
+export interface TicketProposal {
+  title: string;
+  proposedChange: string;
+  files: string[];
+  testDescription: string;
+}
+
 /** One diagnosed group of misses (validated). */
 export interface DiagnosedMiss {
   /** Only refIds that were in the input survive validation; at least one. */
   refIds: string[];
   cause: string;
   category: MissCategory;
+  /** The cause class (absent on pre-d8 diagnoses, or when the reply's value was not one of FIX_CAUSES). */
+  causeType?: FixCause;
+  /** Only on CODE_BUG / DATA groups. */
+  ticket?: TicketProposal;
   /** A lesson that, followed, would have avoided these misses (new or existing key). */
   lessonKey?: string;
   lessonText?: string;

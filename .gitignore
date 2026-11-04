@@ -95,3 +95,6 @@ apps/api/data/
 /saas-*.png
 /.superpowers/
 .superpowers/
+
+# Self-review fix queue, pulled from prod at session start (scripts/ops/pull-fix-queue.sh)
+docs/self-review/fix-queue.md

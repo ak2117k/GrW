@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] }; exitNoise?: unknown[]; engine?: { decisions: unknown[]; trades: unknown[] }; setups?: Array<Record<string, unknown>> } = {}) {
+function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] }; exitNoise?: unknown[]; engine?: { decisions: unknown[]; trades: unknown[] }; setups?: Array<Record<string, unknown>>; loop?: { grading?: unknown; grades?: unknown; tickets?: unknown; alert?: unknown } } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -81,6 +81,11 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     clock,
     { 'exit.openingGuardMin': 15, 'exit.persistMinSec': 120 },
     o.diagnosis as never,
+    undefined,
+    o.loop?.grading as never,
+    o.loop?.grades as never,
+    o.loop?.tickets as never,
+    o.loop?.alert as never,
   );
   return { svc, repo, sources, stored };
 }
@@ -419,5 +424,82 @@ describe('SelfReviewRunService — learning kinds (SIGNAL_JUDGE / PAPER_EXIT / E
     expect(sent.map((m) => m.kind).sort()).toEqual(['ENGINE_ENTRY', 'OVERNIGHT_VERDICT', 'PAPER_EXIT', 'SCORECARD_TOTAL', 'SIGNAL_JUDGE']);
     const finish = t.repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { byKind: Record<string, unknown> } }];
     expect(finish[1].summary.byKind).toMatchObject({ SIGNAL_JUDGE: { n: 2, wrong: 1, nullCount: 1 }, PAPER_EXIT: { n: 1, wrong: 1 }, ENGINE_ENTRY: { n: 1, wrong: 1 } });
+  });
+});
+
+describe('SelfReviewRunService — wrong-decision loop (2026-11-04)', () => {
+  const wrongRow = (id: string, over: Record<string, unknown> = {}) => ({
+    id, sessionDate: '2026-10-21', decisionType: 'ENTRY_BLOCKED', detector: null, symbol: 'NIFTY', mode: 'live', chosen: 'blocked', alternative: 'take',
+    pnlChosen: 0, pnlAlternative: 6000, deltaRupees: 6000, horizon: 'close', verdict: 'WRONG', reason: 'risk_manager block', ...over,
+  });
+  const ticket = { title: 'Paper trades counted against the live limit', proposedChange: 'count live only', files: ['apps/api/src/modules/risk-manager/risk.service.ts'], testDescription: 'paper does not block live' };
+  afterEach(() => {
+    delete process.env.SELF_REVIEW_DECISION_LOOP;
+  });
+
+  it('grades S first, hands WRONG/DETECTOR rows to the diagnosis as DECISION:<type>, writes the ticket and the summary line', async () => {
+    const grading = { gradeSession: jest.fn(async () => ({ graded: 14, wrong: 2, unscorable: 1, byType: { EXIT: 9, ENTRY_BLOCKED: 5 } })) };
+    const grades = { wrongSince: jest.fn(async () => [wrongRow('g1'), wrongRow('g0', { sessionDate: '2026-10-19', verdict: 'RIGHT' }), wrongRow('d1', { decisionType: 'DETECTOR', detector: 'LIVE_NOT_PLACED', deltaRupees: null, verdict: 'WRONG' })]) };
+    const tickets = { upsert: jest.fn(async (d: { key: string; title: string }) => ({ key: d.key, title: d.title, occurrences: 1, status: 'OPEN' })) };
+    const alert = jest.fn(async () => true);
+    const diagnose = jest.fn(async () => ({ misses: [{ refIds: ['dg:g1'], cause: 'paper counted', category: 'OTHER', causeType: 'CODE_BUG', ticket }] }));
+    const { svc, repo } = make({ diagnosis: { diagnose }, loop: { grading, grades, tickets, alert } });
+    await svc.run(NOW);
+    expect(grading.gradeSession).toHaveBeenCalledWith('2026-10-21', NOW);
+    // 10 sessions back from S (20 closed sessions are known; the 10th newest is the window's start).
+    expect((grades.wrongSince.mock.calls[0] as unknown as [string])[0] < '2026-10-21').toBe(true);
+    const misses = (diagnose.mock.calls[0] as unknown as [string, Array<{ kind: string; refId: string; score: number | null }>])[1];
+    expect(misses.filter((m) => m.kind.startsWith('DECISION:')).map((m) => `${m.kind}:${m.refId}`)).toEqual(['DECISION:DETECTOR:dg:d1', 'DECISION:ENTRY_BLOCKED:dg:g1']);
+    expect(tickets.upsert).toHaveBeenCalledTimes(1);
+    expect(alert).not.toHaveBeenCalled();
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { decisions: Record<string, unknown> & { items: Array<Record<string, unknown>> } } }];
+    const dec = finish[1].summary.decisions;
+    expect(dec).toMatchObject({ session: '2026-10-21', graded: 14, wrong: 2, unscorable: 1, tickets: [{ title: ticket.title, status: 'OPEN' }] });
+    expect(dec.reason).toBeUndefined();
+    expect(dec.items.find((i) => i.refId === 'dg:g1')).toMatchObject({ causeType: 'CODE_BUG', action: `ticket ${ticket.title}` });
+  });
+
+  it('nothing graded on a trading day alerts', async () => {
+    const grading = { gradeSession: jest.fn(async () => ({ graded: 0, wrong: 0, unscorable: 0, byType: {} })) };
+    const alert = jest.fn(async () => true);
+    const { svc, repo } = make({ loop: { grading, grades: { wrongSince: async () => [] }, alert } });
+    await svc.run(NOW);
+    expect(alert).toHaveBeenCalledWith('SELF_REVIEW_NOTHING_GRADED', expect.stringContaining('0 decisions graded'));
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { decisions: { graded: number; reason: string } } }];
+    expect(finish[1].summary.decisions).toMatchObject({ graded: 0, reason: expect.stringContaining('trading day') });
+  });
+
+  it('a weekend run re-reads the last session without alerting; the reason says why', async () => {
+    const grading = { gradeSession: jest.fn(async () => ({ graded: 0, wrong: 0, unscorable: 0, byType: {} })) };
+    const alert = jest.fn(async () => true);
+    const { svc, repo } = make({ loop: { grading, alert } });
+    await svc.run(new Date('2026-10-24T13:30:00Z')); // Sat 19:00 IST → S = Fri 10-23
+    expect(alert).not.toHaveBeenCalled();
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { decisions: { session: string; reason: string } } }];
+    expect(finish[1].summary.decisions).toMatchObject({ session: '2026-10-23', reason: expect.stringContaining('weekend') });
+  });
+
+  it('a throwing grader or ledger costs only the loop step', async () => {
+    const grading = { gradeSession: jest.fn(async () => { throw new Error('boom'); }) };
+    const grades = { wrongSince: jest.fn(async () => { throw new Error('no table'); }) };
+    const alert = jest.fn(async () => true);
+    const { svc, repo } = make({ loop: { grading, grades, alert } });
+    expect(await svc.run(NOW)).toMatchObject({ started: true, runId: 'run1' });
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; error: string }];
+    expect(finish[1].status).toBe('DONE');
+    expect(finish[1].error).toMatch(/decision grading: boom.*decision ledger: no table/);
+    expect(alert).toHaveBeenCalledTimes(1);
+  });
+
+  it('SELF_REVIEW_DECISION_LOOP=off ⇒ no grading, no ledger, no alert, no decisions block', async () => {
+    process.env.SELF_REVIEW_DECISION_LOOP = 'off';
+    const grading = { gradeSession: jest.fn() };
+    const alert = jest.fn();
+    const { svc, repo } = make({ loop: { grading, alert } });
+    await svc.run(NOW);
+    expect(grading.gradeSession).not.toHaveBeenCalled();
+    expect(alert).not.toHaveBeenCalled();
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: Record<string, unknown> }];
+    expect(finish[1].summary.decisions).toBeUndefined();
   });
 });

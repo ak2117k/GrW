@@ -3225,6 +3225,28 @@ model TuningOverride {
   @@map("tuning_overrides")
 }
 
+/// A fix ticket the nightly self-review wrote for a repeated CODE_BUG / DATA cause of wrong decisions (2026-11-04,
+/// wrong-decision loop). One row per stable key (cause + component); a repeat bumps occurrences / lastSeen / cost.
+/// Never changes code: served at GET /api/self-review/fix-queue and pulled into docs/self-review/fix-queue.md.
+model FixTicket {
+  id              String   @id @default(cuid())
+  key             String   @unique // e.g. 'code-bug:risk-manager-risk-manager.service'
+  cause           String // CODE_BUG | DATA
+  title           String
+  evidence        Json // {cause, sessions[], kinds[], symbols[], refIds[], reopened?[]}
+  proposedChange  String   @map("proposed_change")
+  files           String[] @default([])
+  testDescription String   @default("") @map("test_description")
+  status          String   @default("OPEN") // OPEN | DONE | WONTFIX
+  occurrences     Int      @default(1)
+  costRupees      Float    @default(0) @map("cost_rupees") // ₹ per lot net of the wrong decisions it explains
+  firstSeen       DateTime @default(now()) @map("first_seen") @db.Timestamptz(6)
+  lastSeen        DateTime @default(now()) @map("last_seen") @db.Timestamptz(6)
+
+  @@index([status, lastSeen])
+  @@map("fix_tickets")
+}
+
 /// Stock big-move model (docs/superpowers/plans/2026-10-22-stock-move-contract.md): one row per F&O stock per
 /// scoring date. Written by the MBM service (grw_ai), read by the API. SHADOW until the owner approves points.
 model StockMoveScore {

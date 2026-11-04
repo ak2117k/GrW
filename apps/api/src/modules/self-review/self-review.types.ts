@@ -91,6 +91,8 @@ export interface RunSummary {
   engine?: import('./domain/engine-trades').EngineSummary;
   /** NEWS_IMPACT: hit rates by news source and by material type + mean |move| per called magnitude, session and rolling 20. */
   news?: { session: import('./domain/news-impact-scorer').NewsImpactSummary; rolling20: import('./domain/news-impact-scorer').NewsImpactSummary };
+  /** The wrong-decision loop (2026-11-04): graded / wrong / unscorable for S, S's wrong items with cause and action, tickets. */
+  decisions?: import('./tickets/decision-loop').DecisionLoopSummary & { wrongInWindow?: number };
 }
 
 export interface ChannelStats {

@@ -1,6 +1,9 @@
-import { Controller, Get, HttpCode, Param, Post, Query } from '@nestjs/common';
+import { Controller, Get, HttpCode, Optional, Param, Post, Query, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { AdminOnly, CurrentUser } from '../../../common/decorators';
 import { SelfReviewService } from '../services/self-review.service';
+import { renderFixQueueMd, type FixTicketRecord } from '../tickets/fix-queue';
+import { FixTicketRepository } from '../tickets/fix-ticket.repository';
 
 /**
  * /api/self-review (contract §API). GETs are open to the authenticated owner (global JwtAuthGuard);
@@ -8,7 +11,11 @@ import { SelfReviewService } from '../services/self-review.service';
  */
 @Controller('api/self-review')
 export class SelfReviewController {
-  constructor(private readonly service: SelfReviewService) {}
+  constructor(
+    private readonly service: SelfReviewService,
+    /** Fix tickets (2026-11-04, wrong-decision loop); absent ⇒ the queue is empty. */
+    @Optional() private readonly tickets?: FixTicketRepository,
+  ) {}
 
   @Get('latest')
   latest() {
@@ -54,6 +61,20 @@ export class SelfReviewController {
   @HttpCode(200)
   reject(@Param('id') id: string, @CurrentUser('userId') userId?: string) {
     return this.service.reject(id, userId ?? null);
+  }
+
+  /**
+   * The dev fix queue: OPEN first, then cost, then lastSeen. `format=md` answers text/markdown (the shape
+   * scripts/ops/pull-fix-queue.sh writes to docs/self-review/fix-queue.md); otherwise a bare array.
+   * `status` narrows (OPEN | DONE | WONTFIX).
+   */
+  @Get('fix-queue')
+  async fixQueue(@Res({ passthrough: true }) res: Response, @Query('format') format?: string, @Query('status') status?: string): Promise<FixTicketRecord[] | string> {
+    const s = status && ['OPEN', 'DONE', 'WONTFIX'].includes(status.toUpperCase()) ? status.toUpperCase() : undefined;
+    const rows = this.tickets ? await this.tickets.queue(s) : [];
+    if ((format ?? '').toLowerCase() !== 'md') return rows;
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    return renderFixQueueMd(rows);
   }
 
   @AdminOnly()

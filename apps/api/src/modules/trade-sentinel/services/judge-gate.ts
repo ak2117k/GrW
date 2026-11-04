@@ -192,16 +192,39 @@ export function isAdverseMove(
  * expiry day — unchanged. EQ_INTRADAY counts to the MIS square-off instead
  * (`eqSquareOffLeadMin` earlier), and stays in the window once past it.
  * EQ_DELIVERY has no close risk and is never in it.
+ *
+ * A carry-forward F&O position (`productType` CARRYFORWARD / NRML) is not in it
+ * either, except on its expiry day. Prod 2026-11-04: LAURUSLABS 2600 CE (NRML, 19
+ * days to expiry) was sold at 15:24 on "8 minutes to close, no time to recover" —
+ * the user had chosen to hold it overnight, so the close was never its deadline.
+ * `productType` null (unknown) keeps the window exactly as before.
  */
 export function hardRiskWindow(
   cfg: Pick<JudgeGateConfig, 'closeGuardMin' | 'expiryCloseMin' | 'eqSquareOffLeadMin'>,
   segment: Segment | undefined,
   minutesToClose: number | null,
   expiryToday: boolean,
+  productType: string | null = null,
 ): boolean {
   if (minutesToClose === null || segment === 'EQ_DELIVERY') return false;
+  if (segment !== undefined && isDerivativeSegment(segment) && !expiryToday && isCarryForwardProduct(productType)) return false;
   const left = minutesToDeadline(cfg, segment, minutesToClose);
   return left <= cfg.closeGuardMin || (expiryToday && left <= cfg.expiryCloseMin);
+}
+
+/**
+ * A carry-forward product as Angel's position book spells it (`producttype`
+ * CARRYFORWARD; NRML in the broker's own UI): the user chose overnight at entry.
+ */
+export function isCarryForwardProduct(productType: string | null | undefined): boolean {
+  const p = String(productType ?? '').trim().toUpperCase();
+  return p === 'CARRYFORWARD' || p === 'NRML';
+}
+
+/** An intraday (MIS) product: the broker squares it off before the close. */
+export function isIntradayProduct(productType: string | null | undefined): boolean {
+  const p = String(productType ?? '').trim().toUpperCase();
+  return p === 'INTRADAY' || p === 'MIS';
 }
 
 /** Minutes to the position's own deadline: the MIS square-off for EQ_INTRADAY, else the exchange close. */

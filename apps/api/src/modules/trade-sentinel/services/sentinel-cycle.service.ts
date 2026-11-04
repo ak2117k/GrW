@@ -35,6 +35,7 @@ import {
 } from './judge-gate';
 import { squareOffLook, type SquareOffDecision, type SquareOffLook } from './square-off-look';
 import { OWNER_ALERTS, type OwnerAlert, type OwnerAlertPort } from '../ports/owner-alerts.port';
+import { CLOSE_PRODUCTS, NO_CLOSE_CONTEXT, type CloseContext, type CloseProductLookup } from '../ports/close-products.port';
 import type { Verdict as SentinelVerdict } from './sentinel-agent.service';
 import { ThesisService, isRetryable as isRetryableThesis, type EnsuredThesis } from './thesis.service';
 import { SentinelAgentService } from './sentinel-agent.service';
@@ -674,7 +675,19 @@ export class SentinelCycleService {
     // Target ladder for real positions (ports/ladder-plans.port.ts). Optional: absent or null (the paper
     // cycle, TARGET_LADDER=off) ⇒ no ladder — every packet and exit exactly as before.
     @Optional() @Inject(LADDER_PLANS) private readonly ladderPlans?: LadderPlanReader | null,
+    // Intraday carry (2026-11-04, ports/close-products.port.ts): the position's product and its
+    // CARRY/EXIT close window. Optional: absent ⇒ product unknown, every look exactly as before.
+    @Optional() @Inject(CLOSE_PRODUCTS) private readonly closeProducts?: CloseProductLookup | null,
   ) {}
+
+  /** The position's close context (product + carry window). Never throws: a faulty lookup is "unknown". */
+  private closeContextFor(entry: RosterEntry): CloseContext {
+    try {
+      return this.closeProducts?.closeContextFor(entry) ?? NO_CLOSE_CONTEXT;
+    } catch {
+      return NO_CLOSE_CONTEXT;
+    }
+  }
 
   /**
    * One full cycle, judgements included: resolves only once every judgement this
@@ -1488,6 +1501,7 @@ export class SentinelCycleService {
     const cfg = this.gateCfg;
     if (!cfg?.squareOffLook) return null;
     const mtc = minutesToSessionClose(now, entry.exchange);
+    const close = this.closeContextFor(entry);
     return squareOffLook({
       cfg,
       segment: tick.segment,
@@ -1497,6 +1511,8 @@ export class SentinelCycleService {
       expiryToday: tick.expiry !== null && tick.expiry === istWallClock(now).slice(0, 10),
       nowMs: now.getTime(),
       last: last ? { verdict: String(last.verdict), createdAt: new Date(last.createdAt) } : null,
+      productType: close.productType,
+      carry: close.carry,
     });
   }
 
@@ -1542,7 +1558,7 @@ export class SentinelCycleService {
     const mtc = minutesToSessionClose(now, entry.exchange);
     const left = mtc.available ? mtc.value : null;
     const expiryToday = tick.expiry !== null && tick.expiry === istWallClock(now).slice(0, 10);
-    const hardRisk = hardRiskWindow(cfg, tick.segment, left, expiryToday);
+    const hardRisk = hardRiskWindow(cfg, tick.segment, left, expiryToday, this.closeContextFor(entry).productType);
 
     // An adverse move since the last judgement, while losing. Segment-aware: cash
     // equity is measured in its own noise units (see isAdverseMove).

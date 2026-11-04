@@ -74,6 +74,9 @@ import { THESIS_PROMPT_VERSION } from './thesis-prompt';
  * squareOffDecision in the field list and one reading line for it. A SUFFIX after +e1:
  * `v9+l1+d1+e1+s1`. Off, byte-identical. The packet carries the key only inside a position's
  * hard-risk window before its deadline, so every other packet describes an absent key.
+ * +s2 (2026-11-04, intraday carry): the same switch, its reading line reworded — BROKER_SQUARE_OFF
+ * covers any intraday (MIS) position, closeChoice CARRY_OR_EXIT reads HOLD as CARRY, and a
+ * carry-forward position is held overnight by the user's choice (the close is no reason to exit).
  *
  * FROM +a1 AN EIGHTH SWITCH, FLOOR_HARD_EXIT (fixed anchors + the hard floor, 2026-10-29; ON unless
  * exactly `false`, OFF without a ConfigService; only with exit discipline on): money.anchors in the
@@ -405,11 +408,15 @@ function withAnchors(text: string, on: boolean, delta: boolean): string {
  * The stamp suffix for the deadline look (SENTINEL_SQUARE_OFF_LOOK, on unless exactly `false`,
  * OFF without a ConfigService): `v9+l1+d1+e1` becomes `v9+l1+d1+e1+s1`. Off, byte-identical.
  */
-export const SQUARE_OFF_VERSION_SUFFIX = '+s1';
+export const SQUARE_OFF_VERSION_SUFFIX = '+s2';
 
-/** The +s1 reading line, after the trigger line (and the +d1 lines when present). Ends with a newline. */
+/**
+ * The +s2 reading line (was +s1 until 2026-11-04), after the trigger line (and the +d1 lines when
+ * present). Ends with a newline. Prod 2026-11-04: the judge argued "8 minutes to close, no time to
+ * recover" for a carry-forward LAURUSLABS option with 19 days left — hence the carry-forward sentence.
+ */
 export const SQUARE_OFF_READING_LINE =
-  '- squareOffDecision, present only in the last minutes before this position\'s deadline, makes this look a decision with a deadline: deadline says what happens then (BROKER_SQUARE_OFF: the broker closes an intraday cash position at market; SESSION_CLOSE or EXPIRY_CLOSE: the exchange close), deadlineIst and minutesLeft say when, look says whether this is the FIRST decision, the FINAL re-look or another look inside the window, and choice states the two options. Weigh exiting now at the current price against what the deadline will do to the position anyway; a verdict other than EXIT_NOW accepts that outcome, so say in reason why it beats exiting now.\n';
+  '- squareOffDecision, present only in the last minutes before this position\'s deadline, makes this look a decision with a deadline: deadline says what happens then (BROKER_SQUARE_OFF: the broker closes an intraday (MIS) position at market; SESSION_CLOSE or EXPIRY_CLOSE: the exchange close), deadlineIst and minutesLeft say when, look says whether this is the FIRST decision, the FINAL re-look or another look inside the window, and choice states the two options. Weigh exiting now at the current price against what the deadline will do to the position anyway; a verdict other than EXIT_NOW accepts that outcome, so say in reason why it beats exiting now. With closeChoice CARRY_OR_EXIT the choice is CARRY or EXIT for an intraday position: HOLD means CARRY (converted to carry-forward and held overnight with the gap risk), any other verdict means EXIT; weigh the overnight gap, the days to expiry and theta, and the trade\'s state now. When squareOffDecision is absent near the close, the close is not this position\'s deadline: a carry-forward position is held overnight by the user\'s choice, and the session close is not a reason to exit it.\n';
 
 /** The +s1 field list and reading line into a rendered prompt; fails rather than drift if the anchors move. */
 function withSquareOff(text: string, on: boolean, delta: boolean): string {

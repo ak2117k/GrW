@@ -1,4 +1,4 @@
-import { parseJudgeGateConfig } from './judge-gate';
+import { hardRiskWindow, parseJudgeGateConfig } from './judge-gate';
 import { squareOffLook, type SquareOffInput } from './square-off-look';
 
 const cfg = parseJudgeGateConfig({});
@@ -77,5 +77,59 @@ describe('squareOffLook — the deadline look (prod JPL-EQ 2026-10-29: no look b
     expect(squareOffLook(input(ist(15, 10), { kind: 'HOLDING' }))).toBeNull();
     expect(squareOffLook(input(ist(15, 10), { minutesToClose: null }))).toBeNull();
     expect(squareOffLook(input(ist(15, 10), { cfg: parseJudgeGateConfig({ SENTINEL_SQUARE_OFF_LOOK: 'false' }) }))).toBeNull();
+  });
+});
+
+describe('squareOffLook — product type (prod 2026-11-04 LAURUSLABS 2600 CE NRML sold at 15:24 on "8 minutes to close")', () => {
+  const opt = { segment: 'OPT' as const, exchange: 'NFO' };
+  it('F&O CARRYFORWARD, non-expiry, 8 min to close → null (no fire, no framing)', () => {
+    expect(squareOffLook(input(ist(15, 22), { ...opt, productType: 'CARRYFORWARD' }))).toBeNull();
+    expect(squareOffLook(input(ist(15, 22), { ...opt, productType: 'NRML', last: null }))).toBeNull();
+  });
+
+  it('F&O CARRYFORWARD on expiry day → EXPIRY_CLOSE look as today', () => {
+    const r = squareOffLook(input(ist(15, 0), { ...opt, productType: 'CARRYFORWARD', expiryToday: true }))!;
+    expect(r.decision).toMatchObject({ deadline: 'EXPIRY_CLOSE', minutesLeft: 30, look: 'FIRST' });
+    expect(r.fire?.name).toBe('square-off-due');
+  });
+
+  it('F&O INTRADAY → SESSION_CLOSE look as today (no carry window given); null product → as today', () => {
+    for (const productType of ['INTRADAY', null]) {
+      expect(squareOffLook(input(ist(15, 19), { ...opt, productType }))).toBeNull();
+      const r = squareOffLook(input(ist(15, 20), { ...opt, productType }))!;
+      expect(r.decision).toMatchObject({ deadline: 'SESSION_CLOSE', deadlineIst: '15:30', minutesLeft: 10, look: 'FIRST' });
+      expect(r.decision.closeChoice).toBeUndefined();
+    }
+  });
+
+  it('F&O INTRADAY with the carry window: ONE CARRY/EXIT look against the broker MIS square-off, no re-look', () => {
+    const carry = { leadMin: 15, windowMin: 10 };
+    expect(squareOffLook(input(ist(15, 4, 59), { ...opt, productType: 'INTRADAY', carry }))).toBeNull();
+    const r = squareOffLook(input(ist(15, 5, 10), { ...opt, productType: 'INTRADAY', carry }))!;
+    expect(r.fire?.name).toBe('square-off-due');
+    expect(r.fire?.detail).toContain('close decision');
+    expect(r.decision).toMatchObject({ deadline: 'BROKER_SQUARE_OFF', deadlineIst: '15:15', minutesLeft: 10, look: 'FIRST', closeChoice: 'CARRY_OR_EXIT' });
+    expect(r.decision.choice).toContain('HOLD means CARRY');
+    const later = squareOffLook(input(ist(15, 11), { ...opt, productType: 'INTRADAY', carry, last: verdictAt(ist(15, 6)) }))!;
+    expect(later.fire).toBeNull();
+    expect(later.decision.look).toBe('IN_WINDOW');
+    // Past the square-off: no fire (the broker has closed it).
+    expect(squareOffLook(input(ist(15, 16), { ...opt, productType: 'INTRADAY', carry, last: null }))!.fire).toBeNull();
+  });
+
+  it('carry window on expiry day or on a carry-forward position is ignored (expiry look / none)', () => {
+    const carry = { leadMin: 15, windowMin: 10 };
+    expect(squareOffLook(input(ist(15, 0), { ...opt, productType: 'INTRADAY', carry, expiryToday: true }))!.decision.deadline).toBe('EXPIRY_CLOSE');
+    expect(squareOffLook(input(ist(15, 8), { ...opt, productType: 'CARRYFORWARD', carry }))).toBeNull();
+  });
+});
+
+describe('hardRiskWindow — product type', () => {
+  it('a carry-forward F&O position is outside the close window except on expiry day; null keeps today', () => {
+    expect(hardRiskWindow(cfg, 'OPT', 8, false, 'CARRYFORWARD')).toBe(false);
+    expect(hardRiskWindow(cfg, 'OPT', 8, true, 'CARRYFORWARD')).toBe(true);
+    expect(hardRiskWindow(cfg, 'OPT', 8, false, 'INTRADAY')).toBe(true);
+    expect(hardRiskWindow(cfg, 'OPT', 8, false, null)).toBe(true);
+    expect(hardRiskWindow(cfg, 'OPT', 8, false)).toBe(true);
   });
 });

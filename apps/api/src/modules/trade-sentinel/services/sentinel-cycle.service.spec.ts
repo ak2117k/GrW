@@ -597,7 +597,9 @@ describe('SentinelCycleService — shadow mode is structural', () => {
     // (ports/owner-alerts.port.ts, type-only: a Telegram message, bound in the module).
     // The 19th the LADDER_PLANS port (ports/ladder-plans.port.ts, type-only: a READ-ONLY view of
     // signal_orders and sentinel_verdicts for the target ladder, bound in the module).
-    expect(injected).toHaveLength(19);
+    // The 20th the CLOSE_PRODUCTS port (ports/close-products.port.ts, type-only: a synchronous
+    // in-memory product cache for the intraday close decision, bound in the module; 2026-11-04).
+    expect(injected).toHaveLength(20);
     // `TickSource` is an interface, so paramtypes emits Object for it and Nest
     // cannot resolve it by type. Without an explicit token Task 12 could not
     // register an adapter without editing this file.

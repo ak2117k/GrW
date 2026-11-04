@@ -51,7 +51,8 @@ import { MACRO_CUES } from './ports/market-cues.port';
 import { SentinelOvernightService } from './services/sentinel-overnight.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
-import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
+import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, withSessionExitTuning, type ExitTuningReader } from '../exit-discipline/config';
+import { SESSION_TUNING } from '../self-review/tuning/tunables';
 import { REJUDGE_CONFIG, parseRejudgeConfig } from './services/rejudge-suppression';
 import { EXIT_ATTEMPTS, FUTILE_REJUDGE_CONFIG, parseFutileRejudgeConfig } from './services/futile-rejudge';
 import { JUDGE_GATE_CONFIG, parseJudgeGateConfig } from './services/judge-gate';
@@ -218,7 +219,12 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     // Exit discipline (docs/superpowers/specs/2026-10-14-exit-discipline-design.md):
     // the parsed EXIT_DISCIPLINE_* config, and the candles_1m reader the tick
     // source measures the noise unit from — a DATABASE read, never a broker call.
-    { provide: EXIT_DISCIPLINE_CONFIG, useFactory: () => parseExitDisciplineConfig(process.env) },
+    // 2026-11-05: floor arm/trail + spike-bank N may be self-review overrides, fixed per session (SESSION_TUNING).
+    {
+      provide: EXIT_DISCIPLINE_CONFIG,
+      useFactory: (tuning?: ExitTuningReader) => withSessionExitTuning(parseExitDisciplineConfig(process.env), tuning),
+      inject: [{ token: SESSION_TUNING, optional: true }],
+    },
     // Re-judge suppression (default ON; SENTINEL_REJUDGE_SUPPRESSION=false rolls back).
     { provide: REJUDGE_CONFIG, useFactory: () => parseRejudgeConfig(process.env) },
     // Futile re-judge suppression (default ON; SENTINEL_FUTILE_REJUDGE_SUPPRESSION=false rolls back):

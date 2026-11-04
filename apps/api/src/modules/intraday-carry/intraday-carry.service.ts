@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../common/utils/boot-jobs';
@@ -14,7 +14,8 @@ import { paperTrackerId } from '../trade-sentinel/paper/paper-tracker';
 import { isIntradayProduct } from '../trade-sentinel/services/judge-gate';
 import { paperCloseEffect } from '../paper-sentinel/paper-exit';
 import { CloseProductBook } from './close-product-book';
-import { CARRY_EXCHANGES, describeCarryConfig, isLiveCarryUser, parseCarryConfig, type CarryConfig } from './domain/carry-config';
+import { CARRY_EXCHANGES, describeCarryConfig, isLiveCarryUser, parseCarryConfig, withCarryTuning, type CarryConfig, type CarryTuningReader } from './domain/carry-config';
+import { SESSION_TUNING } from '../self-review/tuning/tunables';
 import { afterConversion, decideClose, type CloseAction, type CloseOutcome } from './domain/carry-decision';
 import { openRowFor, verifyConversion, type BookRow } from './domain/verify-conversion';
 import { IntradayCarryRepository } from './repositories/intraday-carry.repository';
@@ -105,6 +106,8 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     private readonly verdicts: SentinelVerdictRepository,
     private readonly execRepo: AiExitExecutionRepository,
     @Inject(CARRY_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'minutesToClose'>,
+    /** Self-review session-open tunables (carry.decideByMin); absent ⇒ INTRADAY_CARRY_DECIDE_BY_MIN. */
+    @Optional() @Inject(SESSION_TUNING) private readonly sessionTuning?: CarryTuningReader,
   ) {}
 
   onModuleInit(): void {
@@ -245,7 +248,7 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     ]);
     const o = decideClose(
       { mode: 'live', userAllowed: true, productType, expiryToday: expiry.today, held, minutesLeft: w.minutesLeft, verdict, capExhausted },
-      this.cfg,
+      withCarryTuning(this.cfg, this.sessionTuning),
     );
     if (o.action === 'WAIT') return null;
     if (o.action === 'NONE' && !o.reason.startsWith('OWNER_HOLD')) return null;
@@ -428,7 +431,7 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     const expiryToday = tr.instrument.expiry ? istYmd(tr.instrument.expiry) === day : false;
     const o = decideClose(
       { mode: 'paper', userAllowed: true, productType: tr.positionType, expiryToday, held: false, minutesLeft: w.minutesLeft, verdict, capExhausted: false },
-      this.cfg,
+      withCarryTuning(this.cfg, this.sessionTuning),
     );
     if (o.action === 'WAIT' || o.action === 'NONE') return;
     const ltp = num((verdict?.packet as { position?: { ltp?: unknown } } | null)?.position?.ltp);

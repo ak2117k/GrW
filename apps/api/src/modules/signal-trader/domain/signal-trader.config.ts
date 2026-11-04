@@ -137,6 +137,35 @@ export function parseJudgeDefault(raw: string | undefined, problems: string[]): 
   return 'skip';
 }
 
+/** The reader shape of the self-review tunables (self-review/tuning/tunables.ts TuningReader). */
+export type SignalTuningReader = { get<T extends number | boolean>(target: string, fallback: T): T };
+
+/**
+ * Self-review overrides of the judge (2026-11-05 wrong-decision loop, S7): `signal.judgeMinConfidence`
+ * (integer 50–80) and `signal.judgeDefaultTake` (boolean) — read from the SESSION-OPEN reader, so a change
+ * lands at the next session's open. Bounded again here: a bad / throwing answer keeps the env value.
+ * No reader, or no override ⇒ `cfg` itself (exactly SIGNAL_JUDGE_MIN_CONFIDENCE / SIGNAL_JUDGE_DEFAULT).
+ */
+export function withSignalTuning(cfg: SignalTraderConfig, tuning: SignalTuningReader | null | undefined): SignalTraderConfig {
+  if (!tuning) return cfg;
+  let minConf = cfg.judgeMinConfidence;
+  let takeDefault = cfg.judgeDefault === 'take';
+  try {
+    const v = tuning.get('signal.judgeMinConfidence', cfg.judgeMinConfidence);
+    if (Number.isInteger(v) && v >= 50 && v <= 80) minConf = v;
+  } catch {
+    /* keep the env value */
+  }
+  try {
+    const v = tuning.get('signal.judgeDefaultTake', takeDefault);
+    if (typeof v === 'boolean') takeDefault = v;
+  } catch {
+    /* keep the env value */
+  }
+  const judgeDefault: SignalJudgeDefault = takeDefault ? 'take' : 'skip';
+  return minConf === cfg.judgeMinConfidence && judgeDefault === cfg.judgeDefault ? cfg : { ...cfg, judgeMinConfidence: minConf, judgeDefault };
+}
+
 /** The SIGNAL_LIVE_KINDS kinds (the token OPT expands to CE + PE). */
 export type SignalLiveKind = 'CE' | 'PE' | 'FUT' | 'EQ';
 

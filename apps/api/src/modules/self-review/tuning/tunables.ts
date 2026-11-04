@@ -44,6 +44,20 @@ export const STOCK_MOVE_POINTS_TARGET = 'scorecard.stockMove.points';
  */
 export const MBM_PACKET_TARGET = 'mbm.packet';
 
+/**
+ * 2026-11-05 wrong-decision loop (spec 2026-11-04-self-review-wrong-decision-loop-design.md S2/S7). Read
+ * through {@link SESSION_TUNING}: an override takes effect at the next IST session open, never mid-session.
+ * `default: null` = the consumer's env value is the default (SIGNAL_JUDGE_MIN_CONFIDENCE, FLOOR_ARM_N, ...),
+ * so with no override every consumer runs exactly today's value.
+ */
+export const JUDGE_MIN_CONFIDENCE_TARGET = 'signal.judgeMinConfidence';
+export const JUDGE_DEFAULT_TAKE_TARGET = 'signal.judgeDefaultTake';
+export const FLOOR_ARM_N_TARGET = 'exit.floorArmN';
+export const FLOOR_TRAIL_N_TARGET = 'exit.floorTrailN';
+export const SPIKE_BANK_RISE_N_TARGET = 'exit.spikeBankRiseN';
+export const SPIKE_BANK_TRAIL_N_TARGET = 'exit.spikeBankTrailN';
+export const CARRY_DECIDE_BY_TARGET = 'carry.decideByMin';
+
 /** Exit defaults are the env-parsed config (15 / 120 when unset); the bounds are tighter than env's. */
 export const EXIT_OPENING_GUARD_DEFAULT = 15;
 export const EXIT_PERSIST_MIN_DEFAULT = 120;
@@ -57,10 +71,33 @@ export const TUNABLES: Readonly<Record<string, Tunable>> = Object.freeze({
   [PERSIST_MIN_TARGET]: { kind: 'number', default: EXIT_PERSIST_MIN_DEFAULT, min: 60, max: 600, integer: true },
   [STOCK_MOVE_POINTS_TARGET]: { kind: 'number', default: 0, min: 0, max: 1, integer: true },
   [MBM_PACKET_TARGET]: { kind: 'boolean', default: false },
+  // Code defaults today: 60 / take / 1.5 / 2.0 / 2.5 / 1.0 / 6 (env may differ: the consumer's value wins).
+  [JUDGE_MIN_CONFIDENCE_TARGET]: { kind: 'number', default: null, min: 50, max: 80, integer: true },
+  [JUDGE_DEFAULT_TAKE_TARGET]: { kind: 'boolean', default: true },
+  [FLOOR_ARM_N_TARGET]: { kind: 'number', default: null, min: 1.0, max: 3.0, integer: false },
+  [FLOOR_TRAIL_N_TARGET]: { kind: 'number', default: null, min: 1.0, max: 3.5, integer: false },
+  [SPIKE_BANK_RISE_N_TARGET]: { kind: 'number', default: null, min: 1.5, max: 4.0, integer: false },
+  [SPIKE_BANK_TRAIL_N_TARGET]: { kind: 'number', default: null, min: 0.5, max: 2.0, integer: false },
+  [CARRY_DECIDE_BY_TARGET]: { kind: 'number', default: null, min: 4, max: 9, integer: true },
 });
 
-/** Words no self-modifiable target may contain, whatever the allow-list says. */
-const FORBIDDEN = /(daily.?loss|max.?loss|position.?size|kill|hold.?switch|\bhold\b|exit.?cap|cap$|auto.?exit|autoexit|enable|mode|broker|credential|secret|password|api.?key|risk)/i;
+/** The targets read at session open ({@link SESSION_TUNING}), not live ({@link TUNING_READER}). */
+export const SESSION_TARGETS: readonly string[] = [
+  JUDGE_MIN_CONFIDENCE_TARGET,
+  JUDGE_DEFAULT_TAKE_TARGET,
+  FLOOR_ARM_N_TARGET,
+  FLOOR_TRAIL_N_TARGET,
+  SPIKE_BANK_RISE_N_TARGET,
+  SPIKE_BANK_TRAIL_N_TARGET,
+  CARRY_DECIDE_BY_TARGET,
+];
+
+/**
+ * Words no self-modifiable target may contain, whatever the allow-list says. 2026-11-05 (the loop now
+ * applies changes itself): widened to ANY `hold` (hold list / hold switch), lots, trades per day, loss
+ * limits / stops, daily caps, per-trade / per-underlying limits and sizes — CLAUDE.md §9, never tunable.
+ */
+const FORBIDDEN = /(daily.?loss|max.?loss|loss.?limit|loss.?stop|position.?size|size|kill|hold|lot|trades.?per.?day|max.?trades|per.?trade|per.?underlying|daily.?cap|exit.?cap|cap$|auto.?exit|autoexit|enable|mode|broker|credential|secret|password|api.?key|risk)/i;
 
 export function isForbiddenTarget(target: string): boolean {
   return FORBIDDEN.test(target);
@@ -100,6 +137,13 @@ export interface TuningReader {
 
 /** The DI token consumers inject (`@Optional()`): absent ⇒ every value is the consumer's default. */
 export const TUNING_READER = Symbol('TUNING_READER');
+
+/**
+ * The SESSION-OPEN reader (S7): the same `get(target, default)` contract, but the values are fixed per IST
+ * session date — an override applied today is served from tomorrow's open (session-tuning.service.ts).
+ * Inject `@Optional()`: absent ⇒ every value is the consumer's default.
+ */
+export const SESSION_TUNING = Symbol('SESSION_TUNING');
 
 /** A reader that always answers the default (tests, and modules booted without self-review). */
 export const DEFAULT_TUNING: TuningReader = { get: (_target, fallback) => fallback };

@@ -3,8 +3,13 @@ import { clampTunable, isAllowedTarget, isForbiddenTarget, TUNABLES, validateTun
 describe('self-review allow-list', () => {
   it('lists exactly the contract targets', () => {
     expect(Object.keys(TUNABLES).sort()).toEqual([
+      'carry.decideByMin',
+      'exit.floorArmN',
+      'exit.floorTrailN',
       'exit.openingGuardMin',
       'exit.persistMinSec',
+      'exit.spikeBankRiseN',
+      'exit.spikeBankTrailN',
       'mbm.packet',
       'scorecard.factor.expiry.weight',
       'scorecard.factor.fii_dii.weight',
@@ -15,6 +20,8 @@ describe('self-review allow-list', () => {
       'scorecard.factor.oi.weight',
       'scorecard.factor.vix.weight',
       'scorecard.stockMove.points',
+      'signal.judgeDefaultTake',
+      'signal.judgeMinConfidence',
     ]);
     for (const t of Object.keys(TUNABLES)) expect(isForbiddenTarget(t)).toBe(false);
   });
@@ -52,5 +59,27 @@ describe('self-review allow-list', () => {
     expect(clampTunable('exit.openingGuardMin', 35)).toBe(30);
     expect(clampTunable('exit.persistMinSec', 900)).toBe(600);
     expect(clampTunable('exit.persistMinSec', 10)).toBe(60);
+  });
+
+  it('the wrong-decision loop tunables: bounds, env-derived defaults', () => {
+    expect(TUNABLES['signal.judgeMinConfidence']).toEqual({ kind: 'number', default: null, min: 50, max: 80, integer: true });
+    expect(TUNABLES['signal.judgeDefaultTake']).toEqual({ kind: 'boolean', default: true });
+    expect(TUNABLES['exit.floorArmN']).toMatchObject({ min: 1.0, max: 3.0, integer: false, default: null });
+    expect(TUNABLES['exit.floorTrailN']).toMatchObject({ min: 1.0, max: 3.5, integer: false, default: null });
+    expect(TUNABLES['exit.spikeBankRiseN']).toMatchObject({ min: 1.5, max: 4.0, integer: false, default: null });
+    expect(TUNABLES['exit.spikeBankTrailN']).toMatchObject({ min: 0.5, max: 2.0, integer: false, default: null });
+    expect(TUNABLES['carry.decideByMin']).toMatchObject({ min: 4, max: 9, integer: true, default: null });
+    expect(validateTunable('signal.judgeMinConfidence', 49).ok).toBe(false);
+    expect(validateTunable('signal.judgeMinConfidence', 62.5).ok).toBe(false);
+    expect(validateTunable('exit.floorTrailN', 2.25)).toEqual({ ok: true, value: 2.25 });
+    expect(validateTunable('carry.decideByMin', 10).ok).toBe(false);
+  });
+
+  it.each([
+    'risk.maxDailyLoss', 'signal.maxDailyLoss', 'signal.lots', 'signal.maxLots', 'signal.defaultLots', 'signal.tradesPerDay', 'signal.maxTradesPerDay',
+    'exit.lossLimit', 'exit.hardLossLimit', 'exit.killSwitch', 'exit.holdList', 'hold', 'exit.dailyCap', 'exit.dailyExitCap',
+    'signal.maxLossPerTrade', 'exit.lossPerUnderlying', 'signal.positionSize', 'signal.dailyLossStop',
+  ])('isForbiddenTarget rejects any name containing maxDailyLoss|lots|tradesPerDay|lossLimit|killSwitch|hold|dailyCap: %s', (t) => {
+    expect(isForbiddenTarget(t)).toBe(true);
   });
 });

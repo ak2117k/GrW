@@ -72,16 +72,19 @@ export function solveCycleSpike(i: {
   const all = [...samples.map((s) => s.px), ...barPx];
   const windowWorst = all.length === 0 ? null : dir > 0 ? Math.min(...all) : Math.max(...all);
 
+  // 2026-11-05: self-review session-open tunables (exit-discipline/config.ts withSessionExitTuning); absent ⇒ the constants.
+  const riseN = i.cfg.spikeBankRiseN ?? SPIKE_BANK_RISE_N;
+  const spikeTrailN = i.cfg.spikeBankTrailN ?? SPIKE_BANK_TRAIL_N;
   let latch = mem.latch ?? storedSpike(i.last, i.entryPrice);
   if (!latch) {
-    const r = spikeBankReading({ side: i.side, prevBest: mem.prevBest, best, windowWorst, n: i.nContract, riseN: SPIKE_BANK_RISE_N, noise: i.noise ?? null });
+    const r = spikeBankReading({ side: i.side, prevBest: mem.prevBest, best, windowWorst, n: i.nContract, riseN, noise: i.noise ?? null });
     if (r.spike && best !== null && windowWorst !== null && fin(i.nContract)) {
       latch = { at: i.now.toISOString(), from: windowWorst, to: best, riseN: r.riseInN, n: r2(i.nContract) };
     }
   }
   // The previous best only ever moves to a better price (a missing read never resets it).
   const prevBest = best === null ? mem.prevBest : mem.prevBest === null ? best : dir > 0 ? Math.max(mem.prevBest, best) : Math.min(mem.prevBest, best);
-  const trailN = latch ? Math.min(SPIKE_BANK_TRAIL_N, i.cfg.floorTrailN) : i.cfg.floorTrailN;
+  const trailN = latch ? Math.min(spikeTrailN, i.cfg.floorTrailN) : i.cfg.floorTrailN;
   const block: PacketSpike = {
     latched: latch !== null,
     at: latch?.at ?? null,
@@ -90,7 +93,7 @@ export function solveCycleSpike(i: {
     riseN: latch?.riseN ?? null,
     n: latch?.n ?? null,
     trailN,
-    needRiseN: SPIKE_BANK_RISE_N,
+    needRiseN: riseN,
     windowMin: SPIKE_BANK_WINDOW_MIN,
   };
   return { block, trailN, memory: { entry: i.entryPrice, latch, prevBest, samples } };

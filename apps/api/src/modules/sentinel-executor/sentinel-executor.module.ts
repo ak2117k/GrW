@@ -19,7 +19,8 @@ import { ExitFillSettler } from './services/exit-fill-settler.service';
 import { EXIT_OUTCOME_CANDLES, EXIT_OUTCOME_USERS, ExitOutcomeService } from './services/exit-outcome.service';
 import { AiExitOutcomeRepository } from './repositories/ai-exit-outcome.repository';
 import { parseAutoExitConfig } from './domain/auto-exit.config';
-import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig } from '../exit-discipline/config';
+import { EXIT_DISCIPLINE_CONFIG, parseExitDisciplineConfig, withSessionExitTuning, type ExitTuningReader } from '../exit-discipline/config';
+import { SESSION_TUNING } from '../self-review/tuning/tunables';
 import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ManualExitService } from './services/manual-exit.service';
@@ -68,7 +69,12 @@ import { MbmModule } from '../mbm/mbm.module';
     // Exit discipline (docs/superpowers/specs/2026-10-14-exit-discipline-design.md): the AI exit gate.
     ExitGateRepository,
     ExitGateService,
-    { provide: EXIT_DISCIPLINE_CONFIG, useFactory: () => parseExitDisciplineConfig(process.env) },
+    // 2026-11-05: floor arm/trail + spike-bank N may be self-review overrides, fixed per session (SESSION_TUNING).
+    {
+      provide: EXIT_DISCIPLINE_CONFIG,
+      useFactory: (tuning?: ExitTuningReader) => withSessionExitTuning(parseExitDisciplineConfig(process.env), tuning),
+      inject: [{ token: SESSION_TUNING, optional: true }],
+    },
     // Outcome scoring reads hub tick bars from candles_1m (no broker call).
     { provide: EXIT_OUTCOME_CANDLES, useFactory: (prisma: PrismaService) => new PrismaCandleRepo(prisma as never), inject: [PrismaService] },
     { provide: EXIT_OUTCOME_USERS, useFactory: () => parseAutoExitConfig(process.env).userIds },

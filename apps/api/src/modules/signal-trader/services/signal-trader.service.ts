@@ -16,13 +16,14 @@ import { slEnforceability } from '../domain/execution';
 import { skipAlert, takeAlert, triggerArmedAlert, triggerFiredAlert, updateAlert } from '../domain/alerts';
 import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, triggerOf } from '../domain/trigger';
 import { SIGNAL_READY, SIGNAL_UPDATE, type SignalReadyEvent, type SignalUpdateEvent, type SignalView } from '../domain/signal.types';
-import { learning, liveLearning, liveRouteBlock, liveRouteSummary, type SignalTraderConfig } from '../domain/signal-trader.config';
+import { learning, liveLearning, liveRouteBlock, liveRouteSummary, withSignalTuning, type SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService, type CtxBlock } from './signal-context.service';
 import { lateRoom, type LateRoom } from '../domain/late-entry';
 import { channelStatsForJudge, labelChain, optionValue, packetMarketFacts } from '../domain/judge-noise';
 import { daysToExpiry } from '../domain/option-delta';
 import { LESSONS_READER, type InjectedLesson, type LessonsReader } from '../../self-review/lessons/types';
+import { SESSION_TUNING, type TuningReader } from '../../self-review/tuning/tunables';
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
 import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
@@ -221,6 +222,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     @Optional() @Inject(LESSONS_READER) private readonly lessons?: LessonsReader,
     /** The stored event calendar (SIGNAL_JUDGE_DEFAULT=take packets). Absent ⇒ `events: absent(...)`. */
     @Optional() @Inject(SIGNAL_MARKET_EVENTS) private readonly marketEvents?: EventContextDeps['repo'],
+    /** Self-review session-open tunables (judge min confidence / default take); absent ⇒ the env values. */
+    @Optional() @Inject(SESSION_TUNING) private readonly sessionTuning?: TuningReader,
   ) {}
 
   /** The judge's `events` block. Never throws; unwired / slow / failing ⇒ absent with the reason. */
@@ -470,7 +473,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
   /** The AI judge on a plan. Never throws (an unavailable judge = SKIP). */
   private async runJudge(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date, plan: EntryPlan, tradesToday: number | null, contract?: ResolvedContract | null): Promise<JudgeOutcome> {
-    const cfg = this.cfg;
+    // 2026-11-05: the judge's min confidence / default take may be self-review overrides (session-open values).
+    const cfg = withSignalTuning(this.cfg, this.sessionTuning);
     const owner = cfg.ownerUserId;
     const what = describeSignal(s);
     const cluster = await this.repo.cluster(e.clusterId ?? null).catch(() => null);

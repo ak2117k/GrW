@@ -89,6 +89,26 @@ export function parseCarryConfig(env: Env): CarryConfig {
   return { mode, users, leadMin, windowMin, decideByMin, safetyMin, retrySec, problems };
 }
 
+/** The reader shape of the self-review tunables (self-review/tuning/tunables.ts TuningReader). */
+export type CarryTuningReader = { get<T extends number | boolean>(target: string, fallback: T): T };
+
+/**
+ * 2026-11-05 wrong-decision loop (S7): `carry.decideByMin` (integer 4–9) as a self-review override, read from
+ * the SESSION-OPEN reader. It must still sit strictly between safetyMin and windowMin (the parse rule above);
+ * anything else, a throwing reader, or no override ⇒ `cfg` itself (INTRADAY_CARRY_DECIDE_BY_MIN, as today).
+ */
+export function withCarryTuning(cfg: CarryConfig, tuning: CarryTuningReader | null | undefined): CarryConfig {
+  if (!tuning) return cfg;
+  let v: number;
+  try {
+    v = tuning.get('carry.decideByMin', cfg.decideByMin);
+  } catch {
+    return cfg;
+  }
+  const ok = Number.isInteger(v) && v >= 4 && v <= 9 && v > cfg.safetyMin && v < cfg.windowMin;
+  return ok && v !== cfg.decideByMin ? { ...cfg, decideByMin: v } : cfg;
+}
+
 /** The CARRY/EXIT window for a position on `exchange`, or null when the decision does not apply there. */
 export function carryWindowFor(cfg: CarryConfig, exchange: string): CarryCloseWindow | null {
   if (cfg.mode === 'off') return null;

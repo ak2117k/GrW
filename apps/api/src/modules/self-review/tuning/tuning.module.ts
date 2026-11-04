@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { TUNING_READER } from './tunables';
+import { SESSION_TUNING, TUNING_READER } from './tunables';
+import { SessionTuningService } from './session-tuning.service';
 import { TuningService } from './tuning.service';
 
 /**
@@ -13,7 +14,10 @@ import { TuningService } from './tuning.service';
   providers: [
     { provide: TuningService, useFactory: (prisma: PrismaService) => TuningService.fromPrisma(prisma), inject: [PrismaService] },
     { provide: TUNING_READER, useExisting: TuningService },
+    // 2026-11-05: the session-open reader for the wrong-decision loop's tunables (S7).
+    { provide: SessionTuningService, useFactory: (prisma: PrismaService) => SessionTuningService.fromPrisma(prisma), inject: [PrismaService] },
+    { provide: SESSION_TUNING, useExisting: SessionTuningService },
   ],
-  exports: [TuningService, TUNING_READER],
+  exports: [TuningService, TUNING_READER, SessionTuningService, SESSION_TUNING],
 })
 export class SelfReviewTuningModule {}

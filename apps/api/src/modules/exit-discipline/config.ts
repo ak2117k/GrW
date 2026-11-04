@@ -78,6 +78,12 @@ export interface ExitDisciplineConfig {
    * tighter SPIKE_BANK_TRAIL_N trail (spike.ts). Off: the trail is floorTrailN, as before. Acts only with floorHardExit.
    */
   spikeBank: boolean;
+  /**
+   * The spike bank's rise / trail in contract N (2026-11-05: self-review tunables exit.spikeBankRiseN /
+   * exit.spikeBankTrailN). Absent ⇒ SPIKE_BANK_RISE_N / SPIKE_BANK_TRAIL_N, exactly as before.
+   */
+  spikeBankRiseN?: number;
+  spikeBankTrailN?: number;
   problems: string[];
 }
 
@@ -162,4 +168,51 @@ export function withExitTuning(cfg: ExitDisciplineConfig, tuning: { get<T extend
   const openingGuardMin = bounded('exit.openingGuardMin', cfg.openingGuardMin, 0, 30);
   const persistMinSec = bounded('exit.persistMinSec', cfg.persistMinSec, 60, 600);
   return openingGuardMin === cfg.openingGuardMin && persistMinSec === cfg.persistMinSec ? cfg : { ...cfg, openingGuardMin, persistMinSec };
+}
+
+/** The reader shape of the self-review tunables (self-review/tuning/tunables.ts TuningReader). */
+export type ExitTuningReader = { get<T extends number | boolean>(target: string, fallback: T): T };
+
+/** Bounds the loop may set (self-review/tuning/tunables.ts), checked again here. */
+const SESSION_EXIT_BOUNDS = {
+  floorArmN: ['exit.floorArmN', 1.0, 3.0],
+  floorTrailN: ['exit.floorTrailN', 1.0, 3.5],
+  spikeBankRiseN: ['exit.spikeBankRiseN', 1.5, 4.0],
+  spikeBankTrailN: ['exit.spikeBankTrailN', 0.5, 2.0],
+} as const;
+
+/**
+ * 2026-11-05 wrong-decision loop (S7): the floor's arm / trail N and the spike bank's rise / trail N as
+ * self-review tunables, read from the SESSION-OPEN reader (values fixed per IST session date). Returns
+ * `base` with those four fields as getters, so every holder of the injected EXIT_DISCIPLINE_CONFIG (the
+ * sentinel cycle, the tick source, the exit gate, paper exits) reads the session's value with no change of
+ * its own. No reader ⇒ `base` itself. No override / an out-of-range or throwing answer ⇒ the env value
+ * (FLOOR_ARM_N / FLOOR_TRAIL_N) or SPIKE_BANK_RISE_N / SPIKE_BANK_TRAIL_N — exactly today's behaviour.
+ */
+export function withSessionExitTuning(base: ExitDisciplineConfig, tuning: ExitTuningReader | null | undefined): ExitDisciplineConfig {
+  if (!tuning) return base;
+  const fallbacks: Record<keyof typeof SESSION_EXIT_BOUNDS, number> = {
+    floorArmN: base.floorArmN,
+    floorTrailN: base.floorTrailN,
+    spikeBankRiseN: base.spikeBankRiseN ?? SPIKE_BANK_RISE_N,
+    spikeBankTrailN: base.spikeBankTrailN ?? SPIKE_BANK_TRAIL_N,
+  };
+  const out = { ...base } as ExitDisciplineConfig;
+  for (const key of Object.keys(SESSION_EXIT_BOUNDS) as Array<keyof typeof SESSION_EXIT_BOUNDS>) {
+    const [target, lo, hi] = SESSION_EXIT_BOUNDS[key];
+    const fallback = fallbacks[key];
+    Object.defineProperty(out, key, {
+      enumerable: true,
+      get: (): number => {
+        let v: number;
+        try {
+          v = tuning.get(target, fallback);
+        } catch {
+          return fallback;
+        }
+        return typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : fallback;
+      },
+    });
+  }
+  return out;
 }

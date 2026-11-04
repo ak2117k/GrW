@@ -114,8 +114,12 @@ describe('evaluateExitGate', () => {
       anchors: { bestUnderlying: 9531, armUnderlying: 9547, packetLtp: 375.2, packetNetPnl: 119, freshNetPnl: 115 },
     };
 
-    it('appends the two hard-floor clauses; a pre-anchor packet keeps exactly the eight', () => {
-      expect(evaluateExitGate(PE, CFG).clauses.map((c) => c.id).slice(8)).toEqual(['FLOOR_HARD_GREEN_TO_RED', 'FLOOR_HARD_UNDERLYING_MOVE']);
+    /** The rules before FLOOR_LOCK_GREEN (2026-11-04). */
+    const NO_LOCK = { ...CFG, floorLockGreen: false };
+
+    it('appends the hard-floor clauses (the green lock third when on); a pre-anchor packet keeps exactly the eight', () => {
+      expect(evaluateExitGate(PE, CFG).clauses.map((c) => c.id).slice(8)).toEqual(['FLOOR_HARD_GREEN_TO_RED', 'FLOOR_HARD_UNDERLYING_MOVE', 'FLOOR_HARD_GREEN_LOCK']);
+      expect(evaluateExitGate(PE, NO_LOCK).clauses.map((c) => c.id).slice(8)).toEqual(['FLOOR_HARD_GREEN_TO_RED', 'FLOOR_HARD_UNDERLYING_MOVE']);
       expect(evaluateExitGate({ ...PE, anchors: undefined }, CFG).clauses).toHaveLength(8);
       expect(evaluateExitGate(PE, { ...CFG, floorHardExit: false }).clauses).toHaveLength(8);
     });
@@ -133,8 +137,8 @@ describe('evaluateExitGate', () => {
       expect(best).toMatchObject({ pass: true, measured: expect.objectContaining({ from: 'BEST', adverseMove: 25 }) });
     });
 
-    it('below the floor but still net green, the underlying 1.76 N from the best point: no hard-floor clause passes', () => {
-      const r = evaluateExitGate(PE, CFG);
+    it('green lock off: below the floor but still net green, the underlying 1.76 N from the best point — no hard-floor clause passes', () => {
+      const r = evaluateExitGate(PE, NO_LOCK);
       expect(r.floorHard).toBe(false);
       expect(clause(r, 'FLOOR_HARD_GREEN_TO_RED').pass).toBe(false);
       expect(clause(r, 'FLOOR_HARD_UNDERLYING_MOVE')).toMatchObject({ pass: false, measured: expect.objectContaining({ adverseMove: 22, needN: 2 }) });
@@ -150,8 +154,20 @@ describe('evaluateExitGate', () => {
       const red = { ...PE, ltpNow: 368, anchors: { ...PE.anchors!, packetLtp: 368.4, packetNetPnl: -18, freshNetPnl: -26 } };
       expect(evaluateExitGate(red, CFG)).toMatchObject({ justification: 'FLOOR_HARD_EXIT', floorHard: true });
       // One read still green, or one read back above the floor: not a hard exit.
-      expect(evaluateExitGate({ ...red, anchors: { ...red.anchors, packetNetPnl: 4 } }, CFG).floorHard).toBe(false);
+      expect(evaluateExitGate({ ...red, anchors: { ...red.anchors, packetNetPnl: 4 } }, NO_LOCK).floorHard).toBe(false);
       expect(evaluateExitGate({ ...red, anchors: { ...red.anchors, packetLtp: 377 } }, CFG).floorHard).toBe(false);
+    });
+
+    it('FLOOR_HARD_GREEN_LOCK (2026-11-04): below the floor on both reads and still net green ⇒ FLOOR_HARD_EXIT', () => {
+      const r = evaluateExitGate(PE, CFG);
+      expect(r).toMatchObject({ justified: true, justification: 'FLOOR_HARD_EXIT', floorHard: true });
+      expect(clause(r, 'FLOOR_HARD_GREEN_LOCK')).toMatchObject({ pass: true, measured: expect.objectContaining({ packetNetPnl: 119, freshNetPnl: 115 }) });
+      // Mixed reads (packet green, fresh red) are covered too — a broken floor never falls between the clauses.
+      expect(evaluateExitGate({ ...PE, anchors: { ...PE.anchors!, freshNetPnl: -3 } }, CFG).floorHard).toBe(true);
+      // One read back above the floor, or no net P&L at all: not a hard exit.
+      expect(evaluateExitGate({ ...PE, anchors: { ...PE.anchors!, packetLtp: 377 } }, CFG).floorHard).toBe(false);
+      const noNet = evaluateExitGate({ ...PE, anchors: { ...PE.anchors!, packetNetPnl: null, freshNetPnl: null } }, CFG);
+      expect(clause(noNet, 'FLOOR_HARD_GREEN_LOCK').pass).toBeNull();
     });
 
     it('hard risk still outranks the hard floor in the justification', () => {

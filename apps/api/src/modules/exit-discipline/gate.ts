@@ -102,7 +102,8 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig): GateE
 
   // 4. hard floor (hard-floor.ts), anchored packets only: the armed floor broken on BOTH reads — the
   // packet's premium and the executor's fresh one — AND net red on every net P&L read, or the
-  // underlying K·N against the position from the best point.
+  // underlying K·N against the position from the best point, or (FLOOR_LOCK_GREEN) net green on a read:
+  // with the green lock on, a floor broken on both reads with a known net P&L is an exit whatever its sign.
   const hard: ClauseResult[] = [];
   if (a) {
     const lt = [a.packetLtp, f.ltpNow].filter(fin);
@@ -120,6 +121,13 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig): GateE
       : res('FLOOR_HARD_UNDERLYING_MOVE', bothBelow && fromBest >= cfg.floorHardExitN * nU - 1e-9,
         { floorBroken: bothBelow, floor: fp ?? null, ltpNow: f.ltpNow, underlying: u, bestUnderlying: a.bestUnderlying, adverseMove: fromBest, nUnderlying: nU, needN: cfg.floorHardExitN },
         'armed floor broken on both reads AND the underlying moved K noise units against the position from the best point'));
+    if (cfg.floorLockGreen) {
+      hard.push(nets.length === 0
+        ? res('FLOOR_HARD_GREEN_LOCK', null, { floorBroken: bothBelow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl }, 'no net P&L to compare')
+        : res('FLOOR_HARD_GREEN_LOCK', bothBelow && nets.some((x) => x >= 0),
+          { floorBroken: bothBelow, floor: fp ?? null, packetLtp: a.packetLtp, ltpNow: f.ltpNow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl },
+          'armed floor broken on both reads while the position is still net green (FLOOR_LOCK_GREEN: lock the green in)'));
+    }
   }
 
   // 5. target ladder (target-ladder.ts), enforced packets only: the last target was reached, or the ladder's

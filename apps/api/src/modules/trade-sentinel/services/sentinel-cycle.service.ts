@@ -53,7 +53,8 @@ import {
 import { exitConfirmFire } from '../tripwires/exit-confirm';
 import { solveCycleFloor } from './cycle-floor';
 import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
-import { confirmHardFloor, hardFloorReading, hardLossLimit, hardLossTrip, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { defaultLadderStop, ladderReading, ladderTargets, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
 import { LADDER_PLANS, type LadderPlan, type LadderPlanReader } from '../ports/ladder-plans.port';
@@ -454,6 +455,10 @@ interface TrackerState {
   hardFloor?: HardFloorMemo;
   /** HARD_LOSS_EXIT confirmation memo (hardLossFor). */
   hardLoss?: HardFloorMemo;
+  /** HARD_LOSS_EXIT: epoch ms a loss held inside the noise band was last logged (once per 5 min). */
+  hardLossHeldLoggedAt?: number;
+  /** SPIKE BANK (cycle-spike.ts): the in-process half of the latch (previous best, window prices). */
+  spike?: SpikeMemory;
   /** FLOOR_HARD_EXIT: epoch ms a held position's suppressed trip was last logged (once per 30 min). */
   hardFloorHeldLoggedAt?: number;
   /**
@@ -539,6 +544,8 @@ export const FLOOR_HARD_EXIT_FIRE = 'floor-hard-exit';
 export const FLOOR_HARD_EXIT_STAMP = 'rule:floor-hard/1';
 /** FLOOR_HARD_EXIT: every rule verdict's reason starts with this (the executor row's verdictReason). */
 export const FLOOR_HARD_EXIT_REASON_PREFIX = 'FLOOR_HARD_EXIT (code rule, not a judgement)';
+/** HARD_LOSS_EXIT: a loss held inside the ₹limit–₹cap noise band is logged at most this often per position. */
+export const HARD_LOSS_HELD_LOG_MS = 5 * 60_000;
 
 /** Discipline off: used when no EXIT_DISCIPLINE_CONFIG is bound, so the cycle behaves exactly as before. */
 const DISCIPLINE_OFF = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
@@ -858,8 +865,32 @@ export class SentinelCycleService {
     // Exit discipline §4: the noise-aware floor, ratcheted like the latch above
     // (in-process memory + the last live packet). Null when discipline is off or
     // N is unknown — the fixed floor then stays in charge, exactly as before.
+    // SPIKE BANK (cycle-spike.ts): a fast new best latches the tighter trail BEFORE the floor is solved,
+    // so the floor this pass already trails by it. Durable half: the last live packet's money.spike.
+    const spikeSolve = solveCycleSpike({
+      cfg: this.discipline ?? DISCIPLINE_OFF,
+      side: tick.side,
+      entryPrice: tick.entryPrice,
+      ltp: tick.ltp,
+      peak: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,
+      nContract: tick.noise?.contract?.n ?? null,
+      bars: tick.contractBars ?? null,
+      now,
+      memory: this.stateFor(entry).spike ?? EMPTY_SPIKE,
+      last,
+      // The classifier plug (NoiseOpinion): nothing supplies one yet.
+      noise: null,
+    });
+    this.stateFor(entry).spike = spikeSolve.memory;
+    if (spikeSolve.block?.latched && spikeSolve.block.at === now.toISOString()) {
+      this.logger.log(
+        `[spike-bank] latched — ${entry.symbol} (tracker ${entry.trackerId}): ${spikeSolve.block.from} → ${spikeSolve.block.to} ` +
+          `(${spikeSolve.block.riseN} N of ${spikeSolve.block.n}) inside ${spikeSolve.block.windowMin} min; the floor now trails by ${spikeSolve.trailN} N`,
+      );
+    }
     const floorSolve = solveCycleFloor({
       cfg: this.discipline ?? DISCIPLINE_OFF,
+      trailN: spikeSolve.trailN,
       segment: tick.segment,
       side: tick.side,
       entryPrice: tick.entryPrice,
@@ -899,6 +930,7 @@ export class SentinelCycleService {
       noiseFloor: floorSolve.noiseFloor,
       ...(anchorSolve ? { anchors: { ...anchorSolve.anchors, hardExitN: this.discipline!.floorHardExitN } } : {}),
       ...(ladder ? { ladder: ladder.block } : {}),
+      ...(spikeSolve.block ? { spike: spikeSolve.block } : {}),
     };
 
     const capture = await this.wallsFor(entry, tick, now);
@@ -1138,17 +1170,43 @@ export class SentinelCycleService {
    * refuse it as OWNER_HOLD anyway; the suppressed trip is logged once per 30 min.
    */
   /** HARD_LOSS_EXIT: REAL derivative positions only (never paper); the owner's HOLD list is respected like the floor. */
+  /**
+   * NOISE-AWARE (2026-11-04, hard-floor.ts hardLossReading): at −HARD_LOSS_CAP_RUPEES it exits outright; between
+   * −HARD_LOSS_EXIT_RUPEES and the cap only once the underlying is HARD_LOSS_NOISE_N of its noise units against
+   * the position from its entry (else its best point). An unmeasurable move is the plain ₹limit rule (fail safe).
+   */
   private hardLossFor(entry: RosterEntry, state: TrackerState, tick: TickReading, now: Date): { reading: HardFloorReading; floor: number; netPnl: number } | null {
-    const limit = hardLossLimit();
-    if (limit === null || entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !isDerivativeSegment(tick.segment)) return null;
+    const cfg = hardLossConfig();
+    if (cfg.limit === null || entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !isDerivativeSegment(tick.segment)) return null;
     const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side });
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
-    const trip = hardLossTrip(green.netPnl, limit) && !(hold && isHeldPosition(hold, entry));
+    const loss = hardLossReading({
+      netPnl: green.netPnl,
+      cfg,
+      exposure: exposureOf(entry.symbol, tick.side),
+      underlying: tick.underlyingLtp,
+      entryUnderlying: tick.entryUnderlying ?? null,
+      bestUnderlying: tick.anchors?.best?.underlying ?? null,
+      nUnderlying: tick.noise?.underlying1m?.n ?? null,
+      // The classifier plug (NoiseOpinion): nothing supplies one yet ⇒ the N test.
+      noise: null,
+    });
+    if (!loss.trip && (loss.band === 'HOLD_UNDER_N' || loss.band === 'HOLD_NOISE')) {
+      if (now.getTime() - (state.hardLossHeldLoggedAt ?? Number.NEGATIVE_INFINITY) >= HARD_LOSS_HELD_LOG_MS) {
+        state.hardLossHeldLoggedAt = now.getTime();
+        this.logger.warn(
+          `[hard-loss] HELD in the noise band — ${entry.symbol} (tracker ${entry.trackerId}): net ₹${Math.round(green.netPnl)} ≤ −₹${cfg.limit} ` +
+            `but the underlying is ${loss.adverse} (${loss.adverseN} N) against from ${loss.ref === 'ENTRY' ? 'entry' : 'the best point'} ` +
+            `(< ${cfg.noiseN} N); exits at −₹${cfg.cap} regardless`,
+        );
+      }
+    }
+    const trip = loss.trip && !(hold && isHeldPosition(hold, entry));
     const c = confirmHardFloor(state.hardLoss, trip, now.getTime());
     state.hardLoss = c.memo;
     if (!c.fire) return null;
-    const reading: HardFloorReading = { trip: true, rule: 'MAX_LOSS', belowFloor: false, netRed: true, adverseFromBest: null, adverseFromBestN: null };
-    return { reading, floor: -limit, netPnl: green.netPnl };
+    const reading: HardFloorReading = { trip: true, rule: 'MAX_LOSS', belowFloor: false, netRed: true, adverseFromBest: null, adverseFromBestN: null, loss };
+    return { reading, floor: loss.band === 'CAP' && cfg.cap !== null ? -cfg.cap : -cfg.limit, netPnl: green.netPnl };
   }
 
   private hardFloorFor(
@@ -1177,6 +1235,9 @@ export class SentinelCycleService {
       bestUnderlying: tick.anchors.best?.underlying ?? null,
       nUnderlying: tick.noise?.underlying1m?.n ?? null,
       k: cfg.floorHardExitN,
+      lockGreen: cfg.floorLockGreen,
+      // The classifier plug (NoiseOpinion): nothing supplies one yet ⇒ the green lock trips.
+      noise: null,
     });
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
     if (reading.trip && hold && isHeldPosition(hold, entry)) {
@@ -1212,9 +1273,18 @@ export class SentinelCycleService {
   ): Promise<JudgeOutcome> {
     const r = hard.reading;
     const from = tick.anchors?.best;
+    const loss = r.loss;
     const detail =
       r.rule === 'MAX_LOSS'
-        ? `net ₹${Math.round(hard.netPnl)} reached the hard loss exit of ₹${-hard.floor} (HARD_LOSS_EXIT_RUPEES)`
+        ? loss?.band === 'CAP'
+          ? `net ₹${Math.round(hard.netPnl)} reached the absolute hard loss cap of ₹${-hard.floor} (HARD_LOSS_CAP_RUPEES)`
+          : loss?.band === 'BAND_UNDERLYING'
+          ? `net ₹${Math.round(hard.netPnl)} is past the hard loss exit of ₹${-hard.floor} and the underlying ${tick.underlyingLtp} is ${loss.adverse} (${loss.adverseN} N) against the position from ${loss.ref === 'ENTRY' ? 'entry' : 'its best point'} (≥ ${loss.noiseN} N, HARD_LOSS_NOISE_N)`
+          : loss?.band === 'BAND_UNMEASURED'
+          ? `net ₹${Math.round(hard.netPnl)} reached the hard loss exit of ₹${-hard.floor} (HARD_LOSS_EXIT_RUPEES; the underlying's move is unmeasurable, so the plain rule applies)`
+          : `net ₹${Math.round(hard.netPnl)} reached the hard loss exit of ₹${-hard.floor} (HARD_LOSS_EXIT_RUPEES)`
+        : r.rule === 'FLOOR_BREAK_GREEN'
+        ? `premium ${tick.ltp} below the armed floor ${hard.floor} while net ₹${Math.round(hard.netPnl)} is still green — locking the green in (FLOOR_LOCK_GREEN)`
         : r.rule === 'GREEN_TO_RED'
         ? `premium ${tick.ltp} below the armed floor ${hard.floor} and net ₹${Math.round(hard.netPnl)} — the trade turned red`
         : `premium ${tick.ltp} below the armed floor ${hard.floor}; underlying ${tick.underlyingLtp} is ${r.adverseFromBest} (${r.adverseFromBestN} N) against the position from ${from?.underlying} at its best point ${from?.ltp}`;

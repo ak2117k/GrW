@@ -24,7 +24,7 @@ import { normaliseSymbol } from '../symbols';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import { EXIT_DISCIPLINE_CONFIG, type ExitDisciplineConfig } from '../../exit-discipline/config';
 import { noiseFromBars, scaledUnderlyingNoise } from '../../exit-discipline/noise';
-import type { NoiseReading } from '../../exit-discipline/types';
+import type { MinuteBar, NoiseReading } from '../../exit-discipline/types';
 import { sessionFor } from '../market-sessions';
 import type { EquityLeg, EquityTickInputs } from '../services/equity-blocks';
 import { MinuteBarsReader } from './minute-bars.reader';
@@ -451,7 +451,14 @@ export class SentinelTickSource implements TickSource {
         : Promise.resolve({ count: null, items: null }),
     ]);
 
-    const noise = opts.closedSession ? null : await this.noiseFor(row, isCash, underlying);
+    const read = opts.closedSession ? null : await this.noiseFor(row, isCash, underlying);
+    const noise = read?.noise ?? null;
+    // NOISE-AWARE HARD LOSS: the underlying at entry (F&O, discipline on, a live read only).
+    const entryUnderlying = read && !isCash && underlying.token && underlying.exchange
+      ? await this.underlyingAtEntry(trackerId, row.entryTime, {
+          exchange: underlying.exchange, token: underlying.token, symbol: underlying.contract ?? underlying.name ?? underlying.token,
+        })
+      : null;
     // Equity spec §4: the equity block's market inputs — CASH only, so an F&O tick is unchanged.
     const equityInputs = isCash ? await this.equityInputsFor(trackerId, row, hub) : null;
     const news = mergeImpactNews(opts.closedSession ? [] : (this.impactBook?.freshFor(structureSymbol, Date.now()) ?? []), v2News?.fresh, legacyNews);
@@ -515,6 +522,8 @@ export class SentinelTickSource implements TickSource {
       factorValues: structure.factorValues,
       factorsReason: structure.factorsReason,
       noise,
+      // SPIKE BANK / NOISE-AWARE HARD LOSS inputs: only with discipline on (absent otherwise).
+      ...(read ? { contractBars: read.contractBars, entryUnderlying } : {}),
       ...(equityInputs ? { equityInputs } : {}),
     };
   }
@@ -529,7 +538,7 @@ export class SentinelTickSource implements TickSource {
     row: { exchange: string; token: string; symbol: string; userId?: string },
     isCash: boolean,
     underlying: Underlying,
-  ): Promise<TickReading['noise']> {
+  ): Promise<{ noise: TickReading['noise']; contractBars: MinuteBar[] } | null> {
     if (!this.discipline?.enabled || !this.minuteBars) return null;
     const now = new Date();
     const [cBars, uBars] = await Promise.all([
@@ -548,13 +557,41 @@ export class SentinelTickSource implements TickSource {
     const contract = noiseFromBars(cBars) ?? (isCash ? await this.cashDailyNoise(row, now) : null);
     const underlying1m = isCash ? contract : noiseFromBars(uBars);
     return {
-      contract,
-      underlying1m,
-      reason: contract
-        ? null
-        : 'no hub 1-minute bars for this contract in the last 120 minutes (needs MARKET_HUB_ENABLED + HUB_CANDLES_ENABLED and a live feed slot)' +
-          (isCash ? ", and no daily ATR14 on the stock's level book to fall back to" : ''),
+      noise: {
+        contract,
+        underlying1m,
+        reason: contract
+          ? null
+          : 'no hub 1-minute bars for this contract in the last 120 minutes (needs MARKET_HUB_ENABLED + HUB_CANDLES_ENABLED and a live feed slot)' +
+            (isCash ? ", and no daily ATR14 on the stock's level book to fall back to" : ''),
+      },
+      // The spike window needs only the last few minutes.
+      contractBars: cBars.slice(-10),
     };
+  }
+
+  /**
+   * NOISE-AWARE HARD LOSS: the underlying's stored 1-minute close at the position's entry (DB only, the
+   * same read as NIFTY-at-entry). A found close is kept for the position's life, a miss retried after
+   * {@link ANCHOR_MISS_RETRY_MS}. Null when none is stored — the band then measures from the best point.
+   */
+  private async underlyingAtEntry(trackerId: string, entryTime: Date, ref: { exchange: string; token: string; symbol: string }): Promise<number | null> {
+    if (!this.minuteBars) return null;
+    const key = `u:${trackerId}:${entryTime.getTime()}:${ref.exchange}:${ref.token}`;
+    let hit = this.niftyAnchors.get(key);
+    if (!hit || (hit.close === null && Date.now() - hit.at > ANCHOR_MISS_RETRY_MS)) {
+      let close: number | null = null;
+      try {
+        close = await this.minuteBars.closeAt(ref, entryTime);
+      } catch {
+        close = null;
+      }
+      hit = { close, at: Date.now() };
+      this.niftyAnchors.delete(key);
+      this.niftyAnchors.set(key, hit);
+      if (this.niftyAnchors.size > 500) this.niftyAnchors.delete(this.niftyAnchors.keys().next().value as string);
+    }
+    return hit.close;
   }
 
   /**

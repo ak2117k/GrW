@@ -32,11 +32,20 @@ export type PriceAnchor = { ltp: number; underlying: number | null; at: string }
  */
 export type FloorAnchors = { best: PriceAnchor | null; floorArm: PriceAnchor | null };
 
+/**
+ * The noise-vs-real opinion an exit decision point may take (owner 2026-11-04: "the engine identifies
+ * noise and chooses the exit"). The plug for a future classifier: TODAY NOTHING SUPPLIES ONE — every
+ * caller passes null — and null / UNKNOWN means exactly the code rules (lock-green floor break, spike
+ * bank, the ₹2k band's K·N underlying test). Where a decision point honours it is documented on it.
+ */
+export type NoiseVerdict = 'NOISE' | 'REAL' | 'UNKNOWN';
+export type NoiseOpinion = { verdict: NoiseVerdict; p?: number; source: string };
+
 export type ClauseId =
   | 'THESIS_INVALIDATION' | 'THESIS_LEVEL'
   | 'HARD_MAX_LOSS' | 'HARD_SESSION_CLOSE' | 'HARD_EXPIRY' | 'HARD_DAILY_LOSS'
   | 'FLOOR_BREACH_UNDERLYING_MOVE' | 'FLOOR_BREACH_VWAP'
-  | 'FLOOR_HARD_GREEN_TO_RED' | 'FLOOR_HARD_UNDERLYING_MOVE'
+  | 'FLOOR_HARD_GREEN_TO_RED' | 'FLOOR_HARD_UNDERLYING_MOVE' | 'FLOOR_HARD_GREEN_LOCK'
   | 'TARGET_LADDER';
 /** `pass: null` = could not be measured (an input was missing). */
 export interface ClauseResult {

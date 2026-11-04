@@ -35,6 +35,16 @@ export const GATE_LOAD_TIMEOUT_MS = 2000;
 export const FLOOR_HARD_CONFIRM_SEC = 20;
 /** Hard floor exit: after a rule EXIT_NOW is recorded, the rule stays quiet this long while the exit runs. */
 export const FLOOR_HARD_REFIRE_SEC = 120;
+/**
+ * SPIKE BANK (spike.ts, owner-approved 2026-11-04): a new best premium reached by a jump of at least
+ * SPIKE_BANK_RISE_N contract noise units (the floor's own N) above the lowest premium of the previous
+ * SPIKE_BANK_WINDOW_MIN minutes latches the position's trail from floorTrailN to SPIKE_BANK_TRAIL_N.
+ * Prod 2026-11-04 NIFTY 23650 PE: 141.7 → 155.6 in three minutes, the 2 N trail sat 12 points under
+ * the spike, and the snap-back sold the trade red.
+ */
+export const SPIKE_BANK_RISE_N = 2.5;
+export const SPIKE_BANK_WINDOW_MIN = 3;
+export const SPIKE_BANK_TRAIL_N = 1.0;
 
 export interface ExitDisciplineConfig {
   enabled: boolean;
@@ -57,6 +67,17 @@ export interface ExitDisciplineConfig {
   floorHardExit: boolean;
   /** FLOOR_HARD_EXIT_N (default 2, 1–6): K — the underlying's move against the position, in its own noise units, from the best point. */
   floorHardExitN: number;
+  /**
+   * FLOOR_LOCK_GREEN (ON unless exactly `false`; owner-approved 2026-11-04): an armed floor broken while
+   * the position is still net green is a hard-floor exit (FLOOR_BREAK_GREEN) — no K·N underlying move
+   * required. Off: only GREEN_TO_RED / HWM_UNDERLYING_MOVE, exactly as before. Acts only with floorHardExit.
+   */
+  floorLockGreen: boolean;
+  /**
+   * FLOOR_SPIKE_BANK (ON unless exactly `false`; owner-approved 2026-11-04): a fast new best latches the
+   * tighter SPIKE_BANK_TRAIL_N trail (spike.ts). Off: the trail is floorTrailN, as before. Acts only with floorHardExit.
+   */
+  spikeBank: boolean;
   problems: string[];
 }
 
@@ -85,6 +106,14 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
   if (hard !== '' && hard !== 'true' && hard !== 'false') {
     problems.push(`FLOOR_HARD_EXIT=${hard} is not true|false — keeping the hard floor exit ON`);
   }
+  const lock = (env.FLOOR_LOCK_GREEN ?? '').trim();
+  if (lock !== '' && lock !== 'true' && lock !== 'false') {
+    problems.push(`FLOOR_LOCK_GREEN=${lock} is not true|false — keeping the green-lock floor exit ON`);
+  }
+  const spike = (env.FLOOR_SPIKE_BANK ?? '').trim();
+  if (spike !== '' && spike !== 'true' && spike !== 'false') {
+    problems.push(`FLOOR_SPIKE_BANK=${spike} is not true|false — keeping the spike bank ON`);
+  }
   const d = EXIT_DISCIPLINE_DEFAULTS;
   return {
     enabled: raw !== 'false',
@@ -99,6 +128,8 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
     openingGuardMin: num(env, 'EXIT_OPENING_GUARD_MIN', d.openingGuardMin, int(0, 60), problems),
     floorHardExit: hard !== 'false',
     floorHardExitN: num(env, 'FLOOR_HARD_EXIT_N', d.floorHardExitN, real(1, 6), problems),
+    floorLockGreen: lock !== 'false',
+    spikeBank: spike !== 'false',
     problems,
   };
 }
@@ -107,7 +138,9 @@ export function describeExitDiscipline(c: ExitDisciplineConfig): string {
   return `${c.enabled ? 'ON' : 'OFF'} floorArmN=${c.floorArmN} floorTrailN=${c.floorTrailN} givebackN=${c.givebackN} ` +
     `gateCloseMin=${c.gateCloseMin} gateUnderlyingN=${c.gateUnderlyingN} ` +
     `persist=${c.persistWindowSec}s/${c.persistMinSec}s openingGuard=${c.openingGuardMin}m outcomeWindow=${c.outcomeWindowMin}m ` +
-    `floorHardExit=${c.floorHardExit ? `ON K=${c.floorHardExitN}` : 'off'}`;
+    `floorHardExit=${c.floorHardExit ? `ON K=${c.floorHardExitN}` : 'off'} ` +
+    `lockGreen=${c.floorLockGreen ? 'ON' : 'off'} ` +
+    `spikeBank=${c.spikeBank ? `ON ${SPIKE_BANK_RISE_N}N/${SPIKE_BANK_WINDOW_MIN}m→trail ${SPIKE_BANK_TRAIL_N}N` : 'off'}`;
 }
 
 /**

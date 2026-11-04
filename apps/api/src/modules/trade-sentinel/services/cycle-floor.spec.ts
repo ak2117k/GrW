@@ -41,6 +41,15 @@ describe('solveCycleFloor', () => {
     const r = solveCycleFloor({ ...BASE, holdingHigh: 527, memory: { armed: true, level: 531, entry: 500 } });
     expect(r.noiseFloor).toMatchObject({ armed: false });
   });
+  it('SPIKE BANK: a 1 N trail (cycle-spike.ts) trails the peak by 1 N; tighten-only keeps it when the latch arrives later', () => {
+    const r = solveCycleFloor({ ...BASE, trailN: 1 });
+    expect(r.noiseFloor!.level).toBeCloseTo(539.5 - 4.5, 2);
+    const first = solveCycleFloor(BASE);
+    const tightened = solveCycleFloor({ ...BASE, trailN: 1, memory: first.memory });
+    expect(tightened.noiseFloor!.level).toBeGreaterThan(first.noiseFloor!.level);
+    expect(solveCycleFloor({ ...BASE, trailN: 0 }).noiseFloor!.level).toBeCloseTo(539.5 - 9, 2);
+  });
+
   it('SHORT reads holdingLow as the peak', () => {
     const r = solveCycleFloor({ ...BASE, side: 'SHORT', entryPrice: 100, holdingHigh: 103, holdingLow: 94, nContract: 2 });
     expect(r.noiseFloor).toMatchObject({ armed: true });

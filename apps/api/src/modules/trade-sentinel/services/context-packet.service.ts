@@ -13,7 +13,8 @@ import { liveSessionClock } from '../overnight/overnight-calendar';
 import { MACRO_CUES, type MacroCuesReader } from '../ports/market-cues.port';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import type { CommodityCueKey, CommodityQuote, CueRecord, GiftGap, MarketCuesSnapshot, UsQuote } from '../../market-cues/market-cues.types';
-import type { Exposure, FloorAnchors, FloorBasis, NoiseFloor, NoiseReading, NoiseUnitValue, PriceAnchor } from '../../exit-discipline/types';
+import type { Exposure, FloorAnchors, FloorBasis, MinuteBar, NoiseFloor, NoiseReading, NoiseUnitValue, PriceAnchor } from '../../exit-discipline/types';
+import type { PacketSpike } from './cycle-spike';
 import { scaledUnderlyingNoise } from '../../exit-discipline/noise';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { underlyingAgainst } from '../../exit-discipline/hard-floor';
@@ -433,6 +434,18 @@ export interface TickSnapshot {
    * read; the packet then states `flow.noiseUnit` absent with this reason.
    */
   noise?: { contract: NoiseReading | null; underlying1m: NoiseReading | null; reason: string | null } | null;
+  /**
+   * SPIKE BANK: the contract's recent stored 1-minute bars (the ones its noise unit was read from), set by
+   * the tick source with exit discipline on. Read by the cycle's spike window only; never rendered.
+   */
+  contractBars?: MinuteBar[] | null;
+  /**
+   * NOISE-AWARE HARD LOSS: the underlying's stored 1-minute close at the position's entry (F&O only; null
+   * when no bar was stored). The reference the ₹limit–₹cap band measures the underlying's move from. Never rendered.
+   */
+  entryUnderlying?: number | null;
+  /** SPIKE BANK: set by the CYCLE only (cycle-spike.ts). Absent ⇒ the packet has no money.spike (byte-identical). */
+  spike?: PacketSpike | null;
   /** Exit discipline §4: set by the CYCLE only (like the latch); a tick source never sets it. */
   noiseFloor?: NoiseFloor | null;
   /**
@@ -531,6 +544,11 @@ export type ContextPacket = {
      * no ladder (paper, observe-only, or the switch off).
      */
     ladder?: PacketLadder;
+    /**
+     * SPIKE BANK (FLOOR_SPIKE_BANK): whether a fast new best latched the tighter trail, the jump that did,
+     * and the trail in force. Absent key ⇒ the switch off (byte-identical packet).
+     */
+    spike?: PacketSpike;
     mfe: number | null;
     mae: number | null;
   };
@@ -1408,6 +1426,8 @@ export class ContextPacketService {
         ...(anchors ? { anchors } : {}),
         // Only when the cycle read a ladder for this position; otherwise the key is absent.
         ...(tick.ladder ? { ladder: { ...tick.ladder, targets: [...tick.ladder.targets] } } : {}),
+        // Only when the cycle solved the spike bank (FLOOR_SPIKE_BANK on); otherwise the key is absent.
+        ...(tick.spike ? { spike: { ...tick.spike } } : {}),
         // Excursions are read from the position's side: a LONG's best case is
         // the high, a SHORT's is the low. Both are PRICES, not rupee figures.
         mfe: tick.side === 'LONG' ? tick.holdingHigh : tick.holdingLow,

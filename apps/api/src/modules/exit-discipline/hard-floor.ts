@@ -1,5 +1,5 @@
 import { FLOOR_HARD_CONFIRM_SEC, FLOOR_HARD_REFIRE_SEC } from './config';
-import type { Exposure, PositionSide } from './types';
+import type { Exposure, NoiseOpinion, PositionSide } from './types';
 
 /**
  * HARD FLOOR EXIT (owner-approved 2026-10-29: "measure from the best point, and make the floor a
@@ -18,11 +18,17 @@ import type { Exposure, PositionSide } from './types';
  *    the position from where it was at the position's BEST point (FLOOR_HARD_EXIT_N, default 2) —
  *    the trade is still green but the move that made it is clearly undone.
  *
+ *  - FLOOR_BREAK_GREEN (FLOOR_LOCK_GREEN, owner-approved 2026-11-04): the floor is broken and the
+ *    position is still net green — lock the green in, no underlying move required. Prod 2026-11-04
+ *    NIFTY 23650 PE: below the armed floor at +₹212 and +₹63, held because NIFTY was 1.8 N (< K) from
+ *    the best point, then sold by GREEN_TO_RED at −₹664. HWM_UNDERLYING_MOVE now fires only when the
+ *    green lock is off, the net P&L is unknown, or a NOISE opinion holds the green break.
+ *
  * A trip sells only once confirmed (`confirmHardFloor`): it must hold on two consecutive cycle reads
  * at least FLOOR_HARD_CONFIRM_SEC apart, so one print through the floor never sells. The exit goes
  * through the same verdict → executor → gate path as an AI EXIT_NOW (owner HOLD, F&O only, the cap).
  */
-export type HardFloorRule = 'GREEN_TO_RED' | 'HWM_UNDERLYING_MOVE' | 'MAX_LOSS';
+export type HardFloorRule = 'GREEN_TO_RED' | 'FLOOR_BREAK_GREEN' | 'HWM_UNDERLYING_MOVE' | 'MAX_LOSS';
 
 const fin = (x: number | null | undefined): x is number => typeof x === 'number' && Number.isFinite(x);
 const r2 = (x: number) => Math.round(x * 100) / 100;
@@ -49,6 +55,14 @@ export interface HardFloorInput {
   nUnderlying: number | null;
   /** FLOOR_HARD_EXIT_N. */
   k: number;
+  /** FLOOR_LOCK_GREEN: a broken floor that is still net green trips (FLOOR_BREAK_GREEN). Absent = off. */
+  lockGreen?: boolean;
+  /**
+   * The decision point's noise opinion (types.ts NoiseOpinion). Honoured ONLY by FLOOR_BREAK_GREEN: a
+   * NOISE opinion holds a green floor break (the K·N rule and GREEN_TO_RED still apply). Null / UNKNOWN
+   * / REAL ⇒ the green lock trips, exactly the code rule.
+   */
+  noise?: NoiseOpinion | null;
 }
 
 export interface HardFloorReading {
@@ -60,6 +74,8 @@ export interface HardFloorReading {
   /** Underlying points against the position from the best point; null when unmeasurable. */
   adverseFromBest: number | null;
   adverseFromBestN: number | null;
+  /** MAX_LOSS only: the hard loss reading that tripped (band, reference, move) — for the reason and the audit. */
+  loss?: HardLossReading;
 }
 
 export function hardFloorReading(i: HardFloorInput): HardFloorReading {
@@ -70,7 +86,9 @@ export function hardFloorReading(i: HardFloorInput): HardFloorReading {
   const n = fin(i.nUnderlying) && i.nUnderlying > 0 ? i.nUnderlying : null;
   const adverseN = adverse !== null && n !== null ? r2(adverse / n) : null;
   const moved = adverse !== null && n !== null && fin(i.k) && i.k > 0 && adverse >= i.k * n - 1e-9;
-  const rule: HardFloorRule | null = !belowFloor ? null : netRed ? 'GREEN_TO_RED' : moved ? 'HWM_UNDERLYING_MOVE' : null;
+  const green = fin(i.netPnl) && i.netPnl >= 0;
+  const lock = i.lockGreen === true && green && i.noise?.verdict !== 'NOISE';
+  const rule: HardFloorRule | null = !belowFloor ? null : netRed ? 'GREEN_TO_RED' : lock ? 'FLOOR_BREAK_GREEN' : moved ? 'HWM_UNDERLYING_MOVE' : null;
   return { trip: rule !== null, rule, belowFloor, netRed, adverseFromBest: adverse, adverseFromBestN: adverseN };
 }
 
@@ -150,4 +168,118 @@ export function hardLossLimit(env: Record<string, string | undefined> = process.
 
 export function hardLossTrip(netPnl: number | null | undefined, limit: number | null): boolean {
   return limit !== null && fin(netPnl) && netPnl <= -limit;
+}
+
+/** HARD_LOSS_CAP_RUPEES default: the absolute per-trade loss exit (no conditions). */
+export const HARD_LOSS_CAP_DEFAULT_RUPEES = 3000;
+/** HARD_LOSS_NOISE_N default: the underlying move, in its own noise units, that makes a ₹2k–cap loss real. */
+export const HARD_LOSS_NOISE_N_DEFAULT = 3;
+
+/**
+ * NOISE-AWARE HARD LOSS (owner-approved 2026-11-04). Prod 2026-11-04 NIFTY09NOV2623750PE (2 lots):
+ * the plain ₹2k rule sold at 142.1 (net −₹2299) with NIFTY only 1.83 N against the position; the
+ * premium bottomed at 137.2 two minutes later and ran to 184 by 11:36. A ₹2k loss inside ordinary
+ * noise is not a reason to sell; a ₹2k loss with the underlying clearly moved is.
+ *
+ *  - limit: HARD_LOSS_EXIT_RUPEES (unset / 0 / junk = the whole hard loss exit OFF, as before).
+ *  - cap:   HARD_LOSS_CAP_RUPEES (default 3000; 0 = no cap). Absolute: at or below −cap it exits.
+ *  - noiseN: HARD_LOSS_NOISE_N (default 3; 0 = no noise band). Between −limit and −cap the trade exits
+ *    only once the underlying is ≥ noiseN N against the position from its reference.
+ * The band is used only with a cap ABOVE the limit and noiseN > 0 — any other combination is the plain
+ * rule (net ≤ −limit, or the tighter cap), so a misconfiguration can never leave a loss uncapped.
+ */
+export interface HardLossConfig { limit: number | null; cap: number | null; noiseN: number | null }
+
+function envNum(raw: string | undefined, fallback: number): number | null {
+  const s = String(raw ?? '').trim();
+  if (s === '') return fallback;
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n === 0 ? null : n;
+}
+
+export function hardLossConfig(env: Record<string, string | undefined> = process.env): HardLossConfig {
+  return {
+    limit: hardLossLimit(env),
+    cap: envNum(env.HARD_LOSS_CAP_RUPEES, HARD_LOSS_CAP_DEFAULT_RUPEES),
+    noiseN: envNum(env.HARD_LOSS_NOISE_N, HARD_LOSS_NOISE_N_DEFAULT),
+  };
+}
+
+/** True when the ₹limit–₹cap band is noise-aware (else the plain rule). */
+export function hardLossBandOn(c: HardLossConfig): boolean {
+  return c.limit !== null && c.cap !== null && c.cap > c.limit && c.noiseN !== null && c.noiseN > 0;
+}
+
+export type HardLossBand =
+  /** net ≤ −cap: absolute. */
+  | 'CAP'
+  /** In the band and the underlying ≥ noiseN N against the position. */
+  | 'BAND_UNDERLYING'
+  /** In the band, the move unmeasurable (no N, no underlying, no reference) ⇒ the plain ₹limit rule: fail safe. */
+  | 'BAND_UNMEASURED'
+  /** In the band and a noise opinion said REAL. */
+  | 'BAND_REAL'
+  /** The band is off (see hardLossBandOn): net ≤ −limit, as before 2026-11-04. */
+  | 'PLAIN';
+export type HardLossHold = 'HOLD_UNDER_N' | 'HOLD_NOISE';
+
+export interface HardLossInput {
+  netPnl: number | null | undefined;
+  cfg: HardLossConfig;
+  exposure: Exposure | null;
+  underlying: number | null;
+  /** The underlying's 1-minute close at the position's entry (null when not stored). */
+  entryUnderlying: number | null;
+  /** The underlying at the position's best point (FloorAnchors.best.underlying) — the fallback reference. */
+  bestUnderlying: number | null;
+  nUnderlying: number | null;
+  /**
+   * The decision point's noise opinion (types.ts NoiseOpinion). Honoured ONLY inside the band: REAL ⇒
+   * exit, NOISE ⇒ hold to the cap. Never at the cap. Null / UNKNOWN ⇒ the noiseN underlying test.
+   */
+  noise?: NoiseOpinion | null;
+}
+
+export interface HardLossReading {
+  trip: boolean;
+  /** Why it tripped, or why a loss at/over the limit is being held; null when not at the limit. */
+  band: HardLossBand | HardLossHold | null;
+  /** Which reference the underlying move is measured from. */
+  ref: 'ENTRY' | 'BEST' | null;
+  adverse: number | null;
+  adverseN: number | null;
+  /** The thresholds in force (rupees, N). */
+  limit: number | null;
+  cap: number | null;
+  noiseN: number | null;
+}
+
+/**
+ * The move is measured from the position's ENTRY underlying (the 1-minute close at entry): the loss is
+ * measured from entry, so the move that matches it is the move since entry. Without one, from the BEST
+ * point: the best is at least as favourable as entry, so the move from it is at least as large — the
+ * fallback can only exit sooner, never later. Pure.
+ */
+export function hardLossReading(i: HardLossInput): HardLossReading {
+  const { limit, cap, noiseN } = i.cfg;
+  const refU = fin(i.entryUnderlying) ? i.entryUnderlying : fin(i.bestUnderlying) ? i.bestUnderlying : null;
+  const ref = fin(i.entryUnderlying) ? 'ENTRY' : fin(i.bestUnderlying) ? 'BEST' : null;
+  const adverse = underlyingAgainst(i.exposure, refU, i.underlying);
+  const n = fin(i.nUnderlying) && i.nUnderlying > 0 ? i.nUnderlying : null;
+  const adverseN = adverse !== null && n !== null ? r2(adverse / n) : null;
+  const out = (trip: boolean, band: HardLossReading['band']): HardLossReading => ({ trip, band, ref, adverse, adverseN, limit, cap, noiseN });
+  if (limit === null || !fin(i.netPnl)) return out(false, null);
+  const net = i.netPnl;
+  if (!hardLossBandOn(i.cfg)) {
+    const plain = cap !== null ? Math.min(limit, cap) : limit;
+    return net <= -plain ? out(true, cap !== null && cap < limit ? 'CAP' : 'PLAIN') : out(false, null);
+  }
+  if (net <= -(cap as number)) return out(true, 'CAP');
+  if (net > -limit) return out(false, null);
+  const v = i.noise?.verdict;
+  if (v === 'REAL') return out(true, 'BAND_REAL');
+  if (v === 'NOISE') return out(false, 'HOLD_NOISE');
+  if (adverse === null || n === null) return out(true, 'BAND_UNMEASURED');
+  return adverse >= (noiseN as number) * n - 1e-9 ? out(true, 'BAND_UNDERLYING') : out(false, 'HOLD_UNDER_N');
 }

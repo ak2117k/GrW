@@ -3,7 +3,7 @@ import { EXIT_DISCIPLINE_DEFAULTS, describeExitDiscipline, parseExitDisciplineCo
 describe('parseExitDisciplineConfig', () => {
   it('empty env = spec §10 defaults, ON', () => {
     const c = parseExitDisciplineConfig({});
-    expect(c).toEqual({ enabled: true, floorHardExit: true, ...EXIT_DISCIPLINE_DEFAULTS, problems: [] });
+    expect(c).toEqual({ enabled: true, floorHardExit: true, floorLockGreen: true, spikeBank: true, ...EXIT_DISCIPLINE_DEFAULTS, problems: [] });
     expect(EXIT_DISCIPLINE_DEFAULTS).toEqual({
       floorArmN: 1.5, floorTrailN: 2.0, givebackN: 1.5, gateCloseMin: 10, gateUnderlyingN: 1.0,
       persistWindowSec: 300, persistMinSec: 120, outcomeWindowMin: 60, openingGuardMin: 15, floorHardExitN: 2.0,
@@ -20,6 +20,14 @@ describe('parseExitDisciplineConfig', () => {
     const bad = parseExitDisciplineConfig({ FLOOR_HARD_EXIT_N: '0.5' });
     expect(bad.floorHardExitN).toBe(2);
     expect(bad.problems).toEqual([expect.stringMatching(/FLOOR_HARD_EXIT_N=0.5/)]);
+  });
+
+  it('FLOOR_LOCK_GREEN / FLOOR_SPIKE_BANK: off only for the exact word false; a typo stays ON and is reported', () => {
+    expect(parseExitDisciplineConfig({ FLOOR_LOCK_GREEN: 'false' }).floorLockGreen).toBe(false);
+    expect(parseExitDisciplineConfig({ FLOOR_SPIKE_BANK: 'false' }).spikeBank).toBe(false);
+    const typo = parseExitDisciplineConfig({ FLOOR_LOCK_GREEN: 'no', FLOOR_SPIKE_BANK: '0' });
+    expect(typo).toMatchObject({ floorLockGreen: true, spikeBank: true });
+    expect(typo.problems).toEqual([expect.stringMatching(/FLOOR_LOCK_GREEN=no/), expect.stringMatching(/FLOOR_SPIKE_BANK=0/)]);
   });
 
   it('only the exact word false turns it off; a typo stays ON (the narrower behaviour) and is reported', () => {
@@ -61,9 +69,10 @@ describe('parseExitDisciplineConfig', () => {
 
   it('describeExitDiscipline names every multiplier (the boot log)', () => {
     expect(describeExitDiscipline(parseExitDisciplineConfig({}))).toBe(
-      'ON floorArmN=1.5 floorTrailN=2 givebackN=1.5 gateCloseMin=10 gateUnderlyingN=1 persist=300s/120s openingGuard=15m outcomeWindow=60m floorHardExit=ON K=2',
+      'ON floorArmN=1.5 floorTrailN=2 givebackN=1.5 gateCloseMin=10 gateUnderlyingN=1 persist=300s/120s openingGuard=15m outcomeWindow=60m floorHardExit=ON K=2 lockGreen=ON spikeBank=ON 2.5N/3m→trail 1N',
     );
-    expect(describeExitDiscipline(parseExitDisciplineConfig({ FLOOR_HARD_EXIT: 'false' }))).toMatch(/ floorHardExit=off$/);
+    expect(describeExitDiscipline(parseExitDisciplineConfig({ FLOOR_HARD_EXIT: 'false' }))).toMatch(/ floorHardExit=off /);
+    expect(describeExitDiscipline(parseExitDisciplineConfig({ FLOOR_LOCK_GREEN: 'false', FLOOR_SPIKE_BANK: 'false' }))).toMatch(/ lockGreen=off spikeBank=off$/);
     expect(describeExitDiscipline(parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' }))).toMatch(/^OFF /);
   });
 });

@@ -23,6 +23,8 @@ export function solveCycleFloor(i: {
   cfg: ExitDisciplineConfig; segment: Segment; side: Side; entryPrice: number; qty: number;
   holdingHigh: number | null; holdingLow: number | null; nContract: number | null;
   memory: Memory; last: { packet?: unknown } | undefined;
+  /** SPIKE BANK (cycle-spike.ts): the trail in force for this position; absent ⇒ cfg.floorTrailN. */
+  trailN?: number;
 }): { noiseFloor: NoiseFloor | null; memory: Memory } {
   if (!i.cfg.enabled || i.nContract === null || !(i.nContract > 0)) return { noiseFloor: null, memory: EMPTY };
   const breakeven = breakevenPrice({ segment: i.segment, entryPrice: i.entryPrice, qty: i.qty, side: i.side });
@@ -32,7 +34,7 @@ export function solveCycleFloor(i: {
   const prevLevel = mem.level ?? stored.level;
   const nf = noiseAwareFloor({
     side: i.side, breakeven, peak: i.side === 'LONG' ? i.holdingHigh : i.holdingLow, n: i.nContract,
-    armN: i.cfg.floorArmN, trailN: i.cfg.floorTrailN, prevArmedLevel: prevLevel, latchedArmed: mem.armed || stored.armed,
+    armN: i.cfg.floorArmN, trailN: typeof i.trailN === 'number' && i.trailN > 0 ? i.trailN : i.cfg.floorTrailN, prevArmedLevel: prevLevel, latchedArmed: mem.armed || stored.armed,
   });
   return { noiseFloor: nf, memory: nf.armed ? { armed: true, level: nf.level, entry: i.entryPrice } : { ...EMPTY, entry: i.entryPrice } };
 }

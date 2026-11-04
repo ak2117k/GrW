@@ -1,6 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '@/services/api';
 import type { Trade } from '@/types';
+import { useLiveRefresh } from './useLiveRefresh';
+
+/**
+ * Silent re-poll of the journal page. An open paper trade's P&L / P&L % live on the trade row (the
+ * paper watch / refresher re-mark it every 30 s); fetched once, the row froze while the "Current"
+ * column (useJournalLtps, 30 s) kept moving — the owner saw the P&L % stuck as the price rose.
+ */
+const JOURNAL_REFRESH_MS = 30_000;
 
 export interface JournalFilters {
   dateFrom: string;
@@ -37,8 +45,14 @@ export function useTradeJournal() {
   const [page, setPage] = useState(1);
   const [filters, setFilters] = useState<JournalFilters>(defaultFilters);
 
-  const fetchTrades = useCallback(async () => {
-    setIsLoading(true);
+  /** Bumped per request: a slow response for an older page / filter set must not overwrite a newer one. */
+  const seq = useRef(0);
+
+  /** `silent` = the background re-poll: no loading flash, and a failure keeps the rows on screen. */
+  const load = useCallback(async (silent: boolean) => {
+    const mine = ++seq.current;
+    const current = () => mine === seq.current;
+    if (!silent) setIsLoading(true);
     try {
       const params: Record<string, string | number> = {
         page,
@@ -62,6 +76,7 @@ export function useTradeJournal() {
       }
 
       const { data } = await api.get('/portfolio/journal', { params });
+      if (!current()) return;
       // Defensive unwrap: backend returns { trades: [...], total: N }, but
       // older shapes used { data: [...] } and a couple of legacy paths
       // returned the bare array. The Array.isArray guard surfaces shape
@@ -91,16 +106,22 @@ export function useTradeJournal() {
       setTotalCount(data?.totalCount ?? data?.total ?? normalized.length);
     } catch (err) {
       console.warn('useTradeJournal: fetch failed', err);
+      if (silent || !current()) return;
       setTrades([]);
       setTotalCount(0);
     } finally {
-      setIsLoading(false);
+      if (!silent) setIsLoading(false);
     }
   }, [page, filters]);
+
+  const fetchTrades = useCallback(() => load(false), [load]);
 
   useEffect(() => {
     fetchTrades();
   }, [fetchTrades]);
+
+  // Keep open rows' P&L / P&L % live (market-aware; catches up on tab return).
+  useLiveRefresh(() => load(true), JOURNAL_REFRESH_MS);
 
   const updateFilters = useCallback(
     (partial: Partial<JournalFilters>) => {

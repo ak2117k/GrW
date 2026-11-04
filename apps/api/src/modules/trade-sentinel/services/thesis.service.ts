@@ -24,6 +24,9 @@ import {
 import type { Side } from '../charges';
 import type { RosterEntry } from './roster.service';
 import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
+import { isCashSegment } from './equity-blocks';
+import { guardInferredThesis, thesisGuardEnabled } from './thesis-guard';
+import { exposureOf } from '../../exit-discipline/exposure';
 
 /**
  * A price the model may decline to give.
@@ -86,15 +89,40 @@ const UNKNOWN_REASON_PREFIX = 'thesis could not be inferred';
  */
 export type EnsuredThesis = StoredThesis & { modelDirectionDisagreed?: true };
 
-/** Everything the model is allowed to see about the position. */
+/**
+ * Everything the model is allowed to see about the position.
+ *
+ * `underlyingAtEntry`, `dayHigh`, `dayLow` and `vwap` (2026-11-04, thesis-guard.ts): prod LAURUSLABS
+ * CE was inferred as "breakout above PDH 2343.9, cleared and held" with the stock at 2310 — the
+ * request never said where the underlying was. Each is null when unknown, never omitted:
+ * `underlyingAtEntry` is the contract's own entry price for cash, the stored 1-minute close at entry
+ * for F&O; the day range and VWAP are the level book's (as of now, not entry).
+ */
 type InferenceRequest = {
   symbol: string;
   side: Side;
   entryPrice: number;
   entryTime: string;
   qty: number;
+  underlyingAtEntry: number | null;
+  dayHigh: number | null;
+  dayLow: number | null;
+  vwap: number | null;
   structure: Block<unknown>;
 };
+
+const posNum = (x: unknown): number | null => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : null);
+
+/** The underlying at entry: cash ⇒ the entry price itself; F&O ⇒ the tick's stored 1-minute close at entry. */
+export function underlyingAtEntryOf(tick: Pick<TickSnapshot, 'segment' | 'entryPrice' | 'entryUnderlying'>): number | null {
+  return isCashSegment(tick.segment) ? posNum(tick.entryPrice) : posNum(tick.entryUnderlying ?? null);
+}
+
+/** The level book's day range and VWAP, each null when the block is absent or the number is not positive. */
+export function dayContextOf(structure: Block<unknown>): { dayHigh: number | null; dayLow: number | null; vwap: number | null } {
+  const v = structure.available && structure.value && typeof structure.value === 'object' ? (structure.value as Record<string, unknown>) : null;
+  return { dayHigh: posNum(v?.todayHigh), dayLow: posNum(v?.todayLow), vwap: posNum(v?.vwap) };
+}
 
 /**
  * "Reversed" only means something relative to an expectation. A trade the
@@ -180,19 +208,23 @@ export class ThesisService {
     userId: string,
   ): Promise<{ draft: ThesisDraft; directionDisagreed: boolean }> {
     try {
+      // `tick.structureSymbol`, NOT `entry.symbol` — identical reasoning to
+      // the context packet's. The level book is keyed by the underlying, and
+      // handing it a derivative tradingsymbol misses every time. The thesis
+      // is what every later "has it turned?" judgement is measured against,
+      // so inferring it from a structure block that silently never loaded is
+      // the worst place in the module for this to go wrong.
+      const structure = await this.structureFor(tick.structureSymbol, tick.structureInstrument ?? null);
+      const underlyingAtEntry = underlyingAtEntryOf(tick);
       const request: InferenceRequest = {
         symbol: entry.symbol,
         side: tick.side,
         entryPrice: tick.entryPrice,
         entryTime: tick.entryTime.toISOString(),
         qty: tick.qty,
-        // `tick.structureSymbol`, NOT `entry.symbol` — identical reasoning to
-        // the context packet's. The level book is keyed by the underlying, and
-        // handing it a derivative tradingsymbol misses every time. The thesis
-        // is what every later "has it turned?" judgement is measured against,
-        // so inferring it from a structure block that silently never loaded is
-        // the worst place in the module for this to go wrong.
-        structure: await this.structureFor(tick.structureSymbol, tick.structureInstrument ?? null),
+        underlyingAtEntry,
+        ...dayContextOf(structure),
+        structure,
       };
 
       const response = await this.client.messages.create({
@@ -233,15 +265,31 @@ export class ThesisService {
         );
       }
 
+      // THESIS GUARD (2026-11-04, thesis-guard.ts; THESIS_GUARD=false = rollback): an invalidation
+      // already crossed against the position at entry is discarded before it is stored, so it can
+      // never sell the trade on its first cycle (prod LAURUSLABS CE, sold 3 minutes in).
+      // The guard's direction is the UNDERLYING's (a bought PE is SHORT the underlying), because the
+      // invalidation is on the underlying's scale — the gate compares it the same way (exposureOf).
+      const underlyingDirection = exposureOf(entry.symbol, tick.side) === 'BULLISH' ? 'LONG' : 'SHORT';
+      const guarded = thesisGuardEnabled()
+        ? guardInferredThesis({ direction: underlyingDirection, levelPrice: parsed.levelPrice, invalidation: parsed.invalidation, reason: parsed.reason }, underlyingAtEntry)
+        : { levelPrice: parsed.levelPrice, invalidation: parsed.invalidation, reason: parsed.reason, discarded: null };
+      if (guarded.discarded === 'BREACHED_AT_ENTRY') {
+        this.logger.warn(
+          `[thesis-guard] ${entry.symbol} (${entry.trackerId}): inferred ${tick.side} invalidation ${parsed.invalidation} ` +
+            `already breached at entry ${underlyingAtEntry}, discarded`,
+        );
+      }
+
       return {
         directionDisagreed,
         draft: {
           userId,
           direction: tick.side,
-          reason: parsed.reason,
-          levelPrice: parsed.levelPrice,
+          reason: guarded.reason,
+          levelPrice: guarded.levelPrice,
           targetPrice: parsed.targetPrice,
-          invalidation: parsed.invalidation,
+          invalidation: guarded.invalidation,
         },
       };
     } catch (err) {

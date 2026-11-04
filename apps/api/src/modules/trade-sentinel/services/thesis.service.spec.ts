@@ -251,6 +251,60 @@ describe('ThesisService', () => {
       expect(args.system[0].text).not.toContain('INFY');
     });
 
+    describe('thesis guard (2026-11-04 LAURUSLABS CE sold 3 minutes in)', () => {
+      const fnoEntry: RosterEntry = { ...entry, symbol: 'LAURUSLABS23NOV262600CE', exchange: 'NFO' };
+      const fnoTick: TickSnapshot = {
+        ...tick, segment: 'OPT' as TickSnapshot['segment'], structureSymbol: 'LAURUSLABS', entryPrice: 31.5, ltp: 30, underlyingLtp: 2312, entryUnderlying: 2310,
+      };
+      const laurus = { direction: 'LONG', reason: 'breakout above PDH 2343.9, cleared and held', levelPrice: 2343.9, targetPrice: 2400, invalidation: 2343.9 };
+      const book = { available: true, value: { todayHigh: 2330, todayLow: 2290, vwap: 2308.4, atr14: 50 }, source: 'level book', at: '2026-11-04T05:00:00.000Z' };
+      afterEach(() => { delete process.env.THESIS_GUARD; });
+
+      it('the request carries the underlying at entry and the day range / VWAP', async () => {
+        levelsFor.mockResolvedValue({ value: book.value, source: 'level book', at: book.at });
+        create.mockResolvedValue(reply(laurus));
+        await svc.ensureFor(fnoEntry, fnoTick);
+        const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
+        expect(payload).toMatchObject({ underlyingAtEntry: 2310, dayHigh: 2330, dayLow: 2290, vwap: 2308.4 });
+      });
+
+      it('cash: the underlying at entry is the entry price; unknown fields are null, never omitted', async () => {
+        create.mockResolvedValue(reply(goodDraft));
+        await svc.ensureFor(entry, tick);
+        const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
+        expect(payload).toMatchObject({ underlyingAtEntry: 1455, dayHigh: null, dayLow: null, vwap: null });
+      });
+
+      it('an invalidation breached at entry is discarded before it is stored', async () => {
+        create.mockResolvedValue(reply(laurus));
+        await svc.ensureFor(fnoEntry, fnoTick);
+        expect(savedDraft()).toMatchObject({ invalidation: null, levelPrice: null, targetPrice: 2400 });
+        expect(savedDraft().reason).toMatch(/\(invalidation 2343\.9 already breached at entry 2310, discarded\)$/);
+      });
+
+      it('a bought PE is short the underlying: an invalidation above the price is valid and kept', async () => {
+        create.mockResolvedValue(reply({ ...laurus, reason: 'rejection under 2343.9' }));
+        await svc.ensureFor({ ...fnoEntry, symbol: 'LAURUSLABS23NOV262300PE' }, fnoTick);
+        expect(savedDraft()).toMatchObject({ invalidation: 2343.9, levelPrice: 2343.9 });
+      });
+
+      it('F&O with no stored entry bar: invalidation kept, reason says the entry context is unknown', async () => {
+        create.mockResolvedValue(reply(laurus));
+        await svc.ensureFor(fnoEntry, { ...fnoTick, entryUnderlying: null });
+        const payload = JSON.parse(create.mock.calls[0][0].messages[0].content);
+        expect(payload.underlyingAtEntry).toBeNull();
+        expect(savedDraft()).toMatchObject({ invalidation: 2343.9 });
+        expect(savedDraft().reason).toMatch(/underlying at entry unknown/);
+      });
+
+      it('THESIS_GUARD=false stores the model draft as before', async () => {
+        process.env.THESIS_GUARD = 'false';
+        create.mockResolvedValue(reply(laurus));
+        await svc.ensureFor(fnoEntry, fnoTick);
+        expect(savedDraft()).toMatchObject({ invalidation: 2343.9, levelPrice: 2343.9, reason: laurus.reason });
+      });
+    });
+
     it('tells the model in so many words when there is no structure to read', async () => {
       levelsFor.mockResolvedValue(null);
       create.mockResolvedValue(reply(goodDraft));

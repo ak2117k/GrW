@@ -181,11 +181,47 @@ describe('RiskManagerService — trade-rejection logging', () => {
       const svc = mod.get(RiskManagerService);
       expect((await svc.validateTrade({ ...tgPaper, entryTags: ['learn'] } as any)).allowed).toBe(true);
       expect((await svc.validateTrade(tgPaper as any)).allowed).toBe(false);
-      expect((await svc.validateTrade({ ...tgPaper, isPaper: false, entryTags: ['learn'] } as any)).allowed).toBe(false);
+      // A live order is never a learning one: it meets the caps (counted on LIVE open trades, 2026-11-04).
+      const live = { entryPrice: 1, quantity: 1, isPaperTrade: false, strategy: 'TELEGRAM_SIGNAL' };
+      const liveMod = await buildModule({ settings, openTrades: [live, live] });
+      expect((await liveMod.get(RiskManagerService).validateTrade({ ...tgPaper, isPaper: false, entryTags: ['learn'] } as any)).allowed).toBe(false);
     });
 
-    it('the same strategy as a LIVE order is never isolated (counts every open trade)', async () => {
-      const mod = await buildModule({ settings, openTrades: [scanner, scanner] });
+    it('2026-11-04: a LIVE order counts only live open trades — 10 stale paper trades no longer block it', async () => {
+      const ten = { maxDailyLoss: 5000, maxConcurrentPositions: 10, maxCapitalPerTrade: 200000, paperTrading: true, tradingHoursOnly: false };
+      const stale = [...Array.from({ length: 9 }, () => scanner), { entryPrice: 1, quantity: 1, isPaperTrade: true, strategy: null }];
+      const liveGold = { ...baseRequest, symbol: 'GOLD27NOV26150000CE', exchange: 'MCX', isPaper: false, strategy: 'TELEGRAM_SIGNAL', quantity: 1, price: 569 };
+      const mod = await buildModule({ settings: ten, openTrades: stale });
+      expect(await mod.get(RiskManagerService).validateTrade(liveGold as any)).toEqual({ allowed: true });
+
+      // Ten LIVE open trades still block it.
+      const live = { entryPrice: 1, quantity: 1, isPaperTrade: false, strategy: 'TELEGRAM_SIGNAL' };
+      const full = await buildModule({ settings: ten, openTrades: Array.from({ length: 10 }, () => live) });
+      expect((await full.get(RiskManagerService).validateTrade(liveGold as any)).reason).toMatch(/Max concurrent positions reached: 10\/10/);
+
+      // A paper order (no pool) still counts every open trade, as before.
+      const paperOrder = { ...liveGold, isPaper: true, strategy: undefined };
+      expect((await mod.get(RiskManagerService).validateTrade(paperOrder as any)).reason).toMatch(/Max concurrent positions reached: 10\/10/);
+    });
+
+    it('RISK_LIVE_POSITIONS_LIVE_ONLY=false rolls back to counting every open trade for a live order', async () => {
+      const ten = { maxDailyLoss: 5000, maxConcurrentPositions: 10, maxCapitalPerTrade: 200000, paperTrading: true, tradingHoursOnly: false };
+      const saved = process.env.RISK_LIVE_POSITIONS_LIVE_ONLY;
+      process.env.RISK_LIVE_POSITIONS_LIVE_ONLY = 'false';
+      try {
+        const mod = await buildModule({ settings: ten, openTrades: Array.from({ length: 10 }, () => scanner) });
+        const liveOrder = { ...baseRequest, isPaper: false, strategy: 'TELEGRAM_SIGNAL' };
+        expect((await mod.get(RiskManagerService).validateTrade(liveOrder as any)).reason).toMatch(/Max concurrent positions reached: 10\/10/);
+      } finally {
+        if (saved === undefined) delete process.env.RISK_LIVE_POSITIONS_LIVE_ONLY;
+        else process.env.RISK_LIVE_POSITIONS_LIVE_ONLY = saved;
+      }
+    });
+
+    it('the same strategy as a LIVE order is never isolated (counts every LIVE open trade, whatever its strategy)', async () => {
+      // 2026-11-04: live orders count live trades only (paper positions are not real exposure).
+      const otherLive = { entryPrice: 1, quantity: 1, isPaperTrade: false, strategy: 'MANUAL' };
+      const mod = await buildModule({ settings, openTrades: [otherLive, otherLive] });
       const svc = mod.get(RiskManagerService);
       expect((await svc.validateTrade({ ...tgPaper, isPaper: false } as any)).allowed).toBe(false);
     });

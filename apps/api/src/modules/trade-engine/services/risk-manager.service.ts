@@ -28,6 +28,14 @@ export const ISOLATED_PAPER_STRATEGIES: ReadonlySet<string> = new Set(['TELEGRAM
 /** The entry tag of a learning-mode Telegram paper trade (no stop, no account caps). */
 export const LEARNING_PAPER_TAG = 'learn';
 
+/**
+ * RISK_LIVE_POSITIONS_LIVE_ONLY (default on; 'false' / '0' / 'off' = rollback): a live order's
+ * max-concurrent-positions check counts live open trades only, not paper ones (see checkMaxConcurrentPositions).
+ */
+export function livePositionsLiveOnly(raw: string | undefined = process.env.RISK_LIVE_POSITIONS_LIVE_ONLY): boolean {
+  return !['false', '0', 'off'].includes(String(raw ?? '').trim().toLowerCase());
+}
+
 export function isLearningPaper(r: Pick<ExecuteTradeDto, 'isPaper' | 'strategy'> & { entryTags?: string[] }): boolean {
   return r.isPaper === true && !!r.strategy && ISOLATED_PAPER_STRATEGIES.has(r.strategy) && (r.entryTags ?? []).includes(LEARNING_PAPER_TAG);
 }
@@ -247,9 +255,17 @@ export class RiskManagerService {
     // Inside that pool, carried (BTST / POSITIONAL) paper trades held for days have their own slots,
     // so a few swing picks cannot block the day's intraday calls (owner 2026-10-27).
     const carried = (positionType: unknown) => String(positionType ?? 'INTRADAY').toUpperCase() !== 'INTRADAY';
+    // A LIVE order counts only LIVE open trades (prod 2026-11-04): the 9 stale scanner paper trades the
+    // owner keeps open + 1 old WATCH paper trade filled maxConcurrentPositions (10/10), so every live
+    // signal entry since 2026-11-03 13:17 IST came back liveGateBlocked='risk_manager' — 14 calls, zero
+    // real orders, the GOLD27NOV26150000CE call of 4 Nov among them. A paper position is not real
+    // exposure. RISK_LIVE_POSITIONS_LIVE_ONLY=false rolls back to counting every open trade.
+    const liveOnly = request.isPaper === false && livePositionsLiveOnly();
     const openTrades = pool
       ? all.filter((t) => t.isPaperTrade === true && t.strategy === pool && carried(t.positionType) === carried(request.positionType))
-      : all;
+      : liveOnly
+        ? all.filter((t) => t.isPaperTrade === false)
+        : all;
 
     if (openTrades.length >= maxPositions) {
       const reason = `Max concurrent positions reached: ${openTrades.length}/${maxPositions}`;

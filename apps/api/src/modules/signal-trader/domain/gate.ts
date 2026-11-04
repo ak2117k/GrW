@@ -1,3 +1,5 @@
+import { contractValueFactor, mcxUnderlyingOf } from '@td/shared';
+import { parseLossLimitsByUnderlying } from '../../../common/utils/loss-limit';
 import { learning, type SignalTraderConfig } from './signal-trader.config';
 import type { ResolvedContract } from './contract-resolver';
 import type { SignalView } from './signal.types';
@@ -129,15 +131,45 @@ export function signalLots(qty: number | null, lotSize: number, defaultLots: num
 
 export type Sizing = { ok: true; lots: number; qty: number; riskRupees: number; detail: string } | { ok: false; reason: string; detail: string };
 
+type Env = Record<string, string | undefined>;
+
 /**
- * Quantity under the caps: min(signal, SIGNAL_MAX_LOTS), then resized DOWN so (entry − SL) × qty ≤
- * SIGNAL_MAX_LOSS_PER_TRADE. Never up. One lot already over the cap → refused.
+ * Rupees per unit of qty per 1-point move, for the entry risk (contract-value.ts in @td/shared).
+ * Prod 2026-11-04: GOLD27NOV26150000CE 566.5, SL 424.5, lot 1 was sized as "risk ₹144.5" — the real
+ * risk is ×100 (GOLD is ₹100 per point per lot; the master lotSize is 1). 1 outside MCX.
+ * SIGNAL_RISK_VALUE_FACTOR=off rolls back to the unscaled figure (default on: it only ever refuses more).
+ */
+export function riskValueFactor(exchange: string, tradingsymbol: string, env: Env = process.env): number {
+  if (String(env.SIGNAL_RISK_VALUE_FACTOR ?? '').trim().toLowerCase() === 'off') return 1;
+  return contractValueFactor(exchange, tradingsymbol);
+}
+
+/**
+ * The per-trade risk cap the sizing checks against: the per-underlying figure of
+ * HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING (common/utils/loss-limit.ts, owner 2026-11-04: GOLD ₹7,500) when
+ * the underlying is listed, else today's SIGNAL_MAX_LOSS_PER_TRADE (`fallback`). Only a LISTED name
+ * changes: lossLimitFor's default cap (HARD_LOSS_CAP_RUPEES, the exit-side cap) is not the entry cap.
+ * Names match like lossLimitFor: GOLDM / GOLDGUINEA are not GOLD.
+ */
+export function riskCapFor(underlying: string | null, tradingsymbol: string | null, fallback: number, env: Env = process.env): number {
+  const raw = String(underlying ?? '').trim().toUpperCase();
+  const key = mcxUnderlyingOf(tradingsymbol) ?? mcxUnderlyingOf(raw) ?? raw;
+  if (!key) return fallback;
+  const listed = parseLossLimitsByUnderlying(env.HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING)[key];
+  return listed !== undefined ? listed : fallback;
+}
+
+/**
+ * Quantity under the caps: min(signal, SIGNAL_MAX_LOTS), then resized DOWN so (entry − SL) × qty ×
+ * valueFactor ≤ SIGNAL_MAX_LOSS_PER_TRADE (or the underlying's own cap). Never up. One lot already
+ * over the cap → refused. `valueFactor` (default 1) makes the risk real rupees on MCX.
  */
 export function sizeEntry(
-  input: { kind: SignalView['instrumentKind']; qty: number | null; lotSize: number; limitPrice: number; sl: number },
+  input: { kind: SignalView['instrumentKind']; qty: number | null; lotSize: number; limitPrice: number; sl: number; valueFactor?: number },
   cfg: Pick<SignalTraderConfig, 'maxLots' | 'maxLossPerTrade' | 'maxNotional' | 'defaultLots'>,
 ): Sizing {
-  const perUnit = Math.abs(input.limitPrice - input.sl);
+  const vf = input.valueFactor !== undefined && Number.isFinite(input.valueFactor) && input.valueFactor > 0 ? input.valueFactor : 1;
+  const perUnit = Math.abs(input.limitPrice - input.sl) * vf;
   if (!(perUnit > 0)) return { ok: false, reason: 'sl_equals_entry', detail: 'SL equals the entry price' };
   if (input.kind === 'EQ') {
     const byNotional = Math.floor(cfg.maxNotional / input.limitPrice);
@@ -197,8 +229,9 @@ export interface GateFacts {
 export function planEntry(
   f: Pick<GateFacts, 'signal' | 'contract' | 'ltp' | 'engineSl' | 'engineSlInfo' | 'engineTargets'>,
   cfg: SignalTraderConfig,
+  env: Env = process.env,
 ): { checks: GateCheck[]; plan: EntryPlan | null } {
-  const planned = planEntryCore(f, cfg);
+  const planned = planEntryCore(f, cfg, env);
   if (!planned.plan) return planned;
   const t = chooseTargets(f, planned.plan);
   const detail =
@@ -221,6 +254,7 @@ function chooseTargets(f: Pick<GateFacts, 'engineTargets'>, plan: EntryPlan): Pi
 function planEntryCore(
   f: Pick<GateFacts, 'signal' | 'contract' | 'ltp' | 'engineSl' | 'engineSlInfo'>,
   cfg: SignalTraderConfig,
+  env: Env,
 ): { checks: GateCheck[]; plan: EntryPlan | null } {
   const s = f.signal;
   const checks: GateCheck[] = [];
@@ -287,16 +321,19 @@ function planEntryCore(
     const sideOk = s.side === 'BUY' ? sl < ltp && sl < limit : sl > ltp && sl > limit;
     checks.push(check('sl_side', sideOk, sideOk ? `SL ${sl} on the protective side of LTP ${ltp} / limit ${limit}` : `SL ${sl} is not ${s.side === 'BUY' ? 'below' : 'above'} LTP ${ltp} / limit ${limit} (already hit or wrong side)`));
     if (sideOk) {
-      let size = sizeEntry({ kind: s.instrumentKind, qty: s.qty, lotSize: c.lotSize, limitPrice: limit, sl }, cfg);
+      // 2026-11-04: real rupees (×contract value) against the underlying's own cap (GOLD ₹7,500) — riskValueFactor / riskCapFor.
+      const vf = riskValueFactor(c.exchange, c.tradingsymbol, env);
+      const cap = riskCapFor(s.underlying, c.tradingsymbol, cfg.maxLossPerTrade, env);
+      let size = sizeEntry({ kind: s.instrumentKind, qty: s.qty, lotSize: c.lotSize, limitPrice: limit, sl, valueFactor: vf }, { ...cfg, maxLossPerTrade: cap });
       // Paper always; live too with SIGNAL_RISK_CAP_GATE=off (the loss is then capped at the exit, HARD_LOSS_EXIT_RUPEES).
       if (!size.ok && size.reason === 'one_lot_exceeds_risk_cap' && (cfg.mode === 'paper' || cfg.riskCapGate === false)) {
         // Paper tests the call itself: the smallest tradable size, its risk recorded as a warning.
         const unit = s.instrumentKind === 'EQ' ? 1 : c.lotSize;
-        const risk = r2(Math.abs(limit - sl) * unit);
+        const risk = r2(Math.abs(limit - sl) * unit * vf);
         checks.push(check('risk_cap', false, `${size.reason}: ${size.detail} — ${cfg.mode === 'paper' ? 'paper' : 'risk cap off'}: 1 ${s.instrumentKind === 'EQ' ? 'share' : 'lot'} anyway`, false));
-        size = { ok: true, lots: 1, qty: unit, riskRupees: risk, detail: `paper 1 ${s.instrumentKind === 'EQ' ? 'share' : `lot × ${unit}`} (over the ₹${cfg.maxLossPerTrade} cap)` };
+        size = { ok: true, lots: 1, qty: unit, riskRupees: risk, detail: `paper 1 ${s.instrumentKind === 'EQ' ? 'share' : `lot × ${unit}`} (over the ₹${cap} cap)` };
       } else if (size.ok) {
-        checks.push(check('risk_cap', true, `${size.detail}; risk ₹${size.riskRupees} ≤ ₹${cfg.maxLossPerTrade}`));
+        checks.push(check('risk_cap', true, `${size.detail}; risk ₹${size.riskRupees} ≤ ₹${cap}`));
       }
       if (size.ok) {
         plan = {
@@ -364,7 +401,7 @@ function planEntryCore(
       ...(better ? { better } : {}),
       lots: s.instrumentKind === 'EQ' ? qty : 1,
       qty,
-      riskRupees: refSl > 0 ? r2(Math.abs(limit - refSl) * qty) : 0,
+      riskRupees: refSl > 0 ? r2(Math.abs(limit - refSl) * qty * riskValueFactor(c.exchange, c.tradingsymbol, env)) : 0,
       learn: true,
       ...(slSource === 'engine' && f.engineSlInfo?.method ? { engineSl: { method: f.engineSlInfo.method, detail: f.engineSlInfo.detail } } : {}),
     },
@@ -441,5 +478,5 @@ export function applyJudgeTightening(
   }
   const unit = kind === 'EQ' ? 1 : plan.lotSize;
   const qty = lots * unit;
-  return { plan: { ...plan, sl, slSource, lots, qty, riskRupees: r2(Math.abs(plan.limitPrice - sl) * qty) }, changed };
+  return { plan: { ...plan, sl, slSource, lots, qty, riskRupees: r2(Math.abs(plan.limitPrice - sl) * qty * riskValueFactor(plan.exchange, plan.tradingsymbol)) }, changed };
 }

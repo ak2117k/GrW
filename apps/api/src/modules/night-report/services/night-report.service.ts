@@ -47,6 +47,9 @@ import { channelSentiment, infoList } from '../../signal-intake/domain/sentiment
 import type { ChannelViewsView } from '../domain/night-report.types';
 import { NEWS_DIGEST_SOURCE, type NewsDigestSource } from '../../news-impact/news-impact.ports';
 import { PRE_OPEN_OUTLOOK_REPORT, type PreOpenOutlookSource } from '../../pre-open-outlook/pre-open-outlook.ports';
+import type { AppliedChangesPort } from '../../self-review/tickets/decision-loop.ports';
+import { AutoApplyService } from '../../self-review/auto-apply/auto-apply.service';
+import { decisionsSessionOf, wrongDecisionsView } from '../domain/wrong-decisions';
 
 /** The part of MbmClient the report uses (fail-open by contract: every failure is `absent`). */
 export interface MoodSource {
@@ -114,6 +117,8 @@ export class NightReportService {
     @Optional() @Inject(NEWS_DIGEST_SOURCE) private readonly newsDigestSource?: NewsDigestSource,
     /** Pre-open outlook (@Global pre-open-outlook module); absent ⇒ the section is null. */
     @Optional() @Inject(PRE_OPEN_OUTLOOK_REPORT) private readonly preOpenSource?: PreOpenOutlookSource,
+    /** Auto-applied / rolled-back settings (the @Global self-review module's AutoApplyService); absent ⇒ none listed. */
+    @Optional() @Inject(AutoApplyService) private readonly appliedChanges?: AppliedChangesPort,
   ) {}
 
   async build(userId: string, now: Date = new Date()): Promise<NightReport> {
@@ -155,6 +160,7 @@ export class NightReportService {
       : null;
     const preOpenSource = this.preOpenSource;
     const preOpenOutlook = preOpenSource ? await this.safe('preOpenOutlook', () => preOpenSource.forReport(now)) : null;
+    const wrongDecisions = selfReview && !isError(selfReviewSection) ? await this.safe('wrongDecisions', () => this.wrongDecisions(selfReviewSection)) : null;
 
     return {
       generatedAt: now.toISOString(),
@@ -174,7 +180,22 @@ export class NightReportService {
       channelViews,
       newsDigest,
       preOpenOutlook,
+      wrongDecisions,
     };
+  }
+
+  /** "Wrong decisions" from the latest self-review run + the settings auto-applied since its session (fail-soft). */
+  private async wrongDecisions(latest: unknown) {
+    const session = decisionsSessionOf(latest);
+    let changes: Awaited<ReturnType<AppliedChangesPort['recentChanges']>> = [];
+    if (session && this.appliedChanges) {
+      try {
+        changes = await this.appliedChanges.recentChanges(session);
+      } catch (e) {
+        this.logger.warn(`[night-report] applied changes unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return wrongDecisionsView(latest, changes);
   }
 
   /** The day's Telegram INFO items + the weighted sentiment per underlying (read-only; never a trigger). */

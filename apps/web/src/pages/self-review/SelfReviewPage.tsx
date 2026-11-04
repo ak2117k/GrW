@@ -12,10 +12,12 @@ import type { AgentLesson, TuningProposal } from '@/types/selfReview.types';
 import { decideProposal, type Decision } from './proposalDecision';
 import { sortLessons } from './selfReviewFormat';
 import { Empty, LessonCard, MUTED, PRIMARY, ProposalCard, RunCard, SECONDARY } from './SelfReviewViews';
+import WrongDecisionsTab from './WrongDecisionsTab';
 
 const TABS = [
   { key: 'proposals', label: 'Proposals' },
   { key: 'lessons', label: 'Lessons' },
+  { key: 'wrong', label: 'Wrong decisions' },
   { key: 'history', label: 'History' },
 ];
 
@@ -184,6 +186,7 @@ export default function SelfReviewPage() {
       />
       {tab === 'proposals' && <ProposalsTab />}
       {tab === 'lessons' && <LessonsTab />}
+      {tab === 'wrong' && <WrongDecisionsTab />}
       {tab === 'history' && <HistoryTab />}
     </div>
   );

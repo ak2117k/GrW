@@ -290,4 +290,11 @@ export interface NightReport {
    * run when fresh, else a preview from stored data. `{ error }` on failure, null when the module is not loaded.
    */
   preOpenOutlook?: Section<PreOpenOutlookReport> | null;
+  /**
+   * Wrong decisions (2026-11-04, self-review wrong-decision loop): always "graded N, wrong W, unscorable U" (+ why
+   * when nothing was graded), then each wrong decision in plain words — what was decided, what would have been
+   * better in ₹, the cause, the action taken — and the settings applied / rolled back. Read from the latest
+   * self-review run; `{ error }` on failure, null when the self-review module is not loaded.
+   */
+  wrongDecisions?: Section<import('./wrong-decisions').WrongDecisionsView> | null;
 }

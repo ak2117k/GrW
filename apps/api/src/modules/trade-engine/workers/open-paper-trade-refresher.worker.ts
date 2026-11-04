@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { TradeRepository } from '../repositories/trade.repository';
 import { OptionsChainService } from '../../options-chain/services/options-chain.service';
 import { MarketFeedService } from '../../market-data/services/market-feed.service';
+import { PAPER_WATCH_STRATEGIES } from '../../signal-trader/domain/paper';
 
 /** IST calendar date (YYYY-MM-DD) of an instant. */
 function istYmd(d: Date): string {
@@ -50,6 +51,13 @@ const UNDERLYING_TOKEN: Record<string, string> = {
  *   left to PaperTradeService's tick stream
  * - Skips when the chain has no LTP for the strike (e.g. the chain just
  *   refreshed and the row hasn't loaded) — keeps the previous value
+ * - Skips trades the signal paper watch owns (PAPER_WATCH_STRATEGIES): it
+ *   marks them from the owner's live LTP every 30 s, and a chain-snapshot
+ *   price written here would overwrite that live mark with a stale one
+ *   (prod 2026-11-04 GOLD27NOV26150000CE: P&L % stuck while the price rose).
+ * - For a non-index underlying (no live spot ⇒ no delta correction), a failed
+ *   broker quote keeps the previous value instead of writing the stale chain
+ *   snapshot LTP (MCX quotes fail intermittently with 403).
  */
 @Injectable()
 export class OpenPaperTradeRefresherWorker {
@@ -74,6 +82,8 @@ export class OpenPaperTradeRefresherWorker {
           // REALIZED P&L booked by the partial close — overwriting it with a
           // mark-to-market figure would erase that realized profit.
           t.status === 'OPEN' &&
+          // The signal paper watch marks these from the live LTP — never overwrite with a chain snapshot.
+          !PAPER_WATCH_STRATEGIES.includes((t as any).strategy) &&
           (t as any).instrument?.segment === 'OPTIONS' &&
           (t as any).instrument?.expiry &&
           (t as any).instrument?.strike != null &&
@@ -150,8 +160,9 @@ export class OpenPaperTradeRefresherWorker {
         //    Accurate within ~5% for near-ATM strikes; ignores gamma, vega,
         //    and IV expansion (notably understates PE on big down moves).
         //
-        // 3. Plain stale chain LTP — at least the row moves when the chain
-        //    snapshot eventually refreshes, instead of freezing at entry.
+        // 3. Plain stale chain LTP (index underlyings only) — at least the row
+        //    moves when the chain snapshot eventually refreshes, instead of
+        //    freezing at entry. A non-index trade keeps its previous mark.
         const realLtp = await this.optionsChainService.getLiveOptionLtp(
           underlying,
           expiryIso,
@@ -172,13 +183,19 @@ export class OpenPaperTradeRefresherWorker {
 
           const useDeltaCorrection =
             liveSpot > 0 && snapshotSpot > 0 && delta !== 0;
+          // Tier 3 only for an index underlying. A non-index one (MCX, stocks) has no live spot to
+          // correct with, and its chain snapshot can be far older than the trade's last mark — keep
+          // the previous value rather than overwrite it with a stale price.
+          if (!useDeltaCorrection && !token) continue;
           currentLtp = useDeltaCorrection
             ? Math.max(0.05, snapshotLtp + delta * (liveSpot - snapshotSpot))
             : snapshotLtp;
         }
 
-        const pnl = (currentLtp - entryPrice) * trade.quantity;
-        const pnlPercent = ((currentLtp - entryPrice) / entryPrice) * 100;
+        // A SELL (written option) gains when the premium falls.
+        const sign = String(trade.side).toUpperCase() === 'SELL' ? -1 : 1;
+        const pnl = sign * (currentLtp - entryPrice) * trade.quantity;
+        const pnlPercent = ((sign * (currentLtp - entryPrice)) / entryPrice) * 100;
 
         try {
           // OPEN-only write: a close that lands while this cycle is pricing must keep its realised pnl.

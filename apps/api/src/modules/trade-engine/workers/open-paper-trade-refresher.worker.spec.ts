@@ -80,6 +80,90 @@ describe('OpenPaperTradeRefresherWorker — preserves realized partial P&L', () 
   });
 });
 
+describe('OpenPaperTradeRefresherWorker — never overwrites a fresher mark with a stale chain price', () => {
+  let worker: OpenPaperTradeRefresherWorker;
+  let tradeRepo: { getOpenTrades: jest.Mock; markOpenTrade: jest.Mock };
+  let chain: { getOptionsChainWithSpot: jest.Mock; getLiveOptionLtp: jest.Mock };
+  let feed: { getQuote: jest.Mock };
+
+  function trade(o: { strategy?: string; name?: string; side?: string; strike?: number } = {}) {
+    return {
+      id: 't1', isPaperTrade: true, status: 'OPEN', side: o.side ?? 'BUY', strategy: o.strategy ?? 'UNIVERSE_SCANNER',
+      quantity: 1, entryPrice: 566.74, pnl: 204,
+      instrument: { name: o.name ?? 'GOLD', segment: 'OPTIONS', expiry: new Date('2099-11-27'), strike: o.strike ?? 150000, optionType: 'CE' },
+    };
+  }
+
+  beforeEach(async () => {
+    tradeRepo = { getOpenTrades: jest.fn(), markOpenTrade: jest.fn().mockResolvedValue(true) };
+    chain = {
+      getOptionsChainWithSpot: jest.fn().mockResolvedValue({
+        chain: [
+          { strikePrice: 150000, ceData: { ltp: 600, delta: 0.5 }, peData: { ltp: 400, delta: -0.5 } },
+          { strikePrice: 22500, ceData: { ltp: 130, delta: 0.5 }, peData: { ltp: 90, delta: -0.5 } },
+        ],
+        spotPrice: 22000,
+      }),
+      getLiveOptionLtp: jest.fn().mockResolvedValue(null),
+    };
+    feed = { getQuote: jest.fn(() => null) };
+    const mod: TestingModule = await Test.createTestingModule({
+      providers: [
+        OpenPaperTradeRefresherWorker,
+        { provide: TradeRepository, useValue: tradeRepo },
+        { provide: OptionsChainService, useValue: chain },
+        { provide: MarketFeedService, useValue: feed },
+      ],
+    }).compile();
+    worker = mod.get(OpenPaperTradeRefresherWorker);
+  });
+
+  it.each(['TELEGRAM_SIGNAL_NO_FUNDS', 'ENGINE_ENTRY'])('leaves a %s trade to the signal paper watch — even with a live quote', async (strategy) => {
+    chain.getLiveOptionLtp.mockResolvedValue(770);
+    tradeRepo.getOpenTrades.mockResolvedValue([trade({ strategy })]);
+
+    await worker.refreshLoop();
+
+    expect(chain.getOptionsChainWithSpot).not.toHaveBeenCalled();
+    expect(tradeRepo.markOpenTrade).not.toHaveBeenCalled();
+  });
+
+  it('keeps the previous mark on a non-index (MCX) trade when the broker quote fails — no stale snapshot write', async () => {
+    tradeRepo.getOpenTrades.mockResolvedValue([trade()]);
+
+    await worker.refreshLoop();
+
+    expect(chain.getLiveOptionLtp).toHaveBeenCalled();
+    expect(tradeRepo.markOpenTrade).not.toHaveBeenCalled();
+  });
+
+  it('marks a non-index trade from the broker live quote when it is there', async () => {
+    chain.getLiveOptionLtp.mockResolvedValue(770);
+    tradeRepo.getOpenTrades.mockResolvedValue([trade()]);
+
+    await worker.refreshLoop();
+
+    expect(tradeRepo.markOpenTrade).toHaveBeenCalledWith('t1', { pnl: 203.26, pnlPercent: 35.86 });
+  });
+
+  it('still falls back to the chain snapshot for an index trade with no live spot', async () => {
+    tradeRepo.getOpenTrades.mockResolvedValue([{ ...trade({ name: 'NIFTY', strike: 22500 }), entryPrice: 100 }]);
+
+    await worker.refreshLoop();
+
+    expect(tradeRepo.markOpenTrade).toHaveBeenCalledWith('t1', { pnl: 30, pnlPercent: 30 });
+  });
+
+  it('signs a SELL trade: premium up is a loss', async () => {
+    chain.getLiveOptionLtp.mockResolvedValue(120);
+    tradeRepo.getOpenTrades.mockResolvedValue([{ ...trade({ name: 'NIFTY', strike: 22500, side: 'SELL' }), entryPrice: 100 }]);
+
+    await worker.refreshLoop();
+
+    expect(tradeRepo.markOpenTrade).toHaveBeenCalledWith('t1', { pnl: -20, pnlPercent: -20 });
+  });
+});
+
 describe('isContractExpired', () => {
   const now = new Date('2026-10-22T06:00:00Z'); // 11:30 IST, 22 Oct
 

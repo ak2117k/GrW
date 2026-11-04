@@ -28,6 +28,7 @@ import { SIGNAL_BARS, SignalPaperWatchService, type BarsLike } from './services/
 import {
   SIGNAL_FUNDS,
   SIGNAL_INSTRUMENT_MASTER,
+  SIGNAL_MARKET_EVENTS,
   SIGNAL_PAPER,
   SIGNAL_QUOTES,
   SIGNAL_SESSION_CLOCK,
@@ -38,6 +39,7 @@ import {
   type QuotesLike,
 } from './services/signal-trader.service';
 import { SignalTraderController } from './controllers/signal-trader.controller';
+import { MarketEventsRepository } from '../news-events/events/market-events.repository';
 
 /**
  * Telegram signal trading — stream X (docs/superpowers/plans/2026-10-23-telegram-signals-contract.md).
@@ -99,6 +101,8 @@ import { SignalTraderController } from './controllers/signal-trader.controller';
     OwnerBrokerSessionProvider,
     { provide: SIGNAL_TRADER_CONFIG, useFactory: () => parseSignalTraderConfig(process.env) },
     { provide: SIGNAL_TRADER_ENV, useValue: process.env },
+    // 2026-11-04: the judge's `events` block reads market_events directly (read-only; PrismaModule above).
+    { provide: SIGNAL_MARKET_EVENTS, useClass: MarketEventsRepository },
     {
       provide: SIGNAL_SESSION_CLOCK,
       useFactory: (config: ConfigService) =>

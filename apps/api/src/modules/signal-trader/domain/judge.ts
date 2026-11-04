@@ -79,6 +79,47 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'most important first],"entry":number|null,"sl":number|null,"targets":[numbers],"lots":integer|null}.',
 ].join(' ');
 
+/** v6-take (2026-11-04): default TAKE unless concrete evidence against; `events` (event days) in the packet. */
+export const SIGNAL_JUDGE_PROMPT_VERSION_TAKE = 'signal-judge-v6-take';
+
+/** The v5 default-SKIP opening the take prompt replaces (must exist in SIGNAL_JUDGE_SYSTEM verbatim). */
+const SKIP_DEFAULT_RULE =
+  'Most tip-channel calls lose money after costs; your default is SKIP. Say TAKE only when the market context (OI/PCR and walls, the level book, news, VIX, the expected-move model, the trend) actively supports the signal\'s direction AND the stop is at a sensible structural level.';
+
+/**
+ * The default-TAKE rule (owner 2026-11-04). Why: over 21 days the v5 judge SKIPped 65 of 70 calls — its
+ * wrong skips missed ~₹34.6k vs ~₹9.3k its right skips avoided — and on 4 Nov (US midterm results) it
+ * SKIPped a GOLD CE at 76% citing unavailable chain/VIX/expected-move and "mixed news"; T1 hit in 3 min.
+ */
+export function judgeTakeRule(minConfidence: number): string {
+  return [
+    'Your default is TAKE: take the channel\'s call unless there is CONCRETE EVIDENCE AGAINST it, and name that evidence',
+    'in your first reason. Concrete evidence is: the price is already past T1 / the target; the stop is already broken',
+    '(the price is on the wrong side of plan.sl); the entry is outside the tolerance band; an expiry-day or illiquid',
+    'contract (no quote, a wide spread, a stale feed); or a hard risk (an obstacle or wall right in the way with no room to',
+    'T1, the trend firmly against the direction, the stop inside ordinary noise per market.noise).',
+    'Unavailable data (option chain, OI, VIX, the expected-move model) and mixed or neutral news are NEVER by themselves a',
+    'reason to SKIP: state what is absent and judge on what is present.',
+    'events = the scheduled event days affecting this underlying (US elections, FOMC, US CPI/NFP, RBI policy, India CPI,',
+    'OPEC). events.status "absent" means we could not read the calendar — NOT that there is no event. An event with',
+    'expectMove true means a bigger-than-usual move is expected with its direction unknown: that favours a long option in',
+    'the channel\'s direction, and on such a day missing data counts for nothing.',
+    `A default TAKE (no concrete evidence either way) carries confidence ${Math.min(100, minConfidence + 5)} or more; code SKIPs a TAKE below ${minConfidence}.`,
+  ].join(' ');
+}
+
+/** The system prompt for SIGNAL_JUDGE_DEFAULT. `skip` = SIGNAL_JUDGE_SYSTEM (v5) byte for byte. */
+export function signalJudgeSystem(mode: 'take' | 'skip', minConfidence = 60): string {
+  if (mode === 'skip') return SIGNAL_JUDGE_SYSTEM;
+  if (!SIGNAL_JUDGE_SYSTEM.includes(SKIP_DEFAULT_RULE)) throw new Error('signal judge prompt: the v5 default-SKIP rule moved — update SKIP_DEFAULT_RULE');
+  return SIGNAL_JUDGE_SYSTEM.replace(SKIP_DEFAULT_RULE, judgeTakeRule(minConfidence));
+}
+
+/** promptVersion stamped on the packet for SIGNAL_JUDGE_DEFAULT. */
+export function signalJudgePromptVersion(mode: 'take' | 'skip'): string {
+  return mode === 'skip' ? SIGNAL_JUDGE_PROMPT_VERSION : SIGNAL_JUDGE_PROMPT_VERSION_TAKE;
+}
+
 export interface JudgeVerdict {
   verdict: 'TAKE' | 'SKIP';
   confidence: number;

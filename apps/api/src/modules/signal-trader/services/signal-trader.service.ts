@@ -9,8 +9,9 @@ import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
 import { resolveContract, segmentFor, type ResolvedContract, type ResolveResult } from '../domain/contract-resolver';
-import { applyJudgeTightening, evaluateGate, planEntry, type EntryPlan, type GateCheck, type GateFacts, type GateResult, type TriggerState } from '../domain/gate';
-import { judgeDecision, SIGNAL_JUDGE_PROMPT_VERSION, type JudgeVerdict } from '../domain/judge';
+import { applyJudgeTightening, evaluateGate, planEntry, riskCapFor, type EntryPlan, type GateCheck, type GateFacts, type GateResult, type TriggerState } from '../domain/gate';
+import { judgeDecision, signalJudgePromptVersion, signalJudgeSystem, type JudgeVerdict } from '../domain/judge';
+import { eventContextFor, type EventContext, type EventContextDeps } from '../../news-events/events/event-context';
 import { slEnforceability } from '../domain/execution';
 import { skipAlert, takeAlert, triggerArmedAlert, triggerFiredAlert, updateAlert } from '../domain/alerts';
 import { entryNotReached, judgeFresh, readTrigger, triggerExpiry, triggerHit, triggerOf } from '../domain/trigger';
@@ -35,6 +36,10 @@ export const SIGNAL_SESSION_CLOCK = Symbol('SIGNAL_SESSION_CLOCK');
 export const SIGNAL_INSTRUMENT_MASTER = Symbol('SIGNAL_INSTRUMENT_MASTER');
 /** A fresh LTP over the owner's own Angel session. */
 export const SIGNAL_QUOTES = Symbol('SIGNAL_QUOTES');
+/** The market_events reader for the judge's `events` block (MarketEventsRepository). */
+export const SIGNAL_MARKET_EVENTS = Symbol('SIGNAL_MARKET_EVENTS');
+/** The judge never waits longer than this for the event calendar. */
+const EVENTS_READ_TIMEOUT_MS = 5_000;
 
 export interface SessionClockLike {
   isOpen(exchange: string, at?: Date): boolean;
@@ -214,7 +219,25 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     @Optional() @Inject(SIGNAL_PAPER) private readonly paper?: PaperLike,
     /** Self-review lessons for the entry judge (scope SIGNAL_JUDGE; @Global SelfReviewLearningModule). Absent / off ⇒ none. */
     @Optional() @Inject(LESSONS_READER) private readonly lessons?: LessonsReader,
+    /** The stored event calendar (SIGNAL_JUDGE_DEFAULT=take packets). Absent ⇒ `events: absent(...)`. */
+    @Optional() @Inject(SIGNAL_MARKET_EVENTS) private readonly marketEvents?: EventContextDeps['repo'],
   ) {}
+
+  /** The judge's `events` block. Never throws; unwired / slow / failing ⇒ absent with the reason. */
+  private async eventsFor(underlying: string, now: Date): Promise<EventContext> {
+    if (!this.marketEvents) return { status: 'absent', reason: 'the events calendar is not wired into the signal trader — NOT a finding that nothing is scheduled' };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<EventContext>((resolve) => {
+      timer = setTimeout(() => resolve({ status: 'absent', reason: `the events calendar did not answer within ${EVENTS_READ_TIMEOUT_MS / 1000} s — NOT a finding that nothing is scheduled` }), EVENTS_READ_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([eventContextFor(underlying, now, { repo: this.marketEvents, env: this.env }), timeout]);
+    } catch (err) {
+      return { status: 'absent', reason: `events: ${errText(err)} — NOT a finding that nothing is scheduled` };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 
   get config(): SignalTraderConfig {
     return this.cfg;
@@ -453,19 +476,26 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const cluster = await this.repo.cluster(e.clusterId ?? null).catch(() => null);
     const agreeCount = e.agreeCount ?? cluster?.agreeCount ?? 1;
     const conflict = e.conflict === true || cluster?.conflict === true;
-    const [market, channelStats, channelViews] = await Promise.all([
+    // 2026-11-04: event days reach the judge only on the default-TAKE prompt (skip = the v5 packet exactly).
+    const takeDefault = cfg.judgeDefault === 'take';
+    const [market, channelStats, channelViews, events] = await Promise.all([
       this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp }),
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()
         .then(() => this.repo.channelViews(s.underlying, now))
         .catch((err: unknown) => ({ status: 'unavailable', reason: `channel views: ${err instanceof Error ? err.message : String(err)}` })),
+      takeDefault ? this.eventsFor(s.underlying, now) : Promise.resolve(null),
     ]);
+    // 2026-11-04: the per-trade cap the judge reasons with is the underlying's own (GOLD ₹7,500 via
+    // HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING) — the same figure the gate sized against (gate.ts riskCapFor).
+    // It said ₹2,000 for GOLD, so reward/risk on a GOLD call was judged against a cap 3.75× too small.
+    const lossCap = riskCapFor(s.underlying, plan.tradingsymbol, cfg.maxLossPerTrade, this.env);
     // The judge's numbers (domain/judge-noise): noise units + both stops in them, intrinsic from SPOT, chain labels.
     const facts = packetMarketFacts(market);
     const lotQty = plan.lots > 0 ? plan.qty / plan.lots : plan.lotSize;
     market.noise = await Promise.resolve()
-      .then(() => this.context.noise({ signal: s, contract: contract ?? null, price: plan.ltp, planSl: plan.sl > 0 ? plan.sl : null, cap: cfg.maxLossPerTrade, lotQty, spot: facts.spot, vix: facts.vix, ownerUserId: owner, now }))
+      .then(() => this.context.noise({ signal: s, contract: contract ?? null, price: plan.ltp, planSl: plan.sl > 0 ? plan.sl : null, cap: lossCap, lotQty, spot: facts.spot, vix: facts.vix, ownerUserId: owner, now }))
       .catch((err: unknown) => ({ status: 'unavailable' as const, reason: `noise units: ${err instanceof Error ? err.message : String(err)}` }));
     labelChain(market);
     const optionValueBlock = optionValue({
@@ -485,7 +515,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       judgeLessons = [];
     }
     const packet = {
-      promptVersion: SIGNAL_JUDGE_PROMPT_VERSION,
+      promptVersion: signalJudgePromptVersion(cfg.judgeDefault),
       at: now.toISOString(),
       signal: { text: s.rawText.slice(0, 1500), parsed: what, channel, receivedAt: s.receivedAt?.toISOString() ?? null, horizon: s.horizon ?? 'INTRADAY' },
       cluster: { agreeCount, conflict, channels: cluster?.channelIds.length ?? null, strong: !conflict && agreeCount >= cfg.strongChannels },
@@ -507,11 +537,15 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         late: plan.late ? { ...plan.late, room: await this.lateRoomFor(s, plan, market, contract ?? null, owner, now) } : null,
         optionValue: optionValueBlock,
       },
-      caps: { maxLots: cfg.maxLots, maxLossPerTrade: cfg.maxLossPerTrade, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
+      caps: { maxLots: cfg.maxLots, maxLossPerTrade: lossCap, tradesToday, maxTradesPerDay: cfg.maxTradesPerDay },
       market,
+      ...(events ? { events } : {}),
       ...(judgeLessons.length ? { lessons: judgeLessons } : {}),
     };
-    const out = await this.judge.judge(packet, { model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs, slotWaitMs: cfg.judgeSlotWaitMs, userId: owner });
+    const out = await this.judge.judge(packet, {
+      model: cfg.judgeModel, timeoutMs: cfg.judgeTimeoutMs, slotWaitMs: cfg.judgeSlotWaitMs, userId: owner,
+      system: signalJudgeSystem(cfg.judgeDefault, cfg.judgeMinConfidence),
+    });
     if (!out.ok) {
       return { ok: false, reason: out.reason, detail: out.detail, record: { unavailable: out.reason, detail: out.detail, latencyMs: out.latencyMs, packet } };
     }

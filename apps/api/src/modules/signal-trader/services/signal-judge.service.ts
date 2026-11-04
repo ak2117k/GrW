@@ -42,14 +42,15 @@ export class SignalJudgeService {
 
   async judge(
     packet: Record<string, unknown>,
-    opts: { model: string; timeoutMs: number; slotWaitMs: number; userId: string | null },
+    /** `system`: the SIGNAL_JUDGE_DEFAULT prompt (signalJudgeSystem); unset = SIGNAL_JUDGE_SYSTEM (v5). */
+    opts: { model: string; timeoutMs: number; slotWaitMs: number; userId: string | null; system?: string },
   ): Promise<JudgeOutcome> {
     const started = Date.now();
     const request: TransportRequest = {
       model: opts.model,
       max_tokens: JUDGE_MAX_TOKENS,
       output_config: { effort: 'high', format: { type: 'json_schema', schema: SIGNAL_JUDGE_SCHEMA } },
-      system: [{ type: 'text', text: SIGNAL_JUDGE_SYSTEM }],
+      system: [{ type: 'text', text: opts.system ?? SIGNAL_JUDGE_SYSTEM }],
       messages: [{ role: 'user', content: JSON.stringify(packet) }],
     } as TransportRequest;
     let timer: ReturnType<typeof setTimeout> | undefined;

@@ -3,6 +3,7 @@ jest.mock('../../../common/utils/ops-alert', () => ({ sendOpsAlert: jest.fn().mo
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { setCoreKillSwitchReader } from '../../trade-core/risk-wall/kill-gate';
 import { parseSignalTraderConfig, type SignalTraderConfig } from '../domain/signal-trader.config';
+import { SIGNAL_JUDGE_SYSTEM } from '../domain/judge';
 import type { SignalView } from '../domain/signal.types';
 import { SignalTraderService } from './signal-trader.service';
 
@@ -53,16 +54,17 @@ function makeRepo() {
 
 const takeVerdict = { verdict: 'TAKE', confidence: 80, reasons: ['OI supports'], entry: null, sl: null, targets: [], lots: null };
 
-function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any; lessons?: any } = {}) {
+function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any; lessons?: any; marketEvents?: any; master?: unknown[]; signal?: SignalView } = {}) {
   // liveFromIstMin 0: the specs run at any hour (the 09:45 live start has its own tests).
   const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), liveFromIstMin: 0, ...over.cfg };
   const repo = makeRepo();
+  if (over.signal) repo.signal.mockResolvedValue(over.signal);
   const judge = { judge: jest.fn(over.judge ?? (async () => ({ ok: true, verdict: takeVerdict, latencyMs: 10 }))) };
   const context = { build: jest.fn(async () => ({})), nearestLevels: jest.fn(async () => null), optionDelta: jest.fn(async () => null) };
   const executor = { place: jest.fn(over.place ?? (async () => ({ kind: 'PLACED', orderRowId: 'o1', brokerOrderId: 'b1' }))), resume: jest.fn() };
   const risk = { validateTrade: jest.fn(async () => ({ allowed: true })) };
   const clock = { isOpen: () => true, minutesToClose: () => 200 };
-  const master = { getInstrumentMaster: async () => masterRows };
+  const master = { getInstrumentMaster: async () => over.master ?? masterRows };
   const ltp = over.ltp === undefined ? 101 : over.ltp;
   const quotes = { ltp: jest.fn(async () => ltp) };
   const fundsVal = over.funds === undefined ? 1_000_000 : over.funds;
@@ -71,7 +73,7 @@ function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, s
     return fundsVal;
   }) };
   const paper = { open: jest.fn(async () => ({ ok: true as const, tradeId: 'pt1', entryPrice: 101.5, duplicate: false })) };
-  const svc = new SignalTraderService(cfg, over.env ?? LIVE_ENV, repo as never, judge as never, context as never, executor as never, risk as never, clock, master, quotes, funds, paper, over.lessons);
+  const svc = new SignalTraderService(cfg, over.env ?? LIVE_ENV, repo as never, judge as never, context as never, executor as never, risk as never, clock, master, quotes, funds, paper, over.lessons, over.marketEvents);
   return { svc, repo, judge, executor, risk, quotes, funds, paper };
 }
 
@@ -305,7 +307,7 @@ describe('SignalTraderService', () => {
   });
 
   it('prompt v5 packet: channel sample flag, market.noise (stated unavailable when it cannot be read)', async () => {
-    const t = build({ cfg: { mode: 'shadow' } });
+    const t = build({ cfg: { mode: 'shadow', judgeDefault: 'skip' } });
     (t.repo.channelStats as jest.Mock).mockResolvedValueOnce({ n: 8, right: 0, wrong: 1, rolling20Right: 5, rolling20Wrong: 2 });
     await t.svc.evaluate(ev);
     const packet = (t.judge.judge.mock.calls[0] as any[])[0];
@@ -314,6 +316,54 @@ describe('SignalTraderService', () => {
     expect(packet.market.noise).toMatchObject({ status: 'unavailable', reason: expect.stringMatching(/^noise units:/) });
     expect(packet.plan).toHaveProperty('optionValue');
     expect(packet).not.toHaveProperty('lessons');
+  });
+
+  describe('SIGNAL_JUDGE_DEFAULT (2026-11-04)', () => {
+    const judged = (t: ReturnType<typeof build>) => t.judge.judge.mock.calls[0] as any[];
+
+    it('skip: today exactly — the v5 system prompt, promptVersion v5, no events block', async () => {
+      const t = build({ cfg: { mode: 'shadow', judgeDefault: 'skip' }, marketEvents: { listFrom: jest.fn(async () => []) } });
+      await t.svc.evaluate(ev);
+      const [packet, opts] = judged(t);
+      expect(opts.system).toBe(SIGNAL_JUDGE_SYSTEM);
+      expect(packet.promptVersion).toBe('signal-judge-v5');
+      expect(packet).not.toHaveProperty('events');
+    });
+
+    it('take: the default-take prompt and v6-take; events present from the calendar', async () => {
+      const fomc = { id: 'e1', scope: 'market', kind: 'fomc', key: 'US', title: 'FOMC rate decision', startsAt: new Date(), allDay: false, impact: 'high', source: 'config/market-events.json', sourceRef: null, fetchedAt: new Date() };
+      const t = build({ cfg: { mode: 'shadow', judgeDefault: 'take' }, env: { ...LIVE_ENV, MARKET_EVENT_DAYS: 'off' }, marketEvents: { listFrom: jest.fn(async () => [fomc]) } });
+      await t.svc.evaluate(ev);
+      const [packet, opts] = judged(t);
+      expect(opts.system).toMatch(/Your default is TAKE/);
+      expect(opts.system).not.toMatch(/your default is SKIP/);
+      expect(packet.promptVersion).toBe('signal-judge-v6-take');
+      expect(packet.events).toEqual({ status: 'present', events: [expect.objectContaining({ name: 'FOMC rate decision', expectMove: true, affects: expect.arrayContaining(['NIFTY']) })] });
+    });
+
+    it('take: the calendar failing or unwired → events absent with a reason (never "no event")', async () => {
+      const failing = build({ cfg: { mode: 'shadow', judgeDefault: 'take' }, marketEvents: { listFrom: jest.fn(async () => { throw new Error('db down'); }) } });
+      await failing.svc.evaluate(ev);
+      expect(judged(failing)[0].events).toEqual({ status: 'absent', reason: expect.stringMatching(/db down.*NOT a finding/) });
+      const unwired = build({ cfg: { mode: 'shadow', judgeDefault: 'take' } });
+      await unwired.svc.evaluate(ev);
+      expect(judged(unwired)[0].events).toEqual({ status: 'absent', reason: expect.stringMatching(/not wired/) });
+    });
+  });
+
+  it('caps.maxLossPerTrade is the underlying’s own cap: GOLD ₹7,500 (HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING default), NIFTY ₹2,000', async () => {
+    const nifty = build({ cfg: { mode: 'shadow' } });
+    await nifty.svc.evaluate(ev);
+    expect(((nifty.judge.judge.mock.calls[0] as any[])[0]).caps.maxLossPerTrade).toBe(2000);
+    const gold: SignalView = {
+      ...signal, underlying: 'GOLD', strike: 150000, entryLow: 566.5, entryHigh: 566.5, entryType: 'AT', sl: 560, targets: [600], qty: 1,
+      rawText: 'BUY GOLD 150000 CE @ 566.5 SL 560',
+    };
+    const goldRow = { token: '556656', symbol: 'GOLD27NOV99150000CE', name: 'GOLD', expiry: '27NOV2099', strike: '15000000', lotsize: '1', instrumenttype: 'OPTFUT', exch_seg: 'MCX', tick_size: '50' };
+    const t = build({ cfg: { mode: 'shadow' }, ltp: 566.5, master: [goldRow], signal: gold });
+    await t.svc.evaluate(ev);
+    expect(t.judge.judge).toHaveBeenCalledTimes(1);
+    expect(((t.judge.judge.mock.calls[0] as any[])[0]).caps.maxLossPerTrade).toBe(7500);
   });
 
   it('self-review lessons of scope SIGNAL_JUDGE ride in the packet when the reader gives any', async () => {

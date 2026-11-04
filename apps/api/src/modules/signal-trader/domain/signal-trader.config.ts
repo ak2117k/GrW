@@ -112,7 +112,29 @@ export interface SignalTraderConfig {
    * Default 09:45. Paper trading itself still runs from the open. One rule for every venue (MCX included).
    */
   liveFromIstMin: number;
+  /**
+   * SIGNAL_JUDGE_DEFAULT=take|skip (2026-11-04, owner approved). The judge's default when the evidence is
+   * neither for nor against. Over 21 days the judge SKIPped 65 of 70 channel calls; its scored skips were
+   * 11 right (−₹9.3k avoided) vs 13 wrong (+₹34.6k missed), and on 4 Nov it SKIPped a GOLD CE that ran +53%
+   * citing unavailable chain/VIX and "mixed news".
+   *   take (default): prompt signal-judge-v6-take — TAKE unless there is concrete evidence against; missing
+   *                   data / mixed news are no reason to SKIP; the packet carries `events` (event days).
+   *   skip: today's behaviour exactly — prompt signal-judge-v5 byte for byte, no `events` in the packet.
+   * Rollback: SIGNAL_JUDGE_DEFAULT=skip + restart. A typo lands on skip (the conservative value, reported).
+   */
+  judgeDefault: SignalJudgeDefault;
   problems: string[];
+}
+
+export type SignalJudgeDefault = 'take' | 'skip';
+
+/** SIGNAL_JUDGE_DEFAULT: unset = take; a value that is not take|skip = skip (fewer real orders), reported. */
+export function parseJudgeDefault(raw: string | undefined, problems: string[]): SignalJudgeDefault {
+  const v = String(raw ?? '').trim().toLowerCase();
+  if (v === '') return 'take';
+  if (v === 'take' || v === 'skip') return v;
+  problems.push(`SIGNAL_JUDGE_DEFAULT=${raw} is not take|skip — using skip`);
+  return 'skip';
 }
 
 /** The SIGNAL_LIVE_KINDS kinds (the token OPT expands to CE + PE). */
@@ -318,6 +340,7 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     liveUnderlyings: String(env.SIGNAL_LIVE_UNDERLYINGS ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean),
     liveKinds: parseLiveKinds(env.SIGNAL_LIVE_KINDS, problems),
     liveFromIstMin: parseLiveFromIst(env.SIGNAL_LIVE_FROM_IST, problems),
+    judgeDefault: parseJudgeDefault(env.SIGNAL_JUDGE_DEFAULT, problems),
     problems,
   };
 }

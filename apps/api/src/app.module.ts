@@ -47,6 +47,7 @@ import { TradeTrackerModule } from './modules/trade-tracker/trade-tracker.module
 import { MarketHubModule } from './modules/market-hub/market-hub.module';
 import { TradeSentinelModule } from './modules/trade-sentinel/trade-sentinel.module';
 import { SentinelExecutorModule } from './modules/sentinel-executor/sentinel-executor.module';
+import { IntradayCarryModule } from './modules/intraday-carry/intraday-carry.module';
 import { MbmModule } from './modules/mbm/mbm.module';
 import { NightReportModule } from './modules/night-report/night-report.module';
 import { SignalBoardModule } from './modules/signal-board/signal-board.module';
@@ -266,6 +267,11 @@ import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-revi
     // Inert unless AI_AUTO_EXIT_ENABLED=true (no timer, no query, no broker call);
     // meets TradeSentinelModule only in the database.
     SentinelExecutorModule,
+
+    // Intraday carry (2026-11-04): the close-time CARRY / EXIT decision for MIS F&O positions —
+    // Angel convertPosition (verified on the position book) or an EXIT_NOW for the executor above;
+    // paper simulated. INTRADAY_CARRY=live|off (default live); live only for INTRADAY_CARRY_USERS.
+    IntradayCarryModule,
 
     // Market-behaviour model M2 (observe only): 1m bar refresher + fail-open proxy to the
     // MBM service. Inert unless MBM_ENABLED=observe|on.

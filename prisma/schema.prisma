@@ -1939,6 +1939,53 @@ model AiExitOutcome {
   @@map("ai_exit_outcomes")
 }
 
+/// Intraday carry (docs/superpowers/specs/2026-11-04-intraday-carry-and-thesis-guard-design.md §5.3/§5.4):
+/// one row per intraday (MIS) position's close decision — CARRY (MIS → carry-forward) or EXIT —
+/// live or simulated on paper, with its reason, facts, the conversion result and the broker's answer,
+/// then scored the next session (gap, first-hour range, carry-vs-exit P&L at 10:15 IST). No FK.
+model IntradayCarryDecision {
+  id                 String    @id @default(cuid())
+  userId             String
+  mode               String    // live | paper
+  trackerId          String    // live tracker id, or the paper tracker id (paper:<tradeId>)
+  tradeId            String?   // paper only
+  istDay             String    // YYYY-MM-DD IST of the decision
+  symbol             String
+  exchange           String
+  token              String
+  productType        String?
+  positionSide       String    // LONG | SHORT
+  qty                Float
+  decision           String    // CARRY | EXIT | NONE | CAP_BLOCKED_BROKER_SQUARE_OFF
+  reason             String
+  verdictId          String?   // the close judgement the decision read
+  facts              Json
+  decisionPrice      Float?
+  conversionStatus   String?   // PENDING | CONVERTED | NOT_CONVERTED | POSITION_GONE | SIMULATED | EXIT_FALLBACK
+  conversionAttempts Int       @default(0)
+  brokerMessage      String?
+  exitVerdictId      String?   // the EXIT_NOW verdict recorded for the exit executor
+  decidedAt          DateTime
+  executedAt         DateTime?
+  scoreStatus        String    @default("PENDING") // PENDING | DONE | NO_DATA
+  gapPct             Float?
+  maxAfter           Float?
+  minAfter           Float?
+  priceAt1015        Float?
+  pnlCarry           Float?
+  pnlExit            Float?
+  scoreVerdict       String?   // RIGHT | WRONG
+  scoreNote          String?
+  scoredAt           DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([trackerId, istDay])
+  @@index([userId, decidedAt])
+  @@index([scoreStatus, decidedAt])
+  @@map("intraday_carry_decisions")
+}
+
 /// One row per exitTrigger proposal the executor looked at
 /// (docs/superpowers/specs/2026-10-13-sentinel-price-triggers-design.md §3.3).
 /// verdictId is UNIQUE: a proposal is armed or rejected exactly once. At most one

@@ -161,3 +161,25 @@ export function stepPaperTrigger(
   const beyond = t.op === 'BELOW' ? q.price < t.price : q.price > t.price;
   return beyond ? { kind: 'fire', watched: q.price } : { kind: 'none' };
 }
+
+/**
+ * Intraday carry on paper (spec 2026-11-04 D12) — what a close decision does to an INTRADAY paper
+ * trade. Pure; no broker call ever (this module reaches no order code).
+ *  - CARRY: the paper trade's product becomes CARRYFORWARD, so the paper watch's intraday square-off
+ *    (signal-trader/domain/paper.ts: last 5 minutes) no longer closes it — it is held overnight on its
+ *    carried rules (SL, targets, the contract's expiry day), as a live conversion would be.
+ *  - EXIT (and the cap's broker square-off, which paper has no cap for): left INTRADAY — the paper
+ *    watch's square-off closes it at the LTP before the close, as the broker's MIS square-off would.
+ *  - Anything else, or a trade that is no longer INTRADAY: nothing.
+ */
+export function paperCloseEffect(
+  decision: string,
+  product: string | null,
+): { kind: 'convert'; positionType: 'CARRYFORWARD'; note: string } | { kind: 'leave'; note: string } {
+  const intraday = String(product ?? '').trim().toUpperCase() === 'INTRADAY';
+  if (!intraday) return { kind: 'leave', note: `paper product ${product ?? 'unknown'} is not INTRADAY — nothing to do` };
+  if (decision === 'CARRY') {
+    return { kind: 'convert', positionType: 'CARRYFORWARD', note: 'paper close decision CARRY: product INTRADAY → CARRYFORWARD (held overnight)' };
+  }
+  return { kind: 'leave', note: `paper close decision ${decision}: left INTRADAY — the paper square-off closes it before the close` };
+}

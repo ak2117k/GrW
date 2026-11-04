@@ -1,6 +1,6 @@
 import { parseExitDisciplineConfig } from '../exit-discipline/config';
 import { parseTriggerConfig } from '../sentinel-executor/domain/trigger-config';
-import { armPaperTrigger, gateExits, paperExitGate, stepPaperTrigger, type PaperTrigger } from './paper-exit';
+import { armPaperTrigger, gateExits, paperCloseEffect, paperExitGate, stepPaperTrigger, type PaperTrigger } from './paper-exit';
 
 const NOW = Date.parse('2026-10-29T06:00:00Z');
 const tcfg = parseTriggerConfig({});
@@ -188,5 +188,17 @@ describe('stepPaperTrigger', () => {
 
   it('expires at the live max age', () => {
     expect(stepPaperTrigger(t, premium(80), tcfg, NOW + tcfg.maxAgeMin * 60_000 + 1)).toEqual({ kind: 'expired' });
+  });
+});
+
+describe('paperCloseEffect — intraday carry on paper (2026-11-04 D12)', () => {
+  it('CARRY converts an INTRADAY paper trade to CARRYFORWARD; EXIT leaves it to the paper square-off', () => {
+    expect(paperCloseEffect('CARRY', 'INTRADAY')).toMatchObject({ kind: 'convert', positionType: 'CARRYFORWARD' });
+    expect(paperCloseEffect('EXIT', 'INTRADAY').kind).toBe('leave');
+    expect(paperCloseEffect('CAP_BLOCKED_BROKER_SQUARE_OFF', 'intraday').kind).toBe('leave');
+  });
+  it('a trade that is not INTRADAY is never touched', () => {
+    expect(paperCloseEffect('CARRY', 'CARRYFORWARD').kind).toBe('leave');
+    expect(paperCloseEffect('CARRY', null).kind).toBe('leave');
   });
 });

@@ -74,6 +74,8 @@ import { TelegramOwnerAlerts } from './adapters/owner-alert.telegram.adapter';
 import { LADDER_PLANS } from './ports/ladder-plans.port';
 import { PrismaLadderPlanReader } from './repositories/ladder-plan.reader';
 import { parseLadderMode } from '../exit-discipline/target-ladder';
+import { CLOSE_PRODUCTS } from './ports/close-products.port';
+import { CloseProductBook } from '../intraday-carry/close-product-book';
 
 /**
  * Trade Sentinel — Stage 0 (shadow). Watches open Angel One positions and
@@ -294,6 +296,10 @@ import { parseLadderMode } from '../exit-discipline/target-ladder';
     HighImpactNewsBook,
     // Paper exit shadow stage 2: the paper looks' table (read by the packet's memory block too).
     PaperLookRepository,
+    // Intraday carry (2026-11-04): each open tracker's broker product + the CARRY/EXIT window, a
+    // broker-free in-memory cache that IntradayCarryModule fills from warm position-book reads.
+    { provide: CloseProductBook, useFactory: () => new CloseProductBook() },
+    { provide: CLOSE_PRODUCTS, useExisting: CloseProductBook },
   ],
   // SentinelChartContextAdapter + NEWS_SHIM: read-only context blocks for the signal-trader judge.
   // The rest: the pieces PaperSentinelModule builds its second, paper-only cycle from — the same
@@ -315,6 +321,7 @@ import { parseLadderMode } from '../exit-discipline/target-ladder';
     FUTILE_REJUDGE_CONFIG,
     JUDGE_GATE_CONFIG,
     MARKET_EVENTS,
+    CloseProductBook,
   ],
 })
 export class TradeSentinelModule {}

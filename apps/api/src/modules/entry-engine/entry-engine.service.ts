@@ -1,8 +1,10 @@
 import { randomUUID } from 'crypto';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { bootJobsEnabled } from '../../common/utils/boot-jobs';
 import { INDEX_UNDERLYINGS } from '../market-hub/underlying';
+import { eventContextFor, type EventContext } from '../news-events/events/event-context';
+import { MarketEventsRepository } from '../news-events/events/market-events.repository';
 import { segmentFor } from '../signal-trader/domain/contract-resolver';
 import type { SignalTraderConfig } from '../signal-trader/domain/signal-trader.config';
 import { SignalTraderRepository } from '../signal-trader/repositories/signal-trader.repository';
@@ -64,6 +66,9 @@ export class EntryEngineService {
     private readonly signalRepo: SignalTraderRepository,
     private readonly oi: SignalOiCheckService,
     private readonly paper: EntryEnginePaperService,
+    // 2026-11-04: the event calendar (market_events + MARKET_EVENT_DAYS) for the decision's reasons.
+    // Optional: without it the decision simply carries no event line.
+    @Optional() private readonly events?: MarketEventsRepository,
   ) {
     for (const p of cfg.problems) this.logger.warn(`[entry-engine] ${p}`);
   }
@@ -123,7 +128,8 @@ export class EntryEngineService {
     const trend = trendReading(chosen.bars, at, sessionStart);
     const want = wantFor(news, trend);
     const oi = await this.oiRead(underlying, optionExchange, want, trend.price, at);
-    const decision = entryDecision({ underlying, at, news, trend, oi });
+    const event = await this.eventRead(underlying, at);
+    const decision = entryDecision({ underlying, at, news, trend, oi, event });
 
     let minutesToClose: number | null = null;
     try {
@@ -141,7 +147,7 @@ export class EntryEngineService {
       at,
       action: decision.action,
       mode: this.cfg.mode,
-      inputs: { news, trend: { ...trend, barSource: chosen.source, line }, oi, guards: { openForUnderlying, tradesToday, minutesToClose, ok: guards.ok }, scores: decision.scores },
+      inputs: { news, trend: { ...trend, barSource: chosen.source, line }, oi, ...(event ? { event } : {}), guards: { openForUnderlying, tradesToday, minutesToClose, ok: guards.ok }, scores: decision.scores },
       reasons: [...decision.reasons, ...guards.reasons],
     });
     this.logger.log(`[entry-engine] ${underlying} ${decision.action} (${this.cfg.mode}) — ${decision.reasons.map((r) => r.split(' — ')[0]).join('; ')}${guards.ok ? '' : `; ${guards.reasons.join('; ')}`}`);
@@ -163,6 +169,20 @@ export class EntryEngineService {
     if (index) return { exchange: index.exchange, token: index.token, symbol: index.symbol };
     const fut = await this.signalRepo.nearestFuture(underlying, istDayAt(at, 0));
     return fut ? { exchange: fut.exchange, token: fut.token, symbol: fut.symbol } : null;
+  }
+
+  /**
+   * The event view (2026-11-04, US-midterm GOLD day: the engine never knew it was an event day). Never
+   * throws: eventContextFor reports an unreadable / empty calendar as absent(<reason>) itself; null only
+   * when no calendar is wired here at all.
+   */
+  private async eventRead(underlying: string, at: Date): Promise<EventContext | null> {
+    if (!this.events) return null;
+    try {
+      return await eventContextFor(underlying, at, { repo: this.events });
+    } catch (e) {
+      return { status: 'absent', reason: `event context failed: ${errText(e)}` };
+    }
   }
 
   /** The OI read (signal-trader's DB-only input builder); the trend price centres the strikes when nothing else can. */

@@ -91,6 +91,18 @@ const HEADLINE_SUBJECT: Readonly<Record<string, { include: RegExp; exclude: RegE
   NIFTY: { include: /\b(nifty|sensex|d-street|dalal street|indian (equities|stocks|shares|markets?))\b/i, exclude: /\bbank nifty\b/i },
   SENSEX: { include: /\b(sensex|nifty|d-street|dalal street)\b/i, exclude: null },
   BANKNIFTY: { include: /\b(bank nifty|banknifty|nifty bank|psu banks?|private banks?)\b/i, exclude: null },
+  // 2026-11-04: bullion. Gold-loan lenders, jewellers, 'golden', gold bonds / ETFs are companies or
+  // products, not the metal's price — unless the headline also names the price (Comex, bullion, 'gold prices').
+  GOLD: {
+    include: /\b(gold|bullion|yellow metal|comex gold)\b/i,
+    exclude: /\b(muthoot|manappuram|gold loans?|gold finance|gold bonds?|sovereign gold|gold etfs?|golden|kalyan|titan|senco|gold medals?|gold standard)\b/i,
+    rescue: /\b(comex|bullion|yellow metal|gold (prices?|rates?|futures)|mcx gold|spot gold)\b/i,
+  },
+  SILVER: {
+    include: /\b(silver|comex silver)\b/i,
+    exclude: /\b(silver (lining|jubilee|screen|medals?|oak)|silverline|silver spoon)\b/i,
+    rescue: /\b(comex|bullion|silver (prices?|rates?|futures)|mcx silver|spot silver)\b/i,
+  },
 });
 
 /** Is the headline about the underlying's own market (crude: oil / crude / Brent / WTI / OPEC, not "Indian Oil")? */
@@ -104,11 +116,15 @@ export function headlineAbout(underlying: string, headline: string): boolean {
 const SUBJECT_SECTORS: Readonly<Record<string, string[]>> = Object.freeze({
   CRUDEOIL: ['MCX ENERGY'],
   BANKNIFTY: ['NIFTY BANK'],
+  GOLD: ['MCX BULLION'],
+  SILVER: ['MCX BULLION'],
 });
 
 /** Cluster instruments that name the underlying itself. */
 const SUBJECT_INSTRUMENTS: Readonly<Record<string, string[]>> = Object.freeze({
   CRUDEOIL: ['CRUDEOIL', 'CRUDEOILM'],
+  GOLD: ['GOLD', 'GOLDM'],
+  SILVER: ['SILVER', 'SILVERM'],
   NIFTY: ['NIFTY'],
   SENSEX: ['SENSEX'],
   BANKNIFTY: ['BANKNIFTY'],

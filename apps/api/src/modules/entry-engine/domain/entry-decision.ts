@@ -1,3 +1,4 @@
+import type { EventContext } from '../../news-events/events/event-context';
 import type { OiCheck, OiVerdict } from '../../signal-trader/domain/oi-check';
 
 /**
@@ -92,6 +93,12 @@ export interface ImpactRow {
   /** The cluster's sources (outlets) and tagged instruments — read by the news theme; optional (older fixtures). */
   sources?: string[];
   instruments?: string[];
+  /**
+   * The news reader's EVENT_RISK tag (2026-11-04): a scheduled / binary / political-macro outcome
+   * (election, rate decision, war / ceasefire) — a big move is expected, direction unknown. Read as
+   * "move expected", never as a direction. Optional: null / absent on rows read before the tag existed.
+   */
+  eventRisk?: boolean | null;
 }
 
 /** Which impacts concern an underlying. Broad-market (index NIFTY) news counts for NIFTY and SENSEX. */
@@ -100,6 +107,10 @@ const NEWS_MATCH: Readonly<Record<string, { symbols: string[]; indexNames: strin
   SENSEX: { symbols: ['SENSEX'], indexNames: ['NIFTY', 'SENSEX'], sectors: [] },
   BANKNIFTY: { symbols: ['BANKNIFTY'], indexNames: ['BANKNIFTY'], sectors: ['NIFTY BANK'] },
   CRUDEOIL: { symbols: ['CRUDEOIL', 'CRUDEOILM'], indexNames: [], sectors: [] },
+  // 2026-11-04: bullion joined the universe. The tagger files gold / silver stories under 'MCX BULLION'
+  // (news-events/keys.ts); a bullion-sector story counts for both metals (they move together).
+  GOLD: { symbols: ['GOLD', 'GOLDM'], indexNames: [], sectors: ['MCX BULLION'] },
+  SILVER: { symbols: ['SILVER', 'SILVERM'], indexNames: [], sectors: ['MCX BULLION'] },
 });
 
 export function impactConcerns(underlying: string, r: Pick<ImpactRow, 'symbols' | 'sectors' | 'indexName'>): boolean {
@@ -126,6 +137,8 @@ export interface NewsItem {
   ageMin: number;
   readAgoMin: number;
   headline: string;
+  /** EVENT_RISK story: move expected, no direction of its own (a NEUTRAL one weighs 0). */
+  eventRisk?: boolean;
 }
 
 export interface NewsReading {
@@ -146,6 +159,8 @@ export interface NewsReading {
   /** The extra-path reads behind it (recorded on the decision row). */
   theme?: unknown;
   preOpen?: unknown;
+  /** EVENT_RISK stories among the counted ones (2026-11-04): a big move is expected, direction unknown. */
+  moveExpected?: number;
 }
 
 export type NewsMaterialPath = 'STORY' | 'THEME' | 'PRE_OPEN';
@@ -188,10 +203,14 @@ export function newsReading(impacts: readonly ImpactRow[], underlying: string, a
         ageMin: r1((t - r.firstSeen.getTime()) / MIN),
         readAgoMin: r1((t - r.analysedAt.getTime()) / MIN),
         headline: r.headline.slice(0, 160),
+        ...(r.eventRisk === true ? { eventRisk: true } : {}),
       };
     });
   const score = r4(items.reduce((s, i) => s + i.weight, 0));
   if (items.length === 0) return { lean: 'NO_DATA', score: 0, material: false, items, freshestAgeMin: null, summary: `no news read in the last ${ENTRY_ENGINE.newsLookbackMin} min` };
+  // EVENT_RISK adds "move expected" to the read, never a direction: the score above is untouched by it.
+  const moveExpected = items.filter((i) => i.eventRisk).length;
+  const moveNote = moveExpected > 0 ? `; move expected (${moveExpected} EVENT_RISK stor${moveExpected === 1 ? 'y' : 'ies'}, no direction)` : '';
   const lean: ComponentLean = score >= ENTRY_ENGINE.newsMinScore ? 'BULLISH' : score <= -ENTRY_ENGINE.newsMinScore ? 'BEARISH' : 'NEUTRAL';
   const side = lean === 'BULLISH' ? 'BULL' : lean === 'BEARISH' ? 'BEAR' : null;
   const material = side !== null && items.some((i) => i.direction === side && (ENTRY_ENGINE.newsMaterialMagnitudes.includes(i.magnitude) || i.material));
@@ -204,7 +223,8 @@ export function newsReading(impacts: readonly ImpactRow[], underlying: string, a
     items,
     freshestAgeMin,
     materialPath: material ? 'STORY' : null,
-    summary: `${lean.toLowerCase()} score ${score} from ${items.length} stor${items.length === 1 ? 'y' : 'ies'}${material ? ' (material)' : ''}; latest: ${top.direction} ${top.magnitude} ${top.confidence} "${top.headline.slice(0, 80)}"`,
+    ...(moveExpected > 0 ? { moveExpected } : {}),
+    summary: `${lean.toLowerCase()} score ${score} from ${items.length} stor${items.length === 1 ? 'y' : 'ies'}${material ? ' (material)' : ''}; latest: ${top.direction} ${top.magnitude} ${top.confidence} "${top.headline.slice(0, 80)}"${moveNote}`,
   };
 }
 
@@ -366,6 +386,22 @@ export interface EntryInput {
   news: NewsReading;
   trend: TrendReading;
   oi: OiReading | null;
+  /**
+   * The event view for the underlying (news-events eventContextFor, 2026-11-04). Recorded as a reason
+   * only: an event day predicts move SIZE, not direction, so it never makes or blocks an entry here.
+   * Absent / undefined = not read (older callers, the replay).
+   */
+  event?: EventContext | null;
+}
+
+/** One line for the decision's reasons; null when the event view was not read. */
+export function eventReason(underlying: string, e: EventContext | null | undefined): string | null {
+  if (!e) return null;
+  if (e.status === 'absent') return `event: absent — ${e.reason}`;
+  if (e.events.length === 0) return `event: none scheduled affecting ${underlying.toUpperCase()}`;
+  const names = e.events.map((x) => `${x.name} (${x.at}, ${x.impact})`).join('; ');
+  const move = e.events.some((x) => x.expectMove);
+  return `event: ${names}${move ? ' — big move expected, direction unknown' : ''}`;
 }
 
 export interface EntryDecision {
@@ -452,6 +488,9 @@ export function entryDecision(i: EntryInput): EntryDecision {
   } else {
     reasons.push(`oi: AGREES ✓ (futures ${o.futuresVerdict}) — ${o.summary}`);
   }
+
+  const ev = eventReason(i.underlying, i.event);
+  if (ev) reasons.push(ev);
 
   if (!ok || !dir) return { action: 'NO_TRADE', direction: null, reasons, scores };
   return { action: dir === 'BULLISH' ? 'ENTER_CE' : 'ENTER_PE', direction: dir, reasons, scores };

@@ -6,8 +6,12 @@ import { ENTRY_ENGINE, oiReading, type Bar1m, type ComponentLean, type Direction
  * same way. Pure.
  */
 
-/** The universe of stage 1 (fixed): index options on NFO / BFO and crude on MCX. NFO stocks: not yet. */
-export const ENGINE_UNIVERSE = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL'] as const);
+/**
+ * The universe of stage 1 (fixed): index options on NFO / BFO, crude and bullion on MCX. NFO stocks: not yet.
+ * 2026-11-04: GOLD and SILVER joined (still ENTRY_ENGINE=paper). On the US-midterm day GOLD moved ~3.5k
+ * points and the engine never looked at it. Full GOLD, not GOLDM (owner).
+ */
+export const ENGINE_UNIVERSE = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'GOLD', 'SILVER'] as const);
 export type EngineUnderlying = (typeof ENGINE_UNIVERSE)[number];
 
 /** The evaluation window (IST minutes after midnight): 09:20–23:00. */

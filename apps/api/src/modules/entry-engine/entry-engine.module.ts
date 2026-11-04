@@ -6,6 +6,7 @@ import { AngelOneAdapterService } from '../market-data/services/angel-one-adapte
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { SessionClock, parseLateClose } from '../market-hub/session-clock';
+import { MarketEventsRepository } from '../news-events/events/market-events.repository';
 import { TradeEngineModule } from '../trade-engine/trade-engine.module';
 import { parseSignalTraderConfig } from '../signal-trader/domain/signal-trader.config';
 import { SignalTraderRepository } from '../signal-trader/repositories/signal-trader.repository';
@@ -32,6 +33,8 @@ import { ENGINE_CLOCK, ENGINE_MASTER, ENGINE_QUOTES, ENGINE_SIGNAL_CONFIG, Entry
     EntryEngineService,
     SignalTraderRepository,
     SignalOiCheckService,
+    // The event calendar read (Prisma only), for eventContextFor in the decision's reasons (2026-11-04).
+    MarketEventsRepository,
     { provide: ENTRY_ENGINE_CONFIG, useFactory: () => parseEntryEngineConfig(process.env) },
     { provide: ENGINE_SIGNAL_CONFIG, useFactory: () => parseSignalTraderConfig(process.env) },
     {

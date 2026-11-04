@@ -37,7 +37,7 @@ function bearishOiInput(at: Date, want: 'BULLISH' | 'BEARISH') {
   return { at, want, sessionStart: SESSION, chain: { expiry: '2026-11-17', contracts, rows, center: 9650, centerSource: 'test' }, futures: null };
 }
 
-function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minutesToClose?: number; oiFails?: boolean; impacts?: ImpactRow[]; preOpen?: PreOpenBiasInput | null } = {}) {
+function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minutesToClose?: number; oiFails?: boolean; impacts?: ImpactRow[]; preOpen?: PreOpenBiasInput | null; events?: { listFrom: (from: Date) => Promise<unknown[]> } } = {}) {
   const repo = {
     impacts: jest.fn(async () => o.impacts ?? [bearImpact]),
     hubBars: jest.fn(async () => [] as Bar1m[]),
@@ -73,11 +73,31 @@ function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minute
     signalRepo as never,
     oi as never,
     paper as never,
+    o.events as never,
   );
   return { svc, repo, paper, oi, quotes };
 }
 
 describe('EntryEngineService', () => {
+  it('2026-11-04: an event day affecting the underlying is in the decision reasons and inputs; an unreadable calendar says absent', async () => {
+    const midterm = { id: 'e1', source: 'macro', kind: 'us_election', title: 'US midterm election results', scope: 'GLOBAL', impact: 'high', startsAt: new Date('2026-10-29T01:30:00Z') };
+    const { svc, repo } = make({ events: { listFrom: async () => [midterm] } });
+    await svc.evaluate('CRUDEOIL', AT);
+    const row = (repo.insertDecision.mock.calls[0] as unknown as [{ inputs: { event?: { status: string } }; reasons: string[] }])[0];
+    expect(row.inputs.event?.status).toBe('present');
+    expect(row.reasons.some((x) => x.startsWith('event: US midterm election results') && x.includes('big move expected'))).toBe(true);
+
+    const down = make({ events: { listFrom: async () => { throw new Error('db down'); } } });
+    await down.svc.evaluate('CRUDEOIL', AT);
+    const r2 = (down.repo.insertDecision.mock.calls[0] as unknown as [{ reasons: string[] }])[0];
+    expect(r2.reasons.some((x) => x.startsWith('event: absent — the events calendar could not be read (db down)'))).toBe(true);
+
+    // No calendar wired: today's reasons, no event line.
+    const none = make();
+    await none.svc.evaluate('CRUDEOIL', AT);
+    expect((none.repo.insertDecision.mock.calls[0] as unknown as [{ reasons: string[] }])[0].reasons.some((x) => x.startsWith('event:'))).toBe(false);
+  });
+
   it('observe (the default): records the ENTER_PE decision with its inputs and reasons, opens NOTHING', async () => {
     expect(parseEntryEngineConfig({}).mode).toBe('observe');
     const { svc, repo, paper, quotes } = make();

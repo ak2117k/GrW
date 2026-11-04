@@ -9,7 +9,13 @@ import { DIRECTION_FREE_FACTORS, INDEX_ONLY_DIRECTION_FACTORS, MIN_JUDGED_MOVE_B
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import {
   clampTunable,
+  FLOOR_ARM_N_TARGET,
+  FLOOR_TRAIL_N_TARGET,
   isAllowedTarget,
+  JUDGE_DEFAULT_TAKE_TARGET,
+  JUDGE_MIN_CONFIDENCE_TARGET,
+  SPIKE_BANK_RISE_N_TARGET,
+  SPIKE_BANK_TRAIL_N_TARGET,
   MBM_PACKET_TARGET,
   NEWS_CONFIRMATION_TARGET,
   OPENING_GUARD_TARGET,
@@ -194,6 +200,13 @@ export function evidenceRowsFor(target: string, rows: readonly EvidenceRow[]): E
   }
   if (target === PERSIST_MIN_TARGET) return rows.filter((r) => r.kind === 'LIVE_EXIT');
   if (target === STOCK_MOVE_POINTS_TARGET) return rows.filter((r) => r.kind === 'STOCK_MOVE');
+  // 2026-11-05 wrong-decision loop: a diagnosis SETTING suggestion on these is vetted (evidenceGate) on the
+  // judge's / the exits' own verification rows. carry.decideByMin has no verification kind yet ⇒ [] ⇒ never
+  // proposed (only the owner can set it).
+  if (target === JUDGE_MIN_CONFIDENCE_TARGET || target === JUDGE_DEFAULT_TAKE_TARGET) return rows.filter((r) => r.kind === 'SIGNAL_JUDGE');
+  if (target === FLOOR_ARM_N_TARGET || target === FLOOR_TRAIL_N_TARGET || target === SPIKE_BANK_RISE_N_TARGET || target === SPIKE_BANK_TRAIL_N_TARGET) {
+    return rows.filter((r) => r.kind === 'LIVE_EXIT' || r.kind === 'PAPER_EXIT');
+  }
   return [];
 }
 

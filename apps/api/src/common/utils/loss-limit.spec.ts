@@ -78,8 +78,8 @@ describe('hard loss exit per underlying (hard-floor.ts, 2026-11-04)', () => {
     expect(hardLossTrip(-2500, limit)).toBe(false);
   });
 
-  it('hardLossConfig(env, symbol): GOLD is the plain ₹7,500 rule (no noise band)', () => {
-    const cfg = hardLossConfig(ENV, SYM);
+  it('hardLossConfig(env, lossLimitFor(symbol)): GOLD is the plain ₹7,500 rule (no noise band)', () => {
+    const cfg = hardLossConfig(ENV, lossLimitFor(SYM, ENV));
     expect(cfg).toMatchObject({ limit: 7500, cap: 7500 });
     const base = { cfg, exposure: 'BEARISH' as const, underlying: 125500, entryUnderlying: 125000, bestUnderlying: 125000, nUnderlying: 10 };
     expect(hardLossReading({ ...base, netPnl: -7600 })).toMatchObject({ trip: true, band: 'PLAIN' });
@@ -88,7 +88,7 @@ describe('hard loss exit per underlying (hard-floor.ts, 2026-11-04)', () => {
 
   it('hardLossConfig(env) without a symbol and for NIFTY is unchanged', () => {
     expect(hardLossConfig(ENV)).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
-    expect(hardLossConfig(ENV, 'NIFTY09NOV2623750PE')).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
-    expect(hardLossConfig(ENV, 'GOLDM05DEC26FUT')).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
+    expect(hardLossConfig(ENV, lossLimitFor('NIFTY09NOV2623750PE', ENV))).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
+    expect(hardLossConfig(ENV, lossLimitFor('GOLDM05DEC26FUT', ENV))).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
   });
 });

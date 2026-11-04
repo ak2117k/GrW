@@ -1,4 +1,5 @@
 import { mcxUnderlyingOf } from '@td/shared';
+import { hardLossConfig } from '../../modules/exit-discipline/hard-floor';
 
 /**
  * PER-UNDERLYING HARD LOSS LIMIT (owner 2026-11-04: "GOLD loss limit ₹7.5k"). Pure.
@@ -21,8 +22,6 @@ import { mcxUnderlyingOf } from '@td/shared';
  * a non-MCX name is compared upper-case exactly (NIFTY ≠ NIFTY09NOV2623750PE).
  */
 export const HARD_LOSS_BY_UNDERLYING_DEFAULT = 'GOLD:7500';
-/** HARD_LOSS_CAP_RUPEES default: the absolute per-trade loss exit (no conditions). */
-export const HARD_LOSS_CAP_DEFAULT_RUPEES = 3000;
 
 type Env = Record<string, string | undefined>;
 
@@ -49,21 +48,6 @@ export function parseLossLimitsByUnderlying(raw: string | undefined): Record<str
   return out;
 }
 
-/** HARD_LOSS_EXIT_RUPEES: unset / 0 / junk ⇒ null (the hard loss exit is off). */
-export function defaultLossLimit(env: Env = process.env): number | null {
-  const n = Number(String(env.HARD_LOSS_EXIT_RUPEES ?? '').trim());
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
-/** HARD_LOSS_CAP_RUPEES: unset / junk / negative ⇒ 3000, 0 ⇒ null (no cap). */
-export function defaultLossCap(env: Env = process.env): number | null {
-  const s = String(env.HARD_LOSS_CAP_RUPEES ?? '').trim();
-  if (s === '') return HARD_LOSS_CAP_DEFAULT_RUPEES;
-  const n = Number(s);
-  if (!Number.isFinite(n) || n < 0) return HARD_LOSS_CAP_DEFAULT_RUPEES;
-  return n === 0 ? null : n;
-}
-
 /** The key a name or tradingsymbol is looked up by: the MCX underlying, else the upper-cased name. */
 function underlyingKey(underlying: string | null | undefined): string | null {
   const s = String(underlying ?? '').trim().toUpperCase();
@@ -72,9 +56,10 @@ function underlyingKey(underlying: string | null | undefined): string | null {
 }
 
 export function lossLimitFor(underlying: string | null, env: Env = process.env): LossLimit {
-  const limit = defaultLossLimit(env);
+  // The defaults are hard-floor.ts's own parse (one source of truth for HARD_LOSS_EXIT_RUPEES / _CAP_RUPEES).
+  const { limit, cap } = hardLossConfig(env);
   const key = underlyingKey(underlying);
   const listed = key !== null ? parseLossLimitsByUnderlying(env.HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING)[key] : undefined;
   if (listed !== undefined) return { limit: limit === null ? null : listed, cap: listed };
-  return { limit, cap: defaultLossCap(env) };
+  return { limit, cap };
 }

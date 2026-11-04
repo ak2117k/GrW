@@ -41,7 +41,7 @@ describe('the overnight prompt variants (SENTINEL_SCORECARD)', () => {
 
   it('o5 is a new version id, still recognised as an overnight stamp', () => {
     expect(SENTINEL_OVERNIGHT_SCORECARD_PROMPT_VERSION).toBe('o5');
-    expect(SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION).toBe('o5/t1');
+    expect(SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION).toBe('o5/t2');
     expect(isOvernightPromptVersion(SENTINEL_OVERNIGHT_SCORECARD_COMPOSITE_PROMPT_VERSION)).toBe(true);
   });
 
@@ -96,7 +96,7 @@ describe('SentinelAgentService.judgeOvernight with a scorecard', () => {
     const svc = new SentinelAgentService({ messages: { create } } as never);
     await expect(svc.judgeOvernight(withCard)).resolves.toMatchObject({ verdict: 'HOLD_OVERNIGHT' });
     expect(create.mock.calls[0][0].system[0].text).toBe(SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT);
-    expect(svc.overnightPromptVersionFor(withCard)).toBe('o5/t1');
+    expect(svc.overnightPromptVersionFor(withCard)).toBe('o5/t2');
   });
 
   it('sends o4 for a packet without one; the live prompt is untouched', async () => {

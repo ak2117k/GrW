@@ -106,6 +106,8 @@ export function buildGateFacts(p: PacketFacts, ctx: {
   valueFactor?: number;
   /** The packet thesis's source (thesisSourceOf); absent ⇒ the facts carry no thesisSource, as before. */
   thesisSource?: ThesisSource | null;
+  /** The broker's MIS square-off lead for this exchange (GateFacts.squareOffLeadMin); absent ⇒ not set. */
+  squareOffLeadMin?: number | null;
 }): GateFacts {
   const dir = p.side === 'LONG' ? 1 : -1;
   const vf = typeof ctx.valueFactor === 'number' && Number.isFinite(ctx.valueFactor) && ctx.valueFactor > 0 ? ctx.valueFactor : 1;
@@ -129,6 +131,7 @@ export function buildGateFacts(p: PacketFacts, ctx: {
     netPnlNow,
     maxLossPerTrade: ctx.maxLossPerTrade,
     minutesToClose: ctx.minutesToClose ?? p.minutesToClose,
+    ...(ctx.squareOffLeadMin !== undefined ? { squareOffLeadMin: ctx.squareOffLeadMin } : {}),
     productType: ctx.productType,
     isExpiryDay: p.expiry !== null && p.expiry === istDate(ctx.now),
     dailyLossLatched: ctx.dailyLossLatched,

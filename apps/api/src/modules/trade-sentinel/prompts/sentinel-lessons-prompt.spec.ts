@@ -54,24 +54,24 @@ describe('overnight prompt +l1 (packet-driven)', () => {
   const lessons = [{ key: 'k', text: 't', right: 2, wrong: 0 }];
 
   it('no lessons (absent or empty): o4 / o5 unchanged', () => {
-    expect(overnightPromptFor({})).toEqual({ text: SENTINEL_OVERNIGHT_SYSTEM_PROMPT, version: 'o4/t1' });
-    expect(overnightPromptFor({ memory: { lessons: [] } }).version).toBe('o4/t1');
-    expect(overnightPromptFor({ overnight: { scorecard: {} } })).toEqual({ text: SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT, version: 'o5/t1' });
+    expect(overnightPromptFor({})).toEqual({ text: SENTINEL_OVERNIGHT_SYSTEM_PROMPT, version: 'o4/t2' });
+    expect(overnightPromptFor({ memory: { lessons: [] } }).version).toBe('o4/t2');
+    expect(overnightPromptFor({ overnight: { scorecard: {} } })).toEqual({ text: SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT, version: 'o5/t2' });
   });
 
   it('lessons in memory: the line after the memory line, and the suffix before the thesis part', () => {
     const o4 = overnightPromptFor({ memory: { lessons } });
-    expect(o4.version).toBe('o4+l1/t1');
+    expect(o4.version).toBe('o4+l1/t2');
     expect(o4.text.replace(OVERNIGHT_LESSONS_LINE, '')).toBe(SENTINEL_OVERNIGHT_SYSTEM_PROMPT);
     expect(o4.text).toMatch(/- The "memory" block holds your own recent verdicts[^\n]*\n- memory\.lessons, when present/);
     const o5 = overnightPromptFor({ memory: { lessons }, overnight: { scorecard: {} } });
-    expect(o5.version).toBe('o5+l1/t1');
+    expect(o5.version).toBe('o5+l1/t2');
     expect(o5.text.replace(OVERNIGHT_LESSONS_LINE, '')).toBe(SENTINEL_OVERNIGHT_SCORECARD_SYSTEM_PROMPT);
   });
 
   it('isOvernightPromptVersion accepts the suffixed stamps and still rejects live ones', () => {
-    expect(isOvernightPromptVersion('o4+l1/t1')).toBe(true);
-    expect(isOvernightPromptVersion('o5/t1')).toBe(true);
-    expect(isOvernightPromptVersion('v9+l1/t1')).toBe(false);
+    expect(isOvernightPromptVersion('o4+l1/t2')).toBe(true);
+    expect(isOvernightPromptVersion('o5/t2')).toBe(true);
+    expect(isOvernightPromptVersion('v9+l1/t2')).toBe(false);
   });
 });

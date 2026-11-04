@@ -88,8 +88,12 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig, env: R
     ? res('HARD_MAX_LOSS', null, { netPnlNow: f.netPnlNow ?? null, maxLossPerTrade: maxLoss }, 'no per-trade max loss or P&L')
     : res('HARD_MAX_LOSS', f.netPnlNow <= -maxLoss, { netPnlNow: r2(f.netPnlNow), maxLossPerTrade: maxLoss }, 'net loss vs maxRiskPerTrade');
   const mtc = fin(f.minutesToClose) ? f.minutesToClose : null;
-  const close = res('HARD_SESSION_CLOSE', mtc === null ? null : f.productType === 'INTRADAY' && mtc <= cfg.gateCloseMin,
-    { productType: f.productType, minutesToClose: mtc, gateCloseMin: cfg.gateCloseMin }, 'intraday product near the close (E3)');
+  // 2026-11-04: an MIS position is squared off by the BROKER before the exchange close (NFO 15:15), so
+  // the window counts to that deadline — else the intraday-carry EXIT at 15:08–15:12 was GATED and
+  // Angel's square-off closed the position instead.
+  const lead = f.productType === 'INTRADAY' && fin(f.squareOffLeadMin) && f.squareOffLeadMin > 0 ? f.squareOffLeadMin : 0;
+  const close = res('HARD_SESSION_CLOSE', mtc === null ? null : f.productType === 'INTRADAY' && mtc - lead <= cfg.gateCloseMin,
+    { productType: f.productType, minutesToClose: mtc, squareOffLeadMin: lead, gateCloseMin: cfg.gateCloseMin }, 'intraday product near the broker square-off (E3)');
   const expiry = res('HARD_EXPIRY', mtc === null ? null : f.isExpiryDay && mtc <= EXPIRY_CLOSE_MIN,
     { isExpiryDay: f.isExpiryDay, minutesToClose: mtc }, `expiry day, <= ${EXPIRY_CLOSE_MIN} min to close`);
   const daily = res('HARD_DAILY_LOSS', f.dailyLossLatched, { dailyLossLatched: f.dailyLossLatched }, 'core daily-loss latch for today');

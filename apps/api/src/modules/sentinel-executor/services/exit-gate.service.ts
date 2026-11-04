@@ -16,6 +16,7 @@ import type { PendingVerdict } from '../repositories/ai-exit-execution.repositor
 import { ExitGateRepository } from '../repositories/exit-gate.repository';
 import { AI_EXIT_SESSION_CLOCK } from './executor.tokens';
 import { lossLimitFor } from '../../../common/utils/loss-limit';
+import { parseCarryConfig } from '../../intraday-carry/domain/carry-config';
 
 export type GateContext =
   | {
@@ -150,6 +151,9 @@ export class ExitGateService {
         maxLossPerTrade: ctx.maxLossPerTrade, dailyLossLatched: ctx.dailyLossLatched, history: ctx.history, now: live.now,
         valueFactor: contractValueFactor(live.exchange, ctx.packet.symbol),
         ...(ctx.thesisSource !== undefined ? { thesisSource: ctx.thesisSource } : {}),
+        ...(live.productType === 'INTRADAY'
+          ? { squareOffLeadMin: parseCarryConfig(process.env).leadMin[String(live.exchange).toUpperCase()] ?? null }
+          : {}),
       });
       const record = decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg, now: live.now });
       if (record.outcome === 'BYPASS') this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${record.error ?? record.bypassReason}`);

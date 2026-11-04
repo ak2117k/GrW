@@ -80,6 +80,12 @@ export interface GateFactsSnapshot {
   netPnlNow: number | null;
   maxLossPerTrade: number | null;
   minutesToClose: number | null;
+  /**
+   * Minutes before the exchange close that the broker squares off an INTRADAY (MIS) position
+   * (INTRADAY_CARRY_SQUARE_OFF_LEAD_MIN, e.g. NFO 15 → 15:15). HARD_SESSION_CLOSE counts to that
+   * deadline, not the exchange close. Absent/null ⇒ 0 (the exchange close, as before).
+   */
+  squareOffLeadMin?: number | null;
   productType: string | null;
   isExpiryDay: boolean;
   dailyLossLatched: boolean;

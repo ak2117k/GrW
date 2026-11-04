@@ -158,10 +158,10 @@ describe('SentinelAgentService', () => {
     // The literal, not only the composition — an expectation built purely from
     // the constants under test would still pass if both were empty strings.
     // No config here = market cues off, exit discipline on (its default), triggers off.
-    expect(svc.promptVersion).toBe('v2.4/t1');
+    expect(svc.promptVersion).toBe('v2.4/t2');
     const on = new SentinelAgentService({ messages: { create: jest.fn() } } as never, { get: (k: string) => (k === 'MARKET_CUES_ENABLED' ? 'true' : undefined) } as never);
     // A ConfigService with SELF_REVIEW_LESSONS unset = lessons on (its default): the +l1 suffix.
-    expect(on.promptVersion).toBe('v7+l1+d1+e1+s2+a2/t1');
+    expect(on.promptVersion).toBe('v7+l1+d1+e1+s2+a2/t2');
     expect(on.promptVersion).toBe(`${SENTINEL_PROMPT_VERSION}+l1+d1+e1+s2+a2/${THESIS_PROMPT_VERSION}`);
     expect(SENTINEL_PROMPT_VERSION).not.toContain('/');
     expect(THESIS_PROMPT_VERSION).not.toContain('/');
@@ -267,7 +267,7 @@ describe('SentinelAgentService', () => {
     await on.judge(packet());
     // SELF_REVIEW_LESSONS unset = on: SENTINEL_SYSTEM_PROMPT plus the +l1 memory.lessons line.
     expect(c.mock.calls[0][0].system[0].text).toBe(sentinelSystemPrompt({ cues: true, triggers: false, discipline: true, lessons: true, delta: true, equity: true, squareOff: true, anchors: true }));
-    expect(on.promptVersion).toBe('v7+l1+d1+e1+s2+a2/t1');
+    expect(on.promptVersion).toBe('v7+l1+d1+e1+s2+a2/t2');
   });
 
   it('sends the packet as the user turn and caches the system prompt', async () => {

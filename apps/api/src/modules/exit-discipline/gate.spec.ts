@@ -32,6 +32,8 @@ describe('evaluateExitGate', () => {
     ['below the support the trade was HELD against', { underlying: 8940 }, 'THESIS_BROKEN', false, false, 'THESIS_LEVEL'],
     ['net loss at the per-trade max', { netPnlNow: -2000 }, 'HARD_RISK', true, false, 'HARD_MAX_LOSS'],
     ['intraday product 9 min before close', { productType: 'INTRADAY', minutesToClose: 9 }, 'HARD_RISK', true, false, 'HARD_SESSION_CLOSE'],
+    // NFO MIS: Angel squares off at 15:15 (lead 15), so 15:08 (22 min to the 15:30 close) is inside the window.
+    ['intraday NFO at 15:08, broker square-off 15:15', { productType: 'INTRADAY', minutesToClose: 22, squareOffLeadMin: 15 }, 'HARD_RISK', true, false, 'HARD_SESSION_CLOSE'],
     ['expiry day 25 min before close', { isExpiryDay: true, minutesToClose: 25 }, 'HARD_RISK', true, false, 'HARD_EXPIRY'],
     ['daily loss latched', { dailyLossLatched: true }, 'HARD_RISK', true, false, 'HARD_DAILY_LOSS'],
     ['floor breached + underlying 3.5 against since HOLD', { holdRef: { ...BASE.holdRef!, underlying: 9006.5 } }, 'CONFIRMED_FLOOR_BREACH', false, false, 'FLOOR_BREACH_UNDERLYING_MOVE'],
@@ -48,6 +50,9 @@ describe('evaluateExitGate', () => {
 
   it('carry-forward 9 min before close is NOT hard risk (E3)', () => {
     expect(clause(evaluateExitGate({ ...BASE, minutesToClose: 9 }, CFG), 'HARD_SESSION_CLOSE').pass).toBe(false);
+    // The square-off lead applies to INTRADAY only: a carry-forward position 22 min out stays outside the window.
+    expect(clause(evaluateExitGate({ ...BASE, minutesToClose: 22, squareOffLeadMin: 15 }, CFG), 'HARD_SESSION_CLOSE').pass).toBe(false);
+    expect(clause(evaluateExitGate({ ...BASE, productType: 'INTRADAY', minutesToClose: 30, squareOffLeadMin: 15 }, CFG), 'HARD_SESSION_CLOSE').pass).toBe(false);
   });
 
   it('an unarmed floor never confirms a breach, even below VWAP', () => {

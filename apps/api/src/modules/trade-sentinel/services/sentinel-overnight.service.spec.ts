@@ -469,7 +469,7 @@ function makeSvc(
     { build } as never,
     { build: buildPacket } as never,
     { find } as never,
-    { judgeOvernight, overnightPromptVersion: 'o1/t1' } as never,
+    { judgeOvernight, overnightPromptVersion: 'o1/t2' } as never,
     { record, hasWindowVerdict, recentForTracker } as never,
     { runShared } as never,
     { tickFor } as never,
@@ -532,7 +532,7 @@ describe('SentinelOvernightService.runWindow', () => {
         reason: formatOvernightReason(VERDICT.overnightRisk, VERDICT.openPlan),
         invalidationPoint: VERDICT.changeMindLevel,
         evidence: ['overnight.decay'],
-        promptVersion: 'o1/t1',
+        promptVersion: 'o1/t2',
         triggeredBy: ['OVERNIGHT_REVIEW', 'window:OVERNIGHT_REVIEW:EQUITY:2026-10-12'],
         netPnl: -1590,
         greenFloor: 142.4,
@@ -1078,7 +1078,7 @@ describe('SentinelOvernightService — the scorecard block (SENTINEL_SCORECARD)'
       expect(p.latest).not.toHaveBeenCalled();
       expect(JSON.stringify(r.packet)).toBe(JSON.stringify(baseline.packet));
       expect('scorecard' in r.packet.overnight).toBe(false);
-      expect(r.row.promptVersion).toBe('o1/t1');
+      expect(r.row.promptVersion).toBe('o1/t2');
     }
   });
 
@@ -1087,7 +1087,7 @@ describe('SentinelOvernightService — the scorecard block (SENTINEL_SCORECARD)'
     for (const scorecards of [provider(null), undefined, provider(new Error('db down'))]) {
       const r = await judged({ scorecardFlag: 'on', scorecards });
       expect(JSON.stringify(r.packet)).toBe(JSON.stringify(baseline.packet));
-      expect(r.row.promptVersion).toBe('o1/t1');
+      expect(r.row.promptVersion).toBe('o1/t2');
     }
   });
 
@@ -1107,7 +1107,7 @@ describe('SentinelOvernightService — the scorecard block (SENTINEL_SCORECARD)'
     expect(block.value.factors).toContain('news:n/a');
     expect(block.value.factors).toContain('expiry:-2 1 session left');
     expect(JSON.stringify(block.value).length).toBeLessThanOrEqual(SCORECARD_BLOCK_MAX_CHARS);
-    expect(r.row.promptVersion).toBe('o5/t1');
+    expect(r.row.promptVersion).toBe('o5/t2');
     // Stored with the packet, so the verdict row shows what the judge saw.
     expect(r.row.packet.overnight.scorecard).toEqual(block);
   });
@@ -1139,6 +1139,6 @@ describe('SentinelOvernightService — the scorecard block (SENTINEL_SCORECARD)'
     await c.svc.runWindow(PRE_OPEN_CHECK, at('09:10:00'));
     expect(c.judgeOvernight).toHaveBeenCalledTimes(1);
     expect(c.judgeOvernight.mock.calls[0][0].overnight.scorecard.available).toBe(true);
-    expect(c.record.mock.calls[0][0].promptVersion).toBe('o5/t1');
+    expect(c.record.mock.calls[0][0].promptVersion).toBe('o5/t2');
   });
 });

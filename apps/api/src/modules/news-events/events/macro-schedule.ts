@@ -4,7 +4,8 @@ import type { EventImpact, EventScope, MarketEventInput } from '../types';
 import type { EiaOverride } from './rule-events';
 import { isValidTimeZone, zonedToUtc } from './zoned-time';
 
-export const MACRO_KINDS = ['rbi_mpc', 'fomc', 'us_cpi', 'india_cpi', 'us_nfp', 'opec'] as const;
+// 2026-11-04: + us_election — the US midterm results day moved GOLD ~3.5k points and no calendar row said so.
+export const MACRO_KINDS = ['rbi_mpc', 'fomc', 'us_cpi', 'india_cpi', 'us_nfp', 'opec', 'us_election'] as const;
 export type MacroKind = (typeof MACRO_KINDS)[number];
 export interface MacroEntry { kind: MacroKind; date: string; localTime: string; tz: string; impact: EventImpact; sourceUrl: string; title?: string }
 export interface MarketEventsFile { version: 1; macro: MacroEntry[]; usFederalHolidays: string[]; eiaOverrides: EiaOverride[] }
@@ -16,6 +17,7 @@ export const MACRO_META: Readonly<Record<MacroKind, { key: string; scope: EventS
   us_cpi: { key: 'US', scope: 'market', title: 'US CPI release' },
   us_nfp: { key: 'US', scope: 'market', title: 'US non-farm payrolls' },
   opec: { key: 'CRUDEOIL', scope: 'commodity', title: 'OPEC+ meeting' },
+  us_election: { key: 'US', scope: 'market', title: 'US election results' },
 };
 
 const YMD = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;

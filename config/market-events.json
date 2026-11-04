@@ -10,6 +10,7 @@
     { "kind": "eia_natgas", "originalDate": "2026-11-26", "date": "2026-11-25", "localTime": "12:00" }
   ],
   "macro": [
+    { "kind": "us_election", "date": "2026-11-03", "localTime": "19:00", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.usa.gov/midterm-elections", "title": "US midterm election results" },
     { "kind": "fomc", "date": "2026-10-28", "localTime": "14:00", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm" },
     { "kind": "us_nfp", "date": "2026-11-06", "localTime": "08:30", "tz": "America/New_York", "impact": "medium", "sourceUrl": "https://www.bls.gov/schedule/news_release/empsit.htm" },
     { "kind": "us_cpi", "date": "2026-11-10", "localTime": "08:30", "tz": "America/New_York", "impact": "high", "sourceUrl": "https://www.bls.gov/schedule/news_release/cpi.htm" },

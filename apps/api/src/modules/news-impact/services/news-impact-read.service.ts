@@ -33,7 +33,8 @@ export class NewsImpactReadService implements NewsDigestSource, ImpactIdeaSource
   ) {}
 
   async digest(from: Date, to: Date, limit = 10): Promise<NewsDigestView> {
-    const impacts = (await this.repo.impactsBetween(from, to, 300)).filter((i) => i.direction !== 'NEUTRAL' || i.magnitude !== 'LOW');
+    // 2026-11-04: a NEUTRAL LOW story tagged event risk (an election result) is kept — "big move, direction unknown".
+    const impacts = (await this.repo.impactsBetween(from, to, 300)).filter((i) => i.direction !== 'NEUTRAL' || i.magnitude !== 'LOW' || i.eventRisk === true);
     const top = impacts.sort(digestOrder).slice(0, limit);
     const reactions = await this.repo.reactionsForClusters(top.map((i) => i.clusterId));
     const byCluster = new Map<string, StoredReaction[]>();
@@ -48,6 +49,7 @@ export class NewsImpactReadService implements NewsDigestSource, ImpactIdeaSource
         magnitude: i.magnitude,
         horizon: i.horizon,
         pricedIn: i.pricedIn,
+        eventRisk: i.eventRisk ?? null,
         confidence: i.confidence,
         oneLine: i.oneLine,
         affected: { symbols: i.symbols, sectors: i.sectors, index: i.indexName },

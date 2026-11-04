@@ -75,8 +75,11 @@ export function pickBatch(clusters: readonly ClusterForImpact[], now: Date, cap 
  * v2 (2026-11-02): one direction per target set (crude vs the Indian index), commodity symbols named,
  * oil-direction guidance (diplomacy / ceasefire ⇒ crude BEAR; strikes / Hormuz ⇒ crude BULL), recaps
  * and already-realised moves NEUTRAL (also enforced in code: recap.ts).
+ * v3 (2026-11-04): `eventRisk` — "big move expected, direction unknown". On the US midterm results day
+ * 19 election and 12 gold stories were read and nearly all came back NEUTRAL LOW "no Indian impact"
+ * while GOLD moved ~3.5k points: a per-story direction read has no way to say "event day".
  */
-export const NEWS_IMPACT_PROMPT_VERSION = 'v2';
+export const NEWS_IMPACT_PROMPT_VERSION = 'v3';
 
 export const NEWS_IMPACT_SYSTEM = `You are a markets desk analyst for an Indian F&O trader (NIFTY / BANKNIFTY options, F&O stocks, MCX crude oil / gold / silver).
 For EACH news story you are given, judge its likely price impact FROM NOW ON (not the move that already happened). Most news is NEUTRAL or LOW.
@@ -94,6 +97,10 @@ For EACH news story you are given, judge its likely price impact FROM NOW ON (no
   previews / outlooks ("things that will decide the market", "GIFT Nifty signals ..."), and headlines that describe an already-realised move ("52-week low", "down 20% in a month", "worst week").
   Do not give a symbol a direction merely because it is named in such a list.
 - pricedIn: true when the story is old, widely expected, or a recap of a move that already happened.
+- eventRisk: true when the story is about a SCHEDULED, BINARY or POLITICAL-MACRO outcome — an election or its results, a central-bank rate decision (Fed / RBI),
+  US CPI / jobs data, a war start / ceasefire / peace-deal decision, a budget, an OPEC+ decision — that can move GOLD, SILVER, CRUDEOIL or the Indian indices
+  sharply in EITHER direction. Set it even when the direction is NEUTRAL (a big move is expected, its direction unknown): never call such a story "no Indian impact".
+  List the exposed targets (GOLD / SILVER / CRUDEOIL in affected.symbols, NIFTY / BANKNIFTY in affected.index); with a direction, the one-direction rule above still holds. Otherwise false.
 - confidence: 0..1. oneLine: ≤ 20 words, what it means for price.
 Use only the text given. Answer every clusterId exactly once. Strict JSON only.`;
 
@@ -107,7 +114,7 @@ export const NEWS_IMPACT_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['clusterId', 'direction', 'magnitude', 'horizon', 'affected', 'pricedIn', 'confidence', 'oneLine'],
+        required: ['clusterId', 'direction', 'magnitude', 'horizon', 'affected', 'pricedIn', 'eventRisk', 'confidence', 'oneLine'],
         properties: {
           clusterId: { type: 'string' },
           direction: { type: 'string', enum: [...DIRECTIONS] },
@@ -124,6 +131,7 @@ export const NEWS_IMPACT_SCHEMA = {
             },
           },
           pricedIn: { type: 'boolean' },
+          eventRisk: { type: 'boolean' },
           confidence: { type: 'number' },
           oneLine: { type: 'string' },
         },
@@ -167,6 +175,8 @@ export interface ImpactItem {
   horizon: Horizon;
   affected: { symbols: string[]; sectors: string[]; index: ImpactIndex | null };
   pricedIn: boolean;
+  /** v3: big move expected, direction unknown (news_impacts.event_risk). Unset on items built before v3. */
+  eventRisk?: boolean;
   confidence: number;
   oneLine: string;
 }
@@ -208,6 +218,8 @@ export function validateImpactReply(reply: unknown, batchIds: readonly string[])
         index,
       },
       pricedIn: r.pricedIn,
+      // Lenient on purpose: a reply without it (CLI transport, an older model) keeps the item as not-event-risk.
+      eventRisk: r.eventRisk === true,
       confidence: Math.round(conf * 100) / 100,
       oneLine: cut(r.oneLine.trim(), 200),
     });

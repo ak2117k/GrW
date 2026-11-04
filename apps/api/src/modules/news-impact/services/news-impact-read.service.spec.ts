@@ -23,6 +23,13 @@ describe('news-impact reads', () => {
     expect(d.items[0]).toMatchObject({ headline: 'H b', magnitude: 'HIGH', sources: ['Economic Times'], reaction: [] });
   });
 
+  it('digest (2026-11-04): a NEUTRAL LOW event-risk story is kept; eventRisk passes through, old rows read null', async () => {
+    const rows = [imp('old', 'MED', 3), imp('ev', 'LOW', 2, { direction: 'NEUTRAL', eventRisk: true }), imp('q', 'LOW', 1, { direction: 'NEUTRAL', eventRisk: false })];
+    const repo = { impactsBetween: jest.fn(async () => rows), reactionsForClusters: jest.fn(async () => []) };
+    const d = await new NewsImpactReadService(repo as never, {} as never).digest(new Date(0), new Date(), 10);
+    expect(d.items.map((i) => [i.clusterId, i.eventRisk])).toEqual([['c-old', null], ['c-ev', true]]);
+  });
+
   it('ideas feed: MED/HIGH non-neutral, not priced in, strength 0.75 / 1.0 with the sign', async () => {
     const rows = [imp('h', 'HIGH', 2, { direction: 'BEAR' }), imp('m', 'MED', 1), imp('l', 'LOW', 3), imp('p', 'HIGH', 4, { pricedIn: true }), imp('n', 'HIGH', 5, { direction: 'NEUTRAL' })];
     const repo = { impactsBetween: jest.fn(async () => rows) };

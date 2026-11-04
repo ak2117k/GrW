@@ -105,7 +105,7 @@ describe('NewsImpactService — code guards over the reply (prompt v2)', () => {
     await svc.run(NOW);
     expect(repo.upsertImpact).toHaveBeenCalledWith(
       expect.objectContaining({ clusterId: 'w1', direction: 'NEUTRAL', magnitude: 'LOW', pricedIn: true }),
-      'claude-haiku-5-5#v2', 1, expect.any(Number), NOW,
+      'claude-haiku-5-5#v3', 1, expect.any(Number), NOW,
     );
     expect(repo.setClusterSentiment).toHaveBeenCalledWith('w1', 'neutral', 0);
   });

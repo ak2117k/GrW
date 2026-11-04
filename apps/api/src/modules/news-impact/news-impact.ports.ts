@@ -49,6 +49,8 @@ export interface NewsDigestItem {
   magnitude: string;
   horizon: string;
   pricedIn: boolean;
+  /** Big move expected, direction unknown (prompt v3); null = read before v3. */
+  eventRisk?: boolean | null;
   confidence: number;
   oneLine: string;
   affected: { symbols: string[]; sectors: string[]; index: string | null };

@@ -3630,6 +3630,8 @@ model NewsImpact {
   sectors       String[]  @default([])
   indexName     String?   @map("index_name") // NIFTY | BANKNIFTY
   pricedIn      Boolean   @map("priced_in")
+  /// Prompt v3 (2026-11-04): big move expected, direction unknown (elections, rate decisions, war/ceasefire). Null = read before v3.
+  eventRisk     Boolean?  @map("event_risk")
   confidence    Float
   oneLine       String    @map("one_line")
   rank          Float     @default(0)

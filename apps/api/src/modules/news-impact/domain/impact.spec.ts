@@ -79,7 +79,7 @@ describe('reply validation', () => {
   };
 
   it('schema is strict JSON with the agreed fields', () => {
-    expect(NEWS_IMPACT_SCHEMA.properties.items.items.required).toEqual(['clusterId', 'direction', 'magnitude', 'horizon', 'affected', 'pricedIn', 'confidence', 'oneLine']);
+    expect(NEWS_IMPACT_SCHEMA.properties.items.items.required).toEqual(['clusterId', 'direction', 'magnitude', 'horizon', 'affected', 'pricedIn', 'eventRisk', 'confidence', 'oneLine']);
   });
 
   it('keeps well-formed items for batch ids, once each; upper-cases symbols', () => {
@@ -136,7 +136,7 @@ describe('prompt v2 (2026-11-02): one direction per target set, crude guidance, 
   };
 
   it('the system prompt carries the version, the crude-vs-index rule and the oil-direction guidance', () => {
-    expect(NEWS_IMPACT_PROMPT_VERSION).toBe('v2');
+    expect(NEWS_IMPACT_PROMPT_VERSION).toBe('v3'); // v3 (2026-11-04) keeps every v2 rule; adds eventRisk
     expect(NEWS_IMPACT_SYSTEM).toMatch(/TRUE FOR EVERY TARGET/);
     expect(NEWS_IMPACT_SYSTEM).toMatch(/ceasefire[^\n]*CRUDEOIL BEAR/);
     expect(NEWS_IMPACT_SYSTEM).toMatch(/Hormuz[^\n]*CRUDEOIL BULL/);
@@ -166,5 +166,31 @@ describe('prompt v2 (2026-11-02): one direction per target set, crude guidance, 
     const [w, n] = msg.split('clusterId: ').slice(1);
     expect(w).toMatch(/note: wrap headline \(a recap\) — answer NEUTRAL, LOW, pricedIn true/);
     expect(n).not.toMatch(/note:/);
+  });
+});
+
+describe('prompt v3 (2026-11-04): EVENT_RISK — big move expected, direction unknown', () => {
+  const good = {
+    clusterId: 'e1', direction: 'NEUTRAL', magnitude: 'LOW', horizon: 'INTRADAY',
+    affected: { symbols: ['GOLD', 'SILVER'], sectors: [], index: 'NIFTY' }, pricedIn: false, confidence: 0.6, oneLine: 'US midterm results due; big move either way.',
+  };
+
+  it('the prompt names the rule: scheduled / binary / political-macro outcomes are EVENT_RISK even when NEUTRAL', () => {
+    expect(NEWS_IMPACT_SYSTEM).toMatch(/eventRisk: true when the story is about a SCHEDULED, BINARY or POLITICAL-MACRO outcome/);
+    expect(NEWS_IMPACT_SYSTEM).toMatch(/election/);
+    expect(NEWS_IMPACT_SYSTEM).toMatch(/even when the direction is NEUTRAL/);
+    expect(NEWS_IMPACT_SCHEMA.properties.items.items.properties.eventRisk).toEqual({ type: 'boolean' });
+  });
+
+  it('parses eventRisk true / false; missing or non-boolean → false (the item is kept)', () => {
+    expect(validateImpactReply({ items: [{ ...good, eventRisk: true }] }, ['e1'])[0].eventRisk).toBe(true);
+    expect(validateImpactReply({ items: [{ ...good, eventRisk: false }] }, ['e1'])[0].eventRisk).toBe(false);
+    expect(validateImpactReply({ items: [good] }, ['e1'])[0].eventRisk).toBe(false);
+    expect(validateImpactReply({ items: [{ ...good, eventRisk: 'yes' }] }, ['e1'])[0].eventRisk).toBe(false);
+  });
+
+  it('a NEUTRAL event-risk story keeps its commodity and index targets', () => {
+    const [item] = validateImpactReply({ items: [{ ...good, eventRisk: true }] }, ['e1']);
+    expect(normaliseTargets(item).affected).toEqual({ symbols: ['GOLD', 'SILVER'], sectors: [], index: 'NIFTY' });
   });
 });

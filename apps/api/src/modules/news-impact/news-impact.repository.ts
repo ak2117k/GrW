@@ -32,6 +32,8 @@ export interface ImpactWithCluster {
   sectors: string[];
   indexName: string | null;
   pricedIn: boolean;
+  /** news_impacts.event_risk (prompt v3); null = read before v3. Optional until the Prisma client is regenerated. */
+  eventRisk?: boolean | null;
   confidence: number;
   oneLine: string;
   rank: number;
@@ -204,14 +206,18 @@ export class NewsImpactRepository {
       sectors: i.affected.sectors,
       indexName: i.affected.index,
       pricedIn: i.pricedIn,
+      eventRisk: i.eventRisk ?? false,
       confidence: i.confidence,
       oneLine: i.oneLine,
       rank,
     };
+    // Non-literal create/update: event_risk (2026-11-04 migration) type-checks before `prisma generate` picks it up.
+    const create = { clusterId: i.clusterId, ...data };
+    const update = { ...data, analyses: { increment: 1 } };
     return this.prisma.newsImpact.upsert({
       where: { clusterId: i.clusterId },
-      create: { clusterId: i.clusterId, ...data },
-      update: { ...data, analyses: { increment: 1 } },
+      create,
+      update,
       select: { id: true, alertedAt: true },
     });
   }

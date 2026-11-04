@@ -3736,6 +3736,21 @@ model SanityViolation {
   @@map("sanity_violations")
 }
 
+/// Inputs health (inputs-health module, 2026-11-04): one row per alert sent, unique per (problem, underlying,
+/// IST day) so a restart never re-sends the day's alert. Written with raw SQL. Detection only.
+model InputsHealthAlert {
+  id         String   @id
+  problem    String // NO_BARS | NO_CHAIN | NEWS_SILENT | ENGINE_NEWS_EMPTY
+  underlying String // upper-case name, or NEWS
+  istDay     String   @map("ist_day") // YYYY-MM-DD IST
+  message    String
+  alertedAt  DateTime @map("alerted_at") @db.Timestamptz(6)
+
+  @@unique([problem, underlying, istDay])
+  @@index([alertedAt])
+  @@map("inputs_health_alerts")
+}
+
 /// Entry engine stage 1 (owner 2026-10-30): one row per evaluation of an underlying (news + trend + OI →
 /// ENTER_CE / ENTER_PE / NO_TRADE), NO_TRADE included. Written with raw SQL by entry-engine.repository.ts.
 /// tradeId = the PAPER trade an ENTER opened (ENTRY_ENGINE=paper). No FK.

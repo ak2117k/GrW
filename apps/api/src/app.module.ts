@@ -67,6 +67,7 @@ import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
 import { EntryEngineModule } from './modules/entry-engine/entry-engine.module';
 import { PreOpenOutlookModule } from './modules/pre-open-outlook/pre-open-outlook.module';
 import { SanityAuditModule } from './modules/sanity-audit/sanity-audit.module';
+import { InputsHealthModule } from './modules/inputs-health/inputs-health.module';
 import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-review.module';
 
 @Module({
@@ -337,6 +338,11 @@ import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-revi
     // sanity_violations and alerted once (ops bot). DETECTION ONLY: never modifies or blocks a trade.
     // SANITY_AUDIT=off disables it; SANITY_AUDIT_SINCE (default 2026-10-30T09:30Z) is the alert cutoff.
     SanityAuditModule,
+
+    // Inputs health (2026-11-04) — every 15 min in each underlying's session: 1m bars, option chain, news
+    // pipeline and the entry engine's news input; one ops alert per (problem, underlying, IST day), deduped
+    // in inputs_health_alerts. DETECTION ONLY. INPUTS_HEALTH=off disables it (default on).
+    InputsHealthModule,
 
     // Portfolio review (2026-11-02) — GET /api/portfolio-review: the caller's real book analysed (P&L
     // sources, behaviour patterns, holdings tags, ranked suggestions, owner-only AI summary). Read-only;

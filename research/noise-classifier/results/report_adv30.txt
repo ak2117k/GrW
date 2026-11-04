@@ -1,0 +1,145 @@
+[adv] dropped 337 of 623210 rows with stale/zero N
+
+==================== ADVERSE EXCURSIONS, horizon 30 min, REAL = 1.5 N further ====================
+events: BANKNIFTY 309716 (2467 days, 2016-10-07..2026-11-03), CRUDE 1533 (5 days, 2026-10-27..2026-11-03), NIFTY 310031 (2468 days, 2016-10-07..2026-11-04), SENSEX 1593 (13 days, 2026-10-16..2026-11-04)
+base rates (NOISE/REAL/TIMEOUT share; among resolved: observed NOISE vs random-walk null m/(move+m)); hold-always marginal P&L in N (gross, net of theta) with day-bootstrap CI
+  BANKNIFTY k=1.5 train n= 84621 d=2016  N/R/T 0.44/0.54/0.02  resolved NOISE 0.449 vs null 0.444  hold gross -0.084 [-0.095,-0.073]  net -0.163 [-0.175,-0.153]  fwd30 +0.056
+  BANKNIFTY k=1.5 test  n= 18937 d= 451  N/R/T 0.44/0.54/0.03  resolved NOISE 0.447 vs null 0.447  hold gross -0.096 [-0.119,-0.074]  net -0.177 [-0.199,-0.155]  fwd30 +0.013
+  BANKNIFTY k=2.0 train n= 84600 d=2016  N/R/T 0.38/0.57/0.05  resolved NOISE 0.396 vs null 0.387  hold gross -0.056 [-0.071,-0.042]  net -0.152 [-0.166,-0.137]  fwd30 +0.084
+  BANKNIFTY k=2.0 test  n= 18920 d= 451  N/R/T 0.37/0.58/0.06  resolved NOISE 0.387 vs null 0.391  hold gross -0.097 [-0.126,-0.068]  net -0.194 [-0.224,-0.168]  fwd30 +0.018
+  BANKNIFTY k=3.0 train n= 83933 d=2016  N/R/T 0.26/0.61/0.12  resolved NOISE 0.301 vs null 0.308  hold gross -0.031 [-0.051,-0.010]  net -0.151 [-0.170,-0.131]  fwd30 +0.129
+  BANKNIFTY k=3.0 test  n= 18705 d= 451  N/R/T 0.25/0.62/0.13  resolved NOISE 0.291 vs null 0.310  hold gross -0.081 [-0.124,-0.039]  net -0.204 [-0.247,-0.162]  fwd30 +0.056
+  CRUDE     k=1.5 test  n=   512 d=   5  N/R/T 0.46/0.53/0.02  resolved NOISE 0.464 vs null 0.437  hold gross -0.003 [-0.101,+0.134]  net -0.071 [-0.174,+0.068]  fwd30 +0.198
+  CRUDE     k=2.0 test  n=   511 d=   5  N/R/T 0.40/0.55/0.05  resolved NOISE 0.424 vs null 0.381  hold gross +0.084 [-0.044,+0.210]  net +0.001 [-0.126,+0.125]  fwd30 +0.114
+  CRUDE     k=3.0 test  n=   510 d=   5  N/R/T 0.30/0.62/0.08  resolved NOISE 0.330 vs null 0.304  hold gross +0.100 [-0.145,+0.359]  net -0.004 [-0.233,+0.257]  fwd30 -0.037
+  NIFTY     k=1.5 train n= 84587 d=2016  N/R/T 0.43/0.56/0.01  resolved NOISE 0.432 vs null 0.441  hold gross -0.136 [-0.146,-0.125]  net -0.205 [-0.217,-0.195]  fwd30 +0.016
+  NIFTY     k=1.5 test  n= 18968 d= 452  N/R/T 0.43/0.55/0.02  resolved NOISE 0.440 vs null 0.444  hold gross -0.114 [-0.140,-0.092]  net -0.189 [-0.214,-0.164]  fwd30 +0.005
+  NIFTY     k=2.0 train n= 84569 d=2016  N/R/T 0.38/0.59/0.03  resolved NOISE 0.388 vs null 0.385  hold gross -0.095 [-0.108,-0.083]  net -0.178 [-0.192,-0.166]  fwd30 +0.042
+  NIFTY     k=2.0 test  n= 18957 d= 452  N/R/T 0.37/0.59/0.04  resolved NOISE 0.385 vs null 0.388  hold gross -0.101 [-0.131,-0.070]  net -0.191 [-0.220,-0.163]  fwd30 +0.048
+  NIFTY     k=3.0 train n= 84120 d=2016  N/R/T 0.28/0.64/0.08  resolved NOISE 0.302 vs null 0.306  hold gross -0.070 [-0.090,-0.051]  net -0.177 [-0.198,-0.158]  fwd30 +0.062
+  NIFTY     k=3.0 test  n= 18830 d= 452  N/R/T 0.27/0.64/0.10  resolved NOISE 0.294 vs null 0.308  hold gross -0.089 [-0.130,-0.048]  net -0.200 [-0.242,-0.158]  fwd30 +0.105
+  SENSEX    k=1.5 test  n=   535 d=  13  N/R/T 0.41/0.59/0.01  resolved NOISE 0.412 vs null 0.438  hold gross -0.217 [-0.319,-0.105]  net -0.279 [-0.376,-0.179]  fwd30 -0.218
+  SENSEX    k=2.0 test  n=   533 d=  13  N/R/T 0.35/0.64/0.01  resolved NOISE 0.353 vs null 0.384  hold gross -0.242 [-0.397,-0.092]  net -0.312 [-0.475,-0.165]  fwd30 -0.291
+  SENSEX    k=3.0 test  n=   525 d=  13  N/R/T 0.28/0.69/0.03  resolved NOISE 0.288 vs null 0.303  hold gross -0.192 [-0.407,+0.003]  net -0.282 [-0.507,-0.074]  fwd30 -0.264
+
+model: train 506430 events (2016 days)  test 113317 events (452 days)
+  [adv H30] per-feature AUC (direction fixed on train), top 12:
+     moveN          train 0.598  test 0.600  (-)
+     p_null         train 0.598  test 0.600  (+)
+     k              train 0.577  test 0.584  (-)
+     speed_min      train 0.545  test 0.553  (-)
+     held_min       train 0.544  test 0.552  (-)
+     best_gainN     train 0.516  test 0.527  (-)
+     pnl_at_event   train 0.526  test 0.517  (+)
+     N_ratio        train 0.506  test 0.516  (-)
+     N_atr          train 0.507  test 0.510  (-)
+     ret30N         train 0.516  test 0.508  (+)
+     pdhN           train 0.510  test 0.505  (+)
+     adv_extN       train 0.514  test 0.504  (+)
+  holdout AUC (NOISE) GBM              0.601  CI [0.596, 0.606]
+  holdout AUC (NOISE) logistic         0.599  CI [0.594, 0.605]
+  holdout AUC (NOISE) null m/(move+m)  0.600  CI [0.596, 0.605]
+    k=1.5: AUC GBM 0.547  null 0.549  n=37905
+    k=2.0: AUC GBM 0.545  null 0.540  n=37877
+    k=3.0: AUC GBM 0.553  null 0.535  n=37535
+  spearman(pred P(NOISE), realised hold P&L) holdout = -0.007
+  [adv H30 GBM] calibration deciles (pred -> obs): 0.21->0.21  0.27->0.26  0.30->0.28  0.33->0.31  0.36->0.35  0.39->0.37  0.41->0.41  0.43->0.42  0.45->0.45  0.49->0.46
+  [NIFTY k=1.5 H30] thr(train)=0.479  best fixed = exit_always
+  [NIFTY k=1.5 H30] hold_always  held 100.0%  mean marginal -0.189 [-0.210, -0.165] N/event   vs best fixed -0.189 [-0.214, -0.164]
+  [NIFTY k=1.5 H30] clf_p>thr    held 14.9%  mean marginal -0.027 [-0.036, -0.018] N/event   vs best fixed -0.027 [-0.036, -0.019]
+  [NIFTY k=1.5 H30] reg_E>0      held  6.2%  mean marginal -0.009 [-0.016, -0.003] N/event   vs best fixed -0.009 [-0.016, -0.003]
+  [NIFTY k=2.0 H30] thr(train)=0.421  best fixed = exit_always
+  [NIFTY k=2.0 H30] hold_always  held 100.0%  mean marginal -0.191 [-0.220, -0.160] N/event   vs best fixed -0.191 [-0.221, -0.162]
+  [NIFTY k=2.0 H30] clf_p>thr    held 15.8%  mean marginal -0.021 [-0.034, -0.008] N/event   vs best fixed -0.021 [-0.033, -0.009]
+  [NIFTY k=2.0 H30] reg_E>0      held  7.7%  mean marginal -0.011 [-0.020, -0.002] N/event   vs best fixed -0.011 [-0.021, -0.001]
+  [NIFTY k=3.0 H30] thr(train)=0.314  best fixed = exit_always
+  [NIFTY k=3.0 H30] hold_always  held 100.0%  mean marginal -0.200 [-0.245, -0.158] N/event   vs best fixed -0.200 [-0.241, -0.154]
+  [NIFTY k=3.0 H30] clf_p>thr    held 20.9%  mean marginal -0.019 [-0.039, +0.002] N/event   vs best fixed -0.019 [-0.038, +0.002]
+  [NIFTY k=3.0 H30] reg_E>0      held 12.0%  mean marginal -0.018 [-0.034, -0.001] N/event   vs best fixed -0.018 [-0.036, -0.002]
+  [BANKNIFTY k=1.5 H30] thr(train)=0.479  best fixed = exit_always
+  [BANKNIFTY k=1.5 H30] hold_always  held 100.0%  mean marginal -0.177 [-0.199, -0.155] N/event   vs best fixed -0.177 [-0.199, -0.154]
+  [BANKNIFTY k=1.5 H30] clf_p>thr    held 18.4%  mean marginal -0.032 [-0.043, -0.022] N/event   vs best fixed -0.032 [-0.043, -0.021]
+  [BANKNIFTY k=1.5 H30] reg_E>0      held  6.0%  mean marginal -0.011 [-0.018, -0.005] N/event   vs best fixed -0.011 [-0.018, -0.005]
+  [BANKNIFTY k=2.0 H30] thr(train)=0.421  best fixed = exit_always
+  [BANKNIFTY k=2.0 H30] hold_always  held 100.0%  mean marginal -0.194 [-0.226, -0.167] N/event   vs best fixed -0.194 [-0.223, -0.164]
+  [BANKNIFTY k=2.0 H30] clf_p>thr    held 16.9%  mean marginal -0.026 [-0.038, -0.014] N/event   vs best fixed -0.026 [-0.038, -0.014]
+  [BANKNIFTY k=2.0 H30] reg_E>0      held  7.5%  mean marginal -0.014 [-0.024, -0.005] N/event   vs best fixed -0.014 [-0.023, -0.005]
+  [BANKNIFTY k=3.0 H30] thr(train)=0.314  best fixed = exit_always
+  [BANKNIFTY k=3.0 H30] hold_always  held 100.0%  mean marginal -0.204 [-0.247, -0.161] N/event   vs best fixed -0.204 [-0.248, -0.159]
+  [BANKNIFTY k=3.0 H30] clf_p>thr    held 19.1%  mean marginal -0.027 [-0.049, -0.005] N/event   vs best fixed -0.027 [-0.048, -0.006]
+  [BANKNIFTY k=3.0 H30] reg_E>0      held 11.7%  mean marginal -0.017 [-0.035, +0.001] N/event   vs best fixed -0.017 [-0.036, +0.001]
+  [POOLED H30] thr(train)=0.481  best fixed = exit_always
+  [POOLED H30] hold_always  held 100.0%  mean marginal -0.193 [-0.211, -0.176] N/event   vs best fixed -0.193 [-0.211, -0.173]
+  [POOLED H30] clf_p>thr    held  5.4%  mean marginal -0.009 [-0.011, -0.006] N/event   vs best fixed -0.009 [-0.012, -0.006]
+  [POOLED H30] reg_E>0      held  8.5%  mean marginal -0.013 [-0.020, -0.007] N/event   vs best fixed -0.013 [-0.020, -0.007]
+  walk-forward AUC by test year (expanding train): 2020: 0.597 (null 0.596)  2021: 0.589 (null 0.588)  2022: 0.593 (null 0.591)  2023: 0.606 (null 0.604)  2024: 0.618 (null 0.614)  2025: 0.602 (null 0.602)  2026: 0.602 (null 0.597)
+
+  OI subset NIFTY 2025-11-04..2026-10-19: train 17473 test 11801 (split 2026-06-04)
+    base feats           AUC 0.573 [0.556,0.590]
+    base + OI            AUC 0.574 [0.558,0.590]
+    OI only + moveN,k    AUC 0.570 [0.553,0.586]
+  [OI subset] per-feature AUC (direction fixed on train), top 12:
+     doi15_z        train 0.507  test 0.513  (+)
+     doi60_z        train 0.504  test 0.504  (+)
+     s_dp15_z       train 0.506  test 0.492  (-)
+
+  FAILED-BREAK context (adverse leg crossed PDH/PDL [fb_pd] or the day's prior extreme [fb_day]) -- hold-always P&L net, NOISE rate, holdout + full
+    full fb_pd =1 k=1.5: n=  7366 NOISE 0.432 (null 0.434)  hold net -0.150 [-0.198, -0.103]
+    full fb_pd =0 k=1.5: n=199747 NOISE 0.432 (null 0.443)  hold net -0.185 [-0.194, -0.178]
+    full fb_pd =1 k=2.0: n=  8767 NOISE 0.367 (null 0.382)  hold net -0.169 [-0.220, -0.121]
+    full fb_pd =0 k=2.0: n=198279 NOISE 0.376 (null 0.387)  hold net -0.170 [-0.180, -0.161]
+    full fb_pd =1 k=3.0: n= 11846 NOISE 0.265 (null 0.305)  hold net -0.151 [-0.213, -0.089]
+    full fb_pd =0 k=3.0: n=193742 NOISE 0.270 (null 0.307)  hold net -0.172 [-0.186, -0.158]
+    full fb_day=1 k=1.5: n= 11845 NOISE 0.422 (null 0.419)  hold net -0.130 [-0.167, -0.091]
+    full fb_day=0 k=1.5: n=195268 NOISE 0.433 (null 0.444)  hold net -0.187 [-0.195, -0.179]
+    full fb_day=1 k=2.0: n= 14014 NOISE 0.366 (null 0.372)  hold net -0.140 [-0.181, -0.103]
+    full fb_day=0 k=2.0: n=193032 NOISE 0.376 (null 0.387)  hold net -0.172 [-0.184, -0.162]
+    full fb_day=1 k=3.0: n= 18351 NOISE 0.252 (null 0.300)  hold net -0.229 [-0.271, -0.192]
+    full fb_day=0 k=3.0: n=187237 NOISE 0.271 (null 0.307)  hold net -0.165 [-0.181, -0.150]
+    test fb_pd =1 k=1.5: n=  1364 NOISE 0.451 (null 0.437)  hold net -0.102 [-0.216, +0.006]
+    test fb_pd =0 k=1.5: n= 36541 NOISE 0.432 (null 0.445)  hold net -0.186 [-0.206, -0.167]
+    test fb_pd =1 k=2.0: n=  1592 NOISE 0.377 (null 0.386)  hold net -0.146 [-0.275, -0.029]
+    test fb_pd =0 k=2.0: n= 36285 NOISE 0.367 (null 0.389)  hold net -0.195 [-0.218, -0.172]
+    test fb_pd =1 k=3.0: n=  2171 NOISE 0.267 (null 0.307)  hold net -0.112 [-0.263, +0.031]
+    test fb_pd =0 k=3.0: n= 35364 NOISE 0.259 (null 0.309)  hold net -0.208 [-0.245, -0.174]
+    test fb_day=1 k=1.5: n=  2205 NOISE 0.434 (null 0.427)  hold net -0.112 [-0.190, -0.026]
+    test fb_day=0 k=1.5: n= 35700 NOISE 0.433 (null 0.446)  hold net -0.187 [-0.206, -0.168]
+    test fb_day=1 k=2.0: n=  2595 NOISE 0.375 (null 0.377)  hold net -0.106 [-0.195, -0.010]
+    test fb_day=0 k=2.0: n= 35282 NOISE 0.367 (null 0.389)  hold net -0.199 [-0.222, -0.177]
+    test fb_day=1 k=3.0: n=  3369 NOISE 0.261 (null 0.304)  hold net -0.176 [-0.268, -0.082]
+    test fb_day=0 k=3.0: n= 34166 NOISE 0.259 (null 0.309)  hold net -0.205 [-0.240, -0.170]
+
+  hold-always net P&L by time-of-day bucket and N_ratio tercile (holdout)
+    09:15-10:15  n= 13799 NOISE 0.355 hold net -0.215 [-0.261, -0.173]
+    10:15-11:15  n= 21425 NOISE 0.348 hold net -0.228 [-0.274, -0.184]
+    11:15-13:15  n= 43148 NOISE 0.357 hold net -0.184 [-0.215, -0.155]
+    13:15-14:15  n= 21691 NOISE 0.364 hold net -0.169 [-0.215, -0.124]
+    14:15+       n= 13254 NOISE 0.333 hold net -0.177 [-0.233, -0.115]
+    N calm       n= 37492 NOISE 0.366 hold net -0.187 [-0.218, -0.159]
+    N mid        n= 37483 NOISE 0.361 hold net -0.184 [-0.219, -0.152]
+    N expanding  n= 37487 NOISE 0.335 hold net -0.204 [-0.238, -0.171]
+  SENSEX (prod, 13 days, n=1593): NOISE 0.347  null 0.376  hold net -0.291 [-0.389, -0.178]  model AUC 0.586  (sessions/tod differ for CRUDE)
+  CRUDE (prod, 5 days, n=1533): NOISE 0.387  null 0.373  hold net -0.025 [-0.140, +0.125]  model AUC 0.605  (sessions/tod differ for CRUDE)
+
+  NIFTY 2026-11-04 short-side events (hypothetical shorts = long puts) entered 11:00-12:30:
+    entry +105m  k=1.5 at 11:07 move 1.51N fb_pd=0 fb_day=0 P(NOISE)=0.50  outcome REAL hold net -1.75N
+    entry +105m  k=2.0 at 11:10 move 2.79N fb_pd=1 fb_day=0 P(NOISE)=0.34  outcome REAL hold net -1.77N
+    entry +105m  k=3.0 at 11:13 move 3.47N fb_pd=1 fb_day=0 P(NOISE)=0.29  outcome REAL hold net -1.74N
+    entry +120m  k=1.5 at 11:17 move 1.88N fb_pd=1 fb_day=0 P(NOISE)=0.41  outcome REAL hold net -1.74N
+    entry +120m  k=2.0 at 11:18 move 2.60N fb_pd=1 fb_day=0 P(NOISE)=0.34  outcome NOISE hold net +2.44N
+    entry +120m  k=3.0 at 11:20 move 3.26N fb_pd=1 fb_day=0 P(NOISE)=0.30  outcome NOISE hold net +3.12N
+    entry +135m  k=1.5 at 11:38 move 1.81N fb_pd=0 fb_day=0 P(NOISE)=0.46  outcome NOISE hold net +1.76N
+    entry +135m  k=2.0 at 11:39 move 2.15N fb_pd=0 fb_day=0 P(NOISE)=0.42  outcome NOISE hold net +2.11N
+    entry +135m  k=3.0 at 12:03 move 3.26N fb_pd=0 fb_day=0 P(NOISE)=0.31  outcome NOISE hold net +3.17N
+    entry +150m  k=1.5 at 11:51 move 1.81N fb_pd=0 fb_day=0 P(NOISE)=0.43  outcome NOISE hold net +1.79N
+    entry +150m  k=2.0 at 12:01 move 2.15N fb_pd=0 fb_day=0 P(NOISE)=0.38  outcome REAL hold net -1.73N
+    entry +150m  k=3.0 at 12:03 move 3.26N fb_pd=0 fb_day=0 P(NOISE)=0.30  outcome NOISE hold net +3.17N
+    entry +165m  k=1.5 at 12:01 move 1.70N fb_pd=0 fb_day=0 P(NOISE)=0.43  outcome REAL hold net -1.73N
+    entry +165m  k=2.0 at 12:02 move 2.45N fb_pd=0 fb_day=0 P(NOISE)=0.35  outcome NOISE hold net +2.35N
+    entry +165m  k=3.0 at 12:22 move 3.06N fb_pd=0 fb_day=0 P(NOISE)=0.27  outcome REAL hold net -1.73N
+    entry +180m  k=1.5 at 12:16 move 1.52N fb_pd=0 fb_day=0 P(NOISE)=0.45  outcome REAL hold net -1.76N
+    entry +180m  k=2.0 at 12:17 move 2.06N fb_pd=0 fb_day=0 P(NOISE)=0.38  outcome REAL hold net -1.76N
+    entry +180m  k=3.0 at 12:22 move 3.06N fb_pd=0 fb_day=0 P(NOISE)=0.26  outcome REAL hold net -1.73N
+    entry +195m  k=1.5 at 12:35 move 1.62N fb_pd=0 fb_day=0 P(NOISE)=0.46  outcome REAL hold net -1.76N
+    entry +195m  k=2.0 at 12:36 move 2.03N fb_pd=1 fb_day=0 P(NOISE)=0.41  outcome REAL hold net -1.75N
+    entry +195m  k=3.0 at 12:40 move 3.24N fb_pd=1 fb_day=0 P(NOISE)=0.31  outcome REAL hold net -1.89N

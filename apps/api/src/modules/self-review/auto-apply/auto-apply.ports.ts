@@ -5,6 +5,8 @@
  */
 export interface DecisionPnlPort {
   perDecisionPnl(types: string[], sessionDates: string[]): Promise<{ sessions: string[]; decisions: number; perDecision: number | null }>;
+  /** WRONG decisions since a session (F `wrongSince`): the direction check (policy `evidenceDirection`) reads them. */
+  wrongSince?(fromSessionDate: string): Promise<Array<{ decisionType: string; alternative: string | null }>>;
 }
 
 export const DECISION_PNL = Symbol('DECISION_PNL');

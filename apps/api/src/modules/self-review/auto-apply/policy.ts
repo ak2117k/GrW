@@ -12,8 +12,6 @@ import {
   FLOOR_TRAIL_N_TARGET,
   JUDGE_DEFAULT_TAKE_TARGET,
   JUDGE_MIN_CONFIDENCE_TARGET,
-  OPENING_GUARD_TARGET,
-  PERSIST_MIN_TARGET,
   SPIKE_BANK_RISE_N_TARGET,
   SPIKE_BANK_TRAIL_N_TARGET,
 } from '../tuning/tunables';
@@ -39,9 +37,37 @@ export const AFFECTED_DECISIONS: Readonly<Record<string, readonly string[]>> = O
   [SPIKE_BANK_RISE_N_TARGET]: ['SPIKE_BANK', 'FLOOR', 'EXIT'],
   [SPIKE_BANK_TRAIL_N_TARGET]: ['SPIKE_BANK', 'FLOOR', 'EXIT'],
   [CARRY_DECIDE_BY_TARGET]: ['CARRY', 'CARRY_EXIT'],
-  [PERSIST_MIN_TARGET]: ['EXIT', 'GATED_EXIT', 'HOLD'],
-  [OPENING_GUARD_TARGET]: ['EXIT', 'GATED_EXIT'],
+  // PERSIST_MIN_TARGET / OPENING_GUARD_TARGET are deliberately absent (coordinator 2026-11-04): their
+  // consumers re-read overrides every 60 s, so a 19:30 auto-apply would land mid MCX session (spec S7).
+  // They stay owner-approval only.
 });
+
+/** How lopsided the WRONG counts must be before the evidence names a direction. */
+export const DIRECTION_RATIO = 1.5;
+
+/**
+ * The direction the GRADED evidence points a target (spec S2: the code decides, never the LLM), or null when
+ * it doesn't point clearly. Judge: wrong skips (missed winners) vs wrong takes. Floor / spike bank: wrong exits
+ * whose better alternative was to hold (exited too early ⇒ wider, 'up') vs wrong holds whose better alternative
+ * was to exit (held too long ⇒ tighter, 'down'). Booleans answer with the target value, like `directionOf`.
+ */
+export function evidenceDirection(target: string, wrong: ReadonlyArray<{ decisionType: string; alternative: string | null }>): string | null {
+  const count = (p: (r: { decisionType: string; alternative: string | null }) => boolean) => wrong.filter(p).length;
+  const lean = (a: number, b: number): 1 | -1 | 0 => (a > 0 && a >= DIRECTION_RATIO * b ? 1 : b > 0 && b >= DIRECTION_RATIO * a ? -1 : 0);
+  if (target === JUDGE_MIN_CONFIDENCE_TARGET || target === JUDGE_DEFAULT_TAKE_TARGET) {
+    const l = lean(count((r) => r.decisionType === 'ENTRY_SKIP'), count((r) => r.decisionType === 'ENTRY_TAKE'));
+    if (l === 0) return null;
+    if (target === JUDGE_DEFAULT_TAKE_TARGET) return l === 1 ? 'true' : 'false';
+    return l === 1 ? 'down' : 'up';
+  }
+  if ([FLOOR_ARM_N_TARGET, FLOOR_TRAIL_N_TARGET, SPIKE_BANK_RISE_N_TARGET, SPIKE_BANK_TRAIL_N_TARGET].includes(target)) {
+    const early = count((r) => ['EXIT', 'FLOOR', 'SPIKE_BANK', 'GATED_EXIT'].includes(r.decisionType) && /hold/i.test(r.alternative ?? ''));
+    const late = count((r) => r.decisionType === 'HOLD' && /exit/i.test(r.alternative ?? ''));
+    const l = lean(early, late);
+    return l === 0 ? null : l === 1 ? 'up' : 'down';
+  }
+  return null;
+}
 
 /**
  * `to` moved toward from `from` by at most MAX_STEP_SHARE of (max − min), inside the bounds. An integer

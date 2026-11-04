@@ -8,7 +8,7 @@ import { isAllowedTarget, isForbiddenTarget, TUNABLES, validateTunable, type Tun
 import { TuningService } from '../tuning/tuning.service';
 import { AUTO_APPLY_CONFIG, DECISION_PNL, type AutoApplyConfig, type DecisionPnlPort } from './auto-apply.ports';
 import { AUTO_BY, AUTO_ROLLBACK_BY, AutoApplyRepository, type AutoApplyStore, type ProposalRow } from './auto-apply.repository';
-import { AFFECTED_DECISIONS, blockedDirectionOf, changeBlock, rollbackDue, stepLimit, WATCH_SESSIONS, type Change, type WindowPnl } from './policy';
+import { AFFECTED_DECISIONS, blockedDirectionOf, changeBlock, evidenceDirection, rollbackDue, stepLimit, WATCH_SESSIONS, type Change, type WindowPnl } from './policy';
 
 /** Sessions of history the watch and the spacing rules look at. */
 export const HISTORY_SESSIONS = 60;
@@ -226,6 +226,12 @@ export class AutoApplyService {
     const direction = directionOf(from, v.value);
     const block = changeBlock(p.target, direction, history, sessionsAsc);
     if (block) return block;
+    // Spec S2: the code, not the LLM, decides which way a knob moves — the graded WRONG decisions must point the same way.
+    if (!this.pnl.wrongSince) return 'decision grades cannot name a direction (wrongSince not wired)';
+    const fromSession = sessionsAsc[Math.max(0, sessionsAsc.length - 10)] ?? istYmd(now);
+    const expected = evidenceDirection(p.target, await this.pnl.wrongSince(fromSession));
+    if (expected === null) return 'the graded evidence points no clear direction';
+    if (expected !== direction) return `the proposal moves ${direction}, the graded evidence points ${expected}`;
     const before = await this.window(types, sessionsAsc, 'last');
     if (before.sessions < WATCH_SESSIONS) return `only ${before.sessions} recent session(s) with ${types.join('/')} decisions to compare a change against (need ${WATCH_SESSIONS})`;
 

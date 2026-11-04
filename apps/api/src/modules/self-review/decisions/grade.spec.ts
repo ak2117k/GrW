@@ -15,9 +15,10 @@ describe('isWrong', () => {
     expect(isWrong(499, null)).toBe(false);
     expect(isWrong(WRONG_RUPEES, null)).toBe(true);
   });
-  it('one noise unit is enough, a null delta never is', () => {
-    expect(isWrong(300, 250)).toBe(true);
-    expect(isWrong(200, 250)).toBe(false);
+  it('must also beat one noise unit; a small unit never lowers the ₹500 bar; a null delta never is', () => {
+    expect(isWrong(300, 250)).toBe(false);
+    expect(isWrong(600, 250)).toBe(true);
+    expect(isWrong(600, 800)).toBe(false);
     expect(isWrong(null, 1)).toBe(false);
   });
 });

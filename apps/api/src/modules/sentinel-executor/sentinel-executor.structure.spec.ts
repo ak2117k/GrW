@@ -117,6 +117,26 @@ describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
    */
   const AUDIT_READERS = ['sanity-audit/repositories/ai-exit-audit.reader.ts'];
 
+  /*
+   * Grading reader (2026-11-04, self-review wrong-decision loop): grades each AI exit against the price
+   * path. Read-only, and its query excludes `man_` (owner Exit button) verdict ids, so a manual exit is
+   * never graded or diagnosed as an AI decision. The ledger / service only carry the table NAME as a
+   * row label (refTable) and never query it.
+   */
+  const GRADING_READERS = ['self-review/decisions/decision-sources.repository.ts'];
+  const GRADING_LABEL_ONLY = ['self-review/decisions/ledger.ts', 'self-review/decisions/decision-grading.service.ts'];
+
+  it('the grading reader stays read-only and never grades a manual exit', () => {
+    for (const rel of GRADING_READERS) {
+      const src = code(join(MODULES, rel));
+      expect(src).not.toMatch(/\b(INSERT|UPDATE|DELETE)\b|aiExitExecution\s*\.\s*(create|update|upsert|delete)/i);
+      const reads = src.match(/aiExitExecution\.findMany\(\{[\s\S]*?\}\);/g) ?? [];
+      expect(reads.length).toBeGreaterThan(0);
+      for (const q of reads) expect(q).toContain(`NOT: { verdictId: { startsWith: 'man_' } }`);
+    }
+    for (const rel of GRADING_LABEL_ONLY) expect(code(join(MODULES, rel))).not.toMatch(/aiExitExecution\s*\./);
+  });
+
   it('the audit reader stays read-only and never counts a manual exit', () => {
     for (const rel of AUDIT_READERS) {
       const src = code(join(MODULES, rel));
@@ -130,7 +150,7 @@ describe('manual exits stay out of the AI corpus (owner Exit button)', () => {
   it('only sentinel-executor reads ai_exit_executions — no corpus writer can mistake a manual exit for an AI decision', () => {
     const offenders = all()
       .filter((f) => !f.includes(`${join('modules', 'sentinel-executor')}`))
-      .filter((f) => ![...SANCTIONED_READERS, ...AUDIT_READERS].includes(relative(MODULES, f).replace(/\\/g, '/')))
+      .filter((f) => ![...SANCTIONED_READERS, ...AUDIT_READERS, ...GRADING_READERS, ...GRADING_LABEL_ONLY].includes(relative(MODULES, f).replace(/\\/g, '/')))
       .filter((f) => /aiExitExecution|ai_exit_executions/.test(code(f)))
       .map((f) => relative(MODULES, f).replace(/\\/g, '/'));
     expect(offenders).toEqual([]);

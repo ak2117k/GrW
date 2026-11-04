@@ -1,5 +1,5 @@
 import { TUNABLES, type NumberTunable } from '../tuning/tunables';
-import { changeBlock, mayChange, rollbackDue, stepLimit, type Change } from './policy';
+import { AFFECTED_DECISIONS, changeBlock, evidenceDirection, mayChange, rollbackDue, stepLimit, type Change } from './policy';
 
 const num = (t: string) => TUNABLES[t] as NumberTunable;
 /** 30 consecutive "sessions", oldest first. */
@@ -50,5 +50,24 @@ describe('auto-apply policy', () => {
     expect(rollbackDue({ perDecision: 100, sessions: 3 }, { perDecision: -500, sessions: 2 })).toBe(false);
     expect(rollbackDue({ perDecision: 100, sessions: 2 }, { perDecision: -500, sessions: 3 })).toBe(false);
     expect(rollbackDue({ perDecision: null, sessions: 3 }, { perDecision: -500, sessions: 3 })).toBe(false);
+  });
+});
+
+describe('evidenceDirection (spec S2: the graded evidence, not the LLM, picks the way a knob moves)', () => {
+  const rows = (n: number, decisionType: string, alternative: string) => Array.from({ length: n }, () => ({ decisionType, alternative }));
+  it('wrong skips outnumber wrong takes ⇒ lower the judge bar, default to take', () => {
+    const w = [...rows(6, 'ENTRY_SKIP', 'take'), ...rows(2, 'ENTRY_TAKE', 'skip')];
+    expect(evidenceDirection('signal.judgeMinConfidence', w)).toBe('down');
+    expect(evidenceDirection('signal.judgeDefaultTake', w)).toBe('true');
+  });
+  it('early exits ⇒ widen the floor; late holds ⇒ tighten it; a close split ⇒ no direction', () => {
+    expect(evidenceDirection('exit.floorTrailN', rows(3, 'EXIT', 'hold'))).toBe('up');
+    expect(evidenceDirection('exit.floorTrailN', rows(3, 'HOLD', 'exit'))).toBe('down');
+    expect(evidenceDirection('exit.floorTrailN', [...rows(3, 'EXIT', 'hold'), ...rows(3, 'HOLD', 'exit')])).toBeNull();
+    expect(evidenceDirection('exit.floorTrailN', [])).toBeNull();
+  });
+  it('targets read live mid-session are not auto-applied', () => {
+    expect(AFFECTED_DECISIONS['exit.persistMinSec']).toBeUndefined();
+    expect(AFFECTED_DECISIONS['exit.openingGuardMin']).toBeUndefined();
   });
 });

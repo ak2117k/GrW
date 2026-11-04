@@ -25,7 +25,8 @@ import { SelfReviewTuningModule } from './tuning/tuning.module';
 import { SelfReviewLearningModule } from './lessons/self-review-learning.module';
 import { DecisionsModule } from './decisions/decisions.module';
 import { AutoApplyCron } from './auto-apply/auto-apply.cron';
-import { AUTO_APPLY_CONFIG, parseAutoApplyConfig } from './auto-apply/auto-apply.ports';
+import { AUTO_APPLY_CONFIG, DECISION_PNL, parseAutoApplyConfig } from './auto-apply/auto-apply.ports';
+import { DecisionGradeRepository } from './decisions/decision-grade.repository';
 import { AutoApplyRepository } from './auto-apply/auto-apply.repository';
 import { AutoApplyService } from './auto-apply/auto-apply.service';
 import { parseSignalTraderConfig } from '../signal-trader/domain/signal-trader.config';
@@ -73,6 +74,8 @@ import { SPIKE_BANK_RISE_N, SPIKE_BANK_TRAIL_N } from '../exit-discipline/config
         };
       },
     },
+    // Auto-apply watches and directs changes from stream F's graded decisions (perDecisionPnl / wrongSince).
+    { provide: DECISION_PNL, useExisting: DecisionGradeRepository },
     SelfReviewRunService,
     SelfReviewService,
     SelfReviewCron,

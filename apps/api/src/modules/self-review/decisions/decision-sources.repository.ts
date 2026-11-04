@@ -39,7 +39,8 @@ export class DecisionSourcesRepository {
   /** AI exit executions in [from, to) with their outcome, tracker exit, lot size and the spike latch. */
   async exitExecutions(from: Date, to: Date): Promise<ExitExecSrc[]> {
     const rows = await this.prisma.aiExitExecution.findMany({
-      where: { createdAt: { gte: from, lt: to }, status: { in: ['PLACED', 'FILLED', 'DRY_RUN', 'SKIPPED'] } },
+      // `man_` = the owner's Exit button: never graded as an AI decision (sentinel-executor.structure.spec).
+      where: { createdAt: { gte: from, lt: to }, status: { in: ['PLACED', 'FILLED', 'DRY_RUN', 'SKIPPED'] }, NOT: { verdictId: { startsWith: 'man_' } } },
       select: {
         id: true, userId: true, verdictId: true, trackerId: true, symbol: true, exchange: true, token: true, side: true, quantity: true, mode: true,
         status: true, reason: true, verdictReason: true, gate: true, decisionLtp: true, decisionAt: true, fillPrice: true, createdAt: true,

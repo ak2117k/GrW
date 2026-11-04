@@ -51,8 +51,17 @@ class FakeStore implements AutoApplyStore {
 }
 
 /** ₹ per session: {decisions, total}; a session absent here had no such decision. */
-function fakePnl(bySession: Record<string, { decisions: number; total: number }>): DecisionPnlPort & { perDecisionPnl: jest.Mock } {
+/** Graded WRONG rows pointing the floor knobs UP (exits whose better alternative was to hold). */
+const EARLY_EXITS = [1, 2, 3].map(() => ({ decisionType: 'EXIT', alternative: 'hold' }));
+/** …and DOWN (holds whose better alternative was to exit). */
+const LATE_HOLDS = [1, 2, 3].map(() => ({ decisionType: 'HOLD', alternative: 'exit' }));
+
+function fakePnl(
+  bySession: Record<string, { decisions: number; total: number }>,
+  wrong: Array<{ decisionType: string; alternative: string | null }> = EARLY_EXITS,
+): DecisionPnlPort & { perDecisionPnl: jest.Mock } {
   return {
+    wrongSince: jest.fn(async () => wrong),
     perDecisionPnl: jest.fn(async (_types: string[], dates: string[]) => {
       const had = dates.filter((d) => (bySession[d]?.decisions ?? 0) > 0);
       const decisions = had.reduce((s, d) => s + bySession[d].decisions, 0);
@@ -181,7 +190,7 @@ describe('AutoApplyService', () => {
     later.overrides.set('exit.floorTrailN', { value: 2.0, proposalId: 'rb' });
     later.rows.push(proposal({ id: 'up', currentValue: 2.0, proposedValue: 3.0 }));
     later.rows.push(proposal({ id: 'down', key: 'exit.floorArmN', target: 'exit.floorArmN', currentValue: 1.5, proposedValue: 1.2 }));
-    const out2 = await make({ store: later }).svc.run(NOW);
+    const out2 = await make({ store: later, pnl: fakePnl(every(SESSIONS, { decisions: 2, total: 1000 }), LATE_HOLDS) }).svc.run(NOW);
     expect(out2.blocked.join('\n')).toMatch(/moving up was rolled back 6 session/);
     expect(out2.applied.map((c) => c.target)).toEqual(['exit.floorArmN']);
   });

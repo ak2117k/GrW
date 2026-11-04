@@ -26,14 +26,14 @@ const pos = (x: unknown): x is number => fin(x) && x > 0;
 const vfOf = (f: number) => (pos(f) ? f : 1);
 
 /**
- * The owner's WRONG rule: delta ≥ ₹500 per lot, OR delta ≥ one contract noise unit in ₹ (when known).
- * Taken literally from the plan's Global Constraints: the noise unit can only LOWER the bar below ₹500.
- * A null / non-finite delta is never wrong (it is UNSCORABLE upstream).
+ * WRONG = the alternative was better by a MATERIAL margin: ≥ ₹500 per lot AND, when the contract's noise
+ * unit is known, ≥ one noise unit in ₹. Coordinator 2026-11-04: read as "material in money and beyond
+ * noise" — taken as an OR, a cheap option's small noise unit would lower the bar below ₹500 and flood
+ * the loop with trivia. A null / non-finite delta is never wrong (it is UNSCORABLE upstream).
  */
 export function isWrong(deltaRupees: number | null, noiseUnitRupees: number | null): boolean {
-  if (!fin(deltaRupees)) return false;
-  if (deltaRupees >= WRONG_RUPEES) return true;
-  return pos(noiseUnitRupees) && deltaRupees >= noiseUnitRupees;
+  if (!fin(deltaRupees) || deltaRupees < WRONG_RUPEES) return false;
+  return !pos(noiseUnitRupees) || deltaRupees >= noiseUnitRupees;
 }
 
 /** One contract noise unit (contract points) → ₹ per lot; null when unknown. */

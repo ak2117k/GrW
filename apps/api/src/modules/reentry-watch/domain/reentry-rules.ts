@@ -12,7 +12,8 @@ export const REENTRY_WATCH = Object.freeze({
   /** Minutes after the exit (or after a re-entry's own exit) before the watch may signal. */
   cooldownMin: 10,
   maxPerOriginal: 2,
-  maxPerDay: 3,
+  /** 5 (owner 2026-11-05, was 3): paper only — more scored signals; the 3-cap made a losing crude signal take NIFTY's slot. */
+  maxPerDay: 5,
   /** SAME: the underlying back beyond the exit point by ≥ this many N15. */
   sameN: 1,
   /** OPPOSITE: the underlying against the original direction by ≥ this many N15. */

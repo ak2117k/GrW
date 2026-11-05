@@ -16,7 +16,7 @@ import { trendReading, type Bar1m, type Direction, type OiReading, type TrendRea
 import { EntryEnginePaperService } from '../entry-engine/entry-engine-paper.service';
 import { EntryEngineRepository } from '../entry-engine/entry-engine.repository';
 import {
-  alertText, bestUnderlying, decideReentry, directionOf, kindFor, noise15, noiseSessionOf, REENTRY_UNIVERSE, underlyingAt, watchKey,
+  alertText, bestUnderlying, decideReentry, directionOf, kindFor, moveInN, noise15, noiseSessionOf, REENTRY_UNIVERSE, underlyingAt, watchKey,
   type ExitedPosition, type NoiseUnit, type ReentryVerdict,
 } from './domain/reentry-rules';
 import { REENTRY_OF_TAG, REENTRY_SOURCE, REENTRY_STRATEGY, REENTRY_TAG, REENTRY_WATCH_CONFIG, type ReentryWatchConfig } from './reentry-watch.config';
@@ -112,10 +112,23 @@ export class ReentryWatchService {
       if (exits.length === 0) return [];
       let today = await this.repo.reentriesSince(dayStart).catch(() => Number.POSITIVE_INFINITY);
       const contexts = new Map<string, UnderlyingContext | null>();
+      const uOf = (x: ExitedPosition) => (x.underlying && REENTRY_UNIVERSE.includes(x.underlying) ? x.underlying : null);
       for (const x of exits) {
+        const u = uOf(x);
+        if (u && !contexts.has(u)) contexts.set(u, await this.contextOf(u, now).catch((e) => (this.logger.warn(`[reentry-watch] ${u} context failed: ${errText(e)}`), null)));
+      }
+      // RANK BY STRENGTH (owner 2026-11-05): the daily cap goes to the strongest move first, not exit order — the
+      // |move| in N15 from each exit point now (the same moveInN decideReentry uses).
+      const strength = (x: ExitedPosition): number => {
+        const ctx = uOf(x) ? contexts.get(uOf(x)!) ?? null : null;
+        if (!ctx) return -1;
+        const m = moveInN(directionOf(x.kind, x.side), underlyingAt(ctx.bars, x.exitAt), ctx.trend.price ?? null, ctx.noise?.n ?? null);
+        return m === null ? -1 : Math.abs(m);
+      };
+      const ranked = [...exits].sort((a, b) => strength(b) - strength(a));
+      for (const x of ranked) {
         try {
-          const u = x.underlying && REENTRY_UNIVERSE.includes(x.underlying) ? x.underlying : null;
-          if (u && !contexts.has(u)) contexts.set(u, await this.contextOf(u, now).catch((e) => (this.logger.warn(`[reentry-watch] ${u} context failed: ${errText(e)}`), null)));
+          const u = uOf(x);
           const ctx = u ? contexts.get(u) ?? null : null;
           const r = await this.watch(x, ctx, today, now);
           if (r.opened) {

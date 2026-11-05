@@ -1,4 +1,4 @@
-import { MIN_NOISE_BARS, noiseFromBars, scaledUnderlyingNoise } from './noise';
+import { MIN_NOISE_BARS, noiseFromBars, scaledUnderlyingNoise, sessionBarsOnly } from './noise';
 import type { MinuteBar } from './types';
 
 const T0 = Date.parse('2026-10-14T10:09:00Z');
@@ -47,4 +47,25 @@ describe('scaledUnderlyingNoise (R3)', () => {
     expect(scaledUnderlyingNoise(0, 'x', 870)).toBeNull();
   });
   it.each([null, undefined, 0, -1, NaN])('%s ⇒ null', (v) => expect(scaledUnderlyingNoise(v as never, 'x')).toBeNull());
+});
+
+describe('sessionBarsOnly (2026-11-05: NSE pre-open bars 09:00–09:14 tripled the morning noise unit)', () => {
+  const ist = (hhmm: string) => Date.parse(`2026-11-05T${hhmm}:00+05:30`);
+  const bar = (hhmm: string, low = 24000, high = 24010) => ({ ts: ist(hhmm), open: low, high, low, close: high });
+  const bars = [bar('09:00', 23608, 24580), bar('09:14'), bar('09:15'), bar('15:29'), bar('15:30')];
+  it('NSE / NFO keep 09:15–15:29 only', () => {
+    expect(sessionBarsOnly(bars, 'NSE').map((b) => b.ts)).toEqual([ist('09:15'), ist('15:29')]);
+    expect(sessionBarsOnly(bars, 'NFO')).toHaveLength(2);
+  });
+  it('MCX keeps its 09:00 open; an unknown exchange keeps everything', () => {
+    expect(sessionBarsOnly(bars, 'MCX')).toHaveLength(5);
+    expect(sessionBarsOnly(bars, null)).toHaveLength(5);
+  });
+  it('the pre-open bar no longer inflates N', () => {
+    // 09:23 IST: 8 session bars, under ATR14, so the range path — where the 09:00 bar did the damage.
+    const morning = [bar('09:00', 23608, 24580), ...Array.from({ length: 8 }, (_, i) => bar(`09:${String(15 + i).padStart(2, '0')}`))];
+    const all = noiseFromBars(morning)!.n;
+    const session = noiseFromBars(sessionBarsOnly(morning, 'NSE'))!.n;
+    expect(session).toBeLessThan(all / 5);
+  });
 });

@@ -146,7 +146,8 @@ describe('re-entry rules', () => {
     expect(decideReentry('BULLISH', facts({ lastReentryExitAt: new Date(istTs(DAY, '10:25')) })).category).toBe('cooldown');
     expect(decideReentry('BULLISH', facts({ reentriesForOriginal: 2 })).category).toBe('cap-original');
     expect(decideReentry('BULLISH', facts({ reentriesForOriginal: 1 })).action).toBe('SIGNAL');
-    expect(decideReentry('BULLISH', facts({ reentriesToday: 3 })).category).toBe('cap-day');
+    expect(decideReentry('BULLISH', facts({ reentriesToday: 5 })).category).toBe('cap-day');
+    expect(decideReentry('BULLISH', facts({ reentriesToday: 4 })).category).not.toBe('cap-day');
     expect(decideReentry('BULLISH', facts({ openOnUnderlying: 1 })).category).toBe('position-open');
     expect(decideReentry('BULLISH', facts({ minutesToClose: 20 })).category).toBe('session-end');
     expect(decideReentry('BULLISH', facts({ minutesToClose: null })).category).toBe('session-unreadable');

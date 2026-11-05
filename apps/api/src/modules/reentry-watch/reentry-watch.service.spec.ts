@@ -131,8 +131,8 @@ describe('ReentryWatchService', () => {
     expect((alert.mock.calls[0] as unknown as [string, string])[1]).toContain('NIFTY PE opposite direction');
   });
 
-  it('the daily cap: 3 re-entries already today ⇒ recorded as CAP once, nothing opened', async () => {
-    const { svc, repo, paper } = make({ today: 3 });
+  it('the daily cap: 5 re-entries already today ⇒ recorded as CAP once, nothing opened', async () => {
+    const { svc, repo, paper } = make({ today: 5 });
     await session(svc, '10:03', '12:00');
     expect(paper.open).not.toHaveBeenCalled();
     const cats = repo.insertDecision.mock.calls.map((c) => (c as unknown as [{ category: string }])[0].category);

@@ -26,7 +26,7 @@ import type { PaperTradeRow } from '../repositories/signal-trader.repository';
 import type { SignalTraderConfig } from '../domain/signal-trader.config';
 import { emptyShadow, grossPnl, shadowLine, stepShadow, type ShadowParams, type ShadowState } from '../domain/exit-shadow';
 import { NOISE_LOOKBACK_MIN, parseExitDisciplineConfig } from '../../exit-discipline/config';
-import { noiseFromBars } from '../../exit-discipline/noise';
+import { noiseFromBars, sessionBarsOnly } from '../../exit-discipline/noise';
 import type { MinuteBar } from '../../exit-discipline/types';
 import { PaperSentinelService, type PaperAiExit, type PaperPosition } from '../../paper-sentinel/paper-sentinel.service';
 import {
@@ -451,7 +451,7 @@ export class SignalPaperWatchService {
     if (age < (sh.n === null ? NOISE_RETRY_MS : NOISE_REFRESH_MS)) return;
     sh.nAt = now.getTime();
     const bars = await this.bars.minuteBars(owner, t.instrument.token, t.instrument.exchange, new Date(now.getTime() - NOISE_LOOKBACK_MIN * 60_000), now).catch(() => []);
-    const reading = noiseFromBars(bars);
+    const reading = noiseFromBars(sessionBarsOnly(bars, t.instrument.exchange)); // 2026-11-05: session bars only
     if (reading) {
       sh.n = r2(reading.n);
       sh.nMethod = reading.method;

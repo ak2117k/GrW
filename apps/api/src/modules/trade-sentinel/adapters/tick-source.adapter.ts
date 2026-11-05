@@ -23,7 +23,7 @@ import { SENTINEL_LEVEL_SOURCE, SentinelChartContextAdapter } from './chart-cont
 import { normaliseSymbol } from '../symbols';
 import { newsKeyFor } from '../../news/services/underlying-news-aliases';
 import { EXIT_DISCIPLINE_CONFIG, type ExitDisciplineConfig } from '../../exit-discipline/config';
-import { noiseFromBars, scaledUnderlyingNoise } from '../../exit-discipline/noise';
+import { noiseFromBars, scaledUnderlyingNoise, sessionBarsOnly } from '../../exit-discipline/noise';
 import type { MinuteBar, NoiseReading } from '../../exit-discipline/types';
 import { sessionFor } from '../market-sessions';
 import type { EquityLeg, EquityTickInputs } from '../services/equity-blocks';
@@ -554,8 +554,9 @@ export class SentinelTickSource implements TickSource {
     // minutes) — the fallback the packet already gave `underlying`, now on `contract` too, because
     // for cash the contract IS the underlying. Without it the noise floor, the noise giveback and
     // every N-based rule were off for nearly every stock (few hold a hub slot). F&O: unchanged.
-    const contract = noiseFromBars(cBars) ?? (isCash ? await this.cashDailyNoise(row, now) : null);
-    const underlying1m = isCash ? contract : noiseFromBars(uBars);
+    // 2026-11-05: session bars only — NSE pre-open 09:00–09:14 bars inflated the morning units (noise.ts sessionBarsOnly).
+    const contract = noiseFromBars(sessionBarsOnly(cBars, row.exchange)) ?? (isCash ? await this.cashDailyNoise(row, now) : null);
+    const underlying1m = isCash ? contract : noiseFromBars(sessionBarsOnly(uBars, underlying.exchange));
     return {
       noise: {
         contract,

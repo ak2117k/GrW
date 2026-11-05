@@ -12,6 +12,24 @@ export const MIN_NOISE_BARS = 5;
 const ok = (b: MinuteBar) =>
   [b.ts, b.open, b.high, b.low, b.close].every((x) => Number.isFinite(x)) && b.low > 0 && b.high >= b.low;
 
+/**
+ * Only bars inside the exchange's continuous session (IST). Prod 2026-11-05: candles_1m holds NSE PRE-OPEN index
+ * bars 09:00–09:14 (the 09:00 bar spanned NIFTY 23,608–24,580), which tripled the morning noise unit for every
+ * rule until they rolled out of the 120-min window (~11:15). NSE / NFO / BSE / BFO 09:15–15:30; MCX 09:00–23:55;
+ * an unknown exchange keeps every bar (as before).
+ */
+export function sessionBarsOnly(bars: MinuteBar[], exchange: string | null | undefined): MinuteBar[] {
+  const ex = String(exchange ?? '').toUpperCase();
+  const win = ['NSE', 'NFO', 'BSE', 'BFO'].includes(ex) ? [555, 930] : ex.startsWith('MCX') ? [540, 1435] : null;
+  if (!win) return bars;
+  return bars.filter((b) => {
+    if (!Number.isFinite(b.ts)) return false;
+    const ist = new Date(b.ts + 5.5 * 3_600_000);
+    const m = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    return m >= win[0] && m < win[1];
+  });
+}
+
 /** R2. The caller chooses the window (last NOISE_LOOKBACK_MIN minutes of the IST day). */
 export function noiseFromBars(input: MinuteBar[]): NoiseReading | null {
   const bars = input.filter(ok).sort((a, b) => a.ts - b.ts);

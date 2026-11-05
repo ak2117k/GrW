@@ -509,7 +509,7 @@ export class SentinelTickSource implements TickSource {
       holdingHigh: row.holdingHigh,
       holdingLow: row.holdingLow,
       entryTime: row.entryTime,
-      expiry: await this.expiryFor(row.token, row.exchange, segment),
+      expiry: await this.expiryFor(row.token, row.exchange, segment, row.symbol),
       volumeRatio: structure.volumeRatio,
       freshNewsCount: news.count,
       ...(news.freshNews ? { freshNews: news.freshNews } : {}),
@@ -915,7 +915,10 @@ export class SentinelTickSource implements TickSource {
       const r = await resolveUnderlyingRef(
         { exchange: exchange ?? '', token, symbol },
         {
-          contract: (ex, tok) => this.instruments.getInstrumentByToken(tok, ex || undefined),
+          // A REUSED token (prod 2026-11-05: NFO 39982 = an expired COFORGE CE AND the live NIFTY09NOV2624300CE)
+          // must not resolve to another contract: the row's tradingsymbol has to be the position's, else the
+          // position is looked up by its own tradingsymbol.
+          contract: (ex, tok) => this.contractRow(ex, tok, symbol),
           cash: (sym, ex) => this.instruments.getInstrumentBySymbol(sym, ex),
           // MCX: a commodity option has no cash row; its underlying is the
           // nearest future of the SAME master name (CRUDEOIL, never CRUDEOILM).
@@ -982,11 +985,31 @@ export class SentinelTickSource implements TickSource {
     this.logger.warn(message);
   }
 
+  /**
+   * The position's OWN master row. A REUSED token (prod 2026-11-05: NFO 39982 = an expired COFORGE29SEP262240CE
+   * AND the live NIFTY09NOV2624300CE) must not resolve to another contract — that made the sentinel judge a
+   * NIFTY call as an expired COFORGE option ("0 sessions left", COFORGE's levels). The token row is used only
+   * when its tradingsymbol IS the position's; otherwise the position's tradingsymbol is looked up.
+   */
+  private async contractRow(exchange: string, token: string, symbol: string) {
+    const ex = String(exchange ?? '').toUpperCase();
+    const byToken = await this.instruments.getInstrumentByToken(token, ex || undefined);
+    const rowSymbol = typeof byToken?.symbol === 'string' ? byToken.symbol.trim() : '';
+    if (byToken && ex && symbol && rowSymbol !== '' && rowSymbol.toUpperCase() !== String(symbol).trim().toUpperCase()) {
+      const bySymbol = await this.instruments.getInstrumentBySymbol(symbol, ex);
+      if (bySymbol) {
+        this.warnOnce(`reused:${ex}:${token}`, `token ${ex}:${token} is ${byToken.symbol} on the master, not ${symbol} — a reused token; using ${symbol}'s own row`);
+        return bySymbol;
+      }
+    }
+    return byToken;
+  }
+
   /** The nearest expiry as 'YYYY-MM-DD', or null for cash (the OI capture key). */
-  private async expiryFor(token: string, exchange: string, segment: Segment): Promise<string | null> {
+  private async expiryFor(token: string, exchange: string, segment: Segment, symbol: string): Promise<string | null> {
     if (segment !== 'OPT' && segment !== 'FUT') return null;
     try {
-      const contract = await this.instruments.getInstrumentByToken(token, String(exchange ?? '').toUpperCase() || undefined);
+      const contract = await this.contractRow(String(exchange ?? '').toUpperCase(), token, symbol);
       const expiry = contract?.expiry;
       if (!expiry) return null;
       return istDateOnly(expiry);

@@ -5,9 +5,11 @@ describe('MarketDataRepository.getInstrumentByToken', () => {
     const findFirst = jest.fn().mockResolvedValue(null);
     const repo = new MarketDataRepository({ instrument: { findFirst } } as never);
     await repo.getInstrumentByToken('35001', 'NFO');
-    expect(findFirst).toHaveBeenLastCalledWith({ where: { token: '35001', exchange: 'NFO', isActive: true } });
+    const NEWEST_FIRST = [{ updatedAt: 'desc' }, { expiry: { sort: 'desc', nulls: 'last' } }];
+    expect(findFirst).toHaveBeenLastCalledWith({ where: { token: '35001', exchange: 'NFO', isActive: true }, orderBy: NEWEST_FIRST });
     await repo.getInstrumentByToken('35001');
-    expect(findFirst).toHaveBeenLastCalledWith({ where: { token: '35001', isActive: true } });
+    // A reused token (2026-11-05 NFO 39982: an expired COFORGE CE and a live NIFTY CE): the newest row wins.
+    expect(findFirst).toHaveBeenLastCalledWith({ where: { token: '35001', isActive: true }, orderBy: NEWEST_FIRST });
   });
 });
 

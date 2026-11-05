@@ -301,9 +301,17 @@ export class MarketDataRepository {
    * exchange whenever it is known: tokens collide across segments (an NSE cash
    * token can equal an NFO or MCX contract token).
    */
+  /**
+   * NSE / BSE / MCX REUSE a token once its contract expires, and the master keeps both rows (prod 2026-11-05:
+   * NFO 39982 = COFORGE29SEP262240CE, expired, AND NIFTY09NOV2624300CE; 12,831 reused derivative tokens). An
+   * unordered findFirst returned the expired COFORGE row for a live NIFTY option, so the sentinel judged it as
+   * an expired COFORGE contract (EXIT_AT_OPEN "0 sessions left") with COFORGE's levels. The most recently
+   * refreshed row — the live contract the master still carries — wins; the latest expiry breaks a tie.
+   */
   async getInstrumentByToken(token: string, exchange?: string) {
     return this.prisma.instrument.findFirst({
       where: exchange ? { token, exchange, isActive: true } : { token, isActive: true },
+      orderBy: [{ updatedAt: 'desc' }, { expiry: { sort: 'desc', nulls: 'last' } }],
     });
   }
 

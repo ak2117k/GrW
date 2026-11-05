@@ -333,6 +333,20 @@ describe('SentinelTickSource', () => {
       expect(tick.underlyingRef).toEqual({ exchange: 'NSE', token: '99926000', symbol: 'NIFTY' });
     });
 
+    it('a REUSED token (2026-11-05: NFO 39982 = expired COFORGE CE + live NIFTY CE) resolves by the own tradingsymbol', async () => {
+      const t = make();
+      t.findUnique.mockResolvedValue(row({ symbol: 'NIFTY09NOV2624300CE', exchange: 'NFO', token: '39982', lastLtp: 170 }));
+      t.getInstrumentByToken.mockResolvedValue({ symbol: 'COFORGE29SEP262240CE', name: 'COFORGE', expiry: new Date('2026-09-29T00:00:00+05:30') });
+      t.getInstrumentBySymbol.mockImplementation(async (sym: string) =>
+        sym === 'NIFTY09NOV2624300CE' ? { symbol: 'NIFTY09NOV2624300CE', name: 'NIFTY', expiry: new Date('2026-11-09T00:00:00+05:30') } : null);
+      t.getLevels.mockReturnValue({ spot: 24350, lastTickAt: NOW });
+
+      const tick = await t.svc.tickFor('t1');
+
+      expect(tick.underlyingRef).toEqual({ exchange: 'NSE', token: '99926000', symbol: 'NIFTY' });
+      expect(tick.expiry).toBe('2026-11-09');
+    });
+
     it('an unresolvable underlying gives underlyingRef null, never the contract', async () => {
       const t = make();
       t.findUnique.mockResolvedValue(option());

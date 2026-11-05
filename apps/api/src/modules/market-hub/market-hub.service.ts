@@ -445,7 +445,16 @@ export class MarketHubService implements OnModuleInit, OnModuleDestroy, HubCandl
     if (this.underlyings.has(key)) return this.underlyings.get(key) ?? null;
     try {
       const { ref: underlying } = await resolveUnderlying(ref, {
-        contract: (exchange, token) => this.instruments.getInstrumentByToken(token, exchange),
+        // A REUSED token (prod 2026-11-05: NFO 39982 = an expired COFORGE CE and the live NIFTY09NOV2624300CE)
+        // must resolve to THIS contract: when the token row's tradingsymbol is another contract's, use the ref's own.
+        contract: async (exchange, token) => {
+          const byToken = await this.instruments.getInstrumentByToken(token, exchange);
+          const rowSymbol = typeof byToken?.symbol === 'string' ? byToken.symbol.trim() : '';
+          if (byToken && ref.symbol && rowSymbol !== '' && rowSymbol.toUpperCase() !== String(ref.symbol).trim().toUpperCase()) {
+            return (await this.instruments.getInstrumentBySymbol(ref.symbol, exchange)) ?? byToken;
+          }
+          return byToken;
+        },
         cash: (symbol, exchange) => this.instruments.getInstrumentBySymbol(symbol, exchange),
         // An MCX option's underlying is its month's future (the sentinel's pick): without this an
         // MCX position resolved to NO underlying and its future was never held.

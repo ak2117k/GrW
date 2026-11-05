@@ -3875,6 +3875,29 @@ model EntryEngineDecision {
   @@map("entry_engine_decisions")
 }
 
+/// Re-entry watch (2026-11-05, PAPER only): one row per watch of an exited option position whenever its
+/// outcome category changes. Written with raw SQL by the reentry-watch module (migration 202611051530_reentry_watch).
+model ReentryWatchDecision {
+  id         String   @id
+  watchKey   String   @map("watch_key") // '<table>:<id>' of the exited position
+  underlying String
+  at         DateTime @db.Timestamptz(6)
+  action     String // SIGNAL | WAIT | SKIP | CAP | ENDED
+  direction  String? // SAME | OPPOSITE (SIGNAL only)
+  category   String
+  inputs     Json // ref / price / N15 / move / trend / OI / counts; plan for a SIGNAL
+  reasons    Json // string[]
+  tradeId    String?  @map("trade_id")
+  mode       String // paper
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([at])
+  @@index([watchKey, at])
+  @@index([action, at])
+  @@index([tradeId])
+  @@map("reentry_watch_decisions")
+}
+
 /// Pre-open outlook (2026-11-02): overnight global prices (Yahoo chart; CL=F / BZ=F / ES=F), every
 /// 30 min incl. weekends. Written with raw SQL by the pre-open-outlook module. NO_DATA rows carry
 /// a reason and null price (never a zero).

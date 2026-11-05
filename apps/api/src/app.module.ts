@@ -66,6 +66,7 @@ import { TradeCoreModule } from './modules/trade-core/trade-core.module';
 import { SignalTraderModule } from './modules/signal-trader/signal-trader.module';
 import { ExitNoiseModule } from './modules/exit-noise/exit-noise.module';
 import { EntryEngineModule } from './modules/entry-engine/entry-engine.module';
+import { ReentryWatchModule } from './modules/reentry-watch/reentry-watch.module';
 import { PreOpenOutlookModule } from './modules/pre-open-outlook/pre-open-outlook.module';
 import { SanityAuditModule } from './modules/sanity-audit/sanity-audit.module';
 import { InputsHealthModule } from './modules/inputs-health/inputs-health.module';
@@ -334,6 +335,9 @@ import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-revi
     // evaluation recorded (entry_engine_decisions). ENTRY_ENGINE=off|observe|paper (default observe:
     // records only); paper opens PAPER trades only (strategy ENGINE_ENTRY). Never a broker order.
     EntryEngineModule,
+    // Re-entry watch (2026-11-05): after an option exit, watch the underlying for a SAME / OPPOSITE re-entry.
+    // REENTRY_WATCH=paper|off (default paper); PAPER trades only (strategy REENTRY_WATCH). Never a broker order.
+    ReentryWatchModule,
 
     // Pre-open outlook (2026-11-02) — global prices every 30 min (global_price_snapshots), the 08:30 IST
     // outlook per underlying (pre_open_outlooks, ops alert, night report, the engine's PRE_OPEN news path)

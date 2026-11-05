@@ -8,6 +8,8 @@
 export const DECISION_TYPES = [
   'ENTRY_TAKE', 'ENTRY_SKIP', 'ENTRY_BLOCKED', 'SIZE', 'EXIT', 'HOLD', 'GATED_EXIT', 'FLOOR', 'SPIKE_BANK',
   'HARD_LOSS', 'LADDER', 'CARRY', 'CARRY_EXIT', 'THESIS', 'DETECTOR',
+  // 2026-11-05: a re-entry watch SIGNAL (reentry_watch_decisions, paper), graded like ENTRY_TAKE.
+  'REENTRY',
 ] as const;
 export type DecisionType = (typeof DECISION_TYPES)[number];
 

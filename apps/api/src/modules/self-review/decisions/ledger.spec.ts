@@ -1,7 +1,7 @@
 import { DecisionGradeRepository } from './decision-grade.repository';
 import { DecisionGradingService, previousWeekday } from './decision-grading.service';
 import type { DecisionSourcesRepository } from './decision-sources.repository';
-import { carryDrafts, entryDrafts, entryKindOf, exitDrafts, exitTypeOf, type ExitExecSrc, type SignalDecisionSrc } from './ledger';
+import { carryDrafts, entryDrafts, entryKindOf, exitDrafts, exitTypeOf, reentryDrafts, type ExitExecSrc, type SignalDecisionSrc } from './ledger';
 import { perDecisionPnlOf, worstPerDecision } from './rollup';
 import type { Bar, DecisionGradeRow } from './types';
 
@@ -161,7 +161,7 @@ describe('DecisionGradingService', () => {
     const none = async () => [];
     return {
       signalDecisions: async () => [{ ...goldSkip, orderStatus: null }],
-      exitExecutions: none, holdVerdicts: none, trackers: none, paperExits: none, carries: none, theses: none, engineEnters: none,
+      exitExecutions: none, holdVerdicts: none, trackers: none, paperExits: none, carries: none, theses: none, engineEnters: none, reentrySignals: none,
       inputPackets: async () => [{ source: 'judge', underlying: 'GOLD', at: goldSkip.decidedAt, userId: 'owner', blocks: { chain: { status: 'unavailable' } } }],
       moveOverAtr: async () => null,
       bars: async () => goldBars,
@@ -209,5 +209,26 @@ describe('DecisionGradingService', () => {
   it('previousWeekday skips the weekend', () => {
     expect(previousWeekday('2026-11-02')).toBe('2026-10-30'); // Monday → Friday
     expect(previousWeekday('2026-11-04')).toBe('2026-11-03');
+  });
+});
+
+describe('REENTRY (re-entry watch SIGNAL, 2026-11-05) — graded like ENTRY_TAKE', () => {
+  // NIFTY SAME re-entry 10:53 IST: BUY NIFTY10NOV2624450CE @ 150, SL 112.5 (−25 %), T1 225 (+50 %), lot 75.
+  const AT = Date.parse('2026-11-05T05:23:00Z');
+  const plan = { tradingsymbol: 'NIFTY10NOV2624450CE', token: '41234', exchange: 'NFO', side: 'BUY', ltp: 150, limitPrice: 151, sl: 112.5, targets: [225], lotSize: 75, qty: 75, tickSize: 0.05 };
+  const night = Date.parse('2026-11-05T13:15:00Z');
+  const up = barsFrom(Math.floor(AT / MIN) * MIN + MIN, [...linear(150, 230, 120), ...Array(150).fill(230)]);
+
+  it('a re-entry that ran to T1 is RIGHT (take > ₹0); before the close it is not graded', () => {
+    const src = { id: 'rw1', underlying: 'NIFTY', at: new Date(AT), direction: 'SAME', tradeId: 't1', plan };
+    expect(reentryDrafts(src, () => null, AT + 60 * MIN)).toEqual([]);
+    const [d] = reentryDrafts(src, (ex, tok) => (ex === 'NFO' && tok === '41234' ? up : null), night);
+    expect(d).toMatchObject({ decisionType: 'REENTRY', refTable: 'reentry_watch_decisions', refId: 'rw1', chosen: 'take', alternative: 'skip', mode: 'paper', horizon: 'close', verdict: 'RIGHT' });
+    expect(d.pnlChosen!).toBeGreaterThan(5000);
+  });
+
+  it('a refused contract (no plan) is UNSCORABLE', () => {
+    const [d] = reentryDrafts({ id: 'rw2', underlying: 'NIFTY', at: new Date(AT), direction: 'OPPOSITE', tradeId: null, plan: null }, () => null, night);
+    expect(d).toMatchObject({ decisionType: 'REENTRY', verdict: 'UNSCORABLE' });
   });
 });

@@ -3,7 +3,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { PAPER_TRACKER_PREFIX } from '../../trade-sentinel/paper/paper-tracker';
 import type { InputPacketSrc, ThesisSrc } from './detectors';
-import type { CarrySrc, ExitExecSrc, HoldVerdictSrc, PaperExitSrc, SignalDecisionSrc, TrackerSrc } from './ledger';
+import type { CarrySrc, ExitExecSrc, HoldVerdictSrc, PaperExitSrc, ReentrySignalSrc, SignalDecisionSrc, TrackerSrc } from './ledger';
 import type { Bar } from './types';
 
 type Rec = Record<string, unknown>;
@@ -163,6 +163,17 @@ export class DecisionSourcesRepository {
       .map((s) => ({ source: 'judge' as const, underlying: s.underlying, at: s.decidedAt, userId: s.userId, blocks: obj(obj(s.judge).packet).market }));
     const engine = await this.prisma.entryEngineDecision.findMany({ where: { at: { gte: from, lt: to } }, select: { underlying: true, at: true, inputs: true }, take: READ_MAX * 2 });
     return [...judge, ...engine.map((e) => ({ source: 'engine' as const, underlying: e.underlying, at: e.at, userId: null, blocks: e.inputs }))];
+  }
+
+  /** Re-entry watch SIGNALs in [from, to) with the plan they opened (raw SQL: migration 202611051530_reentry_watch). */
+  async reentrySignals(from: Date, to: Date): Promise<ReentrySignalSrc[]> {
+    const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+      SELECT id, underlying, at, direction, trade_id, inputs->'plan' AS plan FROM "reentry_watch_decisions"
+      WHERE action = 'SIGNAL' AND at >= ${from} AND at < ${to} ORDER BY at LIMIT ${READ_MAX}`;
+    return rows.map((r) => ({
+      id: String(r.id), underlying: typeof r.underlying === 'string' ? r.underlying : null, at: r.at as Date,
+      direction: typeof r.direction === 'string' ? r.direction : null, tradeId: typeof r.trade_id === 'string' ? r.trade_id : null, plan: r.plan ?? null,
+    }));
   }
 
   /** Entry-engine ENTER decisions in [from, to) per underlying (event detector's "takes"). */

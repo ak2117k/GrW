@@ -16,6 +16,11 @@ export interface EnginePaperInput {
   /** Contract expiry YYYY-MM-DD. */
   expiry: string;
   why: string;
+  /**
+   * Another PAPER-only caller's identity (the re-entry watch, 2026-11-05): its strategy / source / tags and the
+   * entryReason label. Absent ⇒ the entry engine's own. isPaper stays true either way.
+   */
+  brand?: { strategy: string; source: string; tags: string[]; label: string };
 }
 
 export type EnginePaperResult = { ok: true; tradeId: string; entryPrice: number | null } | { ok: false; reason: string };
@@ -43,11 +48,11 @@ export function enginePaperDto(i: EnginePaperInput): ExecuteTradeDto {
     positionType: 'INTRADAY',
     stoploss: p.sl > 0 ? p.sl : undefined,
     target: p.targets[0],
-    entryReason: `Entry engine (decision ${i.decisionId}): BUY ${i.underlying} ${i.strike} ${i.kind} ${i.expiry} @ ${p.ltp}, SL ${p.sl}, T1 ${p.targets[0] ?? '—'}. ${i.why}`.slice(0, 2000),
-    entryTags: enginePaperTags(i.decisionId, i.underlying),
-    strategy: ENGINE_ENTRY_STRATEGY,
+    entryReason: `${i.brand?.label ?? 'Entry engine'} (decision ${i.decisionId}): BUY ${i.underlying} ${i.strike} ${i.kind} ${i.expiry} @ ${p.ltp}, SL ${p.sl}, T1 ${p.targets[0] ?? '—'}. ${i.why}`.slice(0, 2000),
+    entryTags: i.brand?.tags ?? enginePaperTags(i.decisionId, i.underlying),
+    strategy: i.brand?.strategy ?? ENGINE_ENTRY_STRATEGY,
     isPaper: true,
-    source: ENGINE_ENTRY_SOURCE,
+    source: i.brand?.source ?? ENGINE_ENTRY_SOURCE,
   } as unknown as ExecuteTradeDto;
 }
 

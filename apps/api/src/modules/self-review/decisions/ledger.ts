@@ -430,3 +430,52 @@ export function carryDrafts(c: CarrySrc): DecisionGradeDraft[] {
     ),
   ];
 }
+
+// ─── Re-entries: reentry_watch_decisions (2026-11-05, PAPER) ─────────────────
+
+export interface ReentrySignalSrc {
+  id: string;
+  underlying: string | null;
+  at: Date;
+  /** SAME | OPPOSITE */
+  direction: string | null;
+  tradeId: string | null;
+  /** inputs.plan: the entry engine's plan the re-entry was opened with (null when the open was refused). */
+  plan: unknown;
+}
+
+/**
+ * A re-entry SIGNAL graded like ENTRY_TAKE: chosen = taking it (the plan's SL / T1, first touch on the contract's
+ * own 1-minute bars, else closed at the session's end), alternative = ₹0. A signal with no plan (the contract was
+ * refused) is UNSCORABLE.
+ */
+export function reentryDrafts(r: ReentrySignalSrc, bars: BarLookup, now: number): DecisionGradeDraft[] {
+  const plan = obj(r.plan);
+  const exchange = str(plan.exchange);
+  const symbol = str(plan.tradingsymbol);
+  const decidedAt = r.at.getTime();
+  const sessionDate = istYmd(decidedAt);
+  const endTs = sessionEndTs(sessionDate, exchange);
+  if (!horizonOver('close', decidedAt, now, endTs)) return [];
+  const vf = contractValueFactor(exchange, symbol);
+  const entry = num(plan.ltp) ?? num(plan.limitPrice);
+  const lotQty = num(plan.lotSize) ?? 0;
+  const sl = num(plan.sl);
+  const targets = Array.isArray(plan.targets) ? plan.targets.map(num).filter((x): x is number => x !== null) : [];
+  const t: TakeOutcome = !symbol || entry === null
+    ? { pnl: null, outcome: null, reason: 'no plan (the re-entry contract was refused)' }
+    : takeOutcome({
+      side: 'BUY', entry, entryTs: decidedAt, sl: sl !== null && sl > 0 ? sl : null, targets, lotQty, valueFactor: vf, segment: segOf(exchange, symbol),
+      cap: null, tick: num(plan.tickSize) ?? undefined, path: bars(exchange, str(plan.token)), endTs,
+    });
+  return [
+    draft(
+      {
+        sessionDate, decisionType: 'REENTRY', detector: null, refTable: 'reentry_watch_decisions', refId: r.id, userId: null, symbol, underlying: r.underlying,
+        mode: 'paper', decidedAt: r.at, chosen: 'take', alternative: 'skip',
+        facts: { direction: r.direction, tradeId: r.tradeId, entry, sl, targets, lotQty, valueFactor: vf, method: 'contract-1m', outcome: t.outcome ? { result: t.outcome.result, stop: t.outcome.stop, price: t.outcome.price, at: t.outcome.at } : null },
+      },
+      gradeTake({ outcome: t }),
+    ),
+  ];
+}

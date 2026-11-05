@@ -4,7 +4,7 @@ import { MarketEventsRepository } from '../../news-events/events/market-events.r
 import { DecisionGradeRepository } from './decision-grade.repository';
 import { DecisionSourcesRepository } from './decision-sources.repository';
 import { detectEventNoAction, detectInputMissing, detectLiveNotPlaced, detectThesisContradictions, familyOf, type EventDaySrc } from './detectors';
-import { carryDrafts, entryDrafts, entryKindOf, exitDrafts, holdDrafts, istMidnight, istYmd, paperExitDrafts, sampleHolds, sessionEndTs, type BarLookup } from './ledger';
+import { carryDrafts, entryDrafts, entryKindOf, exitDrafts, holdDrafts, istMidnight, istYmd, paperExitDrafts, reentryDrafts, sampleHolds, sessionEndTs, type BarLookup } from './ledger';
 import type { Bar, DecisionGradeDraft, GradeSessionResult } from './types';
 
 const MIN = 60_000;
@@ -126,6 +126,7 @@ export class DecisionGradingService {
     const theses = await safe('sentinel_theses', () => this.sources.theses(from, to), []);
     const packets = await safe('input packets', () => this.sources.inputPackets(from, to, signal), []);
     const enters = await safe('entry_engine_decisions', () => this.sources.engineEnters(from, to), []);
+    const reentries = await safe('reentry_watch_decisions', () => this.sources.reentrySignals(from, to), []);
 
     // One candles_1m read per contract, spanning every window it is needed for.
     const want = new Map<string, { exchange: string; token: string; from: number; to: number }>();
@@ -152,6 +153,12 @@ export class DecisionGradingService {
       if (tr) need(tr.exchange, tr.token, t - 10 * MIN, t + 40 * MIN);
     }
     for (const p of paper) need(p.exchange, p.token, p.exitTime.getTime() - 5 * MIN, p.exitTime.getTime() + 70 * MIN);
+    for (const r of reentries) {
+      const p = (r.plan ?? {}) as Record<string, unknown>;
+      const ex = typeof p.exchange === 'string' ? p.exchange : null;
+      const t = r.at.getTime();
+      need(ex, typeof p.token === 'string' ? p.token : null, t - 5 * MIN, sessionEndTs(istYmd(t), ex) + MIN);
+    }
     const barCache = new Map<string, Bar[]>();
     for (const [k, w] of want) {
       barCache.set(k, await safe(`candles_1m ${k}`, () => this.sources.bars(w.exchange, w.token, new Date(w.from), new Date(w.to)), []));
@@ -173,6 +180,7 @@ export class DecisionGradingService {
     for (const h of holds) drafts.push(...holdDrafts(h, trackerOf.get(h.trackerId), bars, now));
     for (const p of paper) drafts.push(...paperExitDrafts(p, bars, now));
     for (const c of carries) drafts.push(...carryDrafts(c));
+    for (const r of reentries) drafts.push(...reentryDrafts(r, bars, now));
 
     // ─── detectors, per session ───
     drafts.push(...detectThesisContradictions(theses));

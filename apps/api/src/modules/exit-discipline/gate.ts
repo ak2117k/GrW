@@ -141,12 +141,17 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig, env: R
     const lt = [a.packetLtp, f.ltpNow].filter(fin);
     const bothBelow = f.floor.armed && fin(fp) && lt.length === 2 && lt.every((x) => (f.positionSide === 'LONG' ? x < fp : x > fp));
     const nets = [a.packetNetPnl, a.freshNetPnl].filter(fin);
+    const fromBest = known && fin(a.bestUnderlying) ? r2(bull ? a.bestUnderlying - (u as number) : (u as number) - a.bestUnderlying) : null;
+    // The noise test (FLOOR_NOISE_CONFIRM_N, hard-floor.ts): with a measurable underlying, a floor break that
+    // the underlying has not confirmed by c noise units from its best point is the contract's noise.
+    const c = fin(cfg.floorNoiseConfirmN) && cfg.floorNoiseConfirmN > 0 ? cfg.floorNoiseConfirmN : 0;
+    const noise = c > 0 && fromBest !== null && nU !== null && fromBest < c * nU - 1e-9;
+    const realMove = { adverseMove: fromBest, nUnderlying: nU, confirmN: c, noise };
     hard.push(nets.length === 0
       ? res('FLOOR_HARD_GREEN_TO_RED', null, { floorBroken: bothBelow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl }, 'no net P&L to compare')
-      : res('FLOOR_HARD_GREEN_TO_RED', bothBelow && nets.every((x) => x < 0),
-        { floorBroken: bothBelow, floor: fp ?? null, packetLtp: a.packetLtp, ltpNow: f.ltpNow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl },
-        'armed floor broken on both reads AND the position is net red after charges'));
-    const fromBest = known && fin(a.bestUnderlying) ? r2(bull ? a.bestUnderlying - (u as number) : (u as number) - a.bestUnderlying) : null;
+      : res('FLOOR_HARD_GREEN_TO_RED', bothBelow && nets.every((x) => x < 0) && !noise,
+        { floorBroken: bothBelow, floor: fp ?? null, packetLtp: a.packetLtp, ltpNow: f.ltpNow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl, ...realMove },
+        'armed floor broken on both reads AND the position is net red after charges AND the underlying confirms it (not noise)'));
     hard.push(fromBest === null || nU === null
       ? res('FLOOR_HARD_UNDERLYING_MOVE', null, { floorBroken: bothBelow, underlying: u, bestUnderlying: a.bestUnderlying, nUnderlying: nU },
         'no best-point underlying or no underlying noise unit')
@@ -156,9 +161,9 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig, env: R
     if (cfg.floorLockGreen) {
       hard.push(nets.length === 0
         ? res('FLOOR_HARD_GREEN_LOCK', null, { floorBroken: bothBelow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl }, 'no net P&L to compare')
-        : res('FLOOR_HARD_GREEN_LOCK', bothBelow && nets.some((x) => x >= 0),
-          { floorBroken: bothBelow, floor: fp ?? null, packetLtp: a.packetLtp, ltpNow: f.ltpNow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl },
-          'armed floor broken on both reads while the position is still net green (FLOOR_LOCK_GREEN: lock the green in)'));
+        : res('FLOOR_HARD_GREEN_LOCK', bothBelow && nets.some((x) => x >= 0) && !noise,
+          { floorBroken: bothBelow, floor: fp ?? null, packetLtp: a.packetLtp, ltpNow: f.ltpNow, packetNetPnl: a.packetNetPnl, freshNetPnl: a.freshNetPnl, ...realMove },
+          'armed floor broken on both reads while the position is still net green AND the underlying confirms it (FLOOR_LOCK_GREEN; not noise)'));
     }
   }
 

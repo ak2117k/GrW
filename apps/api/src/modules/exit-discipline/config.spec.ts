@@ -6,7 +6,7 @@ describe('parseExitDisciplineConfig', () => {
     expect(c).toEqual({ enabled: true, floorHardExit: true, floorLockGreen: true, spikeBank: true, ...EXIT_DISCIPLINE_DEFAULTS, problems: [] });
     expect(EXIT_DISCIPLINE_DEFAULTS).toEqual({
       floorArmN: 1.5, floorTrailN: 2.0, givebackN: 1.5, gateCloseMin: 10, gateUnderlyingN: 1.0,
-      persistWindowSec: 300, persistMinSec: 120, outcomeWindowMin: 60, openingGuardMin: 15, floorHardExitN: 2.0,
+      persistWindowSec: 300, persistMinSec: 120, outcomeWindowMin: 60, openingGuardMin: 15, floorHardExitN: 2.0, floorNoiseConfirmN: 1.0,
     });
   });
 

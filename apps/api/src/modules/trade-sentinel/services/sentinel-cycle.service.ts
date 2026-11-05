@@ -467,6 +467,8 @@ interface TrackerState {
   spike?: SpikeMemory;
   /** FLOOR_HARD_EXIT: epoch ms a held position's suppressed trip was last logged (once per 30 min). */
   hardFloorHeldLoggedAt?: number;
+  /** Last time a floor break held as noise (FLOOR_NOISE_CONFIRM_N) was logged — rate-limited like the HELD log. */
+  hardFloorNoiseLoggedAt?: number;
   /**
    * TARGET_LADDER (exit-discipline/target-ladder.ts): the position's targets — FROZEN once set, so a manual
    * trade's R never drifts with a later stop — the ratcheted ladder stop, and the exit's confirmation run.
@@ -1259,7 +1261,16 @@ export class SentinelCycleService {
       lockGreen: cfg.floorLockGreen,
       // The classifier plug (NoiseOpinion): nothing supplies one yet ⇒ the green lock trips.
       noise: null,
+      // 2026-11-05: a floor break the underlying has not confirmed is noise (FLOOR_NOISE_CONFIRM_N).
+      noiseConfirmN: cfg.floorNoiseConfirmN,
     });
+    if (reading.noiseHeld && now.getTime() - (state.hardFloorNoiseLoggedAt ?? Number.NEGATIVE_INFINITY) >= HELD_LOG_EVERY_MS) {
+      state.hardFloorNoiseLoggedAt = now.getTime();
+      this.logger.log(
+        `[floor-hard-exit] NOISE — ${entry.symbol} (tracker ${entry.trackerId}): ltp ${tick.ltp} below the floor ${floor.price}, ` +
+          `but the underlying is only ${reading.adverseFromBest} pts (${reading.adverseFromBestN} N) against from its best — held, not sold`,
+      );
+    }
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
     if (reading.trip && hold && isHeldPosition(hold, entry)) {
       if (now.getTime() - (state.hardFloorHeldLoggedAt ?? Number.NEGATIVE_INFINITY) >= HELD_LOG_EVERY_MS) {

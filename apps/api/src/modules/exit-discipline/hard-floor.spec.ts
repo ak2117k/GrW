@@ -248,3 +248,33 @@ describe('noise-aware hard loss (HARD_LOSS_CAP_RUPEES / HARD_LOSS_NOISE_N, 2026-
     expect(hardLossReading({ ...T1, noise: { verdict: 'UNKNOWN', source: 'test' } })).toMatchObject({ trip: false, band: 'HOLD_UNDER_N' });
   });
 });
+
+describe('the noise test (FLOOR_NOISE_CONFIRM_N, 2026-11-05 SUZLON 40 CE)', () => {
+  // Long SUZLON23NOV2640CE: entry 0.81, best 0.85 with Suzlon 38.55, floor 0.84, sold at 0.82 with Suzlon 38.54.
+  const SUZ: HardFloorInput = {
+    side: 'LONG', exposure: 'BULLISH', ltp: 0.82, floor: { price: 0.84, armed: true },
+    netPnl: 60, underlying: 38.54, bestUnderlying: 38.55, nUnderlying: 0.06, k: 2, lockGreen: true, noiseConfirmN: 1,
+  };
+  it('a 3-tick premium wobble with the stock 0.01 off its best is noise: held, no trip', () => {
+    const r = hardFloorReading(SUZ);
+    expect(r).toMatchObject({ trip: false, rule: null, belowFloor: true, noiseHeld: true });
+  });
+  it('the same break with the stock a full noise unit against its best locks the green in', () => {
+    expect(hardFloorReading({ ...SUZ, underlying: 38.49 })).toMatchObject({ trip: true, rule: 'FLOOR_BREAK_GREEN' });
+  });
+  it('a red break the stock has not confirmed is held too; confirmed ⇒ GREEN_TO_RED', () => {
+    expect(hardFloorReading({ ...SUZ, netPnl: -40 })).toMatchObject({ trip: false, noiseHeld: true });
+    expect(hardFloorReading({ ...SUZ, netPnl: -40, underlying: 38.48 })).toMatchObject({ trip: true, rule: 'GREEN_TO_RED' });
+  });
+  it('an unmeasurable underlying keeps the price-only rule (fail safe)', () => {
+    expect(hardFloorReading({ ...SUZ, underlying: null })).toMatchObject({ trip: true, rule: 'FLOOR_BREAK_GREEN' });
+    expect(hardFloorReading({ ...SUZ, nUnderlying: null })).toMatchObject({ trip: true, rule: 'FLOOR_BREAK_GREEN' });
+  });
+  it('off (0 / absent) is exactly the old rule', () => {
+    expect(hardFloorReading({ ...SUZ, noiseConfirmN: 0 })).toMatchObject({ trip: true, rule: 'FLOOR_BREAK_GREEN' });
+    expect(hardFloorReading({ ...SUZ, noiseConfirmN: undefined })).toMatchObject({ trip: true, rule: 'FLOOR_BREAK_GREEN' });
+  });
+  it('the K·N underlying rule is untouched: 2 N against from the best still exits', () => {
+    expect(hardFloorReading({ ...SUZ, lockGreen: false, underlying: 38.43 })).toMatchObject({ trip: true, rule: 'HWM_UNDERLYING_MOVE' });
+  });
+});

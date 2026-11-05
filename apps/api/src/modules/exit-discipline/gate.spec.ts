@@ -175,6 +175,16 @@ describe('evaluateExitGate', () => {
       expect(clause(noNet, 'FLOOR_HARD_GREEN_LOCK').pass).toBeNull();
     });
 
+    it('the noise test (2026-11-05): a floor break the underlying has not confirmed by 1 N is noise — no hard exit', () => {
+      // Crude only 5 pts (0.4 N) off its 9531 best: the premium dip is the contract's own noise.
+      const noise = evaluateExitGate({ ...PE, underlying: 9536 }, CFG);
+      expect(clause(noise, 'FLOOR_HARD_GREEN_LOCK')).toMatchObject({ pass: false, measured: expect.objectContaining({ noise: true, confirmN: 1 }) });
+      expect(clause(noise, 'FLOOR_HARD_GREEN_TO_RED').pass).toBe(false);
+      expect(noise.floorHard).toBe(false);
+      // Off ⇒ the old price-only lock.
+      expect(evaluateExitGate({ ...PE, underlying: 9536 }, { ...CFG, floorNoiseConfirmN: 0 }).floorHard).toBe(true);
+    });
+
     it('hard risk still outranks the hard floor in the justification', () => {
       expect(evaluateExitGate({ ...PE, underlying: 9556, dailyLossLatched: true }, CFG).justification).toBe('HARD_RISK');
     });

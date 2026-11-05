@@ -63,6 +63,11 @@ export interface HardFloorInput {
    * / REAL ⇒ the green lock trips, exactly the code rule.
    */
   noise?: NoiseOpinion | null;
+  /**
+   * FLOOR_NOISE_CONFIRM_N: GREEN_TO_RED / FLOOR_BREAK_GREEN need the underlying at least this many noise units
+   * against the position from its best point. Absent / 0 ⇒ off (the price-only rule, as before).
+   */
+  noiseConfirmN?: number;
 }
 
 export interface HardFloorReading {
@@ -74,6 +79,8 @@ export interface HardFloorReading {
   /** Underlying points against the position from the best point; null when unmeasurable. */
   adverseFromBest: number | null;
   adverseFromBestN: number | null;
+  /** The floor is broken but the underlying moved < noiseConfirmN units against: the contract's noise, held. */
+  noiseHeld?: boolean;
   /** MAX_LOSS only: the hard loss reading that tripped (band, reference, move) — for the reason and the audit. */
   loss?: HardLossReading;
 }
@@ -88,8 +95,17 @@ export function hardFloorReading(i: HardFloorInput): HardFloorReading {
   const moved = adverse !== null && n !== null && fin(i.k) && i.k > 0 && adverse >= i.k * n - 1e-9;
   const green = fin(i.netPnl) && i.netPnl >= 0;
   const lock = i.lockGreen === true && green && i.noise?.verdict !== 'NOISE';
-  const rule: HardFloorRule | null = !belowFloor ? null : netRed ? 'GREEN_TO_RED' : lock ? 'FLOOR_BREAK_GREEN' : moved ? 'HWM_UNDERLYING_MOVE' : null;
-  return { trip: rule !== null, rule, belowFloor, netRed, adverseFromBest: adverse, adverseFromBestN: adverseN };
+  // The noise test (FLOOR_NOISE_CONFIRM_N): known underlying, known unit, less than c units against ⇒ noise.
+  const c = fin(i.noiseConfirmN) && i.noiseConfirmN > 0 ? i.noiseConfirmN : 0;
+  const noiseHeld = belowFloor && c > 0 && adverse !== null && n !== null && adverse < c * n - 1e-9;
+  const rule: HardFloorRule | null = !belowFloor
+    ? null
+    : moved
+      ? netRed ? 'GREEN_TO_RED' : lock ? 'FLOOR_BREAK_GREEN' : 'HWM_UNDERLYING_MOVE'
+      : noiseHeld
+        ? null
+        : netRed ? 'GREEN_TO_RED' : lock ? 'FLOOR_BREAK_GREEN' : null;
+  return { trip: rule !== null, rule, belowFloor, netRed, adverseFromBest: adverse, adverseFromBestN: adverseN, ...(noiseHeld ? { noiseHeld: true } : {}) };
 }
 
 /** The cycle's per-position confirmation memory (in-process; a restart costs one extra read). */

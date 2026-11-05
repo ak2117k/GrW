@@ -17,6 +17,7 @@ export const EXIT_DISCIPLINE_DEFAULTS = {
   outcomeWindowMin: 60,
   openingGuardMin: 15,
   floorHardExitN: 2.0,
+  floorNoiseConfirmN: 1.0,
 } as const;
 
 /** Spec text, not tunables. */
@@ -73,6 +74,15 @@ export interface ExitDisciplineConfig {
    * required. Off: only GREEN_TO_RED / HWM_UNDERLYING_MOVE, exactly as before. Acts only with floorHardExit.
    */
   floorLockGreen: boolean;
+  /**
+   * FLOOR_NOISE_CONFIRM_N (default 1, 0 = off, 0–3; owner 2026-11-05 "identify the noise and decide").
+   * A broken floor is an exit by GREEN_TO_RED / FLOOR_BREAK_GREEN only when the UNDERLYING has moved at least
+   * this many of its own noise units against the position from its best point; less than that is the contract's
+   * own noise and the position is held. Prod 2026-11-05 SUZLON 40 CE (0.81 → 0.85 → 0.82, Suzlon 38.55 → 38.54):
+   * sold on a 3-tick wobble while the stock moved one paisa. An unmeasurable underlying keeps the price-only
+   * rule (fail safe). HWM_UNDERLYING_MOVE (K·N) and MAX_LOSS are untouched.
+   */
+  floorNoiseConfirmN: number;
   /**
    * FLOOR_SPIKE_BANK (ON unless exactly `false`; owner-approved 2026-11-04): a fast new best latches the
    * tighter SPIKE_BANK_TRAIL_N trail (spike.ts). Off: the trail is floorTrailN, as before. Acts only with floorHardExit.
@@ -135,6 +145,7 @@ export function parseExitDisciplineConfig(env: Env): ExitDisciplineConfig {
     floorHardExit: hard !== 'false',
     floorHardExitN: num(env, 'FLOOR_HARD_EXIT_N', d.floorHardExitN, real(1, 6), problems),
     floorLockGreen: lock !== 'false',
+    floorNoiseConfirmN: num(env, 'FLOOR_NOISE_CONFIRM_N', d.floorNoiseConfirmN, real(0, 3), problems),
     spikeBank: spike !== 'false',
     problems,
   };

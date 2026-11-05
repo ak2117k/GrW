@@ -10,7 +10,7 @@ import type { SignalTraderConfig } from '../signal-trader/domain/signal-trader.c
 import { SignalTraderRepository } from '../signal-trader/repositories/signal-trader.repository';
 import { SignalOiCheckService } from '../signal-trader/services/signal-oi-check.service';
 import type { InstrumentMasterLike, QuotesLike, SessionClockLike } from '../signal-trader/services/signal-trader.service';
-import { atmOption, engineContract, engineSignal, planEngineEntry } from './domain/engine-contract';
+import { atmCandidates, engineContract, engineSignal, ENGINE_LIQUIDITY, pickLiquidStrike, planEngineEntry } from './domain/engine-contract';
 import { chooseBars, ENGINE_UNIVERSE, ENGINE_WINDOW, istDayAt, istMinutes, readOi, sessionStartOf, wantFor } from './domain/engine-inputs';
 import { ENTRY_ENGINE, entryDecision, entryGuards, newsReading, trendReading, type EntryDecision, type GuardResult, type OiReading } from './domain/entry-decision';
 import { withNewsPaths } from './domain/news-paths';
@@ -216,8 +216,18 @@ export class EntryEngineService {
     } catch (e) {
       return { tradeId: null, note: `paper: not opened — instrument master unavailable: ${errText(e)}` };
     }
-    const atm = atmOption(master, underlying, kind, spot ?? 0, at);
-    if (!atm.ok) return { tradeId: null, note: `paper: not opened — ${atm.reason}` };
+    const cands = atmCandidates(master, underlying, kind, spot ?? 0, at);
+    if (!cands.ok) return { tradeId: null, note: `paper: not opened — ${cands.reason}` };
+    // LIQUIDITY (2026-11-05, engine-contract.ts ENGINE_LIQUIDITY): never a strike nobody is trading.
+    let liq: Awaited<ReturnType<EntryEngineRepository['strikeLiquidity']>> | null = null;
+    try {
+      liq = await this.repo.strikeLiquidity(underlying, kind, cands.expiry, cands.strikes, sessionStartOf(segmentFor({ underlying, instrumentKind: kind }), at), new Date(at.getTime() - ENGINE_LIQUIDITY.recentMin * MIN));
+    } catch (e) {
+      this.logger.warn(`[entry-engine] liquidity read failed for ${underlying} ${kind}: ${errText(e)} — ATM, unchecked`);
+    }
+    const pick = pickLiquidStrike(cands.strikes, liq);
+    if (!pick.ok) return { tradeId: null, note: `paper: not opened — ${pick.reason}` };
+    const atm = { strike: pick.strike, expiry: cands.expiry };
     const contract = engineContract(master, { underlying, instrumentKind: kind, strike: atm.strike, expiry: atm.expiry }, at);
     if (!contract.ok) return { tradeId: null, note: `paper: not opened — ${contract.reason}` };
     const c = contract.contract;
@@ -231,7 +241,7 @@ export class EntryEngineService {
     }
     const r = await this.paper.open({ decisionId, plan: planned.plan, underlying, kind, strike: atm.strike, expiry: c.expiry ?? atm.expiry, why: d.reasons.map((x) => x.split(' — ')[0]).join('; ') });
     return r.ok
-      ? { tradeId: r.tradeId, note: `paper: opened ${planned.plan.tradingsymbol} x${planned.plan.qty} @ ${r.entryPrice ?? ltp} (trade ${r.tradeId})` }
+      ? { tradeId: r.tradeId, note: `paper: opened ${planned.plan.tradingsymbol} x${planned.plan.qty} @ ${r.entryPrice ?? ltp} (trade ${r.tradeId}); ${pick.note}` }
       : { tradeId: null, note: `paper: open failed — ${r.reason}` };
   }
 }

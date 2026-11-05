@@ -46,6 +46,53 @@ export function atmOption(master: readonly unknown[], underlying: string, kind: 
   return { ok: true, strike: best, expiry: ymdLocal(new Date(nearest)) };
 }
 
+/**
+ * LIQUIDITY (2026-11-05). Prod: the engine bought GOLD27NOV26145500CE at 676 — a strike that never traded all
+ * day (volume 0, one price across 126 chain snapshots) while gold futures moved 144,555 → 146,109; the paper
+ * fill and P&L were fiction. Gold's half-strikes are dead; 145000 traded 1,014 lots at 102 prices. A strike is
+ * LIQUID when it has traded today (≥ minVolume) and its price moved ≥ minMoves times in the recent window.
+ */
+export const ENGINE_LIQUIDITY = Object.freeze({ minVolume: 20, minMoves: 2, recentMin: 30, maxStepsFromAtm: 4 });
+
+export interface StrikeLiquidity {
+  /** Today's (cumulative) traded volume from the latest chain snapshot. */
+  volume: number;
+  /** Distinct prices printed in the recent window. */
+  moves: number;
+}
+
+/** The ATM-nearest strikes of the nearest expiry, closest first (ties: the lower strike), at most `n`. */
+export function atmCandidates(master: readonly unknown[], underlying: string, kind: 'CE' | 'PE', spot: number, today: Date, n = ENGINE_LIQUIDITY.maxStepsFromAtm + 1): { ok: true; strikes: number[]; expiry: string } | { ok: false; reason: string } {
+  const atm = atmOption(master, underlying, kind, spot, today);
+  if (!atm.ok) return atm;
+  const seg = segmentFor({ underlying, instrumentKind: kind });
+  const name = up(underlying);
+  const strikes = [...new Set((master as Row[])
+    .filter((r) => r && up(r.exch_seg) === seg && up(r.name) === name && /^OPT/.test(up(r.instrumenttype)) && up(r.symbol).endsWith(kind))
+    .filter((r) => { const e = parseMasterExpiry(r.expiry); return e !== null && ymdLocal(e) === atm.expiry; })
+    .map((r) => parseMasterStrike(r.strike))
+    .filter((s): s is number => s !== null && s > 0))]
+    .sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot) || a - b);
+  return { ok: true, strikes: strikes.slice(0, n), expiry: atm.expiry };
+}
+
+/**
+ * The nearest LIQUID strike among `candidates` (closest-to-ATM first). No liquidity read at all (the chain is not
+ * captured for this underlying) ⇒ the ATM strike, flagged unchecked; a read with no liquid candidate ⇒ refused.
+ */
+export function pickLiquidStrike(candidates: readonly number[], liq: ReadonlyMap<number, StrikeLiquidity> | null, cfg = ENGINE_LIQUIDITY): { ok: true; strike: number; note: string } | { ok: false; reason: string } {
+  if (candidates.length === 0) return { ok: false, reason: 'no candidate strikes' };
+  if (!liq || liq.size === 0) return { ok: true, strike: candidates[0], note: 'liquidity unchecked (no chain snapshots for this underlying)' };
+  for (const s of candidates) {
+    const l = liq.get(s);
+    if (l && l.volume >= cfg.minVolume && l.moves >= cfg.minMoves) {
+      return { ok: true, strike: s, note: s === candidates[0] ? `liquid ATM ${s} (vol ${l.volume}, ${l.moves} prices in ${cfg.recentMin}m)` : `ATM ${candidates[0]} illiquid → nearest liquid ${s} (vol ${l.volume}, ${l.moves} prices in ${cfg.recentMin}m)` };
+    }
+  }
+  const atm = liq.get(candidates[0]);
+  return { ok: false, reason: `no liquid strike within ${candidates.length} of ATM ${candidates[0]} (ATM vol ${atm?.volume ?? 0}, ${atm?.moves ?? 0} prices in ${cfg.recentMin}m; need vol ≥ ${cfg.minVolume} and ≥ ${cfg.minMoves} prices)` };
+}
+
 /** The synthetic call the plan is built from: BUY the ATM option AT its LTP, premium-% SL and T1. */
 export function engineSignal(i: { decisionId: string; underlying: string; kind: 'CE' | 'PE'; strike: number; expiry: string; ltp: number; tick: number; at: Date }): SignalView {
   const sl = floorToTick(i.ltp * (1 - ENGINE_PLAN.slPremiumPct / 100), i.tick);

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import type { Bar1m, ImpactRow } from './domain/entry-decision';
 import type { PreOpenBiasInput } from './domain/news-paths';
+import type { StrikeLiquidity } from './domain/engine-contract';
 import { ENGINE_ENTRY_STRATEGY, ENGINE_UNDERLYING_TAG, type EntryEngineMode } from './entry-engine.config';
 
 export interface DecisionRow {
@@ -27,6 +28,26 @@ const num = (v: unknown): number => {
 @Injectable()
 export class EntryEngineRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Per-strike liquidity of one option series from the chain snapshots (oi_snapshots, ~3-min cadence): today's
+   * volume (latest snapshot since `dayStart`) and the distinct prices printed since `recentFrom`. Joined by the
+   * contract's own name / expiry / type / strike — never a token (tokens are reused across expiries). Empty map ⇒
+   * no snapshots for this series (pickLiquidStrike then flags it unchecked).
+   */
+  async strikeLiquidity(name: string, kind: 'CE' | 'PE', expiryYmd: string, strikes: readonly number[], dayStart: Date, recentFrom: Date): Promise<Map<number, StrikeLiquidity>> {
+    if (strikes.length === 0) return new Map();
+    const rows = await this.prisma.$queryRaw<Array<{ strike: number; volume: unknown; moves: unknown }>>`
+      SELECT i.strike AS strike,
+        COALESCE((array_agg(o.volume ORDER BY o."timestamp" DESC))[1], 0) AS volume,
+        COUNT(DISTINCT o.ltp) FILTER (WHERE o."timestamp" >= ${recentFrom}) AS moves
+      FROM "oi_snapshots" o JOIN "instruments" i ON i.id = o."instrumentId"
+      WHERE UPPER(i.name) = ${name.toUpperCase()} AND i."optionType" = ${kind}
+        AND (i.expiry::date = ${expiryYmd}::date OR (i.expiry + interval '5 hours 30 minutes')::date = ${expiryYmd}::date)
+        AND i.strike = ANY(${[...strikes]}::float8[]) AND o."timestamp" >= ${dayStart}
+      GROUP BY i.strike`;
+    return new Map(rows.map((r) => [Number(r.strike), { volume: num(r.volume), moves: num(r.moves) }]));
+  }
 
   /** Impacts the model read in (from, to], joined to their cluster. */
   async impacts(from: Date, to: Date): Promise<ImpactRow[]> {

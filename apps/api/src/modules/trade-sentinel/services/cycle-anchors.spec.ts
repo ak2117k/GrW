@@ -38,3 +38,17 @@ describe('solveCycleAnchors (FLOOR_HARD_EXIT fixed references)', () => {
     expect(other.anchors.best).toMatchObject({ ltp: 365, underlying: 9600 });
   });
 });
+
+describe('anchors stored on another instrument\'s scale (2026-11-05 reused token: COFORGE ~2100 vs NIFTY ~24400)', () => {
+  const mem = { best: { ltp: 228, underlying: 2108.1, at: '2026-11-05T04:20:00.000Z' }, floorArm: { ltp: 70, underlying: 2073.1, at: '2026-11-05T03:46:00.000Z' }, entry: 47 };
+  it('re-pairs a wrong-scale underlying with the live one, keeping the contract price and time', () => {
+    const a = solveCycleAnchors({ side: 'LONG', entryPrice: 47, floorArmed: true, last: undefined, memory: mem, ltp: 212.9, peak: 228, underlying: 24410, now: at('2026-11-05T06:21:46Z') });
+    expect(a.anchors.best).toEqual({ ltp: 228, underlying: 24410, at: '2026-11-05T04:20:00.000Z' });
+    expect(a.anchors.floorArm).toEqual({ ltp: 70, underlying: 24410, at: '2026-11-05T03:46:00.000Z' });
+  });
+  it('a same-scale anchor is left alone', () => {
+    const same = { ...mem, best: { ltp: 228, underlying: 24450, at: '2026-11-05T04:20:00.000Z' } };
+    const a = solveCycleAnchors({ side: 'LONG', entryPrice: 47, floorArmed: true, last: undefined, memory: same, ltp: 212.9, peak: 228, underlying: 24410, now: at('2026-11-05T06:21:46Z') });
+    expect(a.anchors.best?.underlying).toBe(24450);
+  });
+});

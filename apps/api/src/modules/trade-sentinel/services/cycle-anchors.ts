@@ -36,14 +36,29 @@ export function storedAnchors(last: { packet?: unknown } | undefined | null, ent
  *  - floorArm: the contract price and underlying at the pass that first saw the green floor armed.
  *    Latched for the entry: a floor that briefly reads unarmed (N unmeasured) does not re-anchor it.
  */
+/** An anchor's underlying this far (relative) from the live one was read on ANOTHER instrument's scale. */
+export const ANCHOR_SCALE_BREAK = 0.25;
+
+/**
+ * Prod 2026-11-05: a reused token resolved NIFTY09NOV2624300CE to an expired COFORGE CE, so its best-point
+ * underlying was stored at COFORGE's ~2,100; once fixed, the live NIFTY ~24,400 read as "−22,301 pts against".
+ * An anchor whose underlying is off the live one by more than ANCHOR_SCALE_BREAK is re-paired with the live
+ * underlying (its contract price and time are kept) — under-stating, never inventing, an adverse move.
+ */
+function rescaled(a: PriceAnchor | null, u: number | null): PriceAnchor | null {
+  if (!a || u === null || !fin(a.underlying) || a.underlying <= 0) return a;
+  return Math.abs(a.underlying - u) / u > ANCHOR_SCALE_BREAK ? { ...a, underlying: u } : a;
+}
+
 export function solveCycleAnchors(i: {
   side: Side; entryPrice: number; ltp: number; peak: number | null; underlying: number | null;
   floorArmed: boolean; now: Date; memory: AnchorMemory; last: { packet?: unknown } | undefined;
 }): { anchors: FloorAnchors; memory: AnchorMemory } {
-  const base: AnchorMemory = i.memory.entry === i.entryPrice ? i.memory : { ...storedAnchors(i.last, i.entryPrice), entry: i.entryPrice };
+  const u = fin(i.underlying) ? i.underlying : null;
+  const raw: AnchorMemory = i.memory.entry === i.entryPrice ? i.memory : { ...storedAnchors(i.last, i.entryPrice), entry: i.entryPrice };
+  const base: AnchorMemory = { ...raw, best: rescaled(raw.best, u), floorArm: rescaled(raw.floorArm, u) };
   const dir = i.side === 'LONG' ? 1 : -1;
   const at = i.now.toISOString();
-  const u = fin(i.underlying) ? i.underlying : null;
   const seen = [i.peak, i.ltp].filter((x): x is number => fin(x) && x > 0);
   const px = seen.length === 0 ? null : dir > 0 ? Math.max(...seen) : Math.min(...seen);
   const best = px !== null && (base.best === null || (px - base.best.ltp) * dir > 1e-9)

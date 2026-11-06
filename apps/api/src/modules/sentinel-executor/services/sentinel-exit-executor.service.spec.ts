@@ -153,8 +153,9 @@ describe('SentinelExitExecutor', () => {
     });
     const h = harness({ lotSize: 10, positions: [env([posRow('100', '50.25', { lotsize: '10' })]), env([posRow('0')])] });
     await h.ex.process(V, lots, NOW);
+    // 2026-11-06: by the position's own tradingsymbol first (a reused token read BANKINDIA's lot 5200 for BHARTIARTL).
     expect(h.prisma.instrument.findFirst).toHaveBeenCalledWith(expect.objectContaining({
-      where: { exchange: 'MCX', token: '445566' }, select: { tickSize: true, lotSize: true },
+      where: expect.objectContaining({ exchange: 'MCX' }), select: { tickSize: true, lotSize: true },
     }));
     expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
     expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 10 }));

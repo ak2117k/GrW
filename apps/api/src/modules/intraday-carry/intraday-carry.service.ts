@@ -242,7 +242,7 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     const auto = parseAutoExitConfig(process.env);
     const held = (auto.hold ?? []).some((h) => h === up(symbol) || h === up(t.symbol) || h === up(t.id));
     const [expiry, verdict, capExhausted] = await Promise.all([
-      this.expiryToday(t.exchange, t.token, now),
+      this.expiryToday(t.exchange, t.token, symbol, now),
       this.closeVerdict(t.id, w.openedAt, 'live'),
       this.capExhausted(t.userId, now),
     ]);
@@ -477,8 +477,11 @@ export class IntradayCarryService implements OnModuleInit, OnModuleDestroy {
     return row?.packet ?? null;
   }
 
-  private async expiryToday(exchange: string, token: string, now: Date): Promise<{ today: boolean; expiry: string | null }> {
-    const inst = await this.prisma.instrument.findFirst({ where: { exchange: up(exchange), token: String(token) }, select: { expiry: true } });
+  private async expiryToday(exchange: string, token: string, symbol: string, now: Date): Promise<{ today: boolean; expiry: string | null }> {
+    // By tradingsymbol first: tokens are REUSED after expiry (2026-11-06 BHARTIARTL / BANKINDIA), newest row otherwise.
+    const bySymbol = await this.prisma.instrument.findFirst({ where: { exchange: up(exchange), symbol }, orderBy: { updatedAt: 'desc' }, select: { expiry: true } });
+    if (bySymbol) { const e0 = bySymbol.expiry ?? null; return { today: e0 !== null && istYmd(e0) === istYmd(now), expiry: e0 ? istYmd(e0) : null }; }
+    const inst = await this.prisma.instrument.findFirst({ where: { exchange: up(exchange), token: String(token) }, orderBy: { updatedAt: 'desc' }, select: { expiry: true } });
     const e = inst?.expiry ?? null;
     return { today: e !== null && istYmd(e) === istYmd(now), expiry: e ? istYmd(e) : null };
   }

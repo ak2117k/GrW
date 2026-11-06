@@ -60,7 +60,7 @@ const CONFIRM_STEPS_MS = [2_000, 3_000, 5_000];
 /** Reason prefix for every outcome that leaves a position whose protective order we cancelled unexited. */
 export const UNPROTECTED_AFTER_CANCEL = 'UNPROTECTED_AFTER_CANCEL';
 
-type Tracker = { id: string; userId: string; status: string; kind: string; exchange: string; token: string; qty: number; entryTime?: Date | null };
+type Tracker = { id: string; userId: string; status: string; kind: string; exchange: string; token: string; symbol: string; qty: number; entryTime?: Date | null };
 type Inst = { tickSize: number | null; lotSize: number | null } | null;
 type PreCheck =
   | { kind: 'ok'; order: OrderRequest; ltp: number; unitVerified: boolean }
@@ -196,10 +196,19 @@ export class SentinelExitExecutor {
     // Instrument tick + lot size (R5, R16), read once, outside the broker lease.
     let inst: Inst;
     try {
-      inst = (await this.prisma.instrument.findFirst({
-        where: { exchange: t.exchange, token: t.token },
+      // The position's OWN contract row: by tradingsymbol first. Tokens are REUSED after expiry (prod 2026-11-06:
+      // NFO token of BHARTIARTL23NOV262100CE is also BANKINDIA25AUG26137.5CE, lot 5200) — an unordered token
+      // findFirst read BANKINDIA's lot, and every exit of the BHARTIARTL call (91 attempts, from a green floor
+      // break at 09:43 to MAX_LOSS at −₹4k) was refused as LOT_SIZE_MISMATCH. Token-only, newest row, as fallback.
+      inst = ((await this.prisma.instrument.findFirst({
+        where: { exchange: t.exchange, symbol: t.symbol },
+        orderBy: { updatedAt: 'desc' },
         select: { tickSize: true, lotSize: true },
-      })) as Inst;
+      })) ?? (await this.prisma.instrument.findFirst({
+        where: { exchange: t.exchange, token: t.token },
+        orderBy: { updatedAt: 'desc' },
+        select: { tickSize: true, lotSize: true },
+      }))) as Inst;
     } catch (err) {
       return this.finish(id, v, 'FAILED', 'INSTRUMENT_READ', { brokerMessage: errText(err) });
     }
@@ -655,7 +664,7 @@ export class SentinelExitExecutor {
     const { id, v, cfg } = run;
     // Synthetic tracker: only the SIGN of qty is used (side check), which is unit-independent.
     const tracker: Tracker = { id: v.trackerId, userId: v.userId, status: 'OPEN', kind: 'POSITION',
-      exchange: first.exchange, token: first.token, qty: first.side === 'SELL' ? first.quantity : -first.quantity };
+      exchange: first.exchange, token: first.token, symbol: first.symbol, qty: first.side === 'SELL' ? first.quantity : -first.quantity };
     const pre = await this.preOrderCheck(s, tracker, run);
     if (pre.kind !== 'ok') return this.finish(id, v, 'FAILED', `FALLBACK_ABORTED:${refusal(pre)}`, { marketOrderId });
     if (pre.order.quantity !== first.quantity || pre.order.side !== first.side) {

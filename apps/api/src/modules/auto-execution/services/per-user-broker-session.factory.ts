@@ -58,6 +58,13 @@ export interface UserSmartApiLike {
    * for the same reason as cancelOrder; a client without it makes every conversion `accepted:false`.
    */
   convertPosition?(params: Record<string, string>): Promise<any>;
+  /** smartapi-javascript `modifyOrder(params)` (POST order_modify). Optional for the same reason as cancelOrder. */
+  modifyOrder?(params: Record<string, string>): Promise<any>;
+}
+
+/** FLOOR_BROKER_SL: change a resting order's trigger / limit / quantity. Identity fields are the order's own. */
+export interface ModifyOrderRequest extends OrderRequest {
+  orderId: string;
 }
 
 /** Builds a throwaway SmartAPI client for one user's disposable order session. */
@@ -148,6 +155,13 @@ export interface UserBrokerSession {
    * not stub it.
    */
   convertPosition?(p: ConvertPositionRequest): Promise<ConvertPositionResult>;
+
+  /**
+   * Modify one resting order (FLOOR_BROKER_SL trails its stop). Same never-rejects caveat and the same
+   * classification as {@link cancelOrderClassified}: ACCEPTED only when Angel answered status true with the
+   * orderid; even then the caller confirms the new trigger in the order book. Optional so fakes need not stub it.
+   */
+  modifyOrderClassified?(m: ModifyOrderRequest): Promise<ClassifiedCancel>;
 }
 
 /** Classify a raw smartapi-javascript `convertPosition` resolution. Pure; never throws. */
@@ -363,6 +377,37 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
     return classifyCancelResponse(response);
   }
 
+  async modifyOrderClassified(m: ModifyOrderRequest): Promise<ClassifiedCancel> {
+    this.assertCanPlace();
+    this.logger.log(`Modifying per-user order ${m.orderId} (${m.variety ?? 'NORMAL'}) ${m.symbol} trigger=${m.triggerPrice ?? 0} limit=${m.price ?? 0} qty=${m.quantity} (client ${maskClientId(this.clientId)})`);
+    const params: Record<string, string> = {
+      variety: m.variety ?? 'NORMAL',
+      orderid: m.orderId,
+      ordertype: ORDER_TYPE_MAP[m.orderType] ?? m.orderType,
+      producttype: PRODUCT_TYPE_MAP[m.positionType] ?? m.positionType,
+      duration: 'DAY',
+      price: m.price != null && m.price > 0 ? String(m.price) : '0',
+      triggerprice: m.triggerPrice != null && m.triggerPrice > 0 ? String(m.triggerPrice) : '0',
+      quantity: String(m.quantity),
+      tradingsymbol: m.symbol,
+      symboltoken: m.token,
+      exchange: m.exchange,
+    };
+    let response: unknown;
+    try {
+      response = await withTimeout(
+        this.client.modifyOrder ? this.client.modifyOrder(params) : Promise.reject(new Error('this broker client has no modifyOrder')),
+        BROKER_CALL_TIMEOUT_MS,
+        'Angel One modifyOrder',
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to modify per-user order ${m.orderId} (outcome unknown): ${msg}`);
+      return { status: 'UNCERTAIN', message: msg };
+    }
+    return classifyCancelResponse(response);
+  }
+
   async convertPosition(p: ConvertPositionRequest): Promise<ConvertPositionResult> {
     this.assertCanPlace();
     this.logger.log(
@@ -393,7 +438,7 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
   /** Map + send one order under the wall-clock cap; returns the SDK's resolution untouched. */
   private async send(order: OrderRequest, orderTag?: string): Promise<any> {
     const params: Record<string, string> = {
-      variety: 'NORMAL',
+      variety: order.variety ?? 'NORMAL',
       tradingsymbol: order.symbol,
       symboltoken: order.token,
       transactiontype: order.side,

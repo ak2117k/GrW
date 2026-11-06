@@ -3976,3 +3976,45 @@ model PortfolioReviewRun {
   @@index([userId, startedAt])
   @@map("portfolio_review_runs")
 }
+
+/// FLOOR_BROKER_SL (2026-11-06, sentinel-executor floor-broker-sl): a STOPLOSS-LIMIT resting at Angel at the
+/// armed noise floor, trailed up. One row per action it took (live) or WOULD have taken (shadow): PLACE |
+/// MODIFY | CANCEL | SKIP | FILLED | RECONCILE | ERROR, and one EXIT_COMPARE per position that exited while a
+/// stop rested — the stop's simulated fill (candles_1m) vs the real exit, saved_rupees = (stop − exit) × qty
+/// for a long. Written only by sentinel-executor. No FK.
+model FloorBrokerSlEvent {
+  id                String    @id @default(cuid())
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  userId            String    @map("user_id")
+  trackerId         String    @map("tracker_id")
+  symbol            String
+  exchange          String
+  token             String
+  mode              String // shadow | live
+  action            String // PLACE | MODIFY | CANCEL | SKIP | FILLED | RECONCILE | ERROR | EXIT_COMPARE
+  reason            String?
+  side              String? // SELL (long) | BUY (short)
+  triggerPrice      Float?    @map("trigger_price")
+  limitPrice        Float?    @map("limit_price")
+  prevTriggerPrice  Float?    @map("prev_trigger_price")
+  quantity          Int?
+  productType       String?   @map("product_type")
+  floorPrice        Float?    @map("floor_price")
+  ltp               Float?
+  orderTag          String?   @map("order_tag")
+  brokerOrderId     String?   @map("broker_order_id")
+  brokerStatus      String?   @map("broker_status")
+  brokerMessage     String?   @map("broker_message")
+  exitPrice         Float?    @map("exit_price")
+  exitAt            DateTime? @map("exit_at") @db.Timestamptz(6)
+  wouldFillPrice    Float?    @map("would_fill_price")
+  wouldFillLimit    Float?    @map("would_fill_limit")
+  wouldTriggerAt    DateTime? @map("would_trigger_at") @db.Timestamptz(6)
+  savedRupees       Float?    @map("saved_rupees")
+  detail            Json?
+
+  @@index([trackerId, createdAt])
+  @@index([action, createdAt])
+  @@index([userId, createdAt])
+  @@map("floor_broker_sl_events")
+}

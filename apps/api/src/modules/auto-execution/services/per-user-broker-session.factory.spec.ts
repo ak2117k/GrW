@@ -13,6 +13,7 @@ function fakeClient(): jest.Mocked<Required<UserSmartApiLike>> {
     getOrderBook: jest.fn().mockResolvedValue({ status: true, data: [{ orderid: 'O1', status: 'open' }] }),
     cancelOrder: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', errorcode: '', data: { orderid: 'SL1' } }),
     convertPosition: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', data: null }),
+    modifyOrder: jest.fn().mockResolvedValue({ status: true, message: 'SUCCESS', errorcode: '', data: { orderid: 'SL1' } }),
   };
 }
 const CREDS = { apiKey: 'k', apiSecret: 's', clientId: 'C1', password: 'p', totpSecret: 'JBSWY3DPEHPK3PXP' };
@@ -220,5 +221,49 @@ describe('convertPosition — intraday carry (2026-11-04): the broker answer is 
     expect((await borrow(boom)).accepted).toBe(false);
     const { convertPosition: _omit, ...none } = fakeClient();
     expect((await borrow(none)).accepted).toBe(false);
+  });
+});
+
+describe('FLOOR_BROKER_SL: stop-loss variety and modifyOrderClassified', () => {
+  const f = () => new PerUserBrokerSessionFactory(() => { throw new Error('must not build a client'); });
+  const STOP = {
+    symbol: 'NIFTY09NOV2624650CE', token: '40009', exchange: 'NFO', side: 'SELL', orderType: 'STOPLOSS', quantity: 130,
+    positionType: 'CARRYFORWARD', price: 180.6, triggerPrice: 180.75, variety: 'STOPLOSS',
+  } as const;
+
+  it('a STOPLOSS order goes out as variety STOPLOSS / STOPLOSS_LIMIT with its trigger and limit', async () => {
+    const client = fakeClient();
+    await f().borrow(client, 'C1', (s) => s.placeOrderClassified(STOP as never, 'afSabc'));
+    expect(client.placeOrder).toHaveBeenCalledWith(expect.objectContaining({
+      variety: 'STOPLOSS', ordertype: 'STOPLOSS_LIMIT', price: '180.6', triggerprice: '180.75', ordertag: 'afSabc', producttype: 'CARRYFORWARD',
+    }));
+  });
+
+  it('an order without a variety is still NORMAL (every existing caller unchanged)', async () => {
+    const client = fakeClient();
+    await f().borrow(client, 'C1', (s) => s.placeOrderClassified({ ...STOP, variety: undefined, orderType: 'MARKET' } as never, 'axM1'));
+    expect(client.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ variety: 'NORMAL', ordertype: 'MARKET' }));
+  });
+
+  it('modify sends the full Angel modify body and classifies like a cancel (only Angel answers)', async () => {
+    const client = fakeClient();
+    const r = await f().borrow(client, 'C1', (s) => s.modifyOrderClassified!({ ...STOP, orderId: 'SL1' } as never));
+    expect(client.modifyOrder).toHaveBeenCalledWith({
+      variety: 'STOPLOSS', orderid: 'SL1', ordertype: 'STOPLOSS_LIMIT', producttype: 'CARRYFORWARD', duration: 'DAY',
+      price: '180.6', triggerprice: '180.75', quantity: '130', tradingsymbol: 'NIFTY09NOV2624650CE', symboltoken: '40009', exchange: 'NFO',
+    });
+    expect(r).toEqual({ status: 'ACCEPTED', message: 'SUCCESS' });
+    client.modifyOrder.mockResolvedValueOnce({});
+    expect((await f().borrow(client, 'C1', (s) => s.modifyOrderClassified!({ ...STOP, orderId: 'SL1' } as never))).status).toBe('UNCERTAIN');
+    client.modifyOrder.mockRejectedValueOnce(new Error('timeout'));
+    expect((await f().borrow(client, 'C1', (s) => s.modifyOrderClassified!({ ...STOP, orderId: 'SL1' } as never))).status).toBe('UNCERTAIN');
+  });
+
+  it('a client without modifyOrder is UNCERTAIN; a disposed session refuses', async () => {
+    const { modifyOrder: _omit, ...client } = fakeClient();
+    expect((await f().borrow(client as never, 'C1', (s) => s.modifyOrderClassified!({ ...STOP, orderId: 'SL1' } as never))).status).toBe('UNCERTAIN');
+    let leaked: any;
+    await f().borrow(fakeClient(), 'C1', async (s) => { leaked = s; });
+    await expect(leaked.modifyOrderClassified({ ...STOP, orderId: 'SL1' })).rejects.toThrow(/disposed/);
   });
 });

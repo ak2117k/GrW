@@ -53,6 +53,16 @@ describe('sentinel-executor safety shape (plan Global Constraints, Review Focus)
     expect(modify).toEqual([]);
   });
 
+  it('FLOOR_BROKER_SL: modifyOrderClassified has exactly one call site (the executor\'s `modifyResting`), and the floor-stop service reaches the broker only through the executor', () => {
+    const sites = source().flatMap((f) =>
+      [...code(f).matchAll(/\.modifyOrderClassified\(/g)].map(() => relative(__dirname, f).replace(/\\/g, '/')));
+    expect(sites).toEqual(['services/sentinel-exit-executor.service.ts']);
+    const svc = code(join(__dirname, 'services', 'floor-broker-sl.service.ts'));
+    expect(svc).not.toMatch(/placeOrder|cancelOrder|modifyOrder|getPositionsEnvelope|getOrderBookEnvelope|withOwnerSession/);
+    expect(svc).toMatch(/this\.executor\.syncFloorStops\(/);
+    expect(svc).toMatch(/bootJobsEnabled\(\)/);
+  });
+
   it('only the classified placement is used (review fix 1: the legacy mapping turns an SDK `{}` into REJECTED)', () => {
     const legacy = source().filter((f) => /\.placeOrder\(/.test(code(f)));
     expect(legacy).toEqual([]);

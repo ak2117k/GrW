@@ -66,6 +66,7 @@ import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
 import { MARKET_EVENTS, type EventsReader } from '../ports/events.port';
 import type { TripwireInput } from '../tripwires/types';
 import { NewsWatchBook } from './news-watch-book';
+import { FLOOR_STATE_BOARD } from '../../floor-board/floor-state.board';
 import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
 import {
   REJUDGE_CONFIG,
@@ -924,6 +925,13 @@ export class SentinelCycleService {
       last,
     });
     this.stateFor(entry).noiseFloor = floorSolve.memory;
+    // FLOOR_BROKER_SL (sentinel-executor reads it): this pass's noise floor. Memory only; publish never throws.
+    FLOOR_STATE_BOARD.publish({
+      trackerId: entry.trackerId, userId: entry.userId, symbol: entry.symbol, exchange: String(entry.exchange).toUpperCase(),
+      ownership: entry.ownership, side: tick.side, entryPrice: tick.entryPrice, ltp: tick.ltp,
+      floor: floorSolve.noiseFloor ? { basis: 'noise', armed: floorSolve.noiseFloor.armed, level: floorSolve.noiseFloor.level } : null,
+      at: now.getTime(),
+    });
     // What the heartbeat cadence reads: the noise floor's latch when it is in
     // charge, else the fixed one.
     const armedForCadence = floorSolve.noiseFloor ? floorSolve.noiseFloor.armed : greenFloorArmedLatched;

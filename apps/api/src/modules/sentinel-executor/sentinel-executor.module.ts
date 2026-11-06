@@ -30,6 +30,8 @@ import { SentinelExecutorController } from './controllers/sentinel-executor.cont
 import { ExitGateRepository } from './repositories/exit-gate.repository';
 import { ExitGateService } from './services/exit-gate.service';
 import { MbmModule } from '../mbm/mbm.module';
+import { FloorBrokerSlRepository } from './repositories/floor-broker-sl.repository';
+import { FLOOR_SL_CANDLES, FloorBrokerSlService } from './services/floor-broker-sl.service';
 
 /**
  * Sentinel auto-exit (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md).
@@ -78,6 +80,10 @@ import { MbmModule } from '../mbm/mbm.module';
     // Outcome scoring reads hub tick bars from candles_1m (no broker call).
     { provide: EXIT_OUTCOME_CANDLES, useFactory: (prisma: PrismaService) => new PrismaCandleRepo(prisma as never), inject: [PrismaService] },
     { provide: EXIT_OUTCOME_USERS, useFactory: () => parseAutoExitConfig(process.env).userIds },
+    // FLOOR_BROKER_SL (2026-11-06): resting stop at the armed noise floor. Default shadow (records only).
+    FloorBrokerSlRepository,
+    FloorBrokerSlService,
+    { provide: FLOOR_SL_CANDLES, useFactory: (prisma: PrismaService) => new PrismaCandleRepo(prisma as never), inject: [PrismaService] },
   ],
 })
 export class SentinelExecutorModule {}

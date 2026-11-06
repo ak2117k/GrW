@@ -50,6 +50,8 @@ export interface OrderRequest {
   price?: number;
   triggerPrice?: number;
   positionType: 'INTRADAY' | 'DELIVERY' | 'CARRYFORWARD';
+  /** Angel order variety; absent ⇒ NORMAL. A stop-loss order is STOPLOSS (FLOOR_BROKER_SL). */
+  variety?: 'NORMAL' | 'STOPLOSS';
 }
 
 export interface OrderResponse {

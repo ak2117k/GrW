@@ -7,8 +7,10 @@ import type { OrderRequest } from '../../../common/interfaces/broker-adapter.int
 import type {
   ClassifiedCancel,
   ClassifiedPlacement,
+  ModifyOrderRequest,
   UserBrokerSession,
 } from '../../auto-execution/services/per-user-broker-session.factory';
+import { desiredFloorStop, floorStopTag, planFloorStop, restingFloorStop, type RestingStop } from '../domain/floor-broker-sl';
 import { answeredPositions } from '../../trade-tracker/services/trade-tracker.service';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { UNKNOWN_FATE_REASONS, type AiExitStatus, type AutoExitConfig } from '../domain/auto-exit.types';
@@ -54,6 +56,30 @@ export { AI_EXIT_SESSION_CLOCK, AI_EXIT_SLEEP } from './executor.tokens';
 const DISABLED_CFG = parseExitDisciplineConfig({ EXIT_DISCIPLINE_ENABLED: 'false' });
 export type Sleep = (ms: number) => Promise<void>;
 export type AiExitOutcome = { status: AiExitStatus | 'DUPLICATE'; reason?: string };
+
+/** FLOOR_BROKER_SL live: one position's stop request (FloorBrokerSlService builds it from the cycle's floor). */
+export interface FloorStopIntent {
+  trackerId: string; symbol: string; exchange: string; token: string; trackerQty: number; entryTime: Date | null;
+  lotSize: number | null;
+  /** Contract tick in rupees (tickRupees of the instrument row by exchange + tradingsymbol). */
+  tick: number;
+  /** The armed noise floor; null ⇒ nothing to rest. */
+  floor: number | null;
+  /** Upstream eligibility (fresh armed noise floor, SENTINEL-owned, not held, allow-listed user). */
+  eligible: { ok: true } | { ok: false; reason: string };
+}
+export interface FloorStopResult {
+  trackerId: string;
+  action: 'PLACE' | 'MODIFY' | 'CANCEL' | 'KEEP' | 'NONE' | 'FILLED' | 'ERROR';
+  reason?: string;
+  side?: 'BUY' | 'SELL'; trigger?: number; limit?: number; prevTrigger?: number; quantity?: number; productType?: string;
+  ltp?: number; orderId?: string; brokerStatus?: string | null; brokerMessage?: string; fillPrice?: number;
+}
+/** An exit waits at most this long for a floor-stop change in flight on its position (then goes anyway). */
+export const STOP_IDLE_WAIT_MS = 20_000;
+const STOP_IDLE_POLL_MS = 250;
+/** Spacing between two floor-stop writes in one pass (Angel: ≤ 10 req/s overall). */
+const STOP_WRITE_SPACING_MS = 250;
 
 /** Plan R10: order-book checks at +2 s, +5 s, +10 s after placing. */
 const CONFIRM_STEPS_MS = [2_000, 3_000, 5_000];
@@ -146,6 +172,12 @@ export class SentinelExitExecutor {
   private readonly authFailStreak = new Map<string, number>();
   /** One Telegram ops alert per tracker per 30 min when an exit ends FAILED (prod 10-14..19: 471 silent FAILED rows). */
   private readonly failureAlerts = new ExitFailureAlerts(exitFailStreakFrom(process.env.AI_EXIT_FAIL_ALERT_STREAK));
+  /** trackerId → exit attempts running on it (FLOOR_BROKER_SL never touches its stop meanwhile). */
+  private readonly exitBusy = new Map<string, number>();
+  /** trackerIds whose floor stop is being changed right now (an exit waits for it, bounded). */
+  private readonly stopBusy = new Set<string>();
+  /** trackerId → ms of our last write to its floor stop (the modify rate limit). */
+  private readonly stopChangedAt = new Map<string, number>();
 
   constructor(
     private readonly repo: AiExitExecutionRepository,
@@ -172,6 +204,26 @@ export class SentinelExitExecutor {
    */
   async execute(
     id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date = new Date(), trigger: ExitTrigger = 'AI',
+  ): Promise<AiExitOutcome> {
+    // FLOOR_BROKER_SL: an exit and a floor-stop change never overlap on one position. The exit marks the
+    // tracker busy (syncFloorStops leaves it alone) and first waits — bounded, exits are never blocked — for
+    // a stop change already in flight, so its order-book read sees the stop and cancels it as protective.
+    const key = v.trackerId;
+    this.exitBusy.set(key, (this.exitBusy.get(key) ?? 0) + 1);
+    try {
+      for (let waited = 0; this.stopBusy.has(key) && waited < STOP_IDLE_WAIT_MS; waited += STOP_IDLE_POLL_MS) {
+        await this.sleep(STOP_IDLE_POLL_MS);
+      }
+      return await this.executeAttempt(id, v, aiCfg, now, trigger);
+    } finally {
+      const n = (this.exitBusy.get(key) ?? 1) - 1;
+      if (n > 0) this.exitBusy.set(key, n);
+      else this.exitBusy.delete(key);
+    }
+  }
+
+  private async executeAttempt(
+    id: string, v: PendingVerdict, aiCfg: AutoExitConfig, now: Date, trigger: ExitTrigger,
   ): Promise<AiExitOutcome> {
     const cfg: AutoExitConfig = trigger === 'MANUAL' ? { ...aiCfg, mode: 'live' } : aiCfg;
 
@@ -367,17 +419,139 @@ export class SentinelExitExecutor {
     });
   }
 
-  /** The ONLY call site of placeOrder. Marks the run as sent before the call. */
+  /** An exit's placement. Marks the run as sent before the call. */
   private place(s: UserBrokerSession, run: Run, o: OrderRequest, leg: 'M' | 'L'): Promise<ClassifiedPlacement> {
     run.sent = true;
     run.sentAt = new Date();
-    return s.placeOrderClassified(o, aiExitOrderTag(run.v.id, leg, run.trigger));
+    return this.sendOrder(s, o, aiExitOrderTag(run.v.id, leg, run.trigger));
   }
 
-  /** The ONLY call site of cancelOrder. Marks the run as cancel-sent before the call. */
-  private cancel(s: UserBrokerSession, run: Run, p: ProtectiveOrder): Promise<ClassifiedCancel> {
-    run.cancelSent = true;
+  /** The ONLY call site of placeOrder (exits via `place`, the floor stop via syncFloorStops). */
+  private sendOrder(s: UserBrokerSession, o: OrderRequest, tag: string): Promise<ClassifiedPlacement> {
+    return s.placeOrderClassified(o, tag);
+  }
+
+  /** The ONLY call site of cancelOrder. Marks the run (an exit's; null for the floor stop) as cancel-sent before the call. */
+  private cancel(s: UserBrokerSession, run: Run | null, p: Pick<ProtectiveOrder, 'variety' | 'orderId'>): Promise<ClassifiedCancel> {
+    if (run) run.cancelSent = true;
     return s.cancelOrderClassified(p.variety, p.orderId);
+  }
+
+  /** The ONLY call site of modifyOrder (FLOOR_BROKER_SL trailing its own stop). */
+  private modifyResting(s: UserBrokerSession, m: ModifyOrderRequest): Promise<ClassifiedCancel> {
+    if (!s.modifyOrderClassified) return Promise.resolve({ status: 'UNCERTAIN', message: 'this broker session cannot modify orders' });
+    return s.modifyOrderClassified(m);
+  }
+
+  /**
+   * FLOOR_BROKER_SL live: bring each position's resting stop in line with its armed floor, on ONE lease and
+   * ONE fresh positions + order-book read for the user. Quantity, product and side come from the broker row
+   * (planExitOrder, as for an exit); the LTP the placeability test uses is the broker's. Nothing is written
+   * when: either read is unanswered; an exit is running or of unknown fate on the position; any order other
+   * than our stop is open on the contract (two stops = a double sell — ours is cancelled instead); the position
+   * is flat (ours is cancelled). Never throws; every write's answer is re-read from the book by our ordertag.
+   */
+  async syncFloorStops(
+    userId: string, intents: FloorStopIntent[], cfg: { limitTicks: number; modifyMinSec: number; exit: AutoExitConfig }, now: Date = new Date(),
+  ): Promise<FloorStopResult[]> {
+    if (intents.length === 0) return [];
+    try {
+      return await this.sessions.withOwnerSession(userId, async (s) => {
+        const positions = await this.rows(() => s.getPositionsEnvelope());
+        const book = positions ? await this.rows(() => s.getOrderBookEnvelope()) : null;
+        if (!positions || !book) return intents.map((i) => ({ trackerId: i.trackerId, action: 'ERROR' as const, reason: 'BROKER_READ' }));
+        const out: FloorStopResult[] = [];
+        let wrote = false;
+        for (const i of intents) {
+          if (this.exitBusy.has(i.trackerId)) { out.push({ trackerId: i.trackerId, action: 'KEEP', reason: 'EXIT_IN_FLIGHT' }); continue; }
+          this.stopBusy.add(i.trackerId);
+          try {
+            if (wrote) await this.sleep(STOP_WRITE_SPACING_MS);
+            const r = await this.syncOneStop(s, userId, i, positions, book, cfg, now);
+            if (r.action === 'PLACE' || r.action === 'MODIFY' || r.action === 'CANCEL') wrote = true;
+            out.push(r);
+          } catch (err) {
+            out.push({ trackerId: i.trackerId, action: 'ERROR', reason: 'SYNC_FAULT', brokerMessage: errText(err).slice(0, 200) });
+          } finally {
+            this.stopBusy.delete(i.trackerId);
+          }
+        }
+        return out;
+      }, { allowEphemeralLogin: true });
+    } catch (err) {
+      return intents.map((i) => ({ trackerId: i.trackerId, action: 'ERROR' as const, reason: 'SESSION', brokerMessage: errText(err).slice(0, 200) }));
+    }
+  }
+
+  private async syncOneStop(
+    s: UserBrokerSession, userId: string, i: FloorStopIntent, positions: unknown[], book: unknown[],
+    cfg: { limitTicks: number; modifyMinSec: number; exit: AutoExitConfig }, now: Date,
+  ): Promise<FloorStopResult> {
+    const base = { trackerId: i.trackerId };
+    const exchange = String(i.exchange).toUpperCase();
+    const stop = restingFloorStop(book, i.trackerId);
+    if (stop.kind === 'complete') {
+      return { ...base, action: 'FILLED', orderId: stop.orderId, brokerStatus: 'complete', fillPrice: stop.averagePrice, quantity: stop.filledQty };
+    }
+    const plan = planExitOrder(positions, { exchange, token: i.token, trackerQty: i.trackerQty, lotSize: i.lotSize }, { mode: 'live', qtyUnit: cfg.exit.qtyUnits[exchange] });
+    // A stop resting on a FLAT position would open a fresh one: it is cancelled whatever else is going on.
+    // Otherwise an exit running / of unknown fate, or an exit order of ours on the book: hands off entirely.
+    const flat = !plan.ok && plan.reason === 'ALREADY_FLAT';
+    if (!flat) {
+      if (await this.repo.hasInFlight(i.trackerId, '', now, { userId, exchange, token: i.token })) return { ...base, action: 'KEEP', reason: 'EXIT_IN_FLIGHT' };
+      if (hasPriorAiExit(book, exchange, i.token, i.entryTime)) return { ...base, action: 'KEEP', reason: 'EXIT_ORDER_ON_BOOK' };
+    }
+    const tag = floorStopTag(i.trackerId);
+    const others = (book as Array<Record<string, unknown>>).some((o) =>
+      String(o?.symboltoken ?? '') === i.token && String(o?.exchange ?? '').toUpperCase() === exchange
+      && String(o?.ordertag ?? '') !== tag && !isTerminalOrderStatus(String(o?.status ?? o?.orderstatus ?? '')));
+    const eligible = !i.eligible.ok ? i.eligible : !plan.ok ? { ok: false as const, reason: plan.reason } : others ? { ok: false as const, reason: 'OTHER_OPEN_ORDER' } : { ok: true as const };
+    const desired = plan.ok
+      ? desiredFloorStop({ side: plan.netQty > 0 ? 'LONG' : 'SHORT', floor: i.floor ?? NaN, ltp: plan.ltp, tick: i.tick, limitTicks: cfg.limitTicks, quantity: plan.order.quantity })
+      : null;
+    const resting: RestingStop | null = stop.kind === 'open'
+      ? { side: stop.side, trigger: stop.trigger, limit: stop.limit, quantity: stop.quantity, changedAt: this.stopChangedAt.get(i.trackerId) ?? 0 }
+      : null;
+    const action = planFloorStop({ eligible, desired, resting, tick: i.tick, nowMs: now.getTime(), modifyMinSec: cfg.modifyMinSec });
+    const ltp = plan.ok ? plan.ltp : undefined;
+    if (action.kind === 'KEEP' || action.kind === 'NONE') {
+      return { ...base, action: action.kind, reason: action.reason, ltp, ...(resting ? { side: resting.side, trigger: resting.trigger, limit: resting.limit, quantity: resting.quantity } : {}) };
+    }
+    // Re-checked right before the write: JS runs this check and the send with nothing in between.
+    if (this.exitBusy.has(i.trackerId)) return { ...base, action: 'KEEP', reason: 'EXIT_IN_FLIGHT' };
+
+    if (action.kind === 'CANCEL') {
+      const open = stop as Extract<typeof stop, { kind: 'open' }>;
+      const r = await this.cancel(s, null, { variety: open.variety || 'STOPLOSS', orderId: open.orderId });
+      this.stopChangedAt.set(i.trackerId, Date.now());
+      this.logger.warn(`[floor-sl] LIVE CANCEL ${open.orderId} on ${i.symbol} (${action.reason}) → ${r.status} (${r.message})`);
+      return { ...base, action: 'CANCEL', reason: action.reason, orderId: open.orderId, brokerMessage: `${r.status}: ${r.message}`.slice(0, 200),
+        brokerStatus: await this.stopStatus(s, i.trackerId), side: open.side, trigger: open.trigger, limit: open.limit, quantity: open.quantity, ltp };
+    }
+    const d = action.desired;
+    const o = plan as Extract<typeof plan, { ok: true }>;
+    const order: OrderRequest = { ...o.order, side: d.side, quantity: d.quantity, orderType: 'STOPLOSS', price: d.limit, triggerPrice: d.trigger, variety: 'STOPLOSS' };
+    const fields = { side: d.side, trigger: d.trigger, limit: d.limit, quantity: d.quantity, productType: o.order.positionType, ltp };
+    if (action.kind === 'PLACE') {
+      const r = await this.sendOrder(s, order, tag);
+      this.stopChangedAt.set(i.trackerId, Date.now());
+      this.logger.warn(`[floor-sl] LIVE PLACE ${d.side} ${d.quantity} ${o.order.symbol} SL-L trigger ${d.trigger} limit ${d.limit} → ${r.status} ${r.orderId || ''} (${r.message})`);
+      return { ...base, action: 'PLACE', ...fields, orderId: r.orderId || undefined, brokerMessage: `${r.status}: ${r.message}`.slice(0, 200), brokerStatus: await this.stopStatus(s, i.trackerId) };
+    }
+    const open = stop as Extract<typeof stop, { kind: 'open' }>;
+    const r = await this.modifyResting(s, { ...order, orderId: open.orderId, variety: 'STOPLOSS' });
+    this.stopChangedAt.set(i.trackerId, Date.now());
+    this.logger.log(`[floor-sl] LIVE MODIFY ${open.orderId} ${o.order.symbol} trigger ${open.trigger} → ${d.trigger} (qty ${open.quantity} → ${d.quantity}) → ${r.status} (${r.message})`);
+    return { ...base, action: 'MODIFY', ...fields, prevTrigger: open.trigger, orderId: open.orderId, brokerMessage: `${r.status}: ${r.message}`.slice(0, 200), brokerStatus: await this.stopStatus(s, i.trackerId) };
+  }
+
+  /** Our stop's status in a fresh book after a write (the answer is never trusted on its own). Null when unread. */
+  private async stopStatus(s: UserBrokerSession, trackerId: string): Promise<string | null> {
+    await this.sleep(TAG_LOOKUP_DELAY_MS);
+    const book = await this.rows(() => s.getOrderBookEnvelope());
+    if (!book) return null;
+    const mine = findOrderByTag(book, floorStopTag(trackerId));
+    return mine ? `${mine.status}${mine.status === 'rejected' && mine.text ? `: ${mine.text}` : ''}`.slice(0, 200) : 'not in book';
   }
 
   /**

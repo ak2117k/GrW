@@ -469,6 +469,20 @@ describe('SelfReviewRunService — wrong-decision loop (2026-11-04)', () => {
     expect(dec.items.find((i) => i.refId === 'dg:g1')).toMatchObject({ causeType: 'CODE_BUG', action: `ticket ${ticket.title}` });
   });
 
+  it('a failed AI analysis records the real reason on the run and alerts', async () => {
+    const grading = { gradeSession: jest.fn(async () => ({ graded: 3, wrong: 0, unscorable: 0, byType: {} })) };
+    const alert = jest.fn(async () => true);
+    const diagnose = jest.fn(async () => {
+      throw new Error('LLM call failed: usage limit reached');
+    });
+    const { svc, repo } = make({ diagnosis: { diagnose }, loop: { grading, grades: { wrongSince: async () => [] }, alert } });
+    await svc.run(NOW);
+    expect(alert).toHaveBeenCalledWith('SELF_REVIEW_DIAGNOSIS_FAILED', expect.stringContaining('usage limit reached'));
+    const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { status: string; error: string }];
+    expect(finish[1].status).toBe('DONE');
+    expect(finish[1].error).toContain('usage limit reached');
+  });
+
   it('nothing graded on a trading day alerts', async () => {
     const grading = { gradeSession: jest.fn(async () => ({ graded: 0, wrong: 0, unscorable: 0, byType: {} })) };
     const alert = jest.fn(async () => true);

@@ -558,6 +558,12 @@ export class SelfReviewRunService {
     } catch (e) {
       errors.push(`diagnosis: ${errText(e)}`);
       this.logger.warn(`[self-review] diagnosis failed (run continues): ${errText(e)}`);
+      const send = this.alert ?? ((key: string, text: string) => sendOpsAlert(key, text));
+      try {
+        await send('SELF_REVIEW_DIAGNOSIS_FAILED', `Self-review ${S}: the AI analysis failed, so this session has no diagnosis, lessons or fix tickets. The scoring still ran. Reason: ${errText(e).slice(0, 500)}`);
+      } catch {
+        // An injected double might throw; the run carries on either way.
+      }
       return { out: null, sent: misses };
     }
   }

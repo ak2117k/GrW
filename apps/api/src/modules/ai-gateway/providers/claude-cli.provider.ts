@@ -266,21 +266,7 @@ export class ClaudeCliTransport implements MessagesTransport {
     }
 
     if (envelope.is_error) {
-      // The OAuth session expiring is the one failure an operator can actually
-      // fix, and it must not read as a rate limit or a network blip — those are
-      // waited out, this one needs a human to run `claude` and sign in.
-      const status = envelope.api_error_status;
-      const detail = envelope.result ?? envelope.subtype ?? 'no detail';
-      if (status === 401 || status === 403 || /auth|login|expired/i.test(detail)) {
-        throw new Error(
-          'claude CLI: NOT AUTHENTICATED — the OAuth session on this host has expired or was ' +
-            'never established. Run `claude` interactively on this machine and sign in. No ' +
-            `verdict recorded. (${detail.slice(0, 200)})`,
-        );
-      }
-      throw new Error(
-        `claude CLI: the call failed (status ${String(status ?? 'none')}): ${detail.slice(0, 300)}`,
-      );
+      throw envelopeFailure(envelope);
     }
 
     const text = envelope.result;
@@ -367,11 +353,7 @@ export class ClaudeCliTransport implements MessagesTransport {
             return;
           }
           if (code !== 0) {
-            reject(
-              new Error(
-                `claude CLI: exited with code ${String(code)}: ${err.slice(0, 300) || 'no stderr'}`,
-              ),
-            );
+            reject(exitFailure(code, out, err));
             return;
           }
           resolve(out);
@@ -386,6 +368,48 @@ export class ClaudeCliTransport implements MessagesTransport {
       child.stdin.end(input);
     });
   }
+}
+
+/**
+ * The error for a CLI reply that reports a failure. The OAuth session expiring is the one failure an
+ * operator can actually fix, and it must not read as a rate limit or a network blip: those are waited
+ * out, this one needs a human to run `claude` and sign in.
+ */
+function envelopeFailure(envelope: CliEnvelope): Error {
+  const status = envelope.api_error_status;
+  const detail = envelope.result ?? envelope.subtype ?? 'no detail';
+  if (status === 401 || status === 403 || /auth|login|expired/i.test(detail)) {
+    return new Error(
+      'claude CLI: NOT AUTHENTICATED — the OAuth session on this host has expired or was ' +
+        'never established. Run `claude` interactively on this machine and sign in. No ' +
+        `verdict recorded. (${detail.slice(0, 200)})`,
+    );
+  }
+  return new Error(`claude CLI: the call failed (status ${String(status ?? 'none')}): ${detail.slice(0, 300)}`);
+}
+
+function parseEnvelope(stdout: string): CliEnvelope | null {
+  try {
+    return JSON.parse(stdout) as CliEnvelope;
+  } catch {
+    try {
+      return streamJsonResult(stdout);
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * The error for a non-zero exit. A failed call's reason is in the stdout envelope and stderr is often
+ * empty or an unrelated warning (prod 2026-11-06: a day of "exited with code 1: no stderr"), so
+ * stdout is read first.
+ */
+function exitFailure(code: number | null, stdout: string, stderr: string): Error {
+  const envelope = parseEnvelope(stdout);
+  if (envelope?.is_error) return envelopeFailure(envelope);
+  const tail = stdout.trim().slice(-300);
+  return new Error(`claude CLI: exited with code ${String(code)}: ${stderr.slice(0, 300) || 'no stderr'}${tail ? `; stdout: ${tail}` : ''}`);
 }
 
 /**

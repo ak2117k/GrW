@@ -207,6 +207,28 @@ describe('ClaudeCliTransport', () => {
       await expect(svc.messages.create(request())).rejects.toThrow(/exited with code 2.*boom/s);
     });
 
+    it('a non-zero exit reports the error the CLI put on stdout', async () => {
+      spawnMock.mockReturnValue(fakeChild({ is_error: true, api_error_status: 429, result: 'usage limit reached' }, { code: 1 }));
+      await expect(svc.messages.create(request())).rejects.toThrow(/status 429.*usage limit reached/s);
+    });
+
+    it('a warning on stderr does not hide the real error on stdout', async () => {
+      spawnMock.mockReturnValue(
+        fakeChild({ is_error: true, result: 'usage limit reached' }, { code: 1, stderr: '[claude-code:unrecognized_model] {}' }),
+      );
+      await expect(svc.messages.create(request())).rejects.toThrow(/usage limit reached/);
+    });
+
+    it('an expired session on a non-zero exit still reads as NOT AUTHENTICATED', async () => {
+      spawnMock.mockReturnValue(fakeChild({ is_error: true, api_error_status: 401, result: 'unauthorized' }, { code: 1 }));
+      await expect(svc.messages.create(request())).rejects.toThrow(/NOT AUTHENTICATED/);
+    });
+
+    it('plain text on stdout is kept when there is no envelope', async () => {
+      spawnMock.mockReturnValue(fakeChild('Credit balance is too low', { code: 1 }));
+      await expect(svc.messages.create(request())).rejects.toThrow(/exited with code 1.*no stderr.*Credit balance is too low/s);
+    });
+
     it('rejects an unparseable envelope rather than guessing', async () => {
       spawnMock.mockReturnValue(fakeChild('not json at all'));
       await expect(svc.messages.create(request())).rejects.toThrow(/could not parse/i);

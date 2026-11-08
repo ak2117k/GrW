@@ -9,6 +9,7 @@ import { BudgetMeter, istDayKey } from './budget/budget-meter';
 import { loadPrices } from './budget/model-prices';
 import { AnthropicApiProvider } from './providers/anthropic-api.provider';
 import { ClaudeCliProvider, ClaudeCliTransport } from './providers/claude-cli.provider';
+import { ProviderOutageAlert } from './provider-outage-alert';
 import { loadRoutes, readAiConfig } from './routes/route-config';
 import { PriorityScheduler } from './scheduler/priority-scheduler';
 import { ScorerClient } from './scorer/scorer.client';
@@ -101,6 +102,7 @@ export function istMidnight(now: Date): Date {
             ),
           },
           audit: repo,
+          outage: new ProviderOutageAlert(),
         });
       },
       inject: [ConfigService, ClaudeCliTransport, AiCallRepository],

@@ -8,8 +8,9 @@ import { diagnosisForRun, type DiagnosedMiss, type DiagnosisResult } from './typ
 /**
  * Stream A's {@link DiagnosisPort} (`SELF_REVIEW_DIAGNOSIS`): diagnose the run's misses, apply
  * the result to the lessons, and hand back what goes on `self_review_runs.diagnosis` — the
- * validated misses (plus promptVersion / model) on OK, `null` when the diagnosis failed or was
- * skipped. Never throws: a failed lesson upsert is logged and the diagnosis is still returned.
+ * validated misses (plus promptVersion / model) on OK, `null` when it was skipped. A FAILED diagnosis
+ * throws its reason so the run records it and alerts. A failed lesson upsert is logged and the
+ * diagnosis is still returned.
  */
 @Injectable()
 export class SelfReviewDiagnosisAdapter implements DiagnosisPort {
@@ -29,6 +30,7 @@ export class SelfReviewDiagnosisAdapter implements DiagnosisPort {
     } catch (e) {
       this.logger.warn(`[self-review] run ${runId}: lesson upsert failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+    if (result.status === 'FAILED') throw new Error(result.reason ?? 'the diagnosis failed');
     return diagnosisForRun(result);
   }
 }

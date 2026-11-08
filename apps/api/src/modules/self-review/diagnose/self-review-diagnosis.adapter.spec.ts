@@ -43,11 +43,11 @@ describe('SelfReviewDiagnosisAdapter (stream A DiagnosisPort)', () => {
     expect(out?.misses.map((m) => m.lessonKey)).toEqual([undefined, 'big-one', 'legacy']);
   });
 
-  it('FAILED → null; a failed lesson upsert does not lose the diagnosis', async () => {
-    const failed = { diagnose: jest.fn().mockResolvedValue({ status: 'FAILED', misses: [], sent: 1, dropped: 0, promptVersion: 'd1' }) };
+  it('FAILED throws its reason so the run records it; a failed lesson upsert does not lose the diagnosis', async () => {
+    const failed = { diagnose: jest.fn().mockResolvedValue({ status: 'FAILED', misses: [], reason: 'LLM call failed: x', sent: 1, dropped: 0, promptVersion: 'd1' }) };
     const ok = { diagnose: jest.fn().mockResolvedValue({ status: 'OK', misses: [], sent: 1, dropped: 0, promptVersion: 'd1' }) };
     const broken = { upsertFromDiagnosis: jest.fn().mockRejectedValue(new Error('db')) };
-    expect(await new SelfReviewDiagnosisAdapter(failed as never, broken as never).diagnose('r', [miss('a', 'NEWS_IDEA')])).toBeNull();
+    await expect(new SelfReviewDiagnosisAdapter(failed as never, broken as never).diagnose('r', [miss('a', 'NEWS_IDEA')])).rejects.toThrow('LLM call failed: x');
     expect(await new SelfReviewDiagnosisAdapter(ok as never, broken as never).diagnose('r', [miss('a', 'NEWS_IDEA')])).toEqual({ misses: [], promptVersion: 'd1', model: undefined });
   });
 });

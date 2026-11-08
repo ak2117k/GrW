@@ -36,6 +36,8 @@ export interface AiGatewayDeps {
   scheduler: PriorityScheduler;
   adapters: Partial<Record<ProviderName, ProviderAdapter>>;
   audit: { insert(row: AiCallRow): Promise<void> };
+  /** Told about every provider answer and failure, so an outage reaches the owner. */
+  outage?: { failure(provider: ProviderName, err: unknown): void; success(provider: ProviderName): void };
 }
 
 /** Providers that spend metered credit and therefore pass through the budget meter. */
@@ -137,11 +139,13 @@ export class AiGatewayService implements AiGateway {
             )
           : 0;
         reservation?.settle(cost);
+        this.deps.outage?.success(provider);
         this.audit(base, { result, cost, latencyMs, queuedMs });
         return result.message;
       } catch (err) {
         reservation?.release();
         if (err instanceof AiQueueTimeout) this.counters.queueTimeouts++;
+        else this.deps.outage?.failure(provider, err);
         const elapsed = Math.max(0, Date.now() - startedAt);
         this.audit(base, {
           error: err,

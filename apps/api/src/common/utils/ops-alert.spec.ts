@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { __resetOpsAlerts, OPS_ALERT_COOLDOWN_MS, sendOpsAlert } from './ops-alert';
 
 describe('sendOpsAlert', () => {
@@ -29,6 +30,20 @@ describe('sendOpsAlert', () => {
     const fetch = jest.fn(async () => { throw new Error('getaddrinfo ENOTFOUND api.telegram.org secret-token'); });
     await expect(sendOpsAlert('k', 'hi', { env, fetch })).resolves.toBe(false);
     expect(warn.mock.calls.flat().join(' ')).not.toContain('secret-token');
+    warn.mockRestore();
+  });
+});
+
+describe('sendOpsAlert when the bot is not configured', () => {
+  it('logs what it could not send, once per cooldown', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const fetch = jest.fn();
+    const key = 'UNCONFIGURED_WARN_TEST';
+    expect(await sendOpsAlert(key, 'the judge is down', { env: {}, fetch: fetch as never, now: () => 1_000 })).toBe(false);
+    expect(await sendOpsAlert(key, 'the judge is down', { env: {}, fetch: fetch as never, now: () => 2_000 })).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/NOT SENT.*the judge is down/s));
+    expect(fetch).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 });

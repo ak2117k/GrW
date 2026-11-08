@@ -5,7 +5,7 @@
  * For failures that otherwise only reach a log nobody watches during market
  * hours (prod 2026-10-19: every AI exit failed AG8001 all day, silently).
  * Never throws, never logs the token, and sends each `key` at most once per
- * cooldown so a failure loop cannot spam the chat. Unconfigured → no-op.
+ * cooldown so a failure loop cannot spam the chat. Unconfigured: logged as NOT SENT, once per cooldown.
  */
 import { Logger } from '@nestjs/common';
 
@@ -25,11 +25,14 @@ export async function sendOpsAlert(
   const env = deps.env ?? process.env;
   const token = (env.TELEGRAM_ALERT_BOT_TOKEN ?? '').trim();
   const chatId = (env.TELEGRAM_ALERT_CHAT_ID ?? '').trim();
-  if (!token || !chatId) return false;
   const now = (deps.now ?? Date.now)();
   const prev = lastSent.get(key);
   if (prev !== undefined && now - prev < OPS_ALERT_COOLDOWN_MS) return false;
   lastSent.set(key, now);
+  if (!token || !chatId) {
+    logger.warn(`[ops-alert] ${key} NOT SENT (TELEGRAM_ALERT_BOT_TOKEN / TELEGRAM_ALERT_CHAT_ID not set): ${text.slice(0, 300)}`);
+    return false;
+  }
   try {
     const res = await (deps.fetch ?? (globalThis.fetch as unknown as Fetch))(
       `https://api.telegram.org/bot${token}/sendMessage`,

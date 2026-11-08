@@ -3,16 +3,16 @@ import { Cron } from '@nestjs/schedule';
 import { CronLeaseService } from '../../../common/cron-lease/cron-lease.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import type { SessionClock } from '../../market-hub/session-clock';
+import { istMidnightOf, reviewDay } from '../../night-report/domain/night-report.logic';
 import { SELF_REVIEW_CLOCK, SelfReviewRunService } from './self-review-run.service';
 
 /**
- * 18:45 IST, not the contract's 17:05: analysis_scorecards / news_ideas outcomes are filled by
- * ScorecardService's `scorecard-outcomes` cron at 18:30 IST (ai_exit_outcomes fill within ~60 min of
- * each exit, mbm_predictions within the session), so 17:05 would find S's scorecards still empty.
- * The 09:00 IST catch-up re-verifies the last 3 sessions for anything filled later (the daily-bar
- * backfill runs at 23:45, so a scorecard missing its bar at 18:30 is filled the next evening).
+ * 00:30 IST, Tue-Sat: the night after each session. By then MCX has closed (23:30, or 23:55 while the US
+ * is off DST), the scorecard outcomes are in (18:30) and so are the daily bars (23:45). The date has
+ * rolled over at this hour, so the trading-day gate asks about {@link reviewDay}, not today.
+ * The 09:00 IST catch-up re-verifies the last 3 sessions for anything filled later.
  */
-export const SELF_REVIEW_CRON = '0 45 18 * * 1-5';
+export const SELF_REVIEW_CRON = '0 30 0 * * 2-6';
 export const SELF_REVIEW_CATCHUP_CRON = '0 0 9 * * 1-5';
 const LEASE_TTL_MS = 30 * 60_000;
 
@@ -27,7 +27,7 @@ export class SelfReviewCron {
   ) {}
 
   @Cron(SELF_REVIEW_CRON, { name: 'self-review', timeZone: 'Asia/Kolkata' })
-  onEvening(): Promise<void> {
+  onNight(): Promise<void> {
     return this.fire('cron');
   }
 
@@ -40,7 +40,7 @@ export class SelfReviewCron {
   async fire(trigger: string, now: Date = new Date()): Promise<void> {
     try {
       if (!bootJobsEnabled()) return void this.logger.log(BOOT_JOBS_DISABLED);
-      if (!this.clock.isTradingDay('NSE', now)) return;
+      if (!this.clock.isTradingDay('NSE', istMidnightOf(reviewDay(now)))) return;
       const job = () => this.runner.run(now, trigger);
       const out = this.lease ? await this.lease.runExclusiveFailClosed('self-review', LEASE_TTL_MS, job) : await job();
       if (out && !out.started) this.logger.log(`[self-review] ${trigger} skipped: ${out.reason}`);

@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { SessionClock } from '../../market-hub/session-clock';
-import { istMidnightOf, istYmd, lastSessionDates } from '../../night-report/domain/night-report.logic';
+import { istMidnightOf, istYmd, lastSessionDates, reviewDay } from '../../night-report/domain/night-report.logic';
 import { shapeOf } from '../../overnight-scorecard/domain/positions';
 import { outcomeSession } from '../../overnight-scorecard/domain/windows';
 import { directionOf, isExpired, proposeTuning, type EvidenceRow, type PastDecision, type RunSkill, type Suggestion } from '../domain/proposals';
@@ -258,9 +258,9 @@ export class SelfReviewRunService {
 
   // ─── Verify ────────────────────────────────────────────────────────────────
 
-  private sessionBounds(s: string): { midnight: Date; openAt: Date; closeAt: Date } | null {
+  private sessionBounds(s: string, exchange = 'NSE'): { midnight: Date; openAt: Date; closeAt: Date } | null {
     const midnight = istMidnightOf(s);
-    const w = this.clock.tradingWindow('NSE', new Date(midnight.getTime() + 12 * 3_600_000));
+    const w = this.clock.tradingWindow(exchange, new Date(midnight.getTime() + 12 * 3_600_000));
     if (!w) return null;
     return {
       midnight,
@@ -448,9 +448,11 @@ export class SelfReviewRunService {
     const out: VerificationDraft[] = [];
     for (const p of picked) {
       const t = trackers.get(p.row.trackerId);
-      // MCX positions trade to 23:30+, past this run: not an NSE-session outcome (open question).
-      if (!t || t.exchange.toUpperCase() === 'MCX' || !t.qty) continue;
-      const prices = await this.optionPrices(t, b);
+      if (!t || !t.qty) continue;
+      // MCX trades 09:00 to 23:30+, so an MCX carry is scored on its own session, which this run is past.
+      const session = t.exchange.toUpperCase() === 'MCX' ? this.sessionBounds(s, 'MCX') : b;
+      if (!session || p.row.createdAt >= session.openAt) continue;
+      const prices = await this.optionPrices(t, session);
       out.push(
         scoreOvernightVerdict({
           sessionDate: s,
@@ -605,7 +607,7 @@ export class SelfReviewRunService {
   ): Promise<DecisionLoopSummary> {
     const g = loop.grade;
     const loaded = !!this.grading;
-    const sessionToday = istYmd(now) === S;
+    const sessionToday = reviewDay(now) === S;
     // The gate counts every ledger miss of the window, not only the ones that fit the cap.
     const facts = missFacts([...sent, ...loop.rows.map(decisionMiss)]);
     const ticketsOut: DecisionLoopSummary['tickets'] = [];
@@ -676,10 +678,10 @@ export class SelfReviewRunService {
     const out: PastDecision[] = decided.map((p) => ({
       key: p.key,
       status: p.status === 'APPLIED' ? 'APPLIED' : 'REJECTED',
-      session: istYmd(p.decidedAt ?? p.createdAt),
+      session: reviewDay(p.decidedAt ?? p.createdAt),
       direction: directionOf(p.currentValue, p.proposedValue),
     }));
-    for (const o of overrides) out.push({ key: o.target, status: 'APPLIED', session: istYmd(o.appliedAt) });
+    for (const o of overrides) out.push({ key: o.target, status: 'APPLIED', session: reviewDay(o.appliedAt) });
     return out;
   }
 

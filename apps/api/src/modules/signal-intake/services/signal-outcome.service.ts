@@ -46,7 +46,7 @@ const LOOKBACK_SESSIONS = 6;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
- * After the close (cron 16:20 IST, before the 18:45 self-review run) replay every parsed signal whose
+ * After the close (cron 16:20 IST, before the 00:30 self-review run) replay every parsed signal whose
  * horizon has ended on its own contract's 5-minute bars and store TARGET1 / SL / NEITHER /
  * NOT_TRIGGERED / NO_DATA / UNRESOLVED on the row. The self-review kind CHANNEL_SIGNAL reads these
  * (its session = `outcomeSession`). Traded or not, every signal is scored.

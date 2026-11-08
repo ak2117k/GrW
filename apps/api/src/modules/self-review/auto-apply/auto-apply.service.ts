@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
-import { istYmd, lastSessionDates } from '../../night-report/domain/night-report.logic';
+import { istYmd, lastSessionDates, reviewDay } from '../../night-report/domain/night-report.logic';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { decide, directionOf, evidenceGate } from '../domain/proposals';
 import { SELF_REVIEW_CLOCK } from '../services/self-review-run.service';
@@ -40,7 +40,7 @@ export function toChange(p: ProposalRow): Change {
     kind: rollback ? 'ROLLBACK' : 'APPLY',
     from: tv(p.currentValue),
     to: tv(p.proposedValue),
-    session: istYmd(p.decidedAt ?? p.createdAt),
+    session: reviewDay(p.decidedAt ?? p.createdAt),
     at,
     reason: p.rationale,
     ...(rollback
@@ -164,7 +164,7 @@ export class AutoApplyService {
       return 'WATCHING';
     }
     const rb: Change = {
-      id: row.id, target: c.target, kind: 'ROLLBACK', from: c.to, to: v.value, session: istYmd(now),
+      id: row.id, target: c.target, kind: 'ROLLBACK', from: c.to, to: v.value, session: reviewDay(now),
       at: now.toISOString(), reason: why, rollbackOf: c.id, blockedDirection, watch: null,
     };
     out.rolledBack.push(rb);
@@ -243,7 +243,7 @@ export class AutoApplyService {
     if (!(await this.store.approveAndApply(p.id, p.target, v.value as number | boolean, AUTO_BY))) return 'decided concurrently';
     done.add(p.target);
     const c: Change = {
-      id: p.id, target: p.target, kind: 'APPLY', from, to: v.value, session: istYmd(now), at: now.toISOString(), reason: rationale, watch: 'WATCHING',
+      id: p.id, target: p.target, kind: 'APPLY', from, to: v.value, session: reviewDay(now), at: now.toISOString(), reason: rationale, watch: 'WATCHING',
     };
     out.applied.push(c);
     this.logger.warn(`[auto-apply] APPLIED ${p.target}: ${JSON.stringify(from)} → ${JSON.stringify(v.value)} (proposal ${p.id}; ${rationale})`);

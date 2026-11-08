@@ -6,7 +6,7 @@ import type { SessionClock } from '../../market-hub/session-clock';
 import { SignalIntakeService } from './signal-intake.service';
 import { SIGNAL_CLOCK, SignalOutcomeService } from './signal-outcome.service';
 
-/** Outcomes after the NSE close and the trade-setup replay (16:15), before the 18:45 self-review run. */
+/** Outcomes after the NSE close and the trade-setup replay (16:15), before the 00:30 self-review run. */
 export const SIGNAL_OUTCOME_CRON = '0 20 16 * * 1-5';
 /** Busy-slot LLM parses are retried while fresh. */
 export const SIGNAL_LLM_RETRY_CRON = '30 */3 * * * *';

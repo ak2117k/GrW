@@ -250,7 +250,7 @@ export const OI_STALE_MIN = 10;
 export const OI_OPEN_GRACE_MIN = 10;
 /** A noise read's 30-min follow-up must be filled this long after the exit. */
 export const NOISE_FOLLOW_DUE_MIN = 60;
-/** The nightly self-review of session D must have run by D+1 01:00 IST (it runs at 18:45 IST). */
+/** The nightly self-review of session D must have run by D+1 01:00 IST (it runs at 00:30 IST). */
 export const SELF_REVIEW_DEADLINE_IST_MIN = 60;
 
 /** IST calendar date (YYYY-MM-DD) of an instant. */

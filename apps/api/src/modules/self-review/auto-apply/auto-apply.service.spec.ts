@@ -94,6 +94,18 @@ describe('AutoApplyService', () => {
     expect(alert).not.toHaveBeenCalled();
   });
 
+  it('a change made after midnight belongs to the session that just ended', async () => {
+    const after = new Date('2026-11-05T19:45:00Z'); // Fri 6 Nov 01:15 IST: session Thu 5 Nov
+    const store = new FakeStore();
+    store.rows.push(proposal({}));
+    const { svc } = make({ store });
+    const out = await svc.run(after);
+    expect(out.applied.map((c) => c.session)).toEqual(['2026-11-05']);
+    const stored = new FakeStore();
+    stored.rows.push(proposal({ id: 'late', status: 'APPLIED', decidedBy: AUTO_BY, decidedAt: after, currentValue: 2.0, proposedValue: 2.5 }));
+    expect((await make({ store: stored }).svc.recentChanges('2026-11-05')).map((c) => c.session)).toEqual(['2026-11-05']);
+  });
+
   it('applies a gated PENDING proposal via approveAndApply by auto, step-limited, announced', async () => {
     const store = new FakeStore();
     store.rows.push(proposal({}));

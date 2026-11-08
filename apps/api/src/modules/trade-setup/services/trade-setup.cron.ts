@@ -14,7 +14,7 @@ export const TRADE_SETUPS_NIGHT_CRON = '0 50 23 * * *';
 export const TRADE_SETUPS_MORNING_CRON = '0 50 8 * * 1-5';
 /** Broker funds snapshot while the owner's session is warm: the "last known" margin for the night. */
 export const TRADE_SETUPS_MARGIN_CRON = '0 0 15 * * 1-5';
-/** Outcomes after the close, before the 18:45 self-review run. */
+/** Outcomes after the close, before the 00:30 self-review run. */
 export const TRADE_SETUPS_OUTCOME_CRON = '0 15 16 * * 1-5';
 const LEASE_TTL_MS = 20 * 60_000;
 /** A restart inside the night window re-runs the build after this delay (feeds warm up first). */

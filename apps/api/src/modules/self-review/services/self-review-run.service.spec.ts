@@ -113,6 +113,16 @@ describe('SelfReviewRunService', () => {
     expect(finish[1].summary.byKind.SCORECARD_TOTAL).toMatchObject({ n: 1, wrong: 1 });
   });
 
+  it('an MCX carry is scored on the MCX session (09:00 to 23:30), not the NSE one', async () => {
+    const { svc, sources } = make();
+    sources.nightVerdicts.mockResolvedValue([
+      { id: 'v1', trackerId: 't1', symbol: 'CRUDEOIL19NOV268500CE', verdict: 'HOLD_OVERNIGHT', confidence: 'high', createdAt: new Date('2026-10-19T18:20:00Z'), triggeredBy: ['OVERNIGHT_REVIEW'] },
+    ] as never);
+    sources.trackers.mockResolvedValue([{ id: 't1', symbol: 'CRUDEOIL19NOV268500CE', exchange: 'MCX', token: '999', qty: 100, status: 'OPEN', exitPrice: null, exitTime: null }] as never);
+    await svc.run(new Date('2026-10-21T19:00:00Z')); // Thu 00:30 IST: S = Wed 10-21
+    expect(sources.bars1m).toHaveBeenCalledWith('MCX', '999', new Date('2026-10-21T03:30:00Z'), new Date('2026-10-21T18:00:00Z'));
+  });
+
   it('CHANNEL_SIGNAL: each scored tip is a result (subject = channel); per-channel stats in summary.byChannel; never notable', async () => {
     const row = (id: string, channelId: string, outcomeStatus: string, sessionDate = '2026-10-21') => ({
       id, sessionDate, channelId, underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, side: 'BUY', entryType: 'ABOVE',
@@ -467,6 +477,22 @@ describe('SelfReviewRunService — wrong-decision loop (2026-11-04)', () => {
     expect(alert).toHaveBeenCalledWith('SELF_REVIEW_NOTHING_GRADED', expect.stringContaining('0 decisions graded'));
     const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { summary: { decisions: { graded: number; reason: string } } }];
     expect(finish[1].summary.decisions).toMatchObject({ graded: 0, reason: expect.stringContaining('trading day') });
+  });
+
+  it('the 00:30 run still counts as the session that just ended, so nothing graded alerts', async () => {
+    const grading = { gradeSession: jest.fn(async () => ({ graded: 0, wrong: 0, unscorable: 0, byType: {} })) };
+    const alert = jest.fn(async () => true);
+    const { svc } = make({ loop: { grading, grades: { wrongSince: async () => [] }, alert } });
+    await svc.run(new Date('2026-10-21T19:00:00Z')); // Thu 00:30 IST: S = Wed 10-21
+    expect(alert).toHaveBeenCalledWith('SELF_REVIEW_NOTHING_GRADED', expect.stringContaining('2026-10-21'));
+  });
+
+  it('the 09:00 catch-up re-reads the last session without alerting', async () => {
+    const grading = { gradeSession: jest.fn(async () => ({ graded: 0, wrong: 0, unscorable: 0, byType: {} })) };
+    const alert = jest.fn(async () => true);
+    const { svc } = make({ loop: { grading, grades: { wrongSince: async () => [] }, alert } });
+    await svc.run(new Date('2026-10-22T03:30:00Z')); // Thu 09:00 IST, before that day's close: S = Wed 10-21
+    expect(alert).not.toHaveBeenCalled();
   });
 
   it('a weekend run re-reads the last session without alerting; the reason says why', async () => {

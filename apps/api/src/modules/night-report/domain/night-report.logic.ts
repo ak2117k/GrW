@@ -23,6 +23,14 @@ export function istYmd(at: Date): string {
   return new Date(at.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
+/** Night jobs run past midnight: before 06:00 IST an instant still belongs to the evening before. */
+const NIGHT_ROLLOVER_MS = 6 * 3_600_000;
+
+/** The IST calendar day a night job's instant belongs to: 00:30 Saturday is still Friday's night. */
+export function reviewDay(at: Date): string {
+  return istYmd(new Date(at.getTime() - NIGHT_ROLLOVER_MS));
+}
+
 /** UTC instant of IST midnight of `ymd`. */
 export function istMidnightOf(ymd: string): Date {
   return new Date(Date.parse(`${ymd}T00:00:00.000Z`) - IST_OFFSET_MS);

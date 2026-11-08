@@ -62,7 +62,7 @@ export function countDrafts(drafts: readonly DecisionGradeDraft[]): Omit<GradeSe
 
 /**
  * The nightly decision ledger (plan 2026-11-04 stream F): reads every decision of session S AND of the
- * weekday before it (MCX decides until 23:30, after the 18:45 run, and carries are scored the next
+ * weekday before it (carries are scored the next
  * morning — so each night also settles what the previous night could not), grades each horizon that is
  * over by `now`, runs the system detectors, and upserts `decision_grades`. Called by the self-review run
  * (G1). Fail-soft: a source that cannot be read is skipped and named in `error`; the call never throws.

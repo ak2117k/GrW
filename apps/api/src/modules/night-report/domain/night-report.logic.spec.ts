@@ -4,6 +4,7 @@ import {
   chartHref,
   isHeld,
   lastSessionDates,
+  reviewDay,
   nightWindow,
   parseOvernightReason,
   pickVerdicts,
@@ -131,5 +132,16 @@ describe('splitNews', () => {
     const r = splitNews(rows, []);
     expect(r.market).toHaveLength(20);
     expect(r.market[0].id).toBe('m24');
+  });
+});
+
+describe('reviewDay', () => {
+  it('counts the small hours as the evening before', () => {
+    expect(reviewDay(new Date('2026-11-06T19:00:00Z'))).toBe('2026-11-06'); // Sat 7 Nov 00:30 IST
+    expect(reviewDay(new Date('2026-11-07T00:29:00Z'))).toBe('2026-11-06'); // Sat 7 Nov 05:59 IST
+  });
+  it('leaves the daytime alone', () => {
+    expect(reviewDay(new Date('2026-11-07T00:30:00Z'))).toBe('2026-11-07'); // Sat 7 Nov 06:00 IST
+    expect(reviewDay(new Date('2026-11-06T13:15:00Z'))).toBe('2026-11-06'); // Fri 6 Nov 18:45 IST
   });
 });

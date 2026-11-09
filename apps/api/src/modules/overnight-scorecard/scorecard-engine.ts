@@ -34,8 +34,9 @@ import type { ScorecardRepository } from './scorecard.repository';
 import type { FactorScore, Scorecard, ScoreWindow } from './scorecard.types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const DAILY_BARS = 80;
-const M15_BARS = 80;
+/** EMA80 needs a long run-in: 300 bars lets it settle well past its seed. */
+const DAILY_BARS = 300;
+const M15_BARS = 300;
 const VIX_DAYS = 21;
 /** A stored NIFTY prediction older than this is not used as the after-hours mood (covers a long weekend). */
 export const STORED_MOOD_MAX_AGE_MS = 5 * DAY_MS;

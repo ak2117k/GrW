@@ -10,7 +10,7 @@
 import type { ChainSnapshotRow } from '../../mbm/domain/chain-snapshot';
 import type { CueRecord, FiiDerivatives, FiiDiiCash } from '../../market-cues/market-cues.types';
 import type { FactorScore } from '../scorecard.types';
-import { lastEma, macdHistogram, median, rsi } from './indicators';
+import { lastEma, macdHistogram, median } from './indicators';
 import { factor, orient, unavailable, type Side } from './scoring';
 import { stockMovePart, type StockMoveReading } from '../../stock-move/stock-move.logic';
 import { mbmHeadline, type RelativeHorizon } from '../../mbm/domain/relative-reading';
@@ -287,7 +287,7 @@ export function scoreNews(articles: readonly NewsArticleLite[] | null, side: Sid
 // ─── Indicators ──────────────────────────────────────────────────────────────
 
 /** Daily bars needed for MACD(12,26,9). */
-export const DAILY_MIN_BARS = 35;
+export const DAILY_MIN_BARS = 120;
 export const M15_WEIGHT = 0.5;
 
 export interface IndicatorInput {
@@ -301,22 +301,18 @@ export interface IndicatorInput {
   isLongCe?: boolean;
 }
 
-/** One timeframe's vote in −3…+3: EMA9 vs EMA20, MACD histogram sign (+slope), RSI14 zone. */
+/**
+ * One timeframe's call: green (+2) when EMA20 is above EMA80 and the MACD histogram is green, red (-2) when
+ * EMA20 is below EMA80 and the histogram is red, otherwise mixed (0). A fresh cross is simply the first bar above.
+ */
 export function timeframeVote(closes: readonly number[]): { vote: number; text: string } | null {
-  const e9 = lastEma(closes, 9);
   const e20 = lastEma(closes, 20);
+  const e80 = lastEma(closes, 80);
   const m = macdHistogram(closes);
-  const r = rsi(closes, 14);
-  if (e9 == null || e20 == null || m == null || r == null) return null;
-  let vote = e9 > e20 ? 1 : e9 < e20 ? -1 : 0;
-  if (m.hist > 0 && m.hist >= m.prevHist) vote += 1;
-  else if (m.hist < 0 && m.hist <= m.prevHist) vote -= 1;
-  if (r >= 55 && r < 75) vote += 1;
-  else if (r <= 45 && r > 25) vote -= 1;
-  const text = `EMA9${e9 > e20 ? '>' : e9 < e20 ? '<' : '='}EMA20, MACD h ${m.hist >= 0 ? '+' : ''}${f2(m.hist)}${
-    m.hist >= m.prevHist ? '↑' : '↓'
-  }, RSI ${r.toFixed(0)}`;
-  return { vote, text };
+  if (e20 == null || e80 == null || m == null) return null;
+  const vote = e20 > e80 && m.hist > 0 ? 2 : e20 < e80 && m.hist < 0 ? -2 : 0;
+  const call = vote > 0 ? 'green' : vote < 0 ? 'red' : 'mixed';
+  return { vote, text: `EMA20${e20 > e80 ? '>' : e20 < e80 ? '<' : '='}EMA80, MACD h ${m.hist >= 0 ? '+' : ''}${f2(m.hist)}: ${call}` };
 }
 
 /**

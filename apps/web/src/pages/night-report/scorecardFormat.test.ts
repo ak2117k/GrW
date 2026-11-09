@@ -24,7 +24,7 @@ describe('factor labels and order', () => {
       'India VIX',
       'Expiry / time decay',
       'News',
-      'Indicators (EMA 9/20, MACD, RSI)',
+      'Indicators (EMA 20/80, MACD)',
       'Expected move',
     ]);
     expect(factorLabel('gift_nifty')).toBe('Gift nifty');

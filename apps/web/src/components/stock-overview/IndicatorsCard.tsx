@@ -1,6 +1,7 @@
 import clsx from 'clsx';
 import { useIndicators } from '@/hooks/useIndicators';
 import { Card } from './_shared';
+import { emaTrendChip } from './emaTrendChip';
 
 interface Props {
   token: string;
@@ -55,17 +56,9 @@ export default function IndicatorsCard({ token, exchange, timeframe }: Props) {
           alignment={ind.alignment.macd}
         />
         <Chip
-          label="EMA9/21"
-          value={
-            ind.ema9 != null && ind.ema21 != null
-              ? ind.ema9 > ind.ema21
-                ? '↑ above'
-                : ind.ema9 < ind.ema21
-                  ? '↓ below'
-                  : '= equal'
-              : '—'
-          }
-          alignment={ind.alignment.ema}
+          label="EMA20/80"
+          value={emaTrendChip(ind).value}
+          alignment={emaTrendChip(ind).alignment}
         />
         <Chip
           label="BB pos"

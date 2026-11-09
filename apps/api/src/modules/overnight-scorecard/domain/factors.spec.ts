@@ -174,10 +174,10 @@ describe('news factor', () => {
 });
 
 describe('indicators factor', () => {
-  const up = Array.from({ length: 60 }, (_, i) => 100 + i + (i % 3 === 0 ? -0.6 : 0));
-  const down = up.map((x) => 300 - x);
-  it('fewer than 35 daily bars ⇒ unavailable', () => {
-    expect(scoreIndicators({ dailyCloses: up.slice(0, 20), m15Closes: null, setups: [] }, 'BULLISH')).toMatchObject({ available: false, points: 0 });
+  const up = Array.from({ length: 160 }, (_, i) => 100 + i + 0.02 * i * i + (i % 3 === 0 ? -0.6 : 0));
+  const down = up.map((x) => 1000 - x);
+  it('fewer than 120 daily bars ⇒ unavailable', () => {
+    expect(scoreIndicators({ dailyCloses: up.slice(0, 119), m15Closes: null, setups: [] }, 'BULLISH')).toMatchObject({ available: false, points: 0 });
     expect(scoreIndicators({ dailyCloses: null, m15Closes: null, setups: [] }, 'BULLISH').available).toBe(false);
   });
   it('an uptrend supports a bull and opposes a bear; a downtrend the reverse', () => {
@@ -186,8 +186,36 @@ describe('indicators factor', () => {
     expect(scoreIndicators({ dailyCloses: up, m15Closes: up, setups: [] }, 'BEARISH').points).toBeLessThan(0);
     expect(scoreIndicators({ dailyCloses: down, m15Closes: null, setups: [] }, 'BULLISH').points).toBeLessThan(0);
   });
+  describe('EMA20/80 with MACD (owner 2026-11-08)', () => {
+    // A trend, then a short pull-back against it: the EMAs have not crossed but MACD has turned.
+    const pullback = [...up, ...Array.from({ length: 10 }, (_, i) => up[up.length - 1] - 2 * (i + 1))];
+    const bounce = pullback.map((x) => 1000 - x);
+
+    it('green needs EMA20 above EMA80 and MACD green', () => {
+      expect(timeframeVote(up)).toMatchObject({ vote: 2, text: expect.stringMatching(/EMA20>EMA80.*green/) });
+    });
+    it('red needs EMA20 below EMA80 and MACD red', () => {
+      expect(timeframeVote(down)).toMatchObject({ vote: -2, text: expect.stringMatching(/EMA20<EMA80.*red/) });
+    });
+    it('EMAs up but MACD red is no call, and the same for the reverse', () => {
+      expect(timeframeVote(pullback)).toMatchObject({ vote: 0, text: expect.stringMatching(/EMA20>EMA80.*mixed/) });
+      expect(timeframeVote(bounce)).toMatchObject({ vote: 0, text: expect.stringMatching(/EMA20<EMA80.*mixed/) });
+    });
+    it('needs 80 bars for the EMA80', () => {
+      expect(timeframeVote(up.slice(0, 79))).toBeNull();
+    });
+    it('scores: both timeframes green +2, daily alone +1, 15m alone +1, daily green against 15m red +1', () => {
+      const pts = (d: number[], m: number[] | null) => scoreIndicators({ dailyCloses: d, m15Closes: m, setups: [] }, 'BULLISH').points;
+      expect(pts(up, up)).toBe(2);
+      expect(pts(up, pullback)).toBe(1);
+      expect(pts(pullback, up)).toBe(1);
+      expect(pts(up, down)).toBe(1);
+      expect(pts(down, down)).toBe(-2);
+    });
+  });
+
   it('daily setups vote for INDEX positions only: long setup +1 oriented to the side', () => {
-    const flat = Array.from({ length: 60 }, () => 100);
+    const flat = Array.from({ length: 160 }, () => 100);
     const long = [{ setup: 'BB_BREAKOUT_UP', action: 'LONG_SETUP' }];
     expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: [] }, 'BULLISH').points).toBe(0);
     expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: long, isIndex: true, isLongCe: true }, 'BULLISH')).toMatchObject({
@@ -197,7 +225,7 @@ describe('indicators factor', () => {
     expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: long, isIndex: false }, 'BULLISH').points).toBe(0);
   });
   it('a tighten-longs warning is −1 for a long CE only (never supports a PE)', () => {
-    const flat = Array.from({ length: 60 }, () => 100);
+    const flat = Array.from({ length: 160 }, () => 100);
     const warn = [{ setup: 'EMA_DOWNCROSS', action: 'EXIT_OR_TIGHTEN_LONGS' }];
     expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: warn, isIndex: true, isLongCe: true }, 'BULLISH').points).toBe(-1);
     expect(scoreIndicators({ dailyCloses: flat, m15Closes: null, setups: warn, isIndex: true, isLongCe: false }, 'BEARISH').points).toBe(0);

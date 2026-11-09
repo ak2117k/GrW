@@ -9,7 +9,7 @@ interface UseIndicatorsResult {
 }
 
 /**
- * Standalone indicator readings (EMA9/EMA21, RSI14, MACD histogram, BB
+ * Standalone indicator readings (EMA20/EMA80 trend, RSI14, MACD histogram, BB
  * position, ROC10) for the IndicatorsCard. Hits GET /signals/indicators.
  *
  * Returns `indicators: null` when the backend reports fewer than 30

@@ -247,6 +247,9 @@ function snapshotFromBook(book: LevelBook): LevelsSnapshot {
   };
 }
 
+/** Bars read for the Indicators card: the EMA80 needs a run-in past its first 80 to match the chart's line. */
+const INDICATOR_BARS = 300;
+
 @Injectable()
 export class SignalGeneratorService {
   private readonly logger = new Logger(SignalGeneratorService.name);
@@ -722,7 +725,7 @@ export class SignalGeneratorService {
     if (instrument) {
       try {
         const rows = await this.marketDataRepository.getCandles(
-          instrument.id, timeframe, windowStart, now, 100,
+          instrument.id, timeframe, windowStart, now, INDICATOR_BARS,
         );
         candles = rows.map((c) => ({
           timestamp: c.timestamp,
@@ -740,7 +743,7 @@ export class SignalGeneratorService {
         const broker = await this.angelOneAdapter.getHistoricalData(
           token, exchange, timeframe, windowStart, now,
         );
-        candles = broker.slice(-100).map((c: any) => ({
+        candles = broker.slice(-INDICATOR_BARS).map((c: any) => ({
           timestamp: new Date(c.timestamp),
           open: Number(c.open), high: Number(c.high),
           low: Number(c.low), close: Number(c.close),

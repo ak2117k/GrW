@@ -195,9 +195,9 @@ describe('ScorecardEngine: short candles + after-hours mood', () => {
   const shape = shapeOf('RELIANCE28OCT261400CE', 'NFO', 500);
   const rising = (n: number) => Array.from({ length: n }, (_, i) => ({ day: `d${i}`, open: 100 + i, close: 100 + i + Math.sin(i) }));
 
-  it('fewer than 35 daily bars ⇒ one backfill per timeframe, then re-read: indicators available', async () => {
+  it('fewer than 120 daily bars ⇒ one backfill per timeframe, then re-read: indicators available', async () => {
     let filled = false;
-    const f = fakeRepo({ bars: async () => (filled ? rising(60) : rising(3)) });
+    const f = fakeRepo({ bars: async () => (filled ? rising(160) : rising(3)) });
     const backfill = { fill: jest.fn(async (_name: string, _tf: '1d' | '15m') => { filled = true; return 60; }) };
     const engine = new ScorecardEngine(f.repo, UNAVAILABLE_CHAINS, null, null, clock, backfill);
     const sc = await engine.score(await engine.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
@@ -206,7 +206,7 @@ describe('ScorecardEngine: short candles + after-hours mood', () => {
   });
 
   it('enough stored bars ⇒ no backfill; a failing backfill keeps "unavailable"', async () => {
-    const deep = fakeRepo({ bars: async () => rising(60) });
+    const deep = fakeRepo({ bars: async () => rising(160) });
     const noCall = { fill: jest.fn(async () => 0) };
     const e1 = new ScorecardEngine(deep.repo, UNAVAILABLE_CHAINS, null, null, clock, noCall);
     await e1.score(await e1.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
@@ -216,7 +216,7 @@ describe('ScorecardEngine: short candles + after-hours mood', () => {
     const failing = { fill: jest.fn(async () => { throw new Error('no session'); }) };
     const e2 = new ScorecardEngine(short.repo, UNAVAILABLE_CHAINS, null, null, clock, failing);
     const sc = await e2.score(await e2.context('OVERNIGHT', NOW), { userId: 'owner', symbol: 'X', exchange: 'NFO', shape, window: 'OVERNIGHT' });
-    expect(sc.factors.find((x) => x.name === 'indicators')).toMatchObject({ available: false, reason: 'unavailable: fewer than 35 daily candles' });
+    expect(sc.factors.find((x) => x.name === 'indicators')).toMatchObject({ available: false, reason: 'unavailable: fewer than 120 daily candles' });
   });
 
   it('live MBM behaviour absent ⇒ the last session\'s stored NIFTY predictions, labelled with their as-of', async () => {
@@ -293,11 +293,11 @@ describe('ScorecardBarBackfill', () => {
     return { b: new ScorecardBarBackfill(repo as never, { fetchCandles } as never, { saveCandles }, user, () => now), fetchCandles, saveCandles, repo };
   };
 
-  it('fetches ~95 days of 1d over the owner session, persists into candles, once per IST day', async () => {
+  it('fetches ~500 days of 1d over the owner session, persists into candles, once per IST day', async () => {
     const now = ist('2026-10-19T23:30:00');
     const t = build(now, [bar('2026-10-16T00:00:00+05:30', 1), bar('2026-10-19T00:00:00+05:30', 2)]);
     expect(await t.b.fill('RELIANCE', '1d')).toBe(2);
-    expect(t.fetchCandles).toHaveBeenCalledWith('owner', '2885', 'NSE', '1d', new Date(now.getTime() - 95 * 86_400_000), now);
+    expect(t.fetchCandles).toHaveBeenCalledWith('owner', '2885', 'NSE', '1d', new Date(now.getTime() - 500 * 86_400_000), now);
     expect(t.saveCandles.mock.calls[0][0]).toEqual([
       expect.objectContaining({ instrumentId: 'i1', timeframe: '1d', close: 1 }),
       expect.objectContaining({ instrumentId: 'i1', timeframe: '1d', close: 2 }),

@@ -107,12 +107,18 @@ export function buildIndicatorReadings(
   const closes = candles.map((c) => c.close);
   const ema9Val = ema(closes, 9);
   const ema21Val = ema(closes, 21);
+  const ema20Val = ema(closes, 20);
+  const ema80Val = ema(closes, 80);
   const rsi14Val = rsi(closes, 14);
   const macdVal = macd(closes);
   const bb = bollinger(closes, 20, 2);
   const roc10Val = roc(closes, 10);
 
   const macdHistogram = macdVal ? macdVal.histogram : null;
+  let trend: 1 | 0 | -1 | null = null;
+  if (ema20Val != null && ema80Val != null && macdHistogram != null) {
+    trend = ema20Val > ema80Val && macdHistogram > 0 ? 1 : ema20Val < ema80Val && macdHistogram < 0 ? -1 : 0;
+  }
 
   // Bollinger position normalised to [-1, +1] using `(spot - middle) /
   // (upper - middle)`. When upper === middle (zero-volatility window)
@@ -178,6 +184,9 @@ export function buildIndicatorReadings(
   return {
     ema9: ema9Val,
     ema21: ema21Val,
+    ema20: ema20Val,
+    ema80: ema80Val,
+    trend,
     rsi14: rsi14Val,
     macdHistogram,
     bollingerPosition,

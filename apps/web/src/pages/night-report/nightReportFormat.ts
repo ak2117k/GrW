@@ -256,7 +256,7 @@ const FACTOR_LABEL: Record<FactorName, string> = {
   vix: 'India VIX',
   expiry: 'Expiry / time decay',
   news: 'News',
-  indicators: 'Indicators (EMA 9/20, MACD, RSI)',
+  indicators: 'Indicators (EMA 20/80, MACD)',
   // Key stays `mood` (stored rows); since 2026-10-20 it is the MBM move-size "expected move" factor.
   mood: 'Expected move',
 };

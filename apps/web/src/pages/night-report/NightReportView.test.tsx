@@ -45,7 +45,7 @@ describe('NightReportView', () => {
     const html = render(report);
     expect(html.match(/data-testid="scorecard"/g)?.length).toBe(3); // 2 positions + 1 news idea
     expect(html).toContain('Option chain (OI)');
-    expect(html).toContain('Indicators (EMA 9/20, MACD, RSI)');
+    expect(html).toContain('Indicators (EMA 20/80, MACD)');
     expect(html).toContain('PCR 2.1 (5d med 1.3), put build +18% @2860');
     expect(html).toContain('Strongly supports +4');
     expect(html).toContain('Against −3');

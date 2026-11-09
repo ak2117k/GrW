@@ -8,10 +8,10 @@ import { istYmd } from './domain/windows';
 const DAY_MS = 86_400_000;
 const IST_OFFSET_MS = 5.5 * 3600_000;
 /**
- * Calendar days fetched per timeframe. 1d: ~60 sessions (MACD needs 35; weekends and holidays are
- * the slack). 15m: ~4 sessions (≥ 35 bars at 25 a session); one broker call per day, so kept short.
+ * Calendar days fetched per timeframe, sized for EMA80 plus its run-in. 1d: ~340 sessions (weekends and
+ * holidays are the slack). 15m: ~20 sessions (~500 bars at 25 a session). One broker call per day.
  */
-export const BACKFILL_DAYS: Record<'1d' | '15m', number> = { '1d': 95, '15m': 7 };
+export const BACKFILL_DAYS: Record<'1d' | '15m', number> = { '1d': 500, '15m': 30 };
 /** Before this IST hour today's daily bar may still be forming: it is not stored (it would never be corrected). */
 const DAILY_SETTLED_HOUR_IST = 16;
 

@@ -32,6 +32,9 @@ export interface LevelsSnapshot {
 export interface IndicatorReadings {
   ema9: number | null;
   ema21: number | null;
+  ema20?: number | null;
+  ema80?: number | null;
+  trend?: 1 | 0 | -1 | null;
   rsi14: number | null;
   macdHistogram: number | null;
   bollingerPosition: number | null;

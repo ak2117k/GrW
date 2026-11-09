@@ -437,6 +437,20 @@ export class NewsAggregatorService {
   }
 
   /**
+   * The stock page's news: the old tags and the new ones (`instruments`). The old field alone misses most
+   * companies whose name is not their ticker (ADANIGREEN: 0 old, 19 new in 30 days, 2026-11-09). A separate
+   * method because `getNewsForSymbol` feeds the sentinel's news triggers, which must not change with a page fix.
+   */
+  async getNewsForStockPage(symbol: string): Promise<NewsArticle[]> {
+    const s = symbol.toUpperCase();
+    return this.prisma.newsArticle.findMany({
+      where: { OR: [{ relatedSymbols: { has: s } }, { instruments: { has: s } }] },
+      orderBy: { publishedAt: 'desc' },
+      take: 20,
+    });
+  }
+
+  /**
    * Get a single article by ID.
    */
   async getArticleById(id: string): Promise<NewsArticle | null> {

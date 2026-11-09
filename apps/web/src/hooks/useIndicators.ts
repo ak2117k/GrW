@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '@/services/api';
 import type { IndicatorReadings } from '@/components/stock-overview/SetupContextCard';
+import { fetchIndicators } from './fetchIndicators';
 
 interface UseIndicatorsResult {
   indicators: IndicatorReadings | null;
@@ -36,17 +37,14 @@ export function useIndicators(
     setIndicators(null);
     setLoading(true);
 
-    api
-      .get<{ indicators: IndicatorReadings | null }>('/signals/indicators', {
-        params: { token, exchange, timeframe },
-      })
-      .then((r) => {
+    fetchIndicators(
+      (url, config) => api.get<{ indicators: IndicatorReadings | null }>(url, config),
+      { token, exchange, timeframe },
+      () => cancelled,
+    )
+      .then((readings) => {
         if (cancelled) return;
-        setIndicators(r.data?.indicators ?? null);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setIndicators(null);
+        setIndicators(readings);
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

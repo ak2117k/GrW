@@ -34,7 +34,7 @@ export class NewsController {
   @ApiParam({ name: 'symbol', description: 'Stock symbol (e.g., RELIANCE)' })
   @ApiResponse({ status: 200, description: 'News articles for symbol' })
   async getNewsForSymbol(@Param('symbol') symbol: string) {
-    return this.newsAggregatorService.getNewsForSymbol(symbol);
+    return this.newsAggregatorService.getNewsForStockPage(symbol);
   }
 
   @Get(':id')

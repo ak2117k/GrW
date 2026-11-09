@@ -303,7 +303,7 @@ const futSignal: Partial<SignalView> = { instrumentKind: 'FUT', strike: null, en
   });
 
   it('futures: margin call fails → 25% estimate fallback (method estimate), short → PAPER', async () => {
-    const t = build({ cfg: futCfg, signal: futSignal, ltp: () => 25000, funds: 100_000, margin: async () => ({ status: false, message: 'Invalid Token' }) });
+    const t = build({ cfg: { ...futCfg, entryRetryMin: 0 }, signal: futSignal, ltp: () => 25000, funds: 100_000, margin: async () => ({ status: false, message: 'Invalid Token' }) });
     const r = await t.svc.evaluate(ev, T0);
     const funds = t.repo.decisions[0].gate.find((c: any) => c.name === 'funds');
     expect(funds.funds.method).toBe('estimate');
@@ -336,5 +336,155 @@ describe('SignalTraderService — BFO', () => {
     expect(arg.plan).toMatchObject({ exchange: 'BFO', tradingsymbol: 'SENSEX99OCT8000CE', lotSize: 20 });
     expect(arg.qtyUnit).toBe('units');
     expect(t.repo.decisions[0].gate.find((c: any) => c.name === 'sl_enforceable').ok).toBe(true);
+  });
+});
+
+describe('SignalTraderService — keep trying a TAKE for a few minutes (owner 2026-11-09)', () => {
+  // UNIONBANK: short of funds at 15:07, cash freed at 15:09. CRUDEOIL 8200 PE: ₹1.50 under the band after the judge's 54 s.
+  const at: Partial<SignalView> = { entryType: 'AT', entryLow: 100, entryHigh: 100, sl: 90 };
+  const later = (s: number) => new Date(T0.getTime() + s * 1000);
+  beforeEach(() => {
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    setCoreKillSwitchReader({ isOn: async () => false, isOnForPlatform: async () => false, invalidate: () => undefined });
+    (sendOpsAlert as jest.Mock).mockClear();
+  });
+  afterAll(() => setCoreKillSwitchReader(null));
+
+  it('short of funds: waits, and goes live when the cash arrives, without asking the judge again', async () => {
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    expect(await t.svc.evaluate(ev, T0)).toMatchObject({ decision: 'PENDING' });
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'PENDING', status: 'PENDING' });
+    expect(t.paper.open).not.toHaveBeenCalled();
+    (t.funds.available as jest.Mock).mockResolvedValue(1_000_000);
+    await t.svc.checkTriggers(later(30));
+    expect(t.executor.place).toHaveBeenCalledTimes(1);
+    expect(t.judge.judge).toHaveBeenCalledTimes(1);
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'TAKE', status: 'DONE' });
+    expect(t.svc.pendingIds()).toEqual([]);
+    t.svc.onModuleDestroy();
+  });
+
+  it('still short when the window ends: the paper trade, as before', async () => {
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    await t.svc.evaluate(ev, T0);
+    await t.svc.checkTriggers(later(30));
+    expect(t.paper.open).not.toHaveBeenCalled();
+    await t.svc.checkTriggers(later(5 * 60));
+    expect(t.paper.open).toHaveBeenCalledTimes(1);
+    expect(t.executor.place).not.toHaveBeenCalled();
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'PAPER', skipReason: 'insufficient_funds', status: 'DONE' });
+    expect(t.svc.pendingIds()).toEqual([]);
+    t.svc.onModuleDestroy();
+  });
+
+  it('checks the account at most every 30 s while waiting', async () => {
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    await t.svc.evaluate(ev, T0);
+    const before = (t.funds.available as jest.Mock).mock.calls.length;
+    await t.svc.checkTriggers(later(5));
+    await t.svc.checkTriggers(later(20));
+    await t.svc.checkTriggers(later(29));
+    expect((t.funds.available as jest.Mock).mock.calls.length - before).toBeLessThanOrEqual(1);
+    t.svc.onModuleDestroy();
+  });
+
+  it('price left the band while the judge thought: waits, and enters when it comes back', async () => {
+    let ltp = 101;
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => ltp });
+    t.judge.judge.mockImplementation((async () => { ltp = 95; return { ok: true, verdict: takeVerdict, latencyMs: 10 }; }) as never);
+    expect(await t.svc.evaluate(ev, T0)).toMatchObject({ decision: 'PENDING' });
+    await t.svc.checkTriggers(later(30));
+    expect(t.executor.place).not.toHaveBeenCalled();
+    ltp = 100;
+    await t.svc.checkTriggers(later(60));
+    expect(t.executor.place).toHaveBeenCalledTimes(1);
+    expect(t.judge.judge).toHaveBeenCalledTimes(1);
+    t.svc.onModuleDestroy();
+  });
+
+  it('price never comes back: SKIP price_moved when the window ends', async () => {
+    let ltp = 101;
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => ltp });
+    t.judge.judge.mockImplementation((async () => { ltp = 95; return { ok: true, verdict: takeVerdict, latencyMs: 10 }; }) as never);
+    await t.svc.evaluate(ev, T0);
+    await t.svc.checkTriggers(later(5 * 60));
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'SKIP', skipReason: 'price_moved', status: 'DONE' });
+    expect(t.executor.place).not.toHaveBeenCalled();
+    t.svc.onModuleDestroy();
+  });
+
+  it('price recovers but the cash is short at the end: paper, not a price skip', async () => {
+    let ltp = 101;
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => ltp, funds: 500 });
+    t.judge.judge.mockImplementation((async () => { ltp = 95; return { ok: true, verdict: takeVerdict, latencyMs: 10 }; }) as never);
+    await t.svc.evaluate(ev, T0);
+    ltp = 100;
+    await t.svc.checkTriggers(later(30));
+    await t.svc.checkTriggers(later(5 * 60));
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'PAPER', skipReason: 'insufficient_funds' });
+    t.svc.onModuleDestroy();
+  });
+
+  it('the stop was already crossed: no waiting', async () => {
+    let ltp = 101;
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => ltp });
+    t.judge.judge.mockImplementation((async () => { ltp = 89; return { ok: true, verdict: takeVerdict, latencyMs: 10 }; }) as never);
+    expect(await t.svc.evaluate(ev, T0)).toMatchObject({ decision: 'SKIP', skipReason: 'price_moved' });
+    expect(t.svc.pendingIds()).toEqual([]);
+    t.svc.onModuleDestroy();
+  });
+
+  it('every safety check runs again: the kill switch during the wait stops the order', async () => {
+    let kill = false;
+    setCoreKillSwitchReader({ isOn: async () => kill, isOnForPlatform: async () => kill, invalidate: () => undefined });
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    await t.svc.evaluate(ev, T0);
+    kill = true;
+    (t.funds.available as jest.Mock).mockResolvedValue(1_000_000);
+    await t.svc.checkTriggers(later(30));
+    expect(t.executor.place).not.toHaveBeenCalled();
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'SKIP', status: 'DONE' });
+    t.svc.onModuleDestroy();
+  });
+
+  it('another channel took the same trade during the wait: no second order', async () => {
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    await t.svc.evaluate(ev, T0);
+    t.repo.clusterTaken.mockImplementation((async (id: string) => id === 'cl1') as never);
+    (t.funds.available as jest.Mock).mockResolvedValue(1_000_000);
+    await t.svc.checkTriggers(later(30));
+    expect(t.executor.place).not.toHaveBeenCalled();
+    expect(t.repo.decisions[0]).toMatchObject({ decision: 'SKIP', skipReason: 'cluster_not_taken' });
+    t.svc.onModuleDestroy();
+  });
+
+  it('never waits inside the last minutes of the session', async () => {
+    const t = build({ cfg: { mode: 'live', minMinutesToClose: 300 }, signal: at, ltp: () => 101, funds: 500 });
+    expect(await t.svc.evaluate(ev, T0)).not.toMatchObject({ decision: 'PENDING' });
+    t.svc.onModuleDestroy();
+  });
+
+  it('SIGNAL_ENTRY_RETRY_MIN=0 is the rollback: paper at once', async () => {
+    const t = build({ cfg: { mode: 'live', entryRetryMin: 0 } as never, signal: at, ltp: () => 101, funds: 500 });
+    expect(await t.svc.evaluate(ev, T0)).toMatchObject({ decision: 'PAPER' });
+    t.svc.onModuleDestroy();
+  });
+
+  it('restart after the window: the paper trade still opens', async () => {
+    const a = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    await a.svc.evaluate(ev, T0);
+    a.svc.onModuleDestroy();
+    const b = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    b.repo.decisions.push(...a.repo.decisions);
+    expect(await b.svc.resumeTriggers(later(10 * 60))).toBe(0);
+    expect(b.paper.open).toHaveBeenCalledTimes(1);
+    expect(b.repo.decisions[0]).toMatchObject({ decision: 'PAPER', skipReason: 'insufficient_funds' });
+  });
+
+  it('a re-emitted signal.ready never starts a second evaluation while waiting', async () => {
+    const t = build({ cfg: { mode: 'live' }, signal: at, ltp: () => 101, funds: 500 });
+    await t.svc.evaluate(ev, T0);
+    expect(await t.svc.evaluate(ev, later(10))).toBeNull();
+    t.svc.onModuleDestroy();
   });
 });

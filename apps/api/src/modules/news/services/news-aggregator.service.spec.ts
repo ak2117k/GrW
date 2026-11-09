@@ -185,3 +185,25 @@ describe('NewsAggregatorService — refused-source back-off (ET Auto HTTP 403, 2
     expect(t.warn.mock.calls.filter((c) => String(c[0]).includes('refused'))).toHaveLength(0);
   });
 });
+
+describe('getNewsForStockPage', () => {
+  const page = () => {
+    const findMany = jest.fn().mockResolvedValue([]);
+    const svc = new NewsAggregatorService({ newsArticle: { findMany } } as never, {} as never, {} as never);
+    return { svc, findMany };
+  };
+  it('reads the new tags as well as the old ones (prod 2026-11-09: ADANIGREEN 0 old, 19 new in 30 days)', async () => {
+    const { svc, findMany } = page();
+    await svc.getNewsForStockPage('adanigreen');
+    expect(findMany).toHaveBeenCalledWith({
+      where: { OR: [{ relatedSymbols: { has: 'ADANIGREEN' } }, { instruments: { has: 'ADANIGREEN' } }] },
+      orderBy: { publishedAt: 'desc' },
+      take: 20,
+    });
+  });
+  it('the sentinel lookup stays on the old tags, so the live exit triggers do not change', async () => {
+    const { svc, findMany } = page();
+    await svc.getNewsForSymbol('ADANIGREEN');
+    expect(findMany.mock.calls[0][0].where).toEqual({ relatedSymbols: { has: 'ADANIGREEN' } });
+  });
+});

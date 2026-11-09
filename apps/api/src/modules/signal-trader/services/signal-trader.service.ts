@@ -9,7 +9,7 @@ import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
 import { resolveContract, segmentFor, type ResolvedContract, type ResolveResult } from '../domain/contract-resolver';
-import { applyJudgeTightening, evaluateGate, planEntry, riskCapFor, type EntryPlan, type GateCheck, type GateFacts, type GateResult, type TriggerState } from '../domain/gate';
+import { applyJudgeTightening, evaluateGate, planEntry, riskCapFor, type EntryPlan, type GateCheck, type GateFacts, type GateResult, type EntryRetry, type TriggerState } from '../domain/gate';
 import { judgeDecision, signalJudgePromptVersion, signalJudgeSystem, type JudgeVerdict } from '../domain/judge';
 import { eventContextFor, type EventContext, type EventContextDeps } from '../../news-events/events/event-context';
 import { slEnforceability } from '../domain/execution';
@@ -91,6 +91,8 @@ interface BaseFacts {
   tradesToday: number | null;
   signalLossToday: number | null;
   clusterTaken: boolean | null;
+  /** The cluster this signal belongs to: a retried entry must keep "not already taken from another channel". */
+  clusterId: string | null;
   holding: boolean | null;
   coreOff: boolean | null;
   slEnf: ReturnType<typeof slEnforceability>;
@@ -168,6 +170,9 @@ export function learnTake(j: JudgeOutcome, agreeCount: number, conflict: boolean
     judgedAt: typeof rec.judgedAt === 'string' ? rec.judgedAt : now.toISOString(),
   };
 }
+
+/** While a TAKE is being tried again, each try re-reads the account and the whole gate, so not every 5 s. */
+const ENTRY_RETRY_POLL_SEC = 30;
 
 /** Re-evaluations allowed for one signal (a low-confidence SKIP upgraded by corroboration). */
 const MAX_EVALUATIONS = 3;
@@ -352,7 +357,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       owner ? this.safe(() => coreEntryAllowed('signal-trader', { userId: owner, ref: c?.tradingsymbol ?? s.underlying })) : Promise.resolve(false),
     ]);
     const slEnf = slEnforceability(this.env, owner, c?.exchange ?? null, c?.tradingsymbol ?? null);
-    return { contract, c, marketOpen, minutesToClose, ltp, tradesToday, signalLossToday, clusterTaken, holding, coreOff, slEnf };
+    return { contract, c, marketOpen, minutesToClose, ltp, tradesToday, signalLossToday, clusterTaken, clusterId: e.clusterId ?? null, holding, coreOff, slEnf };
   }
 
   private async safe<T>(fn: () => Promise<T>): Promise<T | null> {
@@ -603,7 +608,9 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const recheck: GateCheck = { name: 'pre_send_price', ok: inBand && stillProtective, required: true, detail: fresh === null ? 'no fresh quote before sending' : `LTP ${fresh} vs band [${finalPlan.bandLow}, ${finalPlan.bandHigh}], SL ${finalPlan.sl}` };
     const checks: GateCheck[] = [...gateChecks, recheck];
     if (!recheck.ok) {
-      return this.skip(decisionId, 'price_moved', recheck.detail, checks, judgeWithChanges, finalPlan, channel, what);
+      // A crossed stop is a dead call. Otherwise the premium may be back in a moment (CRUDEOIL 8200 PE, 2026-11-09: ₹1.50 out after the judge's 54 s).
+      const waiting = fresh !== null && !stillProtective ? null : await this.retryEntry({ kind: 'price', detail: recheck.detail }, decisionId, s, channel, now, checks, finalPlan, j, fresh, base);
+      return waiting ?? this.skip(decisionId, 'price_moved', recheck.detail, checks, judgeWithChanges, finalPlan, channel, what);
     }
 
     // ---- live: enough funds for this entry? (unknown → sent as before; short → PAPER / SKIP) ----
@@ -614,7 +621,10 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     checks.push(funds);
     const noFunds: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: need.required, available, method: need.method };
     if (funds.ok === false) {
-      return this.paperOrSkip(noFunds, funds, checks, judgeWithChanges);
+      // Cash can free up in minutes (UNIONBANK, 2026-11-09: refused at 15:07, ₹25k came back at 15:09).
+      const retry = { kind: 'funds' as const, detail: funds.detail, required: need.required, available, method: need.method, expiry: noFunds.expiry };
+      const waiting = await this.retryEntry(retry, decisionId, s, channel, now, checks, finalPlan, j, fresh, base);
+      return waiting ?? this.paperOrSkip(noFunds, funds, checks, judgeWithChanges);
     }
 
     await this.repo.finishDecision(decisionId, { gate: checks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
@@ -632,6 +642,65 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     });
     void now;
     return { decisionId, decision: 'TAKE', skipReason: null, placed: placed.kind };
+  }
+
+  /**
+   * A TAKE that failed only on funds or on the price band: keep the decision PENDING in the trigger watch for
+   * SIGNAL_ENTRY_RETRY_MIN. Each try is the full gate and this same path, so nothing is bypassed; the judge is reused
+   * while fresh. null = no waiting (the caller gives up as before). A real ABOVE / BELOW trigger that fired is not
+   * converted: it has already had its own wait.
+   */
+  private async retryEntry(retry: EntryRetry, decisionId: string, s: SignalView, channel: string, now: Date, checks: GateCheck[], plan: EntryPlan, j: JudgeTake, ltp: number | null, base: BaseFacts): Promise<EvaluationResult | null> {
+    const waitingNow = { decisionId, decision: 'PENDING' as const, skipReason: null };
+    if (plan.trigger?.retry) {
+      const live = this.pending.get(decisionId);
+      if (live) {
+        live.trigger.retry = retry;
+        live.plan = plan;
+        live.gate = checks;
+        await this.repo.touchTrigger(decisionId, { ...plan, trigger: live.trigger }).catch(() => undefined);
+      }
+      return waitingNow;
+    }
+    if (plan.trigger) return null;
+    const expiresAt = triggerExpiry(now, this.cfg.entryRetryMin, base.minutesToClose, this.cfg.minMinutesToClose);
+    if (!expiresAt) return null;
+    const pendingNow = await this.safe(() => this.repo.pendingTriggerCount());
+    if (pendingNow === null || pendingNow >= this.cfg.triggerMaxPending) return null;
+    const trigger: TriggerState = {
+      price: plan.limitPrice,
+      op: plan.side === 'BUY' ? 'ABOVE' : 'BELOW',
+      bandLow: plan.bandLow,
+      bandHigh: plan.bandHigh,
+      armedAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      judgedAt: j.judgedAt,
+      lastLtp: ltp,
+      lastCheckAt: now.toISOString(),
+      retry,
+    };
+    const planWithRetry: EntryPlan = { ...plan, trigger };
+    if (!(await this.repo.armTrigger(decisionId, { gate: checks, judge: j.record, plan: planWithRetry }))) return null;
+    this.pending.set(decisionId, {
+      decisionId, signal: s, event: { signalId: s.id, clusterId: base.clusterId, agreeCount: j.agreeCount, conflict: j.conflict }, channel, trigger, gate: checks, judge: j, plan: planWithRetry,
+      nextPollAt: now.getTime() + ENTRY_RETRY_POLL_SEC * 1000, persistedAt: now.getTime(),
+    });
+    this.ensureTimer();
+    this.logger.log(`[signal-trader] ${describeSignal(s)}: trying again until ${trigger.expiresAt} — ${retry.detail}`);
+    void sendOpsAlert(`signal-retry:${decisionId}`, `Signal ${plan.tradingsymbol}: AI said TAKE but ${retry.detail}. Trying again until ${trigger.expiresAt}.`);
+    return waitingNow;
+  }
+
+  /** The retry window ended: what would have happened at the first try. */
+  private giveUpRetry(p: PendingTrigger, retry: EntryRetry): Promise<EvaluationResult> {
+    const what = describeSignal(p.signal);
+    const plan: EntryPlan = { ...p.plan, trigger: p.trigger };
+    if (retry.kind === 'price') return this.skip(p.decisionId, 'price_moved', retry.detail, p.gate, p.judge.record, plan, p.channel, what);
+    const check: FundsCheck = {
+      name: 'funds', ok: false, required: true, detail: retry.detail, funds: { available: retry.available, required: retry.required, ok: false, method: retry.method },
+    };
+    const n: NoFundsContext = { decisionId: p.decisionId, signal: p.signal, plan, expiry: retry.expiry, channel: p.channel, what, required: retry.required, available: retry.available, method: retry.method };
+    return this.paperOrSkip(n, check, p.gate, p.judge.record);
   }
 
   /** Broker margin calculator (SmartAPI marginApi over the owner's live session). Never throws. */
@@ -740,7 +809,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       return;
     }
     if (now.getTime() < p.nextPollAt) return;
-    p.nextPollAt = now.getTime() + this.cfg.triggerPollSec * 1000;
+    p.nextPollAt = now.getTime() + (t.retry ? Math.max(ENTRY_RETRY_POLL_SEC, this.cfg.triggerPollSec) : this.cfg.triggerPollSec) * 1000;
     const owner = this.cfg.ownerUserId;
     const ltp = owner ? await this.quotes.ltp(owner, p.plan.token, p.plan.exchange).catch(() => null) : null;
     t.lastLtp = ltp;
@@ -752,7 +821,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       }
       return;
     }
-    void sendOpsAlert(`signal-trigger:${p.decisionId}:${t.lastCheckAt}`, triggerFiredAlert({ mode: this.cfg.mode, symbol: p.plan.tradingsymbol, op: t.op, price: t.price, ltp: ltp as number }));
+    if (!t.retry) void sendOpsAlert(`signal-trigger:${p.decisionId}:${t.lastCheckAt}`, triggerFiredAlert({ mode: this.cfg.mode, symbol: p.plan.tradingsymbol, op: t.op, price: t.price, ltp: ltp as number }));
     const r = await this.enqueue(() => this.fire(p, new Date(now.getTime())));
     if (r !== 'WAIT') this.pending.delete(p.decisionId);
   }
@@ -781,10 +850,11 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       } else {
         j = { ...p.judge, record: { ...(p.judge.record as Record<string, unknown>), reused: true } };
       }
-      if (learning(this.cfg)) return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, learnTake(j, p.event.agreeCount ?? 1, p.event.conflict === true, now), base);
-      if (!j.ok && liveLearning(this.cfg)) return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, learnTake(j, p.event.agreeCount ?? 1, p.event.conflict === true, now), base);
+      const untilDone = (r: EvaluationResult): EvaluationResult | 'WAIT' => (r.decision === 'PENDING' ? 'WAIT' : r);
+      if (learning(this.cfg)) return untilDone(await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, learnTake(j, p.event.agreeCount ?? 1, p.event.conflict === true, now), base));
+      if (!j.ok && liveLearning(this.cfg)) return untilDone(await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, learnTake(j, p.event.agreeCount ?? 1, p.event.conflict === true, now), base));
       if (!j.ok) return this.skip(p.decisionId, j.reason, j.detail, pg.gate.checks, j.record, plan, p.channel, what);
-      return await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, j, base);
+      return untilDone(await this.act(p.decisionId, s, p.channel, now, pg.gate.checks, plan, j, base));
     } catch (err) {
       this.logger.error(`[signal-trader] trigger fire for ${p.decisionId} failed: ${errText(err)}`);
       return this.skip(p.decisionId, 'internal_error', errText(err), p.gate, p.judge.record, p.plan, p.channel, what);
@@ -793,6 +863,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
   private expire(p: PendingTrigger): Promise<EvaluationResult> {
     const t = p.trigger;
+    if (t.retry) return this.giveUpRetry(p, t.retry);
     const mins = Math.round((Date.parse(t.expiresAt) - Date.parse(t.armedAt)) / 60_000);
     return this.skip(p.decisionId, 'trigger_expired', `waited ${mins} min for ${t.op} ${t.price}; last LTP ${t.lastLtp ?? '?'}`, p.gate, p.judge.record, { ...p.plan, trigger: t }, p.channel, describeSignal(p.signal));
   }

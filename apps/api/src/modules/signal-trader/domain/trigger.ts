@@ -1,4 +1,4 @@
-import { entryBand, type TriggerState } from './gate';
+import { entryBand, type EntryRetry, type TriggerState } from './gate';
 import type { SignalView } from './signal.types';
 
 /**
@@ -58,6 +58,16 @@ export function judgeFresh(judgedAt: string | null | undefined, now: Date, reuse
   return Number.isFinite(t) && now.getTime() - t <= reuseMin * 60_000;
 }
 
+function readRetry(raw: unknown): EntryRetry | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const detail = String(r.detail ?? '');
+  if (r.kind === 'price') return { kind: 'price', detail };
+  if (r.kind !== 'funds' || typeof r.required !== 'number') return undefined;
+  const method = r.method === 'notional' || r.method === 'estimate' || r.method === 'broker' ? r.method : 'premium';
+  return { kind: 'funds', detail, required: r.required, available: typeof r.available === 'number' ? r.available : null, method, expiry: typeof r.expiry === 'string' ? r.expiry : null };
+}
+
 /** Read a TriggerState back from SignalDecision.plan JSON (restart-safe); null when malformed. */
 export function readTrigger(plan: unknown): TriggerState | null {
   if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return null;
@@ -81,5 +91,6 @@ export function readTrigger(plan: unknown): TriggerState | null {
     judgedAt: typeof t.judgedAt === 'string' ? t.judgedAt : null,
     lastLtp: n(t.lastLtp),
     lastCheckAt: typeof t.lastCheckAt === 'string' ? t.lastCheckAt : null,
+    ...(readRetry(t.retry) ? { retry: readRetry(t.retry) } : {}),
   };
 }

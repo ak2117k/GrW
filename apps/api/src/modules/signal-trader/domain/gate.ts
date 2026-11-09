@@ -69,7 +69,14 @@ export interface TriggerState {
   judgedAt: string | null;
   lastLtp: number | null;
   lastCheckAt: string | null;
+  /** Set when this is not a waiting entry but a TAKE being tried again; what to do if the window ends. */
+  retry?: EntryRetry;
 }
+
+/** Why the last try of a TAKE failed. Funds → paper when the window ends; price → SKIP('price_moved'). */
+export type EntryRetry =
+  | { kind: 'price'; detail: string }
+  | { kind: 'funds'; detail: string; required: number; available: number | null; method: 'premium' | 'notional' | 'estimate' | 'broker'; expiry: string | null };
 
 export interface GateResult {
   pass: boolean;

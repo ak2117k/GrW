@@ -67,6 +67,8 @@ export interface SignalTraderConfig {
   triggerMaxPending: number;
   /** Seconds between LTP polls of one armed trigger (never below 5). */
   triggerPollSec: number;
+  /** SIGNAL_ENTRY_RETRY_MIN: a TAKE short of funds or just outside its price band keeps being tried this long. 0 = give up at once. */
+  entryRetryMin: number;
   /** When a trigger fires, a judge verdict older than this (minutes) is asked again. */
   judgeReuseMin: number;
   /** Engine-derived SL when the channel hides it (level book → delta / premium % / ATR). */
@@ -278,6 +280,7 @@ export const SIGNAL_DEFAULTS = {
   triggerWaitMin: 30,
   triggerMaxPending: 5,
   triggerPollSec: 5,
+  entryRetryMin: 5,
   judgeReuseMin: 10,
   engineSlOptionPct: 25,
   engineSlBufferPct: 0.15,
@@ -357,6 +360,7 @@ export function parseSignalTraderConfig(env: Env): SignalTraderConfig {
     // Owner cap: never more than 5 watched at once.
     triggerMaxPending: num(env, 'SIGNAL_TRIGGER_MAX_PENDING', SIGNAL_DEFAULTS.triggerMaxPending, (n) => int(n) && n >= 1 && n <= 5, problems),
     triggerPollSec: num(env, 'SIGNAL_TRIGGER_POLL_SEC', SIGNAL_DEFAULTS.triggerPollSec, (n) => int(n) && n >= 5 && n <= 60, problems),
+    entryRetryMin: num(env, 'SIGNAL_ENTRY_RETRY_MIN', SIGNAL_DEFAULTS.entryRetryMin, (n) => int(n) && n >= 0 && n <= 10, problems),
     judgeReuseMin: num(env, 'SIGNAL_JUDGE_REUSE_MIN', SIGNAL_DEFAULTS.judgeReuseMin, (n) => n >= 0 && n <= 10, problems),
     engineSl: parseOnOff(env.SIGNAL_ENGINE_SL, true, 'SIGNAL_ENGINE_SL', problems),
     // Bounds: a typo can make the % stop neither absurdly wide nor zero.

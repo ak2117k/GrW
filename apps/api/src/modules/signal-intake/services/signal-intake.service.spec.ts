@@ -340,12 +340,12 @@ describe('SignalIntakeService — image posts (vision)', () => {
   });
 
   it('daily cap counts ai_calls signal.vision rows since IST midnight; at the cap the image is skipped', async () => {
-    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }, { used: 40 });
+    const { v, classify } = fakeVision({ kind: 'NOISE', isSignal: false, signals: [] }, { used: 120 });
     const m = make({ vision: v });
     await m.svc.handle(img(m, 'm1', 'A'));
     expect(v.usedSince).toHaveBeenCalledWith(new Date('2026-10-22T18:30:00Z'));
     expect(classify).not.toHaveBeenCalled();
-    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: 'daily vision cap 40 reached' });
+    expect(m.mem.classes.get('m1')).toMatchObject({ status: 'LLM_SKIPPED', reason: 'daily vision cap 120 reached' });
   });
 
   it('the in-process count caps too when ai_calls lags (SIGNAL_VISION_DAILY_CAP=1)', async () => {

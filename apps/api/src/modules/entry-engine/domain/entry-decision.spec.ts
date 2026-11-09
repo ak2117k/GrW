@@ -39,7 +39,7 @@ describe('newsReading', () => {
     const r = newsReading(
       [
         impact({ clusterId: 'future', analysedAt: new Date(AT.getTime() + MIN) }),
-        impact({ clusterId: 'old', analysedAt: new Date(AT.getTime() - (ENTRY_ENGINE.newsLookbackMin + 1) * MIN) }),
+        impact({ clusterId: 'old', magnitude: 'LOW', analysedAt: new Date(AT.getTime() - (ENTRY_ENGINE.newsLookbackMin + 1) * MIN) }),
         impact({ clusterId: 'weak', confidence: 0.3 }),
         impact({ clusterId: 'other', symbols: ['RELIANCE'], sectors: ['NIFTY ENERGY'] }),
       ],
@@ -203,5 +203,30 @@ describe('event-day news waiver (2026-11-04 CRUDEOIL after the US midterms)', ()
   });
   it('an absent calendar waives nothing', () => {
     expect(entryDecision(input({ news: NO_DATA_NEWS, event: { status: 'absent', reason: 'db down' } })).action).toBe('NO_TRADE');
+  });
+});
+
+describe('strong news is remembered for the IST day (owner 2026-11-09: Iran talks read BEAR MED at 07:15, crude fell all evening)', () => {
+  const evening = new Date('2026-11-09T14:30:00Z'); // 20:00 IST
+  const morning = new Date('2026-11-09T01:45:00Z'); // 07:15 IST
+  const row = (o: Partial<ImpactRow>) => impact({ analysedAt: morning, firstSeen: morning, ...o });
+
+  it('a MED or HIGH story not priced in still counts in the evening', () => {
+    const r = newsReading([row({ clusterId: 'a', confidence: 0.6 })], 'CRUDEOIL', evening);
+    expect(r).toMatchObject({ lean: 'BEARISH', material: true });
+    expect(newsReading([row({ clusterId: 'h', magnitude: 'HIGH' })], 'CRUDEOIL', evening).lean).toBe('BEARISH');
+  });
+  it('a LOW story or one already priced in stays on the 60 minute window', () => {
+    expect(newsReading([row({ magnitude: 'LOW' })], 'CRUDEOIL', evening).lean).toBe('NO_DATA');
+    expect(newsReading([row({ pricedIn: true })], 'CRUDEOIL', evening).lean).toBe('NO_DATA');
+  });
+  it('yesterday does not carry over', () => {
+    const y = new Date('2026-11-08T18:29:00Z'); // 23:59 IST the day before
+    expect(newsReading([row({ analysedAt: y, firstSeen: y })], 'CRUDEOIL', evening).lean).toBe('NO_DATA');
+  });
+  it('a later story the other way offsets it', () => {
+    const late = new Date('2026-11-09T14:00:00Z');
+    const r = newsReading([row({ clusterId: 'a' }), row({ clusterId: 'b', direction: 'BULL', analysedAt: late, firstSeen: late })], 'CRUDEOIL', evening);
+    expect(r.lean).toBe('NEUTRAL');
   });
 });

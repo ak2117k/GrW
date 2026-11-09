@@ -71,7 +71,7 @@ export function parseSignalIntakeConfig(env: Record<string, string | undefined>)
     ownerUserId: owner,
     visionEnabled: !off(env.SIGNAL_VISION),
     visionModel: (env.SIGNAL_VISION_MODEL ?? '').trim() || SIGNAL_VISION_DEFAULT_MODEL,
-    visionDailyCap: int(env.SIGNAL_VISION_DAILY_CAP, 40, 0, 10_000),
+    visionDailyCap: int(env.SIGNAL_VISION_DAILY_CAP, 120, 0, 10_000), // 40 ran out at 18:00 on 2026-11-09, mostly on P&L screenshots
     visionMaxAgeMs: int(env.SIGNAL_VISION_MAX_AGE_MIN, 60, 1, 7 * 24 * 60) * 60_000,
     infoLlmEnabled: !off(env.SIGNAL_INFO_LLM),
     infoLlmDailyCap: int(env.SIGNAL_INFO_LLM_DAILY_CAP, 60, 0, 10_000),

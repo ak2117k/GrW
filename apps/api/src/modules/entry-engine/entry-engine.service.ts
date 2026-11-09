@@ -116,7 +116,9 @@ export class EntryEngineService {
     const line = await this.lineOf(underlying, at);
     const from = new Date(at.getTime() - BAR_HISTORY_DAYS * 24 * 60 * MIN);
     // Impacts for the 60-min read AND the 3 h news theme; the day's pre-open outlook (08:30 IST).
-    const lookbackMin = Math.max(ENTRY_ENGINE.newsLookbackMin, NEWS_THEME.intraday.windowMin);
+    // Also back to IST midnight: strong stories are remembered for the day (newsReading).
+    const sinceIstMidnightMin = Math.ceil(((at.getTime() + 330 * MIN) % (24 * 60 * MIN)) / MIN);
+    const lookbackMin = Math.max(ENTRY_ENGINE.newsLookbackMin, NEWS_THEME.intraday.windowMin, sinceIstMidnightMin);
     const [impacts, hub, table, preOpen] = await Promise.all([
       this.repo.impacts(new Date(at.getTime() - lookbackMin * MIN), at),
       line ? this.repo.hubBars(line.exchange, line.token, from, at) : Promise.resolve([]),

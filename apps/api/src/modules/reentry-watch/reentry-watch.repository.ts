@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SIGNAL_PAPER_STRATEGY } from '../signal-trader/domain/paper';
-import { nameFromSymbol, optionKindOf, type ExitedPosition } from './domain/reentry-rules';
+import { nameFromSymbol, optionKindOf, watchUnderlying, type ExitedPosition } from './domain/reentry-rules';
 import { REENTRY_OF_TAG, REENTRY_STRATEGY, type ReentryWatchMode } from './reentry-watch.config';
 
 /** The paper strategies whose exits start a watch (kept literal for ENGINE_ENTRY like signal-trader's paper.ts). */
@@ -48,7 +48,7 @@ export class ReentryWatchRepository {
       if (!kind || !t.exitTime) continue;
       out.push({
         refTable: 'trades', refId: t.id, origin: t.strategy === 'ENGINE_ENTRY' ? 'ENGINE_PAPER' : 'SIGNAL_PAPER',
-        symbol: t.instrument.symbol, exchange: t.instrument.exchange, underlying: up(t.instrument.name) || nameFromSymbol(t.instrument.symbol),
+        symbol: t.instrument.symbol, exchange: t.instrument.exchange, underlying: watchUnderlying(up(t.instrument.name) || nameFromSymbol(t.instrument.symbol)),
         kind, side: up(t.side) === 'SELL' ? 'SELL' : 'BUY', entryAt: t.entryTime ?? null, exitAt: t.exitTime, exitPrice: t.exitPrice ?? null,
       });
     }
@@ -63,7 +63,7 @@ export class ReentryWatchRepository {
       if (!kind || !t.exitTime) continue;
       out.push({
         refTable: 'trade_trackers', refId: t.id, origin: 'REAL', symbol: t.symbol, exchange: t.exchange,
-        underlying: (await this.instrumentName(t.symbol, t.exchange)) ?? nameFromSymbol(t.symbol),
+        underlying: watchUnderlying((await this.instrumentName(t.symbol, t.exchange)) ?? nameFromSymbol(t.symbol)),
         kind, side: t.qty < 0 ? 'SELL' : 'BUY', entryAt: t.entryTime ?? null, exitAt: t.exitTime, exitPrice: t.exitPrice ?? null,
       });
     }

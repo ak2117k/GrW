@@ -24,6 +24,7 @@ describe('PrismaChainRepo', () => {
       exchange: { in: ['NFO', 'BFO', 'MCX'] },
       optionType: { in: ['CE', 'PE'] },
       isActive: true,
+      token: { not: { startsWith: 'PAPER-' } },
       expiry: { gte: localMidnight('2026-10-13'), lt: localMidnight('2026-10-14') },
     });
     expect(out).toEqual([
@@ -38,6 +39,7 @@ describe('PrismaChainRepo', () => {
     await expect(repo.expiries('NIFTY', '2026-10-13')).resolves.toEqual(['2026-10-13', '2026-10-20']);
     const q = prisma.instrument.findMany.mock.calls[0][0];
     expect(q.where.expiry).toEqual({ gte: localMidnight('2026-10-13') });
+    expect(q.where.token).toEqual({ not: { startsWith: 'PAPER-' } }); // paper rows (prod 2026-11-09) made crude read as NFO, closed at 15:30
     expect(q.distinct).toEqual(['expiry']);
     expect(q.orderBy).toEqual({ expiry: 'asc' });
   });

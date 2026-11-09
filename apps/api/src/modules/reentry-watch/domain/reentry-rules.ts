@@ -27,6 +27,11 @@ export const REENTRY_WATCH = Object.freeze({
 /** The engine universe the watch can read (index line or MCX nearest future + chain + liquidity). */
 export const REENTRY_UNIVERSE: readonly string[] = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'GOLD', 'SILVER']);
 
+/** Crude Mini is watched on CRUDEOIL: the same price, and the big contract has the line and the chain the watch reads. */
+export function watchUnderlying(name: string | null): string | null {
+  return name === 'CRUDEOILM' ? 'CRUDEOIL' : name;
+}
+
 const MIN = 60_000;
 const IST = 330 * MIN;
 const r2 = (n: number) => Math.round(n * 100) / 100;

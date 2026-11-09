@@ -166,6 +166,10 @@ export interface NewsReading {
 export type NewsMaterialPath = 'STORY' | 'THEME' | 'PRE_OPEN';
 
 const MIN = 60_000;
+const IST_OFFSET_MS = 330 * MIN;
+const DAY_MS = 24 * 60 * MIN;
+/** Epoch ms of the IST midnight that starts the day of `t`. */
+const istDayStart = (t: number) => Math.floor((t + IST_OFFSET_MS) / DAY_MS) * DAY_MS - IST_OFFSET_MS;
 const r4 = (x: number) => Math.round(x * 10_000) / 10_000;
 const r1 = (x: number) => Math.round(x * 10) / 10;
 const pct = (x: number | null) => (x === null ? 'n/a' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(2)}%`);
@@ -177,10 +181,14 @@ const pct = (x: number | null) => (x === null ? 'n/a' : `${x >= 0 ? '+' : ''}${(
 export function newsReading(impacts: readonly ImpactRow[], underlying: string, at: Date): NewsReading {
   const t = at.getTime();
   const from = t - ENTRY_ENGINE.newsLookbackMin * MIN;
+  const dayStart = istDayStart(t);
   const byCluster = new Map<string, ImpactRow>();
   for (const r of impacts) {
     const a = r.analysedAt.getTime();
-    if (!(a > from && a <= t)) continue;
+    // A MED / HIGH story not yet priced in is remembered for the IST day (2026-11-09: the Iran talks read BEAR MED
+    // at 07:15 and crude fell ~3% that evening while the engine saw "no news").
+    const remembered = a >= dayStart && !r.pricedIn && ENTRY_ENGINE.newsMaterialMagnitudes.includes(String(r.magnitude).toUpperCase());
+    if (!((a > from || remembered) && a <= t)) continue;
     if (!(r.confidence >= ENTRY_ENGINE.newsMinConfidence)) continue;
     if (!impactConcerns(underlying, r)) continue;
     const prev = byCluster.get(r.clusterId);

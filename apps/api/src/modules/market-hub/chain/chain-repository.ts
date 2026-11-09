@@ -13,6 +13,11 @@ const BASELINE_LOOKBACK_MS = 10 * DAY_MS;
  * master refresh keeps (master-contract.ts keepMasterRow), so adding it cannot pull in BSE stock options.
  */
 const CHAIN_EXCHANGES: readonly HubExchange[] = ['NFO', 'BFO', 'MCX'];
+/**
+ * The paper path writes rows like NFO:PAPER-CRUDEOIL-261117-8500-PE. They are not listed contracts, and one read first
+ * made crude's chain an NFO chain, so its OI capture stopped at the NSE close (prod 2026-11-06 and 11-09).
+ */
+const LISTED_TOKEN = { not: { startsWith: 'PAPER-' } } as const;
 const OPEN_TRADE_STATUSES = ['OPEN', 'PARTIALLY_FILLED'];
 
 /**
@@ -64,6 +69,7 @@ export class PrismaChainRepo implements ChainRepo, OiCaptureRepo {
         exchange: { in: [...CHAIN_EXCHANGES] },
         optionType: { in: ['CE', 'PE'] },
         isActive: true,
+        token: LISTED_TOKEN,
         expiry: { gte: localMidnight(expiry), lt: localMidnight(nextYmd(expiry)) },
       },
       select: { id: true, token: true, symbol: true, exchange: true, strike: true, optionType: true, lotSize: true },
@@ -86,6 +92,7 @@ export class PrismaChainRepo implements ChainRepo, OiCaptureRepo {
         exchange: { in: [...CHAIN_EXCHANGES] },
         optionType: { in: ['CE', 'PE'] },
         isActive: true,
+        token: LISTED_TOKEN,
         expiry: { gte: localMidnight(today) },
       },
       select: { expiry: true },

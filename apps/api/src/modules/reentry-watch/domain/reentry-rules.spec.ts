@@ -2,6 +2,7 @@ import { trendReading, type Bar1m, type Direction } from '../../entry-engine/dom
 import { bankNiftyBars, istTs, niftyBars, niftyReversalBars } from './reentry-fixtures';
 import {
   alertText, decideReentry, directionOf, moveInN, nameFromSymbol, noise15, noiseSessionOf, optionKindOf, REENTRY_WATCH, underlyingAt, type ReentryFacts, type ReentryVerdict,
+  watchUnderlying,
 } from './reentry-rules';
 
 const MIN = 60_000;
@@ -165,5 +166,16 @@ describe('re-entry rules', () => {
     expect(t).toBe('Re-entry (paper): NIFTY CE same direction — NIFTY 24,452 back above the 10:01 exit point 24,402 with the trend bullish; bought NIFTY10NOV2624450CE @ 152.3');
     const o = alertText({ underlying: 'NIFTY', original: 'BULLISH', verdict: { direction: 'OPPOSITE', enter: 'BEARISH' }, exitAt: new Date(istTs(DAY, '10:01')), ref: 24402, price: 24330, opened: null, note: 'no fresh LTP' });
     expect(o).toContain('NIFTY PE opposite direction — NIFTY 24,330 fell below the 10:01 exit point 24,402 with the trend bearish; not opened — no fresh LTP');
+  });
+});
+
+describe('watchUnderlying', () => {
+  it('watches Crude Mini on CRUDEOIL, the same price with a line and a chain (prod 2026-11-06: skipped as not-in-universe)', () => {
+    expect(watchUnderlying('CRUDEOILM')).toBe('CRUDEOIL');
+  });
+  it('leaves everything else alone', () => {
+    expect(watchUnderlying('CRUDEOIL')).toBe('CRUDEOIL');
+    expect(watchUnderlying('NIFTY')).toBe('NIFTY');
+    expect(watchUnderlying('RELIANCE')).toBe('RELIANCE');
   });
 });

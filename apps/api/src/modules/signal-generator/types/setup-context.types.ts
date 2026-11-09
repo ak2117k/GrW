@@ -75,6 +75,8 @@ export interface IndicatorReadings {
   /** The Indicators card's trend lines (owner 2026-11-09). Null with fewer than 80 bars. */
   ema20?: number | null;
   ema80?: number | null;
+  /** The MACD histogram on Heikin Ashi closes, the one the Indicators card and trend use. */
+  trendMacdHistogram?: number | null;
   /** 1 = EMA20 above EMA80 and MACD histogram above 0; -1 = the opposite; 0 = they disagree; null = not enough bars. */
   trend?: 1 | 0 | -1 | null;
   rsi14: number | null;

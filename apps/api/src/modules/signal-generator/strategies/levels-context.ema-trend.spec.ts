@@ -30,3 +30,14 @@ describe('Indicators card trend: EMA20/80 with MACD (owner 2026-11-09)', () => {
     expect(r.alignment.ema).toBe(1);
   });
 });
+
+describe('Indicators card reads Heikin Ashi, like the owner charts', () => {
+  it('EMA20/80 and the MACD use (O+H+L+C)/4, and the setup scoring keeps normal closes', () => {
+    const candles = up.map((close) => ({ close, open: close - 8, high: close + 1, low: close - 9, volume: 1 }));
+    const r = buildIndicatorReadings(candles as never, up[up.length - 1], true);
+    const flat = buildIndicatorReadings(up.map((c) => ({ close: c - 4, open: c - 4, high: c - 4, low: c - 4, volume: 1 })) as never, up[up.length - 1], true);
+    expect(r.ema20).toBeCloseTo(flat.ema20 as number, 6);
+    expect(r.trendMacdHistogram).toBeCloseTo(flat.macdHistogram as number, 6);
+    expect(r.ema9).toBeCloseTo(read(up).ema9 as number, 6);
+  });
+});

@@ -35,6 +35,7 @@ export interface IndicatorReadings {
   ema20?: number | null;
   ema80?: number | null;
   trend?: 1 | 0 | -1 | null;
+  trendMacdHistogram?: number | null;
   rsi14: number | null;
   macdHistogram: number | null;
   bollingerPosition: number | null;

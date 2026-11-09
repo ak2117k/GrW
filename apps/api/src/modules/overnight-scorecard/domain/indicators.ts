@@ -17,6 +17,11 @@ export function lastEma(values: readonly number[], period: number): number | nul
   return s.length ? s[s.length - 1] : null;
 }
 
+/** Heikin Ashi closes, (O+H+L+C)/4, which is what EMA and MACD read on the owner's charts. A bar with no high or low stays its close. */
+export function heikinCloses(bars: ReadonlyArray<{ open: number; high?: number | null; low?: number | null; close: number }>): number[] {
+  return bars.map((b) => (b.high == null || b.low == null ? b.close : (b.open + b.high + b.low + b.close) / 4));
+}
+
 /** MACD(12,26,9) histogram, last two values (for sign and slope). */
 export function macdHistogram(values: readonly number[]): { hist: number; prevHist: number } | null {
   const fast = emaSeries(values, 12);

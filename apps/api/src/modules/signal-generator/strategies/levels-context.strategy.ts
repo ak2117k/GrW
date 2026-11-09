@@ -107,8 +107,12 @@ export function buildIndicatorReadings(
   const closes = candles.map((c) => c.close);
   const ema9Val = ema(closes, 9);
   const ema21Val = ema(closes, 21);
-  const ema20Val = ema(closes, 20);
-  const ema80Val = ema(closes, 80);
+  // The card's trend reads Heikin Ashi closes, as the owner's charts do. Setup scoring keeps normal closes.
+  const heikin = candles.map((c) => (c.open + c.high + c.low + c.close) / 4);
+  const ema20Val = ema(heikin, 20);
+  const ema80Val = ema(heikin, 80);
+  const trendMacd = macd(heikin);
+  const trendMacdHistogram = trendMacd ? trendMacd.histogram : null;
   const rsi14Val = rsi(closes, 14);
   const macdVal = macd(closes);
   const bb = bollinger(closes, 20, 2);
@@ -116,8 +120,8 @@ export function buildIndicatorReadings(
 
   const macdHistogram = macdVal ? macdVal.histogram : null;
   let trend: 1 | 0 | -1 | null = null;
-  if (ema20Val != null && ema80Val != null && macdHistogram != null) {
-    trend = ema20Val > ema80Val && macdHistogram > 0 ? 1 : ema20Val < ema80Val && macdHistogram < 0 ? -1 : 0;
+  if (ema20Val != null && ema80Val != null && trendMacdHistogram != null) {
+    trend = ema20Val > ema80Val && trendMacdHistogram > 0 ? 1 : ema20Val < ema80Val && trendMacdHistogram < 0 ? -1 : 0;
   }
 
   // Bollinger position normalised to [-1, +1] using `(spot - middle) /
@@ -186,6 +190,7 @@ export function buildIndicatorReadings(
     ema21: ema21Val,
     ema20: ema20Val,
     ema80: ema80Val,
+    trendMacdHistogram,
     trend,
     rsi14: rsi14Val,
     macdHistogram,

@@ -249,6 +249,7 @@ function snapshotFromBook(book: LevelBook): LevelsSnapshot {
 
 /** Bars read for the Indicators card: the EMA80 needs a run-in past its first 80 to match the chart's line. */
 const INDICATOR_BARS = 300;
+const INDICATOR_MIN_BARS = 120;
 
 @Injectable()
 export class SignalGeneratorService {
@@ -738,17 +739,19 @@ export class SignalGeneratorService {
         );
       }
     }
-    if (candles.length < 30) {
+    // Stored history is often 60-90 daily bars, too short for an EMA80, so anything under the minimum asks the broker.
+    if (candles.length < INDICATOR_MIN_BARS) {
       try {
         const broker = await this.angelOneAdapter.getHistoricalData(
           token, exchange, timeframe, windowStart, now,
         );
-        candles = broker.slice(-INDICATOR_BARS).map((c: any) => ({
+        const fetched = broker.slice(-INDICATOR_BARS).map((c: any) => ({
           timestamp: new Date(c.timestamp),
           open: Number(c.open), high: Number(c.high),
           low: Number(c.low), close: Number(c.close),
           volume: Number(c.volume) || 0,
         }));
+        if (fetched.length > candles.length) candles = fetched; // a throttled, shorter answer never replaces stored bars
       } catch (err) {
         this.logger.warn(
           `computeIndicatorsFor: broker candles fetch failed for ${token}/${timeframe}: ${err instanceof Error ? err.message : err}`,

@@ -10,7 +10,7 @@ import {
   scoreVix,
   timeframeVote,
 } from './factors';
-import { betaTo } from './indicators';
+import { betaTo, heikinCloses } from './indicators';
 import { assemble, bandOf, clampPoints, compactScorecard } from './scoring';
 
 const leg = (oi: number, oi_chg: number | null) => ({ ltp: 1, oi, oi_chg, vol: 0, iv: null, delta: null, gamma: null, theta: null, vega: null });
@@ -357,5 +357,14 @@ describe('betaTo', () => {
   it('too little overlap, or a flat index ⇒ null', () => {
     expect(betaTo(idx.slice(0, 10), idx)).toBeNull();
     expect(betaTo(idx, idx.map((b) => ({ ...b, close: 100 })))).toBeNull();
+  });
+});
+
+describe('heikinCloses', () => {
+  it('is (O+H+L+C)/4, so the scorecard reads what the owner charts show', () => {
+    expect(heikinCloses([{ open: 10, high: 14, low: 8, close: 12 }])).toEqual([11]);
+  });
+  it('falls back to the close when a stored bar has no high or low', () => {
+    expect(heikinCloses([{ open: 10, close: 12 }])).toEqual([12]);
   });
 });

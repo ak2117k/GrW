@@ -22,6 +22,7 @@ import {
 } from './domain/factors';
 import { betaTo } from './domain/indicators';
 import type { DailyBar } from './domain/outcome';
+import { heikinCloses } from './domain/indicators';
 import type { PositionShape } from './domain/positions';
 import { assemble } from './domain/scoring';
 import { applyTuning, stockMovePointsSetting } from './domain/tuning';
@@ -193,8 +194,8 @@ export class ScorecardEngine {
           history: history.v,
           chainFailed: chain.failed,
           dailyBars: daily.v,
-          daily: daily.v?.map((b) => b.close) ?? null,
-          m15: m15.v?.map((b) => b.close) ?? null,
+          daily: daily.v ? heikinCloses(daily.v) : null,
+          m15: m15.v ? heikinCloses(m15.v) : null,
           setups: setups.v,
         };
       })();

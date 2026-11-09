@@ -144,11 +144,11 @@ export class ScorecardRepository {
     if (!id) return null;
     const rows = await this.prisma.candle.findMany({
       where: { instrumentId: id, timeframe, ...(until ? { timestamp: { lte: until } } : {}) },
-      select: { timestamp: true, open: true, close: true },
+      select: { timestamp: true, open: true, high: true, low: true, close: true },
       orderBy: { timestamp: 'desc' },
       take: limit,
     });
-    return rows.reverse().map((r) => ({ day: istYmd(r.timestamp), open: r.open, close: r.close }));
+    return rows.reverse().map((r) => ({ day: istYmd(r.timestamp), open: r.open, high: r.high, low: r.low, close: r.close }));
   }
 
   /** Daily India VIX closes (last 1m close of each IST day) from mbm_bars_1m, oldest first. */

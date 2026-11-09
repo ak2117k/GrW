@@ -1,7 +1,7 @@
 import clsx from 'clsx';
 import { useIndicators } from '@/hooks/useIndicators';
 import { Card } from './_shared';
-import { emaTrendChip } from './emaTrendChip';
+import { emaTrendChip, macdChip } from './emaTrendChip';
 
 interface Props {
   token: string;
@@ -48,12 +48,8 @@ export default function IndicatorsCard({ token, exchange, timeframe }: Props) {
         />
         <Chip
           label="MACD-H"
-          value={
-            ind.macdHistogram !== null
-              ? `${ind.macdHistogram >= 0 ? '+' : ''}${ind.macdHistogram.toFixed(2)}`
-              : '—'
-          }
-          alignment={ind.alignment.macd}
+          value={macdChip(ind).value}
+          alignment={macdChip(ind).alignment}
         />
         <Chip
           label="EMA20/80"

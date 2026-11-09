@@ -11,6 +11,8 @@ export interface DailyBar {
   day: string;
   open: number;
   close: number;
+  high?: number | null;
+  low?: number | null;
 }
 
 export interface Outcome {

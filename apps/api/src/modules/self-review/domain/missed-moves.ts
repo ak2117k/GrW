@@ -53,6 +53,7 @@ export const NO_EVIDENCE: MoveEvidence = { realTrade: false, paperTrade: false, 
 
 export type MissCause =
   | 'TRADED'
+  | 'OWNER_FOUND'
   | 'PAPER_ONLY'
   | 'SETUP_NOT_TAKEN'
   | 'IDEA_NOT_TAKEN'
@@ -82,7 +83,8 @@ export function bigMoves(rows: readonly DailyMoveRow[], minAtr = MISSED_MOVE_MIN
 /** The furthest point the stock reached in our pipeline, nearest to a trade first. */
 export function missCause(move: BigMove, e: MoveEvidence): MissCause {
   const up = move.retPct > 0;
-  if (e.realTrade) return 'TRADED';
+  // A real position with no engine behind it is the owner's find, and still a miss for the system.
+  if (e.realTrade) return e.setups.length + e.ideas.length + e.signals.length > 0 ? 'TRADED' : 'OWNER_FOUND';
   if (e.paperTrade) return 'PAPER_ONLY';
   if (e.setups.includes(up ? 'LONG' : 'SHORT')) return 'SETUP_NOT_TAKEN';
   if (e.ideas.includes(up ? 'CE_IDEA' : 'PE_IDEA')) return 'IDEA_NOT_TAKEN';
@@ -97,7 +99,8 @@ export function missCause(move: BigMove, e: MoveEvidence): MissCause {
 }
 
 const PLAIN: Record<MissCause, string> = {
-  TRADED: 'held a real position',
+  TRADED: 'an engine put it forward and we held a real position',
+  OWNER_FOUND: 'the owner found and traded it; no engine put it forward',
   PAPER_ONLY: 'held a paper position only',
   SETUP_NOT_TAKEN: 'a setup on the right side existed, no position',
   IDEA_NOT_TAKEN: 'a news idea on the right side existed, no setup or position',
@@ -110,7 +113,7 @@ const PLAIN: Record<MissCause, string> = {
   NO_SIGNAL: 'nothing in the system flagged it',
 };
 
-/** A position (real or paper) counts as caught; everything else is a miss for the diagnosis. */
+/** A position an engine put forward (real or paper) counts as caught; everything else is a miss for the diagnosis. */
 export function scoreMissedMove(sessionDate: string, move: BigMove, e: MoveEvidence): VerificationDraft {
   const cause = missCause(move, e);
   return {

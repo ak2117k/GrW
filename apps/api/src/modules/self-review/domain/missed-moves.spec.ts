@@ -20,8 +20,13 @@ describe('bigMoves', () => {
 });
 
 describe('missCause', () => {
-  it('a real position wins over everything else', () => {
-    expect(missCause(up, { ...NO_EVIDENCE, realTrade: true, paperTrade: true, articles: 3 })).toBe('TRADED');
+  it('a real position an engine put forward is TRADED, whichever side the engine was on', () => {
+    expect(missCause(up, { ...NO_EVIDENCE, realTrade: true, signals: ['BULL'] })).toBe('TRADED');
+    expect(missCause(up, { ...NO_EVIDENCE, realTrade: true, ideas: ['NO_TRADE'] })).toBe('TRADED');
+    expect(missCause(up, { ...NO_EVIDENCE, realTrade: true, setups: ['LONG'] })).toBe('TRADED');
+  });
+  it('a real position no engine put forward is the owner\'s find, even with news or a model flag', () => {
+    expect(missCause({ ...up, bucket: 'TOP20' }, { ...NO_EVIDENCE, realTrade: true, articles: 3 })).toBe('OWNER_FOUND');
   });
   it('a setup, idea or signal only counts on the side the stock moved', () => {
     expect(missCause(up, { ...NO_EVIDENCE, setups: ['LONG'] })).toBe('SETUP_NOT_TAKEN');
@@ -46,8 +51,11 @@ describe('missCause', () => {
 });
 
 describe('scoreMissedMove', () => {
-  it('a move we held is not a miss', () => {
-    expect(scoreMissedMove('2026-11-09', up, { ...NO_EVIDENCE, realTrade: true })).toMatchObject({ correct: true, subject: 'TRADED' });
+  it('a move only the owner found is still a miss', () => {
+    expect(scoreMissedMove('2026-11-09', up, { ...NO_EVIDENCE, realTrade: true })).toMatchObject({ correct: false, subject: 'OWNER_FOUND' });
+  });
+  it('a move an engine put forward and we held is not a miss', () => {
+    expect(scoreMissedMove('2026-11-09', up, { ...NO_EVIDENCE, realTrade: true, signals: ['BULL'] })).toMatchObject({ correct: true, subject: 'TRADED' });
     expect(scoreMissedMove('2026-11-09', up, { ...NO_EVIDENCE, paperTrade: true })).toMatchObject({ correct: true, subject: 'PAPER_ONLY' });
   });
   it('a miss carries its cause and the size of the move', () => {

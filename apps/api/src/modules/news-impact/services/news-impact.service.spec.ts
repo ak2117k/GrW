@@ -79,6 +79,12 @@ describe('NewsImpactService — batched layer 2', () => {
     expect(repo.bumpAttempts).toHaveBeenLastCalledWith(['c2']);
   });
 
+  it('a failed model call does not use up a story\'s attempts, so it is read once the model is back', async () => {
+    const { svc, repo } = setup({ clusters: [cluster('c1')], llmError: new Error('claude CLI: the call failed') });
+    await svc.run(NOW);
+    expect(repo.bumpAttempts).not.toHaveBeenCalled();
+  });
+
   it('busy shared slot: skipped without counting attempts', async () => {
     const { svc, repo } = setup({ llmError: new AssistBusyError(60_000) });
     expect(await svc.run(NOW)).toMatchObject({ reason: 'busy' });

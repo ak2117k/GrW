@@ -14,7 +14,8 @@ export type VerificationKind =
   | 'NEWS_IDEA'
   | 'MBM_PREDICTION'
   | 'MBM_RELATIVE'
-  | 'STOCK_MOVE';
+  | 'STOCK_MOVE'
+  | 'MISSED_MOVE';
 
 export interface KindStats {
   n: number;

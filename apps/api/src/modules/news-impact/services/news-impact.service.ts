@@ -116,7 +116,8 @@ export class NewsImpactService {
         this.logger.log('[news-impact] shared model slot busy — batch skipped, next run retries');
         return { ran: true, reason: 'busy', sent: 0 };
       }
-      await this.repo.bumpAttempts(batch.map((c) => c.id));
+      // A failed call says nothing about the stories: spending their attempts here gave up on every story
+      // that arrived during the 2026-11-06 outage, including Divi's Q2 results.
       throw e;
     }
     // Code guards over the reply (prompt v2): recap headlines carry no direction; one direction per target set.

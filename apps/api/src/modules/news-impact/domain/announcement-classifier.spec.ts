@@ -65,3 +65,12 @@ describe('NSE announcement classifier', () => {
     expect(combineTypes(['BOILERPLATE', 'NEWS']).type).toBe('NEWS');
   });
 });
+
+describe('board meeting outcomes', () => {
+  it('an NSE "Outcome of Board Meeting" filing counts as results, so the AI reads it', () => {
+    expect(classifyArticle({ source: NSE_ANNOUNCEMENTS, title: "DIVISLAB: Outcome of Board Meeting — Divi's Laboratories Limited has submitted to the Exchange" })).toMatchObject({ type: 'RESULTS', material: true });
+  });
+  it('a prior intimation of a board meeting stays boilerplate', () => {
+    expect(classifyArticle({ source: NSE_ANNOUNCEMENTS, title: 'X: Board Meeting Intimation — prior intimation of board meeting' })).toMatchObject({ boilerplate: true });
+  });
+});

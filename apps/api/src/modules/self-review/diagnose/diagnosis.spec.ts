@@ -202,13 +202,13 @@ describe('DiagnosisService', () => {
     const create = jest.fn().mockResolvedValue(reply('```json\n{"misses":[{"refIds":["r1"],"cause":"gap","category":"THESIS_WRONG","lessonKey":"old-key"}]}\n```'));
     const { svc } = make(create, { SENTINEL_MODEL_TRIGGERED: 'claude-x', SENTINEL_EFFORT_TRIGGERED: 'medium' });
     const res = await svc.diagnose('run1', [miss('r1'), miss('r2')]);
-    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd8' });
+    expect(res).toMatchObject({ status: 'OK', sent: 2, dropped: 0, model: 'claude-x', promptVersion: 'd9' });
     expect(res.misses).toEqual([{ refIds: ['r1'], cause: 'gap', category: 'THESIS_WRONG', lessonKey: 'old-key' }]);
     expect(create).toHaveBeenCalledTimes(1);
     const req = create.mock.calls[0][0];
     expect(req).toMatchObject({ model: 'claude-x', max_tokens: DIAGNOSIS_MAX_TOKENS, output_config: { effort: 'medium', format: { type: 'json_schema', schema: DIAGNOSIS_SCHEMA } } });
     expect(JSON.parse(req.messages[0].content).misses.map((m: MissInput) => m.refId)).toEqual(['r1', 'r2']);
-    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd8', model: 'claude-x' });
+    expect(diagnosisForRun(res)).toEqual({ misses: res.misses, promptVersion: 'd9', model: 'claude-x' });
   });
 
   it('checks the reply against the scorecard points it was sent', async () => {
@@ -291,7 +291,7 @@ describe('DiagnosisService', () => {
     const req = create.mock.calls[0][0];
     expect(JSON.parse(req.messages[0].content).engine).toEqual(engine);
     expect(req.system[0].text).toMatch(/fewer than 10 closed engine trades, say "insufficient sample"/);
-    expect(res).toMatchObject({ status: 'OK', promptVersion: 'd8', engineAssessment: '2 enters in 40; insufficient sample.' });
+    expect(res).toMatchObject({ status: 'OK', promptVersion: 'd9', engineAssessment: '2 enters in 40; insufficient sample.' });
     expect(diagnosisForRun(res)?.engineAssessment).toBe(res.engineAssessment);
     const c2 = jest.fn().mockResolvedValue(reply('{"misses":[],"engineAssessment":"x"}'));
     expect((await make(c2).svc.diagnose('r', [miss('r1')])).engineAssessment).toBeUndefined();

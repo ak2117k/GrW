@@ -16,6 +16,7 @@ export const KIND_ORDER = [
   'MBM_PREDICTION',
   'MBM_RELATIVE',
   'STOCK_MOVE',
+  'MISSED_MOVE',
   'SCORECARD_FACTOR',
 ] as const;
 
@@ -28,6 +29,7 @@ const KIND_LABELS: Record<string, string> = {
   MBM_PREDICTION: 'Move-size model',
   MBM_RELATIVE: 'Move size vs recent days',
   STOCK_MOVE: 'Stock big-move model',
+  MISSED_MOVE: 'Big F&O moves we caught',
 };
 
 export function kindLabel(kind: string): string {

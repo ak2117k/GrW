@@ -23,6 +23,8 @@ export const VERIFICATION_KINDS = [
   'PAPER_EXIT',
   /** A closed ENGINE_ENTRY paper trade (the entry engine): a gross loss is a miss, 2026-11-02. */
   'ENGINE_ENTRY',
+  /** An F&O stock that moved at least 2 ATR in the session: did we have it, and if not where was it lost (domain/missed-moves), 2026-11-09. */
+  'MISSED_MOVE',
 ] as const;
 export type VerificationKind = (typeof VERIFICATION_KINDS)[number];
 

@@ -67,7 +67,7 @@ const MATERIAL: ReadonlyArray<[MaterialKind, RegExp]> = [
   ['BUYBACK', /\bbuy-?back/i],
   ['CREDIT_RATING', /credit rating|\brating (upgrade|downgrade|reaffirm)|\b(crisil|icra|care ratings|india ratings|moody'?s|fitch|s&p)\b/i],
   ['BLOCK_DEAL', /\b(block|bulk) deals?\b/i],
-  ['RESULTS', /financial results?|\bresults\b|\bq[1-4]\b.*\b(profit|loss|revenue|earnings)|\b(net )?profit (rises|falls|jumps|drops|up|down)|\bearnings\b/i],
+  ['RESULTS', /outcome of (the )?board meeting|financial results?|\bresults\b|\bq[1-4]\b.*\b(profit|loss|revenue|earnings)|\b(net )?profit (rises|falls|jumps|drops|up|down)|\bearnings\b/i],
   ['M_AND_A', /\b(acqui(re|res|red|sition|ring)|merger|amalgamation|demerger|takeover|open offer|scheme of arrangement|stake (sale|purchase|buy)|divest(ment|s)?|joint venture)\b/i],
   ['FUND_RAISING', /fund ?rais|\bqip\b|qualified institutions? placement|rights issue|preferential (issue|allotment)|\bncds?\b|\bdebentures?\b|\bwarrants?\b|\bipo\b|\bofs\b|offer for sale/i],
   ['CORPORATE_ACTION', /\bdividend|\bbonus (issue|shares?)?|stock split|sub-?division|split of (equity )?shares/i],

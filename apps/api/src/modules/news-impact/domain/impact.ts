@@ -20,8 +20,8 @@ export type ImpactIndex = (typeof IMPACT_INDICES)[number];
 
 /** Clusters per model call (one call per run). */
 export const BATCH_CAP = 30;
-/** A cluster older than this (by lastSeen) is never sent: the window for a fresh read has passed. */
-export const ANALYSE_WITHIN_MS = 24 * 3_600_000;
+/** A cluster older than this (by lastSeen) is never sent. Two days, so a weekend or an AI outage does not lose it. */
+export const ANALYSE_WITHIN_MS = 48 * 3_600_000;
 /** A cluster the model skipped / answered invalidly this many times is not sent again. */
 export const MAX_ATTEMPTS = 2;
 const HEADLINE_MAX = 200;
@@ -50,7 +50,7 @@ export interface ClusterForImpact {
 
 /**
  * Eligible for the model: not boilerplate; relevant; an NSE-filing-only cluster must be a MATERIAL
- * type; fresh (lastSeen within 24 h); never analysed (or its coverage has since doubled); not given up on.
+ * type; fresh (lastSeen within 48 h); never analysed (or its coverage has since doubled); not given up on.
  */
 export function eligible(c: ClusterForImpact, now: Date): boolean {
   if (c.boilerplate || c.relevance < RELEVANT_AT) return false;
@@ -61,11 +61,13 @@ export function eligible(c: ClusterForImpact, now: Date): boolean {
   return c.impactAttempts < MAX_ATTEMPTS;
 }
 
-/** Up to `cap` eligible clusters: most relevant first, then widest coverage, then newest. */
+const isResults = (c: ClusterForImpact): number => (c.materialType === 'RESULTS' ? 1 : 0);
+
+/** Up to `cap` eligible clusters: results first, then most relevant, then widest coverage, then newest. */
 export function pickBatch(clusters: readonly ClusterForImpact[], now: Date, cap = BATCH_CAP): ClusterForImpact[] {
   return clusters
     .filter((c) => eligible(c, now))
-    .sort((a, b) => b.relevance - a.relevance || b.sourceCount - a.sourceCount || b.lastSeen.getTime() - a.lastSeen.getTime())
+    .sort((a, b) => isResults(b) - isResults(a) || b.relevance - a.relevance || b.sourceCount - a.sourceCount || b.lastSeen.getTime() - a.lastSeen.getTime())
     .slice(0, cap);
 }
 

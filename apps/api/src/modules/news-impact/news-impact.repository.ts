@@ -233,7 +233,8 @@ export class NewsImpactRepository {
   }
 
   aiCallsSince(since: Date): Promise<number> {
-    return this.prisma.aiCall.count({ where: { job: NEWS_IMPACT_JOB, createdAt: { gte: since } } });
+    // Successful calls only: an outage must not use up the day's allowance before the model is back.
+    return this.prisma.aiCall.count({ where: { job: NEWS_IMPACT_JOB, createdAt: { gte: since }, errorClass: null } });
   }
 
   async lastAiCallAt(): Promise<Date | null> {

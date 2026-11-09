@@ -38,6 +38,24 @@ function cl(id: string, o: Partial<ClusterForImpact> = {}): ClusterForImpact {
   };
 }
 
+describe('reading results first', () => {
+  const NOW_R = new Date('2026-11-07T10:00:00Z');
+  const c = (id: string, o: Record<string, unknown>) => ({
+    id, headline: id, instruments: ['X'], sectors: [], indices: [], sources: ['ET'], sourceCount: 1, firstSeen: NOW_R, lastSeen: NOW_R,
+    materialType: 'NEWS', material: false, boilerplate: false, relevance: 0.4, reasons: [], impactAttempts: 0, analysedSourceCount: null, ...o,
+  }) as never;
+
+  it('a results story beats more relevant ordinary news when the batch is full', () => {
+    const ordinary = Array.from({ length: 30 }, (_, i) => c(`n${i}`, { relevance: 1 }));
+    expect(pickBatch([...ordinary, c('results', { materialType: 'RESULTS', material: true })], NOW_R).map((x) => x.id)).toContain('results');
+  });
+  it('a story up to 48 hours old can still be read after an outage', () => {
+    const old = (h: number) => c('o', { lastSeen: new Date(NOW_R.getTime() - h * 3_600_000) });
+    expect(pickBatch([old(47)], NOW_R)).toHaveLength(1);
+    expect(pickBatch([old(49)], NOW_R)).toHaveLength(0);
+  });
+});
+
 describe('batch building', () => {
   it('only relevant, non-boilerplate, fresh clusters; NSE-only must be material', () => {
     expect(eligible(cl('a'), NOW)).toBe(true);
@@ -45,7 +63,7 @@ describe('batch building', () => {
     expect(eligible(cl('c', { relevance: 0.2 }), NOW)).toBe(false);
     expect(eligible(cl('d', { sources: ['NSE Announcements'], material: false }), NOW)).toBe(false);
     expect(eligible(cl('e', { sources: ['NSE Announcements'], material: true, materialType: 'RESULTS' }), NOW)).toBe(true);
-    expect(eligible(cl('f', { lastSeen: new Date(NOW.getTime() - 25 * 3_600_000) }), NOW)).toBe(false);
+    expect(eligible(cl('f', { lastSeen: new Date(NOW.getTime() - 49 * 3_600_000) }), NOW)).toBe(false);
   });
 
   it('once only: an analysed cluster is re-sent only when its coverage doubles; given up after 2 attempts', () => {

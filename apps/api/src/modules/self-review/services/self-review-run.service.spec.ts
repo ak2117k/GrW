@@ -7,7 +7,7 @@ import { parseOption, SelfReviewRunService, minutesSinceOpenOf } from './self-re
 const NOW = new Date('2026-10-21T13:30:00Z');
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
-function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] }; exitNoise?: unknown[]; engine?: { decisions: unknown[]; trades: unknown[] }; setups?: Array<Record<string, unknown>>; loop?: { grading?: unknown; grades?: unknown; tickets?: unknown; alert?: unknown } } = {}) {
+function make(o: { moves?: unknown[]; moveEvidence?: Record<string, unknown>; enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pending?: unknown[]; failScorecards?: boolean; prevRun?: unknown; mbm?: unknown[]; decided?: unknown[]; channel?: Array<Record<string, unknown>>; infos?: Array<Record<string, unknown>>; signalTrades?: { paper: unknown[]; live: unknown[] }; exitNoise?: unknown[]; engine?: { decisions: unknown[]; trades: unknown[] }; setups?: Array<Record<string, unknown>>; loop?: { grading?: unknown; grades?: unknown; tickets?: unknown; alert?: unknown } } = {}) {
   const stored: Array<Record<string, unknown>> = [];
   const repo = {
     createRun: jest.fn(async (s: string) => ({ id: 'run1', sessionDate: s })),
@@ -50,6 +50,8 @@ function make(o: { enabled?: boolean; diagnosis?: { diagnose: jest.Mock }; pendi
     ]),
     trackers: jest.fn(async () => [{ id: 't1', symbol: 'NIFTY28OCT2625000CE', exchange: 'NFO', token: '123', qty: 75, status: 'OPEN', exitPrice: null, exitTime: null }]),
     bars1m: jest.fn(async () => []),
+    dailyMoves: jest.fn(async () => o.moves ?? []),
+    moveEvidence: jest.fn(async () => new Map(Object.entries(o.moveEvidence ?? {}))),
     chainLtp: jest.fn(async () => null),
     liveExits: jest.fn(async () => []),
     newsIdeas: jest.fn(async () => []),
@@ -121,6 +123,40 @@ describe('SelfReviewRunService', () => {
     sources.trackers.mockResolvedValue([{ id: 't1', symbol: 'CRUDEOIL19NOV268500CE', exchange: 'MCX', token: '999', qty: 100, status: 'OPEN', exitPrice: null, exitTime: null }] as never);
     await svc.run(new Date('2026-10-21T19:00:00Z')); // Thu 00:30 IST: S = Wed 10-21
     expect(sources.bars1m).toHaveBeenCalledWith('MCX', '999', new Date('2026-10-21T03:30:00Z'), new Date('2026-10-21T18:00:00Z'));
+  });
+
+  describe('missed moves', () => {
+    const big = (symbol: string, close: number) => ({ symbol, close, prevClose: 100, atrPct: 0.02, bucket: 'TOP20', rankPct: 1, resultsInWindow: true });
+    const none = { realTrade: false, paperTrade: false, setups: [], ideas: [], signals: [], articles: 0, reads: [] };
+
+    it('reads the session and the one before it, and stores a miss with its cause', async () => {
+      const { svc, sources, stored } = make({ moves: [big('DIVISLAB', 106)], moveEvidence: { DIVISLAB: { ...none, articles: 2 } } });
+      await svc.run(NOW);
+      expect(sources.dailyMoves).toHaveBeenCalledWith('2026-10-21', '2026-10-19');
+      expect(stored.find((r) => r.kind === 'MISSED_MOVE')).toMatchObject({ refId: '2026-10-21:DIVISLAB', correct: false, subject: 'NEWS_NOT_READ' });
+    });
+
+    it('the evidence window runs from the previous close to this close', async () => {
+      const { svc, sources } = make({ moves: [big('DIVISLAB', 106)] });
+      await svc.run(NOW);
+      expect(sources.moveEvidence).toHaveBeenCalledWith(['DIVISLAB'], '2026-10-21', new Date('2026-10-19T10:00:00Z'), new Date('2026-10-21T10:00:00Z'));
+    });
+
+    it('reach the diagnosis even when larger-scored misses of other kinds fill the list', async () => {
+      const diagnose = jest.fn(async () => ({ misses: [] }));
+      const { svc } = make({ diagnosis: { diagnose }, moves: [big('A', 106), big('B', 107), big('C', 108)] });
+      await svc.run(NOW);
+      const sent = (diagnose.mock.calls[0] as unknown as [string, Array<{ kind: string; symbol: string }>])[1];
+      expect(sent.filter((m) => m.kind === 'MISSED_MOVE').map((m) => m.symbol).sort()).toEqual(['A', 'B', 'C']);
+    });
+
+    it('no stock-book rows yet means no rows and no error', async () => {
+      const { svc, repo, stored } = make({ moves: [] });
+      await svc.run(NOW);
+      expect(stored.some((r) => r.kind === 'MISSED_MOVE')).toBe(false);
+      const finish = repo.finishRun.mock.calls.at(-1) as unknown as [string, { error: string | null }];
+      expect(finish[1].error ?? '').not.toContain('MISSED_MOVE');
+    });
   });
 
   it('CHANNEL_SIGNAL: each scored tip is a result (subject = channel); per-channel stats in summary.byChannel; never notable', async () => {

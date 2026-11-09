@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { istMidnightOf, istYmd, lastSessionDates, reviewDay } from '../../night-report/domain/night-report.logic';
 import { shapeOf } from '../../overnight-scorecard/domain/positions';
+import { bigMoves, MISSED_MOVE_DIAGNOSIS_SLOTS, NO_EVIDENCE, scoreMissedMove } from '../domain/missed-moves';
 import { outcomeSession } from '../../overnight-scorecard/domain/windows';
 import { directionOf, isExpired, proposeTuning, type EvidenceRow, type PastDecision, type RunSkill, type Suggestion } from '../domain/proposals';
 import {
@@ -321,6 +322,7 @@ export class SelfReviewRunService {
       })),
     );
     out.push(...(await this.soft('STOCK_MOVE', errors, () => this.stockMoves(s, b.closeAt))));
+    out.push(...(await this.soft('MISSED_MOVE', errors, () => this.missedMoves(s, b.closeAt))));
     // Outcomes are filled by the trade-setup module's 16:15 IST job, before this run.
     out.push(...(await this.soft('TRADE_SETUP', errors, async () => (await this.sources.tradeSetups(s)).map(scoreTradeSetup))));
     // Telegram channel tips: outcomes filled by signal-intake's 16:20 IST replay, before this run.
@@ -356,6 +358,17 @@ export class SelfReviewRunService {
    * sessions before s. Their outcome is filled by the writer after s's close (20:15 IST, after this run),
    * so a horizon is judged by the next night's re-verification (VERIFY_SESSIONS).
    */
+  /** The session's big F&O moves, each scored on how far it got in our pipeline. Empty until the stock book has the session's closes. */
+  private async missedMoves(s: string, closeAt: Date): Promise<VerificationDraft[]> {
+    const prev = lastSessionDates(new Date(closeAt.getTime() + 60_000), this.clock, 2)[1];
+    const from = prev ? this.sessionBounds(prev)?.closeAt : undefined;
+    if (!prev || !from) return [];
+    const moves = bigMoves(await this.sources.dailyMoves(s, prev));
+    if (moves.length === 0) return [];
+    const evidence = await this.sources.moveEvidence(moves.map((m) => m.symbol), s, from, closeAt);
+    return moves.map((m) => scoreMissedMove(s, m, evidence.get(m.symbol) ?? NO_EVIDENCE));
+  }
+
   private async stockMoves(s: string, closeAt: Date): Promise<VerificationDraft[]> {
     const back = lastSessionDates(new Date(closeAt.getTime() + 60_000), this.clock, STOCK_MOVE_HORIZON_DAYS + 1);
     if (back[0] !== s || back.length <= STOCK_MOVE_HORIZON_DAYS) return [];
@@ -534,7 +547,10 @@ export class SelfReviewRunService {
     decisionRows: readonly DecisionGradeRowLike[] = [],
   ): Promise<{ out: DiagnosisOutput | null; sent: DiagnosisMiss[] }> {
     // The decision ledger's WRONG / DETECTOR rows (last 10 sessions) share the 15-miss cap with the older kinds.
-    const misses = mergeMisses(topMisses(rows.filter((r) => DIAGNOSED_KINDS.has(r.kind)), DIAGNOSIS_MISS_CAP), decisionRows, DIAGNOSIS_MISS_CAP);
+    // Missed moves are scored in ATRs, so they go first or the bp- and rupee-scored misses would always outrank them.
+    const missed = topMisses(rows.filter((r) => r.kind === 'MISSED_MOVE'), MISSED_MOVE_DIAGNOSIS_SLOTS);
+    const legacy = topMisses(rows.filter((r) => DIAGNOSED_KINDS.has(r.kind)), DIAGNOSIS_MISS_CAP - missed.length);
+    const misses = mergeMisses([...missed, ...legacy], decisionRows, DIAGNOSIS_MISS_CAP);
     const wrong = Object.values(summary.byKind).reduce((s, k) => s + (k?.wrong ?? 0), 0) + decisionRows.length;
     const prior = (await this.repo.doneRunsFor(S)).find((r) => r.diagnosis !== null && r.id !== runId);
     if (prior) {

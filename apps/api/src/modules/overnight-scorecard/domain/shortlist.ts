@@ -5,6 +5,9 @@
 import { NSE_ANNOUNCEMENTS_SOURCE, newsStrength } from './factors';
 
 export const SHORTLIST_CAP = 5;
+/** A story tagging more names than this is about the market, not the stocks it mentions. */
+export const MAX_STOCK_SPECIFIC_TAGS = 2;
+const INDEX_NAMES: ReadonlySet<string> = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX']);
 /** |weighted sentiment| at or above this is "strong" news. */
 export const STRONG_NEWS = 0.5;
 
@@ -61,8 +64,10 @@ export function shortlist(
   const bySymbol = new Map<string, CandidateArticle[]>();
   for (const a of articles) {
     if (already.has(a.id) || !isStrong(a)) continue;
-    for (const raw of new Set(a.instruments.map((s) => s.trim().toUpperCase()).filter(Boolean))) {
-      if (!fno.has(raw) || held.has(raw)) continue;
+    const tags = new Set(a.instruments.map((s) => s.trim().toUpperCase()).filter(Boolean));
+    const marketWide = tags.size > MAX_STOCK_SPECIFIC_TAGS;
+    for (const raw of tags) {
+      if (!fno.has(raw) || held.has(raw) || (marketWide && !INDEX_NAMES.has(raw))) continue;
       bySymbol.set(raw, [...(bySymbol.get(raw) ?? []), a]);
     }
   }

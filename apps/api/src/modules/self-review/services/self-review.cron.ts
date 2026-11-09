@@ -14,6 +14,8 @@ import { SELF_REVIEW_CLOCK, SelfReviewRunService } from './self-review-run.servi
  */
 export const SELF_REVIEW_CRON = '0 30 0 * * 2-6';
 export const SELF_REVIEW_CATCHUP_CRON = '0 0 9 * * 1-5';
+/** 02:30 IST, Tue-Sat: the stock book with every F&O close lands around 01:56, so the missed-move review reruns after it. */
+export const SELF_REVIEW_MISSED_MOVES_CRON = '0 30 2 * * 2-6';
 const LEASE_TTL_MS = 30 * 60_000;
 
 @Injectable()
@@ -29,6 +31,11 @@ export class SelfReviewCron {
   @Cron(SELF_REVIEW_CRON, { name: 'self-review', timeZone: 'Asia/Kolkata' })
   onNight(): Promise<void> {
     return this.fire('cron');
+  }
+
+  @Cron(SELF_REVIEW_MISSED_MOVES_CRON, { name: 'self-review-missed-moves', timeZone: 'Asia/Kolkata' })
+  onMissedMoves(now: Date = new Date()): Promise<void> {
+    return this.fire('missed-moves', now);
   }
 
   @Cron(SELF_REVIEW_CATCHUP_CRON, { name: 'self-review-catchup', timeZone: 'Asia/Kolkata' })

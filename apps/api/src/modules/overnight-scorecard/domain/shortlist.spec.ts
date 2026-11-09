@@ -13,6 +13,14 @@ describe('news-ideas shortlist', () => {
     const out = shortlist([art('a', ['SMALLCAP'], 0.9), art('b', ['INFY'], 0.9)], FNO, new Set());
     expect(out.map((c) => c.symbol)).toEqual(['INFY']);
   });
+  it('a market-wide headline tagging many names cannot take stock slots, but still counts for an index', () => {
+    const fno = new Set([...FNO, 'NIFTY', 'CRUDEOIL']);
+    const out = shortlist([art('wide', ['NIFTY', 'RELIANCE', 'CRUDEOIL'], 0.9), art('one', ['INFY'], 0.6)], fno, new Set());
+    expect(out.map((c) => c.symbol)).toEqual(['NIFTY', 'INFY']);
+  });
+  it('a story on two named stocks still counts for both', () => {
+    expect(shortlist([art('pair', ['TCS', 'INFY'], 0.9)], FNO, new Set()).map((c) => c.symbol).sort()).toEqual(['INFY', 'TCS']);
+  });
   it('drops symbols already held', () => {
     expect(shortlist([art('a', ['RELIANCE'], 0.9), art('b', ['INFY'], -0.8)], FNO, new Set(['RELIANCE'])).map((c) => c.symbol)).toEqual(['INFY']);
   });

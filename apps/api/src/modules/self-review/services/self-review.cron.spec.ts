@@ -1,6 +1,6 @@
 import { SessionClock } from '../../market-hub/session-clock';
 import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.service';
-import { SELF_REVIEW_CATCHUP_CRON, SELF_REVIEW_CRON, SelfReviewCron } from './self-review.cron';
+import { SELF_REVIEW_CATCHUP_CRON, SELF_REVIEW_CRON, SELF_REVIEW_MISSED_MOVES_CRON, SelfReviewCron } from './self-review.cron';
 
 const clock = new SessionClock({ holidays: MARKET_HOLIDAYS });
 
@@ -13,6 +13,14 @@ describe('SelfReviewCron', () => {
   it('runs at 00:30 IST Tue-Sat (after the MCX close and the 23:45 daily bars); the catch-up stays at 09:00', () => {
     expect(SELF_REVIEW_CRON).toBe('0 30 0 * * 2-6');
     expect(SELF_REVIEW_CATCHUP_CRON).toBe('0 0 9 * * 1-5');
+  });
+
+  it('runs again at 02:30 IST Tue-Sat, once the 01:56 stock book has the closes the missed-move review needs', async () => {
+    expect(SELF_REVIEW_MISSED_MOVES_CRON).toBe('0 30 2 * * 2-6');
+    const { runner, cron } = make();
+    const now = new Date('2026-11-06T21:00:00Z'); // Sat 7 Nov 02:30 IST
+    await cron.onMissedMoves(now);
+    expect(runner.run).toHaveBeenCalledWith(now, 'missed-moves');
   });
 
   it('00:30 Saturday reviews Friday: the gate asks about the session that just ended, not the new date', async () => {

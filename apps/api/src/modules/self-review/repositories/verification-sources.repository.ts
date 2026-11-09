@@ -4,6 +4,8 @@ import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { MANUAL_VERDICT_PREFIX } from '../../sentinel-executor/domain/manual-exit';
 import { OVERNIGHT_TAGS } from '../domain/scorers';
 import { STOCK_MOVE_HORIZON_DAYS, STOCK_MOVE_THRESHOLD_ATR } from '../../stock-move/stock-move.logic';
+import { underlyingName } from '../../night-report/domain/night-report.logic';
+import { NO_EVIDENCE, type DailyMoveRow, type MoveEvidence } from '../domain/missed-moves';
 import { PAPER_WATCH_STRATEGIES, SIGNAL_PAPER_STRATEGY, decisionIdFromTags } from '../../signal-trader/domain/paper';
 import { oiVerdictOf } from '../../signal-trader/domain/oi-check';
 import { judgeCallOf } from '../../signal-trader/domain/paper-summary';
@@ -193,6 +195,80 @@ export class VerificationSourcesRepository {
   }
 
   /** Resolved stock big-move rows scored on `asOf` (IST 'YYYY-MM-DD'; a DATE column, read as UTC midnight). */
+  /** Every scored stock's close for session `day`, with the previous session's close, ATR and big-move rank. Empty until the book has `day`. */
+  async dailyMoves(day: string, prev: string): Promise<DailyMoveRow[]> {
+    const key = { horizonDays: STOCK_MOVE_HORIZON_DAYS, thresholdAtr: STOCK_MOVE_THRESHOLD_ATR };
+    const select = { symbol: true, close: true, atrPct: true, bucket: true, rankPct: true, resultsInWindow: true };
+    const [today, before] = await Promise.all([
+      this.prisma.stockMoveScore.findMany({ where: { ...key, asOf: new Date(`${day}T00:00:00.000Z`) }, select, take: 1000 }),
+      this.prisma.stockMoveScore.findMany({ where: { ...key, asOf: new Date(`${prev}T00:00:00.000Z`) }, select, take: 1000 }),
+    ]);
+    const prior = new Map(before.map((r) => [r.symbol, r]));
+    return today.map((r) => {
+      const p = prior.get(r.symbol);
+      return { symbol: r.symbol, close: r.close, prevClose: p?.close ?? null, atrPct: p?.atrPct ?? null, bucket: p?.bucket ?? null, rankPct: p?.rankPct ?? null, resultsInWindow: p?.resultsInWindow ?? false };
+    });
+  }
+
+  /** What the system had on each stock between `from` (the previous close) and `to` (this close). */
+  async moveEvidence(symbols: string[], day: string, from: Date, to: Date): Promise<Map<string, MoveEvidence>> {
+    const wanted = new Set(symbols);
+    const out = new Map<string, MoveEvidence>(symbols.map((s) => [s, { ...NO_EVIDENCE, setups: [], ideas: [], signals: [], reads: [] }]));
+    const nameOf = (symbol: string, exchange: string) => underlyingName(symbol, exchange) ?? symbol.replace(/-(EQ|BE)$/i, '').toUpperCase();
+
+    const [trackers, papers, ideas, setups, signals, articles] = await Promise.all([
+      this.prisma.tradeTracker.findMany({
+        where: { kind: 'POSITION', entryTime: { lte: to }, OR: [{ exitTime: null }, { exitTime: { gte: from } }] },
+        select: { symbol: true, exchange: true },
+        take: 2000,
+      }),
+      this.prisma.trade.findMany({
+        where: { isPaperTrade: true, entryTime: { gte: from, lte: to } },
+        select: { instrument: { select: { symbol: true, exchange: true } } },
+        take: 2000,
+      }),
+      this.prisma.newsIdea.findMany({ where: { createdAt: { gte: from, lte: to }, symbol: { in: symbols } }, select: { symbol: true, idea: true } }),
+      this.prisma.tradeSetup.findMany({ where: { sessionDate: day, symbol: { in: symbols } }, select: { symbol: true, side: true } }),
+      this.prisma.tradeSignal.findMany({ where: { sessionDate: day, underlying: { in: symbols } }, select: { underlying: true, direction: true } }),
+      this.prisma.newsArticle.findMany({
+        where: { publishedAt: { gte: from, lte: to }, instruments: { hasSome: symbols } },
+        select: { instruments: true, clusterId: true },
+        take: 2000,
+      }),
+    ]);
+
+    for (const t of trackers) {
+      const e = out.get(nameOf(t.symbol, t.exchange));
+      if (e) e.realTrade = true;
+    }
+    for (const p of papers) {
+      const e = out.get(nameOf(p.instrument.symbol, p.instrument.exchange));
+      if (e) e.paperTrade = true;
+    }
+    for (const i of ideas) out.get(i.symbol)?.ideas.push(i.idea);
+    for (const s of setups) out.get(s.symbol)?.setups.push(s.side);
+    for (const s of signals) out.get(s.underlying)?.signals.push(s.direction);
+
+    const clusterIds = [...new Set(articles.map((a) => a.clusterId).filter((c): c is string => !!c))];
+    const [boilerplate, impacts] = await Promise.all([
+      this.prisma.newsCluster.findMany({ where: { id: { in: clusterIds }, boilerplate: true }, select: { id: true } }),
+      this.prisma.newsImpact.findMany({ where: { clusterId: { in: clusterIds } }, select: { clusterId: true, direction: true, magnitude: true } }),
+    ]);
+    const routine = new Set(boilerplate.map((c) => c.id));
+    const read = new Map(impacts.map((i) => [i.clusterId, { direction: i.direction, magnitude: i.magnitude }]));
+    for (const a of articles) {
+      if (a.clusterId && routine.has(a.clusterId)) continue;
+      const impact = a.clusterId ? read.get(a.clusterId) : undefined;
+      for (const name of a.instruments.map((n) => n.trim().toUpperCase())) {
+        if (!wanted.has(name)) continue;
+        const e = out.get(name)!;
+        e.articles += 1;
+        if (impact) e.reads.push(impact);
+      }
+    }
+    return out;
+  }
+
   async stockMoves(asOf: string) {
     const rows = await this.prisma.stockMoveScore.findMany({
       where: {

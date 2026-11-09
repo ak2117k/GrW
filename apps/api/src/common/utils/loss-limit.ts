@@ -63,3 +63,32 @@ export function lossLimitFor(underlying: string | null, env: Env = process.env):
   if (listed !== undefined) return { limit: limit === null ? null : listed, cap: listed };
   return { limit, cap };
 }
+
+/** Trade value (premium x quantity) from which a stock trade gets the wider stop. Upper quartile of real stock option trades, Oct-Nov 2026. */
+export const HIGH_VALUE_TRADE_RUPEES_DEFAULT = 25_000;
+export const HIGH_VALUE_EXIT_RUPEES_DEFAULT = 3_000;
+const INDEX_DERIVATIVE = /^(NIFTY|BANKNIFTY|FINNIFTY|MIDCPNIFTY|NIFTYNXT50|SENSEX|BANKEX)\d/;
+
+function positive(raw: string | undefined, fallback: number): number {
+  const n = Number(String(raw ?? '').trim());
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * THE HARD RUPEE STOP BY TRADE VALUE (owner 2026-11-09: no risk-reward test at entry; the loss is capped at the exit).
+ * An index derivative exits at HARD_LOSS_EXIT_RUPEES (2k). A stock or commodity trade worth at least
+ * HARD_LOSS_HIGH_VALUE_TRADE_RUPEES exits at HARD_LOSS_HIGH_VALUE_EXIT_RUPEES (3k), a smaller one at 2k. All plain
+ * stops: limit = cap, so no noise band. A listed underlying (GOLD) keeps its figure. A stock with no usable value
+ * falls back to lossLimitFor, as does HARD_LOSS_BY_TRADE_VALUE=off (the rollback).
+ */
+export function lossLimitForTrade(symbol: string, tradeValue: number | null | undefined, env: Env = process.env): LossLimit {
+  const base = lossLimitFor(symbol, env);
+  if (base.limit === null || String(env.HARD_LOSS_BY_TRADE_VALUE ?? '').trim().toLowerCase() === 'off') return base;
+  const key = underlyingKey(symbol);
+  if (key !== null && parseLossLimitsByUnderlying(env.HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING)[key] !== undefined) return base;
+  if (INDEX_DERIVATIVE.test(symbol.trim().toUpperCase())) return { limit: base.limit, cap: base.limit };
+  if (typeof tradeValue !== 'number' || !Number.isFinite(tradeValue)) return base;
+  const high = tradeValue >= positive(env.HARD_LOSS_HIGH_VALUE_TRADE_RUPEES, HIGH_VALUE_TRADE_RUPEES_DEFAULT);
+  const rupees = high ? positive(env.HARD_LOSS_HIGH_VALUE_EXIT_RUPEES, HIGH_VALUE_EXIT_RUPEES_DEFAULT) : base.limit;
+  return { limit: rupees, cap: rupees };
+}

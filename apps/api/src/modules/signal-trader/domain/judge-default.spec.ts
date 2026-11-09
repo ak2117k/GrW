@@ -3,28 +3,29 @@ import {
   SIGNAL_JUDGE_PROMPT_VERSION,
   SIGNAL_JUDGE_PROMPT_VERSION_TAKE,
   SIGNAL_JUDGE_SYSTEM,
+  judgeTakeRule,
   signalJudgePromptVersion,
   signalJudgeSystem,
 } from './judge';
 import { parseJudgeDefault, parseSignalTraderConfig } from './signal-trader.config';
 
 /** sha256 of the v5 system prompt as it was in prod before 2026-11-04 (SIGNAL_JUDGE_DEFAULT=skip must keep it). */
-const V5_SHA256 = '56c1084f13aebd3af03073292a10f28080781a29d6f99de8a14385171b753ca3';
+const V5_SHA256 = '1a6d854b686713389fa0dc7626e2baa78665f6cd17ab8ebd1ca44fb65942ce4c';
 const sha = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 
 describe('SIGNAL_JUDGE_DEFAULT prompt', () => {
-  it('skip: byte-identical to the v5 prompt, version v5', () => {
+  it('skip: byte-identical to the v6 prompt, version v6', () => {
     expect(sha(SIGNAL_JUDGE_SYSTEM)).toBe(V5_SHA256);
     expect(signalJudgeSystem('skip')).toBe(SIGNAL_JUDGE_SYSTEM);
     expect(signalJudgeSystem('skip', 80)).toBe(SIGNAL_JUDGE_SYSTEM);
     expect(signalJudgePromptVersion('skip')).toBe(SIGNAL_JUDGE_PROMPT_VERSION);
-    expect(SIGNAL_JUDGE_PROMPT_VERSION).toBe('signal-judge-v5');
+    expect(SIGNAL_JUDGE_PROMPT_VERSION).toBe('signal-judge-v6');
   });
 
   it('take: the default-take rule replaces the default-SKIP opening; everything else is kept', () => {
     const p = signalJudgeSystem('take');
     expect(signalJudgePromptVersion('take')).toBe(SIGNAL_JUDGE_PROMPT_VERSION_TAKE);
-    expect(SIGNAL_JUDGE_PROMPT_VERSION_TAKE).toBe('signal-judge-v7-take');
+    expect(SIGNAL_JUDGE_PROMPT_VERSION_TAKE).toBe('signal-judge-v8-take');
     expect(p).not.toMatch(/your default is SKIP/);
     expect(p).toMatch(/Your default is TAKE: take the channel's call unless there is CONCRETE EVIDENCE AGAINST it/);
     expect(p).toMatch(/price is already past T1/);
@@ -57,5 +58,17 @@ describe('parseJudgeDefault', () => {
     const problems: string[] = [];
     expect(parseJudgeDefault('tkae', problems)).toBe('skip');
     expect(problems).toEqual([expect.stringMatching(/SIGNAL_JUDGE_DEFAULT=tkae is not take\|skip — using skip/)]);
+  });
+});
+
+describe('no risk-reward test at entry (owner 2026-11-09)', () => {
+  it('the system prompt tells the judge the rupee stop handles the loss, and never to skip on risk or reward', () => {
+    expect(SIGNAL_JUDGE_SYSTEM).toMatch(/no risk-reward test and no per-trade risk limit at entry/);
+    expect(SIGNAL_JUDGE_SYSTEM).toMatch(/Never SKIP because plan\.riskRupees is above caps\.maxLossPerTrade/);
+    expect(SIGNAL_JUDGE_SYSTEM).not.toMatch(/judge THAT stop on its noise distance/);
+    expect(SIGNAL_JUDGE_SYSTEM).not.toMatch(/clearly pays for the/);
+  });
+  it('a stop inside noise is no longer concrete evidence against a call', () => {
+    expect(judgeTakeRule(60)).not.toMatch(/stop inside ordinary noise/);
   });
 });

@@ -221,6 +221,7 @@ describe('SentinelCycleService — noise-aware HARD_LOSS_EXIT (prod 2026-11-04 N
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     process.env.HARD_LOSS_EXIT_RUPEES = '2000';
+    process.env.HARD_LOSS_BY_TRADE_VALUE = 'off'; // this block tests the noise band, which is the rollback path
     delete process.env.HARD_LOSS_CAP_RUPEES;
     delete process.env.HARD_LOSS_NOISE_N;
   });

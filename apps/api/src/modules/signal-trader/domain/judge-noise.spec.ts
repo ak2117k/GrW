@@ -102,7 +102,7 @@ describe('option delta when no greek was read', () => {
 
 describe('judge prompt v5', () => {
   it('is stamped and carries the three rules', () => {
-    expect(SIGNAL_JUDGE_PROMPT_VERSION).toBe('signal-judge-v5');
+    expect(SIGNAL_JUDGE_PROMPT_VERSION).toBe('signal-judge-v6');
     expect(SIGNAL_JUDGE_SYSTEM).toMatch(/never guess "inside noise": market\.noise/);
     expect(SIGNAL_JUDGE_SYSTEM).toMatch(/intrinsic value is from the SPOT .* NEVER the future/);
     expect(SIGNAL_JUDGE_SYSTEM).toMatch(/up to ~1% below spot intrinsic near expiry is NORMAL/);

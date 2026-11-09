@@ -58,7 +58,7 @@ import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anc
 import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
 import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
 import { exposureOf } from '../../exit-discipline/exposure';
-import { lossLimitFor } from '../../../common/utils/loss-limit';
+import { lossLimitForTrade } from '../../../common/utils/loss-limit';
 import { defaultLadderStop, ladderReading, ladderTargets, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
 import { LADDER_PLANS, type LadderPlan, type LadderPlanReader } from '../ports/ladder-plans.port';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
@@ -1207,7 +1207,7 @@ export class SentinelCycleService {
    */
   private hardLossFor(entry: RosterEntry, state: TrackerState, tick: TickReading, now: Date): { reading: HardFloorReading; floor: number; netPnl: number } | null {
     // Per-underlying limit (2026-11-04 owner: GOLD ₹7,500) — the same source the exit gate's HARD_MAX_LOSS reads.
-    const cfg = hardLossConfig(process.env, lossLimitFor(entry.symbol));
+    const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, tick.entryPrice * Math.abs(tick.qty) * valueFactorOf(entry)));
     if (cfg.limit === null || entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !isDerivativeSegment(tick.segment)) return null;
     const green = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: tick.ltp, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) });
     const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;

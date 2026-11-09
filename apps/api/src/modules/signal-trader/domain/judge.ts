@@ -5,7 +5,8 @@ import type { SignalTraderConfig } from './signal-trader.config';
 /** `ai_calls.job` label of the signal judge. */
 export const SIGNAL_JUDGE_JOB = 'signal.judge';
 /** v5 (2026-11-02): market.noise units + cap-sized stop, intrinsic from SPOT (plan.optionValue), channel sample rule, self-review lessons. */
-export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v5';
+/** v6 (2026-11-09): no risk-reward test at entry; the hard rupee stop caps the loss. */
+export const SIGNAL_JUDGE_PROMPT_VERSION = 'signal-judge-v6';
 
 const NULLABLE_NUMBER = { anyOf: [{ type: 'number' }, { type: 'null' }] } as const;
 
@@ -47,9 +48,9 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'plan.late.targetsPassed the ones already hit. Decide on the ROOM LEFT, not on whether the channel was right:',
   'plan.late.room gives the underlying\'s next obstacle in the trade\'s direction (level book resistance / call wall for a long,',
   'support / put wall for a short), the points and % to it, the contract\'s move to it (≈ |delta| × points) and roomToRisk',
-  'against the stop from here. TAKE a late entry only when the room to the obstacle or to the next target clearly pays for the',
-  'stop from the current price AND the trend still supports the direction. Your first reason must state the room (e.g. "room 85',
-  'pts to 54500 call wall ≈ ₹42 premium vs ₹30 risk"). room.missing lists what we could NOT read: never treat a missing input as',
+  'against the stop from here (information only). TAKE a late entry only when there is room left to the obstacle or to the next',
+  'target AND the trend still supports the direction. Your first reason must state the room (e.g. "room 85',
+  'pts to 54500 call wall ≈ ₹42 premium"). room.missing lists what we could NOT read: never treat a missing input as',
   '"no room" — say it is unknown and judge on the inputs that are present.',
   'plan.better present = the price is ALREADY plan.better.betterPct% BETTER than the channel\'s entry (a buy below it, a sell',
   'above it); the entry is planned at plan.ltp. A better fill is not free: ask whether the price got there because the call is',
@@ -62,9 +63,11 @@ export const SIGNAL_JUDGE_SYSTEM = [
   'the CAP-SIZED stop (stops.cap: the widest stop keeping 1 lot within caps.maxLossPerTrade) the premium points to it, the',
   'underlying move that hits it and that move in N1 / N5. Under ~1.5×N5 a stop is inside ordinary 5-minute noise; 1.5–3×N5 is',
   'tight but tradable; over 3×N5 is outside routine noise. Any reason about a stop vs noise must quote these numbers. A delta',
-  'marked moneyness-heuristic is an estimate, not a quote. When plan.riskRupees breaks caps.maxLossPerTrade, the trade you can',
-  'actually take is the cap-sized stop: judge THAT stop on its noise distance and its reward to the target — the cap alone is',
-  'not the decisive reason when the cap-sized stop sits outside noise with room to the target.',
+  'marked moneyness-heuristic is an estimate, not a quote.',
+  'RISK — there is no risk-reward test and no per-trade risk limit at entry. Code force-exits a position when its net loss reaches a',
+  'hard rupee stop: ₹2,000 on index options and smaller trades, ₹3,000 on stock trades worth ₹25,000 or more. So you judge the DIRECTION',
+  'and the timing only. Never SKIP because plan.riskRupees is above caps.maxLossPerTrade, because the channel stop is far away, because',
+  'the reward is small against the stop, or because the stop sits inside noise. The noise numbers above are information.',
   'INTRINSIC — an index or stock option\'s intrinsic value is from the SPOT (market.chain.spot / plan.optionValue.spot), NEVER the',
   'future (market.chain.fut carries cost of carry; options settle to spot). plan.optionValue gives intrinsicFromSpot, timeValue and',
   'belowIntrinsicPct: a deep-ITM option quoting at or up to ~1% below spot intrinsic near expiry is NORMAL (bid/ask, no carry for',
@@ -85,7 +88,7 @@ export const SIGNAL_JUDGE_SYSTEM = [
  * a CRUDEOIL 8600 PE call was SKIPped at 78% because support 8938 sat 31 pts below spot, with crude's 15m and
  * 1h trends both bearish; the support broke within the hour and the PE hit its 339 target by 21:00.
  */
-export const SIGNAL_JUDGE_PROMPT_VERSION_TAKE = 'signal-judge-v7-take';
+export const SIGNAL_JUDGE_PROMPT_VERSION_TAKE = 'signal-judge-v8-take';
 
 /** The v5 default-SKIP opening the take prompt replaces (must exist in SIGNAL_JUDGE_SYSTEM verbatim). */
 const SKIP_DEFAULT_RULE =
@@ -102,7 +105,7 @@ export function judgeTakeRule(minConfidence: number): string {
     'in your first reason. Concrete evidence is: the price is already past T1 / the target; the stop is already broken',
     '(the price is on the wrong side of plan.sl); the entry is outside the tolerance band; an expiry-day or illiquid',
     'contract (no quote, a wide spread, a stale feed); or a hard risk (an obstacle or wall right in the way with no room to',
-    'T1, the trend firmly against the direction, the stop inside ordinary noise per market.noise).',
+    'T1, the trend firmly against the direction).',
     'A nearby support or resistance is NOT concrete evidence when the trend already runs WITH the call (the higher-timeframe',
     'trend in the call\'s direction): price moving into a level with the trend behind it is a break candidate, not a wall —',
     'judge the room to T1 beyond that level. A level is a wall only when the trend is flat or against the call.',

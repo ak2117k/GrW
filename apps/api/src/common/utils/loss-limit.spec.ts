@@ -1,4 +1,4 @@
-import { lossLimitFor, parseLossLimitsByUnderlying } from './loss-limit';
+import { lossLimitFor, lossLimitForTrade, parseLossLimitsByUnderlying } from './loss-limit';
 import { hardLossConfig, hardLossReading, hardLossTrip } from '../../modules/exit-discipline/hard-floor';
 
 describe('lossLimitFor (HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING, 2026-11-04)', () => {
@@ -90,5 +90,42 @@ describe('hard loss exit per underlying (hard-floor.ts, 2026-11-04)', () => {
     expect(hardLossConfig(ENV)).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
     expect(hardLossConfig(ENV, lossLimitFor('NIFTY09NOV2623750PE', ENV))).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
     expect(hardLossConfig(ENV, lossLimitFor('GOLDM05DEC26FUT', ENV))).toEqual({ limit: 2000, cap: 3000, noiseN: 3 });
+  });
+});
+
+describe('lossLimitForTrade: the hard rupee stop by trade value (owner 2026-11-09)', () => {
+  const ENV = { HARD_LOSS_EXIT_RUPEES: '2000' };
+
+  it('an index option is a hard 2k whatever its value', () => {
+    expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, ENV)).toEqual({ limit: 2000, cap: 2000 });
+    expect(lossLimitForTrade('BANKNIFTY25NOV2659000CE', 90_000, ENV)).toEqual({ limit: 2000, cap: 2000 });
+    expect(lossLimitForTrade('SENSEX13NOV2678600CE', null, ENV)).toEqual({ limit: 2000, cap: 2000 });
+  });
+  it('a high-value stock trade is a hard 3k, from 25k of trade value', () => {
+    expect(lossLimitForTrade('LAURUSLABS23NOV262360CE', 44_519, ENV)).toEqual({ limit: 3000, cap: 3000 });
+    expect(lossLimitForTrade('DIVISLAB23NOV2611700CE', 25_000, ENV)).toEqual({ limit: 3000, cap: 3000 });
+  });
+  it('a smaller stock trade is a hard 2k', () => {
+    expect(lossLimitForTrade('SBIN23NOV261020CE', 24_999, ENV)).toEqual({ limit: 2000, cap: 2000 });
+  });
+  it('the threshold and the high-value stop can be set', () => {
+    const env = { ...ENV, HARD_LOSS_HIGH_VALUE_TRADE_RUPEES: '40000', HARD_LOSS_HIGH_VALUE_EXIT_RUPEES: '3500' };
+    expect(lossLimitForTrade('X23NOV26100CE', 39_999, env)).toEqual({ limit: 2000, cap: 2000 });
+    expect(lossLimitForTrade('X23NOV26100CE', 40_000, env)).toEqual({ limit: 3500, cap: 3500 });
+  });
+  it('a stock named like an index is not an index', () => {
+    expect(lossLimitForTrade('NIFTYBEES', 50_000, ENV)).toEqual({ limit: 3000, cap: 3000 });
+  });
+  it('a listed underlying keeps its own figure', () => {
+    expect(lossLimitForTrade('GOLD27NOV26125000PE', 90_000, ENV)).toEqual({ limit: 7500, cap: 7500 });
+  });
+  it('an unknown value on a stock falls back to the old rule, and off is the rollback', () => {
+    expect(lossLimitForTrade('SBIN23NOV261020CE', null, ENV)).toEqual({ limit: 2000, cap: 3000 });
+    expect(lossLimitForTrade('SBIN23NOV261020CE', Number.NaN, ENV)).toEqual({ limit: 2000, cap: 3000 });
+    expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, { ...ENV, HARD_LOSS_BY_TRADE_VALUE: 'off' })).toEqual({ limit: 2000, cap: 3000 });
+  });
+  it('with the master switch off nothing exits', () => {
+    expect(lossLimitForTrade('NIFTY09NOV2625100PE', 13_000, {}).limit).toBeNull();
+    expect(lossLimitForTrade('LAURUSLABS23NOV262360CE', 44_519, {}).limit).toBeNull();
   });
 });

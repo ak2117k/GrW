@@ -311,7 +311,7 @@ describe('SignalTraderService', () => {
     (t.repo.channelStats as jest.Mock).mockResolvedValueOnce({ n: 8, right: 0, wrong: 1, rolling20Right: 5, rolling20Wrong: 2 });
     await t.svc.evaluate(ev);
     const packet = (t.judge.judge.mock.calls[0] as any[])[0];
-    expect(packet.promptVersion).toBe('signal-judge-v5');
+    expect(packet.promptVersion).toBe('signal-judge-v6');
     expect(packet.channelStats).toMatchObject({ scoredCalls: 7, sessionScored: 1, sampleSufficient: false });
     expect(packet.market.noise).toMatchObject({ status: 'unavailable', reason: expect.stringMatching(/^noise units:/) });
     expect(packet.plan).toHaveProperty('optionValue');
@@ -326,7 +326,7 @@ describe('SignalTraderService', () => {
       await t.svc.evaluate(ev);
       const [packet, opts] = judged(t);
       expect(opts.system).toBe(SIGNAL_JUDGE_SYSTEM);
-      expect(packet.promptVersion).toBe('signal-judge-v5');
+      expect(packet.promptVersion).toBe('signal-judge-v6');
       expect(packet).not.toHaveProperty('events');
     });
 
@@ -337,7 +337,7 @@ describe('SignalTraderService', () => {
       const [packet, opts] = judged(t);
       expect(opts.system).toMatch(/Your default is TAKE/);
       expect(opts.system).not.toMatch(/your default is SKIP/);
-      expect(packet.promptVersion).toBe('signal-judge-v7-take');
+      expect(packet.promptVersion).toBe('signal-judge-v8-take');
       expect(packet.events).toEqual({ status: 'present', events: [expect.objectContaining({ name: 'FOMC rate decision', expectMove: true, affects: expect.arrayContaining(['NIFTY']) })] });
     });
 

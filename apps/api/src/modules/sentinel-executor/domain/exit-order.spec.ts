@@ -148,11 +148,20 @@ describe('planExitOrder — quantity unit (ruling R16, owner addition 2026-10-12
     expect(qty(planExitOrder([row()], { ...target, lotSize: 1 }, LIVE_UNITS))).toBe(100);
   });
 
-  it('caller lot size and broker row lotsize disagree → LOT_SIZE_MISMATCH (never guess)', () => {
+  it('unit=lots divides by the lot, so a disagreement → LOT_SIZE_MISMATCH (never guess)', () => {
     expect(planExitOrder([row({ lotsize: '10' })], mcx, { mode: 'live', qtyUnit: 'lots' })).toEqual({
       ok: false, reason: 'LOT_SIZE_MISMATCH',
     });
-    expect(planExitOrder([row({ lotsize: '10' })], mcx, LIVE_UNITS)).toEqual({ ok: false, reason: 'LOT_SIZE_MISMATCH' });
+  });
+
+  it('unit=units sends the broker net quantity, so our lot can never block the exit (prod 2026-11-09: a stale 775 refused 17 exits)', () => {
+    expect(qty(planExitOrder([row({ lotsize: '100' })], { ...target, lotSize: 775 }, LIVE_UNITS))).toBe(100);
+  });
+
+  it('unit=units still refuses a netqty that is not a whole number of the broker\'s own lots (it was reported in lots)', () => {
+    expect(planExitOrder([row({ netqty: '1', lotsize: '100' })], { ...target, trackerQty: 1, lotSize: 1 }, LIVE_UNITS)).toEqual({
+      ok: false, reason: 'QTY_NOT_LOT_MULTIPLE',
+    });
   });
 
   it('|netqty| not a whole number of lots → QTY_NOT_LOT_MULTIPLE (units or lots)', () => {

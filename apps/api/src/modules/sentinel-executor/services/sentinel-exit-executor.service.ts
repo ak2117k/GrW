@@ -251,16 +251,14 @@ export class SentinelExitExecutor {
       // The position's OWN contract row: by tradingsymbol first. Tokens are REUSED after expiry (prod 2026-11-06:
       // NFO token of BHARTIARTL23NOV262100CE is also BANKINDIA25AUG26137.5CE, lot 5200) — an unordered token
       // findFirst read BANKINDIA's lot, and every exit of the BHARTIARTL call (91 attempts, from a green floor
-      // break at 09:43 to MAX_LOSS at −₹4k) was refused as LOT_SIZE_MISMATCH. Token-only, newest row, as fallback.
-      inst = ((await this.prisma.instrument.findFirst({
+      // break at 09:43 to MAX_LOSS at −₹4k) was refused as LOT_SIZE_MISMATCH. Never by token alone: with no row of
+      // its own, DIVISLAB23NOV2611500PE read a dead FORTIS row, lot 775, and 17 exits were refused (2026-11-09).
+      // No row means no caller lot, and planExitOrder uses the broker position's own lot size.
+      inst = (await this.prisma.instrument.findFirst({
         where: { exchange: t.exchange, symbol: t.symbol },
         orderBy: { updatedAt: 'desc' },
         select: { tickSize: true, lotSize: true },
-      })) ?? (await this.prisma.instrument.findFirst({
-        where: { exchange: t.exchange, token: t.token },
-        orderBy: { updatedAt: 'desc' },
-        select: { tickSize: true, lotSize: true },
-      }))) as Inst;
+      })) as Inst;
     } catch (err) {
       return this.finish(id, v, 'FAILED', 'INSTRUMENT_READ', { brokerMessage: errText(err) });
     }

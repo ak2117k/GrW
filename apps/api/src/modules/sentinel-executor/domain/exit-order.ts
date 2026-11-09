@@ -68,7 +68,8 @@ export type ExitPlan =
  * comes from the broker row, never the tracker.
  *
  * R16: `target.lotSize` is the instrument's lot size (instrument master); the broker
- * row's own `lotsize` is used when the caller has none, and a disagreement refuses.
+ * row's own `lotsize` is used when the caller has none, and a disagreement refuses in
+ * lots mode only (units mode sends |netqty| and checks it against the broker's lot first).
  * An exchange with no configured unit is refused in live mode; dry-run records
  * |netqty| with `unitVerified: false`.
  */
@@ -95,12 +96,14 @@ export function planExitOrder(
   // R16 — quantity unit.
   const callerLot = lotOf(target.lotSize);
   const rowLot = lotOf(r.lotsize);
-  if (callerLot !== null && rowLot !== null && callerLot !== rowLot) {
-    return { ok: false, reason: 'LOT_SIZE_MISMATCH' };
-  }
-  const lot = callerLot ?? rowLot;
   const units = Math.abs(netQty);
   const unit = policy.qtyUnit ?? null;
+  // Only a lots order depends on the lot size. A units order is the broker's own net quantity, so our table cannot
+  // be allowed to block it, and the multiple check below trusts the broker's lot first (prod 2026-11-09).
+  if (unit === 'lots' && callerLot !== null && rowLot !== null && callerLot !== rowLot) {
+    return { ok: false, reason: 'LOT_SIZE_MISMATCH' };
+  }
+  const lot = unit === 'lots' ? callerLot ?? rowLot : rowLot ?? callerLot;
 
   let quantity: number;
   if (unit === null) {

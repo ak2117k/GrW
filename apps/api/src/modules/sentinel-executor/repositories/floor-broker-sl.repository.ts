@@ -57,15 +57,11 @@ export class FloorBrokerSlRepository {
 
   /**
    * The contract's OWN instrument row: exchange + tradingsymbol first (tokens are reused after expiry —
-   * f54ce0db, d050d539), newest; token only as a fallback. No isActive filter: expired rows are deactivated
-   * (prod 2026-11-06) but a live position's own row is what we want.
+   * f54ce0db, d050d539), newest; never by token alone, which can name a dead contract (2026-11-09). No isActive
+   * filter: expired rows are deactivated (prod 2026-11-06) but a live position's own row is what we want.
    */
-  async instrument(exchange: string, symbol: string, token: string): Promise<{ tickSize: number | null; lotSize: number | null } | null> {
-    const select = { tickSize: true, lotSize: true } as const;
-    return (
-      (await this.prisma.instrument.findFirst({ where: { exchange, symbol }, orderBy: { updatedAt: 'desc' }, select }))
-      ?? (await this.prisma.instrument.findFirst({ where: { exchange, token }, orderBy: { updatedAt: 'desc' }, select }))
-    );
+  async instrument(exchange: string, symbol: string): Promise<{ tickSize: number | null; lotSize: number | null } | null> {
+    return this.prisma.instrument.findFirst({ where: { exchange, symbol }, orderBy: { updatedAt: 'desc' }, select: { tickSize: true, lotSize: true } });
   }
 
   /** PLACE / MODIFY / CANCEL rows since `since`, oldest first (restart memory and the comparison's steps). */

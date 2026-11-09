@@ -161,6 +161,22 @@ describe('SentinelExitExecutor', () => {
     expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 10 }));
   });
 
+  it('a contract with no instrument row exits on the broker lot, never on a dead contract sharing its token', async () => {
+    // prod 2026-11-09: DIVISLAB23NOV2611500PE had no row, token 103361 still named FORTIS25AUG261050CE (lot 775), and 17 exits were refused.
+    const units = parseAutoExitConfig({
+      AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units',
+    });
+    const h = harness({
+      tracker: { id: 't1', userId: 'owner', status: 'OPEN', kind: 'POSITION', exchange: 'MCX', symbol: 'DIVISLAB23NOV2611500PE', token: '445566', qty: 100 } as never,
+      positions: [env([posRow('100', '50.25', { lotsize: '100' })]), env([posRow('0')])],
+    });
+    h.prisma.instrument.findFirst.mockImplementation((async (q: { where: { symbol?: string } }) => (q.where.symbol ? null : { tickSize: 5, lotSize: 775 })) as never);
+    const out = await h.ex.process(V, units, NOW);
+    expect(out).not.toEqual(expect.objectContaining({ reason: 'LOT_SIZE_MISMATCH' }));
+    expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
+    expect(h.session.placeOrderClassified.mock.calls[0][0]).toEqual(expect.objectContaining({ side: 'SELL', quantity: 100 }));
+  });
+
   it('lots unit with a disagreeing broker lot size → SKIPPED: LOT_SIZE_MISMATCH, no order', async () => {
     const lots = parseAutoExitConfig({
       AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_QTY_UNITS: 'MCX:lots',

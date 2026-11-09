@@ -142,22 +142,26 @@ export class InstrumentMasterRefreshCron implements OnModuleInit {
   }
 
   /**
-   * 09:20 IST Mon-Fri — NEW cash listings only. A stock listing today can reach Angel's master after the
-   * 08:00 load (JPL 2026-10-28: "NEW LISTING JPL CASH ONLY ABOVE 1380" was NOISE — unknown symbol). The
-   * master is downloaded fresh and only cash rows whose token is not in the table yet are upserted, so
-   * this never re-writes the whole universe. New listings trade from 10:00.
+   * 09:20 IST Mon-Fri — NEW listings only. A stock or option contract listed today can reach Angel's master after
+   * the 08:00 load (JPL 2026-10-28: "NEW LISTING JPL CASH ONLY ABOVE 1380" was NOISE — unknown symbol; 2026-11-09:
+   * 136 option contracts, Angel's file was published 08:00:07 and the 08:00:00 pass read an older copy). The master
+   * is downloaded fresh and only rows not in the table yet are upserted, so this never re-writes the whole universe.
+   * Tokens are reused after expiry, so an option counts as known only when its token carries the same symbol.
    */
   @Cron('0 20 9 * * 1-5', { timeZone: 'Asia/Kolkata' })
   async refreshListings(): Promise<number> {
     try {
       const master = await this.adapter.getInstrumentMaster({ fresh: true });
-      const rows = this.toUpsertInputs(master).filter((r) => !r.expiry && !this.instruments.getByExchangeTokenSync(r.exchange, r.token));
+      const rows = this.toUpsertInputs(master).filter((r) => {
+        const known = this.instruments.getByExchangeTokenSync(r.exchange, r.token);
+        return r.expiry ? known?.symbol !== r.symbol : !known;
+      });
       if (rows.length === 0) {
-        this.logger.log('Listing refresh: no new cash symbols in the master');
+        this.logger.log('Listing refresh: nothing new in the master');
         return 0;
       }
       const count = await this.instruments.refreshMaster(rows);
-      this.logger.log(`Listing refresh: ${count} new cash symbol(s): ${rows.slice(0, 20).map((r) => `${r.exchange}:${r.symbol}`).join(', ')}`);
+      this.logger.log(`Listing refresh: ${count} new symbol(s): ${rows.slice(0, 20).map((r) => `${r.exchange}:${r.symbol}`).join(', ')}`);
       return count;
     } catch (err) {
       this.logger.warn(`Listing refresh failed: ${err instanceof Error ? err.message : String(err)}`);

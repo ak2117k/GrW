@@ -329,7 +329,7 @@ export class FloorBrokerSlService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async instrumentOf(t: FloorSlTracker) {
-    if (!this.inst.has(t.id)) this.inst.set(t.id, await this.repo.instrument(String(t.exchange).toUpperCase(), t.symbol, t.token));
+    if (!this.inst.has(t.id)) this.inst.set(t.id, await this.repo.instrument(String(t.exchange).toUpperCase(), t.symbol));
     return this.inst.get(t.id) ?? null;
   }
 

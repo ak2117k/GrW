@@ -113,6 +113,21 @@ describe('InstrumentMasterRefreshCron', () => {
       expect(n).toBe(1);
     });
 
+    it('also adds option contracts listed after the 08:00 load, even on a token a dead contract once used', async () => {
+      // prod 2026-11-09: 136 NFO contracts (every DIVISLAB 11300/11500/11700 strike) were in the morning file and never reached the table.
+      const opt = (symbol: string, token: string) => ({ exch_seg: 'NFO', symbol, token, name: 'DIVISLAB', lotsize: '100', tick_size: '5.000000', expiry: '23NOV2099', strike: '1150000.000000', instrumenttype: 'OPTSTK' });
+      const known: Record<string, unknown> = {
+        '103361': { token: '103361', symbol: 'FORTIS25AUG261050CE' },
+        '103364': { token: '103364', symbol: 'DIVISLAB23NOV9911800CE' },
+      };
+      const instruments = { refreshMaster: jest.fn().mockResolvedValue(3), getByExchangeTokenSync: jest.fn((_e: string, t: string) => known[t] ?? null) } as any;
+      const rows = [opt('DIVISLAB23NOV9911500PE', '103361'), opt('DIVISLAB23NOV9911700CE', '103362'), opt('DIVISLAB23NOV9911800CE', '103364')];
+      const adapter = { getInstrumentMaster: jest.fn().mockResolvedValue(rows) } as any;
+      await new InstrumentMasterRefreshCron(instruments, adapter).refreshListings();
+      const written = instruments.refreshMaster.mock.calls[0][0].map((r: { symbol: string }) => r.symbol);
+      expect(written).toEqual(['DIVISLAB23NOV9911500PE', 'DIVISLAB23NOV9911700CE']);
+    });
+
     it('nothing new: no write; a failed download never throws', async () => {
       const instruments = { refreshMaster: jest.fn(), getByExchangeTokenSync: jest.fn(() => ({})) } as any;
       expect(await new InstrumentMasterRefreshCron(instruments, { getInstrumentMaster: jest.fn().mockResolvedValue(master) } as any).refreshListings()).toBe(0);

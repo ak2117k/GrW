@@ -31,8 +31,18 @@ const istMidnight = (now: Date) => {
   return ist - (ist % 86_400_000) - 5.5 * 3_600_000;
 };
 
-/** A block that is either present with its source, or stated unavailable WITH the reason (never silent). */
-export type CtxBlock = { status: 'present'; source: string; value: unknown } | { status: 'unavailable'; reason: string };
+/**
+ * A block that is present with its source, stated unavailable WITH the reason (we failed to look / no data),
+ * or not_applicable WITH the reason (absent BY DESIGN: the source does not cover this underlying, or the
+ * owner withholds it). Never silent. The night review's INPUT_MISSING counts `unavailable`, not `not_applicable`.
+ */
+export type CtxBlock =
+  | { status: 'present'; source: string; value: unknown }
+  | { status: 'unavailable'; reason: string }
+  | { status: 'not_applicable'; reason: string };
+
+/** Thrown inside a block when its absence is by design (→ `not_applicable`), not a failure. */
+class NotApplicable extends Error {}
 
 const BLOCK_TIMEOUT_MS = 8_000;
 /**
@@ -152,8 +162,13 @@ export class SignalContextService {
     const [chain, market, structure, news, mbm] = await Promise.all([
       this.block('mbm_chain_snapshots', async () => {
         if (!this.chain) return null;
+        // The chain capture (mbm-chain-capture) snapshots NFO index / stock chains only — never MCX.
+        if (i.exchange === 'MCX') throw new NotApplicable(`chain snapshots cover NFO index / stock underlyings only; ${i.underlying} trades on MCX`);
         const c = await this.chain.latestChain(i.underlying);
-        return c ? { expiry: c.expiry, capturedAt: c.capturedAt.toISOString(), spot: c.spot, fut: c.fut ?? null, pcr: c.pcr, maxPain: c.maxPain, callWall: c.callWall, putWall: c.putWall } : null;
+        if (!c) throw new Error(`no snapshot for ${i.underlying} in the last 10 days`);
+        // The newest snapshot can be days old (prod 2026-11-06: MCX's was 2 days, NYKAA's 9) — say so.
+        const ageMin = Math.round((i.now.getTime() - c.capturedAt.getTime()) / 60_000);
+        return { expiry: c.expiry, capturedAt: c.capturedAt.toISOString(), ageMin, spot: c.spot, fut: c.fut ?? null, pcr: c.pcr, maxPain: c.maxPain, callWall: c.callWall, putWall: c.putWall };
       }),
       this.block('market-context (VIX, breadth, chain aggregate)', async () => {
         if (!this.marketCtx) return null;
@@ -182,9 +197,9 @@ export class SignalContextService {
       }),
       this.block('mbm expected move (incl. relative reading)', async () => {
         if (!this.mbm || !this.mbmCfg) return null;
-        if (!this.mbmVisible()) throw new Error('MBM is hidden from judges until the self-review clears it (MBM_PACKET / mbm.packet)');
         const inst = mbmInstrumentFor({ symbol: i.underlying, exchange: i.exchange === 'MCX' ? 'MCX' : 'NSE' }, this.mbmCfg.instruments);
-        if (!inst) throw new Error(`${i.underlying} is not an MBM instrument`);
+        if (!inst) throw new NotApplicable(`${i.underlying} is not an MBM instrument (MBM covers ${this.mbmCfg.instruments.join(', ')})`);
+        if (!this.mbmVisible()) throw new NotApplicable('MBM is withheld from judges by the owner rule until the self-review clears it (MBM_PACKET=on / mbm.packet)');
         const b = await this.mbm.behaviour(inst, i.now.getTime());
         return b.status === 'absent' ? null : b;
       }),
@@ -411,6 +426,7 @@ export class SignalContextService {
       if (value === null || value === undefined) return { status: 'unavailable', reason: `${source}: nothing available (not wired, or no data)` };
       return { status: 'present', source, value };
     } catch (err) {
+      if (err instanceof NotApplicable) return { status: 'not_applicable', reason: `${source}: ${err.message}` };
       return { status: 'unavailable', reason: `${source}: ${errText(err)}` };
     }
   }

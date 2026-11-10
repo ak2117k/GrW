@@ -190,7 +190,7 @@ export function channelStatsForJudge(stats: Record<string, unknown> | null): Rec
   };
 }
 
-type Block = { status: 'present'; source: string; value: unknown } | { status: 'unavailable'; reason: string };
+type Block = { status: 'present'; source: string; value: unknown } | { status: 'unavailable' | 'not_applicable'; reason: string };
 const val = (b: Block | undefined): Record<string, unknown> =>
   b && b.status === 'present' && b.value && typeof b.value === 'object' && !Array.isArray(b.value) ? (b.value as Record<string, unknown>) : {};
 

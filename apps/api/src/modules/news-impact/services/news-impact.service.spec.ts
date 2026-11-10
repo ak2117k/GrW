@@ -165,3 +165,59 @@ describe('NewsImpactService — HIGH impact wake + alert', () => {
     expect(events.emit).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Prod 2026-11-09 (self-review): JUBLFOOD moved -6.28 % (2.16 ATR) with "articles 2, reads 0". Its Q2
+ * results cluster and its management-change cluster (NSE filings, 6 Nov) were each in two batches during
+ * the 6–7 Nov CLI outage; every failed call spent an attempt, both hit MAX_ATTEMPTS, and neither was ever
+ * read. Attempts are persisted per cluster here, so a run that spends them for a non-answer shows up.
+ */
+describe('NewsImpactService — a story is read once the model answers (JUBLFOOD, 2026-11-09)', () => {
+  const at = (min: number) => new Date(NOW.getTime() + min * 60_000);
+  const jubl = () => [
+    cluster('jubl-results', { headline: 'JUBLFOOD: Outcome of Board Meeting', instruments: ['JUBLFOOD'], sources: ['NSE Announcements'], materialType: 'RESULTS', material: true, relevance: 0.4 }),
+    cluster('jubl-mgmt', { headline: 'JUBLFOOD: Change in Auditors', instruments: ['JUBLFOOD'], sources: ['NSE Announcements'], materialType: 'MANAGEMENT_CHANGE', material: true, relevance: 0.4 }),
+  ];
+  const affected = { symbols: ['JUBLFOOD'], sectors: [], index: null };
+  const answer = { items: [item('jubl-results', { affected }), item('jubl-mgmt', { affected })] };
+
+  /** The service over a repo that keeps each cluster's impactAttempts between runs, as news_clusters does. */
+  function persisted(replies: Array<unknown>) {
+    const { svc, repo, llm } = setup({ clusters: jubl() });
+    const state = jubl();
+    repo.impactCandidates.mockImplementation(async () => state.map((c) => ({ ...c })));
+    repo.bumpAttempts.mockImplementation(async (...args: unknown[]) => {
+      for (const id of args[0] as string[]) {
+        const c = state.find((s) => s.id === id);
+        if (c) c.impactAttempts += 1;
+      }
+    });
+    let n = 0;
+    llm.analyse.mockImplementation(async () => {
+      const r = replies[Math.min(n++, replies.length - 1)];
+      if (r instanceof Error) throw r;
+      return r;
+    });
+    const stored = () => repo.upsertImpact.mock.calls.map((c) => (c as unknown as [{ clusterId: string }])[0].clusterId);
+    return { svc, stored };
+  }
+
+  it('two failed calls (the outage), then a working one: both JUBLFOOD stories are read', async () => {
+    const down = new Error('claude CLI: exited with code 1: [claude-code:unrecognized_model]');
+    const { svc, stored } = persisted([down, down, answer]);
+    for (const m of [0, 15, 30]) await svc.run(at(m));
+    expect(stored()).toEqual(expect.arrayContaining(['jubl-results', 'jubl-mgmt']));
+  });
+
+  it('two replies with no items array (a broken reply, not a judgement), then a working one: both are read', async () => {
+    const { svc, stored } = persisted([{ type: 'result', result: '' }, {}, answer]);
+    for (const m of [0, 15, 30]) await svc.run(at(m));
+    expect(stored()).toEqual(expect.arrayContaining(['jubl-results', 'jubl-mgmt']));
+  });
+
+  it('a story the model really did skip twice in a valid reply is still given up (the cap holds)', async () => {
+    const { svc, stored } = persisted([{ items: [] }, { items: [] }, answer]);
+    for (const m of [0, 15, 30]) await svc.run(at(m));
+    expect(stored()).toEqual([]);
+  });
+});

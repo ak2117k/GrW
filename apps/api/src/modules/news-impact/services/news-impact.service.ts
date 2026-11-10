@@ -120,6 +120,9 @@ export class NewsImpactService {
       // that arrived during the 2026-11-06 outage, including Divi's Q2 results.
       throw e;
     }
+    // Same for a reply that is not our schema at all (no items array): a broken reply, not a judgement of
+    // any story, so it must not spend their attempts either. A valid reply that omits a story still does.
+    if (!Array.isArray((reply as { items?: unknown } | null)?.items)) throw new Error('the reply had no items array');
     // Code guards over the reply (prompt v2): recap headlines carry no direction; one direction per target set.
     const byId = new Map(batch.map((c) => [c.id, c]));
     const items = validateImpactReply(reply, batch.map((c) => c.id)).map((i) => normaliseTargets(applyRecapGuard(i, recapKind(byId.get(i.clusterId)?.headline))));

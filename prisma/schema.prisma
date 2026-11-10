@@ -2011,6 +2011,10 @@ model SentinelExitTrigger {
   firedAt       DateTime?
   firedPrice    Float?
   firedTickAt   DateTime?
+  /// RECORD ONLY (2026-11-10): the trigger check at arming (exit-discipline/trigger-check.ts) — distance in
+  /// noise units, inside the AI's own invalidation, CUT_LOSS / PROTECT_PROFIT. Nothing arms, fires or exits
+  /// on it. NULL for rows armed before it, and when the verdict's packet was unreadable.
+  check         Json?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
@@ -3371,6 +3375,7 @@ model SignalDecision {
   skipReason  String?   @map("skip_reason")
   aiCheck     Json?     @map("ai_check") // learning mode: the closed paper trade held against the judge's call (domain/ai-check)
   oiCheck     Json?     @map("oi_check") // the paper open's OI check, record only: {verdict, source, numbers} (domain/oi-check)
+  trend       Json? // WITH | AGAINST | MIXED | UNKNOWN the underlying's 15m EMA20/80 + MACD trend, record only: {status, tag, direction, trend, ema20, ema80, macdHist, timeframe, candleCount, computedAt, source} or {status: unavailable, reason} (domain/trend-tag)
   createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 

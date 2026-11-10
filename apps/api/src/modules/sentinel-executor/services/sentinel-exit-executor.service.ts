@@ -1,7 +1,7 @@
 // apps/api/src/modules/sentinel-executor/services/sentinel-exit-executor.service.ts
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { sendOpsAlert } from '../../../common/utils/ops-alert';
-import { ExitFailureAlerts, exitFailStreakFrom } from '../domain/exit-failure-alert';
+import { ExitFailureAlerts, exitFailStreakFrom, scrubBrokerMessage } from '../domain/exit-failure-alert';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import type { OrderRequest } from '../../../common/interfaces/broker-adapter.interface';
 import type {
@@ -865,6 +865,7 @@ export class SentinelExitExecutor {
     const line = `[ai-exit] ${status}${reason ? `: ${reason}` : ''} — ${v.symbol} verdict ${v.id}`;
     if (warn || status === 'FAILED' || status === 'REJECTED') this.logger.warn(line);
     else this.logger.log(line);
+    if (status === 'FAILED' && reason && UNKNOWN_FATE_REASONS.includes(reason)) this.alertUncertain(id, v, reason, extra.brokerMessage);
     this.alertOnFailure(v, status, reason, extra.brokerMessage);
     return reason ? { status, reason } : { status };
   }
@@ -887,6 +888,29 @@ export class SentinelExitExecutor {
       if (alert) void sendOpsAlert(alert.key, alert.text).catch(() => undefined);
     } catch (err) {
       this.logger.warn(`[ai-exit] failure alert could not be built: ${errText(err)}`);
+    }
+  }
+
+  /**
+   * The moment an exit ends with an UNKNOWN fate (2026-11-10): the order may or may not
+   * be at Angel, and hasInFlight blocks every later exit on the position until the
+   * resolver (ExitUncertainResolver) settles it from the broker's books. Always its own
+   * alert (keyed by the row, so no other failure's cooldown can swallow it). Never throws.
+   */
+  private alertUncertain(id: string, v: PendingVerdict, reason: string, brokerMessage: string | null | undefined): void {
+    try {
+      this.logger.error(
+        `[ai-exit] !!! ${reason} on ${v.symbol} (tracker ${v.trackerId}, verdict ${v.id}): the exit order may or may not exist at Angel ` +
+          `(broker: ${scrubBrokerMessage(brokerMessage)}). Exits on this position are BLOCKED until the resolver checks the order book ` +
+          `and positions (~1–2 min). Check Angel now.`,
+      );
+      void sendOpsAlert(
+        `ai-exit-uncertain:${id}`,
+        `GrW ALERT: exit of ${v.symbol} has an UNKNOWN outcome (${reason}; broker: ${scrubBrokerMessage(brokerMessage)}). ` +
+          `The order may or may not be at Angel; further exits on it are blocked until it is resolved from the order book (~1–2 min). Check the position.`,
+      ).catch(() => undefined);
+    } catch {
+      // an alert problem must not change the attempt's outcome
     }
   }
 

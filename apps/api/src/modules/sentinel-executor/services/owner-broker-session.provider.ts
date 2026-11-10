@@ -89,7 +89,11 @@ export class OwnerBrokerSessionProvider {
     const warm = this.userFeeds.leaseRestClient(userId);
     if (warm) {
       try {
-        return await this.factory.borrow(warm.client as UserSmartApiLike, warm.clientId, (s) => fn(s, 'user-feed'));
+        // The order client (same login, longer SDK timeout, own axios instance) when the
+        // session has one; and the session's priority gate, so the user's background
+        // quote / greeks / candle reads wait while this exit talks to the broker (2026-11-10).
+        const client = (warm.orderClient ?? warm.client) as UserSmartApiLike;
+        return await this.factory.borrow(client, warm.clientId, (s) => fn(s, 'user-feed'), { priority: warm.priority ?? null });
       } finally {
         warm.release();
       }

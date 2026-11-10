@@ -568,6 +568,46 @@ export class SignalTraderRepository {
   }
 
   /**
+   * The hub's candles_1m rolled up to 15-minute bars (IST quarter-hours: 5h30 is a multiple of 15 min,
+   * so the UTC epoch origin lines up with 09:15 / 09:00), oldest first. The trend tag's source; the
+   * rows a bucket may hold are capped by the window, never the broker.
+   */
+  async hub15mBars(exchange: string, token: string, from: Date, to: Date): Promise<Array<{ ts: number; open: number; high: number; low: number; close: number }>> {
+    const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
+      SELECT date_bin('15 minutes', ts, TIMESTAMPTZ '1970-01-01 00:00:00+00') AS b,
+             (array_agg(open ORDER BY ts))[1] AS open, max(high) AS high, min(low) AS low,
+             (array_agg(close ORDER BY ts DESC))[1] AS close
+      FROM "candles_1m"
+      WHERE exchange = ${exchange} AND token = ${token}
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+        AND low > 0 AND high >= low
+      GROUP BY b
+      ORDER BY b`;
+    return rows.map((r) => ({ ts: (r.b as Date).getTime(), open: num(r.open) ?? 0, high: num(r.high) ?? 0, low: num(r.low) ?? 0, close: num(r.close) ?? 0 }));
+  }
+
+  /** Newest `limit` persisted 15m bars of the instrument (`candles`, the scorecard's backfill) before `before`, oldest first. */
+  async stored15mBars(exchange: string, token: string, limit: number, before: Date): Promise<Array<{ ts: number; open: number; high: number; low: number; close: number }>> {
+    const inst = await this.prisma.instrument.findFirst({ where: { token, exchange }, select: { id: true } });
+    if (!inst) return [];
+    const rows = await this.prisma.candle.findMany({
+      where: { instrumentId: inst.id, timeframe: '15m', timestamp: { lt: before } },
+      select: { timestamp: true, open: true, high: true, low: true, close: true },
+      orderBy: { timestamp: 'desc' },
+      take: limit,
+    });
+    return rows.reverse().map((r) => ({ ts: r.timestamp.getTime(), open: r.open, high: r.high, low: r.low, close: r.close }));
+  }
+
+  /**
+   * The trend tag on the decision (domain/trend-tag), record only. Raw SQL so it writes the column
+   * whether or not this build's Prisma client was generated with it.
+   */
+  async recordTrend(decisionId: string, trend: unknown): Promise<void> {
+    await this.prisma.$executeRaw`UPDATE "signal_decisions" SET "trend" = ${JSON.stringify(trend)}::jsonb WHERE id = ${decisionId}`;
+  }
+
+  /**
    * The underlying's own price line (market-hub INDEX_UNDERLYINGS for an index; the nearest live future
    * of the same name on MCX; the NSE cash line for a stock). null when the master has none.
    */
@@ -627,6 +667,43 @@ export class SignalTraderRepository {
       select: { id: true, symbol: true, exchange: true, token: true },
     });
     return r ? { instrumentId: r.id, symbol: r.symbol, exchange: r.exchange, token: r.token } : null;
+  }
+
+  /** `name`'s active MCX futures expiring on or after `from`, nearest first (an MCX option's underlying is one of them). */
+  async mcxFutures(name: string, from: Date): Promise<Array<{ exchange: string; token: string; symbol: string; expiry: string }>> {
+    const rows = await this.prisma.instrument.findMany({
+      where: { name: name.toUpperCase(), exchange: 'MCX', optionType: null, symbol: { endsWith: 'FUT' }, isActive: true, expiry: { gte: from } },
+      orderBy: { expiry: 'asc' },
+      select: { exchange: true, token: true, symbol: true, expiry: true },
+      take: 6,
+    });
+    return rows.map((r) => ({ exchange: r.exchange, token: r.token, symbol: r.symbol, expiry: ymd(r.expiry) })).filter((r): r is { exchange: string; token: string; symbol: string; expiry: string } => !!r.expiry);
+  }
+
+  /**
+   * The NEWEST oi_snapshots capture of `ids` at or after `since`: every row stamped with that capture's
+   * timestamp (the hub's snapshot job writes one chain's rows with one timestamp). null when none.
+   */
+  async latestOiCapture(ids: string[], since: Date): Promise<{ at: Date; rows: Array<{ instrumentId: string; oi: number; oiChange: number | null; volume: number; ltp: number | null }> } | null> {
+    if (ids.length === 0) return null;
+    const rows = await this.prisma.$queryRaw<Array<{ instrumentId: string; oi: bigint; oiChange: bigint | null; volume: bigint; ltp: number | null; timestamp: Date }>>`
+      SELECT "instrumentId", "oi", "oiChange", "volume", "ltp", "timestamp" FROM "oi_snapshots"
+      WHERE "instrumentId" IN (${Prisma.join(ids)})
+        AND "timestamp" = (
+          SELECT MAX("timestamp") FROM "oi_snapshots"
+          WHERE "instrumentId" IN (${Prisma.join(ids)}) AND "timestamp" >= ${since}
+        )`;
+    if (rows.length === 0) return null;
+    return {
+      at: rows[0].timestamp,
+      rows: rows.map((r) => ({
+        instrumentId: r.instrumentId,
+        oi: Number(r.oi),
+        oiChange: r.oiChange === null ? null : Number(r.oiChange),
+        volume: Number(r.volume),
+        ltp: num(r.ltp),
+      })),
+    };
   }
 
   /** The NSE cash line of a stock (`X-EQ`, else `X`). */

@@ -212,6 +212,11 @@ export function labelChain(market: Record<string, Block>): void {
   const ch = market.chain;
   if (!ch || ch.status !== 'present' || !ch.value || typeof ch.value !== 'object') return;
   const v = ch.value as Record<string, unknown>;
-  v.spotIs = 'the cash INDEX / stock SPOT — options settle to it; intrinsic = spot − strike (CE) / strike − spot (PE)';
+  if (v.exchange === 'MCX') {
+    // MCX options are options on futures: the chain's `spot` IS the underlying future (mcx-chain.ts).
+    v.spotIs = `the UNDERLYING FUTURE${typeof v.underlyingFuture === 'string' ? ` (${v.underlyingFuture})` : ''} — MCX options are options on futures and settle to it; intrinsic = future − strike (CE) / strike − future (PE)`;
+    return;
+  }
+  v.spotIs ='the cash INDEX / stock SPOT — options settle to it; intrinsic = spot − strike (CE) / strike − spot (PE)';
   if (v.fut !== null && v.fut !== undefined) v.futIs = 'the near-month FUTURE — spot + cost of carry; never use it for an option\'s intrinsic';
 }

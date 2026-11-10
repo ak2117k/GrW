@@ -23,6 +23,9 @@ import { noiseFromBars } from '../../exit-discipline/noise';
 import { NOISE_LOOKBACK_MIN } from '../../exit-discipline/config';
 import type { MinuteBar } from '../../exit-discipline/types';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+import { istYmd } from '../../mbm/domain/chain-snapshot';
+import { MCX_CHAIN_LOOKBACK_DAYS, MCX_FUT_BAR_MAX_LAG_MS, chainBlockValue, mcxChainSnapshot, mcxExpiryOrder, mcxProxyParent, proxyExpiry, underlyingFutureFor, useProxy } from '../domain/mcx-chain';
+import { classifyTrend, mergeTrendBars, TREND_MAX_BARS, type TrendBar } from '../domain/trend-tag';
 
 /** Fewer hub bars than this today ⇒ the noise block asks the broker's 1-min history instead. */
 const MIN_HUB_BARS = 15;
@@ -45,6 +48,12 @@ export type CtxBlock =
 class NotApplicable extends Error {}
 
 const BLOCK_TIMEOUT_MS = 8_000;
+/** The MCX chain block's source: the market hub's 3-minute OI capture (database reads only). */
+const MCX_CHAIN_SOURCE = 'oi_snapshots (market hub 3-min OI capture, MCX)';
+/** The trend tag is record only: it must never hold a signal up, so it gets a short box of its own. */
+export const TREND_TIMEOUT_MS = 5_000;
+/** candles_1m read for the trend: ~5 NSE sessions of 15m bars past weekends / a holiday (MCX needs ~2). */
+const TREND_HUB_LOOKBACK_MS = 10 * 86_400_000;
 /**
  * A cold level book is several historical windows (daily statics, 15m bars, the higher-TF trend)
  * through the owner's 350 ms-gated session, behind whatever else is fetching; 8 s timed out on
@@ -136,6 +145,47 @@ export class SignalContextService {
     });
   }
 
+  /**
+   * market.trend (domain/trend-tag), RECORD ONLY — the underlying's 15m EMA20/EMA80 + MACD histogram
+   * against the signal's direction. Database reads only (the hub's candles_1m rolled to 15m, older
+   * history from the persisted `candles` 15m rows), never the broker; boxed at {@link TREND_TIMEOUT_MS}.
+   * Too few bars ⇒ present with tag UNKNOWN; a failed read / timeout ⇒ `unavailable` with the reason.
+   * The bar read is shared for the quarter-hour (the decision record and the judge packet both ask).
+   */
+  async trend(i: { signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'side'>; exchange: string; now: Date }): Promise<CtxBlock> {
+    return this.block(
+      'trend tag (15m EMA20/EMA80 + MACD histogram; candles_1m → 15m, candles 15m history)',
+      async () => {
+        if (!this.repo) return null;
+        const s = i.signal;
+        const ref = await this.repo.underlyingRef(s.underlying, i.exchange, i.now);
+        if (!ref) throw new Error(`no price line for the underlying ${s.underlying}`);
+        const { bars, source } = await this.trendBars(this.repo, ref, i.now);
+        return classifyTrend({ kind: s.instrumentKind, side: s.side, bars, now: i.now, source });
+      },
+      TREND_TIMEOUT_MS,
+    );
+  }
+
+  private readonly trendBarCache = new Map<string, Promise<{ bars: TrendBar[]; source: string }>>();
+
+  private trendBars(repo: SignalTraderRepository, ref: { exchange: string; token: string; symbol: string }, now: Date): Promise<{ bars: TrendBar[]; source: string }> {
+    const key = `${ref.exchange}:${ref.token}:${Math.floor(now.getTime() / (15 * 60_000))}`;
+    const hit = this.trendBarCache.get(key);
+    if (hit) return hit;
+    const p = Promise.all([
+      repo.hub15mBars(ref.exchange, ref.token, new Date(now.getTime() - TREND_HUB_LOOKBACK_MS), now),
+      repo.stored15mBars(ref.exchange, ref.token, TREND_MAX_BARS, now).catch(() => [] as TrendBar[]),
+    ]).then(([hub, older]) => ({
+      bars: mergeTrendBars(older, hub, now),
+      source: `candles_1m ${ref.symbol} → 15m (${hub.length} bars)${older.length ? ` + candles 15m (${older.length})` : ''}`,
+    }));
+    if (this.trendBarCache.size > 200) this.trendBarCache.clear();
+    this.trendBarCache.set(key, p);
+    p.catch(() => this.trendBarCache.delete(key));
+    return p;
+  }
+
   /** 1-min bars: the hub's candles_1m, else (too few today) the broker's 1-min history over the owner's session. */
   private async minuteBars(ref: { exchange: string; token: string; symbol: string }, from: Date, to: Date, ownerUserId: string | null): Promise<{ bars: MinuteBar[]; source: string }> {
     let hub: MinuteBar[] = [];
@@ -157,19 +207,21 @@ export class SignalContextService {
     }
   }
 
-  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null }): Promise<Record<string, CtxBlock>> {
+  /** `expiry`: the traded contract's (YYYY-MM-DD), so an MCX chain reads that expiry's capture first. */
+  async build(i: { underlying: string; kind: string; exchange: string; ownerUserId: string | null; now: Date; ltp?: number | null; expiry?: string | null }): Promise<Record<string, CtxBlock>> {
     const sym = levelSymbolFor(i.underlying, i.kind);
     const [chain, market, structure, news, mbm] = await Promise.all([
-      this.block('mbm_chain_snapshots', async () => {
-        if (!this.chain) return null;
-        // The chain capture (mbm-chain-capture) snapshots NFO index / stock chains only — never MCX.
-        if (i.exchange === 'MCX') throw new Error(`not wired for MCX yet: the judge reads NFO chain snapshots, while ${i.underlying}'s chain is captured by the market hub (oi_snapshots) and not read here`);
-        const c = await this.chain.latestChain(i.underlying);
-        if (!c) throw new Error(`no snapshot for ${i.underlying} in the last 10 days`);
-        // The newest snapshot can be days old (prod 2026-11-06: MCX's was 2 days, NYKAA's 9) — say so.
-        const ageMin = Math.round((i.now.getTime() - c.capturedAt.getTime()) / 60_000);
-        return { expiry: c.expiry, capturedAt: c.capturedAt.toISOString(), ageMin, spot: c.spot, fut: c.fut ?? null, pcr: c.pcr, maxPain: c.maxPain, callWall: c.callWall, putWall: c.putWall };
-      }),
+      // The chain capture (mbm-chain-capture) snapshots NFO index / stock chains only; an MCX chain is read
+      // from the market hub's own 3-minute OI capture instead (mcxChain), in the same block shape.
+      i.exchange === 'MCX'
+        ? this.block(MCX_CHAIN_SOURCE, () => this.mcxChain(i))
+        : this.block('mbm_chain_snapshots', async () => {
+            if (!this.chain) return null;
+            const c = await this.chain.latestChain(i.underlying);
+            if (!c) throw new Error(`no snapshot for ${i.underlying} in the last 10 days`);
+            // The newest snapshot can be days old (prod 2026-11-06: MCX's was 2 days, NYKAA's 9): ageMin says so.
+            return chainBlockValue(c, i.now);
+          }),
       this.block('market-context (VIX, breadth, chain aggregate)', async () => {
         if (!this.marketCtx) return null;
         const s = await this.marketCtx.snapshot(i.underlying);
@@ -205,6 +257,98 @@ export class SignalContextService {
       }),
     ]);
     return { chain, market, structure, news, mbm };
+  }
+
+  /**
+   * An MCX commodity's option chain for the judge, from the DATABASE only, never the broker: the market
+   * hub's OI snapshot job already quotes the core MCX chains (CRUDEOIL, NATURALGAS, GOLD, SILVER) and any
+   * held / screen-viewed one every 3 minutes into oi_snapshots (OI, OI change vs the previous session, LTP).
+   * Expiry: the traded one, else the nearest live one (the next on its expiry day). ATM centres on the
+   * option's UNDERLYING FUTURE (the earliest future expiring on or after the option), priced from its
+   * candles_1m close at the capture, else put-call parity from the capture itself. Same value shape as the
+   * NSE block; `spot` is that future (MCX options settle to it), `fut` null. Throws the reason when it
+   * cannot be built (the block turns that into `unavailable`). A mini / variant (CRUDEOILM, GOLDM, …;
+   * domain/mcx-chain MCX_PROXY_PARENT) whose own capture is missing or older reads the parent's chain at
+   * the nearest parent expiry on or after its own, labelled `proxyOf`.
+   */
+  private async mcxChain(i: { underlying: string; now: Date; expiry?: string | null }): Promise<unknown> {
+    if (!this.repo) throw new Error('not wired: no signal-trader repository to read the hub OI capture');
+    const name = i.underlying.toUpperCase();
+    const today = istYmd(i.now);
+    const todayStart = new Date(`${today}T00:00:00+05:30`);
+    const since = new Date(i.now.getTime() - MCX_CHAIN_LOOKBACK_DAYS * 86_400_000);
+    const [expiries, futures] = await Promise.all([this.repo.optionExpiries(name, todayStart), this.repo.mcxFutures(name, todayStart)]);
+    const order = mcxExpiryOrder(expiries, today, i.expiry ?? null);
+    const own = order.length > 0 ? await this.mcxCaptured(name, order, futures, since, i.now) : { ok: false as const, misses: ['no live MCX option expiry in the instrument master'] };
+
+    // A mini / variant (CRUDEOILM, GOLDM, …): the hub captures its own chain only while held / viewed, so
+    // when that capture is missing or older than the parent's, the parent's chain at the matching expiry is
+    // read instead (database only, like the own read) and labelled proxyOf.
+    const parent = mcxProxyParent(name);
+    const miniExpiry = own.ok ? own.expiry : order[0] ?? null;
+    let proxyMiss: string | null = null;
+    if (parent && miniExpiry) {
+      const [pExpiries, pFutures] = await Promise.all([this.repo.optionExpiries(parent, todayStart), this.repo.mcxFutures(parent, todayStart)]);
+      const pExpiry = proxyExpiry(pExpiries, miniExpiry);
+      if (!pExpiry) proxyMiss = `${parent} proxy: no ${parent} option expiry on or after ${miniExpiry}`;
+      else {
+        const p = await this.mcxCaptured(parent, [pExpiry], pFutures, since, i.now);
+        if (!p.ok) proxyMiss = `${parent} proxy: ${p.misses.join('; ')}`;
+        else if (useProxy(own.ok ? own.at : null, p.at)) return { ...p.value, proxyOf: parent };
+      }
+    } else if (parent) proxyMiss = `${parent} proxy: no ${name} option expiry to match`;
+    if (own.ok) return own.value;
+    throw new Error(
+      `no usable hub OI capture of ${name}'s options (${own.misses.join('; ')}${proxyMiss ? `; ${proxyMiss}` : ''}); the hub captures its OI core list (HUB_OI_CORE_UNDERLYINGS + GOLD/SILVER) and held / screen-viewed chains only`,
+    );
+  }
+
+  /** The first of `order`'s expiries with a usable hub capture of `name`'s options, as the block value. DB only. */
+  private async mcxCaptured(
+    name: string,
+    order: readonly string[],
+    futures: Array<{ exchange: string; token: string; symbol: string; expiry: string }>,
+    since: Date,
+    now: Date,
+  ): Promise<{ ok: true; expiry: string; at: Date; value: Record<string, unknown> } | { ok: false; misses: string[] }> {
+    const repo = this.repo as SignalTraderRepository;
+    const misses: string[] = [];
+    for (const expiry of order) {
+      const contracts = await repo.optionContracts(name, expiry);
+      if (contracts.length === 0) {
+        misses.push(`${expiry}: no option contracts in the master`);
+        continue;
+      }
+      const cap = await repo.latestOiCapture(contracts.map((c) => c.instrumentId), since);
+      if (!cap) {
+        misses.push(`${expiry}: no oi_snapshots capture in the last ${MCX_CHAIN_LOOKBACK_DAYS} days`);
+        continue;
+      }
+      const fut = underlyingFutureFor(expiry, futures);
+      let futBar: number | null = null;
+      if (fut) {
+        const bars = await repo.minuteCloses(fut.exchange, fut.token, new Date(cap.at.getTime() - MCX_FUT_BAR_MAX_LAG_MS), cap.at).catch(() => []);
+        futBar = bars.length > 0 ? bars[bars.length - 1].close : null;
+      }
+      const r = mcxChainSnapshot({ underlying: name, expiry, capturedAt: cap.at, contracts, rows: cap.rows, futBar });
+      if (!r.ok) {
+        misses.push(`${expiry}: ${r.reason}`);
+        continue;
+      }
+      return {
+        ok: true,
+        expiry,
+        at: cap.at,
+        value: {
+          ...chainBlockValue({ ...r.row, fut: null }, now),
+          exchange: 'MCX',
+          underlyingFuture: fut?.symbol ?? null,
+          spotSource: r.futSource === 'candles_1m' ? `candles_1m ${fut?.symbol ?? 'future'} at the capture` : 'put-call parity at the ATM strike of the capture',
+          strikes: r.strikes,
+        },
+      };
+    }
+    return { ok: false, misses };
   }
 
   /** The level book's nearest support/resistance at `price` (engine SL source for FUT/EQ). */

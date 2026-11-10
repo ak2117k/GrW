@@ -425,6 +425,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
   private async pipeline(decisionId: string, s: SignalView, e: SignalReadyEvent, channel: string, now: Date): Promise<EvaluationResult> {
     const what = describeSignal(s);
+    void this.recordTrend(decisionId, s, now);
     const base = await this.gatherBase(s, e, now);
     const pg = await this.planAndGate(decisionId, s, base, base.ltp, now);
     if (!pg.gate.pass || !pg.plan) {
@@ -462,6 +463,28 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     return this.act(decisionId, s, channel, now, pg.gate.checks, pg.plan, j, base);
   }
 
+  /** The trend block (domain/trend-tag). Never throws; a failure is an `unavailable` block with the reason. */
+  private trendBlock(s: SignalView, now: Date): Promise<CtxBlock> {
+    return Promise.resolve()
+      .then(() => this.context.trend({ signal: s, exchange: segmentFor(s), now }))
+      .catch((err: unknown) => ({ status: 'unavailable' as const, reason: `trend tag: ${errText(err)}` }));
+  }
+
+  /**
+   * WITH / AGAINST the trend on the decision row (signal_decisions.trend), RECORD ONLY: fired and
+   * forgotten at the start of the pipeline so it never holds the signal up, and nothing reads it back
+   * for the gate, the sizing, the judge's rules or the exits. Never throws.
+   */
+  private async recordTrend(decisionId: string, s: SignalView, now: Date): Promise<void> {
+    try {
+      const b = await this.trendBlock(s, now);
+      const row = b.status === 'present' ? { status: 'present', ...(b.value as Record<string, unknown>) } : { status: b.status, reason: b.reason, computedAt: now.toISOString() };
+      await this.repo.recordTrend(decisionId, row);
+    } catch (err) {
+      this.logger.warn(`[signal-trader] trend tag for ${decisionId}: ${errText(err)}`);
+    }
+  }
+
   /** A late entry's room, from the packet's own level book + chain blocks and the option's delta. Never throws. */
   private async lateRoomFor(s: SignalView, plan: EntryPlan, market: Record<string, CtxBlock>, contract: ResolvedContract | null, owner: string | null, now: Date): Promise<LateRoom> {
     const val = (b: CtxBlock | undefined) => (b && b.status === 'present' && b.value && typeof b.value === 'object' ? (b.value as Record<string, unknown>) : {});
@@ -495,15 +518,18 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const conflict = e.conflict === true || cluster?.conflict === true;
     // 2026-11-04: event days reach the judge only on the default-TAKE prompt (skip = the v5 packet exactly).
     const takeDefault = cfg.judgeDefault === 'take';
-    const [market, channelStats, channelViews, events] = await Promise.all([
-      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp }),
+    const [market, channelStats, channelViews, events, trend] = await Promise.all([
+      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp, expiry: contract?.expiry ?? null }),
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()
         .then(() => this.repo.channelViews(s.underlying, now))
         .catch((err: unknown) => ({ status: 'unavailable', reason: `channel views: ${err instanceof Error ? err.message : String(err)}` })),
       takeDefault ? this.eventsFor(s.underlying, now) : Promise.resolve(null),
+      // Informational (record only): WITH / AGAINST / MIXED / UNKNOWN the 15m trend, or unavailable with the reason.
+      this.trendBlock(s, now),
     ]);
+    market.trend = trend;
     // 2026-11-04: the per-trade cap the judge reasons with is the underlying's own (GOLD ₹7,500 via
     // HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING) — the same figure the gate sized against (gate.ts riskCapFor).
     // It said ₹2,000 for GOLD, so reward/risk on a GOLD call was judged against a cap 3.75× too small.

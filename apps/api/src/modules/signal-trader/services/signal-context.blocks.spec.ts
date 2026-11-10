@@ -42,10 +42,10 @@ describe('SignalContextService.build — by-design absences are explicit, not da
     expect(ctx.mbm.status).toBe('present');
   });
 
-  it('chain on an MCX commodity is not_applicable (chain capture covers NFO underlyings only)', async () => {
+  it('chain on an MCX commodity stays unavailable: a gap to wire, not by design (the hub captures it)', async () => {
     const { svc, chain } = make();
     const ctx = await build(svc, 'CRUDEOIL', 'PE', 'MCX');
-    expect(ctx.chain).toEqual({ status: 'not_applicable', reason: expect.stringContaining('MCX') });
+    expect(ctx.chain).toEqual({ status: 'unavailable', reason: expect.stringContaining('not wired for MCX yet') });
     expect(chain.latestChain).not.toHaveBeenCalled();
   });
 
@@ -68,6 +68,6 @@ describe('SignalContextService.build — by-design absences are explicit, not da
     const ctx = await build(svc, 'CRUDEOIL', 'PE', 'MCX');
     const miss = missingBlocks('judge', ctx);
     expect(miss).not.toContain('mbm');
-    expect(miss).not.toContain('chain');
+    expect(miss).toContain('chain'); // MCX chain: a real gap until it is wired to the hub's capture
   });
 });

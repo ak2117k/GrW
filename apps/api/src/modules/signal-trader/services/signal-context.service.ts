@@ -163,7 +163,7 @@ export class SignalContextService {
       this.block('mbm_chain_snapshots', async () => {
         if (!this.chain) return null;
         // The chain capture (mbm-chain-capture) snapshots NFO index / stock chains only — never MCX.
-        if (i.exchange === 'MCX') throw new NotApplicable(`chain snapshots cover NFO index / stock underlyings only; ${i.underlying} trades on MCX`);
+        if (i.exchange === 'MCX') throw new Error(`not wired for MCX yet: the judge reads NFO chain snapshots, while ${i.underlying}'s chain is captured by the market hub (oi_snapshots) and not read here`);
         const c = await this.chain.latestChain(i.underlying);
         if (!c) throw new Error(`no snapshot for ${i.underlying} in the last 10 days`);
         // The newest snapshot can be days old (prod 2026-11-06: MCX's was 2 days, NYKAA's 9) — say so.

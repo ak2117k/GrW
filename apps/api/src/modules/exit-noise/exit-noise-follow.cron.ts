@@ -3,6 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { bootJobsEnabled } from '../../common/utils/boot-jobs';
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { ExitNoiseRepository, type MinuteBar } from './exit-noise.repository';
+import { POSITION_FOLLOW_MIN, positionFollow, positionFollowDone, type PositionFollow, type PricePoint } from './domain/exit-shadow';
 
 const MIN = 60_000;
 /** A read is followed once its 30 minutes are over. */
@@ -184,6 +185,78 @@ export class ExitNoiseFollowCron {
       }
     }
     if (done > 0 || brokerCalls > 0) this.logger.log(`[exit-noise] followed up ${done} exit noise read(s); ${brokerCalls} broker 1m history call(s)`);
+    try {
+      const priced = await this.pricePositions(now, feeds, owner, BROKER_CALLS_PER_SWEEP - brokerCalls);
+      if (priced.done > 0 || priced.brokerCalls > 0) this.logger.log(`[exit-noise] priced ${priced.done} position(s) after the exit; ${priced.brokerCalls} broker 1m history call(s)`);
+    } catch (err) {
+      this.logger.warn(`[exit-noise] position pricing sweep failed: ${errText(err)}`);
+    }
     return done;
+  }
+
+  /**
+   * The position's own price for {@link POSITION_FOLLOW_MIN} min after each exit (domain/exit-shadow), so the exit
+   * replay has every case priced (2026-11-10: 11 of 47 cases had no price after the exit). Sources, in order: the
+   * contract's oi_snapshots.ltp (~3 min), its candles_1m, the owner's broker 1m history (within the sweep's budget).
+   * Kept on the row as read.positionFollow; after a day it closes with what it has.
+   */
+  async pricePositions(now: Date, feeds: UserFeedManager | null, owner: string | null, brokerBudget: number): Promise<{ done: number; brokerCalls: number }> {
+    const rows = await this.repo.unpriced(new Date(now.getTime() - (POSITION_FOLLOW_MIN + 2) * MIN), new Date(now.getTime() - GIVE_UP_MIN * MIN), PER_SWEEP);
+    let done = 0;
+    let brokerCalls = 0;
+    for (const r of rows) {
+      try {
+        const long = r.side !== 'SHORT';
+        const from = r.exitAt;
+        const to = new Date(r.exitAt.getTime() + (POSITION_FOLLOW_MIN + 1) * MIN);
+        const ageMin = (now.getTime() - r.exitAt.getTime()) / MIN;
+        const giveUp = ageMin >= GIVE_UP_MIN - 10;
+        const inst = r.exchange ? await this.repo.instrumentOf(r.exchange, r.symbol) : null;
+        if (!inst || !r.exchange) {
+          await this.repo.setPositionFollow(r.id, { ...positionFollow(long, r.exitAt, r.exitPrice, []), source: 'none', note: 'contract not in the master' });
+          done += 1;
+          continue;
+        }
+        const tries: Array<{ source: string; points: () => Promise<PricePoint[]> }> = [
+          { source: 'oi_snapshots', points: async () => (await this.repo.oiLtps(inst.id, from, to)).map((x) => ({ at: x.at, price: x.close })) },
+          { source: 'candles_1m', points: async () => (await this.repo.minuteBars(r.exchange!, inst.token, from, to)).map((b) => ({ at: b.at, price: b.close })) },
+        ];
+        const key = `pos:${r.id}`;
+        const lastTry = this.brokerTried.get(key);
+        if (feeds && owner && brokerCalls < brokerBudget && (lastTry === undefined || now.getTime() - lastTry >= BROKER_RETRY_MIN * MIN)) {
+          tries.push({
+            source: 'broker',
+            points: async () => {
+              if (brokerCalls > 0) await this.sleep(BROKER_GAP_MS);
+              brokerCalls += 1;
+              try {
+                const c = await feeds.fetchCandles(owner, inst.token, r.exchange!, '1m', new Date(from.getTime() - MIN), to);
+                return (c ?? []).map((x) => ({ at: x.timestamp, price: Number(x.close) }));
+              } catch (err) {
+                this.brokerTried.set(key, now.getTime());
+                this.logger.warn(`[exit-noise] broker 1m history for position ${r.symbol} (${r.id}) failed, retried later: ${errText(err)}`);
+                return [];
+              }
+            },
+          });
+        }
+        let best: { source: string; f: PositionFollow } | null = null;
+        for (const t of tries) {
+          const f = positionFollow(long, r.exitAt, r.exitPrice, await t.points());
+          if (!best || f.points > best.f.points) best = { source: t.source, f };
+          if (positionFollowDone(f)) break;
+        }
+        if (best && (positionFollowDone(best.f) || giveUp)) {
+          await this.repo.setPositionFollow(r.id, { ...best.f, source: best.f.points ? best.source : 'none', ...(positionFollowDone(best.f) ? {} : { partial: true, note: 'gave up after a day' }) });
+          this.brokerTried.delete(key);
+          done += 1;
+        } else if (tries.some((t) => t.source === 'broker')) {
+          this.brokerTried.set(key, now.getTime());
+        }
+      } catch (err) {
+        this.logger.warn(`[exit-noise] pricing the position of ${r.id}: ${errText(err)}`);
+      }
+    }
+    return { done, brokerCalls };
   }
 }

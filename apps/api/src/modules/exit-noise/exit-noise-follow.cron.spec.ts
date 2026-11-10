@@ -18,6 +18,7 @@ function setup(opts: { rows?: ReturnType<typeof row>[]; bars?: (token: string) =
     unfollowed: jest.fn(async () => opts.rows ?? [row('r')]),
     minuteBars: jest.fn(async (_e: string, token: string) => (opts.bars ? opts.bars(token) : [bar(1, 1237), bar(2, 1238)])),
     setFollow: jest.fn(async () => undefined),
+    unpriced: jest.fn(async () => []),
   };
   const fetchCandles = opts.fetch ?? jest.fn(async () => candles(0, 31));
   const cron = new ExitNoiseFollowCron(repo as never, opts.noFeeds ? undefined : ({ fetchCandles } as never));
@@ -128,5 +129,55 @@ describe('ExitNoiseFollowCron.sweep — broker fallback', () => {
     const t = setup({ noFeeds: true, bars: () => [] });
     expect(await t.cron.sweep(now)).toBe(0);
     expect(t.repo.setFollow).not.toHaveBeenCalled();
+  });
+});
+
+describe('ExitNoiseFollowCron.pricePositions — the position priced 60 min after the exit (2026-11-10)', () => {
+  const NOW = new Date(EXIT.getTime() + 70 * MIN);
+  const pos = (id: string, side = 'LONG') => ({ id, exchange: 'NFO', symbol: 'NIFTY06NOV2624750CE', side, exitAt: EXIT, exitPrice: 120 });
+  const ltp = (min: number, close: number) => ({ at: new Date(EXIT.getTime() + min * MIN), close });
+  function priceSetup(o: { ltps?: unknown[]; bars?: unknown[]; fetch?: jest.Mock; inst?: unknown } = {}) {
+    const repo = {
+      unpriced: jest.fn(async () => [pos('p')]),
+      instrumentOf: jest.fn(async () => (o.inst === undefined ? { id: 'i1', token: '45000' } : o.inst)),
+      oiLtps: jest.fn(async () => o.ltps ?? []),
+      minuteBars: jest.fn(async () => o.bars ?? []),
+      setPositionFollow: jest.fn(async () => undefined),
+    };
+    const fetchCandles = o.fetch ?? jest.fn(async () => []);
+    const cron = new ExitNoiseFollowCron(repo as never, { fetchCandles } as never);
+    cron.sleep = jest.fn(async () => undefined);
+    return { repo, fetchCandles, cron };
+  }
+
+  it('oi_snapshots reach +60: priced from them, no broker call', async () => {
+    const t = priceSetup({ ltps: [ltp(3, 118), ltp(30, 131), ltp(45, 150), ltp(60, 141)] });
+    expect(await t.cron.pricePositions(NOW, { fetchCandles: t.fetchCandles } as never, 'owner', 5)).toEqual({ done: 1, brokerCalls: 0 });
+    expect(t.repo.unpriced).toHaveBeenCalledWith(new Date(NOW.getTime() - 62 * MIN), expect.any(Date), 50);
+    expect(t.repo.setPositionFollow).toHaveBeenCalledWith('p', expect.objectContaining({ source: 'oi_snapshots', after30m: 131, after60m: 141, hold60mPerUnit: 21, best60m: 150 }));
+    expect(t.fetchCandles).not.toHaveBeenCalled();
+  });
+
+  it('no snapshots or bars (a stock option): the owner broker history prices it', async () => {
+    const fetch = jest.fn(async () => candles(0, 61, (m) => 120 - m / 10));
+    const t = priceSetup({ fetch });
+    expect(await t.cron.pricePositions(NOW, { fetchCandles: fetch } as never, 'owner', 5)).toEqual({ done: 1, brokerCalls: 1 });
+    expect(fetch).toHaveBeenCalledWith('owner', '45000', 'NFO', '1m', new Date(EXIT.getTime() - MIN), new Date(EXIT.getTime() + 61 * MIN));
+    expect(t.repo.setPositionFollow).toHaveBeenCalledWith('p', expect.objectContaining({ source: 'broker', after60m: 114 }));
+  });
+
+  it('nothing yet: left pending; after a day closed as partial; no broker budget = no call', async () => {
+    const t = priceSetup();
+    expect((await t.cron.pricePositions(NOW, { fetchCandles: t.fetchCandles } as never, 'owner', 0)).done).toBe(0);
+    expect(t.fetchCandles).not.toHaveBeenCalled();
+    const late = new Date(EXIT.getTime() + 24 * 60 * MIN);
+    expect((await t.cron.pricePositions(late, null, null, 0)).done).toBe(1);
+    expect(t.repo.setPositionFollow).toHaveBeenCalledWith('p', expect.objectContaining({ source: 'none', partial: true, after60m: null }));
+  });
+
+  it('a contract not in the master is closed at once', async () => {
+    const t = priceSetup({ inst: null });
+    expect((await t.cron.pricePositions(NOW, null, null, 5)).done).toBe(1);
+    expect(t.repo.setPositionFollow).toHaveBeenCalledWith('p', expect.objectContaining({ source: 'none', note: 'contract not in the master' }));
   });
 });

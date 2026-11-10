@@ -63,7 +63,8 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     void Promise.resolve()
       .then(async () => {
         const exitPrice = exitPriceOf(await Promise.resolve().then(() => this.repo.findByVerdictId(v.id)).catch(() => null));
-        const context = { execution: out.status, verdictAt: v.createdAt instanceof Date ? v.createdAt.toISOString() : null };
+        // The reason tags a FLOOR_HARD exit in the read's shadow record (exit-noise/domain/exit-shadow).
+        const context = { execution: out.status, verdictAt: v.createdAt instanceof Date ? v.createdAt.toISOString() : null, reason: String(v.reason ?? '').slice(0, 300) };
         return this.noise?.record({ source: 'real', refId: v.id, exitRule: rule, at, trackerId: v.trackerId, userId: v.userId, exitPrice, context });
       })
       .catch((e) => this.logger.warn(`[ai-exit] noise read for verdict ${v.id} failed: ${errText(e)}`));

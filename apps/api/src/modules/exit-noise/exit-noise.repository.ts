@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import type { OiRow } from '../signal-trader/domain/oi-check';
+import type { NewsImpactLike } from './domain/adverse-probability';
 
 /** Option / future venues of the master reads (instruments.segment holds these too). */
 const DERIVATIVE_EXCHANGES = ['NFO', 'BFO', 'MCX'];
@@ -45,6 +46,16 @@ export interface NoiseReadRow {
   noiseN: number | null;
   verdict: string;
   read: unknown;
+}
+
+export interface UnpricedRow {
+  id: string;
+  exchange: string | null;
+  symbol: string;
+  /** LONG | SHORT */
+  side: string;
+  exitAt: Date;
+  exitPrice: number | null;
 }
 
 export interface UnfollowedRow {
@@ -172,6 +183,44 @@ export class ExitNoiseRepository {
       VALUES (${randomUUID()}, ${r.source}, ${r.refId}, ${r.tradeId}, ${r.trackerId}, ${r.userId}, ${r.symbol}, ${r.exchange}, ${r.underlying},
         ${r.underlyingExchange}, ${r.underlyingToken}, ${r.side}, ${r.want}, ${r.exitRule}, ${r.exitPrice}, ${r.exitAt}, ${r.underlyingAtExit}, ${r.noiseN}, ${r.verdict}, ${read}::jsonb)
       ON CONFLICT ("source", "ref_id", "exit_rule") DO NOTHING`;
+  }
+
+  /**
+   * Directional MED / HIGH news impacts analysed in [from, to] (adverse-probability's NEWS part filters further):
+   * the news P(adverse) can see at the exit. Same read as the self-review's newsImpactsAround.
+   */
+  async newsImpacts(from: Date, to: Date): Promise<NewsImpactLike[]> {
+    const rows = await this.prisma.newsImpact.findMany({
+      where: { analysedAt: { gte: from, lte: to }, direction: { in: ['BULL', 'BEAR'] }, magnitude: { in: ['MED', 'HIGH'] } },
+      select: { analysedAt: true, direction: true, magnitude: true, confidence: true, pricedIn: true, symbols: true, indexName: true, oneLine: true, clusterId: true },
+      take: 500,
+    });
+    if (rows.length === 0) return [];
+    const clusters = await this.prisma.newsCluster.findMany({ where: { id: { in: rows.map((r) => r.clusterId) } }, select: { id: true, headline: true } });
+    const head = new Map(clusters.map((c) => [c.id, c.headline]));
+    return rows.map((r) => ({ analysedAt: r.analysedAt, direction: r.direction, magnitude: r.magnitude, confidence: r.confidence, pricedIn: r.pricedIn, symbols: r.symbols, indexName: r.indexName, headline: head.get(r.clusterId) ?? null, oneLine: r.oneLine }));
+  }
+
+  /** The traded contract's master row by exchange + symbol (the read row keeps the symbol, not the token). */
+  async instrumentOf(exchange: string, symbol: string): Promise<{ id: string; token: string } | null> {
+    return this.prisma.instrument.findFirst({ where: { exchange, symbol, token: { not: { startsWith: 'PAPER-' } } }, select: { id: true, token: true } });
+  }
+
+  /** Reads whose position has not been priced after the exit yet (read.positionFollow absent), exited in [since, before]. */
+  async unpriced(before: Date, since: Date, limit: number): Promise<UnpricedRow[]> {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; exchange: string | null; symbol: string; side: string; exit_at: Date; exit_price: number | null }>>`
+      SELECT id, exchange, symbol, side, exit_at, exit_price FROM "exit_noise_reads"
+      WHERE ("read" -> 'positionFollow') IS NULL AND exit_at <= ${before} AND exit_at >= ${since}
+      ORDER BY exit_at LIMIT ${limit}`;
+    return rows.map((r) => ({ id: r.id, exchange: r.exchange, symbol: r.symbol, side: r.side, exitAt: r.exit_at, exitPrice: num(r.exit_price) }));
+  }
+
+  /** Keep the position's price path after the exit on the row (read.positionFollow; no new column). */
+  async setPositionFollow(id: string, follow: Record<string, unknown>): Promise<void> {
+    const f = JSON.stringify(follow);
+    await this.prisma.$executeRaw`
+      UPDATE "exit_noise_reads" SET "read" = COALESCE("read", '{}'::jsonb) || jsonb_build_object('positionFollow', ${f}::jsonb)
+      WHERE id = ${id}`;
   }
 
   /** Reads whose 30 minutes are over but not followed up yet, exited after `since`. */

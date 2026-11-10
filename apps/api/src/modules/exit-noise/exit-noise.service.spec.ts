@@ -25,6 +25,7 @@ function repo(over: Record<string, jest.Mock> = {}) {
     oiLtps: jest.fn(async () => []),
     minuteBars: jest.fn(async () => [{ at: new Date(EXIT.getTime() - MIN), high: 74_470, low: 74_455, close: 74_458.76, volume: 0 }]),
     insert: jest.fn(async () => undefined),
+    newsImpacts: jest.fn(async () => []),
     ...over,
   };
 }
@@ -87,6 +88,28 @@ describe('ExitNoiseReadService.record', () => {
     await expect(new ExitNoiseReadService(w as never).record(PAPER)).resolves.toBeNull();
   });
 
+  it('keeps P(adverse) and the shadow gate as known at the exit (2026-11-10: p was only computed the next night)', async () => {
+    const r = repo();
+    await new ExitNoiseReadService(r as never).record({ ...PAPER, context: { reason: 'FLOOR_HARD_EXIT (code): green to red' } });
+    expect(r.newsImpacts).toHaveBeenCalledWith(new Date(EXIT.getTime() - 60 * MIN), EXIT);
+    const read = ((r.insert.mock.calls[0] as unknown[])[0] as { read: { shadow: Record<string, unknown> } }).read;
+    // 1.45 N from the best: MOVE −0.368, nothing else read → p 0.409, not under 0.40.
+    expect(read.shadow).toMatchObject({ at: EXIT.toISOString(), p: 0.409, basis: 'heuristic-v1', from: 'noise-read', floorHard: true, gate: { wouldHold: false } });
+    expect((read.shadow.parts as unknown[]).length).toBe(6);
+  });
+
+  it('news against the position at the exit raises p; a news read failure leaves NEWS unread, not the record', async () => {
+    const bear = { analysedAt: new Date(EXIT.getTime() - 10 * MIN), direction: 'BEAR', magnitude: 'HIGH', confidence: 0.5, pricedIn: false, symbols: ['SENSEX'], indexName: null, headline: 'x', oneLine: 'x' };
+    const r = repo({ newsImpacts: jest.fn(async () => [bear]) });
+    await new ExitNoiseReadService(r as never).record(PAPER);
+    const shadow = ((r.insert.mock.calls[0] as unknown[])[0] as { read: { shadow: { p: number; floorHard: boolean } } }).read.shadow;
+    expect(shadow.p).toBeGreaterThan(0.409);
+    expect(shadow.floorHard).toBe(false);
+    const f = repo({ newsImpacts: jest.fn(async () => { throw new Error('db'); }) });
+    await new ExitNoiseReadService(f as never).record(PAPER);
+    expect(((f.insert.mock.calls[0] as unknown[])[0] as { read: { shadow: { p: number } } }).read.shadow.p).toBe(0.409);
+  });
+
   it('EXIT_NOISE_READS=off: nothing is read or written', async () => {
     process.env.EXIT_NOISE_READS = 'off';
     const r = repo();
@@ -117,6 +140,7 @@ describe('follow-up', () => {
       unfollowed: jest.fn(async () => rows),
       minuteBars: jest.fn(async (_e: string, token: string) => (token === 'nobars' ? [] : [bar(15, 74_560), bar(30, 74_610)])),
       setFollow: jest.fn(async () => undefined),
+      unpriced: jest.fn(async () => []),
     };
     expect(await new ExitNoiseFollowCron(r as never).sweep(now)).toBe(2);
     expect(r.setFollow.mock.calls.map((c) => (c as unknown[])[0])).toEqual(['a', 'c']);

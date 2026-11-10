@@ -3,6 +3,8 @@ import { INDEX_UNDERLYINGS } from '../market-hub/underlying';
 import { exposureOf } from '../exit-discipline/exposure';
 import type { PositionSide } from '../exit-discipline/types';
 import { noiseRead, type NoiseRead, type NoiseReadInput } from './domain/noise-read';
+import { adverseProbability, ADVERSE_P_V1 } from './domain/adverse-probability';
+import { exitShadow, isFloorHard, type ExitShadow } from './domain/exit-shadow';
 import { ExitNoiseRepository, type MinuteBar } from './exit-noise.repository';
 
 export type NoiseSource = 'paper' | 'signal_paper' | 'real';
@@ -120,6 +122,7 @@ export class ExitNoiseReadService {
         read = { verdict: 'NO_DATA', want, at: r.at.toISOString(), summary: `NO_DATA: error ${error}`, components: [], error };
       }
       const exitPrice = fin(r.exitPrice) ? r.exitPrice : null;
+      const shadow = await this.shadow(r, read, want, meta.name);
       await this.repo.insert({
         source: r.source,
         refId: r.refId,
@@ -139,13 +142,32 @@ export class ExitNoiseReadService {
         underlyingAtExit: meta.underlying,
         noiseN: meta.n,
         verdict: read.verdict,
-        read: { ...read, underlyingRef: meta.ref, ...meta.extra, ...(r.context ? { context: r.context } : {}) },
+        read: { ...read, underlyingRef: meta.ref, ...meta.extra, ...(r.context ? { context: r.context } : {}), shadow },
       });
-      this.logger.log(`[exit-noise] ${r.source} ${r.exitRule} ${pos.symbol} (${r.refId}): ${read.summary}`);
+      const g = shadow.gate;
+      this.logger.log(
+        `[exit-noise] ${r.source} ${r.exitRule}${shadow.floorHard ? ' (floor)' : ''} ${pos.symbol} (${r.refId}): ${read.summary}; p ${shadow.p ?? 'n/a'}; shadow gate ${g.wouldHold ? 'WOULD HOLD' : 'exit'} (${g.why})`,
+      );
       return read;
     } catch (e) {
       this.logger.warn(`[exit-noise] could not record the read for ${r.source} ${r.refId}: ${errText(e)}`);
       return null;
+    }
+  }
+
+  /**
+   * P(adverse) at the exit and what the candidate gate would have done (domain/exit-shadow), from this read and the
+   * news analysed up to the exit: the night review used to compute p afterwards, so no gate could be tested on it.
+   * Never throws: a failure is kept as p null with the error.
+   */
+  private async shadow(r: ExitNoiseRequest, read: NoiseRead, want: NoiseReadInput['want'], underlying: string | null): Promise<ExitShadow & { error?: string }> {
+    const floorHard = isFloorHard(obj(r.context)?.reason);
+    try {
+      const news = await this.repo.newsImpacts(new Date(r.at.getTime() - ADVERSE_P_V1.newsWindowMin * MIN), r.at).catch(() => null);
+      const components = read.components.length ? read.components : null;
+      return exitShadow(r.at, read.verdict, adverseProbability({ want, exitAt: r.at, underlying, components, news }), floorHard);
+    } catch (e) {
+      return { ...exitShadow(r.at, read.verdict, null, floorHard), error: errText(e) };
     }
   }
 

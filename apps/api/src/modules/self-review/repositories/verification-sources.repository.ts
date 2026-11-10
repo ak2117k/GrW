@@ -11,7 +11,7 @@ import { oiVerdictOf } from '../../signal-trader/domain/oi-check';
 import { judgeCallOf } from '../../signal-trader/domain/paper-summary';
 import { asInfoItems } from '../../signal-intake/domain/info';
 import { noiseVerdictOfRecord } from '../../exit-noise/domain/noise-read';
-import type { ExitNoiseReadRow } from '../domain/exit-noise';
+import { triggerCheckOf, type ExitNoiseReadRow } from '../domain/exit-noise';
 import type { EngineDecisionRow, EngineTradeRow } from '../domain/engine-trades';
 import type { MinuteBar } from '../../exit-discipline/types';
 import { componentsOfRecord, type NewsImpactLike } from '../../exit-noise/domain/adverse-probability';
@@ -398,25 +398,30 @@ export class VerificationSourcesRepository {
     try {
       const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
         SELECT source, symbol, exit_rule, want, verdict, exit_at, underlying_at_exit, noise_n, underlying_after_15m, underlying_after_30m,
-          max_favour_30m, max_against_30m, followed_at, read->>'summary' AS summary
+          max_favour_30m, max_against_30m, followed_at, read->>'summary' AS summary, read->'context'->'triggerCheck' AS trigger_check
         FROM "exit_noise_reads" WHERE exit_at >= ${from} AND exit_at < ${to} ORDER BY exit_at LIMIT 2000`;
       const n = (v: unknown) => (v === null || v === undefined ? null : Number.isFinite(Number(v)) ? Number(v) : null);
-      return rows.map((r) => ({
-        source: String(r.source),
-        symbol: String(r.symbol),
-        exitRule: String(r.exit_rule),
-        want: r.want === 'BEARISH' ? 'BEARISH' : 'BULLISH',
-        verdict: noiseVerdictOfRecord(r.verdict),
-        exitAt: r.exit_at as Date,
-        underlyingAtExit: n(r.underlying_at_exit),
-        n: n(r.noise_n),
-        after15m: n(r.underlying_after_15m),
-        after30m: n(r.underlying_after_30m),
-        maxFavour30m: n(r.max_favour_30m),
-        maxAgainst30m: n(r.max_against_30m),
-        followed: r.followed_at !== null && r.followed_at !== undefined,
-        summary: typeof r.summary === 'string' ? r.summary : null,
-      }));
+      return rows.map((r): ExitNoiseReadRow => {
+        const triggerCheck = triggerCheckOf(r.trigger_check);
+        return {
+          source: String(r.source),
+          symbol: String(r.symbol),
+          exitRule: String(r.exit_rule),
+          want: r.want === 'BEARISH' ? 'BEARISH' : 'BULLISH',
+          verdict: noiseVerdictOfRecord(r.verdict),
+          exitAt: r.exit_at as Date,
+          underlyingAtExit: n(r.underlying_at_exit),
+          n: n(r.noise_n),
+          after15m: n(r.underlying_after_15m),
+          after30m: n(r.underlying_after_30m),
+          maxFavour30m: n(r.max_favour_30m),
+          maxAgainst30m: n(r.max_against_30m),
+          followed: r.followed_at !== null && r.followed_at !== undefined,
+          summary: typeof r.summary === 'string' ? r.summary : null,
+          // AI_TRIGGER exits armed after 2026-11-10 (record only).
+          ...(triggerCheck ? { triggerCheck } : {}),
+        };
+      });
     } catch {
       return [];
     }

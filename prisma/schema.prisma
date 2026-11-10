@@ -2011,6 +2011,10 @@ model SentinelExitTrigger {
   firedAt       DateTime?
   firedPrice    Float?
   firedTickAt   DateTime?
+  /// RECORD ONLY (2026-11-10): the trigger check at arming (exit-discipline/trigger-check.ts) — distance in
+  /// noise units, inside the AI's own invalidation, CUT_LOSS / PROTECT_PROFIT. Nothing arms, fires or exits
+  /// on it. NULL for rows armed before it, and when the verdict's packet was unreadable.
+  check         Json?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 

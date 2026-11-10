@@ -128,8 +128,15 @@ const MISSING_STATUS = new Set(['absent', 'unavailable', 'NO_DATA', 'no_data']);
  */
 const NOT_INPUTS: Readonly<Record<InputPacketSrc['source'], ReadonlySet<string>>> = {
   judge: new Set([]),
-  engine: new Set(['news', 'guards', 'scores', 'event']),
+  engine: new Set(['news', 'guards', 'scores', 'event', 'readiness']),
 };
+
+/**
+ * An entry-engine cycle recorded as INPUT_NOT_READY (inputs.readiness, entry-decision.ts session warm-up): the
+ * trend / OI were not populated yet at the session open, so the engine did not decide. Not a decision.
+ */
+export const engineNotReady = (p: Pick<InputPacketSrc, 'source' | 'blocks'>): boolean =>
+  p.source === 'engine' && obj(obj(p.blocks).readiness).status === 'INPUT_NOT_READY';
 
 /** The names of a packet's blocks that are absent / unavailable / NO_DATA. */
 export function missingBlocks(source: InputPacketSrc['source'], blocks: unknown): string[] {
@@ -148,6 +155,7 @@ export function missingBlocks(source: InputPacketSrc['source'], blocks: unknown)
 export function detectInputMissing(sessionDate: string, packets: readonly InputPacketSrc[]): DecisionGradeDraft[] {
   const groups = new Map<string, { src: InputPacketSrc; total: number; missing: number; blocks: Record<string, number>; first: Date | null }>();
   for (const p of packets) {
+    if (engineNotReady(p)) continue;
     const u = p.underlying ?? '?';
     const k = `${p.source}:${u}`;
     const g = groups.get(k) ?? { src: p, total: 0, missing: 0, blocks: {}, first: null };

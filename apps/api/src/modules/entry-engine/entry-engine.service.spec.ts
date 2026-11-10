@@ -162,6 +162,21 @@ describe('EntryEngineService', () => {
     expect(lateRow.reasons[0]).toMatch(/^news: NO_DATA/);
   });
 
+  it('first cycle after the open with no trend series / OI snapshot yet: NO_TRADE recorded as INPUT_NOT_READY, nothing opened', async () => {
+    const { svc, repo, paper } = make({ mode: 'paper' });
+    const r = await svc.evaluate('CRUDEOIL', new Date(SESSION.getTime() + 5 * MIN)); // MCX 09:05 IST: 5 session bars, one OI snapshot
+    expect(r.action).toBe('NO_TRADE');
+    expect(paper.open).not.toHaveBeenCalled();
+    const row = (repo.insertDecision.mock.calls[0] as unknown as [{ action: string; inputs: { readiness?: { status: string; missing: string[] } }; reasons: string[] }])[0];
+    expect(row.action).toBe('NO_TRADE');
+    expect(row.inputs.readiness).toEqual({ status: 'INPUT_NOT_READY', missing: expect.arrayContaining(['trend']) });
+    expect(row.reasons[0]).toMatch(/^INPUT_NOT_READY/);
+    // A normal cycle carries no readiness marker.
+    const ok = make();
+    await ok.svc.evaluate('CRUDEOIL', AT);
+    expect((ok.repo.insertDecision.mock.calls[0] as unknown as [{ inputs: { readiness?: unknown } }])[0].inputs.readiness).toBeUndefined();
+  });
+
   it('off: run() does nothing; outside 09:20–23:00 IST nothing is evaluated', async () => {
     const off = make({ mode: 'off' });
     expect(await off.svc.run(AT)).toEqual([]);

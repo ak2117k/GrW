@@ -79,6 +79,17 @@ describe('INPUT_MISSING', () => {
     expect(judge.facts).toMatchObject({ count: 2, decisions: 2, blocks: { chain: 2, vix: 1 } });
   });
 
+  it('an engine INPUT_NOT_READY cycle (session open, inputs not populated yet) is not a decision: not counted, no row', () => {
+    const notReady = { source: 'engine' as const, underlying: 'NIFTY', at: at('09:20'), userId: null, blocks: { readiness: { status: 'INPUT_NOT_READY', missing: ['trend'] }, trend: { lean: 'NO_DATA' }, oi: { verdict: 'MIXED' } } };
+    const ready = (t: string) => ({ source: 'engine' as const, underlying: 'NIFTY', at: at(t), userId: null, blocks: { trend: { lean: 'BEARISH' }, oi: { verdict: 'AGREES' } } as Record<string, unknown> });
+    expect(detectInputMissing(S, [notReady, ready('09:35'), ready('09:50')])).toEqual([]);
+    // A real gap later in the session is still flagged, over the decisions only.
+    const gap = { ...ready('10:05'), blocks: { trend: { lean: 'BEARISH' }, oi: { verdict: 'NO_DATA' } } };
+    const rows = detectInputMissing(S, [notReady, ready('09:35'), gap]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].facts).toMatchObject({ count: 1, decisions: 2, blocks: { oi: 1 } });
+  });
+
   it("the engine's news NO_DATA is a reading (no news), not a missing input", () => {
     expect(missingBlocks('engine', { news: { lean: 'NO_DATA' } })).toEqual([]);
     expect(missingBlocks('judge', { news: { status: 'unavailable' } })).toEqual(['news']);

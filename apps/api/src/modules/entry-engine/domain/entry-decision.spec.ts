@@ -230,3 +230,34 @@ describe('strong news is remembered for the IST day (owner 2026-11-09: Iran talk
     expect(r.lean).toBe('NEUTRAL');
   });
 });
+
+describe('INPUT_NOT_READY at the session open (self-review 2026-11-03..09: the 09:20 IST cycle decided before the trend / OI existed)', () => {
+  const OPEN = new Date('2026-11-09T03:45:00Z'); // NSE 09:15 IST
+  const FIRST = new Date('2026-11-09T03:50:00Z'); // the 09:20 IST cycle
+  const EVENT = { status: 'present' as const, events: [{ name: 'US_MIDTERM_RESULTS', at: '2026-11-04 IST session', impact: 'high' as const, affects: ['CRUDEOIL'], expectMove: true }] };
+  it('trend NO_DATA (4 session bars) at the first cycle ⇒ NO_TRADE marked INPUT_NOT_READY, never a plain NO_TRADE', () => {
+    const d = entryDecision(input({ underlying: 'NIFTY', at: FIRST, sessionStart: OPEN, trend: trend('NO_DATA') }));
+    expect(d.action).toBe('NO_TRADE');
+    expect(d.direction).toBeNull();
+    expect(d.inputNotReady).toEqual(['trend']);
+    expect(d.reasons[0]).toMatch(/^INPUT_NOT_READY: trend not populated 5 min after the session open/);
+  });
+  it('no OI snapshot yet (or none read) at the first cycle ⇒ INPUT_NOT_READY, even on an event day', () => {
+    for (const o of [oi('BEARISH', 'NO_DATA'), null]) {
+      const d = entryDecision(input({ at: FIRST, sessionStart: OPEN, oi: o, event: EVENT }));
+      expect(d.action).toBe('NO_TRADE');
+      expect(d.inputNotReady).toEqual(['oi']);
+    }
+    const both = entryDecision(input({ at: FIRST, sessionStart: OPEN, trend: trend('NO_DATA'), oi: null }));
+    expect(both.inputNotReady).toEqual(['trend', 'oi']);
+  });
+  it('inputs present at the first cycle decide normally; a NO_DATA after the warm-up is a plain NO_TRADE (a real gap)', () => {
+    expect(entryDecision(input({ at: FIRST, sessionStart: OPEN })).action).toBe('ENTER_PE');
+    const later = entryDecision(input({ at: new Date(OPEN.getTime() + ENTRY_ENGINE.inputWarmupMin * MIN), sessionStart: OPEN, oi: null }));
+    expect(later.action).toBe('NO_TRADE');
+    expect(later.inputNotReady).toBeUndefined();
+    expect(later.reasons[0]).not.toMatch(/INPUT_NOT_READY/);
+    // No session start given (the replay, older callers): unchanged.
+    expect(entryDecision(input({ at: FIRST, trend: trend('NO_DATA') })).inputNotReady).toBeUndefined();
+  });
+});

@@ -12,7 +12,7 @@ import { SignalOiCheckService } from '../signal-trader/services/signal-oi-check.
 import type { InstrumentMasterLike, QuotesLike, SessionClockLike } from '../signal-trader/services/signal-trader.service';
 import { atmCandidates, engineContract, engineSignal, ENGINE_LIQUIDITY, pickLiquidStrike, planEngineEntry } from './domain/engine-contract';
 import { chooseBars, ENGINE_UNIVERSE, ENGINE_WINDOW, istDayAt, istMinutes, readOi, sessionStartOf, wantFor } from './domain/engine-inputs';
-import { ENTRY_ENGINE, entryDecision, entryGuards, newsReading, trendReading, type EntryDecision, type GuardResult, type OiReading } from './domain/entry-decision';
+import { ENTRY_ENGINE, entryDecision, entryGuards, INPUT_NOT_READY, newsReading, trendReading, type EntryDecision, type GuardResult, type OiReading } from './domain/entry-decision';
 import { withNewsPaths } from './domain/news-paths';
 import { NEWS_THEME, newsTheme } from './domain/news-theme';
 import { ENTRY_ENGINE_CONFIG, type EntryEngineConfig } from './entry-engine.config';
@@ -131,7 +131,7 @@ export class EntryEngineService {
     const want = wantFor(news, trend);
     const oi = await this.oiRead(underlying, optionExchange, want, trend.price, at);
     const event = await this.eventRead(underlying, at);
-    const decision = entryDecision({ underlying, at, news, trend, oi, event });
+    const decision = entryDecision({ underlying, at, news, trend, oi, event, sessionStart });
 
     let minutesToClose: number | null = null;
     try {
@@ -149,7 +149,8 @@ export class EntryEngineService {
       at,
       action: decision.action,
       mode: this.cfg.mode,
-      inputs: { news, trend: { ...trend, barSource: chosen.source, line }, oi, ...(event ? { event } : {}), guards: { openForUnderlying, tradesToday, minutesToClose, ok: guards.ok }, scores: decision.scores },
+      // readiness marks a session-warm-up NO_TRADE so the night review does not grade it as a decision (detectInputMissing).
+      inputs: { news, trend: { ...trend, barSource: chosen.source, line }, oi, ...(event ? { event } : {}), ...(decision.inputNotReady ? { readiness: { status: INPUT_NOT_READY, missing: decision.inputNotReady } } : {}), guards: { openForUnderlying, tradesToday, minutesToClose, ok: guards.ok }, scores: decision.scores },
       reasons: [...decision.reasons, ...guards.reasons],
     });
     this.logger.log(`[entry-engine] ${underlying} ${decision.action} (${this.cfg.mode}) — ${decision.reasons.map((r) => r.split(' — ')[0]).join('; ')}${guards.ok ? '' : `; ${guards.reasons.join('; ')}`}`);

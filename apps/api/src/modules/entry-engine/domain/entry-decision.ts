@@ -69,7 +69,16 @@ export const ENTRY_ENGINE = Object.freeze({
   maxTradesPerDay: 3,
   /** No entry in the last 30 min of the session. */
   noEntryLastMin: 30,
+  /**
+   * Session warm-up (self-review 2026-11-03..09): a cycle less than this many minutes after the venue's open
+   * whose trend or OI is NO_DATA is INPUT_NOT_READY, not a decision (the 09:20 IST cycle has ~4 closed bars
+   * against the trend's 15, and often one partial OI snapshot). Still NO_TRADE; the next cycle decides.
+   */
+  inputWarmupMin: 15,
 });
+
+/** The reason tag of a NO_TRADE taken because the inputs were not populated yet (session warm-up). */
+export const INPUT_NOT_READY = 'INPUT_NOT_READY';
 
 // ───────────────────────────── news ─────────────────────────────
 
@@ -401,6 +410,8 @@ export interface EntryInput {
    * Absent / undefined = not read (older callers, the replay).
    */
   event?: EventContext | null;
+  /** The venue session's open; with it, a NO_DATA trend / OI in the warm-up is INPUT_NOT_READY. Absent = not checked (the replay). */
+  sessionStart?: Date | null;
 }
 
 /** One line for the decision's reasons; null when the event view was not read. */
@@ -417,6 +428,8 @@ export interface EntryDecision {
   action: EngineAction;
   /** The direction all three agreed on (null for NO_TRADE). */
   direction: Direction | null;
+  /** Set only on an INPUT_NOT_READY NO_TRADE: the components not populated yet (trend / oi). */
+  inputNotReady?: string[];
   reasons: string[];
   scores: {
     news: number;
@@ -514,6 +527,14 @@ export function entryDecision(i: EntryInput): EntryDecision {
 
   const ev = eventReason(i.underlying, i.event);
   if (ev) reasons.push(ev);
+
+  // Session warm-up: trend / OI not populated yet is "not ready", not a decision (the component reasons stay for audit).
+  const sinceOpenMin = i.sessionStart ? (i.at.getTime() - i.sessionStart.getTime()) / MIN : null;
+  const notReady = [...(i.trend.lean === 'NO_DATA' ? ['trend'] : []), ...(oLean === 'NO_DATA' ? ['oi'] : [])];
+  if (sinceOpenMin !== null && sinceOpenMin < ENTRY_ENGINE.inputWarmupMin && notReady.length > 0) {
+    const head = `${INPUT_NOT_READY}: ${notReady.join(' + ')} not populated ${Math.round(sinceOpenMin)} min after the session open — no decision this cycle, retry next cycle`;
+    return { action: 'NO_TRADE', direction: null, inputNotReady: notReady, reasons: [head, ...reasons], scores };
+  }
 
   if (!ok || !dir) return { action: 'NO_TRADE', direction: null, reasons, scores };
   return { action: dir === 'BULLISH' ? 'ENTER_CE' : 'ENTER_PE', direction: dir, reasons, scores };

@@ -240,7 +240,8 @@ export class SelfReviewRunService {
       const { out: diagnosis, sent } = await this.diagnose(run.id, S, sessionRows, summary, errors, loop?.rows ?? []);
       if (loop) summary.decisions = await this.finishDecisionLoop(S, loop, diagnosis, sent, now, errors);
       const mbmSkill = await this.mbmSkillRuns(S, summary, errors);
-      const proposals = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors, mbmSkill);
+      const { raised: proposals, considered } = await this.propose(run.id, history, suggestionsOf(diagnosis), now, errors, mbmSkill);
+      summary.proposalsConsidered = considered;
 
       await this.repo.finishRun(run.id, { status: 'DONE', summary, error: errors.length ? errors.join('; ').slice(0, 2000) : null });
       this.logger.log(
@@ -714,7 +715,7 @@ export class SelfReviewRunService {
     now: Date,
     errors: string[],
     mbmSkill: RunSkill[] = [],
-  ): Promise<number> {
+  ): Promise<{ raised: number; considered: Array<{ target: string; reason: string }> }> {
     try {
       const pending = await this.repo.proposals('PENDING', 500);
       const stale = pending.filter((p) => isExpired(p, now));
@@ -731,11 +732,11 @@ export class SelfReviewRunService {
         await this.repo.createProposal(d, runId);
         this.logger.log(`[self-review] PROPOSAL ${d.target}: ${JSON.stringify(d.currentValue)} → ${JSON.stringify(d.proposedValue)} (${d.rationale})`);
       }
-      return drafts.length;
+      return { raised: drafts.length, considered: rejected.map((x) => ({ target: x.target, reason: x.reason })) };
     } catch (e) {
       errors.push(`proposals: ${errText(e)}`);
       this.logger.warn(`[self-review] proposal step failed: ${errText(e)}`);
-      return 0;
+      return { raised: 0, considered: [] };
     }
   }
 }

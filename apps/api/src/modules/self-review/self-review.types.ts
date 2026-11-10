@@ -95,6 +95,8 @@ export interface RunSummary {
   news?: { session: import('./domain/news-impact-scorer').NewsImpactSummary; rolling20: import('./domain/news-impact-scorer').NewsImpactSummary };
   /** The wrong-decision loop (2026-11-04): graded / wrong / unscorable for S, S's wrong items with cause and action, tickets. */
   decisions?: import('./tickets/decision-loop').DecisionLoopSummary & { wrongInWindow?: number };
+  /** Settings the proposal step checked and did not raise, with the reason (shown on the Proposals tab; was log-only). */
+  proposalsConsidered?: Array<{ target: string; reason: string }>;
 }
 
 export interface ChannelStats {

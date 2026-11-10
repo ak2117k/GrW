@@ -13,6 +13,7 @@ import { decideProposal, type Decision } from './proposalDecision';
 import { sortLessons } from './selfReviewFormat';
 import { Empty, LessonCard, MUTED, PRIMARY, ProposalCard, RunCard, SECONDARY } from './SelfReviewViews';
 import WrongDecisionsTab from './WrongDecisionsTab';
+import { ConsideredProposals, consideredFrom } from './ConsideredProposals';
 
 const TABS = [
   { key: 'proposals', label: 'Proposals' },
@@ -47,6 +48,7 @@ function Loading() {
 
 function ProposalsTab() {
   const q = useProposals();
+  const runs = useSelfReviewRuns(5);
   const qc = useQueryClient();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [showDecided, setShowDecided] = useState(false);
@@ -75,7 +77,10 @@ function ProposalsTab() {
         Bounded changes the review raised from the evidence. Nothing changes until you approve; hard risk limits are never proposed.
       </p>
       {pending.length === 0 ? (
-        <Empty text="No pending proposals." />
+        <>
+          <Empty text="No pending proposals." />
+          <ConsideredProposals data={consideredFrom(runs.data as never)} />
+        </>
       ) : (
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
           {pending.map((p) => (

@@ -629,6 +629,43 @@ export class SignalTraderRepository {
     return r ? { instrumentId: r.id, symbol: r.symbol, exchange: r.exchange, token: r.token } : null;
   }
 
+  /** `name`'s active MCX futures expiring on or after `from`, nearest first (an MCX option's underlying is one of them). */
+  async mcxFutures(name: string, from: Date): Promise<Array<{ exchange: string; token: string; symbol: string; expiry: string }>> {
+    const rows = await this.prisma.instrument.findMany({
+      where: { name: name.toUpperCase(), exchange: 'MCX', optionType: null, symbol: { endsWith: 'FUT' }, isActive: true, expiry: { gte: from } },
+      orderBy: { expiry: 'asc' },
+      select: { exchange: true, token: true, symbol: true, expiry: true },
+      take: 6,
+    });
+    return rows.map((r) => ({ exchange: r.exchange, token: r.token, symbol: r.symbol, expiry: ymd(r.expiry) })).filter((r): r is { exchange: string; token: string; symbol: string; expiry: string } => !!r.expiry);
+  }
+
+  /**
+   * The NEWEST oi_snapshots capture of `ids` at or after `since`: every row stamped with that capture's
+   * timestamp (the hub's snapshot job writes one chain's rows with one timestamp). null when none.
+   */
+  async latestOiCapture(ids: string[], since: Date): Promise<{ at: Date; rows: Array<{ instrumentId: string; oi: number; oiChange: number | null; volume: number; ltp: number | null }> } | null> {
+    if (ids.length === 0) return null;
+    const rows = await this.prisma.$queryRaw<Array<{ instrumentId: string; oi: bigint; oiChange: bigint | null; volume: bigint; ltp: number | null; timestamp: Date }>>`
+      SELECT "instrumentId", "oi", "oiChange", "volume", "ltp", "timestamp" FROM "oi_snapshots"
+      WHERE "instrumentId" IN (${Prisma.join(ids)})
+        AND "timestamp" = (
+          SELECT MAX("timestamp") FROM "oi_snapshots"
+          WHERE "instrumentId" IN (${Prisma.join(ids)}) AND "timestamp" >= ${since}
+        )`;
+    if (rows.length === 0) return null;
+    return {
+      at: rows[0].timestamp,
+      rows: rows.map((r) => ({
+        instrumentId: r.instrumentId,
+        oi: Number(r.oi),
+        oiChange: r.oiChange === null ? null : Number(r.oiChange),
+        volume: Number(r.volume),
+        ltp: num(r.ltp),
+      })),
+    };
+  }
+
   /** The NSE cash line of a stock (`X-EQ`, else `X`). */
   async cashRef(name: string): Promise<{ exchange: string; token: string; symbol: string } | null> {
     const n = name.toUpperCase();

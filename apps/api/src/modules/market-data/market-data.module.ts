@@ -42,7 +42,6 @@ import { CommoditiesSnapshotService } from './services/commodities-snapshot.serv
 import { BreadthSectorService, BREADTH_QUOTE_RESOLVER } from './services/breadth-sector.service';
 import { BatchQuotesService, MARKET_QUOTE_RESOLVER } from './services/batch-quotes.service';
 import { UserFeedSession } from './services/user-feed-session';
-import { ORDER_SDK_TIMEOUT_MS } from '../auto-execution/services/per-user-broker-session.factory';
 import { USER_FEED_SESSION_FACTORY } from './services/user-feed.types';
 import type { UserFeedSessionFactory } from './services/user-feed.types';
 // LevelBookService comes from SignalGeneratorModule which is @Global —
@@ -151,18 +150,6 @@ import type { UserFeedSessionFactory } from './services/user-feed.types';
           withDecryptedCreds: (uid, cb) =>
             decryptor.withDecryptedCredentials(uid, { reason: 'FEED' }, cb),
           smartApiFactory: (apiKey: string) => new SmartAPI({ api_key: apiKey }),
-          // Orders (and an exit's own book/positions reads) ride a SECOND client on the
-          // SAME login: smartapi-javascript takes the tokens as constructor params (no
-          // generateSession — a second login would kill this session's feed) and builds
-          // its own axios instance, so data-read timeouts never share its settings.
-          orderSmartApiFactory: (apiKey, auth) =>
-            new SmartAPI({
-              api_key: apiKey,
-              access_token: auth.accessToken,
-              refresh_token: auth.refreshToken,
-              client_code: auth.clientCode,
-              timeout: ORDER_SDK_TIMEOUT_MS,
-            }),
           wsFactory: (opts) => new WebSocketV2(opts),
         }),
     },

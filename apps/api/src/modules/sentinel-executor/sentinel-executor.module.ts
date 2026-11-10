@@ -16,7 +16,6 @@ import {
 } from './services/sentinel-exit-executor.service';
 import { SentinelExitPoller } from './services/sentinel-exit-poller.service';
 import { ExitFillSettler } from './services/exit-fill-settler.service';
-import { ExitUncertainResolver } from './services/exit-uncertain-resolver.service';
 import { EXIT_OUTCOME_CANDLES, EXIT_OUTCOME_USERS, ExitOutcomeService } from './services/exit-outcome.service';
 import { AiExitOutcomeRepository } from './repositories/ai-exit-outcome.repository';
 import { parseAutoExitConfig } from './domain/auto-exit.config';
@@ -50,7 +49,6 @@ import { FLOOR_SL_CANDLES, FloorBrokerSlService } from './services/floor-broker-
     SentinelExitExecutor,
     SentinelExitPoller,
     ExitFillSettler,
-    ExitUncertainResolver,
     AiExitOutcomeRepository,
     ExitOutcomeService,
     SentinelExitTriggerRepository,

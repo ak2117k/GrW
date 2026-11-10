@@ -112,37 +112,6 @@ describe('armPaperTrigger — the live arming rules', () => {
     expect(r).toEqual({ kind: 'armed', trigger: { lookId: 'L1', instrument: 'UNDERLYING', op: 'BELOW', price: 23900, armedAt: NOW, refPrice: 24000 } });
   });
 
-  describe('trigger check (record only)', () => {
-    /** Paper trade cmwaqfnbs0g1epm01gowo9h2t, 2026-11-10 21:21 IST. */
-    const goldPacket = {
-      position: { symbol: 'GOLD26DEC26141000PE', side: 'LONG', qty: 1, entryPrice: 2900, ltp: 2635.5, underlyingLtp: { available: true, value: 141021 } },
-      money: { netPnl: -7800, greenFloorArmed: false },
-      flow: { noiseUnit: { available: true, value: { contract: null, underlying: { n: 56, method: 'atr14-1m', bars: 60, at: 'x' } } } },
-    };
-    const gold = (basis: unknown) => arm({
-      symbol: 'GOLD26DEC26141000PE', exchange: 'MCX', qty: 1,
-      pending: { lookId: 'L1', exitTrigger: trigger({ instrument: 'UNDERLYING', op: 'ABOVE', price: 141150 }), seenAt: NOW, basis: basis as never },
-      prices: { premium: { price: 2635.5, at: NOW }, underlying: { price: 141021, at: NOW } },
-    });
-
-    it('the gold case: armed exactly as before, with the check on the trigger', () => {
-      const r = gold({ packet: goldPacket, invalidationPoint: 'GOLD sustains above 141860 (VWAP 141725)', netPnl: -7800 });
-      expect(r).toMatchObject({ kind: 'armed', trigger: { instrument: 'UNDERLYING', op: 'ABOVE', price: 141150, refPrice: 141021 } });
-      expect((r as { trigger: PaperTrigger }).trigger.check).toMatchObject({
-        distance: 129, distanceN: 2.3, insideInvalidation: true, invalidation: 141860, positionWant: 'DOWN',
-        pnlState: 'RED', purpose: 'CUT_LOSS', tight: true,
-      });
-    });
-
-    it('an unreadable packet, or no basis, arms the same trigger with no check', () => {
-      const bare = gold(undefined);
-      const junk = gold({ packet: 'junk', invalidationPoint: null, netPnl: null });
-      expect(bare).toMatchObject({ kind: 'armed' });
-      expect('check' in (bare as { trigger: object }).trigger).toBe(false);
-      expect(junk).toEqual(bare);
-    });
-  });
-
   it('tighten-only: a newer level that loosens the armed one is rejected', () => {
     const armed: PaperTrigger = { lookId: 'L0', instrument: 'PREMIUM', op: 'BELOW', price: 95, armedAt: NOW - 60_000, refPrice: 100 };
     expect(arm({ armed })).toEqual({ kind: 'rejected', reason: 'LOOSENS' });

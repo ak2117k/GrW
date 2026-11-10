@@ -17,7 +17,6 @@ expect "caddy publishes 80 (ACME + redirect)" 'grep -A40 "^  caddy:" <<<"$cfg" |
 expect "api not published publicly"        'grep -A60 "^  api:" <<<"$cfg" | grep -q "host_ip: 127.0.0.1"'
 expect "postgres sized for 2 GB"           'grep -q "shared_buffers=256MB" <<<"$cfg"'
 expect "redis capped at 128mb"             'grep -q -- "- 128mb" <<<"$cfg"'
-expect "Angel SDK error log on a volume"   'grep -A80 "^  api:" <<<"$cfg" | grep -q "target: /app/data/broker-logs" && grep -q "BROKER_ERROR_LOG_DIR: /app/data/broker-logs" <<<"$cfg"'
 
 MSYS_NO_PATHCONV=1 docker run --rm -e API_HOST="$API_HOST" \
   -v "$(pwd -W 2>/dev/null || pwd)/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \

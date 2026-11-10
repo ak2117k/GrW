@@ -28,7 +28,7 @@ describe('OwnerBrokerSessionProvider (ruling R1)', () => {
       seen.push(source);
     });
     expect(seen).toEqual(['user-feed']);
-    expect(d.factory.borrow).toHaveBeenCalledWith({ tag: 'warm' }, 'C1', expect.any(Function), { priority: null });
+    expect(d.factory.borrow).toHaveBeenCalledWith({ tag: 'warm' }, 'C1', expect.any(Function));
     expect(d.decryptor.withDecryptedCredentials).not.toHaveBeenCalled();
     expect(d.factory.withSession).not.toHaveBeenCalled();
   });
@@ -135,7 +135,7 @@ describe('borrowing the live owner feed session end to end (real manager + sessi
     expect(st.vault.withDecryptedCredentials).not.toHaveBeenCalled();
     expect(st.sessionFactory).toHaveBeenCalledTimes(1);
     expect(states).toEqual([]); // no feed state transition at all
-    expect(st.mgr.warmRestClient('owner')).toEqual({ client: st.sdk, clientId: 'C1', priority: expect.any(Object) }); // still lendable
+    expect(st.mgr.warmRestClient('owner')).toEqual({ client: st.sdk, clientId: 'C1' }); // still lendable
   });
 
   it('a throwing callback on the borrowed session still never logs the feed out', async () => {
@@ -215,7 +215,7 @@ describe('the borrowed feed session is leased for the whole callback (cannot be 
     d.release.mockImplementation(() => order.push('release'));
     await d.p.withOwnerSession('owner', async () => { order.push('fn'); });
     expect((d.userFeeds as any).leaseRestClient).toHaveBeenCalledWith('owner');
-    expect(d.factory.borrow).toHaveBeenCalledWith({ tag: 'warm' }, 'C1', expect.any(Function), { priority: null });
+    expect(d.factory.borrow).toHaveBeenCalledWith({ tag: 'warm' }, 'C1', expect.any(Function));
     expect(order).toEqual(['fn', 'release']);
   });
 
@@ -262,87 +262,5 @@ describe('lease end to end (real manager + feed session, fake SDK)', () => {
     } finally {
       jest.useRealTimers();
     }
-  });
-});
-
-describe('orders get priority (2026-11-10: a lost MARKET SELL answer blocked a position for 4 h)', () => {
-  function stack() {
-    const ws = { connect: jest.fn().mockResolvedValue(undefined), close: jest.fn(), fetchData: jest.fn(), on: jest.fn() };
-    const data = {
-      generateSession: jest.fn().mockResolvedValue({ data: { jwtToken: 'jwt', feedToken: 'feed', refreshToken: 'rt' } }),
-      logout: jest.fn().mockResolvedValue({}),
-      getCandleData: jest.fn(),
-      marketData: jest.fn().mockResolvedValue({ status: true, data: { fetched: [] } }),
-      optionGreek: jest.fn(),
-      placeOrder: jest.fn(),
-      getPosition: jest.fn(),
-      getOrderBook: jest.fn(),
-    };
-    let answer!: (v: unknown) => void;
-    const orders = {
-      generateSession: jest.fn(),
-      logout: jest.fn(),
-      placeOrder: jest.fn(() => new Promise((r) => { answer = r; })),
-      getPosition: jest.fn().mockResolvedValue({ status: true, data: [] }),
-      getOrderBook: jest.fn().mockResolvedValue({ status: true, data: [] }),
-    };
-    const orderFactory = jest.fn(() => orders);
-    const mgr = new UserFeedManager(
-      (userId: string) => new UserFeedSession(userId, {
-        withDecryptedCreds: (async (_u: string, cb: any) => cb({ apiKey: 'k', apiSecret: 's', clientId: 'C1', password: 'p', totpSecret: 'AAAA' })) as any,
-        smartApiFactory: () => data as any,
-        orderSmartApiFactory: orderFactory,
-        wsFactory: () => ws,
-      }),
-      { idleMs: 120000, maxSessions: 40 },
-    );
-    const provider = new OwnerBrokerSessionProvider(mgr, new PerUserBrokerSessionFactory(), { withDecryptedCredentials: jest.fn() } as never);
-    return { mgr, data, orders, orderFactory, provider, answer: (v: unknown) => answer(v) };
-  }
-  const ORDER = { symbol: 'X', token: '1', exchange: 'MCX', side: 'SELL', orderType: 'MARKET', quantity: 30, positionType: 'CARRYFORWARD' } as never;
-
-  it('the exit places and reads on the ORDER client, built from the live login\'s tokens — never a second login', async () => {
-    const st = stack();
-    await st.mgr.pin('owner', [{ token: '1', exchange: 'MCX' }]);
-    expect(st.orderFactory).toHaveBeenCalledWith('k', { accessToken: 'jwt', refreshToken: 'rt', clientCode: 'C1' });
-    const p = st.provider.withOwnerSession('owner', async (s) => {
-      await s.getOrderBookEnvelope();
-      return s.placeOrderClassified(ORDER, 'atMabc');
-    });
-    await new Promise((r) => setImmediate(r));
-    st.answer({ status: true, message: 'SUCCESS', data: { orderid: 'O1' } });
-    await expect(p).resolves.toMatchObject({ status: 'PLACED', orderId: 'O1' });
-    expect(st.orders.placeOrder).toHaveBeenCalledTimes(1);
-    expect(st.orders.getOrderBook).toHaveBeenCalledTimes(1);
-    expect(st.data.placeOrder).not.toHaveBeenCalled();
-    expect(st.data.getOrderBook).not.toHaveBeenCalled();
-    expect(st.orders.generateSession).not.toHaveBeenCalled();
-    expect(st.data.generateSession).toHaveBeenCalledTimes(1); // only the feed's own login
-    expect(st.orders.logout).not.toHaveBeenCalled();
-    expect(st.data.logout).not.toHaveBeenCalled();
-  });
-
-  it('while the order call is in flight the user\'s quote polls wait, then go', async () => {
-    const st = stack();
-    await st.mgr.pin('owner', [{ token: '1', exchange: 'MCX' }]);
-    const p = st.provider.withOwnerSession('owner', (s) => s.placeOrderClassified(ORDER, 'atMabc'));
-    await new Promise((r) => setImmediate(r));
-    const session = (st.mgr as any).registry.get('owner').session as UserFeedSession;
-    const q = session.getQuotes([{ token: '1', exchange: 'MCX' }]);
-    await new Promise((r) => setImmediate(r));
-    expect(st.data.marketData).not.toHaveBeenCalled(); // held back behind the order
-    st.answer({ status: true, message: 'SUCCESS', data: { orderid: 'O1' } });
-    await p;
-    await q;
-    expect(st.data.marketData).toHaveBeenCalledTimes(1);
-  });
-
-  it('a session whose order-client factory fails still serves orders on the data client', async () => {
-    const st = stack();
-    st.orderFactory.mockImplementation(() => { throw new Error('boom'); });
-    await st.mgr.pin('owner', [{ token: '1', exchange: 'MCX' }]);
-    st.data.placeOrder.mockResolvedValue({ status: true, message: 'SUCCESS', data: { orderid: 'O2' } });
-    await expect(st.provider.withOwnerSession('owner', (s) => s.placeOrderClassified(ORDER, 'atMabc'))).resolves.toMatchObject({ orderId: 'O2' });
-    expect(st.data.generateSession).toHaveBeenCalledTimes(1);
   });
 });

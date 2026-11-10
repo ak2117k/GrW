@@ -13,7 +13,6 @@ import { isBenignWsHeartbeatError } from './common/utils/ws-heartbeat-error';
 import { EnforceHttpsMiddleware } from './common/http/enforce-https.middleware';
 import { validateBootConfig } from './common/config/validate-boot-config';
 import { exitOnBootFailure } from './boot-failure';
-import { configureBrokerErrorLog } from './common/utils/broker-error-log';
 
 /**
  * Transport-layer hardening (TDA-004), exported so tests exercise the real code.
@@ -81,11 +80,6 @@ async function bootstrap(): Promise<void> {
   validateBootConfig();
 
   const logger = new Logger('Bootstrap');
-  // smartapi-javascript's error.log: to BROKER_ERROR_LOG_DIR (a persistent volume in prod),
-  // size-rotated and redacted. Before any broker call can log. Never throws.
-  const brokerLog = configureBrokerErrorLog();
-  if (brokerLog) logger.log(`Angel SDK error log → ${brokerLog.path} (rotated, redacted)`);
-  else logger.warn('Angel SDK error log left at the SDK default (cwd/error.log, unrotated)');
   // rawBody:true (Nest built-in) buffers the exact request bytes onto
   // req.rawBody so the Razorpay webhook (TDA-015) can HMAC-verify the raw
   // payload. Additive: normal parsed-body routes are unaffected.

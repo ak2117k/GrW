@@ -104,30 +104,6 @@ export class SentinelExitTriggerRepository {
     }
   }
 
-  /** The arming verdict's packet, stated invalidation and net P&L — read only for the record-only trigger check. */
-  verdictForCheck(verdictId: string): Promise<{ packet: unknown; invalidationPoint: string | null; netPnl: number } | null> {
-    return this.prisma.sentinelVerdict.findUnique({
-      where: { id: verdictId },
-      select: { packet: true, invalidationPoint: true, netPnl: true },
-    });
-  }
-
-  /**
-   * RECORD ONLY: the trigger check onto an armed row (raw SQL, so the column needs no regenerated client).
-   * Touches only `check` — never status, price or any column the watcher reads.
-   */
-  async recordCheck(id: string, check: object): Promise<void> {
-    await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE "sentinel_exit_triggers" SET "check" = ${JSON.stringify(check)}::jsonb WHERE "id" = ${id}`);
-  }
-
-  /** The trigger check stored at arming, or null. */
-  async checkOf(id: string): Promise<unknown> {
-    const rows = await this.prisma.$queryRaw<Array<{ check: unknown }>>(Prisma.sql`
-      SELECT "check" FROM "sentinel_exit_triggers" WHERE "id" = ${id}`);
-    return rows[0]?.check ?? null;
-  }
-
   /** Ruling R7 layer 2: exactly one caller can move a trigger ARMED → FIRED. */
   async claimFire(id: string, tick: { price: number; at: Date }, now: Date): Promise<boolean> {
     const r = await this.prisma.sentinelExitTrigger.updateMany({

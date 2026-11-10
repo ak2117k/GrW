@@ -22,7 +22,6 @@ const fresh = (ltp: number, at = T0.getTime()): PriceResult => ({
 function harness(o: {
   proposals?: unknown[][]; tracker?: unknown; price?: PriceResult; hub?: boolean;
   claimFire?: () => Promise<boolean>; armed?: unknown[]; closed?: string[];
-  verdictForCheck?: (...a: any[]) => Promise<unknown>; recordCheck?: (...a: any[]) => Promise<void>; checkOf?: (...a: any[]) => Promise<unknown>;
 } = {}) {
   const listeners: Array<(p: Price) => void> = [];
   const hub = {
@@ -45,9 +44,6 @@ function harness(o: {
     loadArmed: jest.fn(async () => o.armed ?? []),
     trackerExchanges: jest.fn(async () => new Map([['t1', 'MCX']])),
     closedTrackerIds: jest.fn(async (..._a: any[]) => o.closed ?? ([] as string[])),
-    verdictForCheck: jest.fn(o.verdictForCheck ?? (async (..._a: any[]) => null)),
-    recordCheck: jest.fn(o.recordCheck ?? (async (..._a: any[]) => undefined)),
-    checkOf: jest.fn(o.checkOf ?? (async (..._a: any[]) => null)),
   };
   const execRepo = { claim: jest.fn(async (..._a: any[]) => 'exec1'), findByVerdictId: jest.fn(async (..._a: any[]) => ({ fillPrice: 8920, orderLtp: 8924, decisionLtp: 8924 })) };
   const executor = { execute: jest.fn(async (..._a: any[]) => ({ status: 'DRY_RUN' })) };
@@ -360,73 +356,5 @@ describe('TriggerWatchService — exit noise read (record only)', () => {
       source: 'real', refId: 'trg_trg1', exitRule: 'AI_TRIGGER', trackerId: 't1', userId: 'owner', exitPrice: 8920,
       context: { execution: 'DRY_RUN', trigger: { instrument: 'UNDERLYING', op: 'BELOW', price: 8930, armedBy: 'v1' } },
     });
-  });
-});
-
-describe('TriggerWatchService — trigger check (record only)', () => {
-  /** A long crude call: wants UP; the AI said the trade is wrong below 8925; N 6 on the underlying. */
-  const VERDICT = {
-    invalidationPoint: 'CRUDE 15m close below 8,925', netPnl: -1200,
-    packet: {
-      position: { symbol: TRACKER.symbol, side: 'LONG', qty: 100, entryPrice: 200, ltp: 190, underlyingLtp: { available: true, value: 8951 } },
-      money: { netPnl: -1200, greenFloorArmed: false },
-      flow: { noiseUnit: { available: true, value: { contract: null, underlying: { n: 6, method: 'atr14-1m', bars: 60, at: 'x' } } } },
-    },
-  };
-
-  it('arming stores the check on the armed row, after the arm', async () => {
-    const h = harness({ proposals: [[proposal()]], verdictForCheck: async () => VERDICT });
-    await armed(h);
-    expect(h.repo.verdictForCheck).toHaveBeenCalledWith('v1');
-    expect(h.repo.recordCheck).toHaveBeenCalledTimes(1);
-    const [id, check] = h.repo.recordCheck.mock.calls[0] as unknown as [string, Record<string, unknown>];
-    expect(id).toBe('trg1');
-    expect(check).toMatchObject({
-      v: 1, op: 'BELOW', instrument: 'UNDERLYING', triggerPrice: 8930, refPrice: 8951, distance: -21, distanceN: 3.5,
-      invalidation: 8925, invalidationSource: 'VERDICT_TEXT', insideInvalidation: true, positionWant: 'UP',
-      pnlState: 'RED', purpose: 'CUT_LOSS', tight: false,
-    });
-    expect(h.repo.arm.mock.invocationCallOrder[0]).toBeLessThan(h.repo.recordCheck.mock.invocationCallOrder[0]);
-  });
-
-  it.each([
-    ['the verdict read throws', { verdictForCheck: async () => { throw new Error('db down'); } }],
-    ['the check write throws (column not migrated yet)', { verdictForCheck: async () => VERDICT, recordCheck: async () => { throw new Error('column "check" does not exist'); } }],
-    ['the packet is unreadable', { verdictForCheck: async () => ({ ...VERDICT, packet: 'junk' }) }],
-  ])('%s: the trigger is still armed and still fires', async (_l, over) => {
-    const h = harness({ proposals: [[proposal()], []], ...over });
-    await armed(h);
-    h.emit(8925, ms(T0, 1000));
-    h.emit(8924, ms(T0, 2100));
-    await new Promise((r) => setImmediate(r));
-    expect(h.repo.claimFire).toHaveBeenCalledTimes(1);
-    expect(h.executor.execute).toHaveBeenCalledTimes(1);
-  });
-
-  it('the exit noise read carries the stored check as context.triggerCheck', async () => {
-    const stored = { v: 1, distanceN: 3.5, insideInvalidation: true, purpose: 'CUT_LOSS' };
-    const h = harness({ proposals: [[proposal()], []], checkOf: async () => stored });
-    const record = jest.fn(async (..._a: any[]) => undefined);
-    (h.svc as unknown as { noise: unknown }).noise = { record };
-    await armed(h);
-    h.emit(8925, ms(T0, 1000));
-    h.emit(8924, ms(T0, 2100));
-    for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
-    expect(h.repo.checkOf).toHaveBeenCalledWith('trg1');
-    expect(record.mock.calls[0][0]).toMatchObject({
-      context: { execution: 'DRY_RUN', trigger: { armedBy: 'v1' }, triggerCheck: stored },
-    });
-  });
-
-  it('a failed check read leaves the noise read as before (no triggerCheck key)', async () => {
-    const h = harness({ proposals: [[proposal()], []], checkOf: async () => { throw new Error('x'); } });
-    const record = jest.fn(async (..._a: any[]) => undefined);
-    (h.svc as unknown as { noise: unknown }).noise = { record };
-    await armed(h);
-    h.emit(8925, ms(T0, 1000));
-    h.emit(8924, ms(T0, 2100));
-    for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
-    expect(record).toHaveBeenCalledTimes(1);
-    expect('triggerCheck' in (record.mock.calls[0][0] as { context: object }).context).toBe(false);
   });
 });

@@ -293,27 +293,6 @@ function maskClientId(clientId: string): string {
  */
 export const BROKER_CALL_TIMEOUT_MS = 15_000;
 
-/**
- * smartapi-javascript's own axios timeout for an ORDER client (the SDK default is 7 s
- * and turns a timeout into `{}`). Prod 2026-11-10: an exit's MARKET SELL got `{}` at
- * 7 s while the same session's data reads were timing out about once a minute; the
- * order's fate was unknown and every later exit on the position was blocked. Orders
- * get their own SmartAPI client on the same login with this longer timeout.
- */
-export const ORDER_SDK_TIMEOUT_MS = 20_000;
-
-/**
- * Wall-clock cap on an ORDER call (place / cancel / modify): above
- * {@link ORDER_SDK_TIMEOUT_MS} so the SDK's own answer (an orderid, or `{}`) arrives
- * before our cap fires. Reads keep {@link BROKER_CALL_TIMEOUT_MS}.
- */
-export const ORDER_CALL_TIMEOUT_MS = 25_000;
-
-/** Structural slice of the market-data OrderPriorityGate: hold the user's data reads during a call. */
-export interface BrokerCallPriority {
-  begin(): () => void;
-}
-
 /** Reject if `p` does not settle within `ms`; always clears the timer. */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -335,23 +314,7 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
     private readonly client: UserSmartApiLike,
     private readonly clientId: string,
     private readonly logger: Logger,
-    private readonly priority: BrokerCallPriority | null = null,
   ) {}
-
-  /** Run one broker call while holding the user's data reads back (when a priority gate was lent). */
-  private async held<T>(call: () => Promise<T>): Promise<T> {
-    let release: (() => void) | undefined;
-    try {
-      release = this.priority?.begin();
-    } catch {
-      release = undefined; // a gate fault never blocks or fails the broker call
-    }
-    try {
-      return await call();
-    } finally {
-      release?.();
-    }
-  }
 
   async placeOrder(order: OrderRequest, orderTag?: string): Promise<OrderResponse> {
     this.assertCanPlace();
@@ -399,13 +362,13 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
     this.logger.log(`Cancelling per-user order ${orderId} (${variety}) (client ${maskClientId(this.clientId)})`);
     let response: unknown;
     try {
-      response = await this.held(() => withTimeout(
+      response = await withTimeout(
         this.client.cancelOrder
           ? this.client.cancelOrder({ variety, orderid: orderId })
           : Promise.reject(new Error('this broker client has no cancelOrder')),
-        ORDER_CALL_TIMEOUT_MS,
+        BROKER_CALL_TIMEOUT_MS,
         'Angel One cancelOrder',
-      ));
+      );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to cancel per-user order ${orderId} (outcome unknown): ${msg}`);
@@ -432,11 +395,11 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
     };
     let response: unknown;
     try {
-      response = await this.held(() => withTimeout(
+      response = await withTimeout(
         this.client.modifyOrder ? this.client.modifyOrder(params) : Promise.reject(new Error('this broker client has no modifyOrder')),
-        ORDER_CALL_TIMEOUT_MS,
+        BROKER_CALL_TIMEOUT_MS,
         'Angel One modifyOrder',
-      ));
+      );
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       this.logger.error(`Failed to modify per-user order ${m.orderId} (outcome unknown): ${msg}`);
@@ -502,11 +465,11 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
         `qty=${order.quantity} (client ${maskClientId(this.clientId)})`,
     );
 
-    return this.held(() => withTimeout(
+    return withTimeout(
       this.client.placeOrder(params),
-      ORDER_CALL_TIMEOUT_MS,
+      BROKER_CALL_TIMEOUT_MS,
       'Angel One placeOrder',
-    ));
+    );
   }
 
   /**
@@ -576,7 +539,7 @@ class AngelOneUserBrokerSession implements UserBrokerSession {
     if (this.disposed) {
       throw new Error('UserBrokerSession has been disposed and can no longer be read');
     }
-    return this.held(() => withTimeout(call(), BROKER_CALL_TIMEOUT_MS, label));
+    return withTimeout(call(), BROKER_CALL_TIMEOUT_MS, label);
   }
 
   /** Mark the session unusable. Called by the factory in `finally`. */
@@ -684,16 +647,13 @@ export class PerUserBrokerSessionFactory {
    * so this never logs in and never logs out; it only lends the one order mapper
    * above. The wrapper is disposed in `finally` so it cannot outlive the callback;
    * disposing the wrapper does NOT touch the lent client (its owner keeps it).
-   * `opts.priority` (the lender's order-priority gate): every broker call made
-   * through this session holds the user's background data reads back while it runs.
    */
   async borrow<T>(
     client: UserSmartApiLike,
     clientId: string,
     fn: (session: UserBrokerSession) => Promise<T>,
-    opts: { priority?: BrokerCallPriority | null } = {},
   ): Promise<T> {
-    const session = new AngelOneUserBrokerSession(client, clientId, this.logger, opts.priority ?? null);
+    const session = new AngelOneUserBrokerSession(client, clientId, this.logger);
     try {
       return await fn(session);
     } finally {

@@ -23,7 +23,6 @@ import {
 import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './sentinel-exit-executor.service';
 import { NOISE_READ_STATUSES, exitPriceOf } from './sentinel-exit-poller.service';
 import { ExitNoiseReadService } from '../../exit-noise/exit-noise.service';
-import { triggerCheckFromPacket } from '../../exit-discipline/trigger-check';
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const IST_HM = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -275,26 +274,6 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
       `[ai-trigger] ARMED auto-exit if ${ref.symbol} ${sign(p.op)} ${p.price} (now ${current.price}) — ` +
         `${row.symbol} verdict ${row.id}${res.superseded.length ? `; supersedes ${res.superseded.join(',')}` : ''}`,
     );
-    // RECORD ONLY, after the trigger is armed in the table and the book: it cannot change either.
-    await this.recordCheck(res.id, row.id, { instrument: p.instrument, op: p.op, price: p.price }, current.price);
-  }
-
-  /** The trigger check (exit-discipline/trigger-check.ts) onto the armed row. Never throws. */
-  private async recordCheck(
-    triggerId: string,
-    verdictId: string,
-    p: { instrument: 'UNDERLYING' | 'PREMIUM'; op: 'ABOVE' | 'BELOW'; price: number },
-    refPrice: number,
-  ): Promise<void> {
-    try {
-      const v = await this.repo.verdictForCheck(verdictId);
-      const check = v
-        ? triggerCheckFromPacket({ op: p.op, instrument: p.instrument, triggerPrice: p.price, refPrice, packet: v.packet, invalidationPoint: v.invalidationPoint, netPnl: v.netPnl })
-        : null;
-      if (check) await this.repo.recordCheck(triggerId, check);
-    } catch (err) {
-      this.logger.warn(`[ai-trigger] trigger check for ${triggerId} not recorded: ${errText(err)}`);
-    }
   }
 
   private async reject(row: ProposalRow, f: TriggerFields, reason: string): Promise<void> {
@@ -347,11 +326,7 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
         void Promise.resolve()
           .then(async () => {
             const exitPrice = exitPriceOf(await Promise.resolve().then(() => this.execRepo.findByVerdictId(v.id)).catch(() => null));
-            const triggerCheck = await Promise.resolve().then(() => this.repo.checkOf(t.id)).catch(() => null);
-            return this.noise?.record({
-              source: 'real', refId: v.id, exitRule: 'AI_TRIGGER', at: now, trackerId: t.trackerId, userId: t.userId, exitPrice,
-              context: triggerCheck ? { ...context, triggerCheck } : context,
-            });
+            return this.noise?.record({ source: 'real', refId: v.id, exitRule: 'AI_TRIGGER', at: now, trackerId: t.trackerId, userId: t.userId, exitPrice, context });
           })
           .catch((e) => this.logger.warn(`[ai-trigger] noise read for trigger ${t.id} failed: ${errText(e)}`));
       }

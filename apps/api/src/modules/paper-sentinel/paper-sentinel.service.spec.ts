@@ -62,7 +62,7 @@ const verdict = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function make(opts: { judge?: Record<string, unknown>; env?: Record<string, string>; noise?: { record: jest.Mock }; recordTriggerCheck?: jest.Mock } = {}) {
+function make(opts: { judge?: Record<string, unknown>; env?: Record<string, string>; noise?: { record: jest.Mock } } = {}) {
   for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
   let n = 0;
   const looks: Array<Record<string, unknown>> = [];
@@ -87,7 +87,7 @@ function make(opts: { judge?: Record<string, unknown>; env?: Record<string, stri
     { ensureFor: jest.fn().mockResolvedValue({ direction: 'LONG', reason: 'r', levelPrice: null, targetPrice: null, invalidation: null, source: 'INFERRED' }) } as never,
     { judge, promptVersion: 'sentinel-test' } as never,
     { captureAndCompare: jest.fn().mockResolvedValue({ now: null, prev: null }) } as never,
-    { record, recentForTracker, history, recordTriggerCheck: opts.recordTriggerCheck ?? jest.fn().mockResolvedValue(undefined) } as never,
+    { record, recentForTracker, history } as never,
     prisma as never,
     { get: () => undefined } as never,
     { tickForRow } as never,
@@ -266,72 +266,6 @@ describe('PaperSentinelService — the live sentinel cycle on paper trades', () 
     expect(t.upsert).toHaveBeenCalledTimes(1);
     expect(t.upsert.mock.calls[0][0].create).toMatchObject({ rule: 'AI_TRIGGER', price: 94 });
     expect(t.upsert.mock.calls[0][0].create.detail.trigger).toMatchObject({ instrument: 'PREMIUM', op: 'BELOW', price: 95, refPrice: 99 });
-  });
-
-  describe('trigger check (record only)', () => {
-    /** A long NIFTY call (wants UP), the AI's invalidation 23900 underlying, N 10 on the underlying. */
-    const look = (input: Record<string, unknown>) => ({
-      ...input,
-      id: 'L1',
-      tradeId: 'T1',
-      createdAt: new Date(),
-      invalidationPoint: 'NIFTY 5m close below 23,900',
-      netPnl: -300,
-      packet: {
-        position: { symbol: 'NIFTY04NOV2524000CE', side: 'LONG', qty: 75, entryPrice: 100, ltp: 99, underlyingLtp: { available: true, value: 24000 } },
-        money: { netPnl: -300, greenFloorArmed: false },
-        flow: { noiseUnit: { available: true, value: { contract: null, underlying: { n: 10, method: 'atr14-1m', bars: 60, at: 'x' } } } },
-      },
-      exitTrigger: { v: 1, instrument: 'UNDERLYING', op: 'BELOW', price: 23980, watch: { exchange: 'NSE', token: '26000', symbol: 'NIFTY' } },
-    });
-
-    const run = async (t: ReturnType<typeof make>) => {
-      t.record.mockImplementation(async (input: Record<string, unknown>) => look(input));
-      const base = Date.now();
-      const clock = jest.spyOn(Date, 'now');
-      const at = (s: number) => {
-        clock.mockReturnValue(base + s * 1000);
-        return new Date(base + s * 1000);
-      };
-      t.tickForRow.mockImplementation(async (_id: string, row: { lastLtp: number }) => reading({ ltp: row.lastLtp, underlyingLtp: 24000 }));
-      t.svc.observe([pos({ ltp: 100, ltpAt: at(0) })], at(0));
-      await t.svc.idle();
-      t.svc.observe([pos({ ltp: 99, ltpAt: at(30) })], at(30));
-      await t.svc.idle();
-      t.tickForRow.mockImplementation(async (_id: string, row: { lastLtp: number }) => reading({ ltp: row.lastLtp, underlyingLtp: 23970 }));
-      t.svc.observe([pos({ ltp: 95, ltpAt: at(60) })], at(60));
-      await t.svc.idle();
-      t.svc.observe([pos({ ltp: 94, ltpAt: at(90) })], at(90));
-      await t.svc.idle();
-      clock.mockRestore();
-      for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
-    };
-
-    it('arming stores the check on the look, the AI_TRIGGER shadow and noise read carry it', async () => {
-      const noise = { record: jest.fn().mockResolvedValue(undefined) };
-      const recordTriggerCheck = jest.fn().mockResolvedValue(undefined);
-      const t = make({ noise, recordTriggerCheck });
-      await run(t);
-      expect(recordTriggerCheck).toHaveBeenCalledTimes(1);
-      const [lookId, check] = recordTriggerCheck.mock.calls[0];
-      expect(lookId).toBe('L1');
-      expect(check).toMatchObject({
-        op: 'BELOW', instrument: 'UNDERLYING', triggerPrice: 23980, refPrice: 24000, distance: -20, distanceN: 2,
-        invalidation: 23900, insideInvalidation: true, positionWant: 'UP', purpose: 'CUT_LOSS', tight: true,
-      });
-      expect(t.upsert).toHaveBeenCalledTimes(1);
-      expect(t.upsert.mock.calls[0][0].create).toMatchObject({ rule: 'AI_TRIGGER', detail: { triggerCheck: check } });
-      expect(noise.record).toHaveBeenCalledWith(expect.objectContaining({ exitRule: 'AI_TRIGGER', context: expect.objectContaining({ triggerCheck: check }) }));
-    });
-
-    it('a failing check write never blocks arming or the exit', async () => {
-      const recordTriggerCheck = jest.fn().mockRejectedValue(new Error('db down'));
-      const t = make({ recordTriggerCheck });
-      await run(t);
-      expect(recordTriggerCheck).toHaveBeenCalledTimes(1);
-      expect(t.upsert).toHaveBeenCalledTimes(1);
-      expect(t.upsert.mock.calls[0][0].create).toMatchObject({ rule: 'AI_TRIGGER' });
-    });
   });
 
   it('a trade still open whose quote missed this sweep stays on the roster with its last LTP; a closed one leaves', async () => {

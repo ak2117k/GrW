@@ -28,28 +28,6 @@ export interface ExitNoiseReadRow {
   /** The follow-up sweep has run (else the read is pending). */
   followed: boolean;
   summary: string | null;
-  /** AI_TRIGGER exits armed after 2026-11-10: the record-only trigger check (read.context.triggerCheck). */
-  triggerCheck?: TriggerCheckDigest;
-}
-
-/** The trigger check's fields the night review weighs (exit-discipline/trigger-check.ts). */
-export interface TriggerCheckDigest {
-  distanceN: number | null;
-  insideInvalidation: boolean | null;
-  purpose: string | null;
-  tight: boolean | null;
-}
-
-/** read.context.triggerCheck → its digest; null when absent or not an object. Never throws. */
-export function triggerCheckOf(x: unknown): TriggerCheckDigest | null {
-  if (!x || typeof x !== 'object' || Array.isArray(x)) return null;
-  const o = x as Record<string, unknown>;
-  return {
-    distanceN: typeof o.distanceN === 'number' && Number.isFinite(o.distanceN) ? o.distanceN : null,
-    insideInvalidation: typeof o.insideInvalidation === 'boolean' ? o.insideInvalidation : null,
-    purpose: typeof o.purpose === 'string' ? o.purpose : null,
-    tight: typeof o.tight === 'boolean' ? o.tight : null,
-  };
 }
 
 /** One of S's reads for the diagnosis: its verdict, score and one-line reasoning. */
@@ -62,8 +40,6 @@ export interface SessionNoiseRead {
   favourN: number | null;
   againstN: number | null;
   why: string | null;
-  /** AI_TRIGGER only, when recorded: how far the trigger sat (N), inside the AI's own invalidation, what it was for. */
-  trigger?: TriggerCheckDigest;
 }
 
 export interface ExitNoiseSummary {
@@ -90,7 +66,6 @@ export function exitNoiseStats(rows: readonly ExitNoiseReadRow[], sessions: read
       items: onS.slice(0, SESSION_READS_MAX).map(({ r, s }) => ({
         symbol: r.symbol, source: r.source, rule: r.exitRule, verdict: r.verdict, score: s.score, favourN: s.favourN, againstN: s.againstN,
         why: r.summary ? r.summary.slice(0, WHY_MAX) : null,
-        ...(r.triggerCheck ? { trigger: r.triggerCheck } : {}),
       })),
     },
     rolling20: stats(win),

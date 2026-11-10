@@ -41,17 +41,6 @@ export class PaperLookRepository {
     });
   }
 
-  /**
-   * RECORD ONLY: merge the armed trigger's check into the look's exitTrigger json as `check`. Touches nothing
-   * the paper sentinel arms or fires from (the armed trigger lives in memory).
-   */
-  async recordTriggerCheck(lookId: string, check: object): Promise<void> {
-    await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE "paper_sentinel_looks"
-      SET "exitTrigger" = "exitTrigger" || jsonb_build_object('check', ${JSON.stringify(check)}::jsonb)
-      WHERE "id" = ${lookId} AND jsonb_typeof("exitTrigger") = 'object'`);
-  }
-
   /** Newest first. Paper looks are all live looks (no overnight review runs on paper), so `liveOnly` changes nothing. */
   recentForTracker(trackerId: string, limit: number, _opts: { liveOnly?: boolean } = {}): Promise<PaperSentinelLook[]> {
     return this.prisma.paperSentinelLook.findMany({ where: { trackerId }, orderBy: { createdAt: 'desc' }, take: limit });

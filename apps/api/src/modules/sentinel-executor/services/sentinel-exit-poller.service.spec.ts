@@ -2,7 +2,6 @@
 import { Logger } from '@nestjs/common';
 import { SentinelExitPoller, AI_EXIT_POLL_MS, EXIT_FILL_SETTLE_MS, EXIT_OUTCOME_MS } from './sentinel-exit-poller.service';
 import { CLAIM_STALE_MS, SECOND_SWEEP_MS } from '../domain/claim-timing';
-import { UNCERTAIN_RESOLVE_SWEEP_MS } from '../domain/uncertain-exit';
 
 const ENV_KEYS = ['AI_AUTO_EXIT_ENABLED', 'AI_AUTO_EXIT_MODE', 'AI_AUTO_EXIT_USER_IDS', 'AI_AUTO_EXIT_QTY_UNITS', 'BOOT_JOBS'];
 function setEnv(e: Record<string, string>) {
@@ -191,39 +190,5 @@ describe('SentinelExitPoller — exit noise read (record only)', () => {
     expect(record.mock.calls.map((c) => c[0].refId)).toEqual(['a', 'c']);
     expect(record.mock.calls[0][0]).toMatchObject({ source: 'real', exitRule: 'AI_EXIT', trackerId: 't1', userId: 'owner', context: { execution: 'FILLED' }, exitPrice: 532 });
     poller.onModuleDestroy();
-  });
-});
-
-describe('SentinelExitPoller — uncertain-exit resolver timer (2026-11-10)', () => {
-  afterEach(() => { jest.useRealTimers(); setEnv({}); });
-  function withResolver() {
-    const m = make();
-    const resolver = { runOnce: jest.fn().mockResolvedValue(undefined) };
-    const poller = new SentinelExitPoller(m.repo as never, m.executor as never, m.settler as never, m.outcomes as never, undefined, resolver as never);
-    return { ...m, poller, resolver };
-  }
-
-  it('enabled: sweeps unknown-fate exits every UNCERTAIN_RESOLVE_SWEEP_MS with the live qty units; stops on destroy', async () => {
-    jest.useFakeTimers();
-    setEnv({ AI_AUTO_EXIT_ENABLED: 'true', AI_AUTO_EXIT_USER_IDS: 'owner', AI_AUTO_EXIT_MODE: 'live', AI_AUTO_EXIT_QTY_UNITS: 'MCX:units' });
-    const { poller, resolver } = withResolver();
-    poller.onModuleInit();
-    jest.advanceTimersByTime(UNCERTAIN_RESOLVE_SWEEP_MS - 1);
-    expect(resolver.runOnce).not.toHaveBeenCalled();
-    jest.advanceTimersByTime(1);
-    expect(resolver.runOnce).toHaveBeenCalledTimes(1);
-    expect(resolver.runOnce.mock.calls[0][0].qtyUnits).toEqual(expect.objectContaining({ MCX: 'units' }));
-    poller.onModuleDestroy();
-    expect(jest.getTimerCount()).toBe(0);
-  });
-
-  it('disabled: the resolver never runs', () => {
-    jest.useFakeTimers();
-    setEnv({});
-    const { poller, resolver } = withResolver();
-    poller.onModuleInit();
-    jest.advanceTimersByTime(10 * UNCERTAIN_RESOLVE_SWEEP_MS);
-    expect(resolver.runOnce).not.toHaveBeenCalled();
-    expect(jest.getTimerCount()).toBe(0);
   });
 });

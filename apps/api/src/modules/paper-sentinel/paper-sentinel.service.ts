@@ -344,19 +344,13 @@ export class PaperSentinelService {
   }
 
   /** After every look: replay it through the live exit paths. Never throws (the look is already written). */
-  private async afterLook(look: {
-    id: string; tradeId: string; trackerId: string; verdict: string; createdAt: Date; packet: unknown; exitTrigger: unknown;
-    invalidationPoint?: string | null; netPnl?: number | null;
-  }): Promise<void> {
+  private async afterLook(look: { id: string; tradeId: string; trackerId: string; verdict: string; createdAt: Date; packet: unknown; exitTrigger: unknown }): Promise<void> {
     try {
       const h = this.book.get(look.tradeId);
       if (!h || h.aiExited) return;
       if (look.verdict === 'EXIT_NOW') return await this.judgeExit(h, look);
       if ((look.verdict === 'HOLD' || look.verdict === 'EXIT_ARMED') && look.exitTrigger != null) {
-        h.pending = {
-          lookId: look.id, exitTrigger: look.exitTrigger, seenAt: Date.now(),
-          basis: { packet: look.packet, invalidationPoint: look.invalidationPoint ?? null, netPnl: look.netPnl ?? null },
-        };
+        h.pending = { lookId: look.id, exitTrigger: look.exitTrigger, seenAt: Date.now() };
       }
     } catch (err) {
       this.logger.warn(`[paper-sentinel] exit replay for look ${look.id}: ${errText(err)}`);
@@ -422,7 +416,6 @@ export class PaperSentinelService {
             h.armed = r.trigger;
             h.pending = null;
             this.logger.log(`[paper-sentinel] armed ${h.symbol}: exit if ${r.trigger.instrument} ${r.trigger.op} ${r.trigger.price} (now ${r.trigger.refPrice})`);
-            this.storeTriggerCheck(r.trigger);
           } else if (r.kind === 'rejected') {
             this.logger.log(`[paper-sentinel] trigger REJECTED ${r.reason} — ${h.symbol} look ${h.pending.lookId}`);
             h.pending = null;
@@ -445,25 +438,12 @@ export class PaperSentinelService {
               watched: s.watched,
               ...(t.proposedInstrument ? { proposedInstrument: t.proposedInstrument } : {}),
             },
-            ...(t.check ? { triggerCheck: t.check } : {}),
           });
         }
       } catch (err) {
         this.logger.warn(`[paper-sentinel] trigger step ${h.tradeId}: ${errText(err)}`);
       }
     }
-  }
-
-  /**
-   * RECORD ONLY: the armed trigger's check onto its look (paper_sentinel_looks.exitTrigger.check). Fired and
-   * forgotten after the trigger is armed in memory — it cannot block, delay or change arming or firing.
-   */
-  private storeTriggerCheck(t: PaperTrigger): void {
-    if (!t.check) return;
-    const check = t.check;
-    void Promise.resolve()
-      .then(() => this.looks.recordTriggerCheck(t.lookId, check))
-      .catch((e) => this.logger.warn(`[paper-sentinel] trigger check for look ${t.lookId} not stored: ${errText(e)}`));
   }
 
   /**
@@ -506,12 +486,7 @@ export class PaperSentinelService {
         position: { symbol: h.symbol, exchange: h.exchange, token: h.token, side: String(h.side).toUpperCase() === 'SELL' ? 'SHORT' : 'LONG' },
         exitPrice: price,
         underlyingNow: typeof underlyingNow === 'number' && underlyingNow > 0 ? underlyingNow : null,
-        context: {
-          reason: reason.slice(0, 300),
-          ...(detail.lookId ? { lookId: detail.lookId } : {}),
-          ...(detail.trigger ? { trigger: detail.trigger } : {}),
-          ...(detail.triggerCheck ? { triggerCheck: detail.triggerCheck } : {}),
-        },
+        context: { reason: reason.slice(0, 300), ...(detail.lookId ? { lookId: detail.lookId } : {}), ...(detail.trigger ? { trigger: detail.trigger } : {}) },
       }))
       .catch((e) => this.logger.warn(`[paper-sentinel] noise read for ${h.symbol} failed: ${errText(e)}`));
   }

@@ -49,19 +49,18 @@ function makeRepo() {
     orderForSignal: jest.fn(async () => null),
     appendThesisNote: jest.fn(async () => true),
     pendingOrders: jest.fn(async () => []),
-    recordTrend: jest.fn(async (_id: string, _t: unknown) => undefined),
   };
 }
 
 const takeVerdict = { verdict: 'TAKE', confidence: 80, reasons: ['OI supports'], entry: null, sl: null, targets: [], lots: null };
 
-function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any; lessons?: any; marketEvents?: any; master?: unknown[]; signal?: SignalView; context?: Record<string, unknown> } = {}) {
+function build(over: { cfg?: Partial<SignalTraderConfig>; env?: Record<string, string>; judge?: any; ltp?: number | null; funds?: number | null | 'throw'; place?: any; lessons?: any; marketEvents?: any; master?: unknown[]; signal?: SignalView } = {}) {
   // liveFromIstMin 0: the specs run at any hour (the 09:45 live start has its own tests).
   const cfg = { ...parseSignalTraderConfig({ HUB_OWNER_USER_ID: 'owner' }), liveFromIstMin: 0, ...over.cfg };
   const repo = makeRepo();
   if (over.signal) repo.signal.mockResolvedValue(over.signal);
   const judge = { judge: jest.fn(over.judge ?? (async () => ({ ok: true, verdict: takeVerdict, latencyMs: 10 }))) };
-  const context = { build: jest.fn(async () => ({})), nearestLevels: jest.fn(async () => null), optionDelta: jest.fn(async () => null), ...over.context };
+  const context = { build: jest.fn(async () => ({})), nearestLevels: jest.fn(async () => null), optionDelta: jest.fn(async () => null) };
   const executor = { place: jest.fn(over.place ?? (async () => ({ kind: 'PLACED', orderRowId: 'o1', brokerOrderId: 'b1' }))), resume: jest.fn() };
   const risk = { validateTrade: jest.fn(async () => ({ allowed: true })) };
   const clock = { isOpen: () => true, minutesToClose: () => 200 };
@@ -491,64 +490,5 @@ describe('SignalTraderService', () => {
       expect(t.paper.open).not.toHaveBeenCalled();
       expect(t.repo.decisions[0].decision).toBe('TAKE');
     });
-  });
-});
-
-describe('SignalTraderService — trend tag (record only)', () => {
-  const OLD = process.env.LIVE_TRADING_ENABLED;
-  beforeEach(() => {
-    process.env.LIVE_TRADING_ENABLED = 'true';
-    setCoreKillSwitchReader({ isOn: async () => false, isOnForPlatform: async () => false, invalidate: () => undefined });
-  });
-  afterAll(() => {
-    process.env.LIVE_TRADING_ENABLED = OLD;
-    setCoreKillSwitchReader(null);
-  });
-  const flush = () => new Promise((r) => setImmediate(r));
-  const tagged = (tag: string) => ({ status: 'present', source: 'trend tag', value: { tag, direction: 'BULL', trend: 'UP', ema20: 101, ema80: 99, macdHist: 0.4, timeframe: '15m', candleCount: 200, computedAt: 'x' } });
-
-  it('stores the tag on the decision row and puts it in the judge packet as market.trend', async () => {
-    const trend = jest.fn(async () => tagged('WITH'));
-    const t = build({ cfg: { mode: 'shadow' }, context: { trend } });
-    await t.svc.evaluate(ev);
-    await flush();
-    expect(trend).toHaveBeenCalledWith(expect.objectContaining({ signal: expect.objectContaining({ underlying: 'NIFTY', instrumentKind: 'CE', side: 'BUY' }), exchange: 'NFO' }));
-    expect(t.repo.recordTrend).toHaveBeenCalledWith('d1', expect.objectContaining({ status: 'present', tag: 'WITH', ema20: 101, ema80: 99, macdHist: 0.4, timeframe: '15m', candleCount: 200 }));
-    const packet = (t.judge.judge.mock.calls[0] as any[])[0];
-    expect(packet.market.trend).toMatchObject({ status: 'present', value: { tag: 'WITH' } });
-  });
-
-  it('WITH vs AGAINST changes nothing: same decision, same plan, same order', async () => {
-    const outcomes: Array<Record<string, unknown>> = [];
-    for (const tag of ['WITH', 'AGAINST']) {
-      const t = build({ cfg: { mode: 'live' }, context: { trend: jest.fn(async () => tagged(tag)) } });
-      const r = await t.svc.evaluate(ev);
-      await flush();
-      outcomes.push({ decision: r?.decision, skipReason: r?.skipReason, plan: t.repo.decisions[0].plan, order: t.executor.place.mock.calls.length });
-    }
-    expect(outcomes[0]).toEqual(outcomes[1]);
-    expect(outcomes[0].order).toBe(1);
-  });
-
-  it('a failing trend read never blocks the signal: unavailable in the packet and on the row', async () => {
-    const t = build({ cfg: { mode: 'shadow' }, context: { trend: jest.fn(async () => { throw new Error('boom'); }) } });
-    expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'TAKE' });
-    await flush();
-    expect(t.repo.recordTrend).toHaveBeenCalledWith('d1', expect.objectContaining({ status: 'unavailable', reason: expect.stringContaining('boom') }));
-    expect(((t.judge.judge.mock.calls[0] as any[])[0]).market.trend).toEqual({ status: 'unavailable', reason: 'trend tag: boom' });
-    // A failed write of the tag is swallowed too.
-    const t2 = build({ cfg: { mode: 'shadow' } });
-    (t2.repo.recordTrend as jest.Mock).mockRejectedValueOnce(new Error('column "trend" does not exist'));
-    expect(await t2.svc.evaluate(ev)).toMatchObject({ decision: 'TAKE' });
-    await flush();
-  });
-
-  it('a gate SKIP (no judge) still records the tag', async () => {
-    const t = build({ cfg: { mode: 'shadow' }, ltp: null, context: { trend: jest.fn(async () => tagged('AGAINST')) } });
-    const r = await t.svc.evaluate(ev);
-    await flush();
-    expect(r?.decision).not.toBe('TAKE');
-    expect(t.judge.judge).not.toHaveBeenCalled();
-    expect(t.repo.recordTrend).toHaveBeenCalledWith('d1', expect.objectContaining({ tag: 'AGAINST' }));
   });
 });

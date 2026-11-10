@@ -8,9 +8,6 @@ import { CLAIM_STALE_MS, SECOND_SWEEP_MS } from '../domain/claim-timing';
 import { AiExitExecutionRepository, type PendingVerdict } from '../repositories/ai-exit-execution.repository';
 import { ExitNoiseReadService } from '../../exit-noise/exit-noise.service';
 import { ExitFillSettler } from './exit-fill-settler.service';
-import { ExitUncertainResolver } from './exit-uncertain-resolver.service';
-import { UNCERTAIN_RESOLVE_SWEEP_MS } from '../domain/uncertain-exit';
-import { sendOpsAlert } from '../../../common/utils/ops-alert';
 import { ExitOutcomeService } from './exit-outcome.service';
 import { SentinelExitExecutor, type AiExitOutcome } from './sentinel-exit-executor.service';
 
@@ -46,7 +43,6 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
   private sweepTimer: ReturnType<typeof setTimeout> | null = null;
   private settleTimer: ReturnType<typeof setInterval> | null = null;
   private outcomeTimer: ReturnType<typeof setInterval> | null = null;
-  private resolveTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private cfg: AutoExitConfig | null = null;
 
@@ -56,7 +52,6 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     private readonly settler: ExitFillSettler,
     private readonly outcomes: ExitOutcomeService,
     @Optional() private readonly noise?: ExitNoiseReadService,
-    @Optional() private readonly resolver?: ExitUncertainResolver,
   ) {}
 
   /**
@@ -110,13 +105,6 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     // Exit discipline §8: post-decision scoring (DB + governed hub reads only).
     this.outcomeTimer = setInterval(() => void this.outcomes.runOnce(), EXIT_OUTCOME_MS);
     this.outcomeTimer.unref?.();
-    // 2026-11-10: exits of UNKNOWN fate (ORDER_UNCERTAIN / INTERRUPTED) are resolved from the broker's
-    // books (read-only, never logs in, never sends) so a lost answer no longer blocks every later exit all day.
-    if (this.resolver) {
-      const resolver = this.resolver;
-      this.resolveTimer = setInterval(() => void resolver.runOnce(cfg), UNCERTAIN_RESOLVE_SWEEP_MS);
-      this.resolveTimer.unref?.();
-    }
   }
 
   onModuleDestroy(): void {
@@ -124,12 +112,10 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
     if (this.sweepTimer) clearTimeout(this.sweepTimer);
     if (this.settleTimer) clearInterval(this.settleTimer);
     if (this.outcomeTimer) clearInterval(this.outcomeTimer);
-    if (this.resolveTimer) clearInterval(this.resolveTimer);
     this.timer = null;
     this.sweepTimer = null;
     this.settleTimer = null;
     this.outcomeTimer = null;
-    this.resolveTimer = null;
     this.cfg = null;
   }
 
@@ -160,14 +146,7 @@ export class SentinelExitPoller implements OnModuleInit, OnModuleDestroy {
   private async sweep(): Promise<void> {
     try {
       const n = await this.repo.sweepInterrupted(new Date(Date.now() - CLAIM_STALE_MS));
-      if (n > 0) {
-        this.logger.warn(`[ai-exit] ${n} interrupted attempt(s) marked FAILED: INTERRUPTED (never re-sent)`);
-        void sendOpsAlert(
-          'ai-exit-interrupted',
-          `GrW ALERT: ${n} exit attempt(s) were cut off mid-flight (restart) and marked INTERRUPTED — their orders may or may not ` +
-            'exist at Angel. Exits on those positions are blocked until the resolver checks the broker. Check Angel.',
-        ).catch(() => undefined);
-      }
+      if (n > 0) this.logger.warn(`[ai-exit] ${n} interrupted attempt(s) marked FAILED: INTERRUPTED (never re-sent)`);
     } catch (err) {
       this.logger.warn(`[ai-exit] sweep failed: ${errText(err)}`);
     }

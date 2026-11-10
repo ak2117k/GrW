@@ -10,7 +10,6 @@ import { bypassRecord } from '../../exit-discipline/decision';
 import { parseExitDisciplineConfig } from '../../exit-discipline/config';
 import type { GateRecordV1 } from '../../exit-discipline/types';
 import { ExitGateService } from './exit-gate.service';
-import * as opsAlert from '../../../common/utils/ops-alert';
 
 const NOW = new Date('2026-10-12T10:00:00Z');
 const V: PendingVerdict = {
@@ -282,20 +281,6 @@ describe('SentinelExitExecutor', () => {
     const h = harness({ place: [{ orderId: '', status: 'UNCERTAIN', message: 'Angel One placeOrder timed out after 15000ms' }] });
     await expect(h.ex.process(V, LIVE, NOW)).resolves.toEqual({ status: 'FAILED', reason: 'ORDER_UNCERTAIN' });
     expect(h.session.placeOrderClassified).toHaveBeenCalledTimes(1);
-  });
-
-  it('ORDER_UNCERTAIN alerts at once, keyed by the row (2026-11-10: a lost answer silently blocked a position for 4 h)', async () => {
-    const send = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true);
-    try {
-      const h = harness({ place: [{ orderId: '', status: 'UNCERTAIN', message: 'no definitive broker answer: {}' }] });
-      await h.ex.process(V, LIVE, NOW);
-      const uncertain = send.mock.calls.filter((c) => String(c[0]).startsWith('ai-exit-uncertain:'));
-      expect(uncertain).toHaveLength(1);
-      expect(uncertain[0][1]).toContain(V.symbol);
-      expect(uncertain[0][1]).toContain('UNKNOWN outcome');
-    } finally {
-      send.mockRestore();
-    }
   });
 
   it('placeOrderClassified FAILED whose message mentions a MARKET refusal is still ORDER_UNCERTAIN (no fallback)', async () => {

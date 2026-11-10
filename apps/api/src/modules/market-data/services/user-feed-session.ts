@@ -31,7 +31,6 @@ import type { OptionGreekRow } from '../../market-hub/chain/chain.types';
 import { describeUnfetched } from '../utils/quote-from-candles';
 import { depthFromSnapQuote } from '../utils/depth-levels';
 import { HISTORICAL_MIN_GAP_MS, fetchChunksResilient, rowsOrThrottle, throwForMissingData } from './angel-throttle';
-import { OrderPriorityGate } from './order-priority-gate';
 
 /**
  * Angel One WebSocket feed mode. Mirrors `WsFeedMode` in
@@ -76,13 +75,6 @@ const INITIAL_RECONNECT_DELAY_MS = 1000;
 /** Angel One WebSocket sends prices in paise. */
 const PAISE_DIVISOR = 100;
 
-/** The live login's tokens an order client is built with. Secrets: never log, never persist. */
-export interface OrderClientAuth {
-  accessToken: string;
-  refreshToken: string | null;
-  clientCode: string;
-}
-
 /**
  * Constructor deps — all injectable so tests can supply fakes. The module
  * (Task 6) wires `withDecryptedCreds` to
@@ -102,13 +94,6 @@ export interface UserFeedSessionDeps {
     marketData: Function;
     optionGreek: Function;
   };
-  /**
-   * Builds the ORDER client: a second SmartAPI client handed this login's tokens
-   * (never a login of its own — a second login would kill this session's feed), with
-   * its own axios instance and a longer timeout than the data client. Optional: no
-   * factory (or a factory that throws) ⇒ orders use the data client, as before.
-   */
-  orderSmartApiFactory?: (apiKey: string, auth: OrderClientAuth) => unknown;
   wsFactory: (opts: {
     jwttoken: string;
     clientcode: string;
@@ -139,10 +124,6 @@ export class UserFeedSession implements UserFeedSessionLike {
     marketData: Function;
     optionGreek: Function;
   } | null = null;
-  /** Same login as `smartApi`, own axios instance + longer timeout (see deps.orderSmartApiFactory). */
-  private orderApi: unknown = null;
-  /** While an order call holds it, this session's data reads (quotes, greeks, candles, OI) wait. */
-  private readonly orderPriority = new OrderPriorityGate();
   /** Client code — kept for logout() on dispose; not a secret credential. */
   private clientId: string | null = null;
   /**
@@ -258,7 +239,6 @@ export class UserFeedSession implements UserFeedSessionLike {
     this.connectPromise = null;
     this.restReady = false;
     this.auth = null;
-    this.orderApi = null;
     this.setState('reconnecting');
     await this.ensureConnectedInternal(true);
   }
@@ -266,12 +246,7 @@ export class UserFeedSession implements UserFeedSessionLike {
   /** See UserFeedSessionLike.restClient. Never logs in. */
   restClient(): WarmRestClient | null {
     if (this.disposed || !this.restReady || !this.smartApi || !this.clientId) return null;
-    return {
-      client: this.smartApi,
-      clientId: this.clientId,
-      ...(this.orderApi ? { orderClient: this.orderApi } : {}),
-      priority: this.orderPriority,
-    };
+    return { client: this.smartApi, clientId: this.clientId };
   }
 
   /** See UserFeedSessionLike.streamAuth. Never logs in. */
@@ -459,7 +434,6 @@ export class UserFeedSession implements UserFeedSessionLike {
       throw new Error('UserFeedSession has no SmartAPI client after connect');
     }
 
-    await this.orderPriority.wait();
     const response: any = await this.smartApi.marketData({
       mode: 'FULL',
       exchangeTokens: { [exchange]: [token] },
@@ -486,7 +460,6 @@ export class UserFeedSession implements UserFeedSessionLike {
       throw new Error('UserFeedSession has no SmartAPI client after connect');
     }
 
-    await this.orderPriority.wait();
     const response: any = await this.smartApi.marketData({
       mode: 'FULL',
       exchangeTokens: groupTokensByExchange(refs),
@@ -523,7 +496,6 @@ export class UserFeedSession implements UserFeedSessionLike {
     if (!this.smartApi) {
       throw new Error('UserFeedSession has no SmartAPI client after connect');
     }
-    await this.orderPriority.wait();
     const response: any = await this.smartApi.optionGreek({
       name: name.toUpperCase(),
       expirydate: greekExpiry(expiryYmd),
@@ -546,9 +518,6 @@ export class UserFeedSession implements UserFeedSessionLike {
    */
   private paceHistorical<T>(call: () => Promise<T>): Promise<T> {
     const slot = this.historicalQueue.then(async () => {
-      // An order call in flight on this account goes first (bounded; see OrderPriorityGate).
-      // Waited INSIDE the queue, so the pacing below still spaces the calls released after it.
-      await this.orderPriority.wait();
       const wait = this.lastHistoricalAt + HISTORICAL_MIN_GAP_MS - Date.now();
       if (wait > 0) await this.delay(wait);
       this.lastHistoricalAt = Date.now();
@@ -584,8 +553,6 @@ export class UserFeedSession implements UserFeedSessionLike {
       }
     }
     this.smartApi = null;
-    // Same login as smartApi: the logout above already ended it. Never logged out on its own.
-    this.orderApi = null;
     this.clientId = null;
 
     this.activeTokens.clear();
@@ -614,7 +581,6 @@ export class UserFeedSession implements UserFeedSessionLike {
       // (and its JWT superseded), so stop lending it until this one succeeds.
       this.restReady = false;
       this.auth = null;
-      this.orderApi = null;
       this.smartApi = this.deps.smartApiFactory(creds.apiKey);
       // Gated with the shared feed's login (same Angel user is common): one at a
       // time per client code, never two in one TOTP step.
@@ -630,11 +596,6 @@ export class UserFeedSession implements UserFeedSessionLike {
       }
 
       this.clientId = creds.clientId;
-      this.orderApi = this.buildOrderClient(creds.apiKey, {
-        accessToken: jwtToken,
-        refreshToken: typeof session?.data?.refreshToken === 'string' ? session.data.refreshToken : null,
-        clientCode: creds.clientId,
-      });
       this.auth = { jwtToken, feedToken, clientCode: creds.clientId, apiKey: creds.apiKey };
       this.restReady = true;
       await this.openSocket({
@@ -652,23 +613,6 @@ export class UserFeedSession implements UserFeedSessionLike {
     // Restore any subscriptions that survived a reconnect.
     if (this.activeTokens.size > 0) {
       this.issueFetch(Array.from(this.activeTokens.values()), 1);
-    }
-  }
-
-  /**
-   * The order client for this login: handed the tokens, never logged in (a second
-   * login would kill this session's feed). A factory fault is logged by type only
-   * (never the tokens) and orders fall back to the data client.
-   */
-  private buildOrderClient(apiKey: string, auth: OrderClientAuth): unknown {
-    if (!this.deps.orderSmartApiFactory) return null;
-    try {
-      return this.deps.orderSmartApiFactory(apiKey, auth) ?? null;
-    } catch (error) {
-      this.logger.warn(
-        `Order client could not be built for user ${this.userId} (${error instanceof Error ? error.name : 'error'}) — orders use the data client`,
-      );
-      return null;
     }
   }
 

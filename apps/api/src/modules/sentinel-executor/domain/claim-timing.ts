@@ -1,5 +1,5 @@
 // apps/api/src/modules/sentinel-executor/domain/claim-timing.ts
-import { BROKER_CALL_TIMEOUT_MS, ORDER_CALL_TIMEOUT_MS } from '../../auto-execution/services/per-user-broker-session.factory';
+import { BROKER_CALL_TIMEOUT_MS } from '../../auto-execution/services/per-user-broker-session.factory';
 
 /** Grace before looking for an order whose placement answer was not definitive (review fix 1). */
 export const TAG_LOOKUP_DELAY_MS = 2_000;
@@ -33,12 +33,6 @@ export const READ_RETRY_WINDOW_MS = 30_000;
 export const MAX_BROKER_CALLS_WHILE_CLAIMED =
   1 + 2 + MAX_PROTECTIVE_CANCELS + CANCEL_CONFIRM_STEPS_MS.length + 2 + 1 + 1 + 2 + 1 + 1 + 1;
 
-/**
- * Of those, the ORDER calls (each cancel, the MARKET and the LIMIT placement) are capped at
- * ORDER_CALL_TIMEOUT_MS instead of BROKER_CALL_TIMEOUT_MS (2026-11-10: orders get a longer timeout).
- */
-export const ORDER_CALLS_WHILE_CLAIMED = MAX_PROTECTIVE_CANCELS + 2;
-
 const SLEEPS_WHILE_CLAIMED_MS = CANCEL_CONFIRM_STEPS_MS.reduce((a, b) => a + b, 0) + 2 * TAG_LOOKUP_DELAY_MS;
 /**
  * Read retries run one after another and each finishes its wait inside the
@@ -51,16 +45,13 @@ const MARGIN_MS = 30_000;
 /**
  * A CLAIMED row older than this was cut off mid-flight (plan R8) and is swept to
  * FAILED: INTERRUPTED (never re-sent). Derived from the worst case — every call
- * hitting its wall-clock cap (15 s; 25 s for an order call), plus every read retry
- * (405 s today) — so a
+ * hitting the 15 s wall-clock cap, plus every read retry (355 s today) — so a
  * slow but live attempt is never swept.
  * Shared by the AI poller's boot sweeps and the owner's Exit button.
  */
 export const CLAIM_STALE_MS = Math.max(
   180_000,
-  MAX_BROKER_CALLS_WHILE_CLAIMED * BROKER_CALL_TIMEOUT_MS
-    + ORDER_CALLS_WHILE_CLAIMED * (ORDER_CALL_TIMEOUT_MS - BROKER_CALL_TIMEOUT_MS)
-    + SLEEPS_WHILE_CLAIMED_MS + READ_RETRY_WORST_MS + MARGIN_MS,
+  MAX_BROKER_CALLS_WHILE_CLAIMED * BROKER_CALL_TIMEOUT_MS + SLEEPS_WHILE_CLAIMED_MS + READ_RETRY_WORST_MS + MARGIN_MS,
 );
 /** The poller's second boot sweep: after any row claimed just before a restart has gone stale. */
 export const SECOND_SWEEP_MS = CLAIM_STALE_MS + 5_000;

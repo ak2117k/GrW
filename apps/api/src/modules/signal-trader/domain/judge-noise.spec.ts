@@ -68,12 +68,6 @@ describe('intrinsic from SPOT, not the future', () => {
     labelChain(market);
     expect(market.chain.value).toMatchObject({ spotIs: expect.stringMatching(/SPOT/), futIs: expect.stringMatching(/FUTURE/) });
   });
-  it('an MCX chain\'s spot is labelled as the underlying FUTURE the options settle to (no separate fut)', () => {
-    const market = { chain: { status: 'present' as const, source: 'c', value: { spot: 5512, fut: null, exchange: 'MCX', underlyingFuture: 'CRUDEOIL26NOVFUT' } as Record<string, unknown> } };
-    labelChain(market);
-    expect(market.chain.value.spotIs).toMatch(/UNDERLYING FUTURE \(CRUDEOIL26NOVFUT\)/);
-    expect(market.chain.value.futIs).toBeUndefined();
-  });
 });
 
 describe('channel record: small samples', () => {

@@ -1,4 +1,4 @@
-import { exitNoiseStats, noiseReadDigest, triggerCheckOf, type ExitNoiseReadRow } from './exit-noise';
+import { exitNoiseStats, noiseReadDigest, type ExitNoiseReadRow } from './exit-noise';
 
 const row = (over: Partial<ExitNoiseReadRow> = {}): ExitNoiseReadRow => ({
   source: 'signal_paper',
@@ -33,23 +33,6 @@ describe('exitNoiseStats', () => {
     expect(s.rolling20).toMatchObject({ reads: 5, scored: 3, noise: { scored: 2, right: 1 } });
     expect(s.session.items[0]).toMatchObject({ symbol: 'SENSEX26N0574500CE', verdict: 'NOISE', score: 'RIGHT', favourN: 6.8 });
     expect(s.session.items[2]).toMatchObject({ score: null });
-  });
-});
-
-describe('trigger check (record only) in the session reads', () => {
-  it('an AI_TRIGGER read carrying a check lists it; a read without one has no trigger key', () => {
-    const check = triggerCheckOf({ v: 1, distanceN: 2.3, insideInvalidation: true, purpose: 'CUT_LOSS', tight: true, extra: 'ignored' });
-    expect(check).toEqual({ distanceN: 2.3, insideInvalidation: true, purpose: 'CUT_LOSS', tight: true });
-    const s = exitNoiseStats([row({ triggerCheck: check! }), row()], ['2026-10-30']);
-    expect(s.session.items[0].trigger).toEqual(check);
-    expect('trigger' in s.session.items[1]).toBe(false);
-  });
-
-  it('triggerCheckOf: absent / junk ⇒ null; wrong-typed fields ⇒ null fields', () => {
-    expect(triggerCheckOf(null)).toBeNull();
-    expect(triggerCheckOf('x')).toBeNull();
-    expect(triggerCheckOf([])).toBeNull();
-    expect(triggerCheckOf({ distanceN: 'x', tight: 1 })).toEqual({ distanceN: null, insideInvalidation: null, purpose: null, tight: null });
   });
 });
 

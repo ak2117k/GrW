@@ -4,7 +4,6 @@ import { withExitTuning, type ExitDisciplineConfig } from '../exit-discipline/co
 import { readPacketFacts } from '../exit-discipline/packet-facts';
 import type { HistoryVerdict } from '../exit-discipline/persistence';
 import type { GateRecordV1 } from '../exit-discipline/types';
-import { triggerCheckFromPacket, type TriggerCheck } from '../exit-discipline/trigger-check';
 import { parseStoredTrigger } from '../sentinel-executor/domain/stored-trigger';
 import { contractKindOf, validateTrigger, type TriggerLevel } from '../sentinel-executor/domain/trigger-rules';
 import type { TriggerConfig } from '../sentinel-executor/domain/trigger-config';
@@ -78,8 +77,6 @@ export interface PaperTrigger {
   refPrice: number;
   /** Cash only: the instrument the AI named, when it was normalised to the stock's own price. */
   proposedInstrument?: TriggerInstrument;
-  /** RECORD ONLY: the trigger check at arming (exit-discipline/trigger-check.ts). Nothing arms or fires on it. */
-  check?: TriggerCheck;
 }
 
 /** Cash-equity exchanges: the contract IS the stock, so contract price and underlying are one price. */
@@ -98,8 +95,6 @@ export interface PendingTrigger {
   lookId: string;
   exitTrigger: unknown;
   seenAt: number;
-  /** The look's packet, stated invalidation and net P&L — read only for the record-only trigger check. */
-  basis?: { packet: unknown; invalidationPoint: string | null; netPnl: number | null };
 }
 
 const ARM_DEFER_MS = 30_000;
@@ -150,12 +145,6 @@ export function armPaperTrigger(i: {
   if (!v.ok) return { kind: 'rejected', reason: v.reason };
   const trigger: PaperTrigger = { lookId: i.pending.lookId, ...level, armedAt: i.now, refPrice: fresh.price };
   if (cash && p.instrument !== instrument) trigger.proposedInstrument = p.instrument;
-  // RECORD ONLY, after every arming rule has passed; triggerCheckFromPacket never throws (null when unreadable).
-  const b = i.pending.basis;
-  const check = b
-    ? triggerCheckFromPacket({ op: level.op, instrument, triggerPrice: level.price, refPrice: fresh.price, packet: b.packet, invalidationPoint: b.invalidationPoint, netPnl: b.netPnl })
-    : null;
-  if (check) trigger.check = check;
   return { kind: 'armed', trigger };
 }
 

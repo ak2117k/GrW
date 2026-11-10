@@ -1,4 +1,11 @@
-import { PerUserBrokerSessionFactory, classifyCancelResponse, type UserSmartApiLike } from './per-user-broker-session.factory';
+import {
+  BROKER_CALL_TIMEOUT_MS,
+  ORDER_CALL_TIMEOUT_MS,
+  ORDER_SDK_TIMEOUT_MS,
+  PerUserBrokerSessionFactory,
+  classifyCancelResponse,
+  type UserSmartApiLike,
+} from './per-user-broker-session.factory';
 
 function fakeClient(): jest.Mocked<Required<UserSmartApiLike>> {
   return {
@@ -75,6 +82,60 @@ describe('PerUserBrokerSessionFactory.borrow', () => {
     const f = new PerUserBrokerSessionFactory();
     const env = await f.borrow(fakeClient(), 'C1', (s) => s.getOrderBookEnvelope());
     expect(env).toEqual({ status: true, data: [{ orderid: 'O1', status: 'open' }] });
+  });
+});
+
+describe('order calls get priority and a longer cap (2026-11-10)', () => {
+  const ORDER = { symbol: 'X', token: '1', exchange: 'MCX', side: 'SELL', orderType: 'MARKET', quantity: 30, positionType: 'CARRYFORWARD' } as never;
+
+  it('the order cap sits above the order client\'s own SDK timeout, which sits above the read cap', () => {
+    expect(ORDER_SDK_TIMEOUT_MS).toBe(20_000);
+    expect(ORDER_CALL_TIMEOUT_MS).toBe(25_000);
+    expect(ORDER_CALL_TIMEOUT_MS).toBeGreaterThan(ORDER_SDK_TIMEOUT_MS);
+    expect(ORDER_SDK_TIMEOUT_MS).toBeGreaterThan(BROKER_CALL_TIMEOUT_MS);
+  });
+
+  it('every broker call on a borrowed session holds the lender\'s priority gate while it runs (and releases it)', async () => {
+    const events: string[] = [];
+    const priority = { begin: jest.fn(() => { events.push('hold'); return () => events.push('release'); }) };
+    const client = fakeClient();
+    client.placeOrder.mockImplementation(async () => { events.push('place'); return { status: true, message: 'SUCCESS', data: { orderid: 'O1' } }; });
+    client.getOrderBook.mockImplementation(async () => { events.push('book'); return { status: true, data: [] }; });
+    client.cancelOrder.mockImplementation(async () => { events.push('cancel'); return { status: true, data: { orderid: 'SL1' } }; });
+    await new PerUserBrokerSessionFactory().borrow(client, 'C1', async (s) => {
+      await s.getOrderBookEnvelope();
+      await s.placeOrderClassified(ORDER, 'atMabc');
+      await s.cancelOrderClassified('NORMAL', 'SL1');
+    }, { priority });
+    expect(events).toEqual(['hold', 'book', 'release', 'hold', 'place', 'release', 'hold', 'cancel', 'release']);
+  });
+
+  it('a failed order call still releases the hold; a faulty gate never blocks the order', async () => {
+    const release = jest.fn();
+    const client = fakeClient();
+    client.placeOrder.mockRejectedValue(new Error('socket hang up'));
+    const r = await new PerUserBrokerSessionFactory().borrow(client, 'C1', (s) => s.placeOrderClassified(ORDER, 'atMabc'), { priority: { begin: () => release } });
+    expect(r.status).toBe('UNCERTAIN');
+    expect(release).toHaveBeenCalledTimes(1);
+    const ok = fakeClient();
+    const placed = await new PerUserBrokerSessionFactory().borrow(ok, 'C1', (s) => s.placeOrderClassified(ORDER, 'atMabc'), {
+      priority: { begin: () => { throw new Error('gate broke'); } },
+    });
+    expect(placed).toMatchObject({ status: 'PLACED', orderId: 'O1' });
+    expect(ok.placeOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('a placement that answers after the 15 s read cap but inside the 25 s order cap is PLACED, not UNCERTAIN', async () => {
+    jest.useFakeTimers();
+    try {
+      const client = fakeClient();
+      client.placeOrder.mockImplementation(() => new Promise((r) => setTimeout(() => r({ status: true, message: 'SUCCESS', data: { orderid: 'O7' } }), 18_000)));
+      const p = new PerUserBrokerSessionFactory().borrow(client, 'C1', (s) => s.placeOrderClassified(ORDER, 'atMabc'));
+      await jest.advanceTimersByTimeAsync(18_000);
+      await expect(p).resolves.toMatchObject({ status: 'PLACED', orderId: 'O7' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

@@ -91,12 +91,18 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       REDIS_TLS: "false"
       REDIS_ALLOW_PLAINTEXT: "true"
+      # smartapi-javascript's error.log (Angel timeouts / HTTP errors). The SDK hardcodes
+      # cwd/error.log, so it died with every redeploy; the API re-points it here at boot
+      # (src/common/utils/broker-error-log.ts: 10 MB x 5 rotated files, tokens redacted).
+      BROKER_ERROR_LOG_DIR: /app/data/broker-logs
     ports:
       - "127.0.0.1:3001:3001"
     # Telegram signal images (telegram-reader, TELEGRAM_MEDIA_DIR default). Kept across redeploys:
     # the owner's keep-all-data rule; nothing deletes them.
     volumes:
       - telegrammedia:/app/data/telegram-media
+      # The Angel SDK error log (BROKER_ERROR_LOG_DIR above), kept across redeploys.
+      - brokerlogs:/app/data/broker-logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -196,3 +202,4 @@ volumes:
   caddydata: {}
   mbmcache: {}
   telegrammedia: {}
+  brokerlogs: {}

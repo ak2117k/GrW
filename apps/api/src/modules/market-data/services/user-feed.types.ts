@@ -25,6 +25,15 @@ export type StateListener = (state: FeedState) => void;
 export interface WarmRestClient {
   client: unknown;
   clientId: string;
+  /**
+   * A second SmartAPI client on the SAME login (same JWT, no login of its own) with
+   * a longer SDK timeout, for order traffic: placements, cancels and the exit's own
+   * order-book / positions reads (2026-11-10). Absent when it could not be built;
+   * callers then use `client`.
+   */
+  orderClient?: unknown;
+  /** Hold this user's background data reads back while an order call is in flight. */
+  priority?: { begin(): () => void };
 }
 
 /**

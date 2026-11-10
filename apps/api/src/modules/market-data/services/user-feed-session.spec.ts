@@ -604,7 +604,7 @@ describe('restClient (sentinel auto-exit borrows the warm client)', () => {
     const { s, d } = makeSession();
     expect(s.restClient()).toBeNull();
     await s.ensureConnected();
-    expect(s.restClient()).toEqual({ client: d.smartApi, clientId: 'C1' });
+    expect(s.restClient()).toEqual({ client: d.smartApi, clientId: 'C1', priority: expect.any(Object) });
     await s.dispose();
     expect(s.restClient()).toBeNull();
   });
@@ -744,5 +744,67 @@ describe('relogin (Angel 6 AM reset: the socket survives, the JWT does not)', ()
     await s.dispose();
     await s.relogin();
     expect(d.smartApi.generateSession).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('order client + order priority (2026-11-10)', () => {
+  function withOrderClient(d = makeDeps()) {
+    const orderClient = { tag: 'orders' };
+    const orderSmartApiFactory = jest.fn(() => orderClient);
+    const s = new UserFeedSession('u1', {
+      withDecryptedCreds: d.withCreds,
+      smartApiFactory: () => d.smartApi as any,
+      orderSmartApiFactory,
+      wsFactory: d.wsFactory as any,
+    });
+    return { s, d, orderClient, orderSmartApiFactory };
+  }
+
+  it('builds the order client from the live login\'s tokens (no second login) and lends it beside the data client', async () => {
+    const { s, d, orderClient, orderSmartApiFactory } = withOrderClient();
+    await s.ensureConnected();
+    expect(orderSmartApiFactory).toHaveBeenCalledWith('k', { accessToken: 'jwt', refreshToken: null, clientCode: 'C1' });
+    expect(d.smartApi.generateSession).toHaveBeenCalledTimes(1);
+    expect(s.restClient()).toEqual({ client: d.smartApi, clientId: 'C1', orderClient, priority: expect.any(Object) });
+  });
+
+  it('a re-login builds a fresh order client on the new tokens; dispose drops it', async () => {
+    const { s, d, orderSmartApiFactory } = withOrderClient();
+    await s.ensureConnected();
+    d.smartApi.generateSession.mockResolvedValue({ data: { jwtToken: 'jwt2', feedToken: 'feed2', refreshToken: 'r2' } });
+    await s.relogin();
+    expect(orderSmartApiFactory).toHaveBeenLastCalledWith('k', { accessToken: 'jwt2', refreshToken: 'r2', clientCode: 'C1' });
+    await s.dispose();
+    expect(s.restClient()).toBeNull();
+  });
+
+  it('a throwing order-client factory leaves orders on the data client (logged, never the tokens)', async () => {
+    const d = makeDeps();
+    const s = new UserFeedSession('u1', {
+      withDecryptedCreds: d.withCreds,
+      smartApiFactory: () => d.smartApi as any,
+      orderSmartApiFactory: () => { throw new Error('jwt eyJabc.def.ghi'); },
+      wsFactory: d.wsFactory as any,
+    });
+    await s.ensureConnected();
+    expect(s.restClient()).toEqual({ client: d.smartApi, clientId: 'C1', priority: expect.any(Object) });
+  });
+
+  it('quotes, greeks and candles wait while an order call holds the session; they go when it ends', async () => {
+    const { s, d } = withOrderClient();
+    await s.ensureConnected();
+    const release = s.restClient()!.priority!.begin();
+    const q = s.getQuotes([{ token: '111', exchange: 'NSE' }]);
+    const g = s.getOptionGreeks('NIFTY', '2026-10-13');
+    const c = s.getCandleWindow('111', 'NSE', 'ONE_MINUTE', new Date(0), new Date(1));
+    await new Promise((r) => setImmediate(r));
+    expect(d.smartApi.marketData).not.toHaveBeenCalled();
+    expect(d.smartApi.optionGreek).not.toHaveBeenCalled();
+    expect(d.smartApi.getCandleData).not.toHaveBeenCalled();
+    release();
+    await Promise.all([q, g, c]);
+    expect(d.smartApi.marketData).toHaveBeenCalledTimes(1);
+    expect(d.smartApi.optionGreek).toHaveBeenCalledTimes(1);
+    expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(1);
   });
 });

@@ -12,6 +12,7 @@ import {
 import { istDayStartUtc } from '../domain/exit-order';
 import { MANUAL_VERDICT_PREFIX } from '../domain/manual-exit';
 import type { GateRecordV1 } from '../../exit-discipline/types';
+import type { UncertainExitRow } from '../domain/uncertain-exit';
 
 export interface PendingVerdict {
   id: string;
@@ -207,6 +208,32 @@ export class AiExitExecutionRepository {
       take: limit,
       select: { id: true, userId: true, verdictId: true, symbol: true, brokerOrderId: true, createdAt: true },
     });
+  }
+
+  /**
+   * Live rows of UNKNOWN fate since `since` (FAILED: ORDER_UNCERTAIN / INTERRUPTED),
+   * newest first — the ones hasInFlight is blocking on (uncertain-exit resolver).
+   */
+  uncertainSince(since: Date, limit = 20): Promise<UncertainExitRow[]> {
+    return this.prisma.aiExitExecution.findMany({
+      where: { mode: 'live', status: 'FAILED', reason: { in: [...UNKNOWN_FATE_REASONS] }, createdAt: { gte: since } },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: {
+        id: true, userId: true, verdictId: true, trackerId: true, symbol: true, exchange: true, token: true,
+        side: true, quantity: true, orderType: true, reason: true, brokerMessage: true, orderSentAt: true,
+        createdAt: true, updatedAt: true,
+      },
+    });
+  }
+
+  /**
+   * Move an unknown-fate row ONLY while it is still FAILED with the very reason the
+   * resolver read (nothing else may have touched it meanwhile). True when moved.
+   */
+  async resolveUncertain(id: string, fromReason: string, patch: Omit<AiExitPatch, 'gate'>): Promise<boolean> {
+    const r = await this.prisma.aiExitExecution.updateMany({ where: { id, status: 'FAILED', reason: fromReason }, data: patch });
+    return r.count > 0;
   }
 
   /**

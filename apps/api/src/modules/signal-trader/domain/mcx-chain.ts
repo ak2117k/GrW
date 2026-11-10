@@ -29,6 +29,40 @@ export function mcxExpiryOrder(expiries: readonly string[], today: string, trade
   return out.slice(0, MCX_CHAIN_MAX_EXPIRIES);
 }
 
+/**
+ * MCX mini / variant contracts → the parent whose chain the hub always captures. A mini's own chain is
+ * captured only while it is held or screen-viewed, so the judge reads the parent's as a labelled proxy.
+ */
+export const MCX_PROXY_PARENT: Readonly<Record<string, string>> = {
+  CRUDEOILM: 'CRUDEOIL',
+  GOLDM: 'GOLD',
+  GOLDGUINEA: 'GOLD',
+  GOLDPETAL: 'GOLD',
+  SILVERM: 'SILVER',
+  SILVERMIC: 'SILVER',
+  NATGASMINI: 'NATURALGAS',
+};
+
+/** The parent underlying of an MCX mini / variant; null for a parent or an unmapped name. */
+export function mcxProxyParent(name: string): string | null {
+  return MCX_PROXY_PARENT[String(name ?? '').trim().toUpperCase()] ?? null;
+}
+
+/** The parent's option expiry matching a mini's: the nearest one on or after it; null when none. */
+export function proxyExpiry(parentExpiries: readonly string[], miniExpiry: string): string | null {
+  const after = parentExpiries.filter((e) => e >= miniExpiry).sort();
+  return after[0] ?? null;
+}
+
+/**
+ * Whether the parent's capture replaces the mini's own: the own one is missing, or the parent's is newer.
+ * An own capture as new as the parent's (or newer) is always kept.
+ */
+export function useProxy(ownAt: Date | null, parentAt: Date | null): boolean {
+  if (parentAt === null) return false;
+  return ownAt === null || parentAt.getTime() > ownAt.getTime();
+}
+
 /** The future an MCX option of `optionExpiry` is written on: the earliest one expiring on or after it. */
 export function underlyingFutureFor<F extends { expiry: string }>(optionExpiry: string, futures: readonly F[]): F | null {
   let best: F | null = null;

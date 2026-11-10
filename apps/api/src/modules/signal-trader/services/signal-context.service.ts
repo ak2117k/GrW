@@ -24,7 +24,7 @@ import { NOISE_LOOKBACK_MIN } from '../../exit-discipline/config';
 import type { MinuteBar } from '../../exit-discipline/types';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { istYmd } from '../../mbm/domain/chain-snapshot';
-import { MCX_CHAIN_LOOKBACK_DAYS, MCX_FUT_BAR_MAX_LAG_MS, chainBlockValue, mcxChainSnapshot, mcxExpiryOrder, underlyingFutureFor } from '../domain/mcx-chain';
+import { MCX_CHAIN_LOOKBACK_DAYS, MCX_FUT_BAR_MAX_LAG_MS, chainBlockValue, mcxChainSnapshot, mcxExpiryOrder, mcxProxyParent, proxyExpiry, underlyingFutureFor, useProxy } from '../domain/mcx-chain';
 
 /** Fewer hub bars than this today ⇒ the noise block asks the broker's 1-min history instead. */
 const MIN_HUB_BARS = 15;
@@ -221,25 +221,59 @@ export class SignalContextService {
    * option's UNDERLYING FUTURE (the earliest future expiring on or after the option), priced from its
    * candles_1m close at the capture, else put-call parity from the capture itself. Same value shape as the
    * NSE block; `spot` is that future (MCX options settle to it), `fut` null. Throws the reason when it
-   * cannot be built (the block turns that into `unavailable`).
+   * cannot be built (the block turns that into `unavailable`). A mini / variant (CRUDEOILM, GOLDM, …;
+   * domain/mcx-chain MCX_PROXY_PARENT) whose own capture is missing or older reads the parent's chain at
+   * the nearest parent expiry on or after its own, labelled `proxyOf`.
    */
   private async mcxChain(i: { underlying: string; now: Date; expiry?: string | null }): Promise<unknown> {
     if (!this.repo) throw new Error('not wired: no signal-trader repository to read the hub OI capture');
     const name = i.underlying.toUpperCase();
     const today = istYmd(i.now);
     const todayStart = new Date(`${today}T00:00:00+05:30`);
+    const since = new Date(i.now.getTime() - MCX_CHAIN_LOOKBACK_DAYS * 86_400_000);
     const [expiries, futures] = await Promise.all([this.repo.optionExpiries(name, todayStart), this.repo.mcxFutures(name, todayStart)]);
     const order = mcxExpiryOrder(expiries, today, i.expiry ?? null);
-    if (order.length === 0) throw new Error(`no live MCX option expiry for ${name} in the instrument master`);
-    const since = new Date(i.now.getTime() - MCX_CHAIN_LOOKBACK_DAYS * 86_400_000);
+    const own = order.length > 0 ? await this.mcxCaptured(name, order, futures, since, i.now) : { ok: false as const, misses: ['no live MCX option expiry in the instrument master'] };
+
+    // A mini / variant (CRUDEOILM, GOLDM, …): the hub captures its own chain only while held / viewed, so
+    // when that capture is missing or older than the parent's, the parent's chain at the matching expiry is
+    // read instead (database only, like the own read) and labelled proxyOf.
+    const parent = mcxProxyParent(name);
+    const miniExpiry = own.ok ? own.expiry : order[0] ?? null;
+    let proxyMiss: string | null = null;
+    if (parent && miniExpiry) {
+      const [pExpiries, pFutures] = await Promise.all([this.repo.optionExpiries(parent, todayStart), this.repo.mcxFutures(parent, todayStart)]);
+      const pExpiry = proxyExpiry(pExpiries, miniExpiry);
+      if (!pExpiry) proxyMiss = `${parent} proxy: no ${parent} option expiry on or after ${miniExpiry}`;
+      else {
+        const p = await this.mcxCaptured(parent, [pExpiry], pFutures, since, i.now);
+        if (!p.ok) proxyMiss = `${parent} proxy: ${p.misses.join('; ')}`;
+        else if (useProxy(own.ok ? own.at : null, p.at)) return { ...p.value, proxyOf: parent };
+      }
+    } else if (parent) proxyMiss = `${parent} proxy: no ${name} option expiry to match`;
+    if (own.ok) return own.value;
+    throw new Error(
+      `no usable hub OI capture of ${name}'s options (${own.misses.join('; ')}${proxyMiss ? `; ${proxyMiss}` : ''}); the hub captures its OI core list (HUB_OI_CORE_UNDERLYINGS + GOLD/SILVER) and held / screen-viewed chains only`,
+    );
+  }
+
+  /** The first of `order`'s expiries with a usable hub capture of `name`'s options, as the block value. DB only. */
+  private async mcxCaptured(
+    name: string,
+    order: readonly string[],
+    futures: Array<{ exchange: string; token: string; symbol: string; expiry: string }>,
+    since: Date,
+    now: Date,
+  ): Promise<{ ok: true; expiry: string; at: Date; value: Record<string, unknown> } | { ok: false; misses: string[] }> {
+    const repo = this.repo as SignalTraderRepository;
     const misses: string[] = [];
     for (const expiry of order) {
-      const contracts = await this.repo.optionContracts(name, expiry);
+      const contracts = await repo.optionContracts(name, expiry);
       if (contracts.length === 0) {
         misses.push(`${expiry}: no option contracts in the master`);
         continue;
       }
-      const cap = await this.repo.latestOiCapture(contracts.map((c) => c.instrumentId), since);
+      const cap = await repo.latestOiCapture(contracts.map((c) => c.instrumentId), since);
       if (!cap) {
         misses.push(`${expiry}: no oi_snapshots capture in the last ${MCX_CHAIN_LOOKBACK_DAYS} days`);
         continue;
@@ -247,7 +281,7 @@ export class SignalContextService {
       const fut = underlyingFutureFor(expiry, futures);
       let futBar: number | null = null;
       if (fut) {
-        const bars = await this.repo.minuteCloses(fut.exchange, fut.token, new Date(cap.at.getTime() - MCX_FUT_BAR_MAX_LAG_MS), cap.at).catch(() => []);
+        const bars = await repo.minuteCloses(fut.exchange, fut.token, new Date(cap.at.getTime() - MCX_FUT_BAR_MAX_LAG_MS), cap.at).catch(() => []);
         futBar = bars.length > 0 ? bars[bars.length - 1].close : null;
       }
       const r = mcxChainSnapshot({ underlying: name, expiry, capturedAt: cap.at, contracts, rows: cap.rows, futBar });
@@ -256,16 +290,19 @@ export class SignalContextService {
         continue;
       }
       return {
-        ...chainBlockValue({ ...r.row, fut: null }, i.now),
-        exchange: 'MCX',
-        underlyingFuture: fut?.symbol ?? null,
-        spotSource: r.futSource === 'candles_1m' ? `candles_1m ${fut?.symbol ?? 'future'} at the capture` : 'put-call parity at the ATM strike of the capture',
-        strikes: r.strikes,
+        ok: true,
+        expiry,
+        at: cap.at,
+        value: {
+          ...chainBlockValue({ ...r.row, fut: null }, now),
+          exchange: 'MCX',
+          underlyingFuture: fut?.symbol ?? null,
+          spotSource: r.futSource === 'candles_1m' ? `candles_1m ${fut?.symbol ?? 'future'} at the capture` : 'put-call parity at the ATM strike of the capture',
+          strikes: r.strikes,
+        },
       };
     }
-    throw new Error(
-      `no usable hub OI capture of ${name}'s options (${misses.join('; ')}); the hub captures its OI core list (HUB_OI_CORE_UNDERLYINGS + GOLD/SILVER) and held / screen-viewed chains only`,
-    );
+    return { ok: false, misses };
   }
 
   /** The level book's nearest support/resistance at `price` (engine SL source for FUT/EQ). */

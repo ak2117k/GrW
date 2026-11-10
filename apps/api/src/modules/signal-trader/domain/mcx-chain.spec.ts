@@ -1,4 +1,33 @@
-import { chainBlockValue, mcxChainSnapshot, mcxExpiryOrder, parityFuture, underlyingFutureFor, type McxOiRow } from './mcx-chain';
+import { chainBlockValue, mcxChainSnapshot, mcxExpiryOrder, mcxProxyParent, parityFuture, proxyExpiry, underlyingFutureFor, useProxy, type McxOiRow } from './mcx-chain';
+
+describe('MCX mini / variant → parent proxy', () => {
+  it('maps the minis and variants to their parent; parents and others map to null', () => {
+    expect(mcxProxyParent('CRUDEOILM')).toBe('CRUDEOIL');
+    expect(mcxProxyParent('crudeoilm')).toBe('CRUDEOIL');
+    for (const g of ['GOLDM', 'GOLDGUINEA', 'GOLDPETAL']) expect(mcxProxyParent(g)).toBe('GOLD');
+    for (const s of ['SILVERM', 'SILVERMIC']) expect(mcxProxyParent(s)).toBe('SILVER');
+    expect(mcxProxyParent('NATGASMINI')).toBe('NATURALGAS');
+    for (const p of ['CRUDEOIL', 'GOLD', 'SILVER', 'NATURALGAS', 'COPPER', 'NIFTY', '']) expect(mcxProxyParent(p)).toBeNull();
+  });
+
+  it("the parent expiry: the nearest on or after the mini's, else null", () => {
+    const parent = ['2026-12-16', '2026-11-17', '2027-01-14'];
+    expect(proxyExpiry(parent, '2026-11-17')).toBe('2026-11-17');
+    expect(proxyExpiry(parent, '2026-11-18')).toBe('2026-12-16');
+    expect(proxyExpiry(parent, '2027-02-01')).toBeNull();
+    expect(proxyExpiry([], '2026-11-17')).toBeNull();
+  });
+
+  it('the proxy replaces the own capture only when that is missing or older', () => {
+    const t = (m: number) => new Date(Date.UTC(2026, 10, 10, 9, m));
+    expect(useProxy(null, t(0))).toBe(true);
+    expect(useProxy(t(0), t(3))).toBe(true);
+    expect(useProxy(t(3), t(3))).toBe(false);
+    expect(useProxy(t(6), t(3))).toBe(false);
+    expect(useProxy(null, null)).toBe(false);
+    expect(useProxy(t(0), null)).toBe(false);
+  });
+});
 
 describe('mcxExpiryOrder — MCX monthly option expiries', () => {
   const expiries = ['2026-11-17', '2026-12-16', '2027-01-14'];

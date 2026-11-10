@@ -437,8 +437,16 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         if (lp.gate.pass && lp.plan) {
           const lj = await this.runJudge(decisionId, s, e, channel, now, lp.plan, base.tradesToday, base.c);
           const take = learnTake(lj, e.agreeCount ?? 1, e.conflict === true, now);
-          const blocked = { ...take, record: { ...(take.record as Record<string, unknown>), liveGateBlocked: pg.gate.skipReason ?? 'gate' } };
-          return this.act(decisionId, s, channel, now, lp.gate.checks, lp.plan, blocked, base);
+          // Keep WHY the live gate refused: the paper re-check below passes, and its checks are what gets stored. Without
+          // this, 16 refused live calls (3-9 Nov) carried "risk_manager" and no number (self-review ticket 2026-11-10).
+          const liveFailed = pg.gate.checks.find((x) => x.name === pg.gate.skipReason);
+          const liveName = pg.gate.skipReason ?? 'gate';
+          const liveDetail = liveFailed?.detail ?? '';
+          const blocked = { ...take, record: { ...(take.record as Record<string, unknown>), liveGateBlocked: liveName, liveGateDetail: liveDetail } };
+          const checks: GateCheck[] = [...lp.gate.checks, { name: 'live_gate', ok: false, required: false, detail: `${liveName}: ${liveDetail}` }];
+          this.logger.warn(`[signal-trader] ${what}: not sent live — ${liveName}: ${liveDetail}; paper (learning) instead`);
+          void sendOpsAlert(`signal-live-gate:${decisionId}`, `Signal ${what} (${channel}): not sent live — ${liveName}: ${liveDetail}. Paper only.`);
+          return this.act(decisionId, s, channel, now, checks, lp.plan, blocked, base);
         }
       }
       const failed = pg.gate.checks.find((x) => x.name === pg.gate.skipReason);

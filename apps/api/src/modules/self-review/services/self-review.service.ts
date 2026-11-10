@@ -24,6 +24,15 @@ export interface SelfReviewLatestView {
 
 const MISS_CAP = 15;
 
+/**
+ * The run the page shows: the newest DONE run, unless it carries no diagnosis and another run of the same night does.
+ * The 02:30 missed-moves run follows the 00:30 diagnosed one, and showing it left the page empty (prod 2026-11-10).
+ */
+export function shownRun<T extends { diagnosis: unknown }>(latest: T, sameSession: readonly T[]): T {
+  if (latest.diagnosis != null) return latest;
+  return sameSession.find((r) => r.diagnosis != null) ?? latest;
+}
+
 function readAssessment(diagnosis: unknown, key: 'signalPaperAssessment' | 'exitNoiseAssessment' | 'engineAssessment' = 'signalPaperAssessment'): string | null {
   const a = diagnosis && typeof diagnosis === 'object' && !Array.isArray(diagnosis) ? (diagnosis as Record<string, unknown>)[key] : null;
   return typeof a === 'string' && a.trim() !== '' ? a : null;
@@ -42,7 +51,8 @@ export class SelfReviewService {
   ) {}
 
   async latest(): Promise<SelfReviewLatestView> {
-    const [run, proposalsPending] = await Promise.all([this.repo.latestDoneRun().then((r) => r ?? this.repo.latestRun()), this.repo.countPending()]);
+    const [newest, proposalsPending] = await Promise.all([this.repo.latestDoneRun().then((r) => r ?? this.repo.latestRun()), this.repo.countPending()]);
+    const run = newest && newest.status === 'DONE' ? shownRun(newest, await this.repo.doneRunsFor(newest.sessionDate)) : newest;
     if (!run) return { run: null, summary: null, misses: [], lessonsAdded: [], proposalsPending };
     const [results, lessons] = await Promise.all([this.repo.results({ sessionDate: run.sessionDate }), this.repo.lessonsFromRun(run.id)]);
     const bySubject = new Map(results.map((r) => [r.refId, r]));

@@ -488,3 +488,28 @@ describe('SignalTraderService — keep trying a TAKE for a few minutes (owner 20
     t.svc.onModuleDestroy();
   });
 });
+
+describe('SignalTraderService — a call the live gate refuses keeps the reason (self-review ticket 2026-11-10)', () => {
+  beforeEach(() => {
+    process.env.LIVE_TRADING_ENABLED = 'true';
+    setCoreKillSwitchReader({ isOn: async () => false, isOnForPlatform: async () => false, invalidate: () => undefined });
+    (sendOpsAlert as jest.Mock).mockClear();
+  });
+  afterAll(() => setCoreKillSwitchReader(null));
+
+  it('live refused by the risk manager, learning paper opened: the live reason is on the decision, and alerted', async () => {
+    const t = build({ cfg: { mode: 'live', paperLearn: true }, signal: { entryType: 'AT', entryLow: 100, entryHigh: 100, sl: 90 }, ltp: () => 101 });
+    (t as any).svc['risk'].validateTrade = jest
+      .fn()
+      .mockResolvedValueOnce({ allowed: false, reason: 'Max concurrent positions reached: 10/10' })
+      .mockResolvedValue({ allowed: true });
+    const r = await t.svc.evaluate(ev, T0);
+    expect(r?.decision).toBe('PAPER');
+    const d = t.repo.decisions[0];
+    expect(d.judge).toMatchObject({ liveGateBlocked: 'risk_manager', liveGateDetail: expect.stringMatching(/Max concurrent positions reached: 10\/10/) });
+    expect(d.gate).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'live_gate', ok: false, detail: expect.stringMatching(/risk_manager: .*10\/10/) })]));
+    expect(alerts().some((a) => /not sent live/.test(a) && /10\/10/.test(a))).toBe(true);
+    expect(t.executor.place).not.toHaveBeenCalled();
+    t.svc.onModuleDestroy();
+  });
+});

@@ -23,6 +23,7 @@ import { noiseFromBars } from '../../exit-discipline/noise';
 import { NOISE_LOOKBACK_MIN } from '../../exit-discipline/config';
 import type { MinuteBar } from '../../exit-discipline/types';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+import { classifyTrend, mergeTrendBars, TREND_MAX_BARS, type TrendBar } from '../domain/trend-tag';
 
 /** Fewer hub bars than this today ⇒ the noise block asks the broker's 1-min history instead. */
 const MIN_HUB_BARS = 15;
@@ -45,6 +46,10 @@ export type CtxBlock =
 class NotApplicable extends Error {}
 
 const BLOCK_TIMEOUT_MS = 8_000;
+/** The trend tag is record only: it must never hold a signal up, so it gets a short box of its own. */
+export const TREND_TIMEOUT_MS = 5_000;
+/** candles_1m read for the trend: ~5 NSE sessions of 15m bars past weekends / a holiday (MCX needs ~2). */
+const TREND_HUB_LOOKBACK_MS = 10 * 86_400_000;
 /**
  * A cold level book is several historical windows (daily statics, 15m bars, the higher-TF trend)
  * through the owner's 350 ms-gated session, behind whatever else is fetching; 8 s timed out on
@@ -134,6 +139,47 @@ export class SignalContextService {
         premium: pn ? { n1: Math.round(pn.n * 100) / 100, method: `${pn.method} (${prem?.source})`, bars: pn.bars } : null,
       });
     });
+  }
+
+  /**
+   * market.trend (domain/trend-tag), RECORD ONLY — the underlying's 15m EMA20/EMA80 + MACD histogram
+   * against the signal's direction. Database reads only (the hub's candles_1m rolled to 15m, older
+   * history from the persisted `candles` 15m rows), never the broker; boxed at {@link TREND_TIMEOUT_MS}.
+   * Too few bars ⇒ present with tag UNKNOWN; a failed read / timeout ⇒ `unavailable` with the reason.
+   * The bar read is shared for the quarter-hour (the decision record and the judge packet both ask).
+   */
+  async trend(i: { signal: Pick<SignalView, 'underlying' | 'instrumentKind' | 'side'>; exchange: string; now: Date }): Promise<CtxBlock> {
+    return this.block(
+      'trend tag (15m EMA20/EMA80 + MACD histogram; candles_1m → 15m, candles 15m history)',
+      async () => {
+        if (!this.repo) return null;
+        const s = i.signal;
+        const ref = await this.repo.underlyingRef(s.underlying, i.exchange, i.now);
+        if (!ref) throw new Error(`no price line for the underlying ${s.underlying}`);
+        const { bars, source } = await this.trendBars(this.repo, ref, i.now);
+        return classifyTrend({ kind: s.instrumentKind, side: s.side, bars, now: i.now, source });
+      },
+      TREND_TIMEOUT_MS,
+    );
+  }
+
+  private readonly trendBarCache = new Map<string, Promise<{ bars: TrendBar[]; source: string }>>();
+
+  private trendBars(repo: SignalTraderRepository, ref: { exchange: string; token: string; symbol: string }, now: Date): Promise<{ bars: TrendBar[]; source: string }> {
+    const key = `${ref.exchange}:${ref.token}:${Math.floor(now.getTime() / (15 * 60_000))}`;
+    const hit = this.trendBarCache.get(key);
+    if (hit) return hit;
+    const p = Promise.all([
+      repo.hub15mBars(ref.exchange, ref.token, new Date(now.getTime() - TREND_HUB_LOOKBACK_MS), now),
+      repo.stored15mBars(ref.exchange, ref.token, TREND_MAX_BARS, now).catch(() => [] as TrendBar[]),
+    ]).then(([hub, older]) => ({
+      bars: mergeTrendBars(older, hub, now),
+      source: `candles_1m ${ref.symbol} → 15m (${hub.length} bars)${older.length ? ` + candles 15m (${older.length})` : ''}`,
+    }));
+    if (this.trendBarCache.size > 200) this.trendBarCache.clear();
+    this.trendBarCache.set(key, p);
+    p.catch(() => this.trendBarCache.delete(key));
+    return p;
   }
 
   /** 1-min bars: the hub's candles_1m, else (too few today) the broker's 1-min history over the owner's session. */

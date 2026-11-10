@@ -496,7 +496,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     // 2026-11-04: event days reach the judge only on the default-TAKE prompt (skip = the v5 packet exactly).
     const takeDefault = cfg.judgeDefault === 'take';
     const [market, channelStats, channelViews, events] = await Promise.all([
-      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp }),
+      this.context.build({ underlying: s.underlying, kind: s.instrumentKind, exchange: plan.exchange, ownerUserId: owner, now, ltp: plan.ltp, expiry: contract?.expiry ?? null }),
       this.repo.channelStats(s.channelId).catch(() => null),
       // Telegram channels' market views on this underlying (read-only context; never a trigger).
       Promise.resolve()

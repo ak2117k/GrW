@@ -13,9 +13,14 @@ import { decideProposal, type Decision } from './proposalDecision';
 import { sortLessons } from './selfReviewFormat';
 import { Empty, LessonCard, MUTED, PRIMARY, ProposalCard, RunCard, SECONDARY } from './SelfReviewViews';
 import WrongDecisionsTab from './WrongDecisionsTab';
+import LastNightTab from './LastNightTab';
+import LessonScorecardSection from './LessonScorecard';
 import { ConsideredProposals, consideredFrom } from './ConsideredProposals';
 
-const TABS = [
+/** 'last' is the default (2026-11-11): the owner landed on an empty Proposals tab and saw nothing. */
+export const DEFAULT_TAB = 'last';
+export const TABS = [
+  { key: 'last', label: 'Last night' },
   { key: 'proposals', label: 'Proposals' },
   { key: 'lessons', label: 'Lessons' },
   { key: 'wrong', label: 'Wrong decisions' },
@@ -133,9 +138,17 @@ function LessonsTab() {
   if (q.isLoading) return <Loading />;
   if (q.isError) return <Failed error={q.error} onRetry={() => void q.refetch()} what="lessons" />;
   const lessons = sortLessons(q.data ?? []);
-  if (lessons.length === 0) return <Empty text="No lessons yet. They appear after the review diagnoses its first misses." />;
+  if (lessons.length === 0)
+    return (
+      <div className="space-y-6">
+        <LessonScorecardSection />
+        <Empty text="No lessons yet. They appear after the review diagnoses its first misses." />
+      </div>
+    );
   return (
     <div className="space-y-3">
+      <LessonScorecardSection />
+      <h2 className={cn('pt-3 text-sm font-semibold', PRIMARY)}>All lessons</h2>
       <p className={cn('text-xs', MUTED)}>
         Active lessons with at least 2 right cases are fed to the agent. A lesson retires itself once it is wrong more often than right.
       </p>
@@ -163,10 +176,15 @@ function HistoryTab() {
   );
 }
 
-/** The self-review loop: proposals to approve, lessons the agent learned, and how past calls scored. */
+/** The tab a `?tab=` value selects; anything unknown (or none) is the default, Last night. */
+export function tabFrom(param: string | null): string {
+  return TABS.some((t) => t.key === param) ? (param as string) : DEFAULT_TAB;
+}
+
+/** The self-review loop: last night's findings, proposals to approve, lessons and whether they work, past runs. */
 export default function SelfReviewPage() {
   const [params, setParams] = useSearchParams();
-  const tab = TABS.some((t) => t.key === params.get('tab')) ? (params.get('tab') as string) : 'proposals';
+  const tab = tabFrom(params.get('tab'));
   const qc = useQueryClient();
   return (
     <div className="mx-auto max-w-5xl space-y-4 p-4">
@@ -186,9 +204,10 @@ export default function SelfReviewPage() {
       <Tabs
         tabs={TABS}
         activeTab={tab}
-        onChange={(k) => setParams(k === 'proposals' ? {} : { tab: k }, { replace: true })}
+        onChange={(k) => setParams(k === DEFAULT_TAB ? {} : { tab: k }, { replace: true })}
         className="overflow-x-auto"
       />
+      {tab === 'last' && <LastNightTab />}
       {tab === 'proposals' && <ProposalsTab />}
       {tab === 'lessons' && <LessonsTab />}
       {tab === 'wrong' && <WrongDecisionsTab />}

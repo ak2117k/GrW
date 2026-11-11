@@ -55,25 +55,3 @@ describe('WrongDecisionsPanel', () => {
     expect(html).toContain('No fix tickets.');
   });
 });
-
-describe('WrongDecisionsPanel: what the review found (prod 2026-11-10: 8 findings were never on this page)', () => {
-  const findings = {
-    session: '2026-11-09',
-    misses: [
-      { refIds: ['2026-11-09:JUBLFOOD'], category: 'DATA_MISSING', cause: 'Two articles existed for JUBLFOOD but the impact reader never processed them' },
-      { refIds: ['x'], category: 'TIMING', scope: 'SENTINEL_LIVE', cause: 'Both exits were FLOOR_HARD while the noise read said NOISE', lessonText: 'floor-hard bypass still needs pAdverse' },
-    ],
-  };
-  it('lists each finding with its cause and lesson, above the graded decisions', () => {
-    const html = renderToStaticMarkup(<WrongDecisionsPanel decisions={decisions} tickets={tickets} findings={findings} />);
-    expect(html).toContain('What the review found · 2026-11-09');
-    expect(html).toContain('Two articles existed for JUBLFOOD');
-    expect(html).toContain('DATA_MISSING');
-    expect(html).toContain('Lesson: floor-hard bypass still needs pAdverse');
-    expect(html.indexOf('What the review found')).toBeLessThan(html.indexOf('Wrong decisions ·'));
-  });
-  it('says so when the review found nothing', () => {
-    const html = renderToStaticMarkup(<WrongDecisionsPanel decisions={decisions} tickets={tickets} findings={{ session: '2026-11-09', misses: [] }} />);
-    expect(html).toContain('The review found nothing to flag');
-  });
-});

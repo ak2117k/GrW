@@ -1,14 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/utils/cn';
 import api from '@/services/api';
-import type { SelfReviewMiss } from '@/types/selfReview.types';
 import { CARD, Empty, MUTED, PRIMARY, SECONDARY } from './SelfReviewViews';
-
-/** The night's AI diagnosis (GET /self-review/latest `misses`): until 2026-11-10 only the night report showed 3 of them. */
-export interface ReviewFindings {
-  session: string | null;
-  misses: SelfReviewMiss[];
-}
 
 /**
  * "Wrong decisions" + "Fix queue" (2026-11-04, self-review wrong-decision loop): what the nightly run graded,
@@ -73,31 +66,9 @@ const CAUSE_TONE: Record<string, string> = {
   NOISE: 'text-[var(--color-text-muted)]',
 };
 
-export function WrongDecisionsPanel({ decisions, tickets, findings }: { decisions: DecisionsBlock | null; tickets: FixTicket[]; findings?: ReviewFindings }) {
+export function WrongDecisionsPanel({ decisions, tickets }: { decisions: DecisionsBlock | null; tickets: FixTicket[] }) {
   return (
     <div className="space-y-6">
-      {findings && (
-        <section className="space-y-3" aria-labelledby="review-findings-h">
-          <h2 id="review-findings-h" className={cn('text-sm font-semibold', PRIMARY)}>
-            What the review found{findings.session ? ` · ${findings.session}` : ''}
-          </h2>
-          {findings.misses.length === 0 ? (
-            <Empty text="The review found nothing to flag in this session." />
-          ) : (
-            <ul className="space-y-2">
-              {findings.misses.map((m, i) => (
-                <li key={`${m.refIds?.[0] ?? 'm'}-${i}`} className={cn(CARD, 'space-y-1 text-sm')}>
-                  <p className={cn('text-xs', MUTED)}>
-                    {[m.category, m.scope, m.symbol].filter(Boolean).join(' · ')}
-                  </p>
-                  <p className={PRIMARY}>{m.cause}</p>
-                  {m.lessonText ? <p className={SECONDARY}>Lesson: {m.lessonText}</p> : null}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
       <section className="space-y-3" aria-labelledby="wrong-decisions-h">
         <h2 id="wrong-decisions-h" className={cn('text-sm font-semibold', PRIMARY)}>
           Wrong decisions{decisions ? ` · ${decisions.session}` : ''}
@@ -187,7 +158,7 @@ function asDecisions(summary: unknown): DecisionsBlock | null {
 export default function WrongDecisionsTab() {
   const latest = useQuery({
     queryKey: ['self-review', 'latest'],
-    queryFn: async () => (await api.get<{ summary: unknown; misses?: SelfReviewMiss[]; run?: { sessionDate?: string } | null }>('/self-review/latest')).data,
+    queryFn: async () => (await api.get<{ summary: unknown }>('/self-review/latest')).data,
     staleTime: 60_000,
   });
   const queue = useQuery({
@@ -200,6 +171,6 @@ export default function WrongDecisionsTab() {
   });
   if (latest.isLoading || queue.isLoading) return <div className="h-32 animate-pulse rounded-lg bg-[var(--color-bg-tertiary)]" aria-busy="true" />;
   if (latest.isError) return <Empty text="Could not load the latest review run." />;
-  const findings: ReviewFindings = { session: latest.data?.run?.sessionDate ?? null, misses: Array.isArray(latest.data?.misses) ? latest.data.misses : [] };
-  return <WrongDecisionsPanel decisions={asDecisions(latest.data?.summary)} tickets={queue.data ?? []} findings={findings} />;
+  // The review's findings (what each became) moved to the Last night tab (2026-11-11).
+  return <WrongDecisionsPanel decisions={asDecisions(latest.data?.summary)} tickets={queue.data ?? []} />;
 }

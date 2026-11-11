@@ -1,11 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
-import { getLessons, getProposals, getSelfReviewRuns } from '@/services/selfReview';
+import { getLatestSelfReview, getLessonScorecard, getLessons, getProposals, getSelfReviewRuns } from '@/services/selfReview';
 
 export const SELF_REVIEW_KEYS = {
   proposals: ['self-review', 'proposals'] as const,
   pendingCount: ['self-review', 'proposals', 'pending-count'] as const,
   lessons: ['self-review', 'lessons'] as const,
   runs: ['self-review', 'runs'] as const,
+  latest: ['self-review', 'latest'] as const,
+  scorecard: ['self-review', 'lesson-scorecard'] as const,
 };
 
 /** Nav badge poll: proposals are created once a night, so every five minutes is plenty. */
@@ -18,6 +20,16 @@ export function useProposals() {
 
 export function useLessons() {
   return useQuery({ queryKey: SELF_REVIEW_KEYS.lessons, queryFn: getLessons, staleTime: 60_000 });
+}
+
+/** The newest reviewed session (the run with a diagnosis): findings, assessments, run status. */
+export function useLatestSelfReview() {
+  return useQuery({ queryKey: SELF_REVIEW_KEYS.latest, queryFn: getLatestSelfReview, staleTime: 60_000 });
+}
+
+/** Per lesson: mistakes before vs after it went active, with a verdict. */
+export function useLessonScorecard() {
+  return useQuery({ queryKey: SELF_REVIEW_KEYS.scorecard, queryFn: getLessonScorecard, staleTime: 5 * 60_000 });
 }
 
 export function useSelfReviewRuns(limit = 30) {

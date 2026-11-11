@@ -130,6 +130,27 @@ export class EntryEngineRepository {
     });
   }
 
+  /**
+   * Open ENGINE_ENTRY paper trades on any of `underlyings` (the index cluster), split by direction: a bought CE is
+   * bullish, a bought PE bearish (engine entries are always BUY; the option type is the instrument's, else the
+   * symbol's suffix).
+   */
+  async openEngineByDirection(underlyings: readonly string[]): Promise<{ bullish: number; bearish: number }> {
+    const rows = await this.prisma.trade.findMany({
+      where: { strategy: ENGINE_ENTRY_STRATEGY, isPaperTrade: true, status: { in: ['OPEN', 'PENDING'] }, entryTags: { hasSome: underlyings.map((u) => `${ENGINE_UNDERLYING_TAG}${u.toUpperCase()}`) } },
+      select: { side: true, instrument: { select: { optionType: true, symbol: true } } },
+    });
+    let bullish = 0;
+    let bearish = 0;
+    for (const r of rows) {
+      const kind = String(r.instrument?.optionType ?? '').toUpperCase() || (/PE$/i.test(r.instrument?.symbol ?? '') ? 'PE' : /CE$/i.test(r.instrument?.symbol ?? '') ? 'CE' : '');
+      const sell = String(r.side).toUpperCase() === 'SELL';
+      if (kind === 'CE') sell ? bearish++ : bullish++;
+      else if (kind === 'PE') sell ? bullish++ : bearish++;
+    }
+    return { bullish, bearish };
+  }
+
   /** ENGINE_ENTRY trades created since `since` (today's count). */
   engineTradesSince(since: Date): Promise<number> {
     return this.prisma.trade.count({ where: { strategy: ENGINE_ENTRY_STRATEGY, isPaperTrade: true, createdAt: { gte: since } } });

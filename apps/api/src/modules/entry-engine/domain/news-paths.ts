@@ -25,7 +25,21 @@ export const PRE_OPEN_BIAS = Object.freeze({
    * 09:40), so the trend cannot be read at 09:20 — 45 min keeps it to the opening window. 0 = 09:20 only.
    */
   windowMin: 45,
+  /**
+   * NSE / BSE underlyings (NFO / BFO options): the bias stops counting after this IST minute — 09:30, 15 min after
+   * the 09:15 open (2026-11-11). The NSE outlook is a GIFT-NIFTY GAP call: once the market has opened the gap is
+   * priced in. Prod 11-11: BANKNIFTY's news at 09:50 was "material via PRE_OPEN" off the 08:30 gap read (+1.08%),
+   * and the engine bought the top of the opening run. MCX keeps {@link windowMin}: its outlook is the same gap model
+   * (WTI since the MCX close), but MCX bars often start late (above), so the opening window was kept as designed.
+   */
+  nseCutoffMin: 9 * 60 + 30,
 });
+
+/** MCX underlyings (signal-trader contract-resolver's list). */
+const MCX_NAMES: ReadonlySet<string> = new Set(['CRUDEOIL', 'CRUDEOILM', 'NATURALGAS', 'NATGASMINI', 'GOLD', 'GOLDM', 'SILVER', 'SILVERM', 'COPPER', 'ZINC', 'ALUMINIUM', 'LEAD', 'NICKEL']);
+/** Index / stock underlyings whose options trade on NFO / BFO (everything but MCX). */
+export const isNseBseUnderlying = (u: string) => !MCX_NAMES.has(String(u ?? '').trim().toUpperCase());
+const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
 /** What the engine reads of a stored pre-open outlook (pre_open_outlooks). */
 export interface PreOpenBiasInput {
@@ -48,6 +62,9 @@ export function preOpenUsable(p: PreOpenBiasInput | null, at: Date): { ok: boole
   if (p.bias === 'NEUTRAL') return { ok: false, why: 'pre-open bias NEUTRAL' };
   if (!(p.confidence >= PRE_OPEN_BIAS.minConfidence)) return { ok: false, why: `pre-open ${p.bias} confidence ${p.confidence} < ${PRE_OPEN_BIAS.minConfidence}` };
   const m = istMinutes(at);
+  if (isNseBseUnderlying(p.underlying) && m > PRE_OPEN_BIAS.nseCutoffMin) {
+    return { ok: false, why: `pre-open ${p.bias} ${p.confidence} expired at ${hhmm(PRE_OPEN_BIAS.nseCutoffMin)} IST (the pre-open gap is priced in after the NSE / BSE open)` };
+  }
   if (m < ENGINE_WINDOW.fromMin || m > ENGINE_WINDOW.fromMin + PRE_OPEN_BIAS.windowMin) return { ok: false, why: `pre-open ${p.bias} ${p.confidence} outside the opening window` };
   return { ok: true, why: `pre-open ${p.bias} confidence ${p.confidence}` };
 }

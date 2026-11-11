@@ -10,9 +10,11 @@ import type { SignalTraderConfig } from '../signal-trader/domain/signal-trader.c
 import { SignalTraderRepository } from '../signal-trader/repositories/signal-trader.repository';
 import { SignalOiCheckService } from '../signal-trader/services/signal-oi-check.service';
 import type { InstrumentMasterLike, QuotesLike, SessionClockLike } from '../signal-trader/services/signal-trader.service';
+import { loadTrendBars } from '../signal-trader/services/trend-bars.loader';
 import { atmCandidates, engineContract, engineSignal, ENGINE_LIQUIDITY, pickLiquidStrike, planEngineEntry } from './domain/engine-contract';
 import { chooseBars, ENGINE_UNIVERSE, ENGINE_WINDOW, istDayAt, istMinutes, readOi, sessionStartOf, wantFor } from './domain/engine-inputs';
-import { ENTRY_ENGINE, entryDecision, entryGuards, INPUT_NOT_READY, newsReading, trendReading, type EntryDecision, type GuardResult, type OiReading } from './domain/entry-decision';
+import { ENTRY_ENGINE, entryDecision, entryGuards, INPUT_NOT_READY, isEnterAction, newsReading, trendReading, type Bar1m, type Direction, type EngineAction, type EntryDecision, type GuardResult, type OiReading } from './domain/entry-decision';
+import { applyEntryGates, clusterGate, extensionReading, gateLine, INDEX_CLUSTER, inIndexCluster, indicatorReading, sessionBars, type ExtensionReading, type GateResult, type IndicatorReading } from './domain/entry-gates';
 import { withNewsPaths } from './domain/news-paths';
 import { NEWS_THEME, newsTheme } from './domain/news-theme';
 import { ENTRY_ENGINE_CONFIG, type EntryEngineConfig } from './entry-engine.config';
@@ -34,9 +36,14 @@ const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export interface EvaluationResult {
   underlying: string;
   decisionId: string | null;
-  action: EntryDecision['action'] | 'SKIPPED';
+  action: EngineAction | 'SKIPPED';
   opened: string | null;
   note?: string;
+}
+
+/** One scan pass (all underlyings at one cron tick): the index-cluster underlyings already entered in it. */
+export interface ScanPass {
+  clusterEntered: string[];
 }
 
 /**
@@ -44,8 +51,9 @@ export interface EvaluationResult {
  * 09:20–23:00, venue open), for each underlying of the fixed universe: the news read of the last 60
  * min (news_impacts — the same model read the 08:40 news-ideas batch ranks with; that batch is left
  * unchanged), the trend from 1-minute bars, and the OI check (signal-trader SignalOiCheckService, DB
- * reads only) → entryDecision (code, deterministic). EVERY evaluation is recorded in
- * entry_engine_decisions, NO_TRADE included.
+ * reads only) → entryDecision (code, deterministic) → the entry gates (2026-11-11, domain/entry-gates.ts:
+ * 15m EMA/MACD/RSI indicators → NO_TRADE / WAIT, chase in N15 → WAIT, index-cluster cap → not opened).
+ * EVERY evaluation is recorded in entry_engine_decisions, NO_TRADE and WAIT included.
  *
  * ENTRY_ENGINE=paper also opens a PAPER trade for an ENTER that passes the cooldowns (ATM option,
  * nearest non-expiry-day expiry, 1 lot, signal-trader planEntry, isPaper: true). observe (default)
@@ -86,10 +94,11 @@ export class EntryEngineService {
     if (m < ENGINE_WINDOW.fromMin || m > ENGINE_WINDOW.toMin) return [];
     this.running = true;
     const out: EvaluationResult[] = [];
+    const pass: ScanPass = { clusterEntered: [] };
     try {
       for (const u of ENGINE_UNIVERSE) {
         try {
-          out.push(await this.evaluate(u, now));
+          out.push(await this.evaluate(u, now, pass));
         } catch (e) {
           this.logger.warn(`[entry-engine] ${u} evaluation failed: ${errText(e)}`);
           out.push({ underlying: u, decisionId: null, action: 'SKIPPED', opened: null, note: errText(e) });
@@ -101,8 +110,11 @@ export class EntryEngineService {
     return out;
   }
 
-  /** One underlying at `at`: read, decide, record; open a paper trade when paper mode allows. */
-  async evaluate(underlying: string, at: Date): Promise<EvaluationResult> {
+  /**
+   * One underlying at `at`: read, decide, gate, record; open a paper trade when paper mode allows. `pass` is the scan
+   * pass's shared state (the index-cluster cap); a lone call gets its own.
+   */
+  async evaluate(underlying: string, at: Date, pass: ScanPass = { clusterEntered: [] }): Promise<EvaluationResult> {
     const optionExchange = segmentFor({ underlying, instrumentKind: 'CE' });
     let open = false;
     try {
@@ -133,6 +145,13 @@ export class EntryEngineService {
     const event = await this.eventRead(underlying, at);
     const decision = entryDecision({ underlying, at, news, trend, oi, event, sessionStart });
 
+    // ENTRY GATES (2026-11-11, domain/entry-gates.ts): 15m indicators + how far the price already ran. Read on every
+    // evaluation (for the night review), for the decision's direction or else the direction OI was asked about.
+    const gateDir: Direction = decision.direction ?? want;
+    const readings = await this.gateReadings(line, chosen.bars, trend.price, gateDir, at);
+    const gated = applyEntryGates(decision.action as 'ENTER_CE' | 'ENTER_PE' | 'NO_TRADE', readings, readings.unreadWhy ?? 'no bars');
+    const action: EngineAction = gated.action;
+
     let minutesToClose: number | null = null;
     try {
       minutesToClose = this.clock.minutesToClose(optionExchange, at);
@@ -140,30 +159,89 @@ export class EntryEngineService {
       minutesToClose = null;
     }
     const [openForUnderlying, tradesToday] = await Promise.all([this.repo.openEngineTrades(underlying), this.repo.engineTradesSince(istDayAt(at, 0))]);
-    const guards = entryGuards({ openForUnderlying, tradesToday, minutesToClose });
+    const base = entryGuards({ openForUnderlying, tradesToday, minutesToClose });
+    // INDEX CLUSTER (correlated bet): only an ENTER on a cluster underlying asks.
+    const cluster = isEnterAction(action) && inIndexCluster(underlying) ? await this.clusterRead(underlying, gateDir, pass) : null;
+    const guards: GuardResult = cluster && cluster.verdict === 'BLOCK' ? { ok: false, reasons: [...base.reasons, gateLine('cluster', cluster)] } : base;
+    const clusterReason = cluster && cluster.verdict !== 'BLOCK' ? [gateLine('cluster', cluster)] : [];
 
     const id = randomUUID();
+    const reasons = [...decision.reasons, ...gated.reasons, ...clusterReason];
     await this.repo.insertDecision({
       id,
       underlying,
       at,
-      action: decision.action,
+      action,
       mode: this.cfg.mode,
       // readiness marks a session-warm-up NO_TRADE so the night review does not grade it as a decision (detectInputMissing).
-      inputs: { news, trend: { ...trend, barSource: chosen.source, line }, oi, ...(event ? { event } : {}), ...(decision.inputNotReady ? { readiness: { status: INPUT_NOT_READY, missing: decision.inputNotReady } } : {}), guards: { openForUnderlying, tradesToday, minutesToClose, ok: guards.ok }, scores: decision.scores },
-      reasons: [...decision.reasons, ...guards.reasons],
+      inputs: {
+        news,
+        trend: { ...trend, barSource: chosen.source, line },
+        oi,
+        ...(event ? { event } : {}),
+        ...(decision.inputNotReady ? { readiness: { status: INPUT_NOT_READY, missing: decision.inputNotReady } } : {}),
+        guards: { openForUnderlying, tradesToday, minutesToClose, ok: guards.ok, ...(cluster ? { cluster: { verdict: cluster.verdict, read: cluster.compact } } : {}) },
+        gates: {
+          direction: gateDir,
+          preGateAction: decision.action,
+          indicators: readings.indicators,
+          extension: readings.extension,
+          verdicts: { indicators: gated.indicators.verdict, chase: gated.chase.verdict, cluster: cluster?.verdict ?? null },
+          ...(readings.unreadWhy ? { unread: readings.unreadWhy } : {}),
+        },
+        scores: decision.scores,
+      },
+      reasons: [...reasons, ...guards.reasons],
     });
-    this.logger.log(`[entry-engine] ${underlying} ${decision.action} (${this.cfg.mode}) — ${decision.reasons.map((r) => r.split(' — ')[0]).join('; ')}${guards.ok ? '' : `; ${guards.reasons.join('; ')}`}`);
+    this.logger.log(`[entry-engine] ${underlying} ${action} (${this.cfg.mode}) — ${reasons.map((r) => r.split(' — ')[0]).join('; ')}${guards.ok ? '' : `; ${guards.reasons.join('; ')}`}`);
 
-    if (decision.action === 'NO_TRADE') return { underlying, decisionId: id, action: decision.action, opened: null };
-    if (this.cfg.mode !== 'paper') return { underlying, decisionId: id, action: decision.action, opened: null, note: 'observe: nothing opened' };
+    if (!isEnterAction(action)) return { underlying, decisionId: id, action, opened: null };
+    if (this.cfg.mode !== 'paper') return { underlying, decisionId: id, action, opened: null, note: 'observe: nothing opened' };
     if (!guards.ok) {
       await this.repo.settleDecision(id, null, `paper: not opened — ${guards.reasons.join('; ')}`);
-      return { underlying, decisionId: id, action: decision.action, opened: null, note: guards.reasons.join('; ') };
+      return { underlying, decisionId: id, action, opened: null, note: guards.reasons.join('; ') };
     }
-    const opened = await this.openPaper(id, underlying, decision, trend.price, at);
+    const opened = await this.openPaper(id, underlying, decision, reasons, trend.price, at);
+    if (opened.tradeId && inIndexCluster(underlying)) pass.clusterEntered.push(underlying.toUpperCase());
     await this.repo.settleDecision(id, opened.tradeId, opened.note);
-    return { underlying, decisionId: id, action: decision.action, opened: opened.tradeId, note: opened.note };
+    return { underlying, decisionId: id, action, opened: opened.tradeId, note: opened.note };
+  }
+
+  /**
+   * The gates' readings: the line's completed 15m bars through the signal-trader's trend-bar loader (candles_1m →
+   * 15m + the `candles` 15m history; DB only) and the 1m bars the trend read, both cut to the venue's session
+   * (sessionBars). Never throws: a failed read is recorded and the gates read UNKNOWN (never block).
+   */
+  private async gateReadings(
+    line: { exchange: string; token: string; symbol: string } | null,
+    bars1m: readonly Bar1m[],
+    price: number | null,
+    direction: Direction,
+    at: Date,
+  ): Promise<{ indicators: IndicatorReading | null; extension: ExtensionReading | null; unreadWhy?: string }> {
+    if (!line) return { indicators: null, extension: null, unreadWhy: 'no price line' };
+    try {
+      const { bars, source } = await loadTrendBars(this.signalRepo, line, at);
+      const bars15 = sessionBars(bars, line.exchange);
+      return {
+        indicators: indicatorReading(bars15, direction, at, `${source}; session bars ${bars15.length}`),
+        extension: extensionReading({ bars15, bars1m: sessionBars(bars1m, line.exchange), price, at, direction }),
+      };
+    } catch (e) {
+      this.logger.warn(`[entry-engine] ${line.symbol} 15m bars for the entry gates failed (not blocking): ${errText(e)}`);
+      return { indicators: null, extension: null, unreadWhy: `15m bars unreadable: ${errText(e)}` };
+    }
+  }
+
+  /** The index-cluster cap's facts: open engine positions per direction in the cluster + this pass's cluster entries. */
+  private async clusterRead(underlying: string, direction: Direction, pass: ScanPass): Promise<GateResult> {
+    let open: { bullish: number; bearish: number } | null = null;
+    try {
+      open = await this.repo.openEngineByDirection(INDEX_CLUSTER);
+    } catch (e) {
+      this.logger.warn(`[entry-engine] cluster open-position read failed (blocks): ${errText(e)}`);
+    }
+    return clusterGate({ underlying, direction, openBullish: open?.bullish ?? null, openBearish: open?.bearish ?? null, enteredThisPass: pass.clusterEntered });
   }
 
   /** The underlying's own price line: the index, or an MCX underlying's nearest future. */
@@ -209,7 +287,7 @@ export class EntryEngineService {
   }
 
   /** Contract → LTP → plan → paper open. Every refusal is a note on the decision row. */
-  private async openPaper(decisionId: string, underlying: string, d: EntryDecision, spot: number | null, at: Date): Promise<{ tradeId: string | null; note: string }> {
+  private async openPaper(decisionId: string, underlying: string, d: EntryDecision, reasons: readonly string[], spot: number | null, at: Date): Promise<{ tradeId: string | null; note: string }> {
     const kind = d.action === 'ENTER_CE' ? 'CE' : 'PE';
     const owner = this.signalCfg.ownerUserId;
     if (!owner) return { tradeId: null, note: 'paper: not opened — HUB_OWNER_USER_ID is not set (no quote session)' };
@@ -242,7 +320,7 @@ export class EntryEngineService {
       const failed = planned.checks.filter((x) => x.required && x.ok !== true).map((x) => `${x.name}: ${x.detail}`);
       return { tradeId: null, note: `paper: not opened — plan refused (${failed.join('; ') || 'no plan'})` };
     }
-    const r = await this.paper.open({ decisionId, plan: planned.plan, underlying, kind, strike: atm.strike, expiry: c.expiry ?? atm.expiry, why: d.reasons.map((x) => x.split(' — ')[0]).join('; ') });
+    const r = await this.paper.open({ decisionId, plan: planned.plan, underlying, kind, strike: atm.strike, expiry: c.expiry ?? atm.expiry, why: reasons.map((x) => x.split(' — ')[0]).join('; ') });
     return r.ok
       ? { tradeId: r.tradeId, note: `paper: opened ${planned.plan.tradingsymbol} x${planned.plan.qty} @ ${r.entryPrice ?? ltp} (trade ${r.tradeId}); ${pick.note}` }
       : { tradeId: null, note: `paper: open failed — ${r.reason}` };

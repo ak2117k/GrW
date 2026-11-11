@@ -8,7 +8,8 @@
  * entry counts as open for the rest of the day (the per-underlying cooldown).
  */
 import type { ChainContractRef, OiCheckInput, OiRow } from '../../signal-trader/domain/oi-check';
-import { entryDecision, entryGuards, newsReading, trendReading, type Bar1m, type EntryDecision, type GuardResult, type ImpactRow, type NewsReading, type OiReading, type TrendReading } from '../domain/entry-decision';
+import { entryDecision, entryGuards, isEnterAction, newsReading, trendReading, type Bar1m, type EntryDecision, type GuardResult, type ImpactRow, type NewsReading, type OiReading, type TrendReading } from '../domain/entry-decision';
+import { applyEntryGates, extensionReading, indicatorReading, rollTo15m, sessionBars, type GatedAction } from '../domain/entry-gates';
 import { chooseBars, ENGINE_WINDOW, istMinutes, readOi, sessionStartOf, wantFor } from '../domain/engine-inputs';
 import { withNewsPaths, type PreOpenBiasInput } from '../domain/news-paths';
 import { NEWS_THEME, newsTheme } from '../domain/news-theme';
@@ -33,12 +34,19 @@ export interface EntryFixtureV1 {
 export interface ReplayOptions {
   /** false = the engine before 2026-11-02 (per-story rule only: no news theme, no pre-open bias). */
   newsPaths?: boolean;
+  /**
+   * false = the engine before 2026-11-11 (no indicators / chase gates). Default true: the gates read 15m bars rolled
+   * from the fixture's own 1m bars (no `candles` 15m history in the fixture — under 120 session bars the tag is UNKNOWN).
+   */
+  gates?: boolean;
 }
 
 export interface ReplayStep {
   at: string;
   ist: string;
   decision: EntryDecision;
+  /** The entry gates' result (null with gates: false); its action is the step's final action. */
+  gated: GatedAction | null;
   guards: GuardResult;
   /** ENTER and every cooldown passed: paper mode would have opened a trade here. */
   wouldOpen: boolean;
@@ -108,11 +116,20 @@ export function replayEntry(fx: EntryFixtureV1, opts: ReplayOptions = {}): Repla
     };
     const oi = readOi(input);
     const decision = entryDecision({ underlying: fx.underlying, at, news, trend, oi });
+    let gated: GatedAction | null = null;
+    if (opts.gates !== false) {
+      const dir = decision.direction ?? want;
+      const bars15 = sessionBars(rollTo15m(chosen.bars, at), fx.line.exchange);
+      gated = applyEntryGates(decision.action as 'ENTER_CE' | 'ENTER_PE' | 'NO_TRADE', {
+        indicators: indicatorReading(bars15, dir, at, `fixture 1m → 15m (${bars15.length})`),
+        extension: extensionReading({ bars15, bars1m: sessionBars(chosen.bars, fx.line.exchange), price: trend.price, at, direction: dir }),
+      });
+    }
     const guards = entryGuards({ openForUnderlying: opened, tradesToday: opened, minutesToClose: close - istMinutes(at) });
-    const wouldOpen = decision.action !== 'NO_TRADE' && guards.ok;
+    const wouldOpen = isEnterAction(gated?.action ?? decision.action) && guards.ok;
     if (wouldOpen) opened++;
     const ist = new Date(t + 5.5 * 3_600_000).toISOString().slice(11, 16);
-    steps.push({ at: at.toISOString(), ist, decision, guards, wouldOpen, news, trend: { ...trend, barSource: chosen.source }, oi });
+    steps.push({ at: at.toISOString(), ist, decision, gated, guards, wouldOpen, news, trend: { ...trend, barSource: chosen.source }, oi });
   }
   return steps;
 }
@@ -127,5 +144,5 @@ export function formatStep(s: ReplayStep): string {
   const news = `${d.newsLean}${tag} ${d.news >= 0 ? '+' : ''}${d.news.toFixed(2)}`;
   const trend = `${d.trendLean} vwap ${pct(d.vwapPct)} 15m ${pct(d.ema15Slope)} 1h ${pct(d.ema1hSlope)}`;
   const oi = `${d.oiVerdict}→${s.oi.want.slice(0, 4)} (${d.oiLean}) 30m ${pct(d.chainLeanAgo)} open ${pct(d.chainLeanOpen)} fut ${d.futuresVerdict}`;
-  return `${s.ist}  ${pad(s.decision.action, 8)}${s.wouldOpen ? ' OPEN' : '     '}  news ${pad(news, 16)} | trend ${pad(trend, 52)} | oi ${oi}`;
+  return `${s.ist}  ${pad(s.gated?.action ?? s.decision.action, 8)}${s.wouldOpen ? ' OPEN' : '     '}  news ${pad(news, 16)} | trend ${pad(trend, 52)} | oi ${oi}`;
 }

@@ -85,13 +85,13 @@ function window(decisions: readonly EngineDecisionRow[], trades: readonly Engine
     byAction[d.action] = (byAction[d.action] ?? 0) + 1;
     const u = (byUnderlying[d.underlying] ??= { decisions: 0, enters: 0 });
     u.decisions++;
-    if (d.action !== 'NO_TRADE') u.enters++;
+    if (d.action === 'ENTER_CE' || d.action === 'ENTER_PE') u.enters++;
   }
   const grosses = trades.map(engineGross).filter((g): g is number => g !== null);
   const wins = grosses.filter((g) => g > 0).length;
   return {
     decisions: decisions.length,
-    enters: decisions.filter((d) => d.action !== 'NO_TRADE').length,
+    enters: decisions.filter((d) => d.action === 'ENTER_CE' || d.action === 'ENTER_PE').length,
     byAction,
     byUnderlying,
     trades: trades.length,

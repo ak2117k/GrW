@@ -33,6 +33,16 @@ export interface FundsRecord {
 
 export type FundsCheck = GateCheck & { funds: FundsRecord };
 
+/**
+ * The ₹ a new entry can actually use: Angel RMS `net` (the app's "available margin": opening cash
+ * + today's pay-in − margin used by open positions + realised P&L). NOT `availablecash`, which is
+ * the start-of-day cash — 2026-11-11 it read ₹6,768.10 unchanged from 10:53 to 13:59 while trades
+ * opened and closed, and a SENSEX TAKE went to paper. null funds = could not be read (unknown).
+ */
+export function usableFunds(f: { net: number } | null | undefined): number | null {
+  return f && Number.isFinite(f.net) ? f.net : null;
+}
+
 const r2 = (n: number) => Math.round(n * 100) / 100;
 export const inr = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
 

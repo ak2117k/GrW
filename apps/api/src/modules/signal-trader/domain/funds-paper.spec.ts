@@ -1,4 +1,16 @@
-import { fundsCheck, isFundsRejection, requiredFunds } from './funds';
+import { fundsCheck, isFundsRejection, requiredFunds, usableFunds } from './funds';
+
+describe('usableFunds', () => {
+  it('uses RMS net (usable margin), not the start-of-day availablecash', () => {
+    expect(usableFunds({ availableCash: 6768.1, net: 18919.5, utilisedMargin: 0 } as { net: number })).toBe(18919.5);
+  });
+  it('keeps a negative or zero net (account short), and null when funds could not be read', () => {
+    expect(usableFunds({ net: -525.64 })).toBe(-525.64);
+    expect(usableFunds({ net: 0 })).toBe(0);
+    expect(usableFunds(null)).toBeNull();
+    expect(usableFunds({ net: NaN })).toBeNull();
+  });
+});
 import { decisionIdFromTags, paperAlert, paperExitDecision, paperTags } from './paper';
 import { judgeCallOf, liveSummary, paperByJudge, paperSummary } from './paper-summary';
 import { parseSignalTraderConfig } from './signal-trader.config';

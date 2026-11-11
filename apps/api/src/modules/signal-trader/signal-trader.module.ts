@@ -18,6 +18,7 @@ import { PaperSentinelModule } from '../paper-sentinel/paper-sentinel.module';
 import { AiGatewayModule } from '../ai-gateway/ai-gateway.module';
 import { MbmModule } from '../mbm/mbm.module';
 import { parseSignalTraderConfig } from './domain/signal-trader.config';
+import { usableFunds } from './domain/funds';
 import { SignalTraderRepository } from './repositories/signal-trader.repository';
 import { SignalJudgeService } from './services/signal-judge.service';
 import { SignalContextService } from './services/signal-context.service';
@@ -72,11 +73,11 @@ import { MarketEventsRepository } from '../news-events/events/market-events.repo
     SignalPaperWatchService,
     { provide: SIGNAL_PAPER, useExisting: SignalPaperService },
     {
-      // The owner's RMS available cash — the same sanitized funds read trade-setup sizes with
-      // (BrokerOverviewService, own-account session: never a second login over the live feed).
+      // The owner's usable RMS margin (`net`, see usableFunds) — the same sanitized funds read trade-setup
+      // sizes with (BrokerOverviewService, own-account session: never a second login over the live feed).
       provide: SIGNAL_FUNDS,
       useFactory: (overview: BrokerOverviewService, feeds: UserFeedManager): FundsLike => ({
-        available: async (userId) => (await overview.getFunds(userId))?.availableCash ?? null,
+        available: async (userId) => usableFunds(await overview.getFunds(userId)),
         // Angel margin calculator (SmartAPI marginApi) over the owner's LIVE feed session: leased, never a
         // fresh login (leaseRestClient returns null instead). Any failure → the caller uses the estimate.
         margin: async (userId, position) => {

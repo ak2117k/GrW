@@ -161,6 +161,8 @@ export interface SelfReviewRun {
   exitNoiseAssessment?: string | null;
   /** The diagnosis' read of the entry engine's decisions and paper trades (latest run only). */
   engineAssessment?: string | null;
+  /** The stored LLM diagnosis (GET /runs returns the raw row); null when the diagnosis did not run or failed. */
+  diagnosis?: { misses?: unknown[] } | null;
 }
 
 /** One diagnosed miss from the run's LLM diagnosis. */
@@ -175,6 +177,50 @@ export interface SelfReviewMiss {
   scope?: string | null;
   proposalTarget?: string | null;
   proposedValue?: unknown;
+  /** DATA | SETTING | REASONING | CODE_BUG | NOISE. */
+  causeType?: string | null;
+  ticket?: { title: string; proposedChange?: string; files?: string[]; testDescription?: string } | null;
+  /** ₹ per lot net of its decision-ledger refs; null/absent = no ₹ figure. */
+  costRupees?: number | null;
+  /** What the miss became (server-derived, exact key match). */
+  outcome?: MissOutcome | null;
+}
+
+export type MissOutcomeType = 'LESSON' | 'TICKET' | 'ONE_OFF' | 'NOISE';
+export interface MissOutcome {
+  type: MissOutcomeType;
+  label: string;
+  key?: string;
+  status?: string;
+}
+
+export type LessonVerdict = 'TOO_EARLY' | 'HELPING' | 'NOT_HELPING';
+export interface LessonWindow {
+  sessions: number;
+  mistakes: number;
+  perSession: number | null;
+  costRupees: number;
+  costUnknown: number;
+  costPerSession: number | null;
+}
+export interface LessonScore {
+  id: string;
+  key: string;
+  text: string;
+  scope: string;
+  status: string;
+  activeSince: string;
+  rightCount: number;
+  wrongCount: number;
+  before: LessonWindow;
+  after: LessonWindow;
+  verdict: LessonVerdict;
+}
+/** GET /api/self-review/lesson-scorecard */
+export interface LessonScorecard {
+  rule: string;
+  reviewedSessions: number;
+  lessons: LessonScore[];
 }
 
 export type LessonScope = 'SENTINEL_LIVE' | 'SENTINEL_OVERNIGHT' | 'NEWS_IDEAS' | 'ALL';
@@ -247,4 +293,7 @@ export interface SelfReviewLatest {
   /** Lessons created by this run (objects or bare keys, depending on the API build). */
   lessonsAdded: Array<AgentLesson | string> | number;
   proposalsPending: number;
+  signalPaperAssessment?: string | null;
+  exitNoiseAssessment?: string | null;
+  engineAssessment?: string | null;
 }

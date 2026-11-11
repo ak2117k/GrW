@@ -1,6 +1,7 @@
 import api from './api';
 import type {
   AgentLesson,
+  LessonScorecard,
   ProposalStatus,
   SelfReviewLatest,
   SelfReviewRun,
@@ -33,6 +34,11 @@ export async function getSelfReviewRuns(limit = 30): Promise<SelfReviewRun[]> {
 export async function getSelfReviewResults(session: string, kind?: string): Promise<VerificationResult[]> {
   const { data } = await api.get('/self-review/results', { params: { session, ...(kind ? { kind } : {}) } });
   return rows<VerificationResult>(data);
+}
+
+export async function getLessonScorecard(): Promise<LessonScorecard> {
+  const { data } = await api.get<LessonScorecard>('/self-review/lesson-scorecard');
+  return { rule: data?.rule ?? '', reviewedSessions: Number(data?.reviewedSessions ?? 0), lessons: Array.isArray(data?.lessons) ? data.lessons : [] };
 }
 
 export async function getLessons(): Promise<AgentLesson[]> {

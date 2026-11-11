@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { decide } from '../domain/proposals';
 import { topMisses } from '../domain/summary';
+import { decisionGradeId, lessonScorecard, missCostRupees, missOutcome, scorecardRefIds, ticketKeysOf, type LessonScorecard, type MissOutcome, type RefInfo } from '../domain/findings';
 import { SelfReviewRepository } from '../repositories/self-review.repository';
 import { SELF_REVIEW_LESSONS, type DiagnosisMissOut, type LessonsPort } from '../self-review.ports';
 import type { RunSummary } from '../self-review.types';
@@ -11,7 +12,11 @@ import { SelfReviewRunService, toDraft } from './self-review-run.service';
 export interface SelfReviewLatestView {
   run: Record<string, unknown> | null;
   summary: RunSummary | null;
-  misses: Array<DiagnosisMissOut & { kind?: string | null; symbol?: string | null }>;
+  /**
+   * The night's diagnosed misses. `outcome` = what each became (lesson / fix ticket / recorded one-off / noise) and
+   * `costRupees` = ₹ per lot net of its decision-ledger refs (null = no ₹ figure); both absent on the undiagnosed fallback.
+   */
+  misses: Array<DiagnosisMissOut & { kind?: string | null; symbol?: string | null; costRupees?: number | null; outcome?: MissOutcome }>;
   lessonsAdded: Array<{ id: string; key: string; text: string; scope: string; rightCount: number; wrongCount: number; status: string }>;
   proposalsPending: number;
   /** The diagnosis' read of the signal paper trades split by OI verdict / AI judge call; null when none. */
@@ -57,10 +62,29 @@ export class SelfReviewService {
     const [results, lessons] = await Promise.all([this.repo.results({ sessionDate: run.sessionDate }), this.repo.lessonsFromRun(run.id)]);
     const bySubject = new Map(results.map((r) => [r.refId, r]));
     const diagnosed = readMisses(run.diagnosis);
+    const gradeIds = diagnosed.flatMap((m) => m.refIds.map(decisionGradeId).filter((id): id is string => !!id));
+    const lessonKeys = [...new Set(diagnosed.map((m) => m.lessonKey).filter((k): k is string => !!k))];
+    // Each read is a no-op on an empty list (an undiagnosed night).
+    const [grades, lessonRows, ticketRows] = await Promise.all([
+      this.repo.decisionGradesByIds(gradeIds),
+      this.repo.lessonsByKeys(lessonKeys),
+      this.repo.ticketsByKeys(ticketKeysOf(diagnosed)),
+    ]);
+    const gradeByRef = new Map(grades.map((g) => [`dg:${g.id}`, g]));
+    const costByRef = new Map(grades.map((g) => [`dg:${g.id}`, g.deltaRupees]));
+    const lessonByKey = new Map(lessonRows.map((l) => [l.key, l]));
+    const ticketByKey = new Map(ticketRows.map((t) => [t.key, t]));
     const misses = diagnosed.length
       ? diagnosed.map((m) => {
           const first = bySubject.get(m.refIds[0] ?? '');
-          return { ...m, kind: first?.kind ?? null, symbol: first?.symbol ?? null };
+          const grade = gradeByRef.get(m.refIds[0] ?? '');
+          return {
+            ...m,
+            kind: first?.kind ?? (grade ? `DECISION:${grade.decisionType}` : null),
+            symbol: first?.symbol ?? grade?.symbol ?? null,
+            costRupees: missCostRupees(m.refIds, costByRef),
+            outcome: missOutcome(m, lessonByKey, ticketByKey),
+          };
         })
       : topMisses(results.filter((r) => r.kind !== 'SCORECARD_FACTOR' && r.kind !== 'MBM_PREDICTION' && r.kind !== 'MBM_RELATIVE' && r.kind !== 'STOCK_MOVE').map(toDraft), MISS_CAP).map((r) => ({
           refIds: [r.refId],
@@ -102,6 +126,18 @@ export class SelfReviewService {
 
   lessons(status?: string) {
     return this.repo.lessons(status);
+  }
+
+  /** Is each lesson making its mistake rarer? Before vs after it went active, per reviewed session (domain/findings). */
+  async lessonScorecard(): Promise<LessonScorecard> {
+    const [runs, lessons] = await Promise.all([this.repo.diagnosedRuns(), this.repo.scorecardLessons()]);
+    const refIds = scorecardRefIds(runs);
+    const gradeIds = refIds.map(decisionGradeId).filter((id): id is string => !!id);
+    const [grades, results] = await Promise.all([this.repo.decisionGradesByIds(gradeIds), this.repo.resultSessionsByRefIds(refIds.filter((r) => !decisionGradeId(r)))]);
+    const refs = new Map<string, RefInfo>();
+    for (const r of results) if (!refs.has(r.refId)) refs.set(r.refId, { sessionDate: r.sessionDate, costRupees: null });
+    for (const g of grades) refs.set(`dg:${g.id}`, { sessionDate: g.sessionDate, costRupees: g.deltaRupees });
+    return lessonScorecard(runs, lessons, refs);
   }
 
   proposals(status?: string) {

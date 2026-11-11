@@ -1,6 +1,7 @@
 import { parseSignalTraderConfig } from '../signal-trader/domain/signal-trader.config';
 import { PAPER_WATCH_STRATEGIES } from '../signal-trader/domain/paper';
 import { ISOLATED_PAPER_STRATEGIES } from '../trade-engine/services/risk-manager.service';
+import type { TrendBar } from '../signal-trader/domain/trend-tag';
 import type { Bar1m, ImpactRow } from './domain/entry-decision';
 import type { PreOpenBiasInput } from './domain/news-paths';
 import { ENGINE_ENTRY_SOURCE, ENGINE_ENTRY_STRATEGY, parseEntryEngineConfig, type EntryEngineMode } from './entry-engine.config';
@@ -37,7 +38,7 @@ function bearishOiInput(at: Date, want: 'BULLISH' | 'BEARISH') {
   return { at, want, sessionStart: SESSION, chain: { expiry: '2026-11-17', contracts, rows, center: 9650, centerSource: 'test' }, futures: null };
 }
 
-function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minutesToClose?: number; oiFails?: boolean; impacts?: ImpactRow[]; preOpen?: PreOpenBiasInput | null; events?: { listFrom: (from: Date) => Promise<unknown[]> } } = {}) {
+function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minutesToClose?: number; oiFails?: boolean; impacts?: ImpactRow[]; preOpen?: PreOpenBiasInput | null; events?: { listFrom: (from: Date) => Promise<unknown[]> }; bars15?: TrendBar[]; clusterOpen?: { bullish: number; bearish: number } } = {}) {
   const repo = {
     impacts: jest.fn(async () => o.impacts ?? [bearImpact]),
     hubBars: jest.fn(async () => [] as Bar1m[]),
@@ -47,8 +48,13 @@ function make(o: { mode?: EntryEngineMode; open?: number; today?: number; minute
     insertDecision: jest.fn(async () => undefined),
     settleDecision: jest.fn(async () => undefined),
     preOpenOutlook: jest.fn(async () => o.preOpen ?? null),
+    openEngineByDirection: jest.fn(async () => o.clusterOpen ?? { bullish: 0, bearish: 0 }),
   };
-  const signalRepo = { nearestFuture: jest.fn(async () => ({ instrumentId: 'f1', symbol: 'CRUDEOIL19NOV26FUT', exchange: 'MCX', token: '573422' })) };
+  const signalRepo = {
+    nearestFuture: jest.fn(async () => ({ instrumentId: 'f1', symbol: 'CRUDEOIL19NOV26FUT', exchange: 'MCX', token: '573422' })),
+    hub15mBars: jest.fn(async () => o.bars15 ?? []),
+    stored15mBars: jest.fn(async () => [] as TrendBar[]),
+  };
   const oi = {
     input: jest.fn(async (r: { at: Date; signal: { instrumentKind: string } }) => {
       if (o.oiFails) throw new Error('db down');
@@ -175,6 +181,70 @@ describe('EntryEngineService', () => {
     const ok = make();
     await ok.svc.evaluate('CRUDEOIL', AT);
     expect((ok.repo.insertDecision.mock.calls[0] as unknown as [{ inputs: { readiness?: unknown } }])[0].inputs.readiness).toBeUndefined();
+  });
+
+  /** 24 completed 15m session bars on 2026-10-28 (09:15–15:00 IST) with high − low = `range` → N15 = range. */
+  const bars15 = (range: number): TrendBar[] =>
+    Array.from({ length: 24 }, (_, i) => ({ ts: new Date('2026-10-28T03:45:00Z').getTime() + i * 15 * MIN, open: 9_800, high: 9_800 + range / 2, low: 9_800 - range / 2, close: 9_800 }));
+
+  it('2026-11-11 entry gates: readings recorded on the decision and in the paper trade summary; a wide N15 lets the ENTER through', async () => {
+    const { svc, repo, paper } = make({ mode: 'paper', bars15: bars15(100) });
+    const r = await svc.evaluate('CRUDEOIL', AT);
+    expect(r).toMatchObject({ action: 'ENTER_PE', opened: 't1' });
+    const row = (repo.insertDecision.mock.calls[0] as unknown as [{ action: string; inputs: { gates: { direction: string; preGateAction: string; extension: { n15: number; fromSwingN15: number }; indicators: { tag: string }; verdicts: Record<string, string | null> } }; reasons: string[] }])[0];
+    expect(row.action).toBe('ENTER_PE');
+    expect(row.inputs.gates).toMatchObject({ direction: 'BEARISH', preGateAction: 'ENTER_PE', indicators: { tag: 'UNKNOWN' }, extension: { n15: 100 }, verdicts: { indicators: 'UNKNOWN', chase: 'PASS', cluster: null } });
+    expect(row.inputs.gates.extension.fromSwingN15).toBeLessThan(1);
+    expect(row.reasons.some((x) => x.startsWith('indicators: ? '))).toBe(true);
+    expect(row.reasons.some((x) => x.startsWith('chase: ✓ '))).toBe(true);
+    const why = (paper.open.mock.calls[0] as unknown as [{ why: string }])[0].why;
+    expect(why).toMatch(/^news: .*; trend: .*; oi: .*; indicators: \? UNKNOWN, MACD n\/a, RSI 50; chase: ✓ 0\.\d+ N15 off the 30-min high, .* N15 past EMA20$/);
+  });
+
+  it('2026-11-11 chase gate: the same ENTER after a run of many N15 is WAIT — recorded, nothing opened, a later scan may still enter', async () => {
+    const { svc, repo, paper } = make({ mode: 'paper', bars15: bars15(4) });
+    const r = await svc.evaluate('CRUDEOIL', AT);
+    expect(r).toMatchObject({ action: 'WAIT', opened: null });
+    expect(paper.open).not.toHaveBeenCalled();
+    expect(repo.settleDecision).not.toHaveBeenCalled();
+    const row = (repo.insertDecision.mock.calls[0] as unknown as [{ action: string; inputs: { gates: { preGateAction: string; verdicts: { chase: string } } }; reasons: string[] }])[0];
+    expect(row).toMatchObject({ action: 'WAIT', inputs: { gates: { preGateAction: 'ENTER_PE', verdicts: { chase: 'WAIT' } } } });
+    expect(row.reasons.find((x) => x.startsWith('chase: WAIT'))).toContain('already extended');
+  });
+
+  it('a failed 15m read never blocks: the gates read UNKNOWN and the reason says why', async () => {
+    const { svc, repo } = make({ mode: 'observe' });
+    (svc as unknown as { signalRepo: { hub15mBars: jest.Mock } }).signalRepo.hub15mBars.mockRejectedValueOnce(new Error('db down'));
+    expect((await svc.evaluate('CRUDEOIL', AT)).action).toBe('ENTER_PE');
+    const row = (repo.insertDecision.mock.calls[0] as unknown as [{ inputs: { gates: { unread: string } }; reasons: string[] }])[0];
+    expect(row.inputs.gates.unread).toContain('db down');
+  });
+
+  describe('index cluster (NIFTY / BANKNIFTY / SENSEX … one bet)', () => {
+    const niftyImpact: ImpactRow = { ...bearImpact, clusterId: 'n1', symbols: ['NIFTY'], headline: 'Index slides' };
+    it('an open bearish engine position anywhere in the cluster blocks a new PE (recorded as a cooldown, decision stays ENTER)', async () => {
+      const { svc, repo, paper } = make({ mode: 'paper', impacts: [niftyImpact], bars15: bars15(100), clusterOpen: { bullish: 0, bearish: 1 } });
+      const r = await svc.evaluate('NIFTY', AT);
+      expect(r).toMatchObject({ action: 'ENTER_PE', opened: null });
+      expect(paper.open).not.toHaveBeenCalled();
+      expect(repo.settleDecision).toHaveBeenCalledWith(expect.any(String), null, expect.stringContaining('cluster: ✗ 1 bearish open'));
+      const row = (repo.insertDecision.mock.calls[0] as unknown as [{ inputs: { guards: { ok: boolean; cluster: { verdict: string } } } }])[0];
+      expect(row.inputs.guards).toMatchObject({ ok: false, cluster: { verdict: 'BLOCK' } });
+    });
+
+    it('one new cluster entry per scan pass; a bullish position does not block a PE', async () => {
+      const { svc, paper, repo } = make({ mode: 'paper', impacts: [niftyImpact], bars15: bars15(100), clusterOpen: { bullish: 1, bearish: 0 } });
+      const r = await svc.evaluate('NIFTY', AT, { clusterEntered: ['BANKNIFTY'] });
+      expect(r.opened).toBeNull();
+      expect(paper.open).not.toHaveBeenCalled();
+      expect(repo.settleDecision).toHaveBeenCalledWith(expect.any(String), null, expect.stringContaining('BANKNIFTY already entered for the index cluster in this scan'));
+    });
+
+    it('MCX underlyings are not in the cluster (no cluster read)', async () => {
+      const { svc, repo } = make({ mode: 'paper', bars15: bars15(100), clusterOpen: { bullish: 0, bearish: 5 } });
+      expect((await svc.evaluate('CRUDEOIL', AT)).opened).toBe('t1');
+      expect(repo.openEngineByDirection).not.toHaveBeenCalled();
+    });
   });
 
   it('off: run() does nothing; outside 09:20–23:00 IST nothing is evaluated', async () => {

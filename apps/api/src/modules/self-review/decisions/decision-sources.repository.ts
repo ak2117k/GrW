@@ -178,7 +178,7 @@ export class DecisionSourcesRepository {
 
   /** Entry-engine ENTER decisions in [from, to) per underlying (event detector's "takes"). */
   async engineEnters(from: Date, to: Date): Promise<Array<{ underlying: string; at: Date }>> {
-    return this.prisma.entryEngineDecision.findMany({ where: { at: { gte: from, lt: to }, action: { not: 'NO_TRADE' } }, select: { underlying: true, at: true }, take: READ_MAX });
+    return this.prisma.entryEngineDecision.findMany({ where: { at: { gte: from, lt: to }, action: { in: ['ENTER_CE', 'ENTER_PE'] } }, select: { underlying: true, at: true }, take: READ_MAX });
   }
 
   /** The session's high − low of an index underlying over its average daily range (both in bp); null when unknown. */

@@ -18,7 +18,7 @@ describe('entry replay', () => {
   // The real prod export is git-ignored (fixtures/*.real.json); replayed when present.
   const crude = join(__dirname, 'fixtures', 'crude-2026-10-29.real.json');
   (existsSync(crude) ? it : it.skip)('CRUDEOIL 2026-10-29 (prod export): the first ENTER is a PE and every step is explained', () => {
-    const steps = replayEntry(JSON.parse(readFileSync(crude, 'utf8')) as EntryFixtureV1);
+    const steps = replayEntry(JSON.parse(readFileSync(crude, 'utf8')) as EntryFixtureV1, { gates: false });
     const first = steps.find((s) => s.decision.action !== 'NO_TRADE');
     expect(first?.decision.action).toBe('ENTER_PE');
     expect(steps.filter((s) => s.wouldOpen)).toHaveLength(1);

@@ -17,7 +17,13 @@ import type { OiCheck, OiVerdict } from '../../signal-trader/domain/oi-check';
  * Every threshold is a named constant in {@link ENTRY_ENGINE}. Pure: no I/O, no clock.
  */
 
-export type EngineAction = 'ENTER_CE' | 'ENTER_PE' | 'NO_TRADE';
+/**
+ * WAIT (2026-11-11, entry-gates.ts): news / trend / OI agreed, but the price is already extended (or RSI extreme) —
+ * not an entry now, and not a NO_TRADE: a later scan may enter after a pullback. Only the gates produce it.
+ */
+export type EngineAction = 'ENTER_CE' | 'ENTER_PE' | 'NO_TRADE' | 'WAIT';
+/** The engine actions that are an entry (anything else — NO_TRADE, WAIT — opened nothing by design). */
+export const isEnterAction = (a: string): a is 'ENTER_CE' | 'ENTER_PE' => a === 'ENTER_CE' || a === 'ENTER_PE';
 export type Direction = 'BULLISH' | 'BEARISH';
 export type ComponentLean = Direction | 'NEUTRAL' | 'NO_DATA';
 
@@ -75,6 +81,41 @@ export const ENTRY_ENGINE = Object.freeze({
    * against the trend's 15, and often one partial OI snapshot). Still NO_TRADE; the next cycle decides.
    */
   inputWarmupMin: 15,
+
+  // ── entry gates (entry-gates.ts, 2026-11-11): indicators, chase / extension, index cluster ──
+  /**
+   * RSI(14) of 15m session closes: CE waits at / above rsiOverbought, PE at / below rsiOversold. NOT the textbook
+   * 70 / 30: on prod 2026-11-02..11 every index CE ENTER read RSI 78–88 at the open of a trend day — the three
+   * 09:50 11-11 losers (84 / 88 / 85) AND the +₹7k BANKNIFTY re-entry at 10:28 (85) and the +₹612 11-05
+   * BANKNIFTY (83); every 11-10 MCX PE read 18–30. 70 / 30 would have held back every one of them, winners
+   * included, so RSI does not separate a chase from a trend here; it is recorded on every decision and only an
+   * extreme reading waits. Revisit with more engine trades.
+   */
+  rsiOverbought: 90,
+  rsiOversold: 10,
+  rsiPeriod: 14,
+  /** N15 = mean true range of the last this-many completed 15m session bars. */
+  atrPeriod: 14,
+  /** The swing window: the low (CE) / high (PE) of the closed 1-minute session bars of the last this-many minutes. */
+  swingLookbackMin: 30,
+  /**
+   * WAIT when the price is at least this many N15 above the 30-min low (CE; below the 30-min high for PE).
+   * Calibrated on the prod engine ENTERs 2026-11-02..11: the 09:50 11-11 losers read 1.61 / 2.39 / 1.70 N15 and the
+   * other losing engine trades 1.52 (GOLD 11-04, −₹4.7k), 2.59 (NIFTY 11-05), 4.09 (GOLD 11-10, −₹7.3k); every
+   * winner ≤ 1.46 (BANKNIFTY 11-05 +₹612 at 1.46, the closest call; CRUDEOIL 11-09 0.13) and the BANKNIFTY
+   * re-entry at 10:28 0.66 (the 10:20 scan 0.83).
+   */
+  maxFromSwingN15: 1.5,
+  /**
+   * The distance past the 15m EMA20 is RECORDED, not gated (null): after a gap open the EMA20 still sits in the
+   * prior session, so every morning entry reads 5–11 N15 (the 10:28 winner 6.3) — it measures the gap, not the chase.
+   */
+  maxFromEma20N15: null as number | null,
+  /** EMA period of the extension's reference line (15m closes). */
+  extEmaPeriod: 20,
+  /** Index cluster (entry-gates INDEX_CLUSTER): open engine positions per direction, new entries per scan pass. */
+  maxClusterOpenPerDirection: 1,
+  maxClusterEntriesPerPass: 1,
 });
 
 /** The reason tag of a NO_TRADE taken because the inputs were not populated yet (session warm-up). */

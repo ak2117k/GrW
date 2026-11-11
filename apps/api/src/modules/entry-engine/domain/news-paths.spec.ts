@@ -1,5 +1,5 @@
 import { entryDecision, type NewsReading, type OiReading, type TrendReading } from './entry-decision';
-import { PRE_OPEN_BIAS, preOpenUsable, withNewsPaths, type PreOpenBiasInput } from './news-paths';
+import { isNseBseUnderlying, PRE_OPEN_BIAS, preOpenUsable, withNewsPaths, type PreOpenBiasInput } from './news-paths';
 import type { NewsTheme } from './news-theme';
 
 const AT_0920 = new Date('2026-11-02T03:50:00Z'); // 09:20 IST
@@ -62,6 +62,24 @@ describe('news paths (THEME / PRE_OPEN)', () => {
     expect(preOpenUsable(null, AT_0920).ok).toBe(false);
     expect(withNewsPaths(neutralNews, null, pre(), AT_0920)).toMatchObject({ lean: 'BEARISH', material: true, materialPath: 'PRE_OPEN' });
     expect(withNewsPaths(neutralNews, null, pre(), AT_1035)).toMatchObject({ lean: 'NEUTRAL', material: false });
+  });
+
+  it('2026-11-11: on NSE / BSE underlyings the pre-open (GIFT gap) bias expires at 09:30 IST; MCX keeps the opening window', () => {
+    const at = (hhmm: string) => new Date(`2026-11-02T${hhmm}:00+05:30`);
+    const nifty = pre({ underlying: 'NIFTY', bias: 'BULLISH' });
+    expect(preOpenUsable(nifty, at('09:20')).ok).toBe(true);
+    expect(preOpenUsable(nifty, at('09:30')).ok).toBe(true);
+    const late = preOpenUsable(nifty, at('09:50'));
+    expect(late).toEqual({ ok: false, why: expect.stringContaining('expired at 09:30 IST') });
+    expect(preOpenUsable(pre({ underlying: 'BANKNIFTY', bias: 'BULLISH' }), at('09:35')).ok).toBe(false);
+    expect(preOpenUsable(pre({ underlying: 'SENSEX', bias: 'BULLISH' }), at('09:35')).ok).toBe(false);
+    expect(withNewsPaths(neutralNews, null, pre({ underlying: 'BANKNIFTY', bias: 'BULLISH' }), at('09:50'))).toMatchObject({ lean: 'NEUTRAL', material: false, materialPath: null });
+    // MCX: unchanged (09:20 + 45 min).
+    expect(preOpenUsable(pre(), at('09:50')).ok).toBe(true);
+    expect(preOpenUsable(pre(), at('10:05')).ok).toBe(true);
+    expect(preOpenUsable(pre({ underlying: 'GOLD' }), at('09:50')).ok).toBe(true);
+    expect(isNseBseUnderlying('NIFTY')).toBe(true);
+    expect(isNseBseUnderlying('crudeoil')).toBe(false);
   });
 
   it('the engine uses the pre-open bias ONLY when trend and OI agree (all-agree rule stays)', () => {

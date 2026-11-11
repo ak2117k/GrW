@@ -105,11 +105,20 @@ export class SentinelExitTriggerRepository {
   }
 
   /** The arming verdict's packet, stated invalidation and net P&L — read only for the record-only trigger check. */
-  verdictForCheck(verdictId: string): Promise<{ packet: unknown; invalidationPoint: string | null; netPnl: number } | null> {
+  verdictForCheck(verdictId: string): Promise<{
+    packet: unknown; invalidationPoint: string | null; netPnl: number; thesisStatus: string | null; reason: string | null;
+  } | null> {
     return this.prisma.sentinelVerdict.findUnique({
       where: { id: verdictId },
-      select: { packet: true, invalidationPoint: true, netPnl: true },
+      select: { packet: true, invalidationPoint: true, netPnl: true, thesisStatus: true, reason: true },
     });
+  }
+
+  /** RECORD ONLY: the check onto a proposal's REJECTED row (one row per verdict). Touches only `check`. */
+  async recordCheckByVerdict(verdictId: string, check: object): Promise<void> {
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "sentinel_exit_triggers" SET "check" = ${JSON.stringify(check)}::jsonb
+      WHERE "verdictId" = ${verdictId} AND "status" = 'REJECTED'`);
   }
 
   /**

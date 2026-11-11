@@ -143,6 +143,74 @@ describe('armPaperTrigger — the live arming rules', () => {
     });
   });
 
+  describe('CUT_LOSS yardstick (acts on paper)', () => {
+    /** Paper trade cmwbm1oq50uaanx01gvwjah7x, 2026-11-11: BANKNIFTY 60800 CE long, best 60791.95, N1 41.8, thesis 59741.25. */
+    const block = (value: unknown) => ({ available: true, value, source: 's', at: 'a' });
+    const packet = {
+      position: { symbol: 'BANKNIFTY23NOV2660800CE', side: 'LONG', qty: 30, entryPrice: 745.37, ltp: 730, underlyingLtp: block(60776.8) },
+      money: { netPnl: -402.4, greenFloorArmed: false, anchors: { best: { ltp: 760, underlying: 60791.95, at: 'x' }, floorArm: null, hardExitN: 2 } },
+      thesis: block({ invalidation: 59741.25 }),
+      flow: { noiseUnit: block({ contract: null, underlying: { n: 41.8, method: 'atr14-1m', bars: 60, at: 'x' } }) },
+    };
+    const watch = { exchange: 'NSE', token: '99926009', symbol: 'BANKNIFTY' };
+    const cutLoss = { n15: { n: 107.71, bars: 14, method: 'atr14-15m' as const, at: 'x' }, k15: 1.5 };
+    const bnf = (price: number, o: { thesisStatus?: string; armed?: PaperTrigger | null; under?: number; cut?: boolean } = {}) => arm({
+      symbol: 'BANKNIFTY23NOV2660800CE', qty: 30,
+      pending: {
+        lookId: 'L2', exitTrigger: trigger({ instrument: 'UNDERLYING', price, watch }), seenAt: NOW,
+        basis: { packet, invalidationPoint: `Underlying trading below ${price}`, netPnl: -402.4, thesisStatus: o.thesisStatus ?? 'INTACT', reason: 'r' },
+      },
+      prices: { premium: { price: 730, at: NOW }, underlying: { price: o.under ?? 60776.8, at: NOW } },
+      armed: o.armed ?? null,
+      ...(o.cut === false ? {} : { cutLoss }),
+    });
+
+    it('09:53 IST: the AI\'s 60708 (K·N1) is armed at 1.5 N15 from the best point, 60630.38; the check keeps the AI\'s level', () => {
+      const r = bnf(60708);
+      expect(r).toMatchObject({ kind: 'armed', trigger: { price: 60630.38, proposedPrice: 60708, refPrice: 60776.8 } });
+      expect((r as { trigger: PaperTrigger }).trigger.check).toMatchObject({
+        triggerPrice: 60708, purpose: 'CUT_LOSS', tight: true, wouldArmAt: 60630.38, n15: 107.71, acted: true,
+        cutLoss: { widenedFrom: 60708, invalidation: 59741.25, minDistance: 161.57 },
+      });
+    });
+
+    it('without the yardstick inputs the live rules are unchanged', () => {
+      const r = bnf(60708, { cut: false });
+      expect(r).toMatchObject({ kind: 'armed', trigger: { price: 60708 } });
+      expect('proposedPrice' in (r as { trigger: object }).trigger).toBe(false);
+    });
+
+    it('10:13 IST: thesis INTACT may loosen a tight armed level to the invalidation (refused LOOSENS in prod)', () => {
+      const armed: PaperTrigger = { lookId: 'L1', instrument: 'UNDERLYING', op: 'BELOW', price: 60708, armedAt: NOW - 60_000, refPrice: 60744, check: { tight: true } as never };
+      const r = bnf(59741.25, { armed, under: 60736.95 });
+      expect(r).toMatchObject({ kind: 'armed', trigger: { price: 59741.25, loosenedFrom: 60708 } });
+      expect((r as { trigger: PaperTrigger }).trigger.check).toMatchObject({ wouldAllowLoosen: true, loosenWhy: 'ARMED_TIGHT' });
+    });
+
+    it('09:56 IST: a WEAKENING thesis keeps tighten-only', () => {
+      const armed: PaperTrigger = { lookId: 'L1', instrument: 'UNDERLYING', op: 'BELOW', price: 60708, armedAt: NOW - 60_000, refPrice: 60744, check: { tight: true } as never };
+      expect(bnf(60660, { armed, thesisStatus: 'WEAKENING', under: 60709.75 })).toEqual({ kind: 'rejected', reason: 'LOOSENS' });
+    });
+
+    it('a level the yardstick armed wide is judged by the minimum only: re-proposing K·N1 re-arms the same wide level', () => {
+      const armed: PaperTrigger = {
+        lookId: 'L1', instrument: 'UNDERLYING', op: 'BELOW', price: 60630.38, proposedPrice: 60708, armedAt: NOW - 60_000, refPrice: 60774,
+        check: { tight: true } as never,
+      };
+      expect(bnf(60708, { armed, thesisStatus: 'WEAKENING', under: 60741 })).toMatchObject({ kind: 'armed', trigger: { price: 60630.38 } });
+    });
+
+    it('a green position (PROTECT_PROFIT) keeps the AI\'s level', () => {
+      const r = arm({
+        symbol: 'BANKNIFTY23NOV2660800CE', qty: 30,
+        pending: { lookId: 'L2', exitTrigger: trigger({ instrument: 'UNDERLYING', price: 60708, watch }), seenAt: NOW, basis: { packet, invalidationPoint: null, netPnl: 500, thesisStatus: 'INTACT' } },
+        prices: { premium: { price: 760, at: NOW }, underlying: { price: 60776.8, at: NOW } },
+        cutLoss,
+      });
+      expect(r).toMatchObject({ kind: 'armed', trigger: { price: 60708 } });
+    });
+  });
+
   it('tighten-only: a newer level that loosens the armed one is rejected', () => {
     const armed: PaperTrigger = { lookId: 'L0', instrument: 'PREMIUM', op: 'BELOW', price: 95, armedAt: NOW - 60_000, refPrice: 100 };
     expect(arm({ armed })).toEqual({ kind: 'rejected', reason: 'LOOSENS' });

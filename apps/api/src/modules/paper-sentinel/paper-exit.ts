@@ -5,6 +5,7 @@ import { readPacketFacts } from '../exit-discipline/packet-facts';
 import type { HistoryVerdict } from '../exit-discipline/persistence';
 import type { GateRecordV1 } from '../exit-discipline/types';
 import { triggerCheckFromPacket, type TriggerCheck } from '../exit-discipline/trigger-check';
+import { cutLossFromPacket, type N15Reading } from '../exit-discipline/cut-loss-yardstick';
 import { parseStoredTrigger } from '../sentinel-executor/domain/stored-trigger';
 import { contractKindOf, validateTrigger, type TriggerLevel } from '../sentinel-executor/domain/trigger-rules';
 import type { TriggerConfig } from '../sentinel-executor/domain/trigger-config';
@@ -78,8 +79,15 @@ export interface PaperTrigger {
   refPrice: number;
   /** Cash only: the instrument the AI named, when it was normalised to the stock's own price. */
   proposedInstrument?: TriggerInstrument;
-  /** RECORD ONLY: the trigger check at arming (exit-discipline/trigger-check.ts). Nothing arms or fires on it. */
+  /**
+   * The trigger check at arming (exit-discipline/trigger-check.ts), with the CUT_LOSS yardstick's fields. Its
+   * `tight` is read by the next arming's ratchet exception; nothing fires on it.
+   */
   check?: TriggerCheck;
+  /** The AI's level, when the CUT_LOSS yardstick armed a wider one (`price`). */
+  proposedPrice?: number;
+  /** The armed level this trigger LOOSENED under the ratchet exception. */
+  loosenedFrom?: number;
 }
 
 /** Cash-equity exchanges: the contract IS the stock, so contract price and underlying are one price. */
@@ -98,8 +106,8 @@ export interface PendingTrigger {
   lookId: string;
   exitTrigger: unknown;
   seenAt: number;
-  /** The look's packet, stated invalidation and net P&L — read only for the record-only trigger check. */
-  basis?: { packet: unknown; invalidationPoint: string | null; netPnl: number | null };
+  /** The look's packet, stated invalidation, net P&L, thesis status and reason — the trigger check and the CUT_LOSS yardstick. */
+  basis?: { packet: unknown; invalidationPoint: string | null; netPnl: number | null; thesisStatus?: string | null; reason?: string | null };
 }
 
 const ARM_DEFER_MS = 30_000;
@@ -126,7 +134,9 @@ export function armPaperTrigger(i: {
   /** Where a paper trigger may arm: the live auto-exit's F&O exchanges, plus NSE/BSE when equity is on. */
   exchanges: readonly string[];
   now: number;
-}): { kind: 'armed'; trigger: PaperTrigger } | { kind: 'wait' } | { kind: 'rejected'; reason: string } {
+  /** The CUT_LOSS yardstick's inputs (the underlying's N15 and K15). Absent ⇒ the live rules unchanged. */
+  cutLoss?: { n15: N15Reading | null; k15: number | null };
+}):{ kind: 'armed'; trigger: PaperTrigger } | { kind: 'wait' } | { kind: 'rejected'; reason: string } {
   const stored = parseStoredTrigger(i.pending.exitTrigger);
   if (stored.kind === 'problem') return { kind: 'rejected', reason: `MALFORMED: ${stored.problem}` };
   const p = stored.trigger;
@@ -137,25 +147,49 @@ export function armPaperTrigger(i: {
   const quote = instrument === 'PREMIUM' ? i.prices.premium : i.prices.underlying;
   const fresh = quote && quote.price > 0 && i.now - quote.at <= ARM_PRICE_MAX_AGE_MS ? quote : null;
   if (!fresh) return i.now - i.pending.seenAt < ARM_DEFER_MS ? { kind: 'wait' } : { kind: 'rejected', reason: 'NO_FRESH_PRICE' };
-  const level: TriggerLevel = { instrument, op: p.op, price: p.price };
+  const proposed: TriggerLevel = { instrument, op: p.op, price: p.price };
+  const b = i.pending.basis;
+  // CUT_LOSS yardstick (exit-discipline/cut-loss-yardstick.ts) — ACTS on paper: a protective UNDERLYING level
+  // cutting a loss sits at least max(K·N1, K15·N15) from the fixed reference, never past the invalidation.
+  // cutLossFromPacket never throws (null when the packet is unreadable ⇒ the proposal unchanged).
+  const cut = b && i.cutLoss
+    ? cutLossFromPacket({
+      instrument, op: p.op, price: p.price, packet: b.packet, invalidationPoint: b.invalidationPoint, netPnl: b.netPnl,
+      underlyingNow: instrument === 'UNDERLYING' ? fresh.price : null,
+      n15: i.cutLoss.n15, k15: i.cutLoss.k15, thesisStatus: b.thesisStatus ?? null, reasonText: b.reason ?? null,
+      // The check's `tight` describes the AI's level; once the yardstick widened it, the armed level is judged
+      // by the minimum distance alone (cutLossLoosen's inside-the-minimum test).
+      armed: i.armed
+        ? { instrument: i.armed.instrument, op: i.armed.op, price: i.armed.price, tight: i.armed.proposedPrice !== undefined ? null : i.armed.check?.tight ?? null }
+        : null,
+      acted: true,
+    })
+    : null;
+  const level: TriggerLevel = cut ? { ...proposed, price: cut.wouldArmAt } : proposed;
   const cfg = cash ? { ...i.cfg, maxDistancePct: { ...i.cfg.maxDistancePct, PREMIUM: i.cfg.maxDistancePct.UNDERLYING } } : i.cfg;
-  const v = validateTrigger({
+  const validate = (armed: PaperTrigger | null) => validateTrigger({
     proposal: level,
     qty: i.qty,
     kind: contractKindOf(i.symbol),
     current: { price: fresh.price, ageMs: Math.max(0, i.now - fresh.at) },
-    armed: i.armed ? { instrument: i.armed.instrument, op: i.armed.op, price: i.armed.price } : null,
+    armed: armed ? { instrument: armed.instrument, op: armed.op, price: armed.price } : null,
     cfg,
   });
+  let v = validate(i.armed);
+  // The ratchet exception: a tight armed CUT_LOSS level may be loosened by an INTACT-thesis verdict, up to the
+  // invalidation (cutLossLoosen). LOOSENS is the last arming rule, so every other rule has already passed.
+  const loosened = !v.ok && v.reason === 'LOOSENS' && cut?.wouldAllowLoosen === true;
+  if (loosened) v = validate(null);
   if (!v.ok) return { kind: 'rejected', reason: v.reason };
   const trigger: PaperTrigger = { lookId: i.pending.lookId, ...level, armedAt: i.now, refPrice: fresh.price };
   if (cash && p.instrument !== instrument) trigger.proposedInstrument = p.instrument;
-  // RECORD ONLY, after every arming rule has passed; triggerCheckFromPacket never throws (null when unreadable).
-  const b = i.pending.basis;
+  if (cut && cut.wouldArmAt !== p.price) trigger.proposedPrice = p.price;
+  if (loosened) trigger.loosenedFrom = i.armed!.price;
+  // RECORD: the check describes the AI's own level (as before), with the yardstick's reading beside it.
   const check = b
-    ? triggerCheckFromPacket({ op: level.op, instrument, triggerPrice: level.price, refPrice: fresh.price, packet: b.packet, invalidationPoint: b.invalidationPoint, netPnl: b.netPnl })
+    ? triggerCheckFromPacket({ op: proposed.op, instrument, triggerPrice: proposed.price, refPrice: fresh.price, packet: b.packet, invalidationPoint: b.invalidationPoint, netPnl: b.netPnl })
     : null;
-  if (check) trigger.check = check;
+  if (check) trigger.check = cut ? { ...check, ...cut } : check;
   return { kind: 'armed', trigger };
 }
 

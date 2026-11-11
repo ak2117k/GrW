@@ -48,6 +48,7 @@ function harness(o: {
     verdictForCheck: jest.fn(o.verdictForCheck ?? (async (..._a: any[]) => null)),
     recordCheck: jest.fn(o.recordCheck ?? (async (..._a: any[]) => undefined)),
     checkOf: jest.fn(o.checkOf ?? (async (..._a: any[]) => null)),
+    recordCheckByVerdict: jest.fn(async (..._a: any[]) => undefined),
   };
   const execRepo = { claim: jest.fn(async (..._a: any[]) => 'exec1'), findByVerdictId: jest.fn(async (..._a: any[]) => ({ fillPrice: 8920, orderLtp: 8924, decisionLtp: 8924 })) };
   const executor = { execute: jest.fn(async (..._a: any[]) => ({ status: 'DRY_RUN' })) };
@@ -428,5 +429,81 @@ describe('TriggerWatchService — trigger check (record only)', () => {
     for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r));
     expect(record).toHaveBeenCalledTimes(1);
     expect('triggerCheck' in (record.mock.calls[0][0] as { context: object }).context).toBe(false);
+  });
+
+  describe('CUT_LOSS yardstick — RECORD ONLY on real', () => {
+    // Packet underlying 8951, N1 6 (K·N1 = 12), N15 20 (1.5·N15 = 30 ⇒ 8921); the verdict text's 8925 caps it.
+    const INTACT = { ...VERDICT, thesisStatus: 'INTACT', reason: 'thesis intact' };
+    const withN15 = (h: ReturnType<typeof harness>) => {
+      const n15 = jest.fn(async (..._a: any[]) => ({ n: 20, bars: 14, method: 'atr14-15m', at: 'x' }));
+      (h.svc as unknown as { n15Reader: unknown }).n15Reader = { n15 };
+      return n15;
+    };
+
+    it('arms the AI\'s level unchanged and records what the yardstick would have armed', async () => {
+      const h = harness({ proposals: [[proposal()], []], verdictForCheck: async () => INTACT });
+      const n15 = withN15(h);
+      await armed(h);
+      expect(h.repo.arm.mock.calls[0][1]).toMatchObject({ price: 8930 });
+      expect(n15).toHaveBeenCalledWith(expect.objectContaining({ exchange: 'MCX', token: '472789' }), expect.any(Date));
+      const [, check] = h.repo.recordCheck.mock.calls[0] as unknown as [string, Record<string, unknown>];
+      expect(check).toMatchObject({
+        triggerPrice: 8930, wouldArmAt: 8925, n15: 20, k15: 1.5, acted: false, wouldAllowLoosen: null,
+        cutLoss: { applies: true, minDistance: 30, minLevel: 8921, invalidation: 8925, cappedByInvalidation: true },
+      });
+      // The 8930 level still fires (8929 would not have, under the yardstick).
+      h.emit(8929, ms(T0, 1000));
+      h.emit(8928, ms(T0, 2100));
+      await new Promise((r) => setImmediate(r));
+      expect(h.repo.claimFire).toHaveBeenCalledWith('trg1', expect.objectContaining({ price: 8928 }), expect.any(Date));
+    });
+
+    it('a LOOSENS rejection with thesis INTACT over a tight armed level: still REJECTED, the exception recorded on the rejected row', async () => {
+      const h = harness({
+        proposals: [[proposal()], [proposal({ id: 'v2', exitTrigger: { ...STORED, price: 8925 } })], []],
+        verdictForCheck: async () => INTACT,
+        checkOf: async () => ({ tight: true }),
+      });
+      withN15(h);
+      await armed(h);
+      await h.svc.pass(ms(T0, 5000));
+      expect(h.repo.reject.mock.calls[0][2]).toBe('LOOSENS');
+      expect(h.repo.arm).toHaveBeenCalledTimes(1);
+      expect(h.repo.checkOf).toHaveBeenCalledWith('trg1');
+      expect(h.repo.recordCheckByVerdict).toHaveBeenCalledWith('v2', expect.objectContaining({
+        // The text's only number is the trigger itself, so no invalidation: the widened minimum (8921) is the level.
+        triggerPrice: 8925, wouldArmAt: 8921, wouldAllowLoosen: true, loosenWhy: 'ARMED_TIGHT', acted: false,
+      }));
+      // The armed 8930 still fires.
+      h.emit(8929, ms(T0, 6000));
+      h.emit(8928, ms(T0, 7100));
+      await new Promise((r) => setImmediate(r));
+      expect(h.repo.claimFire).toHaveBeenCalledWith('trg1', expect.objectContaining({ price: 8928 }), expect.any(Date));
+    });
+
+    it('thesis WEAKENING: the rejected row records the exception refused', async () => {
+      const h = harness({
+        proposals: [[proposal()], [proposal({ id: 'v2', exitTrigger: { ...STORED, price: 8925 } })], []],
+        verdictForCheck: async () => ({ ...INTACT, thesisStatus: 'WEAKENING' }),
+        checkOf: async () => ({ tight: true }),
+      });
+      withN15(h);
+      await armed(h);
+      await h.svc.pass(ms(T0, 5000));
+      expect(h.repo.recordCheckByVerdict).toHaveBeenCalledWith('v2', expect.objectContaining({ wouldAllowLoosen: false, loosenWhy: 'THESIS_WEAKENING' }));
+    });
+
+    it('a failing N15 read or rejected-row write never changes arming or rejection', async () => {
+      const h = harness({
+        proposals: [[proposal()], [proposal({ id: 'v2', exitTrigger: { ...STORED, price: 8900 } })], []],
+        verdictForCheck: async () => INTACT,
+      });
+      (h.svc as unknown as { n15Reader: unknown }).n15Reader = { n15: async () => { throw new Error('db'); } };
+      h.repo.recordCheckByVerdict.mockRejectedValue(new Error('db'));
+      await armed(h);
+      await h.svc.pass(ms(T0, 5000));
+      expect(h.repo.reject.mock.calls[0][2]).toBe('LOOSENS');
+      expect(h.repo.arm).toHaveBeenCalledTimes(1);
+    });
   });
 });

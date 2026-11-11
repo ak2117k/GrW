@@ -324,6 +324,43 @@ describe('PaperSentinelService — the live sentinel cycle on paper trades', () 
       expect(noise.record).toHaveBeenCalledWith(expect.objectContaining({ exitRule: 'AI_TRIGGER', context: expect.objectContaining({ triggerCheck: check }) }));
     });
 
+    it('CUT_LOSS yardstick: the watched underlying\'s N15 widens the armed level; it fires there, with the AI\'s level recorded', async () => {
+      const recordTriggerCheck = jest.fn().mockResolvedValue(undefined);
+      const t = make({ recordTriggerCheck });
+      const n15 = jest.fn().mockResolvedValue({ n: 20, bars: 14, method: 'atr14-15m', at: 'x' });
+      (t.svc as unknown as { n15Reader: unknown }).n15Reader = { n15 };
+      t.record.mockImplementation(async (input: Record<string, unknown>) => look(input));
+      const base = Date.now();
+      const clock = jest.spyOn(Date, 'now');
+      const at = (s: number) => { clock.mockReturnValue(base + s * 1000); return new Date(base + s * 1000); };
+      const under = (u: number) => t.tickForRow.mockImplementation(async (_id: string, row: { lastLtp: number }) => reading({ ltp: row.lastLtp, underlyingLtp: u }));
+      under(24000);
+      t.svc.observe([pos({ ltp: 100, ltpAt: at(0) })], at(0));
+      await t.svc.idle();
+      t.svc.observe([pos({ ltp: 99, ltpAt: at(30) })], at(30));
+      await t.svc.idle();
+      // 23975 is past the AI's 23980 but inside 1.5 × N15 = 30 from 24000: no fire.
+      under(23975);
+      t.svc.observe([pos({ ltp: 96, ltpAt: at(60) })], at(60));
+      await t.svc.idle();
+      t.svc.observe([pos({ ltp: 96, ltpAt: at(90) })], at(90));
+      await t.svc.idle();
+      expect(t.upsert).not.toHaveBeenCalled();
+      under(23960);
+      t.svc.observe([pos({ ltp: 94, ltpAt: at(120) })], at(120));
+      await t.svc.idle();
+      t.svc.observe([pos({ ltp: 93, ltpAt: at(150) })], at(150));
+      await t.svc.idle();
+      clock.mockRestore();
+      for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+      expect(n15).toHaveBeenCalledWith({ exchange: 'NSE', token: '26000', symbol: 'NIFTY' }, expect.any(Date));
+      expect(recordTriggerCheck.mock.calls[0][1]).toMatchObject({ triggerPrice: 23980, wouldArmAt: 23970, n15: 20, acted: true });
+      expect(t.upsert).toHaveBeenCalledTimes(1);
+      expect(t.upsert.mock.calls[0][0].create).toMatchObject({
+        rule: 'AI_TRIGGER', reason: expect.stringContaining('BELOW 23970 crossed'), detail: { trigger: { price: 23970, proposedPrice: 23980 } },
+      });
+    });
+
     it('a failing check write never blocks arming or the exit', async () => {
       const recordTriggerCheck = jest.fn().mockRejectedValue(new Error('db down'));
       const t = make({ recordTriggerCheck });

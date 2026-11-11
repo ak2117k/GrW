@@ -1,6 +1,7 @@
 import { INVALIDATION_SCALE_TOLERANCE } from './config';
 import { exposureOf } from './exposure';
 import { readPacketFacts } from './packet-facts';
+import type { CutLossRecord } from './cut-loss-yardstick';
 
 /**
  * TRIGGER CHECK — RECORD ONLY (2026-11-10). Pure; never throws from `triggerCheckFromPacket`.
@@ -65,7 +66,12 @@ export type TriggerCheck = {
   greenFloorArmed: boolean;
   purpose: 'PROTECT_PROFIT' | 'CUT_LOSS';
   tight: boolean;
-};
+  /**
+   * The CUT_LOSS yardstick (cut-loss-yardstick.ts), 2026-11-11: wouldArmAt / n15 / wouldAllowLoosen / … —
+   * the level armed on paper (acted: true), or what it would have armed on real (acted: false, record only).
+   * Absent on checks written before it, and when the packet was unreadable.
+   */
+} & Partial<CutLossRecord>;
 
 const fin = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x);
 const r2 = (x: number) => Math.round(x * 100) / 100;

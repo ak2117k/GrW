@@ -21,6 +21,10 @@ import { TUNING_READER, type TuningReader } from '../self-review/tuning/tunables
 import { ExitGateRepository } from '../sentinel-executor/repositories/exit-gate.repository';
 import { AUTO_EXIT_EXCHANGES } from '../sentinel-executor/domain/auto-exit.types';
 import { parseTriggerConfig } from '../sentinel-executor/domain/trigger-config';
+import { parseStoredTrigger } from '../sentinel-executor/domain/stored-trigger';
+import { N15Reader } from '../sentinel-executor/repositories/n15.reader';
+import { PrismaCandleRepo } from '../market-hub/candles/candle-repository';
+import { cutLossK15, type N15Reading } from '../exit-discipline/cut-loss-yardstick';
 import type { SessionClock } from '../market-hub/session-clock';
 import { PaperLookRepository } from '../trade-sentinel/paper/paper-look.repository';
 import { paperTrackerId, tradeIdOf } from '../trade-sentinel/paper/paper-tracker';
@@ -118,6 +122,8 @@ export class PaperSentinelService {
   private readonly risk: ExitGateRepository;
   private readonly triggerCfg = parseTriggerConfig(process.env);
   private readonly carryCfg = parseCarryConfig(process.env);
+  /** The underlying's 15-minute N for the CUT_LOSS yardstick (candles_1m rolled up, DB only). */
+  private readonly n15Reader: Pick<N15Reader, 'n15'>;
   private running = false;
 
   constructor(
@@ -142,6 +148,7 @@ export class PaperSentinelService {
   ) {
     this.clock = makeSentinelClock(config.get<string>('hub.mcxLateClose'));
     this.risk = new ExitGateRepository(prisma);
+    this.n15Reader = new N15Reader(new PrismaCandleRepo(prisma as never));
     const roster: CycleRoster = { build: async (userId) => this.roster(userId) };
     const ticks: TickSource = { tickFor: (trackerId) => this.tickFor(trackerId) };
     const verdicts: CycleVerdicts = {
@@ -346,7 +353,7 @@ export class PaperSentinelService {
   /** After every look: replay it through the live exit paths. Never throws (the look is already written). */
   private async afterLook(look: {
     id: string; tradeId: string; trackerId: string; verdict: string; createdAt: Date; packet: unknown; exitTrigger: unknown;
-    invalidationPoint?: string | null; netPnl?: number | null;
+    invalidationPoint?: string | null; netPnl?: number | null; thesisStatus?: string | null; reason?: string | null;
   }): Promise<void> {
     try {
       const h = this.book.get(look.tradeId);
@@ -355,7 +362,10 @@ export class PaperSentinelService {
       if ((look.verdict === 'HOLD' || look.verdict === 'EXIT_ARMED') && look.exitTrigger != null) {
         h.pending = {
           lookId: look.id, exitTrigger: look.exitTrigger, seenAt: Date.now(),
-          basis: { packet: look.packet, invalidationPoint: look.invalidationPoint ?? null, netPnl: look.netPnl ?? null },
+          basis: {
+            packet: look.packet, invalidationPoint: look.invalidationPoint ?? null, netPnl: look.netPnl ?? null,
+            thesisStatus: look.thesisStatus ?? null, reason: look.reason ?? null,
+          },
         };
       }
     } catch (err) {
@@ -417,11 +427,17 @@ export class PaperSentinelService {
             cfg: this.triggerCfg,
             exchanges: this.exchanges(),
             now: at,
+            cutLoss: await this.cutLossInputs(h.pending, now),
           });
           if (r.kind === 'armed') {
             h.armed = r.trigger;
             h.pending = null;
-            this.logger.log(`[paper-sentinel] armed ${h.symbol}: exit if ${r.trigger.instrument} ${r.trigger.op} ${r.trigger.price} (now ${r.trigger.refPrice})`);
+            const t = r.trigger;
+            const how = [
+              t.proposedPrice !== undefined ? `CUT_LOSS yardstick widened ${t.proposedPrice} → ${t.price} (N15 ${t.check?.n15 ?? '?'})` : '',
+              t.loosenedFrom !== undefined ? `loosened from ${t.loosenedFrom} (thesis INTACT, ${t.check?.loosenWhy})` : '',
+            ].filter(Boolean).join('; ');
+            this.logger.log(`[paper-sentinel] armed ${h.symbol}: exit if ${t.instrument} ${t.op} ${t.price} (now ${t.refPrice})${how ? ` — ${how}` : ''}`);
             this.storeTriggerCheck(r.trigger);
           } else if (r.kind === 'rejected') {
             this.logger.log(`[paper-sentinel] trigger REJECTED ${r.reason} — ${h.symbol} look ${h.pending.lookId}`);
@@ -444,6 +460,8 @@ export class PaperSentinelService {
               armedAt: new Date(t.armedAt).toISOString(),
               watched: s.watched,
               ...(t.proposedInstrument ? { proposedInstrument: t.proposedInstrument } : {}),
+              ...(t.proposedPrice !== undefined ? { proposedPrice: t.proposedPrice } : {}),
+              ...(t.loosenedFrom !== undefined ? { loosenedFrom: t.loosenedFrom } : {}),
             },
             ...(t.check ? { triggerCheck: t.check } : {}),
           });
@@ -451,6 +469,21 @@ export class PaperSentinelService {
       } catch (err) {
         this.logger.warn(`[paper-sentinel] trigger step ${h.tradeId}: ${errText(err)}`);
       }
+    }
+  }
+
+  /**
+   * The CUT_LOSS yardstick's inputs for a pending proposal: K15 (TRIGGER_CUT_LOSS_N15) and the watched
+   * underlying's N15 (UNDERLYING proposals only; DB read, never throws — null ⇒ K × N1 alone).
+   */
+  private async cutLossInputs(pending: PendingTrigger, now: Date): Promise<{ n15: N15Reading | null; k15: number | null }> {
+    const k15 = cutLossK15(process.env);
+    try {
+      const s = parseStoredTrigger(pending.exitTrigger);
+      if (k15 === null || s.kind !== 'trigger' || s.trigger.instrument !== 'UNDERLYING' || !s.trigger.watch) return { n15: null, k15 };
+      return { n15: await this.n15Reader.n15(s.trigger.watch, now), k15 };
+    } catch {
+      return { n15: null, k15 };
     }
   }
 

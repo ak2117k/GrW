@@ -24,6 +24,8 @@ import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './sentinel-exit-exe
 import { NOISE_READ_STATUSES, exitPriceOf } from './sentinel-exit-poller.service';
 import { ExitNoiseReadService } from '../../exit-noise/exit-noise.service';
 import { triggerCheckFromPacket } from '../../exit-discipline/trigger-check';
+import { cutLossFromPacket, cutLossK15, type CutLossRecord } from '../../exit-discipline/cut-loss-yardstick';
+import { TRIGGER_N15_READER, type N15Reader } from '../repositories/n15.reader';
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const IST_HM = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -71,6 +73,8 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     private readonly moduleRef: ModuleRef,
     @Inject(AI_EXIT_SESSION_CLOCK) private readonly clock: Pick<SessionClock, 'isOpen'>,
     @Optional() private readonly noise?: ExitNoiseReadService,
+    // CUT_LOSS yardstick (record only on real): the watched underlying's 15-minute N, DB only.
+    @Optional() @Inject(TRIGGER_N15_READER) private readonly n15Reader?: Pick<N15Reader, 'n15'>,
   ) {}
 
   onModuleInit(): void {
@@ -256,6 +260,10 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     });
     if (!v.ok) {
       await this.reject(row, { ...wfields, refPrice: current.price }, v.reason);
+      // RECORD ONLY: would the CUT_LOSS ratchet exception have let this loosen? (paper acts on it; real never does)
+      if (v.reason === 'LOOSENS') {
+        await this.recordCheck({ verdictId: row.id }, row, p, current.price, ref, armed ? { id: armed.id, instrument: armed.instrument, op: armed.op, price: armed.price } : null);
+      }
       return this.releaseIfUnused(key);
     }
 
@@ -276,24 +284,72 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
         `${row.symbol} verdict ${row.id}${res.superseded.length ? `; supersedes ${res.superseded.join(',')}` : ''}`,
     );
     // RECORD ONLY, after the trigger is armed in the table and the book: it cannot change either.
-    await this.recordCheck(res.id, row.id, { instrument: p.instrument, op: p.op, price: p.price }, current.price);
+    await this.recordCheck(
+      { triggerId: res.id }, row, { instrument: p.instrument, op: p.op, price: p.price }, current.price, ref,
+      armed ? { id: armed.id, instrument: armed.instrument, op: armed.op, price: armed.price } : null,
+    );
   }
 
-  /** The trigger check (exit-discipline/trigger-check.ts) onto the armed row. Never throws. */
+  /**
+   * The trigger check (exit-discipline/trigger-check.ts) onto the armed row — or, for a LOOSENS rejection, onto
+   * the REJECTED row (by verdict) — with the CUT_LOSS yardstick's RECORD-ONLY reading (cut-loss-yardstick.ts):
+   * wouldArmAt / n15 / wouldAllowLoosen, `acted: false`. Nothing here changes what is armed or fired on a real
+   * position. Never throws.
+   */
   private async recordCheck(
-    triggerId: string,
-    verdictId: string,
+    target: { triggerId: string } | { verdictId: string },
+    row: ProposalRow,
     p: { instrument: 'UNDERLYING' | 'PREMIUM'; op: 'ABOVE' | 'BELOW'; price: number },
     refPrice: number,
+    watch: InstrumentRef,
+    prev: { id: string; instrument: string; op: string; price: number } | null,
   ): Promise<void> {
+    const label = 'triggerId' in target ? target.triggerId : `rejected verdict ${target.verdictId}`;
     try {
-      const v = await this.repo.verdictForCheck(verdictId);
+      const v = await this.repo.verdictForCheck(row.id);
       const check = v
         ? triggerCheckFromPacket({ op: p.op, instrument: p.instrument, triggerPrice: p.price, refPrice, packet: v.packet, invalidationPoint: v.invalidationPoint, netPnl: v.netPnl })
         : null;
-      if (check) await this.repo.recordCheck(triggerId, check);
+      if (!v || !check) return;
+      const cut = await this.cutLossRecord(v, p, refPrice, watch, prev);
+      const full = cut ? { ...check, ...cut } : check;
+      if ('triggerId' in target) await this.repo.recordCheck(target.triggerId, full);
+      else await this.repo.recordCheckByVerdict(target.verdictId, full);
+      if (cut && (cut.wouldArmAt !== p.price || cut.wouldAllowLoosen !== null)) {
+        this.logger.log(
+          `[ai-trigger] CUT_LOSS yardstick (record only) ${row.symbol}: AI ${p.op} ${p.price} → would arm ${cut.wouldArmAt}` +
+            ` (N15 ${cut.n15 ?? '?'}, min ${cut.cutLoss.minDistance ?? '?'} pts from ${cut.cutLoss.ref ?? '?'})` +
+            (cut.wouldAllowLoosen !== null ? `; loosen ${prev?.price} → ${cut.wouldAllowLoosen ? 'WOULD ALLOW' : 'refused'} (${cut.loosenWhy})` : ''),
+        );
+      }
     } catch (err) {
-      this.logger.warn(`[ai-trigger] trigger check for ${triggerId} not recorded: ${errText(err)}`);
+      this.logger.warn(`[ai-trigger] trigger check for ${label} not recorded: ${errText(err)}`);
+    }
+  }
+
+  /** The CUT_LOSS yardstick for a real proposal — record only. Null when off, unreadable or anything fails. */
+  private async cutLossRecord(
+    v: { packet: unknown; invalidationPoint: string | null; netPnl: number; thesisStatus?: string | null; reason?: string | null },
+    p: { instrument: 'UNDERLYING' | 'PREMIUM'; op: 'ABOVE' | 'BELOW'; price: number },
+    refPrice: number,
+    watch: InstrumentRef,
+    prev: { id: string; instrument: string; op: string; price: number } | null,
+  ): Promise<CutLossRecord | null> {
+    try {
+      const k15 = cutLossK15(process.env);
+      const n15 = k15 !== null && p.instrument === 'UNDERLYING' && this.n15Reader ? await this.n15Reader.n15(watch, new Date()) : null;
+      const prevCheck = prev ? await Promise.resolve().then(() => this.repo.checkOf(prev.id)).catch(() => null) : null;
+      const tight = prevCheck && typeof prevCheck === 'object' && typeof (prevCheck as { tight?: unknown }).tight === 'boolean'
+        ? (prevCheck as { tight: boolean }).tight : null;
+      return cutLossFromPacket({
+        instrument: p.instrument, op: p.op, price: p.price, packet: v.packet, invalidationPoint: v.invalidationPoint, netPnl: v.netPnl,
+        underlyingNow: p.instrument === 'UNDERLYING' ? refPrice : null, n15, k15,
+        thesisStatus: v.thesisStatus ?? null, reasonText: v.reason ?? null,
+        armed: prev ? { instrument: prev.instrument, op: prev.op, price: prev.price, tight } : null,
+        acted: false,
+      });
+    } catch {
+      return null;
     }
   }
 

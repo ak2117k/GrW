@@ -33,6 +33,7 @@ import { ExitGateService } from './services/exit-gate.service';
 import { MbmModule } from '../mbm/mbm.module';
 import { FloorBrokerSlRepository } from './repositories/floor-broker-sl.repository';
 import { FLOOR_SL_CANDLES, FloorBrokerSlService } from './services/floor-broker-sl.service';
+import { N15Reader, TRIGGER_N15_READER } from './repositories/n15.reader';
 
 /**
  * Sentinel auto-exit (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md).
@@ -86,6 +87,8 @@ import { FLOOR_SL_CANDLES, FloorBrokerSlService } from './services/floor-broker-
     FloorBrokerSlRepository,
     FloorBrokerSlService,
     { provide: FLOOR_SL_CANDLES, useFactory: (prisma: PrismaService) => new PrismaCandleRepo(prisma as never), inject: [PrismaService] },
+    // CUT_LOSS yardstick (2026-11-11), RECORD ONLY on real triggers: the underlying's 15-minute N from candles_1m.
+    { provide: TRIGGER_N15_READER, useFactory: (prisma: PrismaService) => new N15Reader(new PrismaCandleRepo(prisma as never)), inject: [PrismaService] },
   ],
 })
 export class SentinelExecutorModule {}

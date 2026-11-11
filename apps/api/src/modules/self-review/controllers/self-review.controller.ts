@@ -32,6 +32,12 @@ export class SelfReviewController {
     return this.service.results(session || undefined, kind || undefined);
   }
 
+  /** Per lesson: how often its mistake happened and what it cost before vs after it went active, with a verdict. */
+  @Get('lesson-scorecard')
+  lessonScorecard() {
+    return this.service.lessonScorecard();
+  }
+
   @Get('lessons')
   lessons(@Query('status') status?: string) {
     return this.service.lessons(status || undefined);

@@ -196,6 +196,61 @@ export class SelfReviewRepository {
     return this.prisma.agentLesson.findMany({ where: { sourceRun: runId }, orderBy: { firstSeen: 'desc' } });
   }
 
+  async lessonsByKeys(keys: readonly string[]): Promise<Array<{ key: string; status: string }>> {
+    if (keys.length === 0) return [];
+    return this.prisma.agentLesson.findMany({ where: { key: { in: [...keys] } }, select: { key: true, status: true } });
+  }
+
+  // ─── Findings / lesson scorecard reads (2026-11-11) ────────────────────────
+
+  /** Runs that stored a diagnosis (any status), newest first: the reviewed sessions. */
+  diagnosedRuns(limit = 600) {
+    return this.prisma.selfReviewRun.findMany({
+      where: { NOT: { diagnosis: { equals: Prisma.DbNull } } },
+      select: { sessionDate: true, diagnosis: true },
+      orderBy: { startedAt: 'desc' },
+      take: limit,
+    });
+  }
+
+  /** decision_grades rows behind `dg:<id>` refIds: their own session, ₹ delta, type and symbol. */
+  async decisionGradesByIds(ids: readonly string[]) {
+    const out: Array<{ id: string; sessionDate: string; deltaRupees: number | null; decisionType: string; symbol: string | null }> = [];
+    const uniq = [...new Set(ids)];
+    for (let i = 0; i < uniq.length; i += 1000) {
+      out.push(
+        ...(await this.prisma.decisionGrade.findMany({
+          where: { id: { in: uniq.slice(i, i + 1000) } },
+          select: { id: true, sessionDate: true, deltaRupees: true, decisionType: true, symbol: true },
+        })),
+      );
+    }
+    return out;
+  }
+
+  /** verification_results sessions of refIds (the other kinds' misses). */
+  async resultSessionsByRefIds(refIds: readonly string[]) {
+    const out: Array<{ refId: string; sessionDate: string }> = [];
+    const uniq = [...new Set(refIds)];
+    for (let i = 0; i < uniq.length; i += 1000) {
+      out.push(...(await this.prisma.verificationResult.findMany({ where: { refId: { in: uniq.slice(i, i + 1000) } }, select: { refId: true, sessionDate: true } })));
+    }
+    return out;
+  }
+
+  async ticketsByKeys(keys: readonly string[]): Promise<Array<{ key: string; title: string; status: string }>> {
+    if (keys.length === 0) return [];
+    return this.prisma.fixTicket.findMany({ where: { key: { in: [...keys] } }, select: { key: true, title: true, status: true } });
+  }
+
+  scorecardLessons() {
+    return this.prisma.agentLesson.findMany({
+      select: { id: true, key: true, text: true, scope: true, status: true, firstSeen: true, rightCount: true, wrongCount: true },
+      orderBy: { firstSeen: 'desc' },
+      take: 500,
+    });
+  }
+
   async retireLesson(id: string): Promise<boolean> {
     const r = await this.prisma.agentLesson.updateMany({ where: { id, status: 'ACTIVE' }, data: { status: 'RETIRED' } });
     return r.count === 1;

@@ -150,12 +150,27 @@ export class SelfReviewService {
     return this.repo.proposal(id);
   }
 
-  /** Admin re-run for the last closed session, in the background. */
-  startRun(): { started: boolean; reason?: string } {
+  /**
+   * Admin re-run in the background: the last closed session, or — `session` (YYYY-MM-DD), the backfill — that
+   * past session. A session must be a day NSE or MCX traded (an MCX-only evening counts) that has closed;
+   * anything else is a 400, so a typo never starts a run that grades nothing.
+   */
+  startRun(session?: string, now: Date = new Date()): { started: boolean; reason?: string; session?: string } {
+    const s = typeof session === 'string' && session.trim() !== '' ? session.trim() : undefined;
+    if (s) {
+      const why = this.runner.sessionRejection(s, now);
+      if (why) throw new BadRequestException(why);
+    }
     if (!this.runner.isEnabled()) return { started: false, reason: 'SELF_REVIEW_ENABLED=false' };
     if (this.runner.isRunning()) return { started: false, reason: 'a run is already going' };
-    void this.runner.run(new Date(), 'manual').catch((e) => this.logger.warn(`[self-review] manual run failed: ${e instanceof Error ? e.message : String(e)}`));
-    return { started: true };
+    const trigger = s ? `manual ${s}` : 'manual';
+    void this.runner
+      .run(now, trigger, s ? { session: s } : {})
+      .then((out) => {
+        if (out && !out.started) this.logger.log(`[self-review] ${trigger} skipped: ${out.reason}`);
+      })
+      .catch((e) => this.logger.warn(`[self-review] manual run failed: ${e instanceof Error ? e.message : String(e)}`));
+    return s ? { started: true, session: s } : { started: true };
   }
 }
 

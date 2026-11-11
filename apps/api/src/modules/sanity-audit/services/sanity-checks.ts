@@ -132,7 +132,8 @@ export const SANITY_CHECKS: readonly SanityCheck[] = [
     load: async (repo, ctx) => {
       const off = (ctx.env.SELF_REVIEW_ENABLED ?? '').trim().toLowerCase();
       if (off === 'false' || off === 'off' || off === '0') return [];
-      const due = lastDueReviewSession(ctx.now, (at) => ctx.clock.isTradingDay('NSE', at));
+      // NSE or MCX: the self-review also runs after an MCX-only evening (NSE holiday), so its absence there is a miss too.
+      const due = lastDueReviewSession(ctx.now, (at) => ctx.clock.isTradingDay('NSE', at) || ctx.clock.isTradingDay('MCX', at));
       if (!due || due.deadline < ctx.from) return [];
       return [{ ...due, firstDoneAt: await repo.firstDoneReview(due.session) }];
     },

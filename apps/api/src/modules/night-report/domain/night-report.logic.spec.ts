@@ -3,7 +3,10 @@ import { MARKET_HOLIDAYS } from '../../market-data/services/market-holidays.serv
 import {
   chartHref,
   isHeld,
+  isReviewDay,
+  lastReviewSessionDates,
   lastSessionDates,
+  reviewSessionClose,
   reviewDay,
   nightWindow,
   parseOvernightReason,
@@ -40,6 +43,33 @@ describe('nightWindow', () => {
   it('the last two sessions skip the holiday and the weekend', () => {
     expect(lastSessionDates(new Date('2026-10-20T02:30:00Z'), clock, 2)).toEqual(['2026-10-19', '2026-10-16']);
     expect(lastSessionDates(new Date('2026-10-21T12:00:00Z'), clock, 2)).toEqual(['2026-10-21', '2026-10-19']);
+  });
+});
+
+describe('review sessions (NSE or MCX)', () => {
+  it('an NSE holiday with an MCX evening is a review day; a weekend or a day both are shut is not', () => {
+    expect(isReviewDay('2026-11-10', clock)).toBe(true); // Diwali Balipratipada: NSE shut, MCX 17:00 → close
+    expect(isReviewDay('2026-11-09', clock)).toBe(true);
+    expect(isReviewDay('2026-11-08', clock)).toBe(false); // Sunday
+    const shut = new SessionClock({ holidays: MARKET_HOLIDAYS, mcxHolidays: { 2026: [{ date: '2026-11-10', name: 't', session: 'CLOSED' }] } });
+    expect(isReviewDay('2026-11-10', shut)).toBe(false);
+  });
+
+  it('an MCX-only day closes at the MCX close; an ordinary day still at the NSE close', () => {
+    expect(reviewSessionClose('2026-11-10', clock)?.toISOString()).toBe('2026-11-10T18:00:00.000Z'); // 23:30 IST
+    expect(reviewSessionClose('2026-11-09', clock)?.toISOString()).toBe('2026-11-09T10:00:00.000Z'); // 15:30 IST
+    expect(reviewSessionClose('2026-11-08', clock)).toBeNull();
+  });
+
+  it('includes the MCX-only day once its evening has closed; lastSessionDates (NSE) still skips it', () => {
+    const night = new Date('2026-11-10T19:00:00Z'); // Wed 11 Nov 00:30 IST
+    expect(lastReviewSessionDates(night, clock, 3)).toEqual(['2026-11-10', '2026-11-09', '2026-11-06']);
+    expect(lastSessionDates(night, clock, 3)).toEqual(['2026-11-09', '2026-11-06', '2026-11-05']);
+    // 22:30 IST on the holiday: MCX still open, so the last closed review session is Monday's.
+    expect(lastReviewSessionDates(new Date('2026-11-10T17:00:00Z'), clock, 1)).toEqual(['2026-11-09']);
+    // An ordinary day counts from the NSE close, as before.
+    expect(lastReviewSessionDates(new Date('2026-11-09T10:30:00Z'), clock, 1)).toEqual(['2026-11-09']);
+    expect(lastReviewSessionDates(night, clock, 20)).toHaveLength(20);
   });
 });
 

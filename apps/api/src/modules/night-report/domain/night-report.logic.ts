@@ -76,7 +76,11 @@ export function nightWindow(now: Date, clock: SessionClock): NightWindow {
   };
 }
 
-/** The IST dates of the last `n` NSE sessions that have closed at or before `now`, newest first. */
+/**
+ * The IST dates of the last `n` NSE sessions that have closed at or before `now`, newest first. NSE only by
+ * design (night report setups / MBM scorecard, auto-apply cadence, signal outcomes, the stock book's
+ * missed/stock-move windows); the self-review's own session list is {@link lastReviewSessionDates}.
+ */
 export function lastSessionDates(now: Date, clock: SessionClock, n: number): string[] {
   const out: string[] = [];
   let at = now;
@@ -85,6 +89,50 @@ export function lastSessionDates(now: Date, clock: SessionClock, n: number): str
     if (!close) break;
     out.push(istYmd(close));
     at = new Date(istMidnightOf(istYmd(close)).getTime() - 1);
+  }
+  return out;
+}
+
+/**
+ * A night-review day: NSE OR MCX traded on IST date `ymd`. An NSE holiday on which MCX runs its evening
+ * session counts (2026-11-10 Diwali Balipratipada had real and paper MCX trades); a weekend or a day both
+ * exchanges are shut does not.
+ */
+export function isReviewDay(ymd: string, clock: Pick<SessionClock, 'isTradingDay'>): boolean {
+  const noon = new Date(istMidnightOf(ymd).getTime() + 12 * 3_600_000);
+  return clock.isTradingDay('NSE', noon) || clock.isTradingDay('MCX', noon);
+}
+
+/**
+ * The close that makes review day `ymd` "closed": NSE's when NSE traded (so an ordinary day counts from
+ * 15:30, exactly as {@link lastSessionDates}), else MCX's on an MCX-only day (its evening session's close).
+ * Null when neither traded.
+ */
+export function reviewSessionClose(ymd: string, clock: Pick<SessionClock, 'tradingWindow'>): Date | null {
+  const midnight = istMidnightOf(ymd).getTime();
+  const noon = new Date(midnight + 12 * 3_600_000);
+  const w = clock.tradingWindow('NSE', noon) ?? clock.tradingWindow('MCX', noon);
+  return w ? new Date(midnight + w.closeMin * 60_000) : null;
+}
+
+/**
+ * The IST dates of the last `n` review sessions ({@link isReviewDay}: NSE or MCX traded) closed at or before
+ * `now`, newest first. The self-review's session list. Unlike {@link lastSessionDates} it includes MCX-only
+ * days; NSE-only consumers (stock book, MBM, scorecards, auto-apply cadence, night report) keep that one.
+ * Stops after 14 consecutive days without a session, like lastSessionClose.
+ */
+export function lastReviewSessionDates(now: Date, clock: Pick<SessionClock, 'tradingWindow'>, n: number): string[] {
+  const out: string[] = [];
+  let gap = 0;
+  for (let d = 0; out.length < n && gap <= 14; d++) {
+    const ymd = istYmd(new Date(istMidnightOf(istYmd(now)).getTime() - d * DAY_MS + 12 * 3_600_000));
+    const close = reviewSessionClose(ymd, clock);
+    if (!close) {
+      gap++;
+      continue;
+    }
+    gap = 0;
+    if (close.getTime() <= now.getTime()) out.push(ymd);
   }
   return out;
 }

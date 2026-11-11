@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, Optional, Param, Post, Query, Res } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Optional, Param, Post, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { AdminOnly, CurrentUser } from '../../../common/decorators';
 import { SelfReviewService } from '../services/self-review.service';
@@ -77,10 +77,15 @@ export class SelfReviewController {
     return renderFixQueueMd(rows);
   }
 
+  /**
+   * Re-run the review. Optional `session` (YYYY-MM-DD, body or query) backfills that past session — it must be
+   * a closed day NSE or MCX traded (e.g. 2026-11-10, NSE holiday with an MCX evening); otherwise 400.
+   */
   @AdminOnly()
   @Post('run')
   @HttpCode(202)
-  run() {
-    return this.service.startRun();
+  run(@Body() body?: { session?: unknown }, @Query('session') q?: string) {
+    const fromBody = body && typeof body === 'object' && typeof body.session === 'string' ? body.session : undefined;
+    return this.service.startRun(fromBody ?? q);
   }
 }

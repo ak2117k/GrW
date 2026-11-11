@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { makeSentinelClock } from '../../trade-sentinel/overnight/overnight-calendar';
 import { SELF_REVIEW_CRON } from '../services/self-review.cron';
 import { AUTO_APPLY_CRON, AutoApplyCron } from './auto-apply.cron';
@@ -21,5 +22,20 @@ describe('AutoApplyCron', () => {
     const sun = make();
     await sun.cron.fire(new Date('2026-11-07T19:45:00Z')); // Sun 8 Nov 01:15 IST
     expect(sun.svc.run).not.toHaveBeenCalled();
+  });
+
+  it('skips are logged: an MCX-only night (NSE holiday) does not auto-apply, and says so; so does a weekend', async () => {
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      const holiday = make();
+      await holiday.cron.fire(new Date('2026-11-10T19:45:00Z')); // Wed 11 Nov 01:15 IST, Tue 11-10 NSE holiday, MCX evening
+      expect(holiday.svc.run).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith('[auto-apply] skipped: 2026-11-10 MCX-only session; auto-apply counts NSE sessions only');
+      const sun = make();
+      await sun.cron.fire(new Date('2026-11-07T19:45:00Z')); // Sun 8 Nov 01:15 IST
+      expect(log).toHaveBeenCalledWith('[auto-apply] skipped: 2026-11-07 not a trading day on NSE or MCX');
+    } finally {
+      log.mockRestore();
+    }
   });
 });

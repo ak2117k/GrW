@@ -1,6 +1,14 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { SessionClock } from '../../market-hub/session-clock';
-import { istMidnightOf, istYmd, lastSessionDates, reviewDay } from '../../night-report/domain/night-report.logic';
+import {
+  isReviewDay,
+  istMidnightOf,
+  istYmd,
+  lastReviewSessionDates,
+  lastSessionDates,
+  reviewDay,
+  reviewSessionClose,
+} from '../../night-report/domain/night-report.logic';
 import { shapeOf } from '../../overnight-scorecard/domain/positions';
 import { bigMoves, MISSED_MOVE_DIAGNOSIS_SLOTS, NO_EVIDENCE, scoreMissedMove } from '../domain/missed-moves';
 import { outcomeSession } from '../../overnight-scorecard/domain/windows';
@@ -110,7 +118,7 @@ export function parseOption(symbol: string): { underlying: string; expiry: strin
 
 /**
  * The nightly self-review run (contract "What gets verified" + "Proposals"): verify the last closed
- * NSE sessions, summarise S, hand S's misses to stream B's diagnosis (when bound), and raise the
+ * sessions (NSE or MCX — an MCX-only evening on an NSE holiday is a session too), summarise S, hand S's misses to stream B's diagnosis (when bound), and raise the
  * deterministic proposals. Single-flight; every kind fails soft on its own.
  */
 @Injectable()
@@ -150,11 +158,39 @@ export class SelfReviewRunService {
     return this.tuning.get(target, fallback);
   }
 
-  async run(now: Date = new Date(), trigger = 'cron'): Promise<RunOutcome> {
+  /**
+   * Why `session` (IST YYYY-MM-DD) cannot be reviewed at `now`, or null when it can: a day NSE or MCX traded
+   * (an MCX-only evening counts) whose session has closed. The admin backfill's check.
+   */
+  sessionRejection(session: string, now: Date = new Date()): string | null {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(session) || Number.isNaN(Date.parse(`${session}T00:00:00Z`)) || istYmd(istMidnightOf(session)) !== session) {
+      return 'session must be a real date, YYYY-MM-DD';
+    }
+    if (!isReviewDay(session, this.clock)) return `${session} not a trading day on NSE or MCX`;
+    const close = reviewSessionClose(session, this.clock);
+    if (!close || close.getTime() > now.getTime()) return `${session} has not closed yet`;
+    return null;
+  }
+
+  /**
+   * Review the last closed session (NSE or MCX: {@link lastReviewSessionDates}), or — `opts.session`, the admin
+   * backfill — that past session, with the rolling windows ending at it. `now` stays the real time either way
+   * (decision horizons, proposal expiry).
+   */
+  async run(now: Date = new Date(), trigger = 'cron', opts: { session?: string } = {}): Promise<RunOutcome> {
     if (!this.config.enabled) return { started: false, reason: 'SELF_REVIEW_ENABLED=false' };
     if (this.running) return { started: false, reason: 'a run is already going' };
-    const sessions = lastSessionDates(now, this.clock, ROLLING_SESSIONS);
-    if (sessions.length === 0) return { started: false, reason: 'no closed NSE session' };
+    let sessions: string[];
+    if (opts.session) {
+      const why = this.sessionRejection(opts.session, now);
+      if (why) return { started: false, reason: why };
+      // Just before the next IST midnight: the session's own close (NSE 15:30 or MCX 23:30/23:55) has passed.
+      sessions = lastReviewSessionDates(new Date(istMidnightOf(opts.session).getTime() + DAY_MS - 1), this.clock, ROLLING_SESSIONS);
+      if (sessions[0] !== opts.session) return { started: false, reason: `${opts.session} is not a closed review session` };
+    } else {
+      sessions = lastReviewSessionDates(now, this.clock, ROLLING_SESSIONS);
+    }
+    if (sessions.length === 0) return { started: false, reason: 'no closed NSE or MCX session' };
     this.running = true;
     const S = sessions[0];
     let runId: string | undefined;
@@ -281,26 +317,35 @@ export class SelfReviewRunService {
     }
   }
 
-  /** Every kind for one session. A kind that fails costs only itself. */
+  /**
+   * Every kind for one session. A kind that fails costs only itself.
+   * On an MCX-only day (NSE holiday, MCX evening session) the NSE-session kinds — scorecards, overnight
+   * verdicts, news ideas, MBM, stock moves, missed moves — are not graded at all (no NSE session, nothing to
+   * miss); the calendar-day kinds (live / paper exits, the entry judge, engine trades) and the session-keyed
+   * ones (setups, channel tips / infos, news impact: rows only exist for a date they were keyed to) still run.
+   */
   async verifySession(s: string, errors: string[] = []): Promise<VerificationDraft[]> {
-    const b = this.sessionBounds(s);
+    const nse = this.sessionBounds(s);
+    const b = nse ?? this.sessionBounds(s, 'MCX');
     if (!b) return [];
     // Rows whose outcome session is s were written between the previous session and s's open.
     const lookFrom = new Date(b.midnight.getTime() - 10 * DAY_MS);
     const inS = (at: Date) => outcomeSession(at, this.clock) === s;
 
-    const scorecards: ScorecardRow[] = await this.soft('SCORECARD', errors, async () =>
-      latestPerWindowSymbol(
-        (await this.sources.scorecards(lookFrom, b.openAt))
-          .filter((r) => r.moveBp !== null && inS(r.computedAt))
-          .map((r) => ({ ...r, moveBp: r.moveBp as number, sessionDate: s })),
-      ),
-    );
+    const scorecards: ScorecardRow[] = !nse
+      ? []
+      : await this.soft('SCORECARD', errors, async () =>
+          latestPerWindowSymbol(
+            (await this.sources.scorecards(lookFrom, nse.openAt))
+              .filter((r) => r.moveBp !== null && inS(r.computedAt))
+              .map((r) => ({ ...r, moveBp: r.moveBp as number, sessionDate: s })),
+          ),
+        );
     const out: VerificationDraft[] = [];
     for (const sc of scorecards) out.push(scoreScorecardTotal(sc), ...scoreScorecardFactors(sc));
     const proxy = new Map(scorecards.map((sc) => [sc.symbol, sc.moveBp]));
 
-    out.push(...(await this.soft('OVERNIGHT_VERDICT', errors, () => this.overnight(s, b, lookFrom, inS, proxy))));
+    if (nse) out.push(...(await this.soft('OVERNIGHT_VERDICT', errors, () => this.overnight(s, nse, lookFrom, inS, proxy))));
     out.push(
       ...(await this.soft('LIVE_EXIT', errors, async () => {
         const rows = await this.sources.liveExits(b.midnight, new Date(b.midnight.getTime() + DAY_MS));
@@ -314,16 +359,18 @@ export class SelfReviewRunService {
         return out;
       })),
     );
-    out.push(...(await this.soft('NEWS_IDEA', errors, () => this.newsIdeas(s, b.openAt, lookFrom, inS))));
-    out.push(
-      ...(await this.soft('MBM_PREDICTION', errors, async () => {
-        const rows = (await this.sources.mbmPredictions(b.midnight, new Date(b.midnight.getTime() + DAY_MS))).map((r) => ({ ...r, sessionDate: s }));
-        // The same rows judge the relative reading (MBM_RELATIVE) where they carry one.
-        return [...rows.map(scoreMbmPrediction), ...rows.map(scoreMbmRelative).filter((d): d is VerificationDraft => d !== null)];
-      })),
-    );
-    out.push(...(await this.soft('STOCK_MOVE', errors, () => this.stockMoves(s, b.closeAt))));
-    out.push(...(await this.soft('MISSED_MOVE', errors, () => this.missedMoves(s, b.closeAt))));
+    if (nse) {
+      out.push(...(await this.soft('NEWS_IDEA', errors, () => this.newsIdeas(s, nse.openAt, lookFrom, inS))));
+      out.push(
+        ...(await this.soft('MBM_PREDICTION', errors, async () => {
+          const rows = (await this.sources.mbmPredictions(nse.midnight, new Date(nse.midnight.getTime() + DAY_MS))).map((r) => ({ ...r, sessionDate: s }));
+          // The same rows judge the relative reading (MBM_RELATIVE) where they carry one.
+          return [...rows.map(scoreMbmPrediction), ...rows.map(scoreMbmRelative).filter((d): d is VerificationDraft => d !== null)];
+        })),
+      );
+      out.push(...(await this.soft('STOCK_MOVE', errors, () => this.stockMoves(s, nse.closeAt))));
+      out.push(...(await this.soft('MISSED_MOVE', errors, () => this.missedMoves(s, nse.closeAt))));
+    }
     // Outcomes are filled by the trade-setup module's 16:15 IST job, before this run.
     out.push(...(await this.soft('TRADE_SETUP', errors, async () => (await this.sources.tradeSetups(s)).map(scoreTradeSetup))));
     // Telegram channel tips: outcomes filled by signal-intake's 16:20 IST replay, before this run.

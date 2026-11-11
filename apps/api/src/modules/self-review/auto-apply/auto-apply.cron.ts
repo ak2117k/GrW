@@ -3,7 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { CronLeaseService } from '../../../common/cron-lease/cron-lease.service';
 import { BOOT_JOBS_DISABLED, bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import type { SessionClock } from '../../market-hub/session-clock';
-import { istMidnightOf, reviewDay } from '../../night-report/domain/night-report.logic';
+import { isReviewDay, istMidnightOf, reviewDay } from '../../night-report/domain/night-report.logic';
 import { SELF_REVIEW_CLOCK } from '../services/self-review-run.service';
 import { AutoApplyService } from './auto-apply.service';
 
@@ -26,12 +26,21 @@ export class AutoApplyCron {
     return this.fire();
   }
 
-  /** Never throws (scheduler context). NSE trading days only. */
+  /**
+   * Never throws (scheduler context). NSE trading days only, on purpose: the self-review also runs after an
+   * MCX-only evening (NSE holiday), but auto-apply's cadence ("one change per target per 5 sessions", the
+   * watch windows) counts NSE sessions, and one thin MCX evening is no reason to move a tunable. Proposals
+   * from that night wait for the next NSE night (14-day expiry). Every skip logs its reason.
+   */
   async fire(now: Date = new Date()): Promise<void> {
     try {
       if (!bootJobsEnabled()) return void this.logger.log(BOOT_JOBS_DISABLED);
       if (!this.svc.isEnabled()) return void this.logger.log('[auto-apply] SELF_REVIEW_AUTO_APPLY=off — pending proposals wait for the owner');
-      if (!this.clock.isTradingDay('NSE', istMidnightOf(reviewDay(now)))) return;
+      const day = reviewDay(now);
+      if (!this.clock.isTradingDay('NSE', istMidnightOf(day))) {
+        const why = isReviewDay(day, this.clock) ? 'MCX-only session; auto-apply counts NSE sessions only' : 'not a trading day on NSE or MCX';
+        return void this.logger.log(`[auto-apply] skipped: ${day} ${why}`);
+      }
       const job = () => this.svc.run(now);
       const out = this.lease ? await this.lease.runExclusiveFailClosed('self-review-auto-apply', LEASE_TTL_MS, job) : await job();
       if (out) this.logger.log(`[auto-apply] applied ${out.applied.length}, rolled back ${out.rolledBack.length}, blocked ${out.blocked.length}${out.error ? `, error: ${out.error}` : ''}`);

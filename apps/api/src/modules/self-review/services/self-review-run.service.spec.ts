@@ -579,3 +579,78 @@ describe('SelfReviewRunService — wrong-decision loop (2026-11-04)', () => {
     expect(finish[1].summary.decisions).toBeUndefined();
   });
 });
+
+describe('SelfReviewRunService — MCX-only session (NSE holiday, MCX evening: 2026-11-10 Diwali Balipratipada)', () => {
+  // Wed 2026-11-11 00:30 IST: the night after the holiday. MCX ran 17:00 → 23:30 on Tue 11-10.
+  const NIGHT = new Date('2026-11-10T19:00:00Z');
+  const midnight1110 = '2026-11-09T18:30:00.000Z';
+  const fromIso = (m: jest.Mock) => m.mock.calls.map((c) => ((c as unknown as [Date])[0]).toISOString());
+
+  it('reviews 11-10: S is the MCX-only day, re-verifying 11-10, 11-09, 11-06', async () => {
+    const { svc, repo, sources } = make();
+    const out = await svc.run(NIGHT);
+    expect(out).toMatchObject({ started: true, session: '2026-11-10' });
+    expect(repo.createRun).toHaveBeenCalledWith('2026-11-10');
+    expect(fromIso(sources.liveExits)).toEqual([midnight1110, '2026-11-08T18:30:00.000Z', '2026-11-05T18:30:00.000Z']);
+  });
+
+  it('grades the MCX trades of the day; the NSE-session kinds produce nothing for it (no fabricated misses)', async () => {
+    const { svc, sources, stored } = make({ moves: [{ symbol: 'DIVISLAB', close: 106, prevClose: 100, atrPct: 0.02, bucket: 'TOP20', rankPct: 1, resultsInWindow: true }] });
+    const onDay = <T,>(rows: T[]) => jest.fn(async (from: Date) => (from.toISOString() === midnight1110 ? rows : []));
+    Object.assign(sources, {
+      engineClosedTrades: onDay([{ id: 'e-gold', symbol: 'GOLD05DEC26FUT', underlying: 'GOLD', side: 'BUY', quantity: 1, entryPrice: 100, exitPrice: 90, exitReasonTag: 'STOPPED_OUT', reasons: [] }]),
+      signalJudgeChecks: onDay([]),
+      paperExits: onDay([]),
+    });
+    await svc.run(NIGHT);
+    expect(stored.filter((r) => r.sessionDate === '2026-11-10').map((r) => `${r.kind}:${r.refId}`)).toEqual(['ENGINE_ENTRY:e-gold']);
+    // The NSE-only sources are never asked about the holiday …
+    expect(sources.dailyMoves.mock.calls.map((c) => (c as unknown[])[0])).not.toContain('2026-11-10');
+    expect(fromIso(sources.mbmPredictions)).not.toContain(midnight1110);
+    expect(sources.scorecards).toHaveBeenCalledTimes(2); // 11-09 and 11-06 only
+    expect(sources.nightVerdicts).toHaveBeenCalledTimes(2);
+    // … while the NSE days around it are graded as before (11-09's missed moves read against 11-06, NSE to NSE).
+    expect(sources.dailyMoves).toHaveBeenCalledWith('2026-11-09', '2026-11-06');
+  });
+
+  it('the NSE day after the holiday re-verifies the MCX-only day too', async () => {
+    const { svc, sources } = make();
+    expect(await svc.run(new Date('2026-11-11T19:00:00Z'))).toMatchObject({ session: '2026-11-11' }); // Thu 00:30 IST
+    expect(fromIso(sources.liveExits)).toEqual(['2026-11-10T18:30:00.000Z', midnight1110, '2026-11-08T18:30:00.000Z']);
+  });
+
+  describe('backfill: run(now, trigger, { session })', () => {
+    const LATER = new Date('2026-11-12T06:00:00Z'); // Thu 11:30 IST
+
+    it('reviews the named past session, with the rolling windows ending at it', async () => {
+      const { svc, repo } = make();
+      expect(await svc.run(LATER, 'manual 2026-11-10', { session: '2026-11-10' })).toMatchObject({ started: true, session: '2026-11-10' });
+      expect(repo.createRun).toHaveBeenCalledWith('2026-11-10');
+    });
+
+    it('rejects a weekend, a malformed date and an unclosed session; accepts an NSE day and the MCX-only day', () => {
+      const { svc } = make();
+      expect(svc.sessionRejection('2026-11-08', LATER)).toBe('2026-11-08 not a trading day on NSE or MCX');
+      expect(svc.sessionRejection('2026-11-31', LATER)).toMatch(/YYYY-MM-DD/);
+      expect(svc.sessionRejection('11/10/2026', LATER)).toMatch(/YYYY-MM-DD/);
+      expect(svc.sessionRejection('2026-11-12', LATER)).toBe('2026-11-12 has not closed yet');
+      expect(svc.sessionRejection('2026-11-10', new Date('2026-11-10T17:00:00Z'))).toBe('2026-11-10 has not closed yet'); // 22:30 IST, MCX open
+      expect(svc.sessionRejection('2026-11-10', LATER)).toBeNull();
+      expect(svc.sessionRejection('2026-11-09', LATER)).toBeNull();
+    });
+
+    it('a rejected session never creates a run', async () => {
+      const { svc, repo } = make();
+      expect(await svc.run(LATER, 'manual', { session: '2026-11-08' })).toMatchObject({ started: false, reason: expect.stringContaining('not a trading day') });
+      expect(repo.createRun).not.toHaveBeenCalled();
+    });
+  });
+
+  it('a day both exchanges are shut is no review session', async () => {
+    const shut = new SessionClock({ holidays: MARKET_HOLIDAYS, mcxHolidays: { 2026: [{ date: '2026-11-10', name: 'test', session: 'CLOSED' }] } });
+    const t = make();
+    const svc = new SelfReviewRunService(t.repo as never, t.sources as never, new TuningService({ overrides: async () => [] }), { enabled: true }, shut, {});
+    expect(svc.sessionRejection('2026-11-10', new Date('2026-11-12T06:00:00Z'))).toBe('2026-11-10 not a trading day on NSE or MCX');
+    expect(await svc.run(NIGHT)).toMatchObject({ started: true, session: '2026-11-09' });
+  });
+});

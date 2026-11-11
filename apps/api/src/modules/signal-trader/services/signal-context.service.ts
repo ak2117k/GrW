@@ -25,7 +25,8 @@ import type { MinuteBar } from '../../exit-discipline/types';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { istYmd } from '../../mbm/domain/chain-snapshot';
 import { MCX_CHAIN_LOOKBACK_DAYS, MCX_FUT_BAR_MAX_LAG_MS, chainBlockValue, mcxChainSnapshot, mcxExpiryOrder, mcxProxyParent, proxyExpiry, underlyingFutureFor, useProxy } from '../domain/mcx-chain';
-import { classifyTrend, mergeTrendBars, TREND_MAX_BARS, type TrendBar } from '../domain/trend-tag';
+import { classifyTrend, type TrendBar } from '../domain/trend-tag';
+import { loadTrendBars } from './trend-bars.loader';
 
 /** Fewer hub bars than this today ⇒ the noise block asks the broker's 1-min history instead. */
 const MIN_HUB_BARS = 15;
@@ -52,8 +53,6 @@ const BLOCK_TIMEOUT_MS = 8_000;
 const MCX_CHAIN_SOURCE = 'oi_snapshots (market hub 3-min OI capture, MCX)';
 /** The trend tag is record only: it must never hold a signal up, so it gets a short box of its own. */
 export const TREND_TIMEOUT_MS = 5_000;
-/** candles_1m read for the trend: ~5 NSE sessions of 15m bars past weekends / a holiday (MCX needs ~2). */
-const TREND_HUB_LOOKBACK_MS = 10 * 86_400_000;
 /**
  * A cold level book is several historical windows (daily statics, 15m bars, the higher-TF trend)
  * through the owner's 350 ms-gated session, behind whatever else is fetching; 8 s timed out on
@@ -173,13 +172,7 @@ export class SignalContextService {
     const key = `${ref.exchange}:${ref.token}:${Math.floor(now.getTime() / (15 * 60_000))}`;
     const hit = this.trendBarCache.get(key);
     if (hit) return hit;
-    const p = Promise.all([
-      repo.hub15mBars(ref.exchange, ref.token, new Date(now.getTime() - TREND_HUB_LOOKBACK_MS), now),
-      repo.stored15mBars(ref.exchange, ref.token, TREND_MAX_BARS, now).catch(() => [] as TrendBar[]),
-    ]).then(([hub, older]) => ({
-      bars: mergeTrendBars(older, hub, now),
-      source: `candles_1m ${ref.symbol} → 15m (${hub.length} bars)${older.length ? ` + candles 15m (${older.length})` : ''}`,
-    }));
+    const p = loadTrendBars(repo, ref, now);
     if (this.trendBarCache.size > 200) this.trendBarCache.clear();
     this.trendBarCache.set(key, p);
     p.catch(() => this.trendBarCache.delete(key));

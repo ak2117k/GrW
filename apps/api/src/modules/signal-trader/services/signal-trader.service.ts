@@ -19,7 +19,14 @@ import { SIGNAL_READY, SIGNAL_UPDATE, type SignalReadyEvent, type SignalUpdateEv
 import { learning, liveLearning, liveRouteBlock, liveRouteSummary, withSignalTuning, type SignalTraderConfig } from '../domain/signal-trader.config';
 import { SignalJudgeService } from './signal-judge.service';
 import { SignalContextService, type CtxBlock } from './signal-context.service';
-import { lateRoom, type LateRoom } from '../domain/late-entry';
+import { DELAYED_DEFAULTS, delayedRoom, lateRoom, type DelayedRoom, type LateRoom } from '../domain/late-entry';
+
+/** A bounded numeric env value; unset / bad = the default. */
+const envNum = (name: string, d: number, lo: number, hi: number): number => {
+  const raw = String(process.env[name] ?? '').trim();
+  const v = Number(raw);
+  return raw !== '' && Number.isFinite(v) && v >= lo && v <= hi ? v : d;
+};
 import { channelStatsForJudge, labelChain, optionValue, packetMarketFacts } from '../domain/judge-noise';
 import { daysToExpiry } from '../domain/option-delta';
 import { LESSONS_READER, type InjectedLesson, type LessonsReader } from '../../self-review/lessons/types';
@@ -607,8 +614,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const v = j.verdict;
     // Learning mode trades the plan as built (no stop, fixed size): the judge's tightening does not apply.
     const tightened = plan.learn ? { plan, changed: [] as string[] } : applyJudgeTightening(plan, { sl: v.sl, lots: v.lots }, s.instrumentKind);
-    const finalPlan = tightened.plan;
-    const judgeWithChanges = { ...(j.record as Record<string, unknown>), tightened: tightened.changed };
+    let finalPlan = tightened.plan;
+    let judgeWithChanges: Record<string, unknown> = { ...(j.record as Record<string, unknown>), tightened: tightened.changed };
     const { agreeCount, conflict } = j;
 
     // ---- paper: the TAKE becomes a paper trade; the broker is never called (no funds read either) ----
@@ -618,7 +625,17 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const rec = (j.record ?? {}) as { learnTaken?: unknown; aiDecision?: unknown; liveGateBlocked?: unknown };
     // A learning outcome the judge did not TAKE, or any call the live gate refused, is paper only — never sent.
     const learnOnly = (rec.learnTaken === true && rec.aiDecision !== 'TAKE') || (rec.liveGateBlocked !== undefined && rec.liveGateBlocked !== null);
-    const routed = cfg.mode === 'live' && !learnOnly ? liveRouteBlock(cfg, s, now) : null;
+    let routed = cfg.mode === 'live' && !learnOnly ? liveRouteBlock(cfg, s, now) : null;
+    // A delayed call (a re-posted screenshot, or a price already past the band) goes live only with room left
+    // from OUR price to the next target it has not reached since the call; the reached ones are dropped.
+    if (cfg.mode === 'live' && !learnOnly && routed === null) {
+      const d = await this.delayedCheck(s, finalPlan, owner, now);
+      if (d) {
+        judgeWithChanges = { ...judgeWithChanges, delayed: d };
+        if (!d.room.ok) routed = { reason: 'delayed_no_room', detail: `call ${d.ageMin} min old — ${d.room.detail}` };
+        else if (d.room.reached.length > 0) finalPlan = { ...finalPlan, targets: d.room.remaining };
+      }
+    }
     if (cfg.mode === 'paper' || (cfg.mode === 'live' && (learnOnly || routed !== null))) {
       const judge = routed ? { ...judgeWithChanges, liveRouted: routed } : judgeWithChanges;
       if (routed) this.logger.log(`[signal-trader] ${what}: live TAKE paper-traded — ${routed.reason}: ${routed.detail}`);
@@ -677,6 +694,29 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     });
     void now;
     return { decisionId, decision: 'TAKE', skipReason: null, placed: placed.kind };
+  }
+
+  /**
+   * DELAYED CALLS (domain/late-entry delayedRoom): null when the call is fresh — its own time (a screenshot's
+   * CALL_AT, else the post) under SIGNAL_DELAYED_MIN old and the price still in the band. Never throws: a failed
+   * history read leaves only the targets behind our price as reached.
+   */
+  private async delayedCheck(s: SignalView, plan: EntryPlan, owner: string | null, now: Date): Promise<{ callAt: string; ageMin: number; extreme: number | null; extremeSource: string | null; room: DelayedRoom } | null> {
+    const minAge = envNum('SIGNAL_DELAYED_MIN', DELAYED_DEFAULTS.minAgeMin, 0, 240);
+    const minRoom = envNum('SIGNAL_DELAYED_MIN_ROOM', DELAYED_DEFAULTS.minRoom, 0.5, 5);
+    const callAt = s.callAt ?? s.receivedAt;
+    if (!callAt) return null;
+    const ageMin = Math.round((now.getTime() - callAt.getTime()) / 60_000);
+    if (ageMin < minAge && !plan.late) return null;
+    let ext: { price: number; source: string } | null = null;
+    try {
+      ext = await this.context.extremeSince({ exchange: plan.exchange, token: plan.token, symbol: plan.tradingsymbol }, plan.side, callAt, now, owner);
+    } catch {
+      ext = null;
+    }
+    const room = delayedRoom({ side: plan.side, price: plan.limitPrice, sl: plan.sl, targets: plan.targets, extremeSinceCall: ext?.price ?? null, minRoom });
+    this.logger.log(`[signal-trader] ${describeSignal(s)}: delayed call (${ageMin} min, call ${callAt.toISOString()}) — ${room.ok ? 'room OK' : 'NO room'}: ${room.detail}`);
+    return { callAt: callAt.toISOString(), ageMin, extreme: ext?.price ?? null, extremeSource: ext?.source ?? null, room };
   }
 
   /**

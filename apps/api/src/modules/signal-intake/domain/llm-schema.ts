@@ -238,6 +238,8 @@ export const SIGNAL_VISION_SYSTEM = [
   'Midcap 100 …) are INFO, never NIFTY.',
   'For kind=SIGNAL set isSignal=true and fill signals[] exactly as for a text post; for every other kind isSignal=false and signals=[].',
   'For kind=INFO fill items[] (one per underlying with a view: bias, levels, OI note, condition, horizon) as described below; else items=[].',
+  'shownTime: when the image is a SCREENSHOT of a chat message carrying the call, the time printed on that message bubble',
+  '(e.g. "2:34 PM"), as 24-hour "HH:MM" ("14:34"); null when no such time is visible. Never the phone status-bar clock.',
   '',
   SIGNAL_PARSE_SYSTEM,
   '',
@@ -246,14 +248,36 @@ export const SIGNAL_VISION_SYSTEM = [
 
 export const SIGNAL_VISION_SCHEMA = {
   ...SIGNAL_PARSE_SCHEMA,
-  required: ['kind', ...SIGNAL_PARSE_SCHEMA.required, 'items'],
-  properties: { kind: { type: 'string', enum: ['SIGNAL', 'UPDATE', 'INFO', 'NOISE'] }, ...SIGNAL_PARSE_SCHEMA.properties, items: { type: 'array', items: INFO_ITEM_SCHEMA } },
+  required: ['kind', ...SIGNAL_PARSE_SCHEMA.required, 'items', 'shownTime'],
+  properties: {
+    kind: { type: 'string', enum: ['SIGNAL', 'UPDATE', 'INFO', 'NOISE'] },
+    ...SIGNAL_PARSE_SCHEMA.properties,
+    items: { type: 'array', items: INFO_ITEM_SCHEMA },
+    shownTime: { type: ['string', 'null'] },
+  },
 } as const;
 
 export interface VisionReply extends LlmParseReply {
   kind: VisionKind;
   /** kind INFO: the model's info items (unvalidated; see {@link validateInfoItems}). */
   items?: unknown[];
+  /**
+   * The time printed on a screenshotted call's own message bubble, "HH:MM" 24-hour (owner 2026-11-12: MCX
+   * COMMODITY re-posted a 14:34 premium-group call as a screenshot at 15:40 and it was traded as fresh).
+   */
+  shownTime?: string | null;
+}
+
+/** A trade_signals tag carrying the screenshot's own call time: `CALL_AT:HH:MM` (IST clock). */
+export const CALL_AT_TAG = 'CALL_AT:';
+
+/** "HH:MM" 24-hour (a valid clock time) or null. */
+export function clockOrNull(v: unknown): string | null {
+  const m = typeof v === 'string' ? /^(\d{1,2}):(\d{2})$/.exec(v.trim()) : null;
+  if (!m) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  return h <= 23 && mi <= 59 ? `${String(h).padStart(2, '0')}:${m[2]}` : null;
 }
 
 /**
@@ -283,5 +307,11 @@ export function readVisionReply(text: string): VisionReply | null {
     return { kind: k, isSignal: false, signals: [], items };
   }
   if (k !== 'SIGNAL') return { kind: k, isSignal: false, signals: [] };
-  return { kind: k, isSignal: base.isSignal && base.signals.length > 0, signals: base.signals };
+  let shownTime: string | null = null;
+  try {
+    shownTime = clockOrNull((JSON.parse(stripJson(text)) as Record<string, unknown>).shownTime);
+  } catch {
+    /* already parsed above */
+  }
+  return { kind: k, isSignal: base.isSignal && base.signals.length > 0, signals: base.signals, shownTime };
 }

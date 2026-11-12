@@ -56,6 +56,11 @@ export interface SignalView {
   rawText: string;
   /** INTRADAY (default) | BTST | POSITIONAL (the parser's read; a swing pick is held overnight in paper). */
   horizon?: SignalHorizon;
+  /**
+   * When the call was really made, if earlier than the post: a screenshot's own message time (the `CALL_AT:HH:MM`
+   * tag, IST, on the post's IST day). Null/absent = the post time is the call time.
+   */
+  callAt?: Date | null;
 }
 
 export interface ClusterView {

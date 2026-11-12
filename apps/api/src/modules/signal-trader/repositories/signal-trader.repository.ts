@@ -69,7 +69,24 @@ export function normaliseSignal(r: Row | null): SignalView | null {
     confidence: num(r.confidence),
     rawText: String(r.rawText ?? ''),
     horizon: r.horizon === 'BTST' || r.horizon === 'POSITIONAL' ? r.horizon : 'INTRADAY',
+    callAt: callAtOf(r.tags, r.receivedAt instanceof Date ? r.receivedAt : null),
   };
+}
+
+const IST_MS = 5.5 * 3_600_000;
+
+/**
+ * The `CALL_AT:HH:MM` tag (stream S, a screenshot's own message time, IST) on the post's IST day. Null when absent,
+ * unreadable, or not before the post (a time after the post is a misread, never a call from the future).
+ */
+export function callAtOf(tags: unknown, postedAt: Date | null): Date | null {
+  if (!postedAt || !Array.isArray(tags)) return null;
+  const t = tags.map(String).find((x) => x.startsWith('CALL_AT:'));
+  const m = t ? /^CALL_AT:(\d{2}):(\d{2})$/.exec(t) : null;
+  if (!m) return null;
+  const istDay = new Date(postedAt.getTime() + IST_MS);
+  const at = Date.UTC(istDay.getUTCFullYear(), istDay.getUTCMonth(), istDay.getUTCDate(), Number(m[1]), Number(m[2])) - IST_MS;
+  return at <= postedAt.getTime() ? new Date(at) : null;
 }
 
 /** The first `byChannel` object anywhere in a self-review summary (stream S's CHANNEL_SIGNAL). */

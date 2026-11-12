@@ -31,6 +31,7 @@ export function paperWhyLabel(key: string): string {
     return GATE_LABELS[g] ?? `gate: ${g.replace(/_/g, ' ')}`;
   }
   if (key === 'route-live_underlying') return 'not on live list';
+  if (key === 'route-delayed_no_room') return 'late call, no room left';
   if (key.startsWith('route-')) return `live route: ${key.slice(6).replace(/_/g, ' ')}`;
   return 'paper';
 }

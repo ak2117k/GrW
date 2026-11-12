@@ -6,7 +6,7 @@ import { dedupKey, planCluster } from '../domain/cluster';
 import { findContract, listedExpiries, segmentOf } from '../domain/contract';
 import { inferExpiry } from '../domain/expiry';
 import { classifyCommentary, hasBias, recapReason, type CommentaryClass, type InfoItem, type RefPrices } from '../domain/info';
-import { validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
+import { CALL_AT_TAG, clockOrNull, validateInfoItems, validateLlmSignal, type InfoLlmReply, type LlmParseReply, type VisionReply } from '../domain/llm-schema';
 import { prefilter, type PrefilterResult } from '../domain/prefilter';
 import { parseSignal } from '../domain/rule-parser';
 import {
@@ -301,7 +301,8 @@ export class SignalIntakeService {
     // The chart-setup reader (image-setup) may already have made this post a call: never overwrite that class row.
     const prior = await this.repo.classOf(evt.messageId);
     if (prior?.status === 'SIGNAL' && prior.signalId) return;
-    const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), imageSha256: media.sha256 };
+    const shown = clockOrNull(reply.shownTime);
+    const stored = { kind: reply.kind, isSignal: reply.isSignal, signals: reply.signals, ...(reply.items ? { items: reply.items } : {}), ...(shown ? { shownTime: shown } : {}), imageSha256: media.sha256 };
     const save = (status: MessageStatus, reason: string) =>
       this.repo.saveClass({ ...base, status, parser: 'vision', llmResult: stored, reason: `vision (${via}): ${reason}`.slice(0, 500) });
     if (reply.kind === 'INFO' || reply.kind === 'VIEW') {
@@ -323,7 +324,9 @@ export class SignalIntakeService {
     for (const raw of reply.signals) {
       const v = validateLlmSignal(raw, vocab);
       if (v.ok) {
-        await this.createFromParsed(evt, postedAt, { ...v.signal, tags: [...v.signal.tags, 'VISION'] }, 'llm', base, stored);
+        // CALL_AT: the call's own time on a screenshot; signal-trader measures a re-post's delay from it.
+        const tags = [...v.signal.tags, 'VISION', ...(shown ? [`${CALL_AT_TAG}${shown}`] : [])];
+        await this.createFromParsed(evt, postedAt, { ...v.signal, tags }, 'llm', base, stored);
         return;
       }
       reasons.push(v.reason);

@@ -173,7 +173,7 @@ export type SignalLiveKind = 'CE' | 'PE' | 'FUT' | 'EQ';
 
 /** Why a live-mode TAKE is paper-traded instead of sent (the live allowlists); null = it may be sent. */
 export interface LiveRouteBlock {
-  reason: 'live_underlying' | 'live_kind' | 'live_before_start';
+  reason: 'live_underlying' | 'live_kind' | 'live_before_start' | 'delayed_no_room';
   detail: string;
 }
 

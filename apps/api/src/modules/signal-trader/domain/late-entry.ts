@@ -165,3 +165,60 @@ export function lateRoom(i: LateRoomInput): LateRoom {
     missing,
   };
 }
+
+/**
+ * DELAYED CALLS (owner 2026-11-12: "if it is delayed, check for the scope left"). Pure.
+ *
+ * CRUDE 8250 PE: called at 257 in a premium group at 14:34, re-posted as a screenshot at 15:40 and bought at
+ * 291.4 — T1 300 had been crossed and the high was 348.4 by then, yet it was judged as a fresh call (room to T1
+ * from 291). A call older than SIGNAL_DELAYED_MIN (or already past its band) is taken live only when the NEXT
+ * target it has not reached since the call is at least SIGNAL_DELAYED_MIN_ROOM × the risk to the stop away,
+ * measured from our price. The targets reached since the call are dropped, so the ladder works the rest.
+ */
+export const DELAYED_DEFAULTS = { minAgeMin: 10, minRoom: 1.5 } as const;
+
+export interface DelayedRoomInput {
+  side: 'BUY' | 'SELL';
+  /** Our entry price (the plan's limit). */
+  price: number;
+  sl: number;
+  targets: readonly number[];
+  /** The contract's best print since the call: the high for a BUY, the low for a SELL; null = unknown. */
+  extremeSinceCall: number | null;
+  minRoom: number;
+}
+
+export interface DelayedRoom {
+  ok: boolean;
+  /** Targets reached since the call (by the extreme, or already behind our price). */
+  reached: number[];
+  /** Targets still ahead and not yet reached, nearest first. */
+  remaining: number[];
+  nextTarget: number | null;
+  reward: number | null;
+  risk: number;
+  ratio: number | null;
+  detail: string;
+}
+
+export function delayedRoom(i: DelayedRoomInput): DelayedRoom {
+  const buy = i.side === 'BUY';
+  const ts = [...new Set(i.targets.filter((t) => Number.isFinite(t) && t > 0))].sort((a, b) => (buy ? a - b : b - a));
+  const ext = i.extremeSinceCall !== null && Number.isFinite(i.extremeSinceCall) && i.extremeSinceCall > 0 ? i.extremeSinceCall : null;
+  const hit = (t: number) => (buy ? t <= i.price || (ext !== null && t <= ext) : t >= i.price || (ext !== null && t >= ext));
+  const reached = ts.filter(hit);
+  const remaining = ts.filter((t) => !hit(t));
+  const risk = r2(Math.abs(i.price - i.sl));
+  const nextTarget = remaining[0] ?? null;
+  const reward = nextTarget !== null ? r2(Math.abs(nextTarget - i.price)) : null;
+  const ratio = reward !== null && risk > 0 ? r2(reward / risk) : null;
+  const seen = ext !== null ? `${buy ? 'high' : 'low'} ${ext} since the call` : 'no price history since the call';
+  if (nextTarget === null) {
+    return { ok: false, reached, remaining, nextTarget, reward, risk, ratio, detail: `every target (${ts.join('/') || 'none'}) already reached — ${seen}` };
+  }
+  const ok = ratio !== null && ratio >= i.minRoom;
+  const detail =
+    `next untouched target ${nextTarget}: ${reward} pts from ${i.price} vs ${risk} pts to SL ${i.sl} = ${ratio ?? '?'}× (needs ${i.minRoom}×)` +
+    `${reached.length ? `; reached already: ${reached.join('/')}` : ''} — ${seen}`;
+  return { ok, reached, remaining, nextTarget, reward, risk, ratio, detail };
+}

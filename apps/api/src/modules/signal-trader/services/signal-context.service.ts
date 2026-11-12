@@ -179,6 +179,23 @@ export class SignalContextService {
     return p;
   }
 
+  /**
+   * The contract's best print since `from` (the high for a BUY, the low for a SELL) from its 1-min bars; null when
+   * no bars could be read. Used to see which targets a delayed call already reached. Never throws.
+   */
+  async extremeSince(ref: { exchange: string; token: string; symbol: string }, side: 'BUY' | 'SELL', from: Date, to: Date, ownerUserId: string | null): Promise<{ price: number; bars: number; source: string } | null> {
+    try {
+      const { bars, source } = await this.minuteBars(ref, from, to, ownerUserId);
+      const inWindow = bars.filter((b) => b.ts >= from.getTime() - 60_000 && b.ts <= to.getTime());
+      const vals = inWindow.map((b) => (side === 'BUY' ? b.high : b.low)).filter((x) => Number.isFinite(x) && x > 0);
+      if (vals.length === 0) return null;
+      return { price: side === 'BUY' ? Math.max(...vals) : Math.min(...vals), bars: vals.length, source };
+    } catch (err) {
+      this.logger.warn(`[signal-context] extremeSince ${ref.symbol}: ${errText(err)}`);
+      return null;
+    }
+  }
+
   /** 1-min bars: the hub's candles_1m, else (too few today) the broker's 1-min history over the owner's session. */
   private async minuteBars(ref: { exchange: string; token: string; symbol: string }, from: Date, to: Date, ownerUserId: string | null): Promise<{ bars: MinuteBar[]; source: string }> {
     let hub: MinuteBar[] = [];

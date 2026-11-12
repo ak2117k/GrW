@@ -1,4 +1,4 @@
-import { lateBand, lateEntryOf, lateRoom, targetsAhead, type LateRoomInput } from './late-entry';
+import { delayedRoom, lateBand, lateEntryOf, lateRoom, targetsAhead, type LateRoomInput } from './late-entry';
 
 const room = (over: Partial<LateRoomInput> = {}) =>
   lateRoom({
@@ -62,5 +62,29 @@ describe('late entries', () => {
   it('cash / futures: the contract IS the underlying, so room is in its own points', () => {
     const r = room({ kind: 'EQ', ltp: 2490, sl: 2430, spot: 2490, nearestResistance: 2550, callWall: null, delta: null, targets: [3550] });
     expect(r).toMatchObject({ contractRoom: 60, risk: 60, roomToRisk: 1, missing: [] });
+  });
+});
+
+describe('delayedRoom (owner 2026-11-12)', () => {
+  const crude = { side: 'BUY' as const, price: 291.4, sl: 270, targets: [300, 350, 400], minRoom: 1.5 };
+
+  it('CRUDE 8250 PE re-post: 300 reached (high 348.4), next untouched 350 is 2.7× the risk → OK, ladder keeps 350/400', () => {
+    const r = delayedRoom({ ...crude, extremeSinceCall: 348.4 });
+    expect(r).toMatchObject({ ok: true, reached: [300], remaining: [350, 400], nextTarget: 350, reward: 58.6, risk: 21.4, ratio: 2.74 });
+  });
+
+  it('refuses when the next untouched target is too close for the risk', () => {
+    const r = delayedRoom({ ...crude, extremeSinceCall: 302 });
+    expect(r).toMatchObject({ ok: true, nextTarget: 350 });
+    expect(delayedRoom({ ...crude, targets: [300, 310], extremeSinceCall: 302 })).toMatchObject({ ok: false, nextTarget: 310, ratio: 0.87 });
+  });
+
+  it('refuses when every target was reached since the call', () => {
+    expect(delayedRoom({ ...crude, extremeSinceCall: 405 })).toMatchObject({ ok: false, remaining: [], nextTarget: null });
+  });
+
+  it('unknown history: only targets behind our price count as reached; a SELL mirrors it', () => {
+    expect(delayedRoom({ ...crude, extremeSinceCall: null })).toMatchObject({ reached: [], nextTarget: 300, ok: false });
+    expect(delayedRoom({ side: 'SELL', price: 100, sl: 110, targets: [90, 70], extremeSinceCall: 88, minRoom: 1.5 })).toMatchObject({ reached: [90], nextTarget: 70, ratio: 3, ok: true });
   });
 });

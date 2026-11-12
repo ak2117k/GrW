@@ -9,7 +9,7 @@ describe('readVisionReply — strict schema', () => {
   const sig = { underlying: 'NIFTY', instrumentKind: 'CE', strike: 24000, expiry: null, side: 'BUY', entryType: 'AT', entryLow: 120, entryHigh: 120, sl: 100, targets: [150], qty: null, horizon: 'INTRADAY', confidence: 0.8 };
 
   it('the schema requires kind (SIGNAL | UPDATE | INFO | NOISE) and INFO items on top of the text schema', () => {
-    expect(SIGNAL_VISION_SCHEMA.required).toEqual(['kind', 'isSignal', 'signals', 'items']);
+    expect(SIGNAL_VISION_SCHEMA.required).toEqual(['kind', 'isSignal', 'signals', 'items', 'shownTime']);
     expect(SIGNAL_VISION_SCHEMA.properties.kind.enum).toEqual(['SIGNAL', 'UPDATE', 'INFO', 'NOISE']);
   });
 
@@ -20,7 +20,15 @@ describe('readVisionReply — strict schema', () => {
   });
 
   it('a SIGNAL keeps its signals (fences tolerated)', () => {
-    expect(readVisionReply('```json\n' + JSON.stringify({ kind: 'SIGNAL', isSignal: true, signals: [sig] }) + '\n```')).toEqual({ kind: 'SIGNAL', isSignal: true, signals: [sig] });
+    expect(readVisionReply('```json\n' + JSON.stringify({ kind: 'SIGNAL', isSignal: true, signals: [sig] }) + '\n```')).toEqual({ kind: 'SIGNAL', isSignal: true, signals: [sig], shownTime: null });
+  });
+
+  it('a screenshot call carries the time on its own message bubble, HH:MM 24-hour; junk is null', () => {
+    const read = (shownTime: unknown) => readVisionReply(JSON.stringify({ kind: 'SIGNAL', isSignal: true, signals: [sig], shownTime }))?.shownTime;
+    expect(read('14:34')).toBe('14:34');
+    expect(read('9:05')).toBe('09:05');
+    expect(read('2:34 PM')).toBeNull();
+    expect(read('25:00')).toBeNull();
   });
 
   it.each(['NOISE', 'UPDATE'])('%s never carries a signal, even when the model filled one', (kind) => {

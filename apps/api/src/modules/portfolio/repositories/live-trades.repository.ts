@@ -100,6 +100,18 @@ export class LiveTradesRepository {
     });
   }
 
+  /**
+   * Trackers opened by the Telegram signal trader: its entry orders live in signal_orders (not the trades
+   * table), so without this a filled signal entry reads as the owner's own manual trade.
+   */
+  async listSignalTrackerIds(userId: string): Promise<Set<string>> {
+    const rows = await this.prisma.signalOrder.findMany({
+      where: { userId, trackerId: { not: null } },
+      select: { trackerId: true },
+    });
+    return new Set(rows.map((r) => r.trackerId as string));
+  }
+
   async listLiveOrders(userId: string): Promise<LiveOrderRow[]> {
     return this.prisma.trade.findMany({
       where: {

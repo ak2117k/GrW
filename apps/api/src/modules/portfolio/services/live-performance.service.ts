@@ -124,6 +124,8 @@ export function buildLiveTrades(
   trackers: LiveTrackerRow[],
   exits: LiveExitRow[],
   orders: LiveOrderRow[],
+  /** Trackers the Telegram signal trader opened (signal_orders.tracker_id): opened by the MODEL. */
+  signalTrackerIds: ReadonlySet<string> = new Set(),
 ): LiveTradeRow[] {
   // Latest live exit per tracker (rows arrive oldest first; FILLED beats PLACED).
   const exitByTracker = new Map<string, LiveExitRow>();
@@ -155,6 +157,7 @@ export function buildLiveTrades(
     }
 
     const qty = Number(t.qty) || 0;
+    const bySignal = !order && signalTrackerIds.has(t.id);
     rows.push({
       id: t.id,
       origin: 'TRACKER',
@@ -172,9 +175,9 @@ export function buildLiveTrades(
       status: closed ? 'CLOSED' : 'OPEN',
       pnl: round2(Number(t.pnl ?? 0)),
       pnlPercent: t.pnlPercent ?? null,
-      openedBy: order ? openedByOfOrder(order) : 'MANUAL',
+      openedBy: order ? openedByOfOrder(order) : bySignal ? 'MODEL' : 'MANUAL',
       closedBy,
-      strategy: order?.strategy ?? null,
+      strategy: order?.strategy ?? (bySignal ? 'TELEGRAM_SIGNAL' : null),
       closeNote,
     });
   }
@@ -286,13 +289,14 @@ export class LivePerformanceService {
   constructor(private readonly repo: LiveTradesRepository) {}
 
   async listLiveTrades(userId: string): Promise<LiveTradeRow[]> {
-    const [trackers, exits, orders] = await Promise.all([
+    const [trackers, exits, orders, signalTrackerIds] = await Promise.all([
       this.repo.listTrackers(userId),
       this.repo.listLiveExits(userId),
       this.repo.listLiveOrders(userId),
+      this.repo.listSignalTrackerIds(userId),
     ]);
     // Book-blink closes and no-cost rows are not trades (blink-closes.ts): totals count real exits only.
-    return buildLiveTrades(withoutBlinkCloses(trackers), exits, orders);
+    return buildLiveTrades(withoutBlinkCloses(trackers), exits, orders, signalTrackerIds);
   }
 
   async getDashboard(userId: string, now: Date = new Date()): Promise<LiveDashboard> {

@@ -11,6 +11,7 @@ import {
   type LiveTradeRow,
 } from '@/services/livePortfolio';
 import { cn } from '@/utils/cn';
+import { strategyLabel } from '@/components/trading/strategyLabel';
 
 const FILTERS: Array<{ key: LiveJournalFilter; label: string }> = [
   { key: 'ALL', label: 'All' },
@@ -154,7 +155,7 @@ export default function LiveJournal() {
                   </td>
                   <td className="px-3 py-2">
                     {r.openedBy === 'MODEL' ? 'Model' : 'Manual'}
-                    {r.strategy && <div className="text-[10px] text-gray-500">{r.strategy}</div>}
+                    {r.strategy && <div className="text-[10px] text-gray-500">{strategyLabel(r.strategy)}</div>}
                   </td>
                   <td className="px-3 py-2" title={r.closeNote ?? undefined}>
                     <Badge variant={closerVariant(r)} size="sm" label={closedByLabel(r.closedBy)} />

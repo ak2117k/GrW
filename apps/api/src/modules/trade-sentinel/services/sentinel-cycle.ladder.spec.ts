@@ -70,8 +70,25 @@ describe('SentinelCycleService — TARGET_LADDER', () => {
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+    // These cases pin the ladder alone; the profit lock has its own case below.
+    process.env.PROFIT_LOCK_ARM_RUPEES = '0';
   });
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(() => {
+    delete process.env.PROFIT_LOCK_ARM_RUPEES;
+    jest.restoreAllMocks();
+  });
+
+  it('PROFIT LOCK: ₹750 open arms a stop keeping half the best profit; a slide through it exits green', async () => {
+    process.env.PROFIT_LOCK_ARM_RUPEES = '750';
+    const t = makeSvc();
+    // best 116 × 75 qty = +₹1,200 open, before T1 120: the lock stop is 108.
+    await t.pass('10:00:00', tick(116, 116));
+    await t.pass('10:05:00', tick(107.5, 116));
+    await t.pass('10:05:30', tick(107, 116));
+    const rows = ruleRows(t.record);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reason).toMatch(/TARGET_TRAIL: LTP 107 crossed the ladder stop 108 \(profit lock/);
+  });
 
   it('no reader (paper cycle, TARGET_LADDER=off): no ladder on the packet, no rule exits', async () => {
     const t = makeSvc({ reader: null, judged: true });

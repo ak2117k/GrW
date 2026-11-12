@@ -2,7 +2,7 @@ import { parseExitDisciplineConfig } from './config';
 import { decideExit } from './decision';
 import { evaluateExitGate, type GateFacts } from './gate';
 import { readPacketFacts } from './packet-facts';
-import { defaultLadderStop, ladderReading, ladderTargets, parseLadderMode, type LadderInput } from './target-ladder';
+import { defaultLadderStop, ladderReading, ladderTargets, parseLadderMode, parseProfitLockConfig, profitLockStop, type LadderInput } from './target-ladder';
 
 const L = (over: Partial<LadderInput>): LadderInput => ({
   side: 'LONG', entry: 100, targets: [120, 140, 160], best: 100, ltp: 100, nContract: null, trailN: 2, prevStop: null, ...over,
@@ -109,5 +109,41 @@ describe('exit gate: TARGET_LADDER clause', () => {
     };
     const f = readPacketFacts(packet);
     expect('unreadable' in f ? null : f.ladder).toEqual({ stop: 120, stage: 2, lastHit: false, enforced: true });
+  });
+});
+
+describe('profit lock (owner 2026-11-12)', () => {
+  // The CRUDE 8250 PE: entry 291.4, 100 qty, targets 300/350/400, best 302 (+₹1,060), sold at 290.1.
+  const crude = { side: 'LONG' as const, entry: 291.4, targets: [300, 350, 400], nContract: null, trailN: 2 };
+  const lock = { armRupees: 750, keep: 0.5, rupeesPerPoint: 100 };
+
+  it('arms at ₹750 open and keeps half the best profit, tighter than the entry-after-T1 stop', () => {
+    const r = ladderReading({ ...crude, best: 302, ltp: 301, prevStop: null, lock });
+    expect(r.stage).toBe(1);
+    expect(r.stop).toBe(296.7);
+    expect(r.trip).toBeNull();
+    expect(r.detail).toContain('profit lock');
+  });
+
+  it('the CRUDE replay: the slide back through 296.7 exits green instead of at the entry', () => {
+    const r = ladderReading({ ...crude, best: 302, ltp: 296.5, prevStop: 291.4, lock });
+    expect(r).toMatchObject({ stop: 296.7, trip: 'TARGET_TRAIL' });
+  });
+
+  it('works before T1 too, and not before ₹750 is open', () => {
+    expect(ladderReading({ ...crude, best: 298, ltp: 297, prevStop: null, lock })).toMatchObject({ stage: 0, stop: null }); // +₹660
+    expect(ladderReading({ ...crude, best: 299.4, ltp: 299, prevStop: null, lock })).toMatchObject({ stage: 0, stop: 295.4, trip: null }); // +₹800
+  });
+
+  it('never loosens a tighter ladder stop, and a SHORT locks below the entry', () => {
+    expect(ladderReading({ ...L({ best: 145, ltp: 144, prevStop: 120 }), lock: { armRupees: 750, keep: 0.5, rupeesPerPoint: 20 } }).stop).toBe(122.5);
+    expect(profitLockStop('SHORT', 100, 80, { armRupees: 100, keep: 0.5, rupeesPerPoint: 10 })).toBe(90);
+    expect(profitLockStop('LONG', 100, 100, lock)).toBeNull();
+  });
+
+  it('config: defaults 750 / 50%, 0 switches it off, a typo keeps the default', () => {
+    expect(parseProfitLockConfig({})).toEqual({ armRupees: 750, keep: 0.5 });
+    expect(parseProfitLockConfig({ PROFIT_LOCK_ARM_RUPEES: '0' })).toBeNull();
+    expect(parseProfitLockConfig({ PROFIT_LOCK_ARM_RUPEES: 'abc', PROFIT_LOCK_KEEP_PCT: '200' })).toEqual({ armRupees: 750, keep: 0.5 });
   });
 });

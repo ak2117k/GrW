@@ -78,6 +78,31 @@ export interface LadderInput {
   trailN: number;
   /** The stop already reached (cycle memory / the last packet): never loosened. */
   prevStop: number | null;
+  /**
+   * PROFIT LOCK (owner 2026-11-12, CRUDE 8250 PE: +₹1,060 open at 302 rode back to −₹130 because the late
+   * entry sat just under T1 and the only lock was "entry after T1"). Once the best open profit since entry
+   * reaches `armRupees`, the stop keeps `keep` of it, ratcheting with the best price, whatever the stage.
+   * Null/absent = no lock (the ladder alone).
+   */
+  lock?: ProfitLock | null;
+}
+
+export interface ProfitLock {
+  armRupees: number;
+  /** 0–1: the share of the best open profit the stop keeps. */
+  keep: number;
+  /** Rupees per 1 point of premium: |qty| × the exchange value factor. */
+  rupeesPerPoint: number;
+}
+
+/** The profit-lock stop for this best price; null while unarmed or unknown. Pure. */
+export function profitLockStop(side: PositionSide, entry: number, best: number, lock: ProfitLock | null | undefined): number | null {
+  if (!lock || !fin(entry) || !fin(best) || !(lock.rupeesPerPoint > 0) || !(lock.armRupees > 0) || !(lock.keep > 0)) return null;
+  const long = side === 'LONG';
+  const gain = long ? best - entry : entry - best;
+  if (!(gain > 0) || gain * lock.rupeesPerPoint < lock.armRupees) return null;
+  const keep = Math.min(lock.keep, 1);
+  return r2(long ? entry + keep * gain : entry - keep * gain);
 }
 
 export interface LadderReading {
@@ -112,6 +137,13 @@ export function ladderReading(i: LadderInput): LadderReading {
     computed = k === 1 ? i.entry : ts[k - 2];
     how = `T${k} ${ts[k - 1]} reached (best ${r2(best)}): stop at ${k === 1 ? 'the entry' : `T${k - 1}`}`;
   }
+  const locked = profitLockStop(i.side, i.entry, best, i.lock);
+  if (locked !== null && tighter(locked, computed)) {
+    const L = i.lock as ProfitLock;
+    const lockHow = `profit lock: best ${r2(best)} (+₹${Math.round(Math.abs(best - i.entry) * L.rupeesPerPoint)} open), stop keeps ${Math.round(Math.min(L.keep, 1) * 100)}% at ${locked}`;
+    how = how ? `${how}; ${lockHow}` : lockHow;
+    computed = locked;
+  }
   const prev = fin(i.prevStop) && i.prevStop > 0 ? i.prevStop : null;
   const stop = computed !== null && tighter(computed, prev) ? computed : prev;
   const lastHit = ts.length >= 2 && k === ts.length;
@@ -122,7 +154,7 @@ export function ladderReading(i: LadderInput): LadderReading {
       ? `last target T${ts.length} ${ts[ts.length - 1]} reached (best ${r2(best)}, LTP ${i.ltp}) — exit`
       : trip === 'TARGET_TRAIL'
       ? `LTP ${i.ltp} crossed the ladder stop ${stop}${how ? ` (${how})` : ''}`
-      : k === 0
+      : k === 0 && locked === null
       ? `no target reached yet (best ${r2(best)}; T1 ${ts[0] ?? 'none'})`
       : `${how}${stop !== computed ? ` — kept the tighter stop ${stop}` : ''}`;
   return { stage: k, stop, best: r2(best), lastHit, trailing, trip, detail };
@@ -140,6 +172,20 @@ export function defaultLadderStop(side: PositionSide, entry: number, nContract: 
   let risk = nContract * Math.sqrt(sessionMinutes);
   if (side === 'LONG') risk = Math.min(risk, entry * 0.5);
   return r2(side === 'LONG' ? entry - risk : entry + risk);
+}
+
+/**
+ * PROFIT_LOCK_ARM_RUPEES (default 750; 0 = off) and PROFIT_LOCK_KEEP_PCT (default 50, 10–90). A bad value
+ * keeps the default — a typo never switches the lock off.
+ */
+export function parseProfitLockConfig(env: Record<string, string | undefined>): { armRupees: number; keep: number } | null {
+  const num = (raw: string | undefined, d: number, lo: number, hi: number) => {
+    const v = Number(String(raw ?? '').trim());
+    return String(raw ?? '').trim() !== '' && Number.isFinite(v) && v >= lo && v <= hi ? v : d;
+  };
+  const arm = num(env.PROFIT_LOCK_ARM_RUPEES, 750, 0, 1_000_000);
+  if (arm === 0) return null;
+  return { armRupees: arm, keep: num(env.PROFIT_LOCK_KEEP_PCT, 50, 10, 90) / 100 };
 }
 
 /** TARGET_LADDER: on (exits carried out) | observe (targets computed and shown, no exit) | off. Default on. */

@@ -59,7 +59,7 @@ import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, wi
 import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { lossLimitForTrade } from '../../../common/utils/loss-limit';
-import { defaultLadderStop, ladderReading, ladderTargets, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
+import { defaultLadderStop, ladderReading, ladderTargets, parseProfitLockConfig, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
 import { LADDER_PLANS, type LadderPlan, type LadderPlanReader } from '../ports/ladder-plans.port';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
@@ -613,6 +613,8 @@ export class SentinelCycleService {
    * end of every run, so a closed position's state does not accumulate.
    */
   private readonly state = new Map<string, TrackerState>();
+  /** PROFIT LOCK on every real ladder (target-ladder.ts); read once at boot. Null = off. */
+  private readonly profitLock = parseProfitLockConfig(process.env);
 
   /** Trackers already warned about a missing cash underlying — warn once, not per tick. */
   private readonly warnedMissingUnderlying = new Set<string>();
@@ -1416,6 +1418,7 @@ export class SentinelCycleService {
         nContract: tick.noise?.contract?.n ?? null,
         trailN: (this.discipline ?? DISCIPLINE_OFF).floorTrailN,
         prevStop: memo.stop,
+        lock: this.profitLock ? { ...this.profitLock, rupeesPerPoint: Math.abs(tick.qty) * valueFactorOf(entry) } : null,
       });
       if (reading.stop !== memo.stop && reading.stop !== null) {
         this.logger.log(`[target-ladder] ${entry.symbol} (tracker ${entry.trackerId}): stop ${memo.stop ?? 'none'} → ${reading.stop} — ${reading.detail}`);

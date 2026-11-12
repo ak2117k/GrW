@@ -16,6 +16,8 @@ const GATE_LABELS: Record<string, string> = {
 const FIXED: Record<string, string> = {
   ENGINE_ENTRY: 'Entry engine',
   REENTRY_WATCH: 'Re-entry watch',
+  // A real-money Telegram signal entry (signal_orders), shown on the Live journal.
+  TELEGRAM_SIGNAL: 'Telegram signal',
 };
 
 /** The short reason for a `paper-why:` key, e.g. 'gate-entry_tolerance' → 'price off the call'. */

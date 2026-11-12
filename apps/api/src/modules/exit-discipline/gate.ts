@@ -175,7 +175,8 @@ export function evaluateExitGate(f: GateFacts, cfg: ExitDisciplineConfig, env: R
   if (f.ladder) {
     const L = f.ladder;
     const lt = [L.packetLtp, f.ltpNow].filter(fin);
-    const crossed = fin(L.stop) && L.stage >= 1 && lt.length === 2 && lt.every((x) => (f.positionSide === 'LONG' ? x <= (L.stop as number) : x >= (L.stop as number)));
+    // Any ladder stop counts: before T1 it exists only once the profit lock armed (target-ladder.ts).
+    const crossed = fin(L.stop) && lt.length === 2 && lt.every((x) => (f.positionSide === 'LONG' ? x <= (L.stop as number) : x >= (L.stop as number)));
     ladder.push(res('TARGET_LADDER', L.lastHit || crossed,
       { stage: L.stage, stop: L.stop, lastHit: L.lastHit, packetLtp: L.packetLtp, ltpNow: f.ltpNow, stopCrossed: crossed },
       L.lastHit ? 'the last target was reached' : 'the ladder stop (entry after T1, T(n−1) after T(n), or the one-target trail) crossed on both reads'));

@@ -77,6 +77,16 @@ describe('live-performance helpers', () => {
 });
 
 describe('buildLiveTrades — attribution', () => {
+  it('a Telegram signal entry (signal_orders.tracker_id) is opened by the MODEL, not MANUAL', () => {
+    const [row] = buildLiveTrades(
+      [tracker({ id: 'sig1', status: 'CLOSED', exitPrice: 290.1, exitTime: utc('2026-11-12T10:23:03') })],
+      [exit({ trackerId: 'sig1' })],
+      [],
+      new Set(['sig1']),
+    );
+    expect(row).toMatchObject({ openedBy: 'MODEL', strategy: 'TELEGRAM_SIGNAL', closedBy: 'AGENT' });
+  });
+
   it('a broker position with no app rows is opened and closed MANUAL', () => {
     const [row] = buildLiveTrades(
       [tracker({ status: 'CLOSED', exitPrice: 110, exitTime: utc('2026-10-21T09:00:00'), pnl: 100 })],
@@ -197,12 +207,14 @@ describe('LivePerformanceService', () => {
       listTrackers: jest.fn().mockResolvedValue([tracker()]),
       listLiveExits: jest.fn().mockResolvedValue([]),
       listLiveOrders: jest.fn().mockResolvedValue([]),
+      listSignalTrackerIds: jest.fn().mockResolvedValue(new Set()),
     };
     const svc = new LivePerformanceService(repo as any);
     const d = await svc.getDashboard('usr_1', utc('2026-10-22T06:00:00'));
     expect(repo.listTrackers).toHaveBeenCalledWith('usr_1');
     expect(repo.listLiveExits).toHaveBeenCalledWith('usr_1');
     expect(repo.listLiveOrders).toHaveBeenCalledWith('usr_1');
+    expect(repo.listSignalTrackerIds).toHaveBeenCalledWith('usr_1');
     expect(d.summary.openPositions).toBe(1);
   });
 });

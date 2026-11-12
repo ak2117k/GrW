@@ -4,7 +4,7 @@ import { TradeRepository } from '../../trade-engine/repositories/trade.repositor
 import type { ExecuteTradeDto } from '../../trade-engine/dto/trade.dto';
 import { MarketDataRepository } from '../../market-data/repositories/market-data.repository';
 import { SignalTraderRepository, type PaperRecord } from '../repositories/signal-trader.repository';
-import { SIGNAL_PAPER_SOURCE, SIGNAL_PAPER_STRATEGY, paperEntryReason, paperTags } from '../domain/paper';
+import { SIGNAL_PAPER_STRATEGY, paperEntryReason, paperSource, paperTags } from '../domain/paper';
 import type { EntryPlan } from '../domain/gate';
 import type { SignalView } from '../domain/signal.types';
 import { SignalOiCheckService } from './signal-oi-check.service';
@@ -21,6 +21,8 @@ export interface PaperOpenInput {
   what: string;
   why: string;
   trigger: PaperRecord['trigger'];
+  /** Why it is paper, not live (tag paper-why:<key>, Trade.source). Absent = the old 'no-funds' label. */
+  causeKey?: string;
 }
 
 export type PaperOpenResult = { ok: true; tradeId: string; entryPrice: number | null; duplicate: boolean } | { ok: false; reason: string };
@@ -69,11 +71,11 @@ export class SignalPaperService {
         // Learning mode: no stop on the paper trade (plan.sl is only the judge's reference).
         stoploss: p.learn ? undefined : p.sl,
         target: p.targets[0],
-        entryReason: paperEntryReason({ decisionId: i.decisionId, channel: i.channel, what: i.what, plan: p, why: i.why }),
-        entryTags: paperTags(i.decisionId, i.signal.horizon, p.learn === true),
+        entryReason: paperEntryReason({ decisionId: i.decisionId, channel: i.channel, what: i.what, plan: p, why: i.why, source: paperSource(i.causeKey) }),
+        entryTags: paperTags(i.decisionId, i.signal.horizon, p.learn === true, i.causeKey),
         strategy: SIGNAL_PAPER_STRATEGY,
         isPaper: true,
-        source: SIGNAL_PAPER_SOURCE,
+        source: paperSource(i.causeKey),
       } as unknown as ExecuteTradeDto;
       const trade = await this.exec.executeTrade(dto);
       const entryPrice = trade.entryPrice ?? null;

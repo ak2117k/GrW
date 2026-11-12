@@ -14,6 +14,8 @@ import type { SignalHorizon } from './signal.types';
 export const SIGNAL_PAPER_STRATEGY = 'TELEGRAM_SIGNAL_NO_FUNDS';
 /** Trade.source of these paper trades (free text in the DB; the journal shows every paper trade). */
 export const SIGNAL_PAPER_SOURCE = 'telegram-signal / no-funds';
+/** Trade.source carrying the real cause, e.g. 'telegram-signal / gate-entry_tolerance'. */
+export const paperSource = (causeKey?: string): string => (causeKey ? `telegram-signal / ${causeKey}` : SIGNAL_PAPER_SOURCE);
 /**
  * Paper trades the paper watch (SL / target / square-off, and the paper sentinel's AI exits) manages:
  * the Telegram ones and the entry engine's (entry-engine ENGINE_ENTRY_STRATEGY, kept literal so this
@@ -26,9 +28,52 @@ const DECISION_TAG = 'decision:';
 
 const HORIZON_TAG = 'horizon:';
 
+/** Tag carrying WHY a Telegram signal went to paper (the journal badge reads it). */
+export const PAPER_WHY_TAG = 'paper-why:';
+
+/**
+ * Why a Telegram signal became a paper trade instead of a live order. `key` is a short machine id
+ * (tag `paper-why:<key>`, Trade.source suffix); `why` is the sentence for the entry reason / alert.
+ *
+ * Before 2026-11-12 every one was labelled "no-funds" (strategy TELEGRAM_SIGNAL_NO_FUNDS, source
+ * 'telegram-signal / no-funds') and, in live mode, the reason text said "SIGNAL_TRADING=paper" — even
+ * when the real cause was a live gate (NIFTY 24800 PE: LTP 56% under the call), the AI judge skipping
+ * it, or the live allowlist. The strategy key stays (filters across the app depend on it); this
+ * carries the truth next to it.
+ */
+export interface PaperCause {
+  key: string;
+  why: string;
+}
+
+export function paperCause(i: {
+  trigger: 'paper_mode' | 'funds_check' | 'broker_reject';
+  mode: string;
+  record?: { liveGateBlocked?: unknown; liveGateDetail?: unknown; learnTaken?: unknown; aiDecision?: unknown; aiSkipReason?: unknown } | null;
+  routed?: { reason: string; detail: string } | null;
+}): PaperCause {
+  if (i.trigger === 'funds_check') return { key: 'no-funds', why: 'account funds short of the entry' };
+  if (i.trigger === 'broker_reject') return { key: 'broker-funds', why: 'broker rejected the live entry for funds/margin' };
+  if (i.mode === 'paper') return { key: 'paper-mode', why: 'SIGNAL_TRADING=paper' };
+  const r = i.record ?? {};
+  if (typeof r.liveGateBlocked === 'string' && r.liveGateBlocked) {
+    const detail = typeof r.liveGateDetail === 'string' && r.liveGateDetail ? `: ${r.liveGateDetail}` : '';
+    return { key: `gate-${r.liveGateBlocked}`, why: `live gate ${r.liveGateBlocked} refused it${detail}` };
+  }
+  if (r.learnTaken === true && r.aiDecision !== 'TAKE') {
+    const why = typeof r.aiSkipReason === 'string' && r.aiSkipReason ? ` (${r.aiSkipReason})` : '';
+    return { key: 'ai-skip', why: `the AI judge did not take it${why} — learning paper` };
+  }
+  if (i.routed) return { key: `route-${i.routed.reason}`, why: i.routed.detail };
+  return { key: 'paper', why: 'paper-traded' };
+}
+
 /** `horizon` (BTST / POSITIONAL) is tagged so the exit watcher knows a carried trade's rules. */
-export function paperTags(decisionId: string, horizon?: SignalHorizon, learn = false): string[] {
-  const tags = ['telegram-signal', 'no-funds', `${DECISION_TAG}${decisionId}`];
+export function paperTags(decisionId: string, horizon?: SignalHorizon, learn = false, causeKey?: string): string[] {
+  // 'no-funds' only when funds really were the cause (older rows carry it on every paper trade).
+  const fundsCause = causeKey === undefined || causeKey === 'no-funds' || causeKey === 'broker-funds';
+  const tags = ['telegram-signal', ...(fundsCause ? ['no-funds'] : []), `${DECISION_TAG}${decisionId}`];
+  if (causeKey) tags.push(`${PAPER_WHY_TAG}${causeKey}`);
   if (horizon && horizon !== 'INTRADAY') tags.push(`${HORIZON_TAG}${horizon}`);
   // 'learn' = the learning-mode track (no stop, no account caps; trade-engine LEARNING_PAPER_TAG).
   if (learn) tags.push('learn');
@@ -64,11 +109,11 @@ export function decisionIdFromTags(tags: readonly string[] | null | undefined): 
   return t ? t.slice(DECISION_TAG.length) : null;
 }
 
-export function paperAlert(i: { required: number | null; available: number | null; what: string; channel: string; result: string; brokerReason?: string; paperMode?: boolean }): string {
+export function paperAlert(i: { required: number | null; available: number | null; what: string; channel: string; result: string; brokerReason?: string; paperMode?: boolean; cause?: string }): string {
   const need = i.required === null ? '₹?' : inr(i.required);
   const have = i.available === null ? '₹?' : inr(i.available);
   return [
-    i.paperMode ? `PAPER (paper mode) — ${i.what} (${i.channel})` : `PAPER (insufficient funds): need ${need}, available ${have} — ${i.what} (${i.channel})`,
+    i.paperMode ? `PAPER (${i.cause ?? 'paper mode'}) — ${i.what} (${i.channel})` : `PAPER (insufficient funds): need ${need}, available ${have} — ${i.what} (${i.channel})`,
     ...(i.brokerReason ? [`broker: ${i.brokerReason.slice(0, 200)}`] : []),
     i.result,
   ].join('\n');
@@ -342,10 +387,10 @@ export function paperExitDecision(i: {
 }
 
 /** The entry reason written on the paper Trade row (the journal shows it). */
-export function paperEntryReason(i: { decisionId: string; channel: string; what: string; plan: EntryPlan; why: string }): string {
+export function paperEntryReason(i: { decisionId: string; channel: string; what: string; plan: EntryPlan; why: string; source?: string }): string {
   const t = i.plan.targets;
   return [
-    `${SIGNAL_PAPER_SOURCE} (decision ${i.decisionId}) — ${i.why}.`,
+    `${i.source ?? SIGNAL_PAPER_SOURCE} (decision ${i.decisionId}) — ${i.why}.`,
     `Signal (${i.channel}): ${i.what}.`,
     `Plan: LIMIT ${i.plan.limitPrice} x${i.plan.qty} SL ${i.plan.sl} targets ${t.length ? t.join(' / ') : 'none'} (paper exits at SL or the last target; each earlier target trails the SL — T1 to entry, then to the previous target).`,
   ].join(' ');

@@ -27,7 +27,7 @@ import { SESSION_TUNING, type TuningReader } from '../../self-review/tuning/tuna
 import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
 import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
-import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert, paperProduct } from '../domain/paper';
+import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert, paperCause, paperProduct, type PaperCause } from '../domain/paper';
 
 export const SIGNAL_TRADER_CONFIG = Symbol('SIGNAL_TRADER_CONFIG');
 export const SIGNAL_TRADER_ENV = Symbol('SIGNAL_TRADER_ENV');
@@ -624,7 +624,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       if (routed) this.logger.log(`[signal-trader] ${what}: live TAKE paper-traded — ${routed.reason}: ${routed.detail}`);
       await this.repo.finishDecision(decisionId, { gate: gateChecks, judge, plan: finalPlan, decision: 'PAPER', skipReason: null });
       const n: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: finalPlan.limitPrice * finalPlan.qty * contractValueFactor(finalPlan.exchange, finalPlan.tradingsymbol), available: null, method: 'premium' };
-      const paper = await this.openPaper(n, 'paper_mode');
+      const cause = paperCause({ trigger: 'paper_mode', mode: cfg.mode, record: j.record as Parameters<typeof paperCause>[0]['record'], routed });
+      const paper = await this.openPaper(n, 'paper_mode', undefined, cause);
       return { decisionId, decision: 'PAPER', skipReason: null, paper };
     }
 
@@ -988,9 +989,9 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     return this.openPaper(n, 'broker_reject', reason);
   }
 
-  private async openPaper(n: NoFundsContext, trigger: PaperOpenInput['trigger'], brokerReason?: string): Promise<PaperOpenResult> {
-    const why =
-      trigger === 'paper_mode' ? 'SIGNAL_TRADING=paper' : trigger === 'broker_reject' ? 'broker rejected the live entry for funds/margin' : 'account funds short of the entry';
+  private async openPaper(n: NoFundsContext, trigger: PaperOpenInput['trigger'], brokerReason?: string, cause?: PaperCause): Promise<PaperOpenResult> {
+    const c = cause ?? paperCause({ trigger, mode: this.cfg.mode });
+    const why = c.why;
     let res: PaperOpenResult;
     try {
       res = await (this.paper as PaperLike).open({
@@ -1003,6 +1004,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         what: n.what,
         why,
         trigger,
+        causeKey: c.key,
       });
     } catch (err) {
       res = { ok: false, reason: errText(err) };
@@ -1011,7 +1013,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     const result = res.ok
       ? `Paper trade ${res.tradeId}${res.duplicate ? ' (already open)' : ''}: ${p.side} ${p.tradingsymbol} x${p.qty} @ ${res.entryPrice ?? p.limitPrice} | SL ${p.sl} | T1 ${p.targets[0] ?? 'none'} — no live order.`
       : `Paper trade could NOT be opened: ${res.reason}`;
-    void sendOpsAlert(`signal-paper:${n.decisionId}`, paperAlert({ required: n.required, available: n.available, what: n.what, channel: n.channel, result, brokerReason, paperMode: trigger === 'paper_mode' }));
+    void sendOpsAlert(`signal-paper:${n.decisionId}`, paperAlert({ required: n.required, available: n.available, what: n.what, channel: n.channel, result, brokerReason, paperMode: trigger === 'paper_mode', cause: c.key === 'paper-mode' ? undefined : c.why }));
     return res;
   }
 

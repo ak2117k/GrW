@@ -332,7 +332,7 @@ function PaperJournal() {
         render: (_val, row) => {
           const t = row as unknown as Trade;
           return t.strategy ? (
-            <StrategyBadge strategy={t.strategy} />
+            <StrategyBadge strategy={t.strategy} entryTags={t.entryTags} />
           ) : (
             <span className="text-xs text-gray-500">--</span>
           );

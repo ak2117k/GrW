@@ -4,6 +4,7 @@ import { Modal, Badge, PnLDisplay } from '@/components/common';
 import { cn } from '@/utils/cn';
 import { formatINR } from '@td/shared';
 import type { Trade } from '@/types';
+import { strategyLabel } from './strategyLabel';
 import api from '@/services/api';
 import toast from 'react-hot-toast';
 
@@ -233,12 +234,7 @@ export default function TradeDetailModal({
             <InfoRow
               label="Strategy"
               value={
-                trade.strategy
-                  ? trade.strategy
-                      .split('-')
-                      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-                      .join(' ')
-                  : '--'
+                trade.strategy ? strategyLabel(trade.strategy, trade.entryTags) : '--'
               }
             />
           </div>

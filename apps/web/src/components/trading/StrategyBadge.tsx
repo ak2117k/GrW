@@ -1,7 +1,10 @@
 import { cn } from '@/utils/cn';
+import { strategyLabel } from './strategyLabel';
 
 interface StrategyBadgeProps {
   strategy: string;
+  /** A trade's entry tags: Telegram paper trades carry their real cause there (`paper-why:`). */
+  entryTags?: readonly string[] | null;
   className?: string;
 }
 
@@ -20,16 +23,9 @@ const STRATEGY_CONFIG: Record<string, { label: string; color: string }> = {
   },
 };
 
-function formatStrategyName(strategy: string): string {
-  return strategy
-    .split('-')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-export default function StrategyBadge({ strategy, className }: StrategyBadgeProps) {
+export default function StrategyBadge({ strategy, entryTags, className }: StrategyBadgeProps) {
   const config = STRATEGY_CONFIG[strategy];
-  const label = config?.label ?? formatStrategyName(strategy);
+  const label = config?.label ?? strategyLabel(strategy, entryTags);
   const color = config?.color ?? 'bg-gray-500/15 text-gray-400 border-gray-500/30';
 
   return (

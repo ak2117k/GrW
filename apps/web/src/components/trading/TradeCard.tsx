@@ -1,6 +1,7 @@
 import { cn } from '@/utils/cn';
 import { Badge, PnLDisplay } from '@/components/common';
 import type { Trade } from '@/types';
+import { strategyLabel } from './strategyLabel';
 import { TradeStatus, OrderSide } from '@/types';
 import { Clock, X } from 'lucide-react';
 
@@ -97,7 +98,7 @@ export default function TradeCard({ trade, onClose }: TradeCardProps) {
         <div className="flex items-center gap-2">
           {trade.strategy && (
             <span className="text-[10px] text-[var(--color-text-muted)] bg-[var(--color-bg-secondary)] rounded px-1.5 py-0.5">
-              {trade.strategy}
+              {strategyLabel(trade.strategy, trade.entryTags)}
             </span>
           )}
           {trade.isPaper && (

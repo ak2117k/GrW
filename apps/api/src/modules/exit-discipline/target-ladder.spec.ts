@@ -2,7 +2,7 @@ import { parseExitDisciplineConfig } from './config';
 import { decideExit } from './decision';
 import { evaluateExitGate, type GateFacts } from './gate';
 import { readPacketFacts } from './packet-facts';
-import { defaultLadderStop, ladderReading, ladderTargets, parseLadderMode, parseProfitLockConfig, profitLockStop, type LadderInput } from './target-ladder';
+import { defaultLadderStop, ladderReading, ladderTargets, parseLadderMode, parseProfitLockConfig, profitLockMinMove, profitLockStop, type LadderInput } from './target-ladder';
 
 const L = (over: Partial<LadderInput>): LadderInput => ({
   side: 'LONG', entry: 100, targets: [120, 140, 160], best: 100, ltp: 100, nContract: null, trailN: 2, prevStop: null, ...over,
@@ -145,5 +145,20 @@ describe('profit lock (owner 2026-11-12)', () => {
     expect(parseProfitLockConfig({})).toEqual({ armRupees: 750, keep: 0.5 });
     expect(parseProfitLockConfig({ PROFIT_LOCK_ARM_RUPEES: '0' })).toBeNull();
     expect(parseProfitLockConfig({ PROFIT_LOCK_ARM_RUPEES: 'abc', PROFIT_LOCK_KEEP_PCT: '200' })).toEqual({ armRupees: 750, keep: 0.5 });
+  });
+});
+
+describe('profit lock minimum move (prod 2026-11-12, IDEA 15 CE × 71,475)', () => {
+  it('a one-tick ₹1,429 gain on a penny option does not arm the lock', () => {
+    const lock = { armRupees: 750, keep: 0.5, rupeesPerPoint: 71475, minMove: profitLockMinMove(0.09, null) };
+    expect(lock.minMove).toBe(0.05);
+    expect(profitLockStop('LONG', 0.09, 0.11, lock)).toBeNull();
+    expect(profitLockStop('LONG', 0.09, 0.14, lock)).toBe(0.12);
+  });
+
+  it('the CRUDE case still arms: 10.6 pts ≥ max(2N, 3% of 291.4 = 8.74, 5 ticks)', () => {
+    expect(profitLockMinMove(291.4, 2)).toBe(8.74);
+    expect(profitLockStop('LONG', 291.4, 302, { armRupees: 750, keep: 0.5, rupeesPerPoint: 100, minMove: 8.74 })).toBe(296.7);
+    expect(profitLockMinMove(291.4, 6)).toBe(12);
   });
 });

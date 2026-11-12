@@ -59,7 +59,7 @@ import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, wi
 import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { lossLimitForTrade } from '../../../common/utils/loss-limit';
-import { defaultLadderStop, ladderReading, ladderTargets, parseProfitLockConfig, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
+import { defaultLadderStop, ladderReading, ladderTargets, parseProfitLockConfig, profitLockMinMove, type LadderReading, type PacketLadder } from '../../exit-discipline/target-ladder';
 import { LADDER_PLANS, type LadderPlan, type LadderPlanReader } from '../ports/ladder-plans.port';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { instrumentKeysOf, newsPositionOf } from '../../news-events/keys';
@@ -1408,7 +1408,9 @@ export class SentinelCycleService {
       }
       const plan = memo.plan;
       if (!plan || plan.targets.length === 0) return null;
-      if (memo.stop === null && same && typeof stored!.stop === 'number') memo.stop = stored!.stop;
+      // Only a stop the ladder reached at a target is restored: a pre-T1 stop is the profit lock's, recomputed every
+      // pass from the durable best price (and a lock armed before the minimum move existed must not come back).
+      if (memo.stop === null && same && typeof stored!.stop === 'number' && (stored!.stage ?? 0) >= 1) memo.stop = stored!.stop;
       const reading = ladderReading({
         side: tick.side,
         entry: entryPrice,
@@ -1418,7 +1420,13 @@ export class SentinelCycleService {
         nContract: tick.noise?.contract?.n ?? null,
         trailN: (this.discipline ?? DISCIPLINE_OFF).floorTrailN,
         prevStop: memo.stop,
-        lock: this.profitLock ? { ...this.profitLock, rupeesPerPoint: Math.abs(tick.qty) * valueFactorOf(entry) } : null,
+        lock: this.profitLock
+          ? {
+              ...this.profitLock,
+              rupeesPerPoint: Math.abs(tick.qty) * valueFactorOf(entry),
+              minMove: profitLockMinMove(entryPrice, floorNoiseUnit(tick.noise?.contract?.n, tick.noise?.underlying1m?.n, entry.symbol).n),
+            }
+          : null,
       });
       if (reading.stop !== memo.stop && reading.stop !== null) {
         this.logger.log(`[target-ladder] ${entry.symbol} (tracker ${entry.trackerId}): stop ${memo.stop ?? 'none'} → ${reading.stop} — ${reading.detail}`);

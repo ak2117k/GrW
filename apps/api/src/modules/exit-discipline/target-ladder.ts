@@ -93,6 +93,21 @@ export interface ProfitLock {
   keep: number;
   /** Rupees per 1 point of premium: |qty| × the exchange value factor. */
   rupeesPerPoint: number;
+  /**
+   * The least favourable move (points) before the lock arms, whatever the rupees (see {@link profitLockMinMove}).
+   * Prod 2026-11-12: IDEA 15 CE × 71,475 made ₹750 on ONE tick (0.09 → 0.11) — a rupee-only lock sat a tick under.
+   */
+  minMove?: number;
+}
+
+/**
+ * The lock's minimum move: max(2 × the contract's 1-min noise unit, 3% of the entry, 5 ticks). The tick is
+ * estimated (0.01 under ₹1, 0.05 above) — the Angel tick is not on the cycle's tick. Pure.
+ */
+export function profitLockMinMove(entry: number, nContract: number | null | undefined): number {
+  const n = fin(nContract) && nContract > 0 ? nContract : 0;
+  const tick = entry < 1 ? 0.01 : 0.05;
+  return r2(Math.max(2 * n, 0.03 * entry, 5 * tick));
 }
 
 /** The profit-lock stop for this best price; null while unarmed or unknown. Pure. */
@@ -101,6 +116,7 @@ export function profitLockStop(side: PositionSide, entry: number, best: number, 
   const long = side === 'LONG';
   const gain = long ? best - entry : entry - best;
   if (!(gain > 0) || gain * lock.rupeesPerPoint < lock.armRupees) return null;
+  if (fin(lock.minMove) && gain < lock.minMove - 1e-9) return null;
   const keep = Math.min(lock.keep, 1);
   return r2(long ? entry + keep * gain : entry - keep * gain);
 }

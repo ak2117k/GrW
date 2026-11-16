@@ -104,7 +104,7 @@ export class SignalVisionService implements SignalVision, OnApplicationBootstrap
       ],
     };
     const t = this.transportOf();
-    const message = await runInSharedSlot(this.cycle, () => t.messages.create(request), { maxWaitMs: this.cfg.llmMaxWaitMs });
+    const message = await runInSharedSlot(this.cycle, () => t.messages.create(request), { maxWaitMs: this.cfg.llmMaxWaitMs, lane: 'signals' });
     if (message.stop_reason === 'refusal') throw new Error('the model declined');
     const out = (message.content ?? [])
       .filter((b) => b.type === 'text')

@@ -24,7 +24,7 @@ export interface SharedSlotRunner {
   runShared<T>(
     trackerId: string,
     work: () => Promise<T>,
-    opts?: { expired?: () => boolean; reserveLive?: () => boolean },
+    opts?: { expired?: () => boolean; reserveLive?: () => boolean; lane?: 'signals' },
   ): Promise<T>;
 }
 
@@ -44,7 +44,7 @@ let seq = 0;
 export function runInSharedSlot<T>(
   runner: SharedSlotRunner,
   work: () => Promise<T>,
-  opts: { maxWaitMs: number },
+  opts: { maxWaitMs: number; lane?: 'signals' },
 ): Promise<T> {
   let timedOut = false;
   let started = false;
@@ -68,7 +68,7 @@ export function runInSharedSlot<T>(
           return work();
         },
         // No `reserveLive` override: the default always keeps the live slot.
-        { expired: () => timedOut },
+        { expired: () => timedOut, ...(opts.lane ? { lane: opts.lane } : {}) },
       )
       .then(resolve, (err) => {
         clearTimeout(timer);

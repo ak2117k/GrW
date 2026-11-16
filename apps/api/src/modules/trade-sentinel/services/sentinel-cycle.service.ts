@@ -218,6 +218,42 @@ export const JUDGE_CONCURRENCY = 2;
  */
 export const LIVE_RESERVED_SLOTS = 1;
 
+/**
+ * BULKHEADS (2026-11-16 incident). On 16 Nov one stuck job held the shared slots from ~09:20 to 13:15
+ * IST and froze EVERY Claude caller with them: live exits, the signal judge, the Telegram text parser,
+ * the image reader. So:
+ *   - the signal pipeline (`lane: 'signals'`) gets its OWN slot, outside {@link JUDGE_CONCURRENCY}: it
+ *     never waits on exit work and exit work never waits on it (one more CLI process at most);
+ *   - every shared/lane job and every live judgement has a hard time limit; when it is hit the slot is
+ *     freed and the overrun logged loudly (the late result, if any, is discarded);
+ *   - each position's per-tick sensor pass is bounded too, and a position whose previous pass is still
+ *     stuck is skipped (not started twice), so one hung broker/data call can no longer stall the cycle.
+ */
+export const SIGNAL_LANE_SLOTS = 1;
+/** A shared or lane job (CLI transport alone is 180 s) — freed after this. */
+export const SHARED_JOB_TIMEOUT_MS = 240_000;
+/** A live judgement (thesis + packet + judge + write) — its slot is freed after this. */
+export const JUDGE_JOB_TIMEOUT_MS = 300_000;
+/** One position's per-tick sensor pass (tick, walls, sensors). */
+export const SENSOR_PASS_TIMEOUT_MS = 45_000;
+
+/** Thrown by {@link SentinelCycleService.runShared} when a started job overran {@link SHARED_JOB_TIMEOUT_MS}. */
+export class SharedJobTimeout extends Error {
+  constructor(ms: number) {
+    super(`shared judgement overran ${Math.round(ms / 1000)} s — slot freed, result discarded`);
+  }
+}
+
+/** Resolves/rejects with `p`, or rejects with `make()` after `ms`. The timer never keeps the process alive. */
+function withTimeout<T>(p: Promise<T>, ms: number, make: () => Error): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const t = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(make()), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, t]).finally(() => clearTimeout(timer));
+}
+
 /** Thrown by {@link SentinelCycleService.runShared} for a queued job whose moment has passed. */
 export class SharedJobExpired extends Error {
   constructor() {
@@ -639,6 +675,13 @@ export class SentinelCycleService {
   /** Overnight reviews waiting for a slot — see {@link runShared}. */
   private readonly slotWaiters: Array<() => void> = [];
 
+  /** Bulkhead: jobs in the signal lane (own cap {@link SIGNAL_LANE_SLOTS}), and their waiters. */
+  private readonly signalLane = new Set<string>();
+  private readonly signalWaiters: Array<() => void> = [];
+
+  /** Per-position sensor passes still running (started at, ms) — a stuck one is skipped, never doubled. */
+  private readonly sensorRunning = new Map<string, number>();
+
   /** When the concurrency cap was last reported, so a full cap logs once a minute, not per tick. */
   private capReportedAt = 0;
 
@@ -737,9 +780,29 @@ export class SentinelCycleService {
       // One bad position must not blind the sentinel to the other four. The
       // runner's per-sensor isolation is the inner layer of this; the whole of a
       // position's work — tick, walls, packet, agent, write — is the outer one.
+      // Bulkhead: a position whose previous pass is still stuck is skipped (loudly), never run twice.
+      const stuckSince = this.sensorRunning.get(entry.trackerId);
+      if (stuckSince !== undefined) {
+        report.failed += 1;
+        this.logger.error(
+          `sentinel pass for ${entry.symbol} skipped: its previous pass started ${Math.round((Date.now() - stuckSince) / 1000)} s ago and has not finished (a broker or data call is not answering)`,
+        );
+        continue;
+      }
       try {
         // A hard-floor exit (FLOOR_HARD_EXIT) is recorded detached into `jobs` beside the judgements.
-        const candidate = await this.evaluateOne(entry, index, now, report, suppressed, futile, jobs);
+        const started = Date.now();
+        this.sensorRunning.set(entry.trackerId, started);
+        const pass = this.evaluateOne(entry, index, now, report, suppressed, futile, jobs);
+        void pass.then(
+          () => this.sensorRunning.get(entry.trackerId) === started && this.sensorRunning.delete(entry.trackerId),
+          () => this.sensorRunning.get(entry.trackerId) === started && this.sensorRunning.delete(entry.trackerId),
+        );
+        const candidate = await withTimeout(
+          pass,
+          SENSOR_PASS_TIMEOUT_MS,
+          () => new Error(`sensor pass timed out after ${SENSOR_PASS_TIMEOUT_MS / 1000} s (a broker or data call did not answer) — the cycle moved on`),
+        );
         if (candidate) candidates.push(candidate);
       } catch (err) {
         report.failed += 1;
@@ -1769,6 +1832,17 @@ export class SentinelCycleService {
       if (this.judging.get(entry.trackerId) === inFlight) this.judging.delete(entry.trackerId);
       this.wakeSlotWaiters();
     });
+    // Bulkhead watchdog: a judgement that never settles must not hold its slot forever.
+    const watchdog = setTimeout(() => {
+      if (this.judging.get(entry.trackerId) !== inFlight) return;
+      this.judging.delete(entry.trackerId);
+      this.logger.error(
+        `sentinel judgement for ${entry.symbol} overran ${JUDGE_JOB_TIMEOUT_MS / 1000} s — its slot is freed; the position will be judged again on a later tick`,
+      );
+      this.wakeSlotWaiters();
+    }, JUDGE_JOB_TIMEOUT_MS);
+    watchdog.unref?.();
+    void job.finally(() => clearTimeout(watchdog));
     return job;
   }
 
@@ -1790,8 +1864,9 @@ export class SentinelCycleService {
   async runShared<T>(
     trackerId: string,
     work: () => Promise<T>,
-    opts: { expired?: () => boolean; reserveLive?: () => boolean } = {},
+    opts: { expired?: () => boolean; reserveLive?: () => boolean; lane?: 'signals' } = {},
   ): Promise<T> {
+    if (opts.lane === 'signals') return this.runSignalLane(trackerId, work, opts.expired);
     // Never the last free slot(s): see LIVE_RESERVED_SLOTS. And checked on every
     // wake: a pre-open job still queued when its venue opens is dropped.
     for (;;) {
@@ -1813,15 +1888,39 @@ export class SentinelCycleService {
     };
     this.judging.set(trackerId, inFlight);
     try {
-      const out = await work();
+      const out = await withTimeout(work(), SHARED_JOB_TIMEOUT_MS, () => new SharedJobTimeout(SHARED_JOB_TIMEOUT_MS));
       settle('evaluated');
       return out;
     } catch (err) {
       settle('failed');
+      if (err instanceof SharedJobTimeout) this.logger.error(`shared job ${trackerId}: ${err.message}`);
       throw err;
     } finally {
       if (this.judging.get(trackerId) === inFlight) this.judging.delete(trackerId);
       this.wakeSlotWaiters();
+    }
+  }
+
+  /**
+   * The signal pipeline's own lane: {@link SIGNAL_LANE_SLOTS} slot(s), independent of the exit
+   * judgements' {@link JUDGE_CONCURRENCY}. Queues (re-checking `expired` on every wake), one job per
+   * id, hard-limited to {@link SHARED_JOB_TIMEOUT_MS}.
+   */
+  private async runSignalLane<T>(id: string, work: () => Promise<T>, expired?: () => boolean): Promise<T> {
+    for (;;) {
+      if (expired?.()) throw new SharedJobExpired();
+      if (this.signalLane.size < SIGNAL_LANE_SLOTS && !this.signalLane.has(id)) break;
+      await new Promise<void>((resolve) => this.signalWaiters.push(resolve));
+    }
+    this.signalLane.add(id);
+    try {
+      return await withTimeout(work(), SHARED_JOB_TIMEOUT_MS, () => new SharedJobTimeout(SHARED_JOB_TIMEOUT_MS));
+    } catch (err) {
+      if (err instanceof SharedJobTimeout) this.logger.error(`signal-lane job ${id}: ${err.message}`);
+      throw err;
+    } finally {
+      this.signalLane.delete(id);
+      for (const resolve of this.signalWaiters.splice(0)) resolve();
     }
   }
 

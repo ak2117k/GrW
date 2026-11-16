@@ -62,7 +62,7 @@ export class SignalJudgeService {
       const call = runInSharedSlot(
         this.cycle as unknown as SharedSlotRunner,
         () => withAiCallContext({ userId: opts.userId ?? undefined }, () => transport.messages.create(request)),
-        { maxWaitMs: Math.min(opts.slotWaitMs, opts.timeoutMs) },
+        { maxWaitMs: Math.min(opts.slotWaitMs, opts.timeoutMs), lane: 'signals' },
       );
       call.catch(() => undefined); // a late rejection after the timeout is noise
       const message = await Promise.race([call, timeout]);

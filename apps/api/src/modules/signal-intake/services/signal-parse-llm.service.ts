@@ -73,7 +73,7 @@ export class SignalParseLlmService implements SignalLlm, SignalInfoLlm {
       messages: [{ role: 'user', content: `Telegram post:\n"""\n${text.slice(0, 4000)}\n"""` }],
     };
     const t = this.transportOf();
-    const message = await runInSharedSlot(this.cycle, () => t.messages.create(request), { maxWaitMs: this.cfg.llmMaxWaitMs });
+    const message = await runInSharedSlot(this.cycle, () => t.messages.create(request), { maxWaitMs: this.cfg.llmMaxWaitMs, lane: 'signals' });
     if (message.stop_reason === 'refusal') throw new Error('the model declined');
     const out = (message.content ?? [])
       .filter((b) => b.type === 'text')
@@ -94,7 +94,7 @@ export class SignalParseLlmService implements SignalLlm, SignalInfoLlm {
       messages: [{ role: 'user', content: `Telegram post:\n"""\n${text.slice(0, 4000)}\n"""` }],
     };
     const t = (this.infoTransport ??= this.recorded(SIGNAL_INFO_JOB));
-    const message = await runInSharedSlot(this.cycle, () => t.messages.create(request), { maxWaitMs: this.cfg.llmMaxWaitMs });
+    const message = await runInSharedSlot(this.cycle, () => t.messages.create(request), { maxWaitMs: this.cfg.llmMaxWaitMs, lane: 'signals' });
     if (message.stop_reason === 'refusal') throw new Error('the model declined');
     const out = (message.content ?? [])
       .filter((b) => b.type === 'text')

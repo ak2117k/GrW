@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Inject, Injectable, Logger, Optional, type OnApplicationBootstrap, type OnModuleDestroy } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { contractValueFactor } from '@td/shared';
@@ -35,6 +36,13 @@ import { SignalExecutorService } from './signal-executor.service';
 import type { PaperOpenInput, PaperOpenResult } from './signal-paper.service';
 import { fundsCheck, isFundsRejection, marginPosition, needsMargin, parseMarginResponse, requiredFunds, type BrokerMargin, type FundsCheck } from '../domain/funds';
 import { SIGNAL_PAPER_SKIP_REASON, SIGNAL_PAPER_STRATEGY, paperAlert, paperCause, paperProduct, type PaperCause } from '../domain/paper';
+
+/** One queued evaluation's hard limit; an older evaluation may not place a live order. */
+export const EVAL_TIMEOUT_MS = 5 * 60_000;
+/** The running queue job's real start (ms), for the live-order age guard; unset outside the queue. */
+const queueJob = new AsyncLocalStorage<{ startedAt: number }>();
+/** Claimed decisions still undecided after this are closed by the sweeper (must exceed EVAL_TIMEOUT_MS). */
+export const STUCK_DECISION_MS = 10 * 60_000;
 
 export const SIGNAL_TRADER_CONFIG = Symbol('SIGNAL_TRADER_CONFIG');
 export const SIGNAL_TRADER_ENV = Symbol('SIGNAL_TRADER_ENV');
@@ -284,10 +292,42 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     return this.handleUpdate(e).catch((err) => this.logger.warn(`[signal-trader] update failed: ${errText(err)}`));
   }
 
+  /**
+   * The serial queue. Each job is bounded by EVAL_TIMEOUT_MS (2026-11-16: one evaluation hung at 09:20
+   * IST and every later signal waited behind it all day): on overrun the queue moves on; the late job
+   * can no longer place a live order (see the age guard before executor.place) and its claimed row is
+   * closed by the stuck-decision sweeper.
+   */
   private enqueue<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.chain.then(work, work);
+    const bounded = () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const overrun = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          this.logger.error(`[signal-trader] a queued evaluation overran ${EVAL_TIMEOUT_MS / 1000} s — the queue moves on (a data or broker call did not answer)`);
+          reject(new Error('evaluation_timeout'));
+        }, EVAL_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      return Promise.race([queueJob.run({ startedAt: Date.now() }, work), overrun]).finally(() => clearTimeout(timer));
+    };
+    const run = this.chain.then(bounded, bounded);
     this.chain = run.catch(() => undefined);
     return run;
+  }
+
+  private lastSweepAt = 0;
+  /** At most once a minute: close claimed-but-undecided rows older than STUCK_DECISION_MS. Never throws. */
+  async sweepStuckDecisions(nowMs: number): Promise<number> {
+    if (nowMs - this.lastSweepAt < 60_000) return 0;
+    this.lastSweepAt = nowMs;
+    try {
+      const n = await this.repo.expireStuckDecisions(new Date(nowMs - STUCK_DECISION_MS));
+      if (n > 0) this.logger.error(`[signal-trader] closed ${n} stuck decision(s) as SKIP evaluation_timeout (claimed > ${STUCK_DECISION_MS / 60_000} min ago, never decided)`);
+      return n;
+    } catch (err) {
+      this.logger.warn(`[signal-trader] stuck-decision sweep failed: ${errText(err)}`);
+      return 0;
+    }
   }
 
   /** One evaluation of one signal. Never throws: every claimed decision is finished. */
@@ -679,6 +719,11 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
       return waiting ?? this.paperOrSkip(noFunds, funds, checks, judgeWithChanges);
     }
 
+    // Age guard: an evaluation that overran the queue limit must never send a live order late.
+    const jobStart = queueJob.getStore()?.startedAt;
+    if (jobStart !== undefined && Date.now() - jobStart > EVAL_TIMEOUT_MS) {
+      return this.skip(decisionId, 'evaluation_timeout', `evaluation took ${Math.round((Date.now() - jobStart) / 1000)} s — too late to send`, checks, judgeWithChanges, finalPlan, channel, what);
+    }
     await this.repo.finishDecision(decisionId, { gate: checks, judge: judgeWithChanges, plan: finalPlan, decision: 'TAKE', skipReason: null });
     void sendOpsAlert(`signal-take:${decisionId}`, takeAlert({ mode: 'live', channel, plan: finalPlan, agreeCount, conflict, confidence: j.effectiveConfidence, reasons: v.reasons }));
     const placed = await this.executor.place({
@@ -834,7 +879,10 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
   private ensureTimer(): void {
     if (this.timer || this.pending.size === 0) return;
-    this.timer = setInterval(() => void this.checkTriggers(new Date()), Math.min(this.cfg.triggerPollSec, 5) * 1000);
+    this.timer = setInterval(() => {
+      void this.checkTriggers(new Date());
+      void this.sweepStuckDecisions(Date.now());
+    }, Math.min(this.cfg.triggerPollSec, 5) * 1000);
     (this.timer as { unref?: () => void }).unref?.();
   }
 

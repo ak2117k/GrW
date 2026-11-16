@@ -270,6 +270,19 @@ export class SignalTraderRepository {
     }
   }
 
+  /**
+   * 2026-11-16: a claimed evaluation that never finished (status PENDING, no decision) blocked the
+   * serial queue all day. Rows claimed before `before` and still undecided are closed as
+   * SKIP 'evaluation_timeout'. Armed triggers (decision 'PENDING') are untouched. Returns the count.
+   */
+  async expireStuckDecisions(before: Date): Promise<number> {
+    const r = await this.prisma.signalDecision.updateMany({
+      where: { status: 'PENDING', decision: null, createdAt: { lt: before } },
+      data: { status: 'DONE', decidedAt: new Date(), decision: 'SKIP', skipReason: 'evaluation_timeout' },
+    });
+    return r.count;
+  }
+
   async finishDecision(id: string, f: DecisionFinish): Promise<void> {
     await this.prisma.signalDecision.update({
       where: { id },

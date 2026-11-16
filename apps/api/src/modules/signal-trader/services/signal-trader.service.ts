@@ -276,6 +276,12 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
         .catch((err) => this.logger.error(`[signal-trader] resuming open orders failed: ${errText(err)}`));
     }
     if (this.cfg.mode !== 'off' && bootJobsEnabled()) {
+      // Its own timer: the trigger poll above only runs while a trigger is armed (2026-11-16 fix).
+      this.sweepTimer = setInterval(() => void this.sweepStuckDecisions(Date.now()), 60_000);
+      this.sweepTimer.unref?.();
+      void this.sweepStuckDecisions(Date.now());
+    }
+    if (this.cfg.mode !== 'off' && bootJobsEnabled()) {
       void this.resumeTriggers().catch((err) => this.logger.error(`[signal-trader] resuming pending triggers failed: ${errText(err)}`));
     }
   }
@@ -316,6 +322,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
   }
 
   private lastSweepAt = 0;
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
   /** At most once a minute: close claimed-but-undecided rows older than STUCK_DECISION_MS. Never throws. */
   async sweepStuckDecisions(nowMs: number): Promise<number> {
     if (nowMs - this.lastSweepAt < 60_000) return 0;
@@ -879,10 +886,7 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
   private ensureTimer(): void {
     if (this.timer || this.pending.size === 0) return;
-    this.timer = setInterval(() => {
-      void this.checkTriggers(new Date());
-      void this.sweepStuckDecisions(Date.now());
-    }, Math.min(this.cfg.triggerPollSec, 5) * 1000);
+    this.timer = setInterval(() => void this.checkTriggers(new Date()), Math.min(this.cfg.triggerPollSec, 5) * 1000);
     (this.timer as { unref?: () => void }).unref?.();
   }
 
@@ -894,6 +898,8 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
   }
 
   onModuleDestroy(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }

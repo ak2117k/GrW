@@ -18,18 +18,18 @@ const candles = (n: number, stepMs: number) =>
 describe('MultiTimeframeReaderService (F3 data fix)', () => {
   it('with the owner userId it reads bars from the broker per timeframe and never from the database', async () => {
     const prisma = prismaFake(5);
-    const feeds = { fetchCandles: jest.fn().mockImplementation((_u, _t, _e, tf: string) => Promise.resolve(candles(300, tf === '1d' ? 86_400_000 : tf === '15m' ? 900_000 : 60_000))) };
+    const feeds = { fetchCandleWindow: jest.fn().mockImplementation((_u, _r, tf: string) => Promise.resolve(candles(300, tf === 'ONE_DAY' ? 86_400_000 : tf === 'FIFTEEN_MINUTE' ? 900_000 : 60_000))) };
     const svc = new MultiTimeframeReaderService(prisma as never, feeds as never);
     const v = await svc.read('ADANIGREEN', 'NSE', 'owner');
     expect(v).not.toBeNull();
-    expect(feeds.fetchCandles.mock.calls.map((c) => c[3])).toEqual(['1m', '15m', '1d']);
-    expect(feeds.fetchCandles.mock.calls[0].slice(0, 3)).toEqual(['owner', '3563', 'NSE']);
+    expect(feeds.fetchCandleWindow.mock.calls.map((c) => c[2])).toEqual(['ONE_MINUTE', 'FIFTEEN_MINUTE', 'ONE_DAY']);
+    expect(feeds.fetchCandleWindow.mock.calls[0].slice(0, 2)).toEqual(['owner', { token: '3563', exchange: 'NSE' }]);
     expect(prisma.candle.findMany).not.toHaveBeenCalled();
     expect(v!.lastBarIst).toBeDefined();
   });
   it('a broker failure falls back to stored bars and the read still returns (stale sources say so)', async () => {
     const prisma = prismaFake(150);
-    const feeds = { fetchCandles: jest.fn().mockRejectedValue(new Error('throttled')) };
+    const feeds = { fetchCandleWindow: jest.fn().mockRejectedValue(new Error('throttled')) };
     const svc = new MultiTimeframeReaderService(prisma as never, feeds as never);
     const v = await svc.read('ADANIGREEN', 'NSE', 'owner');
     expect(v).not.toBeNull();
@@ -37,10 +37,34 @@ describe('MultiTimeframeReaderService (F3 data fix)', () => {
     expect(v!.timeframes['15m']).toMatchObject({ available: false, reason: expect.stringMatching(/^stale/) });
   });
   it('the broker is cached per cadence: a second read inside a minute makes no new calls', async () => {
-    const feeds = { fetchCandles: jest.fn().mockResolvedValue(candles(300, 60_000)) };
+    const feeds = { fetchCandleWindow: jest.fn().mockResolvedValue(candles(300, 60_000)) };
     const svc = new MultiTimeframeReaderService(prismaFake(0) as never, feeds as never);
     await svc.read('ADANIGREEN', 'NSE', 'owner');
     await svc.read('ADANIGREEN', 'NSE', 'owner');
-    expect(feeds.fetchCandles).toHaveBeenCalledTimes(3);
+    expect(feeds.fetchCandleWindow).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('MultiTimeframeReaderService stale-while-revalidate', () => {
+  it('after the first read, a slow broker never delays a read: the cached view comes back at once', async () => {
+    let release: (v: unknown) => void = () => undefined;
+    const feeds = { fetchCandleWindow: jest.fn().mockResolvedValue(candles(300, 60_000)) };
+    const svc = new MultiTimeframeReaderService(prismaFake(0) as never, feeds as never);
+    const first = await svc.read('ADANIGREEN', 'NSE', 'owner');
+    expect(first).not.toBeNull();
+    feeds.fetchCandleWindow.mockImplementation(() => new Promise((r) => (release = r)));
+    const realNow = Date.now;
+    Date.now = () => realNow() + 10 * 60_000; // everything is due
+    try {
+      const t0 = realNow();
+      const second = await svc.read('ADANIGREEN', 'NSE', 'owner');
+      expect(realNow() - t0).toBeLessThan(200);
+      expect(second).toBe(first);
+      await new Promise((r) => setImmediate(r));
+      expect(feeds.fetchCandleWindow).toHaveBeenCalledTimes(4); // one background refresh started
+    } finally {
+      Date.now = realNow;
+      release(candles(300, 60_000));
+    }
   });
 });

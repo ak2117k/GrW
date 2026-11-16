@@ -21,11 +21,14 @@ const MIN_1M_ROWS = 300;
  * per-user path, paced by the session's historical gate), each timeframe on its own refresh cadence:
  * a held symbol costs ~1 call a minute on average. The account is throttled at times (16 Nov), so a
  * partial or failed fetch keeps the previous bars and the staleness guard decides whether they still count.
- * Lookbacks give EMA80 room: 1m 6 days, 15m 45 days, 1d 400 days.
+ * Lookbacks give EMA80 room: 1m 4 days, 15m 30 days, 1d 400 days.
  */
+/** Angel's getCandleData interval per timeframe; one window per call stays inside Angel's per-interval range limits (1m 30 d, 15m 200 d, 1d 2000 d). */
+export const ANGEL_INTERVAL = { '1m': 'ONE_MINUTE', '15m': 'FIFTEEN_MINUTE', '1d': 'ONE_DAY' } as const;
 export const BROKER_FETCH = {
-  '1m': { days: 6, refreshMs: 2 * 60_000 },
-  '15m': { days: 45, refreshMs: 5 * 60_000 },
+  // 3m EMA80 needs ~300 1m bars (< 1 session); 1h EMA80 needs ~100 hours (~15 sessions) of 15m.
+  '1m': { days: 4, refreshMs: 2 * 60_000 },
+  '15m': { days: 30, refreshMs: 5 * 60_000 },
   '1d': { days: 400, refreshMs: 6 * 3_600_000 },
 } as const;
 type BrokerTf = keyof typeof BROKER_FETCH;
@@ -37,7 +40,8 @@ type Inst = { id: string; exchange: string; token: string };
  * sentinel's services must never import anything that can reach order placement (structural spec).
  */
 export interface BarHistory {
-  fetchCandles(userId: string, token: string, exchange: string, timeframe: string, from: Date, to: Date): Promise<unknown>;
+  /** ONE paced getCandleData call for the window (no per-day chunking) — Angel interval names. */
+  fetchCandleWindow(userId: string, ref: { token: string; exchange: string }, interval: string, from: Date, to: Date): Promise<unknown>;
 }
 export const MTF_BAR_HISTORY = 'SENTINEL_MTF_BAR_HISTORY';
 type Candle = { timestamp: Date | string; open: number; high: number; low: number; close: number };
@@ -53,12 +57,13 @@ type Candle = { timestamp: Date | string; open: number; high: number; low: numbe
  *   - an index (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX) → its index token row (INDEX_UNDERLYINGS),
  *   - exchange MCX → the nearest live future of that name (symbol ending FUT),
  *   - else the NSE cash line (`<SYM>-EQ`, then `<SYM>`), falling back to an MCX future when no cash line exists.
- * Never throws: null + a warn on failure or no instrument. The view is cached 60 s per symbol+exchange.
+ * Never throws: null + a warn on failure or no instrument. Served stale-while-revalidate (refresh after 60 s).
  */
 @Injectable()
 export class MultiTimeframeReaderService {
   private readonly logger = new Logger(MultiTimeframeReaderService.name);
-  private readonly cache = new Map<string, { at: number; value: Promise<MultiTimeframeView | null> }>();
+  private readonly views = new Map<string, { at: number; view: MultiTimeframeView }>();
+  private readonly refreshing = new Map<string, Promise<MultiTimeframeView | null>>();
   private readonly brokerBars = new Map<string, { at: number; bars: Bar[] }>();
   private readonly warned = new Set<string>();
 
@@ -67,19 +72,39 @@ export class MultiTimeframeReaderService {
     @Optional() @Inject(MTF_BAR_HISTORY) private readonly feeds?: BarHistory,
   ) {}
 
+  /**
+   * Stale-while-revalidate: the packet never waits on the broker after the first read. A cached view
+   * (any age) is returned at once; when it is older than CACHE_MS one background refresh is started.
+   * The staleness guard inside the view still says when its bars are too old to use.
+   */
   read(symbol: string, exchange: string, userId?: string | null): Promise<MultiTimeframeView | null> {
     const sym = String(symbol ?? '').trim().toUpperCase();
     const ex = String(exchange ?? '').trim().toUpperCase();
     if (!sym) return Promise.resolve(null);
     const key = `${sym}:${ex}`;
     const now = Date.now();
-    const hit = this.cache.get(key);
-    if (hit && now - hit.at < CACHE_MS) return hit.value;
-    const value = this.load(sym, ex, userId ?? null);
-    this.cache.delete(key);
-    this.cache.set(key, { at: now, value });
-    if (this.cache.size > CACHE_MAX) this.cache.delete(this.cache.keys().next().value as string);
-    return value;
+    const hit = this.views.get(key);
+    if (hit) {
+      if (now - hit.at >= CACHE_MS && !this.refreshing.has(key)) this.refresh(key, sym, ex, userId ?? null, now);
+      return Promise.resolve(hit.view);
+    }
+    const pending = this.refreshing.get(key) ?? this.refresh(key, sym, ex, userId ?? null, now);
+    return pending;
+  }
+
+  private refresh(key: string, sym: string, ex: string, userId: string | null, at: number): Promise<MultiTimeframeView | null> {
+    const p = this.load(sym, ex, userId)
+      .then((view) => {
+        if (view) {
+          this.views.delete(key);
+          this.views.set(key, { at, view });
+          if (this.views.size > CACHE_MAX) this.views.delete(this.views.keys().next().value as string);
+        }
+        return view ?? this.views.get(key)?.view ?? null;
+      })
+      .finally(() => this.refreshing.delete(key));
+    this.refreshing.set(key, p);
+    return p;
   }
 
   private async load(sym: string, ex: string, userId: string | null): Promise<MultiTimeframeView | null> {
@@ -113,7 +138,7 @@ export class MultiTimeframeReaderService {
     if (hit && now - hit.at < BROKER_FETCH[tf].refreshMs) return hit.bars;
     try {
       const from = new Date(now - BROKER_FETCH[tf].days * 86_400_000);
-      const rows = ((await this.feeds.fetchCandles(userId, inst.token, inst.exchange, tf, from, new Date(now))) ?? []) as Candle[];
+      const rows = ((await this.feeds.fetchCandleWindow(userId, { token: inst.token, exchange: inst.exchange }, ANGEL_INTERVAL[tf], from, new Date(now))) ?? []) as Candle[];
       const bars: Bar[] = rows
         .map((c) => ({ ts: new Date(c.timestamp).getTime(), open: Number(c.open), high: Number(c.high), low: Number(c.low), close: Number(c.close) }))
         .filter((b) => Number.isFinite(b.ts));

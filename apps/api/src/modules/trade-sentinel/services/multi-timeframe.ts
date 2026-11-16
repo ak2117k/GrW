@@ -81,6 +81,17 @@ export interface MultiTimeframeView {
   alignment: Alignment;
   /** With `now` given: the newest bar of each source, IST text (null = none). Lets the reader see how fresh the read is. */
   lastBarIst?: { '1m': string | null; '15m': string | null; '1d': string | null };
+  /** With `now` given: the reference levels for a room check (null when unreadable). */
+  levels?: DayLevels;
+}
+
+/** Previous completed session's high / low, today's range so far, and the daily ATR14 (all on the underlying's scale). */
+export interface DayLevels {
+  prevDayHigh: number | null;
+  prevDayLow: number | null;
+  todayHigh: number | null;
+  todayLow: number | null;
+  dailyAtr14: number | null;
 }
 
 export interface MultiTimeframeInput {
@@ -444,7 +455,7 @@ export function multiTimeframeView(input: MultiTimeframeInput): MultiTimeframeVi
   return {
     timeframes,
     alignment: alignmentOf(timeframes),
-    ...(now !== undefined ? { lastBarIst: { '1m': lastOf(one), '15m': lastOf(fifteen), '1d': lastOf(daily) } } : {}),
+    ...(now !== undefined ? { lastBarIst: { '1m': lastOf(one), '15m': lastOf(fifteen), '1d': lastOf(daily) }, levels: dayLevels(daily, fifteen ?? [], ex, now) } : {}),
   };
 }
 
@@ -515,4 +526,21 @@ function testingNote(r: TimeframeRead, prefix: string): string {
   const lvl = r.testing === 'EMA20' ? r.ema20 : r.ema80;
   const side = r.close >= lvl ? 'above' : 'below';
   return `${prefix}testing ${r.testing} ${lvl} from ${side}`;
+}
+
+/** Room-check levels: the last COMPLETED daily bar before today, today's in-session 15m range, daily ATR14. Pure. */
+export function dayLevels(daily: readonly Bar[], fifteen: readonly Bar[], exchange: string, now: number): DayLevels {
+  const today = istDayStartUtc(now);
+  const d = sanitizeBars(daily);
+  const prev = [...d].reverse().find((b) => b.ts < today - 330 * 60_000) ?? null;
+  const todays = sessionBars(sanitizeBars(fifteen), exchange).filter((b) => b.ts >= today && b.ts <= now);
+  const completed = d.filter((b) => b.ts < today - 330 * 60_000);
+  const a = completed.length > 15 ? atr(completed, 14) : null;
+  return {
+    prevDayHigh: prev ? round(prev.high) : null,
+    prevDayLow: prev ? round(prev.low) : null,
+    todayHigh: todays.length ? round(Math.max(...todays.map((b) => b.high))) : null,
+    todayLow: todays.length ? round(Math.min(...todays.map((b) => b.low))) : null,
+    dailyAtr14: a !== null ? round(a) : null,
+  };
 }

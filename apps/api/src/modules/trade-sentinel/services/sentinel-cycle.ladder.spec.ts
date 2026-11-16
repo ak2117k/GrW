@@ -172,12 +172,19 @@ describe('SentinelCycleService — TARGET_LADDER', () => {
     expect(ruleRows(t.record)).toHaveLength(0);
   });
 
-  it('paper trackers, holdings and other engines\' positions get no ladder', async () => {
-    for (const e of [entry({ trackerId: 'paper:pt1' }), entry({ kind: 'HOLDING' }), entry({ ownership: 'OBSERVE_ONLY' })]) {
+  it('holdings and other engines\' positions get no ladder', async () => {
+    for (const e of [entry({ kind: 'HOLDING' }), entry({ ownership: 'OBSERVE_ONLY' })]) {
       const t = makeSvc({ entries: [e] });
       await t.pass('10:00:00', tick(141, 141));
       expect(t.planFor).not.toHaveBeenCalled();
     }
+  });
+
+  it('paper trackers get the ladder + profit lock from the cycle\'s own reader (2026-11-16, F4)', async () => {
+    const t = makeSvc({ entries: [entry({ trackerId: 'paper:pt1' })] });
+    await t.pass('10:00:00', tick(141, 141));
+    expect(t.planFor).toHaveBeenCalledTimes(1);
+    expect(t.planFor.mock.calls[0][0]).toMatchObject({ trackerId: 'paper:pt1' });
   });
 
   it('a manual trade whose targets cannot be set yet is asked again after LADDER_RETRY_MS, not every pass', async () => {

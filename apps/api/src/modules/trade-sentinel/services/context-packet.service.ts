@@ -44,6 +44,8 @@ import { MultiTimeframeReaderService } from './multi-timeframe-reader.service';
 
 /** F2/F3 (correctness review 2026-11-16): each read is skipped after this long so a slow DB never delays a verdict. */
 export const PACKET_EXTRA_READ_TIMEOUT_MS = 1_500;
+/** The entry judge's market read (marketRead): entries can wait longer for fresh bars and the chain. */
+export const MARKET_READ_TIMEOUT_MS = 20_000;
 
 /** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
 export const MBM_PACKET_LOG_EVERY_MS = 15 * 60_000;
@@ -1102,7 +1104,7 @@ export class ContextPacketService {
   }
 
   /** Resolve within PACKET_EXTRA_READ_TIMEOUT_MS or give null; never rejects. */
-  private async bounded<T>(label: string, fn: () => Promise<T | null>): Promise<T | null> {
+  private async bounded<T>(label: string, fn: () => Promise<T | null>, ms: number = PACKET_EXTRA_READ_TIMEOUT_MS): Promise<T | null> {
     let timer: NodeJS.Timeout | undefined;
     try {
       return await Promise.race([
@@ -1111,13 +1113,41 @@ export class ContextPacketService {
           return null;
         }),
         new Promise<null>((resolve) => {
-          timer = setTimeout(() => resolve(null), PACKET_EXTRA_READ_TIMEOUT_MS);
+          timer = setTimeout(() => resolve(null), ms);
           timer.unref?.();
         }),
       ]);
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  /**
+   * The market read for an UNDERLYING with no position yet (2026-11-16, the AI entry judge): the same
+   * news & events v2 blocks, option-chain read (flow.oiRead) and 5-timeframe read (indicators) the exit
+   * judge sees, each bounded and fail-open (null / an absent block with its reason). Never throws.
+   */
+  async marketRead(
+    underlying: string,
+    exchange: string,
+    userId: string | null,
+    spot: number,
+    now: Date = new Date(),
+  ): Promise<{ news: unknown; events: unknown; oiRead: unknown; indicators: unknown }> {
+    const at = now.toISOString();
+    const entry = { symbol: underlying, exchange, userId: userId ?? '' } as unknown as RosterEntry;
+    const tick = { structureSymbol: underlying, expiry: null, segment: 'OPT', underlyingLtp: spot } as unknown as TickSnapshot;
+    let newsEvents: { news: unknown; events: unknown } = { news: null, events: null };
+    try {
+      newsEvents = this.newsCfg?.computing ? this.v2Blocks(entry, tick, now, at) : { news: 'news & events are off', events: 'news & events are off' };
+    } catch (err) {
+      this.logger.warn(`market read (news/events) failed for ${underlying}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // An entry is not latency-critical: the reads get longer than the live packet's 1.5 s.
+    const oiRead = this.oiReader ? await this.bounded('oi-read', () => this.oiReader!.read(underlying, spot), MARKET_READ_TIMEOUT_MS) : null;
+    const ex = String(exchange).toUpperCase() === 'MCX' ? 'MCX' : 'NSE';
+    const indicators = this.mtfReader ? await this.bounded('multi-timeframe', () => this.mtfReader!.read(underlying, ex, userId), MARKET_READ_TIMEOUT_MS) : null;
+    return { ...newsEvents, oiRead, indicators };
   }
 
   /** F2 block, or null (off, cash equity, no underlying, no chain). */

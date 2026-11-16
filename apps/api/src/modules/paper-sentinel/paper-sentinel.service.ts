@@ -28,6 +28,7 @@ import { cutLossK15, type N15Reading } from '../exit-discipline/cut-loss-yardsti
 import type { SessionClock } from '../market-hub/session-clock';
 import { PaperLookRepository } from '../trade-sentinel/paper/paper-look.repository';
 import { paperTrackerId, tradeIdOf } from '../trade-sentinel/paper/paper-tracker';
+import { paperLadderFrom } from './paper-ladder.reader';
 import { ExitNoiseReadService } from '../exit-noise/exit-noise.service';
 import { carryWindowFor, parseCarryConfig } from '../intraday-carry/domain/carry-config';
 import {
@@ -178,7 +179,8 @@ export class PaperSentinelService {
       undefined, // no exit attempts: nothing is ever executed for a paper trade
       gateCfg,
       undefined, // no owner alerts
-      undefined, // no target ladder
+      // Target ladder + profit lock on paper too (2026-11-16, F4): the paper trade's own plan. PAPER_LADDER=off disables.
+      paperLadderFrom(prisma, process.env.PAPER_LADDER),
       // Intraday carry on paper (2026-11-04, D12): the paper trade's own product, and the CARRY/EXIT
       // window while INTRADAY_CARRY is live — IntradayCarryService simulates the decision.
       {

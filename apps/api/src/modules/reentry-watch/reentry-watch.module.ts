@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
 import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { sendOpsAlert } from '../../common/utils/ops-alert';
@@ -26,7 +27,8 @@ import { REENTRY_ALERT, REENTRY_CLOCK, REENTRY_MASTER, REENTRY_QUOTES, REENTRY_S
  * Prisma / trade-engine only), so neither module is changed to export them.
  */
 @Module({
-  imports: [PrismaModule, MarketDataModule, TradeEngineModule],
+  // TradeSentinelModule: the AI entry judge (EntryJudgeService).
+  imports: [PrismaModule, MarketDataModule, TradeEngineModule, TradeSentinelModule],
   providers: [
     ReentryWatchRepository,
     ReentryWatchService,

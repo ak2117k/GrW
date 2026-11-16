@@ -21,6 +21,10 @@ import {
 } from './domain/reentry-rules';
 import { REENTRY_OF_TAG, REENTRY_SOURCE, REENTRY_STRATEGY, REENTRY_TAG, REENTRY_WATCH_CONFIG, type ReentryWatchConfig } from './reentry-watch.config';
 import { ReentryWatchRepository } from './reentry-watch.repository';
+import { EntryJudgeService } from '../trade-sentinel/services/entry-judge.service';
+
+/** After the AI entry judge declines a re-entry, the same watch may ask again only after this long. */
+export const REENTRY_JUDGE_RETRY_MS = 10 * 60_000;
 
 export const REENTRY_CLOCK = Symbol('REENTRY_CLOCK');
 export const REENTRY_MASTER = Symbol('REENTRY_MASTER');
@@ -73,6 +77,8 @@ export class ReentryWatchService {
   private running = false;
   /** The last recorded category per watch (a row is written only when it changes). */
   private readonly last = new Map<string, string>();
+  /** Per watch: when the AI entry judge may be asked again after declining (REENTRY_JUDGE_RETRY_MS). */
+  private readonly judgeRetryAt = new Map<string, number>();
 
   constructor(
     @Inject(REENTRY_WATCH_CONFIG) private readonly cfg: ReentryWatchConfig,
@@ -86,6 +92,8 @@ export class ReentryWatchService {
     private readonly oi: SignalOiCheckService,
     private readonly paper: EntryEnginePaperService,
     @Optional() @Inject(REENTRY_ALERT) private readonly alert?: AlertFn,
+    // F4 (2026-11-16): the AI entry judge decides every SIGNAL before a re-entry is opened (ENTRY_AI_JUDGE).
+    @Optional() private readonly judge?: EntryJudgeService,
   ) {
     for (const p of cfg.problems) this.logger.warn(`[reentry-watch] ${p}`);
   }
@@ -202,6 +210,8 @@ export class ReentryWatchService {
     }
     const result: WatchResult = { watchKey: key, underlying: x.underlying, action: verdict.action, category: verdict.category, decisionId: null, opened: null };
     if (this.last.get(key) === verdict.category) return result;
+    // The AI judge declined this watch recently: unchanged until its retry time (no row, no new question).
+    if (verdict.action === 'SIGNAL' && (this.judgeRetryAt.get(key) ?? 0) > at.getTime()) return result;
     this.last.set(key, verdict.category);
 
     const id = randomUUID();
@@ -220,7 +230,30 @@ export class ReentryWatchService {
     if (verdict.action !== 'SIGNAL' || !ctx || !x.underlying) return result;
     if (this.cfg.mode !== 'paper') return { ...result, note: 'not paper: nothing opened' };
 
+    // AI ENTRY JUDGE: a rule trigger alone ("1 N past the exit point") never opens — the full analysis decides.
+    const judged = this.judge
+      ? await this.judge.judge(
+          {
+            source: 'REENTRY_WATCH',
+            underlying: x.underlying,
+            optionExchange: ctx.optionExchange,
+            direction: verdict.enter as Direction,
+            price,
+            why: verdict.reasons,
+            engineInputs: { reentryOf: { symbol: x.symbol, origin: x.origin, kind: x.kind, side: x.side, exitAt: x.exitAt, exitPrice: x.exitPrice }, underlyingAtExit: ref, move: verdict.move, direction: verdict.direction, trend: ctx.trend },
+            userId: this.signalCfg.ownerUserId ?? null,
+          },
+          at,
+        )
+      : null;
+    if (judged && !judged.open) {
+      this.judgeRetryAt.set(key, at.getTime() + REENTRY_JUDGE_RETRY_MS);
+      this.last.delete(key); // asked again after the retry time if the trigger still stands
+      await this.repo.settleDecision(id, null, `paper: not opened — ${judged.note}`, null);
+      return { ...result, note: judged.note };
+    }
     const opened = await this.openPaper(id, key, x.underlying, verdict, price, at);
+    if (judged) opened.note = `${opened.note}; ${judged.note}`;
     await this.repo.settleDecision(id, opened.tradeId, opened.note, opened.plan);
     const text = alertText({ underlying: x.underlying, original, verdict, exitAt: x.exitAt, ref, price, opened: opened.tradeId ? { tradingsymbol: opened.symbol ?? '?', price: opened.price } : null, note: opened.note });
     await (this.alert ?? sendOpsAlert)(`reentry-watch:${id}`, text).catch(() => false);

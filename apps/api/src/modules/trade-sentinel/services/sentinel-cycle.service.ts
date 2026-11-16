@@ -1527,7 +1527,9 @@ export class SentinelCycleService {
     now: Date,
   ): Promise<{ block: PacketLadder; reading: LadderReading } | null> {
     const reader = this.ladderPlans;
-    if (!reader || entry.ownership !== 'SENTINEL' || entry.kind !== 'POSITION' || isPaperTracker(entry.trackerId)) return null;
+    // Paper too (2026-11-16, F4): the paper cycle passes its own reader (paper-ladder.reader.ts); the live
+    // cycle's reader never sees a paper tracker. Holdings and other engines' positions stay out.
+    if (!reader || entry.ownership !== 'SENTINEL' || entry.kind !== 'POSITION') return null;
     const entryPrice = tick.entryPrice;
     if (!(entryPrice > 0) || !Number.isFinite(tick.ltp) || !(tick.ltp > 0)) return null;
     try {

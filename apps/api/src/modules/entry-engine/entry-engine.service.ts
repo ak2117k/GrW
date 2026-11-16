@@ -20,6 +20,7 @@ import { NEWS_THEME, newsTheme } from './domain/news-theme';
 import { ENTRY_ENGINE_CONFIG, type EntryEngineConfig } from './entry-engine.config';
 import { EntryEnginePaperService } from './entry-engine-paper.service';
 import { EntryEngineRepository } from './entry-engine.repository';
+import { EntryJudgeService } from '../trade-sentinel/services/entry-judge.service';
 
 export const ENGINE_CLOCK = Symbol('ENGINE_CLOCK');
 export const ENGINE_MASTER = Symbol('ENGINE_MASTER');
@@ -77,6 +78,8 @@ export class EntryEngineService {
     // 2026-11-04: the event calendar (market_events + MARKET_EVENT_DAYS) for the decision's reasons.
     // Optional: without it the decision simply carries no event line.
     @Optional() private readonly events?: MarketEventsRepository,
+    // F4 (2026-11-16): the AI entry judge decides every ENTER before a trade is opened (ENTRY_AI_JUDGE).
+    @Optional() private readonly judge?: EntryJudgeService,
   ) {
     for (const p of cfg.problems) this.logger.warn(`[entry-engine] ${p}`);
   }
@@ -201,9 +204,29 @@ export class EntryEngineService {
       await this.repo.settleDecision(id, null, `paper: not opened — ${guards.reasons.join('; ')}`);
       return { underlying, decisionId: id, action, opened: null, note: guards.reasons.join('; ') };
     }
+    // AI ENTRY JUDGE: the owner's full analysis (5 timeframes, OI, room, today's exits, news/events) on this ENTER.
+    const judged = this.judge
+      ? await this.judge.judge(
+          {
+            source: 'ENTRY_ENGINE',
+            underlying,
+            optionExchange,
+            direction: action === 'ENTER_CE' ? 'BULLISH' : 'BEARISH',
+            price: trend.price,
+            why: reasons,
+            engineInputs: { gates: { indicators: readings.indicators, extension: readings.extension }, oi },
+            userId: this.signalCfg.ownerUserId ?? null,
+          },
+          at,
+        )
+      : null;
+    if (judged && !judged.open) {
+      await this.repo.settleDecision(id, null, `paper: not opened — ${judged.note}`);
+      return { underlying, decisionId: id, action, opened: null, note: judged.note };
+    }
     const opened = await this.openPaper(id, underlying, decision, reasons, trend.price, at);
     if (opened.tradeId && inIndexCluster(underlying)) pass.clusterEntered.push(underlying.toUpperCase());
-    await this.repo.settleDecision(id, opened.tradeId, opened.note);
+    await this.repo.settleDecision(id, opened.tradeId, judged ? `${opened.note}; ${judged.note}` : opened.note);
     return { underlying, decisionId: id, action, opened: opened.tradeId, note: opened.note };
   }
 

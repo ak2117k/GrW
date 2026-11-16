@@ -8,6 +8,7 @@ import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service
 import { SessionClock, parseLateClose } from '../market-hub/session-clock';
 import { MarketEventsRepository } from '../news-events/events/market-events.repository';
 import { TradeEngineModule } from '../trade-engine/trade-engine.module';
+import { TradeSentinelModule } from '../trade-sentinel/trade-sentinel.module';
 import { parseSignalTraderConfig } from '../signal-trader/domain/signal-trader.config';
 import { SignalTraderRepository } from '../signal-trader/repositories/signal-trader.repository';
 import { SignalOiCheckService } from '../signal-trader/services/signal-oi-check.service';
@@ -26,7 +27,8 @@ import { ENGINE_CLOCK, ENGINE_MASTER, ENGINE_QUOTES, ENGINE_SIGNAL_CONFIG, Entry
  * for the DB-only OI read, so signal-trader's module is untouched.
  */
 @Module({
-  imports: [PrismaModule, MarketDataModule, TradeEngineModule],
+  // TradeSentinelModule: the AI entry judge (EntryJudgeService) and the shared market read.
+  imports: [PrismaModule, MarketDataModule, TradeEngineModule, TradeSentinelModule],
   providers: [
     EntryEngineRepository,
     EntryEnginePaperService,

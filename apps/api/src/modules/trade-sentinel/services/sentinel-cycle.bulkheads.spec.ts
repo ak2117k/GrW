@@ -169,3 +169,55 @@ describe('hard time limits', () => {
     expect(ticks.tickFor.mock.calls.filter((c) => c[0] === 'a')).toHaveLength(1);
   });
 });
+
+describe('fast hard-loss guard (a stuck position still gets its ₹ loss check)', () => {
+  const saved = { ...process.env };
+  beforeEach(() => {
+    process.env.HARD_LOSS_EXIT_RUPEES = '2000';
+    process.env.HARD_LOSS_CAP_RUPEES = '3000';
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    process.env = { ...saved };
+  });
+
+  async function stuckAt(ltp: number, id = 'a') {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const t = makeSvc();
+    t.build.mockResolvedValue([{ ...entry(id), symbol: 'NIFTY23NOV2624000CE' }]);
+    const ticks = (t.svc as unknown as { ticks: { tickFor: jest.Mock; quickPrice?: jest.Mock } }).ticks;
+    ticks.tickFor.mockImplementation(() => new Promise(() => undefined));
+    ticks.quickPrice = jest.fn().mockResolvedValue({ segment: 'OPT', side: 'LONG', entryPrice: 100, qty: 750, ltp, source: 'hub' });
+    const record = (t.svc as unknown as { verdicts: { record: jest.Mock } }).verdicts.record;
+    for (let i = 0; i < 4; i++) {
+      const p = t.svc.startForUser('u1', new Date(T0.getTime() + i * 30_000));
+      await flush();
+      jest.advanceTimersByTime(SENSOR_PASS_TIMEOUT_MS + 1);
+      await p;
+      await flush();
+      jest.advanceTimersByTime(30_000);
+      await flush();
+    }
+    return { record, quick: ticks.quickPrice };
+  }
+
+  it('a real position past the ₹ loss limit is exited by rule even though its full look is stuck', async () => {
+    const { record, quick } = await stuckAt(80); // −₹15,000 gross on 750 qty
+    expect(quick).toHaveBeenCalled();
+    const exits = record.mock.calls.map((c) => c[0]).filter((v) => v.verdict === 'EXIT_NOW');
+    expect(exits).toHaveLength(1);
+    expect(exits[0].reason).toMatch(/fast guard/);
+    expect(exits[0].promptVersion).toBe('rule:floor-hard/1');
+  });
+
+  it('a position in profit is never exited by the fast guard', async () => {
+    const { record } = await stuckAt(120);
+    expect(record.mock.calls.filter((c) => c[0].verdict === 'EXIT_NOW')).toHaveLength(0);
+  });
+
+  it('paper positions are never touched by the fast guard', async () => {
+    const { record, quick } = await stuckAt(80, 'paper:x');
+    expect(quick).not.toHaveBeenCalled();
+    expect(record.mock.calls.filter((c) => c[0].verdict === 'EXIT_NOW')).toHaveLength(0);
+  });
+});

@@ -1,3 +1,4 @@
+import { asLive } from '../../../common/utils/historical-priority';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { contractValueFactor } from '@td/shared';
 import { computeGreenFloor, isDerivativeSegment } from '../charges';
@@ -325,7 +326,22 @@ export interface TickOptions {
 /** Supplies the per-tick numbers a tripwire needs. Implemented over trade-tracker + market-data. */
 export interface TickSource {
   tickFor(trackerId: string, opts?: TickOptions): Promise<TickReading>;
+  /** Fast price-only read for the hard-loss guard (optional: a source without it gets no fast guard). */
+  quickPrice?(trackerId: string): Promise<QuickPrice>;
 }
+
+/** {@link TickSource.quickPrice}: the contract price and the position's shape, nothing slow. */
+export interface QuickPrice {
+  segment: TickReading['segment'];
+  side: TickReading['side'];
+  entryPrice: number;
+  qty: number;
+  ltp: number;
+  source: 'hub' | 'tracker';
+}
+
+/** The fast hard-loss guard's own price read is bounded by this. */
+export const QUICK_PRICE_TIMEOUT_MS = 5_000;
 
 /**
  * The factor readings the agent saw when it last looked at this trade, pulled
@@ -787,13 +803,16 @@ export class SentinelCycleService {
         this.logger.error(
           `sentinel pass for ${entry.symbol} skipped: its previous pass started ${Math.round((Date.now() - stuckSince) / 1000)} s ago and has not finished (a broker or data call is not answering)`,
         );
+        void this.rescueHardLoss(entry, now); // the stuck pass cannot run its hard-loss check: the fast guard does
         continue;
       }
       try {
         // A hard-floor exit (FLOOR_HARD_EXIT) is recorded detached into `jobs` beside the judgements.
         const started = Date.now();
         this.sensorRunning.set(entry.trackerId, started);
-        const pass = this.evaluateOne(entry, index, now, report, suppressed, futile, jobs);
+        // Live positions: their broker history calls go ahead of background work (historical-priority).
+        const run = () => this.evaluateOne(entry, index, now, report, suppressed, futile, jobs);
+        const pass = isPaperTracker(entry.trackerId) ? run() : asLive(run);
         void pass.then(
           () => this.sensorRunning.get(entry.trackerId) === started && this.sensorRunning.delete(entry.trackerId),
           () => this.sensorRunning.get(entry.trackerId) === started && this.sensorRunning.delete(entry.trackerId),
@@ -808,6 +827,8 @@ export class SentinelCycleService {
         report.failed += 1;
         const message = err instanceof Error ? err.message : String(err);
         this.logger.error(`sentinel cycle failed for ${entry.symbol}: ${message}`);
+        // The full pass never reached its hard-loss check: the fast guard runs it on the contract price alone.
+        if (message.startsWith('sensor pass timed out')) void this.rescueHardLoss(entry, now);
       }
     }
 
@@ -1303,6 +1324,69 @@ export class SentinelCycleService {
     if (!c.fire) return null;
     const reading: HardFloorReading = { trip: true, rule: 'MAX_LOSS', belowFloor: false, netRed: true, adverseFromBest: null, adverseFromBestN: null, loss };
     return { reading, floor: loss.band === 'CAP' && cfg.cap !== null ? -cfg.cap : -cfg.limit, netPnl: green.netPnl };
+  }
+
+  /**
+   * FAST HARD-LOSS GUARD (2026-11-16). On 16 Nov a newly opened real position (ADANIGREEN 09:26, ITC 14:42)
+   * sat minutes-to-hours with no hard-loss check because its full look was stuck on throttled data loads.
+   * When a real position's pass is stuck or timed out, this reads ONLY the contract price
+   * (TickSource.quickPrice, bounded) and applies HARD_LOSS_EXIT with the underlying unmeasured — i.e. the
+   * plain ₹limit rule, the documented fail-safe — confirmed over consecutive reads with the same memo as
+   * the full path, and records the rule EXIT_NOW without building a packet (the executor needs only the
+   * verdict row). Same scope as hardLossFor: SENTINEL-owned real derivatives, never paper, HOLD list
+   * respected. Never rejects.
+   */
+  private async rescueHardLoss(entry: RosterEntry, now: Date): Promise<void> {
+    try {
+      if (entry.ownership !== 'SENTINEL' || isPaperTracker(entry.trackerId) || !this.ticks.quickPrice) return;
+      const hold = this.gateCfg?.hold ?? this.futileCfg?.hold;
+      if (hold && isHeldPosition(hold, entry)) return;
+      const q = await withTimeout(this.ticks.quickPrice(entry.trackerId), QUICK_PRICE_TIMEOUT_MS, () => new Error('quick price read timed out'));
+      if (!isDerivativeSegment(q.segment)) return;
+      const vf = valueFactorOf(entry);
+      const cfg = hardLossConfig(process.env, lossLimitForTrade(entry.symbol, q.entryPrice * Math.abs(q.qty) * vf));
+      if (cfg.limit === null) return;
+      const green = computeGreenFloor({ segment: q.segment, entryPrice: q.entryPrice, ltp: q.ltp, qty: q.qty, side: q.side, valueFactor: vf });
+      const loss = hardLossReading({
+        netPnl: green.netPnl,
+        cfg,
+        exposure: exposureOf(entry.symbol, q.side),
+        underlying: null,
+        entryUnderlying: null,
+        bestUnderlying: null,
+        nUnderlying: null,
+        noise: null,
+      });
+      const state = this.stateFor(entry);
+      const c = confirmHardFloor(state.hardLoss, loss.trip, now.getTime());
+      state.hardLoss = c.memo;
+      if (!loss.trip) return;
+      this.logger.warn(`[hard-loss/fast] ${entry.symbol}: net ₹${Math.round(green.netPnl)} at LTP ${q.ltp} (${q.source}) — past −₹${cfg.limit}${c.fire ? ' — EXIT' : ' — confirming'}`);
+      if (!c.fire) return;
+      const floor = loss.band === 'CAP' && cfg.cap !== null ? -cfg.cap : -cfg.limit;
+      const detail = `net ₹${Math.round(green.netPnl)} reached the hard loss exit of ₹${-floor} at LTP ${q.ltp} — fast guard: the full look was stuck on a slow data call, so the underlying's move is unmeasured and the plain rule applies`;
+      await this.verdicts.record({
+        userId: entry.userId,
+        trackerId: entry.trackerId,
+        symbol: entry.symbol,
+        verdict: 'EXIT_NOW',
+        confidence: 'high',
+        thesisStatus: 'WEAKENING',
+        recoveryAvailable: true,
+        reason: `${FLOOR_HARD_EXIT_REASON_PREFIX} MAX_LOSS: ${detail}`.slice(0, 500),
+        evidence: ['position.ltp', 'money.netPnl'],
+        invalidationPoint: null,
+        reviewInSec: FLOOR_HARD_REFIRE_SEC,
+        packet: { fastGuard: { ltp: q.ltp, priceSource: q.source, entryPrice: q.entryPrice, qty: q.qty, side: q.side, netPnl: green.netPnl, limit: cfg.limit, at: now.toISOString() } } as never,
+        promptVersion: FLOOR_HARD_EXIT_STAMP,
+        triggeredBy: [FLOOR_HARD_EXIT_FIRE],
+        netPnl: green.netPnl,
+        greenFloor: null,
+      });
+      this.logger.warn(`[floor-hard-exit] EXIT_NOW recorded (fast guard) — ${entry.symbol} (tracker ${entry.trackerId}): MAX_LOSS: ${detail}`);
+    } catch (err) {
+      this.logger.error(`[hard-loss/fast] ${entry.symbol}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private hardFloorFor(

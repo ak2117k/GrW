@@ -1,3 +1,4 @@
+import { asLive } from '../../../common/utils/historical-priority';
 import { UserFeedSession } from './user-feed-session';
 import { AngelThrottleError } from './angel-throttle';
 import type { FeedState } from './user-feed.types';
@@ -807,4 +808,21 @@ describe('order client + order priority (2026-11-10)', () => {
     expect(d.smartApi.optionGreek).toHaveBeenCalledTimes(1);
     expect(d.smartApi.getCandleData).toHaveBeenCalledTimes(1);
   });
+});
+
+it('history queue: calls made for a LIVE position (asLive) are released before queued background calls', async () => {
+  const { s, d } = makeSession();
+  const order: string[] = [];
+  d.smartApi.getCandleData.mockImplementation(async (p: { symboltoken: string }) => {
+    order.push(p.symboltoken);
+    return { status: true, data: [] };
+  });
+  // Warm the session, then queue three background calls and one live call behind them.
+  await s.getCandleWindow('warm', 'NSE', 'ONE_MINUTE', new Date(0), new Date(60_000));
+  order.length = 0;
+  const bg = ['bg1', 'bg2', 'bg3'].map((t) => s.getCandleWindow(t, 'NSE', 'ONE_MINUTE', new Date(0), new Date(60_000)));
+  const live = asLive(() => s.getCandleWindow('live', 'NSE', 'ONE_MINUTE', new Date(0), new Date(60_000)));
+  await Promise.all([...bg, live]);
+  expect(order.indexOf('live')).toBeLessThan(order.indexOf('bg2'));
+  expect(order.filter((t) => t.startsWith('bg'))).toEqual(['bg1', 'bg2', 'bg3']); // FIFO within a tier
 });

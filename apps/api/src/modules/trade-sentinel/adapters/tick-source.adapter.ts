@@ -11,7 +11,7 @@ import { NewsAggregatorService } from '../../news/services/news-aggregator.servi
 import { startOfLocalDay } from '../../market-data/services/master-contract';
 import { segmentFor } from '../charges';
 import type { Segment, Side } from '../charges';
-import type { TickOptions, TickReading, TickRow, TickSource } from '../services/sentinel-cycle.service';
+import type { QuickPrice, TickOptions, TickReading, TickRow, TickSource } from '../services/sentinel-cycle.service';
 import {
   SPOT_SOURCE_CASH,
   SPOT_SOURCE_HUB,
@@ -317,6 +317,24 @@ export class SentinelTickSource implements TickSource {
           'to restore the broker-quote tier.',
       );
     }
+  }
+
+  /**
+   * The contract's price and the position's shape ONLY — no underlying, level book or news (2026-11-16).
+   * The cycle's fast hard-loss guard reads this when a position's full look is stuck on a slow data call.
+   * Same price rules as tickFor: the hub's fresh price, else the tracker's if ≤ the staleness bound
+   * (throws TickUnavailable otherwise — a stale price is never acted on).
+   */
+  async quickPrice(trackerId: string): Promise<QuickPrice> {
+    const row = await this.prisma.tradeTracker.findUnique({
+      where: { id: trackerId },
+      select: { userId: true, symbol: true, exchange: true, token: true, kind: true, entryPrice: true, qty: true, lastLtp: true, updatedAt: true },
+    });
+    if (!row) throw new TickUnavailable(`tracker ${trackerId} no longer exists`);
+    const hub = this.hubSource()?.hubFor(row.userId, 'positions') ?? null;
+    const hubLtp = this.hubContractPrice(hub, row as never);
+    const ltp = hubLtp ?? this.storedPrice(trackerId, row);
+    return { segment: segmentFor(row), side: sideFor(row.qty), entryPrice: row.entryPrice, qty: row.qty, ltp, source: hubLtp !== null ? 'hub' : 'tracker' };
   }
 
   async tickFor(trackerId: string, opts: TickOptions = {}): Promise<TickReading> {

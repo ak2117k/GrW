@@ -1,3 +1,4 @@
+import { isLiveHistorical } from '../../../common/utils/historical-priority';
 import { Logger } from '@nestjs/common';
 import { generateTOTP } from '../utils/angel-one-totp';
 import { withAngelLogin } from './angel-login-gate';
@@ -160,7 +161,9 @@ export class UserFeedSession implements UserFeedSessionLike {
   private state: FeedState = 'connecting';
 
   /** Session-wide pacing for getCandleData (see paceHistorical). */
-  private historicalQueue: Promise<void> = Promise.resolve();
+  private readonly historicalLive: Array<() => void> = [];
+  private readonly historicalNormal: Array<() => void> = [];
+  private historicalPumping = false;
   private lastHistoricalAt = 0;
 
   /** Shared login/connect promise so concurrent ensureConnected() share ONE login. */
@@ -544,17 +547,39 @@ export class UserFeedSession implements UserFeedSessionLike {
    * limit and the 403 → retry → dropped-chunk cascade turned seconds into minutes
    * (production, 2026-10-09). A failed call never stalls the calls behind it.
    */
+  /**
+   * Two-tier FIFO (2026-11-16): calls made for a REAL open position (`asLive`, common/utils/historical-priority)
+   * are released before background ones; within a tier, arrival order. Spacing is unchanged: one release per
+   * HISTORICAL_MIN_GAP_MS, an order call in flight still goes first (OrderPriorityGate).
+   */
   private paceHistorical<T>(call: () => Promise<T>): Promise<T> {
-    const slot = this.historicalQueue.then(async () => {
-      // An order call in flight on this account goes first (bounded; see OrderPriorityGate).
-      // Waited INSIDE the queue, so the pacing below still spaces the calls released after it.
-      await this.orderPriority.wait();
-      const wait = this.lastHistoricalAt + HISTORICAL_MIN_GAP_MS - Date.now();
-      if (wait > 0) await this.delay(wait);
-      this.lastHistoricalAt = Date.now();
-    });
-    this.historicalQueue = slot;
-    return slot.then(call);
+    const tier = isLiveHistorical() ? this.historicalLive : this.historicalNormal;
+    const released = new Promise<void>((resolve) => tier.push(resolve));
+    void this.pumpHistorical();
+    return released.then(call);
+  }
+
+  private async pumpHistorical(): Promise<void> {
+    if (this.historicalPumping) return;
+    this.historicalPumping = true;
+    try {
+      for (;;) {
+        const next = this.historicalLive.shift() ?? this.historicalNormal.shift();
+        if (!next) break;
+        try {
+          await this.orderPriority.wait();
+          const wait = this.lastHistoricalAt + HISTORICAL_MIN_GAP_MS - Date.now();
+          if (wait > 0) await this.delay(wait);
+        } catch {
+          // A failed wait must not strand the queue: release the call anyway (the broker paces it).
+        }
+        this.lastHistoricalAt = Date.now();
+        next();
+      }
+    } finally {
+      this.historicalPumping = false;
+      if (this.historicalLive.length > 0 || this.historicalNormal.length > 0) void this.pumpHistorical();
+    }
   }
 
   onTick(listener: TickListener): void {

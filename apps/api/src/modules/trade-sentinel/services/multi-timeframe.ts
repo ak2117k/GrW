@@ -79,6 +79,8 @@ export interface Alignment {
 export interface MultiTimeframeView {
   timeframes: Record<Tf, TimeframeResult>;
   alignment: Alignment;
+  /** With `now` given: the newest bar of each source, IST text (null = none). Lets the reader see how fresh the read is. */
+  lastBarIst?: { '1m': string | null; '15m': string | null; '1d': string | null };
 }
 
 export interface MultiTimeframeInput {
@@ -86,6 +88,80 @@ export interface MultiTimeframeInput {
   '1m'?: readonly Bar[];
   '15m'?: readonly Bar[];
   '1d'?: readonly Bar[];
+  /**
+   * Epoch ms. When given: (a) a source whose newest bar is older than the session it should cover is
+   * STALE and every timeframe built from it is reported unavailable with that reason — never a read of
+   * old bars presented as current; (b) today's forming daily bar is built from today's 15m bars when
+   * the daily series does not have it yet, so 1d reflects today's move.
+   */
+  now?: number;
+}
+
+/** Intraday source lag allowed past the latest expected bar (bars arrive late; 15m is stamped at its open). */
+export const STALE_LAG_MIN = { '1m': 10, '15m': 35 } as const;
+
+const istText = (ms: number) => new Date(ms + 330 * 60_000).toISOString().slice(0, 16).replace('T', ' ');
+const istDayStartUtc = (ms: number) => {
+  const d = new Date(ms + 330 * 60_000);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - 330 * 60_000;
+};
+const isWeekend = (dayStartUtc: number) => {
+  const wd = new Date(dayStartUtc + 330 * 60_000).getUTCDay();
+  return wd === 0 || wd === 6;
+};
+
+/**
+ * The newest instant an intraday source should have a bar for: `now` inside today's session, else the
+ * close of the latest weekday session at or before `now`. Holidays are not known here, so the day after
+ * one can read stale — stated as stale, which is the safe direction. Pure.
+ */
+export function expectedLatestBar(now: number, exchange: string): number {
+  const s = sessionFor(exchange);
+  let day = istDayStartUtc(now);
+  for (let i = 0; i < 10; i++) {
+    if (!isWeekend(day)) {
+      const open = day + s.open * 60_000;
+      const close = day + s.close * 60_000;
+      if (now >= open) return Math.min(now, close);
+    }
+    day -= DAY_MS;
+  }
+  return now;
+}
+
+/** Null when fresh, else the reason. 1d must include the previous weekday's (or today's) bar. Pure. */
+export function staleReason(source: '1m' | '15m' | '1d', bars: readonly Bar[], now: number, exchange: string): string | null {
+  if (bars.length === 0) return null; // "no bars" is reported by the builder itself
+  const last = bars[bars.length - 1].ts;
+  if (source === '1d') {
+    let prev = istDayStartUtc(now) - DAY_MS;
+    while (isWeekend(prev)) prev -= DAY_MS;
+    // Daily bars are stamped at IST midnight (or 00:00 UTC by some sources): allow the whole previous weekday.
+    return last >= prev - 330 * 60_000 ? null : `stale: newest daily bar is ${istText(last).slice(0, 10)} — the previous session is missing`;
+  }
+  const expected = expectedLatestBar(now, exchange);
+  const lag = STALE_LAG_MIN[source] * 60_000;
+  return last >= expected - lag ? null : `stale: newest ${source} bar is ${istText(last)} IST, expected one near ${istText(expected)} IST`;
+}
+
+/**
+ * The daily series with today's forming bar appended (built from today's in-session 15m bars) when the
+ * series has no bar for today yet. Pure.
+ */
+export function withTodayDaily(daily: readonly Bar[], fifteen: readonly Bar[], exchange: string, now: number): Bar[] {
+  const today = istDayStartUtc(now);
+  const out = [...daily];
+  if (out.length && out[out.length - 1].ts >= today - 330 * 60_000) return out; // already has today (either stamp)
+  const todays = sessionBars(sanitizeBars(fifteen), exchange).filter((b) => b.ts >= today && b.ts <= now);
+  if (todays.length === 0) return out;
+  out.push({
+    ts: today,
+    open: todays[0].open,
+    high: Math.max(...todays.map((b) => b.high)),
+    low: Math.min(...todays.map((b) => b.low)),
+    close: todays[todays.length - 1].close,
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -336,21 +412,40 @@ function verdictOf(trend: Trend, h: number, slope: HistSlope, loc: Location): Ve
 
 export function multiTimeframeView(input: MultiTimeframeInput): MultiTimeframeView {
   const ex = input.exchange;
+  const now = input.now;
   const one = input['1m'];
   const fifteen = input['15m'];
-  const daily = sanitizeBars(input['1d']);
+  let daily = sanitizeBars(input['1d']);
 
-  const build = (tf: Tf, bars: Bar[] | null, missing: string): TimeframeResult =>
-    bars === null ? { available: false, tf, reason: missing } : timeframeRead(bars, tf, { structure: STRUCTURE_TFS.has(tf) });
+  // Staleness (only with `now`): a stale source yields no timeframe at all, with the reason.
+  const stale1m = now !== undefined && one ? staleReason('1m', sanitizeBars(one), now, ex) : null;
+  const stale15 = now !== undefined && fifteen ? staleReason('15m', sanitizeBars(fifteen), now, ex) : null;
+  if (now !== undefined && fifteen && !stale15) daily = withTodayDaily(daily, fifteen, ex, now);
+  const stale1d = now !== undefined && input['1d'] ? staleReason('1d', daily, now, ex) : null;
+
+  const build = (tf: Tf, bars: Bar[] | null, missing: string, stale: string | null): TimeframeResult =>
+    stale
+      ? { available: false, tf, reason: stale }
+      : bars === null
+        ? { available: false, tf, reason: missing }
+        : timeframeRead(bars, tf, { structure: STRUCTURE_TFS.has(tf) });
 
   const timeframes: Record<Tf, TimeframeResult> = {
-    '3m': build('3m', one ? aggregateBars(one, 3, ex) : null, 'no 1m bars'),
-    '15m': build('15m', fifteen ? sessionBars(fifteen, ex) : null, 'no 15m bars'),
-    '30m': build('30m', fifteen ? aggregateBars(fifteen, 30, ex) : null, 'no 15m bars'),
-    '1h': build('1h', fifteen ? aggregateBars(fifteen, 60, ex) : null, 'no 15m bars'),
-    '1d': build('1d', input['1d'] ? daily : null, 'no daily bars'),
+    '3m': build('3m', one ? aggregateBars(one, 3, ex) : null, 'no 1m bars', stale1m),
+    '15m': build('15m', fifteen ? sessionBars(fifteen, ex) : null, 'no 15m bars', stale15),
+    '30m': build('30m', fifteen ? aggregateBars(fifteen, 30, ex) : null, 'no 15m bars', stale15),
+    '1h': build('1h', fifteen ? aggregateBars(fifteen, 60, ex) : null, 'no 15m bars', stale15),
+    '1d': build('1d', input['1d'] ? daily : null, 'no daily bars', stale1d),
   };
-  return { timeframes, alignment: alignmentOf(timeframes) };
+  const lastOf = (b: readonly Bar[] | undefined) => {
+    const s = sanitizeBars(b);
+    return s.length ? istText(s[s.length - 1].ts) : null;
+  };
+  return {
+    timeframes,
+    alignment: alignmentOf(timeframes),
+    ...(now !== undefined ? { lastBarIst: { '1m': lastOf(one), '15m': lastOf(fifteen), '1d': lastOf(daily) } } : {}),
+  };
 }
 
 type Lean = 'BULL' | 'BEAR' | 'NONE';

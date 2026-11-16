@@ -1135,7 +1135,7 @@ export class ContextPacketService {
     if (!this.mtfReader || !this.marketReadOn()) return null;
     if (!tick.structureSymbol) return null;
     const ex = entry.exchange === 'MCX' ? 'MCX' : 'NSE';
-    const v = await this.bounded('multi-timeframe', () => this.mtfReader!.read(tick.structureSymbol!, ex));
+    const v = await this.bounded('multi-timeframe', () => this.mtfReader!.read(tick.structureSymbol!, ex, entry.userId));
     if (!v) return null;
     return present(v as unknown as Prisma.InputJsonValue, 'multi-timeframe (candles: 3m from 1m, 15m, 30m and 1h from 15m, 1d; EMA20/EMA80, MACD 12/26/9, swing pivots; volume ignored)', at);
   }

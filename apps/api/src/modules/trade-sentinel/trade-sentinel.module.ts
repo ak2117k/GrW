@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
+import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
 import { SignalGeneratorModule } from '../signal-generator/signal-generator.module';
 import { NewsModule } from '../news/news.module';
 import { MarketCuesModule } from '../market-cues/market-cues.module';
@@ -24,7 +25,7 @@ import { ThesisService } from './services/thesis.service';
 import { ANTHROPIC_CLIENT, SentinelAgentService } from './services/sentinel-agent.service';
 import { OiWallSnapshotService } from './services/oi-wall-snapshot.service';
 import { OiReadService } from './services/oi-read.service';
-import { MultiTimeframeReaderService } from './services/multi-timeframe-reader.service';
+import { MTF_BAR_HISTORY, MultiTimeframeReaderService } from './services/multi-timeframe-reader.service';
 import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.service';
 import { SentinelRunnerService } from './services/sentinel-runner.service';
 import { TickSensorBook } from './services/tick-sensor-book';
@@ -281,6 +282,8 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     // Correctness review F2/F3: the packet's flow.oiRead and indicators reads (optional deps there).
     OiReadService,
     MultiTimeframeReaderService,
+    // F3 broker history over the owner's session; the reader sees only the BarHistory port.
+    { provide: MTF_BAR_HISTORY, useExisting: UserFeedManager },
     ThesisService,
     SentinelAgentService,
     OiWallSnapshotService,

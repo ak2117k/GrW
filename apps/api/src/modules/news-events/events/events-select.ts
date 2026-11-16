@@ -1,6 +1,7 @@
 import { istAt, istYmd } from '../../market-cues/fetchers/ist-dates';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { MAX_EVENTS } from '../config';
+import { newsWindowStart } from '../config';
 import type { EventView, EventsPeek, NewsPosition, StoredMarketEvent } from '../types';
 import { addDaysYmd, istLabel } from './zoned-time';
 
@@ -55,8 +56,18 @@ export function selectEvents(all: readonly StoredMarketEvent[], p: NewsPosition,
       id: e.id, kind: e.kind, scope: e.scope, title: e.title, impact: e.impact, source: e.source, allDay: e.allDay,
       atIst: e.allDay ? `${day} (time not announced)` : istLabel(e.startsAt),
       minutesAway: e.allDay && day === today ? 0 : Math.max(0, Math.round((e.startsAt.getTime() - nowMs) / 60_000)),
+      status: (e.allDay ? day < today : e.startsAt.getTime() < nowMs) ? 'happened' : e.allDay && day === today ? 'today' : 'upcoming',
     };
   };
+  // F1 (2026-11-16): company / commodity events that already happened since the previous session close
+  // (results out after the bell) stay visible, marked `happened`, so the next look weighs the outcome.
+  const since = newsWindowStart(nowMs);
+  const pastStartYmd = istYmd(new Date(since));
+  const past = all
+    .filter((e) => relevant(e, p) && e.scope !== 'market')
+    .filter((e) => (e.allDay ? istYmd(e.startsAt) < today && istYmd(e.startsAt) >= pastStartYmd : e.startsAt.getTime() < nowMs && e.startsAt.getTime() >= since))
+    .sort((a, b) => b.startsAt.getTime() - a.startsAt.getTime())
+    .slice(0, 2);
   const timedHigh = cands.filter((e) => e.impact === 'high' && !e.allDay);
   const allDayHigh = cands.find((e) => e.impact === 'high' && e.allDay);
   const minutesToNextHighImpact = timedHigh.length ? Math.max(0, Math.round((timedHigh[0].startsAt.getTime() - nowMs) / 60_000)) : null;
@@ -66,7 +77,7 @@ export function selectEvents(all: readonly StoredMarketEvent[], p: NewsPosition,
   ];
   return {
     status: 'ok',
-    events: cands.slice(0, MAX_EVENTS).map(view),
+    events: [...past.map(view), ...cands.slice(0, Math.max(0, MAX_EVENTS - past.length)).map(view)],
     minutesToNextHighImpact,
     noHighImpactReason: minutesToNextHighImpact !== null ? null
       : `no timed high-impact event in the next ${o.horizonTradingDays} trading days` +

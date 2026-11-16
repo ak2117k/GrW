@@ -89,7 +89,7 @@ describe('news & events v2 in the live packet', () => {
     expect(m.recentFor).not.toHaveBeenCalled();
     expect(Object.keys(p)).toEqual(['position', 'money', 'thesis', 'structure', 'flow', 'macro', 'news', 'events', 'session', 'trigger', 'memory']);
     expect(Object.keys(p.news)).toEqual(['headlines', 'freshCount', 'asOf']);
-    expect(p.news.headlines).toEqual({ available: true, value: OK_NEWS.status === 'ok' ? OK_NEWS.headlines : [], source: 'news-index (own → sector → index → market, published within 6h)', at: '2026-10-16T04:50:00.000Z' });
+    expect(p.news.headlines).toEqual({ available: true, value: OK_NEWS.status === 'ok' ? OK_NEWS.headlines : [], source: 'news-index (own → sector → index → market, own headlines since the previous session close, the other layers within 6h)', at: '2026-10-16T04:50:00.000Z' });
     expect(p.news.freshCount).toMatchObject({ available: true, value: 1 });
     expect(p.news.asOf).toMatchObject({ available: true, value: { lastIngestAt: '2026-10-16T04:55:00.000Z', downSources: [], stale: false } });
     expect(p.events?.upcoming).toMatchObject({ available: true, value: [{ kind: 'fomc', scope: 'market', title: 'FOMC rate decision', atIst: '2026-10-29 00:30 IST', minutesAway: 42, impact: 'high', source: 'config/market-events.json' }] });

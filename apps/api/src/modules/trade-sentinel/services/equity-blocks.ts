@@ -389,7 +389,7 @@ export function eventRiskBlock(i: EquityBlockInput): Block<EventRiskValue> {
   else if (i.events.upcoming.available) {
     seen.push('events.upcoming');
     for (const e of i.events.upcoming.value as unknown as Array<Record<string, unknown>>) {
-      if (e?.scope !== 'company') continue;
+      if (e?.scope !== 'company' || e?.status === 'happened') continue;
       const atIst = String(e.atIst ?? '');
       const allDay = atIst.endsWith('(time not announced)');
       const startMs = allDay ? istAt(atIst.slice(0, 10), 9, 15).getTime() : i.now.getTime() + Number(e.minutesAway) * 60_000;

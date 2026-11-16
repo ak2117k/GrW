@@ -2298,7 +2298,7 @@ export class SentinelCycleService {
     if (peek.status !== 'ok') return null;
     const live = new Set(peek.events.map((e) => e.id));
     for (const id of [...fired]) if (!live.has(id)) fired.delete(id);
-    const e = peek.events.find((x) => x.impact === 'high' && !x.allDay && x.minutesAway <= leadMin && !fired.has(x.id));
+    const e = peek.events.find((x) => x.impact === 'high' && !x.allDay && x.status !== 'happened' && x.minutesAway <= leadMin && !fired.has(x.id));
     return e ? { id: e.id, title: e.title, minutesAway: e.minutesAway } : null;
   }
 

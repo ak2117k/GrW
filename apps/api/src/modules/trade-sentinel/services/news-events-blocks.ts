@@ -13,7 +13,7 @@ type J = Prisma.InputJsonValue;
 const ok = <T>(value: T, source: string, at: string): Block<T> => ({ available: true, value, source, at });
 const no = (reason: string): Block<never> => ({ available: false, reason });
 
-export const NEWS_V2_SOURCE = 'news-index (own → sector → index → market, published within 6h)';
+export const NEWS_V2_SOURCE = 'news-index (own → sector → index → market, own headlines since the previous session close, the other layers within 6h)';
 export const FRESH_V2_SOURCE = 'news-index (own-instrument headlines in the last 30 minutes; inferred publish times excluded)';
 export const ASOF_SOURCE = 'news ingestion health (last successful fetch of any source; sources failing 6+ times in a row)';
 export const EVENTS_SOURCE =
@@ -63,7 +63,7 @@ export function newsBlocksV2(peek: NewsPeek | null, at: string): NewsBlocksV2 {
           asOf.stale ? `${NEWS_V2_SOURCE} — STALE: news as of ${asOfText}` : NEWS_V2_SOURCE,
           peek.newestAt ?? at,
         )
-      : no(`no headline about this instrument, its sector, its index or the market was published in the last 6 hours${caveat}`),
+      : no(`no headline about this instrument was published since the previous session close, nor about its sector, its index or the market in the last 6 hours${caveat}`),
     freshCount: ok(peek.freshCount, FRESH_V2_SOURCE, at),
     asOf: ok({ lastIngestAt: asOf.lastIngestAt, downSources: [...asOf.downSources], stale: asOf.stale } as J, ASOF_SOURCE, asOf.lastIngestAt ?? at),
   };
@@ -77,7 +77,7 @@ export function eventsBlocks(peek: EventsPeek | null, at: string, horizonDays: n
   return {
     upcoming: peek.events.length
       ? ok(
-          peek.events.map(({ kind, scope, title, atIst, minutesAway, impact, source }) => ({ kind, scope, title, atIst, minutesAway, impact, source })) as J,
+          peek.events.map(({ kind, scope, title, atIst, minutesAway, impact, source, status }) => ({ kind, scope, title, atIst, minutesAway, impact, source, ...(status ? { status } : {}) })) as J,
           `${EVENTS_SOURCE}${notes}`,
           peek.fetchedAt ?? at,
         )

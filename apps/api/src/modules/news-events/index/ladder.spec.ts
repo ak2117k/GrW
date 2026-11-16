@@ -61,13 +61,15 @@ describe('layeredHeadlines (R3)', () => {
     expect(h).toHaveLength(8);
     expect(h.every((x) => x.layer === 'instrument')).toBe(true);
   });
-  it('the 6 h window is applied BEFORE the cap: old own headlines never starve fresh lower layers', () => {
+  it('own headlines older than 6 h (back to the previous close) take at most 3 slots; other layers stay 6 h', () => {
     const i = ix();
     for (let k = 0; k < 20; k++) put(i, `old${k}`, 7 * 60 + k, { instruments: ['SBIN'] });
     put(i, 'fresh', 5, { instruments: ['SBIN'] });
     put(i, 'sec', 6, { sectors: ['NIFTY PSU BANK'] });
+    put(i, 'oldsec', 7 * 60, { sectors: ['NIFTY PSU BANK'] });
     const h = layeredHeadlines(i, ladderFor(stock('SBIN'), sectors), NOW).headlines;
-    expect(h.map((x) => x.layer)).toEqual(['instrument', 'sector']);
+    expect(h.map((x) => x.layer)).toEqual(['instrument', 'instrument', 'instrument', 'instrument', 'sector']);
+    expect(h.filter((x) => x.ageMin >= 360)).toHaveLength(3);
   });
   it('an article keeps its highest layer only (dedupe)', () => {
     const i = ix();

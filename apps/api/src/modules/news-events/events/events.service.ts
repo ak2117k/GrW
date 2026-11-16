@@ -84,7 +84,7 @@ export class EventsService implements EventsReader, OnApplicationBootstrap {
   }
 
   async reload(now: Date): Promise<void> {
-    this.all = await this.repo.listFrom(new Date(now.getTime() - 86_400_000));
+    this.all = await this.repo.listFrom(new Date(now.getTime() - 4 * 86_400_000)); // 4 d: happened events across a weekend (F1)
     this.fetchedAt = this.all.reduce<string | null>((m, e) => {
       const t = e.fetchedAt.toISOString();
       return m === null || t > m ? t : m;

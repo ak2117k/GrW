@@ -35,6 +35,16 @@ export class OiWallSnapshotService {
     @Inject(OI_WALL_SOURCE) private readonly oiWall: OiWallSource,
   ) {}
 
+  /**
+   * The candidate's raw OI, or null. Read structurally: `OiWallCandidate` does
+   * not declare `oi` yet (today `OiWallService.walls` / the adapter drop it), so
+   * this stays null in prod until the source passes OI through.
+   */
+  private static oiOf(c: unknown): number | null {
+    const v = (c as { oi?: unknown } | undefined)?.oi;
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+  }
+
   private warnOnce(symbol: string, cause: string, detail: string): void {
     const key = `${symbol}:${cause}`;
     if (this.warned.has(key)) return;
@@ -114,11 +124,19 @@ export class OiWallSnapshotService {
     // already exists for exactly this and nothing here should grow its own.
     const unchanged = prev !== null && prev.callWall === now.callWall && prev.putWall === now.putWall;
     if (!unchanged) {
-      // callWallOi/putWallOi are left unset: `LevelCandidate` carries only a rank
-      // score (30/20), never the open-interest figure, so there is no honest value
-      // to put in those columns. Writing the score there would be a lie.
+      // callWallOi/putWallOi carry the wall strike's raw open interest WHEN the
+      // source supplies it as `oi`. A rank `score` (30/20) is never used here —
+      // writing the score into an OI column would be a lie — so a candidate
+      // without a real `oi` leaves its column null.
       await this.prisma.oiWallSnapshot.create({
-        data: { symbol, expiry, callWall: now.callWall, putWall: now.putWall },
+        data: {
+          symbol,
+          expiry,
+          callWall: now.callWall,
+          putWall: now.putWall,
+          callWallOi: OiWallSnapshotService.oiOf(call),
+          putWallOi: OiWallSnapshotService.oiOf(put),
+        },
       });
     }
 

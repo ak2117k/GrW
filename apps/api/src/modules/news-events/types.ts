@@ -72,7 +72,12 @@ export interface MarketEventInput {
 export interface StoredMarketEvent extends MarketEventInput { id: string; fetchedAt: Date }
 
 /** One event as the packet renders it. */
-export interface PacketEvent { kind: string; scope: EventScope; title: string; atIst: string; minutesAway: number; impact: EventImpact; source: string }
+/**
+ * status (correctness review F1, 2026-11-16): `happened` = the event is past (its outcome — e.g. results — may already be in
+ * the headlines); `today` = an all-day event dated today; `upcoming` otherwise. Absent on rows built before it existed.
+ */
+export type EventStatus = 'upcoming' | 'today' | 'happened';
+export interface PacketEvent { kind: string; scope: EventScope; title: string; atIst: string; minutesAway: number; impact: EventImpact; source: string; status?: EventStatus }
 
 /** A packet event plus what the tripwire needs (stable id, all-day flag). */
 export interface EventView extends PacketEvent { id: string; allDay: boolean }

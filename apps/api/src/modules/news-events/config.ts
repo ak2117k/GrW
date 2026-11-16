@@ -20,6 +20,24 @@ export interface NewsEventsConfig {
 }
 
 export const NEWS_WINDOW_MS = 6 * 3_600_000;
+/** Overnight-aware window cap: the index keeps at most NEWS_INDEX_HOURS (≤ 72 h). */
+export const NEWS_WINDOW_MAX_MS = 72 * 3_600_000;
+const IST_OFFSET_MS = 19_800_000;
+
+/**
+ * Start of the headline window (correctness review F1, 2026-11-16). At least the last 6 h, and
+ * always back to the previous NSE session close (15:30 IST of the previous weekday) so results and
+ * news published after the close are still in front of the judge at the next open — the old 6 h
+ * window had dropped IDEA's 18:41 results by the 08:30 overnight look. Holidays only make it reach
+ * back to the previous weekday. Capped at {@link NEWS_WINDOW_MAX_MS}. Pure.
+ */
+export function newsWindowStart(now: number): number {
+  const ist = new Date(now + IST_OFFSET_MS);
+  let day = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate()) - 86_400_000;
+  while (new Date(day).getUTCDay() === 0 || new Date(day).getUTCDay() === 6) day -= 86_400_000;
+  const prevCloseUtc = day + (15 * 60 + 30) * 60_000 - IST_OFFSET_MS;
+  return Math.max(now - NEWS_WINDOW_MAX_MS, Math.min(now - NEWS_WINDOW_MS, prevCloseUtc));
+}
 export const FRESH_WINDOW_MS = 30 * 60_000;
 export const STALE_AFTER_MS = 30 * 60_000;
 export const DELTA_POLL_MS = 60_000;

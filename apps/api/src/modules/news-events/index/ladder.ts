@@ -1,6 +1,9 @@
-import { FRESH_WINDOW_MS, LAYER_CAPS, MAX_HEADLINES, NEWS_WINDOW_MS } from '../config';
+import { FRESH_WINDOW_MS, LAYER_CAPS, MAX_HEADLINES, NEWS_WINDOW_MS, newsWindowStart } from '../config';
 import { BANK_SECTORS, INDEX_SECTOR, instrumentKeysOf, MCX_GROUP } from '../keys';
 import type { FreshItem, IndexedArticle, LayeredHeadline, NewsLayer, NewsPosition, SectorLookup } from '../types';
+
+/** Own-instrument headlines older than 6 h (back to the previous close) take at most this many slots (F1). */
+export const OVERNIGHT_OWN_CAP = 3;
 
 export interface Rung { layer: NewsLayer; keys: string[] }
 type Lister = { list(key: string, sinceMs: number): readonly IndexedArticle[] };
@@ -27,14 +30,19 @@ export function ladderFor(p: NewsPosition, sectors: SectorLookup): Rung[] {
 
 /** R3: window first, every article claimed by the highest rung that sees it, ceilings 8/3/2/2, total 8. */
 export function layeredHeadlines(ix: Lister, rungs: readonly Rung[], now: number): { headlines: LayeredHeadline[]; newestAt: string | null } {
-  const since = now - NEWS_WINDOW_MS;
+  const since6h = now - NEWS_WINDOW_MS;
+  // F1: only the own-instrument rung reaches back past 6 h, to the previous session close
+  // (results after the bell), and such older headlines take at most OVERNIGHT_OWN_CAP slots.
+  const sinceOwn = newsWindowStart(now);
   const claimed = new Set<string>();
   const headlines: LayeredHeadline[] = [];
   for (const r of rungs) {
     const cands: Array<{ a: IndexedArticle; key: string }> = [];
+    let older = 0;
     for (const k of r.keys) {
-      for (const a of ix.list(k, since)) {
+      for (const a of ix.list(k, r.layer === 'instrument' ? sinceOwn : since6h)) {
         if (claimed.has(a.id)) continue;
+        if (a.publishedAt < since6h && ++older > OVERNIGHT_OWN_CAP) continue;
         claimed.add(a.id);
         cands.push({ a, key: k.slice(2) });
       }

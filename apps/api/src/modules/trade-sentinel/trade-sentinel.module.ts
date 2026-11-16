@@ -23,6 +23,8 @@ import {
 import { ThesisService } from './services/thesis.service';
 import { ANTHROPIC_CLIENT, SentinelAgentService } from './services/sentinel-agent.service';
 import { OiWallSnapshotService } from './services/oi-wall-snapshot.service';
+import { OiReadService } from './services/oi-read.service';
+import { MultiTimeframeReaderService } from './services/multi-timeframe-reader.service';
 import { SentinelCycleService, TICK_SOURCE } from './services/sentinel-cycle.service';
 import { SentinelRunnerService } from './services/sentinel-runner.service';
 import { TickSensorBook } from './services/tick-sensor-book';
@@ -276,6 +278,9 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     RosterService,
     TripwireService,
     ContextPacketService,
+    // Correctness review F2/F3: the packet's flow.oiRead and indicators reads (optional deps there).
+    OiReadService,
+    MultiTimeframeReaderService,
     ThesisService,
     SentinelAgentService,
     OiWallSnapshotService,
@@ -317,6 +322,8 @@ import { CloseProductBook } from '../intraday-carry/close-product-book';
     NEWS_SHIM,
     TripwireService,
     ContextPacketService,
+    OiReadService,
+    MultiTimeframeReaderService,
     ThesisService,
     SentinelAgentService,
     OiWallSnapshotService,

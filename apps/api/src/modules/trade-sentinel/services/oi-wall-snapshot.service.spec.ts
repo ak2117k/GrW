@@ -55,8 +55,31 @@ describe('OiWallSnapshotService', () => {
     // Top-scoring call strike is the call wall, top-scoring put strike the put wall.
     expect(result.now).toEqual({ callWall: 24200, putWall: 24000 });
     expect(create).toHaveBeenCalledWith({
-      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: 24200, putWall: 24000 },
+      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: 24200, putWall: 24000, callWallOi: null, putWallOi: null },
     });
+  });
+
+  it("stores the wall strikes' open interest when the source supplies it", async () => {
+    oiWall.walls.mockResolvedValue([
+      { price: 24200, kind: 'OI_CALL', oi: 152000 },
+      { price: 24400, kind: 'OI_CALL', oi: 98000 },
+      { price: 24000, kind: 'OI_PUT', oi: 131000 },
+    ]);
+    findFirst.mockResolvedValue(null);
+    await svc.captureAndCompare('NIFTY', '2026-08-28', 24100);
+    expect(create).toHaveBeenCalledWith({
+      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: 24200, putWall: 24000, callWallOi: 152000, putWallOi: 131000 },
+    });
+  });
+
+  it('never writes a rank score, or a non-positive/non-numeric oi, into the OI columns', async () => {
+    oiWall.walls.mockResolvedValue([
+      { price: 24200, kind: 'OI_CALL', score: 30 },
+      { price: 24000, kind: 'OI_PUT', score: 30, oi: 0 },
+    ]);
+    findFirst.mockResolvedValue(null);
+    await svc.captureAndCompare('NIFTY', '2026-08-28', 24100);
+    expect(create.mock.calls[0][0].data).toMatchObject({ callWallOi: null, putWallOi: null });
   });
 
   it('records a wall as null when the chain yields only one side', async () => {
@@ -100,7 +123,7 @@ describe('OiWallSnapshotService', () => {
     await svc.captureAndCompare('NIFTY', '2026-08-28', 24100);
 
     expect(create).toHaveBeenCalledWith({
-      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: 24200, putWall: 24000 },
+      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: 24200, putWall: 24000, callWallOi: null, putWallOi: null },
     });
   });
 
@@ -112,7 +135,7 @@ describe('OiWallSnapshotService', () => {
     await svc.captureAndCompare('NIFTY', '2026-08-28', 24100);
 
     expect(create).toHaveBeenCalledWith({
-      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: null, putWall: 24000 },
+      data: { symbol: 'NIFTY', expiry: '2026-08-28', callWall: null, putWall: 24000, callWallOi: null, putWallOi: null },
     });
   });
 

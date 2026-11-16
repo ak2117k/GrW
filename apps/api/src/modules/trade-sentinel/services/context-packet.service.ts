@@ -39,6 +39,11 @@ import { LESSONS_READER, type InjectedLesson, type InjectionScope, type LessonsR
 import { ConfigService } from '@nestjs/config';
 import { CASH_OI_WALLS_REASON, equityBlockEnabled, equityBlocks, isCashSegment, parseSquareOffIst, type EquityBlock, type EquityTickInputs } from './equity-blocks';
 import type { SquareOffDecision } from './square-off-look';
+import { OiReadService } from './oi-read.service';
+import { MultiTimeframeReaderService } from './multi-timeframe-reader.service';
+
+/** F2/F3 (correctness review 2026-11-16): each read is skipped after this long so a slow DB never delays a verdict. */
+export const PACKET_EXTRA_READ_TIMEOUT_MS = 1_500;
 
 /** MBM_PACKET=observe: at most one `[mbm-packet] would add …` line per position per this window. */
 export const MBM_PACKET_LOG_EVERY_MS = 15 * 60_000;
@@ -567,7 +572,19 @@ export type ContextPacket = {
      * noise units). Present only with exit discipline on — see `money.floorBasis`.
      */
     noiseUnit?: Block<Prisma.InputJsonValue>;
+    /**
+     * F2: the option-chain read of the UNDERLYING — OI and today's OI change per strike near spot, build-up
+     * type (long build-up / short build-up / short covering / long unwinding), support and resistance walls
+     * with whether they are being built or abandoned, PCR and a plain read. Absent key ⇒ off or no chain.
+     */
+    oiRead?: Block<Prisma.InputJsonValue>;
   };
+  /**
+   * F3: the owner's top-down chart read of the UNDERLYING on 3m / 15m / 30m / 1h / 1d — trend (EMA20 vs
+   * EMA80), MACD agreement, price vs the EMAs, swing structure, and how many timeframes align.
+   * Absent key ⇒ off or no candles.
+   */
+  indicators?: Block<Prisma.InputJsonValue>;
   macro: {
     /** The latest published FII/DII cash figures from the market-cues cache — post-close data, never intraday. */
     fiiDii: Block<Prisma.InputJsonValue>;
@@ -1073,7 +1090,55 @@ export class ContextPacketService {
      * block is off and every packet is exactly as before (the same rule as the judge gate's delta).
      */
     @Optional() private readonly config?: ConfigService,
+    /** F2 — optional: absent, or SENTINEL_MARKET_READ not exactly true, ⇒ no flow.oiRead key. */
+    @Optional() private readonly oiReader?: OiReadService,
+    /** F3 — optional: absent, or SENTINEL_MARKET_READ not exactly true, ⇒ no indicators key. */
+    @Optional() private readonly mtfReader?: MultiTimeframeReaderService,
   ) {}
+
+  /** F2/F3 switch: SENTINEL_MARKET_READ exactly `true` (the same parse the agent uses for the prompt lines). */
+  private marketReadOn(): boolean {
+    return String(this.config?.get<string>('SENTINEL_MARKET_READ') ?? '').trim().toLowerCase() === 'true';
+  }
+
+  /** Resolve within PACKET_EXTRA_READ_TIMEOUT_MS or give null; never rejects. */
+  private async bounded<T>(label: string, fn: () => Promise<T | null>): Promise<T | null> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        fn().catch((err) => {
+          this.logger.warn(`${label} failed while building packet: ${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        }),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), PACKET_EXTRA_READ_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** F2 block, or null (off, cash equity, no underlying, no chain). */
+  private async oiReadBlock(entry: RosterEntry, tick: TickSnapshot, at: string): Promise<Block<Prisma.InputJsonValue> | null> {
+    if (!this.oiReader || !this.marketReadOn()) return null;
+    if (isCashSegment(tick.segment) || !tick.structureSymbol) return null;
+    const spot = tick.underlyingLtp ?? 0;
+    const r = await this.bounded('oi-read', () => this.oiReader!.read(tick.structureSymbol!, spot));
+    if (!r) return null;
+    return present(r as unknown as Prisma.InputJsonValue, 'oi-read (option_chain_snapshots: latest chain vs the previous session last chain, same source and expiry)', (r as { asOf?: string }).asOf ?? at);
+  }
+
+  /** F3 block, or null (off, no underlying, no candles). */
+  private async indicatorsBlock(entry: RosterEntry, tick: TickSnapshot, at: string): Promise<Block<Prisma.InputJsonValue> | null> {
+    if (!this.mtfReader || !this.marketReadOn()) return null;
+    if (!tick.structureSymbol) return null;
+    const ex = entry.exchange === 'MCX' ? 'MCX' : 'NSE';
+    const v = await this.bounded('multi-timeframe', () => this.mtfReader!.read(tick.structureSymbol!, ex));
+    if (!v) return null;
+    return present(v as unknown as Prisma.InputJsonValue, 'multi-timeframe (candles: 3m from 1m, 15m, 30m and 1h from 15m, 1d; EMA20/EMA80, MACD 12/26/9, swing pivots; volume ignored)', at);
+  }
 
   /**
    * The equity block switch: on unless SENTINEL_EQUITY_BLOCK is exactly `false`; off without a
@@ -1284,6 +1349,9 @@ export class ContextPacketService {
     const at = now.toISOString();
     // MBM M3: started first so its (cached, ≤ 800 ms, fail-open) read overlaps the others. Never rejects.
     const marketBehaviourP = this.marketBehaviourBlock(entry, now, at);
+    // F2/F3: started early so their (cached, bounded, fail-open) reads overlap the others. Never reject.
+    const oiReadP = this.oiReadBlock(entry, tick, at);
+    const indicatorsP = this.indicatorsBlock(entry, tick, at);
 
     // MCX: qty is the master's lot unit, not the quotation unit (GOLD ₹100/pt per lot of qty 1).
     const valueFactor = contractValueFactor(entry.exchange, entry.symbol);
@@ -1374,6 +1442,8 @@ export class ContextPacketService {
 
     const v2b = v2 ? this.v2Blocks(entry, tick, now, at) : null;
     const marketBehaviour = await marketBehaviourP;
+    const oiRead = await oiReadP;
+    const indicators = await indicatorsP;
     const stockMove = this.stockMoveBlock(entry, now, at);
     // Equity spec §4: CASH positions only, behind SENTINEL_EQUITY_BLOCK — every F&O packet is unchanged.
     const cashEquity = this.equityOn() && isCashSegment(tick.segment);
@@ -1496,7 +1566,9 @@ export class ContextPacketService {
                 tick.oiWallsAt ?? at,
               ),
         ...(noiseUnit ? { noiseUnit } : {}),
+        ...(oiRead ? { oiRead } : {}),
       },
+      ...(indicators ? { indicators } : {}),
       macro: {
         ...macroBlocks(this.readMacro(now), now, {
           exchange: entry.exchange,

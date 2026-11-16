@@ -280,6 +280,8 @@ export class SentinelAgentService {
       delta: !!this.config && String(this.config.get<string>('SENTINEL_PACKET_DELTA') ?? '').trim().toLowerCase() !== 'false',
       // The cash-equity block (+e1): the SAME parse ContextPacketService uses to build it.
       equity: equityBlockEnabled(this.config),
+      // Correctness review F2/F3: the same parse ContextPacketService uses for flow.oiRead / indicators.
+      marketRead: String(this.config?.get<string>('SENTINEL_MARKET_READ') ?? '').trim().toLowerCase() === 'true',
       // The deadline look's packet framing (+s1): the same parse parseJudgeGateConfig uses for
       // SENTINEL_SQUARE_OFF_LOOK. No ConfigService at all ⇒ off (the +d1 rule).
       squareOff: !!this.config && String(this.config.get<string>('SENTINEL_SQUARE_OFF_LOOK') ?? '').trim().toLowerCase() !== 'false',

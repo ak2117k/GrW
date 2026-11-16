@@ -37,7 +37,7 @@ it('stale ingestion and down sources are named — in the source when there are 
 
 it('a healthy feed with no headline is a plain stated absence; freshCount stays a present 0 (we looked and saw none)', () => {
   const b = newsBlocksV2(news(0, 20, { lastIngestAt: AT, downSources: [], stale: false }), AT);
-  expect(b.headlines).toEqual({ available: false, reason: 'no headline about this instrument, its sector, its index or the market was published in the last 6 hours' });
+  expect(b.headlines).toEqual({ available: false, reason: 'no headline about this instrument was published since the previous session close, nor about its sector, its index or the market in the last 6 hours' });
   expect(b.freshCount).toMatchObject({ available: true, value: 3 });
 });
 

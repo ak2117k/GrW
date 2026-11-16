@@ -122,6 +122,8 @@ export interface SentinelPromptOptions {
   squareOff?: boolean;
   /** FLOOR_HARD_EXIT not exactly 'false' (parseExitDisciplineConfig), with discipline on: the +a1 money.anchors / hard-floor lines. */
   anchors?: boolean;
+  /** F2/F3: SENTINEL_MARKET_READ exactly 'true': the flow.oiRead / indicators lines (the packet carries the keys only then). */
+  marketRead?: boolean;
 }
 
 const VERSIONS: Record<'off' | 'trg' | 'ed' | 'ed+trg', { cues: string; noCues: string }> = {
@@ -257,17 +259,30 @@ export const V9_FRESHCOUNT_LINE =
   "- news.freshCount counts headlines about this position's own instrument published in the last 30 minutes; an article whose publication time had to be inferred is not counted.";
 /** v9 reading lines, inserted after the news.freshCount line with news on. Ends with a newline. */
 export const V9_NEWS_READING_LINES = [
-  '- news.headlines lists up to 8 headlines from the last 6 hours, each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.',
+  '- news.headlines lists up to 8 headlines — about this instrument since the previous session close (so results and news that came out after the close are included; at most 3 older than 6 hours), and about its sector, index and the market from the last 6 hours — each with its layer, key and ageMin (minutes since publication). Layer "instrument" is about this company, commodity or index itself; "sector" is its sector or commodity group; "index" is the index it belongs to; "market" is India or global news. Weigh them in that order: an instrument headline outweighs a sector headline, which outweighs index and market headlines.',
   '- news.asOf says when news was last ingested (lastIngestAt), names the sources that are down (downSources) and whether ingestion is stale. A stale or down source means you may not see a headline that exists — never read it as "nothing happened".',
-  '- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract\'s expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason.',
+  '- events.upcoming lists the scheduled events relevant to this position in the coming trading days — results and board meetings, ex-dates, central-bank decisions, inflation and jobs data, EIA inventory reports, OPEC meetings and this contract\'s expiry — each with atIst, minutesAway and impact; "(time not announced)" means only the date is known. events.minutesToNextHighImpact is the minutes until the nearest timed high-impact event, or unavailable with the reason. Each event has a status: "upcoming", "today" (an all-day event dated today — its outcome may already be out) or "happened" (already past — e.g. results declared after the previous close).',
+  '- Events change how to manage a trade, not just when to look. If the position was opened or is being held for an event (the thesis or memory says so, e.g. holding into results), ordinary price noise before the event is not a reason to exit — say that the trade is waiting for the event and what outcome would end it. Once the event is "today" or "happened", find its outcome in news.headlines (layer instrument) and judge the trade on it: an outcome against the position (results missed, loss widened, guidance cut, for a long) is strong evidence for EXIT_AT_OPEN or EXIT_NOW; an outcome for it supports HOLD. If the outcome is not in the headlines, say you cannot see it rather than assuming nothing happened.',
 ].join('\n') + '\n';
 /** v9 exit line (price triggers off): follows the reading lines. No trailing newline. */
-export const V9_NEWS_EXIT_LINE = '- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a shorter reviewIn.';
+export const V9_NEWS_EXIT_LINE = '- An upcoming event, or a sector, index or market headline, alone is never a reason for EXIT_NOW (an outcome on this instrument that went against the position is — see above). It may justify a shorter reviewIn.';
 /** v9 exit line with price triggers on — only then is there an exitTrigger to tighten. No trailing newline. */
 export const V9_NEWS_EXIT_LINE_TRIGGERS =
-  '- A headline or an upcoming event alone is never a reason for EXIT_NOW. It may justify a closer exitTrigger or a shorter reviewIn.';
+  '- An upcoming event, or a sector, index or market headline, alone is never a reason for EXIT_NOW (an outcome on this instrument that went against the position is — see above). It may justify a closer exitTrigger or a shorter reviewIn.';
 /** v9 blocks-line insert: replaces 'news.freshCount, ' in the blocks line with news on. */
 export const V9_BLOCKS_INSERT = 'news.freshCount, news.asOf, events.upcoming, events.minutesToNextHighImpact, ';
+
+/**
+ * Correctness review F2/F3 (2026-11-16): how to read flow.oiRead and indicators — the owner's top-down method
+ * (trend, MACD agreement, five timeframes, OI confirmation, structure). Always rendered; the keys are present
+ * only when the reads succeed. Ends with a newline.
+ */
+export const MARKET_READ_FIELD_LINE =
+  '- When present: flow.oiRead (the option chain of the underlying) and indicators (the chart of the underlying on five timeframes) — see below.\n';
+export const MARKET_READ_LINES = [
+  '- flow.oiRead, when present, is the option chain of the UNDERLYING (underlying scale, like flow.oiWalls). support and resistance are the strikes with the most put OI below spot and call OI above it — put writers defend support, call writers cap resistance, and price rarely breaks through a heavy wall without strong news or an unexpected event. Each wall has oiChg (today vs the previous session) and a trend: BUILT (writers adding — the wall is getting stronger), ABANDONED (writers leaving — the wall may give way) or STEADY. strikes lists the strikes near spot with buildUp per side: LONG_BUILDUP (OI up, premium up), SHORT_BUILDUP (OI up, premium down = fresh writing), SHORT_COVERING (OI down, premium up), LONG_UNWINDING (OI down, premium down). totals gives total call/put OI, their change and PCR; zone says where spot sits between support (0) and resistance (100). units says contracts or shares — never compare numbers across units. OI does not give direction by itself; use it to judge whether the chart\'s move has room or is running into a wall. Its read field is a plain summary.',
+  '- indicators, when present, reads the UNDERLYING\'s chart on 3m, 15m, 30m, 1h and 1d the way the owner does: for each timeframe the trend (EMA20 above EMA80 = UP), whether MACD agrees (histogram sign and whether it is rising or falling), where price sits against the two EMAs (and whether it is testing one — an EMA being tested is a level), the swing structure on 1d/1h/30m/15m (higher highs and higher lows = UPTREND, lower highs and lower lows = DOWNTREND, else RANGE, with the last swing high and low), and a verdict (BULLISH_CONFIRMED, BEARISH_CONFIRMED, BULLISH_WEAKENING, BEARISH_WEAKENING, MIXED). alignment counts the timeframes and names those that disagree with the daily; 1d is the higher-timeframe bias. Read top-down: a move with the daily and confirmed on most timeframes deserves room; a move against the daily, or a trend whose MACD is turning against it, is a warning. Then check flow.oiRead: does the option chain confirm the chart (no heavy wall just ahead in the trade\'s direction, the wall behind being BUILT)? Cite the timeframes and walls you used.',
+].join('\n') + '\n';
 
 /** The stamp suffix for the self-review lessons line (see the note on {@link SENTINEL_PROMPT_VERSION}). */
 export const LESSONS_VERSION_SUFFIX = '+l1';
@@ -335,7 +350,7 @@ const withNewsBlocks =(line: string, on: boolean): string => (on ? line.replace(
  * `ContextPacket` in context-packet.service.ts — when that type changes, this
  * text and SENTINEL_PROMPT_VERSION change with it.
  */
-function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta' | 'equity' | 'squareOff' | 'anchors'>): string {
+function renderPrompt(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'delta' | 'equity' | 'squareOff' | 'anchors' | 'marketRead'>): string {
   const text = withEquity(renderBase(o), !!o.equity);
   const anchors = !!o.anchors && o.discipline;
   if (!o.delta) return withAnchors(withSquareOff(text, !!o.squareOff, false), anchors, false);
@@ -436,7 +451,7 @@ function withSquareOff(text: string, on: boolean, delta: boolean): string {
 const TRIGGER_LINE =
   '- The "trigger" block says what woke you. It always has a value — a heartbeat entry when no sensor fired. A trigger is a reason to look, not a reason to exit.\n';
 
-function renderBase(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons'>): string {
+function renderBase(o: Pick<SentinelPromptOptions, 'triggers' | 'discipline' | 'news' | 'lessons' | 'marketRead'>): string {
   return `You are a trade sentinel watching a single open position in the Indian market.
 
 You receive one JSON context packet describing the position, its money, the entry thesis, market structure, flow, news, and your own prior verdicts on this trade. You return one verdict object. You have no tools and take no actions; another system decides what to do with your verdict.
@@ -458,13 +473,13 @@ ${o.discipline ? V7_FLOW_FIELDS : PRE_V7_FLOW_FIELDS}
 - macro: fiiDii, sector, globalCues, realFactors.
 ${o.news ? V9_NEWS_FIELDS : PRE_V9_NEWS_FIELDS}
 - session: nowIst, nowUtc, minutesToClose, expiry.
-- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
+${o.marketRead ? MARKET_READ_FIELD_LINE : ''}- The remaining top-level fields are thesis, trigger and memory. There are no other fields; anything else you might expect is simply not in this packet.
 
 Reading those fields:
 ${withNewsBlocks(o.discipline ? V7_BLOCKS_LINE : PRE_V7_BLOCKS_LINE, !!o.news)}
 - position.ltp is the CONTRACT's own price — for an option that is the premium, not the underlying. position.underlyingLtp carries the underlying's spot price.
 - SCALE HAZARD: structure.nearestSupport, structure.nearestResistance, structure.levelBook and flow.oiWalls are all on the UNDERLYING's scale. position.ltp is not. Compare them against position.underlyingLtp, never against position.ltp. If position.underlyingLtp is unavailable, you cannot place the position against levels or walls at all — say that instead of substituting ltp.
-- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
+${o.marketRead ? MARKET_READ_LINES : ''}- money.netPnl is charge-adjusted rupees; money.grossPnl is not. money.greenFloorPrice is a PRICE, and is a target while money.greenFloorArmed is false, a protective level once it is true.
 ${o.discipline ? V7_READING_LINES : ''}- money.mfe and money.mae are PRICES, not rupee figures, despite the names: they are the best and worst prices this position has traded at since entry, read from the side. Never report them as profit or loss amounts.
 - SOME PLAIN VALUES MAY BE null, and a null there carries no reason with it: money.greenFloorPrice, money.mfe, money.mae, position.expiry and session.expiry. A null money.mfe or money.mae means no excursion has been recorded — treat it as unseen, never as zero. A null money.greenFloorPrice means no floor could be solved, not a floor at zero. A null position.expiry or session.expiry means this instrument has no expiry OR that it could not be resolved, and the packet does not distinguish the two — do not reason about time to expiry from it.
 ${o.triggers ? V6_OWNERSHIP_LINE : V5_OWNERSHIP_LINE}

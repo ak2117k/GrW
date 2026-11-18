@@ -1,5 +1,7 @@
 # GrW — Deployment & Session Handoff
 
+> **SUPERSEDED (2026-11-18).** Render and Neon were retired in October 2026, and prod runs on the VPS. Use [`docs/handoffs/2026-11-18-full-project-handoff.md`](../handoffs/2026-11-18-full-project-handoff.md). This file is kept for history only.
+
 > Snapshot of the free-tier production deploy as of **2026-07-07**. The app is
 > **live end-to-end in paper mode**. This doc is the pick-up point for the next
 > session. Detailed setup steps live in [`FREE-DEPLOY-RUNBOOK.md`](./FREE-DEPLOY-RUNBOOK.md).

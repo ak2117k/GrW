@@ -2,6 +2,8 @@
 
 > Trade smarter, not harder. Every algorithm is a bet — make it a calculated one.
 
+> **CURRENT STATE / NEW MACHINE: read `docs/handoffs/2026-11-18-full-project-handoff.md` first.** The plan below is the original March design. Production now runs on a VPS (157.10.98.70), not Render/Neon. Live trading switches are on, and pushing `main` deploys to prod.
+
 ---
 
 ## Quick Reference

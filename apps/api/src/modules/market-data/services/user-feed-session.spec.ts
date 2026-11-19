@@ -1,5 +1,5 @@
 import { asLive } from '../../../common/utils/historical-priority';
-import { UserFeedSession } from './user-feed-session';
+import { HISTORICAL_BACKGROUND_MAX_WAIT_MS, HISTORICAL_LIVE_MAX_WAIT_MS, HistoricalQueueTimeout, UserFeedSession } from './user-feed-session';
 import { AngelThrottleError } from './angel-throttle';
 import type { FeedState } from './user-feed.types';
 
@@ -825,4 +825,36 @@ it('history queue: calls made for a LIVE position (asLive) are released before q
   await Promise.all([...bg, live]);
   expect(order.indexOf('live')).toBeLessThan(order.indexOf('bg2'));
   expect(order.filter((t) => t.startsWith('bg'))).toEqual(['bg1', 'bg2', 'bg3']); // FIFO within a tier
+});
+
+describe('history queue deadlines (2026-11-19, the 16 Nov freeze)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a call still queued past its deadline is dropped with HistoricalQueueTimeout and never reaches the broker', async () => {
+    const { s } = makeSession();
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const pace = (fn: () => Promise<string>) => (s as unknown as { paceHistorical: (f: () => Promise<string>) => Promise<string> }).paceHistorical(fn);
+    const first = jest.fn(async () => 'first');
+    const second = jest.fn(async () => 'second');
+    const p1 = pace(first); // released at once
+    const p2 = pace(second); // queued behind it
+    now += HISTORICAL_BACKGROUND_MAX_WAIT_MS + 1_000; // the background caller has long given up
+    await expect(p1).resolves.toBe('first');
+    await expect(p2).rejects.toBeInstanceOf(HistoricalQueueTimeout);
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it('a LIVE call gets the longer deadline: a 61 s wait is still served', async () => {
+    const { s } = makeSession();
+    let now = 2_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const pace = (fn: () => Promise<string>) => (s as unknown as { paceHistorical: (f: () => Promise<string>) => Promise<string> }).paceHistorical(fn);
+    const p1 = pace(async () => 'first');
+    const p2 = asLive(() => pace(async () => 'live'));
+    now += 61_000;
+    expect(61_000).toBeLessThan(HISTORICAL_LIVE_MAX_WAIT_MS);
+    await expect(p1).resolves.toBe('first');
+    await expect(p2).resolves.toBe('live');
+  });
 });

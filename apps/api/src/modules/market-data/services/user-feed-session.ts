@@ -77,6 +77,32 @@ const INITIAL_RECONNECT_DELAY_MS = 1000;
 /** Angel One WebSocket sends prices in paise. */
 const PAISE_DIVISOR = 100;
 
+/**
+ * How long a getCandleData/getOIData call may WAIT in the session's pacing queue before it is dropped.
+ * Live (a real open position's sentinel work): its packet build runs under the 300 s judge limit, so 120 s
+ * still leaves room to use the answer. Background (charts, paper, research, backfills): 60 s; nothing
+ * waiting longer than that is still being waited for.
+ */
+export const HISTORICAL_LIVE_MAX_WAIT_MS = 120_000;
+export const HISTORICAL_BACKGROUND_MAX_WAIT_MS = 60_000;
+/** Queue depth that counts as a backlog worth a log line (≈7 s of drain at 2.85/s). */
+const HISTORICAL_QUEUE_LOG_DEPTH = 20;
+
+/** A queued history call was dropped because it waited past its deadline; it never reached the broker. */
+export class HistoricalQueueTimeout extends Error {
+  constructor(waitedMs: number) {
+    super(`Angel history call dropped: waited ${Math.round(waitedMs / 1000)} s in the session queue (backlog) — not sent`);
+    this.name = 'HistoricalQueueTimeout';
+  }
+}
+
+interface QueuedHistorical {
+  release: () => void;
+  reject: (err: Error) => void;
+  queuedAt: number;
+  maxWaitMs: number;
+}
+
 /** The live login's tokens an order client is built with. Secrets: never log, never persist. */
 export interface OrderClientAuth {
   accessToken: string;
@@ -161,10 +187,13 @@ export class UserFeedSession implements UserFeedSessionLike {
   private state: FeedState = 'connecting';
 
   /** Session-wide pacing for getCandleData (see paceHistorical). */
-  private readonly historicalLive: Array<() => void> = [];
-  private readonly historicalNormal: Array<() => void> = [];
+  private readonly historicalLive: QueuedHistorical[] = [];
+  private readonly historicalNormal: QueuedHistorical[] = [];
   private historicalPumping = false;
   private lastHistoricalAt = 0;
+  /** Queue-health log (one line a minute at most, only when there is a backlog or drops). */
+  private historicalDropped = 0;
+  private lastQueueLogAt = 0;
 
   /** Shared login/connect promise so concurrent ensureConnected() share ONE login. */
   private connectPromise: Promise<void> | null = null;
@@ -552,11 +581,49 @@ export class UserFeedSession implements UserFeedSessionLike {
    * are released before background ones; within a tier, arrival order. Spacing is unchanged: one release per
    * HISTORICAL_MIN_GAP_MS, an order call in flight still goes first (OrderPriorityGate).
    */
+  /**
+   * Queue deadlines (2026-11-19, the 16 Nov freeze): nothing bounded how long a call could WAIT here, and
+   * a call whose caller had already given up (a 45 s sensor pass, a closed chart) still spent a 350 ms
+   * slot and a share of Angel's rate when its turn came. Under a burst of background work the queue grew
+   * faster than 2.85/s drains it and every judgement waited behind it. Now a call still queued past its
+   * tier's deadline is rejected with {@link HistoricalQueueTimeout} WITHOUT reaching the broker or using
+   * a slot; callers already treat a non-throttle error as a failed read (never retried).
+   */
   private paceHistorical<T>(call: () => Promise<T>): Promise<T> {
-    const tier = isLiveHistorical() ? this.historicalLive : this.historicalNormal;
-    const released = new Promise<void>((resolve) => tier.push(resolve));
+    const live = isLiveHistorical();
+    const tier = live ? this.historicalLive : this.historicalNormal;
+    const released = new Promise<void>((release, reject) =>
+      tier.push({ release, reject, queuedAt: Date.now(), maxWaitMs: live ? HISTORICAL_LIVE_MAX_WAIT_MS : HISTORICAL_BACKGROUND_MAX_WAIT_MS }),
+    );
     void this.pumpHistorical();
     return released.then(call);
+  }
+
+  /** Next call still worth making; expired ones are rejected on the way (no slot, no broker call). */
+  private nextHistorical(): QueuedHistorical | undefined {
+    const now = Date.now();
+    for (;;) {
+      const next = this.historicalLive.shift() ?? this.historicalNormal.shift();
+      if (!next) return undefined;
+      const waited = now - next.queuedAt;
+      if (waited <= next.maxWaitMs) return next;
+      this.historicalDropped += 1;
+      next.reject(new HistoricalQueueTimeout(waited));
+    }
+  }
+
+  /** One line a minute at most, only while there is a backlog or something was dropped. */
+  private logQueueHealth(): void {
+    const depth = this.historicalLive.length + this.historicalNormal.length;
+    const now = Date.now();
+    if ((depth < HISTORICAL_QUEUE_LOG_DEPTH && this.historicalDropped === 0) || now - this.lastQueueLogAt < 60_000) return;
+    this.lastQueueLogAt = now;
+    const oldest = Math.min(this.historicalLive[0]?.queuedAt ?? now, this.historicalNormal[0]?.queuedAt ?? now);
+    this.logger.warn(
+      `[history-queue] backlog live=${this.historicalLive.length} background=${this.historicalNormal.length} ` +
+        `oldest=${Math.round((now - oldest) / 1000)}s dropped-past-deadline=${this.historicalDropped} (last minute)`,
+    );
+    this.historicalDropped = 0;
   }
 
   private async pumpHistorical(): Promise<void> {
@@ -564,7 +631,8 @@ export class UserFeedSession implements UserFeedSessionLike {
     this.historicalPumping = true;
     try {
       for (;;) {
-        const next = this.historicalLive.shift() ?? this.historicalNormal.shift();
+        this.logQueueHealth();
+        const next = this.nextHistorical();
         if (!next) break;
         try {
           await this.orderPriority.wait();
@@ -574,7 +642,7 @@ export class UserFeedSession implements UserFeedSessionLike {
           // A failed wait must not strand the queue: release the call anyway (the broker paces it).
         }
         this.lastHistoricalAt = Date.now();
-        next();
+        next.release();
       }
     } finally {
       this.historicalPumping = false;

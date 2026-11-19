@@ -4,6 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { retentionCutoff, retentionDaysFromEnv } from '../../../common/utils/retention';
 import { SentinelCycleService, type CycleReport } from './sentinel-cycle.service';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
+import { SENTINEL_BLIND_ALERT_MS } from './blind-watch';
 import { isExchangeOpen } from '../market-sessions';
 import type { SessionClock } from '../../market-hub/session-clock';
 import { isAnyHeldVenueOpen, isAnyVenueOpen, makeSentinelClock } from '../overnight/overnight-calendar';
@@ -123,6 +125,8 @@ export class SentinelRunnerService {
    * rare and genuinely worth the warning.
    */
   private readonly inFlight = new Set<string>();
+  /** When each in-flight cycle started: one stuck past SENTINEL_BLIND_ALERT_MS alerts the owner (16 Nov). */
+  private readonly inFlightSince = new Map<string, number>();
 
   /**
    * The session clock the tick gates on: the exchange holiday calendar AND the
@@ -212,14 +216,24 @@ export class SentinelRunnerService {
    */
   async runForUser(userId: string): Promise<CycleReport | null> {
     if (this.inFlight.has(userId)) {
+      const stuckMs = Date.now() - (this.inFlightSince.get(userId) ?? Date.now());
       this.logger.warn(
-        `sentinel cycle for user ${userId} is still running; skipping this tick rather than ` +
+        `sentinel cycle for user ${userId} is still running (${Math.round(stuckMs / 1000)} s); skipping this tick rather than ` +
           'running two cycles over the same carry-over state',
       );
+      // 2026-11-16 the cycle sat here 09:27–13:15 IST and only this WARN line knew. Tell the owner.
+      if (stuckMs >= SENTINEL_BLIND_ALERT_MS) {
+        void sendOpsAlert(
+          `sentinel-cycle-stuck:${userId}`,
+          `GrW sentinel STUCK: the exit cycle has been running for ${Math.floor(stuckMs / 60_000)} min and every tick is skipped — ` +
+            'open F&O positions are NOT being judged (only the fast ₹ hard-loss guard may act). Check positions yourself.',
+        );
+      }
       return null;
     }
 
     this.inFlight.add(userId);
+    this.inFlightSince.set(userId, Date.now());
     try {
       const { report, settled } = await this.cycle.startForUser(userId);
       // Judgements finish on their own; `settled` never rejects. Watched only so
@@ -240,6 +254,7 @@ export class SentinelRunnerService {
       // `finally`, so a throw cannot leave the user permanently marked
       // in-flight and silently unwatched for the rest of the process's life.
       this.inFlight.delete(userId);
+      this.inFlightSince.delete(userId);
     }
   }
 

@@ -3,6 +3,8 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { contractValueFactor } from '@td/shared';
 import { computeGreenFloor, isDerivativeSegment } from '../charges';
 import { isPaperTracker } from '../paper/paper-tracker';
+import { sendOpsAlert } from '../../../common/utils/ops-alert';
+import { BlindWatch } from './blind-watch';
 import { RosterService, type RosterEntry } from './roster.service';
 import {
   TripwireService,
@@ -695,6 +697,8 @@ export class SentinelCycleService {
   private readonly signalLane = new Set<string>();
   private readonly signalWaiters: Array<() => void> = [];
 
+  /** Real positions' last completed sensor pass, for the owner's "sentinel blind" alert. */
+  private readonly blind = new BlindWatch();
   /** Per-position sensor passes still running (started at, ms) — a stuck one is skipped, never doubled. */
   private readonly sensorRunning = new Map<string, number>();
 
@@ -804,8 +808,10 @@ export class SentinelCycleService {
           `sentinel pass for ${entry.symbol} skipped: its previous pass started ${Math.round((Date.now() - stuckSince) / 1000)} s ago and has not finished (a broker or data call is not answering)`,
         );
         void this.rescueHardLoss(entry, now); // the stuck pass cannot run its hard-loss check: the fast guard does
+        this.noteBlind(entry, false);
         continue;
       }
+      let passOk = false;
       try {
         // A hard-floor exit (FLOOR_HARD_EXIT) is recorded detached into `jobs` beside the judgements.
         const started = Date.now();
@@ -823,6 +829,7 @@ export class SentinelCycleService {
           () => new Error(`sensor pass timed out after ${SENSOR_PASS_TIMEOUT_MS / 1000} s (a broker or data call did not answer) — the cycle moved on`),
         );
         if (candidate) candidates.push(candidate);
+        passOk = true;
       } catch (err) {
         report.failed += 1;
         const message = err instanceof Error ? err.message : String(err);
@@ -830,7 +837,9 @@ export class SentinelCycleService {
         // The full pass never reached its hard-loss check: the fast guard runs it on the contract price alone.
         if (message.startsWith('sensor pass timed out')) void this.rescueHardLoss(entry, now);
       }
+      this.noteBlind(entry, passOk);
     }
+    this.blind.keepOnly(new Set(entries.map((e) => e.trackerId)));
 
     // Re-judge suppression: ONE aggregated line per pass, never one per position.
     const suppressedTotal = Object.values(suppressed).reduce((a, b) => a + b, 0);
@@ -2421,6 +2430,21 @@ export class SentinelCycleService {
   }
 
   /** Drop carry-over for these tenants' trackers that are no longer on the roster. */
+  /**
+   * Blind-watch (2026-11-19): a REAL position whose full sensor pass has not completed for
+   * SENTINEL_BLIND_ALERT_MS gets one owner alert (de-duplicated 30 min per position). Paper never alerts.
+   */
+  private noteBlind(entry: RosterEntry, ok: boolean): void {
+    if (isPaperTracker(entry.trackerId)) return;
+    const mins = this.blind.record(entry.trackerId, ok, Date.now());
+    if (mins === null) return;
+    void sendOpsAlert(
+      `sentinel-blind:${entry.trackerId}`,
+      `GrW sentinel BLIND on a REAL position: ${entry.symbol} has had no completed check for ${mins} min ` +
+        '(broker/data calls not answering). Only the fast ₹ hard-loss guard is covering it. Check the position yourself.',
+    );
+  }
+
   private prune(owners: Set<string>, live: Set<string>, watched: Set<string>): void {
     for (const [trackerId, state] of this.state) {
       if (owners.has(state.userId) && !live.has(trackerId)) {

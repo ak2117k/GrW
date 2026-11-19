@@ -13,6 +13,15 @@ x-logging: &logging
     max-size: "20m"
     max-file: "5"
 
+# Resolvers for containers that call outside (Angel, NSE, Anthropic, Telegram). 2026-11-19: the host's
+# first resolver 8.8.8.8 failed ~30% of lookups from this VPS (Docker logged 100-290 failed lookups per
+# 10 min every session), each one stalling a broker call for seconds; 1.1.1.1 / 9.9.9.9 / 8.8.4.4 answered
+# 10/10. Containers reach each other by name through Docker's own DNS either way.
+x-dns: &dns
+  - 1.1.1.1
+  - 9.9.9.9
+  - 8.8.4.4
+
 services:
   postgres:
     logging: *logging
@@ -74,6 +83,7 @@ services:
 
   api:
     logging: *logging
+    dns: *dns
     image: grw-api:${GRW_API_TAG:-current}
     container_name: grw-api
     restart: unless-stopped
@@ -115,6 +125,7 @@ services:
   # Off until the owner enables `--profile ai` after measuring headroom (spec §6.5).
   ai-engine:
     logging: *logging
+    dns: *dns
     image: grw-ai-engine:${GRW_AI_TAG:-current}
     container_name: grw-ai-engine
     restart: unless-stopped
@@ -152,6 +163,7 @@ services:
   # row of kind stock-move is ACTIVE; STOCK_MOVE_ENABLED=off disables it entirely.
   mbm:
     logging: *logging
+    dns: *dns
     image: grw-mbm:${GRW_MBM_TAG:-current}
     container_name: grw-mbm
     restart: unless-stopped

@@ -367,6 +367,35 @@ describe('SignalTraderService', () => {
     expect(((t.judge.judge.mock.calls[0] as any[])[0]).caps.maxLossPerTrade).toBe(7500);
   });
 
+  describe('MCX mini fallback (owner 2026-11-19)', () => {
+    const gold: SignalView = {
+      ...signal, underlying: 'GOLD', instrumentKind: 'PE', strike: 120000, entryLow: 280, entryHigh: 280, entryType: 'AT', sl: 210, targets: [350], qty: 1,
+      rawText: 'BUY GOLD 120000 PE @ 280 SL 210',
+    };
+    const row = (name: string, token: string, lot: string) => ({ token, symbol: `${name}27NOV99120000PE`, name, expiry: '27NOV2099', strike: '12000000', lotsize: lot, instrumenttype: 'OPTFUT', exch_seg: 'MCX', tick_size: '50' });
+    const master = [row('GOLD', '900', '1'), row('GOLDM', '901', '100')];
+    const env = { ...LIVE_ENV, AI_AUTO_EXIT_QTY_UNITS: 'NFO:units,MCX:units' };
+
+    it('GOLD 120000 PE short of funds (₹20k vs ₹28.3k) → 2 GOLDM lots placed, the swap recorded', async () => {
+      const t = build({ cfg: { mode: 'live' }, ltp: 280, master, signal: gold, funds: 20_000, env });
+      expect(await t.svc.evaluate(ev)).toMatchObject({ decision: 'TAKE', placed: 'PLACED' });
+      const arg = (t.executor.place.mock.calls[0] as any[])[0];
+      expect(arg.plan).toMatchObject({ tradingsymbol: 'GOLDM27NOV99120000PE', token: '901', lots: 2, qty: 200, sl: 210, riskRupees: 1420 }) // LIMIT 281 (marketable) − SL 210 = 71 × 200 × 0.1;
+      const d = t.repo.decisions[0];
+      expect(d.gate.find((c: any) => c.name === 'mini_fallback')).toMatchObject({ ok: true, detail: expect.stringMatching(/short of funds → GOLD27NOV99120000PE → GOLDM27NOV99120000PE × 2/) });
+      expect(d.gate.find((c: any) => c.name === 'funds')).toMatchObject({ ok: true });
+    });
+
+    it('the full lot fits → no swap; SIGNAL_MINI_FALLBACK=off → paper as before', async () => {
+      const fits = build({ cfg: { mode: 'live' }, ltp: 280, master, signal: gold, funds: 50_000, env });
+      await fits.svc.evaluate(ev);
+      expect(((fits.executor.place.mock.calls[0] as any[])[0]).plan.tradingsymbol).toBe('GOLD27NOV99120000PE');
+      const off = build({ cfg: { mode: 'live' }, ltp: 280, master, signal: gold, funds: 20_000, env: { ...env, SIGNAL_MINI_FALLBACK: 'off' } });
+      await off.svc.evaluate(ev);
+      expect(off.executor.place).not.toHaveBeenCalled();
+    });
+  });
+
   it('self-review lessons of scope SIGNAL_JUDGE ride in the packet when the reader gives any', async () => {
     const lessons = { inject: jest.fn(() => [{ key: 'judge-the-cap-stop', text: 'Judge the cap-sized stop on its noise distance.', right: 2, wrong: 0 }]) };
     const t = build({ cfg: { mode: 'shadow' }, lessons });

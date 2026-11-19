@@ -11,6 +11,7 @@ import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { SignalTraderRepository } from '../repositories/signal-trader.repository';
 import { resolveContract, segmentFor, type ResolvedContract, type ResolveResult } from '../domain/contract-resolver';
 import { applyJudgeTightening, evaluateGate, planEntry, riskCapFor, type EntryPlan, type GateCheck, type GateFacts, type GateResult, type EntryRetry, type TriggerState } from '../domain/gate';
+import { fullLotMisfit, miniFallbackOn, miniMaxLots, miniNameFor, planMini } from '../domain/mini-swap';
 import { judgeDecision, signalJudgePromptVersion, signalJudgeSystem, type JudgeVerdict } from '../domain/judge';
 import { eventContextFor, type EventContext, type EventContextDeps } from '../../news-events/events/event-context';
 import { slEnforceability } from '../domain/execution';
@@ -714,9 +715,22 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
 
     // ---- live: enough funds for this entry? (unknown → sent as before; short → PAPER / SKIP) ----
     const broker = needsMargin(finalPlan.side, s.instrumentKind) ? await this.brokerMargin(owner as string, finalPlan, base.slEnf.qtyUnit) : null;
-    const need = requiredFunds(finalPlan, s, cfg, broker);
+    let need = requiredFunds(finalPlan, s, cfg, broker);
     const available = await this.readFunds(owner as string);
-    const funds = fundsCheck(available, need);
+    let funds = fundsCheck(available, need);
+    // MCX mini fallback (owner 2026-11-19): the full lot does not fit the funds or the loss cap → the same call
+    // on the mini (same strike + expiry), lots sized to the cap AND the funds (domain/mini-swap). Never throws.
+    const mini = await this.miniFallback(s, finalPlan, fresh as number, funds.ok, available, owner as string, base);
+    if (mini) {
+      checks.push(mini.check);
+      if (mini.plan) {
+        this.logger.warn(`[signal-trader] ${what}: MINI fallback — ${mini.check.detail}`);
+        finalPlan = mini.plan;
+        judgeWithChanges = { ...judgeWithChanges, miniFallback: mini.check.detail };
+        need = requiredFunds(finalPlan, s, cfg, null);
+        funds = fundsCheck(available, need);
+      }
+    }
     checks.push(funds);
     const noFunds: NoFundsContext = { decisionId, signal: s, plan: finalPlan, expiry: base.c?.expiry ?? null, channel, what, required: need.required, available, method: need.method };
     if (funds.ok === false) {
@@ -828,6 +842,39 @@ export class SignalTraderService implements OnApplicationBootstrap, OnModuleDest
     };
     const n: NoFundsContext = { decisionId: p.decisionId, signal: p.signal, plan, expiry: retry.expiry, channel: p.channel, what, required: retry.required, available: retry.available, method: retry.method };
     return this.paperOrSkip(n, check, p.gate, p.judge.record);
+  }
+
+  /**
+   * MCX MINI FALLBACK (domain/mini-swap): null = not applicable (off, not an MCX option BUY with a mini, or the full
+   * lot fits). Otherwise a `mini_fallback` check (informational) and, when the swap works, the plan on the mini.
+   * The mini is priced from its own live tick; no price → no swap. Never throws.
+   */
+  private async miniFallback(
+    s: SignalView, plan: EntryPlan, fullLtp: number, fundsOk: boolean | null, available: number | null, owner: string, base: BaseFacts,
+  ): Promise<{ check: GateCheck; plan: EntryPlan | null } | null> {
+    try {
+      const miniName = miniNameFor(s.underlying);
+      const option = s.instrumentKind === 'CE' || s.instrumentKind === 'PE';
+      if (!miniFallbackOn(this.env) || !miniName || !option || plan.side !== 'BUY' || plan.exchange !== 'MCX') return null;
+      const fullCap = riskCapFor(s.underlying, plan.tradingsymbol, this.cfg.maxLossPerTrade, this.env);
+      const misfit = fullLotMisfit({ fundsOk, riskRupees: plan.riskRupees, cap: fullCap });
+      if (!misfit) return null;
+      const fail = (detail: string) => ({ check: { name: 'mini_fallback', ok: false, required: false, detail } as GateCheck, plan: null });
+      const expiry = base.c?.expiry ?? null;
+      const resolved = resolveContract(await this.master.getInstrumentMaster(), { ...s, underlying: miniName, expiry }, new Date());
+      if (!resolved.ok) return fail(`full lot ${misfit === 'funds' ? 'short of funds' : `risk ₹${plan.riskRupees} > ₹${fullCap}`}; no ${miniName} contract: ${resolved.reason}`);
+      const miniLtp = await this.quotes.ltp(owner, resolved.contract.token, 'MCX').catch(() => null);
+      const r = planMini({
+        plan, mini: resolved.contract, miniLtp, fullLtp,
+        cap: riskCapFor(miniName, resolved.contract.tradingsymbol, this.cfg.maxLossPerTrade, this.env),
+        available, fundsBufferPct: this.cfg.fundsBufferPct, maxLots: miniMaxLots(this.env),
+      });
+      const why = misfit === 'funds' ? 'full lot short of funds' : `full lot risk ₹${plan.riskRupees} > ₹${fullCap}`;
+      if (!r.ok) return fail(`${why}; mini not taken: ${r.reason}`);
+      return { check: { name: 'mini_fallback', ok: true, required: false, detail: `${why} → ${r.detail}` } as GateCheck, plan: r.plan };
+    } catch (err) {
+      return { check: { name: 'mini_fallback', ok: false, required: false, detail: `mini fallback failed: ${errText(err)}` } as GateCheck, plan: null };
+    }
   }
 
   /** Broker margin calculator (SmartAPI marginApi over the owner's live session). Never throws. */

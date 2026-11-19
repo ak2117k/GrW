@@ -432,3 +432,65 @@ ssh\   env\   angel-client-key.txt
 ```
 
 `C:\Users\AryanKumar\grw-mbm\`: copy it separately (§5 step 6).
+
+---
+
+## 12. How to move it all (agreed 2026-11-18)
+
+Git carries only the code and this document. The rest moves by two routes, and **secrets never touch GitHub, a cloud drive or chat.**
+
+### 12.1 Non-secret package → a temporary private GitHub repo
+
+1. The owner creates an **empty private** repo `ak2117k/grw-handoff` at github.com/new (no README).
+2. On the old machine, `Desktop\GrW-handoff-2026-11-18` is already a git repo with `origin` set (649 files, byte-exact via `.gitattributes * -text`):
+   ```bash
+   cd ~/Desktop/GrW-handoff-2026-11-18 && git push -u origin main
+   ```
+   `chain.pkl` (104 MB, over GitHub's 100 MB limit) is split into `chain.pkl.part00/01`, and `restore.ps1` joins them again.
+3. On the new machine:
+   ```bash
+   git clone https://github.com/ak2117k/grw-handoff.git
+   powershell -ExecutionPolicy Bypass -File grw-handoff\restore.ps1 -RepoPath <GrW folder> -UserConfig -ScheduledTask
+   ```
+4. **Delete the repo afterwards** (Settings → Danger Zone → Delete) and the local clone.
+
+**Never push this package into the GrW repo.** A push to main redeploys the API, a push to any other branch replaces the live website, and files deleted later stay in git history.
+
+### 12.2 Secrets → the new machine's own SSH key + the VPS
+
+No private key is copied between machines.
+
+1. **New machine** (Git Bash):
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/grw_oracle -N ""
+   cat ~/.ssh/grw_oracle.pub
+   ```
+   The public key is safe to paste anywhere. It is named `grw_oracle` so the fix-queue hook and the scripts work unchanged.
+2. **Old machine** (Claude does this): add that public key to `/root/.ssh/authorized_keys` on 157.10.98.70, then stage the secrets in `/root/handoff-2026-11-18/` (`chmod 700`, files `600`): `root.env`, `apps-api.env`, `ai-engine.env`, `angel-client-key.txt`, and a README.
+3. **New machine:**
+   ```bash
+   scp -i ~/.ssh/grw_oracle -r root@157.10.98.70:/root/handoff-2026-11-18 ~/grw-secrets
+   ```
+   Then place the files:
+   - `root.env` → `GrW/.env`
+   - `apps-api.env` → `GrW/apps/api/.env`
+   - `ai-engine.env` → `GrW/ai-engine/.env`
+
+   `ENCRYPTION_KEY` starts with a space: copy the files whole.
+4. **Clean up:**
+   - `rm -rf /root/handoff-2026-11-18` on the VPS
+   - delete `Desktop\GrW-SECRETS-2026-11-18` on the old machine
+   - delete `~/grw-secrets` on the new machine once the files are in place
+   - when the old laptop is retired, remove its key line from `authorized_keys`
+5. GitHub access on the new machine: sign in to git or GitHub as `ak2117k`. The old `id_ed25519` key is not needed.
+
+Other ways are acceptable: a direct LAN copy between the two PCs, a USB stick, or a OneDrive Personal Vault.
+
+### 12.3 Status of the move
+
+| Item | State on 2026-11-19 |
+|---|---|
+| Handoff doc | pushed to `main` (`be5ce99c`, plus this section) |
+| Package repo `grw-handoff` | committed locally; waiting for the owner to create the empty GitHub repo |
+| Secrets via the VPS | waiting for the new machine's public key |
+| `grw-mbm` (several GB) | copy separately (LAN, USB or OneDrive) |

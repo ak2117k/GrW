@@ -54,7 +54,15 @@ export function cutLossK15(env: Record<string, string | undefined> = process.env
   return Number.isFinite(n) && n > 0 && n <= 6 ? n : CUT_LOSS_N15_DEFAULT;
 }
 
-export type N15Reading = { n: number; bars: number; method: 'atr14-15m' | 'mean-tr-15m'; at: string };
+/**
+ * TRIGGER_CUT_LOSS_REAL (2026-11-19): `act` ⇒ the yardstick SETS real CUT_LOSS levels and its ratchet exception
+ * may loosen a tight armed one (sentinel-executor trigger watch), exactly as on paper. Anything else ⇒ record only.
+ */
+export function cutLossRealActs(env: Record<string, string | undefined> = process.env): boolean {
+  return String(env.TRIGGER_CUT_LOSS_REAL ?? '').trim().toLowerCase() === 'act' && cutLossK15(env) !== null;
+}
+
+export type N15Reading ={ n: number; bars: number; method: 'atr14-15m' | 'mean-tr-15m'; at: string };
 
 /** The IST session window (minutes after midnight) a 15-minute bar must START inside; null = keep every bar. */
 function sessionWindow(exchange: string | null | undefined): [number, number] | null {

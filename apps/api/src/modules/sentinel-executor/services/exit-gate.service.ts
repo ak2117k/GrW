@@ -17,6 +17,9 @@ import { ExitGateRepository } from '../repositories/exit-gate.repository';
 import { AI_EXIT_SESSION_CLOCK } from './executor.tokens';
 import { lossLimitFor } from '../../../common/utils/loss-limit';
 import { parseCarryConfig } from '../../intraday-carry/domain/carry-config';
+import { chartConfirmMode, hardLossAbsRupees, readChart } from '../../exit-discipline/chart-read';
+import { cutLossK15 } from '../../exit-discipline/cut-loss-yardstick';
+import { CHART_CONFIRM_READER, type ChartConfirmReader, type ChartData } from '../repositories/chart-confirm.reader';
 
 export type GateContext =
   | {
@@ -25,6 +28,8 @@ export type GateContext =
       thesisSource?: ThesisSource | null;
       /** MBM_EXIT_SHADOW observe|on only: the shadow's MBM read, never awaited by `decide`. */
       mbm?: MbmShadowSlot;
+      /** The underlying's closed 5m/15m bars + N15 for the loss-side chart confirmation (EXIT_CHART_CONFIRM). */
+      chartData?: ChartData | null;
     }
   | { kind: 'unreadable'; reason: string };
 
@@ -48,6 +53,8 @@ export class ExitGateService {
     @Optional() private readonly mbm?: MbmClient,
     /** Self-review overrides of openingGuardMin / persistMinSec (bounded; absent ⇒ env config). */
     @Optional() @Inject(TUNING_READER) private readonly tuning?: TuningReader,
+    /** Loss-side chart confirmation (2026-11-19); absent ⇒ no chart read, every exit as before. */
+    @Optional() @Inject(CHART_CONFIRM_READER) private readonly chartReader?: Pick<ChartConfirmReader, 'read'>,
   ) {}
 
   /** The config in force for this decision: env, with any approved self-review override on top. */
@@ -121,10 +128,12 @@ export class ExitGateService {
     const facts = readPacketFacts(packet);
     if ('unreadable' in facts) return { kind: 'unreadable', reason: facts.unreadable };
     const since = new Date(v.createdAt.getTime() - STREAK_LOOKBACK_MIN * 60_000);
-    const [history, coreMaxLoss, dailyLossLatched] = await Promise.all([
+    const wantChart = this.chartReader && chartConfirmMode(process.env) !== 'off';
+    const [history, coreMaxLoss, dailyLossLatched, chartData] = await Promise.all([
       this.repo.recentVerdicts(v.trackerId, v.id, v.createdAt, since),
       this.repo.maxRiskPerTrade(v.userId, now),
       this.repo.dailyLossLatched(v.userId, istDate(now)),
+      wantChart ? this.chartReader!.read(v.trackerId, now).catch(() => null) : Promise.resolve(null),
     ]);
     // HARD_LOSS_EXIT_RUPEES (live signal trades, 2026-11-03) is a tighter per-trade max loss than the core limit.
     // Per underlying (owner 2026-11-04, "GOLD loss limit ₹7.5k"): HARD_LOSS_EXIT_RUPEES_BY_UNDERLYING via lossLimitFor.
@@ -132,7 +141,7 @@ export class ExitGateService {
     const maxLossPerTrade = coreMaxLoss !== null && hardLoss !== null ? Math.min(coreMaxLoss, hardLoss) : coreMaxLoss ?? hardLoss;
     // The stored thesis's source rides in the packet (2026-11-04): INFERRED theses are record-only in the gate.
     const thesisSource = thesisSourceOf(packet);
-    return { kind: 'ready', verdict: { id: v.id, createdAt: v.createdAt }, packet: facts, history, maxLossPerTrade, dailyLossLatched, thesisSource };
+    return { kind: 'ready', verdict: { id: v.id, createdAt: v.createdAt }, packet: facts, history, maxLossPerTrade, dailyLossLatched, thesisSource, chartData };
   }
 
   decide(ctx: GateContext, live: { ltpNow: number; productType: string | null; exchange: string; now: Date }): GateRecordV1 {
@@ -155,7 +164,21 @@ export class ExitGateService {
           ? { squareOffLeadMin: parseCarryConfig(process.env).leadMin[String(live.exchange).toUpperCase()] ?? null }
           : {}),
       });
-      const record = decideExit({ facts, current: ctx.verdict, history: ctx.history, cfg, now: live.now });
+      const mode = chartConfirmMode(process.env);
+      if (mode !== 'off' && ctx.chartData && facts.exposure !== null) {
+        facts.chart = readChart({
+          bull: facts.exposure === 'BULLISH', underlyingNow: facts.underlying, invalidation: facts.invalidation,
+          bestUnderlying: facts.anchors?.bestUnderlying ?? facts.holdRef?.underlying ?? null,
+          bars5: ctx.chartData.bars5, bars15: ctx.chartData.bars15, n15: ctx.chartData.n15, k15: cutLossK15(process.env) ?? 1.5,
+        });
+      }
+      const record = decideExit({
+        facts, current: ctx.verdict, history: ctx.history, cfg, now: live.now,
+        chart: { mode, absLossRupees: hardLossAbsRupees(process.env) },
+      });
+      if (record.chartGate) {
+        this.logger.warn(`[exit-gate] chart-confirm ${record.chartGate.held ? 'HELD' : record.chartGate.wouldHold ? 'WOULD HOLD (observe)' : 'exit stands'} — ${ctx.packet.symbol}: ${record.chartGate.why}`);
+      }
       if (record.outcome === 'BYPASS') this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${record.error ?? record.bypassReason}`);
       return this.withMbmShadow(ctx, live, record);
     } catch (err) {

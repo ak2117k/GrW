@@ -1,3 +1,4 @@
+import type { ChartConfirmMode, ChartRead } from './chart-read';
 export type PositionSide = 'LONG' | 'SHORT';
 /** The direction the UNDERLYING must move to help the position. */
 export type Exposure = 'BULLISH' | 'BEARISH';
@@ -111,9 +112,26 @@ export interface GateFactsSnapshot {
    * record-only. Absent / null ⇒ exactly as before.
    */
   thesisSource?: ThesisSource | null;
+  /** The underlying's chart read (chart-read.ts) for the loss-side chart confirmation. Absent ⇒ not read. */
+  chart?: ChartRead | null;
 }
 
 export type ThesisSource = 'INFERRED' | 'USER';
+
+/**
+ * Loss-side chart confirmation (2026-11-19, chart-read.ts): a MAX_LOSS / GREEN_TO_RED exit with the chart NOT
+ * against the position and the loss above −HARD_LOSS_ABS_RUPEES is held (`act`) or only recorded (`observe`).
+ */
+export interface ChartGateRecord {
+  mode: ChartConfirmMode;
+  /** The exit's only grounds were loss-side code rules (HARD_MAX_LOSS / FLOOR_HARD_GREEN_TO_RED). */
+  lossSide: boolean;
+  wouldHold: boolean;
+  held: boolean;
+  netPnlNow: number | null;
+  absLossRupees: number;
+  why: string;
+}
 
 /** `ai_exit_executions.gate` (E7). */
 export interface GateRecordV1 {
@@ -135,6 +153,8 @@ export interface GateRecordV1 {
    * never an input — absent with the flag off, so off-records are unchanged.
    */
   mbmShadow?: { v: 1; usable: boolean; [k: string]: unknown };
+  /** Loss-side chart confirmation (chart-read.ts); absent when the mode is off or the exit was not loss-side. */
+  chartGate?: ChartGateRecord;
 }
 
 export type OutcomeKind = 'EXECUTED' | 'DRY_RUN' | 'GATED' | 'AWAITING';

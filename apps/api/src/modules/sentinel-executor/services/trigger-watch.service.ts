@@ -24,7 +24,7 @@ import { AI_EXIT_SESSION_CLOCK, SentinelExitExecutor } from './sentinel-exit-exe
 import { NOISE_READ_STATUSES, exitPriceOf } from './sentinel-exit-poller.service';
 import { ExitNoiseReadService } from '../../exit-noise/exit-noise.service';
 import { triggerCheckFromPacket } from '../../exit-discipline/trigger-check';
-import { cutLossFromPacket, cutLossK15, type CutLossRecord } from '../../exit-discipline/cut-loss-yardstick';
+import { cutLossFromPacket, cutLossK15, cutLossRealActs, type CutLossRecord } from '../../exit-discipline/cut-loss-yardstick';
 import { TRIGGER_N15_READER, type N15Reader } from '../repositories/n15.reader';
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -253,48 +253,86 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
 
     const current = { price: r.price.ltp, ageMs: Math.max(0, now.getTime() - r.price.at) };
     const armed = this.book!.byTracker(row.trackerId);
-    const v = validateTrigger({
-      proposal: p, qty: Number(tracker.qty), kind: contractKindOf(tracker.symbol), current,
-      armed: armed ? { instrument: armed.instrument, op: armed.op, price: armed.price } : null,
+    const prevRef = armed ? { id: armed.id, instrument: armed.instrument, op: armed.op, price: armed.price } : null;
+
+    // CUT_LOSS yardstick ACTS on real triggers when TRIGGER_CUT_LOSS_REAL=act (2026-11-19). Prod 2026-11-18
+    // GOLDM 131500 PE: the AI armed its stop at VWAP 131066.57 (0.5 N15 away) though its own invalidation was
+    // 131300; the yardstick (min 131345) only recorded, its later widen to 131300 was refused LOOSENS, the
+    // stop fired and gold then ran 476 pts the put's way. Same rule the paper path has acted on since 11-11.
+    const act = cutLossRealActs(process.env);
+    const cut = act ? await this.actingCut(row, p, current.price, ref, prevRef) : null;
+    const level = cut ? { ...p, price: cut.wouldArmAt } : p;
+    const validate = (a: typeof prevRef) => validateTrigger({
+      proposal: level, qty: Number(tracker.qty), kind: contractKindOf(tracker.symbol), current,
+      armed: a ? { instrument: a.instrument as 'UNDERLYING' | 'PREMIUM', op: a.op as 'ABOVE' | 'BELOW', price: a.price } : null,
       cfg: this.tcfg!,
     });
+    let v = validate(prevRef);
+    // The ratchet exception: a tight armed CUT_LOSS level may be loosened by an INTACT-thesis verdict, up to the
+    // invalidation (cutLossLoosen). LOOSENS is the last arming rule, so every other rule has already passed.
+    const loosened = !v.ok && v.reason === 'LOOSENS' && cut?.wouldAllowLoosen === true;
+    if (loosened) v = validate(null);
     if (!v.ok) {
-      await this.reject(row, { ...wfields, refPrice: current.price }, v.reason);
-      // RECORD ONLY: would the CUT_LOSS ratchet exception have let this loosen? (paper acts on it; real never does)
+      await this.reject(row, { ...wfields, price: level.price, refPrice: current.price }, v.reason);
+      // Would the CUT_LOSS ratchet exception have let this loosen? Recorded (acted when the yardstick acts).
       if (v.reason === 'LOOSENS') {
-        await this.recordCheck({ verdictId: row.id }, row, p, current.price, ref, armed ? { id: armed.id, instrument: armed.instrument, op: armed.op, price: armed.price } : null);
+        await this.recordCheck({ verdictId: row.id }, row, p, current.price, ref, prevRef, act);
       }
       return this.releaseIfUnused(key);
     }
+    if (cut && (level.price !== p.price || loosened)) {
+      this.logger.warn(
+        `[ai-trigger] CUT_LOSS yardstick ACTED ${row.symbol}: AI ${p.op} ${p.price} → armed ${level.price}` +
+          ` (N15 ${cut.n15 ?? '?'}, min ${cut.cutLoss.minDistance ?? '?'} pts from ${cut.cutLoss.ref ?? '?'})` +
+          (loosened ? `; loosened from ${prevRef?.price} (${cut.loosenWhy})` : ''),
+      );
+    }
 
-    const res = await this.repo.arm(row, { ...wfields, refPrice: current.price } as Required<TriggerFields>, now);
+    const res = await this.repo.arm(row, { ...wfields, price: level.price, refPrice: current.price } as Required<TriggerFields>, now);
     if (!res) {
       this.logger.warn(`[ai-trigger] arming verdict ${row.id} lost a race — retried next pass if still pending`);
       return this.releaseIfUnused(key);
     }
     const replaced = this.book!.add({
       id: res.id, userId: row.userId, trackerId: row.trackerId, symbol: row.symbol, verdictId: row.id,
-      instrument: p.instrument, op: p.op, price: p.price,
+      instrument: p.instrument, op: p.op, price: level.price,
       watch: { key, exchange: ref.exchange, token: ref.token, symbol: ref.symbol },
       trackerExchange, armedAt: now.getTime(), confirm: EMPTY_CONFIRM,
     });
     if (replaced && replaced.watch.key !== key) this.releaseIfUnused(replaced.watch.key);
     this.logger.warn(
-      `[ai-trigger] ARMED auto-exit if ${ref.symbol} ${sign(p.op)} ${p.price} (now ${current.price}) — ` +
+      `[ai-trigger] ARMED auto-exit if ${ref.symbol} ${sign(p.op)} ${level.price} (now ${current.price}) — ` +
         `${row.symbol} verdict ${row.id}${res.superseded.length ? `; supersedes ${res.superseded.join(',')}` : ''}`,
     );
-    // RECORD ONLY, after the trigger is armed in the table and the book: it cannot change either.
+    // After the trigger is armed in the table and the book: the check describes the AI's OWN level, with the
+    // yardstick's reading beside it (acted: whether that reading set the armed level).
     await this.recordCheck(
-      { triggerId: res.id }, row, { instrument: p.instrument, op: p.op, price: p.price }, current.price, ref,
-      armed ? { id: armed.id, instrument: armed.instrument, op: armed.op, price: armed.price } : null,
+      { triggerId: res.id }, row, { instrument: p.instrument, op: p.op, price: p.price }, current.price, ref, prevRef, act,
     );
+  }
+
+  /** The yardstick reading that SETS the real level (act mode). Null when off / unreadable: the AI's level stands. */
+  private async actingCut(
+    row: ProposalRow,
+    p: { instrument: 'UNDERLYING' | 'PREMIUM'; op: 'ABOVE' | 'BELOW'; price: number },
+    refPrice: number,
+    watch: InstrumentRef,
+    prev: { id: string; instrument: string; op: string; price: number } | null,
+  ): Promise<CutLossRecord | null> {
+    try {
+      const v = await this.repo.verdictForCheck(row.id);
+      return v ? await this.cutLossRecord(v, p, refPrice, watch, prev, true) : null;
+    } catch (err) {
+      this.logger.warn(`[ai-trigger] CUT_LOSS yardstick unreadable for ${row.symbol} — AI level kept: ${errText(err)}`);
+      return null;
+    }
   }
 
   /**
    * The trigger check (exit-discipline/trigger-check.ts) onto the armed row — or, for a LOOSENS rejection, onto
-   * the REJECTED row (by verdict) — with the CUT_LOSS yardstick's RECORD-ONLY reading (cut-loss-yardstick.ts):
-   * wouldArmAt / n15 / wouldAllowLoosen, `acted: false`. Nothing here changes what is armed or fired on a real
-   * position. Never throws.
+   * the REJECTED row (by verdict) — with the CUT_LOSS yardstick's reading (cut-loss-yardstick.ts):
+   * wouldArmAt / n15 / wouldAllowLoosen and `acted` (true when TRIGGER_CUT_LOSS_REAL=act set the armed level).
+   * Nothing here changes what is armed or fired. Never throws.
    */
   private async recordCheck(
     target: { triggerId: string } | { verdictId: string },
@@ -303,6 +341,7 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     refPrice: number,
     watch: InstrumentRef,
     prev: { id: string; instrument: string; op: string; price: number } | null,
+    acted = false,
   ): Promise<void> {
     const label = 'triggerId' in target ? target.triggerId : `rejected verdict ${target.verdictId}`;
     try {
@@ -311,11 +350,11 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
         ? triggerCheckFromPacket({ op: p.op, instrument: p.instrument, triggerPrice: p.price, refPrice, packet: v.packet, invalidationPoint: v.invalidationPoint, netPnl: v.netPnl })
         : null;
       if (!v || !check) return;
-      const cut = await this.cutLossRecord(v, p, refPrice, watch, prev);
+      const cut = await this.cutLossRecord(v, p, refPrice, watch, prev, acted);
       const full = cut ? { ...check, ...cut } : check;
       if ('triggerId' in target) await this.repo.recordCheck(target.triggerId, full);
       else await this.repo.recordCheckByVerdict(target.verdictId, full);
-      if (cut && (cut.wouldArmAt !== p.price || cut.wouldAllowLoosen !== null)) {
+      if (!acted && cut && (cut.wouldArmAt !== p.price || cut.wouldAllowLoosen !== null)) {
         this.logger.log(
           `[ai-trigger] CUT_LOSS yardstick (record only) ${row.symbol}: AI ${p.op} ${p.price} → would arm ${cut.wouldArmAt}` +
             ` (N15 ${cut.n15 ?? '?'}, min ${cut.cutLoss.minDistance ?? '?'} pts from ${cut.cutLoss.ref ?? '?'})` +
@@ -327,26 +366,30 @@ export class TriggerWatchService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** The CUT_LOSS yardstick for a real proposal — record only. Null when off, unreadable or anything fails. */
+  /** The CUT_LOSS yardstick for a real proposal. Null when off, unreadable or anything fails. */
   private async cutLossRecord(
     v: { packet: unknown; invalidationPoint: string | null; netPnl: number; thesisStatus?: string | null; reason?: string | null },
     p: { instrument: 'UNDERLYING' | 'PREMIUM'; op: 'ABOVE' | 'BELOW'; price: number },
     refPrice: number,
     watch: InstrumentRef,
     prev: { id: string; instrument: string; op: string; price: number } | null,
+    acted = false,
   ): Promise<CutLossRecord | null> {
     try {
       const k15 = cutLossK15(process.env);
       const n15 = k15 !== null && p.instrument === 'UNDERLYING' && this.n15Reader ? await this.n15Reader.n15(watch, new Date()) : null;
       const prevCheck = prev ? await Promise.resolve().then(() => this.repo.checkOf(prev.id)).catch(() => null) : null;
-      const tight = prevCheck && typeof prevCheck === 'object' && typeof (prevCheck as { tight?: unknown }).tight === 'boolean'
+      // The stored `tight` describes the AI's level; once the yardstick ACTED (widened it), the armed level is
+      // judged by the minimum distance alone (cutLossLoosen's inside-the-minimum test), as on paper.
+      const prevActed = prevCheck && typeof prevCheck === 'object' && (prevCheck as { acted?: unknown }).acted === true;
+      const tight = !prevActed && prevCheck && typeof prevCheck === 'object' && typeof (prevCheck as { tight?: unknown }).tight === 'boolean'
         ? (prevCheck as { tight: boolean }).tight : null;
       return cutLossFromPacket({
         instrument: p.instrument, op: p.op, price: p.price, packet: v.packet, invalidationPoint: v.invalidationPoint, netPnl: v.netPnl,
         underlyingNow: p.instrument === 'UNDERLYING' ? refPrice : null, n15, k15,
         thesisStatus: v.thesisStatus ?? null, reasonText: v.reason ?? null,
         armed: prev ? { instrument: prev.instrument, op: prev.op, price: prev.price, tight } : null,
-        acted: false,
+        acted,
       });
     } catch {
       return null;

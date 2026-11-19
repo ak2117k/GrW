@@ -4,6 +4,7 @@ import { PrismaModule } from '../../common/prisma/prisma.module';
 import { MarketDataModule } from '../market-data/market-data.module';
 import { AngelOneAdapterService } from '../market-data/services/angel-one-adapter.service';
 import { UserFeedManager } from '../market-data/services/user-feed-manager.service';
+import { TickFirstQuotes } from './adapters/tick-first-quotes';
 import { MARKET_HOLIDAYS } from '../market-data/services/market-holidays.service';
 import { CredentialDecryptorModule } from '../credential-vault/execution/credential-decryptor.module';
 import { CredentialVaultModule } from '../credential-vault/credential-vault.module';
@@ -113,12 +114,9 @@ import { MarketEventsRepository } from '../news-events/events/market-events.repo
     { provide: SIGNAL_INSTRUMENT_MASTER, useExisting: AngelOneAdapterService },
     {
       provide: SIGNAL_QUOTES,
-      useFactory: (feeds: UserFeedManager): QuotesLike => ({
-        ltp: async (userId, token, exchange) => {
-          const q = await feeds.fetchQuote(userId, token, exchange);
-          return q && Number.isFinite(q.ltp) && q.ltp > 0 ? q.ltp : null;
-        },
-      }),
+      // Live tick first, REST quote only as the fallback (2026-11-19: a TAKE on CRUDEOIL 7500 PE died
+      // as "no fresh quote" while REST quotes were rate-limited; see adapters/tick-first-quotes.ts).
+      useFactory: (feeds: UserFeedManager): QuotesLike => new TickFirstQuotes(feeds),
       inject: [UserFeedManager],
     },
     {

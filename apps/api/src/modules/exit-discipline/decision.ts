@@ -4,7 +4,8 @@ import { evaluatePersistence, type HistoryVerdict } from './persistence';
 import { exposureOf } from './exposure';
 import { scaledUnderlyingNoise } from './noise';
 import type { PacketFacts } from './packet-facts';
-import type { FloorBasis, GateFactsSnapshot, GateRecordV1, ThesisSource } from './types';
+import type { ChartGateRecord, ClauseId, FloorBasis, GateFactsSnapshot, GateRecordV1, ThesisSource } from './types';
+import type { ChartConfirmMode } from './chart-read';
 
 const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
 /** `YYYY-MM-DD` in Asia/Kolkata. */
@@ -31,13 +32,53 @@ export function bypassRecord(reason: 'DISABLED' | 'FACTS_UNREADABLE', cfg: ExitD
   };
 }
 
+/**
+ * Loss-side chart confirmation (chart-read.ts). Applies only when the exit's ONLY grounds are the loss-side code
+ * rules — HARD_MAX_LOSS among the hard risks (never session close, expiry or the daily-loss latch) and/or
+ * FLOOR_HARD_GREEN_TO_RED among the hard-floor clauses — with no thesis break, no confirmed floor breach, no
+ * profit-side clause. Holds when the chart was read, is NOT against the position, and the loss is still above
+ * −absLossRupees. Null when the mode is off or the exit is not loss-side.
+ */
+export function chartGateOf(
+  g: ReturnType<typeof evaluateExitGate>,
+  facts: GateFacts,
+  opts: { mode: ChartConfirmMode; absLossRupees: number } | undefined,
+): ChartGateRecord | null {
+  if (!opts || opts.mode === 'off' || !g.justified) return null;
+  const passed = new Set(g.clauses.filter((c) => c.pass === true).map((c) => c.id));
+  const lossRules: ClauseId[] = ['HARD_MAX_LOSS', 'FLOOR_HARD_GREEN_TO_RED'];
+  const lossSide = [...passed].length > 0 && [...passed].every((id) => lossRules.includes(id));
+  if (!lossSide) return null;
+  const net = typeof facts.netPnlNow === 'number' && Number.isFinite(facts.netPnlNow) ? facts.netPnlNow : null;
+  const base = { mode: opts.mode, lossSide, netPnlNow: net, absLossRupees: opts.absLossRupees };
+  const chart = facts.chart ?? null;
+  let why: string;
+  let wouldHold = false;
+  if (net === null) why = 'net P&L unknown — exit stands';
+  else if (net <= -opts.absLossRupees) why = `net ₹${Math.round(net)} at/below the absolute ₹${opts.absLossRupees} — exits whatever the chart says`;
+  else if (!chart || !chart.known) why = 'chart not readable — exit stands';
+  else if (chart.against) why = `chart against: ${chart.reasons.join('; ')}`;
+  else {
+    wouldHold = true;
+    why = `chart intact (${chart.reasons.join('; ')}); net ₹${Math.round(net)} above −₹${opts.absLossRupees}`;
+  }
+  return { ...base, wouldHold, held: wouldHold && opts.mode === 'act', why: why.slice(0, 400) };
+}
+
 /** Spec §6 + §7 composed (R7). */
 export function decideExit(i: {
   facts: GateFacts; current: { id: string; createdAt: Date }; history: HistoryVerdict[]; cfg: ExitDisciplineConfig; now: Date;
+  chart?: { mode: ChartConfirmMode; absLossRupees: number };
 }): GateRecordV1 {
   if (!i.cfg.enabled) return bypassRecord('DISABLED', i.cfg, i.now);
   const g = evaluateExitGate(i.facts, i.cfg);
-  const base = { v: 1 as const, justification: g.justification, clauses: g.clauses, facts: i.facts, cfg: cfgOf(i.cfg), evaluatedAt: i.now.toISOString() };
+  const cg = chartGateOf(g, i.facts, i.chart);
+  const base = {
+    v: 1 as const, justification: g.justification, clauses: g.clauses, facts: i.facts, cfg: cfgOf(i.cfg), evaluatedAt: i.now.toISOString(),
+    ...(cg ? { chartGate: cg } : {}),
+  };
+  // The chart says the trade is intact and the loss is within the absolute cap: hold (act mode only).
+  if (cg?.held) return { ...base, outcome: 'GATED_THESIS_INTACT', persistence: null };
   if (!g.justified) {
     // Fail OPEN when the gate cannot see: with no thesis or floor clause measurable
     // (no underlying LTP, no exposure, no invalidation/HOLD/VWAP), "thesis intact" is
@@ -69,6 +110,7 @@ export function decideExit(i: {
   return { ...base, outcome: p.confirmed ? 'PASS' : 'AWAITING_CONFIRMATION', persistence: p };
 }
 
+
 export function isBlocking(r: GateRecordV1 | null | undefined): boolean {
   return r?.outcome === 'GATED_THESIS_INTACT' || r?.outcome === 'AWAITING_CONFIRMATION';
 }
@@ -92,7 +134,10 @@ export function gateSummary(r: GateRecordV1): string {
   const head = r.outcome === 'PASS' || r.outcome === 'AWAITING_CONFIRMATION'
     ? `${r.outcome}: ${r.justification} via ${passed.join('+')}${r.persistence ? ` persist=${r.persistence.rule ?? 'pending'}` : ''}`
     : `${r.outcome}: `;
-  return `${head}${r.outcome === 'GATED_THESIS_INTACT' ? '' : '; '}${parts.join(', ')}`.slice(0, 300);
+  const chart = r.chartGate
+    ? `${r.chartGate.held ? 'CHART HOLD' : r.chartGate.wouldHold ? 'chart would hold (observe)' : 'chart'}: ${r.chartGate.why}; `
+    : '';
+  return `${head}${r.outcome === 'GATED_THESIS_INTACT' ? '' : '; '}${chart}${parts.join(', ')}`.slice(0, 400);
 }
 
 export function buildGateFacts(p: PacketFacts, ctx: {

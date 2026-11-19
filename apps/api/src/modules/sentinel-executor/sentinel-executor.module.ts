@@ -34,6 +34,8 @@ import { MbmModule } from '../mbm/mbm.module';
 import { FloorBrokerSlRepository } from './repositories/floor-broker-sl.repository';
 import { FLOOR_SL_CANDLES, FloorBrokerSlService } from './services/floor-broker-sl.service';
 import { N15Reader, TRIGGER_N15_READER } from './repositories/n15.reader';
+import { CHART_CONFIRM_READER, ChartConfirmReader } from './repositories/chart-confirm.reader';
+import { ExitNoiseRepository } from '../exit-noise/exit-noise.repository';
 
 /**
  * Sentinel auto-exit (docs/superpowers/specs/2026-10-12-sentinel-auto-exit-design.md).
@@ -89,6 +91,12 @@ import { N15Reader, TRIGGER_N15_READER } from './repositories/n15.reader';
     { provide: FLOOR_SL_CANDLES, useFactory: (prisma: PrismaService) => new PrismaCandleRepo(prisma as never), inject: [PrismaService] },
     // CUT_LOSS yardstick (2026-11-11), RECORD ONLY on real triggers: the underlying's 15-minute N from candles_1m.
     { provide: TRIGGER_N15_READER, useFactory: (prisma: PrismaService) => new N15Reader(new PrismaCandleRepo(prisma as never)), inject: [PrismaService] },
+    // Loss-side chart confirmation (EXIT_CHART_CONFIRM, exit-discipline/chart-read.ts): database reads only.
+    {
+      provide: CHART_CONFIRM_READER,
+      useFactory: (prisma: PrismaService) => new ChartConfirmReader(new PrismaCandleRepo(prisma as never), new ExitNoiseRepository(prisma)),
+      inject: [PrismaService],
+    },
   ],
 })
 export class SentinelExecutorModule {}

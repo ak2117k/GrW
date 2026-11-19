@@ -204,6 +204,21 @@ describe('RiskManagerService — trade-rejection logging', () => {
       expect((await mod.get(RiskManagerService).validateTrade(paperOrder as any)).reason).toMatch(/Max concurrent positions reached: 10\/10/);
     });
 
+    it('2026-11-19: a LIVE order\'s daily loss counts only live closed trades — a paper loss no longer blocks it', async () => {
+      const mod = await buildModule({ settings, dailyPnl: -19166 });
+      const repo = mod.get(TradeRepository) as unknown as { getDailyPnL: jest.Mock };
+      repo.getDailyPnL.mockImplementation(async (_d: Date, o?: { isPaperTrade?: boolean }) => (o?.isPaperTrade === false ? 0 : -19166));
+      const svc = mod.get(RiskManagerService);
+      const liveGold = { ...baseRequest, symbol: 'GOLD27NOV26120000PE', exchange: 'MCX', isPaper: false, strategy: 'TELEGRAM_SIGNAL', quantity: 1, price: 280 };
+      expect(await svc.validateTrade(liveGold as any)).toEqual({ allowed: true });
+      // A real loss over the limit still blocks it.
+      repo.getDailyPnL.mockImplementation(async () => -6000);
+      expect((await svc.validateTrade(liveGold as any)).reason).toMatch(/Max daily loss limit reached: loss=6000/);
+      // A paper order still counts every trade, as before.
+      repo.getDailyPnL.mockImplementation(async (_d: Date, o?: { isPaperTrade?: boolean }) => (o?.isPaperTrade === false ? 0 : -19166));
+      expect((await svc.validateTrade({ ...liveGold, isPaper: true, strategy: undefined } as any)).reason).toMatch(/Max daily loss limit reached: loss=19166/);
+    });
+
     it('RISK_LIVE_POSITIONS_LIVE_ONLY=false rolls back to counting every open trade for a live order', async () => {
       const ten = { maxDailyLoss: 5000, maxConcurrentPositions: 10, maxCapitalPerTrade: 200000, paperTrading: true, tradingHoursOnly: false };
       const saved = process.env.RISK_LIVE_POSITIONS_LIVE_ONLY;

@@ -223,8 +223,17 @@ export class RiskManagerService {
     maxDailyLoss: number,
     request: ExecuteTradeDto,
   ): Promise<RiskValidation> {
-    const realizedPnl = await this.tradeRepository.getDailyPnL(new Date());
-    const totalDailyPnl = realizedPnl + this.currentUnrealizedPnl;
+    // A LIVE order counts only LIVE closed trades (prod 2026-11-19): the paper learning track lost ₹19,166
+    // on paper, and that blocked three approved live MCX calls (GOLD 120000 PE, CRUDEOIL 7400/7450 PE)
+    // as "Max daily loss limit reached" — the same paper-counts-as-real bug as the positions check above.
+    // The unrealized figure is the trade-engine's own (paper) positions, so it is left out too. Real
+    // money's daily stop is the signal trader's daily_signal_loss (its trackers' P&L) and the exit gate's
+    // HARD_DAILY_LOSS. RISK_LIVE_POSITIONS_LIVE_ONLY=false rolls this back with the positions check.
+    const liveOnly = request.isPaper === false && livePositionsLiveOnly();
+    const realizedPnl = liveOnly
+      ? await this.tradeRepository.getDailyPnL(new Date(), { isPaperTrade: false })
+      : await this.tradeRepository.getDailyPnL(new Date());
+    const totalDailyPnl = realizedPnl + (liveOnly ? 0 : this.currentUnrealizedPnl);
 
     // If total P&L is negative and exceeds the max daily loss threshold
     if (totalDailyPnl < 0 && Math.abs(totalDailyPnl) >= maxDailyLoss) {

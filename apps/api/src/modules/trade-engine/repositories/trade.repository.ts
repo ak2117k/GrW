@@ -224,7 +224,8 @@ export class TradeRepository {
     });
   }
 
-  async getDailyPnL(date: Date): Promise<number> {
+  /** `opts.isPaperTrade` limits the sum to paper (true) or live (false) trades; absent = every trade, as before. */
+  async getDailyPnL(date: Date, opts: { isPaperTrade?: boolean } = {}): Promise<number> {
     const dayStart = new Date(date);
     dayStart.setHours(0, 0, 0, 0);
     const dayEnd = new Date(date);
@@ -234,6 +235,7 @@ export class TradeRepository {
       where: {
         status: 'CLOSED',
         exitTime: { gte: dayStart, lte: dayEnd },
+        ...(opts.isPaperTrade !== undefined ? { isPaperTrade: opts.isPaperTrade } : {}),
       },
       _sum: { pnl: true },
     });

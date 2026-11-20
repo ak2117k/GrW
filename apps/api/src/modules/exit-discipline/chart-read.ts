@@ -138,6 +138,19 @@ export function chartConfirmMode(env: Record<string, string | undefined> = proce
   return v === 'off' || v === 'act' ? v : 'observe';
 }
 
+/**
+ * PROFIT_CHART_CONFIRM: off | observe (default) | act — the same chart check on PROFIT-side code exits
+ * (FLOOR_HARD_GREEN_LOCK, FLOOR_HARD_UNDERLYING_MOVE, the TARGET_LADDER trail). Owner 2026-11-20, LTM 4100 CE:
+ * bought 85, the AI said HOLD every look, the green lock sold 139.55 on a 12.7-pt LTM dip (1.0 x its 1-MINUTE N,
+ * 0.18 x N15) with the chart intact; the stock kept rising. Replay of 33 live profit-side exits (21 days): holding
+ * while the chart is intact netted +₹6.9k but was worse on 18 of 29 (the floor was right on most; the gain is a few
+ * trend days) — so it starts in OBSERVE.
+ */
+export function profitChartConfirmMode(env: Record<string, string | undefined> = process.env): ChartConfirmMode {
+  const v = String(env.PROFIT_CHART_CONFIRM ?? '').trim().toLowerCase();
+  return v === 'off' || v === 'act' ? v : 'observe';
+}
+
 /** HARD_LOSS_ABS_RUPEES (owner 2026-11-19: ₹3,500): the loss that exits whatever the chart says. Junk/unset => 3500. */
 export const HARD_LOSS_ABS_DEFAULT = 3500;
 export function hardLossAbsRupees(env: Record<string, string | undefined> = process.env): number {

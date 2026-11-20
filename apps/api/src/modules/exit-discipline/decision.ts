@@ -42,15 +42,17 @@ export function bypassRecord(reason: 'DISABLED' | 'FACTS_UNREADABLE', cfg: ExitD
 export function chartGateOf(
   g: ReturnType<typeof evaluateExitGate>,
   facts: GateFacts,
-  opts: { mode: ChartConfirmMode; absLossRupees: number } | undefined,
+  opts: { mode: ChartConfirmMode; absLossRupees: number; profitMode?: ChartConfirmMode } | undefined,
 ): ChartGateRecord | null {
-  if (!opts || opts.mode === 'off' || !g.justified) return null;
-  const passed = new Set(g.clauses.filter((c) => c.pass === true).map((c) => c.id));
+  if (!opts || !g.justified) return null;
+  const passedClauses = g.clauses.filter((c) => c.pass === true);
+  const passed = new Set(passedClauses.map((c) => c.id));
   const lossRules: ClauseId[] = ['HARD_MAX_LOSS', 'FLOOR_HARD_GREEN_TO_RED'];
   const lossSide = [...passed].length > 0 && [...passed].every((id) => lossRules.includes(id));
-  if (!lossSide) return null;
   const net = typeof facts.netPnlNow === 'number' && Number.isFinite(facts.netPnlNow) ? facts.netPnlNow : null;
-  const base = { mode: opts.mode, lossSide, netPnlNow: net, absLossRupees: opts.absLossRupees };
+  if (!lossSide) return profitChartGateOf(passedClauses, facts, net, opts);
+  if (opts.mode === 'off') return null;
+  const base = { mode: opts.mode, lossSide, side: 'loss' as const, netPnlNow: net, absLossRupees: opts.absLossRupees };
   const chart = facts.chart ?? null;
   let why: string;
   let wouldHold = false;
@@ -65,10 +67,43 @@ export function chartGateOf(
   return { ...base, wouldHold, held: wouldHold && opts.mode === 'act', why: why.slice(0, 400) };
 }
 
+/**
+ * Profit-side chart confirmation (PROFIT_CHART_CONFIRM, owner 2026-11-20). Applies only when the exit's ONLY grounds
+ * are the profit-side code rules — FLOOR_HARD_GREEN_LOCK, FLOOR_HARD_UNDERLYING_MOVE and the TARGET_LADDER trail
+ * (never the last target reached) — measured on the option premium and the 1-minute noise unit. Holds while the
+ * trade is still net green (≥ ₹0: green-to-red stays a hard exit) and the chart was read and is NOT against.
+ */
+function profitChartGateOf(
+  passedClauses: ReturnType<typeof evaluateExitGate>['clauses'],
+  facts: GateFacts,
+  net: number | null,
+  opts: { absLossRupees: number; profitMode?: ChartConfirmMode },
+): ChartGateRecord | null {
+  const mode = opts.profitMode ?? 'off';
+  if (mode === 'off' || passedClauses.length === 0) return null;
+  const profitRules: ClauseId[] = ['FLOOR_HARD_GREEN_LOCK', 'FLOOR_HARD_UNDERLYING_MOVE', 'TARGET_LADDER'];
+  if (!passedClauses.every((c) => profitRules.includes(c.id))) return null;
+  const ladder = passedClauses.find((c) => c.id === 'TARGET_LADDER');
+  if (ladder && (ladder.measured as { lastHit?: unknown } | undefined)?.lastHit === true) return null;
+  const base = { mode, lossSide: false, side: 'profit' as const, netPnlNow: net, absLossRupees: opts.absLossRupees };
+  const chart = facts.chart ?? null;
+  let why: string;
+  let wouldHold = false;
+  if (net === null) why = 'net P&L unknown — exit stands';
+  else if (net < 0) why = `net ₹${Math.round(net)} is red — green-to-red stays a hard exit`;
+  else if (!chart || !chart.known) why = 'chart not readable — exit stands';
+  else if (chart.against) why = `chart against: ${chart.reasons.join('; ')}`;
+  else {
+    wouldHold = true;
+    why = `profit-side exit on premium noise with the chart intact (${chart.reasons.join('; ')}); net ₹${Math.round(net)} still green`;
+  }
+  return { ...base, wouldHold, held: wouldHold && mode === 'act', why: why.slice(0, 400) };
+}
+
 /** Spec §6 + §7 composed (R7). */
 export function decideExit(i: {
   facts: GateFacts; current: { id: string; createdAt: Date }; history: HistoryVerdict[]; cfg: ExitDisciplineConfig; now: Date;
-  chart?: { mode: ChartConfirmMode; absLossRupees: number };
+  chart?: { mode: ChartConfirmMode; absLossRupees: number; profitMode?: ChartConfirmMode };
 }): GateRecordV1 {
   if (!i.cfg.enabled) return bypassRecord('DISABLED', i.cfg, i.now);
   const g = evaluateExitGate(i.facts, i.cfg);

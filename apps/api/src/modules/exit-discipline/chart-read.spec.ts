@@ -1,4 +1,4 @@
-import { chartConfirmMode, hardLossAbsRupees, readChart, supertrend, type ChartBar } from './chart-read';
+import { chartConfirmMode, hardLossAbsRupees, profitChartConfirmMode, readChart, supertrend, type ChartBar } from './chart-read';
 import { chartGateOf } from './decision';
 import type { ClauseResult, GateFactsSnapshot } from './types';
 
@@ -107,5 +107,52 @@ describe('cutLossRealActs (TRIGGER_CUT_LOSS_REAL)', () => {
     expect(cutLossRealActs({})).toBe(false);
     expect(cutLossRealActs({ TRIGGER_CUT_LOSS_REAL: 'act' })).toBe(true);
     expect(cutLossRealActs({ TRIGGER_CUT_LOSS_REAL: 'act', TRIGGER_CUT_LOSS_N15: 'off' })).toBe(false);
+  });
+});
+
+describe('profit-side chart gate (PROFIT_CHART_CONFIRM, owner 2026-11-20 LTM 4100 CE)', () => {
+  const clause = (id: ClauseResult['id'], pass: boolean | null, measured: ClauseResult['measured'] = {}): ClauseResult => ({ id, pass, measured, note: '' });
+  const g = (passed: ClauseResult[]) => ({
+    justified: passed.length > 0, justification: null, hardRisk: false, thesisClearMargin: false, floorHard: true, ladder: false,
+    clauses: [...passed, clause('THESIS_INVALIDATION', false)],
+  }) as never;
+  // LTM 09:40: green lock sold 139.55 on a 12.7-pt dip; LTM 4221 above the 4155 invalidation, still rising.
+  const intact = readChart({ bull: true, underlyingNow: 4221.8, invalidation: 4155, bestUnderlying: 4234.5, bars5: rising(30, 4150, 2.5), bars15: rising(30, 4100, 4), n15: 72, k15: 1.5 });
+  const facts = (net: number, chart = intact) => ({ netPnlNow: net, chart } as unknown as GateFactsSnapshot);
+  const opts = (profitMode: 'off' | 'observe' | 'act') => ({ mode: 'observe' as const, absLossRupees: 3500, profitMode });
+  const lock = clause('FLOOR_HARD_GREEN_LOCK', true);
+
+  it('LTM 09:40: green lock at +₹7,216 with the chart intact ⇒ held in act mode', () => {
+    expect(intact.against).toBe(false);
+    const r = chartGateOf(g([lock]), facts(7216), opts('act'));
+    expect(r).toMatchObject({ side: 'profit', wouldHold: true, held: true });
+  });
+
+  it('observe records wouldHold but never holds; off is silent', () => {
+    expect(chartGateOf(g([lock]), facts(7216), opts('observe'))).toMatchObject({ wouldHold: true, held: false });
+    expect(chartGateOf(g([lock]), facts(7216), opts('off'))).toBeNull();
+  });
+
+  it('the ladder trail and the K·N floor are profit-side too; the last target reached is never held', () => {
+    expect(chartGateOf(g([lock, clause('TARGET_LADDER', true, { lastHit: false })]), facts(450), opts('act'))?.held).toBe(true);
+    expect(chartGateOf(g([clause('FLOOR_HARD_UNDERLYING_MOVE', true)]), facts(300), opts('act'))?.held).toBe(true);
+    expect(chartGateOf(g([clause('TARGET_LADDER', true, { lastHit: true })]), facts(5000), opts('act'))).toBeNull();
+  });
+
+  it('net red, chart against or unreadable ⇒ the exit stands; mixed with a VWAP/thesis clause ⇒ untouched', () => {
+    expect(chartGateOf(g([clause('TARGET_LADDER', true)]), facts(-443), opts('act'))?.held).toBe(false);
+    expect(chartGateOf(g([lock]), facts(7216, { ...intact, against: true }), opts('act'))?.held).toBe(false);
+    expect(chartGateOf(g([lock]), facts(7216, null as never), opts('act'))?.held).toBe(false);
+    expect(chartGateOf(g([lock, clause('FLOOR_BREACH_VWAP', true)]), facts(700), opts('act'))).toBeNull();
+  });
+
+  it('green-to-red stays with the loss-side switch (observe on prod)', () => {
+    expect(chartGateOf(g([clause('FLOOR_HARD_GREEN_TO_RED', true), clause('TARGET_LADDER', true)]), facts(-443), opts('act'))).toBeNull();
+  });
+
+  it('config: observe by default', () => {
+    expect(profitChartConfirmMode({})).toBe('observe');
+    expect(profitChartConfirmMode({ PROFIT_CHART_CONFIRM: 'act' })).toBe('act');
+    expect(profitChartConfirmMode({ PROFIT_CHART_CONFIRM: 'off' })).toBe('off');
   });
 });

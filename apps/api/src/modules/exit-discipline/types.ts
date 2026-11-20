@@ -126,6 +126,8 @@ export interface ChartGateRecord {
   mode: ChartConfirmMode;
   /** The exit's only grounds were loss-side code rules (HARD_MAX_LOSS / FLOOR_HARD_GREEN_TO_RED). */
   lossSide: boolean;
+  /** Which code rules the check covered: loss-side (EXIT_CHART_CONFIRM) or profit-side (PROFIT_CHART_CONFIRM). Absent on rows before 2026-11-20 = loss. */
+  side?: 'loss' | 'profit';
   wouldHold: boolean;
   held: boolean;
   netPnlNow: number | null;

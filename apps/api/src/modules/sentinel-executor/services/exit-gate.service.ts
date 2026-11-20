@@ -17,7 +17,7 @@ import { ExitGateRepository } from '../repositories/exit-gate.repository';
 import { AI_EXIT_SESSION_CLOCK } from './executor.tokens';
 import { lossLimitFor } from '../../../common/utils/loss-limit';
 import { parseCarryConfig } from '../../intraday-carry/domain/carry-config';
-import { chartConfirmMode, hardLossAbsRupees, readChart } from '../../exit-discipline/chart-read';
+import { chartConfirmMode, hardLossAbsRupees, profitChartConfirmMode, readChart } from '../../exit-discipline/chart-read';
 import { cutLossK15 } from '../../exit-discipline/cut-loss-yardstick';
 import { CHART_CONFIRM_READER, type ChartConfirmReader, type ChartData } from '../repositories/chart-confirm.reader';
 
@@ -128,7 +128,7 @@ export class ExitGateService {
     const facts = readPacketFacts(packet);
     if ('unreadable' in facts) return { kind: 'unreadable', reason: facts.unreadable };
     const since = new Date(v.createdAt.getTime() - STREAK_LOOKBACK_MIN * 60_000);
-    const wantChart = this.chartReader && chartConfirmMode(process.env) !== 'off';
+    const wantChart = this.chartReader && (chartConfirmMode(process.env) !== 'off' || profitChartConfirmMode(process.env) !== 'off');
     const [history, coreMaxLoss, dailyLossLatched, chartData] = await Promise.all([
       this.repo.recentVerdicts(v.trackerId, v.id, v.createdAt, since),
       this.repo.maxRiskPerTrade(v.userId, now),
@@ -165,7 +165,8 @@ export class ExitGateService {
           : {}),
       });
       const mode = chartConfirmMode(process.env);
-      if (mode !== 'off' && ctx.chartData && facts.exposure !== null) {
+      const profitMode = profitChartConfirmMode(process.env);
+      if ((mode !== 'off' || profitMode !== 'off') && ctx.chartData && facts.exposure !== null) {
         facts.chart = readChart({
           bull: facts.exposure === 'BULLISH', underlyingNow: facts.underlying, invalidation: facts.invalidation,
           bestUnderlying: facts.anchors?.bestUnderlying ?? facts.holdRef?.underlying ?? null,
@@ -174,10 +175,10 @@ export class ExitGateService {
       }
       const record = decideExit({
         facts, current: ctx.verdict, history: ctx.history, cfg, now: live.now,
-        chart: { mode, absLossRupees: hardLossAbsRupees(process.env) },
+        chart: { mode, absLossRupees: hardLossAbsRupees(process.env), profitMode },
       });
       if (record.chartGate) {
-        this.logger.warn(`[exit-gate] chart-confirm ${record.chartGate.held ? 'HELD' : record.chartGate.wouldHold ? 'WOULD HOLD (observe)' : 'exit stands'} — ${ctx.packet.symbol}: ${record.chartGate.why}`);
+        this.logger.warn(`[exit-gate] chart-confirm (${record.chartGate.side ?? 'loss'}-side) ${record.chartGate.held ? 'HELD' : record.chartGate.wouldHold ? 'WOULD HOLD (observe)' : 'exit stands'} — ${ctx.packet.symbol}: ${record.chartGate.why}`);
       }
       if (record.outcome === 'BYPASS') this.logger.warn(`[exit-gate] facts unreadable — failing OPEN (today's behaviour): ${record.error ?? record.bypassReason}`);
       return this.withMbmShadow(ctx, live, record);

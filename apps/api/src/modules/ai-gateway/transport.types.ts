@@ -51,6 +51,19 @@ export interface TransportRequest {
     cache_control?: { type: 'ephemeral' };
   }>;
   messages: Array<{ role: 'user'; content: string; images?: TransportImage[] }>;
+  /**
+   * CLI-only hints (2026-11-20). The claude CLI ignores `output_config.effort` — every CLI call ran at the CLI's
+   * default thinking — so a job that wants a set effort on the CLI says so here, opt-in per job. Never sent to
+   * the API: `toApiWire` strips it.
+   */
+  cli?: { effort?: 'low' | 'medium' | 'high' };
+}
+
+/** The request as the Messages API may see it: CLI-only hints removed. */
+export function toApiWire<T extends TransportRequest>(request: T): T {
+  if (!('cli' in request)) return request;
+  const { cli: _cli, ...rest } = request;
+  return rest as T;
 }
 
 /**

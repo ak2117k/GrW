@@ -1,4 +1,4 @@
-import { hasImages, userContentBlocks, type TransportMessage, type TransportRequest } from '../transport.types';
+import { hasImages, toApiWire, userContentBlocks, type TransportMessage, type TransportRequest } from '../transport.types';
 import type { ProviderAdapter, ProviderName, ProviderResult } from './provider.types';
 
 /** The SDK reply: a transport message plus the token usage the API reports. */
@@ -37,9 +37,10 @@ export class AnthropicApiProvider implements ProviderAdapter {
 
   async send(request: TransportRequest): Promise<ProviderResult> {
     // A request with images is mapped to SDK content blocks; every other request is passed as-is.
-    const wire: TransportRequest = hasImages(request)
-      ? ({ ...request, messages: request.messages.map((m) => ({ role: m.role, content: userContentBlocks(m) })) } as unknown as TransportRequest)
-      : request;
+    const api = toApiWire(request);
+    const wire: TransportRequest = hasImages(api)
+      ? ({ ...api, messages: api.messages.map((m) => ({ role: m.role, content: userContentBlocks(m) })) } as unknown as TransportRequest)
+      : api;
     const message = await this.client.messages.create(wire);
     return {
       message,

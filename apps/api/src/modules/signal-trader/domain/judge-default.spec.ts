@@ -72,3 +72,14 @@ describe('no risk-reward test at entry (owner 2026-11-09)', () => {
     expect(judgeTakeRule(60)).not.toMatch(/stop inside ordinary noise/);
   });
 });
+
+describe('SIGNAL_JUDGE_EFFORT', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { signalJudgeEffort } = require('../services/signal-judge.service');
+  it('low | medium | high; unset or junk = null (today: no CLI effort flag)', () => {
+    expect(signalJudgeEffort('medium')).toBe('medium');
+    expect(signalJudgeEffort(' LOW ')).toBe('low');
+    expect(signalJudgeEffort(undefined)).toBeNull();
+    expect(signalJudgeEffort('fast')).toBeNull();
+  });
+});

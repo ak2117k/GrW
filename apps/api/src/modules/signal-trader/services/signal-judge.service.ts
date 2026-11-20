@@ -46,12 +46,14 @@ export class SignalJudgeService {
     opts: { model: string; timeoutMs: number; slotWaitMs: number; userId: string | null; system?: string },
   ): Promise<JudgeOutcome> {
     const started = Date.now();
+    const effort = signalJudgeEffort(this.config.get<string>('SIGNAL_JUDGE_EFFORT'));
     const request: TransportRequest = {
       model: opts.model,
       max_tokens: JUDGE_MAX_TOKENS,
-      output_config: { effort: 'high', format: { type: 'json_schema', schema: SIGNAL_JUDGE_SCHEMA } },
+      output_config: { effort: effort ?? 'high', format: { type: 'json_schema', schema: SIGNAL_JUDGE_SCHEMA } },
       system: [{ type: 'text', text: opts.system ?? SIGNAL_JUDGE_SYSTEM }],
       messages: [{ role: 'user', content: JSON.stringify(packet) }],
+      ...(effort ? { cli: { effort } } : {}),
     } as TransportRequest;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
@@ -97,3 +99,13 @@ export class SignalJudgeService {
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * SIGNAL_JUDGE_EFFORT (owner 2026-11-20, "faster decisions"): low | medium | high. Unset/junk = null = today's
+ * behaviour (API effort 'high', the CLI at its own default). Prod 2026-11-17..20: the judge took 21–23 s median,
+ * ~1,330 output tokens of which ~200 are the visible verdict — the time is the model's thinking, not the reply.
+ */
+export function signalJudgeEffort(raw: string | undefined): 'low' | 'medium' | 'high' | null {
+  const v = String(raw ?? '').trim().toLowerCase();
+  return v === 'low' || v === 'medium' || v === 'high' ? v : null;
+}

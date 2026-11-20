@@ -250,6 +250,7 @@ export class ClaudeCliTransport implements MessagesTransport {
       params.model,
       '--system-prompt-file',
       promptFile,
+      ...(params.cli?.effort ? ['--effort', params.cli.effort] : []),
       ...LEAN_FLAGS,
     ];
 

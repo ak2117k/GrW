@@ -278,6 +278,9 @@ export function directRecordedTransport(opts: {
 }): MessagesTransport {
   const isCli = opts.judge === 'cli';
   if (!opts.record) {
+    // Unrecorded API path: the bare SDK client (other SDK methods are used on it). A request's CLI-only `cli` hint
+    // is stripped on the recorded path (AnthropicApiProvider); SIGNAL_JUDGE_EFFORT is a CLI setting — leave it
+    // unset with AI_CALLS_RECORD=off and SENTINEL_JUDGE=api.
     return isCli ? opts.cli : (new Anthropic({ apiKey: opts.apiKey }) as unknown as MessagesTransport);
   }
   const adapter: ProviderAdapter = isCli

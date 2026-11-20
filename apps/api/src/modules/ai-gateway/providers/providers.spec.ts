@@ -277,3 +277,23 @@ describe('images (signal vision, 2026-10-23)', () => {
     await expect(new ClaudeCliProvider(new ClaudeCliTransport()).send(withImage())).rejects.toThrow(/stream-json result/);
   });
 });
+
+describe('CLI effort hint (2026-11-20, SIGNAL_JUDGE_EFFORT)', () => {
+  beforeEach(() => spawnMock.mockReset());
+  const ok = () => fakeChild('{"result":"{}","stop_reason":"end_turn"}');
+
+  it('passes --effort to the CLI only when the request carries cli.effort', async () => {
+    spawnMock.mockImplementation(ok);
+    await new ClaudeCliTransport().messages.create({ ...request(), cli: { effort: 'medium' } });
+    expect(JSON.stringify(spawnMock.mock.calls[0])).toMatch(/--effort[^a-z]+medium/);
+    spawnMock.mockClear();
+    await new ClaudeCliTransport().messages.create(request());
+    expect(JSON.stringify(spawnMock.mock.calls[0])).not.toContain('--effort');
+  });
+
+  it('the API never sees the CLI hint', async () => {
+    const create = jest.fn().mockResolvedValue({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn' });
+    await new AnthropicApiProvider({ messages: { create } }).send({ ...request(), cli: { effort: 'low' } });
+    expect(create.mock.calls[0][0]).toEqual(request());
+  });
+});

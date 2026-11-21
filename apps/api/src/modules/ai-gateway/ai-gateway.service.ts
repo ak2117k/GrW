@@ -41,7 +41,7 @@ export interface AiGatewayDeps {
 }
 
 /** Providers that spend metered credit and therefore pass through the budget meter. */
-const BILLED: ReadonlySet<ProviderName> = new Set<ProviderName>(['anthropic-api']);
+const BILLED: ReadonlySet<ProviderName> = new Set<ProviderName>(['anthropic-api', 'anthropic-vertex']);
 
 const ERROR_MESSAGE_MAX = 2000;
 
@@ -86,10 +86,12 @@ export class AiGatewayService implements AiGateway {
     for (let i = 0; i < chain.length; i++) {
       const provider = chain[i];
       const isLast = i === chain.length - 1;
-      const req: TransportRequest = route.model ? { ...request, model: route.model } : request;
+      const adapter = this.deps.adapters[provider];
+      const routed: TransportRequest = route.model ? { ...request, model: route.model } : request;
+      // Priced and recorded as the model the provider actually serves (Vertex maps ids).
+      const req: TransportRequest = adapter?.modelFor ? { ...routed, model: adapter.modelFor(routed.model) } : routed;
       const base = { job, provider, priority, ctx, req, fallbackFrom };
 
-      const adapter = this.deps.adapters[provider];
       if (!adapter) {
         const err = new Error(`ai-gateway: provider ${provider} is not configured`);
         this.audit(base, { error: err, latencyMs: 0, queuedMs: 0 });

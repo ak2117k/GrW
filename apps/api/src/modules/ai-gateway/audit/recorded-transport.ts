@@ -3,6 +3,8 @@ import { Logger } from '@nestjs/common';
 import Anthropic from '@anthropic-ai/sdk';
 import { costInr, loadPrices, type ModelPrice } from '../budget/model-prices';
 import { AnthropicApiProvider } from '../providers/anthropic-api.provider';
+import { AnthropicVertexProvider, createVertexClient, vertexSettingsFrom } from '../providers/anthropic-vertex.provider';
+import type { JudgeTransportName } from '../../trade-sentinel/services/llm-transport';
 import { ClaudeCliProvider, type ClaudeCliTransport } from '../providers/claude-cli.provider';
 import { totalInputTokens, type ProviderAdapter, type ProviderResult } from '../providers/provider.types';
 import { readAiConfig } from '../routes/route-config';
@@ -192,7 +194,9 @@ export class RecordedTransport implements MessagesTransport {
       const storedWhole = request.systemStored === 'full' && !(request.truncated as { system: boolean }).system;
       let cost = 0;
       let notional: number | null = null;
-      const price = ok ? this.deps.prices?.get(req.model) : undefined;
+      // The model actually served (Vertex maps ids) — priced and recorded as that.
+      const servedModel = this.deps.adapter.modelFor?.(req.model) ?? req.model;
+      const price = ok ? this.deps.prices?.get(servedModel) : undefined;
       if (ok && price) {
         const priced = costInr(
           price,
@@ -207,7 +211,7 @@ export class RecordedTransport implements MessagesTransport {
       const row: AiCallRow = {
         job: this.deps.jobOf(req),
         provider: this.deps.adapter.name,
-        model: req.model,
+        model: servedModel,
         effort: req.output_config?.effort ?? null,
         priority: 0,
         userId: ctx.userId ?? null,
@@ -269,13 +273,20 @@ function safePrices(): Map<string, ModelPrice> {
  * the unwrapped transport.
  */
 export function directRecordedTransport(opts: {
-  judge: 'api' | 'cli' | 'bedrock';
+  judge: JudgeTransportName;
   cli: ClaudeCliTransport;
   apiKey: string | undefined;
   record: boolean;
   audit: { insert(row: AiCallRow): Promise<void> };
   jobOf: (req: TransportRequest) => string;
 }): MessagesTransport {
+  if (opts.judge === 'vertex') {
+    // Vertex settings come from the process env (VERTEX_AI_PROJECT_ID / VERTEX_AI_LOCATION /
+    // GOOGLE_APPLICATION_CREDENTIALS), so no caller needs a new parameter.
+    const provider = new AnthropicVertexProvider(createVertexClient(vertexSettingsFrom(process.env)));
+    if (!opts.record) return { messages: { create: async (params) => (await provider.send(params)).message } };
+    return new RecordedTransport({ adapter: provider, audit: opts.audit, jobOf: opts.jobOf, prices: safePrices() });
+  }
   const isCli = opts.judge === 'cli';
   if (!opts.record) {
     // Unrecorded API path: the bare SDK client (other SDK methods are used on it). A request's CLI-only `cli` hint

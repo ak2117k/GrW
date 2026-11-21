@@ -17,6 +17,7 @@
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.33.1",
     "@anthropic-ai/sdk": "^0.117.1",
+    "@anthropic-ai/vertex-sdk": "^0.22.0",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/bull": "^11.0.0",
     "@nestjs/common": "^11.0.0",
@@ -93,6 +94,8 @@
       "^@td/shared$": "<rootDir>/../../../packages/shared/src/index.ts"
     },
     "testEnvironment": "node",
-    "setupFiles": ["<rootDir>/../test/setup/core-kill-gate.ts"]
+    "setupFiles": [
+      "<rootDir>/../test/setup/core-kill-gate.ts"
+    ]
   }
 }

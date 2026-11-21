@@ -1,7 +1,7 @@
 import type { TransportMessage, TransportRequest } from '../transport.types';
 
 /** The providers the gateway can route a call to. */
-export type ProviderName = 'anthropic-api' | 'claude-cli';
+export type ProviderName = 'anthropic-api' | 'claude-cli' | 'anthropic-vertex';
 
 /**
  * What one call cost, as the provider reported it.
@@ -37,6 +37,8 @@ export interface ProviderResult {
 export interface ProviderAdapter {
   readonly name: ProviderName;
   send(request: TransportRequest): Promise<ProviderResult>;
+  /** The model id this provider actually serves for a requested id (Vertex maps ids); absent = unchanged. */
+  modelFor?(model: string): string;
 }
 
 /**

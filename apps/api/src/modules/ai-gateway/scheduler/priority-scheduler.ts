@@ -8,7 +8,7 @@ export class AiQueueTimeout extends Error {
   }
 }
 
-const DEFAULT_LIMITS: Record<ProviderName, number> = { 'claude-cli': 2, 'anthropic-api': 8 };
+const DEFAULT_LIMITS: Record<ProviderName, number> = { 'claude-cli': 2, 'anthropic-api': 8, 'anthropic-vertex': 8 };
 
 interface Waiter {
   priority: number;

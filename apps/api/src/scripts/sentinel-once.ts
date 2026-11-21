@@ -67,7 +67,7 @@ async function wakeDatabase(attempts = 5): Promise<void> {
 async function main(): Promise<void> {
   const explicitUser = process.argv[2];
 
-  console.log('transport :', process.env.SENTINEL_JUDGE === 'cli' ? 'claude CLI (subscription)' : 'Anthropic API');
+  console.log('transport :', process.env.SENTINEL_JUDGE === 'cli' ? 'claude CLI (subscription)' : process.env.SENTINEL_JUDGE === 'vertex' ? 'Claude on Vertex AI' : 'Anthropic API');
   await wakeDatabase();
   console.log('booting the application context…\n');
 

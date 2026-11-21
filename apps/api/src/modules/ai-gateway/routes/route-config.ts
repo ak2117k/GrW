@@ -4,7 +4,7 @@ import { judgeTransportFrom } from '../../trade-sentinel/services/llm-transport'
 import { AI_JOBS, isAiJob, type AiJob } from '../ai-job';
 import type { ProviderName } from '../providers/provider.types';
 
-const PROVIDERS: readonly ProviderName[] = ['anthropic-api', 'claude-cli'];
+const PROVIDERS: readonly ProviderName[] = ['anthropic-api', 'claude-cli', 'anthropic-vertex'];
 
 /** Where one job's calls go. `model: null` means "use the request's model untouched". */
 export interface AiRoute {
@@ -66,8 +66,9 @@ export function loadRoutes(json: unknown, env: NodeJS.ProcessEnv): Record<AiJob,
     if (!isAiJob(key)) fail(`unknown job key "${key}"`);
   }
 
+  const judge = judgeTransportFrom(env.SENTINEL_JUDGE);
   const sentinelProvider: ProviderName =
-    judgeTransportFrom(env.SENTINEL_JUDGE) === 'cli' ? 'claude-cli' : 'anthropic-api';
+    judge === 'cli' ? 'claude-cli' : judge === 'vertex' ? 'anthropic-vertex' : 'anthropic-api';
 
   const routes = {} as Record<AiJob, AiRoute>;
   for (const job of AI_JOBS) {

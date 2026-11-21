@@ -8,6 +8,7 @@ import { AiCallsSizeWatch } from './audit/ai-calls-size-watch.service';
 import { BudgetMeter, istDayKey } from './budget/budget-meter';
 import { loadPrices } from './budget/model-prices';
 import { AnthropicApiProvider } from './providers/anthropic-api.provider';
+import { AnthropicVertexProvider, createVertexClient, vertexSettingsFrom } from './providers/anthropic-vertex.provider';
 import { ClaudeCliProvider, ClaudeCliTransport } from './providers/claude-cli.provider';
 import { ProviderOutageAlert } from './provider-outage-alert';
 import { loadRoutes, readAiConfig } from './routes/route-config';
@@ -100,6 +101,7 @@ export function istMidnight(now: Date): Date {
             'anthropic-api': new AnthropicApiProvider(
               new Anthropic({ apiKey: config.get<string>('ANTHROPIC_API_KEY') }),
             ),
+            'anthropic-vertex': new AnthropicVertexProvider(createVertexClient(vertexSettingsFrom(process.env))),
           },
           audit: repo,
           outage: new ProviderOutageAlert(),

@@ -37,11 +37,13 @@ export const SIGNAL_VISION = Symbol('SIGNAL_VISION');
  *   (`--input-format stream-json`, tools still disabled). Verified 2026-10-23 on CLI 2.1.309 with
  *   claude-haiku-5-5; the image is never a file the CLI reads.
  * - `api` → the Anthropic SDK with an `image` block — only when ANTHROPIC_API_KEY is set.
+ * - `vertex` → the Vertex SDK with the same `image` block (Messages API shape); credentials are Google's.
  * - `bedrock` → not wired for images here.
  */
-export function visionTransportState(env: { judge: string | undefined; apiKey: string | undefined }): { via: 'cli' | 'api' | null; reason: string | null } {
+export function visionTransportState(env: { judge: string | undefined; apiKey: string | undefined }): { via: 'cli' | 'api' | 'vertex' | null; reason: string | null } {
   const judge = judgeTransportFrom(env.judge);
   if (judge === 'cli') return { via: 'cli', reason: null };
+  if (judge === 'vertex') return { via: 'vertex', reason: null };
   if (judge === 'api') return (env.apiKey ?? '').trim() ? { via: 'api', reason: null } : { via: null, reason: 'SENTINEL_JUDGE=api but no ANTHROPIC_API_KEY' };
   return { via: null, reason: `SENTINEL_JUDGE=${judge} cannot carry images` };
 }
@@ -56,7 +58,7 @@ export function visionTransportState(env: { judge: string | undefined; apiKey: s
 export class SignalVisionService implements SignalVision, OnApplicationBootstrap {
   private readonly logger = new Logger(SignalVisionService.name);
   private transport: MessagesTransport | null = null;
-  private readonly state: { via: 'cli' | 'api' | null; reason: string | null };
+  private readonly state: ReturnType<typeof visionTransportState>;
 
   constructor(
     private readonly config: ConfigService,

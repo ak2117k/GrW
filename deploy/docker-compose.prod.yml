@@ -113,6 +113,10 @@ services:
       - telegrammedia:/app/data/telegram-media
       # The Angel SDK error log (BROKER_ERROR_LOG_DIR above), kept across redeploys.
       - brokerlogs:/app/data/broker-logs
+      # Google service-account key for SENTINEL_JUDGE=vertex (Claude on Vertex AI), read-only.
+      # Lives only on the host (chmod 600, never in git); api.env points
+      # GOOGLE_APPLICATION_CREDENTIALS at /run/secrets/google-vertex.json.
+      - /opt/grw/env/google-vertex.json:/run/secrets/google-vertex.json:ro
     depends_on:
       postgres:
         condition: service_healthy

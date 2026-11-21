@@ -86,7 +86,7 @@ export async function readWith(t: MessagesTransport, slot: SharedSlotRunner | nu
 @Injectable()
 export class ImageSetupVisionReader implements ImageSetupReader {
   private transport: MessagesTransport | null = null;
-  private readonly state: { via: 'cli' | 'api' | null; reason: string | null };
+  private readonly state: ReturnType<typeof visionTransportState>;
 
   constructor(
     private readonly config: ConfigService,

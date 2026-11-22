@@ -58,7 +58,7 @@ export class NewsImpactLlmService implements ImpactLlm {
     const message = await runInSharedSlot(
       this.cycle,
       () => withAiCallContext({ userId: this.cfg.ownerUserId ?? undefined }, () => t.messages.create(request)),
-      { maxWaitMs: this.cfg.maxWaitMs },
+      { maxWaitMs: this.cfg.maxWaitMs, job: NEWS_IMPACT_JOB },
     );
     if (message.stop_reason === 'refusal') throw new Error('the model declined');
     if (message.stop_reason === 'max_tokens') throw new Error('the reply was cut off (max_tokens)');

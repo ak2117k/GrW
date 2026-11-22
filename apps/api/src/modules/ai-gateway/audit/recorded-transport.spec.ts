@@ -15,6 +15,10 @@ import type { ProviderAdapter, ProviderResult } from '../providers/provider.type
 import type { TransportRequest } from '../transport.types';
 import { ClaudeCliProvider, ClaudeCliTransport } from '../providers/claude-cli.provider';
 import { AnthropicApiProvider } from '../providers/anthropic-api.provider';
+import { AnthropicVertexProvider } from '../providers/anthropic-vertex.provider';
+import { AgentLinkState, AgentProvider } from '../agents/agent-provider';
+import { parseAgentRegistry } from '../agents/agent-registry';
+import { GlobalLimiter } from '../agents/global-limiter';
 
 const REQ: TransportRequest = {
   model: 'claude-opus-5',
@@ -280,6 +284,143 @@ describe('aiCallsRecordingOn / directRecordedTransport', () => {
     expect(directRecordedTransport({ judge: 'api', cli, apiKey: 'k', record: false, audit, jobOf: () => 'x' })).toBeInstanceOf(
       Anthropic,
     );
+  });
+
+  describe('vertex + AI agents switch', () => {
+    const saved = { ...process.env };
+    afterEach(() => {
+      for (const k of ['AI_AGENTS', 'SENTINEL_JUDGE', 'AGENT_SENTINEL_JUDGE_CONCURRENCY']) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    });
+
+    it('agents off (unset, off, or SENTINEL_JUDGE!=vertex): exactly today\'s bare AnthropicVertexProvider', () => {
+      for (const env of [{}, { AI_AGENTS: 'off', SENTINEL_JUDGE: 'vertex' }, { AI_AGENTS: 'on', SENTINEL_JUDGE: 'cli' }]) {
+        delete process.env.AI_AGENTS;
+        delete process.env.SENTINEL_JUDGE;
+        Object.assign(process.env, env);
+        const t = directRecordedTransport({ judge: 'vertex', cli, apiKey: 'k', record: true, audit, jobOf: () => 'x' });
+        const adapter = (t as RecordedTransport).deps.adapter;
+        expect(adapter.constructor).toBe(AnthropicVertexProvider);
+      }
+    });
+
+    it('agents on: the AgentProvider (recorded); unrecorded path is a plain transport over it', () => {
+      process.env.AI_AGENTS = 'on';
+      process.env.SENTINEL_JUDGE = 'vertex';
+      const t = directRecordedTransport({ judge: 'vertex', cli, apiKey: 'k', record: true, audit, jobOf: () => 'sentinel.judge' });
+      expect((t as RecordedTransport).deps.adapter).toBeInstanceOf(AgentProvider);
+      expect((t as RecordedTransport).deps.adapter.name).toBe('anthropic-vertex');
+      const u = directRecordedTransport({ judge: 'vertex', cli, apiKey: 'k', record: false, audit, jobOf: () => 'x' });
+      expect(u).not.toBeInstanceOf(RecordedTransport);
+      expect(typeof u.messages.create).toBe('function');
+    });
+
+    it('agents on but registry unusable: falls back to the bare Vertex provider', () => {
+      process.env.AI_AGENTS = 'on';
+      process.env.SENTINEL_JUDGE = 'vertex';
+      const dir = process.env.AI_CONFIG_DIR;
+      process.env.AI_CONFIG_DIR = '/nonexistent-ai-config-dir';
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      try {
+        const t = directRecordedTransport({ judge: 'vertex', cli, apiKey: 'k', record: true, audit, jobOf: () => 'x' });
+        expect((t as RecordedTransport).deps.adapter.constructor).toBe(AnthropicVertexProvider);
+        expect(logged).toHaveBeenCalled();
+      } finally {
+        if (dir === undefined) delete process.env.AI_CONFIG_DIR;
+        else process.env.AI_CONFIG_DIR = dir;
+        logged.mockRestore();
+      }
+    });
+  });
+});
+
+describe('RecordedTransport: agent columns', () => {
+  const flushRow = () => new Promise((r) => setImmediate(r));
+
+  it('records agent = meta.servedBy and queuedMs = meta.queuedMs', async () => {
+    const insert = jest.fn().mockResolvedValue(undefined);
+    const send = jest.fn().mockResolvedValue(result({ servedBy: 'trading', queuedMs: 37.4 }));
+    const t = new RecordedTransport({ adapter: { name: 'anthropic-vertex', send }, audit: { insert }, jobOf: () => 'sentinel.judge' });
+    await t.messages.create(REQ);
+    await flushRow();
+    expect(insert.mock.calls[0][0]).toMatchObject({ agent: 'trading', queuedMs: 37, provider: 'anthropic-vertex' });
+  });
+
+  it('non-agent paths record agent NULL and queuedMs 0', async () => {
+    const insert = jest.fn().mockResolvedValue(undefined);
+    const t = new RecordedTransport({ adapter: { name: 'claude-cli', send: jest.fn().mockResolvedValue(result()) }, audit: { insert }, jobOf: () => 'x' });
+    await t.messages.create(REQ);
+    await flushRow();
+    expect(insert.mock.calls[0][0]).toMatchObject({ agent: null, queuedMs: 0 });
+  });
+
+  it('a failed agent call records the agent the error was tagged with', async () => {
+    const insert = jest.fn().mockResolvedValue(undefined);
+    const err = new Error('busy');
+    Object.defineProperty(err, 'servedBy', { value: 'reading', enumerable: false });
+    Object.defineProperty(err, 'queuedMs', { value: 12, enumerable: false });
+    const t = new RecordedTransport({ adapter: { name: 'anthropic-vertex', send: jest.fn().mockRejectedValue(err) }, audit: { insert }, jobOf: () => 'x' });
+    await expect(t.messages.create(REQ)).rejects.toBe(err);
+    await flushRow();
+    expect(insert.mock.calls[0][0]).toMatchObject({ agent: 'reading', queuedMs: 12, errorClass: 'Error' });
+  });
+
+  it('profile overrides are recorded as sent (model / effort / max_tokens); requestHash stays the caller\'s', async () => {
+    const insert = jest.fn().mockResolvedValue(undefined);
+    const adapter: ProviderAdapter = {
+      name: 'anthropic-vertex',
+      send: jest.fn().mockResolvedValue(result({ servedBy: 'background' })),
+      modelFor: (m) => `${m}-5`,
+      effectiveRequest: (r) => ({ ...r, model: 'claude-sonnet-5', max_tokens: 4000, output_config: { ...r.output_config, effort: 'low' } }),
+    };
+    const t = new RecordedTransport({ adapter, audit: { insert }, jobOf: () => 'news.ideas' });
+    await t.messages.create(REQ);
+    await flushRow();
+    const row: AiCallRow = insert.mock.calls[0][0];
+    expect(row).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'low' });
+    expect(row.request).toMatchObject({ model: 'claude-sonnet-5', max_tokens: 4000 });
+    expect(row.requestHash).toBe(createHash('sha256').update(JSON.stringify(REQ)).digest('hex'));
+  });
+});
+
+/** In-process integration: a real RecordedTransport over a real AgentProvider over a local HTTP agent. */
+describe('RecordedTransport over AgentProvider (local HTTP agent)', () => {
+  it('writes ai_calls with agent + queuedMs from the agent reply', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const http = require('node:http') as typeof import('node:http');
+    const srv = http.createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ protocol: 1, ok: true, message: result().message, meta: result().meta, queuedMs: 25, agent: 'trading' }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+    const port = (srv.address() as { port: number }).port;
+    try {
+      const env = { AGENT_URL_TRADING: `http://127.0.0.1:${port}` };
+      const provider = new AgentProvider({
+        jobOf: () => 'sentinel.judge',
+        inProcess: { name: 'anthropic-vertex', send: jest.fn(), modelFor: (m) => m },
+        registry: parseAgentRegistry({ 'sentinel.judge': { agent: 'trading', concurrency: 6, timeoutMs: 5000 } }, env),
+        env,
+        limiter: new GlobalLimiter({ total: 16, tradingReserve: 6 }),
+        links: new AgentLinkState(),
+      });
+      const insert = jest.fn().mockResolvedValue(undefined);
+      const t = new RecordedTransport({ adapter: provider, audit: { insert }, jobOf: () => 'sentinel.judge' });
+      const msg = await t.messages.create(REQ);
+      expect(msg.content[0].text).toBe('{"verdict":"HOLD"}');
+      await new Promise((r) => setImmediate(r));
+      const row: AiCallRow = insert.mock.calls[0][0];
+      expect(row.agent).toBe('trading');
+      expect(row.queuedMs).toBeGreaterThanOrEqual(25);
+      expect(row.provider).toBe('anthropic-vertex');
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
   });
 });
 

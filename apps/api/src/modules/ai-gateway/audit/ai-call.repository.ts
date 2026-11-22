@@ -24,6 +24,11 @@ export interface AiCallRow {
   latencyMs: number;
   queuedMs: number;
   fallbackFrom: string | null;
+  /**
+   * AI agents (2026-11-22): `trading` | `reading` | `background` (the agent container that served the
+   * call) or `in-process` (the API called Vertex itself). NULL on every non-agent path.
+   */
+  agent?: string | null;
 }
 
 /**

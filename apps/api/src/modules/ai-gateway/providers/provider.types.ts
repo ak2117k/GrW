@@ -1,4 +1,5 @@
 import type { TransportMessage, TransportRequest } from '../transport.types';
+import type { AgentGroup } from '../agents/agent-registry';
 
 /** The providers the gateway can route a call to. */
 export type ProviderName = 'anthropic-api' | 'claude-cli' | 'anthropic-vertex';
@@ -25,6 +26,14 @@ export interface CallMeta {
   cacheCreationInputTokens: number | null;
   cacheReadInputTokens: number | null;
   billed: boolean;
+  /**
+   * AI agents (2026-11-22): which agent container served the call, or `in-process` when the API
+   * called Vertex itself (job routed in-process, or agent unreachable → fallback). Absent on every
+   * non-agent path. Recorded in `ai_calls.agent`.
+   */
+  servedBy?: AgentGroup | 'in-process';
+  /** AI agents: ms the call waited for a slot (API global limiter + the agent's semaphore). Absent = 0. */
+  queuedMs?: number;
 }
 
 /** The reply exactly as callers saw it before the gateway, plus its metadata. */
@@ -33,12 +42,24 @@ export interface ProviderResult {
   meta: CallMeta;
 }
 
+/** Per-call options a provider may honour. */
+export interface SendOptions {
+  /** Aborting it cancels the model call (the AI agent passes its client-gone signal, so an abandoned call frees its slot). */
+  signal?: AbortSignal;
+}
+
 /** One way of serving a Messages-style request. */
 export interface ProviderAdapter {
   readonly name: ProviderName;
-  send(request: TransportRequest): Promise<ProviderResult>;
+  send(request: TransportRequest, opts?: SendOptions): Promise<ProviderResult>;
   /** The model id this provider actually serves for a requested id (Vertex maps ids); absent = unchanged. */
   modelFor?(model: string): string;
+  /**
+   * The request as this provider will actually send it (before model-id mapping), when it changes
+   * fields itself — the AI agent profile's model / effort / max_tokens overrides. The ledger records
+   * model, effort and max_tokens from it. Absent = the request is sent as given.
+   */
+  effectiveRequest?(request: TransportRequest): TransportRequest;
 }
 
 /**

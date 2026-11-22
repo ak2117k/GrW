@@ -31,6 +31,9 @@ stub() {
   checkout() { CALLS+=("checkout:$1"); }
   record_success() { CALLS+=("record:$1"); }
   ensure_disk_headroom() { :; }
+  # No AI agent container running (rollout step 1: defined, not started). Records only real work.
+  running_agents() { :; }
+  recreate_agents() { (( $# > 1 )) && CALLS+=("agents:$*"); return 0; }
 }
 
 check() { # name want_exit want_calls got_exit — runs in a subshell, so it RETURNS its verdict
@@ -66,6 +69,40 @@ check() { # name want_exit want_calls got_exit — runs in a subshell, so it RET
 # Review I3: a fetch failure alerts (rate-limited) instead of killing the unit silently.
 ( stub; remote_sha() { return 1; }; notify_once() { CALLS+=("notify_once:$1"); }
   main; check "fetch fails: alert once, no deploy" 0 "notify_once:fetch" $? ) || failures=$((failures + 1))
+
+# AI agents (design 2026-11-22 §4.7a): the RUNNING agent containers follow the API's tag, after the
+# API is healthy; never-started ones stay off; a failed agent recreate warns but keeps the good API.
+( stub; running_agents() { echo grw-agents-trading; echo grw-agents-background; }
+  main; check "running agents recreated on the new tag after a healthy swap" 0 "fetch:new migrate:new swap:new health:new agents:new grw-agents-trading grw-agents-background record:new" $? ) || failures=$((failures + 1))
+( stub; running_agents() { echo grw-agents-reading; }
+  recreate_agents() { (( $# > 1 )) && CALLS+=("agents:$*"); return 1; }
+  notify() { [[ "$*" == WARNING* ]] && CALLS+=("warn"); return 0; }
+  main; check "agent recreate fails: warn, API deploy still recorded" 0 "fetch:new migrate:new swap:new health:new agents:new grw-agents-reading warn record:new" $? ) || failures=$((failures + 1))
+( stub; running_agents() { echo grw-agents-trading; }; wait_healthy() { CALLS+=("health:$1"); return 1; }
+  main; check "unhealthy API: agents not moved to new, rolled back with the API" 1 "fetch:new migrate:new swap:new health:new swap:old agents:old grw-agents-trading checkout:old mark_failed:new" $? ) || failures=$((failures + 1))
+( stub; n="$(mktemp)"; running_agents() { echo x >> "$n"; echo grw-agents-trading; }
+  in_market_hours() { return 0; }
+  main; check "market hours: agents untouched" 0 "" $? ; r=$?; [[ ! -s "$n" ]] || { echo "FAIL running_agents asked during a deferred deploy"; r=1; }; exit $r ) || failures=$((failures + 1))
+
+# running_agents lists only containers docker reports as running; recreate_agents targets just those
+# services with the given tag under the "agents" profile, and does nothing for an empty list.
+( source "$here/deploy.sh"; set +e
+  docker() { [[ "$1 $2" == "inspect -f" && "$4" == grw-agents-reading ]] && { echo true; return 0; }
+             [[ "$4" == grw-agents-trading ]] && { echo false; return 0; }; return 1; }
+  got="$(running_agents | tr '\n' ' ')"
+  if [[ "$got" == "grw-agents-reading " ]]; then echo "ok   running_agents lists only running agent containers"
+  else echo "FAIL running_agents lists only running agent containers: got [$got]"; exit 1; fi
+) || failures=$((failures + 1))
+( source "$here/deploy.sh"; set +e
+  COMPOSE=(docker compose -f x.yml); tmpcalls="$(mktemp)"
+  docker() { echo "GRW_API_TAG=${GRW_API_TAG:-} $*" >> "$tmpcalls"; }
+  recreate_agents abc; rc0=$?; empty="$(cat "$tmpcalls")"
+  recreate_agents abc grw-agents-trading grw-agents-reading; rc=$?
+  if [[ $rc0 -eq 0 && -z "$empty" && $rc -eq 0 ]] \
+     && grep -qx "GRW_API_TAG=abc compose -f x.yml --profile agents up -d --no-deps grw-agents-trading grw-agents-reading" "$tmpcalls"; then
+    echo "ok   recreate_agents: no-op when none run, else up -d --no-deps on the given tag"
+  else echo "FAIL recreate_agents: rc0=$rc0 rc=$rc calls: $(tr '\n' ';' < "$tmpcalls")"; exit 1; fi
+) || failures=$((failures + 1))
 
 # SP1 M2 F1: TimescaleDB setup runs on every deploy, after migrations and before the swap,
 # and never blocks a deploy.

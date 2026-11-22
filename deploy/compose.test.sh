@@ -17,6 +17,11 @@ expect "caddy publishes 80 (ACME + redirect)" 'grep -A40 "^  caddy:" <<<"$cfg" |
 expect "api not published publicly"        'grep -A60 "^  api:" <<<"$cfg" | grep -q "host_ip: 127.0.0.1"'
 expect "postgres sized for 2 GB"           'grep -q "shared_buffers=256MB" <<<"$cfg"'
 expect "redis capped at 128mb"             'grep -q -- "- 128mb" <<<"$cfg"'
+agents_cfg="$(docker compose -f deploy/docker-compose.prod.yml --profile agents config 2>/dev/null)"
+expect "AI agents are not started by a bare up (profile agents)" '! grep -q "grw-agents-" <<<"$cfg"'
+expect "AI agents defined under profile agents" '[[ $(grep -cE "^  grw-agents-(trading|reading|background):" <<<"$agents_cfg") -eq 3 ]]'
+expect "AI agents publish no ports"         '! sed -n "/^  grw-agents-trading:/,/^  [a-z]/p" <<<"$agents_cfg" | grep -q "published:"'
+expect "AI agents capped at 160m, API image" 'sed -n "/^  grw-agents-reading:/,/^  [a-z]/p" <<<"$agents_cfg" | grep -q "mem_limit: \"167772160\"" && sed -n "/^  grw-agents-reading:/,/^  [a-z]/p" <<<"$agents_cfg" | grep -q "image: grw-api:"'
 expect "Angel SDK error log on a volume"   'grep -A80 "^  api:" <<<"$cfg" | grep -q "target: /app/data/broker-logs" && grep -q "BROKER_ERROR_LOG_DIR: /app/data/broker-logs" <<<"$cfg"'
 
 MSYS_NO_PATHCONV=1 docker run --rm -e API_HOST="$API_HOST" \

@@ -17,7 +17,19 @@
  *     start later: `runShared` re-checks `expired` on every wake.
  *
  * Once started, the call is bounded by the CLI transport's own 180 s timeout.
+ *
+ * AI AGENTS (design 2026-11-22-ai-agents-design.md §4.5). With `AI_AGENTS=on` AND
+ * `SENTINEL_JUDGE=vertex`, a job that is not one of the sentinel's own
+ * ({@link SENTINEL_GATED_JOBS}) and is routed to an agent container skips this
+ * door — and the signal lane — and calls straight through: its agent's per-job
+ * semaphore (with a hard deadline) is its gate. The agent's `AgentBusyError` is
+ * mapped to {@link AssistBusyError}, so every caller's "busy" path is unchanged.
+ * A job the registry routes `in-process` (rollout steps 4–5) keeps this door.
+ * With agents off, or on `cli`, nothing here changes.
  */
+import { withAgentCallBudget } from '../ai-gateway/agents/agent-call-budget';
+import { AgentBusyError } from '../ai-gateway/agents/agent-protocol';
+import { agentsOn, loadAgentRegistry, SENTINEL_GATED_JOBS, type AgentRegistry } from '../ai-gateway/agents/agent-registry';
 
 /** The slice of `SentinelCycleService` this needs (kept narrow for tests). */
 export interface SharedSlotRunner {
@@ -41,11 +53,77 @@ export class AssistBusyError extends Error {
 
 let seq = 0;
 
+/** The registry, re-read only when the env that shapes it changes (tests flip env between cases). */
+let registryCache: { key: string; registry: AgentRegistry } | null = null;
+
+function registryKey(env: NodeJS.ProcessEnv): string {
+  const parts = [`dir=${env.AI_CONFIG_DIR ?? ''}`];
+  for (const k of Object.keys(env).sort()) if (k.startsWith('AGENT_')) parts.push(`${k}=${env[k]}`);
+  return parts.join('\n');
+}
+
+function registryFor(env: NodeJS.ProcessEnv): AgentRegistry {
+  const key = registryKey(env);
+  if (registryCache?.key !== key) registryCache = { key, registry: loadAgentRegistry(env) };
+  return registryCache.registry;
+}
+
+/**
+ * True when `job` skips the shared slot / signal lane because an AI agent gates it (design §4.5):
+ * agents on, not a sentinel job, and not routed `in-process`. A registry that cannot be read keeps the
+ * door (today's behaviour). No `job` with agents on = an unregistered caller = background agent = skip.
+ */
+export function agentGatesJob(job: string | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!agentsOn(env)) return false;
+  if (job === undefined) return true;
+  if (SENTINEL_GATED_JOBS.includes(job)) return false;
+  try {
+    return registryFor(env).profile(job).agent !== 'in-process';
+  } catch {
+    return false;
+  }
+}
+
+function isAgentBusy(err: unknown): err is Error & { waitedMs?: number } {
+  return err instanceof AgentBusyError || (err instanceof Error && err.name === 'AgentBusyError');
+}
+
+/**
+ * Straight through to the agent; its "busy" becomes the advisor's {@link AssistBusyError}.
+ *
+ * The caller's budgets travel with the call ({@link withAgentCallBudget}): the call must START within
+ * `maxWaitMs` (as the shared slot guaranteed — never started after the caller gave up), and with a
+ * `timeoutMs` it is aborted then, so the agent cancels the Vertex call and frees its slot.
+ */
+async function viaAgent<T>(work: () => Promise<T>, maxWaitMs: number, timeoutMs?: number): Promise<T> {
+  const now = Date.now();
+  const budget = {
+    startBy: now + Math.max(0, maxWaitMs),
+    ...(typeof timeoutMs === 'number' && timeoutMs > 0 ? { abortAt: now + timeoutMs } : {}),
+  };
+  try {
+    return await withAgentCallBudget(budget, work);
+  } catch (err) {
+    if (isAgentBusy(err)) {
+      const waited = typeof err.waitedMs === 'number' && err.waitedMs > 0 ? err.waitedMs : maxWaitMs;
+      throw new AssistBusyError(waited);
+    }
+    throw err;
+  }
+}
+
 export function runInSharedSlot<T>(
   runner: SharedSlotRunner,
   work: () => Promise<T>,
-  opts: { maxWaitMs: number; lane?: 'signals' },
+  opts: {
+    maxWaitMs: number;
+    lane?: 'signals';
+    job?: string;
+    /** The caller's own overall timeout. Agent path: the call is aborted (and cancelled on Vertex) then. */
+    timeoutMs?: number;
+  },
 ): Promise<T> {
+  if (agentGatesJob(opts.job)) return viaAgent(work, opts.maxWaitMs, opts.timeoutMs);
   let timedOut = false;
   let started = false;
   return new Promise<T>((resolve, reject) => {

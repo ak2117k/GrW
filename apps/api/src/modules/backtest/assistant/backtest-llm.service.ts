@@ -91,7 +91,7 @@ export class BacktestLlmService {
       runInSharedSlot(
         this.cycle,
         () => withAiCallContext({ userId: opts.userId }, () => transport.messages.create(request)),
-        { maxWaitMs: ASSIST_DEFAULT_MAX_WAIT_MS },
+        { maxWaitMs: ASSIST_DEFAULT_MAX_WAIT_MS, job, timeoutMs },
       ),
       timeoutMs,
     );

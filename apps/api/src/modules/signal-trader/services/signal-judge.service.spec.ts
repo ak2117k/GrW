@@ -52,3 +52,45 @@ describe('SignalJudgeService', () => {
     expect(await svc.judge({}, opts)).toMatchObject({ ok: false, reason: 'judge_invalid' });
   });
 });
+
+describe('SignalJudgeService with AI agents on (design 2026-11-22 §4.5)', () => {
+  const KEYS = ['AI_AGENTS', 'SENTINEL_JUDGE', 'AGENT_SIGNAL_JUDGE_AGENT'];
+  let saved: Record<string, string | undefined>;
+  beforeEach(() => {
+    saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+    for (const k of KEYS) delete process.env[k];
+    process.env.AI_AGENTS = 'on';
+    process.env.SENTINEL_JUDGE = 'vertex';
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('skips the signal lane: judges even while the lane is full, never calling runShared', async () => {
+    const c = cycle(1); // would wait forever for a slot
+    const transport = { messages: { create: jest.fn(async () => okReply) } };
+    const svc = new SignalJudgeService({ get: () => undefined } as never, c as never, undefined, undefined, transport as never);
+    const r = await svc.judge({ a: 1 }, opts);
+    expect(r).toMatchObject({ ok: true, verdict: { verdict: 'TAKE' } });
+    expect(c.runShared).not.toHaveBeenCalled();
+  });
+
+  it('the agent busy → judge_unavailable (its existing degrade path)', async () => {
+    const { AgentBusyError } = await import('../../ai-gateway/agents/agent-protocol');
+    const transport = { messages: { create: jest.fn(async () => Promise.reject(new AgentBusyError('signal.judge', 100))) } };
+    const svc = new SignalJudgeService({ get: () => undefined } as never, cycle(0) as never, undefined, undefined, transport as never);
+    expect(await svc.judge({}, opts)).toMatchObject({ ok: false, reason: 'judge_unavailable' });
+  });
+
+  it('signal.judge routed in-process keeps the lane (rollout before the trading step)', async () => {
+    process.env.AGENT_SIGNAL_JUDGE_AGENT = 'in-process';
+    const c = cycle(0);
+    const transport = { messages: { create: jest.fn(async () => okReply) } };
+    const svc = new SignalJudgeService({ get: () => undefined } as never, c as never, undefined, undefined, transport as never);
+    await svc.judge({}, opts);
+    expect(c.runShared).toHaveBeenCalledTimes(1);
+  });
+});

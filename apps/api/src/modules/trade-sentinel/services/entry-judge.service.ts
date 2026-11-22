@@ -166,7 +166,7 @@ export class EntryJudgeService {
     const call = runInSharedSlot(
       this.cycle as unknown as SharedSlotRunner,
       () => withAiCallContext({ userId: userId ?? undefined }, () => transport.messages.create(request)),
-      { maxWaitMs: SLOT_WAIT_MS },
+      { maxWaitMs: SLOT_WAIT_MS, job: ENTRY_JUDGE_JOB, timeoutMs: TIMEOUT_MS },
     );
     call.catch(() => undefined);
     try {

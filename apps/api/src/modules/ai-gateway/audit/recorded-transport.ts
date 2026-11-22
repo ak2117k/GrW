@@ -8,6 +8,8 @@ import type { JudgeTransportName } from '../../trade-sentinel/services/llm-trans
 import { ClaudeCliProvider, type ClaudeCliTransport } from '../providers/claude-cli.provider';
 import { totalInputTokens, type ProviderAdapter, type ProviderResult } from '../providers/provider.types';
 import { readAiConfig } from '../routes/route-config';
+import { AgentProvider } from '../agents/agent-provider';
+import { agentsOn } from '../agents/agent-registry';
 import type { MessagesTransport, TransportMessage, TransportRequest } from '../transport.types';
 import type { AiCallRow } from './ai-call.repository';
 import { currentAiCallContext } from './ai-call-context';
@@ -190,12 +192,14 @@ export class RecordedTransport implements MessagesTransport {
       const ok = 'result' in outcome ? outcome.result : null;
       const err = 'error' in outcome ? outcome.error : null;
       const sysHash = sha256(systemText(req));
-      const request = requestRecord(req, AI_CALL_TEXT_CAP_BYTES, !this.systemsStored.has(sysHash));
+      // The request as actually sent (agent profile overrides); the SAME object on every other path.
+      const sent = this.deps.adapter.effectiveRequest?.(req) ?? req;
+      const request = requestRecord(sent, AI_CALL_TEXT_CAP_BYTES, !this.systemsStored.has(sysHash));
       const storedWhole = request.systemStored === 'full' && !(request.truncated as { system: boolean }).system;
       let cost = 0;
       let notional: number | null = null;
       // The model actually served (Vertex maps ids) — priced and recorded as that.
-      const servedModel = this.deps.adapter.modelFor?.(req.model) ?? req.model;
+      const servedModel = this.deps.adapter.modelFor?.(sent.model) ?? sent.model;
       const price = ok ? this.deps.prices?.get(servedModel) : undefined;
       if (ok && price) {
         const priced = costInr(
@@ -212,7 +216,7 @@ export class RecordedTransport implements MessagesTransport {
         job: this.deps.jobOf(req),
         provider: this.deps.adapter.name,
         model: servedModel,
-        effort: req.output_config?.effort ?? null,
+        effort: sent.output_config?.effort ?? null,
         priority: 0,
         userId: ctx.userId ?? null,
         positionId: ctx.positionId ?? null,
@@ -229,8 +233,9 @@ export class RecordedTransport implements MessagesTransport {
         outputTokens: ok ? ok.meta.outputTokens : null,
         costInr: cost,
         latencyMs: Math.round(latencyMs),
-        queuedMs: 0,
+        queuedMs: Math.max(0, Math.round((ok ? ok.meta.queuedMs : agentTag(err, 'queuedMs')) ?? 0)),
         fallbackFrom: null,
+        agent: (ok ? ok.meta.servedBy : agentTag(err, 'servedBy')) ?? null,
       };
       this.deps.audit.insert(row).then(() => {
         if (storedWhole) this.systemsStored.add(sysHash);
@@ -239,6 +244,16 @@ export class RecordedTransport implements MessagesTransport {
       fail(e);
     }
   }
+}
+
+/** What an AgentProvider noted on a failed call (`servedBy` / `queuedMs`); undefined on every other path. */
+function agentTag(err: unknown, key: 'servedBy'): string | undefined;
+function agentTag(err: unknown, key: 'queuedMs'): number | undefined;
+function agentTag(err: unknown, key: 'servedBy' | 'queuedMs'): string | number | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const v = (err as Record<string, unknown>)[key];
+  if (key === 'queuedMs') return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+  return typeof v === 'string' ? v : undefined;
 }
 
 function errorClass(err: unknown): string {
@@ -267,6 +282,21 @@ function safePrices(): Map<string, ModelPrice> {
 }
 
 /**
+ * The AgentProvider for this caller, or the bare Vertex provider when the agent registry cannot be
+ * read (logged): a broken registry must degrade to today's path, never fail boot or a call.
+ */
+function agentProviderOr(vertex: AnthropicVertexProvider, jobOf: (req: TransportRequest) => string): ProviderAdapter {
+  try {
+    return new AgentProvider({ jobOf, inProcess: vertex });
+  } catch (err) {
+    new Logger('directRecordedTransport').error(
+      `AI_AGENTS=on but the agent registry is unusable — serving in-process: ${(err as Error)?.message ?? String(err)}`,
+    );
+    return vertex;
+  }
+}
+
+/**
  * The direct (gateway-off) transport for one LLM caller: the shared CLI
  * transport when `cli`, else a fresh Anthropic SDK client — wrapped in a
  * {@link RecordedTransport} unless `AI_CALLS_RECORD=off`, which binds exactly
@@ -283,7 +313,10 @@ export function directRecordedTransport(opts: {
   if (opts.judge === 'vertex') {
     // Vertex settings come from the process env (VERTEX_AI_PROJECT_ID / VERTEX_AI_LOCATION /
     // GOOGLE_APPLICATION_CREDENTIALS), so no caller needs a new parameter.
-    const provider = new AnthropicVertexProvider(createVertexClient(vertexSettingsFrom(process.env)));
+    const vertex = new AnthropicVertexProvider(createVertexClient(vertexSettingsFrom(process.env)));
+    // AI agents (2026-11-22, design §4.1): with AI_AGENTS=on the job's agent container serves the call
+    // (in-process fallback when it is unreachable). Off = exactly the bare Vertex provider, as before.
+    const provider: ProviderAdapter = agentsOn(process.env) ? agentProviderOr(vertex, opts.jobOf) : vertex;
     if (!opts.record) return { messages: { create: async (params) => (await provider.send(params)).message } };
     return new RecordedTransport({ adapter: provider, audit: opts.audit, jobOf: opts.jobOf, prices: safePrices() });
   }

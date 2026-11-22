@@ -193,7 +193,7 @@ export class AssistLlmService {
     return runInSharedSlot(
       this.cycle,
       () => withAiCallContext({ userId: opts.userId }, () => transport.messages.create(request)),
-      { maxWaitMs: opts.maxWaitMs ?? ASSIST_DEFAULT_MAX_WAIT_MS },
+      { maxWaitMs: opts.maxWaitMs ?? ASSIST_DEFAULT_MAX_WAIT_MS, job },
     );
   }
 

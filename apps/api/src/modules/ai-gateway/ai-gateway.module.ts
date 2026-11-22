@@ -5,6 +5,7 @@ import { PrismaModule } from '../../common/prisma/prisma.module';
 import { AI_GATEWAY, AiGatewayService } from './ai-gateway.service';
 import { AiCallRepository } from './audit/ai-call.repository';
 import { AiCallsSizeWatch } from './audit/ai-calls-size-watch.service';
+import { AgentHealthService } from './agents/agent-health.service';
 import { BudgetMeter, istDayKey } from './budget/budget-meter';
 import { loadPrices } from './budget/model-prices';
 import { AnthropicApiProvider } from './providers/anthropic-api.provider';
@@ -31,6 +32,11 @@ function positiveNumber(raw: string | undefined, fallback: number): number {
  * `JUDGE_CONCURRENCY` (2) judgements plus thesis calls. Below 3 a thesis call
  * waits behind both judges (a CLI call can run 180 s) — a delay the direct,
  * unscheduled binding never had.
+ *
+ * AI agents (2026-11-22) do not change this: they run only with
+ * `SENTINEL_JUDGE=vertex`, and this limit applies only to `claude-cli`, where
+ * the sentinel cap is always 2. On vertex the scheduler sets no limit; the
+ * agent semaphores (`sentinel.thesis` 3) and the global limiter gate instead.
  */
 export const SENTINEL_MIN_CLI_CONCURRENCY = 3;
 
@@ -114,6 +120,8 @@ export function istMidnight(now: Date): Date {
     ScorerClient,
     // Daily ai_calls size log + warning (no retention exists; the table is append-only).
     AiCallsSizeWatch,
+    // AI agent containers: /health every 60 s + owner alerts (design 2026-11-22 §4.6). Inert unless AI_AGENTS=on and SENTINEL_JUDGE=vertex.
+    { provide: AgentHealthService, useFactory: (): AgentHealthService => new AgentHealthService() },
   ],
   exports: [AI_GATEWAY, AiGatewayService, ClaudeCliTransport, ScorerClient, AiCallRepository],
 })

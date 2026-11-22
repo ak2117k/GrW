@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GrW pull-and-deploy (run by grw-deploy.timer every 2 min).
 #
-#   fetch main → build image → migrate → timescale setup → swap → health-check → record
+#   fetch main → build image → migrate → timescale setup → swap → health-check → AI agents → record
 #   any failure before the swap leaves the running API untouched;
 #   an unhealthy swap rolls back to the previous image.
 #
@@ -128,6 +128,26 @@ apply_timescale() {
 
 swap_to() { GRW_API_TAG="$1" "${COMPOSE[@]}" up -d --no-deps api; }
 
+# AI AGENTS (docs/superpowers/specs/2026-11-22-ai-agents-design.md §4.7a). Three stateless containers
+# on the API's image (compose profile "agents"). Only the ones RUNNING right now are recreated, with
+# the API's tag, AFTER the API is healthy: a service defined but never started (rollout step 1) stays
+# off. Same tag as the API => no third image pinned, pruning unchanged. While an agent restarts the
+# API serves its jobs in-process, so a deploy cannot miss an exit.
+AGENT_SERVICES=(grw-agents-trading grw-agents-reading grw-agents-background)
+running_agents() {
+  local svc
+  for svc in "${AGENT_SERVICES[@]}"; do
+    [[ "$(docker inspect -f '{{.State.Running}}' "$svc" 2>/dev/null)" == true ]] && echo "$svc"
+  done
+  return 0
+}
+# Args: tag service... ; no services => nothing to do.
+recreate_agents() {
+  local tag="$1"; shift
+  (( $# > 0 )) || return 0
+  GRW_API_TAG="$tag" "${COMPOSE[@]}" --profile agents up -d --no-deps "$@"
+}
+
 # Healthy means: the running container IS the new image AND it answers. Checking
 # only the URL would pass against the old container during a failed swap.
 # X-Forwarded-Proto: EnforceHttpsMiddleware answers 426 to any request without it
@@ -212,14 +232,28 @@ main() {
     log "WARNING: TimescaleDB setup for candles_1m failed for ${new:0:7}; deploying anyway"
     notify "WARNING: TimescaleDB setup (deploy/sql/candles-timescale.sql) failed for ${new:0:7}; deploy continues"
   fi
+  # Which agent containers to carry along: decided BEFORE the swap, from what is running now.
+  # Unquoted below on purpose: service names have no spaces, and an empty list means none.
+  local agents
+  agents="$(running_agents | tr '\n' ' ')"
   # A failed swap takes the rollback path too; under bare `set -e` it would exit
   # with the old container possibly stopped, no rollback and no alert.
   if swap_to "$new" && wait_healthy "$new"; then
+    # Non-fatal: the API is healthy and serves any agent's jobs in-process (and alerts on the
+    # fallback), so a failed agent recreate must not roll back a good API.
+    # shellcheck disable=SC2086
+    if ! recreate_agents "$new" $agents; then
+      log "WARNING: recreating AI agents (${agents% }) on ${new:0:7} failed; the API serves their jobs in-process"
+      notify "WARNING: AI agents (${agents% }) failed to recreate on ${new:0:7}; API serving their jobs in-process"
+    fi
     record_success "$new"; notify "deployed ${new:0:7}"; return 0
   fi
 
   log "${new:0:7} failed to start or is unhealthy; rolling back to ${cur:0:7}"
-  if [[ -n "$cur" ]]; then swap_to "$cur"; checkout "$cur"; fi
+  # Agents are only recreated after a healthy swap, so here they normally still run $cur and compose
+  # leaves them as they are; recreating them on $cur keeps all four on one tag whatever happened.
+  # shellcheck disable=SC2086
+  if [[ -n "$cur" ]]; then swap_to "$cur"; recreate_agents "$cur" $agents || true; checkout "$cur"; fi
   mark_failed "$new"
   notify "deploy of ${new:0:7} FAILED to start or UNHEALTHY; rolled back to ${cur:-nothing}"
   return 1

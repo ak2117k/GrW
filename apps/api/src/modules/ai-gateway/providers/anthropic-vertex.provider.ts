@@ -2,7 +2,7 @@ import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
 import { vertexModelId, vertexModelMapFrom } from '../../trade-sentinel/services/llm-transport';
 import type { TransportRequest } from '../transport.types';
 import { AnthropicApiProvider, type AnthropicMessagesClient } from './anthropic-api.provider';
-import type { ProviderName, ProviderResult } from './provider.types';
+import type { ProviderName, ProviderResult, SendOptions } from './provider.types';
 
 /** Vertex project + region, from `VERTEX_AI_PROJECT_ID` / `VERTEX_AI_LOCATION` (default `global`). */
 export interface VertexSettings {
@@ -37,9 +37,9 @@ export function createVertexClient(
   let client: AnthropicMessagesClient | null = null;
   return {
     messages: {
-      create: (params) => {
+      create: (params, options) => {
         client ??= build(settings);
-        return client.messages.create(params);
+        return options ? client.messages.create(params, options) : client.messages.create(params);
       },
     },
   };
@@ -68,7 +68,7 @@ export class AnthropicVertexProvider extends AnthropicApiProvider {
     return vertexModelId(model, this.modelMap);
   }
 
-  override send(request: TransportRequest): Promise<ProviderResult> {
-    return super.send({ ...request, model: this.modelFor(request.model) });
+  override send(request: TransportRequest, opts?: SendOptions): Promise<ProviderResult> {
+    return super.send({ ...request, model: this.modelFor(request.model) }, opts);
   }
 }

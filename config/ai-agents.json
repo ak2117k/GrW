@@ -1,0 +1,20 @@
+{
+  "_note": "AI agent registry (docs/superpowers/specs/2026-11-22-ai-agents-design.md 4.2/4.4). One entry per job label: which agent container serves it (trading | reading | background | in-process), how many calls at once, the timeout, and model/effort/maxTokens overrides (null = keep what the caller sets). Env beats file: AGENT_<JOB>_<FIELD>, e.g. AGENT_SENTINEL_JUDGE_CONCURRENCY=8 (dots/dashes -> underscores; fields AGENT, CONCURRENCY, TIMEOUT_MS, MODEL, EFFORT, MAX_TOKENS). A job not listed goes to background with the default profile. A key ending in .* matches every job with that prefix. Only read when AI_AGENTS=on and SENTINEL_JUDGE=vertex.",
+  "sentinel.judge":       { "agent": "trading",    "concurrency": 6, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
+  "sentinel.thesis":      { "agent": "trading",    "concurrency": 3, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
+  "entry.judge":          { "agent": "trading",    "concurrency": 3, "timeoutMs": 150000, "model": null, "effort": null, "maxTokens": null },
+  "signal.judge":         { "agent": "trading",    "concurrency": 3, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
+  "signal.vision":        { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "signal.parse":         { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "signal.info":          { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "signal.image-setup":   { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "news.impact":          { "agent": "reading",    "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "sentinel.overnight":   { "agent": "background", "concurrency": 2, "timeoutMs": 300000, "model": null, "effort": null, "maxTokens": null },
+  "self-review.diagnose": { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "news.ideas":           { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "assist.advisor":       { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "assist.news":          { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "strategy.review":      { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "strategy.suggest":     { "agent": "background", "concurrency": 2, "timeoutMs": 240000, "model": null, "effort": null, "maxTokens": null },
+  "backtest.*":           { "agent": "background", "concurrency": 2, "timeoutMs": 200000, "model": null, "effort": null, "maxTokens": null }
+}

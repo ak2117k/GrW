@@ -67,7 +67,7 @@ export async function transportImageOf(input: Pick<ImageSetupInput, 'path' | 'mi
 export async function readWith(t: MessagesTransport, slot: SharedSlotRunner | null, model: string, input: ImageSetupInput, maxWaitMs: number): Promise<{ text: string; model: string }> {
   const request = imageSetupRequest(model, input, await transportImageOf(input));
   const call = () => t.messages.create(request);
-  const message = slot ? await runInSharedSlot(slot, call, { maxWaitMs, lane: 'signals' }) : await call();
+  const message = slot ? await runInSharedSlot(slot, call, { maxWaitMs, lane: 'signals', job: IMAGE_SETUP_JOB }) : await call();
   if (message.stop_reason === 'refusal') throw new Error('the model declined');
   if (message.stop_reason === 'max_tokens') throw new Error('the reply was cut off (max_tokens)');
   const text = (message.content ?? [])

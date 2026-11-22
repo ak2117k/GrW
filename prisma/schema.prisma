@@ -2634,6 +2634,8 @@ model AiCall {
   latencyMs        Int
   queuedMs         Int      @default(0)
   fallbackFrom     String?
+  /// AI agents (2026-11-22): trading | reading | background | in-process; NULL on non-agent paths.
+  agent            String?
   createdAt        DateTime @default(now())
 
   @@index([job, createdAt])

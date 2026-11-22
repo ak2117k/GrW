@@ -71,6 +71,7 @@ import type { TripwireInput } from '../tripwires/types';
 import { NewsWatchBook } from './news-watch-book';
 import { FLOOR_STATE_BOARD } from '../../floor-board/floor-state.board';
 import { withAiCallContext } from '../../ai-gateway/audit/ai-call-context';
+import { sentinelJudgeConcurrency } from '../../ai-gateway/agents/agent-registry';
 import {
   REJUDGE_CONFIG,
   SUPPRESSIBLE_FIRES,
@@ -204,6 +205,11 @@ export const OI_CAPTURE_INTERVAL_MS = 60 * 1000;
  * time per user. A position that wants a judgement while the cap is full is
  * SKIPPED, not queued — its packet would be stale by the time a slot freed, and
  * the next tick re-reads the market and asks again.
+ *
+ * AI AGENTS (design 2026-11-22-ai-agents-design.md §4.5): this constant is the cap with agents OFF (and
+ * always on `SENTINEL_JUDGE=cli`). With `AI_AGENTS=on` + `SENTINEL_JUDGE=vertex` the service takes its cap
+ * from the agent registry's `sentinel.judge` concurrency instead (`sentinelJudgeConcurrency`, target 6),
+ * fixed at construction. {@link LIVE_RESERVED_SLOTS} and the skip-not-queue rule are unchanged.
  */
 export const JUDGE_CONCURRENCY = 2;
 
@@ -690,6 +696,12 @@ export class SentinelCycleService {
    */
   private readonly judging = new Map<string, InFlight>();
 
+  /**
+   * The cap `judging.size` is held to: {@link JUDGE_CONCURRENCY} (2) unless AI agents are on, then the
+   * registry's `sentinel.judge` concurrency. Overnight work gets this minus {@link LIVE_RESERVED_SLOTS}.
+   */
+  private readonly judgeCap: number = sentinelJudgeConcurrency(process.env);
+
   /** Overnight reviews waiting for a slot — see {@link runShared}. */
   private readonly slotWaiters: Array<() => void> = [];
 
@@ -885,7 +897,7 @@ export class SentinelCycleService {
         a.index - b.index,
     );
     for (const c of candidates) {
-      if (this.judging.size >= JUDGE_CONCURRENCY) {
+      if (this.judging.size >= this.judgeCap) {
         // Skipped, not queued: see JUDGE_CONCURRENCY. `oiEvaluatedKey` is NOT
         // recorded — the agent was not woken, so an unseen wall shift can still
         // wake it — and the fires are carried so the next judgement includes them.
@@ -1970,7 +1982,7 @@ export class SentinelCycleService {
       // venue the book holds is shut (08:30, after the closes) the caller says so
       // and overnight work may use every slot. Default: reserve.
       const reserved = (opts.reserveLive?.() ?? true) ? LIVE_RESERVED_SLOTS : 0;
-      const room = this.judging.size < JUDGE_CONCURRENCY - reserved;
+      const room = this.judging.size < this.judgeCap - reserved;
       if (room && !this.judging.has(trackerId)) break;
       await new Promise<void>((resolve) => this.slotWaiters.push(resolve));
     }
@@ -2259,7 +2271,7 @@ export class SentinelCycleService {
     if (nowMs - this.capReportedAt < OI_CAPTURE_INTERVAL_MS) return;
     this.capReportedAt = nowMs;
     this.logger.warn(
-      `${this.judging.size} sentinel judgements already in flight (cap ${JUDGE_CONCURRENCY}); ` +
+      `${this.judging.size} sentinel judgements already in flight (cap ${this.judgeCap}); ` +
         `${entry.symbol} (${entry.trackerId}) and any others wanting one wait for a later tick — ` +
         'their sensors, latch and OI capture keep running meanwhile',
     );

@@ -1,5 +1,5 @@
 import { hasImages, toApiWire, userContentBlocks, type TransportMessage, type TransportRequest } from '../transport.types';
-import type { ProviderAdapter, ProviderName, ProviderResult } from './provider.types';
+import type { ProviderAdapter, ProviderName, ProviderResult, SendOptions } from './provider.types';
 
 /** The SDK reply: a transport message plus the token usage the API reports. */
 export type AnthropicApiReply = TransportMessage & {
@@ -13,7 +13,7 @@ export type AnthropicApiReply = TransportMessage & {
 
 /** The narrow slice of the Anthropic SDK client this provider calls. */
 export interface AnthropicMessagesClient {
-  messages: { create(params: TransportRequest): Promise<AnthropicApiReply> };
+  messages: { create(params: TransportRequest, options?: { signal?: AbortSignal }): Promise<AnthropicApiReply> };
 }
 
 /** A token count the API reported, or `null` — never a default. */
@@ -35,13 +35,16 @@ export class AnthropicApiProvider implements ProviderAdapter {
 
   constructor(private readonly client: AnthropicMessagesClient) {}
 
-  async send(request: TransportRequest): Promise<ProviderResult> {
+  async send(request: TransportRequest, opts?: SendOptions): Promise<ProviderResult> {
     // A request with images is mapped to SDK content blocks; every other request is passed as-is.
     const api = toApiWire(request);
     const wire: TransportRequest = hasImages(api)
       ? ({ ...api, messages: api.messages.map((m) => ({ role: m.role, content: userContentBlocks(m) })) } as unknown as TransportRequest)
       : api;
-    const message = await this.client.messages.create(wire);
+    // The SDK request option `signal` cancels the HTTP call; without one the call is exactly as before.
+    const message = opts?.signal
+      ? await this.client.messages.create(wire, { signal: opts.signal })
+      : await this.client.messages.create(wire);
     return {
       message,
       meta: {

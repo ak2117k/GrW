@@ -1,25 +1,37 @@
-import { AdvisorMemoryRepository, renderAdvisorHistory, trimAdvisorHistory, type AdvisorTurn } from './advisor-memory';
+import {
+  ADVISOR_MEMORY_MAX_CHARS,
+  ADVISOR_MEMORY_MAX_MESSAGES,
+  AdvisorMemoryRepository,
+  renderAdvisorHistory,
+  trimAdvisorHistory,
+  type AdvisorTurn,
+} from './advisor-memory';
 
 const t = (role: 'user' | 'assistant', content: string): AdvisorTurn => ({ role, content });
 
 describe('trimAdvisorHistory', () => {
-  it('keeps only the last 8 messages', () => {
+  it('remembers a long conversation (40 messages, 60k chars) since tokens are no longer the constraint', () => {
+    expect(ADVISOR_MEMORY_MAX_MESSAGES).toBe(40);
+    expect(ADVISOR_MEMORY_MAX_CHARS).toBe(60_000);
+  });
+
+  it('keeps only the last maxMessages messages', () => {
     const turns = Array.from({ length: 12 }, (_, i) => t(i % 2 ? 'assistant' : 'user', `m${i}`));
-    const out = trimAdvisorHistory(turns);
+    const out = trimAdvisorHistory(turns, 8, 3000);
     expect(out).toHaveLength(8);
     expect(out[0].content).toBe('m4');
     expect(out[7].content).toBe('m11');
   });
 
-  it('drops the oldest messages to fit the 3,000-char budget', () => {
+  it('drops the oldest messages to fit the char budget', () => {
     const turns = [t('user', 'a'.repeat(1500)), t('assistant', 'b'.repeat(1500)), t('user', 'c'.repeat(1000))];
-    const out = trimAdvisorHistory(turns);
+    const out = trimAdvisorHistory(turns, 8, 3000);
     expect(out.map((x) => x.content[0])).toEqual(['b', 'c']);
     expect(out.reduce((s, x) => s + x.content.length, 0)).toBeLessThanOrEqual(3000);
   });
 
   it('tail-clips a single message longer than the whole budget', () => {
-    const out = trimAdvisorHistory([t('assistant', 'x'.repeat(5000))]);
+    const out = trimAdvisorHistory([t('assistant', 'x'.repeat(5000))], 8, 3000);
     expect(out).toHaveLength(1);
     expect(out[0].content.length).toBe(3000);
   });
@@ -50,16 +62,18 @@ describe('AdvisorMemoryRepository', () => {
     return { prisma: { advisorChatTurn } as any, rows: () => rows };
   }
 
-  it('appends exchanges, prunes to the last 8 per user, returns oldest-first, clears per user', async () => {
+  it('appends exchanges, prunes to the last 40 per user, returns oldest-first, clears per user', async () => {
     const f = fakePrisma();
     const repo = new AdvisorMemoryRepository(f.prisma);
     const t0 = Date.parse('2026-10-24T10:00:00Z');
-    for (let i = 0; i < 6; i++) await repo.append('owner', `q${i}`, `a${i}`, new Date(t0 + i * 1000));
+    for (let i = 0; i < 22; i++) await repo.append('owner', `q${i}`, `a${i}`, new Date(t0 + i * 1000));
     await repo.append('other', 'oq', 'oa', new Date(t0));
-    expect(f.rows().filter((r) => r.userId === 'owner')).toHaveLength(8);
+    expect(f.rows().filter((r) => r.userId === 'owner')).toHaveLength(40);
     const hist = await repo.recent('owner');
-    expect(hist.map((h) => h.content)).toEqual(['q2', 'a2', 'q3', 'a3', 'q4', 'a4', 'q5', 'a5']);
-    expect(await repo.clear('owner')).toBe(8);
+    expect(hist).toHaveLength(40);
+    expect(hist.slice(0, 2).map((h) => h.content)).toEqual(['q2', 'a2']);
+    expect(hist.slice(-2).map((h) => h.content)).toEqual(['q21', 'a21']);
+    expect(await repo.clear('owner')).toBe(40);
     expect(await repo.recent('owner')).toEqual([]);
     expect((await repo.recent('other')).map((h) => h.content)).toEqual(['oq', 'oa']);
   });

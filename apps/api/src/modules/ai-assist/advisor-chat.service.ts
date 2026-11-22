@@ -1,7 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { NightReportSummaryService } from '../night-report/services/night-report-summary.service';
 import { AdvisorMemoryRepository, renderAdvisorHistory } from './advisor-memory';
-import { ADVISOR_SYSTEM_PROMPT, advisorUserTurn, classifyAdvisorQuestion } from './advisor-guardrail';
+import { ADVISOR_SYSTEM_PROMPT, advisorUserTurn, screenAdvisorChatQuestion } from './advisor-guardrail';
 import { AssistContextService, renderAssistContext } from './assist-context.service';
 import { AssistLlmService, type AssistPrincipal } from './assist-llm.service';
 import { ASSIST_BUSY_MESSAGE, AssistBusyError } from './assist-slot';
@@ -46,7 +46,7 @@ export class AdvisorChatService {
 
   /** Layer (a): a refusal answer when the question is blocked, else null. */
   guard(question: string): AdvisorChatAnswer | null {
-    const verdict = classifyAdvisorQuestion(question);
+    const verdict = screenAdvisorChatQuestion(question);
     if (verdict.allowed) return null;
     return { answer: verdict.message, confidence: 100, relatedInsights: [], suggestedActions: [], source: 'guardrail' };
   }

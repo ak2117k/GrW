@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 
-/** How many past messages (user + assistant) go back to the advisor with a new question. */
-export const ADVISOR_MEMORY_MAX_MESSAGES = 8;
-/** Character budget for that history block (~750 tokens). */
-export const ADVISOR_MEMORY_MAX_CHARS = 3000;
-/** One stored message is clipped to this many chars before it is saved. */
-const STORED_MESSAGE_MAX_CHARS = 2000;
+/**
+ * How many past messages (user + assistant) go back to the advisor with a new question.
+ * Raised 2026-11-22 (owner: tokens no longer a constraint once on Vertex) from 8 / 3,000 chars /
+ * 2,000 stored — the old caps made the advisor forget a conversation after four exchanges.
+ */
+export const ADVISOR_MEMORY_MAX_MESSAGES = 40;
+/** Character budget for that history block (~15k tokens). */
+export const ADVISOR_MEMORY_MAX_CHARS = 60_000;
+/** One stored message is clipped to this many chars before it is saved (a long research note fits whole). */
+const STORED_MESSAGE_MAX_CHARS = 20_000;
 
 export interface AdvisorTurn {
   role: 'user' | 'assistant';

@@ -26,9 +26,10 @@ export interface AssistContext {
   verdictsToday: AssistVerdictLine[];
 }
 
-const MAX_POSITIONS = 40;
-const MAX_VERDICTS = 20;
-const REASON_CHARS = 280;
+// Raised 2026-11-22 from 40 / 20 / 280 (token caps; owner: tokens are not a constraint on Vertex).
+const MAX_POSITIONS = 200;
+const MAX_VERDICTS = 100;
+const REASON_CHARS = 2000;
 
 /** Midnight IST of the day containing `now`. */
 function istMidnight(now: Date): Date {

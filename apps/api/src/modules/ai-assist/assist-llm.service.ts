@@ -18,6 +18,41 @@ export const ASSIST_DEFAULT_MODEL = 'claude-sonnet-5';
 export const ASSIST_DEFAULT_MAX_WAIT_MS = 20_000;
 const ASSIST_MAX_TOKENS = 2_000;
 
+/** How one assist job calls the model. */
+export interface AssistProfile {
+  model: string;
+  effort: 'low' | 'medium' | 'high';
+  maxTokens: number;
+  /**
+   * Skip the sentinel's shared slot when the transport is metered (api / bedrock /
+   * vertex). The slot exists because the CLI is ONE local process the exits must
+   * not queue behind; a metered transport serves calls in parallel, so the
+   * advisor neither waits nor answers "busy". Ignored on `cli` (the slot applies).
+   */
+  unthrottled: boolean;
+}
+
+/**
+ * The advisor chat without its token guard rails (owner, 2026-11-22: tokens are not
+ * a constraint on Vertex): Opus at high effort, a 16k-token reply ceiling (was 2k —
+ * long answers failed as "cut off"), no shared-slot wait. 16k stays under the SDK's
+ * non-streaming limit (~21k tokens). `AI_ADVISOR_MODEL` overrides the model.
+ */
+export const ADVISOR_PROFILE: AssistProfile = {
+  model: 'claude-opus-5',
+  effort: 'high',
+  maxTokens: 16_000,
+  unthrottled: true,
+};
+
+/** Every other assist job (news, strategy builder) keeps the previous settings. */
+const DEFAULT_PROFILE: AssistProfile = {
+  model: ASSIST_DEFAULT_MODEL,
+  effort: 'medium',
+  maxTokens: ASSIST_MAX_TOKENS,
+  unthrottled: false,
+};
+
 export interface AssistAnswer {
   answer: string;
   confidence: number;
@@ -143,19 +178,31 @@ export class AssistLlmService {
     schema: Record<string, unknown>,
     opts: { userId?: string; maxWaitMs?: number },
   ): Promise<TransportMessage> {
+    const profile = this.profileFor(job);
     const request: TransportRequest = {
-      model: this.config.get<string>('AI_ASSIST_MODEL')?.trim() || ASSIST_DEFAULT_MODEL,
-      max_tokens: ASSIST_MAX_TOKENS,
-      output_config: { effort: 'medium', format: { type: 'json_schema', schema } },
+      model: profile.model,
+      max_tokens: profile.maxTokens,
+      output_config: { effort: profile.effort, format: { type: 'json_schema', schema } },
       system: [{ type: 'text', text: system }],
       messages: [{ role: 'user', content: user }],
     };
     const transport = this.transportFor(job);
+    if (profile.unthrottled && judgeTransportFrom(this.config.get<string>('SENTINEL_JUDGE')) !== 'cli') {
+      return withAiCallContext({ userId: opts.userId }, () => transport.messages.create(request));
+    }
     return runInSharedSlot(
       this.cycle,
       () => withAiCallContext({ userId: opts.userId }, () => transport.messages.create(request)),
       { maxWaitMs: opts.maxWaitMs ?? ASSIST_DEFAULT_MAX_WAIT_MS },
     );
+  }
+
+  /** The job's profile; `AI_ADVISOR_MODEL` / `AI_ASSIST_MODEL` override the model. */
+  profileFor(job: AssistJob): AssistProfile {
+    if (job === 'assist.advisor') {
+      return { ...ADVISOR_PROFILE, model: this.config.get<string>('AI_ADVISOR_MODEL')?.trim() || ADVISOR_PROFILE.model };
+    }
+    return { ...DEFAULT_PROFILE, model: this.config.get<string>('AI_ASSIST_MODEL')?.trim() || DEFAULT_PROFILE.model };
   }
 
   private transportFor(job: AssistJob): MessagesTransport {

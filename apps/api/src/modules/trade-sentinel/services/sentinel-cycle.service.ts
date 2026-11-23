@@ -58,7 +58,11 @@ import {
 import { exitConfirmFire } from '../tripwires/exit-confirm';
 import { floorNoiseUnit, solveCycleFloor } from './cycle-floor';
 import { EMPTY_ANCHORS, solveCycleAnchors, type AnchorMemory } from './cycle-anchors';
-import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, widenExitTrigger, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import { confirmHardFloor, hardFloorReading, hardLossConfig, hardLossReading, widenExitTrigger, type HardFloorInput, type HardFloorMemo, type HardFloorReading } from '../../exit-discipline/hard-floor';
+import {
+  EXEC_REST_TIMEOUT_MS, describeExecCheck, execConfirm, execHolds, execPriceOf, floorReadingAtExec, freshHubBook, ladderTrailTripsAt, parseExecConfirmMode,
+  type ContractBook, type ExecCheck, type ExecConfirmMode,
+} from '../../exit-discipline/exec-price-confirm';
 import { EMPTY_SPIKE, solveCycleSpike, type SpikeMemory } from './cycle-spike';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { lossLimitForTrade } from '../../../common/utils/loss-limit';
@@ -336,6 +340,12 @@ export interface TickSource {
   tickFor(trackerId: string, opts?: TickOptions): Promise<TickReading>;
   /** Fast price-only read for the hard-loss guard (optional: a source without it gets no fast guard). */
   quickPrice?(trackerId: string): Promise<QuickPrice>;
+  /**
+   * EXECUTABLE-PRICE CONFIRM: ONE REST FULL quote's best bid / ask and day volume for the contract, over the
+   * user's own session (cached EXEC_REST_CACHE_MS). Resolves null on any failure. Optional: a source without
+   * it has the hub book and the volume fallback only.
+   */
+  restBook?(userId: string, ref: { exchange: string; token: string }): Promise<ContractBook | null>;
 }
 
 /** {@link TickSource.quickPrice}: the contract price and the position's shape, nothing slow. */
@@ -520,6 +530,11 @@ interface TrackerState {
   anchors?: AnchorMemory;
   /** FLOOR_HARD_EXIT: the hard-floor confirmation run and the last fire (hard-floor.ts). Memory only. */
   hardFloor?: HardFloorMemo;
+  /**
+   * EXECUTABLE-PRICE CONFIRM: the contract's day volume (hub) at the FIRST read of the current hard-floor
+   * confirmation run — the volume fallback's "before". Memory only.
+   */
+  hardFloorExecVol?: number | null;
   /** HARD_LOSS_EXIT confirmation memo (hardLossFor). */
   hardLoss?: HardFloorMemo;
   /** HARD_LOSS_EXIT: epoch ms a loss held inside the noise band was last logged (once per 5 min). */
@@ -578,6 +593,23 @@ interface LadderMemo {
   stop: number | null;
   confirm?: HardFloorMemo;
   heldLoggedAt?: number;
+  /** EXECUTABLE-PRICE CONFIRM: the contract's day volume at the first read of the current confirmation run. */
+  execVol?: number | null;
+  /** EXECUTABLE-PRICE CONFIRM: `confirm.firedAt` before the latest fire — restored when the fire is held. */
+  execPrevFiredAt?: number | null;
+}
+
+/** A confirmed hard-floor / hard-loss exit (hardFloorFor / hardLossFor → recordHardFloorExit). */
+interface HardExit {
+  reading: HardFloorReading;
+  floor: number;
+  netPnl: number;
+  /**
+   * EXECUTABLE-PRICE CONFIRM context — set only for a REAL position's floor rule (never MAX_LOSS, never paper):
+   * the reading's input (re-read at the bid / ask), the memo's firedAt before this fire (restored on a hold),
+   * and the day volume at the confirmation run's first read.
+   */
+  exec?: { input: HardFloorInput; prevFiredAt: number | null; volumeBefore: number | null };
 }
 
 /** TARGET_LADDER: a position whose targets cannot be set yet is asked again this often. */
@@ -667,6 +699,8 @@ interface InFlight {
 @Injectable()
 export class SentinelCycleService {
   private readonly logger = new Logger(SentinelCycleService.name);
+  /** FLOOR_EXEC_PRICE_CONFIRM typo warned once. */
+  private execModeWarned = false;
 
   /**
    * Per-tracker carry-over, keyed by trackerId. Pruned to the live roster at the
@@ -1214,7 +1248,7 @@ export class SentinelCycleService {
     }
     // TARGET_LADDER: the last target reached, or the ladder's moved stop crossed — an exit by rule, confirmed
     // like the hard floor, through the same verdict → executor → exit-gate path.
-    const ladderExit = ladder ? this.ladderExitFor(entry, state, ladder.block, ladder.reading, now) : null;
+    const ladderExit = ladder ? this.ladderExitFor(entry, state, tickF, ladder.block, ladder.reading, now) : null;
     if (ladderExit) {
       ruleJobs.push(this.recordLadderExit(entry, state, tickF, walls, capture.at, greenFloorArmedLatched, ladderExit, now));
       return null;
@@ -1417,7 +1451,7 @@ export class SentinelCycleService {
     noiseFloor: TickSnapshot['noiseFloor'] | null | undefined,
     greenFloorArmedLatched: boolean,
     now: Date,
-  ): { reading: HardFloorReading; floor: number; netPnl: number } | null {
+  ): HardExit | null {
     const cfg = this.discipline;
     if (!cfg?.enabled || !cfg.floorHardExit || !tick.anchors) return null;
     if (entry.ownership !== 'SENTINEL' || !(isDerivativeSegment(tick.segment) || isPaperTracker(entry.trackerId))) return null;
@@ -1426,7 +1460,7 @@ export class SentinelCycleService {
     const floor = noiseFloor
       ? { price: noiseFloor.armed ? noiseFloor.level : null, armed: noiseFloor.armed }
       : { price: greenFloorArmedLatched ? green.floorPrice : null, armed: greenFloorArmedLatched };
-    const reading = hardFloorReading({
+    const input: HardFloorInput = {
       side: tick.side,
       exposure: exposureOf(entry.symbol, tick.side),
       ltp: tick.ltp,
@@ -1441,7 +1475,8 @@ export class SentinelCycleService {
       noise: null,
       // 2026-11-05: a floor break the underlying has not confirmed is noise (FLOOR_NOISE_CONFIRM_N).
       noiseConfirmN: cfg.floorNoiseConfirmN,
-    });
+    };
+    const reading = hardFloorReading(input);
     if (reading.noiseHeld && now.getTime() - (state.hardFloorNoiseLoggedAt ?? Number.NEGATIVE_INFINITY) >= HELD_LOG_EVERY_MS) {
       state.hardFloorNoiseLoggedAt = now.getTime();
       this.logger.log(
@@ -1458,9 +1493,15 @@ export class SentinelCycleService {
       state.hardFloor = confirmHardFloor(state.hardFloor, false, now.getTime()).memo;
       return null;
     }
+    const prevFiredAt = state.hardFloor?.firedAt ?? null;
     const c = confirmHardFloor(state.hardFloor, reading.trip, now.getTime());
     state.hardFloor = c.memo;
-    return c.fire && floor.price !== null ? { reading, floor: floor.price, netPnl: green.netPnl } : null;
+    // EXECUTABLE-PRICE CONFIRM: the volume fallback's "before" is the confirmation run's first read.
+    if (reading.trip && c.memo.reads === 1) state.hardFloorExecVol = tick.contractBook?.volume ?? null;
+    if (!c.fire || floor.price === null) return null;
+    // Real positions only: a paper trade's exit is simulated at the print, so paper stays exactly as before.
+    const exec = isPaperTracker(entry.trackerId) ? undefined : { input, prevFiredAt, volumeBefore: state.hardFloorExecVol ?? null };
+    return { reading, floor: floor.price, netPnl: green.netPnl, ...(exec ? { exec } : {}) };
   }
 
   /**
@@ -1478,10 +1519,21 @@ export class SentinelCycleService {
     walls: { now: WallPair | null; prev: WallPair | null },
     wallsAt: string | null,
     greenFloorArmedLatched: boolean,
-    hard: { reading: HardFloorReading; floor: number; netPnl: number },
+    hard: HardExit,
     now: Date,
   ): Promise<JudgeOutcome> {
     const r = hard.reading;
+    // EXECUTABLE-PRICE CONFIRM (exec-price-confirm.ts): the floor rules only (hard.exec is never set for MAX_LOSS
+    // or paper), re-priced at the bid (ask for a short), run beside the packet build so observe adds no wait.
+    const exec = hard.exec;
+    const execMode: ExecConfirmMode = exec ? this.execMode() : 'off';
+    const execJob: Promise<ExecCheck | null> =
+      exec && execMode !== 'off'
+        ? this.execCheck(entry, tick, now, exec.volumeBefore, (px) => {
+            const net = computeGreenFloor({ segment: tick.segment, entryPrice: tick.entryPrice, ltp: px, qty: tick.qty, side: tick.side, valueFactor: valueFactorOf(entry) }).netPnl;
+            return floorReadingAtExec(exec.input, px, net).trip;
+          })
+        : Promise.resolve(null);
     const from = tick.anchors?.best;
     const loss = r.loss;
     const detail =
@@ -1500,12 +1552,33 @@ export class SentinelCycleService {
         : `premium ${tick.ltp} below the armed floor ${hard.floor}; underlying ${tick.underlyingLtp} is ${r.adverseFromBest} (${r.adverseFromBestN} N) against the position from ${from?.underlying} at its best point ${from?.ltp}`;
     const fire: TripwireFire = { name: FLOOR_HARD_EXIT_FIRE, detail };
     try {
-      const packet = await this.packets.build(
-        entry,
-        { ...tick, oiWallNow: walls.now, oiWallPrev: walls.prev, oiWallsAt: wallsAt, greenFloorArmedLatched },
-        state.thesis?.value ?? null,
-        [fire],
-      );
+      const [check, packet] = await Promise.all([
+        execJob,
+        this.packets.build(
+          entry,
+          { ...tick, oiWallNow: walls.now, oiWallPrev: walls.prev, oiWallsAt: wallsAt, greenFloorArmedLatched },
+          state.thesis?.value ?? null,
+          [fire],
+        ),
+      ]);
+      const execNote = check ? describeExecCheck(check, tick.ltp, hard.floor, 'floor') : null;
+      if (exec && check && execHolds(execMode, check)) {
+        // HOLD: the run starts over (two fresh reads, ≥ FLOOR_HARD_CONFIRM_SEC) and the fire never happened.
+        state.hardFloor = { since: null, reads: 0, firedAt: exec.prevFiredAt };
+        this.logger.warn(
+          `[floor-hard-exit] STALE_PRINT_HELD — ${entry.symbol} (tracker ${entry.trackerId}): ${r.rule} not fired: ltp ${tick.ltp}, ` +
+            `${tick.side === 'LONG' ? 'bid' : 'ask'} ${check.execPrice ?? 'n/a'}, floor ${hard.floor} — ${execNote}`,
+        );
+        return 'skipped';
+      }
+      if (check) {
+        this.logger.log(
+          `[floor-hard-exit] exec-confirm(${execMode}) ${check.fire ? 'CONFIRMS' : 'WOULD HOLD (STALE_PRINT_HELD, observe — fired anyway)'} — ` +
+            `${entry.symbol} (tracker ${entry.trackerId}): ${r.rule}: ltp ${tick.ltp}, ${tick.side === 'LONG' ? 'bid' : 'ask'} ${check.execPrice ?? 'n/a'}, floor ${hard.floor} — ${execNote}`,
+        );
+      }
+      // Observe: a hold it WOULD have made is written on the verdict (the durable record); otherwise the reason is unchanged.
+      const observed = check && !check.fire ? ` [exec-confirm observe: WOULD HOLD — ${execNote}]` : '';
       await this.verdicts.record({
         userId: entry.userId,
         trackerId: entry.trackerId,
@@ -1514,7 +1587,7 @@ export class SentinelCycleService {
         confidence: 'high',
         thesisStatus: 'WEAKENING',
         recoveryAvailable: true,
-        reason: `${FLOOR_HARD_EXIT_REASON_PREFIX} ${r.rule}: ${detail}`.slice(0, 500),
+        reason: `${FLOOR_HARD_EXIT_REASON_PREFIX} ${r.rule}: ${detail}${observed}`.slice(0, 500),
         evidence: ['position.ltp', 'money.greenFloorPrice', 'money.greenFloorArmed', 'money.netPnl', 'money.anchors'],
         invalidationPoint: null,
         reviewInSec: FLOOR_HARD_REFIRE_SEC,
@@ -1629,7 +1702,7 @@ export class SentinelCycleService {
    * FLOOR_HARD_CONFIRM_SEC apart, one fire per FLOOR_HARD_REFIRE_SEC — the hard floor's rule). A HELD position
    * (AI_AUTO_EXIT_HOLD) is read but never fired; the suppressed trip is logged once per 30 min.
    */
-  private ladderExitFor(entry: RosterEntry, state: TrackerState, block: PacketLadder, reading: LadderReading, now: Date): LadderReading | null {
+  private ladderExitFor(entry: RosterEntry, state: TrackerState, tick: TickReading, block: PacketLadder, reading: LadderReading, now: Date): LadderReading | null {
     const memo = state.ladder;
     if (!memo) return null;
     const trip = block.enforced && reading.trip !== null;
@@ -1642,8 +1715,12 @@ export class SentinelCycleService {
       memo.confirm = confirmHardFloor(memo.confirm, false, now.getTime()).memo;
       return null;
     }
+    const prevFiredAt = memo.confirm?.firedAt ?? null;
     const c = confirmHardFloor(memo.confirm, trip, now.getTime());
     memo.confirm = c.memo;
+    // EXECUTABLE-PRICE CONFIRM: the volume fallback's "before" (the run's first read) and the fire to undo on a hold.
+    if (trip && c.memo.reads === 1) memo.execVol = tick.contractBook?.volume ?? null;
+    if (c.fire) memo.execPrevFiredAt = prevFiredAt;
     return c.fire ? reading : null;
   }
 
@@ -1665,13 +1742,42 @@ export class SentinelCycleService {
   ): Promise<JudgeOutcome> {
     const rule = reading.trip as NonNullable<LadderReading['trip']>;
     const fire: TripwireFire = { name: TARGET_LADDER_FIRE, detail: reading.detail };
+    // EXECUTABLE-PRICE CONFIRM: the trail stop only (TARGET_TRAIL; the last target reached is a take-profit, not a
+    // stop), REAL positions only, re-priced at the bid (ask for a short) beside the packet build.
+    const memo = state.ladder;
+    const stop = reading.stop;
+    const execOn = rule === 'TARGET_TRAIL' && stop !== null && !!memo && !isPaperTracker(entry.trackerId);
+    const execMode: ExecConfirmMode = execOn ? this.execMode() : 'off';
+    const execJob: Promise<ExecCheck | null> =
+      execOn && execMode !== 'off'
+        ? this.execCheck(entry, tick, now, memo!.execVol ?? null, (px) => ladderTrailTripsAt(tick.side, stop as number, px))
+        : Promise.resolve(null);
     try {
-      const packet = await this.packets.build(
-        entry,
-        { ...tick, oiWallNow: walls.now, oiWallPrev: walls.prev, oiWallsAt: wallsAt, greenFloorArmedLatched },
-        state.thesis?.value ?? null,
-        [fire],
-      );
+      const [check, packet] = await Promise.all([
+        execJob,
+        this.packets.build(
+          entry,
+          { ...tick, oiWallNow: walls.now, oiWallPrev: walls.prev, oiWallsAt: wallsAt, greenFloorArmedLatched },
+          state.thesis?.value ?? null,
+          [fire],
+        ),
+      ]);
+      const execNote = check ? describeExecCheck(check, tick.ltp, stop as number, 'ladder stop') : null;
+      if (check && memo && execHolds(execMode, check)) {
+        memo.confirm = { since: null, reads: 0, firedAt: memo.execPrevFiredAt ?? null };
+        this.logger.warn(
+          `[target-ladder] STALE_PRINT_HELD — ${entry.symbol} (tracker ${entry.trackerId}): ${rule} not fired: ltp ${tick.ltp}, ` +
+            `${tick.side === 'LONG' ? 'bid' : 'ask'} ${check.execPrice ?? 'n/a'}, ladder stop ${stop} — ${execNote}`,
+        );
+        return 'skipped';
+      }
+      if (check) {
+        this.logger.log(
+          `[target-ladder] exec-confirm(${execMode}) ${check.fire ? 'CONFIRMS' : 'WOULD HOLD (STALE_PRINT_HELD, observe — fired anyway)'} — ` +
+            `${entry.symbol} (tracker ${entry.trackerId}): ${rule}: ltp ${tick.ltp}, ${tick.side === 'LONG' ? 'bid' : 'ask'} ${check.execPrice ?? 'n/a'}, ladder stop ${stop} — ${execNote}`,
+        );
+      }
+      const observed = check && !check.fire ? ` [exec-confirm observe: WOULD HOLD — ${execNote}]` : '';
       await this.verdicts.record({
         userId: entry.userId,
         trackerId: entry.trackerId,
@@ -1680,7 +1786,7 @@ export class SentinelCycleService {
         confidence: 'high',
         thesisStatus: 'INTACT',
         recoveryAvailable: false,
-        reason: `${TARGET_LADDER_REASON_PREFIX} ${rule}: ${reading.detail}`.slice(0, 500),
+        reason: `${TARGET_LADDER_REASON_PREFIX} ${rule}: ${reading.detail}${observed}`.slice(0, 500),
         evidence: ['position.ltp', 'money.ladder'],
         invalidationPoint: null,
         reviewInSec: FLOOR_HARD_REFIRE_SEC,
@@ -1697,6 +1803,50 @@ export class SentinelCycleService {
       this.logger.error(`[target-ladder] could not record the EXIT_NOW for ${entry.symbol}: ${err instanceof Error ? err.message : String(err)} — retried next pass`);
       return 'failed';
     }
+  }
+
+  /** FLOOR_EXEC_PRICE_CONFIRM, read at use like HARD_LOSS_EXIT_RUPEES (default observe; a typo is observe, warned once). */
+  private execMode(): ExecConfirmMode {
+    const { mode, problem } = parseExecConfirmMode(process.env.FLOOR_EXEC_PRICE_CONFIRM);
+    if (problem && !this.execModeWarned) {
+      this.execModeWarned = true;
+      this.logger.warn(`[exec-confirm] ${problem}`);
+    }
+    return mode;
+  }
+
+  /**
+   * EXECUTABLE-PRICE CONFIRM (exec-price-confirm.ts): the book from the hub price this pass read (≤ 3 s old),
+   * else ONE REST FULL quote (TickSource.restBook, bounded by EXEC_REST_TIMEOUT_MS); the trip re-read at the
+   * bid (ask for a short); with no book, the day volume between the run's first read and now. Never rejects:
+   * any failure is "no book".
+   */
+  private async execCheck(
+    entry: RosterEntry,
+    tick: TickReading,
+    now: Date,
+    volumeBefore: number | null,
+    tripsAt: (execPrice: number) => boolean,
+  ): Promise<ExecCheck> {
+    let book: ContractBook | null = freshHubBook(tick.side, tick.contractBook ?? null, now.getTime());
+    if (!book && this.ticks.restBook && tick.contractRef) {
+      try {
+        book = await withTimeout(this.ticks.restBook(entry.userId, tick.contractRef), EXEC_REST_TIMEOUT_MS, () => new Error('REST book read timed out'));
+      } catch (err) {
+        this.logger.warn(`[exec-confirm] ${entry.symbol}: no REST book (${err instanceof Error ? err.message : String(err)}) — volume fallback`);
+        book = null;
+      }
+    }
+    const execPrice = execPriceOf(tick.side, book);
+    const volOk = (v: number | null | undefined): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0;
+    const volumeNow = volOk(book?.volume) ? book!.volume : (tick.contractBook?.volume ?? null);
+    return execConfirm({
+      execPrice,
+      source: book?.source ?? null,
+      tripsAtExec: execPrice !== null ? tripsAt(execPrice) : null,
+      volumeBefore,
+      volumeNow,
+    });
   }
 
   /** The deadline look for this pass (square-off-look.ts), or null when off / outside the window. Never throws. */
@@ -2549,7 +2699,8 @@ type SentinelVerdictLike = {
 const LOGGED_BYPASSES: ReadonlySet<CapBypass> = new Set<CapBypass>(['square-off-due', 'green-to-red', 'giveback-green']);
 
 /** How one detached judgement ended, as the report bucket it lands in. */
-type JudgeOutcome = 'evaluated' | 'failed';
+/** 'skipped': a rule exit held by the executable-price confirm (FLOOR_EXEC_PRICE_CONFIRM=act) — no verdict written. */
+type JudgeOutcome = 'evaluated' | 'failed' | 'skipped';
 
 /** `a` plus whichever of `b` it does not already name, first occurrence kept. */
 function mergeFires(a: TripwireFire[], b: TripwireFire[]): TripwireFire[] {

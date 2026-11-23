@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { lookupHubPrices, type HubPriceSource, type HubPrices } from '../../market-hub/hub-prices';
-import { isHubExchange, type InstrumentRef } from '../../market-hub/hub.types';
+import { isHubExchange, type InstrumentRef, type Price } from '../../market-hub/hub.types';
+import { EXEC_REST_CACHE_MS, contractBookOf, type ContractBook } from '../../exit-discipline/exec-price-confirm';
 import { INDEX_UNDERLYINGS, resolveUnderlying as resolveUnderlyingRef } from '../../market-hub/underlying';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { LevelBookService } from '../../signal-generator/services/level-book.service';
@@ -278,6 +279,9 @@ export class SentinelTickSource implements TickSource {
   /** Recent broker quotes per underlying token — see {@link SPOT_QUOTE_TTL_MS}. */
   private readonly quotes = new Map<string, { at: number; ltp: number; capturedAt: string }>();
 
+  /** EXECUTABLE-PRICE CONFIRM: the last REST book per user + contract (EXEC_REST_CACHE_MS). */
+  private readonly restBooks = new Map<string, { at: number; book: ContractBook | null }>();
+
   private hubSourceRef: HubPriceSource | null = null;
 
   /** NIFTY at each position's entry (equity block F5): a found close is kept for the position's life, a miss retried after {@link ANCHOR_MISS_RETRY_MS}. */
@@ -384,7 +388,10 @@ export class SentinelTickSource implements TickSource {
     // the tracker row, with both of its refusals.
     const source = this.hubSource();
     const hub = source?.hubFor(row.userId, 'positions') ?? null;
-    const hubLtp = this.hubContractPrice(hub, row);
+    const hubPrice = this.hubContractQuote(hub, row);
+    const hubLtp = hubPrice?.ltp ?? null;
+    // EXECUTABLE-PRICE CONFIRM: the book and day volume riding on that same hub price (live reads only).
+    const contractBook = hubPrice && !opts.closedSession ? contractBookOf(hubPrice.depth, hubPrice.volume, hubPrice.at, 'hub') : null;
     // M1: consumers.positions counts only users the hub serves (hub !== null), so the
     // production gate reads the hub's own share and other tenants never confound it.
     const counted = hub && !opts.uncounted ? source : null;
@@ -543,6 +550,8 @@ export class SentinelTickSource implements TickSource {
       // SPIKE BANK / NOISE-AWARE HARD LOSS inputs: only with discipline on (absent otherwise).
       ...(read ? { contractBars: read.contractBars, entryUnderlying } : {}),
       ...(equityInputs ? { equityInputs } : {}),
+      // Absent unless the hub priced the contract (never rendered; the cycle's exec-price confirm reads it).
+      ...(contractBook ? { contractBook } : {}),
     };
   }
 
@@ -728,10 +737,40 @@ export class SentinelTickSource implements TickSource {
 
   /** The hub's fresh contract price, or null (no hub for this user, an exchange it does not speak, or not fresh). */
   private hubContractPrice(hub: HubPrices | null, row: { exchange: string; token: string; symbol: string }): number | null {
+    return this.hubContractQuote(hub, row)?.ltp ?? null;
+  }
+
+  /** The hub's fresh contract Price (ltp > 0) with its volume / depth, or null — the same rule as hubContractPrice. */
+  private hubContractQuote(hub: HubPrices | null, row: { exchange: string; token: string; symbol: string }): Price | null {
     const ref = hub ? toHubRef(row.exchange, row.token, row.symbol) : null;
     if (!hub || !ref) return null;
     const r = hub.price(ref, { maxAgeMs: HUB_DECISION_MAX_AGE_MS });
-    return r.kind === 'fresh' && r.price.ltp > 0 ? r.price.ltp : null;
+    return r.kind === 'fresh' && r.price.ltp > 0 ? r.price : null;
+  }
+
+  /**
+   * EXECUTABLE-PRICE CONFIRM: ONE REST FULL quote over the user's OWN Angel session (UserFeedManager.fetchQuote —
+   * the same FULL-mode marketData call the shared adapter's getMarketDepth makes, on the account that holds the
+   * position; there is no shared feed account), cached EXEC_REST_CACHE_MS per contract. Resolves null on any
+   * failure or when no per-user feed is wired. The cycle bounds the wait (EXEC_REST_TIMEOUT_MS).
+   */
+  async restBook(userId: string, ref: { exchange: string; token: string }): Promise<ContractBook | null> {
+    if (!this.userFeed) return null;
+    const exchange = String(ref.exchange ?? '').toUpperCase();
+    const key = `${userId}|${exchange}:${ref.token}`;
+    const hit = this.restBooks.get(key);
+    if (hit && Date.now() - hit.at < EXEC_REST_CACHE_MS) return hit.book;
+    let book: ContractBook | null = null;
+    try {
+      const t = await this.userFeed.fetchQuote(userId, String(ref.token), exchange);
+      book = t ? contractBookOf(t.depth, t.volume, Date.now(), 'rest') : null;
+    } catch (err) {
+      this.logger.warn(`[exec-confirm] REST book for ${exchange}:${ref.token} failed: ${err instanceof Error ? err.message : String(err)}`);
+      book = null;
+    }
+    this.restBooks.set(key, { at: Date.now(), book });
+    if (this.restBooks.size > 200) this.restBooks.delete(this.restBooks.keys().next().value as string);
+    return book;
   }
 
   /**

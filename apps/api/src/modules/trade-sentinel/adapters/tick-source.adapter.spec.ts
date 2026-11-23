@@ -975,6 +975,46 @@ describe('SentinelTickSource', () => {
         expect(record).toHaveBeenCalledWith('positions', 'hub');
       });
 
+      it('EXECUTABLE-PRICE CONFIRM: carries the hub price\'s best bid / ask and day volume as contractBook (absent without depth or volume)', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const priced: PriceResult = {
+          kind: 'fresh',
+          price: {
+            ref: { exchange: 'NFO', token: '99', symbol: '99' }, ltp: 131, at: NOW.getTime() - 500, source: 'ws', volume: 4200,
+            depth: { bids: [{ price: 130.5, qty: 75, orders: 1 }], asks: [{ price: 131.5, qty: 150, orders: 2 }] },
+          },
+        };
+        const { source } = hubWith({ 'NFO:99': priced });
+        const t = make({ hub: source });
+        t.findUnique.mockResolvedValue(option());
+        expect((await t.svc.tickFor('t1')).contractBook).toEqual({ bid: 130.5, ask: 131.5, volume: 4200, at: NOW.getTime() - 500, source: 'hub' });
+
+        const bare = make({ hub: hubWith({ 'NFO:99': freshAt('NFO', '99', 131, NOW.getTime() - 500) }).source });
+        bare.findUnique.mockResolvedValue(option());
+        expect(await bare.svc.tickFor('t1')).not.toHaveProperty('contractBook');
+
+        const legacy = make();
+        legacy.findUnique.mockResolvedValue(option());
+        expect(await legacy.svc.tickFor('t1')).not.toHaveProperty('contractBook');
+      });
+
+      it('EXECUTABLE-PRICE CONFIRM: restBook reads ONE FULL quote over the user\'s own session, cached 1.5 s; a failure is null', async () => {
+        jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        const t = make();
+        t.fetchQuote.mockResolvedValue({ token: '99', symbol: 'X', ltp: 1121.5, open: 0, high: 0, low: 0, close: 0, volume: 1234, timestamp: NOW,
+          depth: { bids: [{ price: 1146.5, qty: 100, orders: 1 }], asks: [{ price: 1149, qty: 100, orders: 1 }] } });
+        const book = await t.svc.restBook('u1', { exchange: 'mcx', token: '587068' });
+        expect(book).toEqual({ bid: 1146.5, ask: 1149, volume: 1234, at: NOW.getTime(), source: 'rest' });
+        expect(t.fetchQuote).toHaveBeenCalledWith('u1', '587068', 'MCX');
+        await t.svc.restBook('u1', { exchange: 'MCX', token: '587068' });
+        expect(t.fetchQuote).toHaveBeenCalledTimes(1);
+        jest.setSystemTime(NOW.getTime() + 1600);
+        t.fetchQuote.mockRejectedValueOnce(new Error('throttled'));
+        expect(await t.svc.restBook('u1', { exchange: 'MCX', token: '587068' })).toBeNull();
+        expect(t.fetchQuote).toHaveBeenCalledTimes(2);
+        expect(await make({ withFeed: false }).svc.restBook('u1', { exchange: 'MCX', token: '587068' })).toBeNull();
+      });
+
       it('falls back to the tracker row when the hub has never priced it', async () => {
         jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
         const { source, record } = hubWith({ 'NFO:99': { kind: 'unavailable', reason: 'never-priced' } });

@@ -20,6 +20,7 @@ import { scaledUnderlyingNoise } from '../../exit-discipline/noise';
 import { exposureOf } from '../../exit-discipline/exposure';
 import { underlyingAgainst } from '../../exit-discipline/hard-floor';
 import type { PacketLadder } from '../../exit-discipline/target-ladder';
+import type { ContractBook } from '../../exit-discipline/exec-price-confirm';
 import { NEWS_EVENTS_CONFIG, type NewsEventsConfig } from '../../news-events/config';
 import { baseSymbol, newsPositionOf } from '../../news-events/keys';
 import type { EventsPeek, FreshItem, NewsPeek, NewsPosition } from '../../news-events/types';
@@ -452,6 +453,13 @@ export interface TickSnapshot {
    * when no bar was stored). The reference the ₹limit–₹cap band measures the underlying's move from. Never rendered.
    */
   entryUnderlying?: number | null;
+  /**
+   * EXECUTABLE-PRICE CONFIRM (exit-discipline/exec-price-confirm.ts): the contract's best bid / ask and day
+   * volume from the SAME hub price `ltp` came from (SNAP_QUOTE depth), with its receipt time. Set by the tick
+   * source only when the hub priced the contract; absent otherwise. Read by the cycle's hard-floor / ladder
+   * confirm only; never rendered.
+   */
+  contractBook?: ContractBook | null;
   /** SPIKE BANK: set by the CYCLE only (cycle-spike.ts). Absent ⇒ the packet has no money.spike (byte-identical). */
   spike?: PacketSpike | null;
   /** Exit discipline §4: set by the CYCLE only (like the latch); a tick source never sets it. */

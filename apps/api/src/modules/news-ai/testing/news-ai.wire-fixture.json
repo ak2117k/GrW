@@ -1,0 +1,264 @@
+{
+  "brief": {
+    "enabled": true,
+    "ready": true,
+    "building": false,
+    "canRefresh": true,
+    "brief": {
+      "id": "b1",
+      "createdAt": "2026-11-23T05:15:00.000Z",
+      "model": "claude-opus-5",
+      "windowFrom": "2026-11-22T23:15:00.000Z",
+      "windowTo": "2026-11-23T05:15:00.000Z",
+      "brief": {
+        "headline": "Banks lift NIFTY; crude caps oil marketers",
+        "indiaTone": {
+          "direction": "BULL",
+          "summary": "Private banks lead after strong loan growth.",
+          "articleIds": [
+            "a1"
+          ]
+        },
+        "globalTone": {
+          "direction": "MIXED",
+          "summary": "US yields up, Asia steady.",
+          "articleIds": []
+        },
+        "indices": [
+          {
+            "name": "NIFTY",
+            "direction": "BULL",
+            "summary": "Breadth positive on bank strength.",
+            "articleIds": [
+              "a1"
+            ]
+          }
+        ],
+        "sectors": [
+          {
+            "name": "BANKS",
+            "direction": "BULL",
+            "summary": "Loan growth beat.",
+            "articleIds": [
+              "a1",
+              "gone"
+            ]
+          }
+        ],
+        "commodities": [
+          {
+            "name": "CRUDEOIL",
+            "direction": "BEAR",
+            "summary": "OPEC+ supply talk.",
+            "articleIds": [
+              "a2"
+            ]
+          }
+        ],
+        "holdings": [
+          {
+            "symbol": "HDFCBANK",
+            "direction": "BULL",
+            "summary": "Direct beneficiary of the loan data.",
+            "articleIds": [
+              "a1"
+            ]
+          }
+        ],
+        "topStories": [
+          {
+            "articleId": "a1",
+            "headline": "Bank credit growth hits 16%",
+            "direction": "BULL",
+            "whyItMatters": "Supports BANKNIFTY calls into expiry."
+          }
+        ],
+        "watchNext": [
+          {
+            "item": "RBI policy on Friday",
+            "articleIds": [
+              "a1"
+            ]
+          }
+        ],
+        "meta": {
+          "trigger": "cron",
+          "articleCount": 2,
+          "holdingCount": 1
+        }
+      }
+    },
+    "articles": [
+      {
+        "id": "a1",
+        "title": "Bank credit growth hits 16%",
+        "source": "ET",
+        "url": "https://example.com/a1",
+        "publishedAt": "2026-11-23T05:00:00.000Z"
+      },
+      {
+        "id": "a2",
+        "title": "OPEC+ weighs output hike",
+        "source": "ET",
+        "url": "https://example.com/a2",
+        "publishedAt": "2026-11-23T04:00:00.000Z"
+      }
+    ]
+  },
+  "briefEmpty": {
+    "enabled": true,
+    "ready": true,
+    "building": false,
+    "canRefresh": false,
+    "brief": null,
+    "articles": []
+  },
+  "refresh": {
+    "status": "started"
+  },
+  "reads": {
+    "reads": {
+      "a1": {
+        "articleId": "a1",
+        "model": "claude-sonnet-5",
+        "createdAt": "2026-11-23T05:10:00.000Z",
+        "direction": "BULL",
+        "strength": 70,
+        "importance": 80,
+        "takeaway": "Banks have room to run.",
+        "affected": [
+          {
+            "kind": "INDEX",
+            "name": "BANKNIFTY",
+            "direction": "BULL",
+            "why": "Loan growth."
+          },
+          {
+            "kind": "SECTOR",
+            "name": "BANKS",
+            "direction": "BULL",
+            "why": "Credit demand."
+          }
+        ]
+      },
+      "a2": {
+        "articleId": "a2",
+        "model": "claude-sonnet-5",
+        "createdAt": "2026-11-23T05:10:00.000Z",
+        "direction": "BEAR",
+        "strength": 40,
+        "importance": 55,
+        "takeaway": "Crude soft if supply rises.",
+        "affected": [
+          {
+            "kind": "COMMODITY",
+            "name": "CRUDEOIL",
+            "direction": "BEAR",
+            "why": "More supply."
+          }
+        ]
+      }
+    }
+  },
+  "overview": {
+    "enabled": true,
+    "ready": true,
+    "hours": 24,
+    "from": "2026-11-22T05:30:00.000Z",
+    "to": "2026-11-23T05:30:00.000Z",
+    "total": 2,
+    "overall": {
+      "counts": {
+        "BULL": 1,
+        "BEAR": 1,
+        "NEUTRAL": 0,
+        "MIXED": 0
+      },
+      "score": 44,
+      "label": "BULL",
+      "avgImportance": 68
+    },
+    "indices": [
+      {
+        "name": "NIFTY",
+        "counts": {
+          "BULL": 0,
+          "BEAR": 0
+        },
+        "score": 0,
+        "label": "NEUTRAL",
+        "articleIds": []
+      },
+      {
+        "name": "BANKNIFTY",
+        "counts": {
+          "BULL": 1,
+          "BEAR": 0
+        },
+        "score": 100,
+        "label": "BULL",
+        "articleIds": [
+          "a1"
+        ]
+      },
+      {
+        "name": "SENSEX",
+        "counts": {
+          "BULL": 0,
+          "BEAR": 0
+        },
+        "score": 0,
+        "label": "NEUTRAL",
+        "articleIds": []
+      }
+    ],
+    "sectors": [
+      {
+        "name": "BANKS",
+        "counts": {
+          "BULL": 1,
+          "BEAR": 0
+        },
+        "score": 100,
+        "label": "BULL",
+        "articleIds": [
+          "a1"
+        ]
+      }
+    ],
+    "commodities": [
+      {
+        "name": "CRUDEOIL",
+        "counts": {
+          "BULL": 0,
+          "BEAR": 1
+        },
+        "score": -100,
+        "label": "BEAR",
+        "articleIds": [
+          "a2"
+        ]
+      },
+      {
+        "name": "GOLD",
+        "counts": {
+          "BULL": 0,
+          "BEAR": 0
+        },
+        "score": 0,
+        "label": "NEUTRAL",
+        "articleIds": []
+      },
+      {
+        "name": "SILVER",
+        "counts": {
+          "BULL": 0,
+          "BEAR": 0
+        },
+        "score": 0,
+        "label": "NEUTRAL",
+        "articleIds": []
+      }
+    ]
+  }
+}

@@ -2,11 +2,17 @@ import { ExternalLink, Clock } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import { Badge } from '@/components/common';
 import SentimentBadge from './SentimentBadge';
+import AiReadBadge from './AiReadBadge';
+import { useNewsAiRead } from './NewsAiReadsContext';
+import { newsCardDomId } from './newsAiFormat';
+import type { AiArticleRead } from '@/services/newsAi';
 import type { NewsItem } from '@/types';
 
 interface NewsCardProps {
   article: NewsItem;
   className?: string;
+  /** Explicit AI read; when omitted the card reads it from NewsAiReadsContext. */
+  aiRead?: AiArticleRead | null;
 }
 
 function timeAgo(date: Date): string {
@@ -32,10 +38,14 @@ const categoryVariant: Record<string, 'info' | 'warning' | 'success' | 'neutral'
   company: 'neutral',
 };
 
-export default function NewsCard({ article, className }: NewsCardProps) {
+export default function NewsCard({ article, className, aiRead }: NewsCardProps) {
+  const ctxRead = useNewsAiRead(article.id);
+  const read = aiRead === undefined ? ctxRead : aiRead;
   return (
     <div
+      id={newsCardDomId(article.id)}
       className={cn(
+        'scroll-mt-4',
         'group rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-card)] p-4',
         'hover:border-[var(--color-border-default)] transition-colors',
         className,
@@ -76,6 +86,9 @@ export default function NewsCard({ article, className }: NewsCardProps) {
           size="sm"
         />
       </div>
+
+      {/* Claude's read of this article (when the news-ai service has one) */}
+      {read && <AiReadBadge read={read} />}
 
       {/* Related symbols + time */}
       <div className="mt-3 flex items-center justify-between gap-2">

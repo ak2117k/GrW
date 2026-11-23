@@ -56,6 +56,7 @@ import { OvernightScorecardModule } from './modules/overnight-scorecard/overnigh
 import { SelfReviewModule } from './modules/self-review/self-review.module';
 import { StockMoveModule } from './modules/stock-move/stock-move.module';
 import { NewsImpactModule } from './modules/news-impact/news-impact.module';
+import { NewsAiModule } from './modules/news-ai/news-ai.module';
 import { StockMonitorModule } from './modules/stock-monitor/stock-monitor.module';
 import { TelegramModule } from './modules/telegram/telegram.module';
 import { SignalIntakeModule } from './modules/signal-intake/signal-intake.module';
@@ -296,6 +297,9 @@ import { PortfolioReviewModule } from './modules/portfolio-review/portfolio-revi
     // News impact: cluster/classify/relevance every article, batched cheap-LLM impact, HIGH-impact
     // sentinel wake + ops alert, reactions for the self-review. @Global read ports (digest, ideas, review).
     NewsImpactModule,
+    // News AI (2026-11-23): Claude reads every relevant article (news.sentiment, Sonnet) and writes the news
+    // page brief (news.brief, Opus). Stores news_ai_reads / news_briefs only. NEWS_AI=off disables.
+    NewsAiModule,
 
     // Target-profit stock monitor (design feature 2) — per-user watched stocks
     // with an upside profit target captured at add-time; a poller sweeps live

@@ -84,11 +84,12 @@ describe('agent registry', () => {
   it('the shipped config/ai-agents.json matches design 4.2 / 4.4', () => {
     const r = loadAgentRegistry({});
     expect(r.jobsOf('trading').sort()).toEqual(['entry.judge', 'sentinel.judge', 'sentinel.thesis', 'signal.judge']);
-    expect(r.jobsOf('reading').sort()).toEqual(['news.impact', 'signal.image-setup', 'signal.info', 'signal.parse', 'signal.vision']);
+    expect(r.jobsOf('reading').sort()).toEqual(['news.impact', 'news.sentiment', 'signal.image-setup', 'signal.info', 'signal.parse', 'signal.vision']);
     expect(r.jobsOf('background').sort()).toEqual([
       'assist.advisor',
       'assist.news',
       'backtest.*',
+      'news.brief',
       'news.ideas',
       'self-review.diagnose',
       'sentinel.overnight',
@@ -99,7 +100,11 @@ describe('agent registry', () => {
     expect(r.profile('signal.judge').concurrency).toBe(3);
     expect(r.profile('entry.judge').concurrency).toBe(3);
     expect(r.profile('sentinel.thesis').concurrency).toBe(3);
-    for (const job of [...r.jobsOf('reading'), ...r.jobsOf('background')]) expect(r.profile(job).concurrency).toBe(2);
+    // News AI (2026-11-23): news.sentiment reads every article (3 at once), news.brief is one Opus call at a time.
+    expect(r.profile('news.sentiment').concurrency).toBe(3);
+    expect(r.profile('news.brief').concurrency).toBe(1);
+    const newsAi = ['news.sentiment', 'news.brief'];
+    for (const job of [...r.jobsOf('reading'), ...r.jobsOf('background')].filter((j) => !newsAi.includes(j))) expect(r.profile(job).concurrency).toBe(2);
     for (const g of AGENT_GROUPS) {
       for (const job of r.jobsOf(g)) {
         const p = r.profile(job);

@@ -4043,3 +4043,45 @@ model FloorBrokerSlEvent {
   @@index([userId, createdAt])
   @@map("floor_broker_sl_events")
 }
+
+/// News AI (2026-11-23, apps/api/src/modules/news-ai): Claude's read of ONE news article (job 'news.sentiment',
+/// Sonnet). One row per article, written once. No FK: news_articles is pruned on its own schedule; reads are
+/// pruned after 30 days by the module. affected = [{kind, name, direction, why}].
+model NewsAiRead {
+  id         String   @id
+  articleId  String   @unique @map("article_id")
+  model      String
+  direction  String // BULL | BEAR | NEUTRAL | MIXED
+  strength   Int // 0-100
+  importance Int // 0-100
+  takeaway   String
+  affected   Json     @default("[]")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([createdAt])
+  @@map("news_ai_reads")
+}
+
+/// News AI: failed read attempts per article (call error or a reply that failed validation). An article is
+/// tried at most 3 times in all (first read + 2 retries).
+model NewsAiReadFailure {
+  articleId String   @id @map("article_id")
+  attempts  Int      @default(0)
+  lastError String?  @map("last_error")
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("news_ai_read_failures")
+}
+
+/// News AI: the news page's "what matters now" brief (job 'news.brief', Opus). Every point cites article ids.
+model NewsBrief {
+  id         String   @id
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  model      String
+  windowFrom DateTime @map("window_from") @db.Timestamptz(6)
+  windowTo   DateTime @map("window_to") @db.Timestamptz(6)
+  brief      Json
+
+  @@index([createdAt])
+  @@map("news_briefs")
+}

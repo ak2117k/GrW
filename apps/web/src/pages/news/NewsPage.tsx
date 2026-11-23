@@ -1,7 +1,11 @@
 import { useMemo } from 'react';
-import { Newspaper, RefreshCw, TrendingUp, TrendingDown, Minus } from 'lucide-react';
+import { Newspaper, RefreshCw } from 'lucide-react';
 import { useNews } from '@/hooks/useNews';
+import { useNewsAiReads } from '@/hooks/useNewsAiReads';
 import { NewsFeed, NewsFilters } from '@/components/news';
+import NewsBrief, { type ArticleRef } from '@/components/news/NewsBrief';
+import AiSentimentOverview from '@/components/news/AiSentimentOverview';
+import { NewsAiReadsContext } from '@/components/news/NewsAiReadsContext';
 import AIInsightCard from '@/components/ai/AIInsightCard';
 import { cn } from '@/utils/cn';
 
@@ -30,7 +34,17 @@ export default function NewsPage() {
     updateFilters,
   } = useNews();
 
-  const totalSentiment = sentimentCounts.bullish + sentimentCounts.bearish + sentimentCounts.neutral;
+  // Claude's per-article reads for every loaded card (best effort — a failing
+  // news-ai endpoint just means cards show no AI read).
+  const articleIds = useMemo(() => articles.map((a) => a.id), [articles]);
+  const aiReads = useNewsAiReads(articleIds);
+
+  // Titles/urls of loaded articles so brief story links can scroll to or open them.
+  const articleLookup = useMemo(() => {
+    const m = new Map<string, ArticleRef>();
+    for (const a of articles) m.set(a.id, { title: a.title, url: a.url });
+    return m;
+  }, [articles]);
 
   // Batch-analysis context for the feed: send the top 20 filtered articles
   // to Claude (answered in-app by the API's Claude session for the owner —
@@ -65,10 +79,11 @@ export default function NewsPage() {
   }, [articles, filters.source, sentimentCounts]);
 
   return (
+    <NewsAiReadsContext.Provider value={aiReads}>
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-3">
           <Newspaper size={24} className="text-[var(--color-accent-blue)]" />
           <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">
             Market News
@@ -80,7 +95,7 @@ export default function NewsPage() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <span className="text-xs text-[var(--color-text-muted)]">
             Updated: {formatTime(lastUpdated)}
           </span>
@@ -102,6 +117,9 @@ export default function NewsPage() {
         </div>
       </div>
 
+      {/* AI market brief: Claude's read across the whole news window */}
+      <NewsBrief articleLookup={articleLookup} />
+
       {/* Filters */}
       <NewsFilters
         filters={filters}
@@ -121,9 +139,9 @@ export default function NewsPage() {
       )}
 
       {/* Two column layout */}
-      <div className="flex gap-4">
+      <div className="flex flex-col gap-4 lg:flex-row">
         {/* Left: News Feed (70%) */}
-        <div className="flex-[7] min-w-0">
+        <div className="min-w-0 lg:flex-[7]">
           <NewsFeed
             articles={articles}
             isLoading={isLoading}
@@ -134,84 +152,9 @@ export default function NewsPage() {
         </div>
 
         {/* Right: Sidebar (30%) */}
-        <div className="flex-[3] space-y-4">
-          {/* Sentiment Summary */}
-          <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-card)] p-4">
-            <h3 className="mb-3 text-sm font-semibold text-[var(--color-text-primary)]">
-              Sentiment Overview
-            </h3>
-
-            <div className="space-y-3">
-              {/* Bullish */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <TrendingUp size={14} className="text-emerald-400" />
-                  <span className="text-xs text-[var(--color-text-secondary)]">Bullish</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-24 overflow-hidden rounded-full bg-gray-700">
-                    <div
-                      className="h-full rounded-full bg-emerald-400 transition-all"
-                      style={{
-                        width: totalSentiment > 0
-                          ? `${(sentimentCounts.bullish / totalSentiment) * 100}%`
-                          : '0%',
-                      }}
-                    />
-                  </div>
-                  <span className="min-w-[2rem] text-right text-xs font-medium text-emerald-400">
-                    {sentimentCounts.bullish}
-                  </span>
-                </div>
-              </div>
-
-              {/* Bearish */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <TrendingDown size={14} className="text-red-400" />
-                  <span className="text-xs text-[var(--color-text-secondary)]">Bearish</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-24 overflow-hidden rounded-full bg-gray-700">
-                    <div
-                      className="h-full rounded-full bg-red-400 transition-all"
-                      style={{
-                        width: totalSentiment > 0
-                          ? `${(sentimentCounts.bearish / totalSentiment) * 100}%`
-                          : '0%',
-                      }}
-                    />
-                  </div>
-                  <span className="min-w-[2rem] text-right text-xs font-medium text-red-400">
-                    {sentimentCounts.bearish}
-                  </span>
-                </div>
-              </div>
-
-              {/* Neutral */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Minus size={14} className="text-gray-400" />
-                  <span className="text-xs text-[var(--color-text-secondary)]">Neutral</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-24 overflow-hidden rounded-full bg-gray-700">
-                    <div
-                      className="h-full rounded-full bg-gray-400 transition-all"
-                      style={{
-                        width: totalSentiment > 0
-                          ? `${(sentimentCounts.neutral / totalSentiment) * 100}%`
-                          : '0%',
-                      }}
-                    />
-                  </div>
-                  <span className="min-w-[2rem] text-right text-xs font-medium text-gray-400">
-                    {sentimentCounts.neutral}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
+        <div className="space-y-4 lg:flex-[3] lg:min-w-0">
+          {/* Sentiment: Claude's read when available, keyword counts as fallback */}
+          <AiSentimentOverview fallbackCounts={sentimentCounts} />
 
           {/* Trending Symbols */}
           <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-card)] p-4">
@@ -276,5 +219,6 @@ export default function NewsPage() {
         </div>
       </div>
     </div>
+    </NewsAiReadsContext.Provider>
   );
 }

@@ -55,10 +55,11 @@ export class NewsAiController {
     const canRefresh = briefRefreshAllowed(user, this.cfg.ownerUserId);
     const ready = await this.store.tablesReady();
     if (!ready) return { enabled: this.cfg.enabled, ready, building: false, canRefresh, brief: null, articles: [] };
-    const stored = await this.store.latestBrief();
-    // The brief is built from the OWNER's open holdings / positions. Any other signed-in user gets the
-    // brief without that section (security review 2026-11-23: tenant data exposure).
-    const brief = stored && !canRefresh ? { ...stored, brief: { ...stored.brief, holdings: [] } } : stored;
+    // The brief is written by the model WITH the owner's open holdings / positions in its prompt, so any
+    // section (not just `holdings`) can mention them. It is the owner's (and admins') only; other users get
+    // no brief (security review 2026-11-23: tenant data exposure). AI reads / sentiment overview stay shared.
+    if (!canRefresh) return { enabled: this.cfg.enabled, ready, building: false, canRefresh, brief: null, articles: [] };
+    const brief = await this.store.latestBrief();
     const articles = brief ? await this.store.articleRefs(citedIds(brief.brief as unknown as Record<string, unknown>)) : [];
     return { enabled: this.cfg.enabled, ready, building: this.briefs.building, canRefresh, brief, articles };
   }

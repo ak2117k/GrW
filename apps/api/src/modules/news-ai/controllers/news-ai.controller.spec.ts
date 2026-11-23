@@ -87,23 +87,23 @@ describe('NewsAiController reads / overview / brief', () => {
 
   it('brief returns the latest brief with its cited articles', async () => {
     const { ctl, store } = setup();
-    expect(await ctl.brief(user('someone'))).toMatchObject({ brief: null, articles: [] });
+    expect(await ctl.brief(user('owner-1'))).toMatchObject({ brief: null, articles: [] });
     store.articles = [{ id: 'a1', title: 'T', source: 'ET', url: 'u', publishedAt: new Date(), fetchedAt: new Date(), summary: null, category: 'x', relatedSymbols: [], instruments: [], sectors: [], indices: [], markets: [] }];
     store.briefs = [{ id: 'b', createdAt: new Date(), model: 'm', windowFrom: new Date(), windowTo: new Date(), brief: { topStories: [{ articleId: 'a1' }], indices: [{ articleIds: ['a1', 'gone'] }] } as never }];
-    const res = await ctl.brief(user('someone'));
+    const res = await ctl.brief(user('owner-1'));
     expect(res.articles.map((a) => a.id)).toEqual(['a1']);
   });
 
-  it("the owner's holdings section is only returned to the owner or an ADMIN", async () => {
+  it('the brief (written with the owner\'s holdings in its prompt) is returned only to the owner or an ADMIN', async () => {
     const { ctl, store } = setup();
     const holdings = [{ symbol: 'OFSS', direction: 'BULL', summary: 'owner holding', articleIds: [] }];
-    store.briefs = [{ id: 'b', createdAt: new Date(), model: 'm', windowFrom: new Date(), windowTo: new Date(), brief: { holdings, topStories: [] } as never }];
-    const held = (r: Awaited<ReturnType<typeof ctl.brief>>) => (r.brief?.brief as unknown as { holdings: unknown[] }).holdings;
-    expect(held(await ctl.brief(user('owner-1')))).toEqual(holdings);
-    expect(held(await ctl.brief(user('x', 'ADMIN')))).toEqual(holdings);
-    expect(held(await ctl.brief(user('someone')))).toEqual([]);
-    expect(held(await ctl.brief(undefined))).toEqual([]);
-    expect((store.briefs[0].brief as unknown as { holdings: unknown[] }).holdings).toEqual(holdings); // stored copy untouched
+    store.briefs = [{ id: 'b', createdAt: new Date(), model: 'm', windowFrom: new Date(), windowTo: new Date(), brief: { holdings, topStories: [{ articleId: 'a1', whyItMatters: 'your OFSS position' }] } as never }];
+    expect((await ctl.brief(user('owner-1'))).brief?.id).toBe('b');
+    expect((await ctl.brief(user('x', 'ADMIN'))).brief?.id).toBe('b');
+    const other = await ctl.brief(user('someone'));
+    expect(other).toMatchObject({ brief: null, articles: [], canRefresh: false });
+    expect(JSON.stringify(other)).not.toContain('OFSS');
+    expect(await ctl.brief(undefined)).toMatchObject({ brief: null, articles: [] });
   });
 
   it('tables missing: every read endpoint answers empty with ready=false and never queries the tables', async () => {

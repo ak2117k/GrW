@@ -141,15 +141,15 @@ export const INFO_ITEM_SCHEMA = {
   required: ['underlying', 'bias', 'levels', 'targetLevel', 'oiStrike', 'oiSide', 'oiNote', 'conditionDriver', 'conditionDirection', 'horizon'],
   properties: {
     underlying: { type: 'string' },
-    bias: { type: ['string', 'null'], enum: ['BULL', 'BEAR', 'NEUTRAL', null] },
+    bias: { anyOf: [{ type: 'string', enum: ['BULL', 'BEAR', 'NEUTRAL'] }, { type: 'null' }] },
     levels: { type: 'array', items: { type: 'number' } },
     targetLevel: { type: ['number', 'null'] },
     oiStrike: { type: ['number', 'null'] },
-    oiSide: { type: ['string', 'null'], enum: ['CE', 'PE', null] },
+    oiSide: { anyOf: [{ type: 'string', enum: ['CE', 'PE'] }, { type: 'null' }] },
     oiNote: { type: ['string', 'null'] },
     conditionDriver: { type: ['string', 'null'] },
-    conditionDirection: { type: ['string', 'null'], enum: ['UP', 'DOWN', null] },
-    horizon: { type: ['string', 'null'], enum: ['INTRADAY', 'DAYS', 'WEEKS', 'MONTHS', null] },
+    conditionDirection: { anyOf: [{ type: 'string', enum: ['UP', 'DOWN'] }, { type: 'null' }] },
+    horizon: { anyOf: [{ type: 'string', enum: ['INTRADAY', 'DAYS', 'WEEKS', 'MONTHS'] }, { type: 'null' }] },
   },
 } as const;
 

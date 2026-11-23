@@ -103,6 +103,13 @@ const HEADLINE_SUBJECT: Readonly<Record<string, { include: RegExp; exclude: RegE
     exclude: /\b(silver (lining|jubilee|screen|medals?|oak)|silverline|silver spoon)\b/i,
     rescue: /\b(comex|bullion|silver (prices?|rates?|futures)|mcx silver|spot silver)\b/i,
   },
+  // 2026-11-23: natural gas. City-gas distributors and LNG importers are companies, not the gas price — unless the
+  // headline also names the price (Henry Hub, NYMEX, 'natural gas prices / futures').
+  NATURALGAS: {
+    include: /\b(natural gas|nat ?gas|henry hub|lng)\b/i,
+    exclude: /\b(petronet|gail|indraprastha gas|igl|mahanagar gas|gujarat gas|adani total gas|city gas|gas distribution|cgd)\b/i,
+    rescue: /\b(henry hub|nymex|mcx natural gas|natural gas (prices?|futures|rates?))\b/i,
+  },
 });
 
 /** Is the headline about the underlying's own market (crude: oil / crude / Brent / WTI / OPEC, not "Indian Oil")? */
@@ -125,6 +132,7 @@ const SUBJECT_INSTRUMENTS: Readonly<Record<string, string[]>> = Object.freeze({
   CRUDEOIL: ['CRUDEOIL', 'CRUDEOILM'],
   GOLD: ['GOLD', 'GOLDM'],
   SILVER: ['SILVER', 'SILVERM'],
+  NATURALGAS: ['NATURALGAS', 'NATGASMINI'],
   NIFTY: ['NIFTY'],
   SENSEX: ['SENSEX'],
   BANKNIFTY: ['BANKNIFTY'],

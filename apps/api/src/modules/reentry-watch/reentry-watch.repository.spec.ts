@@ -303,6 +303,31 @@ describe('exitsSince — carries the tracker owner (review fix 1: only the owner
     const out = await new ReentryWatchRepository(prisma as never).exitsSince(DAY);
     expect(out[0].underlying).toBe('GOLD');
   });
+
+  it('a NATGASMINI exit is watched on NATURALGAS (2026-11-23: NATURALGAS joined the universe)', async () => {
+    const { prisma } = fakePrisma();
+    prisma.tradeTracker.findMany.mockResolvedValue([{ ...tracker('t1', 'owner'), symbol: 'NATGASMINI23DEC26330PE', exchange: 'MCX' }]);
+    prisma.instrument.findFirst.mockResolvedValue({ name: 'NATGASMINI' });
+    const out = await new ReentryWatchRepository(prisma as never).exitsSince(DAY);
+    expect(out[0].underlying).toBe('NATURALGAS');
+  });
+
+  it('a NATGASMINI exit with no master row is still watched on NATURALGAS (name from the symbol)', async () => {
+    const { prisma } = fakePrisma();
+    prisma.tradeTracker.findMany.mockResolvedValue([{ ...tracker('t1', 'owner'), symbol: 'NATGASMINI23DEC26330PE', exchange: 'MCX' }]);
+    const out = await new ReentryWatchRepository(prisma as never).exitsSince(DAY);
+    expect(out[0].underlying).toBe('NATURALGAS');
+  });
+});
+
+describe('underlyingFamily — natural gas', () => {
+  it('NATURALGAS and NATGASMINI are one family (an open mini holds a NATURALGAS re-entry)', () => {
+    expect(underlyingFamily('NATURALGAS')).toEqual(expect.arrayContaining(['NATURALGAS', 'NATGASMINI']));
+    expect(underlyingFamily('NATGASMINI')).toEqual(expect.arrayContaining(['NATURALGAS']));
+    const re = new RegExp(familyPattern(underlyingFamily('NATURALGAS')));
+    expect(re.test('NATGASMINI23DEC26330PE')).toBe(true);
+    expect(re.test('NATURALGAS23DEC26330CE')).toBe(true);
+  });
 });
 
 describe('liveCountsFor — the NO_TRACKER fallback link (review fix 3)', () => {

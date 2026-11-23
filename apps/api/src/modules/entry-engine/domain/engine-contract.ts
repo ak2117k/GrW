@@ -3,6 +3,47 @@ import { resolveContract, segmentFor, type ResolveResult } from '../../signal-tr
 import { ceilToTick, floorToTick, planEntry, type EntryPlan, type GateCheck } from '../../signal-trader/domain/gate';
 import type { SignalTraderConfig } from '../../signal-trader/domain/signal-trader.config';
 import type { SignalView } from '../../signal-trader/domain/signal.types';
+import { underlyingFutureFor } from '../../signal-trader/domain/mcx-chain';
+
+export interface OptionFutureRef {
+  exchange: string;
+  token: string;
+  symbol: string;
+  expiry: string;
+}
+
+/**
+ * The price the ATM strike is centred on for an MCX option (2026-11-23, NATURALGAS joined the universe). MCX options
+ * are written on a FUTURE, and the month's options expire days BEFORE that month's future: prod 2026-11-23 the live
+ * NATURALGAS options (23 DEC) settle to NATURALGAS28DEC26FUT while the price line — the nearest future — was still
+ * NATURALGAS24NOV26FUT, a different month and a different price (crude has the same 2-day gap). So for MCX the ATM is
+ * centred on the LTP of the future the chosen expiry is written on (mcx-chain underlyingFutureFor). Anything that
+ * cannot be read keeps `spot` (the line price) with a note; never throws. Non-MCX: `spot`, no note.
+ */
+export async function optionFutureSpot(i: {
+  exchange: string;
+  expiry: string;
+  spot: number;
+  futures: () => Promise<readonly OptionFutureRef[]>;
+  ltp: (token: string, exchange: string) => Promise<number | null>;
+}): Promise<{ spot: number; note: string | null }> {
+  if (up(i.exchange) !== 'MCX') return { spot: i.spot, note: null };
+  let fut: OptionFutureRef | null = null;
+  try {
+    fut = underlyingFutureFor(i.expiry, await i.futures());
+  } catch (e) {
+    return { spot: i.spot, note: `option future unreadable (${e instanceof Error ? e.message : String(e)}); ATM on the line price` };
+  }
+  if (!fut) return { spot: i.spot, note: `no future for the ${i.expiry} options; ATM on the line price` };
+  let px: number | null = null;
+  try {
+    px = await i.ltp(fut.token, fut.exchange);
+  } catch {
+    px = null;
+  }
+  if (px === null || !(px > 0)) return { spot: i.spot, note: `no LTP for ${fut.symbol}; ATM on the line price` };
+  return { spot: px, note: `ATM on ${fut.symbol} ${px} (the options' own future)` };
+}
 
 /**
  * The engine's contract and entry plan: the at-the-money option of the nearest live expiry (never the

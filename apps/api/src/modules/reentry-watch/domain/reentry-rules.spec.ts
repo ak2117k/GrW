@@ -2,8 +2,9 @@ import { trendReading, type Bar1m, type Direction } from '../../entry-engine/dom
 import { bankNiftyBars, istTs, niftyBars, niftyReversalBars } from './reentry-fixtures';
 import {
   alertText, decideReentry, directionOf, moveInN, nameFromSymbol, noise15, noiseSessionOf, optionKindOf, REENTRY_WATCH, underlyingAt, type ReentryFacts, type ReentryVerdict,
-  watchUnderlying, REENTRY_UNIVERSE,
+  watchUnderlying, REENTRY_UNIVERSE, WATCH_PARENT_OF,
 } from './reentry-rules';
+import { ENGINE_UNIVERSE } from '../../entry-engine/domain/engine-inputs';
 
 const MIN = 60_000;
 const DAY = '2026-11-05';
@@ -177,9 +178,22 @@ describe('watchUnderlying', () => {
     expect(watchUnderlying('GOLDM')).toBe('GOLD');
     expect(REENTRY_UNIVERSE).toContain(watchUnderlying('GOLDM'));
   });
-  it('NATGASMINI is not mapped: NATURALGAS is not in the watch / engine universe (no line or chain to watch it on)', () => {
-    expect(watchUnderlying('NATGASMINI')).toBe('NATGASMINI');
-    expect(REENTRY_UNIVERSE).not.toContain('NATURALGAS');
+  it('watches Natural Gas Mini on NATURALGAS (2026-11-23: NATURALGAS joined the watch / engine universe)', () => {
+    expect(watchUnderlying('NATGASMINI')).toBe('NATURALGAS');
+    expect(REENTRY_UNIVERSE).toContain('NATURALGAS');
+    expect(REENTRY_UNIVERSE).toContain(watchUnderlying('NATGASMINI'));
+    expect(REENTRY_UNIVERSE).not.toContain('NATGASMINI');
+  });
+  it('watches Silver Mini on SILVER', () => {
+    expect(watchUnderlying('SILVERM')).toBe('SILVER');
+    expect(REENTRY_UNIVERSE).toContain(watchUnderlying('SILVERM'));
+  });
+  it('every mapped mini lands on a name the watch reads, and the watch reads exactly the entry engine universe', () => {
+    for (const mini of Object.keys(WATCH_PARENT_OF)) expect(REENTRY_UNIVERSE).toContain(watchUnderlying(mini));
+    expect([...REENTRY_UNIVERSE].sort()).toEqual([...(ENGINE_UNIVERSE as readonly string[])].sort());
+  });
+  it('base metals without a liquid captured chain stay out', () => {
+    for (const n of ['COPPER', 'ZINC', 'ALUMINIUM', 'LEAD', 'NICKEL']) expect(REENTRY_UNIVERSE).not.toContain(n);
   });
   it('leaves everything else alone', () => {
     expect(watchUnderlying('GOLD')).toBe('GOLD');

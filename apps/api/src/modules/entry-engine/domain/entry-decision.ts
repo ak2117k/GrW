@@ -161,6 +161,9 @@ const NEWS_MATCH: Readonly<Record<string, { symbols: string[]; indexNames: strin
   // (news-events/keys.ts); a bullion-sector story counts for both metals (they move together).
   GOLD: { symbols: ['GOLD', 'GOLDM'], indexNames: [], sectors: ['MCX BULLION'] },
   SILVER: { symbols: ['SILVER', 'SILVERM'], indexNames: [], sectors: ['MCX BULLION'] },
+  // 2026-11-23: natural gas joined the universe. No sector: the tagger files crude AND gas stories under 'MCX ENERGY',
+  // and a crude story is not a gas story (the theme's headline match catches gas stories the tagger left untagged).
+  NATURALGAS: { symbols: ['NATURALGAS', 'NATGASMINI'], indexNames: [], sectors: [] },
 });
 
 export function impactConcerns(underlying: string, r: Pick<ImpactRow, 'symbols' | 'sectors' | 'indexName'>): boolean {

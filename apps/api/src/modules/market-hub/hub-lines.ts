@@ -24,8 +24,12 @@ import { refKey, type HubExchange, type InstrumentRef } from './hub.types';
  * points and candles_1m held ZERO bars for GOLD04DEC26FUT (MCX 495213): the judge, the noise units
  * and the entry engine read gold blind. Full GOLD, not GOLDM (owner). Rollback: set
  * HUB_LINE_FUTURES=NIFTY,BANKNIFTY,SENSEX,CRUDEOIL,CRUDEOILM.
+ *
+ * 2026-11-23: NATURALGAS joined the default (1 slot) with the entry engine / re-entry watch universe. It fell ~5%
+ * that day and candles_1m held no bar of NATURALGAS24NOV26FUT (MCX 574319) since 11-20. Rollback: set
+ * HUB_LINE_FUTURES=NIFTY,BANKNIFTY,SENSEX,CRUDEOIL,CRUDEOILM,GOLD,SILVER.
  */
-export const DEFAULT_LINE_FUTURES = 'NIFTY,BANKNIFTY,SENSEX,CRUDEOIL,CRUDEOILM,GOLD,SILVER';
+export const DEFAULT_LINE_FUTURES = 'NIFTY,BANKNIFTY,SENSEX,CRUDEOIL,CRUDEOILM,GOLD,SILVER,NATURALGAS';
 
 /** Hub watch owner of the lines. */
 export const LINES_OWNER = 'hub:lines';

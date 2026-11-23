@@ -34,6 +34,15 @@ describe('hub lines', () => {
     expect(futureExchangeFor('SILVER')).toBe('MCX');
   });
 
+  it('pins the NATURALGAS near-month future by default (2026-11-23: no NG bars since 11-20 on a -5% day), not NATGASMINI', () => {
+    const names = parseLineFutures(undefined);
+    expect(names).toContain('NATURALGAS');
+    expect(names).not.toContain('NATGASMINI');
+    expect(futureExchangeFor('NATURALGAS')).toBe('MCX');
+    // 8 futures + the index spots: the pinned lines stay far below the 50-slot cap.
+    expect(names.length).toBeLessThanOrEqual(8);
+  });
+
   it('GOLD rolls at expiry like CRUDEOIL: the nearest future on/after today is re-picked', async () => {
     const book = [
       { token: '495213', symbol: 'GOLD04DEC26FUT', expiry: IST('2026-12-04T00:00:00') },

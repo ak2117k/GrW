@@ -41,7 +41,8 @@ export interface EventContextDeps {
   env?: Record<string, string | undefined>;
 }
 
-const US_WIDE = Object.freeze(['GOLD', 'SILVER', 'CRUDEOIL', 'NIFTY', 'BANKNIFTY', 'SENSEX']);
+// 2026-11-23: NATURALGAS (entry engine universe) — a US macro day moves the dollar and every MCX commodity with it.
+const US_WIDE = Object.freeze(['GOLD', 'SILVER', 'CRUDEOIL', 'NATURALGAS', 'NIFTY', 'BANKNIFTY', 'SENSEX']);
 const INDICES = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX']);
 const CRUDE = Object.freeze(['CRUDEOIL']);
 
@@ -60,10 +61,11 @@ export function eventAffects(name: string): string[] {
   return [...US_WIDE];
 }
 
-/** GOLDM / GOLDPETAL → GOLD, SILVERM / SILVERMIC → SILVER, CRUDEOILM → CRUDEOIL; else as given. */
+/** GOLDM / GOLDPETAL → GOLD, SILVERM / SILVERMIC → SILVER, CRUDEOILM → CRUDEOIL, NATGASMINI → NATURALGAS; else as given. */
 function familyOf(underlying: string): string {
   const u = underlying.trim().toUpperCase();
-  for (const root of ['CRUDEOIL', 'GOLD', 'SILVER']) if (u.startsWith(root)) return root;
+  if (u.startsWith('NATGAS')) return 'NATURALGAS';
+  for (const root of ['CRUDEOIL', 'GOLD', 'SILVER', 'NATURALGAS']) if (u.startsWith(root)) return root;
   return u;
 }
 

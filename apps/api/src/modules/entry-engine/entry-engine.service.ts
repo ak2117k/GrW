@@ -11,7 +11,7 @@ import { SignalTraderRepository } from '../signal-trader/repositories/signal-tra
 import { SignalOiCheckService } from '../signal-trader/services/signal-oi-check.service';
 import type { InstrumentMasterLike, QuotesLike, SessionClockLike } from '../signal-trader/services/signal-trader.service';
 import { loadTrendBars } from '../signal-trader/services/trend-bars.loader';
-import { atmCandidates, engineContract, engineSignal, ENGINE_LIQUIDITY, pickLiquidStrike, planEngineEntry } from './domain/engine-contract';
+import { atmCandidates, engineContract, engineSignal, ENGINE_LIQUIDITY, optionFutureSpot, pickLiquidStrike, planEngineEntry } from './domain/engine-contract';
 import { chooseBars, ENGINE_UNIVERSE, ENGINE_WINDOW, istDayAt, istMinutes, readOi, sessionStartOf, wantFor } from './domain/engine-inputs';
 import { ENTRY_ENGINE, entryDecision, entryGuards, INPUT_NOT_READY, isEnterAction, newsReading, trendReading, type Bar1m, type Direction, type EngineAction, type EntryDecision, type GuardResult, type OiReading } from './domain/entry-decision';
 import { applyEntryGates, clusterGate, extensionReading, gateLine, INDEX_CLUSTER, inIndexCluster, indicatorReading, sessionBars, type ExtensionReading, type GateResult, type IndicatorReading } from './domain/entry-gates';
@@ -320,8 +320,20 @@ export class EntryEngineService {
     } catch (e) {
       return { tradeId: null, note: `paper: not opened — instrument master unavailable: ${errText(e)}` };
     }
-    const cands = atmCandidates(master, underlying, kind, spot ?? 0, at);
+    let cands = atmCandidates(master, underlying, kind, spot ?? 0, at);
     if (!cands.ok) return { tradeId: null, note: `paper: not opened — ${cands.reason}` };
+    // MCX: centre the ATM on the future the options are written on, not the (possibly other-month) price line.
+    const centred = await optionFutureSpot({
+      exchange: segmentFor({ underlying, instrumentKind: kind }),
+      expiry: cands.expiry,
+      spot: spot ?? 0,
+      futures: () => this.signalRepo.mcxFutures(underlying, istDayAt(at, 0)),
+      ltp: (token, exchange) => this.quotes.ltp(owner, token, exchange),
+    });
+    if (centred.spot !== (spot ?? 0)) {
+      const again = atmCandidates(master, underlying, kind, centred.spot, at);
+      if (again.ok) cands = again;
+    }
     // LIQUIDITY (2026-11-05, engine-contract.ts ENGINE_LIQUIDITY): never a strike nobody is trading.
     let liq: Awaited<ReturnType<EntryEngineRepository['strikeLiquidity']>> | null = null;
     try {
@@ -345,7 +357,7 @@ export class EntryEngineService {
     }
     const r = await this.paper.open({ decisionId, plan: planned.plan, underlying, kind, strike: atm.strike, expiry: c.expiry ?? atm.expiry, why: reasons.map((x) => x.split(' — ')[0]).join('; ') });
     return r.ok
-      ? { tradeId: r.tradeId, note: `paper: opened ${planned.plan.tradingsymbol} x${planned.plan.qty} @ ${r.entryPrice ?? ltp} (trade ${r.tradeId}); ${pick.note}` }
+      ? { tradeId: r.tradeId, note: `paper: opened ${planned.plan.tradingsymbol} x${planned.plan.qty} @ ${r.entryPrice ?? ltp} (trade ${r.tradeId}); ${pick.note}${centred.note ? `; ${centred.note}` : ''}` }
       : { tradeId: null, note: `paper: open failed — ${r.reason}` };
   }
 }

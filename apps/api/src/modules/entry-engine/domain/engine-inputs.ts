@@ -10,8 +10,15 @@ import { ENTRY_ENGINE, oiReading, type Bar1m, type ComponentLean, type Direction
  * The universe of stage 1 (fixed): index options on NFO / BFO, crude and bullion on MCX. NFO stocks: not yet.
  * 2026-11-04: GOLD and SILVER joined (still ENTRY_ENGINE=paper). On the US-midterm day GOLD moved ~3.5k
  * points and the engine never looked at it. Full GOLD, not GOLDM (owner).
+ * 2026-11-23: NATURALGAS joined (owner; still ENTRY_ENGINE=paper). It fell ~5% that day and the engine never looked
+ * at it. Verified on prod that day: near-month future in the instruments table (NATURALGAS24NOV26FUT 574319), its
+ * chain captured every 3 min by the hub's OI core list (default HUB_OI_CORE_UNDERLYINGS), the most liquid MCX options
+ * after CRUDEOIL / GOLD / SILVER (top strikes 5–15k lots a day), value factor 1 (lot 1250 mmBtu). Its price line is
+ * pinned by the hub (hub-lines.ts DEFAULT_LINE_FUTURES, +1 feed slot). Left out (no liquid, captured chain): COPPER
+ * (top strike ~300 lots a day, chain not in the OI core list), ZINC (chain never captured), ALUMINIUM / LEAD / NICKEL
+ * (no options listed). Minis (NATGASMINI, CRUDEOILM, GOLDM, SILVERM) are not separate underlyings.
  */
-export const ENGINE_UNIVERSE = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'GOLD', 'SILVER'] as const);
+export const ENGINE_UNIVERSE = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'GOLD', 'SILVER', 'NATURALGAS'] as const);
 export type EngineUnderlying = (typeof ENGINE_UNIVERSE)[number];
 
 /** The evaluation window (IST minutes after midnight): 09:20–23:00. */

@@ -24,17 +24,23 @@ export const REENTRY_WATCH = Object.freeze({
   atrPeriod: 14,
 });
 
-/** The engine universe the watch can read (index line or MCX nearest future + chain + liquidity). */
-export const REENTRY_UNIVERSE: readonly string[] = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'GOLD', 'SILVER']);
+/**
+ * The engine universe the watch can read (index line or MCX nearest future + chain + liquidity): the entry engine's
+ * ENGINE_UNIVERSE names, kept literal here so the watch never widens just because the engine does.
+ * 2026-11-23: NATURALGAS joined with the engine (owner: all liquid MCX commodities; its line is pinned by the hub and
+ * its chain is in the hub's OI core list).
+ */
+export const REENTRY_UNIVERSE: readonly string[] = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'GOLD', 'SILVER', 'NATURALGAS']);
 
 /**
  * MCX minis watched on their parent (the same price; the parent has the line and the chain the watch reads):
  * CRUDEOILM → CRUDEOIL (prod 2026-11-06), GOLDM → GOLD (owner 2026-11-23 "fix 2": a real GOLDM exit was logged
- * SKIP not-in-universe). NATGASMINI is NOT mapped: NATURALGAS is in neither the watch universe nor the entry
- * engine's (ENGINE_UNIVERSE), so there is no line / chain to watch it on. A live re-entry picks the parent's
- * contract; the live sizing's mini fallback (₹ risk cap) brings it back to the mini when the full lot is too big.
+ * SKIP not-in-universe), NATGASMINI → NATURALGAS and SILVERM → SILVER (2026-11-23, when NATURALGAS joined the
+ * universe). A live re-entry picks the parent's contract; the live sizing's mini fallback (₹ risk cap) brings it back
+ * to the mini when the full lot is too big (GOLDM / CRUDEOILM / NATGASMINI). SILVER has no mini fallback (MINI_OF), so
+ * a SILVERM exit's live re-entry is a full SILVER lot within the cap, or nothing.
  */
-export const WATCH_PARENT_OF: Readonly<Record<string, string>> = Object.freeze({ CRUDEOILM: 'CRUDEOIL', GOLDM: 'GOLD' });
+export const WATCH_PARENT_OF: Readonly<Record<string, string>> = Object.freeze({ CRUDEOILM: 'CRUDEOIL', GOLDM: 'GOLD', NATGASMINI: 'NATURALGAS', SILVERM: 'SILVER' });
 
 export function watchUnderlying(name: string | null): string | null {
   return name !== null && Object.prototype.hasOwnProperty.call(WATCH_PARENT_OF, name) ? WATCH_PARENT_OF[name] : name;

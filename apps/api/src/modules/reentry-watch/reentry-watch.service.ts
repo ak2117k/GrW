@@ -10,7 +10,7 @@ import type { SignalTraderConfig } from '../signal-trader/domain/signal-trader.c
 import { SignalTraderRepository } from '../signal-trader/repositories/signal-trader.repository';
 import { SignalOiCheckService } from '../signal-trader/services/signal-oi-check.service';
 import type { InstrumentMasterLike, QuotesLike, SessionClockLike } from '../signal-trader/services/signal-trader.service';
-import { atmCandidates, engineContract, engineSignal, ENGINE_LIQUIDITY, pickLiquidStrike, planEngineEntry } from '../entry-engine/domain/engine-contract';
+import { atmCandidates, engineContract, engineSignal, ENGINE_LIQUIDITY, optionFutureSpot, pickLiquidStrike, planEngineEntry } from '../entry-engine/domain/engine-contract';
 import { chooseBars, istDayAt, readOi, sessionStartOf } from '../entry-engine/domain/engine-inputs';
 import { trendReading, type Bar1m, type Direction, type OiReading, type TrendReading } from '../entry-engine/domain/entry-decision';
 import { EntryEnginePaperService } from '../entry-engine/entry-engine-paper.service';
@@ -385,8 +385,20 @@ export class ReentryWatchService {
     } catch (e) {
       return fail(`instrument master unavailable: ${errText(e)}`);
     }
-    const cands = atmCandidates(master, underlying, kind, spot ?? 0, at);
+    let cands = atmCandidates(master, underlying, kind, spot ?? 0, at);
     if (!cands.ok) return fail(cands.reason);
+    // MCX: centre the ATM on the future the options are written on, not the (possibly other-month) price line.
+    const centred = await optionFutureSpot({
+      exchange: segmentFor({ underlying, instrumentKind: kind }),
+      expiry: cands.expiry,
+      spot: spot ?? 0,
+      futures: () => this.signalRepo.mcxFutures(underlying, istDayAt(at, 0)),
+      ltp: (token, exchange) => this.quotes.ltp(owner, token, exchange),
+    });
+    if (centred.spot !== (spot ?? 0)) {
+      const again = atmCandidates(master, underlying, kind, centred.spot, at);
+      if (again.ok) cands = again;
+    }
     let liq: Awaited<ReturnType<EntryEngineRepository['strikeLiquidity']>> | null = null;
     try {
       liq = await this.engineRepo.strikeLiquidity(underlying, kind, cands.expiry, cands.strikes, sessionStartOf(segmentFor({ underlying, instrumentKind: kind }), at), new Date(at.getTime() - ENGINE_LIQUIDITY.recentMin * MIN));
@@ -410,7 +422,7 @@ export class ReentryWatchService {
     }
     const p = planned.plan;
     const plan = { tradingsymbol: p.tradingsymbol, token: p.token, exchange: p.exchange, side: p.side, ltp: p.ltp, limitPrice: p.limitPrice, sl: p.sl, targets: p.targets, lotSize: p.lotSize, qty: p.qty, tickSize: p.tickSize };
-    return { ok: true, p, plan, kind, strike: pick.strike, expiry, ltp, pickNote: pick.note, master };
+    return { ok: true, p, plan, kind, strike: pick.strike, expiry, ltp, pickNote: centred.note ? `${pick.note}; ${centred.note}` : pick.note, master };
   }
 
   /** The entry engine's contract pick (liquid ATM, nearest non-expiry-day expiry) + plan → PAPER open. */

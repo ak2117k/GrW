@@ -96,6 +96,20 @@ describe('eventContextFor', () => {
   });
 });
 
+describe('eventContextFor — natural gas (2026-11-23: NATURALGAS joined the entry engine)', () => {
+  it('a US macro day affects NATURALGAS and NATGASMINI (gas family); OPEC does not', async () => {
+    const fomc = row({ kind: 'fomc', title: 'FOMC rate decision', startsAt: new Date('2026-12-09T19:00:00Z') });
+    const opec = row({ kind: 'opec', key: 'CRUDEOIL', scope: 'commodity', title: 'OPEC+ meeting', startsAt: new Date('2026-12-09T10:00:00Z') });
+    const deps = { repo: repoOf([fomc, opec, FAR]), env: OFF };
+    for (const u of ['NATURALGAS', 'NATGASMINI']) {
+      const ctx = await eventContextFor(u, new Date('2026-12-10T04:00:00Z'), deps);
+      expect(ctx.status === 'present' && ctx.events.map((e) => e.name)).toEqual(['FOMC rate decision']);
+    }
+    expect(eventAffects('US_MIDTERM_RESULTS')).toContain('NATURALGAS');
+    expect(eventAffects('OPEC_MEETING')).not.toContain('NATURALGAS');
+  });
+});
+
 describe('eventAffects', () => {
   it('maps configured MARKET_EVENT_DAYS names by prefix', () => {
     expect(eventAffects('US_MIDTERM_RESULTS')).toContain('GOLD');

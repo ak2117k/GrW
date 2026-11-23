@@ -363,6 +363,11 @@ model NewsArticle {
   dateInferred    Boolean  @default(false)
   /// News impact layer 1 (2026-10-24): the story cluster (news_clusters.id); null = not clustered yet.
   clusterId       String?  @map("cluster_id")
+  /// News relevance filter (2026-11-23, news-events/filter/news-relevance.ts). The row is always stored;
+  /// `filtered = true` HIDES it from every reader (NEWS_FILTER=on). `filter_reason` is the rule that hid it,
+  /// or — under NEWS_FILTER=observe — the rule that WOULD have (filtered stays false). Null = kept / not computed.
+  filtered        Boolean  @default(false)
+  filterReason    String?  @map("filter_reason")
 
   @@index([clusterId])
   @@index([category, publishedAt])

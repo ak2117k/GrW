@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { visibleNewsWhere } from '../../news-events/filter/news-relevance';
 import type { MbmPredictionRow } from '../domain/model-scorecard.logic';
 import type { NewsRow, VerdictRow } from '../domain/night-report.logic';
 import type { ChannelInfoAccuracy, InfoRowLite } from '../../signal-intake/domain/sentiment';
@@ -115,7 +116,7 @@ export class NightReportRepository implements NightReportStore {
 
   newsPublishedBetween(from: Date, to: Date, limit: number): Promise<NewsRow[]> {
     return this.prisma.newsArticle.findMany({
-      where: { publishedAt: { gte: from, lte: to } },
+      where: { publishedAt: { gte: from, lte: to }, ...visibleNewsWhere() },
       select: {
         id: true, title: true, summary: true, source: true, url: true, category: true,
         sentiment: true, sentimentScore: true, relatedSymbols: true, instruments: true,

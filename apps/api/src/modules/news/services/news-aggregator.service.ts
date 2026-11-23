@@ -12,6 +12,8 @@ import { NEWS_INGEST_BUS, type NewsIngestBus } from '../../news-events/ingest-bu
 import { toIndexedArticle } from '../../news-events/keys';
 import { NewsTaggerService } from '../../news-events/tagging/tagger.service';
 import type { ArticleTags } from '../../news-events/types';
+import { publishable, visibleNewsWhere } from '../../news-events/filter/news-relevance';
+import { NewsRelevanceService } from '../../news-events/filter/news-relevance.service';
 
 export interface RSSSource {
   name: string;
@@ -250,6 +252,7 @@ export class NewsAggregatorService {
     @Optional() @Inject(NEWS_EVENTS_CONFIG) private readonly cfg?: NewsEventsConfig,
     @Optional() private readonly tagger?: NewsTaggerService,
     @Optional() @Inject(NEWS_INGEST_BUS) private readonly bus?: NewsIngestBus,
+    @Optional() private readonly relevance?: NewsRelevanceService,
   ) {}
 
   /**
@@ -319,6 +322,14 @@ export class NewsAggregatorService {
         );
 
         const v2 = this.cfg?.computing ? await this.tagV2(article) : null;
+        // News relevance filter: {} when NEWS_FILTER=off (the insert is exactly as before).
+        const relevance = this.relevance
+          ? await this.relevance.columnsFor({
+              source: article.source, title: article.title, summary: article.summary,
+              instruments: v2?.tags.instruments ?? [], sectors: v2?.tags.sectors ?? [], indices: v2?.tags.indices ?? [], markets: v2?.tags.markets ?? [],
+              tagged: (v2?.version ?? 0) > 0,
+            })
+          : {};
 
         const saved = await this.prisma.newsArticle.create({
           data: {
@@ -341,11 +352,13 @@ export class NewsAggregatorService {
                   tagVersion: v2.version,
                 }
               : {}),
+            ...relevance,
           },
         });
 
         // v2: push the saved row to the in-memory index right after its insert.
-        if (v2) this.bus?.publish([toIndexedArticle(saved)]);
+        // A row the filter hid (NEWS_FILTER=on) never reaches the index / news-wake.
+        if (v2 && publishable(saved)) this.bus?.publish([toIndexedArticle(saved)]);
         savedCount++;
       } catch (error) {
         // Skip duplicates or other insert errors
@@ -383,7 +396,8 @@ export class NewsAggregatorService {
     const limit = filters.limit ?? 20;
     const skip = (page - 1) * limit;
 
-    const where: Record<string, any> = {};
+    // Hidden (filtered) rows only with includeFiltered=true (audit); `{}` unless NEWS_FILTER=on.
+    const where: Record<string, any> = { ...visibleNewsWhere(process.env, filters.includeFiltered === true) };
 
     if (filters.category) {
       where.category = filters.category;
@@ -430,6 +444,7 @@ export class NewsAggregatorService {
     return this.prisma.newsArticle.findMany({
       where: {
         relatedSymbols: { has: symbol.toUpperCase() },
+        ...visibleNewsWhere(),
       },
       orderBy: { publishedAt: 'desc' },
       take: 20,
@@ -444,7 +459,7 @@ export class NewsAggregatorService {
   async getNewsForStockPage(symbol: string): Promise<NewsArticle[]> {
     const s = symbol.toUpperCase();
     return this.prisma.newsArticle.findMany({
-      where: { OR: [{ relatedSymbols: { has: s } }, { instruments: { has: s } }] },
+      where: { OR: [{ relatedSymbols: { has: s } }, { instruments: { has: s } }], ...visibleNewsWhere() },
       orderBy: { publishedAt: 'desc' },
       take: 20,
     });

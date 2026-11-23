@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { underlyingName } from '../night-report/domain/night-report.logic';
 import { baseSymbol } from '../news-events/keys';
+import { visibleNewsWhere } from '../news-events/filter/news-relevance';
 import type { ClusterState } from './domain/clustering';
 import type { ClusterForImpact, ImpactItem } from './domain/impact';
 import type { Bar, ReactionPoints } from './domain/reaction';
@@ -76,7 +77,8 @@ export class NewsImpactRepository {
 
   unclusteredArticles(since: Date, take: number): Promise<ArticleRow[]> {
     return this.prisma.newsArticle.findMany({
-      where: { clusterId: null, fetchedAt: { gte: since } },
+      // Hidden rows (NEWS_FILTER=on) are never clustered, so they never reach the impact batch or news ideas.
+      where: { clusterId: null, fetchedAt: { gte: since }, ...visibleNewsWhere() },
       select: { id: true, title: true, summary: true, source: true, publishedAt: true, instruments: true, relatedSymbols: true, sectors: true, indices: true },
       orderBy: { publishedAt: 'asc' },
       take,
@@ -174,7 +176,7 @@ export class NewsImpactRepository {
   /** ≤ 3 titles and the first non-empty summary per cluster (for the prompt). */
   async clusterTexts(clusters: ReadonlyArray<{ id: string; articleIds?: string[] }>): Promise<Map<string, { titles: string[]; summary: string | null }>> {
     const rows = await this.prisma.newsArticle.findMany({
-      where: { clusterId: { in: clusters.map((c) => c.id) } },
+      where: { clusterId: { in: clusters.map((c) => c.id) }, ...visibleNewsWhere() },
       select: { clusterId: true, title: true, summary: true, publishedAt: true },
       orderBy: { publishedAt: 'asc' },
       take: clusters.length * 6,

@@ -5,6 +5,8 @@ import { InProcessNewsIngestBus, NEWS_INGEST_BUS } from './ingest-bus';
 import { NseClient } from './nse-client';
 import { SectorMapService } from './sector-map.service';
 import { SourceHealthBook } from './source-health';
+import { parseNewsFilterMode } from './filter/news-relevance';
+import { NewsRelevanceService } from './filter/news-relevance.service';
 
 const logger = new Logger('NewsEvents');
 
@@ -25,8 +27,9 @@ const logger = new Logger('NewsEvents');
     { provide: SourceHealthBook, useFactory: () => new SourceHealthBook((line) => logger.log(line)) },
     { provide: NseClient, useFactory: () => new NseClient({ log: (line) => logger.warn(line) }) },
     SectorMapService,
+    NewsRelevanceService,
   ],
-  exports: [NEWS_EVENTS_CONFIG, NEWS_INGEST_BUS, SourceHealthBook, NseClient, SectorMapService],
+  exports: [NEWS_EVENTS_CONFIG, NEWS_INGEST_BUS, SourceHealthBook, NseClient, SectorMapService, NewsRelevanceService],
 })
 export class NewsEventsCoreModule implements OnModuleInit {
   constructor(@Inject(NEWS_EVENTS_CONFIG) private readonly cfg: NewsEventsConfig) {}
@@ -34,5 +37,6 @@ export class NewsEventsCoreModule implements OnModuleInit {
   onModuleInit(): void {
     logger.log(newsEventsBootLine(this.cfg));
     for (const p of this.cfg.problems) logger.warn(`[news-events] ${p}`);
+    logger.log(`[news-filter] NEWS_FILTER=${parseNewsFilterMode(process.env)} (off | observe = record the would-be reason | on = hide filtered rows)`);
   }
 }

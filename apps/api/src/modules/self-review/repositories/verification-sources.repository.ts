@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { visibleNewsWhere } from '../../news-events/filter/news-relevance';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { MANUAL_VERDICT_PREFIX } from '../../sentinel-executor/domain/manual-exit';
 import { OVERNIGHT_TAGS } from '../domain/scorers';
@@ -231,7 +232,7 @@ export class VerificationSourcesRepository {
       this.prisma.tradeSetup.findMany({ where: { sessionDate: day, symbol: { in: symbols } }, select: { symbol: true, side: true } }),
       this.prisma.tradeSignal.findMany({ where: { sessionDate: day, underlying: { in: symbols } }, select: { underlying: true, direction: true } }),
       this.prisma.newsArticle.findMany({
-        where: { publishedAt: { gte: from, lte: to }, instruments: { hasSome: symbols } },
+        where: { publishedAt: { gte: from, lte: to }, instruments: { hasSome: symbols }, ...visibleNewsWhere() },
         select: { instruments: true, clusterId: true },
         take: 2000,
       }),

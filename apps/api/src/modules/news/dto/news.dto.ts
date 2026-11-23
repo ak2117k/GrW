@@ -3,6 +3,7 @@ import {
   IsString,
   IsEnum,
   IsDateString,
+  IsBoolean,
   IsInt,
   Min,
   Max,
@@ -72,4 +73,13 @@ export class NewsFilterDto {
   @Min(1)
   @Max(100)
   limit?: number;
+
+  @ApiPropertyOptional({
+    description: 'Audit: also return rows the news relevance filter hid (filtered=true). Each row carries filtered + filterReason.',
+    default: false,
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true' || value === '1')
+  @IsBoolean()
+  includeFiltered?: boolean;
 }

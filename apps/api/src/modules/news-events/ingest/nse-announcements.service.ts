@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
@@ -11,6 +11,8 @@ import { toIndexedArticle } from '../keys';
 import { NseClient } from '../nse-client';
 import { SourceHealthBook } from '../source-health';
 import { NewsTaggerService } from '../tagging/tagger.service';
+import { publishable } from '../filter/news-relevance';
+import { NewsRelevanceService } from '../filter/news-relevance.service';
 import { announcementsDue, NSE_ANNOUNCEMENTS_URL, parseAnnouncements, type ParsedAnnouncement } from './nse-announcements';
 
 export const NSE_ANN_SOURCE = 'NSE Announcements';
@@ -35,6 +37,7 @@ export class NseAnnouncementsService {
     private readonly sentiment: NewsSentimentService,
     @Inject(NEWS_INGEST_BUS) private readonly bus: NewsIngestBus,
     private readonly health: SourceHealthBook,
+    @Optional() private readonly relevance?: NewsRelevanceService,
   ) {}
 
   @Cron('0 * * * * *', { timeZone: 'Asia/Kolkata' })
@@ -71,6 +74,10 @@ export class NseAnnouncementsService {
       try {
         const s = await this.sentiment.analyzeSentiment(a.title, a.summary);
         const { tags, version } = await this.tagger.tag({ title: a.title, summary: a.summary, source: NSE_ANN_SOURCE, category: 'company', forceInstrument: a.symbol });
+        // News relevance filter (owner's universe + filing type): {} when NEWS_FILTER=off.
+        const relevance = this.relevance
+          ? await this.relevance.columnsFor({ source: NSE_ANN_SOURCE, title: a.title, summary: a.summary, ...tags, tagged: version > 0 })
+          : {};
         const row = await this.prisma.newsArticle.create({
           data: {
             title: a.title,
@@ -88,9 +95,11 @@ export class NseAnnouncementsService {
             indices: tags.indices,
             markets: tags.markets,
             tagVersion: version,
+            ...relevance,
           },
         });
-        this.bus.publish([toIndexedArticle(row)]);
+        // A filing the filter hid (NEWS_FILTER=on) never reaches the index / news-wake.
+        if (publishable(row)) this.bus.publish([toIndexedArticle(row)]);
         saved++;
       } catch (err) {
         this.logger.debug(`[news-ann] skipped ${a.symbol}: ${err instanceof Error ? err.message : String(err)}`);

@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { visibleNewsWhere } from '../news-events/filter/news-relevance';
 import { INDEX_UNDERLYINGS } from '../market-hub/underlying';
 import type { NewsRow } from '../night-report/domain/night-report.logic';
 import type { DailyBar } from './domain/outcome';
@@ -169,7 +170,7 @@ export class ScorecardRepository {
 
   newsBetween(from: Date, to: Date, limit = 600): Promise<NewsRow[]> {
     return this.prisma.newsArticle.findMany({
-      where: { publishedAt: { gte: from, lte: to } },
+      where: { publishedAt: { gte: from, lte: to }, ...visibleNewsWhere() },
       select: {
         id: true, title: true, summary: true, source: true, url: true, category: true,
         sentiment: true, sentimentScore: true, relatedSymbols: true, instruments: true,

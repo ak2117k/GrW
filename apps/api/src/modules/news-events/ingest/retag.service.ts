@@ -4,6 +4,7 @@ import { bootJobsEnabled } from '../../../common/utils/boot-jobs';
 import { NEWS_EVENTS_CONFIG, TAG_VERSION, type NewsEventsConfig } from '../config';
 import { NEWS_INGEST_BUS, type NewsIngestBus } from '../ingest-bus';
 import { toIndexedArticle } from '../keys';
+import { publishable } from '../filter/news-relevance';
 import { NewsTaggerService } from '../tagging/tagger.service';
 import type { ArticleTags, IndexedArticle } from '../types';
 
@@ -62,7 +63,7 @@ export class RetagService implements OnApplicationBootstrap {
         }
         // Stamped TAG_VERSION whatever the outcome, so every page leaves the query and the loop terminates.
         const saved = await this.prisma.newsArticle.update({ where: { id: r.id }, data: { ...tags, tagVersion: TAG_VERSION } });
-        out.push(toIndexedArticle(saved));
+        if (publishable(saved)) out.push(toIndexedArticle(saved)); // a hidden row never reaches the index
       }
       this.bus.publish(out);
       done += rows.length;

@@ -6,6 +6,7 @@ import { SessionClock } from '../../market-hub/session-clock';
 import type { NewsIndexReader } from '../../trade-sentinel/ports/news-index.port';
 import { DELTA_POLL_MS, MAX_PER_KEY, NEWS_EVENTS_CONFIG, STALE_AFTER_MS, type NewsEventsConfig } from '../config';
 import { NEWS_INGEST_BUS, type NewsIngestBus } from '../ingest-bus';
+import { visibleNewsWhere } from '../filter/news-relevance';
 import { toIndexedArticle } from '../keys';
 import { SectorMapService } from '../sector-map.service';
 import { SourceHealthBook } from '../source-health';
@@ -105,7 +106,7 @@ export class NewsIndexService implements NewsIndexReader, OnApplicationBootstrap
     const horizon = new Date(t0 - this.horizonMs);
     try {
       const rows = await this.prisma.newsArticle.findMany({
-        where: { publishedAt: { gte: horizon } }, orderBy: { publishedAt: 'asc' }, select: ROW_SELECT,
+        where: { publishedAt: { gte: horizon }, ...visibleNewsWhere() }, orderBy: { publishedAt: 'asc' }, select: ROW_SELECT,
       });
       let cursor: Cursor = { at: horizon, id: '' };
       for (const r of rows) {
@@ -135,7 +136,8 @@ export class NewsIndexService implements NewsIndexReader, OnApplicationBootstrap
       }
       const c = this.cursor;
       const rows = await this.prisma.newsArticle.findMany({
-        where: { OR: [{ fetchedAt: { gt: c.at } }, { fetchedAt: c.at, id: { gt: c.id } }] },
+        // Hidden rows (NEWS_FILTER=on) are skipped; the cursor only moves over rows it read, so it never stalls.
+        where: { OR: [{ fetchedAt: { gt: c.at } }, { fetchedAt: c.at, id: { gt: c.id } }], ...visibleNewsWhere() },
         orderBy: [{ fetchedAt: 'asc' }, { id: 'asc' }],
         take: POLL_PAGE,
         select: ROW_SELECT,

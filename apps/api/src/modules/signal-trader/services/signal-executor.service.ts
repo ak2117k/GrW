@@ -45,6 +45,13 @@ export interface PlaceInput {
    * A throw is logged, never propagated into the order path.
    */
   onRejected?: (reason: string) => Promise<unknown> | void;
+  /**
+   * Re-entry watch LIVE mode (2026-11-23, §6a.8): who places the order. Absent (every signal-trader call) = the
+   * claim is exactly as before. 'reentry' stores source + the watch key on the claimed signal_orders row (the
+   * ordertag keeps the signal executor's 20-char form) so the re-entry caps count it while it is in flight.
+   */
+  source?: 'signal' | 'reentry';
+  reentryWatchKey?: string | null;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -94,6 +101,8 @@ export class SignalExecutorService {
       sl: i.plan.sl,
       targets: i.plan.targets,
       orderTag,
+      ...(i.source !== undefined ? { source: i.source } : {}),
+      ...(i.reentryWatchKey !== undefined ? { reentryWatchKey: i.reentryWatchKey } : {}),
     });
     if (!rowId) {
       this.logger.warn(`[signal-exec] decision ${i.decisionId} already has an order — nothing sent`);

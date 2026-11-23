@@ -3415,12 +3415,18 @@ model SignalOrder {
   trackerId     String?   @map("tracker_id")
   /// The synthetic sentinel_verdicts row carrying the signal SL as an exitTrigger.
   slVerdictId   String?   @map("sl_verdict_id")
+  /// 'signal' (the signal trader; every row before 2026-11-23) | 'reentry' (a live re-entry, re-entry watch LIVE mode).
+  source          String? @default("signal")
+  /// For source 'reentry': the watch ('<table>:<id>' of the original exit) the order is a re-entry of.
+  reentryWatchKey String? @map("reentry_watch_key")
   createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   @@index([createdAt])
   @@index([status])
   @@index([token, status])
+  @@index([reentryWatchKey])
+  @@index([source, createdAt])
   @@map("signal_orders")
 }
 
@@ -3895,13 +3901,20 @@ model ReentryWatchDecision {
   inputs     Json // ref / price / N15 / move / trend / OI / counts; plan for a SIGNAL
   reasons    Json // string[]
   tradeId    String?  @map("trade_id")
-  mode       String // paper
+  mode       String // paper | live
+  /// LIVE mode (2026-11-23): the ReentryLiveLimit that kept a live-eligible SIGNAL off the broker, e.g. MAX_PER_DAY.
+  limitHit      String?  @map("limit_hit")
+  /// e.g. '6/6', 'RISK_OVER_LIMIT ₹2,640 > ₹2,000'.
+  limitDetail   String?  @map("limit_detail")
+  /// The signal_orders row of a live re-entry order. No FK.
+  signalOrderId String?  @map("signal_order_id")
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   @@index([at])
   @@index([watchKey, at])
   @@index([action, at])
   @@index([tradeId])
+  @@index([signalOrderId])
   @@map("reentry_watch_decisions")
 }
 

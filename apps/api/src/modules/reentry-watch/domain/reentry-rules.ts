@@ -27,9 +27,17 @@ export const REENTRY_WATCH = Object.freeze({
 /** The engine universe the watch can read (index line or MCX nearest future + chain + liquidity). */
 export const REENTRY_UNIVERSE: readonly string[] = Object.freeze(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'GOLD', 'SILVER']);
 
-/** Crude Mini is watched on CRUDEOIL: the same price, and the big contract has the line and the chain the watch reads. */
+/**
+ * MCX minis watched on their parent (the same price; the parent has the line and the chain the watch reads):
+ * CRUDEOILM → CRUDEOIL (prod 2026-11-06), GOLDM → GOLD (owner 2026-11-23 "fix 2": a real GOLDM exit was logged
+ * SKIP not-in-universe). NATGASMINI is NOT mapped: NATURALGAS is in neither the watch universe nor the entry
+ * engine's (ENGINE_UNIVERSE), so there is no line / chain to watch it on. A live re-entry picks the parent's
+ * contract; the live sizing's mini fallback (₹ risk cap) brings it back to the mini when the full lot is too big.
+ */
+export const WATCH_PARENT_OF: Readonly<Record<string, string>> = Object.freeze({ CRUDEOILM: 'CRUDEOIL', GOLDM: 'GOLD' });
+
 export function watchUnderlying(name: string | null): string | null {
-  return name === 'CRUDEOILM' ? 'CRUDEOIL' : name;
+  return name !== null && Object.prototype.hasOwnProperty.call(WATCH_PARENT_OF, name) ? WATCH_PARENT_OF[name] : name;
 }
 
 const MIN = 60_000;
@@ -53,6 +61,11 @@ export interface ExitedPosition {
   entryAt: Date | null;
   exitAt: Date;
   exitPrice: number | null;
+  /**
+   * The account that held the position (trade_trackers.userId; absent for paper trades). Only the signal trader's
+   * owner (HUB_OWNER_USER_ID) may re-enter LIVE; any other / missing user is watched exactly as in paper mode.
+   */
+  userId?: string | null;
 }
 
 export const watchKey = (p: Pick<ExitedPosition, 'refTable' | 'refId'>): string => `${p.refTable}:${p.refId}`;
@@ -191,6 +204,12 @@ export interface ReentryFacts {
   reentriesToday: number;
   /** Open positions on this underlying: real trackers + REENTRY_WATCH paper trades. */
   openOnUnderlying: number;
+  /**
+   * LIVE mode only (2026-11-23 §6a.3): the caps of a live-eligible (REAL-source, REENTRY_WATCH=live) watch — the
+   * per-original cap is the live one (4, live + paper fallback together) and the paper day cap does not apply
+   * (maxPerDay null; the live day cap is in liveGate). Absent = the paper caps (REENTRY_WATCH), exactly as before.
+   */
+  caps?: { maxPerOriginal: number; maxPerDay: number | null };
 }
 
 export type ReentryAction = 'SIGNAL' | 'WAIT' | 'SKIP' | 'CAP' | 'ENDED';
@@ -217,8 +236,10 @@ export function decideReentry(original: Direction, f: ReentryFacts): ReentryVerd
   if (!f.inUniverse) return v('SKIP', 'not-in-universe', ['skip: the underlying is not in the re-entry universe (no line / chain read)']);
   if (istDay(f.at.getTime()) !== istDay(f.exitAt.getTime())) return v('ENDED', 'ended', ['ended: the exit was on an earlier session']);
   if (!f.sessionOpen) return v('ENDED', 'ended', ['ended: the underlying\'s session is closed']);
-  if (f.reentriesForOriginal >= REENTRY_WATCH.maxPerOriginal) return v('CAP', 'cap-original', [`cap: ${f.reentriesForOriginal} re-entries of this trade already (max ${REENTRY_WATCH.maxPerOriginal}) — watch done`]);
-  if (f.reentriesToday >= REENTRY_WATCH.maxPerDay) return v('CAP', 'cap-day', [`cap: ${f.reentriesToday} re-entries today (max ${REENTRY_WATCH.maxPerDay})`]);
+  const maxOriginal = f.caps ? f.caps.maxPerOriginal : REENTRY_WATCH.maxPerOriginal;
+  const maxDay = f.caps ? f.caps.maxPerDay : REENTRY_WATCH.maxPerDay;
+  if (f.reentriesForOriginal >= maxOriginal) return v('CAP', 'cap-original', [`cap: ${f.reentriesForOriginal} re-entries of this trade already (max ${maxOriginal}) — watch done`]);
+  if (maxDay !== null && f.reentriesToday >= maxDay) return v('CAP', 'cap-day', [`cap: ${f.reentriesToday} re-entries today (max ${maxDay})`]);
   const since = Math.max(f.exitAt.getTime(), f.lastReentryExitAt?.getTime() ?? 0);
   const waited = (f.at.getTime() - since) / MIN;
   if (waited < REENTRY_WATCH.cooldownMin) return v('WAIT', 'cooldown', [`cooldown: ${Math.floor(waited)} min since the exit (${REENTRY_WATCH.cooldownMin} min)`]);

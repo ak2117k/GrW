@@ -81,7 +81,8 @@ const firstOpen = (paper: { open: jest.Mock }) => paper.open.mock.calls[0][0] as
 describe('ReentryWatchService', () => {
   it('REENTRY_WATCH defaults to paper; off ⇒ the watch reads and opens nothing', async () => {
     expect(parseReentryWatchConfig({}).mode).toBe('paper');
-    expect(parseReentryWatchConfig({ REENTRY_WATCH: 'live' })).toMatchObject({ mode: 'paper' });
+    // 2026-11-23: 'live' is a mode now (reentry-watch.service.live.spec.ts); anything unrecognised is still paper.
+    expect(parseReentryWatchConfig({ REENTRY_WATCH: 'yes please' })).toMatchObject({ mode: 'paper' });
     const { svc, repo, paper, alert } = make({ mode: 'off' });
     expect(await svc.run(new Date(istTs(DAY, '11:00')))).toEqual([]);
     await svc.tick();

@@ -2,7 +2,7 @@ import { trendReading, type Bar1m, type Direction } from '../../entry-engine/dom
 import { bankNiftyBars, istTs, niftyBars, niftyReversalBars } from './reentry-fixtures';
 import {
   alertText, decideReentry, directionOf, moveInN, nameFromSymbol, noise15, noiseSessionOf, optionKindOf, REENTRY_WATCH, underlyingAt, type ReentryFacts, type ReentryVerdict,
-  watchUnderlying,
+  watchUnderlying, REENTRY_UNIVERSE,
 } from './reentry-rules';
 
 const MIN = 60_000;
@@ -173,7 +173,17 @@ describe('watchUnderlying', () => {
   it('watches Crude Mini on CRUDEOIL, the same price with a line and a chain (prod 2026-11-06: skipped as not-in-universe)', () => {
     expect(watchUnderlying('CRUDEOILM')).toBe('CRUDEOIL');
   });
+  it('watches Gold Mini on GOLD (owner 2026-11-23 "fix 2": a real GOLDM exit was logged SKIP not-in-universe)', () => {
+    expect(watchUnderlying('GOLDM')).toBe('GOLD');
+    expect(REENTRY_UNIVERSE).toContain(watchUnderlying('GOLDM'));
+  });
+  it('NATGASMINI is not mapped: NATURALGAS is not in the watch / engine universe (no line or chain to watch it on)', () => {
+    expect(watchUnderlying('NATGASMINI')).toBe('NATGASMINI');
+    expect(REENTRY_UNIVERSE).not.toContain('NATURALGAS');
+  });
   it('leaves everything else alone', () => {
+    expect(watchUnderlying('GOLD')).toBe('GOLD');
+    expect(watchUnderlying(null)).toBeNull();
     expect(watchUnderlying('CRUDEOIL')).toBe('CRUDEOIL');
     expect(watchUnderlying('NIFTY')).toBe('NIFTY');
     expect(watchUnderlying('RELIANCE')).toBe('RELIANCE');

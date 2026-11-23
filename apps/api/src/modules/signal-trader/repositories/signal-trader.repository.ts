@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -171,6 +172,12 @@ export interface OrderClaim {
   sl: number;
   targets: number[];
   orderTag: string;
+  /**
+   * Who places the order (re-entry watch LIVE mode, 2026-11-23). Absent / 'signal' = the signal trader, stored exactly
+   * as before. 'reentry' = a live re-entry: needs `reentryWatchKey` (the per-watch cap and the no-chain rule read it).
+   */
+  source?: 'signal' | 'reentry';
+  reentryWatchKey?: string | null;
 }
 
 /** Order statuses that mean "this contract may be (about to be) held". */
@@ -373,9 +380,13 @@ export class SignalTraderRepository {
 
   /** Claim-before-send: one CLAIMED order per decision. null = already claimed (never a second order). */
   async claimOrder(o: OrderClaim): Promise<string | null> {
+    const { source, reentryWatchKey, ...base } = o;
+    if (source === 'reentry' || (reentryWatchKey !== undefined && reentryWatchKey !== null)) {
+      return this.claimReentryOrder(base, source ?? 'reentry', reentryWatchKey ?? null);
+    }
     try {
       const row = await this.prisma.signalOrder.create({
-        data: { ...o, targets: o.targets as Prisma.InputJsonValue, orderType: 'LIMIT', status: 'CLAIMED' },
+        data: { ...base, targets: base.targets as Prisma.InputJsonValue, orderType: 'LIMIT', status: 'CLAIMED' },
         select: { id: true },
       });
       return row.id;
@@ -383,6 +394,27 @@ export class SignalTraderRepository {
       if (isUnique(err)) return null;
       throw err;
     }
+  }
+
+  /**
+   * The claim of a live re-entry order: the same CLAIMED LIMIT row, plus source + reentry_watch_key, in ONE atomic
+   * INSERT (raw SQL: the columns are newer than some generated clients). A row with this decision id already there
+   * ⇒ null (never a second order). A 'reentry' claim without a watch key throws BEFORE anything is sent.
+   */
+  private async claimReentryOrder(o: Omit<OrderClaim, 'source' | 'reentryWatchKey'>, source: 'signal' | 'reentry', watchKey: string | null): Promise<string | null> {
+    if (source === 'reentry' && !(typeof watchKey === 'string' && watchKey.trim() !== '')) {
+      throw new Error('claimOrder: a re-entry order needs its reentryWatchKey — nothing claimed, nothing sent');
+    }
+    const id = randomUUID();
+    const targets = JSON.stringify(o.targets ?? []);
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>`
+      INSERT INTO "signal_orders" ("id", "decision_id", "user_id", "exchange", "token", "tradingsymbol", "qty", "lots", "side", "order_type",
+        "product_type", "limit_price", "sl", "targets", "order_tag", "status", "source", "reentry_watch_key", "created_at", "updated_at")
+      VALUES (${id}, ${o.decisionId}, ${o.userId}, ${o.exchange}, ${o.token}, ${o.tradingsymbol}, ${o.qty}::int, ${o.lots}::int, ${o.side}, 'LIMIT',
+        ${o.productType}, ${o.limitPrice}::float8, ${o.sl}::float8, ${targets}::jsonb, ${o.orderTag}, 'CLAIMED', ${source}, ${watchKey}, now(), now())
+      ON CONFLICT ("decision_id") DO NOTHING
+      RETURNING "id"`;
+    return rows[0]?.id ? String(rows[0].id) : null;
   }
 
   async updateOrder(id: string, data: Prisma.SignalOrderUpdateInput): Promise<void> {

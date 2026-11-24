@@ -54,7 +54,7 @@ type Candle = { timestamp: Date | string; open: number; high: number; low: numbe
  *
  * Source per timeframe: the broker (owner's session, cached per cadence) when a userId and the feed
  * manager are available and the fetch returns bars; else the `candles` table (1m falling back to the
- * hub's candles_1m). Resolution, as the overnight scorecard resolves underlyings:
+ * hub's candles_1m; 15m and 1d also rolled up from candles_1m, whichever series ends newer). Resolution, as the overnight scorecard resolves underlyings:
  *   - an index (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX) → its index token row (INDEX_UNDERLYINGS),
  *   - exchange MCX → the nearest live future of that name (symbol ending FUT),
  *   - else the NSE cash line (`<SYM>-EQ`, then `<SYM>`), falling back to an MCX future when no cash line exists.
@@ -121,8 +121,8 @@ export class MultiTimeframeReaderService {
       const b15 = await this.fromBroker(userId, inst, '15m');
       const bd = await this.fromBroker(userId, inst, '1d');
       const m1 = b1 ?? (await this.dbOneMinute(inst, take['1m']));
-      const m15 = b15 ?? (await this.bars(inst.id, '15m', take['15m']));
-      const d1 = bd ?? (await this.bars(inst.id, '1d', TAKE['1d']));
+      const m15 = b15 ?? fresher(await this.bars(inst.id, '15m', take['15m']), await this.hubFifteen(inst, take['15m']));
+      const d1 = bd ?? fresher(await this.bars(inst.id, '1d', TAKE['1d']), await this.hubDaily(inst, TAKE['1d']));
       return multiTimeframeView({ exchange: inst.exchange, '1m': m1, '15m': m15, '1d': d1, now: Date.now() });
     } catch (e) {
       this.logger.warn(`multi-timeframe: read failed for ${sym} (${ex || '?'}): ${(e as Error)?.message ?? e}`);
@@ -215,4 +215,59 @@ export class MultiTimeframeReaderService {
       return [];
     }
   }
+
+  /**
+   * 15m bars rolled up from the hub's candles_1m (2026-11-25): the `candles` table's 15m rows stopped months ago for
+   * many names (NATURALGAS: newest 15m bar 21 Aug while trading 24 Nov), so the judges were told "15m stale" in live
+   * MCX hours. Session minutes only, bucketed on 15-minute epoch boundaries (IST 09:00 / 09:15 are multiples of 15 min
+   * from the UTC epoch because +5:30 is), OHLC = first open / max high / min low / last close, last
+   * BROKER_FETCH['15m'].days days; newest `take` buckets, oldest first. Empty on failure.
+   */
+  private async hubFifteen(inst: Inst, take: number): Promise<Bar[]> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ bucket_s: bigint | number; open: number; high: number; low: number; close: number }>>`
+        SELECT (floor(extract(epoch FROM ts) / 900) * 900)::bigint AS bucket_s,
+               (array_agg(open ORDER BY ts ASC))[1] AS open, max(high) AS high, min(low) AS low,
+               (array_agg(close ORDER BY ts DESC))[1] AS close
+        FROM "candles_1m"
+        WHERE exchange = ${inst.exchange} AND token = ${inst.token} AND ts >= ${new Date(Date.now() - BROKER_FETCH['15m'].days * 86_400_000)}${sessionMinuteFilter(inst.exchange)}
+        GROUP BY 1 ORDER BY 1 DESC LIMIT ${take}`;
+      return rows.reverse().map((r) => ({ ts: Number(r.bucket_s) * 1000, open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close) }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Daily bars rolled up from the hub's candles_1m, one per IST session date, stamped at that date's IST midnight (UTC
+   * ms) — the stamp staleReason('1d') and withTodayDaily expect. Session minutes only; last BROKER_FETCH['1d'].days days
+   * (the hub keeps ~180); today's bar is the forming one. Newest `take`, oldest first. Empty on failure.
+   */
+  private async hubDaily(inst: Inst, take: number): Promise<Bar[]> {
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ ist_date: string; open: number; high: number; low: number; close: number }>>`
+        SELECT to_char((ts AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS ist_date,
+               (array_agg(open ORDER BY ts ASC))[1] AS open, max(high) AS high, min(low) AS low,
+               (array_agg(close ORDER BY ts DESC))[1] AS close
+        FROM "candles_1m"
+        WHERE exchange = ${inst.exchange} AND token = ${inst.token} AND ts >= ${new Date(Date.now() - BROKER_FETCH['1d'].days * 86_400_000)}${sessionMinuteFilter(inst.exchange)}
+        GROUP BY 1 ORDER BY 1 DESC LIMIT ${take}`;
+      return rows
+        .reverse()
+        .map((r) => ({ ts: Date.parse(`${r.ist_date}T00:00:00+05:30`), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close) }))
+        .filter((b) => Number.isFinite(b.ts));
+    } catch {
+      return [];
+    }
+  }
+}
+
+/** Of the `candles`-table series and the hub roll-up: the one with the newer last bar; on a tie the longer (tie again: the table). */
+function fresher(table: Bar[], hub: Bar[]): Bar[] {
+  if (hub.length === 0) return table;
+  if (table.length === 0) return hub;
+  const t = table[table.length - 1].ts;
+  const h = hub[hub.length - 1].ts;
+  if (h !== t) return h > t ? hub : table;
+  return hub.length > table.length ? hub : table;
 }

@@ -1,10 +1,24 @@
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { InstrumentRef } from '../hub.types';
 import type { CandleTable, HubCandle } from './candle.types';
+import { sessionMinuteFilter } from './session-sql';
 
+/**
+ * Reads return SESSION minutes only (2026-11-24): candles_1m rows outside the venue's session (session-sql.ts →
+ * exit-discipline/session-bars: NSE/NFO/BSE/BFO 09:15–15:30, MCX 09:00–23:55 IST) — the NSE pre-open auction, flat
+ * off-hours copies — are never returned or bucketed. candles_1h / candles_1d are broker bars and read as stored.
+ * Buckets: intraday callers pass the venue open as `originMinIst` (CandleStore: the SessionClock window, NSE 09:15 /
+ * MCX 09:00); the day's bar (1440, origin 0) is built from session minutes only, so today's 1d never carries the
+ * pre-open auction range. There is NO opt-out: no reader needs off-session minutes — the pre-open outlook reads
+ * candles_1m with its own (session-filtered) SQL, pre-open-outlook.repository lastBarBefore — and dayCounts (the gap
+ * check) / tickInstruments are storage checks that still see every stored row.
+ */
 export interface CandleRepo {
   read(table: CandleTable, ref: InstrumentRef, from: number, to: number): Promise<HubCandle[]>;
-  /** 1-minute bars grouped into `stepMin` buckets aligned to `originMinIst` (IST minutes after midnight). */
+  /**
+   * Session 1-minute bars grouped into `stepMin` buckets aligned to `originMinIst` (IST minutes after midnight: the
+   * venue open for intraday buckets; 0 with 1440 = the day's bar, built from session minutes only).
+   */
   readBucketed(ref: InstrumentRef, stepMin: number, originMinIst: number, from: number, to: number): Promise<HubCandle[]>;
   /** Stored bars per IST day in [from, to). */
   dayCounts(table: CandleTable, ref: InstrumentRef, from: number, to: number): Promise<Map<string, number>>;
@@ -66,11 +80,12 @@ export class PrismaCandleRepo implements CandleRepo {
 
   async read(table: CandleTable, ref: InstrumentRef, from: number, to: number): Promise<HubCandle[]> {
     const oi = table === '1m' ? Prisma.sql`oi` : Prisma.sql`NULL::bigint AS oi`;
+    const session = table === '1m' ? sessionMinuteFilter(ref.exchange) : Prisma.empty;
     const rows = await this.db.$queryRaw<Row[]>`
       SELECT ts, open, high, low, close, volume, ${oi}
       FROM ${TABLE[table]}
       WHERE exchange = ${ref.exchange} AND token = ${ref.token}
-        AND ts >= ${iso(from)}::timestamptz AND ts < ${iso(to)}::timestamptz
+        AND ts >= ${iso(from)}::timestamptz AND ts < ${iso(to)}::timestamptz${session}
       ORDER BY ts`;
     return rows.map(toCandle);
   }
@@ -86,7 +101,7 @@ export class PrismaCandleRepo implements CandleRepo {
              (array_agg(oi ORDER BY ts DESC) FILTER (WHERE oi IS NOT NULL))[1] AS oi
       FROM "candles_1m"
       WHERE exchange = ${ref.exchange} AND token = ${ref.token}
-        AND ts >= ${iso(from)}::timestamptz AND ts < ${iso(to)}::timestamptz
+        AND ts >= ${iso(from)}::timestamptz AND ts < ${iso(to)}::timestamptz${sessionMinuteFilter(ref.exchange)}
       GROUP BY 1
       ORDER BY 1`;
     return rows.map(toCandle);

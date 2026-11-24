@@ -91,13 +91,30 @@ describe('PrismaCandleRepo (real database)', () => {
   it('writes more than one batch', async () => {
     const bars = Array.from({ length: 1500 }, (_, i) => ({ ts: ist('2026-10-01T09:15:00') + i * 60_000, open: 1, high: 1, low: 1, close: 1, volume: 1 }));
     await repo.upsert('1m', REF, bars, 'broker');
-    expect(await repo.read('1m', REF, ist('2026-10-01T00:00:00'), ist('2026-10-03T00:00:00'))).toHaveLength(1500);
+    const counts = await repo.dayCounts('1m', REF, ist('2026-10-01T00:00:00'), ist('2026-10-03T00:00:00'));
+    expect([...counts.values()].reduce((a, b) => a + b, 0)).toBe(1500);
+    // Reads are session minutes only: 01-Oct 09:15–15:29 (375) + 02-Oct 09:15–10:14 (60).
+    expect(await repo.read('1m', REF, ist('2026-10-01T00:00:00'), ist('2026-10-03T00:00:00'))).toHaveLength(435);
   });
 
   it('groups a whole IST day into one 1440-minute bucket at IST midnight (today’s 1d bar)', async () => {
     await repo.upsert('1m', REF, [bar('2026-10-07T09:15:00', 1, 5), bar('2026-10-07T15:29:00', 9, 7)], 'tick');
     const out = await repo.readBucketed(REF, 1440, 0, ist('2026-10-07T00:00:00'), ist('2026-10-08T00:00:00'));
     expect(out).toEqual([{ ts: ist('2026-10-07T00:00:00'), open: 1, high: 10, low: 0, close: 9, volume: 12 }]);
+  });
+
+  it('session minutes only (2026-11-24): NSE drops the pre-open and off-hours, MCX keeps 09:00–23:54', async () => {
+    const day = (t: string) => `2026-10-07T${t}:00`;
+    await repo.upsert('1m', REF, [bar(day('02:00'), 50), bar(day('09:00'), 900), bar(day('09:14'), 60), bar(day('09:15'), 100), bar(day('15:29'), 101), bar(day('15:30'), 70)], 'tick');
+    await repo.upsert('1m', MCX, [bar(day('08:59'), 1), bar(day('09:00'), 2), bar(day('23:54'), 3), bar(day('23:55'), 4)], 'tick');
+    const from = ist(day('00:00'));
+    const to = ist('2026-10-08T00:00:00');
+    expect((await repo.read('1m', REF, from, to)).map((c) => c.close)).toEqual([100, 101]);
+    expect((await repo.read('1m', MCX, from, to)).map((c) => c.close)).toEqual([2, 3]);
+    const [d] = await repo.readBucketed(REF, 1440, 0, from, to);
+    expect(d).toMatchObject({ open: 100, high: 102, low: 99, close: 101 }); // not the 09:00 auction's 901 high
+    expect((await repo.readBucketed(REF, 15, 555, from, to)).map((c) => c.ts)).toEqual([ist(day('09:15')), ist(day('15:15'))]);
+    expect(await repo.dayCounts('1m', REF, from, to)).toEqual(new Map([['2026-10-07', 6]]));
   });
 
   it('candles_1m is a hypertable when TimescaleDB is installed (deploy/sql/candles-timescale.sql, run twice)', async () => {

@@ -15,6 +15,7 @@ import { noiseVerdictOfRecord } from '../../exit-noise/domain/noise-read';
 import { triggerCheckOf, type ExitNoiseReadRow } from '../domain/exit-noise';
 import type { EngineDecisionRow, EngineTradeRow } from '../domain/engine-trades';
 import type { MinuteBar } from '../../exit-discipline/types';
+import { sessionOnlyBars } from '../../exit-discipline/session-bars';
 import { componentsOfRecord, type NewsImpactLike } from '../../exit-noise/domain/adverse-probability';
 import type { NoiseComponent } from '../../exit-noise/domain/noise-read';
 
@@ -576,10 +577,14 @@ export class VerificationSourcesRepository {
     return null;
   }
 
-  /** candles_1m with high / low (bars1m above carries open / close only). */
+  /**
+   * candles_1m with high / low (bars1m above carries open / close only), SESSION minutes only (exit-discipline/session-bars,
+   * 2026-11-24): the exit's N (1-min ATR14 of the 2 h before it) and its best point never take in the NSE pre-open
+   * auction or flat off-hours copies (learning-kinds recoveryFromBars / adverseMoveFromBars).
+   */
   async minuteBarsHL(exchange: string, token: string, from: Date, to: Date): Promise<MinuteBar[]> {
     const rows = await this.prisma.hubCandle1m.findMany({ where: { exchange, token, ts: { gte: from, lt: to } }, select: { ts: true, open: true, high: true, low: true, close: true }, orderBy: { ts: 'asc' } });
-    return rows.map((r) => ({ ts: r.ts.getTime(), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close) }));
+    return sessionOnlyBars(rows.map((r) => ({ ts: r.ts.getTime(), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close) })), exchange);
   }
 
   /** ENGINE_ENTRY paper trades CLOSED in [from, to) by exit time (the engine's entry note as its reason). */

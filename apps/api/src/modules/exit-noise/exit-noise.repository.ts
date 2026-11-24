@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { sessionMinuteFilter } from '../market-hub/candles/session-sql';
 import type { OiRow } from '../signal-trader/domain/oi-check';
 import type { NewsImpactLike } from './domain/adverse-probability';
 
@@ -164,12 +165,16 @@ export class ExitNoiseRepository {
     }
   }
 
-  /** The hub's tick-built 1m bars (candles_1m) of one instrument in [from, to]. */
+  /**
+   * The hub's tick-built 1m bars (candles_1m) of one instrument in [from, to], session minutes only (market-hub
+   * session-sql, 2026-11-24): an exit at 09:15–09:43 no longer reads the NSE pre-open auction as price action, and a
+   * follow-up past the close is not "covered" by flat post-close copies (the broker 1m history fills it instead).
+   */
   async minuteBars(exchange: string, token: string, from: Date, to: Date): Promise<MinuteBar[]> {
     const rows = await this.prisma.$queryRaw<Array<{ ts: Date; high: number; low: number; close: number; volume: bigint | number | null }>>`
       SELECT ts, high, low, close, volume FROM "candles_1m"
       WHERE exchange = ${exchange} AND token = ${token}
-        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz${sessionMinuteFilter(exchange)}
       ORDER BY ts`;
     return rows.map((r) => ({ at: r.ts, high: Number(r.high), low: Number(r.low), close: Number(r.close), volume: Number(r.volume ?? 0) }));
   }

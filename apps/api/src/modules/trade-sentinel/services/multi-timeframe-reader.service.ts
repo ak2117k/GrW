@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { sessionMinuteFilter } from '../../market-hub/candles/session-sql';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 import { multiTimeframeView, type Bar, type MultiTimeframeView } from './multi-timeframe';
 
@@ -199,12 +200,15 @@ export class MultiTimeframeReaderService {
     return rows.reverse().map((r) => ({ ts: r.timestamp.getTime(), open: r.open, high: r.high, low: r.low, close: r.close }));
   }
 
-  /** The hub's tick-built 1m bars (candles_1m), newest `take`, oldest first. Empty on failure. */
+  /**
+   * The hub's tick-built 1m bars (candles_1m), newest `take` SESSION minutes, oldest first. Empty on failure. Filtered in
+   * SQL (market-hub session-sql) so the LIMIT covers ~5 NSE sessions, not ~170 off-session rows a day of flat copies.
+   */
   private async hubBars(inst: Inst, take: number): Promise<Bar[]> {
     try {
       const rows = await this.prisma.$queryRaw<Array<{ ts: Date; open: number; high: number; low: number; close: number }>>`
         SELECT ts, open, high, low, close FROM "candles_1m"
-        WHERE exchange = ${inst.exchange} AND token = ${inst.token} AND ts >= ${new Date(Date.now() - 10 * 86_400_000)}
+        WHERE exchange = ${inst.exchange} AND token = ${inst.token} AND ts >= ${new Date(Date.now() - 10 * 86_400_000)}${sessionMinuteFilter(inst.exchange)}
         ORDER BY ts DESC LIMIT ${take}`;
       return rows.reverse().map((r) => ({ ts: new Date(r.ts).getTime(), open: Number(r.open), high: Number(r.high), low: Number(r.low), close: Number(r.close) }));
     } catch {

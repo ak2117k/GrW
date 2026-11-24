@@ -7,6 +7,7 @@ import type { CandleRepo } from '../market-hub/candles/candle-repository';
 import type { HubCandle } from '../market-hub/candles/candle.types';
 import { HUB_CANDLE_SOURCE, type HubCandleSource } from '../market-hub/hub-candle-source';
 import type { HubExchange, InstrumentRef } from '../market-hub/hub.types';
+import { sessionOnlyBars } from '../exit-discipline/session-bars';
 import { parseCarryConfig } from './domain/carry-config';
 import { carryScorecardLine, scoreCarryDecision, type ScoreBar } from './domain/carry-score';
 import { IntradayCarryRepository, type CarryDecisionRow } from './repositories/intraday-carry.repository';
@@ -82,14 +83,14 @@ export class IntradayCarryScoreService {
     const from = row.decidedAt.getTime() + 30 * MIN;
     let bars = (await this.candles.read('1m', ref, from, now.getTime())).map(toBar);
     let source = 'candles_1m';
-    let session = firstSessionBars(bars, row.istDay);
+    let session = firstSessionBars(bars, row.istDay, row.exchange);
     if (session.bars.length === 0) {
       const hub = this.hub();
       if (hub?.servesCharts()) {
         try {
           const r = await hub.candles(ref, '1m', new Date(from), now);
           bars = r.candles.map(toBar);
-          session = firstSessionBars(bars, row.istDay);
+          session = firstSessionBars(bars, row.istDay, row.exchange);
           source = 'hub-fill';
         } catch (err) {
           this.logger.debug(`[carry-score] ${row.symbol}: hub fill failed: ${errText(err)}`);
@@ -129,9 +130,14 @@ export class IntradayCarryScoreService {
   }
 }
 
-/** The bars of the first IST date after `decisionDay` that has any. */
-export function firstSessionBars(bars: ScoreBar[], decisionDay: string): { ymd: string | null; bars: ScoreBar[] } {
-  const later = bars.filter((b) => istYmd(b.ts) > decisionDay).sort((a, b) => a.ts - b.ts);
+/**
+ * The SESSION bars of the first IST date after `decisionDay` that has any. Off-session minutes are dropped first
+ * (exit-discipline/session-bars; NSE/NFO/BSE/BFO 09:15–15:30, MCX 09:00–23:55): prod candles_1m holds flat copies
+ * from ~02:00 and the NSE pre-open auction, so bars[0] was a 02:00 copy of the last close (gapPct ~0) and the first
+ * hour's high / low took in the auction range. `exchange` omitted = every bar (unknown venue).
+ */
+export function firstSessionBars(bars: ScoreBar[], decisionDay: string, exchange?: string | null): { ymd: string | null; bars: ScoreBar[] } {
+  const later = sessionOnlyBars(bars, exchange).filter((b) => istYmd(b.ts) > decisionDay).sort((a, b) => a.ts - b.ts);
   if (later.length === 0) return { ymd: null, bars: [] };
   const ymd = istYmd(later[0].ts);
   return { ymd, bars: later.filter((b) => istYmd(b.ts) === ymd) };

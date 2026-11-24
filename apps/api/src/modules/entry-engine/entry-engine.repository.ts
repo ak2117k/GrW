@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { sessionMinuteFilter } from '../market-hub/candles/session-sql';
 import type { Bar1m, ImpactRow } from './domain/entry-decision';
 import type { PreOpenBiasInput } from './domain/news-paths';
 import type { StrikeLiquidity } from './domain/engine-contract';
@@ -103,12 +104,15 @@ export class EntryEngineRepository {
     }
   }
 
-  /** The hub's 1-minute bars (candles_1m). */
+  /**
+   * The hub's 1-minute bars (candles_1m), session minutes only (market-hub session-sql, 2026-11-24): the trend's
+   * multi-day history no longer carries prior days' flat post-close copies or today's NSE pre-open auction.
+   */
   async hubBars(exchange: string, token: string, from: Date, to: Date): Promise<Bar1m[]> {
     const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
       SELECT ts, open, high, low, close, volume FROM "candles_1m"
       WHERE exchange = ${exchange} AND token = ${token}
-        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz${sessionMinuteFilter(exchange)}
       ORDER BY ts`;
     return rows.map((r) => ({ ts: (r.ts as Date).getTime(), open: num(r.open), high: num(r.high), low: num(r.low), close: num(r.close), volume: num(r.volume) }));
   }

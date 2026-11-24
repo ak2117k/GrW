@@ -7,6 +7,7 @@ import type { ClusterView, EntryType, InstrumentKind, SignalView } from '../doma
 import { SIGNAL_ENTRY_VERDICT_TAG, istDayStart } from '../domain/execution';
 import { PAPER_WATCH_STRATEGIES, SIGNAL_PAPER_STRATEGY, decisionTag } from '../domain/paper';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
+import { sessionMinuteFilter } from '../../market-hub/candles/session-sql';
 
 const isUnique = (err: unknown) => err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 type Row = Record<string, unknown>;
@@ -617,12 +618,15 @@ export class SignalTraderRepository {
     };
   }
 
-  /** The hub's tick-built 1-minute bars (candles_1m) — the stored price path. */
+  /**
+   * The hub's tick-built 1-minute bars (candles_1m) — the stored price path. Session minutes only (market-hub
+   * session-sql, 2026-11-24): the judge's N1/N5 and extremeSince never see the NSE pre-open or flat off-hours bars.
+   */
   async hubMinuteBars(exchange: string, token: string, from: Date, to: Date): Promise<Array<{ ts: number; open: number; high: number; low: number; close: number }>> {
     const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
       SELECT ts, open, high, low, close FROM "candles_1m"
       WHERE exchange = ${exchange} AND token = ${token}
-        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz${sessionMinuteFilter(exchange)}
       ORDER BY ts`;
     return rows
       .map((r) => ({ ts: (r.ts as Date).getTime(), open: num(r.open) ?? 0, high: num(r.high) ?? 0, low: num(r.low) ?? 0, close: num(r.close) ?? 0 }))
@@ -632,7 +636,7 @@ export class SignalTraderRepository {
   /**
    * The hub's candles_1m rolled up to 15-minute bars (IST quarter-hours: 5h30 is a multiple of 15 min,
    * so the UTC epoch origin lines up with 09:15 / 09:00), oldest first. The trend tag's source; the
-   * rows a bucket may hold are capped by the window, never the broker.
+   * rows a bucket may hold are capped by the window, never the broker. Session minutes only (session-sql).
    */
   async hub15mBars(exchange: string, token: string, from: Date, to: Date): Promise<Array<{ ts: number; open: number; high: number; low: number; close: number }>> {
     const rows = await this.prisma.$queryRaw<Array<Record<string, unknown>>>`
@@ -642,7 +646,7 @@ export class SignalTraderRepository {
       FROM "candles_1m"
       WHERE exchange = ${exchange} AND token = ${token}
         AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
-        AND low > 0 AND high >= low
+        AND low > 0 AND high >= low${sessionMinuteFilter(exchange)}
       GROUP BY b
       ORDER BY b`;
     return rows.map((r) => ({ ts: (r.b as Date).getTime(), open: num(r.open) ?? 0, high: num(r.high) ?? 0, low: num(r.low) ?? 0, close: num(r.close) ?? 0 }));
@@ -817,12 +821,12 @@ export class SignalTraderRepository {
     return v !== null && v > 0 ? v : null;
   }
 
-  /** The hub's tick-built 1m closes (candles_1m) of one instrument in [from, to]. */
+  /** The hub's tick-built 1m closes (candles_1m) of one instrument in [from, to], session minutes only (session-sql). */
   async minuteCloses(exchange: string, token: string, from: Date, to: Date): Promise<Array<{ at: Date; close: number }>> {
     const rows = await this.prisma.$queryRaw<Array<{ ts: Date; close: number }>>`
       SELECT ts, close FROM "candles_1m"
       WHERE exchange = ${exchange} AND token = ${token}
-        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz
+        AND ts >= ${from.toISOString()}::timestamptz AND ts <= ${to.toISOString()}::timestamptz${sessionMinuteFilter(exchange)}
       ORDER BY ts`;
     return rows.map((r) => ({ at: r.ts, close: Number(r.close) }));
   }

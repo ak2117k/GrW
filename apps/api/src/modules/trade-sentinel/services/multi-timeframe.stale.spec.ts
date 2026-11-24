@@ -51,3 +51,18 @@ describe('multi-timeframe staleness guard (F3, 2026-11-16)', () => {
     expect(v.lastBarIst).toBeUndefined();
   });
 });
+
+describe('staleness is judged on session bars (2026-11-24)', () => {
+  it("Monday 09:20: Friday's close plus a 09:10 pre-open copy is stale (the copy is not a session bar)", () => {
+    const now = ist('2026-11-16', 9, 20);
+    const one = [bar(ist('2026-11-13', 15, 29)), bar(ist('2026-11-16', 9, 10))];
+    const v = multiTimeframeView({ exchange: 'NSE', '1m': one, now });
+    expect(v.timeframes['3m']).toMatchObject({ available: false, reason: expect.stringMatching(/^stale: newest 1m bar is 2026-11-13 15:29/) });
+  });
+  it('18:00: flat post-close copies do not matter, the 15:29 bar is fresh', () => {
+    const now = ist('2026-11-16', 18, 0);
+    const one = [bar(ist('2026-11-16', 15, 29)), bar(ist('2026-11-16', 17, 59))];
+    const v = multiTimeframeView({ exchange: 'NSE', '1m': one, now });
+    expect(v.timeframes['3m']).not.toMatchObject({ reason: expect.stringMatching(/^stale/) });
+  });
+});

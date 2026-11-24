@@ -1,7 +1,7 @@
 import { readChart, supertrend, type ChartBar } from '../../exit-discipline/chart-read';
 import { istMinuteOf } from '../../exit-discipline/session-bars';
 import { MemoryCandleRepo } from '../../market-hub/testing/memory-candle-repo';
-import { BANKNIFTY_23NOV_1M, BANKNIFTY_REF, ist, PRIOR_DAYS, syntheticHistory } from '../../market-hub/testing/banknifty-2026-11-23-preopen';
+import { BANKNIFTY_23NOV_1M, BANKNIFTY_REF, ist, PRIOR_DAYS, syntheticHistory, type M1 } from '../../market-hub/testing/banknifty-2026-11-23-preopen';
 import type { InstrumentRef } from '../../market-hub/hub.types';
 import { ChartConfirmReader, type UnderlyingLookup } from './chart-confirm.reader';
 
@@ -18,10 +18,22 @@ async function repoWith(ref: InstrumentRef, bars: Parameters<MemoryCandleRepo['u
   return repo;
 }
 
-/** The OLD reader's bars: readBucketed(origin 09:15) with only the "closed" filter. */
-async function unfiltered(repo: MemoryCandleRepo, ref: InstrumentRef, step: number, now: Date): Promise<ChartBar[]> {
-  const b = await repo.readBucketed(ref, step, 555, now.getTime() - 5 * 86_400_000, now.getTime());
-  return b.filter((x) => x.ts + step * 60_000 <= now.getTime()).map((x) => ({ ts: x.ts, open: x.open, high: x.high, low: x.low, close: x.close }));
+/**
+ * The OLD reader's bars: every stored 1m row (no session filter — the repo filters now, so the raw rows are bucketed
+ * here) in clock-aligned buckets (origin 09:15 IST, a multiple of 5 and 15 min), with only the "closed" filter.
+ */
+function unfiltered(raw: readonly M1[], step: number, now: Date): ChartBar[] {
+  const ms = step * 60_000;
+  const from = now.getTime() - 5 * 86_400_000;
+  const buckets = new Map<number, ChartBar>();
+  for (const r of [...raw].sort((a, b) => a.ts - b.ts)) {
+    if (r.ts < from || r.ts >= now.getTime()) continue;
+    const k = Math.floor(r.ts / ms) * ms;
+    const c = buckets.get(k);
+    if (!c) buckets.set(k, { ts: k, open: r.open, high: r.high, low: r.low, close: r.close });
+    else Object.assign(c, { high: Math.max(c.high, r.high), low: Math.min(c.low, r.low), close: r.close });
+  }
+  return [...buckets.values()].filter((x) => x.ts + ms <= now.getTime()).sort((a, b) => a.ts - b.ts);
 }
 
 describe('ChartConfirmReader — session bars only (2026-11-23 BANKNIFTY pre-open)', () => {
@@ -29,8 +41,9 @@ describe('ChartConfirmReader — session bars only (2026-11-23 BANKNIFTY pre-ope
   const now = new Date(ist('2026-11-23 09:21'));
 
   it('bars5 / bars15 hold no pre-open, night or post-close bucket; bars15 ends at the previous session before 09:30', async () => {
-    const repo = await repoWith(ref, [...syntheticHistory(PRIOR_DAYS), ...BANKNIFTY_23NOV_1M]);
-    const old15 = await unfiltered(repo, ref, 15, now);
+    const raw = [...syntheticHistory(PRIOR_DAYS), ...BANKNIFTY_23NOV_1M];
+    const repo = await repoWith(ref, raw);
+    const old15 = unfiltered(raw, 15, now);
     expect(old15[old15.length - 1].ts).toBe(ist('2026-11-23 09:00')); // the bug: the auction bucket is the last closed bar
     const d = await new ChartConfirmReader(repo, lookup('NFO', 'BANKNIFTY')).read('t1', now);
     expect(d).not.toBeNull();
@@ -46,10 +59,11 @@ describe('ChartConfirmReader — session bars only (2026-11-23 BANKNIFTY pre-ope
   });
 
   it('readChart: the "closed bar beyond invalidation" and Supertrend checks no longer see the auction', async () => {
-    const repo = await repoWith(ref, [...syntheticHistory(PRIOR_DAYS), ...BANKNIFTY_23NOV_1M]);
+    const raw = [...syntheticHistory(PRIOR_DAYS), ...BANKNIFTY_23NOV_1M];
+    const repo = await repoWith(ref, raw);
     const d = (await new ChartConfirmReader(repo, lookup('NFO', 'BANKNIFTY')).read('t1', now))!;
-    const old5 = await unfiltered(repo, ref, 5, now);
-    const old15 = await unfiltered(repo, ref, 15, now);
+    const old5 = unfiltered(raw, 5, now);
+    const old15 = unfiltered(raw, 15, now);
     // A PE (bear) position, invalidation 64,950 above: the 09:00 bucket closed 65,012 (an indicative price) ⇒ old = against.
     const base = { bull: false, underlyingNow: 64197.55, invalidation: 64950, bestUnderlying: null, n15: null, k15: 1.5 };
     const before = readChart({ ...base, bars5: old5.filter((b) => b.ts < ist('2026-11-23 09:15')), bars15: old15 });

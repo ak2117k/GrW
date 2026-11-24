@@ -428,9 +428,15 @@ export function multiTimeframeView(input: MultiTimeframeInput): MultiTimeframeVi
   const fifteen = input['15m'];
   let daily = sanitizeBars(input['1d']);
 
-  // Staleness (only with `now`): a stale source yields no timeframe at all, with the reason.
-  const stale1m = now !== undefined && one ? staleReason('1m', sanitizeBars(one), now, ex) : null;
-  const stale15 = now !== undefined && fifteen ? staleReason('15m', sanitizeBars(fifteen), now, ex) : null;
+  // Staleness (only with `now`): a stale source yields no timeframe at all, with the reason. Judged on SESSION bars
+  // (2026-11-24): a flat off-hours copy or a pre-open print is not a fresh bar of a series the timeframes never use.
+  // A series with no session bar at all is judged on what it has (its newest bar names how old it is).
+  const judged = (b: readonly Bar[]) => {
+    const s = sessionBars(b, ex);
+    return s.length ? s : sanitizeBars(b);
+  };
+  const stale1m = now !== undefined && one ? staleReason('1m', judged(one), now, ex) : null;
+  const stale15 = now !== undefined && fifteen ? staleReason('15m', judged(fifteen), now, ex) : null;
   if (now !== undefined && fifteen && !stale15) daily = withTodayDaily(daily, fifteen, ex, now);
   const stale1d = now !== undefined && input['1d'] ? staleReason('1d', daily, now, ex) : null;
 

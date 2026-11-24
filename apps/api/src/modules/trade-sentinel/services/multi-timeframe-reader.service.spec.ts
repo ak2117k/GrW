@@ -68,3 +68,16 @@ describe('MultiTimeframeReaderService stale-while-revalidate', () => {
     }
   });
 });
+
+describe('MultiTimeframeReaderService hub 1m fallback: session minutes only (2026-11-24)', () => {
+  it('filters candles_1m to the session in SQL, before the LIMIT (NSE 09:15–15:30; MCX 09:00–23:55)', async () => {
+    const { capturedSql, sessionBounds } = await import('../../market-hub/testing/captured-sql');
+    const prisma = prismaFake(5); // fewer `candles` 1m rows than MIN_1M_ROWS → candles_1m is read
+    const svc = new MultiTimeframeReaderService(prisma as never);
+    await svc.read('ADANIGREEN', 'NSE', null);
+    const q = capturedSql(prisma.$queryRaw.mock.calls);
+    expect(q.text).toMatch(/FROM "candles_1m"/);
+    expect(sessionBounds(q)).toEqual({ from: '09:15', to: '15:30' });
+    expect(q.text.indexOf('AT TIME ZONE')).toBeLessThan(q.text.indexOf('LIMIT'));
+  });
+});

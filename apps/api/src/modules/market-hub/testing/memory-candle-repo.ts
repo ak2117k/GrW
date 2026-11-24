@@ -2,25 +2,27 @@ import type { CandleRepo } from '../candles/candle-repository';
 import { bucketOrigin } from '../candles/candle-repository';
 import type { CandleTable, HubCandle } from '../candles/candle.types';
 import { istDay } from '../candles/trading-calendar';
+import { inVenueSession } from '../../exit-discipline/session-bars';
 import { refKey, type HubExchange, type InstrumentRef } from '../hub.types';
 
 type Row = HubCandle & { source?: 'tick' | 'broker' };
 
-/** In-memory CandleRepo with the same semantics as PrismaCandleRepo (see its integration test). */
+/** In-memory CandleRepo with the same semantics as PrismaCandleRepo (see its integration test): 1m reads are session minutes only. */
 export class MemoryCandleRepo implements CandleRepo {
   readonly rows: Record<CandleTable, Map<string, Map<number, Row>>> = { '1m': new Map(), '1h': new Map(), '1d': new Map() };
   readonly coverage = new Set<string>();
   failWrites = false;
 
   async read(table: CandleTable, ref: InstrumentRef, from: number, to: number): Promise<HubCandle[]> {
-    return this.range(table, ref, from, to);
+    const rows = this.range(table, ref, from, to);
+    return table === '1m' ? rows.filter((r) => inVenueSession(r.ts, ref.exchange)) : rows;
   }
 
   async readBucketed(ref: InstrumentRef, stepMin: number, originMinIst: number, from: number, to: number): Promise<HubCandle[]> {
     const origin = Date.parse(bucketOrigin(originMinIst));
     const step = stepMin * 60_000;
     const buckets = new Map<number, HubCandle>();
-    for (const r of this.range('1m', ref, from, to)) {
+    for (const r of this.range('1m', ref, from, to).filter((x) => inVenueSession(x.ts, ref.exchange))) {
       const b = origin + Math.floor((r.ts - origin) / step) * step;
       const c = buckets.get(b);
       if (!c) {

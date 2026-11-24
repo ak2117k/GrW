@@ -15,8 +15,17 @@ describe('loadTrendBars (shared by signal-trader market.trend and the entry engi
     const r = await loadTrendBars(repo as never, { exchange: 'NSE', token: '99926000', symbol: 'NIFTY' }, NOW);
     expect(repo.hub15mBars).toHaveBeenCalledWith('NSE', '99926000', new Date(NOW.getTime() - TREND_HUB_LOOKBACK_MS), NOW);
     expect(repo.stored15mBars).toHaveBeenCalledWith('NSE', '99926000', TREND_MAX_BARS, NOW);
-    expect(r.bars.map((b) => b.close)).toEqual([1, 102, 103]); // the forming bucket t0 is dropped; t0 − 2Q is the hub's
+    // NOW is 09:50 IST: t0 − 3Q is the 09:00 PRE-OPEN bucket — dropped (session bars only); the forming bucket t0 is
+    // dropped; t0 − 2Q (09:15) is the hub's.
+    expect(r.bars.map((b) => b.close)).toEqual([102, 103]);
     expect(r.source).toBe('candles_1m NIFTY → 15m (3 bars) + candles 15m (2)');
+  });
+
+  it('MCX keeps its 09:00 bucket (its session opens 09:00); NSE drops it', async () => {
+    const t0 = Math.floor(NOW.getTime() / Q) * Q;
+    const repo = { hub15mBars: async () => [bar(t0 - 3 * Q, 101), bar(t0 - 2 * Q, 102)], stored15mBars: async () => [] };
+    expect((await loadTrendBars(repo as never, { exchange: 'MCX', token: '1', symbol: 'CRUDEOIL' }, NOW)).bars.map((b) => b.close)).toEqual([101, 102]);
+    expect((await loadTrendBars(repo as never, { exchange: 'NSE', token: '1', symbol: 'NIFTY' }, NOW)).bars.map((b) => b.close)).toEqual([102]);
   });
 
   it('a failed stored read degrades to the hub alone; a failed hub read throws (the caller decides)', async () => {

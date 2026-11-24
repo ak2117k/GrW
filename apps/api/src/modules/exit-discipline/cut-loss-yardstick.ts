@@ -1,3 +1,4 @@
+import { venueSession } from './session-bars';
 import { INVALIDATION_SCALE_TOLERANCE } from './config';
 import { exposureOf } from './exposure';
 import { readPacketFacts } from './packet-facts';
@@ -66,10 +67,8 @@ export type N15Reading ={ n: number; bars: number; method: 'atr14-15m' | 'mean-t
 
 /** The IST session window (minutes after midnight) a 15-minute bar must START inside; null = keep every bar. */
 function sessionWindow(exchange: string | null | undefined): [number, number] | null {
-  const ex = String(exchange ?? '').toUpperCase();
-  if (['NSE', 'NFO', 'BSE', 'BFO'].includes(ex)) return [555, 930];
-  if (ex.startsWith('MCX')) return [540, 1435];
-  return null;
+  const s = venueSession(exchange); // exit-discipline/session-bars: the one source of truth
+  return s ? [s.fromMin, s.toMin] : null;
 }
 
 /**

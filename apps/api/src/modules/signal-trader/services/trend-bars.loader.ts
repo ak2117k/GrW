@@ -1,3 +1,4 @@
+import { sessionOnlyBars } from '../../exit-discipline/session-bars';
 import { mergeTrendBars, TREND_MAX_BARS, type TrendBar } from '../domain/trend-tag';
 import type { SignalTraderRepository } from '../repositories/signal-trader.repository';
 
@@ -19,8 +20,11 @@ export async function loadTrendBars(repo: TrendBarsRepo, ref: { exchange: string
     repo.hub15mBars(ref.exchange, ref.token, new Date(now.getTime() - TREND_HUB_LOOKBACK_MS), now),
     repo.stored15mBars(ref.exchange, ref.token, TREND_MAX_BARS, now).catch(() => [] as TrendBar[]),
   ]);
+  // Session buckets only (exit-discipline/session-bars): the hub's date_bin is epoch-aligned, which IS the session grid for
+  // NSE/BSE (09:15) and MCX (09:00), so dropping the buckets that start off-session (the NSE pre-open 09:00 bucket, the
+  // flat night/post-close buckets) leaves no bucket that mixes pre-open and session minutes.
   return {
-    bars: mergeTrendBars(older, hub, now),
+    bars: sessionOnlyBars(mergeTrendBars(older, hub, now), ref.exchange, 15),
     source: `candles_1m ${ref.symbol} → 15m (${hub.length} bars)${older.length ? ` + candles 15m (${older.length})` : ''}`,
   };
 }

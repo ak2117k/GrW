@@ -1,4 +1,6 @@
-import { classifyTrend, mergeTrendBars, TREND_MIN_BARS, type TrendBar } from './trend-tag';
+import { rollTo15m } from '../../entry-engine/domain/entry-gates';
+import * as fx from '../../market-hub/testing/banknifty-2026-11-23-preopen';
+import { classifyTrend, mergeTrendBars, NO_SESSION_BAR_YET, TREND_MIN_BARS, type TrendBar } from './trend-tag';
 
 const NOW = new Date('2026-11-10T09:00:00Z');
 const Q = 15 * 60_000;
@@ -72,5 +74,50 @@ describe('mergeTrendBars', () => {
     ];
     const m = mergeTrendBars(older, hub, NOW);
     expect(m.map((b) => [b.ts, b.close])).toEqual([[t - 3 * Q, 1], [t - 2 * Q, 2], [t - Q, 3]]);
+  });
+});
+
+describe('session bars only — 2026-11-23 BANKNIFTY pre-open (prod bug)', () => {
+  const m1 = [...fx.syntheticHistory(fx.PRIOR_DAYS), ...fx.BANKNIFTY_23NOV_1M];
+  const at = (t: string) => new Date(fx.ist(`2026-11-23 ${t}`));
+  /** What hub15mBars returns: candles_1m epoch-rolled to 15m (no session filter), closed by `now` (mergeTrendBars). */
+  const hub = (now: Date) => rollTo15m(m1.filter((b) => b.ts + 60_000 <= now.getTime()), now);
+  const tag = (now: Date, exchange?: string) => classifyTrend({ kind: 'CE', side: 'BUY', bars: hub(now), now, source: 'fixture', exchange });
+
+  it('before the fix the 09:21 tag reads the junk 09:00 pre-open bucket as its newest closed bar', () => {
+    const old = tag(at('09:21'));
+    expect(old.lastBarAt).toBe(new Date(fx.ist('2026-11-23 09:00')).toISOString());
+    expect(hub(at('09:21')).find((b) => b.ts === fx.ist('2026-11-23 09:00'))).toMatchObject({ high: 65489.6, low: 63795.7 });
+  });
+
+  it('after the fix at 09:21 (NSE line): no pre-open / off-hours bucket, the reading is from the previous session and says so', () => {
+    const r = tag(at('09:21'), 'NSE');
+    expect(r.lastBarAt).toBe(new Date(fx.ist('2026-11-20 15:15')).toISOString());
+    expect(r.candleCount).toBe(125); // 5 sessions × 25 buckets — the 02:00 / post-close flat buckets are gone
+    expect(r.tag).not.toBe('UNKNOWN');
+    expect(r.note).toContain(NO_SESSION_BAR_YET);
+  });
+
+  it('at 09:31 the newest bar is the 09:15 session bucket and there is no note', () => {
+    const r = tag(at('09:31'), 'NSE');
+    expect(r.lastBarAt).toBe(new Date(fx.ist('2026-11-23 09:15')).toISOString());
+    expect(r.note).toBeUndefined();
+  });
+
+  it('too few prior-session bars before 09:30 ⇒ UNKNOWN "no closed session 15m bar yet"', () => {
+    const now = at('09:21');
+    const few = rollTo15m([...fx.syntheticHistory(['2026-11-20']), ...fx.BANKNIFTY_23NOV_1M].filter((b) => b.ts + 60_000 <= now.getTime()), now);
+    const r = classifyTrend({ kind: 'CE', side: 'BUY', bars: few, now, source: 'fixture', exchange: 'NSE' });
+    expect(r.tag).toBe('UNKNOWN');
+    expect(r.reason).toContain(NO_SESSION_BAR_YET);
+    expect(r.reason).toContain('25 completed 15m bars, need 120');
+  });
+
+  it('MCX keeps its 09:00 bucket (session opens 09:00)', () => {
+    const now = new Date(fx.ist('2026-11-23 09:16'));
+    const bars = Array.from({ length: 130 }, (_, i) => ({ ts: fx.ist('2026-11-23 09:00') - (129 - i) * Q, open: 100, high: 101, low: 99, close: 100 + i }));
+    const r = classifyTrend({ kind: 'FUT', side: 'BUY', bars, now, source: 'fixture', exchange: 'MCX' });
+    expect(r.lastBarAt).toBe(new Date(fx.ist('2026-11-23 09:00')).toISOString());
+    expect(r.note).toBeUndefined();
   });
 });

@@ -1,4 +1,5 @@
 import { heikinCloses, lastEma, macdHistogram } from '../../overnight-scorecard/domain/indicators';
+import { istDayOf, sessionOnlyBars, venueSession } from '../../exit-discipline/session-bars';
 import { directionOf } from '../../signal-intake/domain/types';
 import type { InstrumentKind, Side } from './signal.types';
 
@@ -17,6 +18,14 @@ import type { InstrumentKind, Side } from './signal.types';
  *   AGAINST — both disagree
  *   MIXED   — they disagree with each other (or one of them is exactly flat)
  *   UNKNOWN — fewer than {@link TREND_MIN_BARS} completed 15m bars
+ *
+ * SESSION BARS ONLY (2026-11-24): given the price line's `exchange`, only 15m buckets that START inside the venue's
+ * session and on its grid are read (exit-discipline/session-bars: NSE/BSE 09:15–15:30, MCX 09:00–23:55). Prod 2026-11-23:
+ * the unfiltered BANKNIFTY 09:00 bucket was the NSE pre-open auction (a 1,100-pt range that never traded) and, before
+ * 09:30, the tag's newest "closed" bar (decision rows at 09:21 and 09:28 had lastBarAt 09:00); flat off-hours buckets
+ * (from ~02:00 and after 15:30) diluted the EMAs every day. Before today's first session bar has closed (NSE
+ * 09:15–09:30) the reading is the previous session's closed bars: `note` says so and `lastBarAt` is that session's
+ * last bar; with too few of them it is UNKNOWN with the reason 'no closed session 15m bar yet'.
  */
 export type TrendTag = 'WITH' | 'AGAINST' | 'MIXED' | 'UNKNOWN';
 
@@ -54,15 +63,24 @@ export interface TrendRecord {
   source: string;
   /** Why the tag is UNKNOWN. */
   reason?: string;
+  /** Set when today's session has no closed 15m bar yet: the reading is from the previous session's bars. */
+  note?: string;
 }
 
 const r4 = (v: number | null) => (v === null ? null : Math.round(v * 10_000) / 10_000);
 const sign = (v: number) => (v > 0 ? 1 : v < 0 ? -1 : 0);
 
-/** Pure: the tag + the raw numbers from completed 15m bars (oldest first). */
-export function classifyTrend(i: { kind: InstrumentKind; side: Side; bars: readonly TrendBar[]; now: Date; source: string }): TrendRecord {
+export const NO_SESSION_BAR_YET = 'no closed session 15m bar yet';
+
+/**
+ * Pure: the tag + the raw numbers from completed 15m bars (oldest first). With `exchange` (the UNDERLYING line's:
+ * NSE/BSE for an index, MCX for a commodity future) off-session buckets are dropped first (see the header).
+ */
+export function classifyTrend(i: { kind: InstrumentKind; side: Side; bars: readonly TrendBar[]; now: Date; source: string; exchange?: string | null }): TrendRecord {
   const direction = directionOf(i.kind, i.side);
-  const bars = i.bars.slice(-TREND_MAX_BARS);
+  const session = i.exchange ? venueSession(i.exchange) : null;
+  const bars = (session ? sessionOnlyBars(i.bars, i.exchange, 15) : [...i.bars]).slice(-TREND_MAX_BARS);
+  const noTodayBar = session !== null && !bars.some((b) => istDayOf(b.ts) === istDayOf(i.now.getTime()));
   const base = {
     direction,
     timeframe: TREND_TIMEFRAME as typeof TREND_TIMEFRAME,
@@ -73,7 +91,11 @@ export function classifyTrend(i: { kind: InstrumentKind; side: Side; bars: reado
     source: i.source,
   };
   const unknown = (reason: string): TrendRecord => ({ ...base, tag: 'UNKNOWN', trend: null, ema20: null, ema80: null, macdHist: null, reason });
-  if (bars.length < TREND_MIN_BARS) return unknown(`${bars.length} completed ${TREND_TIMEFRAME} bars, need ${TREND_MIN_BARS}`);
+  if (bars.length < TREND_MIN_BARS) {
+    const few = `${bars.length} completed ${TREND_TIMEFRAME} bars, need ${TREND_MIN_BARS}`;
+    return unknown(noTodayBar ? `${NO_SESSION_BAR_YET} (${few})` : few);
+  }
+  const note = noTodayBar ? `${NO_SESSION_BAR_YET} today — reading from the previous session's closed bars (lastBarAt)` : undefined;
   const closes = heikinCloses(bars);
   const e20 = lastEma(closes, 20);
   const e80 = lastEma(closes, 80);
@@ -84,7 +106,7 @@ export function classifyTrend(i: { kind: InstrumentKind; side: Side; bars: reado
   const want = direction === 'BULL' ? 1 : -1;
   const tag: TrendTag = emaDir === want && macdDir === want ? 'WITH' : emaDir === -want && macdDir === -want ? 'AGAINST' : 'MIXED';
   const trend = emaDir !== 0 && emaDir === macdDir ? (emaDir > 0 ? 'UP' : 'DOWN') : 'MIXED';
-  return { ...base, tag, trend, ema20: r4(e20), ema80: r4(e80), macdHist: r4(m.hist) };
+  return { ...base, tag, trend, ema20: r4(e20), ema80: r4(e80), macdHist: r4(m.hist), ...(note ? { note } : {}) };
 }
 
 /**

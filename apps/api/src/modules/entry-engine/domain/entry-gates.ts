@@ -1,5 +1,6 @@
 import { heikinCloses, lastEma, macdHistogram, rsi } from '../../overnight-scorecard/domain/indicators';
 import { classifyTrend, mergeTrendBars, TREND_MAX_BARS, type TrendBar, type TrendTag } from '../../signal-trader/domain/trend-tag';
+import { MCX_SESSION, NSE_SESSION } from '../../exit-discipline/session-bars';
 import { ENTRY_ENGINE, type Bar1m, type Direction } from './entry-decision';
 
 /**
@@ -38,7 +39,9 @@ const r4 = (x: number | null) => (x === null ? null : Math.round(x * 10_000) / 1
 
 /** The trading session's bucket-start window (IST minutes after midnight) by the price line's exchange. */
 export function sessionWindow(lineExchange: string): { fromMin: number; toMin: number } {
-  return String(lineExchange).toUpperCase() === 'MCX' ? { fromMin: 9 * 60, toMin: 23 * 60 + 55 } : { fromMin: 9 * 60 + 15, toMin: 15 * 60 + 30 };
+  // exit-discipline/session-bars is the one source of truth; anything but MCX reads as NSE here (this gate's old rule).
+  const s = String(lineExchange).toUpperCase() === 'MCX' ? MCX_SESSION : NSE_SESSION;
+  return { fromMin: s.fromMin, toMin: s.toMin };
 }
 
 const istMin = (ts: number) => Math.floor(((ts + 330 * MIN) % (24 * 60 * MIN)) / MIN);

@@ -160,7 +160,8 @@ export class SignalContextService {
         const ref = await this.repo.underlyingRef(s.underlying, i.exchange, i.now);
         if (!ref) throw new Error(`no price line for the underlying ${s.underlying}`);
         const { bars, source } = await this.trendBars(this.repo, ref, i.now);
-        return classifyTrend({ kind: s.instrumentKind, side: s.side, bars, now: i.now, source });
+        // The underlying LINE's exchange (NSE/BSE for an index even when the option is NFO/BFO) picks the session.
+        return classifyTrend({ kind: s.instrumentKind, side: s.side, bars, now: i.now, source, exchange: ref.exchange });
       },
       TREND_TIMEOUT_MS,
     );

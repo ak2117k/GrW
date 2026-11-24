@@ -2,6 +2,7 @@ import { N15_LOOKBACK_DAYS, n15FromBars } from '../../exit-discipline/cut-loss-y
 import type { ChartBar } from '../../exit-discipline/chart-read';
 import type { CandleRepo } from '../../market-hub/candles/candle-repository';
 import type { InstrumentRef } from '../../market-hub/hub.types';
+import { sessionOnlyBars, venueSession } from '../../exit-discipline/session-bars';
 import { INDEX_UNDERLYINGS } from '../../market-hub/underlying';
 
 export const CHART_CONFIRM_READER = Symbol('CHART_CONFIRM_READER');
@@ -39,15 +40,20 @@ export class ChartConfirmReader {
       if (ref) {
         const from = now.getTime() - N15_LOOKBACK_DAYS * 86_400_000;
         const r = { ...ref, exchange: ref.exchange.toUpperCase() } as InstrumentRef;
+        // Buckets aligned to the venue's session open (NSE/BSE 09:15, MCX 09:00; 555 for an unknown venue, as before).
+        const origin = venueSession(r.exchange)?.fromMin ?? 555;
         const [b5, b15] = await Promise.all([
-          this.candles.readBucketed(r, 5, 555, from, now.getTime()),
-          this.candles.readBucketed(r, 15, 555, from, now.getTime()),
+          this.candles.readBucketed(r, 5, origin, from, now.getTime()),
+          this.candles.readBucketed(r, 15, origin, from, now.getTime()),
         ]);
         const closed = (step: number) => (b: { ts: number }) => b.ts + step * 60_000 <= now.getTime();
         const map = (b: { ts: number; open: number; high: number; low: number; close: number; volume?: number | bigint | null }): ChartBar =>
           ({ ts: b.ts, open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume == null ? null : Number(b.volume) });
-        const bars5 = b5.filter(closed(5)).map(map).sort((a, b) => a.ts - b.ts);
-        const bars15 = b15.filter(closed(15)).map(map).sort((a, b) => a.ts - b.ts);
+        // Session buckets only (exit-discipline/session-bars): prod 2026-11-23 the BANKNIFTY 09:00 bucket was the pre-open
+        // auction (1,100-pt range) — until 09:30 it was the "last closed 15m bar" and fed the Supertrend; flat
+        // night/post-close buckets diluted its ATR. The buckets are on the session grid, so none mixes the two.
+        const bars5 = sessionOnlyBars(b5.filter(closed(5)), r.exchange, 5).map(map).sort((a, b) => a.ts - b.ts);
+        const bars15 = sessionOnlyBars(b15.filter(closed(15)), r.exchange, 15).map(map).sort((a, b) => a.ts - b.ts);
         const n15 = n15FromBars(bars15, r.exchange, now.getTime())?.n ?? null;
         v = { ref, bars5, bars15, n15 };
       }

@@ -1,3 +1,4 @@
+import { MCX_SESSION, NSE_SESSION } from '../../exit-discipline/session-bars';
 import { noiseFromBars } from '../../exit-discipline/noise';
 import type { MinuteBar } from '../../exit-discipline/types';
 import { ENTRY_ENGINE, type Bar1m, type ComponentLean, type Direction, type OiReading, type TrendReading } from '../../entry-engine/domain/entry-decision';
@@ -132,7 +133,8 @@ export interface SessionMinutes {
  * NSE / NFO / BSE / BFO 09:15–15:30, MCX 09:00–23:55 (the late close; bars after the real close are rare).
  */
 export function noiseSessionOf(optionExchange: string): SessionMinutes {
-  return String(optionExchange).toUpperCase() === 'MCX' ? { fromMin: 9 * 60, toMin: 23 * 60 + 55 } : { fromMin: 9 * 60 + 15, toMin: 15 * 60 + 30 };
+  const s = String(optionExchange).toUpperCase() === 'MCX' ? MCX_SESSION : NSE_SESSION; // exit-discipline/session-bars
+  return { fromMin: s.fromMin, toMin: s.toMin };
 }
 
 export interface NoiseUnit {

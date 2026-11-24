@@ -1,13 +1,20 @@
 import { SignalContextService, TREND_TIMEOUT_MS } from './signal-context.service';
 import { missingBlocks } from '../../self-review/decisions/detectors';
+import { inVenueSession } from '../../exit-discipline/session-bars';
 
 /** market.trend: database reads only, boxed, and a failure is `unavailable` with the reason (never thrown). */
 const NOW = new Date('2026-11-10T09:00:00Z');
 const Q = 15 * 60_000;
+/** The newest `n` CLOSED NSE session 15m bucket starts before NOW (14:30 IST), oldest first: the trend reads session bars only. */
+const sessionStarts = (n: number) => {
+  const out: number[] = [];
+  for (let t = NOW.getTime() - 2 * Q; out.length < n; t -= Q) if (inVenueSession(t, 'NSE')) out.unshift(t);
+  return out;
+};
 const rising = (n: number) =>
-  Array.from({ length: n }, (_, i) => {
+  sessionStarts(n).map((ts, i) => {
     const c = 100 + 0.01 * i * i;
-    return { ts: NOW.getTime() - (n + 1 - i) * Q, open: c - 0.1, high: c + 0.3, low: c - 0.4, close: c };
+    return { ts, open: c - 0.1, high: c + 0.3, low: c - 0.4, close: c };
   });
 
 function make(repoOver: Record<string, unknown> = {}) {
@@ -54,6 +61,14 @@ describe('SignalContextService.trend — record-only trend tag block', () => {
     const u = await thin.svc.trend({ signal: sig('BUY'), exchange: 'NFO', now: NOW });
     expect(u.status).toBe('present');
     expect((u as any).value).toMatchObject({ tag: 'UNKNOWN', candleCount: 50, reason: expect.stringContaining('need 120') });
+  });
+
+  it('the underlying line\'s session filters the bars: a pre-open 09:00 IST bucket and a post-close one are dropped', async () => {
+    const bars = rising(200);
+    const junk = [Date.parse('2026-11-10T03:30:00Z'), Date.parse('2026-11-09T10:15:00Z')].map((ts) => ({ ts, open: 1, high: 999, low: 1, close: 999 }));
+    const { svc } = make({ hub15mBars: jest.fn(async () => [...bars, ...junk]) });
+    const v = (await svc.trend({ signal: sig('BUY'), exchange: 'NFO', now: NOW }) as any).value;
+    expect(v).toMatchObject({ candleCount: 200, lastBarAt: new Date(bars[199].ts).toISOString(), tag: 'WITH' });
   });
 
   it('a failed read is unavailable with the reason; no price line is unavailable too', async () => {

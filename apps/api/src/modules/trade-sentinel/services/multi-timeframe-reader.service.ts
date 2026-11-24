@@ -262,12 +262,25 @@ export class MultiTimeframeReaderService {
   }
 }
 
-/** Of the `candles`-table series and the hub roll-up: the one with the newer last bar; on a tie the longer (tie again: the table). */
+/** The view's own minimum for EMA80 timeframes: a roll-up this long is as usable as any table series. */
+const MIN_ROLLUP_BARS = 100;
+/** The table is "stale" against the hub when the hub's newest bar is more than this much newer. */
+const TABLE_STALE_GAP_MS = 3 * 86_400_000;
+
+/**
+ * Of the `candles`-table series and the hub roll-up. The hub wins when (a) the table is empty, (b) the table is more
+ * than 3 days behind the hub, whatever the hub's length (NATURALGAS 2026-11-25: table ends in August, hub has 56 15m
+ * buckets / 4 days), or (c) the hub ends newer AND has >= min(table.length, 100) bars. Else the table: the hub daily
+ * always ends on today's forming bar, and a stock watched for a few days must not swap 250 fresh daily bars for 3
+ * (withTodayDaily appends today's bar from 15m anyway). Same last bar: the longer series (tie again: the table).
+ */
 function fresher(table: Bar[], hub: Bar[]): Bar[] {
   if (hub.length === 0) return table;
   if (table.length === 0) return hub;
   const t = table[table.length - 1].ts;
   const h = hub[hub.length - 1].ts;
-  if (h !== t) return h > t ? hub : table;
-  return hub.length > table.length ? hub : table;
+  if (h === t) return hub.length > table.length ? hub : table;
+  if (h - t > TABLE_STALE_GAP_MS) return hub;
+  if (h > t && hub.length >= Math.min(table.length, MIN_ROLLUP_BARS)) return hub;
+  return table;
 }

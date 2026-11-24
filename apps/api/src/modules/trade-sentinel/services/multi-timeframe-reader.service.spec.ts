@@ -182,6 +182,47 @@ describe('MultiTimeframeReaderService 15m / 1d fall back to the hub candles_1m r
     }
   });
 
+  describe('a short hub roll-up never replaces a usable table series', () => {
+    const read = (prisma: ReturnType<typeof fake>) => new MultiTimeframeReaderService(prisma as never).read('NATURALGAS', 'MCX', null);
+    const dayStamps = (n: number, last: number) => istDates(n, last).map((d) => Date.parse(`${d}T00:00:00+05:30`));
+
+    it('table daily fresh (previous session, 250 bars) + hub daily 3 bars ending today -> TABLE', async () => {
+      const v = await read(fake({ table: { '1d': dayStamps(250, NOW - DAY) }, hubDays: istDates(3, NOW) }));
+      expect(v!.lastBarIst!['1d']).toBe('2026-11-24 00:00');
+      expect(v!.timeframes['1d'].available).toBe(true);
+    });
+
+    it('table daily stale (Aug) + hub daily 150 bars ending today -> HUB', async () => {
+      const v = await read(fake({ hubDays: istDates(150, NOW) }));
+      expect(v!.lastBarIst!['1d']).toBe('2026-11-25 00:00');
+    });
+
+    it('table daily empty + hub 3 bars -> HUB', async () => {
+      const v = await read(fake({ table: { '1d': [] }, hubDays: istDates(3, NOW) }));
+      expect(v!.lastBarIst!['1d']).toBe('2026-11-25 00:00');
+    });
+
+    it('table daily last bar 2 days ago + hub 3 bars ending today -> TABLE (gap <= 3 days, hub too short)', async () => {
+      const v = await read(fake({ table: { '1d': dayStamps(250, NOW - 2 * DAY) }, hubDays: istDates(3, NOW) }));
+      expect(v!.lastBarIst!['1d']).toBe('2026-11-23 00:00');
+    });
+
+    it('15m: table stale (Aug) + hub only 56 buckets ending today -> HUB (table > 3 days behind, any length)', async () => {
+      const v = await read(fake({ hub15: mcxBuckets(56, Date.parse('2026-11-25T13:45:00+05:30')) }));
+      expect(v!.lastBarIst!['15m']).toBe('2026-11-25 13:45');
+    });
+
+    it('table daily stale (Aug) + hub only 4 bars ending today -> HUB', async () => {
+      const v = await read(fake({ hubDays: istDates(4, NOW) }));
+      expect(v!.lastBarIst!['1d']).toBe('2026-11-25 00:00');
+    });
+
+    it('15m: table stale (Aug) + hub 120 buckets -> HUB', async () => {
+      const v = await read(fake({ hub15: mcxBuckets(120, Date.parse('2026-11-25T13:45:00+05:30')) }));
+      expect(v!.lastBarIst!['15m']).toBe('2026-11-25 13:45');
+    });
+  });
+
   it('broker bars present for a timeframe -> neither the table nor the hub roll-up is read for it', async () => {
     const prisma = fake({ hubDays: istDates(150, NOW) });
     const bars = (n: number, step: number) => Array.from({ length: n }, (_, i) => ({ timestamp: new Date(NOW - (n - i) * step), open: 1, high: 2, low: 0.5, close: 1 }));
